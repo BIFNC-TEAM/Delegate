@@ -9,6 +9,17 @@
 
 # Delegate
 
+Think of Delegate as an AI front desk.
+
+When people reach you on the web today, and later through channels like Telegram, WhatsApp, or Feishu, Delegate lets your AI representative handle the first reception pass:
+
+- answer what it can answer
+- charge when the interaction should be paid
+- ask you to decide when approval is needed
+- hand off to you when a human should take over
+
+Its goal is not to replace you. It catches high-frequency, standardized, priceable conversations first, so you only step in when your presence is actually needed.
+
 Delegate is the first product wedge for **Agent Monetization Network (AMN)**, an open monetization network for AI Agents and Digital Representatives.
 
 AMN's long-term thesis is simple: any Agent can earn, any user can recharge, any platform can connect, and revenue should be transparent. Delegate turns that thesis into a concrete public digital representative: a web-first interface that answers from approved public knowledge, routes sensitive work through explicit policy, shows recharge/service depth, and hands off to a human when the representative should not act alone.

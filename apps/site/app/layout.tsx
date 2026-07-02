@@ -8,7 +8,7 @@ import { extractCountryHint, formatHtmlLang, getCookieLocale, localeCookieName, 
 export const metadata: Metadata = {
   title: "Delegate",
   description:
-    "Telegram-native public representative for founders, creators, and inbound-heavy operators.",
+    "Web-first AI front desk and public Digital Representative for founders, creators, and inbound-heavy operators.",
 };
 
 export default async function RootLayout({

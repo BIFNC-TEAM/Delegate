@@ -200,6 +200,22 @@ export default async function RepresentativePage({
       />
 
       <DashboardPanelFrame
+        eyebrow={t.frontDeskEyebrow}
+        summary={t.frontDeskSummary(representative.name)}
+        title={t.frontDeskTitle}
+      >
+        <div className="representative-front-desk-flow">
+          {t.frontDeskSteps.map((step) => (
+            <article className="representative-front-desk-step" key={step.label}>
+              <span>{step.label}</span>
+              <h3>{step.title}</h3>
+              <p>{step.body}</p>
+            </article>
+          ))}
+        </div>
+      </DashboardPanelFrame>
+
+      <DashboardPanelFrame
         eyebrow={t.rechargeEyebrow}
         id="recharge"
         summary={t.rechargeSummary(representative.name)}
@@ -595,7 +611,7 @@ function buildDeliverableSourceLabels(locale: Locale) {
 
 const copy = {
   zh: {
-    brandTagline: "Web-first public representative profile",
+    brandTagline: "Web-first 公开代表档案",
     menuAriaLabel: "代表页分区",
     languageAriaLabel: "语言切换",
     language: { zh: "中文", en: "English" },
@@ -619,6 +635,16 @@ const copy = {
       "这个代表只会记住属于本代表范围内的公开安全互动，不会读取主人的私有工作区、私有文件或私有账号。",
     startOnWeb: "在网页中开始",
     viewControlPlane: "查看控制台",
+    frontDeskEyebrow: "AI 接待前台",
+    frontDeskTitle: "先接住高频、标准化、可定价的对话",
+    frontDeskSummary: (name: string) =>
+      `${name} 不替代 owner 本人，而是先把能回答、该收费、要请示、需转接的请求分流清楚。`,
+    frontDeskSteps: [
+      { label: "Answer", title: "能回答的先回答", body: "公开 FAQ、资料和服务边界先由代表说明，减少重复解释。" },
+      { label: "Charge", title: "该收费的先收费", body: "深度服务和优先响应会进入网页服务档位、充值预览和 invoice 信号。" },
+      { label: "Ask", title: "需要拍板的先请示", body: "敏感动作和高价值判断会进入 approval 或 owner inbox，而不是自动越权。" },
+      { label: "Handoff", title: "需要人时再转接", body: "真正需要 owner 的请求会带着上下文进入人工转接流程。" },
+    ],
     rechargeEyebrow: "Agent Wallet",
     rechargeTitle: "这是给当前数字代表充值和继续服务的入口",
     rechargeSummary: (name: string) =>
@@ -747,6 +773,16 @@ const copy = {
       "This representative may remember prior public-safe interactions within this representative only. It does not access the owner's private workspace, private files, or private accounts.",
     startOnWeb: "Start on web",
     viewControlPlane: "View control plane",
+    frontDeskEyebrow: "AI front desk",
+    frontDeskTitle: "Catch high-frequency, standardized, priceable conversations first",
+    frontDeskSummary: (name: string) =>
+      `${name} does not replace the owner. It separates what can be answered, what should be paid, what needs approval, and what deserves human handoff.`,
+    frontDeskSteps: [
+      { label: "Answer", title: "Answer what it can", body: "Public FAQs, materials, and service boundaries are explained before the owner repeats themselves." },
+      { label: "Charge", title: "Charge when needed", body: "Deeper service and priority move into web service tiers, recharge preview, and invoice signals." },
+      { label: "Ask", title: "Ask for approval", body: "Sensitive actions and high-value judgment go through approval or owner inbox instead of silent overreach." },
+      { label: "Handoff", title: "Hand off with context", body: "Requests that truly need the owner arrive with context through the human handoff flow." },
+    ],
     rechargeEyebrow: "Agent Wallet",
     rechargeTitle: "This is the recharge and continuation entry for this Digital Representative",
     rechargeSummary: (name: string) =>

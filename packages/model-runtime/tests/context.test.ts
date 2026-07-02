@@ -39,7 +39,7 @@ describe("buildRepresentativeReplyPrompt", () => {
           layer: "L1",
           score: 0.91,
           abstract: "Founder representative identity.",
-          overview: "Delegate is a Telegram-native public representative.",
+          overview: "Delegate is a web-first public representative.",
         },
       ],
     });
@@ -91,7 +91,7 @@ describe("buildRepresentativeReplyPrompt", () => {
             layer: "L1",
             score: 0.91,
             abstract: "Founder representative identity.",
-            overview: "Delegate is a Telegram-native public representative.",
+            overview: "Delegate is a web-first public representative.",
           },
         ],
       },
@@ -127,7 +127,7 @@ describe("buildRepresentativeReplyPrompt", () => {
           layer: "L1",
           score: 0.91,
           abstract: "Founder representative identity.",
-          overview: "Delegate is a Telegram-native public representative.",
+          overview: "Delegate is a web-first public representative.",
         },
       ],
     });

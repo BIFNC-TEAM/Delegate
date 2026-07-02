@@ -709,7 +709,7 @@ function buildRepresentativeTemplate(params: {
   const safeRepresentativeName = params.representativeName.trim();
   const tagline =
     params.tagline?.trim() ||
-    `替 ${safeOwnerName} 接住 Telegram 上的公开咨询，先回答常见问题，再把高价值请求整理给真人。`;
+    `替 ${safeOwnerName} 接住网页上的公开咨询，先回答常见问题，再把高价值请求整理给真人。`;
 
   return {
     ownerName: safeOwnerName,

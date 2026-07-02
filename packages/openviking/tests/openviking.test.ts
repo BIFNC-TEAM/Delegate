@@ -72,7 +72,7 @@ describe("OpenViking document builders", () => {
       slug: "lin-founder-rep",
       ownerName: "Lin",
       name: "Lin Rep",
-      tagline: "Telegram founder representative",
+      tagline: "Web founder representative",
       tone: "Calm and structured",
       languages: ["English", "Chinese"],
       groupActivation: "reply_or_mention",

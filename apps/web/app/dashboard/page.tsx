@@ -110,7 +110,7 @@ export default async function DashboardPage({
         <div className="dashboard-topbar-context">
           <span className="chip">{activeSlug}</span>
           <span className="chip chip-safe">{activeTab.label}</span>
-          <span className="chip">{t.telegramOnlyLabel}</span>
+          <span className="chip">{t.entryScopeLabel}</span>
           <span className="chip">{t.runtimeLabel}</span>
         </div>
       </header>
@@ -150,8 +150,13 @@ export default async function DashboardPage({
               </article>
               <article className="dashboard-stage-stat">
                 <span>{t.routingLabel}</span>
-                <strong>{t.telegramOnlyLabel}</strong>
+                <strong>{t.entryScopeLabel}</strong>
                 <p>{t.routingDetail}</p>
+              </article>
+              <article className="dashboard-stage-stat dashboard-stage-stat-accent">
+                <span>{t.frontDeskLabel}</span>
+                <strong>{t.frontDeskValue}</strong>
+                <p>{t.frontDeskDetail}</p>
               </article>
             </div>
           </div>
@@ -207,7 +212,7 @@ const dashboardCopy: Record<
     language: { zh: string; en: string };
     websiteLabel: string;
     publicRepresentativeLabel: string;
-    telegramOnlyLabel: string;
+    entryScopeLabel: string;
     runtimeLabel: string;
     workspaceEyebrow: string;
     currentWorkspaceLabel: string;
@@ -215,6 +220,9 @@ const dashboardCopy: Record<
     currentLaneLabel: string;
     routingLabel: string;
     routingDetail: string;
+    frontDeskLabel: string;
+    frontDeskValue: string;
+    frontDeskDetail: string;
     stageStatsAriaLabel: string;
   }
 > = {
@@ -239,7 +247,7 @@ const dashboardCopy: Record<
         blurb: "身份、契约、价格与公开知识。",
         shortLabel: "代表",
         stageTitle: "把公开身份、会话契约和知识包编辑成能直接发布的代表入口。",
-        stageCopy: "这一页不是宣传页文案，而是 bot 与公开页共同读取的发布配置。保存之后，公开入口和运行时应该同时更新。",
+        stageCopy: "这一页不是宣传页文案，而是网页代表页与公开运行时共同读取的发布配置。保存之后，公开入口和运行时应该同时更新。",
       },
       {
         id: "skills",
@@ -273,14 +281,17 @@ const dashboardCopy: Record<
     language: { zh: "中文", en: "English" },
     websiteLabel: "官网",
     publicRepresentativeLabel: "公开代表页",
-    telegramOnlyLabel: "仅 Telegram",
+    entryScopeLabel: "Web-first",
     runtimeLabel: "Trust-first runtime",
     workspaceEyebrow: "当前工作区",
     currentWorkspaceLabel: "工作区",
     currentWorkspaceDetail: "左侧 rail 只负责切换代表，右侧保持当前任务上下文。",
     currentLaneLabel: "当前操作",
     routingLabel: "入口范围",
-    routingDetail: "本版只覆盖 Telegram 私聊、群组 mention / reply 与 deep link。",
+    routingDetail: "第一版先覆盖网页代表页、网页聊天、充值预览和人工转接；Telegram、WhatsApp、飞书等消息入口属于后续扩展。",
+    frontDeskLabel: "接待模式",
+    frontDeskValue: "先接住，再升级",
+    frontDeskDetail: "高频问题、付费续用、审批和人工转接都应该进入明确队列。",
     stageStatsAriaLabel: "当前工作区摘要",
   },
   en: {
@@ -304,7 +315,7 @@ const dashboardCopy: Record<
         blurb: "Profile, contract, pricing, and public knowledge.",
         shortLabel: "Representative",
         stageTitle: "Publish the representative identity, conversation contract, and public knowledge as one launch surface.",
-        stageCopy: "This is not marketing copy. It is the shared configuration that powers both the public page and the Telegram runtime.",
+        stageCopy: "This is not marketing copy. It is the shared configuration that powers the web representative page and public runtime.",
       },
       {
         id: "skills",
@@ -338,14 +349,17 @@ const dashboardCopy: Record<
     language: { zh: "Chinese", en: "English" },
     websiteLabel: "Website",
     publicRepresentativeLabel: "Public Representative",
-    telegramOnlyLabel: "Telegram only",
+    entryScopeLabel: "Web-first",
     runtimeLabel: "Trust-first runtime",
     workspaceEyebrow: "Current workspace",
     currentWorkspaceLabel: "Workspace",
     currentWorkspaceDetail: "The left rail only switches representatives. The right pane keeps the active task context intact.",
     currentLaneLabel: "Current lane",
     routingLabel: "Channel scope",
-    routingDetail: "This release only covers Telegram private chat, mention / reply flows, and shareable deep links.",
+    routingDetail: "This first version covers the web representative page, web chat, recharge preview, and human handoff. Telegram, WhatsApp, Feishu, and other message channels come later.",
+    frontDeskLabel: "Front desk mode",
+    frontDeskValue: "Receive, then escalate",
+    frontDeskDetail: "FAQs, paid continuation, approvals, and human handoff should all land in explicit queues.",
     stageStatsAriaLabel: "Current workspace summary",
   },
 };

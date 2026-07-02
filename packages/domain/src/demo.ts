@@ -22,7 +22,7 @@ export const demoRepresentative: Representative = {
   id: "rep_lin_founder",
   slug: "lin-founder-rep",
   ownerName: "Lin",
-  name: "Lin 的 Telegram 对外代表",
+  name: "Lin 的网页 AI 接待代表",
   tagline: "用公开知识回答问题、筛选合作线索、收集需求，并在需要时转真人。",
   tone: "清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。",
   languages: ["zh-CN", "en"],

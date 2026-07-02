@@ -967,6 +967,41 @@ button.skill-row:hover {
   border-color: rgba(197, 91, 45, 0.14);
 }
 
+.marketing-front-desk-flow {
+  display: grid;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.marketing-front-desk-step {
+  display: grid;
+  gap: 4px;
+  padding: 13px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(25, 23, 23, 0.08);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.72), rgba(255, 247, 237, 0.54));
+}
+
+.marketing-front-desk-step span,
+.representative-front-desk-step span {
+  color: var(--accent-ink);
+  font-family: var(--font-mono), "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.marketing-front-desk-step strong {
+  line-height: 1.25;
+}
+
+.marketing-front-desk-step p {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
 .marketing-stage-card-primary h2,
 .marketing-band-copy h2,
 .marketing-story-copy h2,
@@ -1490,6 +1525,13 @@ button.skill-row:hover {
   line-height: 1.55;
 }
 
+.dashboard-stage-stat-accent {
+  border-color: rgba(197, 91, 45, 0.16);
+  background:
+    radial-gradient(circle at 100% 0%, rgba(197, 91, 45, 0.14), transparent 38%),
+    linear-gradient(180deg, rgba(255, 250, 244, 0.94), rgba(249, 238, 224, 0.86));
+}
+
 .dashboard-view {
   display: grid;
   gap: 18px;
@@ -1918,6 +1960,42 @@ button.skill-row:hover {
   gap: 14px;
 }
 
+.representative-front-desk-flow {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.representative-front-desk-step {
+  display: grid;
+  gap: 10px;
+  min-height: 190px;
+  padding: 20px;
+  border-radius: 22px;
+  border: 1px solid rgba(25, 23, 23, 0.08);
+  background:
+    radial-gradient(circle at 100% 0%, rgba(31, 86, 98, 0.08), transparent 40%),
+    linear-gradient(180deg, rgba(255, 253, 249, 0.94), rgba(247, 240, 229, 0.84));
+  box-shadow: var(--shadow-tight);
+}
+
+.representative-front-desk-step:nth-child(2),
+.representative-front-desk-step:nth-child(4) {
+  margin-top: 16px;
+}
+
+.representative-front-desk-step h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  line-height: 1.22;
+}
+
+.representative-front-desk-step p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
 .representative-stage-links {
   align-items: stretch;
 }
@@ -2046,6 +2124,7 @@ button.skill-row:hover {
   .dashboard-signal-strip,
   .dashboard-surface-grid,
   .dashboard-surface-grid-three,
+  .representative-front-desk-flow,
   .representative-stage,
   .dashboard-table-grid-balanced,
   .setup-stepper {
@@ -2170,7 +2249,9 @@ button.skill-row:hover {
   .marketing-grid > :nth-child(2),
   .marketing-plan-grid > :nth-child(2),
   .marketing-plan-grid > :nth-child(4),
-  .marketing-roadmap-grid > :nth-child(2) {
+  .marketing-roadmap-grid > :nth-child(2),
+  .representative-front-desk-step:nth-child(2),
+  .representative-front-desk-step:nth-child(4) {
     margin-top: 0;
   }
 

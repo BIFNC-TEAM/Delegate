@@ -1,7 +1,7 @@
 # Design System — Delegate
 
 ## Product Context
-- **What this is:** Delegate is a Telegram-native public representative system. It turns an agent into a public-facing interface for a founder, advisor, creator, recruiter, or operator, with explicit trust boundaries, bounded skills, human handoff, and paid continuation.
+- **What this is:** Delegate is a web-first AI front desk and public representative system. It turns an agent into a public-facing interface for a founder, advisor, creator, recruiter, or operator, with explicit trust boundaries, bounded skills, human handoff, and paid continuation.
 - **Who it's for:** Inbound-heavy operators who need a durable public representative, plus the external users who need to understand and trust that representative quickly.
 - **Space/industry:** Agent interface, operator tooling, creator monetization, trust-first AI product infrastructure.
 - **Project type:** Hybrid system: marketing site, public representative page, and owner control-plane dashboard.
@@ -150,3 +150,4 @@
 | 2026-03-24 | Initial design system created | Created by `/design-consultation` after reviewing Delegate's product positioning and researching Linear, Vercel, LangSmith, Intercom, and beehiiv. |
 | 2026-03-24 | Chosen direction: Dispatch Editorial | Delegate is selling public representation, trust boundaries, and paid access, not generic AI intelligence. |
 | 2026-06-29 | Synchronized Site, Dashboard, and Reps surfaces | Tightened the shared Dispatch Editorial system across the marketing site, owner dashboard, and public representative page; improved mobile hierarchy, surface contrast, and trust/action signal rhythm. |
+| 2026-07-02 | Aligned pages to web-first AI front desk framing | README now positions Delegate as the first web AI reception layer before future Telegram, WhatsApp, Feishu, and WeCom channels; pages should make the receive, charge, approve, and handoff sequence visible. |

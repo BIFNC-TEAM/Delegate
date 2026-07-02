@@ -121,7 +121,7 @@ export function DashboardRepresentativeDirectory({
             <h3>{t.createTitle}</h3>
             <p>{t.createCopy}</p>
           </div>
-          <span className="chip">{t.telegramOnly}</span>
+          <span className="chip">{t.entryScope}</span>
         </div>
 
         <form className="setup-stack" onSubmit={handleSubmit}>
@@ -230,7 +230,7 @@ const copy: Record<
     workspaceCopy: string;
     createTitle: string;
     createCopy: string;
-    telegramOnly: string;
+    entryScope: string;
     ownerName: string;
     representativeName: string;
     representativePlaceholder: string;
@@ -254,10 +254,10 @@ const copy: Record<
     workspaceCopy: "把代表切换、创建和公开入口固定在左侧，不打断右侧当前任务。",
     createTitle: "创建代表",
     createCopy: "创建后直接进入 setup，不用在超长页面里重新找入口。",
-    telegramOnly: "仅 Telegram",
+    entryScope: "Web-first",
     ownerName: "Owner name",
     representativeName: "Representative name",
-    representativePlaceholder: "Lin 的 Telegram 对外代表",
+    representativePlaceholder: "Lin 的网页 AI 接待代表",
     tagline: "Tagline",
     taglinePlaceholder: "用公开知识回答问题、筛选合作线索、收集需求，并在需要时转真人。",
     creating: "创建中...",
@@ -277,10 +277,10 @@ const copy: Record<
     workspaceCopy: "Keep switching, creation, and public links in the left rail so the right pane stays on the current task.",
     createTitle: "Create representative",
     createCopy: "Create one and jump straight into setup instead of searching through a long settings page.",
-    telegramOnly: "Telegram only",
+    entryScope: "Web-first",
     ownerName: "Owner name",
     representativeName: "Representative name",
-    representativePlaceholder: "Lin's Telegram representative",
+    representativePlaceholder: "Lin's web AI front desk",
     tagline: "Tagline",
     taglinePlaceholder: "Answers public questions, qualifies leads, collects demand, and hands off when needed.",
     creating: "Creating...",

@@ -11,7 +11,7 @@ import {
 
 const copy = {
   zh: {
-    brandTagline: "Agent Monetization Network 的第一条数字代表楔子",
+    brandTagline: "Web-first AI 接待前台与 AMN 第一条数字代表楔子",
     menu: [
       { href: "#interface", label: "接口" },
       { href: "#trust", label: "信任" },
@@ -22,14 +22,20 @@ const copy = {
     navDemo: "演示代表页",
     navDashboard: "Owner 控制台",
     heroEyebrow: "Agent Monetization Network",
-    heroTitle: "AMN 让每个 Agent 都有自己的钱包、入口和收益路径。",
+    heroTitle: "Delegate 是先替你接住外部请求的 AI 接待前台。",
     heroLead:
-      "Delegate 是 AMN 的第一条可运行楔子：第一版先做 web-first 数字代表，用公开知识、安全边界、网页聊天、充值预览和人工升级，证明 Agent 可以成为可充值、可治理、可持续收益的公开服务入口。",
+      "第一版先做 web-first 数字代表：当别人来找你时，AI 分身先回答高频问题、展示服务档位、收集结构化需求，并在需要收费、审批或人工接手时把请求路由成明确流程。",
     heroPrimary: "查看数字代表",
     heroSecondary: "进入控制台",
-    shipsKicker: "当前闭环",
-    shipsTitle: "公开代表页、网页聊天、owner inbox、充值预览、早期钱包状态和 OpenViking 记忆层。",
-    shipsBody: "当前交付的是 Delegate 代表楔子；AMN Pay、跨平台充值、结算和透明账本仍是目标架构，不在这里假装已经完成。",
+    shipsKicker: "AI front desk loop",
+    shipsTitle: "先回答，收费时收费，需要拍板时请示，需要人时转接。",
+    shipsBody: "当前交付的是网页代表楔子：公开代表页、网页聊天、owner inbox、充值预览、早期钱包状态和 OpenViking 记忆层。AMN Pay、跨平台充值、结算和透明账本仍是目标架构。",
+    frontDeskSteps: [
+      { label: "01 / Answer", title: "能回答的先回答", body: "FAQ、公开资料、服务范围先由代表接住，不把主人拉回一级前台。" },
+      { label: "02 / Charge", title: "该收费的先收费", body: "免费试聊后，深度服务、优先级和继续对话进入网页充值与 invoice 信号。" },
+      { label: "03 / Ask", title: "需要拍板的先请示", body: "敏感 compute、报价判断和不可逆动作进入审批，而不是让 agent 自作主张。" },
+      { label: "04 / Handoff", title: "需要人时再转接", body: "handoff 变成 owner inbox 项目，主人接手的是高价值上下文，不是原始噪音。" },
+    ],
     proofPoints: [
       { stat: "10 秒", label: "陌生人应该在十秒内理解这不是闲聊 bot，而是一个公开代表入口。" },
       { stat: "70%+", label: "高频 inbound 询问应被代表独立接住，而不是重新把主人拉回一级前台。" },
@@ -104,7 +110,7 @@ const copy = {
     switcher: { zh: "中文", en: "English" },
   },
   en: {
-    brandTagline: "The first Digital Representative wedge for AMN",
+    brandTagline: "Web-first AI front desk and AMN representative wedge",
     menu: [
       { href: "#interface", label: "Interface" },
       { href: "#trust", label: "Trust" },
@@ -115,14 +121,20 @@ const copy = {
     navDemo: "Demo digital rep",
     navDashboard: "Owner dashboard",
     heroEyebrow: "Agent Monetization Network",
-    heroTitle: "AMN gives every Agent its own wallet, entry point, and revenue path.",
+    heroTitle: "Delegate is an AI front desk for your public Digital Representative.",
     heroLead:
-      "Delegate is the first working AMN wedge. The first version is web-first: a Digital Representative with public knowledge, explicit trust boundaries, web chat, recharge previews, and human escalation that proves Agents can become rechargeable, governable service surfaces.",
+      "The first version is web-first. When people reach you, your AI representative handles the first reception pass: answer common questions, show service depth, collect structured demand, and route payment, approval, or human handoff when the conversation gets serious.",
     heroPrimary: "Explore digital representative",
     heroSecondary: "Open control plane",
-    shipsKicker: "What ships",
-    shipsTitle: "Public representative page, web chat, owner inbox, recharge preview, early wallet state, OpenViking memory.",
-    shipsBody: "What ships today is the Delegate representative wedge. AMN Pay, cross-platform recharge, settlement, and transparent ledgers remain target architecture, not claimed backend reality.",
+    shipsKicker: "AI front desk loop",
+    shipsTitle: "Answer first, charge when needed, ask for approval, hand off to a human.",
+    shipsBody: "What ships today is the web representative wedge: public representative page, web chat, owner inbox, recharge preview, early wallet state, and OpenViking memory. AMN Pay, cross-platform recharge, settlement, and transparent ledgers remain target architecture.",
+    frontDeskSteps: [
+      { label: "01 / Answer", title: "Answer what it can", body: "FAQs, public materials, and service boundaries are handled before the owner gets pulled back to the front desk." },
+      { label: "02 / Charge", title: "Charge when needed", body: "After the free reception layer, deeper help and priority move into web recharge and invoice signals." },
+      { label: "03 / Ask", title: "Ask for approval", body: "Sensitive compute, quote judgment, and irreversible actions move through approval instead of agent improvisation." },
+      { label: "04 / Handoff", title: "Hand off with context", body: "Handoff becomes an owner inbox item, so the human receives high-value context rather than raw noise." },
+    ],
     proofPoints: [
       { stat: "10s", label: "A stranger should understand within ten seconds that this is a public representative, not a generic chat bot." },
       { stat: "70%+", label: "The representative should absorb most repetitive inbound questions without pulling the founder back to the front desk." },
@@ -290,6 +302,15 @@ export default async function HomePage({
             <p className="marketing-card-kicker">{t.shipsKicker}</p>
             <h2>{t.shipsTitle}</h2>
             <p>{t.shipsBody}</p>
+            <div className="marketing-front-desk-flow">
+              {t.frontDeskSteps.map((step) => (
+                <div className="marketing-front-desk-step" key={step.label}>
+                  <span>{step.label}</span>
+                  <strong>{step.title}</strong>
+                  <p>{step.body}</p>
+                </div>
+              ))}
+            </div>
           </article>
 
           <article className="marketing-stage-card marketing-stage-card-metrics">

@@ -1177,6 +1177,7 @@ export const brokerHealthSchema = z.object({
   status: z.literal("ok"),
   service: z.literal("compute-broker"),
   runnerType: computeRunnerTypeSchema,
+  sandboxProvider: z.enum(["docker", "daytona"]).optional(),
   artifactBucket: z.string(),
 });
 

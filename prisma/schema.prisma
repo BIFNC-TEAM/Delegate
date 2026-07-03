@@ -86,6 +86,10 @@ enum EventType {
   COMPUTE_SESSION_STARTED
   COMPUTE_SESSION_HEARTBEAT
   COMPUTE_SESSION_TERMINATED
+  SANDBOX_IDENTITY_CREATED
+  SANDBOX_LEASE_STARTED
+  SANDBOX_LEASE_STOPPED
+  SANDBOX_LEASE_ERRORED
   TOOL_EXECUTION_REQUESTED
   TOOL_EXECUTION_BLOCKED
   TOOL_EXECUTION_COMPLETED
@@ -165,6 +169,26 @@ enum ComputeLeaseStatus {
   RELEASING
   RELEASED
   FAILED
+}
+
+enum SandboxProviderKind {
+  DOCKER
+  DAYTONA
+}
+
+enum SandboxIdentityStatus {
+  ACTIVE
+  ARCHIVED
+  DELETED
+}
+
+enum SandboxLeaseStatus {
+  STARTING
+  RUNNING
+  STOPPING
+  STOPPED
+  ERROR
+  ARCHIVED
 }
 
 enum ToolExecutionStatus {
@@ -760,6 +784,7 @@ model Representative {
   owner                          Owner                       @relation(fields: [ownerId], references: [id])
   capabilityProfiles             CapabilityPolicyProfile[]
   computeSessions                ComputeSession[]
+  sandboxIdentities              SandboxIdentity[]
   conversations                  Conversation[]
   contextSyncJobs                RepresentativeContextSync[]
   contacts                       Contact[]
@@ -907,6 +932,7 @@ model Contact {
   invoices              Invoice[]
   memoryRecords         OpenVikingMemoryRecord[]
   computeSessions       ComputeSession[]
+  sandboxIdentities     SandboxIdentity[]
   artifacts             Artifact[]
   approvalRequests      ApprovalRequest[]
   ledgerEntries         LedgerEntry[]
@@ -1122,6 +1148,7 @@ model ComputeSession {
   conversationId   String?
   subagentId       String?
   policyProfileId  String?
+  sandboxLeaseId   String?
   requestedBy      ComputeRequestedBy
   status           ComputeSessionStatus     @default(REQUESTED)
   leaseStatus      ComputeLeaseStatus       @default(REQUESTED)
@@ -1144,6 +1171,7 @@ model ComputeSession {
   contact          Contact?                 @relation(fields: [contactId], references: [id])
   conversation     Conversation?            @relation(fields: [conversationId], references: [id])
   policyProfile    CapabilityPolicyProfile? @relation(fields: [policyProfileId], references: [id])
+  sandboxLease     SandboxLease?            @relation(fields: [sandboxLeaseId], references: [id], onDelete: SetNull)
   toolExecutions   ToolExecution[]
   browserSession   BrowserSession?
   artifacts        Artifact[]
@@ -1153,6 +1181,54 @@ model ComputeSession {
   @@index([representativeId, status, createdAt])
   @@index([contactId, createdAt])
   @@index([conversationId, createdAt])
+  @@index([sandboxLeaseId, createdAt])
+}
+
+model SandboxIdentity {
+  id                  String                @id @default(cuid())
+  representativeId    String
+  contactId           String
+  provider            SandboxProviderKind   @default(DOCKER)
+  providerIdentityKey String?
+  status              SandboxIdentityStatus @default(ACTIVE)
+  lastUsedAt          DateTime?
+  archivedAt          DateTime?
+  deletedAt           DateTime?
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+  representative      Representative        @relation(fields: [representativeId], references: [id])
+  contact             Contact               @relation(fields: [contactId], references: [id])
+  leases              SandboxLease[]
+  browserSessions     BrowserSession[]
+
+  @@unique([representativeId, contactId])
+  @@index([representativeId, status, updatedAt])
+  @@index([contactId, updatedAt])
+}
+
+model SandboxLease {
+  id                String              @id @default(cuid())
+  sandboxIdentityId String
+  provider          SandboxProviderKind @default(DOCKER)
+  providerSandboxId String?
+  status            SandboxLeaseStatus  @default(STARTING)
+  runnerLeaseId     String?
+  containerId       String?
+  sessionRoot       String?
+  lastUsedAt        DateTime?
+  expiresAt         DateTime?
+  stoppedAt         DateTime?
+  errorReason       String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  sandboxIdentity   SandboxIdentity     @relation(fields: [sandboxIdentityId], references: [id])
+  computeSessions   ComputeSession[]
+  browserSessions   BrowserSession[]
+
+  @@index([sandboxIdentityId, status, updatedAt])
+  @@index([provider, status, lastUsedAt])
+  @@index([expiresAt])
+  @@index([providerSandboxId])
 }
 
 model ToolExecution {
@@ -1340,6 +1416,8 @@ model BrowserSession {
   contactId           String?
   conversationId      String?
   computeSessionId    String               @unique
+  sandboxIdentityId   String?
+  sandboxLeaseId      String?
   status              BrowserSessionStatus @default(ACTIVE)
   transportKind       BrowserTransportKind @default(PLAYWRIGHT)
   profilePath         String?
@@ -1355,10 +1433,14 @@ model BrowserSession {
   contact             Contact?             @relation(fields: [contactId], references: [id])
   conversation        Conversation?        @relation(fields: [conversationId], references: [id])
   computeSession      ComputeSession       @relation(fields: [computeSessionId], references: [id])
+  sandboxIdentity     SandboxIdentity?     @relation(fields: [sandboxIdentityId], references: [id], onDelete: SetNull)
+  sandboxLease        SandboxLease?        @relation(fields: [sandboxLeaseId], references: [id], onDelete: SetNull)
   navigations         BrowserNavigation[]
 
   @@index([representativeId, updatedAt])
   @@index([conversationId, updatedAt])
+  @@index([sandboxIdentityId, updatedAt])
+  @@index([sandboxLeaseId, updatedAt])
 }
 
 model BrowserNavigation {

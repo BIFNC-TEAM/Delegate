@@ -158,6 +158,7 @@ prisma/
 docs/
   architecture.md
   delegate-architecture-decisions.md
+  per-user-sandbox-runtime.md
   temporal-native-workflow-rfc.md
   v2-isolated-compute-plane-plan.md
   openviking-integration.md

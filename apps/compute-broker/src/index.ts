@@ -24,6 +24,8 @@ import {
   terminateComputeSession,
 } from "./sessions";
 import { SessionError } from "./session-error";
+import { startSandboxLeaseCleanupLoop } from "./sandbox-leases";
+import { getSandboxMetricSnapshot } from "./sandbox-metrics";
 
 const server = createServer(async (request, response) => {
   try {
@@ -38,6 +40,7 @@ const server = createServer(async (request, response) => {
           status: "ok",
           service: "compute-broker",
           runnerType: computeBrokerConfig.runnerType,
+          sandboxProvider: computeBrokerConfig.sandboxProvider,
           artifactBucket: computeBrokerConfig.artifactStore.bucket,
         }),
       );
@@ -47,6 +50,13 @@ const server = createServer(async (request, response) => {
       return sendJson(response, 401, {
         error: "unauthorized",
       });
+    }
+
+    if (
+      method === "GET" &&
+      url.pathname === "/internal/compute/sandbox/metrics"
+    ) {
+      return sendJson(response, 200, getSandboxMetricSnapshot());
     }
 
     if (method === "POST" && url.pathname === "/internal/compute/sessions") {
@@ -179,6 +189,11 @@ const server = createServer(async (request, response) => {
 
 server.listen(computeBrokerConfig.port, "0.0.0.0", () => {
   console.log(`compute-broker listening on http://0.0.0.0:${computeBrokerConfig.port}`);
+});
+
+startSandboxLeaseCleanupLoop({
+  intervalMs: computeBrokerConfig.sandboxLifecycle.cleanupIntervalMs,
+  idleStopMinutes: computeBrokerConfig.sandboxLifecycle.idleStopMinutes,
 });
 
 function isAuthorized(authorizationHeader: string | undefined): boolean {

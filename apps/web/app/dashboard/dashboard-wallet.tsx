@@ -1,0 +1,335 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
+import {
+  DashboardPanelFrame,
+  DashboardSignalStrip,
+  DashboardSurface,
+  DashboardSurfaceGrid,
+  pickCopy,
+  type Locale,
+} from "@delegate/web-ui";
+
+type AgentWalletDashboardSnapshot = {
+  representative: {
+    slug: string;
+    displayName: string;
+    ownerId: string;
+    ownerVerificationStatus: string;
+  };
+  agentWallet: {
+    id: string | null;
+    currency: string;
+    tokenBalance: number;
+    totalPurchasedTokens: number;
+    totalConsumedTokens: number;
+    tokenUnitPriceCents: number;
+    creatorRevenueShareBps: number;
+  };
+  creatorBalances: {
+    pendingCents: number;
+    withdrawableCents: number;
+    frozenCents: number;
+    withdrawnCents: number;
+  };
+  withdrawRequests: Array<{
+    id: string;
+    amountCents: number;
+    currency: string;
+    status: string;
+    requestedAt: string;
+  }>;
+  recentLedgerEntries: Array<{
+    id: string;
+    accountType: string;
+    entryKind: string;
+    amountCents: number;
+    tokenAmount: number;
+    currency: string;
+    notes: string | null;
+    createdAt: string;
+  }>;
+};
+
+export function DashboardWallet({
+  representativeSlug,
+  locale,
+}: {
+  representativeSlug: string;
+  locale: Locale;
+}) {
+  const t = pickCopy(locale, copy);
+  const [snapshot, setSnapshot] = useState<AgentWalletDashboardSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    fetch(`/api/dashboard/representatives/${representativeSlug}/wallet`)
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(await extractError(response));
+        }
+        return response.json() as Promise<AgentWalletDashboardSnapshot>;
+      })
+      .then((nextSnapshot) => {
+        if (!cancelled) {
+          setSnapshot(nextSnapshot);
+        }
+      })
+      .catch((nextError: unknown) => {
+        if (!cancelled) {
+          setError(nextError instanceof Error ? nextError.message : t.loadError);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [representativeSlug, t.loadError]);
+
+  if (!snapshot) {
+    return (
+      <section className="section">
+        <article className="dashboard-highlight-card">
+          <p className="panel-title">{t.loadingTitle}</p>
+          <h3>{t.loadingHeadline}</h3>
+          <p>{error ?? t.loadingCopy}</p>
+        </article>
+      </section>
+    );
+  }
+
+  const signalCards = [
+    {
+      label: t.cards.tokenBalance,
+      value: formatNumber(snapshot.agentWallet.tokenBalance),
+      detail: t.cards.tokenBalanceDetail,
+      tone: "accent" as const,
+    },
+    {
+      label: t.cards.withdrawable,
+      value: formatMoney(snapshot.creatorBalances.withdrawableCents, snapshot.agentWallet.currency),
+      detail: t.cards.withdrawableDetail,
+      tone: "safe" as const,
+    },
+    {
+      label: t.cards.pending,
+      value: formatMoney(snapshot.creatorBalances.pendingCents, snapshot.agentWallet.currency),
+      detail: t.cards.pendingDetail,
+    },
+    {
+      label: t.cards.frozen,
+      value: formatMoney(snapshot.creatorBalances.frozenCents, snapshot.agentWallet.currency),
+      detail: t.cards.frozenDetail,
+    },
+  ];
+
+  return (
+    <DashboardPanelFrame
+      eyebrow={t.eyebrow}
+      summary={t.summary(snapshot.representative.displayName)}
+      title={t.title}
+    >
+      <div className="dashboard-panel-hero">
+        <article className="dashboard-highlight-card dashboard-highlight-card-primary">
+          <p className="panel-title">{t.heroKicker}</p>
+          <h3>{t.heroTitle}</h3>
+          <p>{t.heroCopy}</p>
+          <div className="chip-row">
+            <span className="chip">{snapshot.representative.displayName}</span>
+            <span className="chip chip-safe">{snapshot.representative.ownerVerificationStatus}</span>
+            <span className="chip">{t.revenueShare(snapshot.agentWallet.creatorRevenueShareBps)}</span>
+          </div>
+        </article>
+
+        <DashboardSignalStrip cards={signalCards} />
+      </div>
+
+      {error ? <div className="status-banner status-error">{error}</div> : null}
+
+      <DashboardSurfaceGrid>
+        <DashboardSurface
+          eyebrow={t.agentWalletEyebrow}
+          meta={<span className="chip">{snapshot.agentWallet.currency}</span>}
+          title={t.agentWalletTitle}
+        >
+          <div className="row-list">
+            <WalletMetric label={t.totalPurchased} value={formatNumber(snapshot.agentWallet.totalPurchasedTokens)} />
+            <WalletMetric label={t.totalConsumed} value={formatNumber(snapshot.agentWallet.totalConsumedTokens)} />
+            <WalletMetric
+              label={t.unitPrice}
+              value={formatMoney(snapshot.agentWallet.tokenUnitPriceCents, snapshot.agentWallet.currency)}
+            />
+            <WalletMetric
+              label={t.withdrawn}
+              value={formatMoney(snapshot.creatorBalances.withdrawnCents, snapshot.agentWallet.currency)}
+            />
+          </div>
+        </DashboardSurface>
+
+        <DashboardSurface
+          eyebrow={t.withdrawEyebrow}
+          meta={<span className="chip">{t.withdrawCount(snapshot.withdrawRequests.length)}</span>}
+          title={t.withdrawTitle}
+        >
+          <div className="row-list">
+            {snapshot.withdrawRequests.length ? (
+              snapshot.withdrawRequests.map((request) => (
+                <div className="skill-row" key={request.id}>
+                  <div>
+                    <strong>{formatMoney(request.amountCents, request.currency)}</strong>
+                    <p>{request.status}</p>
+                    <div className="chip-row">
+                      <span className="chip">{formatTimestamp(request.requestedAt, locale)}</span>
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="muted">{t.noWithdrawRequests}</p>
+            )}
+          </div>
+        </DashboardSurface>
+
+        <DashboardSurface
+          eyebrow={t.ledgerEyebrow}
+          meta={<span className="chip">{t.ledgerCount(snapshot.recentLedgerEntries.length)}</span>}
+          title={t.ledgerTitle}
+        >
+          <div className="row-list">
+            {snapshot.recentLedgerEntries.length ? (
+              snapshot.recentLedgerEntries.map((entry) => (
+                <div className="skill-row" key={entry.id}>
+                  <div>
+                    <strong>{entry.entryKind}</strong>
+                    <p>
+                      {formatMoney(entry.amountCents, entry.currency)} · {entry.tokenAmount} token
+                    </p>
+                    <div className="chip-row">
+                      <span className="chip">{entry.accountType}</span>
+                      <span className="chip">{formatTimestamp(entry.createdAt, locale)}</span>
+                    </div>
+                    {entry.notes ? <p className="footer-note">{entry.notes}</p> : null}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="muted">{t.noLedgerEntries}</p>
+            )}
+          </div>
+        </DashboardSurface>
+      </DashboardSurfaceGrid>
+    </DashboardPanelFrame>
+  );
+}
+
+function WalletMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="skill-row">
+      <div>
+        <strong>{label}</strong>
+        <p>{value}</p>
+      </div>
+    </div>
+  );
+}
+
+async function extractError(response: Response): Promise<string> {
+  const body = (await response.json().catch(() => null)) as { error?: string } | null;
+  return body?.error ?? response.statusText;
+}
+
+function formatMoney(cents: number, currency: string): string {
+  return `${currency} ${(cents / 100).toFixed(2)}`;
+}
+
+function formatNumber(value: number): string {
+  return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatTimestamp(value: string, locale: Locale): string {
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+const copy = {
+  zh: {
+    eyebrow: "Agent Wallet",
+    title: "钱包、分成和提现",
+    summary: (name: string) => `${name} 的 Agent 钱包账本视图。`,
+    loadingTitle: "正在加载钱包",
+    loadingHeadline: "正在核对 token、收益和提现队列",
+    loadingCopy: "如果这里一直不动，可能是本地数据库还没有 AMN 钱包数据。",
+    loadError: "加载钱包失败。",
+    heroKicker: "Money plane",
+    heroTitle: "把用户充值、Agent token 和 creator 提现放在一张账本上。",
+    heroCopy: "这里先给 owner 看清楚余额和流向：哪些 token 还没用，哪些收益待释放，哪些钱已经可以申请提现。",
+    revenueShare: (bps: number) => `Creator ${bps / 100}%`,
+    cards: {
+      tokenBalance: "Agent token",
+      tokenBalanceDetail: "当前 Agent 还能消费的 token。",
+      withdrawable: "可提现",
+      withdrawableDetail: "creator 已释放、可申请提现的钱。",
+      pending: "待释放",
+      pendingDetail: "用户已购买，但还没随服务消耗释放。",
+      frozen: "提现冻结",
+      frozenDetail: "已进入提现审核队列的金额。",
+    },
+    agentWalletEyebrow: "Agent account",
+    agentWalletTitle: "Agent 钱包参数",
+    totalPurchased: "累计购买 token",
+    totalConsumed: "累计消耗 token",
+    unitPrice: "Token 单价",
+    withdrawn: "已提现",
+    withdrawEyebrow: "Payout queue",
+    withdrawTitle: "提现请求",
+    withdrawCount: (count: number) => `${count} 条`,
+    noWithdrawRequests: "还没有提现请求。",
+    ledgerEyebrow: "Audit trail",
+    ledgerTitle: "最近 AMN 账本",
+    ledgerCount: (count: number) => `${count} 条`,
+    noLedgerEntries: "还没有 AMN 钱包流水。",
+  },
+  en: {
+    eyebrow: "Agent Wallet",
+    title: "Wallet, revenue share, and withdrawals",
+    summary: (name: string) => `Agent wallet ledger view for ${name}.`,
+    loadingTitle: "Loading wallet",
+    loadingHeadline: "Checking tokens, earnings, and withdrawal queue",
+    loadingCopy: "If this keeps loading, the local database may not have AMN wallet data yet.",
+    loadError: "Failed to load wallet.",
+    heroKicker: "Money plane",
+    heroTitle: "Keep user recharge, Agent tokens, and creator withdrawals on one ledger.",
+    heroCopy: "This view gives owners the money picture first: unused tokens, pending earnings, withdrawable balance, and payout review.",
+    revenueShare: (bps: number) => `Creator ${bps / 100}%`,
+    cards: {
+      tokenBalance: "Agent tokens",
+      tokenBalanceDetail: "Tokens this Agent can still spend.",
+      withdrawable: "Withdrawable",
+      withdrawableDetail: "Creator earnings released and ready to request.",
+      pending: "Pending",
+      pendingDetail: "Purchased by users, not released until service is consumed.",
+      frozen: "Frozen",
+      frozenDetail: "Funds already locked for withdrawal review.",
+    },
+    agentWalletEyebrow: "Agent account",
+    agentWalletTitle: "Agent wallet parameters",
+    totalPurchased: "Total purchased tokens",
+    totalConsumed: "Total consumed tokens",
+    unitPrice: "Token unit price",
+    withdrawn: "Withdrawn",
+    withdrawEyebrow: "Payout queue",
+    withdrawTitle: "Withdrawal requests",
+    withdrawCount: (count: number) => `${count} rows`,
+    noWithdrawRequests: "No withdrawal requests yet.",
+    ledgerEyebrow: "Audit trail",
+    ledgerTitle: "Recent AMN ledger",
+    ledgerCount: (count: number) => `${count} rows`,
+    noLedgerEntries: "No AMN wallet ledger entries yet.",
+  },
+} as const;

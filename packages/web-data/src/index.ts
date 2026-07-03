@@ -1,3 +1,4 @@
+export * from "./agent-wallet-dashboard";
 export * from "./agent-wallet-ledger";
 export * from "./agent-wallet-payment-providers";
 export * from "./agent-wallet-recharge";

@@ -16,6 +16,7 @@ import { DashboardOpenViking } from "./dashboard-openviking";
 import { DashboardRepresentativeDirectory } from "./dashboard-representative-directory";
 import { DashboardRepresentativeSetup } from "./dashboard-representative-setup";
 import { DashboardSkillPacks } from "./dashboard-skill-packs";
+import { DashboardWallet } from "./dashboard-wallet";
 import { listRepresentativeDirectoryItems } from "@delegate/web-data";
 
 export default async function DashboardPage({
@@ -168,6 +169,7 @@ export default async function DashboardPage({
             ) : null}
             {activeView === "skills" ? <DashboardSkillPacks locale={locale} representativeSlug={activeSlug} /> : null}
             {activeView === "compute" ? <DashboardCompute locale={locale} representativeSlug={activeSlug} /> : null}
+            {activeView === "wallet" ? <DashboardWallet locale={locale} representativeSlug={activeSlug} /> : null}
             {activeView === "memory" ? <DashboardOpenViking locale={locale} representativeSlug={activeSlug} /> : null}
           </div>
         </section>
@@ -176,7 +178,7 @@ export default async function DashboardPage({
   );
 }
 
-type DashboardView = "overview" | "setup" | "skills" | "compute" | "memory";
+type DashboardView = "overview" | "setup" | "skills" | "compute" | "wallet" | "memory";
 
 function isDashboardView(value: string | undefined): value is DashboardView {
   return (
@@ -184,6 +186,7 @@ function isDashboardView(value: string | undefined): value is DashboardView {
     value === "setup" ||
     value === "skills" ||
     value === "compute" ||
+    value === "wallet" ||
     value === "memory"
   );
 }
@@ -268,6 +271,15 @@ const dashboardCopy: Record<
         stageCopy: "这页不是终端替身，而是受 policy、approval 和 billing 约束的计算控制台。先决定哪些请求值得批准，再观察 session 和 artifact 是否处在受控边界内。",
       },
       {
+        id: "wallet",
+        label: "钱包",
+        eyebrow: "AMN",
+        blurb: "Agent token、creator 分成、提现冻结和账本。",
+        shortLabel: "钱包",
+        stageTitle: "把 Agent 钱包从黑盒变成 owner 能看懂的资金控制台。",
+        stageCopy: "这里展示用户充值进入 Agent token 后的余额、creator pending/withdrawable，以及提现申请和最近 ledger。先看清楚钱在哪里，再做自动化。",
+      },
+      {
         id: "memory",
         label: "记忆",
         eyebrow: "进阶",
@@ -334,6 +346,15 @@ const dashboardCopy: Record<
         shortLabel: "Compute",
         stageTitle: "Put exec, browser, and artifacts inside an isolated compute plane instead of exposing the host.",
         stageCopy: "This is not a terminal replacement. It is a governed compute lane shaped by policy, approval, and billing. Approve the right requests first, then inspect sessions and artifacts.",
+      },
+      {
+        id: "wallet",
+        label: "Wallet",
+        eyebrow: "AMN",
+        blurb: "Agent tokens, creator share, withdrawal freezes, and ledger trail.",
+        shortLabel: "Wallet",
+        stageTitle: "Turn the Agent wallet from a black box into an owner-readable money console.",
+        stageCopy: "This lane shows where user-funded Agent tokens, creator pending/withdrawable balances, withdrawal requests, and recent ledger entries stand before more automation is added.",
       },
       {
         id: "memory",

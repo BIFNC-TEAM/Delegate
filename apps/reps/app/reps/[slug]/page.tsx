@@ -21,6 +21,7 @@ import {
 } from "@delegate/web-ui";
 
 import { RepresentativeChatPanel } from "./representative-chat-panel";
+import { RepresentativeRechargePanel } from "./representative-recharge-panel";
 
 type RepresentativeSkill = Representative["skills"][number];
 
@@ -230,11 +231,7 @@ export default async function RepresentativePage({
               <span className="chip">{t.amnPayRoadmapChip}</span>
             </div>
             <p className="footer-note">{t.balanceDisclosure(representative.name)}</p>
-            <div className="button-row">
-              <a className="button-primary" href="#plans">
-                {t.rechargeCta}
-              </a>
-            </div>
+            <RepresentativeRechargePanel locale={locale} representativeSlug={representative.slug} />
           </DashboardSurface>
 
           <DashboardSurface eyebrow={t.platformAccountsEyebrow} title={t.platformAccountsTitle}>

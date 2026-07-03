@@ -10,6 +10,7 @@ import {
   recordWalletLedgerTransaction,
   type WalletLedgerClient,
 } from "./agent-wallet-ledger";
+import { mockPaymentProviderAdapter } from "./agent-wallet-payment-providers";
 import { prisma } from "./prisma";
 
 type UserWalletRecord = {
@@ -121,22 +122,24 @@ export async function createMockRechargeOrder(
       },
     });
 
+    const checkout = await mockPaymentProviderAdapter.createRechargeCheckout({
+      externalUserId: normalized.externalUserId,
+      amountCents: normalized.amountCents,
+      currency: normalized.currency,
+      idempotencyKey: normalized.idempotencyKey,
+    });
+
     const order = await tx.rechargeOrder.create({
       data: {
         userWalletId: userWallet.id,
         provider: PaymentProvider.MOCK,
-        providerOrderId: `mock_${normalized.idempotencyKey}`,
+        providerOrderId: checkout.providerOrderId,
         amountCents: normalized.amountCents,
         currency: normalized.currency,
         status: RechargeOrderStatus.REQUIRES_PAYMENT,
         idempotencyKey: normalized.idempotencyKey,
-        checkoutUrl: `/api/amn/recharges/mock/${normalized.idempotencyKey}`,
-        providerPayload: {
-          provider: "mock",
-          externalUserId: normalized.externalUserId,
-          amountCents: normalized.amountCents,
-          currency: normalized.currency,
-        },
+        checkoutUrl: checkout.checkoutUrl,
+        providerPayload: checkout.providerPayload,
       },
     });
 
@@ -173,35 +176,36 @@ export async function completeMockRechargeOrder(
       throw new Error(`Recharge order cannot be paid from status ${order.status}.`);
     }
 
+    const normalizedEvent = await mockPaymentProviderAdapter.normalizeWebhookEvent({
+      payload: {
+        providerEventId: input.providerEventId ?? `mock_recharge_paid_${order.id}`,
+        rechargeOrderId: order.id,
+        amountCents: order.amountCents,
+        currency: order.currency,
+        status: "paid",
+      },
+    });
+    if (normalizedEvent.eventType !== PaymentProviderEventType.RECHARGE_PAID) {
+      throw new Error("Mock payment event is not a paid recharge event.");
+    }
+
     const paidAt = new Date();
-    const providerEventId = input.providerEventId ?? `mock_recharge_paid_${order.id}`;
     const providerEvent = await tx.paymentProviderEvent.upsert({
       where: {
         provider_providerEventId: {
-          provider: PaymentProvider.MOCK,
-          providerEventId,
+          provider: normalizedEvent.provider,
+          providerEventId: normalizedEvent.providerEventId,
         },
       },
       create: {
-        provider: PaymentProvider.MOCK,
-        providerEventId,
-        eventType: PaymentProviderEventType.RECHARGE_PAID,
+        provider: normalizedEvent.provider,
+        providerEventId: normalizedEvent.providerEventId,
+        eventType: normalizedEvent.eventType,
         rechargeOrderId: order.id,
-        rawPayload: {
-          provider: "mock",
-          providerEventId,
-          rechargeOrderId: order.id,
-          amountCents: order.amountCents,
-          currency: order.currency,
-        },
-        normalizedPayload: {
-          type: "RechargePaid",
-          rechargeOrderId: order.id,
-          amountCents: order.amountCents,
-          currency: order.currency,
-        },
+        rawPayload: normalizedEvent.rawPayload,
+        normalizedPayload: normalizedEvent.normalizedPayload,
         processedAt: paidAt,
-        idempotencyKey: `mock:${providerEventId}`,
+        idempotencyKey: normalizedEvent.idempotencyKey,
       },
       update: {
         processedAt: paidAt,

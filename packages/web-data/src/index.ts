@@ -1,4 +1,5 @@
 export * from "./agent-wallet-ledger";
+export * from "./agent-wallet-payment-providers";
 export * from "./agent-wallet-recharge";
 export * from "./compute";
 export * from "./deliverable-insights";

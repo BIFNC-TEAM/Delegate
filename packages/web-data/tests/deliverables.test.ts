@@ -6,6 +6,7 @@ import {
   computeDeliverablePackageCacheKey,
   type DeliverableInsightsSource,
 } from "../src/deliverable-insights";
+import { getRepresentativePublicDeliverables } from "../src/deliverables";
 
 function createSource(): DeliverableInsightsSource {
   return {
@@ -209,5 +210,24 @@ describe("buildRepresentativeDeliverableInsights", () => {
     expect(snapshot.topDeliverables.mostDownloaded).toEqual([]);
     expect(snapshot.artifactReuseHotspots).toEqual([]);
     expect(snapshot.packageHealth.cachedPackageCount).toBe(0);
+  });
+});
+
+describe("getRepresentativePublicDeliverables", () => {
+  it("falls back to an empty demo deliverable list when DATABASE_URL is unavailable", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+    try {
+      await expect(getRepresentativePublicDeliverables("lin-founder-rep")).resolves.toMatchObject({
+        representative: {
+          slug: "lin-founder-rep",
+        },
+        deliverables: [],
+      });
+    } finally {
+      if (typeof previousDatabaseUrl === "string") {
+        process.env.DATABASE_URL = previousDatabaseUrl;
+      }
+    }
   });
 });

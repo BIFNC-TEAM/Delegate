@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import JSZip from "jszip";
 import { Prisma } from "@prisma/client";
+import { demoRepresentative } from "@delegate/domain";
 import {
   listDeliverablePackagingPresetsResponseSchema,
   deliverableDownloadResponseSchema,
@@ -67,63 +68,74 @@ export async function getRepresentativeDeliverables(
     publicOnly?: boolean;
   },
 ): Promise<ListDeliverablesResponse | null> {
-  const representative = await prisma.representative.findUnique({
-    where: { slug: representativeSlug },
-    select: {
-      id: true,
-      slug: true,
-      displayName: true,
-    },
-  });
-
-  if (!representative) {
-    return null;
+  if (shouldUseStaticDeliverableFallback(representativeSlug)) {
+    return getDemoDeliverablesFallback();
   }
 
-  const deliverables = await prisma.deliverable.findMany({
-    where: {
-      representativeId: representative.id,
-      ...(options?.publicOnly ? { visibility: "PUBLIC_MATERIAL" } : {}),
-    },
-    include: {
-      artifact: {
-        select: {
-          id: true,
-          mimeType: true,
-          sizeBytes: true,
-          summary: true,
+  try {
+    const representative = await prisma.representative.findUnique({
+      where: { slug: representativeSlug },
+      select: {
+        id: true,
+        slug: true,
+        displayName: true,
+      },
+    });
+
+    if (!representative) {
+      return null;
+    }
+
+    const deliverables = await prisma.deliverable.findMany({
+      where: {
+        representativeId: representative.id,
+        ...(options?.publicOnly ? { visibility: "PUBLIC_MATERIAL" } : {}),
+      },
+      include: {
+        artifact: {
+          select: {
+            id: true,
+            mimeType: true,
+            sizeBytes: true,
+            summary: true,
+          },
         },
       },
-    },
-    orderBy: [{ createdAt: "desc" }],
-  });
+      orderBy: [{ createdAt: "desc" }],
+    });
 
-  return listDeliverablesResponseSchema.parse({
-    representative: {
-      slug: representative.slug,
-      displayName: representative.displayName,
-    },
-    deliverables: deliverables.map((deliverable) => ({
-      id: deliverable.id,
-      representativeId: deliverable.representativeId,
-      artifactId: deliverable.artifactId,
-      title: deliverable.title,
-      summary: deliverable.summary,
-      kind: deliverable.kind.toLowerCase(),
-      visibility: deliverable.visibility.toLowerCase(),
-      sourceKind: deliverable.sourceKind.toLowerCase(),
-      externalUrl: deliverable.externalUrl,
-      bundleItemArtifactIds: deliverable.bundleItemArtifactIds,
-      downloadCount: deliverable.downloadCount,
-      lastDownloadedAt: deliverable.lastDownloadedAt?.toISOString() ?? null,
-      packageBuiltAt: deliverable.packageBuiltAt?.toISOString() ?? null,
-      packageSizeBytes: deliverable.packageSizeBytes ?? null,
-      hasCachedPackage: Boolean(deliverable.packageObjectKey && deliverable.packageBuiltAt),
-      createdBy: deliverable.createdBy,
-      createdAt: deliverable.createdAt.toISOString(),
-      updatedAt: deliverable.updatedAt.toISOString(),
-    })),
-  });
+    return listDeliverablesResponseSchema.parse({
+      representative: {
+        slug: representative.slug,
+        displayName: representative.displayName,
+      },
+      deliverables: deliverables.map((deliverable) => ({
+        id: deliverable.id,
+        representativeId: deliverable.representativeId,
+        artifactId: deliverable.artifactId,
+        title: deliverable.title,
+        summary: deliverable.summary,
+        kind: deliverable.kind.toLowerCase(),
+        visibility: deliverable.visibility.toLowerCase(),
+        sourceKind: deliverable.sourceKind.toLowerCase(),
+        externalUrl: deliverable.externalUrl,
+        bundleItemArtifactIds: deliverable.bundleItemArtifactIds,
+        downloadCount: deliverable.downloadCount,
+        lastDownloadedAt: deliverable.lastDownloadedAt?.toISOString() ?? null,
+        packageBuiltAt: deliverable.packageBuiltAt?.toISOString() ?? null,
+        packageSizeBytes: deliverable.packageSizeBytes ?? null,
+        hasCachedPackage: Boolean(deliverable.packageObjectKey && deliverable.packageBuiltAt),
+        createdBy: deliverable.createdBy,
+        createdAt: deliverable.createdAt.toISOString(),
+        updatedAt: deliverable.updatedAt.toISOString(),
+      })),
+    });
+  } catch (error) {
+    if (shouldUseDemoFallback(error, representativeSlug)) {
+      return getDemoDeliverablesFallback();
+    }
+    throw error;
+  }
 }
 
 export async function getRepresentativeDeliverableInsights(
@@ -462,6 +474,35 @@ export async function getRepresentativePublicDeliverables(representativeSlug: st
   return getRepresentativeDeliverables(representativeSlug, {
     publicOnly: true,
   });
+}
+
+function getDemoDeliverablesFallback(): ListDeliverablesResponse {
+  return listDeliverablesResponseSchema.parse({
+    representative: {
+      slug: demoRepresentative.slug,
+      displayName: demoRepresentative.name,
+    },
+    deliverables: [],
+  });
+}
+
+function shouldUseStaticDeliverableFallback(representativeSlug: string): boolean {
+  return representativeSlug === demoRepresentative.slug && !process.env.DATABASE_URL?.trim();
+}
+
+function shouldUseDemoFallback(error: unknown, representativeSlug: string): boolean {
+  return representativeSlug === demoRepresentative.slug && isPrismaUnavailableError(error);
+}
+
+function isPrismaUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return (
+    error.message.includes("Environment variable not found: DATABASE_URL") ||
+    error.message.includes("Can't reach database server") ||
+    error.message.includes("Timed out fetching a new connection")
+  );
 }
 
 function resolveNextDeliverableShape(

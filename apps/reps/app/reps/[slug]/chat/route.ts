@@ -7,7 +7,13 @@ import {
   renderReplyPreview,
   resolveConversationSubagent,
 } from "@delegate/runtime";
-import { getRepresentativeSetupSnapshot } from "@delegate/web-data";
+import {
+  getRepresentativeSetupSnapshot,
+  loadWebConversationRecentTurns,
+  persistWebConversationExchange,
+  resolveWebAudienceContact,
+  resolveWebAudienceConversation,
+} from "@delegate/web-data";
 
 import {
   appendPublicChatTurns,
@@ -50,9 +56,22 @@ export async function POST(
       representativeSlug: slug,
       cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
     });
+    const contact = await resolveWebAudienceContact({
+      representativeId: setup.id,
+      representativeSlug: slug,
+      audienceId: sessionState.audienceId,
+    });
+    const conversation = await resolveWebAudienceConversation({
+      representativeId: setup.id,
+      contactId: contact.id,
+      audienceId: sessionState.audienceId,
+    });
     const representative = buildPublicChatRepresentative(setup);
+    const recentTurns = await loadWebConversationRecentTurns({
+      conversationId: conversation.id,
+    });
     const usage = deriveTierUsage({
-      freeRepliesUsed: sessionState.freeRepliesUsed,
+      freeRepliesUsed: conversation.freeRepliesUsed,
       freeReplyLimit: representative.contract.freeReplyLimit,
     });
 
@@ -90,7 +109,7 @@ export async function POST(
         subagent,
         userText: body.message,
         recalled: [],
-        recentTurns: sessionState.recentTurns,
+        recentTurns,
         collectorState: null,
       });
 
@@ -114,6 +133,17 @@ export async function POST(
       userMessage: body.message,
       assistantMessage: response.reply.text,
       nextStep: response.plan.nextStep,
+    });
+    const updatedConversation = await persistWebConversationExchange({
+      conversationId: conversation.id,
+      userMessage: body.message,
+      assistantMessage: response.reply.text,
+      intent: response.plan.intent,
+      nextStep: response.plan.nextStep,
+    });
+    response.usage = deriveTierUsage({
+      freeRepliesUsed: updatedConversation.freeRepliesUsed,
+      freeReplyLimit: representative.contract.freeReplyLimit,
     });
     const nextResponse = NextResponse.json(response);
     nextResponse.cookies.set(

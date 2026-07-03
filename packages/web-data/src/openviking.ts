@@ -747,12 +747,14 @@ async function syncMemoryDocumentAndRecord(params: {
     representativeSlug: params.representativeSlug,
     document: params.document,
   });
+  const audienceIdentityId = await resolveContactAudienceIdentityId(params.tx, params.contactId);
 
   await params.tx.openVikingMemoryRecord.upsert({
     where: { uri: params.document.uri },
     create: {
       representativeId: params.representativeId,
       ...(params.contactId ? { contactId: params.contactId } : {}),
+      ...(audienceIdentityId ? { audienceIdentityId } : {}),
       uri: params.document.uri,
       contextType: params.document.contextType,
       scope: params.document.scope,
@@ -762,6 +764,7 @@ async function syncMemoryDocumentAndRecord(params: {
     },
     update: {
       ...(params.contactId ? { contactId: params.contactId } : {}),
+      ...(audienceIdentityId ? { audienceIdentityId } : {}),
       contextType: params.document.contextType,
       scope: params.document.scope,
       category: params.document.category,
@@ -769,6 +772,22 @@ async function syncMemoryDocumentAndRecord(params: {
       sourceKind: params.sourceKind,
     },
   });
+}
+
+async function resolveContactAudienceIdentityId(
+  tx: PrismaClient,
+  contactId: string | undefined,
+): Promise<string | null> {
+  if (!contactId) {
+    return null;
+  }
+
+  const contact = await tx.contact.findUnique({
+    where: { id: contactId },
+    select: { audienceIdentityId: true },
+  });
+
+  return contact?.audienceIdentityId ?? null;
 }
 
 function buildSummaryFromDocument(content: string): string {

@@ -34,23 +34,22 @@ export type PublicChatResponse = {
 };
 
 export type PublicChatSessionState = {
-  freeRepliesUsed: number;
-  recentTurns: ModelRuntimeRecentTurn[];
+  audienceId: string;
+  sessionToken: string;
+  expiresAt: string;
 };
 
 type PublicChatSessionCookiePayload = {
-  version: 1;
+  version: 2;
   representativeSlug: string;
-  freeRepliesUsed: number;
-  recentTurns: ModelRuntimeRecentTurn[];
+  audienceId: string;
+  sessionToken: string;
+  expiresAt: string;
 };
 
-const PUBLIC_CHAT_STATE_VERSION = 1 as const;
+const PUBLIC_CHAT_STATE_VERSION = 2 as const;
 const PUBLIC_CHAT_COOKIE_PREFIX = "delegate-public-chat";
-const PUBLIC_CHAT_SESSION_SECRET =
-  process.env.REP_PUBLIC_CHAT_SESSION_SECRET?.trim() ||
-  process.env.TELEGRAM_WEBHOOK_SECRET?.trim() ||
-  randomBytes(32).toString("hex");
+const PUBLIC_CHAT_AUDIENCE_ID_PREFIX = "aud";
 const PUBLIC_CHAT_RECENT_TURN_LIMIT = 8;
 const PUBLIC_CHAT_TURN_TEXT_LIMIT = 240;
 
@@ -154,14 +153,15 @@ export function getPublicChatCookieName(representativeSlug: string) {
 export function readPublicChatSessionState(params: {
   representativeSlug: string;
   cookieValue: string | undefined;
+  now?: Date;
 }): PublicChatSessionState {
   if (!params.cookieValue) {
-    return createEmptyPublicChatSessionState();
+    return createPublicChatSessionState({ now: params.now });
   }
 
   const [encodedPayload, encodedSignature] = params.cookieValue.split(".");
   if (!encodedPayload || !encodedSignature) {
-    return createEmptyPublicChatSessionState();
+    return createPublicChatSessionState({ now: params.now });
   }
 
   const expectedSignature = signPublicChatPayload(encodedPayload);
@@ -171,7 +171,7 @@ export function readPublicChatSessionState(params: {
     expectedBuffer.length !== actualBuffer.length ||
     !timingSafeEqual(expectedBuffer, actualBuffer)
   ) {
-    return createEmptyPublicChatSessionState();
+    return createPublicChatSessionState({ now: params.now });
   }
 
   try {
@@ -181,17 +181,23 @@ export function readPublicChatSessionState(params: {
 
     if (
       payload.version !== PUBLIC_CHAT_STATE_VERSION ||
-      payload.representativeSlug !== params.representativeSlug
+      payload.representativeSlug !== params.representativeSlug ||
+      !isValidAudienceId(payload.audienceId) ||
+      typeof payload.sessionToken !== "string" ||
+      payload.sessionToken.length < 24 ||
+      typeof payload.expiresAt !== "string" ||
+      Date.parse(payload.expiresAt) <= (params.now ?? new Date()).getTime()
     ) {
-      return createEmptyPublicChatSessionState();
+      return createPublicChatSessionState({ now: params.now });
     }
 
     return {
-      freeRepliesUsed: normalizeFreeRepliesUsed(payload.freeRepliesUsed),
-      recentTurns: sanitizeRecentTurns(payload.recentTurns),
+      audienceId: payload.audienceId,
+      sessionToken: payload.sessionToken,
+      expiresAt: payload.expiresAt,
     };
   } catch {
-    return createEmptyPublicChatSessionState();
+    return createPublicChatSessionState({ now: params.now });
   }
 }
 
@@ -202,8 +208,9 @@ export function writePublicChatSessionState(params: {
   const payload: PublicChatSessionCookiePayload = {
     version: PUBLIC_CHAT_STATE_VERSION,
     representativeSlug: params.representativeSlug,
-    freeRepliesUsed: normalizeFreeRepliesUsed(params.state.freeRepliesUsed),
-    recentTurns: sanitizeRecentTurns(params.state.recentTurns),
+    audienceId: params.state.audienceId,
+    sessionToken: params.state.sessionToken,
+    expiresAt: params.state.expiresAt,
   };
   const encodedPayload = Buffer.from(JSON.stringify(payload)).toString(
     "base64url",
@@ -218,40 +225,57 @@ export function appendPublicChatTurns(params: {
   assistantMessage: string;
   nextStep?: string;
 }) {
-  return {
-    freeRepliesUsed: normalizeFreeRepliesUsed(params.state.freeRepliesUsed + 1),
-    recentTurns: sanitizeRecentTurns([
-      ...params.state.recentTurns,
-      {
-        direction: "inbound",
-        messageText: params.userMessage,
-      },
-      {
-        direction: "outbound",
-        messageText: params.assistantMessage,
-        ...(params.nextStep ? { summary: params.nextStep } : {}),
-      },
-    ]),
-  } satisfies PublicChatSessionState;
+  void params.userMessage;
+  void params.assistantMessage;
+  void params.nextStep;
+  return params.state;
 }
 
 export function createEmptyPublicChatSessionState(): PublicChatSessionState {
+  return createPublicChatSessionState();
+}
+
+export function createPublicChatSessionState(params: {
+  now?: Date | undefined;
+} = {}): PublicChatSessionState {
+  const now = params.now ?? new Date();
+  const expiresAt = new Date(now.getTime() + PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS * 1000);
+
   return {
-    freeRepliesUsed: 0,
-    recentTurns: [],
+    audienceId: `${PUBLIC_CHAT_AUDIENCE_ID_PREFIX}_${randomBytes(16).toString("base64url")}`,
+    sessionToken: randomBytes(32).toString("base64url"),
+    expiresAt: expiresAt.toISOString(),
   };
 }
 
 function signPublicChatPayload(encodedPayload: string) {
-  return createHmac("sha256", PUBLIC_CHAT_SESSION_SECRET)
+  return createHmac("sha256", getPublicChatSessionSecret())
     .update(encodedPayload)
     .digest("base64url");
 }
 
-function normalizeFreeRepliesUsed(value: unknown) {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0
-    ? value
-    : 0;
+function getPublicChatSessionSecret() {
+  const secret =
+    process.env.REP_PUBLIC_CHAT_SESSION_SECRET?.trim() ||
+    process.env.TELEGRAM_WEBHOOK_SECRET?.trim();
+
+  if (secret) {
+    return secret;
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("REP_PUBLIC_CHAT_SESSION_SECRET is required in production.");
+  }
+
+  return "delegate-public-chat-dev-secret";
+}
+
+function isValidAudienceId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.startsWith(`${PUBLIC_CHAT_AUDIENCE_ID_PREFIX}_`) &&
+    value.length > PUBLIC_CHAT_AUDIENCE_ID_PREFIX.length + 8
+  );
 }
 
 function truncateRecentTurnText(value: string) {

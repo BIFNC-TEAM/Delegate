@@ -191,6 +191,21 @@ enum SandboxLeaseStatus {
   ARCHIVED
 }
 
+enum AudienceIdentityStatus {
+  ANONYMOUS
+  REGISTERED
+  MERGED
+  DISABLED
+}
+
+enum IdentityLinkProvider {
+  WEB_ANONYMOUS
+  EMAIL
+  PHONE
+  TELEGRAM
+  PAYMENT_EXTERNAL_USER
+}
+
 enum ToolExecutionStatus {
   QUEUED
   RUNNING
@@ -453,21 +468,60 @@ model Wallet {
   owner             Owner    @relation(fields: [ownerId], references: [id])
 }
 
+model AudienceIdentity {
+  id                String                   @id @default(cuid())
+  audienceKey       String                   @unique
+  status            AudienceIdentityStatus   @default(ANONYMOUS)
+  mergedIntoId      String?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  lastSeenAt        DateTime                 @default(now())
+  mergedInto        AudienceIdentity?        @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedFrom        AudienceIdentity[]       @relation("AudienceIdentityMerge")
+  contacts          Contact[]
+  conversations     Conversation[]
+  userWallets       UserWallet[]
+  sandboxIdentities SandboxIdentity[]
+  memoryRecords     OpenVikingMemoryRecord[]
+  identityLinks     IdentityLink[]
+
+  @@index([status, lastSeenAt])
+  @@index([mergedIntoId])
+}
+
+model IdentityLink {
+  id                 String               @id @default(cuid())
+  audienceIdentityId String
+  provider           IdentityLinkProvider
+  providerSubject    String
+  verifiedAt         DateTime?
+  metadata           Json?
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  audienceIdentity   AudienceIdentity     @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerSubject])
+  @@index([audienceIdentityId, provider])
+}
+
 model UserWallet {
-  id               String               @id @default(cuid())
-  externalUserId   String               @unique
-  telegramUserId   String?              @unique
-  email            String?              @unique
-  displayName      String?
-  currency         String               @default("CNY")
-  cashBalanceCents Int                  @default(0)
-  createdAt        DateTime             @default(now())
-  updatedAt        DateTime             @updatedAt
-  ledgerEntries    WalletLedgerEntry[]
-  rechargeOrders   RechargeOrder[]
-  tokenPurchases   AgentTokenPurchase[]
+  id                 String               @id @default(cuid())
+  audienceIdentityId String?
+  externalUserId     String               @unique
+  telegramUserId     String?              @unique
+  email              String?              @unique
+  displayName        String?
+  currency           String               @default("CNY")
+  cashBalanceCents   Int                  @default(0)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  audienceIdentity   AudienceIdentity?    @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  ledgerEntries      WalletLedgerEntry[]
+  rechargeOrders     RechargeOrder[]
+  tokenPurchases     AgentTokenPurchase[]
 
   @@index([currency, createdAt])
+  @@index([audienceIdentityId, updatedAt])
 }
 
 model AgentWallet {
@@ -911,18 +965,22 @@ model RepresentativeMcpBinding {
 model Contact {
   id                    String                    @id @default(cuid())
   representativeId      String
+  audienceIdentityId    String?
   customerAccountId     String?
   telegramUserId        String
+  channelUserId         String?
   username              String?
   displayName           String?
   role                  AudienceRole              @default(OTHER)
   stage                 ContactStage              @default(NEW)
   isPaid                Boolean                   @default(false)
   source                String?
+  sourceChannel         String?
   createdAt             DateTime                  @default(now())
   updatedAt             DateTime                  @updatedAt
   lastSeenAt            DateTime                  @default(now())
   representative        Representative            @relation(fields: [representativeId], references: [id])
+  audienceIdentity      AudienceIdentity?         @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
   customerAccount       CustomerAccount?          @relation(fields: [customerAccountId], references: [id])
   commitTraces          ConversationCommitTrace[]
   conversations         Conversation[]
@@ -944,14 +1002,19 @@ model Contact {
   workflowRuns          WorkflowRun[]
 
   @@unique([representativeId, telegramUserId])
+  @@index([audienceIdentityId, updatedAt])
+  @@index([representativeId, sourceChannel, channelUserId])
 }
 
 model Conversation {
   id                            String                    @id @default(cuid())
   representativeId              String
   contactId                     String
+  audienceIdentityId            String?
   telegramChatId                String
+  channelThreadId               String?
   channel                       Channel
+  sourceChannel                 String?
   state                         String                    @default("ACTIVE")
   collectorState                Json?
   freeRepliesUsed               Int                       @default(0)
@@ -969,6 +1032,7 @@ model Conversation {
   computeSessions               ComputeSession[]
   representative                Representative            @relation(fields: [representativeId], references: [id])
   contact                       Contact                   @relation(fields: [contactId], references: [id])
+  audienceIdentity              AudienceIdentity?         @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
   recallTraces                  ConversationRecallTrace[]
   turns                         ConversationTurn[]
   events                        EventAudit[]
@@ -983,6 +1047,8 @@ model Conversation {
   workflowRuns                  WorkflowRun[]
 
   @@unique([representativeId, telegramChatId, contactId])
+  @@index([audienceIdentityId, lastMessageAt])
+  @@index([representativeId, sourceChannel, channelThreadId])
 }
 
 model ChatSession {
@@ -1188,6 +1254,7 @@ model SandboxIdentity {
   id                  String                @id @default(cuid())
   representativeId    String
   contactId           String
+  audienceIdentityId  String?
   provider            SandboxProviderKind   @default(DOCKER)
   providerIdentityKey String?
   status              SandboxIdentityStatus @default(ACTIVE)
@@ -1198,12 +1265,14 @@ model SandboxIdentity {
   updatedAt           DateTime              @updatedAt
   representative      Representative        @relation(fields: [representativeId], references: [id])
   contact             Contact               @relation(fields: [contactId], references: [id])
+  audienceIdentity    AudienceIdentity?     @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
   leases              SandboxLease[]
   browserSessions     BrowserSession[]
 
   @@unique([representativeId, contactId])
   @@index([representativeId, status, updatedAt])
   @@index([contactId, updatedAt])
+  @@index([audienceIdentityId, updatedAt])
 }
 
 model SandboxLease {
@@ -1552,20 +1621,23 @@ model ConversationCommitTrace {
 }
 
 model OpenVikingMemoryRecord {
-  id               String         @id @default(cuid())
-  representativeId String
-  contactId        String?
-  uri              String         @unique
-  contextType      String
-  scope            String
-  category         String
-  summary          String
-  sourceKind       String
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
-  representative   Representative @relation(fields: [representativeId], references: [id])
-  contact          Contact?       @relation(fields: [contactId], references: [id])
+  id                 String            @id @default(cuid())
+  representativeId   String
+  contactId          String?
+  audienceIdentityId String?
+  uri                String            @unique
+  contextType        String
+  scope              String
+  category           String
+  summary            String
+  sourceKind         String
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  representative     Representative    @relation(fields: [representativeId], references: [id])
+  contact            Contact?          @relation(fields: [contactId], references: [id])
+  audienceIdentity   AudienceIdentity? @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
 
   @@index([representativeId, createdAt])
   @@index([representativeId, contactId, createdAt])
+  @@index([audienceIdentityId, createdAt])
 }

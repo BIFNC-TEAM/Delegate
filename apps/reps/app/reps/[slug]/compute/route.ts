@@ -2,10 +2,9 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
-  buildWebAudienceExternalUserId,
-  createMockRechargeOrder,
   getRepresentativeSetupSnapshot,
   resolveWebAudienceContact,
+  resolveWebAudienceConversation,
 } from "@delegate/web-data";
 
 import {
@@ -14,6 +13,10 @@ import {
   readPublicChatSessionState,
   writePublicChatSessionState,
 } from "../public-chat";
+import {
+  createWebAudienceComputeSession,
+  normalizePublicComputeSessionRequest,
+} from "../web-compute";
 
 export async function POST(
   request: Request,
@@ -26,9 +29,14 @@ export async function POST(
     if (!representative) {
       return NextResponse.json({ error: "Representative not found." }, { status: 404 });
     }
+    if (!representative.compute.enabled) {
+      return NextResponse.json(
+        { error: "Compute is disabled for this representative." },
+        { status: 409 },
+      );
+    }
 
-    const body = (await request.json()) as Record<string, unknown>;
-    const amountCents = Number(body.amountCents ?? 0);
+    const body = normalizePublicComputeSessionRequest(await request.json());
     const cookieStore = await cookies();
     const sessionState = readPublicChatSessionState({
       representativeSlug: slug,
@@ -39,22 +47,20 @@ export async function POST(
       representativeSlug: slug,
       audienceId: sessionState.audienceId,
     });
-    const externalUserId = buildWebAudienceExternalUserId(slug, sessionState.audienceId);
-    const idempotencyKey =
-      typeof body.idempotencyKey === "string" && body.idempotencyKey.trim()
-        ? body.idempotencyKey.trim()
-        : `public_recharge:${slug}:${sessionState.audienceId}:${amountCents}`;
-
-    const rechargeOrder = await createMockRechargeOrder({
-      externalUserId,
-      ...(contact.audienceIdentityId ? { audienceIdentityId: contact.audienceIdentityId } : {}),
-      displayName: typeof body.displayName === "string" ? body.displayName : contact.displayName ?? externalUserId,
-      amountCents,
-      currency: "CNY",
-      idempotencyKey,
+    const conversation = await resolveWebAudienceConversation({
+      representativeId: representative.id,
+      contactId: contact.id,
+      audienceId: sessionState.audienceId,
     });
 
-    const response = NextResponse.json({ rechargeOrder }, { status: 201 });
+    const computeSession = await createWebAudienceComputeSession({
+      representativeId: representative.id,
+      contactId: contact.id,
+      conversationId: conversation.id,
+      ...body,
+    });
+
+    const response = NextResponse.json(computeSession, { status: 201 });
     response.cookies.set(
       getPublicChatCookieName(slug),
       writePublicChatSessionState({
@@ -75,7 +81,9 @@ export async function POST(
     return NextResponse.json(
       {
         error:
-          error instanceof Error ? error.message : "Failed to create public recharge order.",
+          error instanceof Error
+            ? error.message
+            : "Failed to create public compute session.",
       },
       { status: 400 },
     );

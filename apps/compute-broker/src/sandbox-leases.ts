@@ -67,6 +67,10 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
   );
 
   const reservation = await prisma.$transaction(async (tx) => {
+    const contact = await tx.contact.findUnique({
+      where: { id: params.session.contactId! },
+      select: { audienceIdentityId: true },
+    });
     const identity = await tx.sandboxIdentity.upsert({
       where: {
         representativeId_contactId: {
@@ -76,6 +80,7 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       },
       update: {
         provider,
+        audienceIdentityId: contact?.audienceIdentityId ?? null,
         status: "ACTIVE",
         lastUsedAt: now,
         deletedAt: null,
@@ -83,6 +88,7 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       create: {
         representativeId: params.session.representativeId,
         contactId: params.session.contactId!,
+        audienceIdentityId: contact?.audienceIdentityId ?? null,
         provider,
         providerIdentityKey: buildProviderIdentityKey(params.session.representativeId, params.session.contactId!),
         status: "ACTIVE",

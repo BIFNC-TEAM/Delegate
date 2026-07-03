@@ -158,6 +158,7 @@ prisma/
 docs/
   architecture.md
   delegate-architecture-decisions.md
+  public-audience-identity.md
   per-user-sandbox-runtime.md
   temporal-native-workflow-rfc.md
   v2-isolated-compute-plane-plan.md
@@ -322,6 +323,7 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 
 - [Architecture](./docs/architecture.md): product thesis, runtime loop, security boundary, and OpenViking rules.
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
+- [Public audience identity](./docs/public-audience-identity.md): web anonymous identity, Contact/Conversation, recharge, and sandbox linkage.
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model, outbox, timer, cancellation, and dashboard semantics.
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute and browser isolation model.
 - [OpenViking integration](./docs/openviking-integration.md): public memory and recall integration.

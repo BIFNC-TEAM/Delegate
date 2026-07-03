@@ -43,6 +43,25 @@ describe("agent wallet mock recharge", () => {
     });
   });
 
+  it("attaches mock recharge wallets to an audience identity when provided", async () => {
+    const client = new FakeRechargeClient();
+
+    await createMockRechargeOrder(
+      {
+        externalUserId: "web:rep:aud_123",
+        audienceIdentityId: "identity-1",
+        amountCents: 1200,
+        idempotencyKey: "recharge_identity_1_1200",
+      },
+      client,
+    );
+
+    expect(client.userWallets[0]).toMatchObject({
+      externalUserId: "web:rep:aud_123",
+      audienceIdentityId: "identity-1",
+    });
+  });
+
   it("completes payment once and credits the user wallet ledger", async () => {
     const client = new FakeRechargeClient();
     const created = await createMockRechargeOrder(
@@ -112,6 +131,7 @@ describe("agent wallet mock recharge", () => {
 
 type UserWalletRow = {
   id: string;
+  audienceIdentityId: string | null;
   externalUserId: string;
   telegramUserId: string | null;
   email: string | null;
@@ -173,6 +193,7 @@ class FakeRechargeClient {
       }
       const wallet: UserWalletRow = {
         id: args.create.id ?? `user_wallet_${this.userWallets.length + 1}`,
+        audienceIdentityId: args.create.audienceIdentityId ?? null,
         externalUserId: args.create.externalUserId,
         telegramUserId: args.create.telegramUserId ?? null,
         email: args.create.email ?? null,

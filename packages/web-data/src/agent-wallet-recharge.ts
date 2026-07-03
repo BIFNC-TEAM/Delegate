@@ -15,6 +15,7 @@ import { prisma } from "./prisma";
 
 type UserWalletRecord = {
   id: string;
+  audienceIdentityId: string | null;
   externalUserId: string;
   telegramUserId: string | null;
   email: string | null;
@@ -78,6 +79,7 @@ export type RechargeOrderSnapshot = {
 
 export type CreateMockRechargeOrderInput = {
   externalUserId: string;
+  audienceIdentityId?: string;
   amountCents: number;
   currency?: string;
   displayName?: string;
@@ -110,12 +112,14 @@ export async function createMockRechargeOrder(
       where: { externalUserId: normalized.externalUserId },
       create: {
         externalUserId: normalized.externalUserId,
+        ...(normalized.audienceIdentityId ? { audienceIdentityId: normalized.audienceIdentityId } : {}),
         ...(normalized.telegramUserId ? { telegramUserId: normalized.telegramUserId } : {}),
         ...(normalized.displayName ? { displayName: normalized.displayName } : {}),
         currency: normalized.currency,
         cashBalanceCents: 0,
       },
       update: {
+        ...(normalized.audienceIdentityId ? { audienceIdentityId: normalized.audienceIdentityId } : {}),
         ...(normalized.telegramUserId ? { telegramUserId: normalized.telegramUserId } : {}),
         ...(normalized.displayName ? { displayName: normalized.displayName } : {}),
         currency: normalized.currency,
@@ -265,7 +269,7 @@ export async function completeMockRechargeOrder(
 function normalizeCreateMockRechargeOrderInput(
   input: CreateMockRechargeOrderInput,
 ): Required<Pick<CreateMockRechargeOrderInput, "externalUserId" | "amountCents" | "currency" | "idempotencyKey">> &
-  Pick<CreateMockRechargeOrderInput, "displayName" | "telegramUserId"> {
+  Pick<CreateMockRechargeOrderInput, "audienceIdentityId" | "displayName" | "telegramUserId"> {
   const externalUserId = input.externalUserId.trim();
   if (!externalUserId) {
     throw new Error("externalUserId is required.");
@@ -281,6 +285,7 @@ function normalizeCreateMockRechargeOrderInput(
     currency,
     idempotencyKey:
       input.idempotencyKey ?? `mock_recharge:${externalUserId}:${currency}:${input.amountCents}`,
+    ...(input.audienceIdentityId ? { audienceIdentityId: input.audienceIdentityId } : {}),
     ...(input.displayName ? { displayName: input.displayName } : {}),
     ...(input.telegramUserId ? { telegramUserId: input.telegramUserId } : {}),
   };

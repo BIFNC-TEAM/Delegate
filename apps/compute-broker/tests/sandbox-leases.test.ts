@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockPrisma } = vi.hoisted(() => {
   const prismaMock = {
+    contact: {
+      findUnique: vi.fn(),
+    },
     sandboxIdentity: {
       upsert: vi.fn(),
     },
@@ -38,6 +41,7 @@ describe("ensureUserSandboxLease", () => {
     mockPrisma.$transaction.mockImplementation(async (callback: unknown) => {
       return (callback as (client: typeof mockPrisma) => unknown)(mockPrisma);
     });
+    mockPrisma.contact.findUnique.mockResolvedValue({ audienceIdentityId: "audience-identity-1" });
     mockPrisma.sandboxIdentity.upsert.mockResolvedValue(buildIdentity());
     mockPrisma.sandboxLease.findFirst.mockResolvedValue(null);
     mockPrisma.sandboxLease.create.mockResolvedValue(buildLease({ status: "STARTING" }));
@@ -67,6 +71,12 @@ describe("ensureUserSandboxLease", () => {
           contactId: "contact-1",
         },
       },
+      update: expect.objectContaining({
+        audienceIdentityId: "audience-identity-1",
+      }),
+      create: expect.objectContaining({
+        audienceIdentityId: "audience-identity-1",
+      }),
     }));
     expect(mockPrisma.sandboxLease.create).toHaveBeenCalledWith({
       data: expect.objectContaining({

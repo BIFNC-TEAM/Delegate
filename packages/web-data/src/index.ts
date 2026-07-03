@@ -1,6 +1,7 @@
 export * from "./agent-wallet-ledger";
 export * from "./agent-wallet-payment-providers";
 export * from "./agent-wallet-recharge";
+export * from "./agent-wallet-refunds";
 export * from "./agent-wallet-revenue-policy";
 export * from "./agent-wallet-token-purchase";
 export * from "./agent-wallet-usage-charge";

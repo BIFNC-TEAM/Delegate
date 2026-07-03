@@ -5,6 +5,7 @@ export * from "./agent-wallet-refunds";
 export * from "./agent-wallet-revenue-policy";
 export * from "./agent-wallet-token-purchase";
 export * from "./agent-wallet-usage-charge";
+export * from "./agent-wallet-withdrawals";
 export * from "./compute";
 export * from "./deliverable-insights";
 export * from "./deliverables";

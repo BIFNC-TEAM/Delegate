@@ -8,6 +8,7 @@ import {
   ComputeNetworkMode,
   Channel,
   ContactStage,
+  CreatorVerificationStatus,
   EventType,
   GroupActivation,
   HandoffStatus,
@@ -16,6 +17,7 @@ import {
   PolicyDecision,
   PricingPlanType,
   PrismaClient,
+  RepresentativeClaimStatus,
   SkillPackSource,
 } from "@prisma/client";
 import { pathToFileURL } from "node:url";
@@ -24,6 +26,8 @@ const prisma = new PrismaClient();
 
 const DEMO_OWNER_ID = "owner_lin_demo";
 const DEMO_WALLET_ID = "wallet_lin_demo";
+const DEMO_USER_WALLET_ID = "user_wallet_demo_public";
+const DEMO_AGENT_WALLET_ID = "agent_wallet_lin_demo";
 const DEMO_OWNER_TELEGRAM_ID = "demo-owner-lin";
 const DEMO_REPRESENTATIVE_ID = demoRepresentative.id;
 const KNOWLEDGE_PACK_ID = "knowledge_lin_founder";
@@ -109,11 +113,13 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
         displayName: demoRepresentative.ownerName,
         handle: "lin",
         timezone: "Asia/Shanghai",
+        creatorVerificationStatus: CreatorVerificationStatus.VERIFIED,
       },
       update: {
         displayName: demoRepresentative.ownerName,
         handle: "lin",
         timezone: "Asia/Shanghai",
+        creatorVerificationStatus: CreatorVerificationStatus.VERIFIED,
       },
     });
 
@@ -143,6 +149,7 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
         roleSummary: demoRepresentative.tagline,
         tone: demoRepresentative.tone,
         publicMode: true,
+        claimStatus: RepresentativeClaimStatus.CLAIMED,
         groupModeEnabled: true,
         groupActivation: mapGroupActivationToDb(demoRepresentative.groupActivation),
         humanInLoop: true,
@@ -171,6 +178,7 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
         roleSummary: demoRepresentative.tagline,
         tone: demoRepresentative.tone,
         publicMode: true,
+        claimStatus: RepresentativeClaimStatus.CLAIMED,
         groupModeEnabled: true,
         groupActivation: mapGroupActivationToDb(demoRepresentative.groupActivation),
         humanInLoop: true,
@@ -192,6 +200,42 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
         computeNetworkMode: ComputeNetworkMode.NO_NETWORK,
         computeNetworkAllowlist: [],
         computeFilesystemMode: ComputeFilesystemMode.WORKSPACE_ONLY,
+      },
+    });
+
+    await tx.userWallet.upsert({
+      where: { externalUserId: "demo-public-user" },
+      create: {
+        id: DEMO_USER_WALLET_ID,
+        externalUserId: "demo-public-user",
+        telegramUserId: "demo-public-telegram-user",
+        displayName: "Demo Public User",
+        currency: "CNY",
+        cashBalanceCents: 0,
+      },
+      update: {
+        telegramUserId: "demo-public-telegram-user",
+        displayName: "Demo Public User",
+        currency: "CNY",
+      },
+    });
+
+    await tx.agentWallet.upsert({
+      where: { representativeId: representative.id },
+      create: {
+        id: DEMO_AGENT_WALLET_ID,
+        representativeId: representative.id,
+        currency: "CNY",
+        tokenBalance: 0,
+        totalPurchasedTokens: 0,
+        totalConsumedTokens: 0,
+        tokenUnitPriceCents: 1,
+        creatorRevenueShareBps: 2000,
+      },
+      update: {
+        currency: "CNY",
+        tokenUnitPriceCents: 1,
+        creatorRevenueShareBps: 2000,
       },
     });
 

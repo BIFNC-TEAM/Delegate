@@ -274,6 +274,107 @@ enum LedgerEntryKind {
   SPONSOR_CREDIT
 }
 
+enum CreatorVerificationStatus {
+  UNVERIFIED
+  VERIFIED
+  BLOCKED
+}
+
+enum RepresentativeClaimStatus {
+  CLAIMED
+  UNCLAIMED
+  DISPUTED
+}
+
+enum AmnWalletAccountType {
+  USER_CASH
+  AGENT_TOKEN
+  CREATOR_PENDING
+  CREATOR_WITHDRAWABLE
+  PLATFORM_REVENUE
+  PROVIDER_COST
+}
+
+enum AmnLedgerEntryKind {
+  USER_RECHARGE
+  USER_CASH_DEBIT
+  AGENT_TOKEN_CREDIT
+  AGENT_TOKEN_DEBIT
+  CREATOR_PENDING_CREDIT
+  CREATOR_PENDING_DEBIT
+  CREATOR_WITHDRAWABLE_CREDIT
+  CREATOR_WITHDRAWABLE_DEBIT
+  PLATFORM_REVENUE_CREDIT
+  PROVIDER_COST_DEBIT
+  REFUND_REVERSAL
+  WITHDRAWAL_FREEZE
+  WITHDRAWAL_PAYOUT
+}
+
+enum PaymentProvider {
+  MOCK
+  STRIPE
+  WECHAT_PAY
+  ALIPAY
+  TELEGRAM_STARS
+}
+
+enum RechargeOrderStatus {
+  CREATED
+  REQUIRES_PAYMENT
+  PAID
+  FAILED
+  CANCELED
+  REFUNDED
+}
+
+enum PaymentProviderEventType {
+  RECHARGE_PAID
+  RECHARGE_FAILED
+  REFUND_SUCCEEDED
+  CHARGEBACK_CREATED
+  UNKNOWN
+}
+
+enum AgentTokenPurchaseStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+  REVERSED
+}
+
+enum AgentUsageChargeKind {
+  MODEL_TOKEN
+  COMPUTE_TIME
+  FIXED_TASK
+  BROWSER_TIME
+  MCP_CALL
+}
+
+enum AgentUsageChargeStatus {
+  CREATED
+  APPLIED
+  REVERSED
+}
+
+enum CreatorEarningStatus {
+  PENDING
+  WITHDRAWABLE
+  FROZEN
+  WITHDRAWN
+  REVERSED
+}
+
+enum WithdrawRequestStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  PAID
+  FAILED
+  CANCELED
+}
+
 enum ComputeRequestedBy {
   SYSTEM
   OWNER
@@ -298,19 +399,23 @@ enum ComputeFilesystemMode {
 }
 
 model Owner {
-  id              String           @id @default(cuid())
-  organizationId  String?
-  telegramUserId  String?          @unique
-  displayName     String
-  handle          String?
-  timezone        String           @default("UTC")
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  wallet          Wallet?
-  organization    Organization?    @relation(fields: [organizationId], references: [id])
-  organizationMember OrganizationMember?
-  capabilityProfiles CapabilityPolicyProfile[]
-  representatives Representative[]
+  id                        String                    @id @default(cuid())
+  organizationId            String?
+  telegramUserId            String?                   @unique
+  displayName               String
+  handle                    String?
+  timezone                  String                    @default("UTC")
+  creatorVerificationStatus CreatorVerificationStatus @default(UNVERIFIED)
+  createdAt                 DateTime                  @default(now())
+  updatedAt                 DateTime                  @updatedAt
+  wallet                    Wallet?
+  organization              Organization?             @relation(fields: [organizationId], references: [id])
+  organizationMember        OrganizationMember?
+  capabilityProfiles        CapabilityPolicyProfile[]
+  representatives           Representative[]
+  creatorEarnings           CreatorEarning[]
+  withdrawRequests          WithdrawRequest[]
+  walletLedgerEntries       WalletLedgerEntry[]
 }
 
 model Wallet {
@@ -324,12 +429,247 @@ model Wallet {
   owner             Owner    @relation(fields: [ownerId], references: [id])
 }
 
+model UserWallet {
+  id               String               @id @default(cuid())
+  externalUserId   String               @unique
+  telegramUserId   String?              @unique
+  email            String?              @unique
+  displayName      String?
+  currency         String               @default("CNY")
+  cashBalanceCents Int                  @default(0)
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  ledgerEntries    WalletLedgerEntry[]
+  rechargeOrders   RechargeOrder[]
+  tokenPurchases   AgentTokenPurchase[]
+
+  @@index([currency, createdAt])
+}
+
+model AgentWallet {
+  id                     String               @id @default(cuid())
+  representativeId       String               @unique
+  currency               String               @default("CNY")
+  tokenBalance           Int                  @default(0)
+  totalPurchasedTokens   Int                  @default(0)
+  totalConsumedTokens    Int                  @default(0)
+  tokenUnitPriceCents    Int                  @default(1)
+  creatorRevenueShareBps Int                  @default(2000)
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+  representative         Representative       @relation(fields: [representativeId], references: [id])
+  ledgerEntries          WalletLedgerEntry[]
+  tokenPurchases         AgentTokenPurchase[]
+  usageCharges           AgentUsageCharge[]
+  creatorEarnings        CreatorEarning[]
+
+  @@index([currency, updatedAt])
+}
+
+model WalletLedgerEntry {
+  id                     String                @id @default(cuid())
+  eventGroupId           String
+  idempotencyKey         String                @unique
+  accountType            AmnWalletAccountType
+  entryKind              AmnLedgerEntryKind
+  userWalletId           String?
+  agentWalletId          String?
+  representativeId       String?
+  ownerId                String?
+  creatorEarningId       String?
+  rechargeOrderId        String?
+  paymentProviderEventId String?
+  tokenPurchaseId        String?
+  usageChargeId          String?
+  withdrawRequestId      String?
+  amountCents            Int                   @default(0)
+  tokenAmount            Int                   @default(0)
+  currency               String                @default("CNY")
+  balanceAfterCents      Int?
+  tokenBalanceAfter      Int?
+  notes                  String?
+  metadata               Json?
+  createdAt              DateTime              @default(now())
+  userWallet             UserWallet?           @relation(fields: [userWalletId], references: [id])
+  agentWallet            AgentWallet?          @relation(fields: [agentWalletId], references: [id])
+  representative         Representative?       @relation(fields: [representativeId], references: [id])
+  owner                  Owner?                @relation(fields: [ownerId], references: [id])
+  creatorEarning         CreatorEarning?       @relation(fields: [creatorEarningId], references: [id])
+  rechargeOrder          RechargeOrder?        @relation(fields: [rechargeOrderId], references: [id])
+  paymentProviderEvent   PaymentProviderEvent? @relation(fields: [paymentProviderEventId], references: [id])
+  tokenPurchase          AgentTokenPurchase?   @relation(fields: [tokenPurchaseId], references: [id])
+  usageCharge            AgentUsageCharge?     @relation(fields: [usageChargeId], references: [id])
+  withdrawRequest        WithdrawRequest?      @relation(fields: [withdrawRequestId], references: [id])
+
+  @@index([eventGroupId, createdAt])
+  @@index([accountType, createdAt])
+  @@index([entryKind, createdAt])
+  @@index([userWalletId, createdAt])
+  @@index([agentWalletId, createdAt])
+  @@index([representativeId, createdAt])
+  @@index([ownerId, createdAt])
+}
+
+model RechargeOrder {
+  id              String                 @id @default(cuid())
+  userWalletId    String
+  provider        PaymentProvider        @default(MOCK)
+  providerOrderId String?                @unique
+  amountCents     Int
+  currency        String                 @default("CNY")
+  status          RechargeOrderStatus    @default(CREATED)
+  idempotencyKey  String                 @unique
+  checkoutUrl     String?
+  providerPayload Json?
+  paidAt          DateTime?
+  refundedAt      DateTime?
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  userWallet      UserWallet             @relation(fields: [userWalletId], references: [id])
+  providerEvents  PaymentProviderEvent[]
+  ledgerEntries   WalletLedgerEntry[]
+  tokenPurchases  AgentTokenPurchase[]
+
+  @@index([userWalletId, status, createdAt])
+  @@index([provider, status, createdAt])
+}
+
+model PaymentProviderEvent {
+  id                String                   @id @default(cuid())
+  provider          PaymentProvider
+  providerEventId   String
+  eventType         PaymentProviderEventType @default(UNKNOWN)
+  rechargeOrderId   String?
+  rawPayload        Json
+  normalizedPayload Json?
+  receivedAt        DateTime                 @default(now())
+  processedAt       DateTime?
+  processingError   String?
+  idempotencyKey    String?                  @unique
+  rechargeOrder     RechargeOrder?           @relation(fields: [rechargeOrderId], references: [id])
+  ledgerEntries     WalletLedgerEntry[]
+
+  @@unique([provider, providerEventId])
+  @@index([provider, eventType, receivedAt])
+  @@index([rechargeOrderId, receivedAt])
+}
+
+model AgentTokenPurchase {
+  id                     String                   @id @default(cuid())
+  userWalletId           String
+  agentWalletId          String
+  representativeId       String
+  rechargeOrderId        String?
+  amountCents            Int
+  currency               String                   @default("CNY")
+  tokenAmount            Int
+  tokenUnitPriceCents    Int
+  creatorRevenueShareBps Int                      @default(2000)
+  creatorPendingCents    Int
+  status                 AgentTokenPurchaseStatus @default(COMPLETED)
+  idempotencyKey         String                   @unique
+  refundedAt             DateTime?
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
+  userWallet             UserWallet               @relation(fields: [userWalletId], references: [id])
+  agentWallet            AgentWallet              @relation(fields: [agentWalletId], references: [id])
+  representative         Representative           @relation(fields: [representativeId], references: [id])
+  rechargeOrder          RechargeOrder?           @relation(fields: [rechargeOrderId], references: [id])
+  usageCharges           AgentUsageCharge[]
+  creatorEarnings        CreatorEarning[]
+  ledgerEntries          WalletLedgerEntry[]
+
+  @@index([userWalletId, createdAt])
+  @@index([agentWalletId, createdAt])
+  @@index([representativeId, status, createdAt])
+}
+
+model AgentUsageCharge {
+  id                   String                 @id @default(cuid())
+  agentWalletId        String
+  representativeId     String
+  tokenPurchaseId      String?
+  kind                 AgentUsageChargeKind
+  status               AgentUsageChargeStatus @default(CREATED)
+  quantity             Int                    @default(1)
+  tokenAmount          Int
+  providerCostCents    Int                    @default(0)
+  platformRevenueCents Int                    @default(0)
+  currency             String                 @default("CNY")
+  idempotencyKey       String                 @unique
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  reversedAt           DateTime?
+  agentWallet          AgentWallet            @relation(fields: [agentWalletId], references: [id])
+  representative       Representative         @relation(fields: [representativeId], references: [id])
+  tokenPurchase        AgentTokenPurchase?    @relation(fields: [tokenPurchaseId], references: [id])
+  creatorEarnings      CreatorEarning[]
+  ledgerEntries        WalletLedgerEntry[]
+
+  @@index([agentWalletId, status, createdAt])
+  @@index([representativeId, kind, createdAt])
+}
+
+model CreatorEarning {
+  id                String               @id @default(cuid())
+  ownerId           String
+  representativeId  String
+  agentWalletId     String
+  tokenPurchaseId   String?
+  usageChargeId     String?
+  status            CreatorEarningStatus @default(PENDING)
+  pendingCents      Int                  @default(0)
+  withdrawableCents Int                  @default(0)
+  frozenCents       Int                  @default(0)
+  withdrawnCents    Int                  @default(0)
+  currency          String               @default("CNY")
+  revenueShareBps   Int                  @default(2000)
+  idempotencyKey    String               @unique
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  owner             Owner                @relation(fields: [ownerId], references: [id])
+  representative    Representative       @relation(fields: [representativeId], references: [id])
+  agentWallet       AgentWallet          @relation(fields: [agentWalletId], references: [id])
+  tokenPurchase     AgentTokenPurchase?  @relation(fields: [tokenPurchaseId], references: [id])
+  usageCharge       AgentUsageCharge?    @relation(fields: [usageChargeId], references: [id])
+  ledgerEntries     WalletLedgerEntry[]
+
+  @@index([ownerId, status, createdAt])
+  @@index([representativeId, status, createdAt])
+  @@index([agentWalletId, status, createdAt])
+}
+
+model WithdrawRequest {
+  id               String                @id @default(cuid())
+  ownerId          String
+  representativeId String?
+  status           WithdrawRequestStatus @default(PENDING_REVIEW)
+  amountCents      Int
+  currency         String                @default("CNY")
+  requestedAt      DateTime              @default(now())
+  reviewedAt       DateTime?
+  reviewedBy       String?
+  paidAt           DateTime?
+  provider         PaymentProvider?
+  providerPayoutId String?               @unique
+  failureReason    String?
+  idempotencyKey   String                @unique
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  owner            Owner                 @relation(fields: [ownerId], references: [id])
+  representative   Representative?       @relation(fields: [representativeId], references: [id])
+  ledgerEntries    WalletLedgerEntry[]
+
+  @@index([ownerId, status, requestedAt])
+  @@index([representativeId, status, requestedAt])
+}
+
 model Organization {
-  id                 String                   @id @default(cuid())
-  slug               String                   @unique
+  id                 String                    @id @default(cuid())
+  slug               String                    @unique
   displayName        String
-  createdAt          DateTime                 @default(now())
-  updatedAt          DateTime                 @updatedAt
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
   owners             Owner[]
   members            OrganizationMember[]
   capabilityProfiles CapabilityPolicyProfile[]
@@ -337,34 +677,34 @@ model Organization {
 }
 
 model OrganizationMember {
-  id                  String                 @id @default(cuid())
-  organizationId      String
-  ownerId             String                 @unique
-  displayName         String
-  role                OrganizationMemberRole @default(OWNER)
-  canApproveCompute   Boolean                @default(true)
-  canManageBilling    Boolean                @default(true)
-  canManageArtifacts  Boolean                @default(true)
-  canManagePolicies   Boolean                @default(true)
-  createdAt           DateTime               @default(now())
-  updatedAt           DateTime               @updatedAt
-  organization        Organization           @relation(fields: [organizationId], references: [id])
-  owner               Owner                  @relation(fields: [ownerId], references: [id])
+  id                 String                 @id @default(cuid())
+  organizationId     String
+  ownerId            String                 @unique
+  displayName        String
+  role               OrganizationMemberRole @default(OWNER)
+  canApproveCompute  Boolean                @default(true)
+  canManageBilling   Boolean                @default(true)
+  canManageArtifacts Boolean                @default(true)
+  canManagePolicies  Boolean                @default(true)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  organization       Organization           @relation(fields: [organizationId], references: [id])
+  owner              Owner                  @relation(fields: [ownerId], references: [id])
 
   @@unique([organizationId, ownerId])
 }
 
 model CustomerAccount {
-  id                 String                   @id @default(cuid())
+  id                 String                    @id @default(cuid())
   organizationId     String
   representativeId   String
   slug               String
   displayName        String
-  enabled            Boolean                  @default(true)
-  createdAt          DateTime                 @default(now())
-  updatedAt          DateTime                 @updatedAt
-  organization       Organization             @relation(fields: [organizationId], references: [id])
-  representative     Representative           @relation(fields: [representativeId], references: [id])
+  enabled            Boolean                   @default(true)
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  organization       Organization              @relation(fields: [organizationId], references: [id])
+  representative     Representative            @relation(fields: [representativeId], references: [id])
   contacts           Contact[]
   capabilityProfiles CapabilityPolicyProfile[]
 
@@ -373,75 +713,82 @@ model CustomerAccount {
 }
 
 model Representative {
-  id                String            @id @default(cuid())
-  ownerId           String
-  slug              String            @unique
-  displayName       String
-  roleSummary       String
-  tone              String
-  avatarUrl         String?
-  publicMode        Boolean           @default(true)
-  groupModeEnabled  Boolean           @default(false)
-  groupActivation   GroupActivation   @default(REPLY_OR_MENTION)
-  humanInLoop       Boolean           @default(true)
-  languages         Json
-  freeReplyLimit    Int               @default(4)
-  freeScope         Json
-  paywalledIntents  Json
-  handoffWindowHours Int              @default(24)
-  freeMonthlyCredit Int               @default(100)
-  handoffPrompt     String
-  allowedSkills     Json
-  actionGate        Json
-  openvikingEnabled Boolean           @default(false)
-  openvikingAgentId String?
-  openvikingAutoRecall Boolean        @default(true)
-  openvikingAutoCapture Boolean       @default(true)
-  openvikingCaptureMode String        @default("semantic")
-  openvikingRecallLimit Int           @default(6)
-  openvikingRecallScoreThreshold Float @default(0.01)
-  openvikingTargetUri String?
-  openvikingLastSyncAt DateTime?
-  openvikingLastSyncStatus String?
-  openvikingLastSyncError String?
-  openvikingLastSyncItemCount Int?
-  computeEnabled     Boolean           @default(false)
-  computeDefaultPolicyMode PolicyDecision @default(ASK)
-  computeBaseImage   String            @default("debian:bookworm-slim")
-  computeMaxSessionMinutes Int         @default(15)
-  computeAutoApproveBudgetCents Int    @default(0)
-  computeArtifactRetentionDays Int     @default(14)
-  computeNetworkMode ComputeNetworkMode @default(NO_NETWORK)
-  computeNetworkAllowlist String[]     @default([])
-  computeFilesystemMode ComputeFilesystemMode @default(WORKSPACE_ONLY)
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
-  owner             Owner             @relation(fields: [ownerId], references: [id])
-  capabilityProfiles CapabilityPolicyProfile[]
-  computeSessions   ComputeSession[]
-  conversations     Conversation[]
-  contextSyncJobs   RepresentativeContextSync[]
-  contacts          Contact[]
-  commitTraces      ConversationCommitTrace[]
-  events            EventAudit[]
-  handoffRequests   HandoffRequest[]
-  artifacts         Artifact[]
-  deliverables      Deliverable[]
-  approvalRequests  ApprovalRequest[]
-  intakeSubmissions IntakeSubmission[]
-  invoices          Invoice[]
-  ledgerEntries     LedgerEntry[]
-  browserSessions   BrowserSession[]
-  browserNavigations BrowserNavigation[]
-  organizationCustomerAccounts CustomerAccount[]
-  knowledgePack     KnowledgePack?
-  memoryRecords     OpenVikingMemoryRecord[]
-  pricingPlans      PricingPlan[]
-  recallTraces      ConversationRecallTrace[]
-  skillPackLinks    RepresentativeSkillPack[]
-  mcpBindings       RepresentativeMcpBinding[]
-  chatSessions      ChatSession[]
-  workflowRuns      WorkflowRun[]
+  id                             String                      @id @default(cuid())
+  ownerId                        String
+  slug                           String                      @unique
+  displayName                    String
+  roleSummary                    String
+  tone                           String
+  avatarUrl                      String?
+  publicMode                     Boolean                     @default(true)
+  claimStatus                    RepresentativeClaimStatus   @default(CLAIMED)
+  groupModeEnabled               Boolean                     @default(false)
+  groupActivation                GroupActivation             @default(REPLY_OR_MENTION)
+  humanInLoop                    Boolean                     @default(true)
+  languages                      Json
+  freeReplyLimit                 Int                         @default(4)
+  freeScope                      Json
+  paywalledIntents               Json
+  handoffWindowHours             Int                         @default(24)
+  freeMonthlyCredit              Int                         @default(100)
+  handoffPrompt                  String
+  allowedSkills                  Json
+  actionGate                     Json
+  openvikingEnabled              Boolean                     @default(false)
+  openvikingAgentId              String?
+  openvikingAutoRecall           Boolean                     @default(true)
+  openvikingAutoCapture          Boolean                     @default(true)
+  openvikingCaptureMode          String                      @default("semantic")
+  openvikingRecallLimit          Int                         @default(6)
+  openvikingRecallScoreThreshold Float                       @default(0.01)
+  openvikingTargetUri            String?
+  openvikingLastSyncAt           DateTime?
+  openvikingLastSyncStatus       String?
+  openvikingLastSyncError        String?
+  openvikingLastSyncItemCount    Int?
+  computeEnabled                 Boolean                     @default(false)
+  computeDefaultPolicyMode       PolicyDecision              @default(ASK)
+  computeBaseImage               String                      @default("debian:bookworm-slim")
+  computeMaxSessionMinutes       Int                         @default(15)
+  computeAutoApproveBudgetCents  Int                         @default(0)
+  computeArtifactRetentionDays   Int                         @default(14)
+  computeNetworkMode             ComputeNetworkMode          @default(NO_NETWORK)
+  computeNetworkAllowlist        String[]                    @default([])
+  computeFilesystemMode          ComputeFilesystemMode       @default(WORKSPACE_ONLY)
+  createdAt                      DateTime                    @default(now())
+  updatedAt                      DateTime                    @updatedAt
+  owner                          Owner                       @relation(fields: [ownerId], references: [id])
+  capabilityProfiles             CapabilityPolicyProfile[]
+  computeSessions                ComputeSession[]
+  conversations                  Conversation[]
+  contextSyncJobs                RepresentativeContextSync[]
+  contacts                       Contact[]
+  commitTraces                   ConversationCommitTrace[]
+  events                         EventAudit[]
+  handoffRequests                HandoffRequest[]
+  artifacts                      Artifact[]
+  deliverables                   Deliverable[]
+  approvalRequests               ApprovalRequest[]
+  intakeSubmissions              IntakeSubmission[]
+  invoices                       Invoice[]
+  ledgerEntries                  LedgerEntry[]
+  browserSessions                BrowserSession[]
+  browserNavigations             BrowserNavigation[]
+  organizationCustomerAccounts   CustomerAccount[]
+  knowledgePack                  KnowledgePack?
+  memoryRecords                  OpenVikingMemoryRecord[]
+  pricingPlans                   PricingPlan[]
+  recallTraces                   ConversationRecallTrace[]
+  skillPackLinks                 RepresentativeSkillPack[]
+  mcpBindings                    RepresentativeMcpBinding[]
+  chatSessions                   ChatSession[]
+  workflowRuns                   WorkflowRun[]
+  agentWallet                    AgentWallet?
+  tokenPurchases                 AgentTokenPurchase[]
+  usageCharges                   AgentUsageCharge[]
+  creatorEarnings                CreatorEarning[]
+  withdrawRequests               WithdrawRequest[]
+  walletLedgerEntries            WalletLedgerEntry[]
 }
 
 model KnowledgePack {
@@ -457,21 +804,21 @@ model KnowledgePack {
 }
 
 model PricingPlan {
-  id                     String          @id @default(cuid())
-  representativeId       String
-  type                   PricingPlanType
-  name                   String
-  starsAmount            Int
-  summary                String
-  includedReplies        Int
-  includesPriorityHandoff Boolean       @default(false)
-  createdAt              DateTime        @default(now())
-  updatedAt              DateTime        @updatedAt
-  representative         Representative  @relation(fields: [representativeId], references: [id])
+  id                      String          @id @default(cuid())
+  representativeId        String
+  type                    PricingPlanType
+  name                    String
+  starsAmount             Int
+  summary                 String
+  includedReplies         Int
+  includesPriorityHandoff Boolean         @default(false)
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  representative          Representative  @relation(fields: [representativeId], references: [id])
 }
 
 model SkillPack {
-  id                  String                   @id @default(cuid())
+  id                  String                    @id @default(cuid())
   source              SkillPackSource
   slug                String
   displayName         String
@@ -481,133 +828,133 @@ model SkillPack {
   ownerHandle         String?
   verificationTier    String?
   capabilityTags      Json
-  executesCode        Boolean                  @default(false)
-  createdAt           DateTime                 @default(now())
-  updatedAt           DateTime                 @updatedAt
+  executesCode        Boolean                   @default(false)
+  createdAt           DateTime                  @default(now())
+  updatedAt           DateTime                  @updatedAt
   representativeLinks RepresentativeSkillPack[]
 
   @@unique([source, slug])
 }
 
 model RepresentativeSkillPack {
-  id               String          @id @default(cuid())
+  id               String                     @id @default(cuid())
   representativeId String
   skillPackId      String
-  enabled          Boolean         @default(true)
-  installStatus    String          @default("available")
+  enabled          Boolean                    @default(true)
+  installStatus    String                     @default("available")
   installedVersion String?
   installedAt      DateTime?
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
-  representative   Representative  @relation(fields: [representativeId], references: [id])
-  skillPack        SkillPack       @relation(fields: [skillPackId], references: [id])
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  representative   Representative             @relation(fields: [representativeId], references: [id])
+  skillPack        SkillPack                  @relation(fields: [skillPackId], references: [id])
   mcpBindings      RepresentativeMcpBinding[]
 
   @@unique([representativeId, skillPackId])
 }
 
 model RepresentativeMcpBinding {
-  id                           String                  @id @default(cuid())
-  representativeId             String
+  id                            String                   @id @default(cuid())
+  representativeId              String
   representativeSkillPackLinkId String?
-  slug                         String
-  displayName                  String
-  description                  String?
-  serverUrl                    String
-  transportKind                McpTransportKind        @default(STREAMABLE_HTTP)
-  allowedToolNames             Json
-  defaultToolName              String?
-  enabled                      Boolean                 @default(true)
-  approvalRequired             Boolean                 @default(true)
-  estimatedCostCentsPerCall    Int                     @default(0)
-  maxRetries                   Int                     @default(2)
-  retryBackoffMs               Int                     @default(1000)
-  consecutiveFailures          Int                     @default(0)
-  lastFailureAt                DateTime?
-  lastFailureReason            String?
-  lastSuccessAt                DateTime?
-  createdAt                    DateTime                @default(now())
-  updatedAt                    DateTime                @updatedAt
-  representative               Representative          @relation(fields: [representativeId], references: [id])
-  representativeSkillPackLink  RepresentativeSkillPack? @relation(fields: [representativeSkillPackLinkId], references: [id])
-  toolExecutions               ToolExecution[]
+  slug                          String
+  displayName                   String
+  description                   String?
+  serverUrl                     String
+  transportKind                 McpTransportKind         @default(STREAMABLE_HTTP)
+  allowedToolNames              Json
+  defaultToolName               String?
+  enabled                       Boolean                  @default(true)
+  approvalRequired              Boolean                  @default(true)
+  estimatedCostCentsPerCall     Int                      @default(0)
+  maxRetries                    Int                      @default(2)
+  retryBackoffMs                Int                      @default(1000)
+  consecutiveFailures           Int                      @default(0)
+  lastFailureAt                 DateTime?
+  lastFailureReason             String?
+  lastSuccessAt                 DateTime?
+  createdAt                     DateTime                 @default(now())
+  updatedAt                     DateTime                 @updatedAt
+  representative                Representative           @relation(fields: [representativeId], references: [id])
+  representativeSkillPackLink   RepresentativeSkillPack? @relation(fields: [representativeSkillPackLinkId], references: [id])
+  toolExecutions                ToolExecution[]
 
   @@unique([representativeId, slug])
   @@index([representativeId, enabled, createdAt])
 }
 
 model Contact {
-  id               String            @id @default(cuid())
-  representativeId String
-  customerAccountId String?
-  telegramUserId   String
-  username         String?
-  displayName      String?
-  role             AudienceRole      @default(OTHER)
-  stage            ContactStage      @default(NEW)
-  isPaid           Boolean           @default(false)
-  source           String?
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  lastSeenAt       DateTime          @default(now())
-  representative   Representative    @relation(fields: [representativeId], references: [id])
-  customerAccount  CustomerAccount?  @relation(fields: [customerAccountId], references: [id])
-  commitTraces     ConversationCommitTrace[]
-  conversations    Conversation[]
-  events           EventAudit[]
-  handoffRequests  HandoffRequest[]
-  intakeSubmissions IntakeSubmission[]
-  invoices         Invoice[]
-  memoryRecords    OpenVikingMemoryRecord[]
-  computeSessions  ComputeSession[]
-  artifacts        Artifact[]
-  approvalRequests ApprovalRequest[]
-  ledgerEntries    LedgerEntry[]
-  browserSessions  BrowserSession[]
-  browserNavigations BrowserNavigation[]
-  recallTraces     ConversationRecallTrace[]
-  computeTrustTier String?
+  id                    String                    @id @default(cuid())
+  representativeId      String
+  customerAccountId     String?
+  telegramUserId        String
+  username              String?
+  displayName           String?
+  role                  AudienceRole              @default(OTHER)
+  stage                 ContactStage              @default(NEW)
+  isPaid                Boolean                   @default(false)
+  source                String?
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  lastSeenAt            DateTime                  @default(now())
+  representative        Representative            @relation(fields: [representativeId], references: [id])
+  customerAccount       CustomerAccount?          @relation(fields: [customerAccountId], references: [id])
+  commitTraces          ConversationCommitTrace[]
+  conversations         Conversation[]
+  events                EventAudit[]
+  handoffRequests       HandoffRequest[]
+  intakeSubmissions     IntakeSubmission[]
+  invoices              Invoice[]
+  memoryRecords         OpenVikingMemoryRecord[]
+  computeSessions       ComputeSession[]
+  artifacts             Artifact[]
+  approvalRequests      ApprovalRequest[]
+  ledgerEntries         LedgerEntry[]
+  browserSessions       BrowserSession[]
+  browserNavigations    BrowserNavigation[]
+  recallTraces          ConversationRecallTrace[]
+  computeTrustTier      String?
   lastApprovalGrantedAt DateTime?
-  workflowRuns     WorkflowRun[]
+  workflowRuns          WorkflowRun[]
 
   @@unique([representativeId, telegramUserId])
 }
 
 model Conversation {
-  id               String            @id @default(cuid())
-  representativeId String
-  contactId        String
-  telegramChatId   String
-  channel          Channel
-  state            String            @default("ACTIVE")
-  collectorState   Json?
-  freeRepliesUsed  Int               @default(0)
-  passUnlockedAt   DateTime?
-  deepHelpUnlockedAt DateTime?
-  activeComputeSessionId String?
+  id                            String                    @id @default(cuid())
+  representativeId              String
+  contactId                     String
+  telegramChatId                String
+  channel                       Channel
+  state                         String                    @default("ACTIVE")
+  collectorState                Json?
+  freeRepliesUsed               Int                       @default(0)
+  passUnlockedAt                DateTime?
+  deepHelpUnlockedAt            DateTime?
+  activeComputeSessionId        String?
   computeBudgetRemainingCredits Int?
-  lastComputeAt    DateTime?
-  openvikingSessionId String?        @unique
-  openvikingSessionKey String?
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  lastMessageAt    DateTime          @default(now())
-  commitTraces     ConversationCommitTrace[]
-  computeSessions  ComputeSession[]
-  representative   Representative    @relation(fields: [representativeId], references: [id])
-  contact          Contact           @relation(fields: [contactId], references: [id])
-  recallTraces     ConversationRecallTrace[]
-  turns            ConversationTurn[]
-  events           EventAudit[]
-  artifacts        Artifact[]
-  approvalRequests ApprovalRequest[]
-  handoffRequests  HandoffRequest[]
-  intakeSubmissions IntakeSubmission[]
-  invoices         Invoice[]
-  ledgerEntries    LedgerEntry[]
-  browserSessions  BrowserSession[]
-  browserNavigations BrowserNavigation[]
-  workflowRuns     WorkflowRun[]
+  lastComputeAt                 DateTime?
+  openvikingSessionId           String?                   @unique
+  openvikingSessionKey          String?
+  createdAt                     DateTime                  @default(now())
+  updatedAt                     DateTime                  @updatedAt
+  lastMessageAt                 DateTime                  @default(now())
+  commitTraces                  ConversationCommitTrace[]
+  computeSessions               ComputeSession[]
+  representative                Representative            @relation(fields: [representativeId], references: [id])
+  contact                       Contact                   @relation(fields: [contactId], references: [id])
+  recallTraces                  ConversationRecallTrace[]
+  turns                         ConversationTurn[]
+  events                        EventAudit[]
+  artifacts                     Artifact[]
+  approvalRequests              ApprovalRequest[]
+  handoffRequests               HandoffRequest[]
+  intakeSubmissions             IntakeSubmission[]
+  invoices                      Invoice[]
+  ledgerEntries                 LedgerEntry[]
+  browserSessions               BrowserSession[]
+  browserNavigations            BrowserNavigation[]
+  workflowRuns                  WorkflowRun[]
 
   @@unique([representativeId, telegramChatId, contactId])
 }
@@ -634,39 +981,39 @@ model ConversationTurn {
 }
 
 model IntakeSubmission {
-  id                 String          @id @default(cuid())
-  representativeId   String
-  contactId          String
-  conversationId     String?
-  requestType        String
-  payload            Json
-  priorityScore      Int             @default(0)
+  id                  String           @id @default(cuid())
+  representativeId    String
+  contactId           String
+  conversationId      String?
+  requestType         String
+  payload             Json
+  priorityScore       Int              @default(0)
   recommendedNextStep String
-  createdAt          DateTime        @default(now())
-  representative     Representative  @relation(fields: [representativeId], references: [id])
-  contact            Contact         @relation(fields: [contactId], references: [id])
-  conversation       Conversation?   @relation(fields: [conversationId], references: [id])
-  handoffRequests    HandoffRequest[]
+  createdAt           DateTime         @default(now())
+  representative      Representative   @relation(fields: [representativeId], references: [id])
+  contact             Contact          @relation(fields: [contactId], references: [id])
+  conversation        Conversation?    @relation(fields: [conversationId], references: [id])
+  handoffRequests     HandoffRequest[]
 }
 
 model HandoffRequest {
-  id                   String           @id @default(cuid())
-  representativeId     String
-  contactId            String
-  conversationId       String?
-  intakeSubmissionId   String?
-  reason               String
-  summary              String
-  recommendedPriority  Int              @default(0)
+  id                     String            @id @default(cuid())
+  representativeId       String
+  contactId              String
+  conversationId         String?
+  intakeSubmissionId     String?
+  reason                 String
+  summary                String
+  recommendedPriority    Int               @default(0)
   recommendedOwnerAction String
-  status               HandoffStatus    @default(OPEN)
-  createdAt            DateTime         @default(now())
-  updatedAt            DateTime         @updatedAt
-  representative       Representative   @relation(fields: [representativeId], references: [id])
-  contact              Contact          @relation(fields: [contactId], references: [id])
-  conversation         Conversation?    @relation(fields: [conversationId], references: [id])
-  intakeSubmission     IntakeSubmission? @relation(fields: [intakeSubmissionId], references: [id])
-  workflowRuns         WorkflowRun[]
+  status                 HandoffStatus     @default(OPEN)
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+  representative         Representative    @relation(fields: [representativeId], references: [id])
+  contact                Contact           @relation(fields: [contactId], references: [id])
+  conversation           Conversation?     @relation(fields: [conversationId], references: [id])
+  intakeSubmission       IntakeSubmission? @relation(fields: [intakeSubmissionId], references: [id])
+  workflowRuns           WorkflowRun[]
 
   @@index([representativeId, status, createdAt])
 }
@@ -696,49 +1043,49 @@ model Invoice {
 }
 
 model EventAudit {
-  id               String          @id @default(cuid())
+  id               String         @id @default(cuid())
   representativeId String
   contactId        String?
   conversationId   String?
   type             EventType
   payload          Json
-  createdAt        DateTime        @default(now())
-  representative   Representative  @relation(fields: [representativeId], references: [id])
-  contact          Contact?        @relation(fields: [contactId], references: [id])
-  conversation     Conversation?   @relation(fields: [conversationId], references: [id])
+  createdAt        DateTime       @default(now())
+  representative   Representative @relation(fields: [representativeId], references: [id])
+  contact          Contact?       @relation(fields: [contactId], references: [id])
+  conversation     Conversation?  @relation(fields: [conversationId], references: [id])
 }
 
 model CapabilityPolicyProfile {
-  id                 String                @id @default(cuid())
-  representativeId   String?
-  ownerId            String?
-  organizationId     String?
-  customerAccountId  String?
-  name               String
-  isDefault          Boolean               @default(true)
-  enabled            Boolean               @default(true)
-  isManaged          Boolean               @default(false)
-  managedScope       ManagedPolicyScope    @default(REPRESENTATIVE_DEFAULT)
-  managedSource      String?
-  editableByOwner    Boolean               @default(false)
+  id                        String                 @id @default(cuid())
+  representativeId          String?
+  ownerId                   String?
+  organizationId            String?
+  customerAccountId         String?
+  name                      String
+  isDefault                 Boolean                @default(true)
+  enabled                   Boolean                @default(true)
+  isManaged                 Boolean                @default(false)
+  managedScope              ManagedPolicyScope     @default(REPRESENTATIVE_DEFAULT)
+  managedSource             String?
+  editableByOwner           Boolean                @default(false)
   contactTrustTierCondition String?
-  precedence         Int                   @default(0)
-  defaultDecision    PolicyDecision        @default(ASK)
-  maxSessionMinutes  Int                   @default(15)
-  maxParallelSessions Int                  @default(1)
-  maxCommandSeconds  Int                   @default(30)
-  artifactRetentionDays Int                @default(14)
-  networkMode        ComputeNetworkMode    @default(NO_NETWORK)
-  networkAllowlist   String[]              @default([])
-  filesystemMode     ComputeFilesystemMode @default(WORKSPACE_ONLY)
-  createdAt          DateTime              @default(now())
-  updatedAt          DateTime              @updatedAt
-  representative     Representative?       @relation(fields: [representativeId], references: [id])
-  owner              Owner?                @relation(fields: [ownerId], references: [id])
-  organization       Organization?         @relation(fields: [organizationId], references: [id])
-  customerAccount    CustomerAccount?      @relation(fields: [customerAccountId], references: [id])
-  computeSessions    ComputeSession[]
-  rules              CapabilityPolicyRule[]
+  precedence                Int                    @default(0)
+  defaultDecision           PolicyDecision         @default(ASK)
+  maxSessionMinutes         Int                    @default(15)
+  maxParallelSessions       Int                    @default(1)
+  maxCommandSeconds         Int                    @default(30)
+  artifactRetentionDays     Int                    @default(14)
+  networkMode               ComputeNetworkMode     @default(NO_NETWORK)
+  networkAllowlist          String[]               @default([])
+  filesystemMode            ComputeFilesystemMode  @default(WORKSPACE_ONLY)
+  createdAt                 DateTime               @default(now())
+  updatedAt                 DateTime               @updatedAt
+  representative            Representative?        @relation(fields: [representativeId], references: [id])
+  owner                     Owner?                 @relation(fields: [ownerId], references: [id])
+  organization              Organization?          @relation(fields: [organizationId], references: [id])
+  customerAccount           CustomerAccount?       @relation(fields: [customerAccountId], references: [id])
+  computeSessions           ComputeSession[]
+  rules                     CapabilityPolicyRule[]
 
   @@index([representativeId, isDefault])
   @@index([ownerId, managedScope, enabled])
@@ -747,61 +1094,61 @@ model CapabilityPolicyProfile {
 }
 
 model CapabilityPolicyRule {
-  id                   String                @id @default(cuid())
-  profileId            String
-  capability           CapabilityKind
-  decision             PolicyDecision
-  commandPattern       String?
-  pathPattern          String?
-  domainPattern        String?
+  id                     String                  @id @default(cuid())
+  profileId              String
+  capability             CapabilityKind
+  decision               PolicyDecision
+  commandPattern         String?
+  pathPattern            String?
+  domainPattern          String?
   resourceScopeCondition PolicyResourceScope?
-  channelCondition     Channel?
-  requiredPlanTier     CapabilityPlanTier?
-  maxCostCents         Int?
-  requiresPaidPlan     Boolean               @default(false)
-  requiresHumanApproval Boolean              @default(false)
-  priority             Int                   @default(0)
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @updatedAt
-  profile              CapabilityPolicyProfile @relation(fields: [profileId], references: [id])
+  channelCondition       Channel?
+  requiredPlanTier       CapabilityPlanTier?
+  maxCostCents           Int?
+  requiresPaidPlan       Boolean                 @default(false)
+  requiresHumanApproval  Boolean                 @default(false)
+  priority               Int                     @default(0)
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+  profile                CapabilityPolicyProfile @relation(fields: [profileId], references: [id])
 
   @@index([profileId, capability, priority])
 }
 
 model ComputeSession {
-  id                 String               @id @default(cuid())
-  representativeId   String
-  contactId          String?
-  conversationId     String?
-  subagentId         String?
-  policyProfileId    String?
-  requestedBy        ComputeRequestedBy
-  status             ComputeSessionStatus @default(REQUESTED)
-  leaseStatus        ComputeLeaseStatus   @default(REQUESTED)
-  runnerLeaseId      String?
-  containerId        String?
-  runnerType         ComputeRunnerType    @default(DOCKER)
-  baseImage          String
-  leaseTokenHash     String               @unique
-  leaseAcquiredAt    DateTime?
-  leaseLastUsedAt    DateTime?
-  leaseReleasedAt    DateTime?
-  startedAt          DateTime?
-  lastHeartbeatAt    DateTime?
-  expiresAt          DateTime?
-  endedAt            DateTime?
-  failureReason      String?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  representative     Representative       @relation(fields: [representativeId], references: [id])
-  contact            Contact?             @relation(fields: [contactId], references: [id])
-  conversation       Conversation?        @relation(fields: [conversationId], references: [id])
-  policyProfile      CapabilityPolicyProfile? @relation(fields: [policyProfileId], references: [id])
-  toolExecutions     ToolExecution[]
-  browserSession     BrowserSession?
-  artifacts          Artifact[]
-  approvalRequests   ApprovalRequest[]
-  ledgerEntries      LedgerEntry[]
+  id               String                   @id @default(cuid())
+  representativeId String
+  contactId        String?
+  conversationId   String?
+  subagentId       String?
+  policyProfileId  String?
+  requestedBy      ComputeRequestedBy
+  status           ComputeSessionStatus     @default(REQUESTED)
+  leaseStatus      ComputeLeaseStatus       @default(REQUESTED)
+  runnerLeaseId    String?
+  containerId      String?
+  runnerType       ComputeRunnerType        @default(DOCKER)
+  baseImage        String
+  leaseTokenHash   String                   @unique
+  leaseAcquiredAt  DateTime?
+  leaseLastUsedAt  DateTime?
+  leaseReleasedAt  DateTime?
+  startedAt        DateTime?
+  lastHeartbeatAt  DateTime?
+  expiresAt        DateTime?
+  endedAt          DateTime?
+  failureReason    String?
+  createdAt        DateTime                 @default(now())
+  updatedAt        DateTime                 @updatedAt
+  representative   Representative           @relation(fields: [representativeId], references: [id])
+  contact          Contact?                 @relation(fields: [contactId], references: [id])
+  conversation     Conversation?            @relation(fields: [conversationId], references: [id])
+  policyProfile    CapabilityPolicyProfile? @relation(fields: [policyProfileId], references: [id])
+  toolExecutions   ToolExecution[]
+  browserSession   BrowserSession?
+  artifacts        Artifact[]
+  approvalRequests ApprovalRequest[]
+  ledgerEntries    LedgerEntry[]
 
   @@index([representativeId, status, createdAt])
   @@index([contactId, createdAt])
@@ -809,29 +1156,29 @@ model ComputeSession {
 }
 
 model ToolExecution {
-  id               String              @id @default(cuid())
-  sessionId        String
-  mcpBindingId     String?
-  capability       CapabilityKind
-  subagentId       String?
-  status           ToolExecutionStatus @default(QUEUED)
-  requestedCommand String?
-  requestedPath    String?
-  requestPayload   Json?
-  workingDirectory String?
-  policyDecision   PolicyDecision?
+  id                String                    @id @default(cuid())
+  sessionId         String
+  mcpBindingId      String?
+  capability        CapabilityKind
+  subagentId        String?
+  status            ToolExecutionStatus       @default(QUEUED)
+  requestedCommand  String?
+  requestedPath     String?
+  requestPayload    Json?
+  workingDirectory  String?
+  policyDecision    PolicyDecision?
   approvalRequestId String?
-  startedAt        DateTime?
-  finishedAt       DateTime?
-  exitCode         Int?
-  cpuMs            Int?
-  wallMs           Int?
-  bytesRead        Int?
-  bytesWritten     Int?
-  createdAt        DateTime            @default(now())
-  session          ComputeSession      @relation(fields: [sessionId], references: [id])
-  mcpBinding       RepresentativeMcpBinding? @relation(fields: [mcpBindingId], references: [id])
-  artifacts        Artifact[]
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  exitCode          Int?
+  cpuMs             Int?
+  wallMs            Int?
+  bytesRead         Int?
+  bytesWritten      Int?
+  createdAt         DateTime                  @default(now())
+  session           ComputeSession            @relation(fields: [sessionId], references: [id])
+  mcpBinding        RepresentativeMcpBinding? @relation(fields: [mcpBindingId], references: [id])
+  artifacts         Artifact[]
   browserNavigation BrowserNavigation?
 
   @@index([sessionId, createdAt])
@@ -840,25 +1187,25 @@ model ToolExecution {
 }
 
 model ApprovalRequest {
-  id                    String         @id @default(cuid())
-  representativeId      String
-  contactId             String?
-  conversationId        String?
-  sessionId             String?
-  toolExecutionId       String?        @unique
-  subagentId            String?
-  status                ApprovalStatus @default(PENDING)
-  reason                String
+  id                     String          @id @default(cuid())
+  representativeId       String
+  contactId              String?
+  conversationId         String?
+  sessionId              String?
+  toolExecutionId        String?         @unique
+  subagentId             String?
+  status                 ApprovalStatus  @default(PENDING)
+  reason                 String
   requestedActionSummary String
-  riskSummary           String
-  requestedAt           DateTime       @default(now())
-  resolvedAt            DateTime?
-  resolvedBy            String?
-  representative        Representative @relation(fields: [representativeId], references: [id])
-  contact               Contact?       @relation(fields: [contactId], references: [id])
-  conversation          Conversation?  @relation(fields: [conversationId], references: [id])
-  session               ComputeSession? @relation(fields: [sessionId], references: [id])
-  workflowRuns          WorkflowRun[]
+  riskSummary            String
+  requestedAt            DateTime        @default(now())
+  resolvedAt             DateTime?
+  resolvedBy             String?
+  representative         Representative  @relation(fields: [representativeId], references: [id])
+  contact                Contact?        @relation(fields: [contactId], references: [id])
+  conversation           Conversation?   @relation(fields: [conversationId], references: [id])
+  session                ComputeSession? @relation(fields: [sessionId], references: [id])
+  workflowRuns           WorkflowRun[]
 
   @@index([representativeId, status, requestedAt])
 }
@@ -896,29 +1243,29 @@ model Artifact {
 }
 
 model Deliverable {
-  id                  String                @id @default(cuid())
-  representativeId    String
-  artifactId          String?
-  title               String
-  summary             String
-  kind                DeliverableKind
-  visibility          DeliverableVisibility @default(OWNER_ONLY)
-  sourceKind          DeliverableSourceKind
-  externalUrl         String?
-  bundleItemArtifactIds String[]            @default([])
-  packageObjectKey     String?
-  packageMimeType      String?
-  packageSizeBytes     Int?
-  packageSha256        String?
-  packageBuiltAt       DateTime?
-  packageCacheKey      String?
-  downloadCount        Int                  @default(0)
-  lastDownloadedAt     DateTime?
-  createdBy           String?
-  createdAt           DateTime              @default(now())
-  updatedAt           DateTime              @updatedAt
-  representative      Representative        @relation(fields: [representativeId], references: [id])
-  artifact            Artifact?             @relation(fields: [artifactId], references: [id])
+  id                    String                @id @default(cuid())
+  representativeId      String
+  artifactId            String?
+  title                 String
+  summary               String
+  kind                  DeliverableKind
+  visibility            DeliverableVisibility @default(OWNER_ONLY)
+  sourceKind            DeliverableSourceKind
+  externalUrl           String?
+  bundleItemArtifactIds String[]              @default([])
+  packageObjectKey      String?
+  packageMimeType       String?
+  packageSizeBytes      Int?
+  packageSha256         String?
+  packageBuiltAt        DateTime?
+  packageCacheKey       String?
+  downloadCount         Int                   @default(0)
+  lastDownloadedAt      DateTime?
+  createdBy             String?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+  representative        Representative        @relation(fields: [representativeId], references: [id])
+  artifact              Artifact?             @relation(fields: [artifactId], references: [id])
 
   @@index([representativeId, visibility, createdAt])
   @@index([artifactId])
@@ -926,42 +1273,42 @@ model Deliverable {
 }
 
 model WorkflowRun {
-  id               String         @id @default(cuid())
-  representativeId String
-  contactId        String?
-  conversationId   String?
-  handoffRequestId String?
-  approvalRequestId String?
-  subagentId       String?
-  kind             WorkflowKind
-  engine           WorkflowEngine @default(LOCAL_RUNNER)
-  status           WorkflowStatus @default(QUEUED)
-  enginePhase      WorkflowEnginePhase?
-  dedupeKey        String         @unique
-  queueName        String?
-  externalWorkflowId String?
-  externalRunId    String?
-  scheduledAt      DateTime
-  nextWakeAt       DateTime?
-  startedAt        DateTime?
-  completedAt      DateTime?
-  failedAt         DateTime?
-  cancelRequestedAt DateTime?
-  lastObservedAt   DateTime?
-  lastError        String?
-  lastEngineError  String?
-  input            Json
-  output           Json?
-  attemptCount     Int            @default(0)
-  dispatchAttemptCount Int        @default(0)
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
-  representative   Representative @relation(fields: [representativeId], references: [id])
-  contact          Contact?       @relation(fields: [contactId], references: [id])
-  conversation     Conversation?  @relation(fields: [conversationId], references: [id])
-  handoffRequest   HandoffRequest? @relation(fields: [handoffRequestId], references: [id])
-  approvalRequest  ApprovalRequest? @relation(fields: [approvalRequestId], references: [id])
-  commandOutbox    WorkflowCommandOutbox[]
+  id                   String                  @id @default(cuid())
+  representativeId     String
+  contactId            String?
+  conversationId       String?
+  handoffRequestId     String?
+  approvalRequestId    String?
+  subagentId           String?
+  kind                 WorkflowKind
+  engine               WorkflowEngine          @default(LOCAL_RUNNER)
+  status               WorkflowStatus          @default(QUEUED)
+  enginePhase          WorkflowEnginePhase?
+  dedupeKey            String                  @unique
+  queueName            String?
+  externalWorkflowId   String?
+  externalRunId        String?
+  scheduledAt          DateTime
+  nextWakeAt           DateTime?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  failedAt             DateTime?
+  cancelRequestedAt    DateTime?
+  lastObservedAt       DateTime?
+  lastError            String?
+  lastEngineError      String?
+  input                Json
+  output               Json?
+  attemptCount         Int                     @default(0)
+  dispatchAttemptCount Int                     @default(0)
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  representative       Representative          @relation(fields: [representativeId], references: [id])
+  contact              Contact?                @relation(fields: [contactId], references: [id])
+  conversation         Conversation?           @relation(fields: [conversationId], references: [id])
+  handoffRequest       HandoffRequest?         @relation(fields: [handoffRequestId], references: [id])
+  approvalRequest      ApprovalRequest?        @relation(fields: [approvalRequestId], references: [id])
+  commandOutbox        WorkflowCommandOutbox[]
 
   @@index([representativeId, scheduledAt])
   @@index([engine, status, scheduledAt])
@@ -971,72 +1318,72 @@ model WorkflowRun {
 }
 
 model WorkflowCommandOutbox {
-  id           String              @id @default(cuid())
+  id            String              @id @default(cuid())
   workflowRunId String
-  commandType  WorkflowCommandType
-  payload      Json?
-  attemptCount Int                 @default(0)
-  availableAt  DateTime            @default(now())
-  processedAt  DateTime?
-  lastError    String?
-  createdAt    DateTime            @default(now())
-  updatedAt    DateTime            @updatedAt
-  workflowRun  WorkflowRun         @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
+  commandType   WorkflowCommandType
+  payload       Json?
+  attemptCount  Int                 @default(0)
+  availableAt   DateTime            @default(now())
+  processedAt   DateTime?
+  lastError     String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  workflowRun   WorkflowRun         @relation(fields: [workflowRunId], references: [id], onDelete: Cascade)
 
   @@index([processedAt, availableAt, createdAt])
   @@index([workflowRunId, commandType, processedAt])
 }
 
 model BrowserSession {
-  id                String               @id @default(cuid())
-  representativeId  String
-  contactId         String?
-  conversationId    String?
-  computeSessionId  String               @unique
-  status            BrowserSessionStatus @default(ACTIVE)
-  transportKind     BrowserTransportKind @default(PLAYWRIGHT)
-  profilePath       String?
-  currentUrl        String?
-  currentTitle      String?
+  id                  String               @id @default(cuid())
+  representativeId    String
+  contactId           String?
+  conversationId      String?
+  computeSessionId    String               @unique
+  status              BrowserSessionStatus @default(ACTIVE)
+  transportKind       BrowserTransportKind @default(PLAYWRIGHT)
+  profilePath         String?
+  currentUrl          String?
+  currentTitle        String?
   lastToolExecutionId String?
-  lastNavigationAt  DateTime?
-  closedAt          DateTime?
-  failureReason     String?
-  createdAt         DateTime             @default(now())
-  updatedAt         DateTime             @updatedAt
-  representative    Representative       @relation(fields: [representativeId], references: [id])
-  contact           Contact?             @relation(fields: [contactId], references: [id])
-  conversation      Conversation?        @relation(fields: [conversationId], references: [id])
-  computeSession    ComputeSession       @relation(fields: [computeSessionId], references: [id])
-  navigations       BrowserNavigation[]
+  lastNavigationAt    DateTime?
+  closedAt            DateTime?
+  failureReason       String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  representative      Representative       @relation(fields: [representativeId], references: [id])
+  contact             Contact?             @relation(fields: [contactId], references: [id])
+  conversation        Conversation?        @relation(fields: [conversationId], references: [id])
+  computeSession      ComputeSession       @relation(fields: [computeSessionId], references: [id])
+  navigations         BrowserNavigation[]
 
   @@index([representativeId, updatedAt])
   @@index([conversationId, updatedAt])
 }
 
 model BrowserNavigation {
-  id                 String                  @id @default(cuid())
-  browserSessionId   String
-  representativeId   String
-  contactId          String?
-  conversationId     String?
-  toolExecutionId    String                  @unique
-  status             BrowserNavigationStatus
-  transportKind      BrowserTransportKind    @default(PLAYWRIGHT)
-  requestedUrl       String
-  finalUrl           String?
-  pageTitle          String?
-  textSnippet        String?
+  id                   String                  @id @default(cuid())
+  browserSessionId     String
+  representativeId     String
+  contactId            String?
+  conversationId       String?
+  toolExecutionId      String                  @unique
+  status               BrowserNavigationStatus
+  transportKind        BrowserTransportKind    @default(PLAYWRIGHT)
+  requestedUrl         String
+  finalUrl             String?
+  pageTitle            String?
+  textSnippet          String?
   screenshotArtifactId String?
-  jsonArtifactId     String?
-  errorMessage       String?
-  createdAt          DateTime                @default(now())
-  updatedAt          DateTime                @updatedAt
-  browserSession     BrowserSession          @relation(fields: [browserSessionId], references: [id])
-  representative     Representative          @relation(fields: [representativeId], references: [id])
-  contact            Contact?                @relation(fields: [contactId], references: [id])
-  conversation       Conversation?           @relation(fields: [conversationId], references: [id])
-  toolExecution      ToolExecution           @relation(fields: [toolExecutionId], references: [id])
+  jsonArtifactId       String?
+  errorMessage         String?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  browserSession       BrowserSession          @relation(fields: [browserSessionId], references: [id])
+  representative       Representative          @relation(fields: [representativeId], references: [id])
+  contact              Contact?                @relation(fields: [contactId], references: [id])
+  conversation         Conversation?           @relation(fields: [conversationId], references: [id])
+  toolExecution        ToolExecution           @relation(fields: [toolExecutionId], references: [id])
 
   @@index([browserSessionId, createdAt])
   @@index([representativeId, createdAt])
@@ -1069,21 +1416,21 @@ model LedgerEntry {
 }
 
 model RepresentativeContextSync {
-  id               String          @id @default(cuid())
+  id               String         @id @default(cuid())
   representativeId String
   status           String
-  itemCount        Int             @default(0)
+  itemCount        Int            @default(0)
   error            String?
   startedAt        DateTime
   finishedAt       DateTime?
-  createdAt        DateTime        @default(now())
-  representative   Representative  @relation(fields: [representativeId], references: [id])
+  createdAt        DateTime       @default(now())
+  representative   Representative @relation(fields: [representativeId], references: [id])
 
   @@index([representativeId, createdAt])
 }
 
 model ConversationRecallTrace {
-  id               String          @id @default(cuid())
+  id               String         @id @default(cuid())
   representativeId String
   conversationId   String?
   contactId        String?
@@ -1092,50 +1439,50 @@ model ConversationRecallTrace {
   contextType      String
   layer            String
   score            Float
-  createdAt        DateTime        @default(now())
-  representative   Representative  @relation(fields: [representativeId], references: [id])
-  conversation     Conversation?   @relation(fields: [conversationId], references: [id])
-  contact          Contact?        @relation(fields: [contactId], references: [id])
+  createdAt        DateTime       @default(now())
+  representative   Representative @relation(fields: [representativeId], references: [id])
+  conversation     Conversation?  @relation(fields: [conversationId], references: [id])
+  contact          Contact?       @relation(fields: [contactId], references: [id])
 
   @@index([representativeId, createdAt])
   @@index([conversationId, createdAt])
 }
 
 model ConversationCommitTrace {
-  id               String          @id @default(cuid())
-  representativeId String
-  conversationId   String?
-  contactId        String?
-  sessionId        String
-  sessionKey       String?
-  reason           String
-  status           String
+  id                String         @id @default(cuid())
+  representativeId  String
+  conversationId    String?
+  contactId         String?
+  sessionId         String
+  sessionKey        String?
+  reason            String
+  status            String
   memoriesExtracted Int?
-  archived         Boolean?
-  error            String?
-  createdAt        DateTime        @default(now())
-  representative   Representative  @relation(fields: [representativeId], references: [id])
-  conversation     Conversation?   @relation(fields: [conversationId], references: [id])
-  contact          Contact?        @relation(fields: [contactId], references: [id])
+  archived          Boolean?
+  error             String?
+  createdAt         DateTime       @default(now())
+  representative    Representative @relation(fields: [representativeId], references: [id])
+  conversation      Conversation?  @relation(fields: [conversationId], references: [id])
+  contact           Contact?       @relation(fields: [contactId], references: [id])
 
   @@index([representativeId, createdAt])
   @@index([conversationId, createdAt])
 }
 
 model OpenVikingMemoryRecord {
-  id               String          @id @default(cuid())
+  id               String         @id @default(cuid())
   representativeId String
   contactId        String?
-  uri              String          @unique
+  uri              String         @unique
   contextType      String
   scope            String
   category         String
   summary          String
   sourceKind       String
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
-  representative   Representative  @relation(fields: [representativeId], references: [id])
-  contact          Contact?        @relation(fields: [contactId], references: [id])
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  representative   Representative @relation(fields: [representativeId], references: [id])
+  contact          Contact?       @relation(fields: [contactId], references: [id])
 
   @@index([representativeId, createdAt])
   @@index([representativeId, contactId, createdAt])

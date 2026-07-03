@@ -88,6 +88,23 @@ export type StripePaymentProviderConfig = {
   productName?: string;
 };
 
+export type SignedWalletCheckoutRecord = {
+  providerOrderId: string;
+  checkoutUrl?: string | null;
+  rawPayload?: Record<string, unknown>;
+};
+
+export type SignedWalletProviderConfig = {
+  appId: string;
+  merchantId: string;
+  createRechargeCheckout?: (
+    input: RechargeCheckoutInput,
+  ) => Promise<SignedWalletCheckoutRecord>;
+  verifyAndParseWebhook?: (
+    input: PaymentProviderWebhookInput,
+  ) => Promise<Record<string, unknown>>;
+};
+
 const SUPPORTED_PAYMENT_CURRENCIES = new Set(["CNY", "USD"]);
 
 export const mockPaymentProviderAdapter: PaymentProviderAdapter = {
@@ -244,15 +261,41 @@ export function createStripePaymentProviderAdapter(
   };
 }
 
+export function createWeChatPayPaymentProviderAdapter(
+  config: SignedWalletProviderConfig,
+): PaymentProviderAdapter {
+  return createSignedWalletPaymentProviderAdapter(
+    PaymentProvider.WECHAT_PAY,
+    "wechat_pay",
+    config,
+  );
+}
+
+export function createAlipayPaymentProviderAdapter(
+  config: SignedWalletProviderConfig,
+): PaymentProviderAdapter {
+  return createSignedWalletPaymentProviderAdapter(PaymentProvider.ALIPAY, "alipay", config);
+}
+
 export function getPaymentProviderAdapter(
   provider: PaymentProvider,
-  config: { stripe?: StripePaymentProviderConfig } = {},
+  config: {
+    stripe?: StripePaymentProviderConfig;
+    wechatPay?: SignedWalletProviderConfig;
+    alipay?: SignedWalletProviderConfig;
+  } = {},
 ): PaymentProviderAdapter {
   if (provider === PaymentProvider.MOCK) {
     return mockPaymentProviderAdapter;
   }
   if (provider === PaymentProvider.STRIPE && config.stripe) {
     return createStripePaymentProviderAdapter(config.stripe);
+  }
+  if (provider === PaymentProvider.WECHAT_PAY && config.wechatPay) {
+    return createWeChatPayPaymentProviderAdapter(config.wechatPay);
+  }
+  if (provider === PaymentProvider.ALIPAY && config.alipay) {
+    return createAlipayPaymentProviderAdapter(config.alipay);
   }
   return createReservedPaymentProviderAdapter(provider);
 }
@@ -299,6 +342,99 @@ function normalizeStripeEventType(eventType: string): PaymentProviderEventType {
     return PaymentProviderEventType.RECHARGE_FAILED;
   }
   return PaymentProviderEventType.UNKNOWN;
+}
+
+function createSignedWalletPaymentProviderAdapter(
+  provider: PaymentProvider,
+  providerName: "wechat_pay" | "alipay",
+  config: SignedWalletProviderConfig,
+): PaymentProviderAdapter {
+  return {
+    provider,
+    async createRechargeCheckout(input) {
+      if (!config.createRechargeCheckout) {
+        throw new Error(`${provider} checkout creation requires an official provider SDK adapter.`);
+      }
+      assertPositiveInteger(input.amountCents, "amountCents");
+      assertSupportedCurrency(input.currency);
+      requiredString(input.externalUserId, "externalUserId");
+      requiredString(input.idempotencyKey, "idempotencyKey");
+      const checkout = await config.createRechargeCheckout(input);
+      return {
+        provider,
+        providerOrderId: checkout.providerOrderId,
+        checkoutUrl: checkout.checkoutUrl ?? null,
+        providerPayload: {
+          provider: providerName,
+          appId: config.appId,
+          merchantId: config.merchantId,
+          providerOrderId: checkout.providerOrderId,
+          checkoutUrl: checkout.checkoutUrl ?? null,
+          rawPayload: toJsonValue(checkout.rawPayload ?? {}),
+        },
+      };
+    },
+    async normalizeWebhookEvent(input) {
+      if (!config.verifyAndParseWebhook) {
+        throw new Error(`${provider} webhooks require signature verification before parsing.`);
+      }
+      const parsed = await config.verifyAndParseWebhook(input);
+      return normalizeSignedWalletPaymentEvent(provider, providerName, parsed);
+    },
+  };
+}
+
+function normalizeSignedWalletPaymentEvent(
+  provider: PaymentProvider,
+  providerName: "wechat_pay" | "alipay",
+  payload: Record<string, unknown>,
+): NormalizedPaymentProviderEvent {
+  const providerEventId = requiredString(
+    payload.providerEventId ?? payload.transactionId ?? payload.tradeNo,
+    "providerEventId",
+  );
+  const rechargeOrderId = optionalString(payload.rechargeOrderId) ?? null;
+  const amountCents = Number(payload.amountCents ?? payload.totalAmountCents);
+  assertPositiveInteger(amountCents, "amountCents");
+  const currency = requiredString(payload.currency ?? "CNY", "currency").toUpperCase();
+  assertSupportedCurrency(currency);
+  const status = String(payload.status ?? payload.tradeStatus ?? "paid").toLowerCase();
+  const eventType =
+    status === "success" ||
+    status === "paid" ||
+    status === "trade_success" ||
+    status === "transaction_success"
+      ? PaymentProviderEventType.RECHARGE_PAID
+      : status === "refund" || status === "refunded"
+        ? PaymentProviderEventType.REFUND_SUCCEEDED
+        : status === "failed" || status === "closed"
+          ? PaymentProviderEventType.RECHARGE_FAILED
+          : PaymentProviderEventType.UNKNOWN;
+
+  return {
+    provider,
+    providerEventId,
+    eventType,
+    rechargeOrderId,
+    amountCents,
+    currency,
+    rawPayload: toJsonValue(payload),
+    normalizedPayload: {
+      type:
+        eventType === PaymentProviderEventType.RECHARGE_PAID
+          ? "RechargePaid"
+          : eventType === PaymentProviderEventType.REFUND_SUCCEEDED
+            ? "RechargeRefunded"
+            : eventType === PaymentProviderEventType.RECHARGE_FAILED
+              ? "RechargeFailed"
+              : "PaymentProviderEvent",
+      provider: providerName,
+      rechargeOrderId,
+      amountCents,
+      currency,
+    },
+    idempotencyKey: `${providerName}:${providerEventId}`,
+  };
 }
 
 function readObject(value: unknown, label: string): Record<string, unknown> {

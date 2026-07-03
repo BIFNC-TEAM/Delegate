@@ -5,7 +5,9 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  createAlipayPaymentProviderAdapter,
   createStripePaymentProviderAdapter,
+  createWeChatPayPaymentProviderAdapter,
   getPaymentProviderAdapter,
   mockPaymentProviderAdapter,
   type StripeCheckoutSessionCreateOptions,
@@ -212,5 +214,103 @@ describe("agent wallet payment provider adapters", () => {
       idempotencyKey: "registry_key",
     });
     expect(checkout.providerOrderId).toBe("cs_test_registry");
+  });
+
+  it("keeps WeChat Pay and Alipay skeletons fail-closed without injected provider callbacks", async () => {
+    for (const adapter of [
+      createWeChatPayPaymentProviderAdapter({
+        appId: "wx_app",
+        merchantId: "merchant_1",
+      }),
+      createAlipayPaymentProviderAdapter({
+        appId: "alipay_app",
+        merchantId: "merchant_1",
+      }),
+    ]) {
+      await expect(
+        adapter.createRechargeCheckout({
+          externalUserId: "user_1",
+          amountCents: 1200,
+          currency: "CNY",
+          idempotencyKey: "signed_wallet_1",
+        }),
+      ).rejects.toThrow("official provider SDK");
+      await expect(
+        adapter.normalizeWebhookEvent({
+          payload: {
+            providerEventId: "evt_1",
+          },
+        }),
+      ).rejects.toThrow("signature verification");
+    }
+  });
+
+  it("normalizes injected WeChat Pay signed webhook payloads", async () => {
+    const adapter = createWeChatPayPaymentProviderAdapter({
+      appId: "wx_app",
+      merchantId: "merchant_1",
+      createRechargeCheckout: async () => ({
+        providerOrderId: "wx_order_1",
+        checkoutUrl: "weixin://wxpay/bizpayurl?pr=demo",
+      }),
+      verifyAndParseWebhook: async () => ({
+        providerEventId: "wx_txn_1",
+        rechargeOrderId: "recharge_1",
+        amountCents: 1200,
+        currency: "CNY",
+        status: "transaction_success",
+      }),
+    });
+
+    const checkout = await adapter.createRechargeCheckout({
+      externalUserId: "user_1",
+      amountCents: 1200,
+      currency: "CNY",
+      idempotencyKey: "wechat_1",
+    });
+    const event = await adapter.normalizeWebhookEvent({ rawBody: "{}" });
+
+    expect(checkout).toMatchObject({
+      provider: PaymentProvider.WECHAT_PAY,
+      providerOrderId: "wx_order_1",
+    });
+    expect(event).toMatchObject({
+      provider: PaymentProvider.WECHAT_PAY,
+      providerEventId: "wx_txn_1",
+      eventType: PaymentProviderEventType.RECHARGE_PAID,
+      rechargeOrderId: "recharge_1",
+      idempotencyKey: "wechat_pay:wx_txn_1",
+    });
+  });
+
+  it("normalizes injected Alipay signed webhook payloads", async () => {
+    const adapter = getPaymentProviderAdapter(PaymentProvider.ALIPAY, {
+      alipay: {
+        appId: "alipay_app",
+        merchantId: "merchant_1",
+        createRechargeCheckout: async () => ({
+          providerOrderId: "alipay_trade_1",
+          checkoutUrl: "https://openapi.alipay.com/gateway.do?demo=1",
+        }),
+        verifyAndParseWebhook: async () => ({
+          tradeNo: "alipay_trade_1",
+          rechargeOrderId: "recharge_1",
+          totalAmountCents: 1200,
+          currency: "CNY",
+          tradeStatus: "TRADE_SUCCESS",
+        }),
+      },
+    });
+
+    const event = await adapter.normalizeWebhookEvent({ rawBody: "signed=true" });
+
+    expect(event).toMatchObject({
+      provider: PaymentProvider.ALIPAY,
+      providerEventId: "alipay_trade_1",
+      eventType: PaymentProviderEventType.RECHARGE_PAID,
+      rechargeOrderId: "recharge_1",
+      amountCents: 1200,
+      idempotencyKey: "alipay:alipay_trade_1",
+    });
   });
 });

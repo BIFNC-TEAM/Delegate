@@ -5,8 +5,11 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  createStripePaymentProviderAdapter,
   getPaymentProviderAdapter,
   mockPaymentProviderAdapter,
+  type StripeCheckoutSessionCreateOptions,
+  type StripeCheckoutSessionCreateParams,
 } from "../src/agent-wallet-payment-providers";
 
 describe("agent wallet payment provider adapters", () => {
@@ -84,5 +87,130 @@ describe("agent wallet payment provider adapters", () => {
         }),
       ).rejects.toThrow("reserved but not configured");
     }
+  });
+
+  it("creates a Stripe Checkout Session through the injected client", async () => {
+    const calls: Array<{
+      params: StripeCheckoutSessionCreateParams;
+      options?: StripeCheckoutSessionCreateOptions;
+    }> = [];
+    const adapter = createStripePaymentProviderAdapter({
+      successUrl: "https://delegate.example/success",
+      cancelUrl: "https://delegate.example/cancel",
+      checkoutSessions: {
+        create: async (params, options) => {
+          calls.push({ params, ...(options ? { options } : {}) });
+          return {
+            id: "cs_test_123",
+            url: "https://checkout.stripe.com/c/pay/cs_test_123",
+          };
+        },
+      },
+    });
+
+    const checkout = await adapter.createRechargeCheckout({
+      rechargeOrderId: "recharge_1",
+      externalUserId: "web:user_1",
+      amountCents: 2500,
+      currency: "CNY",
+      idempotencyKey: "stripe_recharge_1",
+    });
+
+    expect(checkout).toMatchObject({
+      provider: PaymentProvider.STRIPE,
+      providerOrderId: "cs_test_123",
+      checkoutUrl: "https://checkout.stripe.com/c/pay/cs_test_123",
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.params).toMatchObject({
+      mode: "payment",
+      client_reference_id: "stripe_recharge_1",
+      success_url: "https://delegate.example/success",
+      cancel_url: "https://delegate.example/cancel",
+      metadata: {
+        rechargeOrderId: "recharge_1",
+        externalUserId: "web:user_1",
+        amountCents: "2500",
+        currency: "CNY",
+        idempotencyKey: "stripe_recharge_1",
+      },
+    });
+    expect(calls[0]?.params.line_items[0]?.price_data).toMatchObject({
+      currency: "cny",
+      unit_amount: 2500,
+    });
+    expect(calls[0]?.options).toEqual({ idempotencyKey: "stripe_recharge_1" });
+  });
+
+  it("normalizes Stripe Checkout paid and failed webhook events", async () => {
+    const adapter = createStripePaymentProviderAdapter({
+      successUrl: "https://delegate.example/success",
+      checkoutSessions: {
+        create: async () => ({ id: "cs_unused" }),
+      },
+    });
+
+    const paid = await adapter.normalizeWebhookEvent({
+      payload: {
+        id: "evt_paid_1",
+        type: "checkout.session.completed",
+        data: {
+          object: {
+            id: "cs_test_123",
+            amount_total: 2500,
+            currency: "cny",
+            metadata: {
+              rechargeOrderId: "recharge_1",
+            },
+          },
+        },
+      },
+    });
+    const failed = await adapter.normalizeWebhookEvent({
+      payload: {
+        id: "evt_failed_1",
+        type: "checkout.session.async_payment_failed",
+        data: {
+          object: {
+            id: "cs_test_124",
+            amount_total: 2500,
+            currency: "cny",
+            metadata: {
+              rechargeOrderId: "recharge_1",
+            },
+          },
+        },
+      },
+    });
+
+    expect(paid).toMatchObject({
+      provider: PaymentProvider.STRIPE,
+      providerEventId: "evt_paid_1",
+      eventType: PaymentProviderEventType.RECHARGE_PAID,
+      rechargeOrderId: "recharge_1",
+      amountCents: 2500,
+      currency: "CNY",
+      idempotencyKey: "stripe:evt_paid_1",
+    });
+    expect(failed.eventType).toBe(PaymentProviderEventType.RECHARGE_FAILED);
+  });
+
+  it("returns a configured Stripe adapter from the provider registry", async () => {
+    const adapter = getPaymentProviderAdapter(PaymentProvider.STRIPE, {
+      stripe: {
+        successUrl: "https://delegate.example/success",
+        checkoutSessions: {
+          create: async () => ({ id: "cs_test_registry" }),
+        },
+      },
+    });
+
+    const checkout = await adapter.createRechargeCheckout({
+      externalUserId: "user_1",
+      amountCents: 1200,
+      currency: "CNY",
+      idempotencyKey: "registry_key",
+    });
+    expect(checkout.providerOrderId).toBe("cs_test_registry");
   });
 });

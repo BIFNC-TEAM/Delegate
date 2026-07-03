@@ -44,7 +44,7 @@ Delegate 现在包含这些可运行的页面和服务：
 - **公开 representative 应用** 位于 `apps/reps`，包含代表档案、服务档位、网页聊天、充值入口模块，以及签名 public-chat session state。
 - **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、governed actions、compute sessions、artifacts、deliverables、packages、OpenViking traces 和 workflow state。
 - **可选 Telegram bot runtime 基础** 位于 `apps/bot`，基于 grammY 和共享 runtime policy，作为未来渠道基础设施保留，不作为第一版 Delegate 产品主入口。
-- **早期 monetization control plane** 覆盖 paid continuation、wallet-like credits、sponsor pool state、invoice records 和 billing signals。
+- **AMN wallet control plane** 覆盖内部钱包 ledger、mock recharge、Agent token purchase、usage charging、Creator 20% revenue policy、refund/reversal services、withdrawal request freeze、provider adapters，以及 owner/public wallet views。
 - **Compute broker** 位于 `apps/compute-broker`，在 approval 和 policy gate 后提供受治理的 `exec`、`read`、`write`、`process` 和 `browser` 请求。
 - **Workflow runner** 位于 `apps/workflow-runner`，支持 local runner 和 Temporal-backed durable workflow dispatch。
 - **Prisma/Postgres 数据模型** 覆盖 representatives、contacts、conversations、handoffs、approvals、invoices、compute、artifacts、deliverables、workflows 和 audit trails。
@@ -81,9 +81,36 @@ AMN 目标层次包括：
 - **Settlement Engine:** 计算 Creator revenue、platform fees、provider costs 和 withdrawals。
 - **Transparent Ledger:** 记录 recharge、charge、settlement 和 proof events，让用户和 creator 可以验证状态。
 
-今天已经实现的是 web-first Delegate 楔子：公开 representative 页面、网页聊天、pricing tiers、充值入口 UI、paid continuation 语义、wallet-like dashboard state、invoice records、sponsor credits、governed compute costs 和 durable follow-up workflows。
+今天已经实现的是 web-first Delegate 楔子加上第一条 AMN 钱包闭环：公开 representative 页面、网页聊天、pricing tiers、公开 mock recharge、用户现金余额、Agent token purchase、Agent token usage charging、Creator pending / withdrawable earning、withdrawal request freeze、refund/reversal services、owner wallet dashboard、provider adapter boundaries 和 durable follow-up workflows。
 
-尚未实现的是：通用 AMN Pay、微信支付、支付宝、Stripe 聚合、提现、Merkle proof 发布、开放 wallet APIs，以及完整自动 settlement。
+仍未完全产品化的是：真实 Stripe SDK wiring 和 webhook signing、真实微信支付或支付宝 credential / certificate flow、通过 Stripe Connect / 支付宝转账 / 微信商家转账自动出金、通用开放 Wallet API、chargeback 自动化、Merkle proof 发布、多币种 FX，以及完整自动 settlement。
+
+## AMN 钱包实现状态
+
+目标架构是 **内部双账本 + 外部支付适配器**：
+
+```text
+Stripe / 微信支付 / 支付宝
+  -> 负责收钱、退款、通知，未来负责出金
+
+Delegate
+  -> 负责用户余额、Agent tokens、Creator 20%、成本、利润、提现状态和审计账本
+```
+
+当前对照钱包方案的实现状态：
+
+| 模块 | 状态 | 说明 |
+| --- | --- | --- |
+| 账户类型 | 已实现 | Prisma 已建模 `USER_CASH`、`AGENT_TOKEN`、`CREATOR_PENDING`、`CREATOR_WITHDRAWABLE`、`PLATFORM_REVENUE`、`PROVIDER_COST`。Creator earning 拆成 pending 和 withdrawable，方便按服务消耗释放和提现冻结。 |
+| 数据模型 | 基本实现 | 已实现 `UserWallet`、`AgentWallet`、`WalletLedgerEntry`、`RechargeOrder`、`PaymentProviderEvent`、`AgentTokenPurchase`、`AgentUsageCharge`、`CreatorEarning`、`WithdrawRequest`。目前还没有独立通用 `User` 表，公开用户先用 `UserWallet.externalUserId` 表示。 |
+| 整数金额和 token | 已实现 | 钱全部用最小货币单位整数，例如 CNY fen、USD cents。Agent token 也是整数。 |
+| 用户充值 | mock 闭环已实现 | 已实现 `RechargeOrder` 创建、mock payment success、幂等 provider event、`UserWallet` 入账和 wallet ledger。 |
+| 用户给 Agent 买 token | 已实现 | 服务会检查 `UserWallet`、扣用户现金、给 `AgentWallet` 增 token、生成 `AgentTokenPurchase`、按策略生成 Creator pending earning，并写 ledger。当前价格用每个 Agent 的 `tokenUnitPriceCents`，集中 price catalog 仍是后续工作。 |
+| Agent 消耗 token | service 已实现 | `AgentUsageCharge` 会扣 Agent token、记录 provider cost / platform revenue，并把 Creator pending earning 按消耗释放到 withdrawable。它还没有自动接到所有真实回复、compute、browser、MCP runtime 路径上。 |
+| Creator 提现 | MVP 已实现 | `WithdrawRequest` 会检查 verified owner、claimed representative 和 withdrawable balance，并冻结提现金额、写 ledger。Stripe Connect / 支付宝转账 / 微信商家转账自动打款还未实现。 |
+| 退款和冲正 | 部分实现 | 已实现 paid recharge refund 和未消耗 token purchase reversal，并写 reversal ledger。完整 chargeback 自动处理和相关余额冻结仍是后续工作。 |
+| 复用支付能力 | adapter 边界已实现 | Mock provider 可用。Stripe Checkout 风格 adapter 已通过 injected client 边界实现。微信支付和支付宝 adapter 是 fail-closed 骨架，需要官方 SDK / OpenAPI 回调和验签后才能启用。Delegate 不处理银行卡号、支付密码或原始敏感支付信息。 |
+| 第一版不做 | 保持不做 | 不做自动跨境提现、Merkle proof、开放 Wallet API、待认领代表自动提现、链上账本、多币种汇兑。 |
 
 Telegram 是未来渠道基础设施。如果 Delegate 后续提供 bot 内数字商品和数字服务，仍应遵循 Telegram 规则，包括在需要时使用 Telegram Stars。AMN Pay 是未来 Web / 统一充值路径，不是绕过平台政策的理由。
 

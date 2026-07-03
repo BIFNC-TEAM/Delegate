@@ -44,7 +44,7 @@ Delegate currently includes these working surfaces and services:
 - **Public representative app** in `apps/reps`, including representative profiles, service tiers, web chat, recharge-entry modules, and signed public-chat session state.
 - **Owner dashboard** in `apps/web`, covering representative health, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, and workflow state.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and shared runtime policy, kept as future channel infrastructure rather than the first Delegate product surface.
-- **Early monetization control plane** covering paid continuation, wallet-like credits, sponsor pool state, invoice records, and billing signals.
+- **AMN wallet control plane** covering internal wallet ledger entries, mock recharge, Agent token purchase, usage charging, Creator 20% revenue policy, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
 - **Prisma/Postgres data model** for representatives, contacts, conversations, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
@@ -81,9 +81,36 @@ The intended AMN layers are:
 - **Settlement Engine:** calculates Creator revenue, platform fees, provider costs, and withdrawals.
 - **Transparent Ledger:** records recharge, charge, settlement, and proof events so users and creators can verify state.
 
-What is implemented today is the web-first Delegate wedge: public representative pages, web chat, pricing tiers, recharge-entry UI, paid continuation semantics, wallet-like dashboard state, invoice records, sponsor credits, governed compute costs, and durable follow-up workflows.
+What is implemented today is the web-first Delegate wedge plus the first AMN wallet loop: public representative pages, web chat, pricing tiers, public mock recharge, user cash balance, Agent token purchase, Agent token usage charging, Creator pending/withdrawable earnings, withdrawal request freezing, refund/reversal services, owner wallet dashboard, provider adapter boundaries, and durable follow-up workflows.
 
-What is not implemented yet: generic AMN Pay, WeChat Pay, Alipay, Stripe aggregation, withdrawals, Merkle proof publication, open wallet APIs, or full settlement automation.
+What is still not fully productionized: live Stripe SDK wiring and webhook signing, live WeChat Pay or Alipay credentials and certificate flows, automatic payout through Stripe Connect / Alipay transfer / WeChat merchant transfer, generic open Wallet API, chargeback automation, Merkle proof publication, multi-currency FX, and full settlement automation.
+
+## AMN Wallet Implementation Status
+
+The intended architecture is **internal double-entry wallet ledger + external payment adapters**:
+
+```text
+Stripe / WeChat Pay / Alipay
+  -> collect money, refund, notify, and eventually pay out
+
+Delegate
+  -> user balance, Agent tokens, Creator 20%, costs, profit, withdrawal state, and audit ledger
+```
+
+Current status against the wallet plan:
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| Account types | Implemented | `USER_CASH`, `AGENT_TOKEN`, `CREATOR_PENDING`, `CREATOR_WITHDRAWABLE`, `PLATFORM_REVENUE`, and `PROVIDER_COST` are modeled in Prisma. Creator earning is split into pending and withdrawable accounts for safer release and withdrawal freezing. |
+| Data models | Mostly implemented | `UserWallet`, `AgentWallet`, `WalletLedgerEntry`, `RechargeOrder`, `PaymentProviderEvent`, `AgentTokenPurchase`, `AgentUsageCharge`, `CreatorEarning`, and `WithdrawRequest` are implemented. There is no standalone generic `User` table yet; public users are represented by `UserWallet.externalUserId`. |
+| Integer money and tokens | Implemented | Money uses integer smallest currency units such as CNY fen and USD cents. Agent tokens are integers. |
+| User recharge | Implemented for mock flow | `RechargeOrder` creation, mock payment success, idempotent provider events, `UserWallet` credit, and wallet ledger entries are implemented. |
+| User buys Agent tokens | Implemented | The service checks `UserWallet`, debits cash, credits `AgentWallet`, creates `AgentTokenPurchase`, creates Creator pending earnings at the policy share, and writes ledger entries. Current pricing uses per-Agent `tokenUnitPriceCents`; a central price catalog is still future work. |
+| Agent consumes tokens | Implemented as a service | `AgentUsageCharge` debits Agent tokens, records provider cost and platform revenue, and releases Creator pending earnings into withdrawable balance. It is not yet wired into every live reply / compute / browser / MCP runtime path automatically. |
+| Creator withdrawal | MVP implemented | `WithdrawRequest` checks verified owner, claimed representative, and withdrawable balance, then freezes funds with ledger entries. Automatic payout through Stripe Connect / Alipay / WeChat transfer is not implemented yet. |
+| Refund and reversal | Partially implemented | Paid recharge refunds and unconsumed token purchase reversals are implemented with reversal ledger entries. Full chargeback automation and related balance freezing are still future work. |
+| Payment reuse | Adapter boundary implemented | Mock provider is live. Stripe Checkout-style adapter is implemented through an injected client boundary. WeChat Pay and Alipay adapters are fail-closed skeletons requiring official SDK / OpenAPI callbacks and signature verification before use. Delegate does not handle card numbers, bank cards, payment passwords, or raw sensitive payment data. |
+| First-version exclusions | Preserved | No automatic cross-border payout, Merkle proof, open Wallet API, unclaimed-representative auto-withdrawal, chain ledger, or multi-currency FX. |
 
 Telegram remains future channel infrastructure for this product direction. If Delegate later ships bot-based digital goods and services, they should follow Telegram's rules, including Telegram Stars where required. AMN Pay is a future web/unified recharge path, not a reason to bypass platform policy.
 

@@ -649,8 +649,8 @@ const copy = {
     agentWalletEyebrow: "Recharge scope",
     agentWalletTitle: "余额属于这个 Agent，不是平台通用余额",
     agentWalletCopy: (name: string) =>
-      `AMN 的目标模型是让用户给具体 Agent 充值。第一版 ${name} 先通过网页服务档位、充值预览和 dashboard credits 表达早期钱包语义；统一 AMN Pay 与消息平台充值仍是后续路线。`,
-    agentWalletCurrentChip: "当前：web credits",
+      `AMN 的目标模型是让用户给具体 Agent 充值。当前 ${name} 已接入 mock recharge 闭环：创建 RechargeOrder、模拟支付成功、写入 User Wallet 和 WalletLedgerEntry；真实 Stripe、微信、支付宝收款仍需接入正式 provider。`,
+    agentWalletCurrentChip: "当前：mock recharge",
     webFirstChip: "Web first",
     amnPayRoadmapChip: "AMN Pay roadmap",
     balanceDisclosure: (name: string) =>
@@ -787,8 +787,8 @@ const copy = {
     agentWalletEyebrow: "Recharge scope",
     agentWalletTitle: "Balance belongs to this Agent, not a generic platform pool",
     agentWalletCopy: (name: string) =>
-      `AMN's target model lets users recharge a specific Agent. The first ${name} version expresses the early wallet idea through web service tiers, recharge previews, and dashboard credits; unified AMN Pay and message-platform recharge remain roadmap.`,
-    agentWalletCurrentChip: "Today: web credits",
+      `AMN's target model lets users recharge a specific Agent. ${name} now has a mock recharge loop: create a RechargeOrder, simulate payment success, credit User Wallet, and write WalletLedgerEntry records; live Stripe, WeChat, and Alipay collection still require production providers.`,
+    agentWalletCurrentChip: "Today: mock recharge",
     webFirstChip: "Web first",
     amnPayRoadmapChip: "AMN Pay roadmap",
     balanceDisclosure: (name: string) =>

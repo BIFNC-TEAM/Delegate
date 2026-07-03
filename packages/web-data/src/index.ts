@@ -2,6 +2,7 @@ export * from "./agent-wallet-ledger";
 export * from "./agent-wallet-payment-providers";
 export * from "./agent-wallet-recharge";
 export * from "./agent-wallet-token-purchase";
+export * from "./agent-wallet-usage-charge";
 export * from "./compute";
 export * from "./deliverable-insights";
 export * from "./deliverables";

@@ -44,7 +44,7 @@ export type WalletLedgerTransactionInput = {
 
 export type WalletLedgerProjection = Record<string, Required<WalletBalanceSnapshot>>;
 
-type WalletLedgerEntryRecord = {
+export type WalletLedgerEntryRecord = {
   id: string;
   eventGroupId: string;
   idempotencyKey: string;
@@ -55,7 +55,7 @@ type WalletLedgerEntryRecord = {
   currency: string;
 };
 
-type WalletLedgerEntryDelegate = {
+export type WalletLedgerEntryDelegate = {
   findFirst(args: {
     where: { eventGroupId?: string; idempotencyKey?: { startsWith: string } };
   }): Promise<WalletLedgerEntryRecord | null>;
@@ -68,7 +68,7 @@ type WalletLedgerEntryDelegate = {
   }): Promise<WalletLedgerEntryRecord>;
 };
 
-type WalletLedgerClient = {
+export type WalletLedgerClient = {
   walletLedgerEntry: WalletLedgerEntryDelegate;
   $transaction?<T>(fn: (tx: WalletLedgerClient) => Promise<T>): Promise<T>;
 };

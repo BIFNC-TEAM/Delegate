@@ -6,6 +6,7 @@ import {
   buildLocalizedHref,
   extractCountryHint,
   pickCopy,
+  resolveServiceUrl,
   resolveLocale,
   type Locale,
 } from "@delegate/web-ui";
@@ -41,10 +42,18 @@ export default async function DashboardPage({
       ? requestedSlug
       : fallbackSlug;
   const activeView = isDashboardView(requestedView) ? requestedView : "overview";
-  const websiteBaseUrl = resolveServiceUrl(process.env.NEXT_PUBLIC_SITE_URL, "http://localhost:3000");
+  const currentHost = headerStore.get("x-forwarded-host") ?? headerStore.get("host");
+  const websiteBaseUrl = resolveServiceUrl(process.env.NEXT_PUBLIC_SITE_URL, "http://localhost:3000", {
+    currentAppDefaultPort: 3001,
+    currentHost,
+  });
   const representativeBaseUrl = resolveServiceUrl(
     process.env.NEXT_PUBLIC_REPRESENTATIVE_URL,
     "http://localhost:3002",
+    {
+      currentAppDefaultPort: 3001,
+      currentHost,
+    },
   );
   const tabs = t.tabs;
   const activeTab = tabs.find((tab) => tab.id === activeView) ?? tabs[0]!;
@@ -189,11 +198,6 @@ function isDashboardView(value: string | undefined): value is DashboardView {
     value === "wallet" ||
     value === "memory"
   );
-}
-
-function resolveServiceUrl(envValue: string | undefined, fallback: string): string {
-  const candidate = envValue?.trim() || fallback;
-  return candidate.replace(/\/$/, "");
 }
 
 const dashboardCopy: Record<

@@ -6,6 +6,7 @@ import {
   buildLocalizedHref,
   extractCountryHint,
   pickCopy,
+  resolveServiceUrl,
   resolveLocale,
 } from "@delegate/web-ui";
 
@@ -223,13 +224,22 @@ export default async function HomePage({
     countryHint: extractCountryHint(headerStore),
   });
   const t = pickCopy(locale, copy);
+  const currentHost = headerStore.get("x-forwarded-host") ?? headerStore.get("host");
   const representativeBaseUrl = resolveServiceUrl(
     process.env.NEXT_PUBLIC_REPRESENTATIVE_URL,
     "http://localhost:3002",
+    {
+      currentAppDefaultPort: 3000,
+      currentHost,
+    },
   );
   const dashboardBaseUrl = resolveServiceUrl(
     process.env.NEXT_PUBLIC_DASHBOARD_URL,
     "http://localhost:3001",
+    {
+      currentAppDefaultPort: 3000,
+      currentHost,
+    },
   );
 
   return (
@@ -462,9 +472,4 @@ export default async function HomePage({
       </section>
     </main>
   );
-}
-
-function resolveServiceUrl(envValue: string | undefined, fallback: string): string {
-  const candidate = envValue?.trim() || fallback;
-  return candidate.replace(/\/$/, "");
 }

@@ -16,6 +16,7 @@ import {
   buildLocalizedHref,
   extractCountryHint,
   pickCopy,
+  resolveServiceUrl,
   resolveLocale,
   type Locale,
 } from "@delegate/web-ui";
@@ -41,10 +42,18 @@ export default async function RepresentativePage({
     countryHint: extractCountryHint(headerStore),
   });
   const t = pickCopy(locale, copy);
-  const siteBaseUrl = resolveServiceUrl(process.env.NEXT_PUBLIC_SITE_URL, "http://localhost:3000");
+  const currentHost = headerStore.get("x-forwarded-host") ?? headerStore.get("host");
+  const siteBaseUrl = resolveServiceUrl(process.env.NEXT_PUBLIC_SITE_URL, "http://localhost:3000", {
+    currentAppDefaultPort: 3002,
+    currentHost,
+  });
   const dashboardBaseUrl = resolveServiceUrl(
     process.env.NEXT_PUBLIC_DASHBOARD_URL,
     "http://localhost:3001",
+    {
+      currentAppDefaultPort: 3002,
+      currentHost,
+    },
   );
   const [setupSnapshot, skillPackSnapshot, deliverableSnapshot] = await Promise.all([
     getRepresentativeSetupSnapshot(slug),
@@ -527,11 +536,6 @@ export default async function RepresentativePage({
       </DashboardPanelFrame>
     </main>
   );
-}
-
-function resolveServiceUrl(envValue: string | undefined, fallback: string): string {
-  const candidate = envValue?.trim() || fallback;
-  return candidate.replace(/\/$/, "");
 }
 
 function buildSkillLabels(locale: Locale): Record<RepresentativeSkill, string> {

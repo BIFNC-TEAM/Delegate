@@ -11,6 +11,7 @@ import {
   type WalletLedgerClient,
   type WalletLedgerMovement,
 } from "./agent-wallet-ledger";
+import { calculateAgentWalletRevenueSplit } from "./agent-wallet-revenue-policy";
 import { prisma } from "./prisma";
 
 type RepresentativeRecord = {
@@ -154,9 +155,13 @@ export async function applyAgentUsageCharge(
       },
       orderBy: { createdAt: "asc" },
     });
-    const creatorWithdrawableCents = calculateCreatorWithdrawableCents(
-      tokenValueCents,
-      agentWallet.creatorRevenueShareBps,
+    const revenueSplit = calculateAgentWalletRevenueSplit({
+      grossAmountCents: tokenValueCents,
+      creatorRevenueShareBps: agentWallet.creatorRevenueShareBps,
+      providerCostCents: normalized.providerCostCents,
+    });
+    const creatorWithdrawableCents = Math.min(
+      revenueSplit.creatorShareCents,
       releaseSource?.pendingCents ?? 0,
     );
     const platformRevenueCents = Math.max(
@@ -425,17 +430,6 @@ function serializeAgentUsageCharge(
     idempotencyKey: usageCharge.idempotencyKey,
     agentTokenBalance: usageCharge.agentWallet.tokenBalance,
   };
-}
-
-function calculateCreatorWithdrawableCents(
-  tokenValueCents: number,
-  revenueShareBps: number,
-  remainingPendingCents: number,
-): number {
-  if (!Number.isInteger(revenueShareBps) || revenueShareBps < 0 || revenueShareBps > 10_000) {
-    throw new Error("creatorRevenueShareBps must be an integer between 0 and 10000.");
-  }
-  return Math.min(Math.floor((tokenValueCents * revenueShareBps) / 10_000), remainingPendingCents);
 }
 
 function assertPositiveInteger(value: number, label: string): void {

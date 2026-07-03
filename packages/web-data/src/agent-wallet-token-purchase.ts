@@ -9,6 +9,7 @@ import {
   recordWalletLedgerTransaction,
   type WalletLedgerClient,
 } from "./agent-wallet-ledger";
+import { calculateAgentWalletRevenueSplit } from "./agent-wallet-revenue-policy";
 import { prisma } from "./prisma";
 
 type UserWalletRecord = {
@@ -164,14 +165,10 @@ export async function purchaseAgentTokens(
     }
 
     const tokenAmount = normalized.amountCents / agentWallet.tokenUnitPriceCents;
-    const creatorRevenueShareBps = normalizeRevenueShareBps(
-      agentWallet.creatorRevenueShareBps,
-    );
-    const creatorPendingCents = calculateCreatorPendingCents(
-      normalized.amountCents,
-      creatorRevenueShareBps,
-    );
-    const platformRevenueCents = normalized.amountCents - creatorPendingCents;
+    const revenueSplit = calculateAgentWalletRevenueSplit({
+      grossAmountCents: normalized.amountCents,
+      creatorRevenueShareBps: agentWallet.creatorRevenueShareBps,
+    });
 
     const purchase = await tx.agentTokenPurchase.create({
       data: {
@@ -183,8 +180,8 @@ export async function purchaseAgentTokens(
         currency: normalized.currency,
         tokenAmount,
         tokenUnitPriceCents: agentWallet.tokenUnitPriceCents,
-        creatorRevenueShareBps,
-        creatorPendingCents,
+        creatorRevenueShareBps: revenueSplit.creatorRevenueShareBps,
+        creatorPendingCents: revenueSplit.creatorShareCents,
         status: AgentTokenPurchaseStatus.COMPLETED,
         idempotencyKey: normalized.idempotencyKey,
       },
@@ -196,9 +193,9 @@ export async function purchaseAgentTokens(
         agentWalletId: agentWallet.id,
         tokenPurchaseId: purchase.id,
         status: CreatorEarningStatus.PENDING,
-        pendingCents: creatorPendingCents,
+        pendingCents: revenueSplit.creatorShareCents,
         currency: normalized.currency,
-        revenueShareBps: creatorRevenueShareBps,
+        revenueShareBps: revenueSplit.creatorRevenueShareBps,
         idempotencyKey: `creator_earning:${normalized.idempotencyKey}`,
       },
     });
@@ -246,7 +243,7 @@ export async function purchaseAgentTokens(
             agentWalletId: agentWallet.id,
             creatorEarningId: creatorEarning.id,
             tokenPurchaseId: purchase.id,
-            amountCents: creatorPendingCents,
+            amountCents: revenueSplit.creatorShareCents,
             notes: "agent_token_purchase_creator_share",
           },
           {
@@ -255,7 +252,7 @@ export async function purchaseAgentTokens(
             entryKind: AmnLedgerEntryKind.PLATFORM_REVENUE_CREDIT,
             representativeId: agentWallet.representativeId,
             tokenPurchaseId: purchase.id,
-            amountCents: platformRevenueCents,
+            amountCents: revenueSplit.platformGrossCents,
             notes: "agent_token_purchase_platform_share",
           },
         ],
@@ -357,17 +354,6 @@ function serializeAgentTokenPurchase(
     agentTokenBalance: purchase.agentWallet.tokenBalance,
     creatorEarningId: creatorEarning?.id ?? null,
   };
-}
-
-function calculateCreatorPendingCents(amountCents: number, revenueShareBps: number): number {
-  return Math.floor((amountCents * revenueShareBps) / 10_000);
-}
-
-function normalizeRevenueShareBps(value: number): number {
-  if (!Number.isInteger(value) || value < 0 || value > 10_000) {
-    throw new Error("creatorRevenueShareBps must be an integer between 0 and 10000.");
-  }
-  return value;
 }
 
 function assertPositiveInteger(value: number, label: string): void {

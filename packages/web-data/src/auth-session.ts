@@ -21,6 +21,16 @@ export type DelegateAuthSession = {
   expiresAt: number;
 };
 
+export type DelegateAuthState = {
+  version: 1;
+  actor: DelegateAuthActor;
+  state: string;
+  nonce: string;
+  returnTo: string;
+  issuedAt: number;
+  expiresAt: number;
+};
+
 export type LogtoOidcConfig = {
   endpoint: string;
   appId: string;
@@ -215,8 +225,36 @@ export function createDelegateAuthSession(input: {
   return session;
 }
 
+export function createDelegateAuthState(input: {
+  actor: DelegateAuthActor;
+  state: string;
+  nonce: string;
+  returnTo: string;
+  now?: Date | undefined;
+  ttlSeconds?: number | undefined;
+}): DelegateAuthState {
+  const now = input.now ?? new Date();
+  const issuedAt = Math.floor(now.getTime() / 1000);
+  const ttlSeconds = input.ttlSeconds ?? 10 * 60;
+
+  return {
+    version: 1,
+    actor: input.actor,
+    state: normalizeRequiredText(input.state, "state"),
+    nonce: normalizeRequiredText(input.nonce, "nonce"),
+    returnTo: sanitizeRelativeReturnTo(input.returnTo),
+    issuedAt,
+    expiresAt: issuedAt + ttlSeconds,
+  };
+}
+
 export function signDelegateAuthSession(session: DelegateAuthSession, secret: string): string {
   const encodedPayload = Buffer.from(JSON.stringify(session), "utf8").toString("base64url");
+  return `${encodedPayload}.${signPayload(encodedPayload, secret)}`;
+}
+
+export function signDelegateAuthState(state: DelegateAuthState, secret: string): string {
+  const encodedPayload = Buffer.from(JSON.stringify(state), "utf8").toString("base64url");
   return `${encodedPayload}.${signPayload(encodedPayload, secret)}`;
 }
 
@@ -246,6 +284,37 @@ export function verifyDelegateAuthSession(
       return null;
     }
     return session;
+  } catch {
+    return null;
+  }
+}
+
+export function verifyDelegateAuthState(
+  cookieValue: string | undefined,
+  secret: string,
+  now = new Date(),
+): DelegateAuthState | null {
+  if (!cookieValue) {
+    return null;
+  }
+  const [encodedPayload, encodedSignature] = cookieValue.split(".");
+  if (!encodedPayload || !encodedSignature) {
+    return null;
+  }
+  const expectedSignature = signPayload(encodedPayload, secret);
+  if (!safeEqual(encodedSignature, expectedSignature)) {
+    return null;
+  }
+
+  try {
+    const state = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+    if (!isDelegateAuthState(state)) {
+      return null;
+    }
+    if (state.expiresAt <= Math.floor(now.getTime() / 1000)) {
+      return null;
+    }
+    return state;
   } catch {
     return null;
   }
@@ -291,6 +360,14 @@ function normalizeRequiredText(value: string | undefined, name: string): string 
   return normalized;
 }
 
+function sanitizeRelativeReturnTo(value: string): string {
+  const normalized = value.trim();
+  if (!normalized || !normalized.startsWith("/") || normalized.startsWith("//")) {
+    return "/dashboard";
+  }
+  return normalized;
+}
+
 function signPayload(encodedPayload: string, secret: string): string {
   return createHmac("sha256", normalizeRequiredText(secret, "secret"))
     .update(encodedPayload)
@@ -315,5 +392,21 @@ function isDelegateAuthSession(value: unknown): value is DelegateAuthSession {
     typeof session.subject === "string" &&
     typeof session.issuedAt === "number" &&
     typeof session.expiresAt === "number"
+  );
+}
+
+function isDelegateAuthState(value: unknown): value is DelegateAuthState {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const state = value as Partial<DelegateAuthState>;
+  return (
+    state.version === 1 &&
+    (state.actor === "owner" || state.actor === "audience") &&
+    typeof state.state === "string" &&
+    typeof state.nonce === "string" &&
+    typeof state.returnTo === "string" &&
+    typeof state.issuedAt === "number" &&
+    typeof state.expiresAt === "number"
   );
 }

@@ -4,11 +4,14 @@ import {
   buildExternalAuthProfileFromLogtoIdToken,
   buildLogtoAuthorizeUrl,
   createDelegateAuthSession,
+  createDelegateAuthState,
   decodeJwtPayload,
   exchangeLogtoCodeForTokens,
   readDelegateAuthSessionSecret,
   readLogtoOidcConfig,
   signDelegateAuthSession,
+  signDelegateAuthState,
+  verifyDelegateAuthState,
   verifyDelegateAuthSession,
 } from "../src/auth-session";
 
@@ -177,6 +180,24 @@ describe("delegate auth session cookies", () => {
     expect(() => readDelegateAuthSessionSecret({ NODE_ENV: "production" })).toThrow(
       "DELEGATE_AUTH_SESSION_SECRET is required in production",
     );
+  });
+
+  it("signs callback state and sanitizes unsafe return paths", () => {
+    const state = createDelegateAuthState({
+      actor: "owner",
+      state: "state-1",
+      nonce: "nonce-1",
+      returnTo: "https://evil.example.com/phish",
+      now: new Date("2026-07-04T12:00:00.000Z"),
+      ttlSeconds: 60,
+    });
+    const cookie = signDelegateAuthState(state, "secret");
+
+    expect(state.returnTo).toBe("/dashboard");
+    expect(verifyDelegateAuthState(cookie, "secret", new Date("2026-07-04T12:00:30.000Z"))).toEqual(
+      state,
+    );
+    expect(verifyDelegateAuthState(cookie, "secret", new Date("2026-07-04T12:01:01.000Z"))).toBeNull();
   });
 });
 

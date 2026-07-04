@@ -20,6 +20,7 @@ import { DashboardSkillPacks } from "./dashboard-skill-packs";
 import { DashboardTraining } from "./dashboard-training";
 import { DashboardWallet } from "./dashboard-wallet";
 import { listRepresentativeDirectoryItems } from "@delegate/web-data";
+import { requireOwnerAuthSession } from "../auth/owner-session";
 
 export default async function DashboardPage({
   searchParams,
@@ -27,6 +28,7 @@ export default async function DashboardPage({
   searchParams?: Promise<{ rep?: string; view?: string; lang?: string }>;
 }) {
   const params = searchParams ? await searchParams : undefined;
+  await requireOwnerAuthSession(buildDashboardReturnTo(params));
   const headerStore = await headers();
   const locale = resolveLocale({
     requestedLocale: params?.lang,
@@ -201,6 +203,21 @@ function isDashboardView(value: string | undefined): value is DashboardView {
     value === "memory" ||
     value === "training"
   );
+}
+
+function buildDashboardReturnTo(params: { rep?: string; view?: string; lang?: string } | undefined): string {
+  const search = new URLSearchParams();
+  if (params?.rep) {
+    search.set("rep", params.rep);
+  }
+  if (params?.view) {
+    search.set("view", params.view);
+  }
+  if (params?.lang) {
+    search.set("lang", params.lang);
+  }
+  const query = search.toString();
+  return query ? `/dashboard?${query}` : "/dashboard";
 }
 
 const dashboardCopy: Record<

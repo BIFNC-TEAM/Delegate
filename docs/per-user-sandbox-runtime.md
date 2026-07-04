@@ -6,9 +6,12 @@ Delegate now models computer use as **per-user sandbox identity + on-demand runt
 
 This is not "one always-on VM per audience user." The stable unit is `SandboxIdentity`, keyed by `representativeId + contactId`. A runtime lease starts only when that user needs compute or browser work, then idle cleanup stops the runtime while preserving the identity and provider sandbox handle for the next task.
 
+`SandboxIdentity.audienceIdentityId` is copied from `Contact.audienceIdentityId` when the compute broker creates or reuses a lease. If an anonymous web identity is later merged into a registered Logto identity, later public-cookie reuse resolves to the merge target before compute starts, so the sandbox identity remains attached to the registered audience identity instead of drifting back to the anonymous source.
+
 In plain terms:
 
 - `SandboxIdentity` is the user's long-lived locker.
+- `audienceIdentityId` is the cross-channel identity pointer attached to that locker when available.
 - `SandboxLease` is the currently running or recently stopped machine lease.
 - `ComputeSession` remains the per-request execution record.
 - `BrowserSession` still keeps `computeSessionId`, and now also carries optional `sandboxIdentityId` and `sandboxLeaseId` for cross-session browser continuity.

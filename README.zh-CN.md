@@ -268,6 +268,9 @@ pnpm docker:up:temporal
 默认 `.env.example` 适合本地开发。重要配置包括：
 
 - `DATABASE_URL` 指向 Prisma 使用的 Postgres。
+- `LOGTO_ENDPOINT`、`LOGTO_APP_ID`、`LOGTO_APP_SECRET`、`LOGTO_REDIRECT_URI` 和 `LOGTO_SCOPES` 启用兼容 Logto OIDC 的 creator dashboard 登录。
+- `DELEGATE_AUTH_SESSION_SECRET` 用于签名 dashboard auth 和 callback-state cookie。生产环境必须使用强 secret。
+- `DELEGATE_DASHBOARD_AUTH_MODE=required` 可以在非生产环境强制开启 dashboard 登录；生产环境始终要求登录。
 - `TELEGRAM_BOT_TOKEN`、`TELEGRAM_BOT_USERNAME` 和 `TELEGRAM_WEBHOOK_SECRET` 启用可选 Telegram bot 基础设施，但第一版 Delegate 产品先做网页版。
 - `REP_PUBLIC_CHAT_SESSION_SECRET` 可以覆盖 public-chat cookie 签名 secret。如果没有设置，reps app 会依次回退到 `TELEGRAM_WEBHOOK_SECRET` 和本地开发 secret。
 - `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_OPENAI_MODEL` 和 `DELEGATE_ANTHROPIC_MODEL` 控制 model-backed representative replies。

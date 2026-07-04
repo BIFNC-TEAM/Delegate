@@ -13,9 +13,12 @@ The short-term web path is still backward-compatible with the existing Telegram-
 5. Server code resolves one `Conversation` per representative, contact, and web audience thread.
 6. Chat turns are persisted in `ConversationTurn`; recent model context is loaded from Postgres, not from cookies.
 7. Recharge uses the same cookie-derived audience identity and writes `UserWallet.audienceIdentityId`.
-8. Public compute session creation uses the same `contactId` and `conversationId`.
-9. Compute broker creates or reuses `SandboxIdentity` from `representativeId + contactId` and copies `Contact.audienceIdentityId`.
-10. Login, payment, Telegram, email, and phone links can attach to the same identity through `IdentityLink`; merge flows can move references to a target identity.
+8. Logto login links `IdentityLink(provider=LOGTO)` to the current `AudienceIdentity`.
+9. If the Logto subject already belongs to another audience identity, the current anonymous identity is merged into the registered target.
+10. Later cookie reuse of a merged anonymous identity resolves to the target identity, so contacts, wallets, memory, and sandbox identity do not regress.
+11. Payment external ids are linked through `IdentityLink(provider=PAYMENT_EXTERNAL_USER)`.
+12. Public compute session creation uses the same `contactId` and `conversationId`.
+13. Compute broker creates or reuses `SandboxIdentity` from `representativeId + contactId` and copies `Contact.audienceIdentityId`.
 
 ## Compatibility Fields
 
@@ -30,6 +33,37 @@ Current web code dual-writes:
 - `Conversation.sourceChannel = web`
 
 The Telegram-shaped fields remain because existing unique indexes and older code still depend on them. New code should prefer `audienceIdentityId`, `channelUserId`, and `channelThreadId` when possible.
+
+## Login And Merge Semantics
+
+The short-term identity rule is:
+
+- anonymous web identity starts from the signed public-chat cookie
+- logged-in identity is attached through `IdentityLink(provider=LOGTO)`
+- recharge identity is attached through `IdentityLink(provider=PAYMENT_EXTERNAL_USER)`
+- business state hangs from `Contact.id` and `AudienceIdentity.id`
+
+When a visitor logs in after using the public web chat, Delegate moves source references into the registered target identity:
+
+- `Contact.audienceIdentityId`
+- `Conversation.audienceIdentityId`
+- `UserWallet.audienceIdentityId`
+- `SandboxIdentity.audienceIdentityId`
+- `OpenVikingMemoryRecord.audienceIdentityId`
+- `IdentityLink.audienceIdentityId`
+
+If the original anonymous cookie is used again after merge, `resolveAnonymousAudienceIdentity` returns the merge target and refreshes `lastSeenAt`. This prevents later chat, recharge, or computer-use requests from reattaching state to the merged source identity.
+
+## Creator Dashboard Login
+
+The creator dashboard uses Logto-compatible OIDC:
+
+- `/auth/login` creates signed callback state and redirects to Logto.
+- `/auth/callback` exchanges the code, resolves or creates `Owner`, and writes a signed `delegate_auth_session` cookie.
+- `/auth/logout` clears auth cookies.
+- production requires `DELEGATE_AUTH_SESSION_SECRET`; local development falls back to a dev-only secret.
+
+Representative directory and creation APIs now scope to the logged-in `Owner`. The setup API checks that the current owner owns the requested representative before reading or writing setup state.
 
 ## Sandbox Semantics
 
@@ -54,8 +88,11 @@ Useful focused checks:
 ```bash
 ./node_modules/.bin/vitest run apps/reps/tests/public-chat-identity.test.ts apps/reps/tests/public-web-compute.test.ts
 ./node_modules/.bin/vitest run packages/web-data/tests/web-audience.test.ts packages/web-data/tests/agent-wallet-recharge.test.ts
+./node_modules/.bin/vitest run packages/web-data/tests/auth-identities.test.ts packages/web-data/tests/auth-session.test.ts packages/web-data/tests/owner-access.test.ts
+./node_modules/.bin/vitest run apps/web/tests/auth-guard.test.ts
 ./node_modules/.bin/vitest run apps/compute-broker/tests/sandbox-leases.test.ts apps/compute-broker/tests/compute-session-sandbox-path.test.ts apps/compute-broker/tests/sandbox-schema.test.ts
 ./node_modules/.bin/tsc --noEmit -p apps/reps/tsconfig.json
+./node_modules/.bin/tsc --noEmit -p apps/web/tsconfig.json
 ./node_modules/.bin/tsc --noEmit -p packages/web-data/tsconfig.json
 ./node_modules/.bin/tsc --noEmit -p apps/compute-broker/tsconfig.json
 DATABASE_URL='postgresql://delegate:delegate@localhost:5432/delegate' ./node_modules/.bin/prisma validate --schema prisma/schema.prisma

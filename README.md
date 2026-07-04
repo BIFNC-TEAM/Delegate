@@ -272,6 +272,9 @@ If Temporal configuration is incomplete, Delegate falls back to `local_runner` r
 The default `.env.example` is safe for local development. Important settings:
 
 - `DATABASE_URL` points Prisma to Postgres.
+- `LOGTO_ENDPOINT`, `LOGTO_APP_ID`, `LOGTO_APP_SECRET`, `LOGTO_REDIRECT_URI`, and `LOGTO_SCOPES` enable Logto-compatible OIDC login for creator dashboard sessions.
+- `DELEGATE_AUTH_SESSION_SECRET` signs dashboard auth and callback-state cookies. Set a strong secret in production.
+- `DELEGATE_DASHBOARD_AUTH_MODE=required` forces dashboard auth in non-production environments; production always requires it.
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, and `TELEGRAM_WEBHOOK_SECRET` enable the optional Telegram bot foundation, but the first Delegate product version is web-first.
 - `REP_PUBLIC_CHAT_SESSION_SECRET` can override the public-chat cookie signing secret. If unset, the reps app falls back to `TELEGRAM_WEBHOOK_SECRET` and then a local development secret.
 - `DELEGATE_MODEL_ENABLED`, `DELEGATE_MODEL_PROVIDER`, `DELEGATE_OPENAI_MODEL`, and `DELEGATE_ANTHROPIC_MODEL` control model-backed representative replies.

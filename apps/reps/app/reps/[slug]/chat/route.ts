@@ -1,7 +1,8 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
-import { generateRepresentativeReply } from "@delegate/model-runtime";
+import { demoRepresentative } from "@delegate/domain";
+import { generateRepresentativeReply, type ModelRuntimeRecentTurn } from "@delegate/model-runtime";
 import {
   createConversationPlan,
   renderReplyPreview,
@@ -56,22 +57,35 @@ export async function POST(
       representativeSlug: slug,
       cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
     });
-    const contact = await resolveWebAudienceContact({
-      representativeId: setup.id,
-      representativeSlug: slug,
-      audienceId: sessionState.audienceId,
-    });
-    const conversation = await resolveWebAudienceConversation({
-      representativeId: setup.id,
-      contactId: contact.id,
-      audienceId: sessionState.audienceId,
-    });
     const representative = buildPublicChatRepresentative(setup);
-    const recentTurns = await loadWebConversationRecentTurns({
-      conversationId: conversation.id,
-    });
+    let conversationId: string | null = null;
+    let freeRepliesUsed = 0;
+    let recentTurns: ModelRuntimeRecentTurn[] = [];
+
+    try {
+      const contact = await resolveWebAudienceContact({
+        representativeId: setup.id,
+        representativeSlug: slug,
+        audienceId: sessionState.audienceId,
+      });
+      const conversation = await resolveWebAudienceConversation({
+        representativeId: setup.id,
+        contactId: contact.id,
+        audienceId: sessionState.audienceId,
+      });
+      conversationId = conversation.id;
+      freeRepliesUsed = conversation.freeRepliesUsed;
+      recentTurns = await loadWebConversationRecentTurns({
+        conversationId: conversation.id,
+      });
+    } catch (error) {
+      if (!shouldUseNonPersistentDemoChat(error, slug)) {
+        throw error;
+      }
+    }
+
     const usage = deriveTierUsage({
-      freeRepliesUsed: conversation.freeRepliesUsed,
+      freeRepliesUsed,
       freeReplyLimit: representative.contract.freeReplyLimit,
     });
 
@@ -134,17 +148,24 @@ export async function POST(
       assistantMessage: response.reply.text,
       nextStep: response.plan.nextStep,
     });
-    const updatedConversation = await persistWebConversationExchange({
-      conversationId: conversation.id,
-      userMessage: body.message,
-      assistantMessage: response.reply.text,
-      intent: response.plan.intent,
-      nextStep: response.plan.nextStep,
-    });
-    response.usage = deriveTierUsage({
-      freeRepliesUsed: updatedConversation.freeRepliesUsed,
-      freeReplyLimit: representative.contract.freeReplyLimit,
-    });
+    if (conversationId) {
+      const updatedConversation = await persistWebConversationExchange({
+        conversationId,
+        userMessage: body.message,
+        assistantMessage: response.reply.text,
+        intent: response.plan.intent,
+        nextStep: response.plan.nextStep,
+      });
+      response.usage = deriveTierUsage({
+        freeRepliesUsed: updatedConversation.freeRepliesUsed,
+        freeReplyLimit: representative.contract.freeReplyLimit,
+      });
+    } else {
+      response.usage = deriveTierUsage({
+        freeRepliesUsed: freeRepliesUsed + 1,
+        freeReplyLimit: representative.contract.freeReplyLimit,
+      });
+    }
     const nextResponse = NextResponse.json(response);
     nextResponse.cookies.set(
       getPublicChatCookieName(slug),
@@ -173,4 +194,20 @@ export async function POST(
       { status: 500 },
     );
   }
+}
+
+function shouldUseNonPersistentDemoChat(error: unknown, representativeSlug: string): boolean {
+  return representativeSlug === demoRepresentative.slug && isPrismaUnavailableError(error);
+}
+
+function isPrismaUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return (
+    error.message.includes("Can't reach database server") ||
+    error.message.includes("Environment variable not found: DATABASE_URL") ||
+    error.message.includes("P1001")
+  );
 }

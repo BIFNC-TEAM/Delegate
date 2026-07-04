@@ -15,6 +15,7 @@ export * from "./deliverable-insights";
 export * from "./deliverables";
 export * from "./governed-actions";
 export * from "./openviking";
+export * from "./owner-access";
 export * from "./owner-dashboard";
 export * from "./prisma";
 export * from "./representative-setup";

@@ -28,7 +28,7 @@ export default async function DashboardPage({
   searchParams?: Promise<{ rep?: string; view?: string; lang?: string }>;
 }) {
   const params = searchParams ? await searchParams : undefined;
-  await requireOwnerAuthSession(buildDashboardReturnTo(params));
+  const ownerSession = await requireOwnerAuthSession(buildDashboardReturnTo(params));
   const headerStore = await headers();
   const locale = resolveLocale({
     requestedLocale: params?.lang,
@@ -36,7 +36,7 @@ export default async function DashboardPage({
     countryHint: extractCountryHint(headerStore),
   });
   const t = pickCopy(locale, dashboardCopy);
-  const representatives = await listRepresentativeDirectoryItems();
+  const representatives = await listRepresentativeDirectoryItems(ownerSession?.ownerId);
   const fallbackSlug = representatives[0]?.slug ?? demoRepresentative.slug;
   const requestedSlug = params?.rep?.trim();
   const requestedView = params?.view?.trim();

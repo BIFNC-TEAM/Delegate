@@ -183,13 +183,14 @@ const defaultComputeSetup: RepresentativeSetupSnapshot["compute"] = {
   filesystemMode: "workspace_only",
 };
 
-export async function listRepresentativeDirectoryItems(): Promise<RepresentativeDirectoryItem[]> {
+export async function listRepresentativeDirectoryItems(ownerId?: string | null): Promise<RepresentativeDirectoryItem[]> {
   if (!process.env.DATABASE_URL?.trim()) {
     return [buildDemoDirectoryItem()];
   }
 
   try {
     const representatives = await prisma.representative.findMany({
+      ...(ownerId?.trim() ? { where: { ownerId: ownerId.trim() } } : {}),
       include: {
         owner: true,
       },
@@ -219,6 +220,7 @@ export async function listRepresentativeDirectoryItems(): Promise<Representative
 
 export async function createRepresentative(
   input: RepresentativeCreateInput,
+  options: { ownerId?: string | null } = {},
 ): Promise<RepresentativeSetupSnapshot> {
   const parsed = representativeCreateSchema.parse(input);
 
@@ -230,11 +232,18 @@ export async function createRepresentative(
     const openVikingEnv = resolveOpenVikingEnv();
     const created = await prisma.$transaction(async (tx) => {
       const now = new Date();
-      const owner = await tx.owner.create({
-        data: {
-          displayName: parsed.ownerName,
-        },
-      });
+      const owner = options.ownerId?.trim()
+        ? await tx.owner.update({
+            where: { id: options.ownerId.trim() },
+            data: {
+              displayName: parsed.ownerName,
+            },
+          })
+        : await tx.owner.create({
+            data: {
+              displayName: parsed.ownerName,
+            },
+          });
 
       const slug = await reserveRepresentativeSlug(
         tx,
@@ -290,10 +299,14 @@ export async function createRepresentative(
       await upsertManagedCapabilityPolicyProfile(tx, representative.id);
       await upsertOwnerManagedCapabilityProfiles(tx, owner.id);
 
-      await tx.wallet.create({
-        data: {
+      await tx.wallet.upsert({
+        where: {
           ownerId: owner.id,
         },
+        create: {
+          ownerId: owner.id,
+        },
+        update: {},
       });
 
       await tx.knowledgePack.create({

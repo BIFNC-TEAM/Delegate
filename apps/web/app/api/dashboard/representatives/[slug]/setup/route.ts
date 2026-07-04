@@ -5,6 +5,11 @@ import {
   updateRepresentativeSetup,
 } from "@delegate/web-data";
 
+import {
+  dashboardAuthErrorResponse,
+  requireDashboardRepresentativeAccess,
+} from "../../../auth";
+
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ slug: string }> },
@@ -12,6 +17,7 @@ export async function GET(
   const { slug } = await params;
 
   try {
+    await requireDashboardRepresentativeAccess(slug);
     const snapshot = await getRepresentativeSetupSnapshot(slug);
     if (!snapshot) {
       return NextResponse.json({ error: "Representative not found." }, { status: 404 });
@@ -19,6 +25,11 @@ export async function GET(
 
     return NextResponse.json(snapshot);
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:
@@ -36,6 +47,7 @@ export async function PATCH(
   const { slug } = await params;
 
   try {
+    await requireDashboardRepresentativeAccess(slug);
     const body = (await request.json()) as Record<string, unknown>;
     const snapshot = await updateRepresentativeSetup({
       representativeSlug: slug,
@@ -228,6 +240,11 @@ export async function PATCH(
 
     return NextResponse.json(snapshot);
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

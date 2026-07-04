@@ -25,6 +25,7 @@ import {
   PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
   PUBLIC_CHAT_EFFECTIVE_TIER,
   readPublicChatSessionState,
+  shouldUseSecurePublicChatCookie,
   type PublicChatResponse,
   writePublicChatSessionState,
 } from "../public-chat";
@@ -176,7 +177,7 @@ export async function POST(
       {
         httpOnly: true,
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        secure: shouldUseSecurePublicChatCookie(request),
         maxAge: PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
         path: `/reps/${slug}`,
       },

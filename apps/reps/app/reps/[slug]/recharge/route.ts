@@ -12,6 +12,7 @@ import {
   getPublicChatCookieName,
   PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
   readPublicChatSessionState,
+  shouldUseSecurePublicChatCookie,
   writePublicChatSessionState,
 } from "../public-chat";
 
@@ -44,6 +45,10 @@ export async function POST(
       typeof body.idempotencyKey === "string" && body.idempotencyKey.trim()
         ? body.idempotencyKey.trim()
         : `public_recharge:${slug}:${sessionState.audienceId}:${amountCents}`;
+    const sessionCookieValue = writePublicChatSessionState({
+      representativeSlug: slug,
+      state: sessionState,
+    });
 
     const rechargeOrder = await createMockRechargeOrder({
       externalUserId,
@@ -57,14 +62,11 @@ export async function POST(
     const response = NextResponse.json({ rechargeOrder }, { status: 201 });
     response.cookies.set(
       getPublicChatCookieName(slug),
-      writePublicChatSessionState({
-        representativeSlug: slug,
-        state: sessionState,
-      }),
+      sessionCookieValue,
       {
         httpOnly: true,
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        secure: shouldUseSecurePublicChatCookie(request),
         maxAge: PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
         path: `/reps/${slug}`,
       },
@@ -72,10 +74,10 @@ export async function POST(
 
     return response;
   } catch (error) {
+    console.error("Failed to create public recharge order.", error);
     return NextResponse.json(
       {
-        error:
-          error instanceof Error ? error.message : "Failed to create public recharge order.",
+        error: "充值单创建失败，请稍后重试；如果问题持续，请联系代表主人检查支付配置。",
       },
       { status: 400 },
     );

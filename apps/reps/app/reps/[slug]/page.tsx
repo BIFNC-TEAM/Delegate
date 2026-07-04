@@ -406,49 +406,61 @@ export default async function RepresentativePage({
 
           <DashboardSurface eyebrow={t.materialsEyebrow} title={t.materialsTitle}>
             <ul className="list">
-              {representative.knowledgePack.materials.map((item) => (
-                <li className="list-item" key={item.id}>
-                  <strong>{item.title}</strong>
-                  <p>{item.summary}</p>
-                  {item.url ? (
-                    <div className="button-row">
-                      <a className="button-secondary" href={item.url} rel="noreferrer" target="_blank">
-                        {t.openMaterial}
-                      </a>
-                    </div>
-                  ) : null}
-                </li>
-              ))}
-              {publicDeliverables.map((deliverable) => (
-                <li className="list-item" key={deliverable.id}>
-                  <strong>{deliverable.title}</strong>
-                  <p>{deliverable.summary}</p>
-                  <div className="chip-row">
-                    <span className="chip chip-safe">{t.publicDeliverableChip}</span>
-                    <span className="chip">{deliverableKindLabels[deliverable.kind]}</span>
-                    <span className="chip">{deliverableSourceLabels[deliverable.sourceKind]}</span>
-                  </div>
-                  <div className="button-row">
-                    {deliverable.sourceKind === "external_link" && deliverable.externalUrl ? (
-                      <a
-                        className="button-secondary"
-                        href={deliverable.externalUrl}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        {t.openMaterial}
-                      </a>
+              {representative.knowledgePack.materials.map((item) => {
+                const materialUrl = getUsablePublicUrl(item.url);
+                return (
+                  <li className="list-item" key={item.id}>
+                    <strong>{item.title}</strong>
+                    <p>{item.summary}</p>
+                    {materialUrl ? (
+                      <div className="button-row">
+                        <a className="button-secondary" href={materialUrl} rel="noreferrer" target="_blank">
+                          {t.openMaterial}
+                        </a>
+                      </div>
                     ) : (
-                      <a
-                        className="button-secondary"
-                        href={`/reps/${representative.slug}/deliverables/${deliverable.id}/download`}
-                      >
-                        {t.downloadDeliverable}
-                      </a>
+                      <p className="footer-note">{t.materialPending}</p>
                     )}
-                  </div>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
+              {publicDeliverables.map((deliverable) => {
+                const externalUrl = getUsablePublicUrl(deliverable.externalUrl);
+                return (
+                  <li className="list-item" key={deliverable.id}>
+                    <strong>{deliverable.title}</strong>
+                    <p>{deliverable.summary}</p>
+                    <div className="chip-row">
+                      <span className="chip chip-safe">{t.publicDeliverableChip}</span>
+                      <span className="chip">{deliverableKindLabels[deliverable.kind]}</span>
+                      <span className="chip">{deliverableSourceLabels[deliverable.sourceKind]}</span>
+                    </div>
+                    <div className="button-row">
+                      {deliverable.sourceKind === "external_link" ? (
+                        externalUrl ? (
+                          <a
+                            className="button-secondary"
+                            href={externalUrl}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            {t.openMaterial}
+                          </a>
+                        ) : (
+                          <span className="chip">{t.materialPendingChip}</span>
+                        )
+                      ) : (
+                        <a
+                          className="button-secondary"
+                          href={`/reps/${representative.slug}/deliverables/${deliverable.id}/download`}
+                        >
+                          {t.downloadDeliverable}
+                        </a>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </DashboardSurface>
 
@@ -610,6 +622,22 @@ function buildDeliverableSourceLabels(locale: Locale) {
       };
 }
 
+function getUsablePublicUrl(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const url = new URL(value);
+    if (url.hostname === "example.com" || url.hostname.endsWith(".example.com")) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 const copy = {
   zh: {
     brandTagline: "Web-first 公开代表档案",
@@ -642,21 +670,21 @@ const copy = {
       `${name} 不替代 owner 本人，而是先把能回答、该收费、要请示、需转接的请求分流清楚。`,
     frontDeskSteps: [
       { label: "Answer", title: "能回答的先回答", body: "公开 FAQ、资料和服务边界先由代表说明，减少重复解释。" },
-      { label: "Charge", title: "该收费的先收费", body: "深度服务和优先响应会进入网页服务档位、充值预览和 invoice 信号。" },
+      { label: "Charge", title: "该收费的先收费", body: "深度服务和优先响应会进入网页服务档位、充值预览和付款记录。" },
       { label: "Ask", title: "需要拍板的先请示", body: "敏感动作和高价值判断会进入 approval 或 owner inbox，而不是自动越权。" },
       { label: "Handoff", title: "需要人时再转接", body: "真正需要 owner 的请求会带着上下文进入人工转接流程。" },
     ],
-    rechargeEyebrow: "Agent Wallet",
+    rechargeEyebrow: "代表余额",
     rechargeTitle: "这是给当前数字代表充值和继续服务的入口",
     rechargeSummary: (name: string) =>
       `${name} 的余额、服务档位和平台入口应该在同一个公开页面里被看清楚。`,
     agentWalletEyebrow: "Recharge scope",
-    agentWalletTitle: "余额属于这个 Agent，不是平台通用余额",
+    agentWalletTitle: "余额只给这个代表用，不是平台通用钱包",
     agentWalletCopy: (name: string) =>
-      `AMN 的目标模型是让用户给具体 Agent 充值。当前 ${name} 已接入 mock recharge 闭环：创建 RechargeOrder、模拟支付成功、写入 User Wallet 和 WalletLedgerEntry；真实 Stripe、微信、支付宝收款仍需接入正式 provider。`,
-    agentWalletCurrentChip: "当前：mock recharge",
-    webFirstChip: "Web first",
-    amnPayRoadmapChip: "AMN Pay roadmap",
+      `当前 ${name} 已经可以在网页里创建演示充值单、模拟支付成功，并把余额记到当前访问者身份上。真实收款上线前，还需要接入 Stripe、微信或支付宝。`,
+    agentWalletCurrentChip: "当前：演示充值",
+    webFirstChip: "网页优先",
+    amnPayRoadmapChip: "正式支付待接入",
     balanceDisclosure: (name: string) =>
       `充值或购买的服务余额仅用于 ${name} 这个数字代表的服务，不代表进入 owner 私人工作区，也不会自动授权其它 Agent。`,
     rechargeCta: "立即充值 / 继续服务",
@@ -667,9 +695,9 @@ const copy = {
     platformRoadmap: "roadmap",
     platformWebDetail: "第一版主入口。用户先在网页代表页完成理解、试聊、服务档位预览和转接。",
     platformTelegramDetail: "后续消息入口。若未来提供 Telegram 内数字服务，会遵循 Telegram Stars 规则。",
-    platformWhatsAppDetail: "未来可作为消息入口，拉起统一 AMN recharge 页面。",
+    platformWhatsAppDetail: "未来可作为消息入口，把用户带回同一个网页充值和服务入口。",
     platformFeishuDetail: "未来可作为企业协作入口，余额与计费仍归属当前 Agent。",
-    platformWeComDetail: "未来可作为企业微信入口，沿用同一 Agent Wallet 语义。",
+    platformWeComDetail: "未来可作为企业微信入口，余额仍只归属当前代表。",
     openPlatform: "打开",
     trustProofEyebrow: "Proof + QR",
     trustProofTitle: "评分、来源和二维码占位",
@@ -680,7 +708,7 @@ const copy = {
     claimStatusChip: "claimed demo",
     publicSourcesChip: "公开来源",
     refundDisclosure:
-      "数字服务充值通常用于当前 Agent 的持续服务，原则上不作为一次性礼物处理；具体退款规则以后应在正式 AMN Pay 页面清楚展示。",
+      "数字服务充值通常用于当前代表的持续服务，原则上不作为一次性礼物处理；具体退款规则以后应在正式支付页面清楚展示。",
     signalCards: {
       freeRepliesLabel: "免费回复",
       freeRepliesDetail: "首次接触阶段能被代表独立接住的免费深度。",
@@ -703,12 +731,12 @@ const copy = {
     contractEyebrow: "Conversation contract",
     contractTitle: "免费、升级和转接规则",
     contractCopy: (limit: number) => `免费规则：前 ${limit} 条回复适合基础问答与资料领取；更深的合作判断、报价采集和预约意向会引导到付费续用或人工转接。`,
-    publicRuntimeLabel: "public runtime",
-    privateDraftLabel: "private draft",
+    publicRuntimeLabel: "公开运行中",
+    privateDraftLabel: "草稿未公开",
     handoffReadyLabel: "handoff ready",
     contractFootnote: "记忆边界：只会记住这个代表范围内的公开安全互动，不会读取主人的私有工作区、私有文件或私有账号。",
     skillsEyebrow: "Skill Sources",
-    skillsSummary: "参考 OpenClaw 的 ClawHub 习惯后，这里把 builtin 与 registry-backed skill packs 分开，并强调越权永远不被允许。",
+    skillsSummary: "这里把内置能力和外部技能包分开展示：可以扩展能力，但不能扩大权限。",
     skillsTitle: "技能包可以有来源，但不能有越权",
     declaredSkillsEyebrow: "Declared skills",
     skillsCountChip: (count: number) => `${count} skills`,
@@ -717,8 +745,8 @@ const copy = {
     trackedChip: (count: number) => `${count} tracked`,
     skillPacksTitle: "已安装来源与能力标签",
     builtinLabel: "Built-in",
-    executesCodeNote: "This pack executes code and would require extra review.",
-    declarativeNote: "This pack is currently modeled as declarative/non-privileged for public runtime safety.",
+    executesCodeNote: "这个技能包会执行代码，上线前需要额外审核。",
+    declarativeNote: "这个技能包目前只作为能力说明，不会自动获得额外权限。",
     knowledgeEyebrow: "Knowledge Pack",
     knowledgeSummary: "代表先从结构化知识里拿答案，再决定下一步是继续回答、收集 intake 还是升级转接。",
     knowledgeTitle: "公开知识包先于自由发挥",
@@ -727,13 +755,15 @@ const copy = {
     materialsTitle: "可直接投递的公开材料",
     openMaterial: "打开资料",
     downloadDeliverable: "下载交付件",
+    materialPending: "资料已登记，但还没有可公开打开的文件链接。",
+    materialPendingChip: "资料待发布",
     publicDeliverableChip: "公开交付件",
     policiesEyebrow: "Policies",
     policiesTitle: "合作边界与响应规则",
     plansEyebrow: "Plans",
     plansSummary: "用户不该理解原始模型成本，只需要理解还能继续聊多深、能做哪些动作。",
     plansTitle: "四档访问深度，而不是 token 定价",
-    accessLayerEyebrow: "Access layer",
+    accessLayerEyebrow: "服务深度",
     repliesChip: (count: number) => `${count} replies`,
     priorityHandoffChip: "priority handoff",
     startWebChat: "开始网页试聊",
@@ -771,7 +801,7 @@ const copy = {
     aiOnlyLabel: "ai only",
     worksForLabel: "Who this representative works for",
     memoryDisclosure:
-      "This representative may remember prior public-safe interactions within this representative only. It does not access the owner's private workspace, private files, or private accounts.",
+      "This representative may remember prior public, safe interactions within this representative only. It does not access the owner's private workspace, private files, or private accounts.",
     startOnWeb: "Start on web",
     viewControlPlane: "View control plane",
     frontDeskEyebrow: "AI front desk",
@@ -780,21 +810,21 @@ const copy = {
       `${name} does not replace the owner. It separates what can be answered, what should be paid, what needs approval, and what deserves human handoff.`,
     frontDeskSteps: [
       { label: "Answer", title: "Answer what it can", body: "Public FAQs, materials, and service boundaries are explained before the owner repeats themselves." },
-      { label: "Charge", title: "Charge when needed", body: "Deeper service and priority move into web service tiers, recharge preview, and invoice signals." },
+      { label: "Charge", title: "Charge when needed", body: "Deeper service and priority move into web service tiers, recharge preview, and payment records." },
       { label: "Ask", title: "Ask for approval", body: "Sensitive actions and high-value judgment go through approval or owner inbox instead of silent overreach." },
       { label: "Handoff", title: "Hand off with context", body: "Requests that truly need the owner arrive with context through the human handoff flow." },
     ],
-    rechargeEyebrow: "Agent Wallet",
+    rechargeEyebrow: "Representative balance",
     rechargeTitle: "This is the recharge and continuation entry for this Digital Representative",
     rechargeSummary: (name: string) =>
       `${name}'s balance scope, service tiers, and platform entry points should be visible on one public page.`,
     agentWalletEyebrow: "Recharge scope",
     agentWalletTitle: "Balance belongs to this Agent, not a generic platform pool",
     agentWalletCopy: (name: string) =>
-      `AMN's target model lets users recharge a specific Agent. ${name} now has a mock recharge loop: create a RechargeOrder, simulate payment success, credit User Wallet, and write WalletLedgerEntry records; live Stripe, WeChat, and Alipay collection still require production providers.`,
-    agentWalletCurrentChip: "Today: mock recharge",
+      `${name} can now create a demo recharge order, simulate payment success, and attach the balance to the current visitor identity. Live collection still needs Stripe, WeChat, or Alipay integration before real charging.`,
+    agentWalletCurrentChip: "Today: demo recharge",
     webFirstChip: "Web first",
-    amnPayRoadmapChip: "AMN Pay roadmap",
+    amnPayRoadmapChip: "Live payments pending",
     balanceDisclosure: (name: string) =>
       `Recharge or purchase value is scoped to ${name}'s Digital Representative service. It does not grant private workspace access and does not automatically authorize other Agents.`,
     rechargeCta: "Recharge / continue service",
@@ -805,9 +835,9 @@ const copy = {
     platformRoadmap: "roadmap",
     platformWebDetail: "First-version primary entry for understanding, trial chat, service preview, and handoff.",
     platformTelegramDetail: "Future message entry. If Telegram digital services ship later, they should follow Telegram Stars rules.",
-    platformWhatsAppDetail: "Future message entry that can open a unified AMN recharge page.",
+    platformWhatsAppDetail: "Future message entry that can bring users back to the same web recharge and service page.",
     platformFeishuDetail: "Future collaboration entry where balance and billing still belong to this Agent.",
-    platformWeComDetail: "Future WeCom entry using the same Agent Wallet semantics.",
+    platformWeComDetail: "Future WeCom entry where balance still belongs to this representative.",
     openPlatform: "Open",
     trustProofEyebrow: "Proof + QR",
     trustProofTitle: "Rating, source, and QR placeholder",
@@ -818,7 +848,7 @@ const copy = {
     claimStatusChip: "claimed demo",
     publicSourcesChip: "public sources",
     refundDisclosure:
-      "Digital service recharge is generally scoped to ongoing service from this Agent, not treated as a one-time gift. Formal refund rules should be shown clearly on the future AMN Pay page.",
+      "Digital service recharge is generally scoped to ongoing service from this representative, not treated as a one-time gift. Formal refund rules should be shown clearly on the future payment page.",
     signalCards: {
       freeRepliesLabel: "Free replies",
       freeRepliesDetail: "The free depth this representative can absorb in first-contact mode.",
@@ -827,7 +857,7 @@ const copy = {
       knowledgeItemsLabel: "Knowledge items",
       knowledgeItemsDetail: "The public knowledge pack formed by FAQs, materials, and policies.",
       skillPacksLabel: "Skill packs",
-      skillPacksDetail: "Enabled packs that actually enter the representative runtime.",
+      skillPacksDetail: "Enabled packs that are available to this representative.",
     },
     trustEyebrow: "Trust Interface",
     trustSummary: "Capabilities, refusals, escalation, and pricing should be visible before the conversation goes deep.",
@@ -841,12 +871,12 @@ const copy = {
     contractEyebrow: "Conversation contract",
     contractTitle: "Free scope, upgrade rules, and handoff policy",
     contractCopy: (limit: number) => `The first ${limit} replies are optimized for foundational questions and materials. Deeper collaboration judgment, quote intake, and scheduling move into paid continuation or human handoff.`,
-    publicRuntimeLabel: "public runtime",
-    privateDraftLabel: "private draft",
+    publicRuntimeLabel: "publicly active",
+    privateDraftLabel: "draft only",
     handoffReadyLabel: "handoff ready",
-    contractFootnote: "Memory boundary: this representative only keeps public-safe interaction context inside this representative. It does not read the owner's private workspace, files, or accounts.",
+    contractFootnote: "Memory boundary: this representative only keeps public, safe interaction context inside this representative. It does not read the owner's private workspace, files, or accounts.",
     skillsEyebrow: "Skill Sources",
-    skillsSummary: "Borrowing the best ClawHub habits from OpenClaw, Delegate separates builtin and registry-backed packs while keeping privilege boundaries explicit.",
+    skillsSummary: "Delegate separates built-in abilities from external skill packs, while keeping permission boundaries explicit.",
     skillsTitle: "Skill packs can have sources, but they cannot have authority",
     declaredSkillsEyebrow: "Declared skills",
     skillsCountChip: (count: number) => `${count} skills`,
@@ -856,7 +886,7 @@ const copy = {
     skillPacksTitle: "Installed sources and capability tags",
     builtinLabel: "Built-in",
     executesCodeNote: "This pack executes code and would require extra review.",
-    declarativeNote: "This pack is currently modeled as declarative and non-privileged for public-runtime safety.",
+    declarativeNote: "This pack currently describes capabilities only and does not receive extra permissions automatically.",
     knowledgeEyebrow: "Knowledge Pack",
     knowledgeSummary: "The representative should answer from structured knowledge first, then decide whether to continue, collect intake, or escalate.",
     knowledgeTitle: "Structured public knowledge comes before improvisation",
@@ -865,13 +895,15 @@ const copy = {
     materialsTitle: "Public materials that can be delivered directly",
     openMaterial: "Open material",
     downloadDeliverable: "Download deliverable",
+    materialPending: "This material is registered, but there is no public file link yet.",
+    materialPendingChip: "Pending public file",
     publicDeliverableChip: "Public deliverable",
     policiesEyebrow: "Policies",
     policiesTitle: "Boundary and response rules",
     plansEyebrow: "Plans",
     plansSummary: "Users should understand how deep they can go and what actions unlock next, not the raw model cost underneath.",
-    plansTitle: "Four access layers instead of token pricing",
-    accessLayerEyebrow: "Access layer",
+    plansTitle: "Four service depths instead of token pricing",
+    accessLayerEyebrow: "Service depth",
     repliesChip: (count: number) => `${count} replies`,
     priorityHandoffChip: "priority handoff",
     startWebChat: "Start web chat",

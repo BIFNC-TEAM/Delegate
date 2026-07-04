@@ -1,13 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   createPublicChatSessionState,
   getPublicChatCookieName,
   readPublicChatSessionState,
+  shouldUseSecurePublicChatCookie,
   writePublicChatSessionState,
 } from "../app/reps/[slug]/public-chat";
 
+const originalNodeEnv = process.env["NODE_ENV"];
+const originalRepSessionSecret = process.env.REP_PUBLIC_CHAT_SESSION_SECRET;
+const originalTelegramWebhookSecret = process.env.TELEGRAM_WEBHOOK_SECRET;
+
 describe("public chat audience identity cookie", () => {
+  afterEach(() => {
+    restoreEnv("NODE_ENV", originalNodeEnv);
+    restoreEnv("REP_PUBLIC_CHAT_SESSION_SECRET", originalRepSessionSecret);
+    restoreEnv("TELEGRAM_WEBHOOK_SECRET", originalTelegramWebhookSecret);
+  });
+
   it("stores only an anonymous audience identity, not chat transcript state", () => {
     const state = createPublicChatSessionState({
       now: new Date("2026-07-04T12:00:00.000Z"),
@@ -55,4 +66,49 @@ describe("public chat audience identity cookie", () => {
   it("scopes the cookie name per representative slug", () => {
     expect(getPublicChatCookieName("lao-jia")).toBe("delegate-public-chat-lao-jia");
   });
+
+  it("uses the representative session secret in production", () => {
+    restoreEnv("NODE_ENV", "production");
+    restoreEnv("REP_PUBLIC_CHAT_SESSION_SECRET", "rep-secret-for-tests");
+    delete process.env.TELEGRAM_WEBHOOK_SECRET;
+    const state = createPublicChatSessionState({
+      now: new Date("2026-07-04T12:00:00.000Z"),
+    });
+    const cookie = writePublicChatSessionState({
+      representativeSlug: "lao-jia",
+      state,
+    });
+
+    const restored = readPublicChatSessionState({
+      representativeSlug: "lao-jia",
+      cookieValue: cookie,
+      now: new Date("2026-07-04T12:01:00.000Z"),
+    });
+
+    expect(restored.audienceId).toBe(state.audienceId);
+    expect(restored.sessionToken).toBe(state.sessionToken);
+  });
+
+  it("keeps localhost cookies usable in production Docker", () => {
+    restoreEnv("NODE_ENV", "production");
+
+    expect(
+      shouldUseSecurePublicChatCookie(new Request("http://localhost:3002/reps/lao-jia")),
+    ).toBe(false);
+    expect(
+      shouldUseSecurePublicChatCookie(
+        new Request("https://delegate.example/reps/lao-jia", {
+          headers: { host: "delegate.example" },
+        }),
+      ),
+    ).toBe(true);
+  });
 });
+
+function restoreEnv(key: string, value: string | undefined) {
+  if (typeof value === "undefined") {
+    delete process.env[key];
+    return;
+  }
+  process.env[key] = value;
+}

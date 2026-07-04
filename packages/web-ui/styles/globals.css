@@ -253,8 +253,8 @@ select {
 }
 
 .nav-link:hover,
-.button-secondary:hover,
-.button-primary:hover {
+.button-secondary:not(:disabled):hover,
+.button-primary:not(:disabled):hover {
   transform: translateY(-1px);
 }
 
@@ -583,6 +583,20 @@ select {
   background: rgba(255, 255, 255, 0.76);
   color: var(--ink);
   font: inherit;
+}
+
+.field-stack .text-input {
+  flex: 0 1 auto;
+}
+
+select.text-input,
+input.text-input {
+  min-height: 48px;
+}
+
+textarea.text-input {
+  min-height: 112px;
+  resize: vertical;
 }
 
 .text-area {

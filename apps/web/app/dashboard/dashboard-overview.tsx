@@ -299,12 +299,16 @@ export function DashboardOverview({
                         disabled={isPending || busyKey === `${item.id}:${action.status}`}
                         key={action.status}
                         onClick={() => handleStatusChange(item.id, action.status, item.who)}
+                        title={translateActionHint(locale, action.label)}
                         type="button"
                       >
                         {busyKey === `${item.id}:${action.status}` ? t.saving : translateActionLabel(locale, action.label)}
                       </button>
                     ))}
                   </div>
+                  {buildNextStatusActions(item.status).length ? (
+                    <p className="footer-note">{t.handoffButtonHint}</p>
+                  ) : null}
                 </div>
               ))
             ) : (
@@ -338,11 +342,13 @@ export function DashboardOverview({
                     </div>
                   </div>
                   <div className="button-row button-row-stretch">
-                    {invoice.invoiceLink ? (
+                    {isUsableInvoiceLink(invoice.invoiceLink) ? (
                       <a className="button-secondary" href={invoice.invoiceLink} target="_blank" rel="noreferrer">
                         {t.openInvoice}
                       </a>
-                    ) : null}
+                    ) : (
+                      <span className="chip">{t.invoiceRecordOnly}</span>
+                    )}
                   </div>
                 </div>
               ))
@@ -496,21 +502,70 @@ function compactWorkflowId(value: string): string {
 
 function translateActionLabel(locale: Locale, label: string): string {
   if (locale === "en") {
-    return label;
+    switch (label) {
+      case "Review":
+        return "Review first";
+      case "Accept":
+        return "Accept handoff";
+      case "Decline":
+        return "Decline request";
+      case "Close":
+        return "Close item";
+      default:
+        return label;
+    }
   }
 
   switch (label) {
     case "Review":
-      return "评估";
+      return "先评估";
     case "Accept":
-      return "接受";
+      return "接受并接手";
     case "Decline":
-      return "拒绝";
+      return "拒绝并关闭";
     case "Close":
-      return "关闭";
+      return "关闭事项";
     default:
       return label;
   }
+}
+
+function translateActionHint(locale: Locale, label: string): string {
+  if (locale === "en") {
+    switch (label) {
+      case "Review":
+        return "Mark this handoff as being reviewed before deciding.";
+      case "Accept":
+        return "Accept the handoff so the owner can follow up.";
+      case "Decline":
+        return "Decline the request and remove it from the active queue.";
+      case "Close":
+        return "Close the item after it no longer needs owner action.";
+      default:
+        return label;
+    }
+  }
+
+  switch (label) {
+    case "Review":
+      return "先标记为正在评估，之后再决定是否接手。";
+    case "Accept":
+      return "接受后代表主人需要继续人工跟进。";
+    case "Decline":
+      return "拒绝后这条请求会从待处理队列关闭。";
+    case "Close":
+      return "确认不再需要处理后关闭这条事项。";
+    default:
+      return label;
+  }
+}
+
+function isUsableInvoiceLink(value: string | undefined): value is string {
+  if (!value) {
+    return false;
+  }
+
+  return !value.includes("t.me/invoice/");
 }
 
 const copy = {
@@ -518,22 +573,22 @@ const copy = {
     signalCards: {
       openHandoffsLabel: "待处理 handoff",
       openHandoffsDetail: "当前值得主人优先判断与接手的请求数。",
-      starsLiveLabel: "Agent Wallet 信号",
-      starsLiveDetail: "当前以 web credits 表达的早期 Agent Wallet 状态。",
+      starsLiveLabel: "代表余额",
+      starsLiveDetail: "当前可用于网页服务的余额信号。",
       sponsorPoolLabel: "赞助池",
-      sponsorPoolDetail: "公共赞助池还能继续支撑多少代表流量，是 AMN wallet model 的早期切片。",
+      sponsorPoolDetail: "公共赞助池还能继续支撑多少代表流量。",
       recentInvoicesLabel: "最近付款",
-      recentInvoicesDetail: "最近的网页续用、invoice 和充值意图信号。",
+      recentInvoicesDetail: "最近的网页续用、付款记录和充值意图信号。",
     },
     statusSaved: (label: string, status: string) => `${label} 现在是 ${status}。`,
     updateError: "更新 owner inbox 状态失败。",
     loadingTitle: "概览加载中",
     loadingHeadline: "正在读取 owner dashboard 的最新快照。",
-    loadingCopy: "会先加载指标、handoff 收件箱和早期 Agent Wallet / web credits 记录。",
-    ownerViewEyebrow: "AMN Control Slice",
+    loadingCopy: "会先加载指标、人工转接收件箱和代表余额记录。",
+    ownerViewEyebrow: "运营总览",
     summary: (name: string) => `${name} 的 dashboard 先展示高频信号，再进入 handoff、付款和早期钱包细节。`,
     panelTitle: "先看今天的运营脉冲，再判断代表钱包、续用和人工接手状态。",
-    heroKicker: "Early Agent Wallet control",
+    heroKicker: "代表经营状态",
     heroTitle: "主人需要看到这个数字代表是否还在赚钱、消耗和等待接手。",
     starsLiveChip: (stars: number) => `${stars} credits live`,
     activeHandoffsChip: (count: number) => `${count} active handoffs`,
@@ -547,13 +602,15 @@ const copy = {
     handoffTitle: "人工转接收件箱",
     paidLabel: "已付费",
     ownerActionLabel: (value: string) => `Owner action: ${value}`,
+    handoffButtonHint: "先评估不会关闭请求；接受代表主人要接手跟进；拒绝或关闭会移出待处理队列。",
     saving: "保存中...",
     noHandoffs: "当前没有待处理的 handoff 请求。",
-    billingEyebrow: "Billing / Wallet",
-    invoicesChip: (count: number) => `${count} 笔 invoices`,
-    billingTitle: "最近网页续用和 invoice 信号",
+    billingEyebrow: "付款 / 余额",
+    invoicesChip: (count: number) => `${count} 笔付款`,
+    billingTitle: "最近网页续用和付款记录",
     openInvoice: "查看发票",
-    noInvoices: "还没有任何 invoice 记录。",
+    invoiceRecordOnly: "仅付款记录",
+    noInvoices: "还没有任何付款记录。",
     workflowChip: (count: number) => `${count} 条 workflows`,
     workflowEngineChip: (engine: "local_runner" | "temporal") =>
       engine === "temporal" ? "Temporal" : "Local runner",
@@ -571,22 +628,22 @@ const copy = {
     signalCards: {
       openHandoffsLabel: "Open handoffs",
       openHandoffsDetail: "Requests that deserve direct owner review right now.",
-      starsLiveLabel: "Agent Wallet signal",
-      starsLiveDetail: "Early Agent Wallet state represented today through web credits.",
+      starsLiveLabel: "Representative balance",
+      starsLiveDetail: "Balance signal available for web service continuation.",
       sponsorPoolLabel: "Sponsor pool",
-      sponsorPoolDetail: "How much shared credit is left to support representative traffic, as an early AMN wallet slice.",
-      recentInvoicesLabel: "Recent invoices",
-      recentInvoicesDetail: "The latest web continuation, invoice, and recharge-intent signals.",
+      sponsorPoolDetail: "How much shared credit is left to support representative traffic.",
+      recentInvoicesLabel: "Recent payments",
+      recentInvoicesDetail: "The latest web continuation, payment records, and recharge-intent signals.",
     },
     statusSaved: (label: string, status: string) => `${label} is now ${status}.`,
     updateError: "Failed to update owner inbox status.",
     loadingTitle: "Loading overview",
     loadingHeadline: "Fetching the latest owner dashboard snapshot.",
-    loadingCopy: "Metrics, handoff inbox items, and early Agent Wallet / web credit records load first.",
-    ownerViewEyebrow: "AMN Control Slice",
+    loadingCopy: "Metrics, handoff inbox items, and representative balance records load first.",
+    ownerViewEyebrow: "Operations overview",
     summary: (name: string) => `${name}'s dashboard surfaces high-frequency signal before handoff, payment, and early wallet detail.`,
     panelTitle: "Read today's operating pulse before judging representative wallet, continuation, and handoff state.",
-    heroKicker: "Early Agent Wallet control",
+    heroKicker: "Representative operating state",
     heroTitle: "Owners need to know whether this Digital Representative is earning, consuming, or waiting for intervention.",
     starsLiveChip: (stars: number) => `${stars} credits live`,
     activeHandoffsChip: (count: number) => `${count} active handoffs`,
@@ -600,13 +657,15 @@ const copy = {
     handoffTitle: "Human handoff inbox",
     paidLabel: "paid",
     ownerActionLabel: (value: string) => `Owner action: ${value}`,
+    handoffButtonHint: "Review keeps the request open; accept means owner follow-up; decline or close removes it from the active queue.",
     saving: "Saving...",
     noHandoffs: "There are no handoff requests waiting right now.",
-    billingEyebrow: "Billing / Wallet",
-    invoicesChip: (count: number) => `${count} invoices`,
-    billingTitle: "Recent web continuation and invoice signals",
+    billingEyebrow: "Payments / Balance",
+    invoicesChip: (count: number) => `${count} payments`,
+    billingTitle: "Recent web continuation and payment records",
     openInvoice: "View invoice",
-    noInvoices: "There are no invoices yet.",
+    invoiceRecordOnly: "Payment record only",
+    noInvoices: "There are no payment records yet.",
     workflowChip: (count: number) => `${count} workflows`,
     workflowEngineChip: (engine: "local_runner" | "temporal") =>
       engine === "temporal" ? "Temporal" : "Local runner",

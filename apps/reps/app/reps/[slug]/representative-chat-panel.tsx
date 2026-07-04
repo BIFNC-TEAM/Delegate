@@ -106,8 +106,8 @@ export function RepresentativeChatPanel(props: {
               ? { suggestedPlan: payload.plan.suggestedPlan }
               : {}),
             providerLabel:
-              payload.runtime.usedModel && payload.runtime.provider
-                ? `${payload.runtime.provider}${payload.runtime.model ? ` · ${payload.runtime.model}` : ""}`
+              payload.runtime.usedModel
+                ? t.modelUsedLabel
                 : t.fallbackLabel,
           },
         },
@@ -267,10 +267,10 @@ export function RepresentativeChatPanel(props: {
 }
 
 const zhCopy = {
-  eyebrow: "Live Chat",
+  eyebrow: "网页对话",
   summary:
-    "先在网页里直接聊，再查看服务/充值预览；真正的免费次数和可用深度由服务端会话状态决定。",
-  title: "代表页里直接开始一段 public-safe 对话",
+    "先在网页里直接聊，再查看服务和充值预览；免费次数和可继续深聊的状态由服务端记录。",
+  title: "在代表页里开始一段公开安全的对话",
   signalActiveTier: "服务预览",
   signalActiveTierDetail: "这是页面展示的服务层预览，不是客户端授权结果。",
   signalFreeReplies: "剩余免费轮次",
@@ -280,21 +280,22 @@ const zhCopy = {
   depthFree: "基础问路",
   depthPass: "继续判断",
   depthDeep: "深度服务",
-  tiersEyebrow: "Recharge Preview",
+  tiersEyebrow: "服务预览",
   tiersChip: (count: number) => `${count} 档`,
-  tiersTitle: "四档服务和充值路径预览，实际 access 以服务端为准",
-  repliesChip: (count: number) => `${count} replies`,
+  tiersTitle: "四档服务和充值路径预览，最终可用服务以后台状态为准",
+  repliesChip: (count: number) => `${count} 条回复`,
   priorityChip: "优先转接",
   dialogEyebrow: "Conversation",
   dialogTitle: "网页聊天入口",
   youLabel: "你",
   suggestedPlan: (plan: PlanTier) => `建议升级到 ${plan}`,
+  modelUsedLabel: "AI 已回答",
   fallbackLabel: "规则回退",
   inputLabel: "想问什么？",
   placeholder:
     "例如：我是一家做 ToB 服务的团队，想让老贾先帮我判断合作方向，应该怎么开始？",
   footnote:
-    "这里是公开、安全的代表对话，不会读取私有文件、账号或本地环境。页面上的服务档位只是预览；免费次数、付费状态和有效 access 都由签名会话与服务端状态判断。",
+    "这里是公开安全的代表对话，不会读取私有文件、账号或本地环境。页面上的服务档位只是预览；免费次数、付费状态和可继续服务的范围都由服务端判断。",
   sending: "发送中…",
   send: "发送",
   errorGeneric: "聊天请求失败，请稍后再试。",
@@ -303,10 +304,10 @@ const zhCopy = {
 };
 
 const enCopy = {
-  eyebrow: "Live Chat",
+  eyebrow: "Web chat",
   summary:
     "Start on the page, then review service and recharge options; actual free usage and access depth are decided by server-side session state.",
-  title: "Start a public-safe conversation directly on the representative page",
+  title: "Start a public, safe conversation directly on the representative page",
   signalActiveTier: "Service preview",
   signalActiveTierDetail: "This is the page's service-layer preview, not a client-side authorization result.",
   signalFreeReplies: "Free replies left",
@@ -318,7 +319,7 @@ const enCopy = {
   depthFree: "Foundational",
   depthPass: "Extended",
   depthDeep: "Deep service",
-  tiersEyebrow: "Recharge Preview",
+  tiersEyebrow: "Service preview",
   tiersChip: (count: number) => `${count} lanes`,
   tiersTitle: "Preview the service and recharge paths; effective access is server-authoritative",
   repliesChip: (count: number) => `${count} replies`,
@@ -327,12 +328,13 @@ const enCopy = {
   dialogTitle: "Web chat entry point",
   youLabel: "You",
   suggestedPlan: (plan: PlanTier) => `suggested ${plan}`,
+  modelUsedLabel: "AI answered",
   fallbackLabel: "rule fallback",
   inputLabel: "What do you want to ask?",
   placeholder:
     "For example: We run a B2B service team and want Lao Jia to qualify whether a collaboration makes sense before we involve a human.",
   footnote:
-    "This is a public-safe representative lane. It does not access private files, accounts, or local systems. Service tiers shown here are previews; free usage, payment state, and effective access are enforced by signed session and server state.",
+    "This is a public, safe representative lane. It does not access private files, accounts, or local systems. Service tiers shown here are previews; free usage, payment state, and actual service scope are enforced by the server.",
   sending: "Sending…",
   send: "Send",
   errorGeneric: "Chat request failed. Please try again.",

@@ -327,7 +327,7 @@ export function DashboardTraining({
             <label className="field-stack">
               <span>{t.sourceTextLabel}</span>
               <textarea
-                className="text-input"
+                className="text-input text-area"
                 onChange={(event) => setSourceText(event.target.value)}
                 placeholder={t.sourceTextPlaceholder}
                 rows={3}

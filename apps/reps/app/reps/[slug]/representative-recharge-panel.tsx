@@ -163,7 +163,7 @@ const copy = {
     orderCreated: "充值单已创建",
     balanceLabel: "当前余额 ",
     mockPayAction: "模拟支付成功",
-    disclaimer: "当前是 mock 支付入口，用于验证 Agent Wallet 流程：创建充值单、模拟支付成功、给 User Wallet 入账并写 ledger。真实支付会通过 Stripe、微信或支付宝 provider 接入，Delegate 不处理银行卡号或支付密码。",
+    disclaimer: "当前是演示支付入口：可以验证创建充值单、模拟支付成功、余额入账这条链路，但不会真实扣款。正式上线后会接入 Stripe、微信或支付宝；Delegate 不处理银行卡号或支付密码。",
   },
   en: {
     identityNote: "Recharge is attached to this browser's current anonymous identity, so no separate user ID is needed.",
@@ -174,6 +174,6 @@ const copy = {
     orderCreated: "Recharge order created",
     balanceLabel: "Current balance ",
     mockPayAction: "Simulate payment success",
-    disclaimer: "This mock payment entry validates the Agent Wallet flow: create a recharge order, simulate payment success, credit User Wallet, and write ledger entries. Real collection will plug in through Stripe, WeChat, or Alipay providers; Delegate does not handle card numbers or payment passwords.",
+    disclaimer: "This is a demo payment entry: it validates order creation, simulated payment success, and balance crediting without charging real money. Live collection will use Stripe, WeChat, or Alipay; Delegate does not handle card numbers or payment passwords.",
   },
 } as const;

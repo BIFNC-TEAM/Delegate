@@ -640,7 +640,6 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
           status: "paid",
           createdAt: hoursAgo(13),
           paidAt: hoursAgo(12),
-          invoiceLink: "https://t.me/invoice/acme-pass",
         },
         {
           id: "demo-invoice-deep-help",
@@ -651,7 +650,6 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
           status: "paid",
           createdAt: hoursAgo(21),
           paidAt: hoursAgo(20),
-          invoiceLink: "https://t.me/invoice/refund-deep-help",
         },
         {
           id: "demo-invoice-sponsor",
@@ -662,7 +660,6 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
           status: "fulfilled",
           createdAt: hoursAgo(2),
           paidAt: hoursAgo(1),
-          invoiceLink: "https://t.me/invoice/sponsor-pool",
         },
       ],
       recentWorkflows: [
@@ -759,7 +756,6 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
       ...(demoFallbackOverviewSnapshot.recentInvoices[0]?.paidAt
         ? { paidAt: demoFallbackOverviewSnapshot.recentInvoices[0].paidAt }
         : {}),
-      invoiceLink: "https://t.me/invoice/acme-pass",
     },
     {
       id: "demo-invoice-deep-help",
@@ -772,7 +768,6 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
       ...(demoFallbackOverviewSnapshot.recentInvoices[1]?.paidAt
         ? { paidAt: demoFallbackOverviewSnapshot.recentInvoices[1].paidAt }
         : {}),
-      invoiceLink: "https://t.me/invoice/refund-deep-help",
     },
     {
       id: "demo-invoice-sponsor",
@@ -785,7 +780,6 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
       ...(demoFallbackOverviewSnapshot.recentInvoices[2]?.paidAt
         ? { paidAt: demoFallbackOverviewSnapshot.recentInvoices[2].paidAt }
         : {}),
-      invoiceLink: "https://t.me/invoice/sponsor-pool",
     },
   ];
 

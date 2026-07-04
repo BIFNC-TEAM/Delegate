@@ -27,10 +27,10 @@ export async function POST(
 
     return NextResponse.json({ rechargeOrder });
   } catch (error) {
+    console.error("Failed to complete public mock recharge.", error);
     return NextResponse.json(
       {
-        error:
-          error instanceof Error ? error.message : "Failed to complete public mock recharge.",
+        error: "模拟支付确认失败，请刷新后重试；如果问题持续，请联系代表主人检查支付配置。",
       },
       { status: 400 },
     );

@@ -96,14 +96,12 @@ export const demoRepresentative: Representative = {
         title: "一页式服务介绍",
         kind: "deck",
         summary: "概述服务对象、交付形式与合作方式。",
-        url: "https://example.com/intro",
       },
       {
         id: "material_cases",
         title: "案例与场景列表",
         kind: "case_study",
         summary: "展示 inbound handling、资格筛选和对外代表场景。",
-        url: "https://example.com/cases",
       },
     ],
     policies: [

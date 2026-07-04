@@ -40,6 +40,7 @@ export type WebAudienceContact = {
 
 export type WebAudienceIdentityLinkProvider =
   | "WEB_ANONYMOUS"
+  | "LOGTO"
   | "EMAIL"
   | "PHONE"
   | "TELEGRAM"

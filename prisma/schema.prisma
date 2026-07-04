@@ -200,10 +200,18 @@ enum AudienceIdentityStatus {
 
 enum IdentityLinkProvider {
   WEB_ANONYMOUS
+  LOGTO
   EMAIL
   PHONE
   TELEGRAM
   PAYMENT_EXTERNAL_USER
+}
+
+enum OwnerIdentityLinkProvider {
+  LOGTO
+  EMAIL
+  PHONE
+  TELEGRAM
 }
 
 enum CreatorTrainingSourceKind {
@@ -501,6 +509,24 @@ model Owner {
   creatorEarnings           CreatorEarning[]
   withdrawRequests          WithdrawRequest[]
   walletLedgerEntries       WalletLedgerEntry[]
+  identityLinks             OwnerIdentityLink[]
+}
+
+model OwnerIdentityLink {
+  id              String                    @id @default(cuid())
+  ownerId         String
+  provider        OwnerIdentityLinkProvider
+  providerSubject String
+  email           String?
+  phone           String?
+  verifiedAt      DateTime?
+  metadata        Json?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  owner           Owner                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerSubject])
+  @@index([ownerId, provider])
 }
 
 model Wallet {

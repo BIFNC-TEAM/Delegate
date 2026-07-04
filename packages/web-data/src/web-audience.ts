@@ -284,6 +284,17 @@ export async function resolveAnonymousAudienceIdentity(
     },
   });
 
+  if (identity.status === "MERGED" && identity.mergedIntoId) {
+    return client.audienceIdentity.update({
+      where: {
+        id: identity.mergedIntoId,
+      },
+      data: {
+        lastSeenAt: now,
+      },
+    });
+  }
+
   await client.identityLink.upsert({
     where: {
       provider_providerSubject: {

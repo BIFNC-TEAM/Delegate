@@ -249,6 +249,45 @@ describe("web audience identity resolver", () => {
     });
   });
 
+  it("keeps contacts attached to the merged target on later anonymous cookie reuse", async () => {
+    const client = new FakeWebAudienceClient();
+    const contact = await resolveWebAudienceContact(
+      {
+        representativeId: "rep-1",
+        representativeSlug: "lin",
+        audienceId: "aud_cookie",
+      },
+      client,
+    );
+    const target = await resolveAnonymousAudienceIdentity(
+      {
+        audienceId: "aud_logged_in",
+      },
+      client,
+    );
+
+    await mergeAudienceIdentity(
+      {
+        sourceAudienceIdentityId: contact.audienceIdentityId!,
+        targetAudienceIdentityId: target.id,
+        now: new Date("2026-07-04T13:00:00.000Z"),
+      },
+      client,
+    );
+    const reused = await resolveWebAudienceContact(
+      {
+        representativeId: "rep-1",
+        representativeSlug: "lin",
+        audienceId: "aud_cookie",
+        now: new Date("2026-07-04T13:05:00.000Z"),
+      },
+      client,
+    );
+
+    expect(reused.id).toBe(contact.id);
+    expect(reused.audienceIdentityId).toBe(target.id);
+  });
+
   it("creates one conversation per web audience contact", async () => {
     const client = new FakeWebAudienceClient();
 

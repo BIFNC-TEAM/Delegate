@@ -49,8 +49,12 @@ type PaymentProviderEventRecord = {
 
 type RechargeClient = Omit<WalletLedgerClient, "$transaction"> & {
   userWallet: {
+    findFirst?(args: unknown): Promise<UserWalletRecord | null>;
     upsert(args: unknown): Promise<UserWalletRecord>;
     update(args: unknown): Promise<UserWalletRecord>;
+  };
+  identityLink?: {
+    upsert(args: unknown): Promise<unknown>;
   };
   rechargeOrder: {
     findUnique(args: unknown): Promise<RechargeOrderRecord | null>;
@@ -108,26 +112,11 @@ export async function createMockRechargeOrder(
       return serializeRechargeOrder(existing);
     }
 
-    const userWallet = await tx.userWallet.upsert({
-      where: { externalUserId: normalized.externalUserId },
-      create: {
-        externalUserId: normalized.externalUserId,
-        ...(normalized.audienceIdentityId ? { audienceIdentityId: normalized.audienceIdentityId } : {}),
-        ...(normalized.telegramUserId ? { telegramUserId: normalized.telegramUserId } : {}),
-        ...(normalized.displayName ? { displayName: normalized.displayName } : {}),
-        currency: normalized.currency,
-        cashBalanceCents: 0,
-      },
-      update: {
-        ...(normalized.audienceIdentityId ? { audienceIdentityId: normalized.audienceIdentityId } : {}),
-        ...(normalized.telegramUserId ? { telegramUserId: normalized.telegramUserId } : {}),
-        ...(normalized.displayName ? { displayName: normalized.displayName } : {}),
-        currency: normalized.currency,
-      },
-    });
+    const userWallet = await resolveRechargeUserWallet(normalized, tx);
+    await linkPaymentExternalUserId(normalized, tx);
 
     const checkout = await mockPaymentProviderAdapter.createRechargeCheckout({
-      externalUserId: normalized.externalUserId,
+      externalUserId: userWallet.externalUserId,
       amountCents: normalized.amountCents,
       currency: normalized.currency,
       idempotencyKey: normalized.idempotencyKey,
@@ -285,10 +274,78 @@ function normalizeCreateMockRechargeOrderInput(
     currency,
     idempotencyKey:
       input.idempotencyKey ?? `mock_recharge:${externalUserId}:${currency}:${input.amountCents}`,
-    ...(input.audienceIdentityId ? { audienceIdentityId: input.audienceIdentityId } : {}),
-    ...(input.displayName ? { displayName: input.displayName } : {}),
-    ...(input.telegramUserId ? { telegramUserId: input.telegramUserId } : {}),
+    ...(input.audienceIdentityId?.trim() ? { audienceIdentityId: input.audienceIdentityId.trim() } : {}),
+    ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
+    ...(input.telegramUserId?.trim() ? { telegramUserId: input.telegramUserId.trim() } : {}),
   };
+}
+
+async function resolveRechargeUserWallet(
+  normalized: ReturnType<typeof normalizeCreateMockRechargeOrderInput>,
+  tx: RechargeClient,
+): Promise<UserWalletRecord> {
+  const existingByAudienceIdentity =
+    normalized.audienceIdentityId && tx.userWallet.findFirst
+      ? await tx.userWallet.findFirst({
+          where: { audienceIdentityId: normalized.audienceIdentityId },
+          orderBy: { createdAt: "asc" },
+        })
+      : null;
+
+  if (existingByAudienceIdentity) {
+    return tx.userWallet.update({
+      where: { id: existingByAudienceIdentity.id },
+      data: {
+        ...(normalized.telegramUserId ? { telegramUserId: normalized.telegramUserId } : {}),
+        ...(normalized.displayName ? { displayName: normalized.displayName } : {}),
+        currency: normalized.currency,
+      },
+    });
+  }
+
+  return tx.userWallet.upsert({
+    where: { externalUserId: normalized.externalUserId },
+    create: {
+      externalUserId: normalized.externalUserId,
+      ...(normalized.audienceIdentityId ? { audienceIdentityId: normalized.audienceIdentityId } : {}),
+      ...(normalized.telegramUserId ? { telegramUserId: normalized.telegramUserId } : {}),
+      ...(normalized.displayName ? { displayName: normalized.displayName } : {}),
+      currency: normalized.currency,
+      cashBalanceCents: 0,
+    },
+    update: {
+      ...(normalized.audienceIdentityId ? { audienceIdentityId: normalized.audienceIdentityId } : {}),
+      ...(normalized.telegramUserId ? { telegramUserId: normalized.telegramUserId } : {}),
+      ...(normalized.displayName ? { displayName: normalized.displayName } : {}),
+      currency: normalized.currency,
+    },
+  });
+}
+
+async function linkPaymentExternalUserId(
+  normalized: ReturnType<typeof normalizeCreateMockRechargeOrderInput>,
+  tx: RechargeClient,
+) {
+  if (!normalized.audienceIdentityId || !tx.identityLink) {
+    return;
+  }
+
+  await tx.identityLink.upsert({
+    where: {
+      provider_providerSubject: {
+        provider: "PAYMENT_EXTERNAL_USER",
+        providerSubject: normalized.externalUserId,
+      },
+    },
+    update: {
+      audienceIdentityId: normalized.audienceIdentityId,
+    },
+    create: {
+      audienceIdentityId: normalized.audienceIdentityId,
+      provider: "PAYMENT_EXTERNAL_USER",
+      providerSubject: normalized.externalUserId,
+    },
+  });
 }
 
 function serializeRechargeOrder(order: RechargeOrderRecord): RechargeOrderSnapshot {

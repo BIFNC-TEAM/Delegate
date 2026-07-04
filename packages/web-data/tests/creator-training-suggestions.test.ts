@@ -96,6 +96,32 @@ describe("creator training suggestion engine", () => {
     ]);
   });
 
+  it("strips upload metadata before drafting publishable source summaries", async () => {
+    const client = new FakeCreatorTrainingSuggestionClient();
+    client.sources.push(
+      buildSource({
+        id: "source-upload-2",
+        title: "DOCX upload",
+        locator: "upload:training.docx",
+        contentText: [
+          "Uploaded file: training.docx",
+          "MIME type: application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "Extracted text:",
+          "DOCX 训练资料：专属暗号是 PINEAPPLE-427，退款窗口是 9 天。",
+        ].join("\n"),
+      }),
+    );
+
+    const suggestions = await buildCreatorTrainingSuggestions("lin", {}, client);
+
+    expect(suggestions[0]).toMatchObject({
+      sourceId: "source-upload-2",
+      draftPayload: expect.objectContaining({
+        summary: "DOCX 训练资料：专属暗号是 PINEAPPLE-427，退款窗口是 9 天。",
+      }),
+    });
+  });
+
   it("keeps suggestions isolated per representative", async () => {
     const client = new FakeCreatorTrainingSuggestionClient();
     client.feedbackSignals.push(

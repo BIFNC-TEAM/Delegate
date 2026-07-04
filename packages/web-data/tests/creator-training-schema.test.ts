@@ -1,8 +1,7 @@
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const schema = readFileSync(join(process.cwd(), "prisma/schema.prisma"), "utf8");
+const schema = readFileSync(new URL("../../../prisma/schema.prisma", import.meta.url), "utf8");
 
 describe("creator training schema", () => {
   it("models the creator training source, feedback, suggestion, and version loop", () => {

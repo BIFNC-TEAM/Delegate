@@ -342,11 +342,22 @@ export function DashboardTraining({
                 multiple
                 onChange={(event) => setSelectedFiles(Array.from(event.currentTarget.files ?? []))}
                 type="file"
-                accept=".txt,.md,.markdown,.csv,.json,.html,.htm,.pdf,text/plain,text/markdown,text/csv,application/json,text/html,application/pdf"
+                accept=".txt,.md,.markdown,.csv,.json,.html,.htm,.pdf,.docx,text/plain,text/markdown,text/csv,application/json,text/html,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               />
-              <span className="footer-note">
-                {selectedFiles.length ? t.selectedFiles(selectedFiles.map((file) => file.name).join(", ")) : t.sourceFileHint}
-              </span>
+              {selectedFiles.length ? (
+                <>
+                  <div className="chip-row" aria-live="polite">
+                    {selectedFiles.map((file) => (
+                      <span className="chip" key={`${file.name}:${file.size}`}>
+                        {file.name} · {formatFileSize(file.size)}
+                      </span>
+                    ))}
+                  </div>
+                  <span className="footer-note">{t.selectedFiles(selectedFiles.length)}</span>
+                </>
+              ) : (
+                <span className="footer-note">{t.sourceFileHint}</span>
+              )}
             </label>
             <button
               className="button-secondary"
@@ -510,7 +521,27 @@ async function extractError(response: Response): Promise<string> {
 }
 
 function formatPayload(value: unknown) {
-  return JSON.stringify(value, null, 2);
+  return JSON.stringify(formatPayloadForReview(value), null, 2);
+}
+
+function formatPayloadForReview(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") {
+    return value.length > MAX_REVIEW_STRING_LENGTH
+      ? `${value.slice(0, MAX_REVIEW_STRING_LENGTH)}... [truncated for review display]`
+      : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => formatPayloadForReview(item, depth + 1));
+  }
+  if (value && typeof value === "object") {
+    if (depth >= 6) {
+      return "[nested payload truncated for review display]";
+    }
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, formatPayloadForReview(item, depth + 1)]),
+    );
+  }
+  return value;
 }
 
 function buildManualSourcePayload(input: {
@@ -533,11 +564,16 @@ function buildManualSourcePayload(input: {
 }
 
 async function buildFileSourcePayload(file: File, titlePrefix: string): Promise<Record<string, unknown>> {
-  const rawText = await file.text();
   const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
   const kind = detectFileSourceKind(extension);
   const title = titlePrefix.trim() ? `${titlePrefix.trim()} - ${file.name}` : file.name;
-  const text = normalizeFileText(rawText, file.name, file.type);
+  const extracted = await extractFileText(file, extension);
+  const text = normalizeFileText({
+    value: extracted.text,
+    fileName: file.name,
+    mimeType: file.type,
+    warning: extracted.warning,
+  });
 
   return {
     kind,
@@ -549,8 +585,9 @@ async function buildFileSourcePayload(file: File, titlePrefix: string): Promise<
       mimeType: file.type || "application/octet-stream",
       sizeBytes: file.size,
       extension,
-      extractedBy: "browser_file_text",
-      truncated: rawText.length > MAX_FILE_TEXT_LENGTH,
+      extractedBy: extracted.extractedBy,
+      ...(extracted.warning ? { extractionWarning: extracted.warning } : {}),
+      truncated: extracted.text.length > MAX_FILE_TEXT_LENGTH,
     },
   };
 }
@@ -566,15 +603,165 @@ function detectFileSourceKind(extension: string): TrainingSource["kind"] {
 }
 
 const MAX_FILE_TEXT_LENGTH = 24_000;
+const MAX_REVIEW_STRING_LENGTH = 720;
 
-function normalizeFileText(value: string, fileName: string, mimeType: string) {
-  const normalized = value.replace(/\s+/g, " ").trim();
+async function extractFileText(
+  file: File,
+  extension: string,
+): Promise<{ text: string; extractedBy: string; warning?: string }> {
+  if (extension === "docx") {
+    return extractDocxText(file);
+  }
+
+  const rawText = await file.text();
+  if (extension === "html" || extension === "htm" || file.type === "text/html") {
+    return {
+      text: extractHtmlText(rawText),
+      extractedBy: "browser_html_text",
+    };
+  }
+  if (extension === "json" || file.type === "application/json") {
+    return {
+      text: extractJsonText(rawText),
+      extractedBy: "browser_json_text",
+    };
+  }
+  if (extension === "pdf" || file.type === "application/pdf") {
+    const pdfText = extractPdfVisibleText(rawText);
+    return {
+      text: pdfText.text,
+      extractedBy: "browser_pdf_best_effort",
+      ...(pdfText.warning ? { warning: pdfText.warning } : {}),
+    };
+  }
+
+  return {
+    text: rawText,
+    extractedBy: "browser_file_text",
+  };
+}
+
+async function extractDocxText(file: File): Promise<{ text: string; extractedBy: string; warning?: string }> {
+  try {
+    const { default: JSZip } = await import("jszip");
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
+    const documentXml = await zip.file("word/document.xml")?.async("text");
+    if (!documentXml) {
+      return {
+        text: tFallbackBinarySummary(file.name),
+        extractedBy: "browser_docx_best_effort",
+        warning: "DOCX text was not readable; please paste a short summary for best results.",
+      };
+    }
+
+    const text = [...documentXml.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)]
+      .map((match) => decodeXmlText(match[1] ?? ""))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    return {
+      text: text || tFallbackBinarySummary(file.name),
+      extractedBy: "browser_docx_text",
+      ...(text
+        ? {}
+        : { warning: "DOCX did not contain readable body text; please paste a short summary." }),
+    };
+  } catch {
+    return {
+      text: tFallbackBinarySummary(file.name),
+      extractedBy: "browser_docx_best_effort",
+      warning: "DOCX text extraction failed; please paste a short summary for best results.",
+    };
+  }
+}
+
+function extractHtmlText(value: string) {
+  if (typeof DOMParser !== "undefined") {
+    const document = new DOMParser().parseFromString(value, "text/html");
+    return (document.body.textContent ?? value).replace(/\s+/g, " ").trim();
+  }
+  return value.replace(/<[^>]+>/g, " ");
+}
+
+function extractJsonText(value: string) {
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+function extractPdfVisibleText(value: string): { text: string; warning?: string } {
+  const streamMatches = [...value.matchAll(/stream([\s\S]*?)endstream/g)].map((match) => match[1] ?? "");
+  const source = streamMatches.length ? streamMatches.join(" ") : value;
+  const text = source
+    .replace(/%PDF-\S+/g, " ")
+    .replace(/\bendobj\b|\bobj\b|\bstream\b|\bendstream\b|\bxref\b|\btrailer\b|\bstartxref\b/g, " ")
+    .replace(/<<|>>|\/[A-Za-z0-9#]+|\d+\s+\d+\s+R/g, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!text || readableCharacterRatio(text) < 0.65) {
+    return {
+      text: "PDF file registered, but readable text could not be extracted in the browser. Paste a short public summary before publishing.",
+      warning: "PDF readable text was limited; paste a summary for best results.",
+    };
+  }
+  return { text };
+}
+
+function normalizeFileText(input: {
+  value: string;
+  fileName: string;
+  mimeType: string;
+  warning?: string | undefined;
+}) {
+  const normalized = input.value.replace(/\s+/g, " ").trim();
   const body = normalized.length > MAX_FILE_TEXT_LENGTH
     ? normalized.slice(0, MAX_FILE_TEXT_LENGTH)
     : normalized;
-  return [`Uploaded file: ${fileName}`, mimeType ? `MIME type: ${mimeType}` : null, body]
+  return [
+    `Uploaded file: ${input.fileName}`,
+    input.mimeType ? `MIME type: ${input.mimeType}` : null,
+    input.warning ? `Extraction note: ${input.warning}` : null,
+    "Extracted text:",
+    body,
+  ]
     .filter(Boolean)
     .join("\n");
+}
+
+function decodeXmlText(value: string) {
+  return value
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'");
+}
+
+function readableCharacterRatio(value: string) {
+  if (!value.length) {
+    return 0;
+  }
+  const readable = value.replace(/[^\p{L}\p{N}\p{P}\p{Zs}]/gu, "").length;
+  return readable / value.length;
+}
+
+function tFallbackBinarySummary(fileName: string) {
+  return `File ${fileName} was registered, but readable body text was not extracted in the browser. Paste a short public summary before approving this source.`;
+}
+
+function formatFileSize(size: number) {
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${Math.round(size / 102.4) / 10} KB`;
+  }
+  return `${Math.round(size / 1024 / 102.4) / 10} MB`;
 }
 
 const copy = {
@@ -609,8 +796,8 @@ const copy = {
     sourceTextLabel: "文本内容",
     sourceTextPlaceholder: "可直接粘贴一段公开资料",
     sourceFileLabel: "上传资料文件",
-    sourceFileHint: "支持 txt、md、csv、json、html；PDF 会登记并尽力读取可见文本，复杂 PDF 仍建议粘贴摘要。",
-    selectedFiles: (value: string) => `已选择：${value}`,
+    sourceFileHint: "支持 txt、md、csv、json、html、docx；PDF 会登记并尽力读取可见文本，复杂 PDF 仍建议粘贴摘要。",
+    selectedFiles: (count: number) => `已选择 ${count} 个文件。上传后先生成建议，审批通过才会进入公开代表知识。`,
     createSource: "新增资料源",
     creatingSource: "正在新增...",
     sourceCreated: "资料源已创建。",
@@ -675,8 +862,8 @@ const copy = {
     sourceTextLabel: "Text content",
     sourceTextPlaceholder: "Paste public material directly",
     sourceFileLabel: "Upload training files",
-    sourceFileHint: "Supports txt, md, csv, json, html; PDF is registered and best-effort text is read, but complex PDFs still need a pasted summary.",
-    selectedFiles: (value: string) => `Selected: ${value}`,
+    sourceFileHint: "Supports txt, md, csv, json, html, docx; PDF is registered with best-effort visible text, but complex PDFs still need a pasted summary.",
+    selectedFiles: (count: number) => `${count} files selected. Uploads become suggestions first; only approval publishes them to the public representative.`,
     createSource: "Add source",
     creatingSource: "Adding...",
     sourceCreated: "Source created.",

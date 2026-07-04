@@ -7,8 +7,6 @@ import {
 } from "@delegate/workflows";
 import { demoRepresentative } from "@delegate/domain";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import { prisma } from "./prisma";
 
@@ -1211,7 +1209,7 @@ const globalForCreatorTraining = globalThis as unknown as {
 
 const DEMO_TRAINING_STATE_PATH =
   process.env.DELEGATE_DEMO_TRAINING_STATE_PATH?.trim() ||
-  join(tmpdir(), "delegate-creator-training-demo-state.json");
+  "/tmp/delegate-creator-training-demo-state.json";
 
 let demoTrainingState: DemoCreatorTrainingState | null =
   globalForCreatorTraining.delegateCreatorTrainingDemoState ?? readDemoTrainingStateFromDisk();
@@ -1302,10 +1300,12 @@ export function getDemoCreatorTrainingKnowledgeOverlay(
 
 function readDemoTrainingStateFromDisk(): DemoCreatorTrainingState | null {
   try {
-    if (!existsSync(DEMO_TRAINING_STATE_PATH)) {
+    if (!existsSync(/* turbopackIgnore: true */ DEMO_TRAINING_STATE_PATH)) {
       return null;
     }
-    const parsed = JSON.parse(readFileSync(DEMO_TRAINING_STATE_PATH, "utf8")) as DemoCreatorTrainingState;
+    const parsed = JSON.parse(
+      readFileSync(/* turbopackIgnore: true */ DEMO_TRAINING_STATE_PATH, "utf8"),
+    ) as DemoCreatorTrainingState;
     if (!parsed || !Array.isArray(parsed.sources) || !Array.isArray(parsed.suggestions)) {
       return null;
     }
@@ -1320,7 +1320,10 @@ function persistDemoTrainingState() {
     return;
   }
   try {
-    writeFileSync(DEMO_TRAINING_STATE_PATH, JSON.stringify(demoTrainingState, null, 2));
+    writeFileSync(
+      /* turbopackIgnore: true */ DEMO_TRAINING_STATE_PATH,
+      JSON.stringify(demoTrainingState, null, 2),
+    );
   } catch {
     // Best-effort demo fallback only; real persistence belongs to Postgres.
   }
@@ -1697,7 +1700,7 @@ function buildSourceSuggestionCandidates(
   source: CreatorTrainingSourceRecord,
 ): SuggestionCandidate[] {
   const title = source.title.trim();
-  const contentText = source.contentText?.trim();
+  const contentText = normalizeUploadedSourceText(source.contentText);
   const locator = source.locator?.trim();
   const summary = truncateTrainingText(contentText || locator || "");
   if (!title || !summary) {
@@ -1728,6 +1731,42 @@ function buildSourceSuggestionCandidates(
       riskLevel: sourceKind === "pdf" || sourceKind === "drive" ? "medium" : "low",
     },
   ];
+}
+
+function normalizeUploadedSourceText(value: string | null): string {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const lines = normalized
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const inlineStripped = stripInlineUploadPreamble(lines.join(" "));
+  if (inlineStripped) {
+    return inlineStripped;
+  }
+  const extractedTextIndex = lines.findIndex((line) => line.toLowerCase() === "extracted text:");
+  const contentLines = extractedTextIndex >= 0 ? lines.slice(extractedTextIndex + 1) : lines;
+
+  return contentLines
+    .filter((line) => !/^uploaded file:/i.test(line))
+    .filter((line) => !/^mime type:/i.test(line))
+    .filter((line) => !/^extraction note:/i.test(line))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stripInlineUploadPreamble(value: string): string {
+  const stripped = value
+    .replace(/^uploaded file:\s+\S+(?:\s+mime type:\s+\S+)?\s*/i, "")
+    .replace(/\bextracted text:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return stripped === value.trim() ? "" : stripped;
 }
 
 function buildFeedbackSuggestionCandidates(
@@ -1892,11 +1931,11 @@ function normalizeTrainingKnowledgeDocument(
         : "Creator training update";
   const summary =
     typeof payload.summary === "string" && payload.summary.trim()
-      ? payload.summary.trim()
+      ? normalizeUploadedSourceText(payload.summary)
       : typeof payload.rule === "string" && payload.rule.trim()
-        ? payload.rule.trim()
+        ? normalizeUploadedSourceText(payload.rule)
         : typeof payload.question === "string" && payload.question.trim()
-          ? `Needs a creator-approved answer for: ${payload.question.trim()}`
+          ? `Needs a creator-approved answer for: ${normalizeUploadedSourceText(payload.question)}`
           : "Creator-approved training update.";
   const kind =
     typeof payload.kind === "string" && payload.kind.trim() ? payload.kind.trim() : fallbackKind;

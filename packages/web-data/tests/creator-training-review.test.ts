@@ -133,6 +133,32 @@ describe("creator training review and publish", () => {
     ]);
   });
 
+  it("publishes uploaded material summaries without upload metadata preambles", async () => {
+    const client = new FakeCreatorTrainingReviewClient();
+    client.sources.push(buildSource());
+    client.suggestions.push(
+      buildSuggestion({
+        sourceId: "source-1",
+        suggestionType: "MATERIAL_UPDATE",
+        title: "DOCX upload",
+        draftPayload: {
+          kind: "download",
+          title: "DOCX upload",
+          summary:
+            "Uploaded file: training.docx MIME type: application/vnd.openxmlformats-officedocument.wordprocessingml.document DOCX 训练资料：专属暗号是 CINNAMON-638。",
+        },
+      }),
+    );
+
+    await reviewCreatorTrainingSuggestion("lin", "suggestion-1", { action: "approve" }, client);
+
+    expect(client.knowledgePackRow?.materials).toEqual([
+      expect.objectContaining({
+        summary: "DOCX 训练资料：专属暗号是 CINNAMON-638。",
+      }),
+    ]);
+  });
+
   it("fails evaluation for guaranteed outcome claims", () => {
     expect(
       evaluateCreatorTrainingDraftPayload({

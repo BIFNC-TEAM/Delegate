@@ -730,7 +730,9 @@ function normalizeOverlayKnowledgeDocuments(
         ? record.title.trim()
         : `Training item ${index + 1}`;
     const summary =
-      typeof record.summary === "string" && record.summary.trim() ? record.summary.trim() : title;
+      typeof record.summary === "string" && record.summary.trim()
+        ? normalizeUploadedKnowledgeSummary(record.summary)
+        : title;
     const id =
       typeof record.id === "string" && record.id.trim()
         ? record.id.trim()
@@ -748,6 +750,39 @@ function normalizeOverlayKnowledgeDocuments(
   });
 
   return documents;
+}
+
+function normalizeUploadedKnowledgeSummary(value: string): string {
+  const lines = value
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const inlineStripped = stripInlineUploadKnowledgePreamble(lines.join(" "));
+  if (inlineStripped) {
+    return inlineStripped;
+  }
+  const extractedTextIndex = lines.findIndex((line) => line.toLowerCase() === "extracted text:");
+  const contentLines = extractedTextIndex >= 0 ? lines.slice(extractedTextIndex + 1) : lines;
+
+  return (
+    contentLines
+      .filter((line) => !/^uploaded file:/i.test(line))
+      .filter((line) => !/^mime type:/i.test(line))
+      .filter((line) => !/^extraction note:/i.test(line))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim() || value.trim()
+  );
+}
+
+function stripInlineUploadKnowledgePreamble(value: string): string {
+  const stripped = value
+    .replace(/^uploaded file:\s+\S+(?:\s+mime type:\s+\S+)?\s*/i, "")
+    .replace(/\bextracted text:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return stripped === value.trim() ? "" : stripped;
 }
 
 function normalizeKnowledgeKind(

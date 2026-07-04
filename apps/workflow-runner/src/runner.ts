@@ -10,8 +10,10 @@ import {
 } from "@prisma/client";
 import {
   approvalExpirationInputSchema,
+  creatorTrainingReviewInputSchema,
   handoffFollowUpInputSchema,
 } from "@delegate/workflows";
+import { buildCreatorTrainingSuggestions } from "@delegate/web-data";
 
 import { prisma } from "./prisma";
 
@@ -148,9 +150,7 @@ async function runLocalWorkflowTick(options?: {
             type: "WORKFLOW_FAILED",
             payload: {
               workflowRunId: workflow.id,
-              workflowKind: workflow.kind === WorkflowKind.HANDOFF_FOLLOW_UP
-                ? "handoff_follow_up"
-                : "approval_expiration",
+              workflowKind: workflowKindForAudit(workflow.kind),
               ...(workflow.subagentId ? { subagentId: workflow.subagentId } : {}),
               error: failureMessage,
             },
@@ -530,6 +530,9 @@ export async function processWorkflowRunById(workflowRunId: string) {
     case WorkflowKind.HANDOFF_FOLLOW_UP:
       await processHandoffFollowUp(workflow);
       break;
+    case WorkflowKind.CREATOR_TRAINING_REVIEW:
+      await processCreatorTrainingReview(workflow);
+      break;
   }
 }
 
@@ -680,6 +683,38 @@ async function processHandoffFollowUp(workflow: NonNullable<WorkflowRunRecord>) 
   });
 }
 
+async function processCreatorTrainingReview(workflow: NonNullable<WorkflowRunRecord>) {
+  const input = creatorTrainingReviewInputSchema.parse(workflow.input);
+  const suggestions = await buildCreatorTrainingSuggestions(input.representativeSlug, {
+    ...(input.feedbackLimit !== undefined ? { feedbackLimit: input.feedbackLimit } : {}),
+    ...(input.unknownQuestionLimit !== undefined
+      ? { unknownQuestionLimit: input.unknownQuestionLimit }
+      : {}),
+  });
+
+  await prisma.eventAudit.create({
+    data: {
+      representativeId: workflow.representativeId,
+      contactId: workflow.contactId,
+      conversationId: workflow.conversationId,
+      type: "WORKFLOW_COMPLETED",
+      payload: {
+        workflowRunId: workflow.id,
+        workflowKind: "creator_training_review",
+        representativeSlug: input.representativeSlug,
+        suggestionCount: suggestions.length,
+        action: "creator_training_suggestions_built",
+      },
+    },
+  });
+
+  await completeWorkflowRun(workflow.id, {
+    outcome: "creator_training_suggestions_built",
+    representativeSlug: input.representativeSlug,
+    suggestionCount: suggestions.length,
+  });
+}
+
 async function completeWorkflowRun(workflowRunId: string, output: Record<string, unknown>) {
   await prisma.workflowRun.updateMany({
     where: {
@@ -706,8 +741,25 @@ async function loadWorkflowRun(workflowRunId: string) {
     include: {
       approvalRequest: true,
       handoffRequest: true,
+      representative: {
+        select: {
+          slug: true,
+        },
+      },
     },
   });
+}
+
+function workflowKindForAudit(kind: WorkflowKind) {
+  switch (kind) {
+    case WorkflowKind.HANDOFF_FOLLOW_UP:
+      return "handoff_follow_up";
+    case WorkflowKind.CREATOR_TRAINING_REVIEW:
+      return "creator_training_review";
+    case WorkflowKind.APPROVAL_EXPIRATION:
+    default:
+      return "approval_expiration";
+  }
 }
 
 async function loadWorkflowCommand(commandId: string) {

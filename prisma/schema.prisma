@@ -206,6 +206,51 @@ enum IdentityLinkProvider {
   PAYMENT_EXTERNAL_USER
 }
 
+enum CreatorTrainingSourceKind {
+  URL
+  PDF
+  TEXT
+  NOTION
+  DRIVE
+  WEBSITE
+}
+
+enum CreatorTrainingSourceStatus {
+  DRAFT
+  ACTIVE
+  DISABLED
+  FAILED
+}
+
+enum CreatorFeedbackSignalType {
+  APPROVE
+  CORRECTION
+  DO_NOT_SAY
+  SUGGESTED_ANSWER
+}
+
+enum CreatorTrainingSuggestionType {
+  FAQ_UPDATE
+  POLICY_UPDATE
+  MATERIAL_UPDATE
+  TONE_RULE
+  SKILL_RECOMMENDATION
+  KNOWLEDGE_GAP
+}
+
+enum CreatorTrainingSuggestionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  PRIVATE
+  PUBLISHED
+}
+
+enum CreatorTrainingVersionStatus {
+  PUBLISHED
+  ROLLED_BACK
+}
+
 enum ToolExecutionStatus {
   QUEUED
   RUNNING
@@ -271,6 +316,7 @@ enum BrowserNavigationStatus {
 enum WorkflowKind {
   HANDOFF_FOLLOW_UP
   APPROVAL_EXPIRATION
+  CREATOR_TRAINING_REVIEW
 }
 
 enum WorkflowStatus {
@@ -868,6 +914,10 @@ model Representative {
   creatorEarnings                CreatorEarning[]
   withdrawRequests               WithdrawRequest[]
   walletLedgerEntries            WalletLedgerEntry[]
+  trainingSources                CreatorTrainingSource[]
+  feedbackSignals                CreatorFeedbackSignal[]
+  trainingSuggestions            CreatorTrainingSuggestion[]
+  trainingVersions               CreatorTrainingVersion[]
 }
 
 model KnowledgePack {
@@ -1000,6 +1050,7 @@ model Contact {
   computeTrustTier      String?
   lastApprovalGrantedAt DateTime?
   workflowRuns          WorkflowRun[]
+  feedbackSignals       CreatorFeedbackSignal[]
 
   @@unique([representativeId, telegramUserId])
   @@index([audienceIdentityId, updatedAt])
@@ -1045,6 +1096,7 @@ model Conversation {
   browserSessions               BrowserSession[]
   browserNavigations            BrowserNavigation[]
   workflowRuns                  WorkflowRun[]
+  feedbackSignals               CreatorFeedbackSignal[]
 
   @@unique([representativeId, telegramChatId, contactId])
   @@index([audienceIdentityId, lastMessageAt])
@@ -1062,14 +1114,109 @@ model ChatSession {
 }
 
 model ConversationTurn {
-  id             String       @id @default(cuid())
-  conversationId String
-  direction      String
-  messageText    String
-  intent         String?
-  summary        String?
-  createdAt      DateTime     @default(now())
-  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  id              String                  @id @default(cuid())
+  conversationId  String
+  direction       String
+  messageText     String
+  intent          String?
+  summary         String?
+  createdAt       DateTime                @default(now())
+  conversation    Conversation            @relation(fields: [conversationId], references: [id])
+  feedbackSignals CreatorFeedbackSignal[]
+}
+
+model CreatorTrainingSource {
+  id               String                      @id @default(cuid())
+  representativeId String
+  kind             CreatorTrainingSourceKind
+  status           CreatorTrainingSourceStatus @default(DRAFT)
+  title            String
+  locator          String?
+  contentText      String?
+  metadata         Json?
+  lastSyncedAt     DateTime?
+  errorReason      String?
+  createdBy        String?
+  createdAt        DateTime                    @default(now())
+  updatedAt        DateTime                    @updatedAt
+  representative   Representative              @relation(fields: [representativeId], references: [id])
+  suggestions      CreatorTrainingSuggestion[]
+
+  @@index([representativeId, status, updatedAt])
+  @@index([representativeId, kind, createdAt])
+}
+
+model CreatorFeedbackSignal {
+  id               String                      @id @default(cuid())
+  representativeId String
+  contactId        String?
+  conversationId   String?
+  turnId           String?
+  signalType       CreatorFeedbackSignalType
+  status           String                      @default("new")
+  publicSafe       Boolean                     @default(false)
+  note             String?
+  suggestedText    String?
+  createdBy        String?
+  createdAt        DateTime                    @default(now())
+  updatedAt        DateTime                    @updatedAt
+  representative   Representative              @relation(fields: [representativeId], references: [id])
+  contact          Contact?                    @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  conversation     Conversation?               @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  turn             ConversationTurn?           @relation(fields: [turnId], references: [id], onDelete: SetNull)
+  suggestions      CreatorTrainingSuggestion[]
+
+  @@index([representativeId, status, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([turnId, createdAt])
+}
+
+model CreatorTrainingSuggestion {
+  id               String                          @id @default(cuid())
+  representativeId String
+  sourceId         String?
+  feedbackSignalId String?
+  suggestionType   CreatorTrainingSuggestionType
+  status           CreatorTrainingSuggestionStatus @default(PENDING)
+  title            String
+  rationale        String
+  draftPayload     Json
+  dedupeKey        String
+  riskLevel        String                          @default("low")
+  reviewedAt       DateTime?
+  reviewedBy       String?
+  reviewNote       String?
+  createdAt        DateTime                        @default(now())
+  updatedAt        DateTime                        @updatedAt
+  representative   Representative                  @relation(fields: [representativeId], references: [id])
+  source           CreatorTrainingSource?          @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  feedbackSignal   CreatorFeedbackSignal?          @relation(fields: [feedbackSignalId], references: [id], onDelete: SetNull)
+  versions         CreatorTrainingVersion[]
+
+  @@unique([representativeId, dedupeKey])
+  @@index([representativeId, status, createdAt])
+  @@index([sourceId, createdAt])
+  @@index([feedbackSignalId, createdAt])
+}
+
+model CreatorTrainingVersion {
+  id               String                       @id @default(cuid())
+  representativeId String
+  suggestionId     String?
+  status           CreatorTrainingVersionStatus @default(PUBLISHED)
+  title            String
+  snapshotBefore   Json
+  snapshotAfter    Json
+  evaluationReport Json?
+  publishedBy      String?
+  publishedAt      DateTime                     @default(now())
+  rolledBackAt     DateTime?
+  createdAt        DateTime                     @default(now())
+  representative   Representative               @relation(fields: [representativeId], references: [id])
+  suggestion       CreatorTrainingSuggestion?   @relation(fields: [suggestionId], references: [id], onDelete: SetNull)
+
+  @@index([representativeId, publishedAt])
+  @@index([suggestionId])
 }
 
 model IntakeSubmission {

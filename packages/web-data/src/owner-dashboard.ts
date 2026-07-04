@@ -70,7 +70,7 @@ export type DashboardOverviewSnapshot = {
   }>;
   recentWorkflows: Array<{
     id: string;
-    kind: "handoff_follow_up" | "approval_expiration";
+    kind: "handoff_follow_up" | "approval_expiration" | "creator_training_review";
     engine: "local_runner" | "temporal";
     status: "queued" | "running" | "completed" | "failed" | "canceled";
     enginePhase?:
@@ -439,7 +439,7 @@ export async function getDashboardOverviewSnapshot(
       })),
       recentWorkflows: representative.workflowRuns.map((workflowRun) => ({
         id: workflowRun.id,
-        kind: workflowRun.kind === "HANDOFF_FOLLOW_UP" ? "handoff_follow_up" : "approval_expiration",
+        kind: normalizeWorkflowKind(workflowRun.kind),
         engine: workflowRun.engine === "TEMPORAL" ? "temporal" : "local_runner",
         status: normalizeWorkflowStatus(workflowRun.status),
         ...(workflowRun.enginePhase ? { enginePhase: normalizeWorkflowEnginePhase(workflowRun.enginePhase) } : {}),
@@ -457,13 +457,7 @@ export async function getDashboardOverviewSnapshot(
                 "outcome" in workflowRun.output &&
                 typeof workflowRun.output.outcome === "string"
               ? workflowRun.output.outcome
-              : workflowRun.kind === "HANDOFF_FOLLOW_UP"
-                ? locale === "zh"
-                  ? "等待 owner 跟进 handoff"
-                  : "Waiting for owner handoff follow-up."
-                : locale === "zh"
-                  ? "等待审批超时检查"
-                  : "Waiting for approval expiry check.",
+              : describeWorkflowRun(workflowRun.kind, locale),
       })),
     };
   } catch (error) {
@@ -471,6 +465,35 @@ export async function getDashboardOverviewSnapshot(
       return cloneDashboardOverviewSnapshot(getOrCreateDemoFallbackOverviewSnapshot(locale));
     }
     throw error;
+  }
+}
+
+function normalizeWorkflowKind(
+  value: RepresentativeOverviewRecord["workflowRuns"][number]["kind"],
+): DashboardOverviewSnapshot["recentWorkflows"][number]["kind"] {
+  switch (value) {
+    case "HANDOFF_FOLLOW_UP":
+      return "handoff_follow_up";
+    case "CREATOR_TRAINING_REVIEW":
+      return "creator_training_review";
+    case "APPROVAL_EXPIRATION":
+    default:
+      return "approval_expiration";
+  }
+}
+
+function describeWorkflowRun(
+  value: RepresentativeOverviewRecord["workflowRuns"][number]["kind"],
+  locale: "zh" | "en",
+): string {
+  switch (value) {
+    case "HANDOFF_FOLLOW_UP":
+      return locale === "zh" ? "等待 owner 跟进 handoff" : "Waiting for owner handoff follow-up.";
+    case "CREATOR_TRAINING_REVIEW":
+      return locale === "zh" ? "等待生成训练建议" : "Waiting to build training suggestions.";
+    case "APPROVAL_EXPIRATION":
+    default:
+      return locale === "zh" ? "等待审批超时检查" : "Waiting for approval expiry check.";
   }
 }
 

@@ -20,7 +20,7 @@ Delegate already has a real durable workflow backbone:
 - a local runner processes due jobs
 - a Temporal bridge and worker entrypoint already exist in `apps/workflow-runner/src/temporal-bridge.ts` and `apps/workflow-runner/src/temporal/workflows.ts`
 
-Temporal-native waiting from creation time is now implemented for the two current durable workflow kinds.
+Temporal-native waiting from creation time is implemented for the timer workflow kinds, and the same outbox/runner boundary now also supports creator training review.
 
 Today, the Temporal path is:
 
@@ -56,10 +56,11 @@ Relevant code:
 
 ### Durable workflows actually implemented today
 
-There are currently only two real durable workflow kinds in the schema:
+There are currently three real durable workflow kinds in the schema:
 
 - `APPROVAL_EXPIRATION`
 - `HANDOFF_FOLLOW_UP`
+- `CREATOR_TRAINING_REVIEW`
 
 See `prisma/schema.prisma`.
 
@@ -102,7 +103,7 @@ Relevant code:
 1. Use Temporal as the durable waiting engine for long-lived business timers.
 2. Keep Postgres as the source of product truth for dashboard, audit, billing, and operator state.
 3. Preserve the current `WorkflowRun` table as the main business-facing workflow record.
-4. Migrate only the two existing durable workflow kinds first.
+4. Migrate the existing durable workflow kinds incrementally, keeping Postgres as product truth.
 5. Keep `LOCAL_RUNNER` as a fallback and local development mode.
 6. Improve correctness around start idempotency, cancellation, retries, and observability.
 
@@ -300,7 +301,7 @@ Do not add `lastHeartbeat` as a primary workflow field for this RFC.
 Reason:
 
 - heartbeats are activity-level, not workflow-level
-- these two workflows are timer-heavy and activity-light
+- the approval and handoff workflows are timer-heavy and activity-light
 - the activities are short DB operations, so heartbeat is not the right main observability primitive
 
 If future long-running activities need heartbeats, expose that on compute-style operational surfaces, not as the main owner workflow list field.
@@ -511,7 +512,7 @@ That heuristic is approval-specific operational logic, not the generic workflow 
 
 - landed this RFC
 - updated stale docs that claimed Temporal was absent
-- clarified in docs that Delegate has a Temporal bridge, outbox dispatch, native durable timers, and cancellation cleanup for the two current durable workflow kinds
+- clarified in docs that Delegate has a Temporal bridge, outbox dispatch, native durable timers, cancellation cleanup, and creator training review workflow support
 
 ### Phase 1: Outbox-backed Temporal start
 
@@ -544,7 +545,7 @@ That heuristic is approval-specific operational logic, not the generic workflow 
 
 ### Phase 5: Expand to new long-running product workflows
 
-After the two existing workflows are stable, consider new Temporal-native candidates such as:
+After the existing workflows are stable, consider additional Temporal-native candidates such as:
 
 - quote follow-up
 - scheduling reminders

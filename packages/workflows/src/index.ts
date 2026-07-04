@@ -3,6 +3,7 @@ import { z } from "zod";
 export const workflowKindSchema = z.enum([
   "handoff_follow_up",
   "approval_expiration",
+  "creator_training_review",
 ]);
 
 export const workflowEngineSchema = z.enum([
@@ -39,6 +40,12 @@ export const approvalExpirationInputSchema = z.object({
   timeoutMinutes: z.number().int().positive(),
 });
 
+export const creatorTrainingReviewInputSchema = z.object({
+  representativeSlug: z.string().min(1),
+  feedbackLimit: z.number().int().positive().max(500).optional(),
+  unknownQuestionLimit: z.number().int().positive().max(500).optional(),
+});
+
 export const workflowEngineConfigSchema = z.object({
   configuredEngine: workflowEngineSchema,
   effectiveEngine: workflowEngineSchema,
@@ -70,6 +77,7 @@ export type WorkflowEnginePhase = z.infer<typeof workflowEnginePhaseSchema>;
 export type WorkflowStatus = z.infer<typeof workflowStatusSchema>;
 export type HandoffFollowUpInput = z.infer<typeof handoffFollowUpInputSchema>;
 export type ApprovalExpirationInput = z.infer<typeof approvalExpirationInputSchema>;
+export type CreatorTrainingReviewInput = z.infer<typeof creatorTrainingReviewInputSchema>;
 export type WorkflowEngineConfig = z.infer<typeof workflowEngineConfigSchema>;
 export type WorkflowDispatchTarget = z.infer<typeof workflowDispatchTargetSchema>;
 export type TemporalWorkflowRunInput = z.infer<typeof temporalWorkflowRunInputSchema>;
@@ -84,6 +92,17 @@ export function approvalExpirationDedupeKey(approvalId: string): string {
   return `approval_expiration:${approvalId}`;
 }
 
+export function creatorTrainingReviewDedupeKey(
+  representativeSlug: string,
+  requestedAt: Date = new Date(),
+): string {
+  return `creator_training_review:${representativeSlug}:${creatorTrainingReviewWindowKey(requestedAt)}`;
+}
+
+export function creatorTrainingReviewSubjectId(requestedAt: Date = new Date()): string {
+  return `training-review:${creatorTrainingReviewWindowKey(requestedAt)}`;
+}
+
 export function scheduleHandoffFollowUp(
   now: Date,
   handoffWindowHours: number,
@@ -96,6 +115,10 @@ export function scheduleApprovalExpiration(
   timeoutMinutes: number,
 ): Date {
   return new Date(now.getTime() + timeoutMinutes * 60 * 1000);
+}
+
+function creatorTrainingReviewWindowKey(value: Date): string {
+  return value.toISOString().slice(0, 13);
 }
 
 export function isWorkflowTerminal(status: WorkflowStatus): boolean {

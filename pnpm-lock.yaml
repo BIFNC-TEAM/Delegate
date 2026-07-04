@@ -193,6 +193,9 @@ importers:
 
   apps/workflow-runner:
     dependencies:
+      '@delegate/web-data':
+        specifier: workspace:*
+        version: link:../../packages/web-data
       '@delegate/workflows':
         specifier: workspace:*
         version: link:../../packages/workflows

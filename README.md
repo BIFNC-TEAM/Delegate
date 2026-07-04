@@ -42,7 +42,7 @@ Delegate currently includes these working surfaces and services:
 
 - **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
 - **Public representative app** in `apps/reps`, including representative profiles, service tiers, web chat, recharge-entry modules, and signed public-chat session state.
-- **Owner dashboard** in `apps/web`, covering representative health, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, and workflow state.
+- **Owner dashboard** in `apps/web`, covering representative health, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, and workflow state.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and shared runtime policy, kept as future channel infrastructure rather than the first Delegate product surface.
 - **AMN wallet control plane** covering internal wallet ledger entries, mock recharge, Agent token purchase, usage charging, Creator 20% revenue policy, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
@@ -51,12 +51,13 @@ Delegate currently includes these working surfaces and services:
 - **OpenViking integration** for representative-scoped public resources, recall, session commit traces, and safe memory previews.
 - **ClawHub registry primitives** for future non-privileged representative skill packs.
 
-The two durable workflow kinds implemented today are:
+The durable workflow kinds implemented today are:
 
 - `APPROVAL_EXPIRATION`
 - `HANDOFF_FOLLOW_UP`
+- `CREATOR_TRAINING_REVIEW`
 
-Temporal is already wired for those workflows through post-commit command outbox dispatch, native workflow timers, cancellation cleanup, and dashboard phase observability. Ordinary real-time chat routing still stays out of Temporal.
+Temporal is already wired for those workflows through post-commit command outbox dispatch, native workflow timers, cancellation cleanup, asynchronous training review, and dashboard phase observability. Ordinary real-time chat routing still stays out of Temporal.
 
 ## AMN Target Model
 
@@ -161,6 +162,7 @@ docs/
   public-audience-identity.md
   per-user-sandbox-runtime.md
   temporal-native-workflow-rfc.md
+  creator-training-loop.md
   v2-isolated-compute-plane-plan.md
   openviking-integration.md
   roadmap.md
@@ -324,6 +326,7 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 - [Architecture](./docs/architecture.md): product thesis, runtime loop, security boundary, and OpenViking rules.
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
 - [Public audience identity](./docs/public-audience-identity.md): web anonymous identity, Contact/Conversation, recharge, and sandbox linkage.
+- [Creator training loop](./docs/creator-training-loop.md): source registry, creator feedback, suggestion workflow, review, evaluation, and rollback.
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model, outbox, timer, cancellation, and dashboard semantics.
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute and browser isolation model.
 - [OpenViking integration](./docs/openviking-integration.md): public memory and recall integration.

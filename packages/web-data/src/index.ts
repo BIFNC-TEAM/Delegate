@@ -8,6 +8,7 @@ export * from "./agent-wallet-token-purchase";
 export * from "./agent-wallet-usage-charge";
 export * from "./agent-wallet-withdrawals";
 export * from "./compute";
+export * from "./creator-training";
 export * from "./deliverable-insights";
 export * from "./deliverables";
 export * from "./governed-actions";

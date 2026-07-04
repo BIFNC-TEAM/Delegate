@@ -23,7 +23,7 @@ export function DashboardRepresentativeDirectory({
   representativeBaseUrl,
 }: {
   activeSlug: string;
-  activeView: "overview" | "setup" | "skills" | "compute" | "wallet" | "memory";
+  activeView: "overview" | "setup" | "skills" | "compute" | "wallet" | "memory" | "training";
   initialRepresentatives: RepresentativeDirectoryItem[];
   locale: Locale;
   representativeBaseUrl: string;

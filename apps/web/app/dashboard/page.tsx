@@ -17,6 +17,7 @@ import { DashboardOpenViking } from "./dashboard-openviking";
 import { DashboardRepresentativeDirectory } from "./dashboard-representative-directory";
 import { DashboardRepresentativeSetup } from "./dashboard-representative-setup";
 import { DashboardSkillPacks } from "./dashboard-skill-packs";
+import { DashboardTraining } from "./dashboard-training";
 import { DashboardWallet } from "./dashboard-wallet";
 import { listRepresentativeDirectoryItems } from "@delegate/web-data";
 
@@ -180,6 +181,7 @@ export default async function DashboardPage({
             {activeView === "compute" ? <DashboardCompute locale={locale} representativeSlug={activeSlug} /> : null}
             {activeView === "wallet" ? <DashboardWallet locale={locale} representativeSlug={activeSlug} /> : null}
             {activeView === "memory" ? <DashboardOpenViking locale={locale} representativeSlug={activeSlug} /> : null}
+            {activeView === "training" ? <DashboardTraining locale={locale} representativeSlug={activeSlug} /> : null}
           </div>
         </section>
       </div>
@@ -187,7 +189,7 @@ export default async function DashboardPage({
   );
 }
 
-type DashboardView = "overview" | "setup" | "skills" | "compute" | "wallet" | "memory";
+type DashboardView = "overview" | "setup" | "skills" | "compute" | "wallet" | "memory" | "training";
 
 function isDashboardView(value: string | undefined): value is DashboardView {
   return (
@@ -196,7 +198,8 @@ function isDashboardView(value: string | undefined): value is DashboardView {
     value === "skills" ||
     value === "compute" ||
     value === "wallet" ||
-    value === "memory"
+    value === "memory" ||
+    value === "training"
   );
 }
 
@@ -292,6 +295,15 @@ const dashboardCopy: Record<
         stageTitle: "把 recall、commit 和记忆预览收进可治理的控制台，而不是藏在后端日志里。",
         stageCopy: "记忆页服务的是治理，不是炫技。这里要看得清是否在同步、召回了什么、有没有越界，以及哪里该回退到确定性流程。",
       },
+      {
+        id: "training",
+        label: "养成",
+        eyebrow: "闭环",
+        blurb: "资料源、反馈、建议、审批和版本。",
+        shortLabel: "养成",
+        stageTitle: "让 creator 持续喂资料、改答案、审批建议，把 Delegate 越养越像自己。",
+        stageCopy: "养成页把资料登记、纠错反馈、训练建议和发布版本串成一条可审计链路。系统可以提建议，但进入正式知识前必须有人审。",
+      },
     ],
     languageAriaLabel: "语言切换",
     language: { zh: "中文", en: "English" },
@@ -368,6 +380,15 @@ const dashboardCopy: Record<
         shortLabel: "Memory",
         stageTitle: "Keep recall, commit, and memory previews inside an operable governance console.",
         stageCopy: "This lane is for control, not magic. Owners should see what is syncing, what was recalled, and where the system should fall back to deterministic behavior.",
+      },
+      {
+        id: "training",
+        label: "Training",
+        eyebrow: "Loop",
+        blurb: "Sources, feedback, suggestions, review, and versions.",
+        shortLabel: "Training",
+        stageTitle: "Help the creator keep feeding, correcting, and approving what the Delegate should learn.",
+        stageCopy: "The training lane turns source registration, corrections, draft suggestions, and published versions into an auditable loop. The system can suggest; humans approve before public knowledge changes.",
       },
     ],
     languageAriaLabel: "Language switcher",

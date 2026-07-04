@@ -182,6 +182,13 @@ class FakeAuthIdentityClient {
   };
 
   identityLink = {
+    findUnique: async (args: any) => {
+      const key = args.where.provider_providerSubject;
+      const link = this.identityLinks.find(
+        (item) => item.provider === key.provider && item.providerSubject === key.providerSubject,
+      );
+      return link ? { audienceIdentityId: link.audienceIdentityId } : null;
+    },
     upsert: async (args: any) => {
       const key = args.where.provider_providerSubject;
       const existing = this.identityLinks.find(

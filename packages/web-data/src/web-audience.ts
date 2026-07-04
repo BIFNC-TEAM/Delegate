@@ -74,6 +74,17 @@ type WebAudienceClient = {
     }): Promise<WebAudienceIdentity>;
   };
   identityLink: {
+    findUnique(args: {
+      where: {
+        provider_providerSubject: {
+          provider: WebAudienceIdentityLinkProvider;
+          providerSubject: string;
+        };
+      };
+      select: {
+        audienceIdentityId: true;
+      };
+    }): Promise<{ audienceIdentityId: string } | null>;
     upsert(args: {
       where: {
         provider_providerSubject: {
@@ -303,7 +314,7 @@ export async function linkAudienceIdentity(
   },
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ) {
-  const providerSubject = normalizeIdentityProviderSubject(input.providerSubject);
+  const providerSubject = normalizeIdentityProviderSubject(input.provider, input.providerSubject);
 
   return client.identityLink.upsert({
     where: {
@@ -325,6 +336,69 @@ export async function linkAudienceIdentity(
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     },
   });
+}
+
+export async function resolveAuthenticatedAudienceIdentity(
+  input: {
+    audienceIdentityId: string;
+    provider: WebAudienceIdentityLinkProvider;
+    providerSubject: string;
+    verifiedAt?: Date | null | undefined;
+    metadata?: unknown;
+    now?: Date | undefined;
+  },
+  client: WebAudienceClient = prisma as unknown as WebAudienceClient,
+): Promise<WebAudienceIdentity> {
+  const providerSubject = normalizeIdentityProviderSubject(input.provider, input.providerSubject);
+  const currentAudienceIdentityId = normalizeRequiredId(
+    input.audienceIdentityId,
+    "audienceIdentityId",
+  );
+  const now = input.now ?? new Date();
+  const existingLink = await client.identityLink.findUnique({
+    where: {
+      provider_providerSubject: {
+        provider: input.provider,
+        providerSubject,
+      },
+    },
+    select: {
+      audienceIdentityId: true,
+    },
+  });
+  const targetAudienceIdentityId = existingLink?.audienceIdentityId ?? currentAudienceIdentityId;
+
+  if (existingLink && existingLink.audienceIdentityId !== currentAudienceIdentityId) {
+    await mergeAudienceIdentity(
+      {
+        sourceAudienceIdentityId: currentAudienceIdentityId,
+        targetAudienceIdentityId: existingLink.audienceIdentityId,
+        now,
+      },
+      client,
+    );
+  }
+
+  const audienceIdentity = await client.audienceIdentity.update({
+    where: { id: targetAudienceIdentityId },
+    data: {
+      status: "REGISTERED",
+      lastSeenAt: now,
+    },
+  });
+
+  await linkAudienceIdentity(
+    {
+      audienceIdentityId: targetAudienceIdentityId,
+      provider: input.provider,
+      providerSubject,
+      verifiedAt: input.verifiedAt,
+      metadata: input.metadata,
+    },
+    client,
+  );
+
+  return audienceIdentity;
 }
 
 export async function mergeAudienceIdentity(
@@ -614,12 +688,20 @@ function normalizeOptionalString(value: string | null | undefined) {
   return normalized ? normalized : undefined;
 }
 
-function normalizeIdentityProviderSubject(value: string) {
+function normalizeRequiredId(value: string, name: string) {
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error(`${name} is required.`);
+  }
+  return normalized;
+}
+
+function normalizeIdentityProviderSubject(provider: WebAudienceIdentityLinkProvider, value: string) {
   const normalized = value.trim().toLowerCase();
   if (!normalized) {
     throw new Error("providerSubject is required.");
   }
-  return normalized;
+  return provider === "LOGTO" ? value.trim() : normalized;
 }
 
 function truncateRecentTurnText(value: string) {

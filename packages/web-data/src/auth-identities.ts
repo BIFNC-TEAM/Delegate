@@ -1,4 +1,5 @@
 import { prisma } from "./prisma";
+import { resolveAuthenticatedAudienceIdentity } from "./web-audience";
 
 export type ExternalAuthProvider = "logto";
 
@@ -173,36 +174,17 @@ export async function linkAudienceIdentityToAuth(
 ): Promise<AudienceIdentityRecord> {
   const now = input.now ?? new Date();
   const normalized = normalizeExternalAuthProfile(input.profile, now);
-  const audienceIdentity = await client.audienceIdentity.update({
-    where: { id: input.audienceIdentityId },
-    data: {
-      status: "REGISTERED",
-      lastSeenAt: now,
-    },
-  });
-
-  await client.identityLink.upsert({
-    where: {
-      provider_providerSubject: {
-        provider: normalized.audienceProvider,
-        providerSubject: normalized.subject,
-      },
-    },
-    update: {
-      audienceIdentityId: input.audienceIdentityId,
-      verifiedAt: normalized.verifiedAt,
-      metadata: normalized.metadata,
-    },
-    create: {
+  return resolveAuthenticatedAudienceIdentity(
+    {
       audienceIdentityId: input.audienceIdentityId,
       provider: normalized.audienceProvider,
       providerSubject: normalized.subject,
       verifiedAt: normalized.verifiedAt,
       metadata: normalized.metadata,
+      now,
     },
-  });
-
-  return audienceIdentity;
+    client as unknown as Parameters<typeof resolveAuthenticatedAudienceIdentity>[1],
+  );
 }
 
 export function normalizeAuthSubject(provider: ExternalAuthProvider, subject: string): string {

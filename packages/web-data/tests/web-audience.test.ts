@@ -9,6 +9,7 @@ import {
   mergeAudienceIdentity,
   persistWebConversationExchange,
   resolveAnonymousAudienceIdentity,
+  resolveAuthenticatedAudienceIdentity,
   resolveWebAudienceConversation,
   resolveWebAudienceContact,
 } from "../src/web-audience";
@@ -188,6 +189,63 @@ describe("web audience identity resolver", () => {
       status: "MERGED",
       mergedIntoId: target.id,
       lastSeenAt: new Date("2026-07-04T12:30:00.000Z"),
+    });
+  });
+
+  it("merges the current anonymous identity into an existing authenticated identity", async () => {
+    const client = new FakeWebAudienceClient();
+    const anonymous = await resolveAnonymousAudienceIdentity(
+      {
+        audienceId: "aud_anonymous",
+      },
+      client,
+    );
+    const registered = await resolveAnonymousAudienceIdentity(
+      {
+        audienceId: "aud_registered",
+      },
+      client,
+    );
+    client.identityLinks.push({
+      id: "identity-link-logto",
+      audienceIdentityId: registered.id,
+      provider: "LOGTO",
+      providerSubject: "LogtoUserA",
+      verifiedAt: new Date("2026-07-04T12:00:00.000Z"),
+      metadata: null,
+    });
+    client.contacts.push(buildContactRow({ id: "contact-anonymous", audienceIdentityId: anonymous.id }));
+    client.conversations.push(
+      buildConversationRow({ id: "conversation-anonymous", audienceIdentityId: anonymous.id }),
+    );
+    client.userWallets.push({ id: "wallet-anonymous", audienceIdentityId: anonymous.id });
+    client.sandboxIdentities.push({ id: "sandbox-anonymous", audienceIdentityId: anonymous.id });
+    client.memoryRecords.push({ id: "memory-anonymous", audienceIdentityId: anonymous.id });
+
+    const result = await resolveAuthenticatedAudienceIdentity(
+      {
+        audienceIdentityId: anonymous.id,
+        provider: "LOGTO",
+        providerSubject: "LogtoUserA",
+        verifiedAt: new Date("2026-07-04T13:00:00.000Z"),
+        now: new Date("2026-07-04T13:00:00.000Z"),
+      },
+      client,
+    );
+
+    expect(result.id).toBe(registered.id);
+    expect(client.contacts[0]?.audienceIdentityId).toBe(registered.id);
+    expect(client.conversations[0]?.audienceIdentityId).toBe(registered.id);
+    expect(client.userWallets[0]?.audienceIdentityId).toBe(registered.id);
+    expect(client.sandboxIdentities[0]?.audienceIdentityId).toBe(registered.id);
+    expect(client.memoryRecords[0]?.audienceIdentityId).toBe(registered.id);
+    expect(client.audienceIdentities.find((identity) => identity.id === anonymous.id)).toMatchObject({
+      status: "MERGED",
+      mergedIntoId: registered.id,
+    });
+    expect(client.audienceIdentities.find((identity) => identity.id === registered.id)).toMatchObject({
+      status: "REGISTERED",
+      lastSeenAt: new Date("2026-07-04T13:00:00.000Z"),
     });
   });
 
@@ -416,6 +474,13 @@ class FakeWebAudienceClient {
   };
 
   identityLink = {
+    findUnique: async (args: any) => {
+      const key = args.where.provider_providerSubject;
+      const link = this.identityLinks.find(
+        (item) => item.provider === key.provider && item.providerSubject === key.providerSubject,
+      );
+      return link ? { audienceIdentityId: link.audienceIdentityId } : null;
+    },
     upsert: async (args: any) => {
       const key = args.where.provider_providerSubject;
       const existing = this.identityLinks.find(

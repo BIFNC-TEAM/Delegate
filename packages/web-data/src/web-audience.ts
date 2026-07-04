@@ -1,7 +1,29 @@
+import { demoRepresentative } from "@delegate/domain";
+
 import { prisma } from "./prisma";
 
 const WEB_RECENT_TURN_LIMIT = 8;
 const WEB_RECENT_TURN_TEXT_LIMIT = 240;
+
+type DemoWebAudienceTurn = {
+  conversationId: string;
+  direction: "inbound" | "outbound";
+  messageText: string;
+  intent: string | null;
+  summary: string | null;
+  createdAt: Date;
+};
+
+type DemoWebAudienceState = {
+  identities: WebAudienceIdentity[];
+  contacts: WebAudienceContact[];
+  conversations: WebAudienceConversation[];
+  turns: DemoWebAudienceTurn[];
+};
+
+const globalForWebAudience = globalThis as typeof globalThis & {
+  delegateWebAudienceDemoState?: DemoWebAudienceState | undefined;
+};
 
 export type WebAudienceContact = {
   id: string;
@@ -372,41 +394,52 @@ export async function resolveWebAudienceContact(
   },
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ): Promise<WebAudienceContact> {
-  const audienceId = normalizeWebAudienceId(input.audienceId);
-  const channelUserId = buildWebChannelUserId(audienceId);
-  const now = input.now ?? new Date();
-  const displayName = normalizeOptionalString(input.displayName) ?? "Web visitor";
-  const username = normalizeOptionalString(input.username);
-  const identity = await resolveAnonymousAudienceIdentity({ audienceId, now }, client);
+  if (shouldUseDemoWebAudienceFallback(input.representativeSlug, client)) {
+    return resolveDemoWebAudienceContact(input);
+  }
 
-  return client.contact.upsert({
-    where: {
-      representativeId_telegramUserId: {
-        representativeId: input.representativeId,
-        telegramUserId: channelUserId,
+  try {
+    const audienceId = normalizeWebAudienceId(input.audienceId);
+    const channelUserId = buildWebChannelUserId(audienceId);
+    const now = input.now ?? new Date();
+    const displayName = normalizeOptionalString(input.displayName) ?? "Web visitor";
+    const username = normalizeOptionalString(input.username);
+    const identity = await resolveAnonymousAudienceIdentity({ audienceId, now }, client);
+
+    return client.contact.upsert({
+      where: {
+        representativeId_telegramUserId: {
+          representativeId: input.representativeId,
+          telegramUserId: channelUserId,
+        },
       },
-    },
-    update: {
-      lastSeenAt: now,
-      source: "web",
-      sourceChannel: "web",
-      audienceIdentityId: identity.id,
-      channelUserId,
-      ...(username ? { username } : {}),
-      ...(displayName ? { displayName } : {}),
-    },
-    create: {
-      representativeId: input.representativeId,
-      audienceIdentityId: identity.id,
-      telegramUserId: channelUserId,
-      channelUserId,
-      ...(username ? { username } : {}),
-      displayName,
-      source: "web",
-      sourceChannel: "web",
-      lastSeenAt: now,
-    },
-  });
+      update: {
+        lastSeenAt: now,
+        source: "web",
+        sourceChannel: "web",
+        audienceIdentityId: identity.id,
+        channelUserId,
+        ...(username ? { username } : {}),
+        ...(displayName ? { displayName } : {}),
+      },
+      create: {
+        representativeId: input.representativeId,
+        audienceIdentityId: identity.id,
+        telegramUserId: channelUserId,
+        channelUserId,
+        ...(username ? { username } : {}),
+        displayName,
+        source: "web",
+        sourceChannel: "web",
+        lastSeenAt: now,
+      },
+    });
+  } catch (error) {
+    if (shouldUseDemoWebAudienceErrorFallback(error, input.representativeSlug, client)) {
+      return resolveDemoWebAudienceContact(input);
+    }
+    throw error;
+  }
 }
 
 export async function resolveWebAudienceConversation(
@@ -418,37 +451,48 @@ export async function resolveWebAudienceConversation(
   },
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ): Promise<WebAudienceConversation> {
-  const audienceId = normalizeWebAudienceId(input.audienceId);
-  const threadId = buildWebConversationThreadId(audienceId);
-  const now = input.now ?? new Date();
-  const identity = await resolveAnonymousAudienceIdentity({ audienceId, now }, client);
+  if (shouldUseDemoConversationFallback(input.representativeId, client)) {
+    return resolveDemoWebAudienceConversation(input);
+  }
 
-  return client.conversation.upsert({
-    where: {
-      representativeId_telegramChatId_contactId: {
-        representativeId: input.representativeId,
-        telegramChatId: threadId,
-        contactId: input.contactId,
+  try {
+    const audienceId = normalizeWebAudienceId(input.audienceId);
+    const threadId = buildWebConversationThreadId(audienceId);
+    const now = input.now ?? new Date();
+    const identity = await resolveAnonymousAudienceIdentity({ audienceId, now }, client);
+
+    return client.conversation.upsert({
+      where: {
+        representativeId_telegramChatId_contactId: {
+          representativeId: input.representativeId,
+          telegramChatId: threadId,
+          contactId: input.contactId,
+        },
       },
-    },
-    update: {
-      lastMessageAt: now,
-      audienceIdentityId: identity.id,
-      channelThreadId: threadId,
-      sourceChannel: "web",
-    },
-    create: {
-      representativeId: input.representativeId,
-      contactId: input.contactId,
-      audienceIdentityId: identity.id,
-      telegramChatId: threadId,
-      channelThreadId: threadId,
-      channel: "PRIVATE_CHAT",
-      sourceChannel: "web",
-      state: "ACTIVE",
-      lastMessageAt: now,
-    },
-  });
+      update: {
+        lastMessageAt: now,
+        audienceIdentityId: identity.id,
+        channelThreadId: threadId,
+        sourceChannel: "web",
+      },
+      create: {
+        representativeId: input.representativeId,
+        contactId: input.contactId,
+        audienceIdentityId: identity.id,
+        telegramChatId: threadId,
+        channelThreadId: threadId,
+        channel: "PRIVATE_CHAT",
+        sourceChannel: "web",
+        state: "ACTIVE",
+        lastMessageAt: now,
+      },
+    });
+  } catch (error) {
+    if (shouldUseDemoConversationErrorFallback(error, input.representativeId, client)) {
+      return resolveDemoWebAudienceConversation(input);
+    }
+    throw error;
+  }
 }
 
 export async function persistWebConversationExchange(
@@ -462,6 +506,10 @@ export async function persistWebConversationExchange(
   },
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ): Promise<WebAudienceConversation> {
+  if (shouldUseDemoConversationPersistence(input.conversationId, client)) {
+    return persistDemoWebConversationExchange(input);
+  }
+
   const now = input.now ?? new Date();
   const run = async (tx: WebAudienceClient) => {
     await tx.conversationTurn.create({
@@ -502,6 +550,10 @@ export async function loadWebConversationRecentTurns(
   },
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ) {
+  if (shouldUseDemoConversationPersistence(input.conversationId, client)) {
+    return loadDemoWebConversationRecentTurns(input);
+  }
+
   const limit = input.limit ?? WEB_RECENT_TURN_LIMIT;
   const rows = await client.conversationTurn.findMany({
     where: {
@@ -574,4 +626,243 @@ function truncateRecentTurnText(value: string) {
   return normalized.length > WEB_RECENT_TURN_TEXT_LIMIT
     ? normalized.slice(0, WEB_RECENT_TURN_TEXT_LIMIT)
     : normalized;
+}
+
+function getDemoWebAudienceState(): DemoWebAudienceState {
+  if (!globalForWebAudience.delegateWebAudienceDemoState) {
+    globalForWebAudience.delegateWebAudienceDemoState = {
+      identities: [],
+      contacts: [],
+      conversations: [],
+      turns: [],
+    };
+  }
+
+  return globalForWebAudience.delegateWebAudienceDemoState;
+}
+
+function resolveDemoWebAudienceIdentity(
+  input: {
+    audienceId: string;
+    now: Date;
+  },
+): WebAudienceIdentity {
+  const audienceKey = buildWebAudienceKey(input.audienceId);
+  const state = getDemoWebAudienceState();
+  const existing = state.identities.find((identity) => identity.audienceKey === audienceKey);
+  if (existing) {
+    existing.lastSeenAt = input.now;
+    return existing;
+  }
+
+  const identity: WebAudienceIdentity = {
+    id: `demo-web-identity-${state.identities.length + 1}`,
+    audienceKey,
+    status: "ANONYMOUS",
+    mergedIntoId: null,
+    lastSeenAt: input.now,
+  };
+  state.identities.push(identity);
+  return identity;
+}
+
+function resolveDemoWebAudienceContact(input: {
+  representativeId: string;
+  audienceId: string;
+  displayName?: string | null | undefined;
+  username?: string | null | undefined;
+  now?: Date | undefined;
+}): WebAudienceContact {
+  const audienceId = normalizeWebAudienceId(input.audienceId);
+  const now = input.now ?? new Date();
+  const identity = resolveDemoWebAudienceIdentity({ audienceId, now });
+  const channelUserId = buildWebChannelUserId(audienceId);
+  const state = getDemoWebAudienceState();
+  const existing = state.contacts.find(
+    (contact) =>
+      contact.representativeId === input.representativeId &&
+      contact.telegramUserId === channelUserId,
+  );
+  if (existing) {
+    existing.audienceIdentityId = identity.id;
+    existing.channelUserId = channelUserId;
+    existing.displayName = normalizeOptionalString(input.displayName) ?? existing.displayName;
+    existing.username = normalizeOptionalString(input.username) ?? existing.username;
+    existing.lastSeenAt = now;
+    return existing;
+  }
+
+  const contact: WebAudienceContact = {
+    id: `demo-web-contact-${state.contacts.length + 1}`,
+    representativeId: input.representativeId,
+    audienceIdentityId: identity.id,
+    telegramUserId: channelUserId,
+    channelUserId,
+    username: normalizeOptionalString(input.username) ?? null,
+    displayName: normalizeOptionalString(input.displayName) ?? "Web visitor",
+    source: "web",
+    sourceChannel: "web",
+    lastSeenAt: now,
+  };
+  state.contacts.push(contact);
+  return contact;
+}
+
+function resolveDemoWebAudienceConversation(input: {
+  representativeId: string;
+  contactId: string;
+  audienceId: string;
+  now?: Date | undefined;
+}): WebAudienceConversation {
+  const audienceId = normalizeWebAudienceId(input.audienceId);
+  const now = input.now ?? new Date();
+  const identity = resolveDemoWebAudienceIdentity({ audienceId, now });
+  const threadId = buildWebConversationThreadId(audienceId);
+  const state = getDemoWebAudienceState();
+  const existing = state.conversations.find(
+    (conversation) =>
+      conversation.representativeId === input.representativeId &&
+      conversation.telegramChatId === threadId &&
+      conversation.contactId === input.contactId,
+  );
+  if (existing) {
+    existing.audienceIdentityId = identity.id;
+    existing.channelThreadId = threadId;
+    existing.lastMessageAt = now;
+    return existing;
+  }
+
+  const conversation: WebAudienceConversation = {
+    id: `demo-web-conversation-${state.conversations.length + 1}`,
+    representativeId: input.representativeId,
+    contactId: input.contactId,
+    audienceIdentityId: identity.id,
+    telegramChatId: threadId,
+    channelThreadId: threadId,
+    channel: "PRIVATE_CHAT",
+    sourceChannel: "web",
+    state: "ACTIVE",
+    freeRepliesUsed: 0,
+    lastMessageAt: now,
+  };
+  state.conversations.push(conversation);
+  return conversation;
+}
+
+function persistDemoWebConversationExchange(input: {
+  conversationId: string;
+  userMessage: string;
+  assistantMessage: string;
+  intent?: string | null | undefined;
+  nextStep?: string | null | undefined;
+  now?: Date | undefined;
+}): WebAudienceConversation {
+  const state = getDemoWebAudienceState();
+  const conversation = state.conversations.find((item) => item.id === input.conversationId);
+  if (!conversation) {
+    throw new Error("Demo web conversation not found.");
+  }
+
+  const now = input.now ?? new Date();
+  state.turns.push(
+    {
+      conversationId: input.conversationId,
+      direction: "inbound",
+      messageText: input.userMessage,
+      intent: null,
+      summary: null,
+      createdAt: now,
+    },
+    {
+      conversationId: input.conversationId,
+      direction: "outbound",
+      messageText: input.assistantMessage,
+      intent: input.intent ?? null,
+      summary: input.nextStep ?? null,
+      createdAt: now,
+    },
+  );
+  conversation.freeRepliesUsed += 1;
+  conversation.lastMessageAt = now;
+  return conversation;
+}
+
+function loadDemoWebConversationRecentTurns(input: {
+  conversationId: string;
+  limit?: number | undefined;
+}) {
+  const limit = input.limit ?? WEB_RECENT_TURN_LIMIT;
+  return getDemoWebAudienceState()
+    .turns.filter((turn) => turn.conversationId === input.conversationId)
+    .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+    .slice(0, limit)
+    .reverse()
+    .map((turn) => ({
+      direction: turn.direction,
+      messageText: truncateRecentTurnText(turn.messageText),
+      ...(turn.intent ? { intent: turn.intent } : {}),
+      ...(turn.summary ? { summary: truncateRecentTurnText(turn.summary) } : {}),
+    }));
+}
+
+function shouldUseDemoWebAudienceFallback(representativeSlug: string, client: WebAudienceClient) {
+  return (
+    representativeSlug === demoRepresentative.slug &&
+    !process.env.DATABASE_URL?.trim() &&
+    isDefaultWebAudienceClient(client)
+  );
+}
+
+function shouldUseDemoWebAudienceErrorFallback(
+  error: unknown,
+  representativeSlug: string,
+  _client: WebAudienceClient,
+) {
+  return (
+    representativeSlug === demoRepresentative.slug &&
+    isPrismaUnavailableError(error)
+  );
+}
+
+function shouldUseDemoConversationFallback(representativeId: string, client: WebAudienceClient) {
+  return (
+    representativeId === demoRepresentative.id &&
+    !process.env.DATABASE_URL?.trim() &&
+    isDefaultWebAudienceClient(client)
+  );
+}
+
+function shouldUseDemoConversationErrorFallback(
+  error: unknown,
+  representativeId: string,
+  _client: WebAudienceClient,
+) {
+  return (
+    representativeId === demoRepresentative.id &&
+    isPrismaUnavailableError(error)
+  );
+}
+
+function shouldUseDemoConversationPersistence(conversationId: string, client: WebAudienceClient) {
+  return (
+    getDemoWebAudienceState().conversations.some(
+      (conversation) => conversation.id === conversationId,
+    )
+  );
+}
+
+function isDefaultWebAudienceClient(client: WebAudienceClient) {
+  return client === (prisma as unknown as WebAudienceClient);
+}
+
+function isPrismaUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return (
+    error.message.includes("Can't reach database server") ||
+    error.message.includes("Environment variable not found: DATABASE_URL") ||
+    error.message.includes("P1001")
+  );
 }

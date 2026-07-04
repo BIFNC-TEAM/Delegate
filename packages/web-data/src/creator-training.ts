@@ -5,6 +5,10 @@ import {
   resolveWorkflowDispatchTarget,
   shouldDispatchWorkflowViaTemporalOutbox,
 } from "@delegate/workflows";
+import { demoRepresentative } from "@delegate/domain";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { prisma } from "./prisma";
 
@@ -279,6 +283,16 @@ type CreatorTrainingSourceClient = RepresentativeLookupClient & {
 };
 
 type CreatorTrainingSuggestionClient = RepresentativeLookupClient & {
+  creatorTrainingSource: {
+    findMany(args: {
+      where: {
+        representativeId: string;
+        status?: { not: "DISABLED" } | undefined;
+      };
+      orderBy: Array<{ updatedAt: "desc" } | { createdAt: "desc" }>;
+      take: number;
+    }): Promise<CreatorTrainingSourceRecord[]>;
+  };
   creatorFeedbackSignal: {
     findMany(args: {
       where: {
@@ -386,6 +400,14 @@ type CreatorTrainingWorkflowRecord = {
 
 type CreatorTrainingReviewClient = RepresentativeLookupClient & {
   $transaction?: <T>(callback: (client: CreatorTrainingReviewClient) => Promise<T>) => Promise<T>;
+  creatorTrainingSource: {
+    update(args: {
+      where: { id: string };
+      data: {
+        status: "ACTIVE";
+      };
+    }): Promise<CreatorTrainingSourceRecord>;
+  };
   creatorTrainingSuggestion: {
     findFirst(args: {
       where: { id: string; representativeId: string };
@@ -526,6 +548,10 @@ export async function createCreatorTrainingSource(
   },
   client: CreatorTrainingSourceClient = prisma as unknown as CreatorTrainingSourceClient,
 ): Promise<CreatorTrainingSourceSnapshot> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return createDemoCreatorTrainingSource(representativeSlug, input);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const normalized = normalizeSourceInput(input);
   const source = await client.creatorTrainingSource.create({
@@ -547,6 +573,10 @@ export async function listCreatorTrainingSources(
   representativeSlug: string,
   client: CreatorTrainingSourceClient = prisma as unknown as CreatorTrainingSourceClient,
 ): Promise<CreatorTrainingSourceSnapshot[]> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return getDemoTrainingState().sources.map(cloneTrainingSource);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const sources = await client.creatorTrainingSource.findMany({
     where: {
@@ -572,6 +602,10 @@ export async function updateCreatorTrainingSource(
   },
   client: CreatorTrainingSourceClient = prisma as unknown as CreatorTrainingSourceClient,
 ): Promise<CreatorTrainingSourceSnapshot> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return updateDemoCreatorTrainingSource(representativeSlug, sourceId, input);
+  }
+
   const source = await requireSource(representativeSlug, sourceId, client);
   const data: Parameters<CreatorTrainingSourceClient["creatorTrainingSource"]["update"]>[0]["data"] = {};
 
@@ -634,6 +668,10 @@ export async function createCreatorFeedbackSignal(
   },
   client: CreatorFeedbackSignalClient = prisma as unknown as CreatorFeedbackSignalClient,
 ): Promise<CreatorFeedbackSignalSnapshot> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return createDemoCreatorFeedbackSignal(representativeSlug, input);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const signalType = normalizeFeedbackSignalType(input.signalType);
   const scope = await resolveFeedbackScope(representative.id, input, client);
@@ -665,6 +703,13 @@ export async function listCreatorFeedbackSignals(
   } = {},
   client: CreatorFeedbackSignalClient = prisma as unknown as CreatorFeedbackSignalClient,
 ): Promise<CreatorFeedbackSignalSnapshot[]> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return getDemoTrainingState().feedbackSignals
+      .filter((signal) => !input.status || signal.status === input.status)
+      .slice(0, input.limit ?? 50)
+      .map(cloneFeedbackSignal);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const signals = await client.creatorFeedbackSignal.findMany({
     where: {
@@ -683,9 +728,14 @@ export async function buildCreatorTrainingSuggestions(
   input: {
     feedbackLimit?: number | undefined;
     unknownQuestionLimit?: number | undefined;
+    sourceLimit?: number | undefined;
   } = {},
   client: CreatorTrainingSuggestionClient = prisma as unknown as CreatorTrainingSuggestionClient,
 ): Promise<CreatorTrainingSuggestionSnapshot[]> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return buildDemoCreatorTrainingSuggestions(representativeSlug);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const feedbackSignals = await client.creatorFeedbackSignal.findMany({
     where: {
@@ -694,6 +744,16 @@ export async function buildCreatorTrainingSuggestions(
     },
     orderBy: [{ createdAt: "desc" }],
     take: input.feedbackLimit ?? 100,
+  });
+  const sources = await client.creatorTrainingSource.findMany({
+    where: {
+      representativeId: representative.id,
+      status: {
+        not: "DISABLED",
+      },
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    take: input.sourceLimit ?? 100,
   });
   const unknownTurns = await client.conversationTurn.findMany({
     where: {
@@ -712,6 +772,7 @@ export async function buildCreatorTrainingSuggestions(
     take: input.unknownQuestionLimit ?? 200,
   });
   const candidates = [
+    ...sources.flatMap((source) => buildSourceSuggestionCandidates(source)),
     ...feedbackSignals.flatMap((signal) => buildFeedbackSuggestionCandidates(signal)),
     ...buildUnknownQuestionCandidates(unknownTurns),
   ];
@@ -761,6 +822,13 @@ export async function listCreatorTrainingSuggestions(
   } = {},
   client: CreatorTrainingSuggestionClient = prisma as unknown as CreatorTrainingSuggestionClient,
 ): Promise<CreatorTrainingSuggestionSnapshot[]> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return getDemoTrainingState().suggestions
+      .filter((suggestion) => !input.status || suggestion.status === input.status)
+      .slice(0, input.limit ?? 50)
+      .map(cloneTrainingSuggestion);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const suggestions = await client.creatorTrainingSuggestion.findMany({
     where: {
@@ -823,6 +891,10 @@ export async function reviewCreatorTrainingSuggestion(
   suggestion: CreatorTrainingSuggestionSnapshot;
   version: CreatorTrainingVersionSnapshot | null;
 }> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return reviewDemoCreatorTrainingSuggestion(representativeSlug, suggestionId, input);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const now = input.now ?? new Date();
   const action = normalizeReviewAction(input.action);
@@ -885,6 +957,12 @@ export async function reviewCreatorTrainingSuggestion(
         policies: after.policies,
       },
     });
+    if (suggestion.sourceId) {
+      await tx.creatorTrainingSource.update({
+        where: { id: suggestion.sourceId },
+        data: { status: "ACTIVE" },
+      });
+    }
     const reviewed = await tx.creatorTrainingSuggestion.update({
       where: { id: suggestion.id },
       data: {
@@ -929,6 +1007,10 @@ export async function listCreatorTrainingVersions(
   } = {},
   client: CreatorTrainingVersionListClient = prisma as unknown as CreatorTrainingVersionListClient,
 ): Promise<CreatorTrainingVersionSnapshot[]> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return getDemoTrainingState().versions.slice(0, input.limit ?? 20).map(cloneTrainingVersion);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const versions = await client.creatorTrainingVersion.findMany({
     where: {
@@ -949,6 +1031,10 @@ export async function rollbackCreatorTrainingVersion(
   } = {},
   client: CreatorTrainingRollbackClient = prisma as unknown as CreatorTrainingRollbackClient,
 ): Promise<CreatorTrainingVersionSnapshot> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return rollbackDemoCreatorTrainingVersion(representativeSlug, versionId, input);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const now = input.now ?? new Date();
   const run = async (tx: CreatorTrainingRollbackClient) => {
@@ -1006,6 +1092,10 @@ export async function enqueueCreatorTrainingReviewWorkflow(
   } = {},
   client: CreatorTrainingWorkflowClient = prisma as unknown as CreatorTrainingWorkflowClient,
 ): Promise<CreatorTrainingReviewWorkflowSnapshot> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    return enqueueDemoCreatorTrainingReviewWorkflow(representativeSlug, input);
+  }
+
   const representative = await requireRepresentative(representativeSlug, client);
   const requestedAt = input.now ?? new Date();
   const dedupeKey = creatorTrainingReviewDedupeKey(representative.slug, requestedAt);
@@ -1107,6 +1197,491 @@ const creatorTrainingWorkflowSelect = {
 
 type CreatorTrainingWorkflowSelect = typeof creatorTrainingWorkflowSelect;
 
+type DemoCreatorTrainingState = {
+  sources: CreatorTrainingSourceSnapshot[];
+  feedbackSignals: CreatorFeedbackSignalSnapshot[];
+  suggestions: CreatorTrainingSuggestionSnapshot[];
+  versions: CreatorTrainingVersionSnapshot[];
+  workflow: CreatorTrainingReviewWorkflowSnapshot | null;
+};
+
+const globalForCreatorTraining = globalThis as unknown as {
+  delegateCreatorTrainingDemoState?: DemoCreatorTrainingState;
+};
+
+const DEMO_TRAINING_STATE_PATH =
+  process.env.DELEGATE_DEMO_TRAINING_STATE_PATH?.trim() ||
+  join(tmpdir(), "delegate-creator-training-demo-state.json");
+
+let demoTrainingState: DemoCreatorTrainingState | null =
+  globalForCreatorTraining.delegateCreatorTrainingDemoState ?? readDemoTrainingStateFromDisk();
+
+function getDemoTrainingState(): DemoCreatorTrainingState {
+  if (!demoTrainingState) {
+    const now = new Date().toISOString();
+    demoTrainingState = {
+      sources: [
+        {
+          id: "demo-training-source-1",
+          representativeId: demoRepresentative.slug,
+          kind: "text",
+          status: "active",
+          title: "Demo public FAQ",
+          locator: null,
+          contentText: "Refunds are available within seven days. Avoid promising guaranteed revenue.",
+          metadata: { source: "demo_fallback" },
+          lastSyncedAt: now,
+          errorReason: null,
+          createdBy: "demo",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      feedbackSignals: [
+        {
+          id: "demo-feedback-1",
+          representativeId: demoRepresentative.slug,
+          contactId: null,
+          conversationId: null,
+          turnId: null,
+          signalType: "suggested_answer",
+          status: "new",
+          publicSafe: true,
+          note: "Refund FAQ",
+          suggestedText: "Refunds are available within seven days after purchase.",
+          createdBy: "demo",
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      suggestions: [
+        {
+          id: "demo-suggestion-1",
+          representativeId: demoRepresentative.slug,
+          sourceId: null,
+          feedbackSignalId: "demo-feedback-1",
+          suggestionType: "faq_update",
+          status: "pending",
+          title: "Add refund FAQ",
+          rationale: "Demo fallback suggestion generated from public-safe creator feedback.",
+          draftPayload: {
+            kind: "faq",
+            title: "Refund FAQ",
+            summary: "Refunds are available within seven days after purchase.",
+          },
+          dedupeKey: "demo:refund-faq",
+          riskLevel: "medium",
+          reviewedAt: null,
+          reviewedBy: null,
+          reviewNote: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      versions: [],
+      workflow: null,
+    };
+    globalForCreatorTraining.delegateCreatorTrainingDemoState = demoTrainingState;
+    persistDemoTrainingState();
+  }
+
+  return demoTrainingState;
+}
+
+export function getDemoCreatorTrainingKnowledgeOverlay(
+  representativeSlug: string,
+): KnowledgePackSnapshot | null {
+  if (representativeSlug !== demoRepresentative.slug) {
+    return null;
+  }
+
+  const state = getDemoTrainingState();
+  const latestPublished = state.versions.find((version) => version.status === "published");
+  return latestPublished ? normalizeKnowledgePackSnapshot(latestPublished.snapshotAfter) : null;
+}
+
+function readDemoTrainingStateFromDisk(): DemoCreatorTrainingState | null {
+  try {
+    if (!existsSync(DEMO_TRAINING_STATE_PATH)) {
+      return null;
+    }
+    const parsed = JSON.parse(readFileSync(DEMO_TRAINING_STATE_PATH, "utf8")) as DemoCreatorTrainingState;
+    if (!parsed || !Array.isArray(parsed.sources) || !Array.isArray(parsed.suggestions)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function persistDemoTrainingState() {
+  if (!demoTrainingState) {
+    return;
+  }
+  try {
+    writeFileSync(DEMO_TRAINING_STATE_PATH, JSON.stringify(demoTrainingState, null, 2));
+  } catch {
+    // Best-effort demo fallback only; real persistence belongs to Postgres.
+  }
+}
+
+function createDemoCreatorTrainingSource(
+  representativeSlug: string,
+  input: {
+    kind: string;
+    title: string;
+    locator?: string | null | undefined;
+    contentText?: string | null | undefined;
+    metadata?: unknown;
+    createdBy?: string | null | undefined;
+  },
+): CreatorTrainingSourceSnapshot {
+  assertDemoRepresentative(representativeSlug);
+  const normalized = normalizeSourceInput(input);
+  const now = new Date().toISOString();
+  const source: CreatorTrainingSourceSnapshot = {
+    id: `demo-training-source-${getDemoTrainingState().sources.length + 1}`,
+    representativeId: demoRepresentative.slug,
+    kind: normalized.kind,
+    status: "draft",
+    title: normalized.title,
+    locator: normalized.locator ?? null,
+    contentText: normalized.contentText ?? null,
+    metadata: normalized.metadata ?? { source: "demo_fallback" },
+    lastSyncedAt: null,
+    errorReason: null,
+    createdBy: normalized.createdBy ?? "owner-dashboard",
+    createdAt: now,
+    updatedAt: now,
+  };
+  getDemoTrainingState().sources.unshift(source);
+  persistDemoTrainingState();
+  return cloneTrainingSource(source);
+}
+
+function updateDemoCreatorTrainingSource(
+  representativeSlug: string,
+  sourceId: string,
+  input: {
+    kind?: string | undefined;
+    status?: string | undefined;
+    title?: string | undefined;
+    locator?: string | null | undefined;
+    contentText?: string | null | undefined;
+    metadata?: unknown;
+    errorReason?: string | null | undefined;
+  },
+): CreatorTrainingSourceSnapshot {
+  assertDemoRepresentative(representativeSlug);
+  const source = getDemoTrainingState().sources.find((item) => item.id === sourceId);
+  if (!source) {
+    throw new Error("Creator training source not found.");
+  }
+
+  if (input.kind !== undefined) {
+    source.kind = normalizeSourceKind(input.kind);
+  }
+  if (input.status !== undefined) {
+    source.status = normalizeSourceStatus(input.status);
+  }
+  if (input.title !== undefined) {
+    source.title = normalizeRequiredText(input.title, "title");
+  }
+  if (input.locator !== undefined) {
+    source.locator = normalizeNullableText(input.locator);
+  }
+  if (input.contentText !== undefined) {
+    source.contentText = normalizeNullableText(input.contentText);
+  }
+  if (input.metadata !== undefined) {
+    source.metadata = input.metadata;
+  }
+  if (input.errorReason !== undefined) {
+    source.errorReason = normalizeNullableText(input.errorReason);
+  }
+  source.updatedAt = new Date().toISOString();
+  persistDemoTrainingState();
+
+  return cloneTrainingSource(source);
+}
+
+function createDemoCreatorFeedbackSignal(
+  representativeSlug: string,
+  input: {
+    signalType: string;
+    contactId?: string | null | undefined;
+    conversationId?: string | null | undefined;
+    turnId?: string | null | undefined;
+    publicSafe?: boolean | undefined;
+    note?: string | null | undefined;
+    suggestedText?: string | null | undefined;
+    createdBy?: string | null | undefined;
+  },
+): CreatorFeedbackSignalSnapshot {
+  assertDemoRepresentative(representativeSlug);
+  const now = new Date().toISOString();
+  const signal: CreatorFeedbackSignalSnapshot = {
+    id: `demo-feedback-${getDemoTrainingState().feedbackSignals.length + 1}`,
+    representativeId: demoRepresentative.slug,
+    contactId: normalizeNullableText(input.contactId),
+    conversationId: normalizeNullableText(input.conversationId),
+    turnId: normalizeNullableText(input.turnId),
+    signalType: normalizeFeedbackSignalType(input.signalType),
+    status: "new",
+    publicSafe: Boolean(input.publicSafe),
+    note: normalizeNullableText(input.note),
+    suggestedText: normalizeNullableText(input.suggestedText),
+    createdBy: normalizeNullableText(input.createdBy) ?? "owner-dashboard",
+    createdAt: now,
+    updatedAt: now,
+  };
+  getDemoTrainingState().feedbackSignals.unshift(signal);
+  persistDemoTrainingState();
+  return cloneFeedbackSignal(signal);
+}
+
+function buildDemoCreatorTrainingSuggestions(
+  representativeSlug: string,
+): CreatorTrainingSuggestionSnapshot[] {
+  assertDemoRepresentative(representativeSlug);
+  const state = getDemoTrainingState();
+  const now = new Date().toISOString();
+  for (const source of state.sources) {
+    const sourceRecord = demoSourceSnapshotToRecord(source);
+    for (const candidate of buildSourceSuggestionCandidates(sourceRecord)) {
+      if (state.suggestions.some((suggestion) => suggestion.dedupeKey === candidate.dedupeKey)) {
+        continue;
+      }
+      state.suggestions.unshift({
+        id: `demo-suggestion-${state.suggestions.length + 1}`,
+        representativeId: demoRepresentative.slug,
+        sourceId: candidate.sourceId ?? null,
+        feedbackSignalId: candidate.feedbackSignalId ?? null,
+        suggestionType: candidate.suggestionType,
+        status: "pending",
+        title: candidate.title,
+        rationale: candidate.rationale,
+        draftPayload: candidate.draftPayload,
+        dedupeKey: candidate.dedupeKey,
+        riskLevel: candidate.riskLevel,
+        reviewedAt: null,
+        reviewedBy: null,
+        reviewNote: null,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+  }
+
+  persistDemoTrainingState();
+  return state.suggestions.map(cloneTrainingSuggestion);
+}
+
+function reviewDemoCreatorTrainingSuggestion(
+  representativeSlug: string,
+  suggestionId: string,
+  input: {
+    action: CreatorTrainingReviewAction;
+    reviewedBy?: string | null | undefined;
+    reviewNote?: string | null | undefined;
+    editedDraftPayload?: unknown;
+    evaluationReport?: unknown;
+    now?: Date | undefined;
+  },
+): {
+  suggestion: CreatorTrainingSuggestionSnapshot;
+  version: CreatorTrainingVersionSnapshot | null;
+} {
+  assertDemoRepresentative(representativeSlug);
+  const state = getDemoTrainingState();
+  const suggestion = state.suggestions.find((item) => item.id === suggestionId);
+  if (!suggestion) {
+    throw new Error("Creator training suggestion not found.");
+  }
+
+  const now = (input.now ?? new Date()).toISOString();
+  const action = normalizeReviewAction(input.action);
+  suggestion.reviewedAt = now;
+  suggestion.reviewedBy = normalizeNullableText(input.reviewedBy);
+  suggestion.reviewNote = normalizeNullableText(input.reviewNote);
+  suggestion.updatedAt = now;
+
+  if (action === "reject" || action === "private") {
+    suggestion.status = action === "reject" ? "rejected" : "private";
+    persistDemoTrainingState();
+    return {
+      suggestion: cloneTrainingSuggestion(suggestion),
+      version: null,
+    };
+  }
+
+  if (input.editedDraftPayload !== undefined) {
+    suggestion.draftPayload = input.editedDraftPayload;
+  }
+  const evaluationReport =
+    input.evaluationReport ?? evaluateCreatorTrainingDraftPayload(suggestion.draftPayload);
+  if (!isEvaluationReportPassing(evaluationReport)) {
+    throw new Error("Creator training evaluation failed.");
+  }
+
+  suggestion.status = "published";
+  const source = suggestion.sourceId
+    ? state.sources.find((item) => item.id === suggestion.sourceId)
+    : null;
+  if (source) {
+    source.status = "active";
+    source.updatedAt = now;
+  }
+  const before = loadDemoKnowledgePackSnapshot(state);
+  const after = applySuggestionToKnowledgePack(before, {
+    ...suggestion,
+    suggestionType: mapSuggestionTypeToDb(suggestion.suggestionType),
+  });
+  const version: CreatorTrainingVersionSnapshot = {
+    id: `demo-version-${state.versions.length + 1}`,
+    representativeId: demoRepresentative.slug,
+    suggestionId: suggestion.id,
+    status: "published",
+    title: suggestion.title,
+    snapshotBefore: before,
+    snapshotAfter: after,
+    evaluationReport,
+    publishedBy: normalizeNullableText(input.reviewedBy),
+    publishedAt: now,
+    rolledBackAt: null,
+    createdAt: now,
+  };
+  state.versions.unshift(version);
+  persistDemoTrainingState();
+
+  return {
+    suggestion: cloneTrainingSuggestion(suggestion),
+    version: cloneTrainingVersion(version),
+  };
+}
+
+function loadDemoKnowledgePackSnapshot(state: DemoCreatorTrainingState): KnowledgePackSnapshot {
+  const latestPublished = state.versions.find((version) => version.status === "published");
+  if (latestPublished) {
+    return normalizeKnowledgePackSnapshot(latestPublished.snapshotAfter);
+  }
+
+  return {
+    identitySummary: demoRepresentative.tagline,
+    faq: [],
+    materials: [],
+    policies: [],
+  };
+}
+
+function rollbackDemoCreatorTrainingVersion(
+  representativeSlug: string,
+  versionId: string,
+  input: {
+    now?: Date | undefined;
+  },
+): CreatorTrainingVersionSnapshot {
+  assertDemoRepresentative(representativeSlug);
+  const version = getDemoTrainingState().versions.find((item) => item.id === versionId);
+  if (!version) {
+    throw new Error("Creator training version not found.");
+  }
+  if (version.status !== "rolled_back") {
+    version.status = "rolled_back";
+    version.rolledBackAt = (input.now ?? new Date()).toISOString();
+    persistDemoTrainingState();
+  }
+  return cloneTrainingVersion(version);
+}
+
+function enqueueDemoCreatorTrainingReviewWorkflow(
+  representativeSlug: string,
+  input: {
+    now?: Date | undefined;
+  },
+): CreatorTrainingReviewWorkflowSnapshot {
+  assertDemoRepresentative(representativeSlug);
+  const state = getDemoTrainingState();
+  const now = input.now ?? new Date();
+  const workflow: CreatorTrainingReviewWorkflowSnapshot = {
+    id: "demo-training-workflow-1",
+    workflowKind: "creator_training_review",
+    engine: "local_runner",
+    status: "completed",
+    dedupeKey: creatorTrainingReviewDedupeKey(demoRepresentative.slug, now),
+    queueName: "local:demo-training",
+    externalWorkflowId: null,
+    scheduledAt: now.toISOString(),
+    nextWakeAt: null,
+    createdAt: now.toISOString(),
+  };
+  state.workflow = workflow;
+  buildDemoCreatorTrainingSuggestions(representativeSlug);
+  persistDemoTrainingState();
+  return { ...workflow };
+}
+
+function assertDemoRepresentative(representativeSlug: string) {
+  if (representativeSlug !== demoRepresentative.slug) {
+    throw new Error("Representative not found.");
+  }
+}
+
+function cloneTrainingSource(source: CreatorTrainingSourceSnapshot): CreatorTrainingSourceSnapshot {
+  return {
+    ...source,
+    metadata: cloneJsonLike(source.metadata),
+  };
+}
+
+function demoSourceSnapshotToRecord(source: CreatorTrainingSourceSnapshot): CreatorTrainingSourceRecord {
+  return {
+    id: source.id,
+    representativeId: source.representativeId,
+    kind: mapSourceKindToDb(source.kind),
+    status: mapSourceStatusToDb(source.status),
+    title: source.title,
+    locator: source.locator,
+    contentText: source.contentText,
+    metadata: source.metadata,
+    lastSyncedAt: source.lastSyncedAt ? new Date(source.lastSyncedAt) : null,
+    errorReason: source.errorReason,
+    createdBy: source.createdBy,
+    createdAt: new Date(source.createdAt),
+    updatedAt: new Date(source.updatedAt),
+  };
+}
+
+function cloneFeedbackSignal(signal: CreatorFeedbackSignalSnapshot): CreatorFeedbackSignalSnapshot {
+  return { ...signal };
+}
+
+function cloneTrainingSuggestion(
+  suggestion: CreatorTrainingSuggestionSnapshot,
+): CreatorTrainingSuggestionSnapshot {
+  return {
+    ...suggestion,
+    draftPayload: cloneJsonLike(suggestion.draftPayload),
+  };
+}
+
+function cloneTrainingVersion(version: CreatorTrainingVersionSnapshot): CreatorTrainingVersionSnapshot {
+  return {
+    ...version,
+    snapshotBefore: cloneJsonLike(version.snapshotBefore),
+    snapshotAfter: cloneJsonLike(version.snapshotAfter),
+    evaluationReport: cloneJsonLike(version.evaluationReport),
+  };
+}
+
+function cloneJsonLike(value: unknown): unknown {
+  if (value === undefined) {
+    return undefined;
+  }
+  return JSON.parse(JSON.stringify(value)) as unknown;
+}
+
 type SuggestionCandidate = {
   sourceId?: string | null;
   feedbackSignalId?: string | null;
@@ -1117,6 +1692,43 @@ type SuggestionCandidate = {
   dedupeKey: string;
   riskLevel: string;
 };
+
+function buildSourceSuggestionCandidates(
+  source: CreatorTrainingSourceRecord,
+): SuggestionCandidate[] {
+  const title = source.title.trim();
+  const contentText = source.contentText?.trim();
+  const locator = source.locator?.trim();
+  const summary = truncateTrainingText(contentText || locator || "");
+  if (!title || !summary) {
+    return [];
+  }
+
+  const sourceKind = mapSourceKindFromDb(source.kind);
+  const documentKind =
+    sourceKind === "website" || sourceKind === "url" || sourceKind === "notion"
+      ? "deck"
+      : "download";
+
+  return [
+    {
+      sourceId: source.id,
+      suggestionType: "material_update",
+      title: `Publish source: ${title}`,
+      rationale: "Creator added a public training source that can improve future answers after review.",
+      draftPayload: {
+        kind: documentKind,
+        title,
+        summary,
+        sourceTrainingSourceId: source.id,
+        sourceKind,
+        ...(locator ? { url: locator } : {}),
+      },
+      dedupeKey: `source:${source.id}:material_update`,
+      riskLevel: sourceKind === "pdf" || sourceKind === "drive" ? "medium" : "low",
+    },
+  ];
+}
 
 function buildFeedbackSuggestionCandidates(
   signal: CreatorFeedbackSignalRecord,
@@ -1703,6 +2315,10 @@ function containsGuaranteedOutcomeClaim(value: string): boolean {
     "稳赚",
     "包赚",
   ].some((pattern) => value.includes(pattern));
+}
+
+function shouldUseStaticFallbackMode(representativeSlug: string): boolean {
+  return representativeSlug === demoRepresentative.slug && !process.env.DATABASE_URL?.trim();
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

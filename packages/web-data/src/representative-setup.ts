@@ -39,6 +39,7 @@ import { z } from "zod";
 
 import { prisma } from "./prisma";
 import { maybeSyncRepresentativeOpenVikingResources } from "./openviking";
+import { getDemoCreatorTrainingKnowledgeOverlay } from "./creator-training";
 
 const representativeSetupInclude = {
   owner: true,
@@ -394,7 +395,10 @@ export async function getRepresentativeSetupSnapshot(
   representativeSlug: string,
 ): Promise<RepresentativeSetupSnapshot | null> {
   if (shouldUseStaticFallbackMode(representativeSlug)) {
-    return cloneRepresentativeSetupSnapshot(getOrCreateDemoFallbackSetupSnapshot());
+    return applyDemoTrainingOverlay(
+      cloneRepresentativeSetupSnapshot(getOrCreateDemoFallbackSetupSnapshot()),
+      representativeSlug,
+    );
   }
 
   try {
@@ -410,7 +414,10 @@ export async function getRepresentativeSetupSnapshot(
     return serializeRepresentativeSetup(representative);
   } catch (error) {
     if (shouldUseDemoFallback(error, representativeSlug)) {
-      return cloneRepresentativeSetupSnapshot(getOrCreateDemoFallbackSetupSnapshot());
+      return applyDemoTrainingOverlay(
+        cloneRepresentativeSetupSnapshot(getOrCreateDemoFallbackSetupSnapshot()),
+        representativeSlug,
+      );
     }
 
     throw error;
@@ -685,6 +692,81 @@ function cloneRepresentativeSetupSnapshot(
     actionGate: { ...snapshot.actionGate },
     compute: { ...snapshot.compute },
   };
+}
+
+function applyDemoTrainingOverlay(
+  snapshot: RepresentativeSetupSnapshot,
+  representativeSlug: string,
+): RepresentativeSetupSnapshot {
+  const overlay = getDemoCreatorTrainingKnowledgeOverlay(representativeSlug);
+  if (!overlay) {
+    return snapshot;
+  }
+
+  return {
+    ...snapshot,
+    knowledgePack: {
+      identitySummary: overlay.identitySummary || snapshot.knowledgePack.identitySummary,
+      faq: normalizeOverlayKnowledgeDocuments(overlay.faq, "faq"),
+      materials: normalizeOverlayKnowledgeDocuments(overlay.materials, "download"),
+      policies: normalizeOverlayKnowledgeDocuments(overlay.policies, "policy"),
+    },
+  };
+}
+
+function normalizeOverlayKnowledgeDocuments(
+  value: unknown[],
+  fallbackKind: KnowledgeDocument["kind"],
+): KnowledgeDocument[] {
+  const documents: KnowledgeDocument[] = [];
+
+  value.forEach((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return;
+    }
+    const record = item as Record<string, unknown>;
+    const title =
+      typeof record.title === "string" && record.title.trim()
+        ? record.title.trim()
+        : `Training item ${index + 1}`;
+    const summary =
+      typeof record.summary === "string" && record.summary.trim() ? record.summary.trim() : title;
+    const id =
+      typeof record.id === "string" && record.id.trim()
+        ? record.id.trim()
+        : `training_overlay_${index + 1}`;
+    const kind = normalizeKnowledgeKind(record.kind, fallbackKind);
+    const url = typeof record.url === "string" && record.url.trim() ? record.url.trim() : undefined;
+
+    documents.push({
+      id,
+      title,
+      kind,
+      summary,
+      ...(url ? { url } : {}),
+    });
+  });
+
+  return documents;
+}
+
+function normalizeKnowledgeKind(
+  value: unknown,
+  fallbackKind: KnowledgeDocument["kind"],
+): KnowledgeDocument["kind"] {
+  if (
+    value === "bio" ||
+    value === "faq" ||
+    value === "policy" ||
+    value === "pricing" ||
+    value === "case_study" ||
+    value === "deck" ||
+    value === "calendar" ||
+    value === "download"
+  ) {
+    return value;
+  }
+  return fallbackKind;
 }
 
 function normalizeKnowledgeDocuments(

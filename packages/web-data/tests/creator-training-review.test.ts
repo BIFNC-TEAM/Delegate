@@ -95,6 +95,44 @@ describe("creator training review and publish", () => {
     ]);
   });
 
+  it("publishes uploaded material suggestions into KnowledgePack materials", async () => {
+    const client = new FakeCreatorTrainingReviewClient();
+    client.sources.push(buildSource());
+    client.suggestions.push(
+      buildSuggestion({
+        sourceId: "source-1",
+        suggestionType: "MATERIAL_UPDATE",
+        title: "Workshop upload",
+        draftPayload: {
+          kind: "download",
+          title: "Workshop upload",
+          summary: "The workshop refund window is seven days.",
+        },
+      }),
+    );
+
+    const result = await reviewCreatorTrainingSuggestion(
+      "lin",
+      "suggestion-1",
+      {
+        action: "approve",
+        reviewedBy: "owner-1",
+      },
+      client,
+    );
+
+    expect(result.suggestion.status).toBe("published");
+    expect(client.sources[0]?.status).toBe("ACTIVE");
+    expect(client.knowledgePackRow?.materials).toEqual([
+      expect.objectContaining({
+        id: "training_suggestion-1",
+        title: "Workshop upload",
+        kind: "download",
+        summary: "The workshop refund window is seven days.",
+      }),
+    ]);
+  });
+
   it("fails evaluation for guaranteed outcome claims", () => {
     expect(
       evaluateCreatorTrainingDraftPayload({
@@ -198,6 +236,22 @@ type SuggestionRow = {
   updatedAt: Date;
 };
 
+type SourceRow = {
+  id: string;
+  representativeId: string;
+  kind: string;
+  status: string;
+  title: string;
+  locator: string | null;
+  contentText: string | null;
+  metadata: unknown;
+  lastSyncedAt: Date | null;
+  errorReason: string | null;
+  createdBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 type KnowledgePackRow = {
   representativeId: string;
   identitySummary: string;
@@ -223,6 +277,7 @@ type VersionRow = {
 
 class FakeCreatorTrainingReviewClient {
   representatives = [{ id: "rep-1", slug: "lin" }];
+  sources: SourceRow[] = [];
   suggestions: SuggestionRow[] = [];
   knowledgePackRow: KnowledgePackRow | null = {
     representativeId: "rep-1",
@@ -238,6 +293,17 @@ class FakeCreatorTrainingReviewClient {
   representative = {
     findUnique: async (args: any) =>
       this.representatives.find((rep) => rep.slug === args.where.slug) ?? null,
+  };
+
+  creatorTrainingSource = {
+    update: async (args: any) => {
+      const source = this.sources.find((item) => item.id === args.where.id);
+      if (!source) {
+        throw new Error("source not found");
+      }
+      Object.assign(source, args.data, { updatedAt: new Date("2026-07-04T12:30:00.000Z") });
+      return source;
+    },
   };
 
   creatorTrainingSuggestion = {
@@ -306,6 +372,25 @@ class FakeCreatorTrainingReviewClient {
       Object.assign(version, args.data);
       return version;
     },
+  };
+}
+
+function buildSource(overrides: Partial<SourceRow> = {}): SourceRow {
+  return {
+    id: "source-1",
+    representativeId: "rep-1",
+    kind: "TEXT",
+    status: "DRAFT",
+    title: "Workshop upload",
+    locator: "upload:workshop.txt",
+    contentText: "The workshop refund window is seven days.",
+    metadata: null,
+    lastSyncedAt: null,
+    errorReason: null,
+    createdBy: "owner-1",
+    createdAt: new Date("2026-07-04T12:00:00.000Z"),
+    updatedAt: new Date("2026-07-04T12:00:00.000Z"),
+    ...overrides,
   };
 }
 

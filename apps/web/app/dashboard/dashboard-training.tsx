@@ -76,6 +76,8 @@ export function DashboardTraining({
   const [sourceKind, setSourceKind] = useState<TrainingSource["kind"]>("url");
   const [sourceLocator, setSourceLocator] = useState("");
   const [sourceText, setSourceText] = useState("");
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [fileInputResetKey, setFileInputResetKey] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -94,31 +96,35 @@ export function DashboardTraining({
     setError(null);
     startTransition(() => {
       void (async () => {
-        const body: Record<string, unknown> = {
-          kind: sourceKind,
-          title: sourceTitle,
-        };
-        if (sourceLocator.trim()) {
-          body.locator = sourceLocator.trim();
-        }
-        if (sourceText.trim()) {
-          body.contentText = sourceText.trim();
-        }
+        const uploads = selectedFiles.length
+          ? await Promise.all(selectedFiles.map((file) => buildFileSourcePayload(file, sourceTitle)))
+          : [
+              buildManualSourcePayload({
+                kind: sourceKind,
+                title: sourceTitle,
+                locator: sourceLocator,
+                contentText: sourceText,
+              }),
+            ];
 
-        const response = await fetch(`/api/dashboard/representatives/${representativeSlug}/training/sources`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!response.ok) {
-          throw new Error(await extractError(response));
+        for (const body of uploads) {
+          const response = await fetch(`/api/dashboard/representatives/${representativeSlug}/training/sources`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!response.ok) {
+            throw new Error(await extractError(response));
+          }
         }
 
         setSourceTitle("");
         setSourceLocator("");
         setSourceText("");
+        setSelectedFiles([]);
+        setFileInputResetKey((value) => value + 1);
         await refreshTraining(representativeSlug, setSnapshot, setError);
-        setMessage(t.sourceCreated);
+        setMessage(selectedFiles.length ? t.filesCreated(selectedFiles.length) : t.sourceCreated);
       })()
         .catch((nextError: unknown) => {
           setError(nextError instanceof Error ? nextError.message : t.sourceError);
@@ -328,9 +334,23 @@ export function DashboardTraining({
                 value={sourceText}
               />
             </label>
+            <label className="field-stack">
+              <span>{t.sourceFileLabel}</span>
+              <input
+                className="text-input"
+                key={fileInputResetKey}
+                multiple
+                onChange={(event) => setSelectedFiles(Array.from(event.currentTarget.files ?? []))}
+                type="file"
+                accept=".txt,.md,.markdown,.csv,.json,.html,.htm,.pdf,text/plain,text/markdown,text/csv,application/json,text/html,application/pdf"
+              />
+              <span className="footer-note">
+                {selectedFiles.length ? t.selectedFiles(selectedFiles.map((file) => file.name).join(", ")) : t.sourceFileHint}
+              </span>
+            </label>
             <button
               className="button-secondary"
-              disabled={isPending || busyKey === "source:create" || !sourceTitle.trim()}
+              disabled={isPending || busyKey === "source:create" || (!sourceTitle.trim() && selectedFiles.length === 0)}
               type="submit"
             >
               {busyKey === "source:create" ? t.creatingSource : t.createSource}
@@ -493,6 +513,70 @@ function formatPayload(value: unknown) {
   return JSON.stringify(value, null, 2);
 }
 
+function buildManualSourcePayload(input: {
+  kind: TrainingSource["kind"];
+  title: string;
+  locator: string;
+  contentText: string;
+}): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    kind: input.kind,
+    title: input.title,
+  };
+  if (input.locator.trim()) {
+    body.locator = input.locator.trim();
+  }
+  if (input.contentText.trim()) {
+    body.contentText = input.contentText.trim();
+  }
+  return body;
+}
+
+async function buildFileSourcePayload(file: File, titlePrefix: string): Promise<Record<string, unknown>> {
+  const rawText = await file.text();
+  const extension = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const kind = detectFileSourceKind(extension);
+  const title = titlePrefix.trim() ? `${titlePrefix.trim()} - ${file.name}` : file.name;
+  const text = normalizeFileText(rawText, file.name, file.type);
+
+  return {
+    kind,
+    title,
+    locator: `upload:${file.name}`,
+    contentText: text,
+    metadata: {
+      fileName: file.name,
+      mimeType: file.type || "application/octet-stream",
+      sizeBytes: file.size,
+      extension,
+      extractedBy: "browser_file_text",
+      truncated: rawText.length > MAX_FILE_TEXT_LENGTH,
+    },
+  };
+}
+
+function detectFileSourceKind(extension: string): TrainingSource["kind"] {
+  if (extension === "pdf") {
+    return "pdf";
+  }
+  if (extension === "html" || extension === "htm") {
+    return "website";
+  }
+  return "text";
+}
+
+const MAX_FILE_TEXT_LENGTH = 24_000;
+
+function normalizeFileText(value: string, fileName: string, mimeType: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  const body = normalized.length > MAX_FILE_TEXT_LENGTH
+    ? normalized.slice(0, MAX_FILE_TEXT_LENGTH)
+    : normalized;
+  return [`Uploaded file: ${fileName}`, mimeType ? `MIME type: ${mimeType}` : null, body]
+    .filter(Boolean)
+    .join("\n");
+}
+
 const copy = {
   zh: {
     loadingTitle: "正在加载养成驾驶舱",
@@ -524,9 +608,13 @@ const copy = {
     sourceLocatorPlaceholder: "https://...",
     sourceTextLabel: "文本内容",
     sourceTextPlaceholder: "可直接粘贴一段公开资料",
+    sourceFileLabel: "上传资料文件",
+    sourceFileHint: "支持 txt、md、csv、json、html；PDF 会登记并尽力读取可见文本，复杂 PDF 仍建议粘贴摘要。",
+    selectedFiles: (value: string) => `已选择：${value}`,
     createSource: "新增资料源",
     creatingSource: "正在新增...",
     sourceCreated: "资料源已创建。",
+    filesCreated: (count: number) => `${count} 个资料文件已创建。`,
     sourceError: "创建资料源失败。",
     buildSuggestions: "生成训练建议",
     building: "正在生成...",
@@ -586,9 +674,13 @@ const copy = {
     sourceLocatorPlaceholder: "https://...",
     sourceTextLabel: "Text content",
     sourceTextPlaceholder: "Paste public material directly",
+    sourceFileLabel: "Upload training files",
+    sourceFileHint: "Supports txt, md, csv, json, html; PDF is registered and best-effort text is read, but complex PDFs still need a pasted summary.",
+    selectedFiles: (value: string) => `Selected: ${value}`,
     createSource: "Add source",
     creatingSource: "Adding...",
     sourceCreated: "Source created.",
+    filesCreated: (count: number) => `${count} training files created.`,
     sourceError: "Failed to create source.",
     buildSuggestions: "Build suggestions",
     building: "Building...",

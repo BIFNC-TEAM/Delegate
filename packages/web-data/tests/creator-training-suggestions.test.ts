@@ -69,6 +69,33 @@ describe("creator training suggestion engine", () => {
     expect(listed).toHaveLength(1);
   });
 
+  it("builds publishable material suggestions from uploaded sources", async () => {
+    const client = new FakeCreatorTrainingSuggestionClient();
+    client.sources.push(
+      buildSource({
+        id: "source-upload-1",
+        title: "Workshop FAQ upload",
+        locator: "upload:workshop.md",
+        contentText: "The workshop refund window is seven days.",
+      }),
+    );
+
+    const suggestions = await buildCreatorTrainingSuggestions("lin", {}, client);
+
+    expect(suggestions).toEqual([
+      expect.objectContaining({
+        sourceId: "source-upload-1",
+        suggestionType: "material_update",
+        dedupeKey: "source:source-upload-1:material_update",
+        draftPayload: expect.objectContaining({
+          kind: "download",
+          title: "Workshop FAQ upload",
+          summary: "The workshop refund window is seven days.",
+        }),
+      }),
+    ]);
+  });
+
   it("keeps suggestions isolated per representative", async () => {
     const client = new FakeCreatorTrainingSuggestionClient();
     client.feedbackSignals.push(
@@ -116,6 +143,22 @@ type UnknownTurnRow = {
   representativeId: string;
 };
 
+type SourceRow = {
+  id: string;
+  representativeId: string;
+  kind: string;
+  status: string;
+  title: string;
+  locator: string | null;
+  contentText: string | null;
+  metadata: unknown;
+  lastSyncedAt: Date | null;
+  errorReason: string | null;
+  createdBy: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
 type SuggestionRow = {
   id: string;
   representativeId: string;
@@ -140,6 +183,7 @@ class FakeCreatorTrainingSuggestionClient {
     { id: "rep-1", slug: "lin" },
     { id: "rep-2", slug: "ada" },
   ];
+  sources: SourceRow[] = [];
   feedbackSignals: FeedbackRow[] = [];
   unknownTurns: UnknownTurnRow[] = [];
   suggestions: SuggestionRow[] = [];
@@ -147,6 +191,17 @@ class FakeCreatorTrainingSuggestionClient {
   representative = {
     findUnique: async (args: any) =>
       this.representatives.find((rep) => rep.slug === args.where.slug) ?? null,
+  };
+
+  creatorTrainingSource = {
+    findMany: async (args: any) =>
+      this.sources
+        .filter(
+          (source) =>
+            source.representativeId === args.where.representativeId &&
+            (!args.where.status?.not || source.status !== args.where.status.not),
+        )
+        .slice(0, args.take),
   };
 
   creatorFeedbackSignal = {
@@ -230,6 +285,25 @@ function buildFeedback(overrides: Partial<FeedbackRow> = {}): FeedbackRow {
     note: null,
     suggestedText: null,
     createdBy: null,
+    createdAt: new Date("2026-07-04T12:00:00.000Z"),
+    updatedAt: new Date("2026-07-04T12:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+function buildSource(overrides: Partial<SourceRow> = {}): SourceRow {
+  return {
+    id: "source-1",
+    representativeId: "rep-1",
+    kind: "TEXT",
+    status: "ACTIVE",
+    title: "Training source",
+    locator: null,
+    contentText: "Training source content.",
+    metadata: null,
+    lastSyncedAt: null,
+    errorReason: null,
+    createdBy: "owner-dashboard",
     createdAt: new Date("2026-07-04T12:00:00.000Z"),
     updatedAt: new Date("2026-07-04T12:00:00.000Z"),
     ...overrides,

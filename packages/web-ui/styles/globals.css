@@ -2518,3 +2518,13 @@ button.skill-row:hover {
     animation: none;
   }
 }
+
+.marketing-shell .marketing-section-shell,
+.marketing-shell .marketing-story-shell,
+.marketing-shell .marketing-band,
+.marketing-shell .marketing-beat-card,
+.marketing-shell .marketing-cta {
+  animation: none !important;
+  filter: none !important;
+  opacity: 1 !important;
+}

@@ -2060,6 +2060,50 @@ button.skill-row:hover {
   letter-spacing: 0.18em;
 }
 
+.representative-material-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.representative-material-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  cursor: pointer;
+  border: 0;
+  background: rgba(26, 23, 20, 0.34);
+  backdrop-filter: blur(14px);
+}
+
+.representative-material-modal-card {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 18px;
+  width: min(620px, 100%);
+  max-height: min(680px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid rgba(25, 23, 23, 0.12);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(197, 91, 45, 0.1), transparent 34%),
+    rgba(255, 252, 247, 0.98);
+  box-shadow: 0 30px 80px rgba(25, 23, 23, 0.22);
+}
+
+.representative-material-preview-body {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid rgba(25, 23, 23, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
 .representative-chat-tier-grid {
   display: grid;
   gap: 12px;

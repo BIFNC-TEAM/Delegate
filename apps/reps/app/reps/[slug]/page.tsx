@@ -22,6 +22,8 @@ import {
 } from "@delegate/web-ui";
 
 import { RepresentativeChatPanel } from "./representative-chat-panel";
+import { getUsablePublicUrl } from "./public-materials";
+import { RepresentativeMaterialPreview } from "./representative-material-preview";
 import { RepresentativeRechargePanel } from "./representative-recharge-panel";
 
 type RepresentativeSkill = Representative["skills"][number];
@@ -407,20 +409,20 @@ export default async function RepresentativePage({
           <DashboardSurface eyebrow={t.materialsEyebrow} title={t.materialsTitle}>
             <ul className="list">
               {representative.knowledgePack.materials.map((item) => {
-                const materialUrl = getUsablePublicUrl(item.url);
+                const downloadUrl = getUsablePublicUrl(item.url);
                 return (
                   <li className="list-item" key={item.id}>
                     <strong>{item.title}</strong>
                     <p>{item.summary}</p>
-                    {materialUrl ? (
-                      <div className="button-row">
-                        <a className="button-secondary" href={materialUrl} rel="noreferrer" target="_blank">
-                          {t.openMaterial}
-                        </a>
-                      </div>
-                    ) : (
-                      <p className="footer-note">{t.materialPending}</p>
-                    )}
+                    <div className="button-row">
+                      <RepresentativeMaterialPreview
+                        copy={t.materialPreview}
+                        downloadUrl={downloadUrl}
+                        kind={item.kind}
+                        summary={item.summary}
+                        title={item.title}
+                      />
+                    </div>
                   </li>
                 );
               })}
@@ -622,22 +624,6 @@ function buildDeliverableSourceLabels(locale: Locale) {
       };
 }
 
-function getUsablePublicUrl(value: string | null | undefined): string | null {
-  if (!value) {
-    return null;
-  }
-
-  try {
-    const url = new URL(value);
-    if (url.hostname === "example.com" || url.hostname.endsWith(".example.com")) {
-      return null;
-    }
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
 const copy = {
   zh: {
     brandTagline: "Web-first 公开代表档案",
@@ -754,6 +740,13 @@ const copy = {
     materialsEyebrow: "Materials",
     materialsTitle: "可直接投递的公开材料",
     openMaterial: "打开资料",
+    materialPreview: {
+      close: "关闭",
+      download: "下载原文",
+      noDownload: "暂无公开下载",
+      open: "打开资料",
+      summaryLabel: "公开摘要",
+    },
     downloadDeliverable: "下载交付件",
     materialPending: "资料已登记，但还没有可公开打开的文件链接。",
     materialPendingChip: "资料待发布",
@@ -894,6 +887,13 @@ const copy = {
     materialsEyebrow: "Materials",
     materialsTitle: "Public materials that can be delivered directly",
     openMaterial: "Open material",
+    materialPreview: {
+      close: "Close",
+      download: "Download original",
+      noDownload: "No public download yet",
+      open: "Open material",
+      summaryLabel: "Public summary",
+    },
     downloadDeliverable: "Download deliverable",
     materialPending: "This material is registered, but there is no public file link yet.",
     materialPendingChip: "Pending public file",

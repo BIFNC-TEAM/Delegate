@@ -143,6 +143,7 @@ export function DashboardOpenViking({
   return (
     <DashboardPanelFrame
       eyebrow={t.panelEyebrow}
+      id="memory"
       summary={t.panelSummary}
       title={t.panelTitle}
     >

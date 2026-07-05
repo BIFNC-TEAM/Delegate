@@ -2,6 +2,7 @@ import Link from "next/link";
 import { headers } from "next/headers";
 import { demoRepresentative } from "@delegate/domain";
 import {
+  HashScrollRestorer,
   LanguageSwitcher,
   buildLocalizedHref,
   extractCountryHint,
@@ -63,6 +64,7 @@ export default async function DashboardPage({
 
   return (
     <main className="dashboard-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
+      <HashScrollRestorer />
       <header className="dashboard-topbar">
         <div className="dashboard-topbar-main">
           <div className="dashboard-brand">

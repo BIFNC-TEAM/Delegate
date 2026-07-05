@@ -589,6 +589,7 @@ export function DashboardRepresentativeSetup({
   return (
     <DashboardPanelFrame
       eyebrow={t.panelEyebrow}
+      id="setup"
       summary={t.panelSummary(snapshot?.name ?? draft.name)}
       title={t.panelTitle}
     >

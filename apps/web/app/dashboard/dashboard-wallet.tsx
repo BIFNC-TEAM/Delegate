@@ -128,6 +128,7 @@ export function DashboardWallet({
   return (
     <DashboardPanelFrame
       eyebrow={t.eyebrow}
+      id="wallet"
       summary={t.summary(snapshot.representative.displayName)}
       title={t.title}
     >

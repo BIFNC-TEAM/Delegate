@@ -12,6 +12,7 @@ import {
   DashboardSignalStrip,
   DashboardSurface,
   DashboardSurfaceGrid,
+  HashScrollRestorer,
   LanguageSwitcher,
   buildLocalizedHref,
   extractCountryHint,
@@ -98,6 +99,7 @@ export default async function RepresentativePage({
 
   return (
     <main className="dashboard-shell representative-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
+      <HashScrollRestorer />
       <header className="representative-topbar">
         <div className="dashboard-brand">
           <div className="dashboard-brand-mark">R</div>

@@ -30,14 +30,17 @@ html {
   scroll-behavior: smooth;
 }
 
+section[id],
+article[id] {
+  scroll-margin-top: 112px;
+}
+
 @keyframes editorial-rise {
   from {
-    opacity: 0;
-    transform: translateY(18px);
+    transform: translateY(10px);
   }
 
   to {
-    opacity: 1;
     transform: translateY(0);
   }
 }
@@ -2490,40 +2493,20 @@ button.skill-row:hover {
 @media (prefers-reduced-motion: no-preference) {
   .marketing-hero-copy,
   .marketing-stage-card,
-  .marketing-band,
-  .marketing-beat-card,
-  .marketing-feature-card,
-  .marketing-story-item,
-  .marketing-plan-card,
-  .marketing-roadmap-card,
-  .dashboard-highlight-card,
-  .dashboard-signal-card,
-  .dashboard-surface {
+  .dashboard-highlight-card {
     animation: editorial-rise 640ms ease both;
   }
 
   .marketing-stage-card:nth-child(2),
-  .marketing-beat-card:nth-child(2),
-  .marketing-beat-card:nth-child(3),
-  .marketing-feature-card:nth-child(2),
-  .marketing-plan-card:nth-child(2),
-  .marketing-roadmap-card:nth-child(2),
-  .dashboard-signal-card:nth-child(2),
-  .dashboard-surface:nth-child(2) {
+  .dashboard-highlight-card:nth-child(2) {
     animation-delay: 80ms;
   }
 
-  .marketing-beat-card:nth-child(4),
-  .marketing-feature-card:nth-child(3),
-  .marketing-plan-card:nth-child(3),
-  .dashboard-signal-card:nth-child(3),
-  .dashboard-surface:nth-child(3) {
+  .dashboard-highlight-card:nth-child(3) {
     animation-delay: 140ms;
   }
 
-  .marketing-plan-card:nth-child(4),
-  .dashboard-signal-card:nth-child(4),
-  .dashboard-surface:nth-child(4) {
+  .dashboard-highlight-card:nth-child(4) {
     animation-delay: 200ms;
   }
 }
@@ -2531,15 +2514,7 @@ button.skill-row:hover {
 @media (max-width: 640px) {
   .marketing-hero-copy,
   .marketing-stage-card,
-  .marketing-band,
-  .marketing-beat-card,
-  .marketing-feature-card,
-  .marketing-story-item,
-  .marketing-plan-card,
-  .marketing-roadmap-card,
-  .dashboard-highlight-card,
-  .dashboard-signal-card,
-  .dashboard-surface {
+  .dashboard-highlight-card {
     animation: none;
   }
 }

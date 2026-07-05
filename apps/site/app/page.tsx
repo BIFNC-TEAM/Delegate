@@ -2,6 +2,7 @@ import { headers } from "next/headers";
 
 import { demoRepresentative } from "@delegate/domain";
 import {
+  HashScrollRestorer,
   LanguageSwitcher,
   buildLocalizedHref,
   extractCountryHint,
@@ -244,6 +245,7 @@ export default async function HomePage({
 
   return (
     <main className="marketing-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
+      <HashScrollRestorer />
       <header className="marketing-topbar">
         <div className="marketing-brand">
           <div className="marketing-brand-mark">D</div>

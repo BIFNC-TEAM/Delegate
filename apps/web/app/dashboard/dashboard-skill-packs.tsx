@@ -228,6 +228,7 @@ export function DashboardSkillPacks({
   return (
     <DashboardPanelFrame
       eyebrow={t.panelEyebrow}
+      id="skills"
       summary={t.panelSummary}
       title={t.panelTitle}
     >

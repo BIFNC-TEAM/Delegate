@@ -232,7 +232,7 @@ export function DashboardTraining({
   }
 
   return (
-    <DashboardPanelFrame eyebrow={t.panelEyebrow} summary={t.panelSummary} title={t.panelTitle}>
+    <DashboardPanelFrame eyebrow={t.panelEyebrow} id="training" summary={t.panelSummary} title={t.panelTitle}>
       <div className="dashboard-panel-hero">
         <article className="dashboard-highlight-card dashboard-highlight-card-primary">
           <p className="panel-title">{t.heroKicker}</p>

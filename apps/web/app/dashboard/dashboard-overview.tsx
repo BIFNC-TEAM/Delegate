@@ -200,6 +200,7 @@ export function DashboardOverview({
   return (
     <DashboardPanelFrame
       eyebrow={t.ownerViewEyebrow}
+      id="overview"
       summary={t.summary(snapshot.representative.displayName)}
       title={t.panelTitle}
     >

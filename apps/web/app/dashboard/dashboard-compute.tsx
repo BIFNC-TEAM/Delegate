@@ -1817,6 +1817,7 @@ export function DashboardCompute({
   return (
     <DashboardPanelFrame
       eyebrow={t.panelEyebrow}
+      id="compute"
       summary={t.panelSummary(snapshot.representative.displayName)}
       title={t.panelTitle}
     >

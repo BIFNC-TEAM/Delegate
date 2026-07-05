@@ -235,16 +235,16 @@ export function DashboardOverview({
         <div className="dashboard-subsection-stack">
           <div className="dashboard-inline-section-heading">
             <div>
-              <p className="eyebrow">OpenViking</p>
+              <p className="eyebrow">{t.memoryEyebrow}</p>
               <h3>{t.openVikingTitle}</h3>
             </div>
             <p className="section-copy">{t.openVikingCopy}</p>
           </div>
           <DashboardSignalStrip
             cards={snapshot.openVikingMetrics.map((metric) => ({
-              label: metric.label,
+              label: formatMemoryCopy(metric.label, locale),
               value: metric.value,
-              detail: metric.detail,
+              detail: formatMemoryCopy(metric.detail, locale),
               tone: "safe" as const,
             }))}
           />
@@ -501,6 +501,10 @@ function compactWorkflowId(value: string): string {
   return `${value.slice(0, 16)}...${value.slice(-8)}`;
 }
 
+function formatMemoryCopy(value: string, locale: Locale): string {
+  return value.replaceAll(/OpenViking/gi, locale === "zh" ? "记忆同步" : "Memory sync");
+}
+
 function translateActionLabel(locale: Locale, label: string): string {
   if (locale === "en") {
     switch (label) {
@@ -572,7 +576,7 @@ function isUsableInvoiceLink(value: string | undefined): value is string {
 const copy = {
   zh: {
     signalCards: {
-      openHandoffsLabel: "待处理 handoff",
+      openHandoffsLabel: "待处理请求",
       openHandoffsDetail: "当前值得主人优先判断与接手的请求数。",
       starsLiveLabel: "代表余额",
       starsLiveDetail: "当前可用于网页服务的余额信号。",
@@ -582,53 +586,54 @@ const copy = {
       recentInvoicesDetail: "最近的网页续用、付款记录和充值意图信号。",
     },
     statusSaved: (label: string, status: string) => `${label} 现在是 ${status}。`,
-    updateError: "更新 owner inbox 状态失败。",
+    updateError: "更新待处理请求状态失败。",
     loadingTitle: "概览加载中",
-    loadingHeadline: "正在读取 owner dashboard 的最新快照。",
+    loadingHeadline: "正在读取控制台最新快照。",
     loadingCopy: "会先加载指标、人工转接收件箱和代表余额记录。",
     ownerViewEyebrow: "运营总览",
-    summary: (name: string) => `${name} 的 dashboard 先展示高频信号，再进入 handoff、付款和早期钱包细节。`,
+    summary: (name: string) => `${name} 的控制台先展示高频信号，再进入人工接手、付款和钱包细节。`,
     panelTitle: "先看今天的运营脉冲，再判断代表钱包、续用和人工接手状态。",
     heroKicker: "代表经营状态",
     heroTitle: "主人需要看到这个数字代表是否还在赚钱、消耗和等待接手。",
     starsLiveChip: (stars: number) => `${stars} credits live`,
-    activeHandoffsChip: (count: number) => `${count} active handoffs`,
-    openVikingTitle: "记忆层也应该像收件箱一样可观测。",
-    openVikingCopy: "capture、commit、resource sync 和 recall 必须进入 owner 的日常读数，而不是藏在日志里。",
-    workflowEyebrow: "Workflow backbone",
+    activeHandoffsChip: (count: number) => `${count} 个待接手`,
+    memoryEyebrow: "记忆同步",
+    openVikingTitle: "记忆同步也应该像收件箱一样看得见。",
+    openVikingCopy: "保存、同步、召回来源必须进入日常读数，而不是藏在日志里。",
+    workflowEyebrow: "后台定时任务",
     workflowTitle: "跨时间的事情，要能排队、超时、补跑，而不是靠人记得。",
-    workflowCopy: "approval 过期和 handoff 跟进现在会进入耐久工作流，不再只是一次性函数调用。",
-    handoffEyebrow: "Handoff inbox",
+    workflowCopy: "审批过期和人工接手跟进现在会进入后台定时任务，不再只是一次性函数调用。",
+    handoffEyebrow: "待处理请求",
     activeChip: (count: number) => `${count} active`,
     handoffTitle: "人工转接收件箱",
     paidLabel: "已付费",
-    ownerActionLabel: (value: string) => `Owner action: ${value}`,
+    ownerActionLabel: (value: string) => `建议动作：${value}`,
     handoffButtonHint: "先评估不会关闭请求；接受代表主人要接手跟进；拒绝或关闭会移出待处理队列。",
     saving: "保存中...",
-    noHandoffs: "当前没有待处理的 handoff 请求。",
+    noHandoffs: "当前没有待处理的人工接手请求。",
     billingEyebrow: "付款 / 余额",
     invoicesChip: (count: number) => `${count} 笔付款`,
     billingTitle: "最近网页续用和付款记录",
     openInvoice: "查看发票",
     invoiceRecordOnly: "仅付款记录",
     noInvoices: "还没有任何付款记录。",
-    workflowChip: (count: number) => `${count} 条 workflows`,
+    workflowChip: (count: number) => `${count} 条后台任务`,
     workflowEngineChip: (engine: "local_runner" | "temporal") =>
-      engine === "temporal" ? "Temporal" : "Local runner",
+      engine === "temporal" ? "可靠定时" : "本地定时",
     workflowPhaseChip: (phase: NonNullable<DashboardOverviewSnapshot["recentWorkflows"][number]["enginePhase"]>) =>
       `阶段：${phase}`,
     scheduledAtChip: (value: string) => `计划 ${value}`,
     nextWakeAtChip: (value: string) => `下次唤醒 ${value}`,
     cancelRequestedChip: (value: string) => `请求取消 ${value}`,
-    workflowIdLabel: (value: string) => `workflowId: ${value}`,
-    workflowRunIdLabel: (value: string) => `runId: ${value}`,
-    workflowQueueTitle: "最近工作流",
-    noWorkflows: "当前还没有耐久工作流记录。",
+    workflowIdLabel: (value: string) => `任务ID: ${value}`,
+    workflowRunIdLabel: (value: string) => `运行ID: ${value}`,
+    workflowQueueTitle: "最近后台任务",
+    noWorkflows: "当前还没有后台定时任务记录。",
   },
   en: {
     signalCards: {
-      openHandoffsLabel: "Open handoffs",
-      openHandoffsDetail: "Requests that deserve direct owner review right now.",
+      openHandoffsLabel: "Needs follow-up",
+      openHandoffsDetail: "Requests that deserve direct human review right now.",
       starsLiveLabel: "Representative balance",
       starsLiveDetail: "Balance signal available for web service continuation.",
       sponsorPoolLabel: "Sponsor pool",
@@ -637,47 +642,48 @@ const copy = {
       recentInvoicesDetail: "The latest web continuation, payment records, and recharge-intent signals.",
     },
     statusSaved: (label: string, status: string) => `${label} is now ${status}.`,
-    updateError: "Failed to update owner inbox status.",
+    updateError: "Failed to update follow-up status.",
     loadingTitle: "Loading overview",
-    loadingHeadline: "Fetching the latest owner dashboard snapshot.",
-    loadingCopy: "Metrics, handoff inbox items, and representative balance records load first.",
+    loadingHeadline: "Fetching the latest console snapshot.",
+    loadingCopy: "Metrics, follow-up requests, and representative balance records load first.",
     ownerViewEyebrow: "Operations overview",
-    summary: (name: string) => `${name}'s dashboard surfaces high-frequency signal before handoff, payment, and early wallet detail.`,
-    panelTitle: "Read today's operating pulse before judging representative wallet, continuation, and handoff state.",
+    summary: (name: string) => `${name}'s console surfaces high-frequency signal before human follow-up, payment, and wallet detail.`,
+    panelTitle: "Read today's operating pulse before judging representative wallet, continuation, and human follow-up state.",
     heroKicker: "Representative operating state",
     heroTitle: "Owners need to know whether this Digital Representative is earning, consuming, or waiting for intervention.",
     starsLiveChip: (stars: number) => `${stars} credits live`,
-    activeHandoffsChip: (count: number) => `${count} active handoffs`,
-    openVikingTitle: "The memory layer should be as observable as the inbox.",
-    openVikingCopy: "Capture, commit, resource sync, and recall belong in daily owner metrics instead of hidden logs.",
-    workflowEyebrow: "Workflow backbone",
+    activeHandoffsChip: (count: number) => `${count} active follow-ups`,
+    memoryEyebrow: "Memory sync",
+    openVikingTitle: "Memory sync should be as observable as the inbox.",
+    openVikingCopy: "Save, sync, and recall sources belong in daily metrics instead of hidden logs.",
+    workflowEyebrow: "Background timers",
     workflowTitle: "Anything that spans time should queue, expire, and recover instead of relying on memory.",
-    workflowCopy: "Approval expiry and handoff follow-up now flow through a durable workflow lane instead of one-off function calls.",
-    handoffEyebrow: "Handoff inbox",
+    workflowCopy: "Approval expiry and human follow-up now flow through durable background timers instead of one-off function calls.",
+    handoffEyebrow: "Follow-up queue",
     activeChip: (count: number) => `${count} active`,
-    handoffTitle: "Human handoff inbox",
+    handoffTitle: "Human follow-up queue",
     paidLabel: "paid",
-    ownerActionLabel: (value: string) => `Owner action: ${value}`,
-    handoffButtonHint: "Review keeps the request open; accept means owner follow-up; decline or close removes it from the active queue.",
+    ownerActionLabel: (value: string) => `Suggested action: ${value}`,
+    handoffButtonHint: "Review keeps the request open; accept means a human follow-up; decline or close removes it from the active queue.",
     saving: "Saving...",
-    noHandoffs: "There are no handoff requests waiting right now.",
+    noHandoffs: "There are no follow-up requests waiting right now.",
     billingEyebrow: "Payments / Balance",
     invoicesChip: (count: number) => `${count} payments`,
     billingTitle: "Recent web continuation and payment records",
     openInvoice: "View invoice",
     invoiceRecordOnly: "Payment record only",
     noInvoices: "There are no payment records yet.",
-    workflowChip: (count: number) => `${count} workflows`,
+    workflowChip: (count: number) => `${count} background tasks`,
     workflowEngineChip: (engine: "local_runner" | "temporal") =>
-      engine === "temporal" ? "Temporal" : "Local runner",
+      engine === "temporal" ? "Reliable timer" : "Local timer",
     workflowPhaseChip: (phase: NonNullable<DashboardOverviewSnapshot["recentWorkflows"][number]["enginePhase"]>) =>
       `phase: ${phase}`,
     scheduledAtChip: (value: string) => `scheduled ${value}`,
     nextWakeAtChip: (value: string) => `next wake ${value}`,
     cancelRequestedChip: (value: string) => `cancel requested ${value}`,
-    workflowIdLabel: (value: string) => `workflowId: ${value}`,
+    workflowIdLabel: (value: string) => `taskId: ${value}`,
     workflowRunIdLabel: (value: string) => `runId: ${value}`,
-    workflowQueueTitle: "Recent workflows",
-    noWorkflows: "There are no durable workflow records yet.",
+    workflowQueueTitle: "Recent background tasks",
+    noWorkflows: "There are no background timer records yet.",
   },
 } as const;

@@ -509,16 +509,22 @@ export default async function RepresentativePage({
                 ) : null}
               </div>
               <div className="button-row">
-                <a
-                  className={plan.tier === "free" ? "button-secondary" : "button-primary"}
-                  href={plan.tier === "free" ? "#chat" : "#recharge"}
-                >
-                  {plan.tier === "free" ? t.startWebChat : t.previewRecharge}
-                </a>
+                {plan.tier === "free" ? (
+                  <a className="button-secondary" href="#chat">
+                    {t.startWebChat}
+                  </a>
+                ) : (
+                  <span className="chip chip-safe">{t.paidPlanHint}</span>
+                )}
               </div>
             </DashboardSurface>
           ))}
         </DashboardSurfaceGrid>
+        <div className="button-row">
+          <a className="button-primary" href="#recharge">
+            {t.previewRecharge}
+          </a>
+        </div>
       </DashboardPanelFrame>
 
       <DashboardPanelFrame
@@ -736,7 +742,7 @@ const copy = {
     executesCodeNote: "这个技能包会执行代码，上线前需要额外审核。",
     declarativeNote: "这个技能包目前只作为能力说明，不会自动获得额外权限。",
     knowledgeEyebrow: "Knowledge Pack",
-    knowledgeSummary: "代表先从结构化知识里拿答案，再决定下一步是继续回答、收集需求 还是升级转接。",
+    knowledgeSummary: "代表先从结构化知识里拿答案，再决定下一步是继续回答、收集需求还是升级转接。",
     knowledgeTitle: "公开知识包先于自由发挥",
     faqTitle: "高频标准答案",
     materialsEyebrow: "Materials",
@@ -760,13 +766,14 @@ const copy = {
     plansTitle: "四档服务深度，而不是技术计费",
     accessLayerEyebrow: "服务深度",
     repliesChip: (count: number) => `${count} 次回复`,
-    priorityHandoffChip: "priority human follow-up",
+    priorityHandoffChip: "优先转人工",
+    paidPlanHint: "可在充值区选择",
     startWebChat: "开始网页试聊",
     previewRecharge: "查看充值预览",
     handoffEyebrow: "人工转接",
     handoffSummary: "当公开代表接近边界时，转接不该是一句拒答，而应该是一条明确可预期的升级路径。",
     handoffTitle: "主人最终接手的是高价值收件项，不是原始噪音",
-    handoffCopyEyebrow: "Follow-up copy",
+    handoffCopyEyebrow: "转接说明",
     handoffCopyTitle: "对外升级说明",
     entryPointsEyebrow: "Entry points",
     entryPointsTitle: "继续对话的公开入口",
@@ -831,7 +838,7 @@ const copy = {
     platformWebDetail: "First-version primary entry for understanding, trial chat, service preview, and human follow-up.",
     platformTelegramDetail: "Future message entry. If Telegram digital services ship later, they should follow Telegram Stars rules.",
     platformWhatsAppDetail: "Future message entry that can bring users back to the same web recharge and service page.",
-    platformFeishuDetail: "Future collaboration entry where balance and billing still belong to this Agent.",
+    platformFeishuDetail: "Future collaboration entry where balance and billing still belong to this representative.",
     platformWeComDetail: "Future WeCom entry where balance still belongs to this representative.",
     openPlatform: "Open",
     trustProofEyebrow: "Proof + QR",
@@ -868,7 +875,7 @@ const copy = {
     contractCopy: (limit: number) => `The first ${limit} replies are optimized for foundational questions and materials. Deeper collaboration judgment, quote intake, and scheduling move into paid continuation or human follow-up.`,
     publicRuntimeLabel: "publicly active",
     privateDraftLabel: "draft only",
-    handoffReadyLabel: "可转人工",
+    handoffReadyLabel: "human follow-up ready",
     contractFootnote: "Memory boundary: this representative only keeps public, safe interaction context inside this representative. It does not read private workspace files or accounts.",
     skillsEyebrow: "Skill Sources",
     skillsSummary: "Delegate separates built-in abilities from external skill packs, while keeping permission boundaries explicit.",
@@ -906,11 +913,12 @@ const copy = {
     plansSummary: "Users should understand how deep they can go and what actions unlock next, not the raw model cost underneath.",
     plansTitle: "Four service depths instead of technical pricing",
     accessLayerEyebrow: "Service depth",
-    repliesChip: (count: number) => `${count} 次回复`,
+    repliesChip: (count: number) => `${count} replies`,
     priorityHandoffChip: "priority human follow-up",
+    paidPlanHint: "Choose in recharge section",
     startWebChat: "Start web chat",
     previewRecharge: "Preview recharge",
-    handoffEyebrow: "人工转接",
+    handoffEyebrow: "Human follow-up",
     handoffSummary: "When the public representative reaches its boundary, escalation should feel like a predictable path instead of a vague refusal.",
     handoffTitle: "A person should receive high-value follow-up items, not raw noise",
     handoffCopyEyebrow: "Follow-up copy",

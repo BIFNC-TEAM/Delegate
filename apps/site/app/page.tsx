@@ -23,10 +23,10 @@ const copy = {
     ],
     navDemo: "演示代表页",
     navDashboard: "代表控制台",
-    heroEyebrow: "代理收益网络",
-    heroTitle: "Delegate 是先替你接住外部请求的 AI 接待前台。",
+    heroEyebrow: "数字代表网络",
+    heroTitle: "你的 AI 替身，代表你向外界提供服务",
     heroLead:
-      "第一版先做 web-first 数字代表：当别人来找你时，AI 分身先回答高频问题、展示服务档位、收集结构化需求，并在需要收费、审批或人工接手时把请求路由成明确流程。",
+      "替你接待陌生人、筛选商机、处理简单任务。你躺平的时候，它替你干活，为你赚取被动收入，只把该你出面的事留给你。",
     heroPrimary: "查看数字代表",
     heroSecondary: "进入控制台",
     shipsKicker: "AI 接待闭环",
@@ -63,7 +63,7 @@ const copy = {
       {
         eyebrow: "Bounded action",
         title: "代表知道什么、能做什么、不能做什么，都必须显式公开。",
-        body: "公开知识包、许可技能、付费边界和 转人工规则，组成一个可被陌生人快速理解的对外契约。",
+        body: "公开知识包、许可技能、付费边界和转人工规则，组成一个可被陌生人快速理解的对外契约。",
       },
       {
         eyebrow: "Inbound operations",
@@ -80,29 +80,29 @@ const copy = {
       { title: "能做什么", points: ["回答 FAQ", "收集线索与需求", "发起付费解锁", "触发安全转人工"] },
       { title: "不能做什么", points: ["不能代表主人登录账户", "不能任意执行本地命令", "不能直接做不可逆商业承诺"] },
     ],
-    economyEyebrow: "Money layer",
+    economyEyebrow: "收益网络",
     economyTitle: "目标是把支付、计费、钱包、结算和透明账本拆成清晰层。",
     economyLead: "当前 Delegate 已交付内部钱包账本、演示充值、服务额度购买、服务消耗、创作者收益、提现冻结和主理人钱包视图；统一支付入口、真实支付验签、自动出金和公开证明是后续网络层。",
     economyPlans: [
       { name: "代表钱包", detail: "已用内部账本把用户现金、服务额度、创作者待释放 / 可提现收益、平台收入和成本拆开。", kicker: "已落地" },
       { name: "Payment Adapters", detail: "Mock provider 可跑通；Stripe 是 adapter 边界；微信支付和支付宝是 fail-closed 骨架，等待真实验签与 SDK 接入。", kicker: "适配器" },
-      { name: "Billing Engine", detail: "已支持 服务额度购买和消耗计费；接入所有回复、敏感动作、浏览器和外部工具路径仍是后续工作。", kicker: "部分落地" },
+      { name: "计费引擎", detail: "已支持服务额度购买和消耗计费；接入所有回复、敏感动作、浏览器和外部工具路径仍是后续工作。", kicker: "部分落地" },
       { name: "结算 + 账本", detail: "已生成创作者 20% 待释放收益、按消耗释放可提现金额，并支持提现冻结；自动打款和公开证明还未落地。", kicker: "结算" },
     ],
     controlEyebrow: "Control Plane",
     controlTitle: "Dashboard 应该像运营台，而不是设置坟场。",
     controlLead: "控制面板的顺序就是产品价值的顺序：先运营，再发布，再扩展，再治理记忆。",
     controlCards: [
-      { eyebrow: "Overview", title: "先看待处理请求、付款和今天的运营脉冲。", body: "控制台第一屏应该帮助主人判断什么值得亲自接手，而不是展开一堆配置项。" },
-      { eyebrow: "Representative", title: "发布一个公开代表，本质上是在发布一套外部关系接口。", body: "身份、契约、定价、知识包和分步设置需要像发布流程，而不是杂乱表单。" },
-      { eyebrow: "Memory + skills", title: "技能和记忆属于扩展层，应该被治理，而不是被神化。", body: "代表能力要进入可观测面板，记忆要能看到来源，技能要进入边界控制。" },
+      { eyebrow: "概览", title: "先看待处理请求、付款和今天的运营脉冲。", body: "控制台第一屏应该帮助主人判断什么值得亲自接手，而不是展开一堆配置项。" },
+      { eyebrow: "代表", title: "发布一个公开代表，本质上是在发布一套外部关系接口。", body: "身份、契约、定价、知识包和分步设置需要像发布流程，而不是杂乱表单。" },
+      { eyebrow: "记忆 + 技能", title: "技能和记忆属于扩展层，应该被治理，而不是被神化。", body: "代表能力要进入可观测面板，记忆要能看到来源，技能要进入边界控制。" },
     ],
     roadmapEyebrow: "Evolution",
     roadmapTitle: "Delegate 先做数字代表，再走向更大的代理收益网络。",
-    roadmapLead: "产品路径是 `Agent Runtime -> Digital Representative -> 代理收益网络`。",
+    roadmapLead: "产品路径是：先有可靠在线接待，再有公开数字代表，最后扩成代理收益网络。",
     roadmapStages: [
       { eyebrow: "Reference wedge", title: "Delegate Web", body: "公开数字代表页、trust boundary、网页聊天、充值预览和 human escalation 先形成第一条 web 交易闭环。" },
-      { eyebrow: "Wallet loop", title: "先把内部账本记清楚", body: "先把 User Wallet、代表钱包、Creator Earning、Provider Cost 和 Platform Revenue 在 Delegate 内部记清楚。" },
+      { eyebrow: "钱包闭环", title: "先把内部账本记清楚", body: "先把用户钱包、代表钱包、创作者收益、服务成本和平台收入在 Delegate 内部记清楚。" },
       { eyebrow: "Network future", title: "Payment and proof", body: "下一步再接真实 Stripe / 微信 / 支付宝验签、自动出金、chargeback 自动化和公开证明。" },
     ],
     ctaEyebrow: "开始体验",
@@ -122,15 +122,15 @@ const copy = {
     ],
     navDemo: "Demo digital rep",
     navDashboard: "Representative console",
-    heroEyebrow: "代理收益网络",
-    heroTitle: "Delegate is an AI front desk for your public Digital Representative.",
+    heroEyebrow: "Digital Representative Network",
+    heroTitle: "Your AI double represents you and serves the outside world.",
     heroLead:
-      "The first version is web-first. When people reach you, your AI representative handles the first reception pass: answer common questions, show service depth, collect structured demand, and route payment, approval, or human follow-up when the conversation gets serious.",
+      "It greets strangers, qualifies business opportunities, and handles simple tasks for you. While you rest, it works for you, earns passive income, and leaves only the moments that truly need you.",
     heroPrimary: "Explore digital representative",
     heroSecondary: "Open control plane",
-    shipsKicker: "AI 接待闭环",
+    shipsKicker: "AI front desk loop",
     shipsTitle: "Answer first, charge when needed, ask for approval, hand off to a human.",
-    shipsBody: "What ships today is the web representative wedge plus the first Wallet loop: public representative page, web chat, follow-up queue, demo recharge, user cash balance, service credits, creator 20% pending / withdrawable earnings, and wallet ledger entries. Live Stripe / WeChat / Alipay collection, automatic payout, and public proof remain productization work.",
+    shipsBody: "What ships today is the web representative wedge plus the first wallet loop: public representative page, web chat, follow-up queue, demo recharge, user cash balance, service credits, creator 20% pending / withdrawable earnings, and wallet ledger entries. Live Stripe / WeChat / Alipay collection, automatic payout, and public proof remain productization work.",
     frontDeskSteps: [
       { label: "01 / Answer", title: "Answer what it can", body: "FAQs, public materials, and service boundaries are handled before the owner gets pulled back to the front desk." },
       { label: "02 / Charge", title: "Charge when needed", body: "After the free reception layer, deeper help and priority move into web recharge and invoice signals." },
@@ -183,10 +183,10 @@ const copy = {
     economyTitle: "The network separates payment, billing, wallet, settlement, and transparent ledger into legible layers.",
     economyLead: "Delegate now ships the internal wallet ledger, demo recharge, service credit purchase, usage charge, creator earning, withdrawal freeze, and creator wallet view. Unified payment entry, live payment verification, automatic payout, and public proof remain future network layers.",
     economyPlans: [
-      { name: "代表钱包", detail: "Delegate now separates user cash, service credits, creator pending / withdrawable balances, platform revenue, and provider cost in its own ledger.", kicker: "Shipped" },
+      { name: "Representative Wallet", detail: "Delegate now separates user cash, service credits, creator pending / withdrawable balances, platform revenue, and provider cost in its own ledger.", kicker: "Shipped" },
       { name: "Payment Adapters", detail: "Mock provider runs end to end; Stripe has an adapter boundary; WeChat Pay and Alipay are fail-closed skeletons waiting for real SDK/signature wiring.", kicker: "Adapters" },
       { name: "Billing Engine", detail: "Service credit purchase and usage charge services exist; wiring every reply, sensitive action, browser, and external-tool path into billing is next.", kicker: "Partial" },
-      { name: "结算 + 账本", detail: "Creator 20% pending, consumption-based withdrawable release, and WithdrawRequest freeze are in place; automatic payout and public proof are not.", kicker: "Settlement" },
+      { name: "Settlement + Ledger", detail: "Creator 20% pending, consumption-based withdrawable release, and WithdrawRequest freeze are in place; automatic payout and public proof are not.", kicker: "Settlement" },
     ],
     controlEyebrow: "Control Plane",
     controlTitle: "The dashboard should feel like an operations desk, not a settings graveyard.",
@@ -198,10 +198,10 @@ const copy = {
     ],
     roadmapEyebrow: "Evolution",
     roadmapTitle: "Delegate starts with a Digital Representative, then grows into a broader revenue network.",
-    roadmapLead: "The product path is `Agent Runtime -> Digital Representative -> 代理收益网络`.",
+    roadmapLead: "The product path is `Agent Runtime -> Digital Representative -> Agent Monetization Network`.",
     roadmapStages: [
       { eyebrow: "Reference wedge", title: "Delegate Web", body: "A public Digital Representative page with trust boundaries, web chat, recharge preview, and human escalation proves the first web transaction loop." },
-      { eyebrow: "Wallet loop", title: "先把内部账本记清楚", body: "Make User Wallet, 代表钱包, Creator Earning, Provider Cost, and Platform Revenue correct inside Delegate before outsourcing money movement." },
+      { eyebrow: "Wallet loop", title: "Internal ledger first", body: "Make user wallet, representative wallet, creator earning, provider cost, and platform revenue correct inside Delegate before outsourcing money movement." },
       { eyebrow: "Network future", title: "Payment and proof", body: "Next comes live Stripe / WeChat / Alipay verification, automatic payout, chargeback automation, and public proof." },
     ],
     ctaEyebrow: "Try the loop",
@@ -289,7 +289,10 @@ export default async function HomePage({
 
       <section className="marketing-hero" id="interface">
         <div className="marketing-hero-copy">
-          <p className="eyebrow">{t.heroEyebrow}</p>
+          <div className="marketing-hero-badge-row">
+            <p className="eyebrow">{t.heroEyebrow}</p>
+            <span className="marketing-runtime-badge">{t.shipsKicker}</span>
+          </div>
           <h1>{t.heroTitle}</h1>
           <p className="marketing-lead">{t.heroLead}</p>
 
@@ -307,13 +310,38 @@ export default async function HomePage({
               {t.heroSecondary}
             </a>
           </div>
+
+          <div className="marketing-proof-row" aria-label={t.shipsKicker}>
+            {t.proofPoints.map((point) => (
+              <article className="marketing-proof-pill" key={point.stat}>
+                <strong>{point.stat}</strong>
+                <span>{point.label}</span>
+              </article>
+            ))}
+          </div>
         </div>
 
         <div className="marketing-stage">
-          <article className="marketing-stage-card marketing-stage-card-primary">
-            <p className="marketing-card-kicker">{t.shipsKicker}</p>
-            <h2>{t.shipsTitle}</h2>
-            <p>{t.shipsBody}</p>
+          <article className="marketing-runtime-card">
+            <div className="marketing-code-window">
+              <div className="marketing-code-bar" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+              <div className="marketing-code-heading">
+                <span>delegate.frontdesk.ts</span>
+                <strong>{t.economyPlans[0].name}</strong>
+              </div>
+              <pre>{`await delegate.route({
+  inbound: ["web", "telegram", "feishu"],
+  firstPass: "answer",
+  paidDepth: "service_credits",
+  approval: "review_queue",
+  humanFollowUp: "with_context"
+});`}</pre>
+            </div>
+
             <div className="marketing-front-desk-flow">
               {t.frontDeskSteps.map((step) => (
                 <div className="marketing-front-desk-step" key={step.label}>
@@ -324,15 +352,24 @@ export default async function HomePage({
               ))}
             </div>
           </article>
+        </div>
+      </section>
 
-          <article className="marketing-stage-card marketing-stage-card-metrics">
-            {t.proofPoints.map((point) => (
-              <div className="marketing-metric" key={point.stat}>
-                <strong>{point.stat}</strong>
-                <p>{point.label}</p>
-              </div>
-            ))}
-          </article>
+      <section className="marketing-product-band">
+        <div className="marketing-product-copy">
+          <p className="marketing-card-kicker">{t.shipsKicker}</p>
+          <h2>{t.shipsTitle}</h2>
+          <p>{t.shipsBody}</p>
+        </div>
+
+        <div className="marketing-product-grid">
+          {t.interfaceColumns.map((column) => (
+            <article className="marketing-product-card" key={column.title}>
+              <p className="marketing-card-kicker">{column.eyebrow}</p>
+              <h3>{column.title}</h3>
+              <p>{column.body}</p>
+            </article>
+          ))}
         </div>
       </section>
 
@@ -357,16 +394,6 @@ export default async function HomePage({
             <span className="marketing-beat-step">{beat.step}</span>
             <h3>{beat.title}</h3>
             <p>{beat.body}</p>
-          </article>
-        ))}
-      </section>
-
-      <section className="marketing-grid">
-        {t.interfaceColumns.map((column) => (
-          <article className="marketing-feature-card" key={column.title}>
-            <p className="marketing-card-kicker">{column.eyebrow}</p>
-            <h3>{column.title}</h3>
-            <p>{column.body}</p>
           </article>
         ))}
       </section>
@@ -421,14 +448,35 @@ export default async function HomePage({
           <p className="marketing-lead">{t.controlLead}</p>
         </div>
 
-        <div className="marketing-ops-grid">
-          {t.controlCards.map((card) => (
-            <article className="marketing-feature-card" key={card.title}>
-              <p className="marketing-card-kicker">{card.eyebrow}</p>
-              <h3>{card.title}</h3>
-              <p>{card.body}</p>
-            </article>
-          ))}
+        <div className="marketing-control-layout">
+          <article className="marketing-console-card">
+            <div className="marketing-console-row">
+              <span>{t.controlCards[0].eyebrow}</span>
+              <strong>{t.controlCards[0].title}</strong>
+            </div>
+            <div className="marketing-console-meter">
+              <span />
+            </div>
+            <div className="marketing-console-row">
+              <span>{t.economyPlans[2].name}</span>
+              <strong>{t.economyPlans[2].kicker}</strong>
+            </div>
+            <div className="marketing-console-stack">
+              {t.trustPills.map((pill) => (
+                <span key={pill}>{pill}</span>
+              ))}
+            </div>
+          </article>
+
+          <div className="marketing-ops-grid">
+            {t.controlCards.map((card) => (
+              <article className="marketing-feature-card" key={card.title}>
+                <p className="marketing-card-kicker">{card.eyebrow}</p>
+                <h3>{card.title}</h3>
+                <p>{card.body}</p>
+              </article>
+            ))}
+          </div>
         </div>
       </section>
 

@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildCreatorLoginPath,
+  buildCreatorLoginPathForReturnTo,
+  buildCreatorLogoutPath,
   isCreatorDashboardPath,
+  resolveCreatorAccountLabel,
   sanitizeCreatorReturnTo,
   shouldRequireCreatorDashboardAuth,
 } from "../auth-guard";
@@ -37,7 +40,27 @@ describe("creator dashboard auth guard", () => {
     expect(buildCreatorLoginPath("/dashboard", "?view=training")).toBe(
       "/auth/login?actor=owner&returnTo=%2Fdashboard%3Fview%3Dtraining",
     );
+    expect(buildCreatorLoginPathForReturnTo("/dashboard?view=overview&lang=zh")).toBe(
+      "/auth/login?actor=owner&returnTo=%2Fdashboard%3Fview%3Doverview%26lang%3Dzh",
+    );
     expect(sanitizeCreatorReturnTo("https://evil.example.com/phish")).toBe("/dashboard");
     expect(sanitizeCreatorReturnTo("//evil.example.com/phish")).toBe("/dashboard");
+  });
+
+  it("builds a safe creator logout path", () => {
+    expect(buildCreatorLogoutPath("/dashboard?view=overview&lang=en")).toBe(
+      "/auth/logout?returnTo=%2Fdashboard%3Fview%3Doverview%26lang%3Den",
+    );
+    expect(buildCreatorLogoutPath("https://evil.example.com/phish")).toBe(
+      "/auth/logout?returnTo=%2Fdashboard",
+    );
+  });
+
+  it("uses the creator email as the account label when available", () => {
+    expect(resolveCreatorAccountLabel({ email: " creator@example.com " }, "Signed in")).toBe(
+      "creator@example.com",
+    );
+    expect(resolveCreatorAccountLabel({ email: null }, "Signed in")).toBe("Signed in");
+    expect(resolveCreatorAccountLabel(null, "Signed in")).toBe("Signed in");
   });
 });

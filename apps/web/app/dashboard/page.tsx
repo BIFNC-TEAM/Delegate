@@ -21,6 +21,11 @@ import { DashboardSkillPacks } from "./dashboard-skill-packs";
 import { DashboardTraining } from "./dashboard-training";
 import { DashboardWallet } from "./dashboard-wallet";
 import { listRepresentativeDirectoryItems } from "@delegate/web-data";
+import {
+  buildCreatorLoginPathForReturnTo,
+  buildCreatorLogoutPath,
+  resolveCreatorAccountLabel,
+} from "../../auth-guard";
 import { requireOwnerAuthSession } from "../auth/owner-session";
 
 export default async function DashboardPage({
@@ -61,6 +66,12 @@ export default async function DashboardPage({
   );
   const tabs = t.tabs;
   const activeTab = tabs.find((tab) => tab.id === activeView) ?? tabs[0]!;
+  const dashboardReturnTo = buildDashboardReturnTo({
+    rep: activeSlug,
+    view: activeView,
+    lang: locale,
+  });
+  const accountLabel = resolveCreatorAccountLabel(ownerSession, t.accountFallbackLabel);
 
   return (
     <main className="dashboard-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
@@ -119,6 +130,24 @@ export default async function DashboardPage({
             >
               {t.publicRepresentativeLabel}
             </a>
+            {ownerSession ? (
+              <div className="dashboard-account-pill" aria-label={t.accountAriaLabel}>
+                <span className="dashboard-account-status">{t.signedInLabel(accountLabel)}</span>
+                <a
+                  className="dashboard-nav-link dashboard-nav-link-muted"
+                  href={buildCreatorLogoutPath(dashboardReturnTo)}
+                >
+                  {t.logoutLabel}
+                </a>
+              </div>
+            ) : (
+              <a
+                className="dashboard-nav-link dashboard-nav-link-primary dashboard-account-login"
+                href={buildCreatorLoginPathForReturnTo(dashboardReturnTo)}
+              >
+                {t.loginCreateLabel}
+              </a>
+            )}
           </div>
         </div>
 
@@ -241,6 +270,11 @@ const dashboardCopy: Record<
     language: { zh: string; en: string };
     websiteLabel: string;
     publicRepresentativeLabel: string;
+    accountAriaLabel: string;
+    accountFallbackLabel: string;
+    loginCreateLabel: string;
+    logoutLabel: string;
+    signedInLabel: (identity: string) => string;
     entryScopeLabel: string;
     runtimeLabel: string;
     workspaceEyebrow: string;
@@ -328,6 +362,11 @@ const dashboardCopy: Record<
     language: { zh: "中文", en: "English" },
     websiteLabel: "官网",
     publicRepresentativeLabel: "公开代表页",
+    accountAriaLabel: "控制台账号",
+    accountFallbackLabel: "已登录主理人",
+    loginCreateLabel: "登录 / 创建我的代表",
+    logoutLabel: "退出",
+    signedInLabel: (identity: string) => `已登录：${identity}`,
     entryScopeLabel: "网页优先",
     runtimeLabel: "先讲清边界",
     workspaceEyebrow: "当前工作区",
@@ -414,6 +453,11 @@ const dashboardCopy: Record<
     language: { zh: "Chinese", en: "English" },
     websiteLabel: "Website",
     publicRepresentativeLabel: "Public Representative",
+    accountAriaLabel: "Dashboard account",
+    accountFallbackLabel: "Signed-in creator",
+    loginCreateLabel: "Sign in / create my representative",
+    logoutLabel: "Log out",
+    signedInLabel: (identity: string) => `Signed in: ${identity}`,
     entryScopeLabel: "Web-first",
     runtimeLabel: "Trust-first runtime",
     workspaceEyebrow: "Current workspace",

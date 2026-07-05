@@ -19,8 +19,28 @@ export function isCreatorDashboardPath(pathname: string): boolean {
 }
 
 export function buildCreatorLoginPath(pathname: string, search = ""): string {
-  const returnTo = sanitizeCreatorReturnTo(`${pathname}${search}`);
-  return `/auth/login?actor=owner&returnTo=${encodeURIComponent(returnTo)}`;
+  return buildCreatorLoginPathForReturnTo(`${pathname}${search}`);
+}
+
+export function buildCreatorLoginPathForReturnTo(returnTo: string): string {
+  const safeReturnTo = sanitizeCreatorReturnTo(returnTo);
+  return `/auth/login?actor=owner&returnTo=${encodeURIComponent(safeReturnTo)}`;
+}
+
+export function buildCreatorLogoutPath(returnTo = "/dashboard"): string {
+  const safeReturnTo = sanitizeCreatorReturnTo(returnTo);
+  return `/auth/logout?returnTo=${encodeURIComponent(safeReturnTo)}`;
+}
+
+export function resolveCreatorAccountLabel(
+  session: { email?: string | null } | null | undefined,
+  fallback: string,
+): string {
+  const email = session?.email?.trim();
+  if (email) {
+    return email;
+  }
+  return fallback;
 }
 
 export function sanitizeCreatorReturnTo(value: string | null | undefined): string {

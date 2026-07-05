@@ -699,6 +699,13 @@ button.skill-row:hover {
   line-height: 1.5;
 }
 
+.field-error {
+  color: #a94423;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
 .field-span-full {
   grid-column: 1 / -1;
 }

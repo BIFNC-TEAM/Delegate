@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ZodError } from "zod";
 
 import {
   createRepresentative,
@@ -9,6 +10,7 @@ import {
   dashboardAuthErrorResponse,
   requireDashboardApiOwnerSession,
 } from "../auth";
+import { normalizeRepresentativeCreateBody } from "./create-validation";
 
 export async function GET() {
   try {
@@ -35,19 +37,19 @@ export async function POST(request: Request) {
   try {
     const session = await requireDashboardApiOwnerSession();
     const body = (await request.json()) as Record<string, unknown>;
+    const normalized = normalizeRepresentativeCreateBody(body);
+    if (!normalized.ok) {
+      return NextResponse.json(
+        {
+          error: normalized.error,
+          fieldErrors: normalized.fieldErrors,
+        },
+        { status: 400 },
+      );
+    }
+
     const created = await createRepresentative(
-      {
-        ownerName: String(body.ownerName ?? ""),
-        representativeName: String(body.representativeName ?? ""),
-        slug:
-          typeof body.slug === "string" && body.slug.trim().length > 0
-            ? body.slug
-            : undefined,
-        tagline:
-          typeof body.tagline === "string" && body.tagline.trim().length > 0
-            ? body.tagline
-            : undefined,
-      },
+      normalized.input,
       session?.ownerId ? { ownerId: session.ownerId } : {},
     );
 
@@ -56,6 +58,13 @@ export async function POST(request: Request) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
       return authResponse;
+    }
+
+    if (error instanceof ZodError) {
+      return NextResponse.json(
+        { error: "请检查代表信息后再提交。" },
+        { status: 400 },
+      );
     }
 
     return NextResponse.json(

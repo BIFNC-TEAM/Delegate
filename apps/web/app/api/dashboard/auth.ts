@@ -30,6 +30,19 @@ export async function requireDashboardRepresentativeAccess(representativeSlug: s
   return session;
 }
 
+export async function authorizeDashboardRepresentativeAccess(representativeSlug: string) {
+  try {
+    await requireDashboardRepresentativeAccess(representativeSlug);
+    return null;
+  } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+    return NextResponse.json({ error: "Failed to authorize dashboard access." }, { status: 500 });
+  }
+}
+
 export function dashboardAuthErrorResponse(error: unknown) {
   if (error instanceof RepresentativeAccessError) {
     return NextResponse.json({ error: error.message }, { status: error.statusCode });

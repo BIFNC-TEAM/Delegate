@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { enqueueCreatorTrainingReviewWorkflow } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../auth";
 
 type RouteContext = {
   params: Promise<{ slug: string }>;
@@ -9,6 +13,10 @@ type RouteContext = {
 export async function POST(request: Request, context: RouteContext) {
   try {
     const { slug } = await context.params;
+    const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+    if (accessResponse) {
+      return accessResponse;
+    }
     const body = (await request.json().catch(() => ({}))) as {
       feedbackLimit?: number;
       unknownQuestionLimit?: number;
@@ -22,6 +30,11 @@ export async function POST(request: Request, context: RouteContext) {
 
     return NextResponse.json({ workflow }, { status: 202 });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to enqueue training workflow." },
       { status: 400 },

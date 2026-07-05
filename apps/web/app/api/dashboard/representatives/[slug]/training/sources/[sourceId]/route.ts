@@ -4,12 +4,20 @@ import {
   disableCreatorTrainingSource,
   updateCreatorTrainingSource,
 } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../../auth";
 
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ slug: string; sourceId: string }> },
 ) {
   const { slug, sourceId } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const body = (await request.json()) as Record<string, unknown>;
@@ -31,6 +39,11 @@ export async function PATCH(
 
     return NextResponse.json({ source });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:
@@ -46,11 +59,20 @@ export async function DELETE(
   { params }: { params: Promise<{ slug: string; sourceId: string }> },
 ) {
   const { slug, sourceId } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const source = await disableCreatorTrainingSource(slug, sourceId);
     return NextResponse.json({ source });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

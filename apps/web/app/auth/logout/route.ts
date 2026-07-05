@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 
-import { DELEGATE_AUTH_SESSION_COOKIE, DELEGATE_AUTH_STATE_COOKIE } from "@delegate/web-data";
+import {
+  DELEGATE_OWNER_AUTH_SESSION_COOKIE,
+  DELEGATE_OWNER_AUTH_STATE_COOKIE,
+  LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
+  LEGACY_DELEGATE_AUTH_STATE_COOKIE,
+} from "@delegate/web-data";
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -8,7 +13,9 @@ export async function GET(request: Request) {
   const response = NextResponse.redirect(
     new URL(returnTo?.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/", request.url),
   );
-  response.cookies.delete(DELEGATE_AUTH_SESSION_COOKIE);
-  response.cookies.delete(DELEGATE_AUTH_STATE_COOKIE);
+  response.cookies.delete(DELEGATE_OWNER_AUTH_SESSION_COOKIE);
+  response.cookies.delete(DELEGATE_OWNER_AUTH_STATE_COOKIE);
+  response.cookies.delete(LEGACY_DELEGATE_AUTH_SESSION_COOKIE);
+  response.cookies.delete(LEGACY_DELEGATE_AUTH_STATE_COOKIE);
   return response;
 }

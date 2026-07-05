@@ -1,4 +1,5 @@
-export const DASHBOARD_AUTH_COOKIE_NAME = "delegate_auth_session";
+export const DASHBOARD_AUTH_COOKIE_NAME = "delegate_owner_auth_session";
+export const DASHBOARD_LEGACY_AUTH_COOKIE_NAME = "delegate_auth_session";
 
 export function shouldRequireCreatorDashboardAuth(
   env: Record<string, string | undefined> = process.env,
@@ -48,5 +49,17 @@ export function sanitizeCreatorReturnTo(value: string | null | undefined): strin
   if (!normalized || !normalized.startsWith("/") || normalized.startsWith("//")) {
     return "/dashboard";
   }
-  return normalized;
+
+  try {
+    const url = new URL(normalized, "http://delegate.local");
+    if (
+      url.origin !== "http://delegate.local" ||
+      (url.pathname !== "/dashboard" && !url.pathname.startsWith("/dashboard/"))
+    ) {
+      return "/dashboard";
+    }
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return "/dashboard";
+  }
 }

@@ -957,6 +957,7 @@ function isPrismaUnavailableError(error: unknown): boolean {
   return (
     error.message.includes("Can't reach database server") ||
     error.message.includes("Environment variable not found: DATABASE_URL") ||
+    error.message.includes("resolved to an empty string") ||
     error.message.includes("P1001")
   );
 }

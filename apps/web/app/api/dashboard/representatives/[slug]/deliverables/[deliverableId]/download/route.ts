@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
 
 import { getRepresentativeDeliverableDownload } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../../auth";
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ slug: string; deliverableId: string }> },
 ) {
   const { slug, deliverableId } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const deliverable = await getRepresentativeDeliverableDownload(slug, deliverableId);
@@ -22,6 +30,11 @@ export async function GET(
       },
     });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Failed to download deliverable.",

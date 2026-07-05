@@ -4,6 +4,11 @@ import {
   reviewCreatorTrainingSuggestion,
   type CreatorTrainingReviewAction,
 } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../../auth";
+
 
 const reviewActions = new Set(["approve", "reject", "private"]);
 
@@ -12,6 +17,10 @@ export async function PATCH(
   { params }: { params: Promise<{ slug: string; suggestionId: string }> },
 ) {
   const { slug, suggestionId } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const body = (await request.json()) as Record<string, unknown>;
@@ -35,6 +44,11 @@ export async function PATCH(
 
     return NextResponse.json(result);
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

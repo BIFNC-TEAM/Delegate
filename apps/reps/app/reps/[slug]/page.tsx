@@ -1,11 +1,15 @@
-import { headers } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { notFound } from "next/navigation";
 
 import type { Representative } from "@delegate/domain";
 import {
+  DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
+  LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   getRepresentativePublicDeliverables,
   getRepresentativeSetupSnapshot,
   getRepresentativeSkillPackSnapshot,
+  readDelegateAuthSessionSecret,
+  verifyDelegateAuthSession,
 } from "@delegate/web-data";
 import {
   DashboardPanelFrame,
@@ -26,6 +30,10 @@ import { RepresentativeChatPanel } from "./representative-chat-panel";
 import { getUsablePublicUrl } from "./public-materials";
 import { RepresentativeMaterialPreview } from "./representative-material-preview";
 import { RepresentativeRechargePanel } from "./representative-recharge-panel";
+import {
+  buildPublicAudienceLoginHref,
+  buildPublicAudienceLogoutHref,
+} from "./public-auth";
 
 type RepresentativeSkill = Representative["skills"][number];
 
@@ -38,7 +46,7 @@ export default async function RepresentativePage({
 }) {
   const { slug } = await params;
   const query = searchParams ? await searchParams : undefined;
-  const headerStore = await headers();
+  const [headerStore, cookieStore] = await Promise.all([headers(), cookies()]);
   const locale = resolveLocale({
     requestedLocale: query?.lang,
     acceptLanguage: headerStore.get("accept-language"),
@@ -72,6 +80,15 @@ export default async function RepresentativePage({
     ...setupSnapshot,
     skillPacks: skillPackSnapshot.skillPacks,
   };
+  const authSession = verifyDelegateAuthSession(
+    cookieStore.get(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE)?.value ??
+      cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value,
+    readDelegateAuthSessionSecret(),
+  );
+  const audienceSession =
+    authSession?.actor === "audience" && authSession.audienceIdentityId ? authSession : null;
+  const audienceLoginHref = buildPublicAudienceLoginHref(representative.slug, locale);
+  const audienceLogoutHref = buildPublicAudienceLogoutHref(representative.slug, locale);
   const publicDeliverables = deliverableSnapshot?.deliverables ?? [];
   const enabledSkillPacks = representative.skillPacks.filter((skillPack) => skillPack.enabled);
   const totalKnowledgeItems =
@@ -145,6 +162,20 @@ export default async function RepresentativePage({
           >
             {t.dashboardLabel}
           </a>
+          {audienceSession ? (
+            <>
+              <span className="dashboard-nav-link dashboard-nav-link-status">
+                {t.signedInLabel}
+              </span>
+              <a className="dashboard-nav-link" href={audienceLogoutHref}>
+                {t.logoutLabel}
+              </a>
+            </>
+          ) : (
+            <a className="dashboard-nav-link dashboard-nav-link-primary" href={audienceLoginHref}>
+              {t.loginRegisterLabel}
+            </a>
+          )}
         </div>
       </header>
 
@@ -650,6 +681,9 @@ const copy = {
     ],
     homeLabel: "官网",
     dashboardLabel: "Dashboard",
+    loginRegisterLabel: "登录 / 注册",
+    signedInLabel: "已登录",
+    logoutLabel: "退出",
     profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",
@@ -798,6 +832,9 @@ const copy = {
     ],
     homeLabel: "Home",
     dashboardLabel: "Dashboard",
+    loginRegisterLabel: "Log in / Sign up",
+    signedInLabel: "Signed in",
+    logoutLabel: "Log out",
     profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",

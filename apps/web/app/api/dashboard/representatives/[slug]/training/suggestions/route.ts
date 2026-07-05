@@ -5,6 +5,11 @@ import {
   listCreatorTrainingSuggestions,
   type CreatorTrainingSuggestionStatus,
 } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../auth";
+
 
 const suggestionStatuses = new Set([
   "pending",
@@ -19,6 +24,10 @@ export async function GET(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const url = new URL(request.url);
@@ -33,6 +42,11 @@ export async function GET(
 
     return NextResponse.json({ suggestions });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:
@@ -48,11 +62,20 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const suggestions = await buildCreatorTrainingSuggestions(slug);
     return NextResponse.json({ suggestions }, { status: 201 });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

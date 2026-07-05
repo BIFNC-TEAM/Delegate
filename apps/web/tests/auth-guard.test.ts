@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DASHBOARD_AUTH_COOKIE_NAME,
+  DASHBOARD_LEGACY_AUTH_COOKIE_NAME,
   buildCreatorLoginPath,
   buildCreatorLoginPathForReturnTo,
   buildCreatorLogoutPath,
@@ -45,6 +47,11 @@ describe("creator dashboard auth guard", () => {
     );
     expect(sanitizeCreatorReturnTo("https://evil.example.com/phish")).toBe("/dashboard");
     expect(sanitizeCreatorReturnTo("//evil.example.com/phish")).toBe("/dashboard");
+    expect(sanitizeCreatorReturnTo("/api/dashboard/representatives")).toBe("/dashboard");
+    expect(sanitizeCreatorReturnTo("/auth/logout")).toBe("/dashboard");
+    expect(sanitizeCreatorReturnTo("/dashboard/settings#profile")).toBe(
+      "/dashboard/settings#profile",
+    );
   });
 
   it("builds a safe creator logout path", () => {
@@ -62,5 +69,10 @@ describe("creator dashboard auth guard", () => {
     );
     expect(resolveCreatorAccountLabel({ email: null }, "Signed in")).toBe("Signed in");
     expect(resolveCreatorAccountLabel(null, "Signed in")).toBe("Signed in");
+  });
+
+  it("uses an owner-specific cookie while accepting the legacy name during migration", () => {
+    expect(DASHBOARD_AUTH_COOKIE_NAME).toBe("delegate_owner_auth_session");
+    expect(DASHBOARD_LEGACY_AUTH_COOKIE_NAME).toBe("delegate_auth_session");
   });
 });

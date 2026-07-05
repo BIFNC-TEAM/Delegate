@@ -1,9 +1,22 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
+import {
+  createRemoteJWKSet,
+  jwtVerify,
+  type JWTVerifyGetKey,
+  type JWTVerifyOptions,
+} from "jose";
+
 import type { ExternalAuthProfile } from "./auth-identities";
 
-export const DELEGATE_AUTH_SESSION_COOKIE = "delegate_auth_session";
-export const DELEGATE_AUTH_STATE_COOKIE = "delegate_auth_state";
+export const DELEGATE_OWNER_AUTH_SESSION_COOKIE = "delegate_owner_auth_session";
+export const DELEGATE_OWNER_AUTH_STATE_COOKIE = "delegate_owner_auth_state";
+export const DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE = "delegate_audience_auth_session";
+export const DELEGATE_AUDIENCE_AUTH_STATE_COOKIE = "delegate_audience_auth_state";
+export const LEGACY_DELEGATE_AUTH_SESSION_COOKIE = "delegate_auth_session";
+export const LEGACY_DELEGATE_AUTH_STATE_COOKIE = "delegate_auth_state";
+export const DELEGATE_AUTH_SESSION_COOKIE = DELEGATE_OWNER_AUTH_SESSION_COOKIE;
+export const DELEGATE_AUTH_STATE_COOKIE = DELEGATE_OWNER_AUTH_STATE_COOKIE;
 export const DEFAULT_AUTH_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 
 export type DelegateAuthActor = "owner" | "audience";
@@ -27,6 +40,8 @@ export type DelegateAuthState = {
   state: string;
   nonce: string;
   returnTo: string;
+  representativeSlug?: string;
+  audienceId?: string;
   issuedAt: number;
   expiresAt: number;
 };
@@ -57,9 +72,18 @@ type JwtClaims = {
   name?: unknown;
   iss?: unknown;
   aud?: unknown;
+  nonce?: unknown;
 };
 
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>;
+type VerifyLogtoIdTokenOptions = {
+  idToken: string;
+  nonce: string;
+  jwks?: JWTVerifyGetKey | undefined;
+  now?: Date | undefined;
+};
+
+const logtoJwksCache = new Map<string, JWTVerifyGetKey>();
 
 export function readLogtoOidcConfig(
   env: Record<string, string | undefined> = process.env,
@@ -76,6 +100,46 @@ export function readLogtoOidcConfig(
     redirectUri,
     scopes: normalizeScopes(env.LOGTO_SCOPES),
   };
+}
+
+export function isLogtoOidcConfigured(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return Boolean(
+    env.LOGTO_ENDPOINT?.trim() &&
+      env.LOGTO_APP_ID?.trim() &&
+      env.LOGTO_APP_SECRET?.trim() &&
+      env.LOGTO_REDIRECT_URI?.trim(),
+  );
+}
+
+export function shouldUseDelegateAuthDevLogin(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (env.NODE_ENV === "production") {
+    return false;
+  }
+
+  const value = env.DELEGATE_AUTH_DEV_LOGIN?.trim().toLowerCase();
+  if (!value) {
+    return true;
+  }
+
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+export function isDelegateAuthPersistenceUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return (
+    error.message.includes("Can't reach database server") ||
+    error.message.includes("Environment variable not found: DATABASE_URL") ||
+    error.message.includes("resolved to an empty string") ||
+    error.message.includes("P1001") ||
+    error.message.includes("Cannot read properties of undefined (reading 'findUnique')")
+  );
 }
 
 export function readDelegateAuthSessionSecret(
@@ -158,7 +222,39 @@ export async function exchangeLogtoCodeForTokens(
 }
 
 export function buildExternalAuthProfileFromLogtoIdToken(idToken: string): ExternalAuthProfile {
+  // This only decodes trusted/test tokens. Login callbacks must verify with JWKS first.
   const claims = decodeJwtPayload<JwtClaims>(idToken);
+  return buildExternalAuthProfileFromLogtoClaims(claims);
+}
+
+export async function buildVerifiedExternalAuthProfileFromLogtoIdToken(
+  config: LogtoOidcConfig,
+  input: VerifyLogtoIdTokenOptions,
+): Promise<ExternalAuthProfile> {
+  const endpoint = normalizeLogtoEndpoint(config.endpoint);
+  const verifyOptions: JWTVerifyOptions = {
+    audience: normalizeRequiredText(config.appId, "appId"),
+    clockTolerance: "60s",
+  };
+  if (input.now) {
+    verifyOptions.currentDate = input.now;
+  }
+  const { payload } = await jwtVerify(
+    input.idToken,
+    input.jwks ?? getLogtoRemoteJwks(endpoint),
+    verifyOptions,
+  );
+  const claims = payload as JwtClaims;
+  if (!isAcceptedLogtoIssuer(claims.iss, endpoint)) {
+    throw new Error("Logto id_token issuer mismatch");
+  }
+  if (claims.nonce !== normalizeRequiredText(input.nonce, "nonce")) {
+    throw new Error("Logto id_token nonce mismatch");
+  }
+  return buildExternalAuthProfileFromLogtoClaims(claims);
+}
+
+function buildExternalAuthProfileFromLogtoClaims(claims: JwtClaims): ExternalAuthProfile {
   if (typeof claims.sub !== "string" || !claims.sub.trim()) {
     throw new Error("Logto id_token is missing sub");
   }
@@ -187,6 +283,40 @@ export function buildExternalAuthProfileFromLogtoIdToken(idToken: string): Exter
     profile.name = claims.name;
   }
   return profile;
+}
+
+export function buildDelegateDevAuthProfile(input: {
+  actor: DelegateAuthActor;
+  subject?: string | undefined;
+  email?: string | null | undefined;
+  name?: string | null | undefined;
+  representativeSlug?: string | undefined;
+  audienceId?: string | undefined;
+}): ExternalAuthProfile {
+  const subject = normalizeRequiredText(
+    input.subject ??
+      (input.actor === "owner" ? "delegate-dev-owner" : "delegate-dev-audience"),
+    "subject",
+  );
+  const defaultEmail =
+    input.actor === "owner" ? "creator@delegate.local" : "audience@delegate.local";
+  const email = input.email === undefined ? defaultEmail : input.email;
+
+  return {
+    provider: "logto",
+    subject,
+    email,
+    emailVerified: Boolean(email),
+    name:
+      input.name ??
+      (input.actor === "owner" ? "Local Delegate Creator" : "Local Delegate User"),
+    metadata: {
+      mode: "development",
+      actor: input.actor,
+      representativeSlug: input.representativeSlug ?? null,
+      audienceId: input.audienceId ?? null,
+    },
+  };
 }
 
 export function createDelegateAuthSession(input: {
@@ -230,6 +360,8 @@ export function createDelegateAuthState(input: {
   state: string;
   nonce: string;
   returnTo: string;
+  representativeSlug?: string | undefined;
+  audienceId?: string | undefined;
   now?: Date | undefined;
   ttlSeconds?: number | undefined;
 }): DelegateAuthState {
@@ -243,6 +375,10 @@ export function createDelegateAuthState(input: {
     state: normalizeRequiredText(input.state, "state"),
     nonce: normalizeRequiredText(input.nonce, "nonce"),
     returnTo: sanitizeRelativeReturnTo(input.returnTo),
+    ...(input.representativeSlug
+      ? { representativeSlug: normalizeRequiredText(input.representativeSlug, "representativeSlug") }
+      : {}),
+    ...(input.audienceId ? { audienceId: normalizeRequiredText(input.audienceId, "audienceId") } : {}),
     issuedAt,
     expiresAt: issuedAt + ttlSeconds,
   };
@@ -336,6 +472,22 @@ function normalizeLogtoEndpoint(endpoint: string): string {
   return normalizeRequiredText(endpoint, "endpoint").replace(/\/+$/, "");
 }
 
+function getLogtoRemoteJwks(endpoint: string): JWTVerifyGetKey {
+  const jwksUrl = new URL("/oidc/jwks", endpoint).toString();
+  const cached = logtoJwksCache.get(jwksUrl);
+  if (cached) {
+    return cached;
+  }
+
+  const jwks = createRemoteJWKSet(new URL(jwksUrl));
+  logtoJwksCache.set(jwksUrl, jwks);
+  return jwks;
+}
+
+function isAcceptedLogtoIssuer(value: unknown, endpoint: string): boolean {
+  return typeof value === "string" && (value === endpoint || value === `${endpoint}/oidc`);
+}
+
 function getLogtoScopes(config: LogtoOidcConfig): string[] {
   return config.scopes?.length ? config.scopes : ["openid", "profile", "email", "phone"];
 }
@@ -406,7 +558,13 @@ function isDelegateAuthState(value: unknown): value is DelegateAuthState {
     typeof state.state === "string" &&
     typeof state.nonce === "string" &&
     typeof state.returnTo === "string" &&
+    isOptionalString(state.representativeSlug) &&
+    isOptionalString(state.audienceId) &&
     typeof state.issuedAt === "number" &&
     typeof state.expiresAt === "number"
   );
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === "string";
 }

@@ -2,7 +2,8 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
 import {
-  DELEGATE_AUTH_SESSION_COOKIE,
+  DELEGATE_OWNER_AUTH_SESSION_COOKIE,
+  LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   readDelegateAuthSessionSecret,
   verifyDelegateAuthSession,
   type DelegateAuthSession,
@@ -12,10 +13,10 @@ import { sanitizeCreatorReturnTo, shouldRequireCreatorDashboardAuth } from "../.
 
 export async function getOwnerAuthSession(): Promise<DelegateAuthSession | null> {
   const cookieStore = await cookies();
-  const session = verifyDelegateAuthSession(
-    cookieStore.get(DELEGATE_AUTH_SESSION_COOKIE)?.value,
-    readDelegateAuthSessionSecret(),
-  );
+  const secret = readDelegateAuthSessionSecret();
+  const session =
+    verifyDelegateAuthSession(cookieStore.get(DELEGATE_OWNER_AUTH_SESSION_COOKIE)?.value, secret) ??
+    verifyDelegateAuthSession(cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value, secret);
   return session?.actor === "owner" ? session : null;
 }
 

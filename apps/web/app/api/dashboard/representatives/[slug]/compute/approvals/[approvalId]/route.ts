@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { resolveRepresentativeComputeApproval } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../../auth";
 
 export async function PATCH(
   request: Request,
@@ -9,6 +13,10 @@ export async function PATCH(
   }: { params: Promise<{ slug: string; approvalId: string }> },
 ) {
   const { slug, approvalId } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const body = (await request.json()) as Record<string, unknown>;
@@ -28,6 +36,11 @@ export async function PATCH(
 
     return NextResponse.json(result);
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

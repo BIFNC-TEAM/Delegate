@@ -5,6 +5,7 @@ import { localeCookieName, normalizeLocale } from "@delegate/web-ui";
 
 import {
   DASHBOARD_AUTH_COOKIE_NAME,
+  DASHBOARD_LEGACY_AUTH_COOKIE_NAME,
   buildCreatorLoginPath,
   isCreatorDashboardPath,
   shouldRequireCreatorDashboardAuth,
@@ -14,7 +15,8 @@ export function proxy(request: NextRequest) {
   if (
     shouldRequireCreatorDashboardAuth() &&
     isCreatorDashboardPath(request.nextUrl.pathname) &&
-    !request.cookies.get(DASHBOARD_AUTH_COOKIE_NAME)?.value
+    !request.cookies.get(DASHBOARD_AUTH_COOKIE_NAME)?.value &&
+    !request.cookies.get(DASHBOARD_LEGACY_AUTH_COOKIE_NAME)?.value
   ) {
     if (request.nextUrl.pathname.startsWith("/api/dashboard")) {
       return NextResponse.json({ error: "Authentication required." }, { status: 401 });

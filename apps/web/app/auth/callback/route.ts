@@ -2,9 +2,11 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
-  DELEGATE_AUTH_SESSION_COOKIE,
-  DELEGATE_AUTH_STATE_COOKIE,
-  buildExternalAuthProfileFromLogtoIdToken,
+  DELEGATE_OWNER_AUTH_SESSION_COOKIE,
+  DELEGATE_OWNER_AUTH_STATE_COOKIE,
+  LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
+  LEGACY_DELEGATE_AUTH_STATE_COOKIE,
+  buildVerifiedExternalAuthProfileFromLogtoIdToken,
   createDelegateAuthSession,
   exchangeLogtoCodeForTokens,
   readDelegateAuthSessionSecret,
@@ -25,17 +27,23 @@ export async function GET(request: Request) {
 
     const cookieStore = await cookies();
     const secret = readDelegateAuthSessionSecret();
-    const authState = verifyDelegateAuthState(cookieStore.get(DELEGATE_AUTH_STATE_COOKIE)?.value, secret);
+    const authState =
+      verifyDelegateAuthState(cookieStore.get(DELEGATE_OWNER_AUTH_STATE_COOKIE)?.value, secret) ??
+      verifyDelegateAuthState(cookieStore.get(LEGACY_DELEGATE_AUTH_STATE_COOKIE)?.value, secret);
     if (!authState || authState.state !== state || authState.actor !== "owner") {
       return NextResponse.json({ error: "Invalid or expired login state." }, { status: 400 });
     }
 
-    const tokens = await exchangeLogtoCodeForTokens(readLogtoOidcConfig(), { code });
+    const logtoConfig = readLogtoOidcConfig();
+    const tokens = await exchangeLogtoCodeForTokens(logtoConfig, { code });
     if (!tokens.idToken) {
       return NextResponse.json({ error: "Logto did not return an id_token." }, { status: 400 });
     }
 
-    const profile = buildExternalAuthProfileFromLogtoIdToken(tokens.idToken);
+    const profile = await buildVerifiedExternalAuthProfileFromLogtoIdToken(logtoConfig, {
+      idToken: tokens.idToken,
+      nonce: authState.nonce,
+    });
     const { owner } = await resolveOwnerForAuth(profile);
     const session = createDelegateAuthSession({
       actor: "owner",
@@ -44,14 +52,16 @@ export async function GET(request: Request) {
       email: profile.email ?? null,
     });
     const response = NextResponse.redirect(new URL(authState.returnTo, request.url));
-    response.cookies.set(DELEGATE_AUTH_SESSION_COOKIE, signDelegateAuthSession(session, secret), {
+    response.cookies.set(DELEGATE_OWNER_AUTH_SESSION_COOKIE, signDelegateAuthSession(session, secret), {
       httpOnly: true,
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production",
       path: "/",
       maxAge: session.expiresAt - session.issuedAt,
     });
-    response.cookies.delete(DELEGATE_AUTH_STATE_COOKIE);
+    response.cookies.delete(DELEGATE_OWNER_AUTH_STATE_COOKIE);
+    response.cookies.delete(LEGACY_DELEGATE_AUTH_SESSION_COOKIE);
+    response.cookies.delete(LEGACY_DELEGATE_AUTH_STATE_COOKIE);
     return response;
   } catch (error) {
     return NextResponse.json(

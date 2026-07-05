@@ -4,12 +4,20 @@ import {
   createCreatorFeedbackSignal,
   listCreatorFeedbackSignals,
 } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../auth";
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const url = new URL(request.url);
@@ -22,6 +30,11 @@ export async function GET(
 
     return NextResponse.json({ feedbackSignals });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:
@@ -37,6 +50,10 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const body = (await request.json()) as Record<string, unknown>;
@@ -53,6 +70,11 @@ export async function POST(
 
     return NextResponse.json({ feedbackSignal }, { status: 201 });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

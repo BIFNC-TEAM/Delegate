@@ -4,12 +4,20 @@ import {
   getRepresentativeSkillPackSnapshot,
   installClawHubSkillPackForRepresentative,
 } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../auth";
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const snapshot = await getRepresentativeSkillPackSnapshot(slug);
@@ -19,6 +27,11 @@ export async function GET(
 
     return NextResponse.json(snapshot);
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:
@@ -36,6 +49,10 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
   const body = (await request.json()) as { skillPackSlug?: string };
 
   if (!body.skillPackSlug?.trim()) {
@@ -50,6 +67,11 @@ export async function POST(
 
     return NextResponse.json({ skillPack });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

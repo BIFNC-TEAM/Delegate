@@ -7,7 +7,7 @@ import {
 
 import {
   dashboardAuthErrorResponse,
-  requireDashboardRepresentativeAccess,
+  authorizeDashboardRepresentativeAccess,
 } from "../../../auth";
 
 export async function GET(
@@ -15,9 +15,12 @@ export async function GET(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
-    await requireDashboardRepresentativeAccess(slug);
     const snapshot = await getRepresentativeSetupSnapshot(slug);
     if (!snapshot) {
       return NextResponse.json({ error: "Representative not found." }, { status: 404 });
@@ -45,9 +48,12 @@ export async function PATCH(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
-    await requireDashboardRepresentativeAccess(slug);
     const body = (await request.json()) as Record<string, unknown>;
     const snapshot = await updateRepresentativeSetup({
       representativeSlug: slug,

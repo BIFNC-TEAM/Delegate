@@ -181,6 +181,9 @@ importers:
       '@prisma/client':
         specifier: ^6.19.2
         version: 6.19.2(prisma@6.19.2(typescript@5.9.3))(typescript@5.9.3)
+      jose:
+        specifier: ^6.2.3
+        version: 6.2.3
       jszip:
         specifier: ^3.10.1
         version: 3.10.1

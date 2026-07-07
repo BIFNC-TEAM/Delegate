@@ -33,11 +33,18 @@ const copy = {
     shipsTitle: "先回答，收费时收费，需要拍板时请示，需要人时转接。",
     shipsBody: "当前交付的是网页代表楔子和第一条钱包闭环：公开代表页、网页聊天、待处理收件项、演示充值、用户现金余额、服务额度、创作者 20% 待释放 / 可提现收益和钱包账本。真实 Stripe / 微信 / 支付宝收款、自动出金和透明证明仍是后续产品化工作。",
     frontDeskSteps: [
-      { label: "01 / Answer", title: "能回答的先回答", body: "FAQ、公开资料、服务范围先由代表接住，不把主人拉回一级前台。" },
-      { label: "02 / Charge", title: "该收费的先收费", body: "免费试聊后，深度服务、优先级和继续对话进入网页充值与 invoice 信号。" },
-      { label: "03 / Ask", title: "需要拍板的先请示", body: "敏感动作、报价判断和不可逆动作进入审批，而不是让 AI 自作主张。" },
-      { label: "04 / Human", title: "需要人时再转接", body: "转人工会变成待处理收件项，主人接手的是高价值上下文，不是原始噪音。" },
+      { label: "先回答", title: "能回答的先回答", body: "FAQ、公开资料、服务范围先由代表接住，不把主人拉回一级前台。" },
+      { label: "先收费", title: "该收费的先收费", body: "免费试聊后，深度服务、优先级和继续对话进入网页充值与 invoice 信号。" },
+      { label: "先请示", title: "需要拍板的先请示", body: "敏感动作、报价判断和不可逆动作进入审批，而不是让 AI 自作主张。" },
+      { label: "再转接", title: "需要人时再转接", body: "转人工会变成待处理收件项，主人接手的是高价值上下文，不是原始噪音。" },
     ],
+    orbit: {
+      channels: "Telegram / WhatsApp / 飞书",
+      representative: "AI 分身",
+      wallet: "Agent 钱包",
+      approval: "请示主人",
+      human: "转人工",
+    },
     proofPoints: [
       { stat: "10 秒", label: "陌生人应该在十秒内理解这不是闲聊 bot，而是一个公开代表入口。" },
       { stat: "70%+", label: "高频 inbound 询问应被代表独立接住，而不是重新把主人拉回一级前台。" },
@@ -49,10 +56,10 @@ const copy = {
     trustPills: ["仅公开知识", "仅安全技能", "内建人工转接", "动作可审计"],
     operatingAria: "运营节奏",
     operatingBeats: [
-      { step: "01", title: "先接住第一次 inbound", body: "陌生人先被接住，才会继续问下去、付费、或者申请升级转接。" },
-      { step: "02", title: "再把边界说清楚", body: "对方必须清楚这是公开代表，不是主人本人，也不是一个万能 bot。" },
-      { step: "03", title: "把请求路由成流程", body: "FAQ、报价采集、预约和资料投递，都要能把模糊请求变成结构化入口。" },
-      { step: "04", title: "用付费继续深入", body: "免费只负责接住，真正的深度服务和优先级要通过付费自然升级。" },
+      { step: "接住", title: "先接住第一次 inbound", body: "陌生人先被接住，才会继续问下去、付费、或者申请升级转接。" },
+      { step: "边界", title: "再把边界说清楚", body: "对方必须清楚这是公开代表，不是主人本人，也不是一个万能 bot。" },
+      { step: "路由", title: "把请求路由成流程", body: "FAQ、报价采集、预约和资料投递，都要能把模糊请求变成结构化入口。" },
+      { step: "付费", title: "用付费继续深入", body: "免费只负责接住，真正的深度服务和优先级要通过付费自然升级。" },
     ],
     interfaceColumns: [
       {
@@ -123,7 +130,7 @@ const copy = {
     navDemo: "Demo digital rep",
     navDashboard: "Representative console",
     heroEyebrow: "Digital Representative Network",
-    heroTitle: "Your AI double represents you and serves the outside world.",
+    heroTitle: "Your AI double serves the outside world for you.",
     heroLead:
       "It greets strangers, qualifies business opportunities, and handles simple tasks for you. While you rest, it works for you, earns passive income, and leaves only the moments that truly need you.",
     heroPrimary: "Explore digital representative",
@@ -132,11 +139,18 @@ const copy = {
     shipsTitle: "Answer first, charge when needed, ask for approval, hand off to a human.",
     shipsBody: "What ships today is the web representative wedge plus the first wallet loop: public representative page, web chat, follow-up queue, demo recharge, user cash balance, service credits, creator 20% pending / withdrawable earnings, and wallet ledger entries. Live Stripe / WeChat / Alipay collection, automatic payout, and public proof remain productization work.",
     frontDeskSteps: [
-      { label: "01 / Answer", title: "Answer what it can", body: "FAQs, public materials, and service boundaries are handled before the owner gets pulled back to the front desk." },
-      { label: "02 / Charge", title: "Charge when needed", body: "After the free reception layer, deeper help and priority move into web recharge and invoice signals." },
-      { label: "03 / Ask", title: "Ask for approval", body: "Sensitive actions, quote judgment, and irreversible steps move through approval instead of AI improvisation." },
-      { label: "04 / Human", title: "Hand off with context", body: "Human follow-up becomes a clear queue item, so the person receives high-value context rather than raw noise." },
+      { label: "Answer", title: "Answer what it can", body: "FAQs, public materials, and service boundaries are handled before the owner gets pulled back to the front desk." },
+      { label: "Charge", title: "Charge when needed", body: "After the free reception layer, deeper help and priority move into web recharge and invoice signals." },
+      { label: "Ask", title: "Ask for approval", body: "Sensitive actions, quote judgment, and irreversible steps move through approval instead of AI improvisation." },
+      { label: "Hand off", title: "Hand off with context", body: "Human follow-up becomes a clear queue item, so the person receives high-value context rather than raw noise." },
     ],
+    orbit: {
+      channels: "Telegram / WhatsApp / Feishu",
+      representative: "AI double",
+      wallet: "Agent wallet",
+      approval: "Ask owner",
+      human: "Human handoff",
+    },
     proofPoints: [
       { stat: "10s", label: "A stranger should understand within ten seconds that this is a public representative, not a generic chat bot." },
       { stat: "70%+", label: "The representative should absorb most repetitive inbound questions without pulling the founder back to the front desk." },
@@ -148,10 +162,10 @@ const copy = {
     trustPills: ["Public knowledge only", "Bounded skills only", "Human follow-up built in", "Auditable actions"],
     operatingAria: "Operating rhythm",
     operatingBeats: [
-      { step: "01", title: "Catch the first inbound", body: "The stranger has to feel received before they will keep asking, pay, or request escalation." },
-      { step: "02", title: "Show the boundary", body: "People should know immediately that this is a public representative, not the owner and not an unlimited bot." },
-      { step: "03", title: "Route the request", body: "FAQ, quote intake, scheduling, and materials delivery should turn vague demand into structured motion." },
-      { step: "04", title: "Continue with payment", body: "Free gets the relationship started; deeper help and priority should unlock naturally through payment." },
+      { step: "Catch", title: "Catch the first inbound", body: "The stranger has to feel received before they will keep asking, pay, or request escalation." },
+      { step: "Boundary", title: "Show the boundary", body: "People should know immediately that this is a public representative, not the owner and not an unlimited bot." },
+      { step: "Route", title: "Route the request", body: "FAQ, quote intake, scheduling, and materials delivery should turn vague demand into structured motion." },
+      { step: "Charge", title: "Continue with payment", body: "Free gets the relationship started; deeper help and priority should unlock naturally through payment." },
     ],
     interfaceColumns: [
       {
@@ -248,7 +262,7 @@ export default async function HomePage({
       <HashScrollRestorer />
       <header className="marketing-topbar">
         <div className="marketing-brand">
-          <div className="marketing-brand-mark">D</div>
+          <img className="marketing-brand-mark" src="/D_logo.svg" alt="Delegate logo" />
           <div>
             <strong>Delegate</strong>
             <div className="muted">{t.brandTagline}</div>
@@ -323,6 +337,17 @@ export default async function HomePage({
 
         <div className="marketing-stage">
           <article className="marketing-runtime-card">
+            <div className="marketing-orbit-panel" aria-label={t.shipsKicker}>
+              <span className="marketing-orbit-node marketing-orbit-node-channels">{t.orbit.channels}</span>
+              <span className="marketing-orbit-node marketing-orbit-node-wallet">{t.orbit.wallet}</span>
+              <span className="marketing-orbit-node marketing-orbit-node-approval">{t.orbit.approval}</span>
+              <span className="marketing-orbit-node marketing-orbit-node-human">{t.orbit.human}</span>
+              <div className="marketing-orbit-core">
+                <strong>Delegate</strong>
+                <span>{t.orbit.representative}</span>
+              </div>
+            </div>
+
             <div className="marketing-code-window">
               <div className="marketing-code-bar" aria-hidden="true">
                 <span />

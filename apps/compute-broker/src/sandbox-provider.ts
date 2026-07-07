@@ -159,10 +159,7 @@ export async function createDaytonaClientFromInstalledSdk(config: {
   apiUrl?: string | undefined;
   target?: string | undefined;
 }): Promise<DaytonaClientLike> {
-  const sdk = await importDynamic("@daytonaio/sdk").catch((error) => {
-    const reason = error instanceof Error ? error.message : "module_not_available";
-    throw new Error(`Daytona SDK is not installed or could not be loaded: ${reason}`);
-  });
+  const sdk = await importDaytonaSdk();
   const DaytonaCtor =
     getFunctionExport(sdk, "Daytona") ??
     getFunctionExport(sdk, "DaytonaClient") ??
@@ -228,6 +225,19 @@ function importDynamic(specifier: string): Promise<Record<string, unknown>> {
     specifier: string,
   ) => Promise<Record<string, unknown>>;
   return dynamicImport(specifier);
+}
+
+async function importDaytonaSdk(): Promise<Record<string, unknown>> {
+  const errors: string[] = [];
+  for (const specifier of ["@daytona/sdk", "@daytonaio/sdk"]) {
+    try {
+      return await importDynamic(specifier);
+    } catch (error) {
+      errors.push(`${specifier}: ${error instanceof Error ? error.message : "module_not_available"}`);
+    }
+  }
+
+  throw new Error(`Daytona SDK is not installed or could not be loaded: ${errors.join("; ")}`);
 }
 
 export type DaytonaCreateInput = {

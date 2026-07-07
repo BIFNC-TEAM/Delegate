@@ -28,7 +28,82 @@ describe("getNativeComputerProviderReadiness", () => {
         transportKind: "claude_computer_use",
         reason: "provider_credentials_missing",
       },
+      {
+        provider: "opencode",
+        enabled: false,
+        status: "disabled",
+        model: "opencode/default",
+        transportKind: "opencode_computer_use",
+        reason: "provider_disabled",
+      },
     ]);
+  });
+
+  it("requires Daytona before reporting OpenCode as ready", async () => {
+    process.env.COMPUTE_BROKER_INTERNAL_TOKEN ??= "test-internal-token";
+    const { getNativeComputerProviderReadiness } = await import("../src/native-browser");
+
+    const dockerReadiness = getNativeComputerProviderReadiness({
+      COMPUTE_NATIVE_OPENCODE_ENABLED: "true",
+      COMPUTE_NATIVE_OPENCODE_MODEL: "qwen/opencode",
+      SANDBOX_PROVIDER: "docker",
+      DAYTONA_API_KEY: "",
+    }).find((provider) => provider.provider === "opencode");
+
+    expect(dockerReadiness).toEqual({
+      provider: "opencode",
+      enabled: true,
+      status: "missing_sandbox",
+      model: "qwen/opencode",
+      transportKind: "opencode_computer_use",
+      reason: "daytona_sandbox_required",
+    });
+
+    const daytonaReadiness = getNativeComputerProviderReadiness({
+      COMPUTE_NATIVE_OPENCODE_ENABLED: "true",
+      COMPUTE_NATIVE_OPENCODE_MODEL: "qwen/opencode",
+      SANDBOX_PROVIDER: "daytona",
+      DAYTONA_API_KEY: "daytona_test_key",
+    }).find((provider) => provider.provider === "opencode");
+
+    expect(daytonaReadiness).toEqual({
+      provider: "opencode",
+      enabled: true,
+      status: "ready",
+      model: "qwen/opencode",
+      transportKind: "opencode_computer_use",
+      reason: null,
+    });
+  });
+});
+
+describe("buildOpenCodeComputerUseCommand", () => {
+  it("builds a Daytona sandbox command that runs OpenCode and captures the retained browser state", async () => {
+    const { buildOpenCodeCaptureCommand, buildOpenCodeComputerUseCommand } = await import("../src/browser");
+    const command = buildOpenCodeComputerUseCommand({
+      opencodeCommand: "opencode",
+      model: "qwen/opencode",
+      playwrightVersion: "1.58.2",
+      task: "Inspect the visible pricing plan.",
+      maxSteps: 2,
+      allowMutations: false,
+      currentUrl: "https://example.com/pricing",
+      currentTitle: "Pricing",
+      textSnippet: "Starter plan",
+      screenshotBase64: "ZmFrZQ==",
+      screenshotMimeType: "image/png",
+    });
+
+    expect(command).toContain("opencode");
+    expect(command).toContain("run --auto --model 'qwen/opencode'");
+    expect(command).toContain("npm install --silent --no-save opencode-ai");
+    expect(command).toContain("delegate-browser-tool.cjs");
+    expect(command).toContain("Mutation approval: not allowed");
+    expect(command).toContain("opencode_computer_use");
+    expect(command).not.toContain("PLAYWRIGHT_BROWSERS_PATH=/ms-playwright node delegate-browser-tool.cjs inspect");
+
+    const captureCommand = buildOpenCodeCaptureCommand();
+    expect(captureCommand).toContain("node delegate-browser-tool.cjs inspect");
   });
 });
 

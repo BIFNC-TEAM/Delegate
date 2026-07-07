@@ -19,6 +19,10 @@ const envSchema = z.object({
   COMPUTE_NATIVE_ANTHROPIC_BASE_URL: z.string().url().optional(),
   COMPUTE_NATIVE_ANTHROPIC_MODEL: z.string().optional(),
   COMPUTE_NATIVE_ANTHROPIC_COST_CENTS_PER_STEP: z.coerce.number().int().nonnegative().default(8),
+  COMPUTE_NATIVE_OPENCODE_ENABLED: z.string().optional(),
+  COMPUTE_NATIVE_OPENCODE_COMMAND: z.string().min(1).default("opencode"),
+  COMPUTE_NATIVE_OPENCODE_MODEL: z.string().optional(),
+  COMPUTE_NATIVE_OPENCODE_COST_CENTS_PER_STEP: z.coerce.number().int().nonnegative().default(6),
   COMPUTE_NATIVE_MAX_STEPS: z.coerce.number().int().positive().max(8).default(3),
   COMPUTE_NATIVE_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(1024),
   COMPUTE_MCP_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
@@ -72,6 +76,14 @@ export const computeBrokerConfig = {
         ? { model: normalizeOptionalString(parsed.COMPUTE_NATIVE_ANTHROPIC_MODEL) }
         : {}),
       costCentsPerStep: parsed.COMPUTE_NATIVE_ANTHROPIC_COST_CENTS_PER_STEP,
+    },
+    opencode: {
+      enabled: parseBoolean(parsed.COMPUTE_NATIVE_OPENCODE_ENABLED, false),
+      command: parsed.COMPUTE_NATIVE_OPENCODE_COMMAND,
+      ...(normalizeOptionalString(parsed.COMPUTE_NATIVE_OPENCODE_MODEL)
+        ? { model: normalizeOptionalString(parsed.COMPUTE_NATIVE_OPENCODE_MODEL) }
+        : {}),
+      costCentsPerStep: parsed.COMPUTE_NATIVE_OPENCODE_COST_CENTS_PER_STEP,
     },
   },
   mcpTimeoutMs: parsed.COMPUTE_MCP_TIMEOUT_MS,

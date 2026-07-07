@@ -1,3 +1,5 @@
+import type { BrowserTransportKind } from "@delegate/compute-protocol";
+
 import { prisma } from "./prisma";
 import { mapBrowserTransportKindToDb } from "./serializers";
 
@@ -25,7 +27,7 @@ export async function recordBrowserNavigation(params: {
   sandboxIdentityId?: string | null | undefined;
   sandboxLeaseId?: string | null | undefined;
   toolExecutionId: string;
-  transportKind: "playwright" | "openai_computer" | "claude_computer_use";
+  transportKind: BrowserTransportKind;
   requestedUrl: string;
   finalUrl?: string | null | undefined;
   pageTitle?: string | null | undefined;

@@ -4,6 +4,9 @@ import { useEffect, useMemo, useState, useTransition } from "react";
 
 import {
   maxDeliverableBundleItems,
+  type BrowserTransportKind,
+  type NativeComputerProvider,
+  type NativeComputerProviderStatus,
   type RepresentativeGovernedActionSnapshot,
 } from "@delegate/compute-protocol";
 import {
@@ -124,9 +127,9 @@ type ComputeSnapshot = {
     state: "ready" | "no_browser_session" | "missing_screenshot" | "no_ready_providers";
     sessionId: string | null;
     browserSessionId: string | null;
-    browserTransportKind?: "playwright" | "openai_computer" | "claude_computer_use" | null;
-    preferredProvider?: "openai" | "anthropic" | null;
-    targetTransportKind?: "playwright" | "openai_computer" | "claude_computer_use" | null;
+    browserTransportKind?: BrowserTransportKind | null;
+    preferredProvider?: NativeComputerProvider | null;
+    targetTransportKind?: BrowserTransportKind | null;
     currentUrl?: string | null;
     currentTitle?: string | null;
     latestNavigationId?: string | null;
@@ -139,11 +142,11 @@ type ComputeSnapshot = {
     requiresApprovalForMutations: boolean;
     supportsSessionReuse: boolean;
     providerReadiness: Array<{
-      provider: "openai" | "anthropic";
-      status: "ready" | "disabled" | "missing_credentials" | "missing_model";
+      provider: NativeComputerProvider;
+      status: NativeComputerProviderStatus;
       enabled: boolean;
       model?: string | null;
-      transportKind: "playwright" | "openai_computer" | "claude_computer_use";
+      transportKind: BrowserTransportKind;
       reason?: string | null;
     }>;
     nextStep: string;
@@ -152,7 +155,7 @@ type ComputeSnapshot = {
     id: string;
     computeSessionId: string;
     status: "active" | "failed" | "closed";
-    transportKind: "playwright" | "openai_computer" | "claude_computer_use";
+    transportKind: BrowserTransportKind;
     profilePath?: string;
     currentUrl?: string;
     currentTitle?: string;
@@ -167,7 +170,7 @@ type ComputeSnapshot = {
       id: string;
       toolExecutionId: string;
       status: "succeeded" | "failed";
-      transportKind: "playwright" | "openai_computer" | "claude_computer_use";
+      transportKind: BrowserTransportKind;
       requestedUrl: string;
       finalUrl?: string;
       pageTitle?: string;
@@ -645,7 +648,7 @@ type McpBindingFormState = {
 
 type NativeComputerFormState = {
   task: string;
-  provider: "auto" | "openai" | "anthropic";
+  provider: "auto" | NativeComputerProvider;
   maxSteps: number;
   allowMutations: boolean;
 };
@@ -3412,6 +3415,7 @@ export function DashboardCompute({
                     <option value="auto">{t.nativeProviderAuto}</option>
                     <option value="openai">OpenAI</option>
                     <option value="anthropic">Anthropic</option>
+                    <option value="opencode">OpenCode via Daytona</option>
                   </select>
                 </label>
                 <label className="field-label">
@@ -5352,7 +5356,7 @@ const copy = {
     noSessions: "还没有 compute session。",
     browserSessionsEyebrow: "Browser Session Lane",
     nativeComputerUseEyebrow: "Native Computer-Use Prep",
-    nativeComputerUseTitle: "把 retained browser session 变成未来 Claude / OpenAI computer-use 的交接点",
+    nativeComputerUseTitle: "把 retained browser session 交给 OpenAI、Claude 或 Daytona 内的 OpenCode 继续操作",
     nativeComputerUseSessionTitle: "Latest handoff-ready browser session",
     nativeComputerUseState: (value: string) => value.replaceAll("_", " "),
     nativeProviderStatus: (value: string) => value.replaceAll("_", " "),
@@ -5818,7 +5822,7 @@ const copy = {
     noSessions: "No compute sessions yet.",
     browserSessionsEyebrow: "Browser Session Lane",
     nativeComputerUseEyebrow: "Native Computer-Use Prep",
-    nativeComputerUseTitle: "Turn the retained browser session into a handoff point for future Claude / OpenAI computer-use loops",
+    nativeComputerUseTitle: "Hand the retained browser session to OpenAI, Claude, or OpenCode inside Daytona",
     nativeComputerUseSessionTitle: "Latest handoff-ready browser session",
     nativeComputerUseState: (value: string) => value.replaceAll("_", " "),
     nativeProviderStatus: (value: string) => value.replaceAll("_", " "),

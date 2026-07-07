@@ -12,6 +12,15 @@ import type { NativeBrowserAction, PlaywrightBrowseArtifactPayload } from "./bro
 import { computeBrokerConfig } from "./config";
 import { prisma } from "./prisma";
 
+type NativeComputerTransportKind = Extract<
+  BrowserTransportKind,
+  "openai_computer" | "claude_computer_use" | "opencode_computer_use"
+>;
+type NativeComputerActionTransportKind = Extract<
+  BrowserTransportKind,
+  "openai_computer" | "claude_computer_use"
+>;
+
 type BrowserSessionPreflightRecord = {
   id: string;
   computeSessionId: string;
@@ -80,7 +89,7 @@ export type NativeComputerUsageSummary = {
 export type NativeComputerLoopResult = {
   provider: NativeComputerProvider;
   model: string;
-  transportKind: Extract<BrowserTransportKind, "openai_computer" | "claude_computer_use">;
+  transportKind: NativeComputerTransportKind;
   finalText: string | null;
   trace: NativeComputerLoopTrace;
   capture: PlaywrightBrowseArtifactPayload | null;
@@ -260,10 +269,25 @@ export async function executeNativeComputerUseLoop(params: {
   screenshotBase64: string;
   screenshotMimeType: "image/png" | "image/jpeg";
   executeActionBatch: (params: {
-    transportKind: Extract<BrowserTransportKind, "openai_computer" | "claude_computer_use">;
+    transportKind: NativeComputerActionTransportKind;
     actions: NativeBrowserAction[];
     currentUrl?: string | null | undefined;
   }) => Promise<PlaywrightBrowseArtifactPayload>;
+  executeOpenCodeComputerUse?: (params: {
+    providerConfig: ReadyNativeProviderConfig;
+    task: string;
+    maxSteps: number;
+    allowMutations: boolean;
+    currentUrl?: string | null | undefined;
+    currentTitle?: string | null | undefined;
+    textSnippet?: string | null | undefined;
+    screenshotBase64: string;
+    screenshotMimeType: "image/png" | "image/jpeg";
+  }) => Promise<{
+    capture: PlaywrightBrowseArtifactPayload;
+    stdout: string;
+    stderr: string;
+  }>;
 }): Promise<NativeComputerLoopResult> {
   const providerReadiness = getNativeComputerProviderReadiness();
   const provider = resolveRequestedProvider(params.provider, providerReadiness);
@@ -272,6 +296,14 @@ export async function executeNativeComputerUseLoop(params: {
 
   if (provider === "openai") {
     return runOpenAiNativeLoop({
+      ...params,
+      providerConfig,
+      startedAt,
+    });
+  }
+
+  if (provider === "opencode") {
+    return runOpenCodeNativeLoop({
       ...params,
       providerConfig,
       startedAt,
@@ -316,6 +348,24 @@ export function getNativeComputerProviderReadiness(
         return model ? { model } : {};
       })(),
       hasCredentials: Boolean(normalizeOptionalString(env.ANTHROPIC_API_KEY)),
+    }),
+    buildOpenCodeProviderReadiness({
+      enabled: parseBoolean(
+        env.COMPUTE_NATIVE_OPENCODE_ENABLED,
+        computeBrokerConfig.nativeComputerUse.opencode.enabled,
+      ),
+      command:
+        normalizeOptionalString(env.COMPUTE_NATIVE_OPENCODE_COMMAND) ??
+        computeBrokerConfig.nativeComputerUse.opencode.command,
+      model:
+        normalizeOptionalString(env.COMPUTE_NATIVE_OPENCODE_MODEL) ??
+        computeBrokerConfig.nativeComputerUse.opencode.model ??
+        "opencode/default",
+      sandboxProvider:
+        normalizeOptionalString(env.SANDBOX_PROVIDER) ?? computeBrokerConfig.sandboxProvider,
+      hasDaytonaCredentials: Boolean(
+        normalizeOptionalString(env.DAYTONA_API_KEY) ?? computeBrokerConfig.daytona.apiKey,
+      ),
     }),
   ];
 }
@@ -661,11 +711,101 @@ async function runAnthropicNativeLoop(params: {
   };
 }
 
+async function runOpenCodeNativeLoop(params: {
+  providerConfig: ReadyNativeProviderConfig;
+  task: string;
+  maxSteps: number;
+  allowMutations: boolean;
+  currentUrl?: string | null | undefined;
+  currentTitle?: string | null | undefined;
+  textSnippet?: string | null | undefined;
+  screenshotBase64: string;
+  screenshotMimeType: "image/png" | "image/jpeg";
+  executeOpenCodeComputerUse?: (params: {
+    providerConfig: ReadyNativeProviderConfig;
+    task: string;
+    maxSteps: number;
+    allowMutations: boolean;
+    currentUrl?: string | null | undefined;
+    currentTitle?: string | null | undefined;
+    textSnippet?: string | null | undefined;
+    screenshotBase64: string;
+    screenshotMimeType: "image/png" | "image/jpeg";
+  }) => Promise<{
+    capture: PlaywrightBrowseArtifactPayload;
+    stdout: string;
+    stderr: string;
+  }>;
+  startedAt: Date;
+}): Promise<NativeComputerLoopResult> {
+  if (!params.executeOpenCodeComputerUse) {
+    throw new Error("opencode_sandbox_executor_missing");
+  }
+
+  const usage = createUsageAccumulator("opencode", params.providerConfig.model);
+  const trace: NativeComputerLoopTrace = {
+    provider: "opencode",
+    model: params.providerConfig.model,
+    allowMutations: params.allowMutations,
+    maxSteps: params.maxSteps,
+    task: params.task,
+    startedAt: params.startedAt.toISOString(),
+    status: "failed",
+    steps: [],
+  };
+
+  const result = await params.executeOpenCodeComputerUse({
+    providerConfig: params.providerConfig,
+    task: params.task,
+    maxSteps: params.maxSteps,
+    allowMutations: params.allowMutations,
+    currentUrl: params.currentUrl,
+    currentTitle: params.currentTitle,
+    textSnippet: params.textSnippet,
+    screenshotBase64: params.screenshotBase64,
+    screenshotMimeType: params.screenshotMimeType,
+  });
+
+  usage.providerCostCents += params.providerConfig.costCentsPerStep;
+  const finalText = "OpenCode completed the browser task inside the Daytona sandbox.";
+  trace.status = "completed";
+  trace.completedAt = new Date().toISOString();
+  trace.finalText = finalText;
+  trace.usage = finalizeUsage(usage);
+  trace.steps.push({
+    index: 1,
+    providerResponseId: "opencode-cli",
+    actions: result.capture.executedActions?.length
+      ? result.capture.executedActions
+      : [
+          {
+            type: "screenshot",
+            summary: "Captured the browser state after the OpenCode sandbox run.",
+          },
+        ],
+    resultingUrl: result.capture.finalUrl,
+    pageTitle: result.capture.title,
+    textSnippet: result.capture.textSnippet,
+  });
+
+  return {
+    provider: "opencode",
+    model: params.providerConfig.model,
+    transportKind: "opencode_computer_use",
+    finalText,
+    trace,
+    capture: result.capture,
+    usage: finalizeUsage(usage),
+    wallMs: Date.now() - params.startedAt.getTime(),
+  };
+}
+
 type ReadyNativeProviderConfig = {
   provider: NativeComputerProvider;
   model: string;
-  transportKind: Extract<BrowserTransportKind, "openai_computer" | "claude_computer_use">;
+  transportKind: NativeComputerTransportKind;
   costCentsPerStep: number;
+  command?: string;
 };
 
 type NativeUsageAccumulator = {
@@ -710,7 +850,12 @@ function resolveReadyProviderConfig(
     costCentsPerStep:
       provider === "openai"
         ? computeBrokerConfig.nativeComputerUse.openai.costCentsPerStep
-        : computeBrokerConfig.nativeComputerUse.anthropic.costCentsPerStep,
+        : provider === "anthropic"
+          ? computeBrokerConfig.nativeComputerUse.anthropic.costCentsPerStep
+          : computeBrokerConfig.nativeComputerUse.opencode.costCentsPerStep,
+    ...(provider === "opencode"
+      ? { command: computeBrokerConfig.nativeComputerUse.opencode.command }
+      : {}),
   };
 }
 
@@ -1169,11 +1314,53 @@ function buildProviderReadiness(params: {
   };
 }
 
-export function mapProviderToTransportKind(provider: "openai" | "anthropic"): Extract<
-  BrowserTransportKind,
-  "openai_computer" | "claude_computer_use"
-> {
-  return provider === "openai" ? "openai_computer" : "claude_computer_use";
+function buildOpenCodeProviderReadiness(params: {
+  enabled: boolean;
+  command: string;
+  model: string;
+  sandboxProvider: string;
+  hasDaytonaCredentials: boolean;
+}): NativeComputerProviderSnapshot {
+  if (!params.enabled) {
+    return {
+      provider: "opencode",
+      enabled: false,
+      status: "disabled",
+      transportKind: "opencode_computer_use",
+      model: params.model,
+      reason: "provider_disabled",
+    };
+  }
+
+  if (params.sandboxProvider !== "daytona" || !params.hasDaytonaCredentials) {
+    return {
+      provider: "opencode",
+      enabled: true,
+      status: "missing_sandbox",
+      transportKind: "opencode_computer_use",
+      model: params.model,
+      reason: "daytona_sandbox_required",
+    };
+  }
+
+  return {
+    provider: "opencode",
+    enabled: true,
+    status: "ready",
+    transportKind: "opencode_computer_use",
+    model: params.model,
+    reason: null,
+  };
+}
+
+export function mapProviderToTransportKind(provider: NativeComputerProvider): NativeComputerTransportKind {
+  if (provider === "openai") {
+    return "openai_computer";
+  }
+  if (provider === "anthropic") {
+    return "claude_computer_use";
+  }
+  return "opencode_computer_use";
 }
 
 export function normalizeBrowserTransportKind(value: string): BrowserTransportKind {
@@ -1182,6 +1369,9 @@ export function normalizeBrowserTransportKind(value: string): BrowserTransportKi
   }
   if (value === "CLAUDE_COMPUTER_USE" || value === "claude_computer_use") {
     return "claude_computer_use";
+  }
+  if (value === "OPENCODE_COMPUTER_USE" || value === "opencode_computer_use") {
+    return "opencode_computer_use";
   }
   return "playwright";
 }

@@ -308,6 +308,7 @@ enum BrowserTransportKind {
   PLAYWRIGHT
   OPENAI_COMPUTER
   CLAUDE_COMPUTER_USE
+  OPENCODE_COMPUTER_USE
 }
 
 enum BrowserSessionStatus {

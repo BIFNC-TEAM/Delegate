@@ -26,6 +26,8 @@ import {
   type ExecutionBillingSummary,
 } from "./billing";
 import {
+  buildOpenCodeCaptureCommand,
+  buildOpenCodeComputerUseCommand,
   buildPlaywrightBrowseCommand,
   buildPlaywrightNativeCommand,
   parsePlaywrightBrowseArtifactPayload,
@@ -127,7 +129,7 @@ type SandboxLeaseForExecution = {
 };
 
 type BrowserCaptureSummary = {
-  transportKind: "playwright" | "openai_computer" | "claude_computer_use";
+  transportKind: "playwright" | "openai_computer" | "claude_computer_use" | "opencode_computer_use";
   profilePath?: string;
   title?: string;
   finalUrl?: string;
@@ -1043,6 +1045,64 @@ async function runNativeBrowserExecution(params: {
 
       return payload;
     },
+    executeOpenCodeComputerUse: async (input) => {
+      const openCodeResult = await runSandboxAwareExecution({
+        leasedSession: params.leasedSession,
+        command: buildOpenCodeComputerUseCommand({
+          opencodeCommand: input.providerConfig.command ?? "opencode",
+          model: input.providerConfig.model,
+          playwrightVersion: computeBrokerConfig.browserPlaywrightVersion,
+          task: input.task,
+          maxSteps: input.maxSteps,
+          allowMutations: input.allowMutations,
+          currentUrl: input.currentUrl,
+          currentTitle: input.currentTitle,
+          textSnippet: input.textSnippet,
+          screenshotBase64: input.screenshotBase64,
+          screenshotMimeType: input.screenshotMimeType,
+        }),
+        maxCommandSeconds: Math.max(
+          params.context.profile.maxCommandSeconds,
+          computeBrokerConfig.browserMaxCommandSeconds,
+        ),
+        filesystemMode: "ephemeral_full",
+        workingDirectory: undefined,
+        sessionId: params.context.session.id,
+        executionId: params.executionId,
+      });
+
+      if (openCodeResult.exitCode !== 0) {
+        throw new SessionError(500, "opencode_browser_run_failed");
+      }
+
+      const captureResult = await runSandboxAwareExecution({
+        leasedSession: params.leasedSession,
+        command: buildOpenCodeCaptureCommand(),
+        maxCommandSeconds: Math.max(
+          params.context.profile.maxCommandSeconds,
+          computeBrokerConfig.browserMaxCommandSeconds,
+        ),
+        filesystemMode: "ephemeral_full",
+        workingDirectory: undefined,
+        sessionId: params.context.session.id,
+        executionId: `${params.executionId}:capture`,
+      });
+
+      if (captureResult.exitCode !== 0) {
+        throw new SessionError(500, "opencode_browser_capture_failed");
+      }
+
+      const payload = parsePlaywrightBrowseArtifactPayload(captureResult.stdout);
+      if (!payload) {
+        throw new SessionError(500, "opencode_browser_capture_invalid");
+      }
+
+      return {
+        capture: payload,
+        stdout: [openCodeResult.stdout, captureResult.stdout].filter(Boolean).join("\n"),
+        stderr: [openCodeResult.stderr, captureResult.stderr].filter(Boolean).join("\n"),
+      };
+    },
   });
 
   const artifacts: Awaited<ReturnType<typeof persistExecutionArtifacts>> = [];
@@ -1844,7 +1904,9 @@ function reconstructExecutionInput(execution: {
       payload?.browserMode === "native" ? "native" : "deterministic";
     const task = typeof payload?.task === "string" ? payload.task : undefined;
     const nativeProvider =
-      payload?.nativeProvider === "openai" || payload?.nativeProvider === "anthropic"
+      payload?.nativeProvider === "openai" ||
+      payload?.nativeProvider === "anthropic" ||
+      payload?.nativeProvider === "opencode"
         ? payload.nativeProvider
         : undefined;
     const maxSteps =

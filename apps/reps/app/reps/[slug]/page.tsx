@@ -115,26 +115,26 @@ export default async function RepresentativePage({
   ];
 
   return (
-    <main className="dashboard-shell representative-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
+    <main className="marketing-shell representative-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
       <HashScrollRestorer />
-      <header className="representative-topbar">
-        <div className="dashboard-brand">
-          <div className="dashboard-brand-mark">R</div>
+      <header className="marketing-topbar representative-topbar">
+        <div className="marketing-brand">
+          <img className="marketing-brand-mark" src="/D_logo.svg" alt="Delegate logo" />
           <div>
-            <strong>{representative.name}</strong>
+            <strong>Delegate</strong>
             <div className="muted">{t.brandTagline}</div>
           </div>
         </div>
 
-        <nav aria-label={t.menuAriaLabel} className="representative-menu-tabs">
+        <nav aria-label={t.menuAriaLabel} className="marketing-menu-tabs representative-menu-tabs">
           {menu.map((item) => (
-            <a className="dashboard-menu-tab" href={item.href} key={item.href}>
+            <a className="marketing-menu-tab" href={item.href} key={item.href}>
               {item.label}
             </a>
           ))}
         </nav>
 
-        <div className="dashboard-nav-links">
+        <div className="marketing-nav-actions">
           <LanguageSwitcher
             activeLocale={locale}
             ariaLabel={t.languageAriaLabel}
@@ -153,37 +153,40 @@ export default async function RepresentativePage({
               },
             ]}
           />
-          <a className="dashboard-nav-link" href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>
+          <a className="marketing-nav-link" href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>
             {t.homeLabel}
           </a>
           <a
-            className="dashboard-nav-link"
+            className="marketing-button-secondary"
             href={buildLocalizedHref(`${dashboardBaseUrl}/dashboard?rep=${representative.slug}&view=overview`, locale)}
           >
             {t.dashboardLabel}
           </a>
           {audienceSession ? (
             <>
-              <span className="dashboard-nav-link dashboard-nav-link-status">
+              <span className="marketing-nav-link dashboard-nav-link-status">
                 {t.signedInLabel}
               </span>
-              <a className="dashboard-nav-link" href={audienceLogoutHref}>
+              <a className="marketing-nav-link" href={audienceLogoutHref}>
                 {t.logoutLabel}
               </a>
             </>
           ) : (
-            <a className="dashboard-nav-link dashboard-nav-link-primary" href={audienceLoginHref}>
+            <a className="marketing-button-primary dashboard-account-login" href={audienceLoginHref}>
               {t.loginRegisterLabel}
             </a>
           )}
         </div>
       </header>
 
-      <section className="dashboard-stage representative-stage" id="overview">
-        <div>
-          <p className="eyebrow">{t.profileEyebrow}</p>
+      <section className="marketing-hero representative-stage" id="overview">
+        <div className="marketing-hero-copy representative-hero-copy">
+          <div className="marketing-hero-badge-row">
+            <p className="eyebrow">{t.profileEyebrow}</p>
+            <span className="marketing-runtime-badge">{t.frontDeskEyebrow}</span>
+          </div>
           <h1>{representative.name}</h1>
-          <p className="dashboard-stage-copy">{representative.tagline}</p>
+          <p className="marketing-lead">{representative.tagline}</p>
           <div className="chip-row">
             {representative.languages.map((language) => (
               <span className="chip" key={language}>
@@ -193,27 +196,73 @@ export default async function RepresentativePage({
             <span className="chip chip-safe">{groupActivationLabels[representative.groupActivation]}</span>
             <span className="chip">{representative.humanInLoop ? t.aiHumanLabel : t.aiOnlyLabel}</span>
           </div>
-        </div>
 
-        <div className="representative-stage-aside">
-          <article className="dashboard-highlight-card dashboard-highlight-card-primary">
-            <p className="panel-title">{t.worksForLabel}</p>
-            <h3>{representative.ownerName}</h3>
-            <p>{representative.knowledgePack.identitySummary}</p>
-            <p className="footer-note">{t.memoryDisclosure}</p>
-          </article>
-
-          <div className="button-row representative-stage-links">
-            <a className="button-primary" href="#chat">
+          <div className="marketing-actions">
+            <a className="marketing-button-primary" href="#chat">
               {t.startOnWeb}
             </a>
             <a
-              className="button-secondary"
+              className="marketing-button-secondary"
               href={buildLocalizedHref(`${dashboardBaseUrl}/dashboard?rep=${representative.slug}&view=setup`, locale)}
             >
               {t.viewControlPlane}
             </a>
           </div>
+
+          <div className="marketing-proof-row" aria-label={t.profileEyebrow}>
+            <article className="marketing-proof-pill">
+              <strong>{representative.contract.freeReplyLimit}</strong>
+              <span>{t.signalCards.freeRepliesDetail}</span>
+            </article>
+            <article className="marketing-proof-pill">
+              <strong>{representative.skills.length}</strong>
+              <span>{t.signalCards.enabledSkillsDetail}</span>
+            </article>
+            <article className="marketing-proof-pill">
+              <strong>{totalKnowledgeItems}</strong>
+              <span>{t.signalCards.knowledgeItemsDetail}</span>
+            </article>
+          </div>
+        </div>
+
+        <div className="marketing-stage representative-stage-aside">
+          <article className="marketing-runtime-card representative-runtime-card">
+            <div className="marketing-code-window">
+              <div className="marketing-code-bar" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+              <div className="marketing-code-heading">
+                <span>delegate.representative.ts</span>
+                <strong>{groupActivationLabels[representative.groupActivation]}</strong>
+              </div>
+              <pre>{`await delegate.receive({
+  representative: "${representative.slug}",
+  channels: ["web", "telegram", "feishu"],
+  firstPass: "answer",
+  paidDepth: "agent_tokens",
+  approval: "review_queue",
+  handoff: "human_with_context"
+});`}</pre>
+            </div>
+
+            <div className="marketing-front-desk-flow">
+              <article className="marketing-front-desk-step representative-owner-card">
+                <span>{t.worksForLabel}</span>
+                <strong>{representative.ownerName}</strong>
+                <p>{representative.knowledgePack.identitySummary}</p>
+                <p className="footer-note">{t.memoryDisclosure}</p>
+              </article>
+              {t.frontDeskSteps.map((step) => (
+                <div className="marketing-front-desk-step" key={step.label}>
+                  <span>{step.label}</span>
+                  <strong>{step.title}</strong>
+                  <p>{step.body}</p>
+                </div>
+              ))}
+            </div>
+          </article>
         </div>
       </section>
 

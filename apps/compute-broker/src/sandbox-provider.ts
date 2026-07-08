@@ -54,6 +54,7 @@ export type SandboxProviderConfig = {
     apiKey?: string | undefined;
     apiUrl?: string | undefined;
     target?: string | undefined;
+    resources?: DaytonaSandboxResources | undefined;
   } | undefined;
   sandboxLifecycle?: {
     idleStopMinutes?: number | undefined;
@@ -79,6 +80,7 @@ export async function createSandboxProviderFromConfig(config: SandboxProviderCon
         autostopMinutes: config.sandboxLifecycle?.idleStopMinutes,
         autoArchiveMinutes: config.sandboxLifecycle?.autoArchiveMinutes,
         autoDeleteMinutes: config.sandboxLifecycle?.autoDeleteMinutes,
+        resources: config.daytona?.resources,
       }),
       providerKind: "daytona",
     };
@@ -246,6 +248,13 @@ export type DaytonaCreateInput = {
   networkMode: ComputeNetworkMode;
   filesystemMode: ComputeFilesystemMode;
   hostWorkspaceRoot: string;
+  resources?: DaytonaSandboxResources | undefined;
+};
+
+export type DaytonaSandboxResources = {
+  cpu?: number | undefined;
+  memory?: number | undefined;
+  disk?: number | undefined;
 };
 
 export type DaytonaCommandResult = {
@@ -284,6 +293,7 @@ export type DaytonaSandboxProviderOptions = {
   autostopMinutes?: number | undefined;
   autoArchiveMinutes?: number | undefined;
   autoDeleteMinutes?: number | undefined;
+  resources?: DaytonaSandboxResources | undefined;
 };
 
 export class DaytonaSandboxProvider implements SandboxProvider {
@@ -294,6 +304,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   private readonly autostopMinutes?: number | undefined;
   private readonly autoArchiveMinutes?: number | undefined;
   private readonly autoDeleteMinutes?: number | undefined;
+  private readonly resources?: DaytonaSandboxResources | undefined;
 
   constructor(options: DaytonaSandboxProviderOptions) {
     this.client = options.client;
@@ -302,6 +313,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     this.autostopMinutes = options.autostopMinutes;
     this.autoArchiveMinutes = options.autoArchiveMinutes;
     this.autoDeleteMinutes = options.autoDeleteMinutes;
+    this.resources = options.resources;
   }
 
   async start(input: SandboxProviderStartInput): Promise<SandboxProviderLease> {
@@ -319,6 +331,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
           networkMode: input.networkMode,
           filesystemMode: input.filesystemMode,
           hostWorkspaceRoot: input.hostWorkspaceRoot,
+          ...(this.resources ? { resources: this.resources } : {}),
         });
 
     if (input.providerSandboxId) {

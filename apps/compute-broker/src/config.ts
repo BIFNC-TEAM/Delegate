@@ -35,6 +35,9 @@ const envSchema = z.object({
   DAYTONA_API_KEY: z.string().optional(),
   DAYTONA_API_URL: z.string().url().optional(),
   DAYTONA_TARGET: z.string().optional(),
+  DAYTONA_SANDBOX_CPU: z.coerce.number().positive().optional(),
+  DAYTONA_SANDBOX_MEMORY_GIB: z.coerce.number().positive().optional(),
+  DAYTONA_SANDBOX_DISK_GIB: z.coerce.number().positive().optional(),
   ARTIFACT_STORE_ENDPOINT: z.string().url().default("http://artifact-store:9000"),
   ARTIFACT_STORE_BUCKET: z.string().min(1).default("delegate-compute-artifacts"),
   ARTIFACT_STORE_ACCESS_KEY: z.string().min(1).default("delegate"),
@@ -43,6 +46,7 @@ const envSchema = z.object({
 });
 
 const parsed = envSchema.parse(process.env);
+const daytonaResources = buildDaytonaResources(parsed);
 
 export const computeBrokerConfig = {
   port: parsed.PORT,
@@ -105,6 +109,7 @@ export const computeBrokerConfig = {
     ...(normalizeOptionalString(parsed.DAYTONA_TARGET)
       ? { target: normalizeOptionalString(parsed.DAYTONA_TARGET) }
       : {}),
+    ...(daytonaResources ? { resources: daytonaResources } : {}),
   },
   artifactStore: artifactStoreConfigSchema.parse({
     endpoint: parsed.ARTIFACT_STORE_ENDPOINT,
@@ -136,4 +141,16 @@ function parseBoolean(value: string | undefined, defaultValue: boolean): boolean
   }
 
   return defaultValue;
+}
+
+function buildDaytonaResources(parsedEnv: z.infer<typeof envSchema>) {
+  const resources = {
+    ...(typeof parsedEnv.DAYTONA_SANDBOX_CPU === "number" ? { cpu: parsedEnv.DAYTONA_SANDBOX_CPU } : {}),
+    ...(typeof parsedEnv.DAYTONA_SANDBOX_MEMORY_GIB === "number"
+      ? { memory: parsedEnv.DAYTONA_SANDBOX_MEMORY_GIB }
+      : {}),
+    ...(typeof parsedEnv.DAYTONA_SANDBOX_DISK_GIB === "number" ? { disk: parsedEnv.DAYTONA_SANDBOX_DISK_GIB } : {}),
+  };
+
+  return Object.keys(resources).length ? resources : undefined;
 }

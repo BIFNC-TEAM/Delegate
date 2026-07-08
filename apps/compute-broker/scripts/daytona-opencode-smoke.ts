@@ -33,6 +33,11 @@ async function main() {
       apiKey,
       ...(normalize(process.env.DAYTONA_API_URL) ? { apiUrl: normalize(process.env.DAYTONA_API_URL) } : {}),
       ...(normalize(process.env.DAYTONA_TARGET) ? { target: normalize(process.env.DAYTONA_TARGET) } : {}),
+      resources: {
+        cpu: numberFromEnv("DAYTONA_SANDBOX_CPU", 2),
+        memory: numberFromEnv("DAYTONA_SANDBOX_MEMORY_GIB", 4),
+        disk: numberFromEnv("DAYTONA_SANDBOX_DISK_GIB", 10),
+      },
     },
     sandboxLifecycle: {
       idleStopMinutes: numberFromEnv("SANDBOX_IDLE_STOP_MINUTES", 15),
@@ -177,10 +182,16 @@ function numberFromEnv(key: string, fallback: number) {
 
 function tailForLogs(value: string) {
   const trimmed = value.trim();
-  return trimmed.slice(Math.max(0, trimmed.length - 2000));
+  return redactSecrets(trimmed.slice(Math.max(0, trimmed.length - 2000)));
+}
+
+function redactSecrets(value: string) {
+  return value
+    .replace(/dtn_[A-Za-z0-9]+/g, "dtn_[redacted]")
+    .replace(/(DAYTONA_API_KEY=)([^ \n\r]+)/g, "$1[redacted]");
 }
 
 main().catch((error) => {
-  console.error(error instanceof Error ? error.message : error);
+  console.error(redactSecrets(error instanceof Error ? error.message : String(error)));
   process.exit(1);
 });

@@ -69,6 +69,11 @@ describe("sandbox provider contract", () => {
       autostopMinutes: 15,
       autoArchiveMinutes: 60,
       autoDeleteMinutes: -1,
+      resources: {
+        cpu: 2,
+        memory: 4,
+        disk: 10,
+      },
     });
 
     const lease = await provider.start({
@@ -88,6 +93,11 @@ describe("sandbox provider contract", () => {
         "delegate.sandbox_identity_id": "identity-1",
         "delegate.sandbox_lease_id": "lease-1",
       }),
+      resources: {
+        cpu: 2,
+        memory: 4,
+        disk: 10,
+      },
     }));
     expect(sandbox.setAutostopInterval).toHaveBeenCalledWith(15);
     expect(sandbox.setAutoArchiveInterval).toHaveBeenCalledWith(60);

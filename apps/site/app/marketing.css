@@ -105,6 +105,7 @@
 
 .site-brand {
   display: inline-flex;
+  min-height: 44px;
   align-items: center;
   gap: 12px;
   width: fit-content;
@@ -147,6 +148,9 @@
 
 .site-nav a,
 .site-text-link {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
   color: var(--site-ink-soft);
   font-size: 0.84rem;
   font-weight: 650;
@@ -229,7 +233,7 @@
 }
 
 .site-header-cta {
-  min-height: 42px;
+  min-height: 44px;
   padding: 10px 14px;
 }
 
@@ -1237,6 +1241,9 @@
 }
 
 .site-footer-links a {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
   width: fit-content;
   color: var(--site-ink-soft);
   font-size: 0.82rem;

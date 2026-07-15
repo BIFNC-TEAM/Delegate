@@ -389,7 +389,11 @@ export default async function HomePage({
           <summary>{t.menuLabel}</summary>
           <nav aria-label="Mobile website sections">
             {t.menu.map((item) => <a href={item.href} key={item.href}>{item.label}</a>)}
-            <a href={dashboardHref}>{t.navLogin}</a>
+            <a className="site-mobile-login" href={dashboardHref}>{t.navLogin}</a>
+            <div className="site-mobile-language" aria-label="Language">
+              <a href={buildLocalizedHref("/", "zh")}>ZH · {t.switcher.zh}</a>
+              <a href={buildLocalizedHref("/", "en")}>EN · {t.switcher.en}</a>
+            </div>
           </nav>
         </details>
       </header>

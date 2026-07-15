@@ -1380,10 +1380,27 @@
     font-size: 0.86rem;
   }
 
-  .site-mobile-menu nav a:last-child {
-    border-bottom: 0;
+  .site-mobile-menu nav .site-mobile-login {
     color: var(--site-copper);
     font-weight: 700;
+  }
+
+  .site-mobile-language {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    padding-top: 10px;
+  }
+
+  .site-mobile-menu .site-mobile-language a {
+    min-height: 44px;
+    padding: 12px 8px;
+    border: 1px solid var(--site-line);
+    border-radius: 8px;
+    color: var(--site-sea);
+    font-family: var(--site-mono);
+    font-size: 0.66rem;
+    text-align: center;
   }
 
   .site-header-actions {
@@ -1481,12 +1498,9 @@
 }
 
 @media (max-width: 560px) {
+  .site-header-actions,
   .site-header-cta {
     display: none;
-  }
-
-  .site-header-actions {
-    margin-right: 52px;
   }
 
   .site-brand small {

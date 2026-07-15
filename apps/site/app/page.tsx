@@ -63,7 +63,7 @@ const copy = {
       ["每个请求都打断本人", "只转接高价值或敏感事项"],
     ],
     howEyebrow: "THE FRONT DESK LOOP",
-    howTitle: "四步接住一次 inbound，不让 AI 越界。",
+    howTitle: "四步接住一次外部请求，不让 AI 越界。",
     howLead: "从第一句问候到人工接手，每一步都有明确状态和责任边界。",
     steps: [
       {
@@ -131,6 +131,9 @@ const copy = {
       features: ["身份与 AI 披露始终可见", "公开资料和服务范围清楚", "聊天、付费与转人工在同一页面"],
       status: "公开状态",
       statusValue: "已发布 · 边界已批准",
+      profileLabel: "创始人代表",
+      prompt: "可以咨询产品战略、顾问服务，或发起一次引荐申请。",
+      input: "开始公开对话",
     },
     ownerSurface: {
       kicker: "OWNER CONTROL PLANE",
@@ -143,6 +146,8 @@ const copy = {
       ],
       status: "今日接待",
       statusValue: "18 次 · 3 项需要你",
+      queueLabel: "待处理请求",
+      queueStatusLabel: "当前状态",
     },
     trustEyebrow: "VISIBLE CONTRACT",
     trustTitle: "安全边界不是法律页脚，而是每次互动的一部分。",
@@ -195,6 +200,7 @@ const copy = {
     finalSecondary: "先体验演示",
     footerSummary: "面向创始人、顾问和创作者的公开 AI 接待前台。",
     footerStatus: "Web-first · Early access",
+    footerCopyright: "Delegate · 公开 AI 接待前台",
     footerProduct: "产品",
     footerResources: "了解更多",
     footerLinks: ["工作方式", "使用场景", "安全边界", "常见问题"],
@@ -278,6 +284,9 @@ const copy = {
       features: ["AI identity stays visible", "Approved knowledge and service scope are clear", "Chat, payment, and handoff live on one page"],
       status: "Public status",
       statusValue: "Published · Boundaries approved",
+      profileLabel: "Founder representative",
+      prompt: "Ask about product strategy, advisory services, or a warm introduction.",
+      input: "Start a public conversation",
     },
     ownerSurface: {
       kicker: "OWNER CONTROL PLANE",
@@ -286,6 +295,8 @@ const copy = {
       queue: [["Product advisory", "High intent · Awaiting review"], ["Media interview", "Complete brief · Takeover suggested"], ["General FAQ", "Completed by representative"]],
       status: "Received today",
       statusValue: "18 requests · 3 need you",
+      queueLabel: "Inbound queue",
+      queueStatusLabel: "Status",
     },
     trustEyebrow: "VISIBLE CONTRACT",
     trustTitle: "Safety is not a legal footnote. It is part of every interaction.",
@@ -321,6 +332,7 @@ const copy = {
     finalSecondary: "Try the demo first",
     footerSummary: "A public AI front desk for founders, advisors, and creators.",
     footerStatus: "Web-first · Early access",
+    footerCopyright: "Delegate · Public AI front desk",
     footerProduct: "Product",
     footerResources: "Explore",
     footerLinks: ["How it works", "Use cases", "Safety", "Questions"],
@@ -542,9 +554,9 @@ export default async function HomePage({
               <ul>{t.publicSurface.features.map((feature) => <li key={feature}>{feature}</li>)}</ul>
             </div>
             <div className="site-public-preview" aria-label={t.publicSurface.title}>
-              <div><span className="site-demo-avatar">L</span><span><strong>Lin</strong><small>Founder representative</small></span></div>
-              <p>Ask about product strategy, advisory services, or a warm introduction.</p>
-              <span className="site-preview-input">Start a public conversation <b>→</b></span>
+              <div><span className="site-demo-avatar">L</span><span><strong>Lin</strong><small>{t.publicSurface.profileLabel}</small></span></div>
+              <p>{t.publicSurface.prompt}</p>
+              <span className="site-preview-input">{t.publicSurface.input} <b>→</b></span>
               <dl><dt>{t.publicSurface.status}</dt><dd>{t.publicSurface.statusValue}</dd></dl>
             </div>
           </article>
@@ -557,7 +569,7 @@ export default async function HomePage({
               <div className="site-owner-stat"><span>{t.ownerSurface.status}</span><strong>{t.ownerSurface.statusValue}</strong></div>
             </div>
             <div className="site-queue-preview" aria-label={t.ownerSurface.title}>
-              <div className="site-queue-head"><span>INBOUND QUEUE</span><span>STATUS</span></div>
+              <div className="site-queue-head"><span>{t.ownerSurface.queueLabel}</span><span>{t.ownerSurface.queueStatusLabel}</span></div>
               {t.ownerSurface.queue.map(([label, value], index) => (
                 <div className="site-queue-row" key={label}>
                   <span><b>0{index + 1}</b>{label}</span><strong>{value}</strong>
@@ -637,7 +649,7 @@ export default async function HomePage({
           <div><strong>{t.footerProduct}</strong><a href={demoHref}>{t.heroSecondary}</a><a href={dashboardHref}>{t.navLogin}</a></div>
           <div><strong>{t.footerResources}</strong>{t.footerLinks.map((label, index) => <a href={footerHrefs[index]} key={label}>{label}</a>)}</div>
         </div>
-        <p className="site-copyright">© {new Date().getFullYear()} Delegate · Agent Monetization Network</p>
+        <p className="site-copyright">© {new Date().getFullYear()} {t.footerCopyright}</p>
       </footer>
     </main>
   );

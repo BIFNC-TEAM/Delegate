@@ -48,6 +48,26 @@
   text-wrap: balance;
 }
 
+.site-shell.localized-shell[data-locale="zh"] h1,
+.site-shell.localized-shell[data-locale="zh"] h2 {
+  max-width: none;
+  font-family: var(--site-serif);
+  line-height: 1.02;
+}
+
+.site-shell.localized-shell[data-locale="zh"] h3 {
+  max-width: none;
+  font-family: var(--site-sans);
+  line-height: 1.22;
+}
+
+.site-shell.localized-shell[data-locale="en"] h1,
+.site-shell.localized-shell[data-locale="en"] h2,
+.site-shell.localized-shell[data-locale="en"] h3 {
+  max-width: none;
+  font-family: inherit;
+}
+
 .site-shell h3 {
   max-width: none;
   font-family: var(--site-sans);
@@ -1547,7 +1567,7 @@
   }
 
   .site-section {
-    padding: 72px 0;
+    padding: 64px 0;
   }
 
   .site-section-heading h2,

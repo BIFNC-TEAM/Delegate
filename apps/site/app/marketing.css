@@ -1766,6 +1766,7 @@
   --site-success: #17a99b;
   --site-serif: "Avenir Next", Avenir, "PingFang SC", "Hiragino Sans GB", sans-serif;
   --site-sans: "Avenir Next", Avenir, "PingFang SC", "Hiragino Sans GB", sans-serif;
+  display: flow-root;
   background-color: #eaf9f7;
   background-image:
     radial-gradient(circle at 24% 18%, rgba(102, 227, 211, 0.22), transparent 28rem),

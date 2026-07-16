@@ -227,7 +227,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                     locale: "zh",
                     href: buildDashboardHref(props.activeView, props.activeSlug, "zh"),
                     label: "中文",
-                    shortLabel: "ZH",
+                    shortLabel: "中",
                   },
                   {
                     locale: "en",

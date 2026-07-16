@@ -42,7 +42,6 @@ const frameworkCopy = {
     switchWorkspace: "切换代表",
     navAria: "Dashboard 主导航",
     frameworkBadge: "UI Framework",
-    liveModuleBadge: "功能模块",
     frameworkHint: "当前展示新版整体框架，业务数据与动作将分阶段接入。",
     search: "搜索代表、会话、知识或 Action",
     website: "官网",
@@ -70,7 +69,6 @@ const frameworkCopy = {
     switchWorkspace: "Switch representative",
     navAria: "Dashboard navigation",
     frameworkBadge: "UI Framework",
-    liveModuleBadge: "Live module",
     frameworkHint: "This is the new product framework. Business data and actions will be connected incrementally.",
     search: "Search reps, conversations, knowledge, or actions",
     website: "Website",
@@ -221,7 +219,6 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               <kbd>{t.commandKey}</kbd>
             </button>
             <div className="dashboard-v2-top-actions">
-              <span className="dashboard-v2-preview-badge">{props.activeView === "knowledge" ? t.liveModuleBadge : t.frameworkBadge}</span>
               <LanguageSwitcher
                 activeLocale={props.locale}
                 ariaLabel="Language"

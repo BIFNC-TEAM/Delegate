@@ -154,7 +154,7 @@
   background: #fff; box-shadow: 0 1px 1px rgba(17,24,39,.05); font-size: .63rem;
 }
 .dashboard-v2-top-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
-.dashboard-v2-preview-badge, .dashboard-v2-module-status {
+.dashboard-v2-module-status {
   display: inline-flex; align-items: center; min-height: 26px; padding: 5px 9px; border-radius: 999px;
   color: var(--v2-indigo); background: var(--v2-indigo-soft); font-size: .65rem; font-weight: 800;
   letter-spacing: .04em; text-transform: uppercase;
@@ -338,7 +338,7 @@
   .dashboard-v2-metric-grid-six { grid-template-columns: repeat(3,minmax(0,1fr)); }
   .dashboard-v2-overview-grid-bottom { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .dashboard-v2-overview-grid-bottom > :last-child { grid-column: 1/-1; }
-  .dashboard-v2-top-actions .dashboard-v2-preview-badge, .dashboard-v2-text-link { display: none; }
+  .dashboard-v2-text-link { display: none; }
 }
 @media (max-width: 1040px) {
   .dashboard-v2-layout { grid-template-columns: 244px minmax(0,1fr); }

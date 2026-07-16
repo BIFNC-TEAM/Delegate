@@ -38,6 +38,12 @@ x-app-environment: &app-environment
   ARTIFACT_STORE_ACCESS_KEY: ${ARTIFACT_STORE_ACCESS_KEY:-delegate}
   ARTIFACT_STORE_SECRET_KEY: ${ARTIFACT_STORE_SECRET_KEY:-delegate-secret-key}
   ARTIFACT_STORE_REGION: ${ARTIFACT_STORE_REGION:-us-east-1}
+  KNOWLEDGE_OBJECT_STORE_ENDPOINT: ${KNOWLEDGE_OBJECT_STORE_ENDPOINT:-http://artifact-store:9000}
+  KNOWLEDGE_OBJECT_STORE_BUCKET: ${KNOWLEDGE_OBJECT_STORE_BUCKET:-delegate-1324808004}
+  KNOWLEDGE_OBJECT_STORE_ACCESS_KEY: ${KNOWLEDGE_OBJECT_STORE_ACCESS_KEY:-delegate}
+  KNOWLEDGE_OBJECT_STORE_SECRET_KEY: ${KNOWLEDGE_OBJECT_STORE_SECRET_KEY:-delegate-secret-key}
+  KNOWLEDGE_OBJECT_STORE_REGION: ${KNOWLEDGE_OBJECT_STORE_REGION:-us-east-1}
+  KNOWLEDGE_OBJECT_STORE_FORCE_PATH_STYLE: ${KNOWLEDGE_OBJECT_STORE_FORCE_PATH_STYLE:-true}
   OPENVIKING_ENABLED: ${OPENVIKING_ENABLED:-true}
   OPENVIKING_BASE_URL: ${OPENVIKING_BASE_URL:-http://openviking:1933}
   OPENVIKING_API_KEY: ${OPENVIKING_API_KEY:-delegate-local-root-key}
@@ -52,6 +58,8 @@ x-app-environment: &app-environment
   OPENVIKING_VLM_MODEL: ${OPENVIKING_VLM_MODEL:-gpt-4o-mini}
   OPENVIKING_EMBEDDING_MODEL: ${OPENVIKING_EMBEDDING_MODEL:-text-embedding-3-large}
   OPENVIKING_EMBEDDING_DIMENSION: ${OPENVIKING_EMBEDDING_DIMENSION:-3072}
+  OPENVIKING_MODEL_API_KEY: ${OPENVIKING_MODEL_API_KEY:-}
+  OPENVIKING_MODEL_API_BASE: ${OPENVIKING_MODEL_API_BASE:-}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
   ARK_API_KEY: ${ARK_API_KEY:-}
@@ -117,6 +125,7 @@ services:
       ARTIFACT_STORE_BUCKET: ${ARTIFACT_STORE_BUCKET:-delegate-compute-artifacts}
       ARTIFACT_STORE_ACCESS_KEY: ${ARTIFACT_STORE_ACCESS_KEY:-delegate}
       ARTIFACT_STORE_SECRET_KEY: ${ARTIFACT_STORE_SECRET_KEY:-delegate-secret-key}
+      KNOWLEDGE_OBJECT_STORE_BUCKET: ${KNOWLEDGE_OBJECT_STORE_BUCKET:-delegate-1324808004}
     volumes:
       - ./deploy/minio:/opt/delegate-minio:ro
     command: /bin/sh /opt/delegate-minio/bootstrap.sh
@@ -330,7 +339,10 @@ services:
     restart: "no"
 
   openviking:
-    image: ghcr.io/volcengine/openviking:main
+    build:
+      context: .
+      dockerfile: deploy/openviking/Dockerfile
+    image: delegate-openviking:v0.4.9-compat
     container_name: delegate-openviking
     restart: unless-stopped
     environment:
@@ -340,6 +352,8 @@ services:
       OPENVIKING_EMBEDDING_MODEL: ${OPENVIKING_EMBEDDING_MODEL:-text-embedding-3-large}
       OPENVIKING_EMBEDDING_DIMENSION: ${OPENVIKING_EMBEDDING_DIMENSION:-3072}
       OPENVIKING_ROOT_API_KEY: ${OPENVIKING_ROOT_API_KEY:-delegate-local-root-key}
+      OPENVIKING_MODEL_API_KEY: ${OPENVIKING_MODEL_API_KEY:-}
+      OPENVIKING_MODEL_API_BASE: ${OPENVIKING_MODEL_API_BASE:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       ARK_API_KEY: ${ARK_API_KEY:-}
@@ -360,7 +374,7 @@ services:
       start_period: 40s
 
   openviking-console:
-    image: ghcr.io/volcengine/openviking:main
+    image: delegate-openviking:v0.4.9-compat
     container_name: delegate-openviking-console
     restart: unless-stopped
     depends_on:

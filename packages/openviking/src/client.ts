@@ -95,7 +95,7 @@ export class OpenVikingClient {
     filename: string;
     content: string;
     contentType?: string;
-  }): Promise<{ temp_path: string }> {
+  }): Promise<{ temp_path?: string; temp_file_id?: string }> {
     const formData = new FormData();
     const blob = new Blob([params.content], {
       type: params.contentType ?? "text/markdown; charset=utf-8",
@@ -103,7 +103,7 @@ export class OpenVikingClient {
     formData.set("file", blob, params.filename);
     formData.set("telemetry", "false");
 
-    return this.request<{ temp_path: string }>("/api/v1/resources/temp_upload", {
+    return this.request<{ temp_path?: string; temp_file_id?: string }>("/api/v1/resources/temp_upload", {
       method: "POST",
       body: formData,
       json: false,
@@ -113,6 +113,7 @@ export class OpenVikingClient {
   async addResource(params: {
     path?: string;
     tempPath?: string;
+    tempFileId?: string;
     to: string;
     reason: string;
     instruction?: string;
@@ -124,6 +125,7 @@ export class OpenVikingClient {
       body: JSON.stringify({
         ...(params.path ? { path: params.path } : {}),
         ...(params.tempPath ? { temp_path: params.tempPath } : {}),
+        ...(params.tempFileId ? { temp_file_id: params.tempFileId } : {}),
         to: params.to,
         reason: params.reason,
         instruction: params.instruction ?? "",
@@ -141,6 +143,11 @@ export class OpenVikingClient {
         to_uri: params.toUri,
       }),
     });
+  }
+
+  async remove(uri: string, recursive = false): Promise<{ uri?: string; estimated_deleted_count?: number }> {
+    const searchParams = new URLSearchParams({ uri, recursive: String(recursive) });
+    return this.request(`/api/v1/fs?${searchParams.toString()}`, { method: "DELETE" });
   }
 
   async ls(params: {

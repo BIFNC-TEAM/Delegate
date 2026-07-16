@@ -283,6 +283,9 @@ The default `.env.example` is safe for local development. Important settings:
 - `COMPUTE_*` controls the broker, Docker runner, browser image, and native computer-use readiness.
 - `WORKFLOW_*` controls local-runner versus Temporal workflow execution.
 - `ARTIFACT_STORE_*` controls MinIO-backed artifact storage.
+- `KNOWLEDGE_OBJECT_STORE_*` controls private knowledge source storage. Its default bucket is fixed to `delegate-1324808004`; Tencent COS can be used through its S3-compatible endpoint with `FORCE_PATH_STYLE=false`.
+
+Knowledge files are persisted before background processing reads the original object, extracts and normalizes text, prepares retrieval chunks, and writes the document into OpenViking's vector index. An asset becomes `READY` only after source storage, extraction, and vector indexing all succeed. Archive and permanent-delete flows remove the vector index as well, preventing revoked content from remaining retrievable.
 
 When model providers are unavailable, the bot and public representative paths fall back to deterministic previews instead of failing the conversation.
 

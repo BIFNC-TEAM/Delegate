@@ -7,16 +7,18 @@ def main() -> None:
     template_path = Path("/opt/delegate-openviking/ov.conf.example")
     output_path = Path("/etc/openviking/ov.conf")
     provider = os.getenv("OPENVIKING_PROVIDER", "openai").strip() or "openai"
+    dedicated_api_key = os.getenv("OPENVIKING_MODEL_API_KEY", "").strip()
+    dedicated_api_base = os.getenv("OPENVIKING_MODEL_API_BASE", "").strip()
 
     if provider == "volcengine":
-        model_api_key = os.getenv("ARK_API_KEY", "")
-        model_api_base = os.getenv(
+        model_api_key = dedicated_api_key or os.getenv("ARK_API_KEY", "")
+        model_api_base = dedicated_api_base or os.getenv(
             "ARK_API_BASE",
             "https://ark.cn-beijing.volces.com/api/v3",
         )
     else:
-        model_api_key = os.getenv("OPENAI_API_KEY", "")
-        model_api_base = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        model_api_key = dedicated_api_key or os.getenv("OPENAI_API_KEY", "")
+        model_api_base = dedicated_api_base or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
     if not model_api_key:
         model_api_key = "delegate-openviking-placeholder-key"

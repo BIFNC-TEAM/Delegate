@@ -279,6 +279,9 @@ pnpm docker:up:temporal
 - `COMPUTE_*` 控制 broker、Docker runner、browser image 和 native computer-use readiness。
 - `WORKFLOW_*` 控制 local-runner 与 Temporal workflow execution。
 - `ARTIFACT_STORE_*` 控制 MinIO-backed artifact storage。
+- `KNOWLEDGE_OBJECT_STORE_*` 控制知识原文件对象存储，默认私有桶固定为 `delegate-1324808004`；腾讯云 COS 可使用 S3 兼容 endpoint，并将 `FORCE_PATH_STYLE` 设为 `false`。
+
+知识文件会先持久化到对象存储，再由后台任务重新读取原文件、解析正文、规范化与分块，并写入 OpenViking 向量索引。只有对象、正文和向量索引全部成功后，资产才会进入 `READY`；归档和永久删除会同步移除向量索引，避免已撤权内容继续被召回。
 
 当 model providers 不可用时，bot 和 public representative 路径会回退到 deterministic previews，而不是让对话失败。
 

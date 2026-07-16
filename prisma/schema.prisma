@@ -230,6 +230,47 @@ enum CreatorTrainingSourceStatus {
   FAILED
 }
 
+enum KnowledgeAssetKind {
+  PDF
+  DOCX
+  TXT
+  MARKDOWN
+  URL
+  TEXT
+}
+
+enum KnowledgeAssetStatus {
+  PROCESSING
+  READY
+  FAILED
+  ARCHIVED
+}
+
+enum KnowledgeAssetVisibility {
+  OWNER_ONLY
+  ORGANIZATION_SHARED
+  SELECTED_REPRESENTATIVES
+  PUBLIC_MATERIAL
+}
+
+enum KnowledgeAssetUsageMode {
+  QA_SOURCE
+  PUBLIC_MATERIAL
+  BOTH
+}
+
+enum KnowledgeAssetReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum KnowledgeProcessingLogLevel {
+  INFO
+  WARNING
+  ERROR
+}
+
 enum CreatorFeedbackSignalType {
   APPROVE
   CORRECTION
@@ -511,6 +552,7 @@ model Owner {
   withdrawRequests          WithdrawRequest[]
   walletLedgerEntries       WalletLedgerEntry[]
   identityLinks             OwnerIdentityLink[]
+  knowledgeAssets           KnowledgeAsset[]
 }
 
 model OwnerIdentityLink {
@@ -864,51 +906,51 @@ model CustomerAccount {
 }
 
 model Representative {
-  id                             String                      @id @default(cuid())
+  id                             String                         @id @default(cuid())
   ownerId                        String
-  slug                           String                      @unique
+  slug                           String                         @unique
   displayName                    String
   roleSummary                    String
   tone                           String
   avatarUrl                      String?
-  publicMode                     Boolean                     @default(true)
-  claimStatus                    RepresentativeClaimStatus   @default(CLAIMED)
-  groupModeEnabled               Boolean                     @default(false)
-  groupActivation                GroupActivation             @default(REPLY_OR_MENTION)
-  humanInLoop                    Boolean                     @default(true)
+  publicMode                     Boolean                        @default(true)
+  claimStatus                    RepresentativeClaimStatus      @default(CLAIMED)
+  groupModeEnabled               Boolean                        @default(false)
+  groupActivation                GroupActivation                @default(REPLY_OR_MENTION)
+  humanInLoop                    Boolean                        @default(true)
   languages                      Json
-  freeReplyLimit                 Int                         @default(4)
+  freeReplyLimit                 Int                            @default(4)
   freeScope                      Json
   paywalledIntents               Json
-  handoffWindowHours             Int                         @default(24)
-  freeMonthlyCredit              Int                         @default(100)
+  handoffWindowHours             Int                            @default(24)
+  freeMonthlyCredit              Int                            @default(100)
   handoffPrompt                  String
   allowedSkills                  Json
   actionGate                     Json
-  openvikingEnabled              Boolean                     @default(false)
+  openvikingEnabled              Boolean                        @default(false)
   openvikingAgentId              String?
-  openvikingAutoRecall           Boolean                     @default(true)
-  openvikingAutoCapture          Boolean                     @default(true)
-  openvikingCaptureMode          String                      @default("semantic")
-  openvikingRecallLimit          Int                         @default(6)
-  openvikingRecallScoreThreshold Float                       @default(0.01)
+  openvikingAutoRecall           Boolean                        @default(true)
+  openvikingAutoCapture          Boolean                        @default(true)
+  openvikingCaptureMode          String                         @default("semantic")
+  openvikingRecallLimit          Int                            @default(6)
+  openvikingRecallScoreThreshold Float                          @default(0.01)
   openvikingTargetUri            String?
   openvikingLastSyncAt           DateTime?
   openvikingLastSyncStatus       String?
   openvikingLastSyncError        String?
   openvikingLastSyncItemCount    Int?
-  computeEnabled                 Boolean                     @default(false)
-  computeDefaultPolicyMode       PolicyDecision              @default(ASK)
-  computeBaseImage               String                      @default("debian:bookworm-slim")
-  computeMaxSessionMinutes       Int                         @default(15)
-  computeAutoApproveBudgetCents  Int                         @default(0)
-  computeArtifactRetentionDays   Int                         @default(14)
-  computeNetworkMode             ComputeNetworkMode          @default(NO_NETWORK)
-  computeNetworkAllowlist        String[]                    @default([])
-  computeFilesystemMode          ComputeFilesystemMode       @default(WORKSPACE_ONLY)
-  createdAt                      DateTime                    @default(now())
-  updatedAt                      DateTime                    @updatedAt
-  owner                          Owner                       @relation(fields: [ownerId], references: [id])
+  computeEnabled                 Boolean                        @default(false)
+  computeDefaultPolicyMode       PolicyDecision                 @default(ASK)
+  computeBaseImage               String                         @default("debian:bookworm-slim")
+  computeMaxSessionMinutes       Int                            @default(15)
+  computeAutoApproveBudgetCents  Int                            @default(0)
+  computeArtifactRetentionDays   Int                            @default(14)
+  computeNetworkMode             ComputeNetworkMode             @default(NO_NETWORK)
+  computeNetworkAllowlist        String[]                       @default([])
+  computeFilesystemMode          ComputeFilesystemMode          @default(WORKSPACE_ONLY)
+  createdAt                      DateTime                       @default(now())
+  updatedAt                      DateTime                       @updatedAt
+  owner                          Owner                          @relation(fields: [ownerId], references: [id])
   capabilityProfiles             CapabilityPolicyProfile[]
   computeSessions                ComputeSession[]
   sandboxIdentities              SandboxIdentity[]
@@ -938,6 +980,7 @@ model Representative {
   agentWallet                    AgentWallet?
   tokenPurchases                 AgentTokenPurchase[]
   usageCharges                   AgentUsageCharge[]
+  knowledgeAssetLinks            KnowledgeAssetRepresentative[]
   creatorEarnings                CreatorEarning[]
   withdrawRequests               WithdrawRequest[]
   walletLedgerEntries            WalletLedgerEntry[]
@@ -1171,6 +1214,83 @@ model CreatorTrainingSource {
 
   @@index([representativeId, status, updatedAt])
   @@index([representativeId, kind, createdAt])
+}
+
+model KnowledgeAsset {
+  id                   String                         @id @default(cuid())
+  ownerId              String
+  kind                 KnowledgeAssetKind
+  status               KnowledgeAssetStatus           @default(PROCESSING)
+  visibility           KnowledgeAssetVisibility       @default(OWNER_ONLY)
+  title                String
+  originalFileName     String?
+  mimeType             String?
+  sizeBytes            Int?
+  sourceUrl            String?
+  sourceText           String?
+  sourceObjectBucket   String?
+  sourceObjectKey      String?
+  sourceObjectEtag     String?
+  sourceObjectVersion  String?
+  sourceObjectChecksum String?
+  extractedText        String?
+  summary              String?
+  tags                 String[]                       @default([])
+  autoTags             String[]                       @default([])
+  checksum             String?
+  processingError      String?
+  processingVersion    Int                            @default(1)
+  vectorBackend        String?
+  vectorUri            String?
+  vectorChunkCount     Int                            @default(0)
+  embeddingModel       String?
+  indexedAt            DateTime?
+  metadata             Json?
+  processedAt          DateTime?
+  archivedAt           DateTime?
+  createdBy            String?
+  createdAt            DateTime                       @default(now())
+  updatedAt            DateTime                       @updatedAt
+  owner                Owner                          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  representativeLinks  KnowledgeAssetRepresentative[]
+  processingLogs       KnowledgeProcessingLog[]
+
+  @@index([ownerId, status, updatedAt])
+  @@index([ownerId, kind, createdAt])
+  @@index([ownerId, visibility, updatedAt])
+  @@index([ownerId, vectorBackend, indexedAt])
+}
+
+model KnowledgeAssetRepresentative {
+  id               String                     @id @default(cuid())
+  assetId          String
+  representativeId String
+  usageMode        KnowledgeAssetUsageMode    @default(QA_SOURCE)
+  reviewStatus     KnowledgeAssetReviewStatus @default(APPROVED)
+  enabled          Boolean                    @default(true)
+  priority         Int                        @default(50)
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  asset            KnowledgeAsset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  representative   Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, representativeId])
+  @@index([representativeId, enabled, updatedAt])
+  @@index([assetId, reviewStatus])
+}
+
+model KnowledgeProcessingLog {
+  id        String                      @id @default(cuid())
+  assetId   String
+  stage     String
+  level     KnowledgeProcessingLogLevel @default(INFO)
+  message   String
+  metadata  Json?
+  createdAt DateTime                    @default(now())
+  asset     KnowledgeAsset              @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([assetId, createdAt])
+  @@index([level, createdAt])
 }
 
 model CreatorFeedbackSignal {

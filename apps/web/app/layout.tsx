@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { cookies, headers } from "next/headers";
 
 import "@delegate/web-ui/styles.css";
+import "./dashboard/dashboard-v2.css";
 import { extractCountryHint, formatHtmlLang, getCookieLocale, localeCookieName, resolveLocale } from "@delegate/web-ui";
 
 export const metadata: Metadata = {
@@ -25,7 +26,7 @@ export default async function RootLayout({
   });
 
   return (
-    <html lang={formatHtmlLang(locale)}>
+    <html data-scroll-behavior="smooth" lang={formatHtmlLang(locale)}>
       <body>{children}</body>
     </html>
   );

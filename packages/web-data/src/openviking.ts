@@ -698,7 +698,8 @@ async function syncDocumentToOpenViking(params: {
 
   if (params.document.contextType === "resource") {
     await params.client.addResource({
-      tempPath: temp.temp_path,
+      ...(temp.temp_file_id ? { tempFileId: temp.temp_file_id } : {}),
+      ...(temp.temp_path ? { tempPath: temp.temp_path } : {}),
       to: params.document.uri,
       reason: params.document.reason,
       instruction: "Delegate representative public knowledge sync",
@@ -710,7 +711,8 @@ async function syncDocumentToOpenViking(params: {
 
   const stagingUri = `${buildRepresentativeResourceRootUri(params.representativeSlug)}sync/${params.document.filename}`;
   await params.client.addResource({
-    tempPath: temp.temp_path,
+    ...(temp.temp_file_id ? { tempFileId: temp.temp_file_id } : {}),
+    ...(temp.temp_path ? { tempPath: temp.temp_path } : {}),
     to: stagingUri,
     reason: params.document.reason,
     instruction: "Delegate memory staging sync",

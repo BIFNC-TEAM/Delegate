@@ -173,6 +173,17 @@ describe("OpenViking env config", () => {
     expect(config.apiKey).toBe("root-only-key");
     expect(config.rootApiKey).toBe("root-only-key");
   });
+
+  it("accepts a dedicated model credential without enabling the main OpenAI runtime", () => {
+    const config = resolveOpenVikingEnv({
+      OPENVIKING_ENABLED: "true",
+      OPENVIKING_PROVIDER: "openai",
+      OPENVIKING_MODEL_API_KEY: "knowledge-only-key",
+      OPENAI_API_KEY: "",
+    });
+
+    expect(config.hasModelCredentials).toBe(true);
+  });
 });
 
 describe("OpenViking client", () => {
@@ -191,5 +202,25 @@ describe("OpenViking client", () => {
       healthy: true,
       version: "v-test",
     });
+  });
+
+  it("sends the recursive flag when removing a resource directory", async () => {
+    let requestUrl = "";
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      fetchImpl: async (input) => {
+        requestUrl = String(input);
+        return new Response(JSON.stringify({ status: "ok", result: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    });
+
+    await client.remove("viking://resources/delegate/asset.md", true);
+
+    const request = new URL(requestUrl);
+    expect(request.pathname).toBe("/api/v1/fs");
+    expect(request.searchParams.get("recursive")).toBe("true");
   });
 });

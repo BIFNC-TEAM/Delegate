@@ -3,11 +3,16 @@ import { ZodError } from "zod";
 
 import {
   KnowledgeLibraryError,
+  checksumKnowledgeSource,
   createKnowledgeAsset,
   deleteKnowledgeSource,
   detectKnowledgeFileKind,
+  findKnowledgeFileConflicts,
+  getKnowledgeAsset,
   listKnowledgeAssets,
   listKnowledgeRepresentativeOptions,
+  replaceKnowledgeAssetSource,
+  resolveUniqueKnowledgeAssetTitle,
   resolveKnowledgeLibraryOwnerId,
   processKnowledgeAsset,
   storeKnowledgeSource,
@@ -56,30 +61,68 @@ export async function POST(request: Request) {
         throw new KnowledgeLibraryError("文件不能超过 15 MB。", 413);
       }
       const kind = detectKnowledgeFileKind(file.name);
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const checksum = checksumKnowledgeSource(bytes);
+      const conflictPolicy = readUploadConflictPolicy(form);
+      const conflicts = await findKnowledgeFileConflicts(ownerId, {
+        fileName: file.name,
+        checksum,
+      });
+      if (conflictPolicy === "skip_duplicates" && conflicts.exact) {
+        return NextResponse.json({
+          asset: await getKnowledgeAsset(ownerId, conflicts.exact.id),
+          upload: {
+            outcome: "skipped_duplicate",
+            conflictType: "exact",
+            conflictAssetId: conflicts.exact.id,
+          },
+        });
+      }
+      const replacement = conflictPolicy === "replace_existing"
+        ? conflicts.exact ?? conflicts.sameName
+        : null;
       const stored = await storeKnowledgeSource({
         ownerId,
         fileName: file.name,
         contentType: file.type || "application/octet-stream",
-        bytes: new Uint8Array(await file.arrayBuffer()),
+        bytes,
       });
       let asset;
       try {
-        asset = await createKnowledgeAsset(ownerId, {
-          kind,
-          title: readFormString(form, "title") || file.name.replace(/\.[^.]+$/, ""),
-          visibility: readVisibility(form),
-          originalFileName: file.name,
-          mimeType: file.type || "application/octet-stream",
-          sizeBytes: file.size,
-          sourceObjectBucket: stored.bucket,
-          sourceObjectKey: stored.objectKey,
-          ...(stored.etag ? { sourceObjectEtag: stored.etag } : {}),
-          ...(stored.versionId ? { sourceObjectVersion: stored.versionId } : {}),
-          sourceObjectChecksum: stored.checksum,
-          tags: readJsonArray<string>(form, "tags"),
-          representativeLinks: readJsonArray<NonNullable<KnowledgeAssetCreateInput["representativeLinks"]>[number]>(form, "representativeLinks"),
-          createdBy: session?.email ?? session?.ownerId ?? "dashboard-owner",
-        }, { processingMode: "deferred" });
+        if (replacement) {
+          asset = await replaceKnowledgeAssetSource(ownerId, replacement.id, {
+            kind,
+            originalFileName: file.name,
+            mimeType: file.type || "application/octet-stream",
+            sizeBytes: file.size,
+            sourceObjectBucket: stored.bucket,
+            sourceObjectKey: stored.objectKey,
+            ...(stored.etag ? { sourceObjectEtag: stored.etag } : {}),
+            ...(stored.versionId ? { sourceObjectVersion: stored.versionId } : {}),
+            sourceObjectChecksum: stored.checksum,
+          });
+        } else {
+          const title = await resolveUniqueKnowledgeAssetTitle(
+            ownerId,
+            readFormString(form, "title") || file.name.replace(/\.[^.]+$/, ""),
+          );
+          asset = await createKnowledgeAsset(ownerId, {
+            kind,
+            title,
+            visibility: readVisibility(form),
+            originalFileName: file.name,
+            mimeType: file.type || "application/octet-stream",
+            sizeBytes: file.size,
+            sourceObjectBucket: stored.bucket,
+            sourceObjectKey: stored.objectKey,
+            ...(stored.etag ? { sourceObjectEtag: stored.etag } : {}),
+            ...(stored.versionId ? { sourceObjectVersion: stored.versionId } : {}),
+            sourceObjectChecksum: stored.checksum,
+            tags: readJsonArray<string>(form, "tags"),
+            representativeLinks: readJsonArray<NonNullable<KnowledgeAssetCreateInput["representativeLinks"]>[number]>(form, "representativeLinks"),
+            createdBy: session?.email ?? session?.ownerId ?? "dashboard-owner",
+          }, { processingMode: "deferred" });
+        }
       } catch (error) {
         await deleteKnowledgeSource({ bucket: stored.bucket, objectKey: stored.objectKey }).catch(() => undefined);
         throw error;
@@ -88,7 +131,20 @@ export async function POST(request: Request) {
       after(async () => {
         await processKnowledgeAsset(ownerId, assetId);
       });
-      return NextResponse.json({ asset }, { status: 201 });
+      return NextResponse.json({
+        asset,
+        upload: {
+          outcome: replacement ? "replaced" : "created",
+          ...(replacement
+            ? {
+                conflictType: conflicts.exact?.id === replacement.id ? "exact" : "same_name",
+                conflictAssetId: replacement.id,
+              }
+            : conflicts.sameName
+              ? { conflictType: "same_name", conflictAssetId: conflicts.sameName.id }
+              : {}),
+        },
+      }, { status: replacement ? 200 : 201 });
     }
 
     const body = (await request.json()) as Record<string, unknown>;
@@ -128,6 +184,14 @@ function readVisibility(form: FormData) {
   const value = readFormString(form, "visibility");
   const allowed = ["owner_only", "organization_shared", "selected_representatives", "public_material"] as const;
   return allowed.includes(value as (typeof allowed)[number]) ? value as (typeof allowed)[number] : "owner_only";
+}
+
+function readUploadConflictPolicy(form: FormData) {
+  const value = readFormString(form, "conflictPolicy");
+  const allowed = ["skip_duplicates", "replace_existing", "keep_both"] as const;
+  return allowed.includes(value as (typeof allowed)[number])
+    ? value as (typeof allowed)[number]
+    : "skip_duplicates";
 }
 
 function readJsonArray<T>(form: FormData, key: string): T[] {

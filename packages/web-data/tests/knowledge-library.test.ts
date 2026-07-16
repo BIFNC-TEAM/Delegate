@@ -10,12 +10,16 @@ import {
   deleteKnowledgeAsset,
   detectKnowledgeFileKind,
   extractKnowledgeFile,
+  findKnowledgeFileConflicts,
   getKnowledgeAsset,
   inferKnowledgeTags,
   listKnowledgeAssets,
+  processKnowledgeAsset,
+  replaceKnowledgeAssetSource,
+  resolveUniqueKnowledgeAssetTitle,
   updateKnowledgeAsset,
 } from "../src/knowledge-library";
-import { readKnowledgeSource, storeKnowledgeSource } from "../src/knowledge-storage";
+import { checksumKnowledgeSource, readKnowledgeSource, storeKnowledgeSource } from "../src/knowledge-storage";
 import { removeKnowledgeTextIndex, splitKnowledgeText } from "../src/knowledge-vector";
 
 describe("workspace knowledge library", () => {
@@ -150,6 +154,76 @@ describe("workspace knowledge library", () => {
     await archiveKnowledgeAsset(null, asset.id, true);
     await deleteKnowledgeAsset(null, asset.id);
     await expect(readKnowledgeSource({ bucket: stored.bucket, objectKey: stored.objectKey })).rejects.toThrow("not found");
+  });
+
+  it("detects duplicate files, resolves same-name copies, and safely replaces a stored source", async () => {
+    const marker = `conflict-${Date.now()}`;
+    const originalBytes = new TextEncoder().encode("Delegate 第一版知识正文，包含足够长度用于重复检测和安全替换测试。");
+    const original = await storeKnowledgeSource({
+      ownerId: null,
+      fileName: `${marker}.txt`,
+      contentType: "text/plain",
+      bytes: originalBytes,
+    });
+    const created = await createKnowledgeAsset(null, {
+      kind: "txt",
+      title: marker,
+      originalFileName: `${marker}.txt`,
+      mimeType: "text/plain",
+      sizeBytes: originalBytes.byteLength,
+      sourceObjectBucket: original.bucket,
+      sourceObjectKey: original.objectKey,
+      sourceObjectChecksum: original.checksum,
+      tags: ["保留标签"],
+    });
+
+    const exact = await findKnowledgeFileConflicts(null, {
+      fileName: `${marker}.txt`,
+      checksum: checksumKnowledgeSource(originalBytes),
+    });
+    expect(exact.exact?.id).toBe(created.id);
+    expect(exact.sameName?.id).toBe(created.id);
+    await expect(resolveUniqueKnowledgeAssetTitle(null, marker)).resolves.toBe(`${marker} (2)`);
+
+    const replacementBytes = new TextEncoder().encode("Delegate 第二版知识正文，内容已经改变，覆盖后必须重新解析并重建向量索引。");
+    const sameName = await findKnowledgeFileConflicts(null, {
+      fileName: `${marker}.txt`,
+      checksum: checksumKnowledgeSource(replacementBytes),
+    });
+    expect(sameName.exact).toBeNull();
+    expect(sameName.sameName?.id).toBe(created.id);
+
+    const replacement = await storeKnowledgeSource({
+      ownerId: null,
+      fileName: `${marker}.txt`,
+      contentType: "text/plain",
+      bytes: replacementBytes,
+    });
+    const replaced = await replaceKnowledgeAssetSource(null, created.id, {
+      kind: "txt",
+      originalFileName: `${marker}.txt`,
+      mimeType: "text/plain",
+      sizeBytes: replacementBytes.byteLength,
+      sourceObjectBucket: replacement.bucket,
+      sourceObjectKey: replacement.objectKey,
+      sourceObjectChecksum: replacement.checksum,
+    });
+    expect(replaced).toMatchObject({
+      id: created.id,
+      title: marker,
+      status: "processing",
+      tags: ["保留标签"],
+      sourceObjectKey: replacement.objectKey,
+      sourceObjectChecksum: replacement.checksum,
+      vectorBackend: null,
+    });
+    await expect(readKnowledgeSource({ bucket: original.bucket, objectKey: original.objectKey })).rejects.toThrow("not found");
+
+    const processed = await processKnowledgeAsset(null, created.id);
+    expect(processed).toMatchObject({ status: "ready", processingError: null });
+    expect(processed.extractedText).toContain("第二版知识正文");
+    await archiveKnowledgeAsset(null, created.id, true);
+    await deleteKnowledgeAsset(null, created.id);
   });
 
   it("detects supported file kinds and creates bounded overlapping retrieval chunks", () => {

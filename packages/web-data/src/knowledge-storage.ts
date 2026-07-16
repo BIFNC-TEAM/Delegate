@@ -26,6 +26,10 @@ export type StoredKnowledgeObject = {
   checksum: string;
 };
 
+export function checksumKnowledgeSource(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
 export function buildKnowledgeOwnerObjectPrefix(ownerId?: string | null) {
   return `knowledge/${safeSegment(ownerId ?? "demo")}/`;
 }
@@ -77,7 +81,7 @@ export async function storeKnowledgeSource(params: {
     safeFileName(params.fileName),
   ].join("/");
   const body = Buffer.from(params.bytes);
-  const checksum = createHash("sha256").update(body).digest("hex");
+  const checksum = checksumKnowledgeSource(body);
 
   if (useMemoryStore()) {
     memoryObjects.set(memoryKey(config.bucket, objectKey), {

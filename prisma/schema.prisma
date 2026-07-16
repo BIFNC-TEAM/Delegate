@@ -1259,6 +1259,8 @@ model KnowledgeAsset {
   @@index([ownerId, kind, createdAt])
   @@index([ownerId, visibility, updatedAt])
   @@index([ownerId, vectorBackend, indexedAt])
+  @@index([ownerId, sourceObjectChecksum])
+  @@index([ownerId, originalFileName])
 }
 
 model KnowledgeAssetRepresentative {

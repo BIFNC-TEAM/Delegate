@@ -38,6 +38,7 @@ const assetVisibilitySchema = z.enum([
 ]);
 const usageModeSchema = z.enum(["qa_source", "public_material", "both"]);
 const reviewStatusSchema = z.enum(["pending", "approved", "rejected"]);
+const fileAssetKindSchema = z.enum(["pdf", "docx", "txt", "markdown"]);
 
 const representativeLinkSchema = z.object({
   representativeId: z.string().trim().min(1),
@@ -74,8 +75,33 @@ export const knowledgeAssetUpdateSchema = z.object({
   representativeLinks: z.array(representativeLinkSchema).max(100).optional(),
 });
 
+const knowledgeAssetSourceReplacementSchema = z.object({
+  kind: fileAssetKindSchema,
+  originalFileName: z.string().trim().min(1).max(260),
+  mimeType: z.string().trim().max(160),
+  sizeBytes: z.number().int().min(1).max(MAX_FILE_BYTES),
+  sourceObjectBucket: z.string().trim().min(1).max(180),
+  sourceObjectKey: z.string().trim().min(1).max(1_024),
+  sourceObjectEtag: z.string().trim().max(180).optional(),
+  sourceObjectVersion: z.string().trim().max(300).optional(),
+  sourceObjectChecksum: z.string().trim().length(64),
+});
+
 export type KnowledgeAssetCreateInput = z.input<typeof knowledgeAssetCreateSchema>;
 export type KnowledgeAssetUpdateInput = z.input<typeof knowledgeAssetUpdateSchema>;
+export type KnowledgeAssetSourceReplacementInput = z.input<typeof knowledgeAssetSourceReplacementSchema>;
+export type KnowledgeFileConflictMatch = {
+  id: string;
+  title: string;
+  originalFileName: string | null;
+  sourceObjectChecksum: string | null;
+  status: KnowledgeAssetRecord["status"];
+  updatedAt: string;
+};
+export type KnowledgeFileConflicts = {
+  exact: KnowledgeFileConflictMatch | null;
+  sameName: KnowledgeFileConflictMatch | null;
+};
 export type KnowledgeAssetListFilters = {
   query?: string;
   status?: "processing" | "ready" | "failed" | "archived";
@@ -245,6 +271,169 @@ export async function getKnowledgeAsset(
   });
   if (!row) throw new KnowledgeLibraryError("Knowledge asset not found.", 404);
   return serializeAsset(row);
+}
+
+export async function findKnowledgeFileConflicts(
+  ownerId: string | null | undefined,
+  input: { fileName: string; checksum: string },
+): Promise<KnowledgeFileConflicts> {
+  const fileName = z.string().trim().min(1).max(260).parse(input.fileName);
+  const checksum = z.string().trim().length(64).parse(input.checksum);
+  if (shouldUseDemoKnowledge(ownerId)) {
+    const candidates = demoKnowledgeAssets
+      .filter((asset) => asset.status !== "archived")
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    return {
+      exact: toConflictMatch(candidates.find((asset) => asset.sourceObjectChecksum === checksum) ?? null),
+      sameName: toConflictMatch(candidates.find((asset) => sameFileName(asset.originalFileName, fileName)) ?? null),
+    };
+  }
+  const scopedOwnerId = requireOwnerId(ownerId);
+  const candidates = await prisma.knowledgeAsset.findMany({
+    where: {
+      ownerId: scopedOwnerId,
+      status: { not: KnowledgeAssetStatus.ARCHIVED },
+      OR: [
+        { sourceObjectChecksum: checksum },
+        { originalFileName: { equals: fileName, mode: "insensitive" } },
+      ],
+    },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    select: {
+      id: true,
+      title: true,
+      originalFileName: true,
+      sourceObjectChecksum: true,
+      status: true,
+      updatedAt: true,
+    },
+  });
+  return {
+    exact: toConflictMatch(candidates.find((asset) => asset.sourceObjectChecksum === checksum) ?? null),
+    sameName: toConflictMatch(candidates.find((asset) => sameFileName(asset.originalFileName, fileName)) ?? null),
+  };
+}
+
+export async function resolveUniqueKnowledgeAssetTitle(
+  ownerId: string | null | undefined,
+  requestedTitle: string,
+): Promise<string> {
+  const baseTitle = z.string().trim().min(1).max(180).parse(requestedTitle);
+  const titles = shouldUseDemoKnowledge(ownerId)
+    ? demoKnowledgeAssets.map((asset) => asset.title)
+    : (await prisma.knowledgeAsset.findMany({
+        where: { ownerId: requireOwnerId(ownerId), title: { startsWith: baseTitle, mode: "insensitive" } },
+        select: { title: true },
+      })).map((asset) => asset.title);
+  const occupied = new Set(titles.map((title) => title.trim().toLocaleLowerCase()));
+  if (!occupied.has(baseTitle.toLocaleLowerCase())) return baseTitle;
+  for (let copy = 2; copy < 10_000; copy += 1) {
+    const suffix = ` (${copy})`;
+    const candidate = `${baseTitle.slice(0, Math.max(1, 180 - suffix.length)).trimEnd()}${suffix}`;
+    if (!occupied.has(candidate.toLocaleLowerCase())) return candidate;
+  }
+  throw new KnowledgeLibraryError("无法为同名知识生成唯一标题。", 409);
+}
+
+export async function replaceKnowledgeAssetSource(
+  ownerId: string | null | undefined,
+  assetId: string,
+  input: KnowledgeAssetSourceReplacementInput,
+): Promise<KnowledgeAssetRecord> {
+  const parsed = knowledgeAssetSourceReplacementSchema.parse(input);
+  if (shouldUseDemoKnowledge(ownerId)) {
+    const asset = requireDemoAsset(assetId);
+    if (asset.status === "archived") throw new KnowledgeLibraryError("不能覆盖已归档的知识。", 409);
+    const previousObject = asset.sourceObjectBucket && asset.sourceObjectKey
+      ? { bucket: asset.sourceObjectBucket, objectKey: asset.sourceObjectKey }
+      : null;
+    if (asset.vectorUri) {
+      await removeKnowledgeTextIndex({
+        ownerId: "demo",
+        assetId,
+        representativeSlugs: asset.representativeLinks.filter((link) => link.enabled).map((link) => link.representativeSlug),
+      });
+    }
+    assignReplacementSource(asset, parsed);
+    asset.processingLogs.push(demoLog("source_replace", "info", "源文件已安全替换，等待重新提取并构建向量索引。"));
+    if (previousObject && previousObject.objectKey !== parsed.sourceObjectKey) {
+      await deleteKnowledgeSource(previousObject).catch(() => undefined);
+    }
+    return cloneDemoAsset(asset);
+  }
+
+  const scopedOwnerId = requireOwnerId(ownerId);
+  if (!parsed.sourceObjectKey.startsWith(buildKnowledgeOwnerObjectPrefix(scopedOwnerId))) {
+    throw new KnowledgeLibraryError("不能引用其他工作区的知识对象。", 403);
+  }
+  const asset = await requireDatabaseAsset(scopedOwnerId, assetId);
+  if (asset.status === KnowledgeAssetStatus.ARCHIVED) {
+    throw new KnowledgeLibraryError("不能覆盖已归档的知识。", 409);
+  }
+  const previousObject = asset.sourceObjectBucket && asset.sourceObjectKey
+    ? { bucket: asset.sourceObjectBucket, objectKey: asset.sourceObjectKey }
+    : null;
+  if (asset.vectorUri) {
+    const links = await prisma.knowledgeAssetRepresentative.findMany({
+      where: { assetId, enabled: true },
+      include: { representative: { select: { slug: true } } },
+    });
+    await removeKnowledgeTextIndex({
+      ownerId: scopedOwnerId,
+      assetId,
+      representativeSlugs: links.map((link) => link.representative.slug),
+      required: asset.vectorBackend === "openviking",
+    });
+  }
+  try {
+    await prisma.knowledgeAsset.update({
+      where: { id: assetId },
+      data: {
+        kind: toAssetKind(parsed.kind),
+        status: KnowledgeAssetStatus.PROCESSING,
+        originalFileName: parsed.originalFileName,
+        mimeType: parsed.mimeType,
+        sizeBytes: parsed.sizeBytes,
+        sourceUrl: null,
+        sourceText: null,
+        sourceObjectBucket: parsed.sourceObjectBucket,
+        sourceObjectKey: parsed.sourceObjectKey,
+        sourceObjectEtag: parsed.sourceObjectEtag ?? null,
+        sourceObjectVersion: parsed.sourceObjectVersion ?? null,
+        sourceObjectChecksum: parsed.sourceObjectChecksum,
+        extractedText: null,
+        summary: null,
+        autoTags: [],
+        checksum: null,
+        processingError: null,
+        vectorBackend: null,
+        vectorUri: null,
+        vectorChunkCount: 0,
+        embeddingModel: null,
+        indexedAt: null,
+        processedAt: null,
+        processingLogs: {
+          create: { stage: "source_replace", message: "源文件已安全替换，等待重新提取并构建向量索引。" },
+        },
+      },
+    });
+  } catch (error) {
+    await processKnowledgeAsset(scopedOwnerId, assetId).catch(() => undefined);
+    throw error;
+  }
+  if (previousObject && previousObject.objectKey !== parsed.sourceObjectKey) {
+    await deleteKnowledgeSource(previousObject).catch(async () => {
+      await prisma.knowledgeProcessingLog.create({
+        data: {
+          assetId,
+          stage: "source_cleanup",
+          level: KnowledgeProcessingLogLevel.WARNING,
+          message: "新源文件已生效，但旧对象清理失败，等待后台回收。",
+        },
+      }).catch(() => undefined);
+    });
+  }
+  return getKnowledgeAsset(scopedOwnerId, assetId);
 }
 
 export async function createKnowledgeAsset(
@@ -880,6 +1069,60 @@ function normalizeExtractedText(text: string): string {
 
 function normalizeTags(tags: string[]): string[] {
   return [...new Set(tags.map((tag) => tag.trim()).filter(Boolean))].slice(0, 20);
+}
+
+function sameFileName(left: string | null, right: string): boolean {
+  return left?.trim().toLocaleLowerCase() === right.trim().toLocaleLowerCase();
+}
+
+function toConflictMatch(asset: {
+  id: string;
+  title: string;
+  originalFileName: string | null;
+  sourceObjectChecksum: string | null;
+  status: KnowledgeAssetStatus | KnowledgeAssetRecord["status"];
+  updatedAt: Date | string;
+} | null): KnowledgeFileConflictMatch | null {
+  if (!asset) return null;
+  return {
+    id: asset.id,
+    title: asset.title,
+    originalFileName: asset.originalFileName,
+    sourceObjectChecksum: asset.sourceObjectChecksum,
+    status: String(asset.status).toLowerCase() as KnowledgeAssetRecord["status"],
+    updatedAt: asset.updatedAt instanceof Date ? asset.updatedAt.toISOString() : asset.updatedAt,
+  };
+}
+
+function assignReplacementSource(
+  asset: KnowledgeAssetRecord,
+  input: z.output<typeof knowledgeAssetSourceReplacementSchema>,
+) {
+  asset.kind = input.kind;
+  asset.status = "processing";
+  asset.originalFileName = input.originalFileName;
+  asset.mimeType = input.mimeType;
+  asset.sizeBytes = input.sizeBytes;
+  asset.sourceUrl = null;
+  asset.sourceText = null;
+  asset.sourceObjectBucket = input.sourceObjectBucket;
+  asset.sourceObjectKey = input.sourceObjectKey;
+  asset.sourceObjectEtag = input.sourceObjectEtag ?? null;
+  asset.sourceObjectVersion = input.sourceObjectVersion ?? null;
+  asset.sourceObjectChecksum = input.sourceObjectChecksum;
+  asset.extractedText = null;
+  asset.summary = null;
+  asset.autoTags = [];
+  asset.checksum = null;
+  asset.processingError = null;
+  asset.vectorBackend = null;
+  asset.vectorUri = null;
+  asset.vectorChunkCount = 0;
+  asset.embeddingModel = null;
+  asset.indexedAt = null;
+  asset.processedAt = null;
+  asset.archivedAt = null;
+  asset.updatedAt = new Date().toISOString();
 }
 
 async function assertRepresentativeLinksBelongToOwner(

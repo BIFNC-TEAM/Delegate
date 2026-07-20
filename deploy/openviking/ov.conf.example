@@ -2,6 +2,7 @@
   "server": {
     "host": "0.0.0.0",
     "port": 1933,
+    "auth_mode": "trusted",
     "root_api_key": ${OPENVIKING_ROOT_API_KEY_JSON},
     "cors_origins": ["*"]
   },
@@ -14,10 +15,7 @@
     },
     "agfs": {
       "backend": "local",
-      "port": 1833,
-      "log_level": "warn",
-      "timeout": 10,
-      "retry_times": 3
+      "timeout": 10
     }
   },
   "embedding": {
@@ -26,6 +24,7 @@
       "model": "${OPENVIKING_EMBEDDING_MODEL}",
       "api_key": "${MODEL_API_KEY}",
       "api_base": "${MODEL_API_BASE}",
+      "encoding_format": "float",
       "dimension": ${OPENVIKING_EMBEDDING_DIMENSION}
     }
   },
@@ -42,8 +41,6 @@
   "auto_generate_l1": true,
   "default_search_mode": "thinking",
   "default_search_limit": 3,
-  "enable_memory_decay": true,
-  "memory_decay_check_interval": 3600,
   "log": {
     "level": "INFO",
     "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",

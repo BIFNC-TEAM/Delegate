@@ -2,7 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
-  getRepresentativeSetupSnapshot,
+  getPublicRepresentativeRuntime,
   resolveWebAudienceContact,
   resolveWebAudienceConversation,
 } from "@delegate/web-data";
@@ -26,10 +26,9 @@ export async function POST(
   const { slug } = await params;
 
   try {
-    const representative = await getRepresentativeSetupSnapshot(slug);
-    if (!representative) {
-      return NextResponse.json({ error: "Representative not found." }, { status: 404 });
-    }
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") return NextResponse.json({ error: "Representative is not publicly available." }, { status: runtime.status === "paused" ? 423 : 404 });
+    const representative = runtime.setup;
     if (!representative.compute.enabled) {
       return NextResponse.json(
         { error: "Compute is disabled for this representative." },

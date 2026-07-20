@@ -32,6 +32,8 @@ import {
   GroupActivation,
   PolicyDecision,
   PricingPlanType,
+  RepresentativeLifecycleState,
+  RepresentativeChannelKind,
   SkillPackSource,
   type Prisma,
 } from "@prisma/client";
@@ -167,7 +169,59 @@ export type RepresentativeDirectoryItem = {
   name: string;
   tagline: string;
   updatedAt: string;
+  lifecycleState: string;
+  activeVersion: number | null;
 };
+
+export type PublicRepresentativeRuntimeResult =
+  | { status: "available"; setup: RepresentativeSetupSnapshot }
+  | { status: "not_found" | "unpublished" | "paused" | "private" | "web_disabled" };
+
+export function resolvePublicRepresentativeAvailability(input: {
+  lifecycleState: string;
+  publicMode: boolean;
+  activeVersionId?: string | null;
+  webChannelStatuses: string[];
+}): PublicRepresentativeRuntimeResult["status"] {
+  if (input.lifecycleState.toUpperCase() === "PAUSED") return "paused";
+  if (input.lifecycleState.toUpperCase() !== "PUBLISHED" || !input.activeVersionId) return "unpublished";
+  if (!input.publicMode) return "private";
+  if (!input.webChannelStatuses.some((status) => status.toUpperCase() === "CONNECTED")) return "web_disabled";
+  return "available";
+}
+
+/** Build the canonical domain profile used by every conversation channel. */
+export function buildRepresentativeRuntimeProfile(
+  setup: RepresentativeSetupSnapshot,
+): Representative {
+  return {
+    id: setup.id,
+    slug: setup.slug,
+    ownerName: setup.ownerName,
+    name: setup.name,
+    tagline: setup.tagline,
+    tone: setup.tone,
+    languages: [...setup.languages],
+    groupActivation: setup.groupActivation,
+    skills: [...setup.skills],
+    skillPacks: [],
+    knowledgePack: {
+      identitySummary: setup.knowledgePack.identitySummary,
+      faq: setup.knowledgePack.faq.map((item) => ({ ...item })),
+      materials: setup.knowledgePack.materials.map((item) => ({ ...item })),
+      policies: setup.knowledgePack.policies.map((item) => ({ ...item })),
+    },
+    contract: {
+      freeReplyLimit: setup.contract.freeReplyLimit,
+      freeScope: [...setup.contract.freeScope],
+      paywalledIntents: [...setup.contract.paywalledIntents],
+      handoffWindowHours: setup.contract.handoffWindowHours,
+    },
+    pricing: setup.pricing.map((plan) => ({ ...plan })),
+    handoffPrompt: setup.handoffPrompt,
+    actionGate: { ...setup.actionGate },
+  };
+}
 
 let demoFallbackSetupSnapshot: RepresentativeSetupSnapshot | null = null;
 
@@ -189,17 +243,15 @@ export async function listRepresentativeDirectoryItems(ownerId?: string | null):
   }
 
   try {
+    const effectiveOwnerId = ownerId?.trim() || (await findLocalDashboardOwnerId());
     const representatives = await prisma.representative.findMany({
-      ...(ownerId?.trim() ? { where: { ownerId: ownerId.trim() } } : {}),
+      ...(effectiveOwnerId ? { where: { ownerId: effectiveOwnerId } } : {}),
       include: {
         owner: true,
+        activeVersion: true,
       },
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
     });
-
-    if (representatives.length === 0) {
-      return [buildDemoDirectoryItem()];
-    }
 
     return representatives.map((representative) => ({
       id: representative.id,
@@ -208,6 +260,8 @@ export async function listRepresentativeDirectoryItems(ownerId?: string | null):
       name: representative.displayName,
       tagline: representative.roleSummary,
       updatedAt: representative.updatedAt.toISOString(),
+      lifecycleState: representative.lifecycleState.toLowerCase(),
+      activeVersion: representative.activeVersion?.versionNumber ?? null,
     }));
   } catch (error) {
     if (isPrismaUnavailableError(error)) {
@@ -232,18 +286,14 @@ export async function createRepresentative(
     const openVikingEnv = resolveOpenVikingEnv();
     const created = await prisma.$transaction(async (tx) => {
       const now = new Date();
-      const owner = options.ownerId?.trim()
-        ? await tx.owner.update({
-            where: { id: options.ownerId.trim() },
-            data: {
-              displayName: parsed.ownerName,
-            },
-          })
-        : await tx.owner.create({
-            data: {
-              displayName: parsed.ownerName,
-            },
-          });
+      const requestedOwnerId = options.ownerId?.trim();
+      const owner = requestedOwnerId
+        ? await tx.owner.findUnique({ where: { id: requestedOwnerId } })
+        : (await tx.owner.findFirst({ orderBy: [{ createdAt: "asc" }, { id: "asc" }] })) ??
+          (await tx.owner.create({ data: { displayName: parsed.ownerName } }));
+      if (!owner) {
+        throw new Error("The authenticated owner no longer exists.");
+      }
 
       const slug = await reserveRepresentativeSlug(
         tx,
@@ -262,7 +312,7 @@ export async function createRepresentative(
           displayName: template.name,
           roleSummary: template.tagline,
           tone: template.tone,
-          publicMode: true,
+          publicMode: template.publicMode,
           groupModeEnabled: true,
           groupActivation: mapGroupActivationToDb(template.groupActivation),
           humanInLoop: true,
@@ -437,9 +487,90 @@ export async function getRepresentativeSetupSnapshot(
   }
 }
 
+/**
+ * Resolve the immutable configuration used by a public/runtime conversation.
+ * Dashboard editing continues to use getRepresentativeSetupSnapshot(), while
+ * public surfaces must use this function so unpublished edits cannot leak live.
+ */
+export async function getRepresentativeRuntimeSetupSnapshot(
+  representativeSlug: string,
+  representativeVersionId?: string | null,
+): Promise<RepresentativeSetupSnapshot | null> {
+  if (!process.env.DATABASE_URL?.trim()) {
+    return cloneRepresentativeSetupSnapshot(getOrCreateDemoFallbackSetupSnapshot());
+  }
+
+  const representative = await prisma.representative.findUnique({
+    where: { slug: representativeSlug },
+    include: {
+      ...representativeSetupInclude,
+      activeVersion: true,
+    },
+  });
+  if (!representative) return null;
+
+  const version = representativeVersionId?.trim()
+    ? await prisma.representativeVersion.findFirst({
+        where: {
+          id: representativeVersionId.trim(),
+          representativeId: representative.id,
+        },
+      })
+    : representative.activeVersion;
+  if (!version) return null;
+
+  return applyRepresentativeVersionSnapshot(
+    serializeRepresentativeSetup(representative),
+    version.snapshot,
+  );
+}
+
+/**
+ * Canonical public boundary for every visitor-facing page and API.
+ * It prevents draft data, paused representatives, private profiles, and
+ * disconnected Web channels from being served by one route while another
+ * route correctly blocks them.
+ */
+export async function getPublicRepresentativeRuntime(
+  representativeSlug: string,
+): Promise<PublicRepresentativeRuntimeResult> {
+  if (!process.env.DATABASE_URL?.trim()) {
+    const setup = await getRepresentativeRuntimeSetupSnapshot(representativeSlug);
+    return setup ? { status: "available", setup } : { status: "not_found" };
+  }
+
+  const representative = await prisma.representative.findUnique({
+    where: { slug: representativeSlug },
+    select: {
+      lifecycleState: true,
+      publicMode: true,
+      activeVersionId: true,
+      channelBindings: {
+        where: { kind: RepresentativeChannelKind.WEB },
+        select: { status: true },
+      },
+    },
+  });
+  if (!representative) return { status: "not_found" };
+  const availability = resolvePublicRepresentativeAvailability({
+    lifecycleState: representative.lifecycleState,
+    publicMode: representative.publicMode,
+    activeVersionId: representative.activeVersionId,
+    webChannelStatuses: representative.channelBindings.map((binding) => binding.status),
+  });
+  if (availability !== "available") return { status: availability };
+
+  const setup = await getRepresentativeRuntimeSetupSnapshot(
+    representativeSlug,
+    representative.activeVersionId,
+  );
+  return setup ? { status: "available", setup } : { status: "unpublished" };
+}
+
 export async function updateRepresentativeSetup(params: {
   representativeSlug: string;
   input: RepresentativeSetupUpdateInput;
+  syncOpenViking?: boolean;
 }): Promise<RepresentativeSetupSnapshot> {
   const input = representativeSetupUpdateSchema.parse(params.input);
 
@@ -458,13 +589,6 @@ export async function updateRepresentativeSetup(params: {
     }
 
     const updated = await prisma.$transaction(async (tx) => {
-      await tx.owner.update({
-        where: { id: representative.ownerId },
-        data: {
-          displayName: input.ownerName,
-        },
-      });
-
       await tx.representative.update({
         where: { id: representative.id },
         data: {
@@ -530,6 +654,38 @@ export async function updateRepresentativeSetup(params: {
         })),
       });
 
+      const [linkedKnowledgeCount, channelCount] = await Promise.all([
+        tx.knowledgeAssetRepresentative.count({
+          where: { representativeId: representative.id, enabled: true },
+        }),
+        tx.representativeChannelBinding.count({
+          where: { representativeId: representative.id },
+        }),
+      ]);
+      const knowledgeItemCount =
+        input.knowledgePack.faq.length +
+        input.knowledgePack.materials.length +
+        input.knowledgePack.policies.length;
+      const isPublishReady =
+        (linkedKnowledgeCount > 0 || knowledgeItemCount > 0) &&
+        (!input.humanInLoop || Boolean(input.handoffPrompt.trim())) &&
+        input.pricing.length === 4 &&
+        (channelCount > 0 || input.publicMode);
+      if (
+        representative.lifecycleState === RepresentativeLifecycleState.DRAFT ||
+        representative.lifecycleState === RepresentativeLifecycleState.CONFIGURING ||
+        representative.lifecycleState === RepresentativeLifecycleState.READY
+      ) {
+        await tx.representative.update({
+          where: { id: representative.id },
+          data: {
+            lifecycleState: isPublishReady
+              ? RepresentativeLifecycleState.READY
+              : RepresentativeLifecycleState.CONFIGURING,
+          },
+        });
+      }
+
       const refreshed = await tx.representative.findUnique({
         where: { id: representative.id },
         include: representativeSetupInclude,
@@ -543,10 +699,12 @@ export async function updateRepresentativeSetup(params: {
     });
 
     const snapshot = serializeRepresentativeSetup(updated);
-    await maybeSyncRepresentativeOpenVikingResources({
-      representativeSlug: snapshot.slug,
-      trigger: "setup_update",
-    });
+    if (params.syncOpenViking !== false) {
+      await maybeSyncRepresentativeOpenVikingResources({
+        representativeSlug: snapshot.slug,
+        trigger: "setup_update",
+      });
+    }
     return snapshot;
   } catch (error) {
     if (shouldUseDemoFallback(error, params.representativeSlug)) {
@@ -610,6 +768,112 @@ function serializeRepresentativeSetup(
       filesystemMode: mapComputeFilesystemModeFromDb(representative.computeFilesystemMode),
     },
   };
+}
+
+export function applyRepresentativeVersionSnapshot(
+  current: RepresentativeSetupSnapshot,
+  value: unknown,
+): RepresentativeSetupSnapshot {
+  const snapshot = asJsonRecord(value);
+  if (!snapshot) return current;
+
+  const identity = asJsonRecord(snapshot.identity);
+  const conversation = asJsonRecord(snapshot.conversation);
+  const governance = asJsonRecord(snapshot.governance);
+  const knowledge = asJsonRecord(snapshot.knowledge);
+  const parsedContract = conversationContractSchema.safeParse(conversation);
+  const parsedPricing = parseSnapshotPricing(snapshot.pricing);
+  const parsedGroupActivation = groupActivationSchema.safeParse(snapshot.groupActivation);
+  const parsedSkills = Array.isArray(governance?.allowedSkills)
+    ? governance.allowedSkills
+        .map((skill) => representativeSkillSchema.safeParse(skill))
+        .filter(
+          (skill): skill is {
+            success: true;
+            data: RepresentativeSetupSnapshot["skills"][number];
+          } => skill.success,
+        )
+        .map((skill) => skill.data)
+    : [];
+
+  return {
+    ...current,
+    name: readSnapshotString(identity?.displayName) ?? current.name,
+    tagline: readSnapshotString(identity?.roleSummary) ?? current.tagline,
+    tone: readSnapshotString(identity?.tone) ?? current.tone,
+    languages: identity?.languages
+      ? parseStringArray(identity.languages as Prisma.JsonValue, current.languages)
+      : current.languages,
+    groupActivation: parsedGroupActivation.success
+      ? parsedGroupActivation.data
+      : "mention_only",
+    publicMode:
+      typeof snapshot.publicMode === "boolean" ? snapshot.publicMode : current.publicMode,
+    humanInLoop:
+      typeof snapshot.humanInLoop === "boolean" ? snapshot.humanInLoop : current.humanInLoop,
+    skills: parsedSkills.length ? parsedSkills : current.skills,
+    knowledgePack: knowledge
+      ? {
+          identitySummary:
+            readSnapshotString(knowledge.identitySummary) ?? current.knowledgePack.identitySummary,
+          faq: parseKnowledgeDocuments(
+            knowledge.faq as Prisma.JsonValue,
+            current.knowledgePack.faq,
+          ),
+          materials: parseKnowledgeDocuments(
+            knowledge.materials as Prisma.JsonValue,
+            current.knowledgePack.materials,
+          ),
+          policies: parseKnowledgeDocuments(
+            knowledge.policies as Prisma.JsonValue,
+            current.knowledgePack.policies,
+          ),
+        }
+      : current.knowledgePack,
+    contract: parsedContract.success ? parsedContract.data : current.contract,
+    pricing: parsedPricing.length === 4 ? parsedPricing : current.pricing,
+    handoffPrompt:
+      readSnapshotString(conversation?.handoffPrompt) ?? current.handoffPrompt,
+    actionGate: governance?.actionGate
+      ? parseActionGate(governance.actionGate as Prisma.JsonValue)
+      : current.actionGate,
+  };
+}
+
+function parseSnapshotPricing(value: unknown): PricingPlan[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.flatMap((rawPlan) => {
+    const canonical = pricingPlanSchema.safeParse(rawPlan);
+    if (canonical.success) return [canonical.data];
+
+    // Versions published before the canonical domain snapshot used Prisma's
+    // field names. Continue to honor those immutable historical versions.
+    const legacy = asJsonRecord(rawPlan);
+    const rawTier = readSnapshotString(legacy?.type)?.toLowerCase();
+    const tier = rawTier === "free" || rawTier === "pass" || rawTier === "deep_help" || rawTier === "sponsor"
+      ? rawTier
+      : undefined;
+    const parsedLegacy = pricingPlanSchema.safeParse({
+      tier,
+      name: legacy?.name,
+      stars: legacy?.starsAmount,
+      summary: legacy?.summary,
+      includedReplies: legacy?.includedReplies,
+      includesPriorityHandoff: legacy?.includesPriorityHandoff,
+    });
+    return parsedLegacy.success ? [parsedLegacy.data] : [];
+  });
+}
+
+function asJsonRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readSnapshotString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function getOrCreateDemoFallbackSetupSnapshot(): RepresentativeSetupSnapshot {
@@ -848,47 +1112,14 @@ function buildRepresentativeTemplate(params: {
     tone: demoRepresentative.tone,
     languages: [...demoRepresentative.languages],
     groupActivation: demoRepresentative.groupActivation,
-    publicMode: true,
+    publicMode: false,
     humanInLoop: true,
     skills: [...demoRepresentative.skills],
     knowledgePack: {
       identitySummary: `${safeOwnerName} 的公开业务代表，适合先处理 FAQ、合作意向、报价请求和预约入口。你可以继续在 dashboard 里补充更具体的公开材料。`,
-      faq: [
-        {
-          id: "faq_intro",
-          title: `${safeOwnerName} 主要在做什么？`,
-          kind: "faq",
-          summary: `这里建议补充 ${safeOwnerName} 的服务对象、典型问题和合作方式。`,
-        },
-        {
-          id: "faq_fit",
-          title: "什么类型的问题适合先问这个代表？",
-          kind: "faq",
-          summary: "适合先问公开资料、合作方向、是否接单、报价入口和预约方式。",
-        },
-      ],
-      materials: [
-        {
-          id: "material_intro",
-          title: "服务介绍待补充",
-          kind: "deck",
-          summary: "建议放一页式介绍、官网或 Notion 页面。",
-        },
-      ],
-      policies: [
-        {
-          id: "policy_boundary",
-          title: "公开边界",
-          kind: "policy",
-          summary: "这个代表只能使用公开知识，不访问私有文件、账号、浏览器或日历。",
-        },
-        {
-          id: "policy_handoff",
-          title: "人工升级规则",
-          kind: "policy",
-          summary: "复杂报价、敏感材料、退款折扣和高优先级预约会进入人工评估。",
-        },
-      ],
+      faq: [],
+      materials: [],
+      policies: [],
     },
     contract: {
       freeReplyLimit: demoRepresentative.contract.freeReplyLimit,
@@ -1293,6 +1524,8 @@ function buildDemoDirectoryItem(): RepresentativeDirectoryItem {
     name: demoRepresentative.name,
     tagline: demoRepresentative.tagline,
     updatedAt: new Date(0).toISOString(),
+    lifecycleState: "published",
+    activeVersion: 1,
   };
 }
 
@@ -1360,7 +1593,15 @@ function parseKnowledgeDocuments(
     .filter((entry): entry is { success: true; data: KnowledgeDocument } => entry.success)
     .map((entry) => entry.data);
 
-  return parsed.length > 0 ? parsed : fallback.map((item) => ({ ...item }));
+  return parsed;
+}
+
+async function findLocalDashboardOwnerId(): Promise<string | undefined> {
+  const owner = await prisma.owner.findFirst({
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    select: { id: true },
+  });
+  return owner?.id;
 }
 
 function parseInquiryIntents(

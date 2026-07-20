@@ -121,7 +121,12 @@ Why:
 
 - keep Docker reproducible
 - avoid fake-success memory writes
-- preserve safe behavior until the operator provides `OPENAI_API_KEY` or `ARK_API_KEY`
+- preserve safe behavior until the operator provides `OPENVIKING_MODEL_API_KEY`,
+  `OPENAI_API_KEY`, or `ARK_API_KEY`
+
+`OPENVIKING_MODEL_API_KEY` and `OPENVIKING_MODEL_API_BASE` are preferred for
+knowledge indexing because they keep OpenViking provider credentials isolated
+from Delegate's primary model runtime.
 
 ## Docker services
 
@@ -134,9 +139,17 @@ The config template lives at:
 
 - `deploy/openviking/ov.conf.example`
 
+Apple Silicon development uses `deploy/openviking/Dockerfile`, a thin image
+over OpenViking `v0.4.9` that pins `cryptography` to an ARM64-compatible wheel.
+This avoids the upstream image's `SIGILL` startup failure under Docker Desktop.
+
 The runtime renders that template into:
 
 - `/etc/openviking/ov.conf`
+
+The server runs in root-key-protected `trusted` mode. Delegate supplies explicit
+account and user headers on every tenant-scoped request; the root key authenticates
+the internal caller without granting ROOT access to tenant data APIs.
 
 ## Dashboard surface
 
@@ -170,5 +183,6 @@ Expected local verification:
 
 For real memory sync and recall, also set one of:
 
+- `OPENVIKING_MODEL_API_KEY` with `OPENVIKING_MODEL_API_BASE`
 - `OPENAI_API_KEY`
 - `ARK_API_KEY`

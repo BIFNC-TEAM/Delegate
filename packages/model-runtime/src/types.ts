@@ -7,7 +7,7 @@ import type {
 } from "@delegate/runtime";
 import type { ModelContextSegmentTrace } from "@delegate/lifecycle-hooks";
 
-export type ModelProvider = "openai" | "anthropic";
+export type ModelProvider = "openai" | "bailian" | "anthropic";
 
 export type ModelRuntimeState =
   | "ready"
@@ -30,6 +30,12 @@ export type ModelRuntimeEnv = {
   maxInputTokens: number;
   maxOutputTokens: number;
   openai: {
+    model: string;
+    apiKey?: string;
+    baseUrl?: string;
+    pricing: ModelPricingConfig;
+  };
+  bailian: {
     model: string;
     apiKey?: string;
     baseUrl?: string;

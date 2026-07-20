@@ -7,6 +7,7 @@ import {
   buildRepresentativeReplyPrompt,
   calculateModelUsageCost,
   generateRepresentativeReply,
+  renderGroundedKnowledgeFallback,
   resolveModelRuntimeEnv,
   resolveProviderAttemptOrder,
 } from "../src/index";
@@ -45,11 +46,36 @@ describe("buildRepresentativeReplyPrompt", () => {
     });
 
     expect(prompt.instructions).toContain("public-facing representative");
+    expect(prompt.instructions).toContain("authoritative source for factual claims");
     expect(prompt.instructions).toContain("Never imply access to private workspaces");
     expect(prompt.instructions).toContain("Active subagent boundary: Triage Agent");
     expect(prompt.input).toContain("Recalled public-safe context:");
     expect(prompt.input).toContain("Reply outline:");
     expect(prompt.input).toContain("Scoped subagent boundary:");
+  });
+
+  it("builds a factual knowledge fallback when the provider is unavailable", () => {
+    const reply = renderGroundedKnowledgeFallback({
+      userText: "你知道佩奇吗？",
+      recalled: [
+        {
+          uri: "viking://resources/delegate/reps/sktone/knowledge/peppa.md",
+          contextType: "resource",
+          layer: "L2",
+          score: 0.91,
+          abstract: "佩奇临时代课并带大家画恐龙。",
+          content: "羚羊夫人嗓子哑了，请佩奇当小老师，教大家画恐龙。\n\n最后画出来的恐龙有翅膀、有角，还会喷彩虹色的火。",
+        },
+      ],
+    });
+
+    expect(reply).toContain("佩奇当小老师");
+    expect(reply).toContain("画恐龙");
+    expect(reply).not.toContain("dashboard");
+  });
+
+  it("does not claim a knowledge answer when recall is empty", () => {
+    expect(renderGroundedKnowledgeFallback({ userText: "你知道佩奇吗？", recalled: [] })).toBeNull();
   });
 
   it("tracks segment inclusion and trims lower-priority context when the budget is tight", () => {
@@ -237,6 +263,23 @@ describe("resolveModelRuntimeEnv", () => {
 
     expect(env.state).toBe("ready");
     expect(resolveProviderAttemptOrder(env)).toEqual(["anthropic"]);
+  });
+
+  it("uses Bailian after the primary OpenAI-compatible provider", () => {
+    const env = resolveModelRuntimeEnv({
+      DELEGATE_MODEL_ENABLED: "true",
+      DELEGATE_MODEL_PROVIDER: "openai",
+      DELEGATE_MODEL_FALLBACK_PROVIDER: "bailian",
+      OPENAI_API_KEY: "agicto-key",
+      DELEGATE_BAILIAN_API_KEY: "dashscope-key",
+      DELEGATE_BAILIAN_MODEL: "qwen-plus",
+    });
+
+    expect(env.state).toBe("ready");
+    expect(env.bailian.baseUrl).toBe(
+      "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    );
+    expect(resolveProviderAttemptOrder(env)).toEqual(["openai", "bailian"]);
   });
 
   it("calculates internal model cost from per-provider pricing", () => {

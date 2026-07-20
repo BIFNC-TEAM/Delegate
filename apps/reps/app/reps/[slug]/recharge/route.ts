@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import {
   buildWebAudienceExternalUserId,
   createMockRechargeOrder,
-  getRepresentativeSetupSnapshot,
+  getPublicRepresentativeRuntime,
   resolveWebAudienceContact,
 } from "@delegate/web-data";
 
@@ -23,10 +23,9 @@ export async function POST(
   const { slug } = await params;
 
   try {
-    const representative = await getRepresentativeSetupSnapshot(slug);
-    if (!representative) {
-      return NextResponse.json({ error: "Representative not found." }, { status: 404 });
-    }
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") return NextResponse.json({ error: "Representative is not publicly available." }, { status: runtime.status === "paused" ? 423 : 404 });
+    const representative = runtime.setup;
 
     const body = (await request.json()) as Record<string, unknown>;
     const amountCents = Number(body.amountCents ?? 0);

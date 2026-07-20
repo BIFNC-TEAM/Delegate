@@ -16,7 +16,9 @@ describe("dashboard representative API auth coverage", () => {
     expect(routeFiles.length).toBeGreaterThan(20);
     for (const routeFile of routeFiles) {
       const source = readFileSync(routeFile, "utf8");
-      expect(source, routeFile).toContain("authorizeDashboardRepresentativeAccess");
+      expect(source, routeFile).toMatch(
+        /authorizeDashboardRepresentativeAccess|requireDashboardRepresentativeAccess/,
+      );
     }
   });
 });

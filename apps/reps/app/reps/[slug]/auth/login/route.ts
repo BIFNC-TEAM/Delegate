@@ -11,7 +11,7 @@ import {
   createDelegateAuthSession,
   createDelegateAuthState,
   generateAuthStateToken,
-  getRepresentativeSetupSnapshot,
+  getPublicRepresentativeRuntime,
   isDelegateAuthPersistenceUnavailableError,
   isLogtoOidcConfigured,
   linkAudienceIdentityToAuth,
@@ -43,10 +43,9 @@ export async function GET(
   const { slug } = await params;
 
   try {
-    const setup = await getRepresentativeSetupSnapshot(slug);
-    if (!setup) {
-      return NextResponse.json({ error: "Representative not found." }, { status: 404 });
-    }
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") return NextResponse.json({ error: "Representative is not publicly available." }, { status: runtime.status === "paused" ? 423 : 404 });
+    const setup = runtime.setup;
 
     const url = new URL(request.url);
     const returnTo = sanitizePublicAudienceReturnTo(url.searchParams.get("returnTo"), slug);

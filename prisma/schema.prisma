@@ -59,6 +59,16 @@ enum HandoffStatus {
   CLOSED
 }
 
+enum LeadStatus {
+  NEW
+  QUALIFIED
+  FOLLOWING_UP
+  PENDING_PAYMENT
+  WON
+  LOST
+  ARCHIVED
+}
+
 enum InvoiceStatus {
   PENDING
   PAID
@@ -69,6 +79,8 @@ enum InvoiceStatus {
 }
 
 enum EventType {
+  REPRESENTATIVE_VERSION_PUBLISHED
+  REPRESENTATIVE_VERSION_ACTIVATED
   MESSAGE_RECEIVED
   MESSAGE_ANSWERED
   MODEL_CONTEXT_ASSEMBLED
@@ -228,6 +240,47 @@ enum CreatorTrainingSourceStatus {
   ACTIVE
   DISABLED
   FAILED
+}
+
+enum KnowledgeAssetKind {
+  PDF
+  DOCX
+  TXT
+  MARKDOWN
+  URL
+  TEXT
+}
+
+enum KnowledgeAssetStatus {
+  PROCESSING
+  READY
+  FAILED
+  ARCHIVED
+}
+
+enum KnowledgeAssetVisibility {
+  OWNER_ONLY
+  ORGANIZATION_SHARED
+  SELECTED_REPRESENTATIVES
+  PUBLIC_MATERIAL
+}
+
+enum KnowledgeAssetUsageMode {
+  QA_SOURCE
+  PUBLIC_MATERIAL
+  BOTH
+}
+
+enum KnowledgeAssetReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum KnowledgeProcessingLogLevel {
+  INFO
+  WARNING
+  ERROR
 }
 
 enum CreatorFeedbackSignalType {
@@ -492,18 +545,102 @@ enum ComputeFilesystemMode {
   EPHEMERAL_FULL
 }
 
+enum RepresentativeLifecycleState {
+  DRAFT
+  CONFIGURING
+  READY
+  PUBLISHED
+  PAUSED
+  ARCHIVED
+}
+
+enum RepresentativeChannelKind {
+  WEB
+  MATRIX
+  TELEGRAM
+}
+
+enum ConversationEpisodeStatus {
+  ACTIVE
+  WAITING_USER
+  NEEDS_HUMAN
+  HUMAN_ACTIVE
+  RESOLVED
+  ARCHIVED
+  FAILED
+}
+
+enum ConversationParticipantKind {
+  AUDIENCE
+  REPRESENTATIVE
+  OPERATOR
+  SYSTEM
+}
+
+enum MessageSenderType {
+  AUDIENCE
+  REPRESENTATIVE
+  OPERATOR
+  SYSTEM
+  TOOL
+}
+
+enum MessageContentType {
+  TEXT
+  IMAGE
+  FILE
+  SYSTEM
+  TOOL_RESULT
+  PAYMENT
+}
+
+enum MessageDeliveryStatus {
+  ACCEPTED
+  QUEUED
+  PROCESSING
+  SENT
+  FAILED
+  CANCELED
+  EDITED
+  REDACTED
+}
+
+enum GenerationRunStatus {
+  QUEUED
+  PROCESSING
+  WAITING_APPROVAL
+  WAITING_HUMAN
+  COMPLETED
+  FAILED
+  CANCELED
+}
+
+enum ConversationAssignmentStatus {
+  ACTIVE
+  RELEASED
+  TRANSFERRED
+}
+
+enum ReliableEventStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+  DEAD_LETTER
+}
+
 model Owner {
-  id                        String                    @id @default(cuid())
+  id                        String                     @id @default(cuid())
   organizationId            String?
-  telegramUserId            String?                   @unique
+  telegramUserId            String?                    @unique
   displayName               String
   handle                    String?
-  timezone                  String                    @default("UTC")
-  creatorVerificationStatus CreatorVerificationStatus @default(UNVERIFIED)
-  createdAt                 DateTime                  @default(now())
-  updatedAt                 DateTime                  @updatedAt
+  timezone                  String                     @default("UTC")
+  creatorVerificationStatus CreatorVerificationStatus  @default(UNVERIFIED)
+  createdAt                 DateTime                   @default(now())
+  updatedAt                 DateTime                   @updatedAt
   wallet                    Wallet?
-  organization              Organization?             @relation(fields: [organizationId], references: [id])
+  organization              Organization?              @relation(fields: [organizationId], references: [id])
   organizationMember        OrganizationMember?
   capabilityProfiles        CapabilityPolicyProfile[]
   representatives           Representative[]
@@ -511,6 +648,8 @@ model Owner {
   withdrawRequests          WithdrawRequest[]
   walletLedgerEntries       WalletLedgerEntry[]
   identityLinks             OwnerIdentityLink[]
+  knowledgeAssets           KnowledgeAsset[]
+  matrixVirtualUsers        MatrixVirtualUserBinding[]
 }
 
 model OwnerIdentityLink {
@@ -864,57 +1003,65 @@ model CustomerAccount {
 }
 
 model Representative {
-  id                             String                      @id @default(cuid())
+  id                             String                         @id @default(cuid())
   ownerId                        String
-  slug                           String                      @unique
+  slug                           String                         @unique
   displayName                    String
   roleSummary                    String
   tone                           String
   avatarUrl                      String?
-  publicMode                     Boolean                     @default(true)
-  claimStatus                    RepresentativeClaimStatus   @default(CLAIMED)
-  groupModeEnabled               Boolean                     @default(false)
-  groupActivation                GroupActivation             @default(REPLY_OR_MENTION)
-  humanInLoop                    Boolean                     @default(true)
+  publicMode                     Boolean                        @default(true)
+  claimStatus                    RepresentativeClaimStatus      @default(CLAIMED)
+  groupModeEnabled               Boolean                        @default(false)
+  groupActivation                GroupActivation                @default(REPLY_OR_MENTION)
+  humanInLoop                    Boolean                        @default(true)
   languages                      Json
-  freeReplyLimit                 Int                         @default(4)
+  freeReplyLimit                 Int                            @default(4)
   freeScope                      Json
   paywalledIntents               Json
-  handoffWindowHours             Int                         @default(24)
-  freeMonthlyCredit              Int                         @default(100)
+  handoffWindowHours             Int                            @default(24)
+  freeMonthlyCredit              Int                            @default(100)
   handoffPrompt                  String
   allowedSkills                  Json
   actionGate                     Json
-  openvikingEnabled              Boolean                     @default(false)
+  openvikingEnabled              Boolean                        @default(false)
   openvikingAgentId              String?
-  openvikingAutoRecall           Boolean                     @default(true)
-  openvikingAutoCapture          Boolean                     @default(true)
-  openvikingCaptureMode          String                      @default("semantic")
-  openvikingRecallLimit          Int                         @default(6)
-  openvikingRecallScoreThreshold Float                       @default(0.01)
+  openvikingAutoRecall           Boolean                        @default(true)
+  openvikingAutoCapture          Boolean                        @default(true)
+  openvikingCaptureMode          String                         @default("semantic")
+  openvikingRecallLimit          Int                            @default(6)
+  openvikingRecallScoreThreshold Float                          @default(0.01)
   openvikingTargetUri            String?
   openvikingLastSyncAt           DateTime?
   openvikingLastSyncStatus       String?
   openvikingLastSyncError        String?
   openvikingLastSyncItemCount    Int?
-  computeEnabled                 Boolean                     @default(false)
-  computeDefaultPolicyMode       PolicyDecision              @default(ASK)
-  computeBaseImage               String                      @default("debian:bookworm-slim")
-  computeMaxSessionMinutes       Int                         @default(15)
-  computeAutoApproveBudgetCents  Int                         @default(0)
-  computeArtifactRetentionDays   Int                         @default(14)
-  computeNetworkMode             ComputeNetworkMode          @default(NO_NETWORK)
-  computeNetworkAllowlist        String[]                    @default([])
-  computeFilesystemMode          ComputeFilesystemMode       @default(WORKSPACE_ONLY)
-  createdAt                      DateTime                    @default(now())
-  updatedAt                      DateTime                    @updatedAt
-  owner                          Owner                       @relation(fields: [ownerId], references: [id])
+  computeEnabled                 Boolean                        @default(false)
+  computeDefaultPolicyMode       PolicyDecision                 @default(ASK)
+  computeBaseImage               String                         @default("debian:bookworm-slim")
+  computeMaxSessionMinutes       Int                            @default(15)
+  computeAutoApproveBudgetCents  Int                            @default(0)
+  computeArtifactRetentionDays   Int                            @default(14)
+  computeNetworkMode             ComputeNetworkMode             @default(NO_NETWORK)
+  computeNetworkAllowlist        String[]                       @default([])
+  computeFilesystemMode          ComputeFilesystemMode          @default(WORKSPACE_ONLY)
+  lifecycleState                 RepresentativeLifecycleState   @default(DRAFT)
+  activeVersionId                String?
+  createdAt                      DateTime                       @default(now())
+  updatedAt                      DateTime                       @updatedAt
+  owner                          Owner                          @relation(fields: [ownerId], references: [id])
+  activeVersion                  RepresentativeVersion?         @relation("RepresentativeActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  versions                       RepresentativeVersion[]        @relation("RepresentativeVersions")
+  runtimePolicyOverlays          RuntimePolicyOverlay[]
+  channelBindings                RepresentativeChannelBinding[]
+  matrixVirtualUsers             MatrixVirtualUserBinding[]
   capabilityProfiles             CapabilityPolicyProfile[]
   computeSessions                ComputeSession[]
   sandboxIdentities              SandboxIdentity[]
   conversations                  Conversation[]
   contextSyncJobs                RepresentativeContextSync[]
   contacts                       Contact[]
+  leads                          Lead[]
   commitTraces                   ConversationCommitTrace[]
   events                         EventAudit[]
   handoffRequests                HandoffRequest[]
@@ -938,6 +1085,7 @@ model Representative {
   agentWallet                    AgentWallet?
   tokenPurchases                 AgentTokenPurchase[]
   usageCharges                   AgentUsageCharge[]
+  knowledgeAssetLinks            KnowledgeAssetRepresentative[]
   creatorEarnings                CreatorEarning[]
   withdrawRequests               WithdrawRequest[]
   walletLedgerEntries            WalletLedgerEntry[]
@@ -945,6 +1093,66 @@ model Representative {
   feedbackSignals                CreatorFeedbackSignal[]
   trainingSuggestions            CreatorTrainingSuggestion[]
   trainingVersions               CreatorTrainingVersion[]
+
+  @@index([ownerId, lifecycleState, updatedAt])
+  @@index([activeVersionId])
+}
+
+model RepresentativeVersion {
+  id                       String                @id @default(cuid())
+  representativeId         String
+  versionNumber            Int
+  status                   String                @default("PUBLISHED")
+  snapshot                 Json
+  changeSummary            String?
+  publishedBy              String?
+  publishedAt              DateTime              @default(now())
+  createdAt                DateTime              @default(now())
+  representative           Representative        @relation("RepresentativeVersions", fields: [representativeId], references: [id], onDelete: Cascade)
+  activeForRepresentatives Representative[]      @relation("RepresentativeActiveVersion")
+  episodes                 ConversationEpisode[]
+  generationRuns           GenerationRun[]
+
+  @@unique([representativeId, versionNumber])
+  @@index([representativeId, publishedAt])
+}
+
+model RuntimePolicyOverlay {
+  id               String         @id @default(cuid())
+  representativeId String
+  kind             String
+  enabled          Boolean        @default(true)
+  priority         Int            @default(100)
+  payload          Json
+  reason           String?
+  startsAt         DateTime       @default(now())
+  expiresAt        DateTime?
+  createdBy        String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  representative   Representative @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+
+  @@index([representativeId, enabled, priority])
+  @@index([expiresAt])
+}
+
+model RepresentativeChannelBinding {
+  id                String                       @id @default(cuid())
+  representativeId  String
+  kind              RepresentativeChannelKind
+  externalUserId    String?
+  status            String                       @default("CONNECTED")
+  displayName       String?
+  configuration     Json?
+  lastHealthCheckAt DateTime?
+  lastError         String?
+  createdAt         DateTime                     @default(now())
+  updatedAt         DateTime                     @updatedAt
+  representative    Representative               @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  conversations     ConversationChannelBinding[]
+
+  @@unique([representativeId, kind])
+  @@index([kind, status, updatedAt])
 }
 
 model KnowledgePack {
@@ -1046,6 +1254,7 @@ model Contact {
   customerAccountId     String?
   telegramUserId        String
   channelUserId         String?
+  externalUserId        String?
   username              String?
   displayName           String?
   role                  AudienceRole              @default(OTHER)
@@ -1078,6 +1287,7 @@ model Contact {
   lastApprovalGrantedAt DateTime?
   workflowRuns          WorkflowRun[]
   feedbackSignals       CreatorFeedbackSignal[]
+  leads                 Lead[]
 
   @@unique([representativeId, telegramUserId])
   @@index([audienceIdentityId, updatedAt])
@@ -1085,7 +1295,7 @@ model Contact {
 }
 
 model Conversation {
-  id                            String                    @id @default(cuid())
+  id                            String                        @id @default(cuid())
   representativeId              String
   contactId                     String
   audienceIdentityId            String?
@@ -1093,24 +1303,28 @@ model Conversation {
   channelThreadId               String?
   channel                       Channel
   sourceChannel                 String?
-  state                         String                    @default("ACTIVE")
+  externalConversationId        String?
+  state                         String                        @default("ACTIVE")
+  activeEpisodeId               String?
+  assignedOperatorId            String?
+  unreadCount                   Int                           @default(0)
   collectorState                Json?
-  freeRepliesUsed               Int                       @default(0)
+  freeRepliesUsed               Int                           @default(0)
   passUnlockedAt                DateTime?
   deepHelpUnlockedAt            DateTime?
   activeComputeSessionId        String?
   computeBudgetRemainingCredits Int?
   lastComputeAt                 DateTime?
-  openvikingSessionId           String?                   @unique
+  openvikingSessionId           String?                       @unique
   openvikingSessionKey          String?
-  createdAt                     DateTime                  @default(now())
-  updatedAt                     DateTime                  @updatedAt
-  lastMessageAt                 DateTime                  @default(now())
+  createdAt                     DateTime                      @default(now())
+  updatedAt                     DateTime                      @updatedAt
+  lastMessageAt                 DateTime                      @default(now())
   commitTraces                  ConversationCommitTrace[]
   computeSessions               ComputeSession[]
-  representative                Representative            @relation(fields: [representativeId], references: [id])
-  contact                       Contact                   @relation(fields: [contactId], references: [id])
-  audienceIdentity              AudienceIdentity?         @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  representative                Representative                @relation(fields: [representativeId], references: [id])
+  contact                       Contact                       @relation(fields: [contactId], references: [id])
+  audienceIdentity              AudienceIdentity?             @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
   recallTraces                  ConversationRecallTrace[]
   turns                         ConversationTurn[]
   events                        EventAudit[]
@@ -1124,10 +1338,25 @@ model Conversation {
   browserNavigations            BrowserNavigation[]
   workflowRuns                  WorkflowRun[]
   feedbackSignals               CreatorFeedbackSignal[]
+  episodes                      ConversationEpisode[]
+  messages                      Message[]
+  channelBindings               ConversationChannelBinding[]
+  participants                  ConversationParticipant[]
+  assignments                   ConversationAssignment[]
+  stateTransitions              ConversationStateTransition[]
+  generationRuns                GenerationRun[]
+  channelEvents                 ChannelEventInbox[]
+  outboxEvents                  OutboxEvent[]
+  readStates                    ConversationReadState[]
+  internalNotes                 ConversationInternalNote[]
+  leads                         Lead[]
 
   @@unique([representativeId, telegramChatId, contactId])
   @@index([audienceIdentityId, lastMessageAt])
   @@index([representativeId, sourceChannel, channelThreadId])
+  @@index([representativeId, state, lastMessageAt])
+  @@index([representativeId, assignedOperatorId, lastMessageAt])
+  @@index([representativeId, sourceChannel, externalConversationId])
 }
 
 model ChatSession {
@@ -1152,6 +1381,316 @@ model ConversationTurn {
   feedbackSignals CreatorFeedbackSignal[]
 }
 
+model ConversationEpisode {
+  id                      String                     @id @default(cuid())
+  conversationId          String
+  representativeVersionId String?
+  sequence                Int
+  status                  ConversationEpisodeStatus  @default(ACTIVE)
+  summary                 String?
+  resolutionReason        String?
+  pricingSnapshot         Json?
+  startedAt               DateTime                   @default(now())
+  endedAt                 DateTime?
+  createdAt               DateTime                   @default(now())
+  updatedAt               DateTime                   @updatedAt
+  conversation            Conversation               @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  representativeVersion   RepresentativeVersion?     @relation(fields: [representativeVersionId], references: [id], onDelete: SetNull)
+  messages                Message[]
+  generationRuns          GenerationRun[]
+  assignments             ConversationAssignment[]
+  handoffRequests         HandoffRequest[]
+  internalNotes           ConversationInternalNote[]
+  leads                   Lead[]
+
+  @@unique([conversationId, sequence])
+  @@index([conversationId, status, startedAt])
+  @@index([representativeVersionId])
+}
+
+model ConversationParticipant {
+  id             String                      @id @default(cuid())
+  conversationId String
+  kind           ConversationParticipantKind
+  participantId  String
+  displayName    String?
+  avatarUrl      String?
+  joinedAt       DateTime                    @default(now())
+  leftAt         DateTime?
+  metadata       Json?
+  conversation   Conversation                @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, kind, participantId])
+  @@index([conversationId, joinedAt])
+}
+
+model ConversationChannelBinding {
+  id                      String                        @id @default(cuid())
+  conversationId          String
+  representativeBindingId String?
+  kind                    RepresentativeChannelKind
+  externalConversationId  String
+  externalThreadId        String?
+  syncCursor              String?
+  metadata                Json?
+  createdAt               DateTime                      @default(now())
+  updatedAt               DateTime                      @updatedAt
+  conversation            Conversation                  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  representativeBinding   RepresentativeChannelBinding? @relation(fields: [representativeBindingId], references: [id], onDelete: SetNull)
+  messages                Message[]
+
+  @@unique([kind, externalConversationId, externalThreadId])
+  @@index([conversationId, kind])
+  @@index([representativeBindingId])
+}
+
+model Message {
+  id                      String                      @id @default(cuid())
+  conversationId          String
+  episodeId               String?
+  channelBindingId        String?
+  senderType              MessageSenderType
+  senderId                String?
+  senderDisplayName       String?
+  contentType             MessageContentType          @default(TEXT)
+  text                    String?
+  content                 Json?
+  clientMessageId         String?
+  externalMessageId       String?
+  replyToMessageId        String?
+  threadRootMessageId     String?
+  deliveryStatus          MessageDeliveryStatus       @default(ACCEPTED)
+  failureCode             String?
+  failureReason           String?
+  editedAt                DateTime?
+  redactedAt              DateTime?
+  redactionReason         String?
+  retentionExpiresAt      DateTime?
+  createdAt               DateTime                    @default(now())
+  updatedAt               DateTime                    @updatedAt
+  conversation            Conversation                @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  episode                 ConversationEpisode?        @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+  channelBinding          ConversationChannelBinding? @relation(fields: [channelBindingId], references: [id], onDelete: SetNull)
+  replyTo                 Message?                    @relation("MessageReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
+  replies                 Message[]                   @relation("MessageReplies")
+  threadRoot              Message?                    @relation("MessageThreads", fields: [threadRootMessageId], references: [id], onDelete: SetNull)
+  threadMessages          Message[]                   @relation("MessageThreads")
+  revisions               MessageRevision[]
+  attachments             MessageAttachment[]
+  citations               MessageCitation[]
+  inputForGenerationRuns  GenerationRun[]             @relation("GenerationInputMessage")
+  outputForGenerationRuns GenerationRun[]             @relation("GenerationOutputMessage")
+
+  @@unique([conversationId, clientMessageId])
+  @@unique([channelBindingId, externalMessageId])
+  @@index([conversationId, createdAt])
+  @@index([conversationId, deliveryStatus, createdAt])
+  @@index([episodeId, createdAt])
+  @@index([retentionExpiresAt])
+}
+
+model MessageRevision {
+  id        String   @id @default(cuid())
+  messageId String
+  version   Int
+  text      String?
+  content   Json?
+  editedBy  String?
+  createdAt DateTime @default(now())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, version])
+  @@index([messageId, createdAt])
+}
+
+model MessageAttachment {
+  id          String   @id @default(cuid())
+  messageId   String
+  fileName    String
+  mimeType    String?
+  sizeBytes   Int?
+  objectKey   String?
+  externalUrl String?
+  checksum    String?
+  createdAt   DateTime @default(now())
+  message     Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId, createdAt])
+}
+
+model MessageCitation {
+  id                String   @id @default(cuid())
+  messageId         String
+  knowledgeAssetId  String?
+  knowledgeRevision String?
+  title             String
+  uri               String?
+  excerpt           String?
+  score             Float?
+  createdAt         DateTime @default(now())
+  message           Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId, createdAt])
+  @@index([knowledgeAssetId])
+}
+
+model GenerationRun {
+  id                      String                 @id @default(cuid())
+  conversationId          String
+  episodeId               String?
+  inputMessageId          String
+  outputMessageId         String?
+  representativeVersionId String?
+  status                  GenerationRunStatus    @default(QUEUED)
+  idempotencyKey          String                 @unique
+  attemptCount            Int                    @default(0)
+  contextSnapshot         Json?
+  runtimePolicySnapshot   Json?
+  provider                String?
+  model                   String?
+  inputTokens             Int?
+  outputTokens            Int?
+  costCents               Int?
+  errorCode               String?
+  errorMessage            String?
+  queuedAt                DateTime               @default(now())
+  startedAt               DateTime?
+  completedAt             DateTime?
+  canceledAt              DateTime?
+  createdAt               DateTime               @default(now())
+  updatedAt               DateTime               @updatedAt
+  conversation            Conversation           @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  episode                 ConversationEpisode?   @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+  inputMessage            Message                @relation("GenerationInputMessage", fields: [inputMessageId], references: [id], onDelete: Cascade)
+  outputMessage           Message?               @relation("GenerationOutputMessage", fields: [outputMessageId], references: [id], onDelete: SetNull)
+  representativeVersion   RepresentativeVersion? @relation(fields: [representativeVersionId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, status, queuedAt])
+  @@index([episodeId, queuedAt])
+}
+
+model ConversationAssignment {
+  id             String                       @id @default(cuid())
+  conversationId String
+  episodeId      String?
+  operatorId     String
+  operatorName   String
+  status         ConversationAssignmentStatus @default(ACTIVE)
+  assignedAt     DateTime                     @default(now())
+  releasedAt     DateTime?
+  releaseReason  String?
+  conversation   Conversation                 @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  episode        ConversationEpisode?         @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, status, assignedAt])
+  @@index([operatorId, status, assignedAt])
+}
+
+model ConversationReadState {
+  id             String       @id @default(cuid())
+  conversationId String
+  operatorId     String
+  lastReadAt     DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, operatorId])
+  @@index([operatorId, lastReadAt])
+}
+
+model ConversationInternalNote {
+  id             String               @id @default(cuid())
+  conversationId String
+  episodeId      String?
+  authorId       String
+  authorName     String
+  text           String
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  conversation   Conversation         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  episode        ConversationEpisode? @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+  @@index([episodeId, createdAt])
+}
+
+model ConversationStateTransition {
+  id             String       @id @default(cuid())
+  conversationId String
+  fromState      String?
+  toState        String
+  reason         String?
+  actorType      String
+  actorId        String?
+  metadata       Json?
+  createdAt      DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model ChannelEventInbox {
+  id              String                    @id @default(cuid())
+  conversationId  String?
+  kind            RepresentativeChannelKind
+  transactionId   String?
+  externalEventId String
+  eventType       String
+  payload         Json
+  status          ReliableEventStatus       @default(PENDING)
+  attemptCount    Int                       @default(0)
+  availableAt     DateTime                  @default(now())
+  processedAt     DateTime?
+  lastError       String?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  conversation    Conversation?             @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@unique([kind, externalEventId])
+  @@index([status, availableAt, createdAt])
+  @@index([transactionId])
+}
+
+model OutboxEvent {
+  id             String              @id @default(cuid())
+  conversationId String?
+  aggregateType  String
+  aggregateId    String
+  eventType      String
+  payload        Json
+  status         ReliableEventStatus @default(PENDING)
+  idempotencyKey String              @unique
+  attemptCount   Int                 @default(0)
+  availableAt    DateTime            @default(now())
+  processedAt    DateTime?
+  lastError      String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  conversation   Conversation?       @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([status, availableAt, createdAt])
+  @@index([aggregateType, aggregateId, createdAt])
+}
+
+model MatrixVirtualUserBinding {
+  id               String          @id @default(cuid())
+  matrixUserId     String          @unique
+  representativeId String?
+  ownerId          String?
+  kind             String
+  displayName      String
+  avatarUrl        String?
+  enabled          Boolean         @default(true)
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  representative   Representative? @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  owner            Owner?          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@index([representativeId, enabled])
+  @@index([ownerId, enabled])
+}
+
 model CreatorTrainingSource {
   id               String                      @id @default(cuid())
   representativeId String
@@ -1171,6 +1710,85 @@ model CreatorTrainingSource {
 
   @@index([representativeId, status, updatedAt])
   @@index([representativeId, kind, createdAt])
+}
+
+model KnowledgeAsset {
+  id                   String                         @id @default(cuid())
+  ownerId              String
+  kind                 KnowledgeAssetKind
+  status               KnowledgeAssetStatus           @default(PROCESSING)
+  visibility           KnowledgeAssetVisibility       @default(OWNER_ONLY)
+  title                String
+  originalFileName     String?
+  mimeType             String?
+  sizeBytes            Int?
+  sourceUrl            String?
+  sourceText           String?
+  sourceObjectBucket   String?
+  sourceObjectKey      String?
+  sourceObjectEtag     String?
+  sourceObjectVersion  String?
+  sourceObjectChecksum String?
+  extractedText        String?
+  summary              String?
+  tags                 String[]                       @default([])
+  autoTags             String[]                       @default([])
+  checksum             String?
+  processingError      String?
+  processingVersion    Int                            @default(1)
+  vectorBackend        String?
+  vectorUri            String?
+  vectorChunkCount     Int                            @default(0)
+  embeddingModel       String?
+  indexedAt            DateTime?
+  metadata             Json?
+  processedAt          DateTime?
+  archivedAt           DateTime?
+  createdBy            String?
+  createdAt            DateTime                       @default(now())
+  updatedAt            DateTime                       @updatedAt
+  owner                Owner                          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  representativeLinks  KnowledgeAssetRepresentative[]
+  processingLogs       KnowledgeProcessingLog[]
+
+  @@index([ownerId, status, updatedAt])
+  @@index([ownerId, kind, createdAt])
+  @@index([ownerId, visibility, updatedAt])
+  @@index([ownerId, vectorBackend, indexedAt])
+  @@index([ownerId, sourceObjectChecksum])
+  @@index([ownerId, originalFileName])
+}
+
+model KnowledgeAssetRepresentative {
+  id               String                     @id @default(cuid())
+  assetId          String
+  representativeId String
+  usageMode        KnowledgeAssetUsageMode    @default(QA_SOURCE)
+  reviewStatus     KnowledgeAssetReviewStatus @default(APPROVED)
+  enabled          Boolean                    @default(true)
+  priority         Int                        @default(50)
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  asset            KnowledgeAsset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  representative   Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, representativeId])
+  @@index([representativeId, enabled, updatedAt])
+  @@index([assetId, reviewStatus])
+}
+
+model KnowledgeProcessingLog {
+  id        String                      @id @default(cuid())
+  assetId   String
+  stage     String
+  level     KnowledgeProcessingLogLevel @default(INFO)
+  message   String
+  metadata  Json?
+  createdAt DateTime                    @default(now())
+  asset     KnowledgeAsset              @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([assetId, createdAt])
+  @@index([level, createdAt])
 }
 
 model CreatorFeedbackSignal {
@@ -1260,28 +1878,70 @@ model IntakeSubmission {
   contact             Contact          @relation(fields: [contactId], references: [id])
   conversation        Conversation?    @relation(fields: [conversationId], references: [id])
   handoffRequests     HandoffRequest[]
+  leads               Lead[]
 }
 
 model HandoffRequest {
-  id                     String            @id @default(cuid())
+  id                     String               @id @default(cuid())
   representativeId       String
   contactId              String
   conversationId         String?
+  episodeId              String?
   intakeSubmissionId     String?
   reason                 String
   summary                String
-  recommendedPriority    Int               @default(0)
+  recommendedPriority    Int                  @default(0)
   recommendedOwnerAction String
-  status                 HandoffStatus     @default(OPEN)
-  createdAt              DateTime          @default(now())
-  updatedAt              DateTime          @updatedAt
-  representative         Representative    @relation(fields: [representativeId], references: [id])
-  contact                Contact           @relation(fields: [contactId], references: [id])
-  conversation           Conversation?     @relation(fields: [conversationId], references: [id])
-  intakeSubmission       IntakeSubmission? @relation(fields: [intakeSubmissionId], references: [id])
+  status                 HandoffStatus        @default(OPEN)
+  createdAt              DateTime             @default(now())
+  updatedAt              DateTime             @updatedAt
+  representative         Representative       @relation(fields: [representativeId], references: [id])
+  contact                Contact              @relation(fields: [contactId], references: [id])
+  conversation           Conversation?        @relation(fields: [conversationId], references: [id])
+  episode                ConversationEpisode? @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+  intakeSubmission       IntakeSubmission?    @relation(fields: [intakeSubmissionId], references: [id])
   workflowRuns           WorkflowRun[]
+  leads                  Lead[]
 
   @@index([representativeId, status, createdAt])
+  @@index([conversationId, episodeId, status])
+}
+
+model Lead {
+  id                   String               @id @default(cuid())
+  representativeId     String
+  contactId            String
+  conversationId       String?
+  episodeId            String?
+  intakeSubmissionId   String?
+  handoffRequestId     String?
+  kind                 String               @default("general")
+  title                String
+  summary              String?
+  status               LeadStatus           @default(NEW)
+  priority             Int                  @default(0)
+  estimatedValueCents  Int?
+  currency             String               @default("USD")
+  assignedOperatorId   String?
+  assignedOperatorName String?
+  nextFollowUpAt       DateTime?
+  wonAt                DateTime?
+  lostAt               DateTime?
+  closeReason          String?
+  source               String?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  representative       Representative       @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  contact              Contact              @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  conversation         Conversation?        @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  episode              ConversationEpisode? @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+  intakeSubmission     IntakeSubmission?    @relation(fields: [intakeSubmissionId], references: [id], onDelete: SetNull)
+  handoffRequest       HandoffRequest?      @relation(fields: [handoffRequestId], references: [id], onDelete: SetNull)
+
+  @@index([representativeId, status, priority, updatedAt])
+  @@index([contactId, status, updatedAt])
+  @@index([conversationId, status, updatedAt])
+  @@index([assignedOperatorId, status, nextFollowUpAt])
 }
 
 model Invoice {

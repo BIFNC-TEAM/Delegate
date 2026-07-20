@@ -9,7 +9,7 @@ import {
   buildVerifiedExternalAuthProfileFromLogtoIdToken,
   createDelegateAuthSession,
   exchangeLogtoCodeForTokens,
-  getRepresentativeSetupSnapshot,
+  getPublicRepresentativeRuntime,
   linkAudienceIdentityToAuth,
   readDelegateAuthSessionSecret,
   readLogtoOidcConfig,
@@ -61,10 +61,9 @@ export async function GET(
       return NextResponse.json({ error: "Invalid or expired login state." }, { status: 400 });
     }
 
-    const setup = await getRepresentativeSetupSnapshot(slug);
-    if (!setup) {
-      return NextResponse.json({ error: "Representative not found." }, { status: 404 });
-    }
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") return NextResponse.json({ error: "Representative is not publicly available." }, { status: runtime.status === "paused" ? 423 : 404 });
+    const setup = runtime.setup;
 
     const logtoConfig = {
       ...readLogtoOidcConfig(),

@@ -11,7 +11,7 @@ The short-term web path is still backward-compatible with the existing Telegram-
 3. Server code resolves `AudienceIdentity` from `web:{audienceId}`.
 4. Server code resolves one `Contact` per representative and audience.
 5. Server code resolves one `Conversation` per representative, contact, and web audience thread.
-6. Chat turns are persisted in `ConversationTurn`; recent model context is loaded from Postgres, not from cookies.
+6. Chat writes the channel-neutral `Message` / `GenerationRun` path, returns `202 Accepted`, and completes asynchronously in the conversation worker; history and recent context come from Postgres, never from cookies.
 7. Recharge uses the same cookie-derived audience identity and writes `UserWallet.audienceIdentityId`.
 8. Logto login links `IdentityLink(provider=LOGTO)` to the current `AudienceIdentity`.
 9. If the Logto subject already belongs to another audience identity, the current anonymous identity is merged into the registered target.
@@ -19,6 +19,20 @@ The short-term web path is still backward-compatible with the existing Telegram-
 11. Payment external ids are linked through `IdentityLink(provider=PAYMENT_EXTERNAL_USER)`.
 12. Public compute session creation uses the same `contactId` and `conversationId`.
 13. Compute broker creates or reuses `SandboxIdentity` from `representativeId + contactId` and copies `Contact.audienceIdentityId`.
+
+## Public Runtime Gate
+
+Every visitor-facing page and API uses `getPublicRepresentativeRuntime` before accessing representative data. Availability requires all of the following:
+
+- lifecycle is `PUBLISHED`;
+- an immutable active version exists;
+- `publicMode` is enabled;
+- the Web channel binding is `CONNECTED`;
+- lifecycle is not `PAUSED`.
+
+The page renders a dedicated paused state. Chat, SSE, login, callback, compute, recharge, mock recharge confirmation, and public deliverable downloads return the same unavailable state instead of leaking draft/runtime differences between routes.
+
+The representative page is Chat-first. It restores the current audience timeline through `GET /reps/{slug}/chat`, submits through `POST /reps/{slug}/chat`, and receives the final persisted message through `/chat/runs/{runId}/events`. Public messages expose only safe citation title, excerpt, and URI fields.
 
 ## Compatibility Fields
 
@@ -31,6 +45,11 @@ Current web code dual-writes:
 - `Conversation.telegramChatId = web:{audienceId}`
 - `Conversation.channelThreadId = web:{audienceId}`
 - `Conversation.sourceChannel = web`
+- `Message.clientMessageId = <browser generated UUID>`
+- `Message.senderType = AUDIENCE | REPRESENTATIVE`
+- `GenerationRun.idempotencyKey = reply:{conversationId}:{clientMessageId}`
+
+Each long-lived web `Conversation` creates version-pinned `ConversationEpisode` records as service periods resolve and reopen. A human-controlled episode accepts inbound messages but does not queue an AI generation run.
 
 The Telegram-shaped fields remain because existing unique indexes and older code still depend on them. New code should prefer `audienceIdentityId`, `channelUserId`, and `channelThreadId` when possible.
 

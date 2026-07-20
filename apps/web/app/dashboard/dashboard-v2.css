@@ -434,6 +434,8 @@
   .dashboard-v2-resource-matrix { grid-template-columns: 1fr; }
   .dashboard-v2-toolbar { grid-template-columns: minmax(0,1fr) auto; }
   .dashboard-v2-toolbar > button:last-child { display: none; }
+  .dashboard-approval-layout .dashboard-v2-toolbar { grid-template-columns: minmax(0,1fr) auto auto; }
+  .dashboard-approval-layout .dashboard-v2-toolbar > button:last-child { display: inline-flex; align-items: center; }
   .dashboard-v2-panel { padding: 15px; border-radius: 12px; }
   .dashboard-approval-layout { grid-template-columns: 1fr; }
   .dashboard-approval-detail { position: static; }

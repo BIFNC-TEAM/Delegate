@@ -312,7 +312,8 @@ async function syncMemoryDocument(
     const stagingUri = `${buildRepresentativeResourceRootUri(context.representativeSlug)}sync/${document.filename}`;
 
     await client.addResource({
-      tempPath: temp.temp_path,
+      ...(temp.temp_file_id ? { tempFileId: temp.temp_file_id } : {}),
+      ...(temp.temp_path ? { tempPath: temp.temp_path } : {}),
       to: stagingUri,
       reason: document.reason,
       instruction: "Delegate bot memory staging sync",

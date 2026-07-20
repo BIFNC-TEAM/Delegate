@@ -4,13 +4,13 @@ import type { FormEvent } from "react";
 import { useEffect, useState, useTransition } from "react";
 
 import {
-  DashboardPanelFrame,
-  DashboardSignalStrip,
   DashboardSurface,
   DashboardSurfaceGrid,
   pickCopy,
   type Locale,
 } from "@delegate/web-ui";
+
+import { saveRepresentativeSetupRequests } from "./representative-setup-save";
 
 type InquiryIntent =
   | "faq"
@@ -120,6 +120,24 @@ type RepresentativeOpenVikingSnapshot = {
     baseUrl: string;
     consoleUrl?: string;
   };
+};
+
+type RepresentativeKnowledgeAsset = {
+  id: string;
+  kind: "pdf" | "docx" | "txt" | "markdown" | "url" | "text";
+  status: "processing" | "ready" | "failed" | "archived";
+  visibility: "owner_only" | "organization_shared" | "selected_representatives" | "public_material";
+  title: string;
+  originalFileName: string | null;
+  summary: string | null;
+  tags: string[];
+  autoTags: string[];
+  updatedAt: string;
+  representativeLinks: Array<{
+    representativeId: string;
+    representativeSlug: string;
+    enabled: boolean;
+  }>;
 };
 
 function getGroupActivationLabels(locale: Locale): Record<GroupActivation, string> {
@@ -262,10 +280,16 @@ function getComputeFilesystemModeLabels(locale: Locale): Record<ComputeFilesyste
       };
 }
 
-type SetupSectionId = "basics" | "contract" | "pricing" | "knowledge" | "compute" | "memory";
+export type RepresentativeSetupSectionId =
+  | "basics"
+  | "contract"
+  | "pricing"
+  | "knowledge"
+  | "compute"
+  | "memory";
 
 const setupSections: Array<{
-  id: SetupSectionId;
+  id: RepresentativeSetupSectionId;
   step: string;
   label: string;
   blurb: string;
@@ -309,7 +333,7 @@ const setupSections: Array<{
 ];
 
 const setupSectionsEn: Array<{
-  id: SetupSectionId;
+  id: RepresentativeSetupSectionId;
   step: string;
   label: string;
   blurb: string;
@@ -353,9 +377,11 @@ const setupSectionsEn: Array<{
 ];
 
 export function DashboardRepresentativeSetup({
+  initialSection = "basics",
   representativeSlug,
   locale,
 }: {
+  initialSection?: RepresentativeSetupSectionId;
   representativeSlug: string;
   locale: Locale;
 }) {
@@ -367,7 +393,7 @@ export function DashboardRepresentativeSetup({
   const intentOptions = getIntentOptions(locale);
   const materialKindOptions = getMaterialKindOptions(locale);
   const pricingTierLabels = getPricingTierLabels(locale);
-  const [snapshot, setSnapshot] = useState<RepresentativeSetupSnapshot | null>(null);
+  const [, setSnapshot] = useState<RepresentativeSetupSnapshot | null>(null);
   const [draft, setDraft] = useState<RepresentativeSetupSnapshot | null>(null);
   const [openVikingSnapshot, setOpenVikingSnapshot] =
     useState<RepresentativeOpenVikingSnapshot | null>(null);
@@ -376,7 +402,14 @@ export function DashboardRepresentativeSetup({
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [activeSection, setActiveSection] = useState<SetupSectionId>("basics");
+  const [knowledgeAssets, setKnowledgeAssets] = useState<RepresentativeKnowledgeAsset[]>([]);
+  const [knowledgeAssetIds, setKnowledgeAssetIds] = useState<string[]>([]);
+  const [savedKnowledgeAssetIds, setSavedKnowledgeAssetIds] = useState<string[]>([]);
+  const [knowledgeAssetsLoading, setKnowledgeAssetsLoading] = useState(true);
+  const [knowledgePickerOpen, setKnowledgePickerOpen] = useState(false);
+  const [knowledgeQuery, setKnowledgeQuery] = useState("");
+  const [activeSection, setActiveSection] =
+    useState<RepresentativeSetupSectionId>(initialSection);
   const [isPending, startTransition] = useTransition();
   const localizedSetupSections = locale === "zh" ? setupSections : setupSectionsEn;
 
@@ -384,12 +417,32 @@ export function DashboardRepresentativeSetup({
     void Promise.all([
       refreshSetup(representativeSlug, setSnapshot, setDraft, setError),
       refreshOpenViking(representativeSlug, setOpenVikingSnapshot, setOpenVikingDraft, setError),
+      refreshRepresentativeKnowledgeAssets(
+        representativeSlug,
+        setKnowledgeAssets,
+        setKnowledgeAssetIds,
+        setSavedKnowledgeAssetIds,
+        setKnowledgeAssetsLoading,
+        setError,
+      ),
     ]);
   }, [representativeSlug]);
 
   useEffect(() => {
-    setActiveSection("basics");
-  }, [representativeSlug]);
+    setActiveSection(initialSection);
+  }, [initialSection, representativeSlug]);
+
+  useEffect(() => {
+    if (!message) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setMessage(null);
+    }, 6000);
+
+    return () => window.clearTimeout(timeout);
+  }, [message]);
 
   function updateDraft(mutator: (value: RepresentativeSetupSnapshot) => RepresentativeSetupSnapshot) {
     setDraft((current) => (current ? mutator(cloneSnapshot(current)) : current));
@@ -407,19 +460,32 @@ export function DashboardRepresentativeSetup({
 
     startTransition(() => {
       void (async () => {
-        const response = await fetch(`/api/dashboard/representatives/${representativeSlug}/setup`, {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify(draft),
-        });
+        const bindingChanged = !sameStringSet(knowledgeAssetIds, savedKnowledgeAssetIds);
+        const { setupResponse: response, bindingResponse } =
+          await saveRepresentativeSetupRequests({
+            representativeSlug,
+            setup: draft,
+            knowledgeAssetIds,
+            bindingChanged,
+          });
 
         if (!response.ok) {
           throw new Error(await extractError(response));
         }
+        if (bindingResponse && !bindingResponse.ok) {
+          throw new Error(await extractError(bindingResponse));
+        }
 
         const nextSnapshot = (await response.json()) as RepresentativeSetupSnapshot;
+        if (bindingResponse) {
+          const bindingResult = (await bindingResponse.json()) as {
+            assets: RepresentativeKnowledgeAsset[];
+            selectedAssetIds: string[];
+          };
+          setKnowledgeAssets(bindingResult.assets);
+          setKnowledgeAssetIds(bindingResult.selectedAssetIds);
+          setSavedKnowledgeAssetIds(bindingResult.selectedAssetIds);
+        }
         setSnapshot(nextSnapshot);
         setDraft(cloneSnapshot(nextSnapshot));
         setMessage(t.savedMessage);
@@ -550,7 +616,8 @@ export function DashboardRepresentativeSetup({
   const totalKnowledgeItems =
     draft.knowledgePack.faq.length +
     draft.knowledgePack.materials.length +
-    draft.knowledgePack.policies.length;
+    draft.knowledgePack.policies.length +
+    knowledgeAssetIds.length;
   const setupSignalCards = [
     {
       label: t.signalCards.languagesLabel,
@@ -584,99 +651,115 @@ export function DashboardRepresentativeSetup({
     localizedComputePolicyModeLabels,
     localizedComputeNetworkModeLabels,
     localizedComputeFilesystemModeLabels,
+    knowledgeAssetIds.length,
   );
+  const selectedKnowledgeAssets = knowledgeAssetIds
+    .map((assetId) => knowledgeAssets.find((asset) => asset.id === assetId))
+    .filter((asset): asset is RepresentativeKnowledgeAsset => Boolean(asset));
+  const normalizedKnowledgeQuery = knowledgeQuery.trim().toLowerCase();
+  const filteredKnowledgeAssets = knowledgeAssets.filter((asset) => {
+    if (!normalizedKnowledgeQuery) return true;
+    return [
+      asset.title,
+      asset.originalFileName ?? "",
+      ...asset.tags,
+      ...asset.autoTags,
+    ].some((value) => value.toLowerCase().includes(normalizedKnowledgeQuery));
+  });
+  const notification = error
+    ? {
+        kind: "error" as const,
+        title: t.errorNotificationTitle,
+        message: error,
+      }
+    : message
+      ? {
+          kind: "success" as const,
+          title: t.successNotificationTitle,
+          message,
+        }
+      : null;
 
   return (
-    <DashboardPanelFrame
-      eyebrow={t.panelEyebrow}
-      summary={t.panelSummary(snapshot?.name ?? draft.name)}
-      title={t.panelTitle}
-    >
-      {message ? <div className="status-banner status-success">{message}</div> : null}
-      {error ? <div className="status-banner status-error">{error}</div> : null}
-
-      <div className="dashboard-panel-hero">
-        <article className="dashboard-highlight-card dashboard-highlight-card-primary">
-          <p className="panel-title">{t.identityKicker}</p>
-          <h3>{draft.name}</h3>
-          <p>{draft.tagline}</p>
-          <div className="chip-row">
-            <span className="chip">{draft.ownerName}</span>
-            <span className="chip chip-safe">{localizedGroupActivationLabels[draft.groupActivation]}</span>
-            <span className="chip">{draft.publicMode ? t.publicLabel : t.privateLabel}</span>
-            <span className="chip">{draft.humanInLoop ? "ai + human" : "ai only"}</span>
+    <section className="representative-config-workspace" id="setup">
+      {notification ? (
+        <div
+          aria-live={notification.kind === "error" ? "assertive" : "polite"}
+          className="representative-config-notification-viewport"
+        >
+          <div
+            className={`representative-config-notification is-${notification.kind}`}
+            role={notification.kind === "error" ? "alert" : "status"}
+          >
+            <span aria-hidden="true" className="representative-config-notification-mark">
+              {notification.kind === "error" ? "!" : "✓"}
+            </span>
+            <div className="representative-config-notification-copy">
+              <strong>{notification.title}</strong>
+              <p>{notification.message}</p>
+            </div>
+            <button
+              aria-label={t.dismissNotification}
+              className="representative-config-notification-close"
+              onClick={() => {
+                if (notification.kind === "error") {
+                  setError(null);
+                } else {
+                  setMessage(null);
+                }
+              }}
+              type="button"
+            >
+              ×
+            </button>
           </div>
-        </article>
-        <DashboardSignalStrip cards={setupSignalCards} />
+        </div>
+      ) : null}
+
+      <section className="representative-config-summary">
+        <div className="representative-config-identity">
+          <span>{draft.name.slice(0, 1).toUpperCase()}</span>
+          <div>
+            <p>{draft.slug}</p>
+            <h2>{draft.name}</h2>
+            <small>{draft.tagline}</small>
+          </div>
+        </div>
+        <div className="representative-config-signals">
+          {setupSignalCards.map((card) => (
+            <div key={card.label}>
+              <span>{card.label}</span>
+              <strong>{card.value}</strong>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <nav aria-label="Representative setup steps" className="representative-config-stepper">
+        {localizedSetupSections.map((section, index) => (
+          <button
+            className={section.id === activeSection ? "is-active" : index < activeSectionIndex ? "is-complete" : undefined}
+            key={section.id}
+            onClick={() => setActiveSection(section.id)}
+            type="button"
+          >
+            <span>{section.step}</span>
+            <strong>{section.label}</strong>
+          </button>
+        ))}
+      </nav>
+
+      <div className="representative-config-section-heading">
+        <div>
+          <p>{t.currentStepLabel}</p>
+          <h3>{currentSection.label}</h3>
+          <span>{currentSection.blurb}</span>
+        </div>
+        <b>{activeSectionIndex + 1} / {localizedSetupSections.length}</b>
       </div>
 
-      <DashboardSurfaceGrid>
-        <DashboardSurface
-          eyebrow={t.launchEyebrow}
-          meta={<span className="chip chip-safe">{draft.slug}</span>}
-          title={t.launchTitle}
-          tone="accent"
-        >
-          <div className="setup-stepper-shell">
-            <nav aria-label="Representative setup steps" className="setup-stepper">
-              {localizedSetupSections.map((section, index) => {
-                const isActive = section.id === activeSection;
-                const isComplete = index < activeSectionIndex;
-
-                return (
-                  <button
-                    className={
-                      isActive
-                        ? "setup-step-button setup-step-button-active"
-                        : isComplete
-                          ? "setup-step-button setup-step-button-complete"
-                          : "setup-step-button"
-                    }
-                    key={section.id}
-                    onClick={() => setActiveSection(section.id)}
-                    type="button"
-                  >
-                    <span className="setup-step-number">{section.step}</span>
-                    <strong>{section.label}</strong>
-                    <span>{section.blurb}</span>
-                  </button>
-                );
-              })}
-            </nav>
-
-            <article className="setup-step-summary">
-              <div>
-                <p className="panel-title">{t.currentStepLabel}</p>
-                <h3>{currentSection.label}</h3>
-                <p>{currentSection.blurb}</p>
-              </div>
-              <div className="chip-row">
-                <span className="chip">
-                  {activeSectionIndex + 1} / {localizedSetupSections.length}
-                </span>
-                <span className="chip chip-safe">{draft.slug}</span>
-              </div>
-            </article>
-          </div>
-        </DashboardSurface>
-
-        <DashboardSurface
-          eyebrow={t.stepPreviewEyebrow}
-          meta={
-            <span className="chip">
-              {activeSectionIndex + 1} / {localizedSetupSections.length}
-            </span>
-          }
-          title={t.stepPreviewTitle(currentSection.label)}
-        >
-          <div>
-            <p className="section-copy">{t.stepPreviewCopy}</p>
-          </div>
-          <DashboardSignalStrip cards={currentStepCards} />
-        </DashboardSurface>
-      </DashboardSurfaceGrid>
-
-      <form className="setup-stack" onSubmit={handleSubmit}>
+      <div className="representative-config-layout">
+      <form className="setup-stack representative-config-form" onSubmit={handleSubmit}>
         {activeSection === "basics" || activeSection === "contract" ? (
           <DashboardSurfaceGrid columns={1}>
             {activeSection === "basics" ? (
@@ -697,11 +780,14 @@ export function DashboardRepresentativeSetup({
                     <span>{t.ownerName}</span>
                     <input
                       className="text-input"
-                      onChange={(event) =>
-                        updateDraft((value) => ({ ...value, ownerName: event.target.value }))
-                      }
+                      readOnly
                       value={draft.ownerName}
                     />
+                    <small>
+                      {locale === "zh"
+                        ? "Owner 名称属于工作区资料，不会随单个代表配置修改。"
+                        : "Owner identity belongs to workspace settings and is not edited per representative."}
+                    </small>
                   </label>
 
               <label className="field-stack">
@@ -1060,6 +1146,19 @@ export function DashboardRepresentativeSetup({
                   value={draft.knowledgePack.identitySummary}
                 />
               </label>
+
+              <RepresentativeKnowledgeAssetPicker
+                assets={filteredKnowledgeAssets}
+                loading={knowledgeAssetsLoading}
+                locale={locale}
+                onQueryChange={setKnowledgeQuery}
+                onSelectedIdsChange={setKnowledgeAssetIds}
+                onToggleOpen={() => setKnowledgePickerOpen((current) => !current)}
+                open={knowledgePickerOpen}
+                query={knowledgeQuery}
+                selectedAssets={selectedKnowledgeAssets}
+                selectedIds={knowledgeAssetIds}
+              />
 
               <KnowledgeDocumentEditor
                 documents={draft.knowledgePack.faq}
@@ -1522,7 +1621,16 @@ export function DashboardRepresentativeSetup({
                   {t.syncStatusLine(openVikingDraft.lastSyncStatus, openVikingDraft.lastSyncItemCount)}
                 </p>
                 {openVikingDraft.lastSyncError ? (
-                  <p className="footer-note">{t.errorLine(openVikingDraft.lastSyncError)}</p>
+                  openVikingDraft.enabled && openVikingSnapshot?.enabled ? (
+                    <p className="footer-note">{t.errorLine(openVikingDraft.lastSyncError)}</p>
+                  ) : null
+                ) : null}
+                {!openVikingDraft.enabled ? (
+                  <p className="footer-note">{t.enableBeforeSync}</p>
+                ) : openVikingSnapshot?.enabled !== true ? (
+                  <p className="footer-note">{t.saveBeforeSync}</p>
+                ) : openVikingDraft.health.status !== "healthy" ? (
+                  <p className="footer-note">{t.healthBeforeSync}</p>
                 ) : null}
               </div>
             </div>
@@ -1538,7 +1646,14 @@ export function DashboardRepresentativeSetup({
               </button>
               <button
                 className="button-secondary"
-                disabled={isPending || busyKey === "openviking:sync" || !openVikingDraft.resourceSyncEnabled}
+                disabled={
+                  isPending ||
+                  busyKey === "openviking:sync" ||
+                  !openVikingDraft.enabled ||
+                  openVikingSnapshot?.enabled !== true ||
+                  openVikingDraft.health.status !== "healthy" ||
+                  !openVikingDraft.resourceSyncEnabled
+                }
                 onClick={handleOpenVikingSync}
                 type="button"
               >
@@ -1594,14 +1709,43 @@ export function DashboardRepresentativeSetup({
           </div>
         </div>
       </form>
-    </DashboardPanelFrame>
+
+        <aside className="representative-config-aside">
+          <header>
+            <p>{t.stepPreviewEyebrow}</p>
+            <h3>{t.stepPreviewTitle(currentSection.label)}</h3>
+            <span>{t.stepPreviewCopy}</span>
+          </header>
+          <div className="representative-config-checkpoints">
+            {currentStepCards.map((card) => (
+              <div key={`${card.label}:${card.value}`}>
+                <span>{card.label}</span>
+                <strong>{card.value}</strong>
+                <small>{card.detail}</small>
+              </div>
+            ))}
+          </div>
+          <div className="representative-config-draft-note">
+            <strong>{locale === "zh" ? "草稿安全边界" : "Draft safety boundary"}</strong>
+            <span>
+              {locale === "zh"
+                ? "保存只更新工作草稿；发布新版本前，公开页和会话继续使用当前活动版本。"
+                : "Saving updates the working draft only. Public pages and conversations keep using the active version until you publish."}
+            </span>
+          </div>
+        </aside>
+      </div>
+    </section>
   );
 }
 
 const setupCopy = {
   zh: {
-    savedMessage: "代表配置已保存。",
+    savedMessage: "代表配置已保存；变更的知识关联正在后台同步索引。",
     saveError: "保存代表配置失败。",
+    successNotificationTitle: "保存成功",
+    errorNotificationTitle: "操作失败",
+    dismissNotification: "关闭通知",
     memorySavedMessage: "OpenViking 记忆设置已保存。",
     memorySaveError: "保存 OpenViking 记忆设置失败。",
     memorySyncedMessage: "代表公开知识已同步到 OpenViking。",
@@ -1708,6 +1852,9 @@ const setupCopy = {
     saveOpenVikingSettings: "保存 OpenViking 设置",
     syncing: "同步中...",
     syncPublicKnowledge: "同步公开知识",
+    enableBeforeSync: "请先开启 OpenViking 并保存设置，再同步公开知识。",
+    saveBeforeSync: "启用状态尚未保存；请先保存 OpenViking 设置。",
+    healthBeforeSync: "OpenViking 服务连接恢复健康后才能同步公开知识。",
     loadingMemoryTitle: "正在加载代表级公开记忆配置。",
     loadingMemoryCopy: "再等一下，加载完成后这里会展示代表级公开记忆配置。",
     previousStep: "上一步",
@@ -1716,8 +1863,11 @@ const setupCopy = {
     saveRepresentativeSetup: "保存代表配置",
   },
   en: {
-    savedMessage: "Representative setup saved.",
+    savedMessage: "Representative setup saved. Changed knowledge bindings are syncing in the background.",
     saveError: "Failed to save representative setup.",
+    successNotificationTitle: "Saved successfully",
+    errorNotificationTitle: "Action failed",
+    dismissNotification: "Dismiss notification",
     memorySavedMessage: "OpenViking memory settings saved.",
     memorySaveError: "Failed to save OpenViking memory settings.",
     memorySyncedMessage: "Representative public knowledge synced into OpenViking.",
@@ -1825,6 +1975,9 @@ const setupCopy = {
     saveOpenVikingSettings: "Save OpenViking settings",
     syncing: "Syncing...",
     syncPublicKnowledge: "Sync public knowledge",
+    enableBeforeSync: "Enable OpenViking and save the settings before syncing public knowledge.",
+    saveBeforeSync: "The enabled state has not been saved yet. Save OpenViking settings first.",
+    healthBeforeSync: "Public knowledge can be synced after the OpenViking connection is healthy.",
     loadingMemoryTitle: "Loading representative memory configuration.",
     loadingMemoryCopy: "One moment. This section will show representative-level public memory settings when loading finishes.",
     previousStep: "Previous step",
@@ -1836,13 +1989,14 @@ const setupCopy = {
 
 function buildSetupStepCards(
   draft: RepresentativeSetupSnapshot,
-  currentSection: { id: SetupSectionId; label: string; blurb: string },
+  currentSection: { id: RepresentativeSetupSectionId; label: string; blurb: string },
   openVikingDraft: RepresentativeOpenVikingSnapshot | null,
   locale: Locale,
   groupActivationLabels: Record<GroupActivation, string>,
   computePolicyModeLabels: Record<ComputePolicyMode, string>,
   computeNetworkModeLabels: Record<ComputeNetworkMode, string>,
   computeFilesystemModeLabels: Record<ComputeFilesystemMode, string>,
+  linkedKnowledgeAssetCount: number,
 ): Array<{
   label: string;
   value: string;
@@ -1952,6 +2106,7 @@ function buildSetupStepCards(
     case "knowledge":
       if (locale === "en") {
         return [
+          { label: "Library files", value: `${linkedKnowledgeAssetCount}`, detail: "Processed workspace assets authorized for retrieval.", tone: "safe" },
           { label: "FAQ", value: `${draft.knowledgePack.faq.length}`, detail: "Number of high-frequency standard answers.", tone: "accent" },
           { label: "Materials", value: `${draft.knowledgePack.materials.length}`, detail: "Decks, case studies, and downloads that can be delivered directly.", },
           { label: "Policies", value: `${draft.knowledgePack.policies.length}`, detail: "Rules covering boundary, pricing, and process.", tone: "safe" },
@@ -1959,6 +2114,12 @@ function buildSetupStepCards(
         ];
       }
       return [
+        {
+          label: "知识库文件",
+          value: `${linkedKnowledgeAssetCount}`,
+          detail: "已授权给该代表检索的工作区知识。",
+          tone: "safe",
+        },
         {
           label: "FAQ",
           value: `${draft.knowledgePack.faq.length}`,
@@ -2067,6 +2228,161 @@ function buildSetupStepCards(
         },
       ];
   }
+}
+
+function RepresentativeKnowledgeAssetPicker({
+  assets,
+  selectedAssets,
+  selectedIds,
+  loading,
+  open,
+  query,
+  locale,
+  onToggleOpen,
+  onQueryChange,
+  onSelectedIdsChange,
+}: {
+  assets: RepresentativeKnowledgeAsset[];
+  selectedAssets: RepresentativeKnowledgeAsset[];
+  selectedIds: string[];
+  loading: boolean;
+  open: boolean;
+  query: string;
+  locale: Locale;
+  onToggleOpen: () => void;
+  onQueryChange: (value: string) => void;
+  onSelectedIdsChange: (value: string[]) => void;
+}) {
+  const zh = locale === "zh";
+  const selectedSet = new Set(selectedIds);
+  const statusLabels: Record<RepresentativeKnowledgeAsset["status"], string> = {
+    ready: zh ? "已完成" : "Ready",
+    processing: zh ? "处理中" : "Processing",
+    failed: zh ? "异常" : "Failed",
+    archived: zh ? "已归档" : "Archived",
+  };
+
+  function toggleAsset(asset: RepresentativeKnowledgeAsset) {
+    const selected = selectedSet.has(asset.id);
+    if (!selected && asset.status !== "ready") return;
+    onSelectedIdsChange(
+      selected ? selectedIds.filter((assetId) => assetId !== asset.id) : [...selectedIds, asset.id],
+    );
+  }
+
+  return (
+    <section className="representative-knowledge-binding">
+      <header className="representative-knowledge-binding-header">
+        <div>
+          <p>{zh ? "工作区知识库" : "Workspace knowledge library"}</p>
+          <h3>{zh ? "关联知识库文件" : "Link knowledge assets"}</h3>
+          <span>
+            {zh
+              ? "选择已处理完成的文件供该代表检索；原文件只保存一份，可同时授权给多个代表。"
+              : "Authorize processed assets for retrieval. Each source stays single-copy and can serve multiple representatives."}
+          </span>
+        </div>
+        <div className="representative-knowledge-binding-actions">
+          <b>{zh ? `已选择 ${selectedIds.length}` : `${selectedIds.length} selected`}</b>
+          <button className="button-secondary" onClick={onToggleOpen} type="button">
+            {open ? (zh ? "收起选择器" : "Close picker") : (zh ? "从知识库选择" : "Choose from library")}
+          </button>
+        </div>
+      </header>
+
+      {selectedAssets.length ? (
+        <div className="representative-selected-knowledge-list">
+          {selectedAssets.map((asset) => (
+            <article key={asset.id}>
+              <span className={`representative-knowledge-kind is-${asset.kind}`}>
+                {knowledgeAssetKindLabel(asset.kind)}
+              </span>
+              <div>
+                <strong>{asset.title}</strong>
+                <small>
+                  {statusLabels[asset.status]} · {asset.originalFileName ?? (zh ? "知识正文" : "Authored text")}
+                </small>
+              </div>
+              <button
+                aria-label={zh ? `解除关联 ${asset.title}` : `Unlink ${asset.title}`}
+                onClick={() => toggleAsset(asset)}
+                type="button"
+              >
+                ×
+              </button>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="representative-knowledge-binding-empty">
+          <strong>{zh ? "尚未关联工作区知识" : "No workspace knowledge linked"}</strong>
+          <span>{zh ? "当前代表只会使用下方手工维护的结构化知识。" : "This representative currently uses only the structured entries below."}</span>
+        </div>
+      )}
+
+      {open ? (
+        <div className="representative-knowledge-picker">
+          <div className="representative-knowledge-picker-toolbar">
+            <label>
+              <span aria-hidden="true">⌕</span>
+              <input
+                aria-label={zh ? "搜索知识库" : "Search knowledge library"}
+                onChange={(event) => onQueryChange(event.target.value)}
+                placeholder={zh ? "搜索文件名、标题或标签" : "Search title, filename, or tags"}
+                type="search"
+                value={query}
+              />
+            </label>
+            <a href={`/dashboard?view=knowledge&lang=${locale}`}>
+              {zh ? "管理知识库" : "Manage library"} →
+            </a>
+          </div>
+          <p className="representative-knowledge-permission-note">
+            {zh
+              ? "选择即授权该代表访问。仅 Owner 文件会自动调整为“指定代表可见”；取消最后一个关联后恢复为仅 Owner。"
+              : "Selection grants representative access. Owner-only assets become representative-scoped and return to owner-only after their final link is removed."}
+          </p>
+          {loading ? (
+            <div className="representative-knowledge-picker-empty">{zh ? "正在加载知识库…" : "Loading knowledge assets…"}</div>
+          ) : assets.length ? (
+            <div className="representative-knowledge-picker-list">
+              {assets.map((asset) => {
+                const selected = selectedSet.has(asset.id);
+                const disabled = !selected && asset.status !== "ready";
+                return (
+                  <label className={`${selected ? "is-selected" : ""}${disabled ? " is-disabled" : ""}`} key={asset.id}>
+                    <input
+                      checked={selected}
+                      disabled={disabled}
+                      onChange={() => toggleAsset(asset)}
+                      type="checkbox"
+                    />
+                    <span className={`representative-knowledge-kind is-${asset.kind}`}>
+                      {knowledgeAssetKindLabel(asset.kind)}
+                    </span>
+                    <div>
+                      <strong>{asset.title}</strong>
+                      <small>{asset.summary ?? asset.originalFileName ?? (zh ? "暂无摘要" : "No summary")}</small>
+                      <em>
+                        <i className={`is-${asset.status}`} />
+                        {statusLabels[asset.status]}
+                        {asset.tags.slice(0, 2).map((tag) => <b key={tag}>{tag}</b>)}
+                      </em>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="representative-knowledge-picker-empty">
+              <strong>{query ? (zh ? "没有匹配的知识" : "No matching knowledge") : (zh ? "知识库还没有内容" : "The library is empty")}</strong>
+              <span>{query ? (zh ? "调整搜索词后再试。" : "Try a different search.") : (zh ? "先到知识库上传文件、网址或手工正文。" : "Import a file, URL, or authored text first.")}</span>
+            </div>
+          )}
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 function KnowledgeDocumentEditor({
@@ -2239,6 +2555,54 @@ async function refreshSetup(
   setSnapshot(nextSnapshot);
   setDraft(cloneSnapshot(nextSnapshot));
   setError(null);
+}
+
+async function refreshRepresentativeKnowledgeAssets(
+  representativeSlug: string,
+  setAssets: (value: RepresentativeKnowledgeAsset[]) => void,
+  setSelectedIds: (value: string[]) => void,
+  setSavedIds: (value: string[]) => void,
+  setLoading: (value: boolean) => void,
+  setError: (value: string | null) => void,
+) {
+  setLoading(true);
+  try {
+    const response = await fetch(
+      `/api/dashboard/representatives/${representativeSlug}/knowledge-assets`,
+    );
+    if (!response.ok) throw new Error(await extractError(response));
+    const payload = (await response.json()) as { assets: RepresentativeKnowledgeAsset[] };
+    const selectedIds = payload.assets
+      .filter((asset) =>
+        asset.representativeLinks.some(
+          (link) => link.representativeSlug === representativeSlug && link.enabled,
+        ),
+      )
+      .map((asset) => asset.id);
+    setAssets(payload.assets);
+    setSelectedIds(selectedIds);
+    setSavedIds(selectedIds);
+  } catch (nextError) {
+    setError(
+      nextError instanceof Error
+        ? nextError.message
+        : "Failed to load representative knowledge assets.",
+    );
+  } finally {
+    setLoading(false);
+  }
+}
+
+function sameStringSet(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  const values = new Set(left);
+  return right.every((value) => values.has(value));
+}
+
+function knowledgeAssetKindLabel(kind: RepresentativeKnowledgeAsset["kind"]) {
+  if (kind === "markdown") return "MD";
+  if (kind === "text") return "TEXT";
+  return kind.toUpperCase();
 }
 
 async function refreshOpenViking(

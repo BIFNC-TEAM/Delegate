@@ -1,17 +1,18 @@
-import { headers } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { notFound } from "next/navigation";
+import type { Metadata } from "next";
 
 import type { Representative } from "@delegate/domain";
 import {
+  DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
+  LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   getRepresentativePublicDeliverables,
-  getRepresentativeSetupSnapshot,
-  getRepresentativeSkillPackSnapshot,
+  getPublicRepresentativeRuntime,
+  readDelegateAuthSessionSecret,
+  verifyDelegateAuthSession,
 } from "@delegate/web-data";
 import {
-  DashboardPanelFrame,
-  DashboardSignalStrip,
-  DashboardSurface,
-  DashboardSurfaceGrid,
+  HashScrollRestorer,
   LanguageSwitcher,
   buildLocalizedHref,
   extractCountryHint,
@@ -22,9 +23,35 @@ import {
 } from "@delegate/web-ui";
 
 import { RepresentativeChatPanel } from "./representative-chat-panel";
+import { getUsablePublicUrl } from "./public-materials";
+import { RepresentativeMaterialPreview } from "./representative-material-preview";
 import { RepresentativeRechargePanel } from "./representative-recharge-panel";
+import {
+  buildPublicAudienceLoginHref,
+  buildPublicAudienceLogoutHref,
+} from "./public-auth";
 
 type RepresentativeSkill = Representative["skills"][number];
+
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const { slug } = await params;
+  const runtime = await getPublicRepresentativeRuntime(slug);
+  if (runtime.status !== "available") {
+    return {
+      title: "Representative unavailable · Delegate",
+      robots: { index: false, follow: false },
+    };
+  }
+  return {
+    title: `${runtime.setup.name} · Delegate`,
+    description: runtime.setup.tagline,
+    openGraph: {
+      title: runtime.setup.name,
+      description: runtime.setup.tagline,
+      type: "profile",
+    },
+  };
+}
 
 export default async function RepresentativePage({
   params,
@@ -35,7 +62,7 @@ export default async function RepresentativePage({
 }) {
   const { slug } = await params;
   const query = searchParams ? await searchParams : undefined;
-  const headerStore = await headers();
+  const [headerStore, cookieStore] = await Promise.all([headers(), cookies()]);
   const locale = resolveLocale({
     requestedLocale: query?.lang,
     acceptLanguage: headerStore.get("accept-language"),
@@ -47,73 +74,66 @@ export default async function RepresentativePage({
     currentAppDefaultPort: 3002,
     currentHost,
   });
-  const dashboardBaseUrl = resolveServiceUrl(
-    process.env.NEXT_PUBLIC_DASHBOARD_URL,
-    "http://localhost:3001",
-    {
-      currentAppDefaultPort: 3002,
-      currentHost,
-    },
-  );
-  const [setupSnapshot, skillPackSnapshot, deliverableSnapshot] = await Promise.all([
-    getRepresentativeSetupSnapshot(slug),
-    getRepresentativeSkillPackSnapshot(slug),
-    getRepresentativePublicDeliverables(slug),
-  ]);
-
-  if (!setupSnapshot || !skillPackSnapshot) {
+  const runtime = await getPublicRepresentativeRuntime(slug);
+  if (runtime.status === "paused") {
+    return <PausedRepresentativePage locale={locale} siteBaseUrl={siteBaseUrl} />;
+  }
+  if (runtime.status !== "available") {
     notFound();
   }
 
-  const representative = {
-    ...setupSnapshot,
-    skillPacks: skillPackSnapshot.skillPacks,
-  };
+  const deliverableSnapshot = await getRepresentativePublicDeliverables(slug);
+
+  const representative = runtime.setup;
+  const authSession = verifyDelegateAuthSession(
+    cookieStore.get(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE)?.value ??
+      cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value,
+    readDelegateAuthSessionSecret(),
+  );
+  const audienceSession =
+    authSession?.actor === "audience" && authSession.audienceIdentityId ? authSession : null;
+  const audienceLoginHref = buildPublicAudienceLoginHref(representative.slug, locale);
+  const audienceLogoutHref = buildPublicAudienceLogoutHref(representative.slug, locale);
   const publicDeliverables = deliverableSnapshot?.deliverables ?? [];
-  const enabledSkillPacks = representative.skillPacks.filter((skillPack) => skillPack.enabled);
-  const totalKnowledgeItems =
+  const publicResourceCount =
     representative.knowledgePack.faq.length +
     representative.knowledgePack.materials.length +
     representative.knowledgePack.policies.length +
     publicDeliverables.length;
-  const skillLabels = buildSkillLabels(locale);
-  const groupActivationLabels = buildGroupActivationLabels(locale);
+  const visitorCapabilities = buildVisitorCapabilities(locale);
   const deliverableKindLabels = buildDeliverableKindLabels(locale);
   const deliverableSourceLabels = buildDeliverableSourceLabels(locale);
-  const menu = t.menu;
-  const platformAccounts = [
-    {
-      name: "Web",
-      status: t.platformLive,
-      detail: t.platformWebDetail,
-      href: "#chat",
-    },
-    { name: "Telegram", status: t.platformRoadmap, detail: t.platformTelegramDetail },
-    { name: "WhatsApp", status: t.platformRoadmap, detail: t.platformWhatsAppDetail },
-    { name: locale === "zh" ? "飞书" : "Feishu", status: t.platformRoadmap, detail: t.platformFeishuDetail },
-    { name: locale === "zh" ? "企业微信" : "WeCom", status: t.platformRoadmap, detail: t.platformWeComDetail },
+  const showPublicDemoTools =
+    process.env.NODE_ENV !== "production" &&
+    process.env.NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS === "true";
+  const menu = [
+    { href: "#chat", label: t.chatNav },
+    { href: "#about", label: t.aboutNav },
+    ...(publicResourceCount > 0 ? [{ href: "#resources", label: t.resourcesNav }] : []),
+    { href: "#trust", label: t.trustNav },
   ];
 
   return (
-    <main className="dashboard-shell representative-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
-      <header className="representative-topbar">
-        <div className="dashboard-brand">
-          <div className="dashboard-brand-mark">R</div>
+    <main className="marketing-shell representative-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
+      <HashScrollRestorer />
+      <header className="marketing-topbar representative-topbar">
+        <div className="marketing-brand">
+          <img className="marketing-brand-mark" src="/D_logo.svg" alt="Delegate logo" />
           <div>
             <strong>{representative.name}</strong>
-            <div className="muted">{t.brandTagline}</div>
+            <div className="muted">{t.representing(representative.ownerName)}</div>
           </div>
         </div>
 
-        <nav aria-label={t.menuAriaLabel} className="representative-menu-tabs">
+        <nav aria-label={t.menuAriaLabel} className="marketing-menu-tabs representative-menu-tabs">
           {menu.map((item) => (
-            <a className="dashboard-menu-tab" href={item.href} key={item.href}>
+            <a className="marketing-menu-tab" href={item.href} key={item.href}>
               {item.label}
             </a>
           ))}
         </nav>
 
-        <div className="dashboard-nav-links">
+        <div className="marketing-nav-actions">
           <LanguageSwitcher
             activeLocale={locale}
             ariaLabel={t.languageAriaLabel}
@@ -132,450 +152,196 @@ export default async function RepresentativePage({
               },
             ]}
           />
-          <a className="dashboard-nav-link" href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>
+          <a className="marketing-nav-link representative-site-link" href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>
             {t.homeLabel}
           </a>
-          <a
-            className="dashboard-nav-link"
-            href={buildLocalizedHref(`${dashboardBaseUrl}/dashboard?rep=${representative.slug}&view=overview`, locale)}
-          >
-            {t.dashboardLabel}
-          </a>
+          {audienceSession ? (
+            <>
+              <span className="marketing-nav-link dashboard-nav-link-status">
+                {t.signedInLabel}
+              </span>
+              <a className="marketing-nav-link" href={audienceLogoutHref}>
+                {t.logoutLabel}
+              </a>
+            </>
+          ) : (
+            <a className="marketing-button-primary dashboard-account-login" href={audienceLoginHref}>
+              {t.loginRegisterLabel}
+            </a>
+          )}
         </div>
       </header>
 
-      <section className="dashboard-stage representative-stage" id="overview">
-        <div>
-          <p className="eyebrow">{t.profileEyebrow}</p>
-          <h1>{representative.name}</h1>
-          <p className="dashboard-stage-copy">{representative.tagline}</p>
-          <div className="chip-row">
-            {representative.languages.map((language) => (
-              <span className="chip" key={language}>
-                {language}
-              </span>
-            ))}
-            <span className="chip chip-safe">{groupActivationLabels[representative.groupActivation]}</span>
-            <span className="chip">{representative.humanInLoop ? t.aiHumanLabel : t.aiOnlyLabel}</span>
+      <section className="representative-visitor-hero" id="overview">
+        <div className="representative-visitor-identity">
+          <div aria-hidden="true" className="representative-visitor-avatar">
+            {representative.name.slice(0, 1).toUpperCase()}
+          </div>
+          <div className="representative-visitor-copy">
+            <p className="eyebrow">{t.publicRepresentative}</p>
+            <h1>{representative.name}</h1>
+            <p className="representative-owner-line">{t.representing(representative.ownerName)}</p>
+            <p className="marketing-lead">{representative.tagline}</p>
+            <div className="chip-row">
+              <span className="chip chip-safe">{t.aiDisclosure}</span>
+              {representative.humanInLoop ? <span className="chip">{t.humanAvailable}</span> : null}
+              {representative.languages.map((language) => <span className="chip" key={language}>{language}</span>)}
+            </div>
           </div>
         </div>
-
-        <div className="representative-stage-aside">
-          <article className="dashboard-highlight-card dashboard-highlight-card-primary">
-            <p className="panel-title">{t.worksForLabel}</p>
-            <h3>{representative.ownerName}</h3>
-            <p>{representative.knowledgePack.identitySummary}</p>
-            <p className="footer-note">{t.memoryDisclosure}</p>
-          </article>
-
-          <div className="button-row representative-stage-links">
-            <a className="button-primary" href="#chat">
-              {t.startOnWeb}
-            </a>
-            <a
-              className="button-secondary"
-              href={buildLocalizedHref(`${dashboardBaseUrl}/dashboard?rep=${representative.slug}&view=setup`, locale)}
-            >
-              {t.viewControlPlane}
-            </a>
-          </div>
+        <div className="representative-visitor-start">
+          <span className="panel-title">{t.startEyebrow}</span>
+          <h2>{t.startTitle}</h2>
+          <p>{t.startSummary(representative.name)}</p>
+          <a className="button-primary" href="#chat">{t.startChat}</a>
         </div>
       </section>
 
-      <DashboardSignalStrip
-        cards={[
-          {
-            label: t.signalCards.freeRepliesLabel,
-            value: `${representative.contract.freeReplyLimit}`,
-            detail: t.signalCards.freeRepliesDetail,
-            tone: "accent",
-          },
-          {
-            label: t.signalCards.enabledSkillsLabel,
-            value: `${representative.skills.length}`,
-            detail: t.signalCards.enabledSkillsDetail,
-            tone: "safe",
-          },
-          {
-            label: t.signalCards.knowledgeItemsLabel,
-            value: `${totalKnowledgeItems}`,
-            detail: t.signalCards.knowledgeItemsDetail,
-          },
-          {
-            label: t.signalCards.skillPacksLabel,
-            value: `${enabledSkillPacks.length}`,
-            detail: t.signalCards.skillPacksDetail,
-          },
-        ]}
-      />
-
-      <DashboardPanelFrame
-        eyebrow={t.frontDeskEyebrow}
-        summary={t.frontDeskSummary(representative.name)}
-        title={t.frontDeskTitle}
-      >
-        <div className="representative-front-desk-flow">
-          {t.frontDeskSteps.map((step) => (
-            <article className="representative-front-desk-step" key={step.label}>
-              <span>{step.label}</span>
-              <h3>{step.title}</h3>
-              <p>{step.body}</p>
-            </article>
-          ))}
-        </div>
-      </DashboardPanelFrame>
-
-      <DashboardPanelFrame
-        eyebrow={t.rechargeEyebrow}
-        id="recharge"
-        summary={t.rechargeSummary(representative.name)}
-        title={t.rechargeTitle}
-      >
-        <DashboardSurfaceGrid columns={3}>
-          <DashboardSurface eyebrow={t.agentWalletEyebrow} title={t.agentWalletTitle} tone="accent">
-            <p className="section-copy">{t.agentWalletCopy(representative.name)}</p>
-            <div className="chip-row">
-              <span className="chip chip-safe">{t.agentWalletCurrentChip}</span>
-              <span className="chip">{t.webFirstChip}</span>
-              <span className="chip">{t.amnPayRoadmapChip}</span>
-            </div>
-            <p className="footer-note">{t.balanceDisclosure(representative.name)}</p>
-            <RepresentativeRechargePanel locale={locale} representativeSlug={representative.slug} />
-          </DashboardSurface>
-
-          <DashboardSurface eyebrow={t.platformAccountsEyebrow} title={t.platformAccountsTitle}>
-            <div className="row-list">
-              {platformAccounts.map((account) => (
-                <div className="skill-row" key={account.name}>
-                  <div>
-                    <strong>{account.name}</strong>
-                    <p>{account.detail}</p>
-                    <div className="chip-row">
-                      <span className={account.href ? "chip chip-safe" : "chip"}>{account.status}</span>
-                    </div>
-                  </div>
-                  {account.href ? (
-                    <a
-                      className="button-secondary"
-                      href={account.href}
-                      {...(account.href.startsWith("#") ? {} : { rel: "noreferrer", target: "_blank" })}
-                    >
-                      {t.openPlatform}
-                    </a>
-                  ) : null}
-                </div>
-              ))}
-            </div>
-          </DashboardSurface>
-
-          <DashboardSurface eyebrow={t.trustProofEyebrow} title={t.trustProofTitle}>
-            <div className="representative-qr-placeholder" aria-label={t.qrAriaLabel}>
-              <span>QR</span>
-            </div>
-            <p className="section-copy">{t.trustProofCopy}</p>
-            <div className="chip-row">
-              <span className="chip chip-safe">{t.ratingChip}</span>
-              <span className="chip">{t.claimStatusChip}</span>
-              <span className="chip">{t.publicSourcesChip}</span>
-            </div>
-            <p className="footer-note">{t.refundDisclosure}</p>
-          </DashboardSurface>
-        </DashboardSurfaceGrid>
-      </DashboardPanelFrame>
-
       <RepresentativeChatPanel
         freeReplyLimit={representative.contract.freeReplyLimit}
-        identitySummary={representative.knowledgePack.identitySummary}
+        humanInLoop={representative.humanInLoop}
         locale={locale}
+        ownerName={representative.ownerName}
         pricing={representative.pricing}
         representativeName={representative.name}
         representativeSlug={representative.slug}
       />
 
-      <DashboardPanelFrame
-        eyebrow={t.trustEyebrow}
-        id="trust"
-        summary={t.trustSummary}
-        title={t.trustTitle}
-      >
-        <DashboardSurfaceGrid columns={3}>
-          <DashboardSurface eyebrow={t.allowedEyebrow} title={t.allowedTitle} tone="accent">
-            <ul className="list">
-              {t.allowList.map((item) => (
-                <li className="list-item" key={item}>
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </DashboardSurface>
-
-          <DashboardSurface eyebrow={t.notAllowedEyebrow} title={t.notAllowedTitle}>
-            <ul className="list">
-              {t.denyList.map((item) => (
-                <li className="list-item" key={item}>
-                  {item}
-                </li>
-              ))}
-            </ul>
-          </DashboardSurface>
-
-          <DashboardSurface eyebrow={t.contractEyebrow} title={t.contractTitle}>
-            <p className="section-copy">
-              {t.contractCopy(representative.contract.freeReplyLimit)}
-            </p>
-            <div className="chip-row">
-              <span className="chip chip-safe">{groupActivationLabels[representative.groupActivation]}</span>
-              <span className="chip">{representative.publicMode ? t.publicRuntimeLabel : t.privateDraftLabel}</span>
-              <span className="chip">{representative.humanInLoop ? t.handoffReadyLabel : t.aiOnlyLabel}</span>
-            </div>
-            <p className="footer-note">{t.contractFootnote}</p>
-          </DashboardSurface>
-        </DashboardSurfaceGrid>
-      </DashboardPanelFrame>
-
-      <DashboardPanelFrame
-        eyebrow={t.skillsEyebrow}
-        id="skills"
-        summary={t.skillsSummary}
-        title={t.skillsTitle}
-      >
-        <DashboardSurfaceGrid>
-          <DashboardSurface
-            eyebrow={t.declaredSkillsEyebrow}
-            meta={<span className="chip chip-safe">{t.skillsCountChip(representative.skills.length)}</span>}
-            title={t.declaredSkillsTitle}
-            tone="accent"
-          >
-            <div className="chip-row">
-              {representative.skills.map((skill) => (
-                <span className="chip" key={skill}>
-                  {skillLabels[skill]}
-                </span>
-              ))}
-            </div>
-          </DashboardSurface>
-
-          <DashboardSurface
-            eyebrow={t.skillPacksEyebrow}
-            meta={<span className="chip">{t.trackedChip(representative.skillPacks.length)}</span>}
-            title={t.skillPacksTitle}
-          >
-            <div className="row-list">
-              {representative.skillPacks.map((skillPack) => (
-                <div className="skill-row" key={skillPack.id}>
-                  <div>
-                    <strong>{skillPack.displayName}</strong>
-                    <p>{skillPack.summary}</p>
-                    <div className="chip-row">
-                      <span className="chip">
-                        {skillPack.source === "clawhub" ? "ClawHub" : t.builtinLabel}
-                      </span>
-                      <span className="chip">{skillPack.installStatus}</span>
-                      {skillPack.verificationTier ? (
-                        <span className="chip chip-safe">{skillPack.verificationTier}</span>
-                      ) : null}
-                    </div>
-                    <p className="footer-note">
-                      {skillPack.executesCode ? t.executesCodeNote : t.declarativeNote}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </DashboardSurface>
-        </DashboardSurfaceGrid>
-      </DashboardPanelFrame>
-
-      <DashboardPanelFrame
-        eyebrow={t.knowledgeEyebrow}
-        id="knowledge"
-        summary={t.knowledgeSummary}
-        title={t.knowledgeTitle}
-      >
-        <DashboardSurfaceGrid columns={3}>
-          <DashboardSurface eyebrow="FAQ" title={t.faqTitle} tone="accent">
-            <ul className="list">
-              {representative.knowledgePack.faq.map((item) => (
-                <li className="list-item" key={item.id}>
-                  <strong>{item.title}</strong>
-                  <p>{item.summary}</p>
-                </li>
-              ))}
-            </ul>
-          </DashboardSurface>
-
-          <DashboardSurface eyebrow={t.materialsEyebrow} title={t.materialsTitle}>
-            <ul className="list">
-              {representative.knowledgePack.materials.map((item) => (
-                <li className="list-item" key={item.id}>
-                  <strong>{item.title}</strong>
-                  <p>{item.summary}</p>
-                  {item.url ? (
-                    <div className="button-row">
-                      <a className="button-secondary" href={item.url} rel="noreferrer" target="_blank">
-                        {t.openMaterial}
-                      </a>
-                    </div>
-                  ) : null}
-                </li>
-              ))}
-              {publicDeliverables.map((deliverable) => (
-                <li className="list-item" key={deliverable.id}>
-                  <strong>{deliverable.title}</strong>
-                  <p>{deliverable.summary}</p>
-                  <div className="chip-row">
-                    <span className="chip chip-safe">{t.publicDeliverableChip}</span>
-                    <span className="chip">{deliverableKindLabels[deliverable.kind]}</span>
-                    <span className="chip">{deliverableSourceLabels[deliverable.sourceKind]}</span>
-                  </div>
-                  <div className="button-row">
-                    {deliverable.sourceKind === "external_link" && deliverable.externalUrl ? (
-                      <a
-                        className="button-secondary"
-                        href={deliverable.externalUrl}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        {t.openMaterial}
-                      </a>
-                    ) : (
-                      <a
-                        className="button-secondary"
-                        href={`/reps/${representative.slug}/deliverables/${deliverable.id}/download`}
-                      >
-                        {t.downloadDeliverable}
-                      </a>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </DashboardSurface>
-
-          <DashboardSurface eyebrow={t.policiesEyebrow} title={t.policiesTitle}>
-            <ul className="list">
-              {representative.knowledgePack.policies.map((item) => (
-                <li className="list-item" key={item.id}>
-                  <strong>{item.title}</strong>
-                  <p>{item.summary}</p>
-                </li>
-              ))}
-            </ul>
-          </DashboardSurface>
-        </DashboardSurfaceGrid>
-      </DashboardPanelFrame>
-
-      <DashboardPanelFrame
-        eyebrow={t.plansEyebrow}
-        id="plans"
-        summary={t.plansSummary}
-        title={t.plansTitle}
-      >
-        <DashboardSurfaceGrid>
-          {representative.pricing.map((plan) => (
-            <DashboardSurface
-              eyebrow={t.accessLayerEyebrow}
-              key={plan.tier}
-              meta={
-                <span className={plan.includesPriorityHandoff ? "chip chip-safe" : "chip"}>
-                  {plan.tier}
-                </span>
-              }
-              title={plan.name}
-              tone={plan.tier === "deep_help" ? "accent" : "default"}
-            >
-              <span className="price">{plan.stars} credits</span>
-              <p>{plan.summary}</p>
-              <div className="chip-row">
-                <span className="chip">{t.repliesChip(plan.includedReplies)}</span>
-                {plan.includesPriorityHandoff ? (
-                  <span className="chip chip-safe">{t.priorityHandoffChip}</span>
-                ) : null}
-              </div>
-              <div className="button-row">
-                <a
-                  className={plan.tier === "free" ? "button-secondary" : "button-primary"}
-                  href={plan.tier === "free" ? "#chat" : "#recharge"}
-                >
-                  {plan.tier === "free" ? t.startWebChat : t.previewRecharge}
-                </a>
-              </div>
-            </DashboardSurface>
+      <section className="representative-visitor-section" id="about">
+        <div className="representative-visitor-section-heading">
+          <p className="eyebrow">{t.capabilitiesEyebrow}</p>
+          <h2>{t.capabilitiesTitle}</h2>
+          <p>{t.capabilitiesSummary(representative.ownerName)}</p>
+        </div>
+        <div className="representative-capability-grid">
+          {representative.skills.filter((skill) => !["human_handoff", "paid_unlock"].includes(skill)).map((skill) => (
+            <article className="representative-capability-card" key={skill}>
+              <strong>{visitorCapabilities[skill].title}</strong>
+              <p>{visitorCapabilities[skill].detail}</p>
+            </article>
           ))}
-        </DashboardSurfaceGrid>
-      </DashboardPanelFrame>
+        </div>
+      </section>
 
-      <DashboardPanelFrame
-        eyebrow={t.handoffEyebrow}
-        id="handoff"
-        summary={t.handoffSummary}
-        title={t.handoffTitle}
-      >
-        <DashboardSurfaceGrid>
-          <DashboardSurface eyebrow={t.handoffCopyEyebrow} title={t.handoffCopyTitle} tone="accent">
-            <p>{representative.handoffPrompt}</p>
-          </DashboardSurface>
+      {publicResourceCount > 0 ? (
+        <section className="representative-visitor-section" id="resources">
+          <div className="representative-visitor-section-heading">
+            <p className="eyebrow">{t.resourcesEyebrow}</p>
+            <h2>{t.resourcesTitle}</h2>
+            <p>{t.resourcesSummary}</p>
+          </div>
+          <div className="representative-resource-grid">
+            {representative.knowledgePack.faq.map((item) => (
+              <article className="representative-resource-card" key={item.id}>
+                <span className="panel-title">FAQ</span><strong>{item.title}</strong><p>{item.summary}</p>
+              </article>
+            ))}
+            {representative.knowledgePack.materials.map((item) => (
+              <article className="representative-resource-card" key={item.id}>
+                <span className="panel-title">{t.materialsEyebrow}</span><strong>{item.title}</strong><p>{item.summary}</p>
+                <RepresentativeMaterialPreview copy={t.materialPreview} downloadUrl={getUsablePublicUrl(item.url)} kind={item.kind} summary={item.summary} title={item.title} />
+              </article>
+            ))}
+            {representative.knowledgePack.policies.map((item) => (
+              <article className="representative-resource-card" key={item.id}>
+                <span className="panel-title">{t.policiesEyebrow}</span><strong>{item.title}</strong><p>{item.summary}</p>
+              </article>
+            ))}
+            {publicDeliverables.map((deliverable) => {
+              const externalUrl = getUsablePublicUrl(deliverable.externalUrl);
+              return (
+                <article className="representative-resource-card" key={deliverable.id}>
+                  <span className="panel-title">{t.publicDeliverableChip}</span>
+                  <strong>{deliverable.title}</strong><p>{deliverable.summary}</p>
+                  <div className="chip-row"><span className="chip">{deliverableKindLabels[deliverable.kind]}</span><span className="chip">{deliverableSourceLabels[deliverable.sourceKind]}</span></div>
+                  {deliverable.sourceKind === "external_link" ? (
+                    externalUrl ? <a className="button-secondary" href={externalUrl} rel="noreferrer" target="_blank">{t.openMaterial}</a> : <span className="chip">{t.materialPendingChip}</span>
+                  ) : <a className="button-secondary" href={`/reps/${representative.slug}/deliverables/${deliverable.id}/download`}>{t.downloadDeliverable}</a>}
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
 
-          <DashboardSurface eyebrow={t.entryPointsEyebrow} title={t.entryPointsTitle}>
-            <p className="section-copy">
-              {t.entryPointsCopy(groupActivationLabels[representative.groupActivation])}
-            </p>
-            <div className="button-row">
-              <a className="button-primary" href="#chat">
-                {t.openRepresentative}
-              </a>
-              <a
-                className="button-secondary"
-                href={buildLocalizedHref(`${dashboardBaseUrl}/dashboard?rep=${representative.slug}&view=memory`, locale)}
-              >
-                {t.inspectMemoryPolicy}
-              </a>
-            </div>
-          </DashboardSurface>
-        </DashboardSurfaceGrid>
-      </DashboardPanelFrame>
+      {showPublicDemoTools ? (
+        <section className="representative-visitor-section representative-demo-commerce" id="recharge">
+          <div className="representative-visitor-section-heading">
+            <p className="eyebrow">{t.demoEyebrow}</p><h2>{t.demoTitle}</h2><p>{t.demoSummary}</p>
+          </div>
+          <RepresentativeRechargePanel locale={locale} representativeSlug={representative.slug} />
+        </section>
+      ) : null}
+
+      <section className="representative-trust-section" id="trust">
+        <article className="representative-trust-primary">
+          <p className="eyebrow">{t.trustEyebrow}</p>
+          <h2>{t.trustTitle}</h2>
+          <div className="representative-trust-list">
+            {t.trustItems.map((item) => <p key={item}>{item}</p>)}
+          </div>
+        </article>
+        <article className="representative-handoff-card" id="handoff">
+          <p className="eyebrow">{t.handoffEyebrow}</p>
+          <h2>{t.handoffVisitorTitle(representative.ownerName)}</h2>
+          <p>{representative.handoffPrompt}</p>
+          <a className="button-primary" href="#chat">{t.addHandoffContext}</a>
+        </article>
+      </section>
+
+      <footer className="representative-visitor-footer">
+        <span>{t.footerDisclosure(representative.name)}</span>
+        <a href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>Delegate</a>
+      </footer>
     </main>
   );
 }
 
-function buildSkillLabels(locale: Locale): Record<RepresentativeSkill, string> {
+function PausedRepresentativePage({ locale, siteBaseUrl }: { locale: Locale; siteBaseUrl: string }) {
+  const zh = locale === "zh";
+  return (
+    <main className="marketing-shell representative-shell localized-shell" data-locale={locale} lang={zh ? "zh-CN" : "en"}>
+      <header className="marketing-topbar representative-topbar">
+        <div className="marketing-brand"><img className="marketing-brand-mark" src="/D_logo.svg" alt="Delegate logo" /><div><strong>Delegate</strong><div className="muted">Digital Representative OS</div></div></div>
+        <a className="marketing-button-secondary" href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>{zh ? "返回官网" : "Back to Delegate"}</a>
+      </header>
+      <section className="marketing-hero representative-stage representative-paused-stage">
+        <div className="marketing-hero-copy representative-hero-copy">
+          <p className="eyebrow">TEMPORARILY PAUSED</p>
+          <h1>{zh ? "这位数字代表暂时离线。" : "This representative is temporarily offline."}</h1>
+          <p className="marketing-lead">{zh ? "公开页面、聊天和服务接口已同步暂停。请稍后再来，或通过其他已公开渠道联系主理人。" : "The public page, chat, and service APIs are paused together. Please return later or use another published contact channel."}</p>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function buildVisitorCapabilities(
+  locale: Locale,
+): Record<RepresentativeSkill, { title: string; detail: string }> {
   if (locale === "zh") {
     return {
-      faq_reply: "FAQ 回复",
-      lead_qualify: "合作意向初筛",
-      intake_collect: "需求采集",
-      quote_request_collect: "报价请求采集",
-      material_delivery: "资料投递",
-      scheduling_request: "预约意向采集",
-      human_handoff: "人工转接",
-      paid_unlock: "付费续用",
+      faq_reply: { title: "回答常见问题", detail: "根据已发布资料解释产品、服务和合作方式。" },
+      lead_qualify: { title: "了解合作是否合适", detail: "通过几个关键问题，帮你判断下一步该怎么走。" },
+      intake_collect: { title: "整理你的需求", detail: "收集目标、背景和限制，形成清晰的沟通摘要。" },
+      quote_request_collect: { title: "准备报价信息", detail: "先补齐范围、预算和时间要求，再交给真人确认。" },
+      material_delivery: { title: "查找公开资料", detail: "提供与你的问题相关的公开文档和可下载内容。" },
+      scheduling_request: { title: "提交预约意向", detail: "记录希望沟通的主题和时间，不擅自修改真人日程。" },
+      human_handoff: { title: "申请真人接手", detail: "需要判断或承诺时，带着当前上下文转给真人。" },
+      paid_unlock: { title: "继续深入沟通", detail: "基础交流后，可按需要选择更长对话或人工评估。" },
     };
   }
 
   return {
-    faq_reply: "FAQ replies",
-    lead_qualify: "Lead qualification",
-    intake_collect: "Intake collection",
-    quote_request_collect: "Quote request intake",
-    material_delivery: "Material delivery",
-    scheduling_request: "Scheduling intake",
-    human_handoff: "Human handoff",
-    paid_unlock: "Paid continuation",
+    faq_reply: { title: "Answer common questions", detail: "Explain products, services, and ways to work together using published information." },
+    lead_qualify: { title: "Check whether there is a fit", detail: "Ask a few focused questions and suggest the clearest next step." },
+    intake_collect: { title: "Organize your request", detail: "Capture goals, context, and constraints in a useful summary." },
+    quote_request_collect: { title: "Prepare a quote request", detail: "Collect scope, budget, and timing before a human confirms anything." },
+    material_delivery: { title: "Find public resources", detail: "Surface public documents and downloads that match your question." },
+    scheduling_request: { title: "Request a meeting", detail: "Record the topic and preferred timing without changing anyone's calendar." },
+    human_handoff: { title: "Ask for a human", detail: "Carry the conversation context to a human when judgment or commitment is needed." },
+    paid_unlock: { title: "Continue with deeper help", detail: "Move from basic questions to a longer conversation or human review when needed." },
   };
-}
-
-function buildGroupActivationLabels(locale: Locale) {
-  return locale === "zh"
-    ? {
-        mention_only: "仅 mention",
-        reply_or_mention: "reply 或 mention",
-        always: "始终响应",
-      }
-    : {
-        mention_only: "mention only",
-        reply_or_mention: "reply or mention",
-        always: "always on",
-      };
 }
 
 function buildDeliverableKindLabels(locale: Locale) {
@@ -612,6 +378,35 @@ function buildDeliverableSourceLabels(locale: Locale) {
 
 const copy = {
   zh: {
+    chatNav: "开始对话",
+    aboutNav: "能帮什么",
+    resourcesNav: "公开资料",
+    trustNav: "隐私与真人",
+    representing: (ownerName: string) => `${ownerName} 的数字代表`,
+    publicRepresentative: "公开数字代表",
+    aiDisclosure: "由 AI 回复",
+    humanAvailable: "必要时可转真人",
+    startEyebrow: "从这里开始",
+    startTitle: "直接说说你想解决什么",
+    startSummary: (name: string) => `${name} 会先理解问题，再根据已发布资料回答或帮你找到下一步。`,
+    startChat: "开始提问",
+    capabilitiesEyebrow: "我可以帮你",
+    capabilitiesTitle: "把问题推进到清楚的下一步",
+    capabilitiesSummary: (ownerName: string) => `先处理适合公开回答和标准化收集的事项；需要 ${ownerName} 判断或承诺时，再转交真人。`,
+    resourcesEyebrow: "公开资料",
+    resourcesTitle: "你可以直接查看和使用的内容",
+    resourcesSummary: "回答会优先引用这些公开信息；与当前问题相关的来源也会显示在消息下方。",
+    demoEyebrow: "本地演示",
+    demoTitle: "验证充值流程",
+    demoSummary: "这里只用于开发测试，不会产生真实扣款或正式服务权益。",
+    trustItems: [
+      "这是 AI 数字代表，AI 和真人消息会明确区分。",
+      "回答只使用已发布、允许公开使用的资料，并在相关回答下展示来源。",
+      "不会读取主人的私人文件、账号或工作区；报价、承诺和日程需要真人确认。",
+    ],
+    handoffVisitorTitle: (ownerName: string) => `需要 ${ownerName} 本人判断？`,
+    addHandoffContext: "回到对话并补充需求",
+    footerDisclosure: (name: string) => `${name} 是由 Delegate 提供支持的公开数字代表。`,
     brandTagline: "Web-first 公开代表档案",
     menuAriaLabel: "代表页分区",
     languageAriaLabel: "语言切换",
@@ -628,6 +423,9 @@ const copy = {
     ],
     homeLabel: "官网",
     dashboardLabel: "Dashboard",
+    loginRegisterLabel: "登录 / 注册",
+    signedInLabel: "已登录",
+    logoutLabel: "退出",
     profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",
@@ -636,29 +434,30 @@ const copy = {
       "这个代表只会记住属于本代表范围内的公开安全互动，不会读取主人的私有工作区、私有文件或私有账号。",
     startOnWeb: "在网页中开始",
     viewControlPlane: "查看控制台",
+    reviewBoundary: "查看能力边界",
     frontDeskEyebrow: "AI 接待前台",
     frontDeskTitle: "先接住高频、标准化、可定价的对话",
     frontDeskSummary: (name: string) =>
-      `${name} 不替代 owner 本人，而是先把能回答、该收费、要请示、需转接的请求分流清楚。`,
+      `${name} 不替代真人本人，而是先把能回答、该收费、要请示、需转接的请求分流清楚。`,
     frontDeskSteps: [
       { label: "Answer", title: "能回答的先回答", body: "公开 FAQ、资料和服务边界先由代表说明，减少重复解释。" },
-      { label: "Charge", title: "该收费的先收费", body: "深度服务和优先响应会进入网页服务档位、充值预览和 invoice 信号。" },
-      { label: "Ask", title: "需要拍板的先请示", body: "敏感动作和高价值判断会进入 approval 或 owner inbox，而不是自动越权。" },
-      { label: "Handoff", title: "需要人时再转接", body: "真正需要 owner 的请求会带着上下文进入人工转接流程。" },
+      { label: "Charge", title: "该收费的先收费", body: "深度服务和优先响应会进入网页服务档位、充值预览和付款记录。" },
+      { label: "Ask", title: "需要拍板的先请示", body: "敏感动作和高价值判断会进入审批或待处理请求，而不是自动越权。" },
+      { label: "Human", title: "需要人时再转接", body: "真正需要真人的请求会带着上下文进入人工转接流程。" },
     ],
-    rechargeEyebrow: "Agent Wallet",
+    rechargeEyebrow: "代表余额",
     rechargeTitle: "这是给当前数字代表充值和继续服务的入口",
     rechargeSummary: (name: string) =>
       `${name} 的余额、服务档位和平台入口应该在同一个公开页面里被看清楚。`,
     agentWalletEyebrow: "Recharge scope",
-    agentWalletTitle: "余额属于这个 Agent，不是平台通用余额",
+    agentWalletTitle: "余额只给这个代表用，不是平台通用钱包",
     agentWalletCopy: (name: string) =>
-      `AMN 的目标模型是让用户给具体 Agent 充值。当前 ${name} 已接入 mock recharge 闭环：创建 RechargeOrder、模拟支付成功、写入 User Wallet 和 WalletLedgerEntry；真实 Stripe、微信、支付宝收款仍需接入正式 provider。`,
-    agentWalletCurrentChip: "当前：mock recharge",
-    webFirstChip: "Web first",
-    amnPayRoadmapChip: "AMN Pay roadmap",
+      `当前 ${name} 已经可以在网页里创建演示充值单、模拟支付成功，并把余额记到当前访问者身份上。真实收款上线前，还需要接入 Stripe、微信或支付宝。`,
+    agentWalletCurrentChip: "当前：演示充值",
+    webFirstChip: "网页优先",
+    amnPayRoadmapChip: "正式支付待接入",
     balanceDisclosure: (name: string) =>
-      `充值或购买的服务余额仅用于 ${name} 这个数字代表的服务，不代表进入 owner 私人工作区，也不会自动授权其它 Agent。`,
+      `充值或购买的服务余额仅用于 ${name} 这个数字代表的服务，不代表进入真人的私人工作区，也不会自动授权其它代表。`,
     rechargeCta: "立即充值 / 继续服务",
     platformAccountsEyebrow: "Platform accounts",
     platformAccountsTitle: "跨平台入口汇聚",
@@ -667,9 +466,9 @@ const copy = {
     platformRoadmap: "roadmap",
     platformWebDetail: "第一版主入口。用户先在网页代表页完成理解、试聊、服务档位预览和转接。",
     platformTelegramDetail: "后续消息入口。若未来提供 Telegram 内数字服务，会遵循 Telegram Stars 规则。",
-    platformWhatsAppDetail: "未来可作为消息入口，拉起统一 AMN recharge 页面。",
-    platformFeishuDetail: "未来可作为企业协作入口，余额与计费仍归属当前 Agent。",
-    platformWeComDetail: "未来可作为企业微信入口，沿用同一 Agent Wallet 语义。",
+    platformWhatsAppDetail: "未来可作为消息入口，把用户带回同一个网页充值和服务入口。",
+    platformFeishuDetail: "未来可作为企业协作入口，余额与计费仍归属当前代表。",
+    platformWeComDetail: "未来可作为企业微信入口，余额仍只归属当前代表。",
     openPlatform: "打开",
     trustProofEyebrow: "Proof + QR",
     trustProofTitle: "评分、来源和二维码占位",
@@ -680,7 +479,7 @@ const copy = {
     claimStatusChip: "claimed demo",
     publicSourcesChip: "公开来源",
     refundDisclosure:
-      "数字服务充值通常用于当前 Agent 的持续服务，原则上不作为一次性礼物处理；具体退款规则以后应在正式 AMN Pay 页面清楚展示。",
+      "数字服务充值通常用于当前代表的持续服务，原则上不作为一次性礼物处理；具体退款规则以后应在正式支付页面清楚展示。",
     signalCards: {
       freeRepliesLabel: "免费回复",
       freeRepliesDetail: "首次接触阶段能被代表独立接住的免费深度。",
@@ -691,9 +490,9 @@ const copy = {
       skillPacksLabel: "技能包",
       skillPacksDetail: "已启用且进入代表运行时的 skill pack 数量。",
     },
-    trustEyebrow: "Trust Interface",
+    trustEyebrow: "隐私与边界",
     trustSummary: "公开能力、拒绝范围、升级路径和计费方式都不应该藏在对话里。",
-    trustTitle: "用户一进来就该先看到边界和契约",
+    trustTitle: "你在对话前应该知道这些",
     allowedEyebrow: "Allowed",
     allowedTitle: "代表会做什么",
     allowList: ["回答 FAQ", "收集合作/报价/预约信息", "发公开资料", "发起人工转接", "提示网页服务升级"],
@@ -703,12 +502,12 @@ const copy = {
     contractEyebrow: "Conversation contract",
     contractTitle: "免费、升级和转接规则",
     contractCopy: (limit: number) => `免费规则：前 ${limit} 条回复适合基础问答与资料领取；更深的合作判断、报价采集和预约意向会引导到付费续用或人工转接。`,
-    publicRuntimeLabel: "public runtime",
-    privateDraftLabel: "private draft",
-    handoffReadyLabel: "handoff ready",
+    publicRuntimeLabel: "公开运行中",
+    privateDraftLabel: "草稿未公开",
+    handoffReadyLabel: "可转人工",
     contractFootnote: "记忆边界：只会记住这个代表范围内的公开安全互动，不会读取主人的私有工作区、私有文件或私有账号。",
     skillsEyebrow: "Skill Sources",
-    skillsSummary: "参考 OpenClaw 的 ClawHub 习惯后，这里把 builtin 与 registry-backed skill packs 分开，并强调越权永远不被允许。",
+    skillsSummary: "这里把内置能力和外部技能包分开展示：可以扩展能力，但不能扩大权限。",
     skillsTitle: "技能包可以有来源，但不能有越权",
     declaredSkillsEyebrow: "Declared skills",
     skillsCountChip: (count: number) => `${count} skills`,
@@ -717,31 +516,41 @@ const copy = {
     trackedChip: (count: number) => `${count} tracked`,
     skillPacksTitle: "已安装来源与能力标签",
     builtinLabel: "Built-in",
-    executesCodeNote: "This pack executes code and would require extra review.",
-    declarativeNote: "This pack is currently modeled as declarative/non-privileged for public runtime safety.",
+    executesCodeNote: "这个技能包会执行代码，上线前需要额外审核。",
+    declarativeNote: "这个技能包目前只作为能力说明，不会自动获得额外权限。",
     knowledgeEyebrow: "Knowledge Pack",
-    knowledgeSummary: "代表先从结构化知识里拿答案，再决定下一步是继续回答、收集 intake 还是升级转接。",
+    knowledgeSummary: "代表先从结构化知识里拿答案，再决定下一步是继续回答、收集需求还是升级转接。",
     knowledgeTitle: "公开知识包先于自由发挥",
     faqTitle: "高频标准答案",
     materialsEyebrow: "Materials",
     materialsTitle: "可直接投递的公开材料",
     openMaterial: "打开资料",
+    materialPreview: {
+      close: "关闭",
+      download: "下载原文",
+      noDownload: "暂无公开下载",
+      open: "打开资料",
+      summaryLabel: "公开摘要",
+    },
     downloadDeliverable: "下载交付件",
+    materialPending: "资料已登记，但还没有可公开打开的文件链接。",
+    materialPendingChip: "资料待发布",
     publicDeliverableChip: "公开交付件",
     policiesEyebrow: "Policies",
     policiesTitle: "合作边界与响应规则",
     plansEyebrow: "Plans",
     plansSummary: "用户不该理解原始模型成本，只需要理解还能继续聊多深、能做哪些动作。",
-    plansTitle: "四档访问深度，而不是 token 定价",
-    accessLayerEyebrow: "Access layer",
-    repliesChip: (count: number) => `${count} replies`,
-    priorityHandoffChip: "priority handoff",
+    plansTitle: "四档服务深度，而不是技术计费",
+    accessLayerEyebrow: "服务深度",
+    repliesChip: (count: number) => `${count} 次回复`,
+    priorityHandoffChip: "优先转人工",
+    paidPlanHint: "可在充值区选择",
     startWebChat: "开始网页试聊",
     previewRecharge: "查看充值预览",
-    handoffEyebrow: "Human Handoff",
+    handoffEyebrow: "人工转接",
     handoffSummary: "当公开代表接近边界时，转接不该是一句拒答，而应该是一条明确可预期的升级路径。",
     handoffTitle: "主人最终接手的是高价值收件项，不是原始噪音",
-    handoffCopyEyebrow: "Handoff copy",
+    handoffCopyEyebrow: "转接说明",
     handoffCopyTitle: "对外升级说明",
     entryPointsEyebrow: "Entry points",
     entryPointsTitle: "继续对话的公开入口",
@@ -750,6 +559,35 @@ const copy = {
     inspectMemoryPolicy: "查看记忆策略",
   },
   en: {
+    chatNav: "Start chatting",
+    aboutNav: "What I can do",
+    resourcesNav: "Public resources",
+    trustNav: "Privacy & human help",
+    representing: (ownerName: string) => `Digital representative for ${ownerName}`,
+    publicRepresentative: "Public digital representative",
+    aiDisclosure: "Replies with AI",
+    humanAvailable: "Human help when needed",
+    startEyebrow: "Start here",
+    startTitle: "Tell me what you want to solve",
+    startSummary: (name: string) => `${name} will understand the request, answer from published information, and help you find the next step.`,
+    startChat: "Ask a question",
+    capabilitiesEyebrow: "How I can help",
+    capabilitiesTitle: "Move your request toward a clear next step",
+    capabilitiesSummary: (ownerName: string) => `I handle public questions and structured intake first, then involve ${ownerName} when judgment or commitment is required.`,
+    resourcesEyebrow: "Public resources",
+    resourcesTitle: "Information you can review and use directly",
+    resourcesSummary: "Replies prioritize these public sources, and relevant references appear below the answer that used them.",
+    demoEyebrow: "Local demo",
+    demoTitle: "Verify the recharge flow",
+    demoSummary: "This is for development testing only and does not create a real charge or production entitlement.",
+    trustItems: [
+      "This is an AI representative. AI and human messages are always labeled separately.",
+      "Replies use published information approved for public use, with sources shown on relevant answers.",
+      "It cannot read the owner's private files, accounts, or workspace. Quotes, commitments, and calendars require human confirmation.",
+    ],
+    handoffVisitorTitle: (ownerName: string) => `Need ${ownerName} to make the call?`,
+    addHandoffContext: "Return to chat and add context",
+    footerDisclosure: (name: string) => `${name} is a public digital representative powered by Delegate.`,
     brandTagline: "Web-first public representative profile",
     menuAriaLabel: "Representative sections",
     languageAriaLabel: "Language switcher",
@@ -766,48 +604,52 @@ const copy = {
     ],
     homeLabel: "Home",
     dashboardLabel: "Dashboard",
+    loginRegisterLabel: "Log in / Sign up",
+    signedInLabel: "Signed in",
+    logoutLabel: "Log out",
     profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",
     worksForLabel: "Who this representative works for",
     memoryDisclosure:
-      "This representative may remember prior public-safe interactions within this representative only. It does not access the owner's private workspace, private files, or private accounts.",
+      "This representative may remember prior public, safe interactions within this representative only. It does not access the owner's private workspace, private files, or private accounts.",
     startOnWeb: "Start on web",
     viewControlPlane: "View control plane",
+    reviewBoundary: "Review boundaries",
     frontDeskEyebrow: "AI front desk",
     frontDeskTitle: "Catch high-frequency, standardized, priceable conversations first",
     frontDeskSummary: (name: string) =>
-      `${name} does not replace the owner. It separates what can be answered, what should be paid, what needs approval, and what deserves human handoff.`,
+      `${name} does not replace a real person. It separates what can be answered, what should be paid, what needs approval, and what deserves human follow-up.`,
     frontDeskSteps: [
-      { label: "Answer", title: "Answer what it can", body: "Public FAQs, materials, and service boundaries are explained before the owner repeats themselves." },
-      { label: "Charge", title: "Charge when needed", body: "Deeper service and priority move into web service tiers, recharge preview, and invoice signals." },
-      { label: "Ask", title: "Ask for approval", body: "Sensitive actions and high-value judgment go through approval or owner inbox instead of silent overreach." },
-      { label: "Handoff", title: "Hand off with context", body: "Requests that truly need the owner arrive with context through the human handoff flow." },
+      { label: "Answer", title: "Answer what it can", body: "Public FAQs, materials, and service boundaries are explained before a person has to repeat themselves." },
+      { label: "Charge", title: "Charge when needed", body: "Deeper service and priority move into web service tiers, recharge preview, and payment records." },
+      { label: "Ask", title: "Ask for approval", body: "Sensitive actions and high-value judgment go through approval or a follow-up queue instead of silent overreach." },
+      { label: "Human", title: "Bring in a person", body: "Requests that truly need a human arrive with context through the follow-up flow." },
     ],
-    rechargeEyebrow: "Agent Wallet",
+    rechargeEyebrow: "Representative balance",
     rechargeTitle: "This is the recharge and continuation entry for this Digital Representative",
     rechargeSummary: (name: string) =>
       `${name}'s balance scope, service tiers, and platform entry points should be visible on one public page.`,
     agentWalletEyebrow: "Recharge scope",
-    agentWalletTitle: "Balance belongs to this Agent, not a generic platform pool",
+    agentWalletTitle: "Balance belongs to this representative, not a generic platform pool",
     agentWalletCopy: (name: string) =>
-      `AMN's target model lets users recharge a specific Agent. ${name} now has a mock recharge loop: create a RechargeOrder, simulate payment success, credit User Wallet, and write WalletLedgerEntry records; live Stripe, WeChat, and Alipay collection still require production providers.`,
-    agentWalletCurrentChip: "Today: mock recharge",
+      `${name} can now create a demo recharge order, simulate payment success, and attach the balance to the current visitor identity. Live collection still needs Stripe, WeChat, or Alipay integration before real charging.`,
+    agentWalletCurrentChip: "Today: demo recharge",
     webFirstChip: "Web first",
-    amnPayRoadmapChip: "AMN Pay roadmap",
+    amnPayRoadmapChip: "Live payments pending",
     balanceDisclosure: (name: string) =>
-      `Recharge or purchase value is scoped to ${name}'s Digital Representative service. It does not grant private workspace access and does not automatically authorize other Agents.`,
+      `Recharge or purchase value is scoped to ${name}'s Digital Representative service. It does not grant private workspace access and does not automatically authorize other representatives.`,
     rechargeCta: "Recharge / continue service",
     platformAccountsEyebrow: "Platform accounts",
     platformAccountsTitle: "Cross-platform entry points",
     platformLive: "live",
-    platformSetupNeeded: "setup needed",
+    platformSetupNeeded: "needs configuration",
     platformRoadmap: "roadmap",
-    platformWebDetail: "First-version primary entry for understanding, trial chat, service preview, and handoff.",
+    platformWebDetail: "First-version primary entry for understanding, trial chat, service preview, and human follow-up.",
     platformTelegramDetail: "Future message entry. If Telegram digital services ship later, they should follow Telegram Stars rules.",
-    platformWhatsAppDetail: "Future message entry that can open a unified AMN recharge page.",
-    platformFeishuDetail: "Future collaboration entry where balance and billing still belong to this Agent.",
-    platformWeComDetail: "Future WeCom entry using the same Agent Wallet semantics.",
+    platformWhatsAppDetail: "Future message entry that can bring users back to the same web recharge and service page.",
+    platformFeishuDetail: "Future collaboration entry where balance and billing still belong to this representative.",
+    platformWeComDetail: "Future WeCom entry where balance still belongs to this representative.",
     openPlatform: "Open",
     trustProofEyebrow: "Proof + QR",
     trustProofTitle: "Rating, source, and QR placeholder",
@@ -818,7 +660,7 @@ const copy = {
     claimStatusChip: "claimed demo",
     publicSourcesChip: "public sources",
     refundDisclosure:
-      "Digital service recharge is generally scoped to ongoing service from this Agent, not treated as a one-time gift. Formal refund rules should be shown clearly on the future AMN Pay page.",
+      "Digital service recharge is generally scoped to ongoing service from this representative, not treated as a one-time gift. Formal refund rules should be shown clearly on the future payment page.",
     signalCards: {
       freeRepliesLabel: "Free replies",
       freeRepliesDetail: "The free depth this representative can absorb in first-contact mode.",
@@ -827,26 +669,26 @@ const copy = {
       knowledgeItemsLabel: "Knowledge items",
       knowledgeItemsDetail: "The public knowledge pack formed by FAQs, materials, and policies.",
       skillPacksLabel: "Skill packs",
-      skillPacksDetail: "Enabled packs that actually enter the representative runtime.",
+      skillPacksDetail: "Enabled packs that are available to this representative.",
     },
-    trustEyebrow: "Trust Interface",
+    trustEyebrow: "Privacy and boundaries",
     trustSummary: "Capabilities, refusals, escalation, and pricing should be visible before the conversation goes deep.",
-    trustTitle: "People should see the contract before they see the magic",
+    trustTitle: "What you should know before chatting",
     allowedEyebrow: "Allowed",
     allowedTitle: "What this representative will do",
-    allowList: ["Answer FAQs", "Collect collaboration, quote, and scheduling details", "Deliver public materials", "Create safe handoff requests", "Offer web service upgrades"],
+    allowList: ["Answer FAQs", "Collect collaboration, quote, and scheduling details", "Deliver public materials", "Create safe follow-up requests", "Offer web service upgrades"],
     notAllowedEyebrow: "Not allowed",
     notAllowedTitle: "What this representative will not do",
-    denyList: ["Access private file systems", "Read the owner's private memory", "Log into owner accounts", "Change the real calendar directly", "Make irreversible commercial commitments"],
+    denyList: ["Access private file systems", "Read private memory", "Log into private accounts", "Change the real calendar directly", "Make irreversible commercial commitments"],
     contractEyebrow: "Conversation contract",
-    contractTitle: "Free scope, upgrade rules, and handoff policy",
-    contractCopy: (limit: number) => `The first ${limit} replies are optimized for foundational questions and materials. Deeper collaboration judgment, quote intake, and scheduling move into paid continuation or human handoff.`,
-    publicRuntimeLabel: "public runtime",
-    privateDraftLabel: "private draft",
-    handoffReadyLabel: "handoff ready",
-    contractFootnote: "Memory boundary: this representative only keeps public-safe interaction context inside this representative. It does not read the owner's private workspace, files, or accounts.",
+    contractTitle: "Free scope, upgrade rules, and human follow-up policy",
+    contractCopy: (limit: number) => `The first ${limit} replies are optimized for foundational questions and materials. Deeper collaboration judgment, quote intake, and scheduling move into paid continuation or human follow-up.`,
+    publicRuntimeLabel: "publicly active",
+    privateDraftLabel: "draft only",
+    handoffReadyLabel: "human follow-up ready",
+    contractFootnote: "Memory boundary: this representative only keeps public, safe interaction context inside this representative. It does not read private workspace files or accounts.",
     skillsEyebrow: "Skill Sources",
-    skillsSummary: "Borrowing the best ClawHub habits from OpenClaw, Delegate separates builtin and registry-backed packs while keeping privilege boundaries explicit.",
+    skillsSummary: "Delegate separates built-in abilities from external skill packs, while keeping permission boundaries explicit.",
     skillsTitle: "Skill packs can have sources, but they cannot have authority",
     declaredSkillsEyebrow: "Declared skills",
     skillsCountChip: (count: number) => `${count} skills`,
@@ -856,30 +698,40 @@ const copy = {
     skillPacksTitle: "Installed sources and capability tags",
     builtinLabel: "Built-in",
     executesCodeNote: "This pack executes code and would require extra review.",
-    declarativeNote: "This pack is currently modeled as declarative and non-privileged for public-runtime safety.",
+    declarativeNote: "This pack currently describes capabilities only and does not receive extra permissions automatically.",
     knowledgeEyebrow: "Knowledge Pack",
-    knowledgeSummary: "The representative should answer from structured knowledge first, then decide whether to continue, collect intake, or escalate.",
+    knowledgeSummary: "The representative should answer from structured knowledge first, then decide whether to continue, collect details, or escalate.",
     knowledgeTitle: "Structured public knowledge comes before improvisation",
     faqTitle: "High-frequency answers",
     materialsEyebrow: "Materials",
     materialsTitle: "Public materials that can be delivered directly",
     openMaterial: "Open material",
+    materialPreview: {
+      close: "Close",
+      download: "Download original",
+      noDownload: "No public download yet",
+      open: "Open material",
+      summaryLabel: "Public summary",
+    },
     downloadDeliverable: "Download deliverable",
+    materialPending: "This material is registered, but there is no public file link yet.",
+    materialPendingChip: "Pending public file",
     publicDeliverableChip: "Public deliverable",
     policiesEyebrow: "Policies",
     policiesTitle: "Boundary and response rules",
     plansEyebrow: "Plans",
     plansSummary: "Users should understand how deep they can go and what actions unlock next, not the raw model cost underneath.",
-    plansTitle: "Four access layers instead of token pricing",
-    accessLayerEyebrow: "Access layer",
+    plansTitle: "Four service depths instead of technical pricing",
+    accessLayerEyebrow: "Service depth",
     repliesChip: (count: number) => `${count} replies`,
-    priorityHandoffChip: "priority handoff",
+    priorityHandoffChip: "priority human follow-up",
+    paidPlanHint: "Choose in recharge section",
     startWebChat: "Start web chat",
     previewRecharge: "Preview recharge",
-    handoffEyebrow: "Human Handoff",
-    handoffSummary: "When the public representative reaches its boundary, escalation should feel like a predictable workflow instead of a vague refusal.",
-    handoffTitle: "The owner should receive high-value inbox items, not raw noise",
-    handoffCopyEyebrow: "Handoff copy",
+    handoffEyebrow: "Human follow-up",
+    handoffSummary: "When the public representative reaches its boundary, escalation should feel like a predictable path instead of a vague refusal.",
+    handoffTitle: "A person should receive high-value follow-up items, not raw noise",
+    handoffCopyEyebrow: "Follow-up copy",
     handoffCopyTitle: "Public escalation copy",
     entryPointsEyebrow: "Entry points",
     entryPointsTitle: "Public paths to continue the conversation",

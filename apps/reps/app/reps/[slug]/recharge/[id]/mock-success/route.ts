@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   completeMockRechargeOrder,
-  getRepresentativeSetupSnapshot,
+  getPublicRepresentativeRuntime,
 } from "@delegate/web-data";
 
 export async function POST(
@@ -12,10 +12,8 @@ export async function POST(
   const { slug, id } = await params;
 
   try {
-    const representative = await getRepresentativeSetupSnapshot(slug);
-    if (!representative) {
-      return NextResponse.json({ error: "Representative not found." }, { status: 404 });
-    }
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") return NextResponse.json({ error: "Representative is not publicly available." }, { status: runtime.status === "paused" ? 423 : 404 });
 
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const rechargeOrder = await completeMockRechargeOrder(id, {
@@ -27,10 +25,10 @@ export async function POST(
 
     return NextResponse.json({ rechargeOrder });
   } catch (error) {
+    console.error("Failed to complete public mock recharge.", error);
     return NextResponse.json(
       {
-        error:
-          error instanceof Error ? error.message : "Failed to complete public mock recharge.",
+        error: "模拟支付确认失败，请刷新后重试；如果问题持续，请联系代表主人检查支付配置。",
       },
       { status: 400 },
     );

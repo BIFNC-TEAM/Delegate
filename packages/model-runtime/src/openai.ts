@@ -18,6 +18,10 @@ export async function generateOpenAIResponse(params: {
     apiKey: params.env.openai.apiKey,
     ...(params.env.openai.baseUrl ? { baseURL: params.env.openai.baseUrl } : {}),
     timeout: params.env.timeoutMs,
+    // The conversation worker owns retries and fallback behavior. SDK-level
+    // retries multiply the configured timeout and can outlive the public
+    // chat event stream, making a recoverable provider delay look permanent.
+    maxRetries: 0,
   });
 
   const response = await client.responses.create({

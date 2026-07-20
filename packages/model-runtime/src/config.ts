@@ -14,6 +14,11 @@ const envSchema = z.object({
   DELEGATE_OPENAI_OUTPUT_COST_USD_PER_1M_TOKENS: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_BASE_URL: z.string().optional(),
+  DELEGATE_BAILIAN_MODEL: z.string().optional(),
+  DELEGATE_BAILIAN_INPUT_COST_USD_PER_1M_TOKENS: z.string().optional(),
+  DELEGATE_BAILIAN_OUTPUT_COST_USD_PER_1M_TOKENS: z.string().optional(),
+  DELEGATE_BAILIAN_API_KEY: z.string().optional(),
+  DELEGATE_BAILIAN_BASE_URL: z.string().optional(),
   DELEGATE_ANTHROPIC_MODEL: z.string().optional(),
   DELEGATE_ANTHROPIC_INPUT_COST_USD_PER_1M_TOKENS: z.string().optional(),
   DELEGATE_ANTHROPIC_OUTPUT_COST_USD_PER_1M_TOKENS: z.string().optional(),
@@ -32,6 +37,11 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
   const openaiModel = normalizeOptionalString(parsed.DELEGATE_OPENAI_MODEL) ?? "gpt-5-mini";
   const openaiApiKey = normalizeOptionalString(parsed.OPENAI_API_KEY);
   const openaiBaseUrl = normalizeOptionalString(parsed.OPENAI_BASE_URL);
+  const bailianModel = normalizeOptionalString(parsed.DELEGATE_BAILIAN_MODEL) ?? "qwen-plus";
+  const bailianApiKey = normalizeOptionalString(parsed.DELEGATE_BAILIAN_API_KEY);
+  const bailianBaseUrl =
+    normalizeOptionalString(parsed.DELEGATE_BAILIAN_BASE_URL) ??
+    "https://dashscope.aliyuncs.com/compatible-mode/v1";
   const anthropicModel =
     normalizeOptionalString(parsed.DELEGATE_ANTHROPIC_MODEL) ?? "claude-sonnet-4-5";
   const anthropicApiKey = normalizeOptionalString(parsed.ANTHROPIC_API_KEY);
@@ -39,6 +49,10 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
   const openaiPricing = buildPricing(
     parsed.DELEGATE_OPENAI_INPUT_COST_USD_PER_1M_TOKENS,
     parsed.DELEGATE_OPENAI_OUTPUT_COST_USD_PER_1M_TOKENS,
+  );
+  const bailianPricing = buildPricing(
+    parsed.DELEGATE_BAILIAN_INPUT_COST_USD_PER_1M_TOKENS,
+    parsed.DELEGATE_BAILIAN_OUTPUT_COST_USD_PER_1M_TOKENS,
   );
   const anthropicPricing = buildPricing(
     parsed.DELEGATE_ANTHROPIC_INPUT_COST_USD_PER_1M_TOKENS,
@@ -49,6 +63,7 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
   const providerSupported = typeof resolvedProvider !== "undefined";
   const fallbackSupported = !fallbackProvider || typeof resolvedFallbackProvider !== "undefined";
   const openaiReady = Boolean(openaiApiKey);
+  const bailianReady = Boolean(bailianApiKey);
   const anthropicReady = Boolean(anthropicApiKey);
 
   if (!enabled) {
@@ -65,6 +80,12 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
         pricing: openaiPricing,
         ...(openaiApiKey ? { apiKey: openaiApiKey } : {}),
         ...(openaiBaseUrl ? { baseUrl: openaiBaseUrl } : {}),
+      },
+      bailian: {
+        model: bailianModel,
+        pricing: bailianPricing,
+        ...(bailianApiKey ? { apiKey: bailianApiKey } : {}),
+        ...(bailianBaseUrl ? { baseUrl: bailianBaseUrl } : {}),
       },
       anthropic: {
         model: anthropicModel,
@@ -90,6 +111,12 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
         ...(openaiApiKey ? { apiKey: openaiApiKey } : {}),
         ...(openaiBaseUrl ? { baseUrl: openaiBaseUrl } : {}),
       },
+      bailian: {
+        model: bailianModel,
+        pricing: bailianPricing,
+        ...(bailianApiKey ? { apiKey: bailianApiKey } : {}),
+        ...(bailianBaseUrl ? { baseUrl: bailianBaseUrl } : {}),
+      },
       anthropic: {
         model: anthropicModel,
         pricing: anthropicPricing,
@@ -102,10 +129,12 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
   if (
     !isProviderReady(resolvedProvider, {
       openaiReady,
+      bailianReady,
       anthropicReady,
     }) &&
     !isProviderReady(resolvedFallbackProvider, {
       openaiReady,
+      bailianReady,
       anthropicReady,
     })
   ) {
@@ -121,6 +150,11 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
         model: openaiModel,
         pricing: openaiPricing,
         ...(openaiBaseUrl ? { baseUrl: openaiBaseUrl } : {}),
+      },
+      bailian: {
+        model: bailianModel,
+        pricing: bailianPricing,
+        ...(bailianBaseUrl ? { baseUrl: bailianBaseUrl } : {}),
       },
       anthropic: {
         model: anthropicModel,
@@ -144,6 +178,12 @@ export function resolveModelRuntimeEnv(env: NodeJS.ProcessEnv = process.env): Mo
       ...(openaiApiKey ? { apiKey: openaiApiKey } : {}),
       ...(openaiBaseUrl ? { baseUrl: openaiBaseUrl } : {}),
     },
+    bailian: {
+      model: bailianModel,
+      ...(bailianApiKey ? { apiKey: bailianApiKey } : {}),
+      pricing: bailianPricing,
+      ...(bailianBaseUrl ? { baseUrl: bailianBaseUrl } : {}),
+    },
     anthropic: {
       model: anthropicModel,
       ...(anthropicApiKey ? { apiKey: anthropicApiKey } : {}),
@@ -166,6 +206,7 @@ export function resolveProviderAttemptOrder(env: ModelRuntimeEnv): ModelProvider
   return ordered.filter((provider) =>
     isProviderReady(provider, {
       openaiReady: Boolean(env.openai.apiKey),
+      bailianReady: Boolean(env.bailian.apiKey),
       anthropicReady: Boolean(env.anthropic.apiKey),
     }),
   );
@@ -177,7 +218,7 @@ function normalizeOptionalString(value: string | undefined): string | undefined 
 }
 
 function normalizeProvider(value: string | undefined): ModelProvider | undefined {
-  if (value === "openai" || value === "anthropic") {
+  if (value === "openai" || value === "bailian" || value === "anthropic") {
     return value;
   }
 
@@ -230,6 +271,7 @@ function isProviderReady(
   provider: ModelProvider | undefined,
   readiness: {
     openaiReady: boolean;
+    bailianReady: boolean;
     anthropicReady: boolean;
   },
 ): boolean {
@@ -237,5 +279,9 @@ function isProviderReady(
     return false;
   }
 
-  return provider === "openai" ? readiness.openaiReady : readiness.anthropicReady;
+  if (provider === "openai") {
+    return readiness.openaiReady;
+  }
+
+  return provider === "bailian" ? readiness.bailianReady : readiness.anthropicReady;
 }

@@ -1,15 +1,25 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 
 import {
   getRepresentativeSetupSnapshot,
+  maybeSyncRepresentativeOpenVikingResources,
   updateRepresentativeSetup,
 } from "@delegate/web-data";
+
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../auth";
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const snapshot = await getRepresentativeSetupSnapshot(slug);
@@ -19,6 +29,11 @@ export async function GET(
 
     return NextResponse.json(snapshot);
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:
@@ -34,11 +49,16 @@ export async function PATCH(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const body = (await request.json()) as Record<string, unknown>;
     const snapshot = await updateRepresentativeSetup({
       representativeSlug: slug,
+      syncOpenViking: false,
       input: {
         ownerName: String(body.ownerName ?? ""),
         name: String(body.name ?? ""),
@@ -226,8 +246,20 @@ export async function PATCH(
       },
     });
 
+    after(async () => {
+      await maybeSyncRepresentativeOpenVikingResources({
+        representativeSlug: snapshot.slug,
+        trigger: "setup_update",
+      });
+    });
+
     return NextResponse.json(snapshot);
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

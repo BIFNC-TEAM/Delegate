@@ -1,0 +1,23 @@
+{
+  "name": "@delegate/conversation-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@delegate/domain": "workspace:*",
+    "@delegate/model-runtime": "workspace:*",
+    "@delegate/runtime": "workspace:*",
+    "@delegate/web-data": "workspace:*",
+    "dotenv": "^17.2.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.0"
+  }
+}

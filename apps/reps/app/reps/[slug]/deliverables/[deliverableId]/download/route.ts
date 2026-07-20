@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getRepresentativeDeliverableDownload } from "@delegate/web-data";
+import { getPublicRepresentativeRuntime, getRepresentativeDeliverableDownload } from "@delegate/web-data";
 
 export async function GET(
   _request: Request,
@@ -9,6 +9,10 @@ export async function GET(
   const { slug, deliverableId } = await params;
 
   try {
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") {
+      return NextResponse.json({ error: "Representative is not publicly available." }, { status: runtime.status === "paused" ? 423 : 404 });
+    }
     const deliverable = await getRepresentativeDeliverableDownload(slug, deliverableId, {
       publicOnly: true,
     });

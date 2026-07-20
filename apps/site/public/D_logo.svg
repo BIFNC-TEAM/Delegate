@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>D Logo</title>
+  <defs>
+    <linearGradient id="bg" x1="164" y1="96" x2="860" y2="928" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#171C26"/>
+      <stop offset="0.55" stop-color="#0F141D"/>
+      <stop offset="1" stop-color="#090D14"/>
+    </linearGradient>
+
+    <radialGradient id="bgGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(322 220) rotate(43) scale(760 580)">
+      <stop offset="0" stop-color="#252B36" stop-opacity="0.48"/>
+      <stop offset="0.55" stop-color="#111722" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#080C12" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="whiteFace" x1="292" y1="216" x2="668" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.72" stop-color="#F7F8FA"/>
+      <stop offset="1" stop-color="#E9ECF0"/>
+    </linearGradient>
+
+    <linearGradient id="fold" x1="604" y1="424" x2="484" y2="704" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F7F8FA"/>
+      <stop offset="0.36" stop-color="#CCD2DA"/>
+      <stop offset="0.70" stop-color="#AEB6C1"/>
+      <stop offset="1" stop-color="#F9FAFB"/>
+    </linearGradient>
+
+    <linearGradient id="foldShade" x1="658" y1="462" x2="520" y2="692" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#070B11" stop-opacity="0.38"/>
+      <stop offset="0.48" stop-color="#070B11" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#070B11" stop-opacity="0"/>
+    </linearGradient>
+
+    <filter id="softShadow" x="-8%" y="-8%" width="116%" height="116%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="20" stdDeviation="24" flood-color="#000000" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <!-- App icon background -->
+  <rect x="72" y="72" width="880" height="880" rx="166" fill="url(#bg)" filter="url(#softShadow)"/>
+  <rect x="72" y="72" width="880" height="880" rx="166" fill="url(#bgGlow)"/>
+
+  <!-- Stylized D mark -->
+  <path fill="url(#whiteFace)" d="
+    M293 245
+    H499
+    C653 245 759 350 759 512
+    C759 674 653 779 499 779
+    H293
+    V245
+    Z
+
+    M392 345
+    V679
+    H489
+    C580 679 653 608 653 512
+    C653 416 580 345 489 345
+    H392
+    Z" fill-rule="evenodd"/>
+
+  <!-- Inner dark counter / portal cut -->
+  <path fill="#0A0F17" d="
+    M492 393
+    C583 410 638 455 638 512
+    C638 580 578 619 492 699
+    V393
+    Z"/>
+
+  <!-- Fold ribbon highlight -->
+  <path fill="url(#fold)" d="
+    M492 699
+    C570 626 638 585 638 512
+    C638 485 626 458 606 437
+    C668 496 675 607 594 688
+    C560 722 525 751 492 779
+    V699
+    Z"/>
+
+  <!-- Fold shadow overlay -->
+  <path fill="url(#foldShade)" d="
+    M606 437
+    C646 480 656 548 625 608
+    C602 652 557 692 492 747
+    V699
+    C570 626 638 585 638 512
+    C638 485 626 458 606 437
+    Z"/>
+
+  <!-- Left vertical face refinement -->
+  <path fill="#FFFFFF" opacity="0.94" d="M293 245H392V779H293V245Z"/>
+</svg>

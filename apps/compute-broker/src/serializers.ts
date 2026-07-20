@@ -103,10 +103,12 @@ export function mapBrowserTransportKindFromDb(value: string) {
   return value.toLowerCase() as BrowserTransportKind;
 }
 
-export function mapBrowserTransportKindToDb(
-  value: "playwright" | "openai_computer" | "claude_computer_use",
-) {
-  return value.toUpperCase() as "PLAYWRIGHT" | "OPENAI_COMPUTER" | "CLAUDE_COMPUTER_USE";
+export function mapBrowserTransportKindToDb(value: BrowserTransportKind) {
+  return value.toUpperCase() as
+    | "PLAYWRIGHT"
+    | "OPENAI_COMPUTER"
+    | "CLAUDE_COMPUTER_USE"
+    | "OPENCODE_COMPUTER_USE";
 }
 
 export function mapBrowserSessionStatusFromDb(value: string) {

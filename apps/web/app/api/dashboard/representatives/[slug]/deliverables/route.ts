@@ -4,12 +4,20 @@ import {
   getRepresentativeDeliverables,
   upsertRepresentativeDeliverable,
 } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../auth";
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const snapshot = await getRepresentativeDeliverables(slug);
@@ -19,6 +27,11 @@ export async function GET(
 
     return NextResponse.json(snapshot);
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Failed to load deliverables.",
@@ -33,6 +46,10 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const body = await request.json().catch(() => ({}));
@@ -43,6 +60,11 @@ export async function POST(
 
     return NextResponse.json({ deliverable });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Failed to create deliverable.",

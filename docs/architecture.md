@@ -56,8 +56,8 @@ For the next-phase target architecture, including the planned isolated compute p
 
 ## Core runtime loop
 
-1. Telegram message enters through private chat or a clearly addressed group mention.
-2. Runtime resolves the representative, channel, and conversation state.
+1. A web, Matrix, or Telegram message enters through its channel adapter.
+2. Runtime resolves the audience identity, representative, long-lived channel conversation, and active episode.
 3. Inquiry is classified into a narrow intent such as FAQ, pricing, materials, scheduling, or handoff.
 4. `Action Gate` checks whether the next action is allowed, ask-first, or denied.
 5. Conversation contract decides whether the message stays in free mode, should collect structured intake, or should trigger a paid unlock.
@@ -68,13 +68,18 @@ For the next-phase target architecture, including the planned isolated compute p
    - create human handoff
 7. Runtime can recall representative-scoped resources, contact-scoped public-safe memories, and representative agent patterns from OpenViking before composing the next answer.
 8. Runtime can commit safe session context after useful turns, collector completions, paid unlocks, and handoff outcomes.
-9. Every step emits an audit event for analytics and future owner review.
+9. The inbound message, generation run, and outbox event are written transactionally with channel idempotency keys.
+10. Every step emits an audit event for analytics and future owner review.
+
+The channel-neutral message, episode, version, Matrix, and human-control design is documented in [conversation-platform.md](./conversation-platform.md).
 
 ## Data model summary
 
 ### Representative
 
 Owns identity, tone, public boundaries, pricing, public knowledge, allowed skills, and handoff policy.
+
+An Owner owns zero or more Representatives. Each representative has an editable working configuration and zero or more immutable `RepresentativeVersion` records. Dashboard setup reads the working configuration; public pages and conversation runtimes read the active or conversation-pinned published version. This prevents unpublished edits from changing live conversations.
 
 ### Public Knowledge Pack
 

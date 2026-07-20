@@ -42,7 +42,7 @@ Delegate currently includes these working surfaces and services:
 
 - **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
 - **Public representative app** in `apps/reps`, including representative profiles, service tiers, web chat, recharge-entry modules, and signed public-chat session state.
-- **Owner dashboard** in `apps/web`, covering representative health, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, and workflow state.
+- **Owner dashboard** in `apps/web`, covering representative health, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, and workflow state.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and shared runtime policy, kept as future channel infrastructure rather than the first Delegate product surface.
 - **AMN wallet control plane** covering internal wallet ledger entries, mock recharge, Agent token purchase, usage charging, Creator 20% revenue policy, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
@@ -51,12 +51,13 @@ Delegate currently includes these working surfaces and services:
 - **OpenViking integration** for representative-scoped public resources, recall, session commit traces, and safe memory previews.
 - **ClawHub registry primitives** for future non-privileged representative skill packs.
 
-The two durable workflow kinds implemented today are:
+The durable workflow kinds implemented today are:
 
 - `APPROVAL_EXPIRATION`
 - `HANDOFF_FOLLOW_UP`
+- `CREATOR_TRAINING_REVIEW`
 
-Temporal is already wired for those workflows through post-commit command outbox dispatch, native workflow timers, cancellation cleanup, and dashboard phase observability. Ordinary real-time chat routing still stays out of Temporal.
+Temporal is already wired for those workflows through post-commit command outbox dispatch, native workflow timers, cancellation cleanup, asynchronous training review, and dashboard phase observability. Ordinary real-time chat routing still stays out of Temporal.
 
 ## AMN Target Model
 
@@ -158,7 +159,10 @@ prisma/
 docs/
   architecture.md
   delegate-architecture-decisions.md
+  public-audience-identity.md
+  per-user-sandbox-runtime.md
   temporal-native-workflow-rfc.md
+  creator-training-loop.md
   v2-isolated-compute-plane-plan.md
   openviking-integration.md
   roadmap.md
@@ -268,6 +272,9 @@ If Temporal configuration is incomplete, Delegate falls back to `local_runner` r
 The default `.env.example` is safe for local development. Important settings:
 
 - `DATABASE_URL` points Prisma to Postgres.
+- `LOGTO_ENDPOINT`, `LOGTO_APP_ID`, `LOGTO_APP_SECRET`, `LOGTO_REDIRECT_URI`, and `LOGTO_SCOPES` enable Logto-compatible OIDC login for creator dashboard sessions.
+- `DELEGATE_AUTH_SESSION_SECRET` signs dashboard auth and callback-state cookies. Set a strong secret in production.
+- `DELEGATE_DASHBOARD_AUTH_MODE=required` forces dashboard auth in non-production environments; production always requires it.
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, and `TELEGRAM_WEBHOOK_SECRET` enable the optional Telegram bot foundation, but the first Delegate product version is web-first.
 - `REP_PUBLIC_CHAT_SESSION_SECRET` can override the public-chat cookie signing secret. If unset, the reps app falls back to `TELEGRAM_WEBHOOK_SECRET` and then a local development secret.
 - `DELEGATE_MODEL_ENABLED`, `DELEGATE_MODEL_PROVIDER`, `DELEGATE_OPENAI_MODEL`, and `DELEGATE_ANTHROPIC_MODEL` control model-backed representative replies.
@@ -276,6 +283,9 @@ The default `.env.example` is safe for local development. Important settings:
 - `COMPUTE_*` controls the broker, Docker runner, browser image, and native computer-use readiness.
 - `WORKFLOW_*` controls local-runner versus Temporal workflow execution.
 - `ARTIFACT_STORE_*` controls MinIO-backed artifact storage.
+- `KNOWLEDGE_OBJECT_STORE_*` controls private knowledge source storage. Its default bucket is fixed to `delegate-1324808004`; Tencent COS can be used through its S3-compatible endpoint with `FORCE_PATH_STYLE=false`.
+
+Knowledge files are persisted before background processing reads the original object, extracts and normalizes text, prepares retrieval chunks, and writes the document into OpenViking's vector index. An asset becomes `READY` only after source storage, extraction, and vector indexing all succeed. Archive and permanent-delete flows remove the vector index as well, preventing revoked content from remaining retrievable.
 
 When model providers are unavailable, the bot and public representative paths fall back to deterministic previews instead of failing the conversation.
 
@@ -309,8 +319,8 @@ The first product path to dogfood is the browser representative page at `http://
 
 Delegate uses the **Dispatch Editorial** direction from [DESIGN.md](./DESIGN.md):
 
-- warm paper and parchment surfaces
-- sea-ink and copper signal colors
+- light operational surfaces shared with the public site
+- teal trust/live signals with indigo automation and decision emphasis
 - editorial marketing pages
 - procedural, dense owner dashboard views
 - trust disclosures close to primary actions
@@ -321,6 +331,9 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 
 - [Architecture](./docs/architecture.md): product thesis, runtime loop, security boundary, and OpenViking rules.
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
+- [Public audience identity](./docs/public-audience-identity.md): web anonymous identity, Contact/Conversation, recharge, and sandbox linkage.
+- [Conversation platform](./docs/conversation-platform.md): channel-neutral messages, episodes, versions, human control, SSE, and Matrix Application Service boundaries.
+- [Creator training loop](./docs/creator-training-loop.md): source registry, creator feedback, suggestion workflow, review, evaluation, and rollback.
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model, outbox, timer, cancellation, and dashboard semantics.
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute and browser isolation model.
 - [OpenViking integration](./docs/openviking-integration.md): public memory and recall integration.

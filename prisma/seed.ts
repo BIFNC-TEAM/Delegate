@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 import { demoRepresentative } from "@delegate/domain";
 import {
   AudienceRole,
@@ -17,10 +15,20 @@ import {
   PolicyDecision,
   PricingPlanType,
   PrismaClient,
+  RepresentativeChannelKind,
   RepresentativeClaimStatus,
+  RepresentativeLifecycleState,
   SkillPackSource,
 } from "@prisma/client";
 import { pathToFileURL } from "node:url";
+
+try {
+  process.loadEnvFile();
+} catch (error) {
+  if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+    throw error;
+  }
+}
 
 const prisma = new PrismaClient();
 
@@ -76,7 +84,22 @@ const CONTACTS = [
 
 type ContactFixture = (typeof CONTACTS)[number];
 
-export async function seedDatabase(client: PrismaClient = prisma): Promise<void> {
+export async function seedDatabase(
+  client: PrismaClient = prisma,
+): Promise<"seeded" | "skipped"> {
+  // Compose runs the seed command after every migration check. Seed data is an
+  // initial workspace fixture, not a reset operation: once the demo
+  // representative exists, preserve working drafts, active versions, wallet
+  // balances, conversations, and every other piece of user-owned state.
+  const existingWorkspace = await client.representative.findUnique({
+    where: { slug: demoRepresentative.slug },
+    select: { id: true },
+  });
+  if (existingWorkspace) {
+    console.log(`Seed skipped: representative "${demoRepresentative.slug}" already exists.`);
+    return "skipped";
+  }
+
   const now = new Date();
   const hoursAgo = (value: number) => new Date(now.getTime() - value * 60 * 60 * 1000);
   const startOfToday = new Date(now);
@@ -340,6 +363,81 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
       });
     }
 
+    await tx.representativeChannelBinding.upsert({
+      where: {
+        representativeId_kind: {
+          representativeId: representative.id,
+          kind: RepresentativeChannelKind.WEB,
+        },
+      },
+      create: {
+        id: `rep_channel_web_${representative.id}`,
+        representativeId: representative.id,
+        kind: RepresentativeChannelKind.WEB,
+        externalUserId: `/reps/${representative.slug}`,
+        displayName: representative.displayName,
+        configuration: { publicMode: true, source: "seed" },
+      },
+      update: {
+        externalUserId: `/reps/${representative.slug}`,
+        status: "CONNECTED",
+        displayName: representative.displayName,
+        configuration: { publicMode: true, source: "seed" },
+      },
+    });
+
+    await tx.representativeChannelBinding.upsert({
+      where: {
+        representativeId_kind: {
+          representativeId: representative.id,
+          kind: RepresentativeChannelKind.TELEGRAM,
+        },
+      },
+      create: {
+        id: `rep_channel_telegram_${representative.id}`,
+        representativeId: representative.id,
+        kind: RepresentativeChannelKind.TELEGRAM,
+        externalUserId: `telegram:${representative.slug}`,
+        displayName: representative.displayName,
+        configuration: { source: "seed" },
+      },
+      update: {
+        status: "CONNECTED",
+        displayName: representative.displayName,
+        configuration: { source: "seed" },
+      },
+    });
+
+    const representativeVersion = await tx.representativeVersion.upsert({
+      where: {
+        representativeId_versionNumber: {
+          representativeId: representative.id,
+          versionNumber: 1,
+        },
+      },
+      create: {
+        id: `rep_version_${representative.id}_1`,
+        representativeId: representative.id,
+        versionNumber: 1,
+        snapshot: buildSeedRepresentativeVersionSnapshot(),
+        changeSummary: "Initial seeded representative configuration.",
+        publishedBy: "system:seed",
+      },
+      update: {
+        snapshot: buildSeedRepresentativeVersionSnapshot(),
+        changeSummary: "Initial seeded representative configuration.",
+        publishedBy: "system:seed",
+      },
+    });
+
+    await tx.representative.update({
+      where: { id: representative.id },
+      data: {
+        lifecycleState: RepresentativeLifecycleState.PUBLISHED,
+        activeVersionId: representativeVersion.id,
+      },
+    });
+
     for (const contact of CONTACTS) {
       const upsertedContact = await tx.contact.upsert({
         where: {
@@ -352,21 +450,27 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
           id: contact.id,
           representativeId: representative.id,
           telegramUserId: contact.telegramUserId,
+          channelUserId: contact.telegramUserId,
+          externalUserId: contact.telegramUserId,
           username: contact.username ?? null,
           displayName: contact.displayName,
           role: contact.role,
           stage: contact.stage,
           isPaid: contact.isPaid,
           source: contact.source,
+          sourceChannel: "telegram",
           lastSeenAt: now,
         },
         update: {
           username: contact.username ?? null,
+          channelUserId: contact.telegramUserId,
+          externalUserId: contact.telegramUserId,
           displayName: contact.displayName,
           role: contact.role,
           stage: contact.stage,
           isPaid: contact.isPaid,
           source: contact.source,
+          sourceChannel: "telegram",
           lastSeenAt: now,
         },
       });
@@ -440,7 +544,10 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
           representativeId: representative.id,
           contactId,
           telegramChatId: conversation.telegramChatId,
+          channelThreadId: conversation.telegramChatId,
+          externalConversationId: conversation.telegramChatId,
           channel: conversation.channel,
+          sourceChannel: "telegram",
           state: conversation.state,
           freeRepliesUsed: conversation.freeRepliesUsed,
           passUnlockedAt: conversation.passUnlockedAt,
@@ -450,7 +557,10 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
         },
         update: {
           contactId,
+          channelThreadId: conversation.telegramChatId,
+          externalConversationId: conversation.telegramChatId,
           channel: conversation.channel,
+          sourceChannel: "telegram",
           state: conversation.state,
           freeRepliesUsed: conversation.freeRepliesUsed,
           passUnlockedAt: conversation.passUnlockedAt,
@@ -460,6 +570,92 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
       });
 
       conversationIdsByFixtureKey.set(conversation.key, upsertedConversation.id);
+
+      const episodeId = `episode_${conversation.key}_1`;
+      const episode = await tx.conversationEpisode.upsert({
+        where: {
+          conversationId_sequence: {
+            conversationId: upsertedConversation.id,
+            sequence: 1,
+          },
+        },
+        create: {
+          id: episodeId,
+          conversationId: upsertedConversation.id,
+          representativeVersionId: representativeVersion.id,
+          sequence: 1,
+          startedAt: conversation.createdAt,
+        },
+        update: {
+          representativeVersionId: representativeVersion.id,
+          status: "ACTIVE",
+        },
+      });
+      const telegramRepresentativeBinding = await tx.representativeChannelBinding.findUniqueOrThrow({
+        where: {
+          representativeId_kind: {
+            representativeId: representative.id,
+            kind: RepresentativeChannelKind.TELEGRAM,
+          },
+        },
+      });
+      await tx.conversationChannelBinding.deleteMany({
+        where: { conversationId: upsertedConversation.id },
+      });
+      await tx.conversationChannelBinding.create({
+        data: {
+          id: `channel_${conversation.key}_telegram`,
+          conversationId: upsertedConversation.id,
+          representativeBindingId: telegramRepresentativeBinding.id,
+          kind: RepresentativeChannelKind.TELEGRAM,
+          externalConversationId: conversation.telegramChatId,
+          metadata: { source: "seed" },
+        },
+      });
+      await tx.conversationParticipant.upsert({
+        where: {
+          conversationId_kind_participantId: {
+            conversationId: upsertedConversation.id,
+            kind: "AUDIENCE",
+            participantId: contactId,
+          },
+        },
+        create: {
+          id: `participant_${conversation.key}_audience`,
+          conversationId: upsertedConversation.id,
+          kind: "AUDIENCE",
+          participantId: contactId,
+          joinedAt: conversation.createdAt,
+          metadata: { source: "seed" },
+        },
+        update: { metadata: { source: "seed" } },
+      });
+      await tx.conversationParticipant.upsert({
+        where: {
+          conversationId_kind_participantId: {
+            conversationId: upsertedConversation.id,
+            kind: "REPRESENTATIVE",
+            participantId: representative.id,
+          },
+        },
+        create: {
+          id: `participant_${conversation.key}_representative`,
+          conversationId: upsertedConversation.id,
+          kind: "REPRESENTATIVE",
+          participantId: representative.id,
+          displayName: representative.displayName,
+          joinedAt: conversation.createdAt,
+          metadata: { source: "seed" },
+        },
+        update: {
+          displayName: representative.displayName,
+          metadata: { source: "seed" },
+        },
+      });
+      await tx.conversation.update({
+        where: { id: upsertedConversation.id },
+        data: { activeEpisodeId: episode.id },
+      });
     }
 
     await tx.conversationTurn.deleteMany({
@@ -518,6 +714,42 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
           createdAt: hoursAgo(1),
         },
       ],
+    });
+
+    await tx.message.deleteMany({
+      where: {
+        conversationId: {
+          in: conversations.map((conversation) => requireConversationId(conversation.key)),
+        },
+      },
+    });
+
+    const seededTurns = await tx.conversationTurn.findMany({
+      where: {
+        conversationId: {
+          in: conversations.map((conversation) => requireConversationId(conversation.key)),
+        },
+      },
+      include: { conversation: { include: { contact: true, representative: true, channelBindings: true } } },
+    });
+    await tx.message.createMany({
+      data: seededTurns.map((turn) => ({
+        id: `message_${turn.id}`,
+        conversationId: turn.conversationId,
+        episodeId: turn.conversation.activeEpisodeId,
+        channelBindingId: turn.conversation.channelBindings[0]?.id ?? null,
+        senderType: turn.direction === "inbound" ? "AUDIENCE" : "REPRESENTATIVE",
+        senderId: turn.direction === "inbound" ? turn.conversation.contactId : turn.conversation.representativeId,
+        senderDisplayName:
+          turn.direction === "inbound"
+            ? turn.conversation.contact.displayName
+            : turn.conversation.representative.displayName,
+        text: turn.messageText,
+        content: { intent: turn.intent, summary: turn.summary, source: "seed" },
+        deliveryStatus: "SENT",
+        retentionExpiresAt: new Date(turn.createdAt.getTime() + 180 * 24 * 60 * 60 * 1000),
+        createdAt: turn.createdAt,
+      })),
     });
 
     const intakeSubmissions = [
@@ -661,7 +893,7 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
         title: "Pass",
         payload: "delegate:seed:invoice:acme-pass",
         starsAmount: 180,
-        invoiceLink: "https://t.me/invoice/acme-pass",
+        invoiceLink: null,
         telegramPaymentChargeId: "tg_charge_acme_pass",
         providerPaymentChargeId: "xtr_acme_pass",
         status: InvoiceStatus.PAID,
@@ -677,7 +909,7 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
         title: "Deep Help",
         payload: "delegate:seed:invoice:refund-deep-help",
         starsAmount: 680,
-        invoiceLink: "https://t.me/invoice/refund-deep-help",
+        invoiceLink: null,
         telegramPaymentChargeId: "tg_charge_refund_deep_help",
         providerPaymentChargeId: "xtr_refund_deep_help",
         status: InvoiceStatus.PAID,
@@ -693,7 +925,7 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
         title: "Sponsor",
         payload: "delegate:seed:invoice:sponsor-pool",
         starsAmount: 1200,
-        invoiceLink: "https://t.me/invoice/sponsor-pool",
+        invoiceLink: null,
         telegramPaymentChargeId: "tg_charge_sponsor_pool",
         providerPaymentChargeId: "xtr_sponsor_pool",
         status: InvoiceStatus.FULFILLED,
@@ -818,6 +1050,56 @@ export async function seedDatabase(client: PrismaClient = prisma): Promise<void>
       throw new Error("Expected default compute policy profile to be seeded.");
     }
   });
+
+  return "seeded";
+}
+
+function buildSeedRepresentativeVersionSnapshot(): Prisma.InputJsonObject {
+  return {
+    identity: {
+      displayName: demoRepresentative.name,
+      roleSummary: demoRepresentative.tagline,
+      tone: demoRepresentative.tone,
+      avatarUrl: null,
+      languages: [...demoRepresentative.languages],
+    },
+    publicMode: true,
+    humanInLoop: true,
+    conversation: {
+      freeReplyLimit: demoRepresentative.contract.freeReplyLimit,
+      freeScope: [...demoRepresentative.contract.freeScope],
+      paywalledIntents: [...demoRepresentative.contract.paywalledIntents],
+      handoffWindowHours: demoRepresentative.contract.handoffWindowHours,
+      handoffPrompt: demoRepresentative.handoffPrompt,
+    },
+    governance: {
+      allowedSkills: [...demoRepresentative.skills],
+      actionGate: { ...demoRepresentative.actionGate },
+    },
+    knowledge: {
+      identitySummary: demoRepresentative.knowledgePack.identitySummary,
+      faq: demoRepresentative.knowledgePack.faq.map((item) => ({ ...item })),
+      materials: demoRepresentative.knowledgePack.materials.map((item) => ({ ...item })),
+      policies: demoRepresentative.knowledgePack.policies.map((item) => ({ ...item })),
+    },
+    pricing: demoRepresentative.pricing.map((plan) => ({
+      type: mapPricingPlanType(plan.tier),
+      name: plan.name,
+      starsAmount: plan.stars,
+      summary: plan.summary,
+      includedReplies: plan.includedReplies,
+      includesPriorityHandoff: plan.includesPriorityHandoff,
+    })),
+    skills: demoRepresentative.skillPacks.map((pack) => ({
+      slug: pack.slug,
+      version: pack.version ?? null,
+      enabled: pack.enabled,
+    })),
+    channels: [
+      { kind: "WEB", status: "CONNECTED", externalUserId: `/reps/${demoRepresentative.slug}` },
+      { kind: "TELEGRAM", status: "CONNECTED", externalUserId: `telegram:${demoRepresentative.slug}` },
+    ],
+  };
 }
 
 async function upsertDefaultCapabilityPolicyProfile(
@@ -1255,9 +1537,11 @@ function isMainModule(): boolean {
 
 if (isMainModule()) {
   seedDatabase()
-    .then(async () => {
+    .then(async (result) => {
       await prisma.$disconnect();
-      console.log(`Seeded representative ${demoRepresentative.slug}.`);
+      if (result === "seeded") {
+        console.log(`Seeded representative ${demoRepresentative.slug}.`);
+      }
     })
     .catch(async (error: unknown) => {
       console.error("Failed to seed database.", error);

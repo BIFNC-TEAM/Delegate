@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
 
 import { getDashboardOverviewSnapshot } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../auth";
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
   const locale = new URL(request.url).searchParams.get("lang") === "en" ? "en" : "zh";
 
   try {
@@ -17,6 +25,11 @@ export async function GET(
 
     return NextResponse.json(snapshot);
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

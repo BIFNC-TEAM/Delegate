@@ -1,0 +1,1 @@
+ALTER TYPE "BrowserTransportKind" ADD VALUE 'OPENCODE_COMPUTER_USE';

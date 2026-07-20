@@ -11,6 +11,7 @@ import {
   resolveApprovalResponseSchema,
   type CapabilityKind,
   type BrowserExecutionMode,
+  type ComputeFilesystemMode,
   type ComputeSubagentId,
   type NativeComputerProvider,
   type ToolExecutionRequest,
@@ -25,6 +26,8 @@ import {
   type ExecutionBillingSummary,
 } from "./billing";
 import {
+  buildOpenCodeCaptureCommand,
+  buildOpenCodeComputerUseCommand,
   buildPlaywrightBrowseCommand,
   buildPlaywrightNativeCommand,
   parsePlaywrightBrowseArtifactPayload,
@@ -53,6 +56,11 @@ import { prisma } from "./prisma";
 import { evaluateExecutionRequest, loadSessionPolicyContext } from "./policy";
 import { runRunnerExecution } from "./runner";
 import {
+  createDockerSandboxProvider,
+  createSandboxProviderFromConfig,
+  type SandboxProviderLease,
+} from "./sandbox-provider";
+import {
   mapCapabilityFromDb,
   mapCapabilityToDb,
   mapRunnerTypeFromDb,
@@ -72,6 +80,7 @@ type LeasedSessionRecord = {
   conversationId: string | null;
   runnerType: string;
   runnerLeaseId: string | null;
+  sandboxLeaseId: string | null;
   containerId: string | null;
   startedAt: Date | null;
 };
@@ -109,8 +118,18 @@ type ExecutionPlan = {
   filesystemMode: PolicyExecutionContext["profile"]["filesystemMode"];
 };
 
+type SandboxLeaseForExecution = {
+  id: string;
+  provider: string;
+  providerSandboxId: string | null;
+  runnerLeaseId: string | null;
+  containerId: string | null;
+  sessionRoot: string | null;
+  sandboxIdentityId: string;
+};
+
 type BrowserCaptureSummary = {
-  transportKind: "playwright" | "openai_computer" | "claude_computer_use";
+  transportKind: "playwright" | "openai_computer" | "claude_computer_use" | "opencode_computer_use";
   profilePath?: string;
   title?: string;
   finalUrl?: string;
@@ -629,6 +648,8 @@ async function runAllowedExecution(params: {
       contactId: params.context.session.contactId ?? null,
       conversationId: params.context.session.conversationId ?? null,
       computeSessionId: leasedSession.id,
+      sandboxIdentityId: await resolveSandboxIdentityId(leasedSession),
+      sandboxLeaseId: leasedSession.sandboxLeaseId,
       toolExecutionId: execution.id,
       transportKind: runtimeResult.browserCapture?.transportKind ?? "playwright",
       requestedUrl: params.input.url ?? executionDescriptor.requestedCommand ?? "https://invalid.local/",
@@ -797,15 +818,8 @@ async function runContainerExecution(params: {
   }
 
   const executionPlan = buildExecutionPlan(params.context, params.input);
-  const runnerResult = await runRunnerExecution({
-    runnerType: mapRunnerTypeFromDb(params.leasedSession.runnerType),
-    lease: {
-      runnerType: mapRunnerTypeFromDb(params.leasedSession.runnerType),
-      leaseId: params.leasedSession.runnerLeaseId ?? params.leasedSession.id,
-      containerId: params.leasedSession.containerId,
-      containerName: params.leasedSession.containerId,
-      sessionRoot: "/delegate-session",
-    },
+  const runnerResult = await runSandboxAwareExecution({
+    leasedSession: params.leasedSession,
     command: executionPlan.command,
     maxCommandSeconds:
       executionPlan.capability === "browser"
@@ -868,13 +882,133 @@ async function runContainerExecution(params: {
   };
 }
 
+async function runSandboxAwareExecution(params: {
+  leasedSession: LeasedSessionRecord;
+  command: string;
+  maxCommandSeconds: number;
+  filesystemMode: ComputeFilesystemMode;
+  workingDirectory?: string | null | undefined;
+  sessionId: string;
+  executionId: string;
+}) {
+  const sandboxLease = await loadSandboxLeaseForExecution(params.leasedSession);
+  const runnerType = mapRunnerTypeFromDb(params.leasedSession.runnerType);
+  if (!sandboxLease) {
+    return runRunnerExecution({
+      runnerType,
+      lease: {
+        runnerType,
+        leaseId: params.leasedSession.runnerLeaseId ?? params.leasedSession.id,
+        containerId: params.leasedSession.containerId,
+        containerName: params.leasedSession.containerId,
+        sessionRoot: "/delegate-session",
+      },
+      command: params.command,
+      maxCommandSeconds: params.maxCommandSeconds,
+      filesystemMode: params.filesystemMode,
+      workingDirectory: params.workingDirectory,
+      sessionId: params.sessionId,
+      executionId: params.executionId,
+    });
+  }
+
+  const providerKind = mapSandboxProviderFromDb(sandboxLease.provider);
+  const provider = await createSandboxProviderForExecution(providerKind);
+  return provider.execute({
+    runnerType,
+    lease: buildSandboxProviderLease({
+      leasedSession: params.leasedSession,
+      sandboxLease,
+      providerKind,
+    }),
+    command: params.command,
+    maxCommandSeconds: params.maxCommandSeconds,
+    filesystemMode: params.filesystemMode,
+    workingDirectory: params.workingDirectory,
+    sessionId: params.sessionId,
+    executionId: params.executionId,
+  });
+}
+
+async function createSandboxProviderForExecution(providerKind: "docker" | "daytona") {
+  if (providerKind === "docker") {
+    return createDockerSandboxProvider();
+  }
+
+  const configured = await createSandboxProviderFromConfig({
+    ...computeBrokerConfig,
+    sandboxProvider: "daytona",
+  });
+  if (configured.providerKind !== "daytona") {
+    throw new Error("Daytona sandbox provider is not configured.");
+  }
+  return configured.provider;
+}
+
+function buildSandboxProviderLease(params: {
+  leasedSession: LeasedSessionRecord;
+  sandboxLease: SandboxLeaseForExecution;
+  providerKind: "docker" | "daytona";
+}): SandboxProviderLease {
+  const runnerType = mapRunnerTypeFromDb(params.leasedSession.runnerType);
+  const providerSandboxId =
+    params.sandboxLease.providerSandboxId ??
+    params.sandboxLease.runnerLeaseId ??
+    params.leasedSession.runnerLeaseId ??
+    params.sandboxLease.id;
+
+  return {
+    id: params.sandboxLease.id,
+    provider: params.providerKind,
+    runnerType,
+    leaseId: params.sandboxLease.runnerLeaseId ?? params.leasedSession.runnerLeaseId ?? providerSandboxId,
+    providerSandboxId,
+    containerId: params.sandboxLease.containerId ?? params.leasedSession.containerId,
+    containerName: params.sandboxLease.containerId ?? params.leasedSession.containerId,
+    sessionRoot: params.sandboxLease.sessionRoot ?? "/delegate-session",
+  };
+}
+
+async function loadSandboxLeaseForExecution(
+  leasedSession: LeasedSessionRecord,
+): Promise<SandboxLeaseForExecution | null> {
+  if (!leasedSession.sandboxLeaseId) {
+    return null;
+  }
+
+  return prisma.sandboxLease.findUnique({
+    where: { id: leasedSession.sandboxLeaseId },
+    select: {
+      id: true,
+      provider: true,
+      providerSandboxId: true,
+      runnerLeaseId: true,
+      containerId: true,
+      sessionRoot: true,
+      sandboxIdentityId: true,
+    },
+  });
+}
+
+async function resolveSandboxIdentityId(leasedSession: LeasedSessionRecord) {
+  const sandboxLease = await loadSandboxLeaseForExecution(leasedSession);
+  return sandboxLease?.sandboxIdentityId ?? null;
+}
+
+function mapSandboxProviderFromDb(value: string) {
+  return value.toLowerCase() as "docker" | "daytona";
+}
+
 async function runNativeBrowserExecution(params: {
   context: PolicyExecutionContext;
   leasedSession: LeasedSessionRecord;
   executionId: string;
   input: NormalizedExecutionInput;
 }): Promise<RuntimeExecutionResult> {
-  const seed = await loadLatestNativeBrowserSeed(params.context.session.id);
+  const seed = await loadLatestNativeBrowserSeed({
+    computeSessionId: params.context.session.id,
+    sandboxIdentityId: await resolveSandboxIdentityId(params.leasedSession),
+  });
   const nativeResult = await executeNativeComputerUseLoop({
     task: params.input.task ?? "Inspect the retained browser session.",
     maxSteps: params.input.maxSteps,
@@ -886,15 +1020,8 @@ async function runNativeBrowserExecution(params: {
     screenshotMimeType: seed.screenshotMimeType,
     ...(params.input.nativeProvider ? { provider: params.input.nativeProvider } : {}),
     executeActionBatch: async ({ transportKind, actions, currentUrl }) => {
-      const runnerResult = await runRunnerExecution({
-        runnerType: mapRunnerTypeFromDb(params.leasedSession.runnerType),
-        lease: {
-          runnerType: mapRunnerTypeFromDb(params.leasedSession.runnerType),
-          leaseId: params.leasedSession.runnerLeaseId ?? params.leasedSession.id,
-          containerId: params.leasedSession.containerId,
-          containerName: params.leasedSession.containerId,
-          sessionRoot: "/delegate-session",
-        },
+      const runnerResult = await runSandboxAwareExecution({
+        leasedSession: params.leasedSession,
         command: buildPlaywrightNativeCommand({
           transportKind,
           playwrightVersion: computeBrokerConfig.browserPlaywrightVersion,
@@ -917,6 +1044,64 @@ async function runNativeBrowserExecution(params: {
       }
 
       return payload;
+    },
+    executeOpenCodeComputerUse: async (input) => {
+      const openCodeResult = await runSandboxAwareExecution({
+        leasedSession: params.leasedSession,
+        command: buildOpenCodeComputerUseCommand({
+          opencodeCommand: input.providerConfig.command ?? "opencode",
+          model: input.providerConfig.model,
+          playwrightVersion: computeBrokerConfig.browserPlaywrightVersion,
+          task: input.task,
+          maxSteps: input.maxSteps,
+          allowMutations: input.allowMutations,
+          currentUrl: input.currentUrl,
+          currentTitle: input.currentTitle,
+          textSnippet: input.textSnippet,
+          screenshotBase64: input.screenshotBase64,
+          screenshotMimeType: input.screenshotMimeType,
+        }),
+        maxCommandSeconds: Math.max(
+          params.context.profile.maxCommandSeconds,
+          computeBrokerConfig.browserMaxCommandSeconds,
+        ),
+        filesystemMode: "ephemeral_full",
+        workingDirectory: undefined,
+        sessionId: params.context.session.id,
+        executionId: params.executionId,
+      });
+
+      if (openCodeResult.exitCode !== 0) {
+        throw new SessionError(500, "opencode_browser_run_failed");
+      }
+
+      const captureResult = await runSandboxAwareExecution({
+        leasedSession: params.leasedSession,
+        command: buildOpenCodeCaptureCommand(),
+        maxCommandSeconds: Math.max(
+          params.context.profile.maxCommandSeconds,
+          computeBrokerConfig.browserMaxCommandSeconds,
+        ),
+        filesystemMode: "ephemeral_full",
+        workingDirectory: undefined,
+        sessionId: params.context.session.id,
+        executionId: `${params.executionId}:capture`,
+      });
+
+      if (captureResult.exitCode !== 0) {
+        throw new SessionError(500, "opencode_browser_capture_failed");
+      }
+
+      const payload = parsePlaywrightBrowseArtifactPayload(captureResult.stdout);
+      if (!payload) {
+        throw new SessionError(500, "opencode_browser_capture_invalid");
+      }
+
+      return {
+        capture: payload,
+        stdout: [openCodeResult.stdout, captureResult.stdout].filter(Boolean).join("\n"),
+        stderr: [openCodeResult.stderr, captureResult.stderr].filter(Boolean).join("\n"),
+      };
     },
   });
 
@@ -991,24 +1176,40 @@ async function runNativeBrowserExecution(params: {
   };
 }
 
-async function loadLatestNativeBrowserSeed(sessionId: string): Promise<{
+async function loadLatestNativeBrowserSeed(input: {
+  computeSessionId: string;
+  sandboxIdentityId?: string | null | undefined;
+}): Promise<{
   currentUrl?: string | null;
   currentTitle?: string | null;
   textSnippet?: string | null;
   screenshotBase64: string;
   screenshotMimeType: "image/png" | "image/jpeg";
 }> {
-  const browserSession = await prisma.browserSession.findUnique({
-    where: {
-      computeSessionId: sessionId,
-    },
-    include: {
-      navigations: {
-        orderBy: [{ createdAt: "desc" }],
-        take: 1,
-      },
-    },
-  });
+  const browserSession = input.sandboxIdentityId
+    ? await prisma.browserSession.findFirst({
+        where: {
+          sandboxIdentityId: input.sandboxIdentityId,
+        },
+        orderBy: [{ updatedAt: "desc" }],
+        include: {
+          navigations: {
+            orderBy: [{ createdAt: "desc" }],
+            take: 1,
+          },
+        },
+      })
+    : await prisma.browserSession.findUnique({
+        where: {
+          computeSessionId: input.computeSessionId,
+        },
+        include: {
+          navigations: {
+            orderBy: [{ createdAt: "desc" }],
+            take: 1,
+          },
+        },
+      });
 
   const latestNavigation = browserSession?.navigations[0];
   if (!browserSession || !latestNavigation?.screenshotArtifactId) {
@@ -1703,7 +1904,9 @@ function reconstructExecutionInput(execution: {
       payload?.browserMode === "native" ? "native" : "deterministic";
     const task = typeof payload?.task === "string" ? payload.task : undefined;
     const nativeProvider =
-      payload?.nativeProvider === "openai" || payload?.nativeProvider === "anthropic"
+      payload?.nativeProvider === "openai" ||
+      payload?.nativeProvider === "anthropic" ||
+      payload?.nativeProvider === "opencode"
         ? payload.nativeProvider
         : undefined;
     const maxSteps =

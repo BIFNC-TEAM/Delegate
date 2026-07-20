@@ -201,6 +201,76 @@ export function buildPlaywrightNativeCommand(params: {
   return buildPlaywrightCommand(script, params.playwrightVersion);
 }
 
+export function buildOpenCodeComputerUseCommand(params: {
+  opencodeCommand: string;
+  model?: string | null | undefined;
+  playwrightVersion: string;
+  task: string;
+  maxSteps: number;
+  allowMutations: boolean;
+  currentUrl?: string | null | undefined;
+  currentTitle?: string | null | undefined;
+  textSnippet?: string | null | undefined;
+  screenshotBase64: string;
+  screenshotMimeType: "image/png" | "image/jpeg";
+}): string {
+  const command = params.opencodeCommand.trim() || "opencode";
+  const shouldBootstrapOpenCode = command === "opencode";
+  const modelArg =
+    params.model && params.model !== "opencode/default" ? ` --model ${shellQuote(params.model)}` : "";
+  const taskMarkdown = [
+    "# Delegate OpenCode Browser Task",
+    "",
+    "You are running inside a Daytona VM sandbox. Use the local browser helper when you need to inspect or operate the retained browser session.",
+    "",
+    `Task: ${params.task}`,
+    "",
+    `Current URL: ${params.currentUrl ?? "unknown"}`,
+    `Current title: ${params.currentTitle ?? "unknown"}`,
+    `Mutation approval: ${params.allowMutations ? "allowed" : "not allowed"}`,
+    `Maximum browser action rounds: ${params.maxSteps}`,
+    "",
+    "Helpful commands:",
+    "- `node delegate-browser-tool.cjs inspect` prints the current browser state and captures a fresh screenshot.",
+    "- `node delegate-browser-tool.cjs actions '[{\"type\":\"click\",\"x\":100,\"y\":120}]'` executes approved browser actions when mutation approval is enabled.",
+    "",
+    "Use only the retained browser profile at `$DELEGATE_SESSION_ROOT/browser-profile`. Do not create unrelated browser profiles. If mutation approval is not allowed, inspect only and do not click, type, submit, or navigate.",
+    "",
+    "Relevant page text:",
+    params.textSnippet ?? "",
+  ].join("\n");
+  const helperScript = buildOpenCodeBrowserHelperScript(params);
+  return [
+    "set -euo pipefail",
+    "export DELEGATE_SESSION_ROOT=${DELEGATE_SESSION_ROOT:-/workspace}",
+    "WORKDIR=\"$DELEGATE_SESSION_ROOT/opencode-computer-use\"",
+    "mkdir -p \"$WORKDIR\" /tmp/npm-cache",
+    "cd \"$WORKDIR\"",
+    "[ -f package.json ] || npm init -y >/dev/null 2>&1",
+    `HOME=/tmp npm_config_cache=/tmp/npm-cache PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm install --silent --no-save playwright@${params.playwrightVersion} >/dev/null 2>&1`,
+    `cat > delegate-browser-tool.cjs <<'DELEGATE_OPENCODE_HELPER'\n${helperScript}\nDELEGATE_OPENCODE_HELPER`,
+    `printf '%s' ${shellQuote(taskMarkdown)} > TASK.md`,
+    `printf '%s' ${shellQuote(params.screenshotBase64)} > seed-screenshot.${params.screenshotMimeType === "image/png" ? "png" : "jpg"}.base64`,
+    `OPENCODE_BIN=${shellQuote(command)}`,
+    "if ! command -v \"$OPENCODE_BIN\" >/dev/null 2>&1; then",
+    shouldBootstrapOpenCode
+      ? "  HOME=/tmp npm_config_cache=/tmp/npm-cache npm install --silent --no-save opencode-ai >/dev/null 2>&1 && OPENCODE_BIN=./node_modules/.bin/opencode"
+      : `  echo "OpenCode CLI not found in Daytona sandbox: ${command}" >&2; exit 127`,
+    "fi",
+    `"$OPENCODE_BIN" run --auto${modelArg} "$(cat TASK.md)" > opencode.stdout 2> opencode.stderr`,
+  ].join("\n");
+}
+
+export function buildOpenCodeCaptureCommand(): string {
+  return [
+    "set -euo pipefail",
+    "export DELEGATE_SESSION_ROOT=${DELEGATE_SESSION_ROOT:-/workspace}",
+    'WORKDIR="$DELEGATE_SESSION_ROOT/opencode-computer-use"',
+    'cd "$WORKDIR"',
+    "HOME=/tmp PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright node delegate-browser-tool.cjs inspect",
+  ].join("\n");
+}
+
 export function parsePlaywrightBrowseArtifactPayload(stdout: string): PlaywrightBrowseArtifactPayload | null {
   const trimmed = stdout.trim();
   if (!trimmed) {
@@ -266,6 +336,50 @@ function buildPlaywrightCommand(script: string, playwrightVersion: string) {
     "[ -f package.json ] || npm init -y >/dev/null 2>&1",
     `HOME=/tmp npm_config_cache=/tmp/npm-cache PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright npm install --silent --no-save playwright@${playwrightVersion} >/dev/null 2>&1`,
     `HOME=/tmp PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PLAYWRIGHT_BROWSERS_PATH=/ms-playwright node -e ${shellQuote(script)}`,
+  ].join("\n");
+}
+
+function buildOpenCodeBrowserHelperScript(params: {
+  allowMutations: boolean;
+  currentUrl?: string | null | undefined;
+}) {
+  return [
+    "const {chromium}=require('playwright');",
+    "const fs=require('node:fs/promises');",
+    "const norm=(v)=>String(v||'').replace(/\\s+/g,' ').trim();",
+    `const requestedUrl=${JSON.stringify(params.currentUrl ?? null)};`,
+    `const allowMutations=${JSON.stringify(params.allowMutations)};`,
+    "void(async()=>{",
+    "const root=process.env.DELEGATE_SESSION_ROOT||'/workspace';",
+    "const profilePath=`${root}/browser-profile`;",
+    "await fs.mkdir(profilePath,{recursive:true});",
+    "const context=await chromium.launchPersistentContext(profilePath,{headless:true,viewport:{width:1440,height:960},args:['--no-sandbox','--disable-dev-shm-usage']});",
+    "const page=context.pages()[0]||await context.newPage();",
+    "if(requestedUrl&&(!page.url()||page.url()==='about:blank')) await page.goto(requestedUrl,{waitUntil:'domcontentloaded',timeout:15000}).catch(()=>undefined);",
+    "await page.waitForTimeout(400);",
+    "const executedActions=[]; const push=(type,summary)=>executedActions.push({type,summary});",
+    "if((process.argv[2]||'inspect')==='actions'){",
+    "if(!allowMutations) throw new Error('Browser actions are disabled because this task was not approved for mutations. Use inspect only.');",
+    "for(const action of JSON.parse(process.argv[3]||'[]')){",
+    "if(action.type==='move'){await page.mouse.move(action.x,action.y);push('move',`move(${action.x}, ${action.y})`)}",
+    "else if(action.type==='click'&&typeof action.x==='number'&&typeof action.y==='number'){await page.mouse.click(action.x,action.y,{button:action.button||'left'});push('click',`click(${action.x}, ${action.y})`)}",
+    "else if(action.type==='type'){await page.keyboard.type(String(action.text||''));push('type',`type(${String(action.text||'').length} chars)`)}",
+    "else if(action.type==='scroll'){await page.mouse.wheel(Number(action.scroll_x||0),Number(action.scroll_y||0));push('scroll',`scroll(${Number(action.scroll_x||0)}, ${Number(action.scroll_y||0)})`)}",
+    "else if(action.type==='wait'){await page.waitForTimeout(Math.max(250,Math.min(Number(action.durationMs||1000),5000)));push('wait','wait')}",
+    "else if(action.type==='screenshot'){push('screenshot','capture')}",
+    "else throw new Error(`Unsupported OpenCode browser action: ${String(action.type)}`);",
+    "await page.waitForTimeout(350);",
+    "}} else push('screenshot','inspect');",
+    "const title=await page.title().catch(()=>'');",
+    "const finalUrl=page.url();",
+    "const textSnippet=norm(await page.locator('body').innerText().catch(()=>'')).slice(0,2400);",
+    "const contentSnippet=(await page.content()).slice(0,12000);",
+    "const links=await page.locator('a[href]').evaluateAll(ns=>ns.slice(0,12).map(n=>({text:(n.textContent||'').trim().slice(0,120),href:n.href}))).catch(()=>[]);",
+    "const raw=await page.screenshot({type:'jpeg',quality:65,fullPage:false,encoding:'base64'});",
+    "const screenshotBase64=typeof raw==='string'?raw:raw.toString('base64');",
+    "console.log(JSON.stringify({transportKind:'opencode_computer_use',profilePath,title,finalUrl,textSnippet,contentSnippet,links,screenshotBase64,screenshotMimeType:'image/jpeg',executedActions},null,2));",
+    "await context.close();",
+    "})().catch(e=>{console.error(e.stack||e.message||String(e));process.exit(1)});",
   ].join("\n");
 }
 
@@ -352,7 +466,12 @@ function normalizePlaywrightKey(value: string) {
 }
 
 function isBrowserTransportKind(value: unknown): value is BrowserTransportKind {
-  return value === "playwright" || value === "openai_computer" || value === "claude_computer_use";
+  return (
+    value === "playwright" ||
+    value === "openai_computer" ||
+    value === "claude_computer_use" ||
+    value === "opencode_computer_use"
+  );
 }
 
 function isNativeActionType(value: unknown): value is NativeBrowserAction["type"] {

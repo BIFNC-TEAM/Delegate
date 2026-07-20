@@ -13,7 +13,9 @@ import {
   updateArtifactResponseSchema,
   upsertMcpBindingRequestSchema,
   type ArtifactDetailResponse,
+  type BrowserTransportKind,
   type McpBindingSnapshot,
+  type NativeComputerProvider,
   type NativeComputerUseExecutionResponse,
   type NativeComputerUsePreflightSnapshot,
   type OrganizationGovernanceOverlays,
@@ -359,7 +361,7 @@ export type RepresentativeComputeSnapshot = {
     id: string;
     computeSessionId: string;
     status: "active" | "failed" | "closed";
-    transportKind: "playwright" | "openai_computer" | "claude_computer_use";
+    transportKind: BrowserTransportKind;
     profilePath?: string;
     currentUrl?: string;
     currentTitle?: string;
@@ -374,7 +376,7 @@ export type RepresentativeComputeSnapshot = {
       id: string;
       toolExecutionId: string;
       status: "succeeded" | "failed";
-      transportKind: "playwright" | "openai_computer" | "claude_computer_use";
+      transportKind: BrowserTransportKind;
       requestedUrl: string;
       finalUrl?: string;
       pageTitle?: string;
@@ -519,7 +521,7 @@ export type ExecuteRepresentativeNativeComputerUseInput = {
   representativeSlug: string;
   sessionId: string;
   task: string;
-  provider?: "openai" | "anthropic";
+  provider?: NativeComputerProvider;
   maxSteps?: number;
   allowMutations?: boolean;
 };
@@ -1814,10 +1816,7 @@ function serializeBrowserSessionRecord(session: BrowserSessionRecord) {
     id: session.id,
     computeSessionId: session.computeSessionId,
     status: session.status.toLowerCase() as "active" | "failed" | "closed",
-    transportKind: session.transportKind.toLowerCase() as
-      | "playwright"
-      | "openai_computer"
-      | "claude_computer_use",
+    transportKind: session.transportKind.toLowerCase() as BrowserTransportKind,
     ...(session.profilePath ? { profilePath: session.profilePath } : {}),
     ...(session.currentUrl ? { currentUrl: session.currentUrl } : {}),
     ...(session.currentTitle ? { currentTitle: session.currentTitle } : {}),
@@ -1834,10 +1833,7 @@ function serializeBrowserSessionRecord(session: BrowserSessionRecord) {
             id: latestNavigation.id,
             toolExecutionId: latestNavigation.toolExecutionId,
             status: latestNavigation.status.toLowerCase() as "succeeded" | "failed",
-            transportKind: latestNavigation.transportKind.toLowerCase() as
-              | "playwright"
-              | "openai_computer"
-              | "claude_computer_use",
+            transportKind: latestNavigation.transportKind.toLowerCase() as BrowserTransportKind,
             requestedUrl: latestNavigation.requestedUrl,
             ...(latestNavigation.finalUrl ? { finalUrl: latestNavigation.finalUrl } : {}),
             ...(latestNavigation.pageTitle ? { pageTitle: latestNavigation.pageTitle } : {}),

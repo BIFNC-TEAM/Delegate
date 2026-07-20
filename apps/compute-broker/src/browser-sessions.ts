@@ -1,3 +1,5 @@
+import type { BrowserTransportKind } from "@delegate/compute-protocol";
+
 import { prisma } from "./prisma";
 import { mapBrowserTransportKindToDb } from "./serializers";
 
@@ -22,8 +24,10 @@ export async function recordBrowserNavigation(params: {
   contactId?: string | null | undefined;
   conversationId?: string | null | undefined;
   computeSessionId: string;
+  sandboxIdentityId?: string | null | undefined;
+  sandboxLeaseId?: string | null | undefined;
   toolExecutionId: string;
-  transportKind: "playwright" | "openai_computer" | "claude_computer_use";
+  transportKind: BrowserTransportKind;
   requestedUrl: string;
   finalUrl?: string | null | undefined;
   pageTitle?: string | null | undefined;
@@ -34,17 +38,30 @@ export async function recordBrowserNavigation(params: {
   profilePath?: string | null | undefined;
   status: "succeeded" | "failed";
 }) {
-  const existingBrowserSession = await prisma.browserSession.findUnique({
-    where: {
-      computeSessionId: params.computeSessionId,
-    },
-    select: {
-      currentUrl: true,
-      currentTitle: true,
-      failureReason: true,
-      status: true,
-    },
-  });
+  const existingBrowserSession = params.sandboxIdentityId
+    ? await prisma.browserSession.findFirst({
+        where: {
+          sandboxIdentityId: params.sandboxIdentityId,
+        },
+        orderBy: [{ updatedAt: "desc" }],
+        select: {
+          currentUrl: true,
+          currentTitle: true,
+          failureReason: true,
+          status: true,
+        },
+      })
+    : await prisma.browserSession.findUnique({
+        where: {
+          computeSessionId: params.computeSessionId,
+        },
+        select: {
+          currentUrl: true,
+          currentTitle: true,
+          failureReason: true,
+          status: true,
+        },
+      });
   const nextBrowserSessionState = deriveBrowserSessionPersistence({
     existing: existingBrowserSession,
     navigation: {
@@ -64,6 +81,8 @@ export async function recordBrowserNavigation(params: {
       contactId: params.contactId ?? null,
       conversationId: params.conversationId ?? null,
       computeSessionId: params.computeSessionId,
+      sandboxIdentityId: params.sandboxIdentityId ?? null,
+      sandboxLeaseId: params.sandboxLeaseId ?? null,
       status: nextBrowserSessionState.status,
       transportKind: mapBrowserTransportKindToDb(params.transportKind),
       profilePath: params.profilePath ?? null,
@@ -76,6 +95,8 @@ export async function recordBrowserNavigation(params: {
     update: {
       status: nextBrowserSessionState.status,
       transportKind: mapBrowserTransportKindToDb(params.transportKind),
+      sandboxIdentityId: params.sandboxIdentityId ?? null,
+      sandboxLeaseId: params.sandboxLeaseId ?? null,
       ...(params.profilePath ? { profilePath: params.profilePath } : {}),
       currentUrl: nextBrowserSessionState.currentUrl,
       currentTitle: nextBrowserSessionState.currentTitle,
@@ -127,6 +148,8 @@ export async function recordBrowserNavigation(params: {
       type: "BROWSER_NAVIGATION_RECORDED",
       payload: {
         computeSessionId: params.computeSessionId,
+        sandboxIdentityId: params.sandboxIdentityId ?? null,
+        sandboxLeaseId: params.sandboxLeaseId ?? null,
         browserSessionId: browserSession.id,
         navigationId: navigation.id,
         toolExecutionId: params.toolExecutionId,

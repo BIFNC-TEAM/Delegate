@@ -115,17 +115,19 @@ export const browserTransportKindSchema = z.enum([
   "playwright",
   "openai_computer",
   "claude_computer_use",
+  "opencode_computer_use",
 ]);
 export const browserExecutionModeSchema = z.enum([
   "deterministic",
   "native",
 ]);
-export const nativeComputerProviderSchema = z.enum(["openai", "anthropic"]);
+export const nativeComputerProviderSchema = z.enum(["openai", "anthropic", "opencode"]);
 export const nativeComputerProviderStatusSchema = z.enum([
   "ready",
   "disabled",
   "missing_credentials",
   "missing_model",
+  "missing_sandbox",
 ]);
 export const nativeComputerUsePreflightStateSchema = z.enum([
   "ready",
@@ -1177,6 +1179,7 @@ export const brokerHealthSchema = z.object({
   status: z.literal("ok"),
   service: z.literal("compute-broker"),
   runnerType: computeRunnerTypeSchema,
+  sandboxProvider: z.enum(["docker", "daytona"]).optional(),
   artifactBucket: z.string(),
 });
 

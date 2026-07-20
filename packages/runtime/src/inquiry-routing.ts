@@ -383,12 +383,53 @@ export function renderReplyPreview(
 
     case "answer":
     default:
+      {
+        const matchedKnowledge = selectPreviewKnowledge(representative, plan);
+        if (matchedKnowledge) {
+          return [
+            header,
+            representative.knowledgePack.identitySummary,
+            `我能根据公开资料回答：${matchedKnowledge.title}`,
+            matchedKnowledge.summary,
+            matchedKnowledge.url ? `相关链接：${matchedKnowledge.url}` : null,
+            "如果你需要更具体的合作判断、报价采集或预约意向，我也可以继续帮你做结构化 intake。",
+          ]
+            .filter(Boolean)
+            .join("\n\n");
+        }
+      }
       return [
         header,
         representative.knowledgePack.identitySummary,
         "如果你需要更具体的合作判断、报价采集或预约意向，我也可以继续帮你做结构化 intake。",
       ].join("\n\n");
   }
+}
+
+function selectPreviewKnowledge(
+  representative: Representative,
+  plan: ConversationPlan,
+) {
+  const allKnowledge = [
+    ...representative.knowledgePack.faq,
+    ...representative.knowledgePack.materials,
+    ...representative.knowledgePack.policies,
+  ];
+  if (!allKnowledge.length) {
+    return null;
+  }
+
+  if (plan.intent === "materials") {
+    return (
+      allKnowledge.find((item) => item.kind === "deck" || item.kind === "download" || item.kind === "case_study") ??
+      allKnowledge[0]!
+    );
+  }
+  if (plan.intent === "faq" || plan.intent === "unknown") {
+    return allKnowledge.find((item) => item.kind === "faq") ?? allKnowledge[0]!;
+  }
+
+  return allKnowledge[0]!;
 }
 
 function buildIntakeOutline(intent: InquiryIntent, channel: Channel): string[] {

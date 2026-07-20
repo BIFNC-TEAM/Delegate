@@ -22,7 +22,6 @@ export function RepresentativeRechargePanel({
   locale: Locale;
 }) {
   const t = pickCopy(locale, copy);
-  const [audienceId, setAudienceId] = useState("");
   const [amountCents, setAmountCents] = useState(2000);
   const [order, setOrder] = useState<RechargeOrderSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -38,7 +37,6 @@ export function RepresentativeRechargePanel({
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            audienceId,
             amountCents,
             idempotencyKey: `public_recharge:${representativeSlug}:${Date.now()}:${randomId()}`,
           }),
@@ -90,15 +88,7 @@ export function RepresentativeRechargePanel({
 
   return (
     <div className="setup-stack">
-      <label className="field-stack">
-        <span>{t.audienceLabel}</span>
-        <input
-          className="text-input"
-          onChange={(event) => setAudienceId(event.target.value)}
-          placeholder={t.audiencePlaceholder}
-          value={audienceId}
-        />
-      </label>
+      <p className="footer-note">{t.identityNote}</p>
 
       <div className="button-row button-row-stretch">
         {[500, 2000, 10000].map((preset) => (
@@ -115,7 +105,7 @@ export function RepresentativeRechargePanel({
 
       <button
         className="button-primary button-block"
-        disabled={isPending || !audienceId.trim()}
+        disabled={isPending}
         onClick={createRechargeOrder}
         type="button"
       >
@@ -165,8 +155,7 @@ function formatMoney(cents: number, currency: string): string {
 
 const copy = {
   zh: {
-    audienceLabel: "你的联系方式或用户 ID",
-    audiencePlaceholder: "email / Telegram / phone",
+    identityNote: "充值会自动记到当前浏览器里的同一个匿名身份上，不需要再手填用户 ID。",
     createAction: "创建充值单",
     creating: "处理中...",
     createError: "创建充值单失败。",
@@ -174,11 +163,10 @@ const copy = {
     orderCreated: "充值单已创建",
     balanceLabel: "当前余额 ",
     mockPayAction: "模拟支付成功",
-    disclaimer: "当前是 mock 支付入口，用于验证 Agent Wallet 流程：创建充值单、模拟支付成功、给 User Wallet 入账并写 ledger。真实支付会通过 Stripe、微信或支付宝 provider 接入，Delegate 不处理银行卡号或支付密码。",
+    disclaimer: "当前是演示支付入口：可以验证创建充值单、模拟支付成功、余额入账这条链路，但不会真实扣款。正式上线后会接入 Stripe、微信或支付宝；Delegate 不处理银行卡号或支付密码。",
   },
   en: {
-    audienceLabel: "Your contact or user ID",
-    audiencePlaceholder: "email / Telegram / phone",
+    identityNote: "Recharge is attached to this browser's current anonymous identity, so no separate user ID is needed.",
     createAction: "Create recharge order",
     creating: "Working...",
     createError: "Failed to create recharge order.",
@@ -186,6 +174,6 @@ const copy = {
     orderCreated: "Recharge order created",
     balanceLabel: "Current balance ",
     mockPayAction: "Simulate payment success",
-    disclaimer: "This mock payment entry validates the Agent Wallet flow: create a recharge order, simulate payment success, credit User Wallet, and write ledger entries. Real collection will plug in through Stripe, WeChat, or Alipay providers; Delegate does not handle card numbers or payment passwords.",
+    disclaimer: "This is a demo payment entry: it validates order creation, simulated payment success, and balance crediting without charging real money. Live collection will use Stripe, WeChat, or Alipay; Delegate does not handle card numbers or payment passwords.",
   },
 } as const;

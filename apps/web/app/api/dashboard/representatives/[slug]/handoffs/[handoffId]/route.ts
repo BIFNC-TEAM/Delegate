@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
 
 import { setHandoffRequestStatus } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../auth";
 
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ slug: string; handoffId: string }> },
 ) {
   const { slug, handoffId } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
   const body = (await request.json()) as {
     status?: "open" | "reviewing" | "accepted" | "declined" | "closed";
   };
@@ -24,6 +32,11 @@ export async function PATCH(
 
     return NextResponse.json({ handoff });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

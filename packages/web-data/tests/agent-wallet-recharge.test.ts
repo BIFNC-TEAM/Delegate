@@ -43,6 +43,64 @@ describe("agent wallet mock recharge", () => {
     });
   });
 
+  it("attaches mock recharge wallets to an audience identity when provided", async () => {
+    const client = new FakeRechargeClient();
+
+    await createMockRechargeOrder(
+      {
+        externalUserId: "web:rep:aud_123",
+        audienceIdentityId: "identity-1",
+        amountCents: 1200,
+        idempotencyKey: "recharge_identity_1_1200",
+      },
+      client,
+    );
+
+    expect(client.userWallets[0]).toMatchObject({
+      externalUserId: "web:rep:aud_123",
+      audienceIdentityId: "identity-1",
+    });
+  });
+
+  it("reuses the audience identity wallet across changing payment external ids", async () => {
+    const client = new FakeRechargeClient();
+
+    const first = await createMockRechargeOrder(
+      {
+        externalUserId: "web:rep:aud_first",
+        audienceIdentityId: "identity-1",
+        amountCents: 1200,
+        idempotencyKey: "recharge_identity_1_first",
+      },
+      client,
+    );
+    const second = await createMockRechargeOrder(
+      {
+        externalUserId: "web:rep:aud_second",
+        audienceIdentityId: "identity-1",
+        amountCents: 2400,
+        idempotencyKey: "recharge_identity_1_second",
+      },
+      client,
+    );
+
+    expect(second.userWalletId).toBe(first.userWalletId);
+    expect(second.externalUserId).toBe("web:rep:aud_first");
+    expect(client.userWallets).toHaveLength(1);
+    expect(client.identityLinks).toEqual([
+      expect.objectContaining({
+        audienceIdentityId: "identity-1",
+        provider: "PAYMENT_EXTERNAL_USER",
+        providerSubject: "web:rep:aud_first",
+      }),
+      expect.objectContaining({
+        audienceIdentityId: "identity-1",
+        provider: "PAYMENT_EXTERNAL_USER",
+        providerSubject: "web:rep:aud_second",
+      }),
+    ]);
+  });
+
   it("completes payment once and credits the user wallet ledger", async () => {
     const client = new FakeRechargeClient();
     const created = await createMockRechargeOrder(
@@ -112,6 +170,7 @@ describe("agent wallet mock recharge", () => {
 
 type UserWalletRow = {
   id: string;
+  audienceIdentityId: string | null;
   externalUserId: string;
   telegramUserId: string | null;
   email: string | null;
@@ -156,13 +215,28 @@ type LedgerRow = {
   createdAt: Date;
 };
 
+type IdentityLinkRow = {
+  id: string;
+  audienceIdentityId: string;
+  provider: string;
+  providerSubject: string;
+};
+
 class FakeRechargeClient {
   userWallets: UserWalletRow[] = [];
   rechargeOrders: RechargeOrderRow[] = [];
   providerEvents: ProviderEventRow[] = [];
   ledgerEntries: LedgerRow[] = [];
+  identityLinks: IdentityLinkRow[] = [];
 
   userWallet = {
+    findFirst: async (args: any) => {
+      return (
+        this.userWallets.find(
+          (wallet) => wallet.audienceIdentityId === args.where.audienceIdentityId,
+        ) ?? null
+      );
+    },
     upsert: async (args: any) => {
       const existing = this.userWallets.find(
         (wallet) => wallet.externalUserId === args.where.externalUserId,
@@ -173,6 +247,7 @@ class FakeRechargeClient {
       }
       const wallet: UserWalletRow = {
         id: args.create.id ?? `user_wallet_${this.userWallets.length + 1}`,
+        audienceIdentityId: args.create.audienceIdentityId ?? null,
         externalUserId: args.create.externalUserId,
         telegramUserId: args.create.telegramUserId ?? null,
         email: args.create.email ?? null,
@@ -191,7 +266,40 @@ class FakeRechargeClient {
       if (typeof args.data.cashBalanceCents?.increment === "number") {
         wallet.cashBalanceCents += args.data.cashBalanceCents.increment;
       }
+      if (args.data.audienceIdentityId !== undefined) {
+        wallet.audienceIdentityId = args.data.audienceIdentityId;
+      }
+      if (args.data.telegramUserId !== undefined) {
+        wallet.telegramUserId = args.data.telegramUserId;
+      }
+      if (args.data.displayName !== undefined) {
+        wallet.displayName = args.data.displayName;
+      }
+      if (args.data.currency !== undefined) {
+        wallet.currency = args.data.currency;
+      }
       return wallet;
+    },
+  };
+
+  identityLink = {
+    upsert: async (args: any) => {
+      const key = args.where.provider_providerSubject;
+      const existing = this.identityLinks.find(
+        (link) => link.provider === key.provider && link.providerSubject === key.providerSubject,
+      );
+      if (existing) {
+        Object.assign(existing, args.update);
+        return existing;
+      }
+      const link: IdentityLinkRow = {
+        id: `identity_link_${this.identityLinks.length + 1}`,
+        audienceIdentityId: args.create.audienceIdentityId,
+        provider: args.create.provider,
+        providerSubject: args.create.providerSubject,
+      };
+      this.identityLinks.push(link);
+      return link;
     },
   };
 
@@ -291,6 +399,7 @@ class FakeRechargeClient {
     const rechargeOrders = this.rechargeOrders.map((row) => ({ ...row }));
     const providerEvents = this.providerEvents.map((row) => ({ ...row }));
     const ledgerEntries = this.ledgerEntries.map((row) => ({ ...row }));
+    const identityLinks = this.identityLinks.map((row) => ({ ...row }));
     try {
       return await fn(this);
     } catch (error) {
@@ -298,6 +407,7 @@ class FakeRechargeClient {
       this.rechargeOrders = rechargeOrders;
       this.providerEvents = providerEvents;
       this.ledgerEntries = ledgerEntries;
+      this.identityLinks = identityLinks;
       throw error;
     }
   }

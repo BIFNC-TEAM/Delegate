@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
 
 import { getRepresentativeComputeArtifactDownload } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../../../auth";
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ slug: string; artifactId: string }> },
 ) {
   const { slug, artifactId } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
   const inline = new URL(request.url).searchParams.get("inline") === "1";
 
   try {
@@ -25,6 +33,11 @@ export async function GET(
       },
     });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Failed to download artifact.",

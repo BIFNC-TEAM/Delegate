@@ -131,6 +131,7 @@ type RepresentativeRow = {
 
 type UserWalletRow = {
   id: string;
+  audienceIdentityId: string | null;
   externalUserId: string;
   telegramUserId: string | null;
   email: string | null;
@@ -308,6 +309,7 @@ class FakeAmnLifecycleClient {
       }
       const wallet: UserWalletRow = {
         id: `user_wallet_${this.userWallets.length + 1}`,
+        audienceIdentityId: args.create.audienceIdentityId ?? null,
         externalUserId: args.create.externalUserId,
         telegramUserId: args.create.telegramUserId ?? null,
         email: args.create.email ?? null,

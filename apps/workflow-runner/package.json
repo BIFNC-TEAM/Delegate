@@ -13,6 +13,7 @@
     "@temporalio/client": "^1.15.0",
     "@temporalio/worker": "^1.15.0",
     "@temporalio/workflow": "^1.15.0",
+    "@delegate/web-data": "workspace:*",
     "@delegate/workflows": "workspace:*",
     "@prisma/client": "^6.19.2",
     "dotenv": "^17.2.3"

@@ -2,211 +2,340 @@ import { headers } from "next/headers";
 
 import { demoRepresentative } from "@delegate/domain";
 import {
+  HashScrollRestorer,
   LanguageSwitcher,
   buildLocalizedHref,
   extractCountryHint,
   pickCopy,
-  resolveServiceUrl,
   resolveLocale,
+  resolveServiceUrl,
 } from "@delegate/web-ui";
 
 const copy = {
   zh: {
-    brandTagline: "Web-first AI 接待前台与 AMN 第一条数字代表楔子",
+    brandTagline: "公开数字代表",
     menu: [
-      { href: "#interface", label: "接口" },
-      { href: "#trust", label: "信任" },
-      { href: "#economy", label: "计费" },
-      { href: "#control-plane", label: "控制台" },
-      { href: "#roadmap", label: "路线" },
+      { href: "#product", label: "产品" },
+      { href: "#how", label: "工作方式" },
+      { href: "#use-cases", label: "使用场景" },
+      { href: "#trust", label: "安全边界" },
+      { href: "#plans", label: "方案" },
     ],
-    navDemo: "演示代表页",
-    navDashboard: "Owner 控制台",
-    heroEyebrow: "Agent Monetization Network",
-    heroTitle: "Delegate 是先替你接住外部请求的 AI 接待前台。",
+    menuLabel: "菜单",
+    navLogin: "进入控制台",
+    navCreate: "创建数字代表",
+    heroEyebrow: "AI FRONT DESK · WEB-FIRST",
+    heroTitle: "让每一个来找你的人，先被你的 AI 代表接住。",
     heroLead:
-      "第一版先做 web-first 数字代表：当别人来找你时，AI 分身先回答高频问题、展示服务档位、收集结构化需求，并在需要收费、审批或人工接手时把请求路由成明确流程。",
-    heroPrimary: "查看数字代表",
-    heroSecondary: "进入控制台",
-    shipsKicker: "AI front desk loop",
-    shipsTitle: "先回答，收费时收费，需要拍板时请示，需要人时转接。",
-    shipsBody: "当前交付的是网页代表楔子和第一条 AMN 钱包闭环：公开代表页、网页聊天、owner inbox、mock 充值、用户现金余额、Agent token、Creator 20% pending / withdrawable 和钱包账本。真实 Stripe / 微信 / 支付宝收款、自动出金和透明证明仍是后续产品化工作。",
-    frontDeskSteps: [
-      { label: "01 / Answer", title: "能回答的先回答", body: "FAQ、公开资料、服务范围先由代表接住，不把主人拉回一级前台。" },
-      { label: "02 / Charge", title: "该收费的先收费", body: "免费试聊后，深度服务、优先级和继续对话进入网页充值与 invoice 信号。" },
-      { label: "03 / Ask", title: "需要拍板的先请示", body: "敏感 compute、报价判断和不可逆动作进入审批，而不是让 agent 自作主张。" },
-      { label: "04 / Handoff", title: "需要人时再转接", body: "handoff 变成 owner inbox 项目，主人接手的是高价值上下文，不是原始噪音。" },
+      "Delegate 为创始人、顾问和创作者创建一个公开数字代表：回答公开问题、筛选需求、收取服务费；遇到敏感或高价值事项，再带着完整上下文交给你。",
+    heroPrimary: "创建我的数字代表",
+    heroSecondary: "体验真实代表",
+    heroTrust: ["仅使用已批准资料", "敏感动作先请示", "随时转人工接手"],
+    mockLabel: "交互示例 · Mock 数据",
+    mockRepName: "Lin 的数字代表",
+    mockRepStatus: "在线接待中",
+    mockVisitorLabel: "访客",
+    mockVisitorMessage: "我们是 20 人的 AI 团队，想邀请 Lin 做一次产品战略咨询。",
+    mockAgentLabel: "Delegate",
+    mockAgentMessage:
+      "可以。我先帮你确认团队阶段、希望解决的问题和时间范围，再判断适合哪种服务。",
+    mockFields: ["产品已上线", "增长遇到瓶颈", "希望本月沟通"],
+    mockRouteLabel: "已识别并路由",
+    mockRouteValue: "付费咨询 · ¥299 示例服务包",
+    mockOwnerLabel: "Owner 收到",
+    mockOwnerValue: "高意向咨询 · 信息完整 · 等待确认",
+    proofIntro: "不是把私人助理暴露给外界，而是发布一个有边界、可收费、能转接的公开接口。",
+    proofItems: [
+      { label: "公开入口", value: "一个可分享的代表页面" },
+      { label: "服务升级", value: "从免费接待自然进入付费" },
+      { label: "Owner 控制", value: "高价值事项才需要你介入" },
     ],
-    proofPoints: [
-      { stat: "10 秒", label: "陌生人应该在十秒内理解这不是闲聊 bot，而是一个公开代表入口。" },
-      { stat: "70%+", label: "高频 inbound 询问应被代表独立接住，而不是重新把主人拉回一级前台。" },
-      { stat: "1 钱包", label: "用户应该给具体 Agent 充值，而不是给平台泛泛充值；余额归属必须一眼看清。" },
+    problemEyebrow: "WHY DELEGATE",
+    problemTitle: "真正浪费你的，不是一次重要沟通，而是每一次沟通前的重复筛选。",
+    problemLead:
+      "私信、邮件和群聊把同样的问题送到你面前。Delegate 把这些入口变成一条清晰的接待流水线。",
+    beforeLabel: "现在",
+    afterLabel: "使用 Delegate 后",
+    comparisons: [
+      ["消息散落在私信、邮件和群聊", "统一进入一个公开代表入口"],
+      ["反复回答背景、价格和合作方式", "基于批准资料给出一致回答"],
+      ["商机与普通咨询混在一起", "先识别意图，再收集必要信息"],
+      ["每个请求都打断本人", "只转接高价值或敏感事项"],
     ],
-    trustEyebrow: "Trust Boundary",
-    trustTitle: "公开运行时必须先让人信任，再让人付费，最后才让人深入。",
-    trustLead: "Delegate 的竞争力不是更多 tools，而是把陌生人关系、边界和升级路径讲清楚。",
-    trustPills: ["仅公开知识", "仅安全技能", "内建人工转接", "动作可审计"],
-    operatingAria: "运营节奏",
-    operatingBeats: [
-      { step: "01", title: "先接住第一次 inbound", body: "陌生人先被接住，才会继续问下去、付费、或者申请升级转接。" },
-      { step: "02", title: "再把边界说清楚", body: "对方必须清楚这是公开代表，不是主人本人，也不是一个万能 bot。" },
-      { step: "03", title: "把请求路由成流程", body: "FAQ、报价采集、预约和资料投递，都要能把模糊请求变成结构化入口。" },
-      { step: "04", title: "用付费继续深入", body: "免费只负责接住，真正的深度服务和优先级要通过付费自然升级。" },
-    ],
-    interfaceColumns: [
+    howEyebrow: "THE FRONT DESK LOOP",
+    howTitle: "四步接住一次外部请求，不让 AI 越界。",
+    howLead: "从第一句问候到人工接手，每一步都有明确状态和责任边界。",
+    steps: [
       {
-        eyebrow: "Public interface",
-        title: "别人使用的是你的公开代表，不是进入你的私有运行时。",
-        body: "它是 public-facing agent interface，不是 private assistant clone。外部人面对的是一个边界清晰、用途明确、可升级的业务接口。",
+        number: "01",
+        label: "接住",
+        title: "先回答公开问题",
+        body: "代表使用你批准的资料回答背景、服务范围、公开价格和常见问题。",
+        signal: "PUBLIC KNOWLEDGE",
       },
       {
-        eyebrow: "Bounded action",
-        title: "代表知道什么、能做什么、不能做什么，都必须显式公开。",
-        body: "公开知识包、许可技能、付费边界和 handoff 规则，组成一个可被陌生人快速理解的对外契约。",
+        number: "02",
+        label: "筛选",
+        title: "把模糊需求变完整",
+        body: "自动确认身份、目标、预算和时间，把随口一问整理成可判断的请求。",
+        signal: "STRUCTURED INTAKE",
       },
       {
-        eyebrow: "Inbound operations",
-        title: "价值不在会聊天，而在把 inbound 需求变成可路由、可计费、可接手的业务流。",
-        body: "FAQ、报价采集、预约、资料投递和人工升级都不是附属功能，而是核心处理面。",
+        number: "03",
+        label: "深入",
+        title: "该收费时再收费",
+        body: "免费接待结束后，深度问答、优先处理或具体交付进入清楚的服务包。",
+        signal: "PAID CONTINUATION",
+      },
+      {
+        number: "04",
+        label: "转接",
+        title: "带着上下文交给你",
+        body: "敏感、高价值或需要承诺的事项进入请示队列，你接手时不必重新问一遍。",
+        signal: "OWNER HANDOFF",
       },
     ],
-    visibleContractEyebrow: "Visible contract",
-    visibleContractTitle: "Trust 是产品表面，不是法律页脚。",
-    visibleContractLead:
-      "外部用户必须知道代表可以看什么、可以做什么、不能做什么，以及什么时候需要转人工或付费继续。",
-    trustCards: [
-      { title: "能看什么", points: ["仅公开知识包", "仅批准过的 FAQ / 资料 / 价格页", "不接触私有工作区与私有记忆"] },
-      { title: "能做什么", points: ["回答 FAQ", "收集线索与需求", "发起付费解锁", "触发安全 handoff"] },
-      { title: "不能做什么", points: ["不能代表主人登录账户", "不能任意执行本地命令", "不能直接做不可逆商业承诺"] },
+    casesEyebrow: "USE CASES · MOCK SCENARIOS",
+    casesTitle: "不是替你说所有话，而是替你守住第一道门。",
+    casesLead: "以下场景使用 Mock 数据展示产品路径，最终配置由每位 Owner 自己批准。",
+    cases: [
+      {
+        audience: "创始人",
+        descriptor: "融资、合作与招聘",
+        inbound: "“我们想和你聊一轮融资合作，下周有时间吗？”",
+        handled: "核验机构、收集合作目标、团队阶段和时间范围",
+        handoff: "高匹配合作进入 Owner 待处理队列",
+      },
+      {
+        audience: "顾问 / 专家",
+        descriptor: "咨询资格与服务交付",
+        inbound: "“能否帮我们评审一版 AI 产品路线？”",
+        handled: "确认问题类型、交付深度、预算与资料准备情况",
+        handoff: "匹配服务包后收费，复杂判断再请示",
+      },
+      {
+        audience: "创作者",
+        descriptor: "品牌合作与深度问答",
+        inbound: "“想邀请你做一次新品内容合作。”",
+        handled: "收集品牌、排期、预算和内容授权范围",
+        handoff: "符合合作规则的请求才进入本人视野",
+      },
     ],
-    economyEyebrow: "AMN Economy Layer",
-    economyTitle: "AMN 目标是把支付、计费、钱包、结算和透明账本拆成清晰层。",
-    economyLead: "当前 Delegate 已交付内部钱包账本、mock recharge、Agent token purchase、usage charge、Creator earning、WithdrawRequest 冻结和 owner 钱包视图；统一 AMN Pay、真实支付验签、自动出金和 Merkle proof 是后续网络层。",
-    economyPlans: [
-      { name: "Agent Wallet", detail: "已用内部账本把用户现金、Agent token、Creator pending / withdrawable、平台收入和成本拆开。", kicker: "已落地" },
-      { name: "Payment Adapters", detail: "Mock provider 可跑通；Stripe 是 adapter 边界；微信支付和支付宝是 fail-closed 骨架，等待真实验签与 SDK 接入。", kicker: "适配器" },
-      { name: "Billing Engine", detail: "已支持 Agent token purchase 和 usage charge；接入所有回复、compute、browser、MCP 路径仍是后续工作。", kicker: "部分落地" },
-      { name: "Settlement + Ledger", detail: "已生成 Creator 20% pending、按消耗释放 withdrawable，并支持 WithdrawRequest 冻结；自动打款和公开证明还未落地。", kicker: "结算" },
+    productEyebrow: "TWO SURFACES, ONE RELATIONSHIP",
+    productTitle: "访客看到可信的代表，Owner 看到清楚的运营台。",
+    productLead: "同一条关系，在外部保持简单，在内部保持可控。",
+    publicSurface: {
+      kicker: "PUBLIC REPRESENTATIVE",
+      title: "对外：公开代表页面",
+      body: "访客先理解代表身份、资料边界和可用服务，再开始对话。",
+      features: ["身份与 AI 披露始终可见", "公开资料和服务范围清楚", "聊天、付费与转人工在同一页面"],
+      status: "公开状态",
+      statusValue: "已发布 · 边界已批准",
+      profileLabel: "创始人代表",
+      prompt: "可以咨询产品战略、顾问服务，或发起一次引荐申请。",
+      input: "开始公开对话",
+    },
+    ownerSurface: {
+      kicker: "OWNER CONTROL PLANE",
+      title: "对内：代表运营台",
+      body: "Owner 只处理值得亲自介入的请求，并能看见每次路由的原因。",
+      queue: [
+        ["产品咨询", "高意向 · 等待确认"],
+        ["媒体采访", "资料完整 · 建议接手"],
+        ["普通 FAQ", "已由代表完成"],
+      ],
+      status: "今日接待",
+      statusValue: "18 次 · 3 项需要你",
+      queueLabel: "待处理请求",
+      queueStatusLabel: "当前状态",
+    },
+    trustEyebrow: "VISIBLE CONTRACT",
+    trustTitle: "安全边界不是法律页脚，而是每次互动的一部分。",
+    trustLead:
+      "外部用户知道自己面对的是谁，Owner 知道代表依据什么做出每一步判断。",
+    trustItems: [
+      { label: "能看", value: "仅批准过的公开知识、FAQ、资料与价格" },
+      { label: "能做", value: "回答、收集需求、发起服务升级、创建转接" },
+      { label: "先请示", value: "敏感信息、商业承诺、不可逆动作与例外报价" },
+      { label: "绝不会", value: "进入私人工作区、冒充本人、任意执行外部动作" },
     ],
-    controlEyebrow: "Control Plane",
-    controlTitle: "Dashboard 应该像运营台，而不是设置坟场。",
-    controlLead: "控制面板的顺序就是产品价值的顺序：先运营，再发布，再扩展，再治理记忆。",
-    controlCards: [
-      { eyebrow: "Overview", title: "先看 owner inbox、付款和今天的运营脉冲。", body: "Dashboard 的第一屏应该帮助主人判断什么值得亲自接手，而不是展开一堆配置项。" },
-      { eyebrow: "Representative", title: "发布一个公开代表，本质上是在发布一套外部关系接口。", body: "身份、契约、定价、知识包和 stepper 化 setup 需要像发布流程，而不是杂乱表单。" },
-      { eyebrow: "Memory + skills", title: "ClawHub 和 OpenViking 属于扩展层，应该被治理，而不是被神化。", body: "代表能力要进入可观测面板，记忆要进入 provenance，技能要进入边界控制。" },
+    trustNote: "所有示例均为 Mock 数据；真实代表的知识、服务和动作权限由 Owner 明确批准。",
+    planEyebrow: "EARLY ACCESS · MOCK PRICING",
+    planTitle: "先发布一个代表，再按真实使用深度升级。",
+    planLead: "以下为官网展示用示例方案，不构成正式报价；最终价格以上线版本为准。",
+    plans: [
+      {
+        name: "Preview",
+        price: "¥0",
+        suffix: "体验期",
+        summary: "验证公开代表是否适合你的 inbound。",
+        features: ["1 个公开代表", "基础知识包", "免费接待与人工转接", "示例运营概览"],
+        cta: "体验演示代表",
+        primary: false,
+      },
+      {
+        name: "Operator",
+        price: "¥199",
+        suffix: "/ 月 · Mock",
+        summary: "为稳定接待、付费服务和 Owner 协作而设计。",
+        features: ["完整代表主页", "服务包与付费继续", "审批和高价值转接", "接待与收益视图"],
+        cta: "创建我的代表",
+        primary: true,
+      },
     ],
-    roadmapEyebrow: "Evolution",
-    roadmapTitle: "Delegate 是第一类数字代表，AMN 才是更大的商业网络。",
-    roadmapLead: "产品路径是 `Agent Runtime -> Digital Representative -> Agent Monetization Network`。",
-    roadmapStages: [
-      { eyebrow: "Reference wedge", title: "Delegate Web", body: "公开数字代表页、trust boundary、网页聊天、充值预览和 human escalation 先形成第一条 web 交易闭环。" },
-      { eyebrow: "AMN wallet loop", title: "Internal ledger first", body: "先把 User Wallet、Agent Wallet、Creator Earning、Provider Cost 和 Platform Revenue 在 Delegate 内部记清楚。" },
-      { eyebrow: "Network future", title: "Payment and proof", body: "下一步再接真实 Stripe / 微信 / 支付宝验签、自动出金、chargeback 自动化和公开证明。" },
+    faqEyebrow: "QUESTIONS",
+    faqTitle: "开始之前，最常被问到的事。",
+    faqs: [
+      ["它会冒充我吗？", "不会。代表页面会明确披露 AI 身份，并使用独立的公开代表身份与访客互动。"],
+      ["它能看到我的私人资料吗？", "默认不能。代表只使用 Owner 明确批准的公开知识、FAQ、服务资料和价格。"],
+      ["遇到它不该决定的事怎么办？", "请求会进入请示或转人工队列，并保留已收集的信息与路由原因。"],
+      ["可以收费吗？", "可以配置免费接待和付费继续。当前官网价格与数据为 Mock，真实支付能力以上线配置为准。"],
+      ["现在支持哪些入口？", "当前产品以 Web 公开代表页为主，其他消息渠道属于后续扩展方向。"],
+      ["创建一个代表需要什么？", "准备身份介绍、公开资料、服务范围、边界规则和希望转接的请求类型即可。"],
     ],
-    ctaEyebrow: "开始体验",
-    ctaTitle: "先把一个数字代表跑通，再把钱包、计费、结算和透明度扩成 AMN。",
-    ctaPrimary: "查看演示数字代表",
-    ctaSecondary: "配置一个代表",
+    finalEyebrow: "OPEN YOUR FRONT DESK",
+    finalTitle: "把重复接待交给代表，把重要关系留给自己。",
+    finalLead: "先体验一个真实代表，再决定如何发布属于你的公开入口。",
+    finalPrimary: "创建我的数字代表",
+    finalSecondary: "先体验演示",
+    footerSummary: "面向创始人、顾问和创作者的公开 AI 接待前台。",
+    footerStatus: "Web-first · Early access",
+    footerCopyright: "Delegate · 公开 AI 接待前台",
+    footerProduct: "产品",
+    footerResources: "了解更多",
+    footerLinks: ["工作方式", "使用场景", "安全边界", "常见问题"],
     switcher: { zh: "中文", en: "English" },
   },
   en: {
-    brandTagline: "Web-first AI front desk and AMN representative wedge",
+    brandTagline: "Public digital representatives",
     menu: [
-      { href: "#interface", label: "Interface" },
-      { href: "#trust", label: "Trust" },
-      { href: "#economy", label: "Economy" },
-      { href: "#control-plane", label: "Control Plane" },
-      { href: "#roadmap", label: "Roadmap" },
+      { href: "#product", label: "Product" },
+      { href: "#how", label: "How it works" },
+      { href: "#use-cases", label: "Use cases" },
+      { href: "#trust", label: "Safety" },
+      { href: "#plans", label: "Plans" },
     ],
-    navDemo: "Demo digital rep",
-    navDashboard: "Owner dashboard",
-    heroEyebrow: "Agent Monetization Network",
-    heroTitle: "Delegate is an AI front desk for your public Digital Representative.",
+    menuLabel: "Menu",
+    navLogin: "Open console",
+    navCreate: "Create a representative",
+    heroEyebrow: "AI FRONT DESK · WEB-FIRST",
+    heroTitle: "Let your AI representative receive every person who comes looking for you.",
     heroLead:
-      "The first version is web-first. When people reach you, your AI representative handles the first reception pass: answer common questions, show service depth, collect structured demand, and route payment, approval, or human handoff when the conversation gets serious.",
-    heroPrimary: "Explore digital representative",
-    heroSecondary: "Open control plane",
-    shipsKicker: "AI front desk loop",
-    shipsTitle: "Answer first, charge when needed, ask for approval, hand off to a human.",
-    shipsBody: "What ships today is the web representative wedge plus the first AMN wallet loop: public representative page, web chat, owner inbox, mock recharge, user cash balance, Agent tokens, Creator 20% pending / withdrawable earnings, and wallet ledger entries. Live Stripe / WeChat / Alipay collection, automatic payout, and public proof remain productization work.",
-    frontDeskSteps: [
-      { label: "01 / Answer", title: "Answer what it can", body: "FAQs, public materials, and service boundaries are handled before the owner gets pulled back to the front desk." },
-      { label: "02 / Charge", title: "Charge when needed", body: "After the free reception layer, deeper help and priority move into web recharge and invoice signals." },
-      { label: "03 / Ask", title: "Ask for approval", body: "Sensitive compute, quote judgment, and irreversible actions move through approval instead of agent improvisation." },
-      { label: "04 / Handoff", title: "Hand off with context", body: "Handoff becomes an owner inbox item, so the human receives high-value context rather than raw noise." },
+      "Delegate gives founders, advisors, and creators a public digital representative that answers approved questions, qualifies demand, charges for deeper service, and hands high-value moments back with context.",
+    heroPrimary: "Create my representative",
+    heroSecondary: "Try the live representative",
+    heroTrust: ["Approved knowledge only", "Sensitive actions ask first", "Human takeover anytime"],
+    mockLabel: "Interaction example · Mock data",
+    mockRepName: "Lin's digital representative",
+    mockRepStatus: "Receiving visitors",
+    mockVisitorLabel: "Visitor",
+    mockVisitorMessage: "We're a 20-person AI team and would like Lin's help with product strategy.",
+    mockAgentLabel: "Delegate",
+    mockAgentMessage:
+      "I can help qualify the request first. What stage is the product at, what problem matters most, and when would you like to talk?",
+    mockFields: ["Product launched", "Growth stalled", "This month"],
+    mockRouteLabel: "Recognized and routed",
+    mockRouteValue: "Paid advisory · ¥299 mock service",
+    mockOwnerLabel: "Owner receives",
+    mockOwnerValue: "High intent · Complete context · Awaiting review",
+    proofIntro:
+      "This is not a private assistant exposed to strangers. It is a bounded, billable public interface with a human handoff.",
+    proofItems: [
+      { label: "Public entry", value: "One representative page to share" },
+      { label: "Service depth", value: "Free reception can become paid help" },
+      { label: "Owner control", value: "You enter only where judgment matters" },
     ],
-    proofPoints: [
-      { stat: "10s", label: "A stranger should understand within ten seconds that this is a public representative, not a generic chat bot." },
-      { stat: "70%+", label: "The representative should absorb most repetitive inbound questions without pulling the founder back to the front desk." },
-      { stat: "1 wallet", label: "Users should recharge a specific Agent, not the platform in general; balance ownership has to be visible." },
+    problemEyebrow: "WHY DELEGATE",
+    problemTitle: "The drain is not one important conversation. It is the repetitive filtering before every one.",
+    problemLead:
+      "DMs, email, and group chats keep sending the same questions back to you. Delegate turns them into one visible reception flow.",
+    beforeLabel: "Today",
+    afterLabel: "With Delegate",
+    comparisons: [
+      ["Requests scattered across DMs and email", "One public representative entry"],
+      ["Repeating context, pricing, and process", "Consistent answers from approved material"],
+      ["Real opportunities mixed with casual asks", "Intent recognized before information is collected"],
+      ["Every request interrupts the owner", "Only sensitive or high-value work is handed off"],
     ],
-    trustEyebrow: "Trust Boundary",
-    trustTitle: "A public runtime must earn trust first, charge second, and deepen the relationship third.",
-    trustLead: "Delegate wins by making boundaries, escalation paths, and relationship rules obvious to strangers.",
-    trustPills: ["Public knowledge only", "Bounded skills only", "Human handoff built in", "Auditable actions"],
-    operatingAria: "Operating rhythm",
-    operatingBeats: [
-      { step: "01", title: "Catch the first inbound", body: "The stranger has to feel received before they will keep asking, pay, or request escalation." },
-      { step: "02", title: "Show the boundary", body: "People should know immediately that this is a public representative, not the owner and not an unlimited bot." },
-      { step: "03", title: "Route the request", body: "FAQ, quote intake, scheduling, and materials delivery should turn vague demand into structured motion." },
-      { step: "04", title: "Continue with payment", body: "Free gets the relationship started; deeper help and priority should unlock naturally through payment." },
+    howEyebrow: "THE FRONT DESK LOOP",
+    howTitle: "Four steps receive an inbound request without letting AI overstep.",
+    howLead: "From the first greeting to human takeover, every step has a visible state and boundary.",
+    steps: [
+      { number: "01", label: "Receive", title: "Answer public questions", body: "The representative uses material you approved for context, scope, public pricing, and FAQs.", signal: "PUBLIC KNOWLEDGE" },
+      { number: "02", label: "Qualify", title: "Turn a vague ask into a complete one", body: "It confirms identity, goals, budget, and timing before the owner needs to look.", signal: "STRUCTURED INTAKE" },
+      { number: "03", label: "Deepen", title: "Charge only when depth begins", body: "Deeper answers, priority, and deliverables move into a clearly named service package.", signal: "PAID CONTINUATION" },
+      { number: "04", label: "Hand off", title: "Bring the owner complete context", body: "Sensitive, high-value, or commitment-heavy requests enter a review queue without losing context.", signal: "OWNER HANDOFF" },
     ],
-    interfaceColumns: [
-      {
-        eyebrow: "Public interface",
-        title: "People interact with your representative, not your private runtime.",
-        body: "This is a public-facing agent interface, not a private assistant clone. The outside world sees a bounded, legible, business-facing surface.",
-      },
-      {
-        eyebrow: "Bounded action",
-        title: "What the representative knows, can do, and cannot do should be explicitly visible.",
-        body: "Public knowledge packs, allowed skills, pricing boundaries, and handoff rules together form a contract strangers can understand quickly.",
-      },
-      {
-        eyebrow: "Inbound operations",
-        title: "The real value is not chatting. It is routing inbound demand into billable, triageable business flow.",
-        body: "FAQ, quote intake, scheduling, materials delivery, and escalation are the product, not side features.",
-      },
+    casesEyebrow: "USE CASES · MOCK SCENARIOS",
+    casesTitle: "It does not speak for you everywhere. It protects the first doorway.",
+    casesLead: "These mock scenarios show the product path. Each owner approves the final knowledge, service, and handoff rules.",
+    cases: [
+      { audience: "Founder", descriptor: "Fundraising, partnerships, hiring", inbound: "“We'd like to explore a funding partnership. Are you free next week?”", handled: "Verify the organization, goal, company stage, and timing", handoff: "High-fit partnerships enter the owner's queue" },
+      { audience: "Advisor / Expert", descriptor: "Qualification and delivery", inbound: "“Could you review our AI product roadmap?”", handled: "Confirm problem type, depth, budget, and material readiness", handoff: "Match a service package, then ask on complex judgment" },
+      { audience: "Creator", descriptor: "Brand work and deeper access", inbound: "“We'd like to collaborate on a product launch.”", handled: "Collect brand, schedule, budget, and usage rights", handoff: "Only requests matching the collaboration rules reach the creator" },
     ],
-    visibleContractEyebrow: "Visible contract",
-    visibleContractTitle: "Trust is a product surface, not a legal footnote.",
-    visibleContractLead:
-      "External users should see what the representative can access, what it can do, what it will refuse, and when payment or human escalation begins.",
-    trustCards: [
-      { title: "Can see", points: ["Public knowledge pack only", "Approved FAQs, materials, and pricing only", "No private workspace or private memory"] },
-      { title: "Can do", points: ["Answer FAQs", "Collect leads and structured demand", "Trigger paid continuation", "Create safe handoff requests"] },
-      { title: "Cannot do", points: ["Log into owner accounts", "Run arbitrary local commands", "Make irreversible commercial commitments"] },
+    productEyebrow: "TWO SURFACES, ONE RELATIONSHIP",
+    productTitle: "Visitors see a trustworthy representative. Owners see an operating desk.",
+    productLead: "The same relationship stays simple outside and controllable inside.",
+    publicSurface: {
+      kicker: "PUBLIC REPRESENTATIVE",
+      title: "Outside: the representative page",
+      body: "Visitors understand identity, knowledge boundaries, and available services before they start.",
+      features: ["AI identity stays visible", "Approved knowledge and service scope are clear", "Chat, payment, and handoff live on one page"],
+      status: "Public status",
+      statusValue: "Published · Boundaries approved",
+      profileLabel: "Founder representative",
+      prompt: "Ask about product strategy, advisory services, or a warm introduction.",
+      input: "Start a public conversation",
+    },
+    ownerSurface: {
+      kicker: "OWNER CONTROL PLANE",
+      title: "Inside: the operating desk",
+      body: "Owners see only the requests worth direct attention and why each request was routed.",
+      queue: [["Product advisory", "High intent · Awaiting review"], ["Media interview", "Complete brief · Takeover suggested"], ["General FAQ", "Completed by representative"]],
+      status: "Received today",
+      statusValue: "18 requests · 3 need you",
+      queueLabel: "Inbound queue",
+      queueStatusLabel: "Status",
+    },
+    trustEyebrow: "VISIBLE CONTRACT",
+    trustTitle: "Safety is not a legal footnote. It is part of every interaction.",
+    trustLead: "Visitors know who they are speaking with. Owners know what evidence produced every routing decision.",
+    trustItems: [
+      { label: "Can see", value: "Approved public knowledge, FAQs, materials, and prices" },
+      { label: "Can do", value: "Answer, collect demand, offer service depth, and create handoffs" },
+      { label: "Asks first", value: "Sensitive data, commitments, irreversible actions, and exceptions" },
+      { label: "Never", value: "Enter private workspaces, impersonate the owner, or act arbitrarily" },
     ],
-    economyEyebrow: "AMN Economy Layer",
-    economyTitle: "AMN separates payment, billing, wallet, settlement, and transparent ledger into legible layers.",
-    economyLead: "Delegate now ships the internal wallet ledger, mock recharge, Agent token purchase, usage charge, Creator earning, WithdrawRequest freeze, and owner wallet view. Unified AMN Pay, live payment verification, automatic payout, and Merkle proof remain future network layers.",
-    economyPlans: [
-      { name: "Agent Wallet", detail: "Delegate now separates user cash, Agent tokens, Creator pending / withdrawable balances, platform revenue, and provider cost in its own ledger.", kicker: "Shipped" },
-      { name: "Payment Adapters", detail: "Mock provider runs end to end; Stripe has an adapter boundary; WeChat Pay and Alipay are fail-closed skeletons waiting for real SDK/signature wiring.", kicker: "Adapters" },
-      { name: "Billing Engine", detail: "Agent token purchase and usage charge services exist; wiring every reply, compute, browser, and MCP path into billing is next.", kicker: "Partial" },
-      { name: "Settlement + Ledger", detail: "Creator 20% pending, consumption-based withdrawable release, and WithdrawRequest freeze are in place; automatic payout and public proof are not.", kicker: "Settlement" },
+    trustNote: "Every example uses mock data. Real knowledge, services, and action permissions require explicit owner approval.",
+    planEyebrow: "EARLY ACCESS · MOCK PRICING",
+    planTitle: "Publish one representative first. Upgrade when real usage becomes deeper.",
+    planLead: "These are illustrative plans for the website, not a formal offer. Launch pricing may change.",
+    plans: [
+      { name: "Preview", price: "¥0", suffix: "trial", summary: "Validate whether a public representative fits your inbound.", features: ["1 public representative", "Basic knowledge pack", "Free reception and human handoff", "Mock operating overview"], cta: "Try the demo", primary: false },
+      { name: "Operator", price: "¥199", suffix: "/ month · Mock", summary: "For stable reception, paid services, and owner collaboration.", features: ["Complete representative page", "Service packages and paid depth", "Approvals and high-value handoff", "Reception and revenue views"], cta: "Create my representative", primary: true },
     ],
-    controlEyebrow: "Control Plane",
-    controlTitle: "The dashboard should feel like an operations desk, not a settings graveyard.",
-    controlLead: "The order of the dashboard should mirror product value: operate first, publish second, expand third, govern memory last.",
-    controlCards: [
-      { eyebrow: "Overview", title: "Start with the owner inbox, payments, and today’s operating pulse.", body: "The first screen should help the owner decide what deserves direct attention, not dump a wall of settings." },
-      { eyebrow: "Representative", title: "Publishing a representative means publishing a relationship interface.", body: "Identity, contract, pricing, knowledge, and setup should feel like a launch flow, not a messy back-office form." },
-      { eyebrow: "Memory + skills", title: "ClawHub and OpenViking are expansion layers that need governance, not mystique.", body: "Skill sources belong in boundary control and memory belongs in provenance, not hidden magic." },
+    faqEyebrow: "QUESTIONS",
+    faqTitle: "What people ask before opening the front desk.",
+    faqs: [
+      ["Will it impersonate me?", "No. The page explicitly discloses AI identity and uses a separate public representative identity."],
+      ["Can it see my private material?", "Not by default. It uses only public knowledge, FAQs, services, and prices explicitly approved by the owner."],
+      ["What happens when it should not decide?", "The request enters an approval or human handoff queue with its context and routing reason intact."],
+      ["Can it charge for service?", "You can configure free reception and paid continuation. Pricing and data on this site are mock examples."],
+      ["Which channels work today?", "The current product is centered on the public web representative. Other messaging channels are future extensions."],
+      ["What do I need to create one?", "Prepare an identity, public materials, service scope, boundary rules, and the kinds of requests you want handed off."],
     ],
-    roadmapEyebrow: "Evolution",
-    roadmapTitle: "Delegate is the first Digital Representative. AMN is the broader commercial network.",
-    roadmapLead: "The product path is `Agent Runtime -> Digital Representative -> Agent Monetization Network`.",
-    roadmapStages: [
-      { eyebrow: "Reference wedge", title: "Delegate Web", body: "A public Digital Representative page with trust boundaries, web chat, recharge preview, and human escalation proves the first web transaction loop." },
-      { eyebrow: "AMN wallet loop", title: "Internal ledger first", body: "Make User Wallet, Agent Wallet, Creator Earning, Provider Cost, and Platform Revenue correct inside Delegate before outsourcing money movement." },
-      { eyebrow: "Network future", title: "Payment and proof", body: "Next comes live Stripe / WeChat / Alipay verification, automatic payout, chargeback automation, and public proof." },
-    ],
-    ctaEyebrow: "Try the loop",
-    ctaTitle: "Start with one Digital Representative, then scale wallet, billing, settlement, and transparency into AMN.",
-    ctaPrimary: "See demo digital rep",
-    ctaSecondary: "Configure a representative",
+    finalEyebrow: "OPEN YOUR FRONT DESK",
+    finalTitle: "Give repetitive reception to your representative. Keep the important relationships.",
+    finalLead: "Try a real representative first, then decide how your own public doorway should work.",
+    finalPrimary: "Create my representative",
+    finalSecondary: "Try the demo first",
+    footerSummary: "A public AI front desk for founders, advisors, and creators.",
+    footerStatus: "Web-first · Early access",
+    footerCopyright: "Delegate · Public AI front desk",
+    footerProduct: "Product",
+    footerResources: "Explore",
+    footerLinks: ["How it works", "Use cases", "Safety", "Questions"],
     switcher: { zh: "Chinese", en: "English" },
   },
 } as const;
@@ -225,43 +354,37 @@ export default async function HomePage({
   });
   const t = pickCopy(locale, copy);
   const currentHost = headerStore.get("x-forwarded-host") ?? headerStore.get("host");
-  const representativeBaseUrl = resolveServiceUrl(
-    process.env.NEXT_PUBLIC_REPRESENTATIVE_URL,
-    "http://localhost:3002",
-    {
-      currentAppDefaultPort: 3000,
-      currentHost,
-    },
-  );
-  const dashboardBaseUrl = resolveServiceUrl(
-    process.env.NEXT_PUBLIC_DASHBOARD_URL,
-    "http://localhost:3001",
-    {
-      currentAppDefaultPort: 3000,
-      currentHost,
-    },
-  );
+  const representativeBaseUrl = resolveServiceUrl(process.env.NEXT_PUBLIC_REPRESENTATIVE_URL, "http://localhost:3002", {
+    currentAppDefaultPort: 3000,
+    currentHost,
+  });
+  const dashboardBaseUrl = resolveServiceUrl(process.env.NEXT_PUBLIC_DASHBOARD_URL, "http://localhost:3001", {
+    currentAppDefaultPort: 3000,
+    currentHost,
+  });
+  const demoHref = buildLocalizedHref(`${representativeBaseUrl}/reps/${demoRepresentative.slug}`, locale);
+  const dashboardHref = buildLocalizedHref(`${dashboardBaseUrl}/dashboard?view=overview`, locale);
+  const setupHref = buildLocalizedHref(`${dashboardBaseUrl}/dashboard?view=setup`, locale);
+  const footerHrefs = ["#how", "#use-cases", "#trust", "#faq"];
 
   return (
-    <main className="marketing-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
-      <header className="marketing-topbar">
-        <div className="marketing-brand">
-          <div className="marketing-brand-mark">D</div>
-          <div>
-            <strong>Delegate</strong>
-            <div className="muted">{t.brandTagline}</div>
-          </div>
-        </div>
+    <main className="site-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
+      <HashScrollRestorer />
 
-        <nav aria-label="Website sections" className="marketing-menu-tabs">
-          {t.menu.map((item) => (
-            <a className="marketing-menu-tab" href={item.href} key={item.href}>
-              {item.label}
-            </a>
-          ))}
+      <header className="site-header">
+        <a className="site-brand" href="#top" aria-label="Delegate home">
+          <img src="/D_logo.svg" alt="" className="site-brand-mark" />
+          <span>
+            <strong>Delegate</strong>
+            <small>{t.brandTagline}</small>
+          </span>
+        </a>
+
+        <nav className="site-nav" aria-label="Website sections">
+          {t.menu.map((item) => <a href={item.href} key={item.href}>{item.label}</a>)}
         </nav>
 
-        <div className="marketing-nav-actions">
+        <div className="site-header-actions">
           <LanguageSwitcher
             activeLocale={locale}
             ariaLabel="Language"
@@ -270,206 +393,264 @@ export default async function HomePage({
               { locale: "en", href: buildLocalizedHref("/", "en"), label: t.switcher.en, shortLabel: "EN" },
             ]}
           />
-          <a
-            className="marketing-nav-link"
-            href={buildLocalizedHref(`${representativeBaseUrl}/reps/${demoRepresentative.slug}`, locale)}
-          >
-            {t.navDemo}
-          </a>
-          <a
-            className="marketing-button-primary"
-            href={buildLocalizedHref(`${dashboardBaseUrl}/dashboard?view=overview`, locale)}
-          >
-            {t.navDashboard}
-          </a>
+          <a className="site-text-link site-header-login" href={dashboardHref}>{t.navLogin}</a>
+          <a className="site-button site-button-primary site-header-cta" href={setupHref}>{t.navCreate}</a>
         </div>
+
+        <details className="site-mobile-menu">
+          <summary>{t.menuLabel}</summary>
+          <nav aria-label="Mobile website sections">
+            {t.menu.map((item) => <a href={item.href} key={item.href}>{item.label}</a>)}
+            <a className="site-mobile-login" href={dashboardHref}>{t.navLogin}</a>
+            <div className="site-mobile-language" aria-label="Language">
+              <a href={buildLocalizedHref("/", "zh")}>ZH · {t.switcher.zh}</a>
+              <a href={buildLocalizedHref("/", "en")}>EN · {t.switcher.en}</a>
+            </div>
+          </nav>
+        </details>
       </header>
 
-      <section className="marketing-hero" id="interface">
-        <div className="marketing-hero-copy">
-          <p className="eyebrow">{t.heroEyebrow}</p>
-          <h1>{t.heroTitle}</h1>
-          <p className="marketing-lead">{t.heroLead}</p>
+      <section className="site-hero" id="top">
+        <div className="site-hero-inner">
+          <div className="site-hero-copy">
+            <p className="site-eyebrow">{t.heroEyebrow}</p>
+            <h1>{t.heroTitle}</h1>
+            <p className="site-hero-lead">{t.heroLead}</p>
+            <div className="site-actions">
+              <a className="site-button site-button-primary" href={setupHref}>{t.heroPrimary}</a>
+              <a className="site-button site-button-secondary" href={demoHref}>{t.heroSecondary}</a>
+            </div>
+            <ul className="site-trust-inline" aria-label="Trust summary">
+              {t.heroTrust.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          </div>
 
-          <div className="marketing-actions">
-            <a
-              className="marketing-button-primary"
-              href={buildLocalizedHref(`${representativeBaseUrl}/reps/${demoRepresentative.slug}`, locale)}
-            >
-              {t.heroPrimary}
-            </a>
-            <a
-              className="marketing-button-secondary"
-              href={buildLocalizedHref(`${dashboardBaseUrl}/dashboard?view=overview`, locale)}
-            >
-              {t.heroSecondary}
-            </a>
+          <div className="site-reception-demo" aria-label={t.mockLabel}>
+            <div className="site-demo-caption">
+              <span>{t.mockLabel}</span>
+              <span className="site-live-dot">{t.mockRepStatus}</span>
+            </div>
+            <div className="site-demo-window">
+              <div className="site-demo-header">
+                <span className="site-demo-avatar">L</span>
+                <span><strong>{t.mockRepName}</strong><small>Delegate · AI</small></span>
+                <span className="site-status-pill">PUBLIC</span>
+              </div>
+              <div className="site-conversation">
+                <div className="site-message site-message-visitor">
+                  <span>{t.mockVisitorLabel}</span>
+                  <p>{t.mockVisitorMessage}</p>
+                </div>
+                <div className="site-message site-message-agent">
+                  <span>{t.mockAgentLabel}</span>
+                  <p>{t.mockAgentMessage}</p>
+                  <div className="site-demo-tags">
+                    {t.mockFields.map((field) => <span key={field}>{field}</span>)}
+                  </div>
+                </div>
+              </div>
+              <div className="site-route-row">
+                <span>{t.mockRouteLabel}</span>
+                <strong>{t.mockRouteValue}</strong>
+              </div>
+              <div className="site-owner-notice">
+                <span>{t.mockOwnerLabel}</span>
+                <strong>{t.mockOwnerValue}</strong>
+              </div>
+            </div>
           </div>
         </div>
+      </section>
 
-        <div className="marketing-stage">
-          <article className="marketing-stage-card marketing-stage-card-primary">
-            <p className="marketing-card-kicker">{t.shipsKicker}</p>
-            <h2>{t.shipsTitle}</h2>
-            <p>{t.shipsBody}</p>
-            <div className="marketing-front-desk-flow">
-              {t.frontDeskSteps.map((step) => (
-                <div className="marketing-front-desk-step" key={step.label}>
-                  <span>{step.label}</span>
-                  <strong>{step.title}</strong>
-                  <p>{step.body}</p>
+      <section className="site-proof" id="product">
+        <p>{t.proofIntro}</p>
+        <dl>
+          {t.proofItems.map((item) => (
+            <div key={item.label}>
+              <dt>{item.label}</dt>
+              <dd>{item.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      <section className="site-section site-problem">
+        <div className="site-section-heading">
+          <p className="site-eyebrow">{t.problemEyebrow}</p>
+          <h2>{t.problemTitle}</h2>
+          <p>{t.problemLead}</p>
+        </div>
+        <div className="site-comparison" role="table" aria-label={`${t.beforeLabel} / ${t.afterLabel}`}>
+          <div className="site-comparison-head" role="row">
+            <span role="columnheader">{t.beforeLabel}</span>
+            <span role="columnheader">{t.afterLabel}</span>
+          </div>
+          {t.comparisons.map(([before, after]) => (
+            <div className="site-comparison-row" role="row" key={before}>
+              <span role="cell">{before}</span>
+              <strong role="cell">{after}</strong>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="site-section site-process" id="how">
+        <div className="site-process-intro">
+          <p className="site-eyebrow">{t.howEyebrow}</p>
+          <h2>{t.howTitle}</h2>
+          <p>{t.howLead}</p>
+        </div>
+        <ol className="site-process-list">
+          {t.steps.map((step) => (
+            <li key={step.number}>
+              <span className="site-step-number">{step.number}</span>
+              <div className="site-step-copy">
+                <span>{step.label}</span>
+                <h3>{step.title}</h3>
+                <p>{step.body}</p>
+              </div>
+              <span className="site-step-signal">{step.signal}</span>
+            </li>
+          ))}
+        </ol>
+      </section>
+
+      <section className="site-section site-cases" id="use-cases">
+        <div className="site-section-heading site-section-heading-wide">
+          <p className="site-eyebrow">{t.casesEyebrow}</p>
+          <h2>{t.casesTitle}</h2>
+          <p>{t.casesLead}</p>
+        </div>
+        <div className="site-case-list">
+          {t.cases.map((useCase, index) => (
+            <article key={useCase.audience}>
+              <div className="site-case-persona">
+                <span>0{index + 1}</span>
+                <h3>{useCase.audience}</h3>
+                <p>{useCase.descriptor}</p>
+              </div>
+              <blockquote>{useCase.inbound}</blockquote>
+              <dl>
+                <div><dt>Delegate</dt><dd>{useCase.handled}</dd></div>
+                <div><dt>Owner</dt><dd>{useCase.handoff}</dd></div>
+              </dl>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="site-section site-surfaces">
+        <div className="site-section-heading site-section-heading-wide">
+          <p className="site-eyebrow">{t.productEyebrow}</p>
+          <h2>{t.productTitle}</h2>
+          <p>{t.productLead}</p>
+        </div>
+        <div className="site-surface-grid">
+          <article className="site-surface site-surface-public">
+            <div className="site-surface-copy">
+              <p className="site-kicker">{t.publicSurface.kicker}</p>
+              <h3>{t.publicSurface.title}</h3>
+              <p>{t.publicSurface.body}</p>
+              <ul>{t.publicSurface.features.map((feature) => <li key={feature}>{feature}</li>)}</ul>
+            </div>
+            <div className="site-public-preview" aria-label={t.publicSurface.title}>
+              <div><span className="site-demo-avatar">L</span><span><strong>Lin</strong><small>{t.publicSurface.profileLabel}</small></span></div>
+              <p>{t.publicSurface.prompt}</p>
+              <span className="site-preview-input">{t.publicSurface.input} <b>→</b></span>
+              <dl><dt>{t.publicSurface.status}</dt><dd>{t.publicSurface.statusValue}</dd></dl>
+            </div>
+          </article>
+
+          <article className="site-surface site-surface-owner">
+            <div className="site-surface-copy">
+              <p className="site-kicker">{t.ownerSurface.kicker}</p>
+              <h3>{t.ownerSurface.title}</h3>
+              <p>{t.ownerSurface.body}</p>
+              <div className="site-owner-stat"><span>{t.ownerSurface.status}</span><strong>{t.ownerSurface.statusValue}</strong></div>
+            </div>
+            <div className="site-queue-preview" aria-label={t.ownerSurface.title}>
+              <div className="site-queue-head"><span>{t.ownerSurface.queueLabel}</span><span>{t.ownerSurface.queueStatusLabel}</span></div>
+              {t.ownerSurface.queue.map(([label, value], index) => (
+                <div className="site-queue-row" key={label}>
+                  <span><b>0{index + 1}</b>{label}</span><strong>{value}</strong>
                 </div>
               ))}
             </div>
           </article>
-
-          <article className="marketing-stage-card marketing-stage-card-metrics">
-            {t.proofPoints.map((point) => (
-              <div className="marketing-metric" key={point.stat}>
-                <strong>{point.stat}</strong>
-                <p>{point.label}</p>
-              </div>
-            ))}
-          </article>
         </div>
       </section>
 
-      <section className="marketing-band" id="trust">
-        <div className="marketing-band-copy">
-          <p className="eyebrow">{t.trustEyebrow}</p>
+      <section className="site-trust" id="trust">
+        <div className="site-trust-copy">
+          <p className="site-eyebrow">{t.trustEyebrow}</p>
           <h2>{t.trustTitle}</h2>
           <p>{t.trustLead}</p>
         </div>
-        <div className="marketing-band-chips">
-          {t.trustPills.map((pill) => (
-            <span className="marketing-pill" key={pill}>
-              {pill}
-            </span>
-          ))}
+        <dl className="site-trust-rules">
+          {t.trustItems.map((item) => <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}
+        </dl>
+        <p className="site-trust-note">{t.trustNote}</p>
+      </section>
+
+      <section className="site-section site-plans" id="plans">
+        <div className="site-section-heading">
+          <p className="site-eyebrow">{t.planEyebrow}</p>
+          <h2>{t.planTitle}</h2>
+          <p>{t.planLead}</p>
         </div>
-      </section>
-
-      <section aria-label={t.operatingAria} className="marketing-rhythm-strip">
-        {t.operatingBeats.map((beat) => (
-          <article className="marketing-beat-card" key={beat.step}>
-            <span className="marketing-beat-step">{beat.step}</span>
-            <h3>{beat.title}</h3>
-            <p>{beat.body}</p>
-          </article>
-        ))}
-      </section>
-
-      <section className="marketing-grid">
-        {t.interfaceColumns.map((column) => (
-          <article className="marketing-feature-card" key={column.title}>
-            <p className="marketing-card-kicker">{column.eyebrow}</p>
-            <h3>{column.title}</h3>
-            <p>{column.body}</p>
-          </article>
-        ))}
-      </section>
-
-      <section className="marketing-story marketing-story-shell">
-        <div className="marketing-story-copy">
-          <p className="eyebrow">{t.visibleContractEyebrow}</p>
-          <h2>{t.visibleContractTitle}</h2>
-          <p>{t.visibleContractLead}</p>
-        </div>
-
-        <div className="marketing-story-list">
-          {t.trustCards.map((card) => (
-            <article className="marketing-story-item" key={card.title}>
-              <h3>{card.title}</h3>
-              <ul className="marketing-bullet-list">
-                {card.points.map((point) => (
-                  <li key={point}>{point}</li>
-                ))}
-              </ul>
+        <div className="site-plan-list">
+          {t.plans.map((plan) => (
+            <article className={plan.primary ? "site-plan site-plan-featured" : "site-plan"} key={plan.name}>
+              <div className="site-plan-title"><span>{plan.name}</span><p>{plan.summary}</p></div>
+              <p className="site-plan-price"><strong>{plan.price}</strong><span>{plan.suffix}</span></p>
+              <ul>{plan.features.map((feature) => <li key={feature}>{feature}</li>)}</ul>
+              <a className={plan.primary ? "site-button site-button-primary" : "site-button site-button-secondary"} href={plan.primary ? setupHref : demoHref}>{plan.cta}</a>
             </article>
           ))}
         </div>
       </section>
 
-      <section className="marketing-section marketing-section-shell marketing-section-shell-economy" id="economy">
-        <div className="marketing-section-heading">
-          <div>
-            <p className="eyebrow">{t.economyEyebrow}</p>
-            <h2>{t.economyTitle}</h2>
-          </div>
-          <p className="marketing-lead">{t.economyLead}</p>
+      <section className="site-section site-faq" id="faq">
+        <div className="site-section-heading">
+          <p className="site-eyebrow">{t.faqEyebrow}</p>
+          <h2>{t.faqTitle}</h2>
         </div>
-
-        <div className="marketing-plan-grid">
-          {t.economyPlans.map((plan) => (
-            <article className="marketing-plan-card" key={plan.name}>
-              <p className="marketing-card-kicker">{plan.kicker}</p>
-              <h3>{plan.name}</h3>
-              <p>{plan.detail}</p>
-            </article>
+        <div className="site-faq-list">
+          {t.faqs.map(([question, answer], index) => (
+            <details key={question} open={index === 0}>
+              <summary>{question}</summary>
+              <p>{answer}</p>
+            </details>
           ))}
         </div>
       </section>
 
-      <section className="marketing-section marketing-section-shell marketing-section-shell-control" id="control-plane">
-        <div className="marketing-section-heading">
-          <div>
-            <p className="eyebrow">{t.controlEyebrow}</p>
-            <h2>{t.controlTitle}</h2>
-          </div>
-          <p className="marketing-lead">{t.controlLead}</p>
-        </div>
-
-        <div className="marketing-ops-grid">
-          {t.controlCards.map((card) => (
-            <article className="marketing-feature-card" key={card.title}>
-              <p className="marketing-card-kicker">{card.eyebrow}</p>
-              <h3>{card.title}</h3>
-              <p>{card.body}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="marketing-section marketing-section-shell marketing-section-shell-roadmap" id="roadmap">
-        <div className="marketing-section-heading">
-          <div>
-            <p className="eyebrow">{t.roadmapEyebrow}</p>
-            <h2>{t.roadmapTitle}</h2>
-          </div>
-          <p className="marketing-lead">{t.roadmapLead}</p>
-        </div>
-
-        <div className="marketing-roadmap-grid">
-          {t.roadmapStages.map((stage) => (
-            <article className="marketing-roadmap-card" key={stage.title}>
-              <p className="marketing-card-kicker">{stage.eyebrow}</p>
-              <h3>{stage.title}</h3>
-              <p>{stage.body}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="marketing-cta">
+      <section className="site-final-cta">
         <div>
-          <p className="eyebrow">{t.ctaEyebrow}</p>
-          <h2>{t.ctaTitle}</h2>
+          <p className="site-eyebrow">{t.finalEyebrow}</p>
+          <h2>{t.finalTitle}</h2>
+          <p>{t.finalLead}</p>
         </div>
-        <div className="marketing-actions">
-          <a
-            className="marketing-button-primary"
-            href={buildLocalizedHref(`${representativeBaseUrl}/reps/${demoRepresentative.slug}`, locale)}
-          >
-            {t.ctaPrimary}
-          </a>
-          <a
-            className="marketing-button-secondary"
-            href={buildLocalizedHref(`${dashboardBaseUrl}/dashboard?view=setup`, locale)}
-          >
-            {t.ctaSecondary}
-          </a>
+        <div className="site-actions">
+          <a className="site-button site-button-light" href={setupHref}>{t.finalPrimary}</a>
+          <a className="site-button site-button-ghost" href={demoHref}>{t.finalSecondary}</a>
         </div>
       </section>
+
+      <footer className="site-footer">
+        <div className="site-footer-brand">
+          <a className="site-brand" href="#top">
+            <img src="/D_logo.svg" alt="" className="site-brand-mark" />
+            <span><strong>Delegate</strong><small>{t.footerSummary}</small></span>
+          </a>
+          <span className="site-footer-status">{t.footerStatus}</span>
+        </div>
+        <div className="site-footer-links">
+          <div><strong>{t.footerProduct}</strong><a href={demoHref}>{t.heroSecondary}</a><a href={dashboardHref}>{t.navLogin}</a></div>
+          <div><strong>{t.footerResources}</strong>{t.footerLinks.map((label, index) => <a href={footerHrefs[index]} key={label}>{label}</a>)}</div>
+        </div>
+        <p className="site-copyright">© {new Date().getFullYear()} {t.footerCopyright}</p>
+      </footer>
     </main>
   );
 }

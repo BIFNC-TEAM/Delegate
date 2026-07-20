@@ -4,12 +4,20 @@ import {
   getRepresentativeComputeSnapshot,
   upsertRepresentativeMcpBinding,
 } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../auth";
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const snapshot = await getRepresentativeComputeSnapshot(slug);
@@ -25,6 +33,11 @@ export async function GET(
       bindings: snapshot.representative.mcpBindings,
     });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Failed to load MCP bindings.",
@@ -39,6 +52,10 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
 
   try {
     const body = (await request.json()) as Record<string, unknown>;
@@ -82,6 +99,11 @@ export async function POST(
 
     return NextResponse.json(binding, { status: 201 });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error: error instanceof Error ? error.message : "Failed to create MCP binding.",

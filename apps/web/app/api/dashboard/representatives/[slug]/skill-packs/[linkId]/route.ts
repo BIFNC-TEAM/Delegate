@@ -1,12 +1,20 @@
 import { NextResponse } from "next/server";
 
 import { setRepresentativeSkillPackEnabled } from "@delegate/web-data";
+import {
+  dashboardAuthErrorResponse,
+  authorizeDashboardRepresentativeAccess,
+} from "../../../../auth";
 
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ slug: string; linkId: string }> },
 ) {
   const { slug, linkId } = await params;
+  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
+  if (accessResponse) {
+    return accessResponse;
+  }
   const body = (await request.json()) as { enabled?: boolean };
 
   if (typeof body.enabled !== "boolean") {
@@ -22,6 +30,11 @@ export async function PATCH(
 
     return NextResponse.json({ skillPack });
   } catch (error) {
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) {
+      return authResponse;
+    }
+
     return NextResponse.json(
       {
         error:

@@ -48,6 +48,10 @@ const representativeLinkSchema = z.object({
   priority: z.number().int().min(0).max(100).default(50),
 });
 
+const representativeKnowledgeBindingSchema = z.object({
+  assetIds: z.array(z.string().trim().min(1)).max(100),
+});
+
 export const knowledgeAssetCreateSchema = z.object({
   kind: assetKindSchema,
   title: z.string().trim().min(1).max(180),
@@ -116,6 +120,11 @@ export type KnowledgeRepresentativeOption = {
   id: string;
   slug: string;
   name: string;
+};
+
+export type RepresentativeKnowledgeBindingResult = {
+  changedAssetIds: string[];
+  selectedAssetIds: string[];
 };
 
 export type KnowledgeAssetRecord = {
@@ -253,6 +262,186 @@ export async function listKnowledgeAssets(
     orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
   });
   return rows.map(serializeAsset);
+}
+
+export async function setRepresentativeKnowledgeAssetBindings(
+  ownerId: string | null | undefined,
+  representativeSlug: string,
+  assetIds: unknown,
+): Promise<RepresentativeKnowledgeBindingResult> {
+  const parsed = representativeKnowledgeBindingSchema.parse({ assetIds });
+  const selectedAssetIds = [...new Set(parsed.assetIds)];
+
+  if (shouldUseDemoKnowledge(ownerId)) {
+    if (representativeSlug !== demoRepresentative.slug) {
+      throw new KnowledgeLibraryError("Representative not found.", 404);
+    }
+    const selected = new Set(selectedAssetIds);
+    const existingIds = new Set(
+      demoKnowledgeAssets
+        .filter((asset) =>
+          asset.representativeLinks.some(
+            (link) => link.representativeId === demoRepresentative.id && link.enabled,
+          ),
+        )
+        .map((asset) => asset.id),
+    );
+    const additions = selectedAssetIds.filter((assetId) => !existingIds.has(assetId));
+    const selectedAssets = demoKnowledgeAssets.filter((asset) => selected.has(asset.id));
+    if (selectedAssets.length !== selectedAssetIds.length) {
+      throw new KnowledgeLibraryError("Knowledge asset not found.", 404);
+    }
+    const unavailable = selectedAssets.find(
+      (asset) => additions.includes(asset.id) && asset.status !== "ready",
+    );
+    if (unavailable) {
+      throw new KnowledgeLibraryError(`知识“${unavailable.title}”尚未处理完成，暂时不能关联。`, 409);
+    }
+
+    const changedAssetIds: string[] = [];
+    for (const asset of demoKnowledgeAssets) {
+      const wasSelected = existingIds.has(asset.id);
+      const isSelected = selected.has(asset.id);
+      if (wasSelected === isSelected) continue;
+      changedAssetIds.push(asset.id);
+      asset.representativeLinks = asset.representativeLinks.filter(
+        (link) => link.representativeId !== demoRepresentative.id,
+      );
+      if (isSelected) {
+        asset.representativeLinks.push({
+          representativeId: demoRepresentative.id,
+          representativeSlug: demoRepresentative.slug,
+          representativeName: demoRepresentative.name,
+          usageMode: asset.visibility === "public_material" ? "both" : "qa_source",
+          reviewStatus: "approved",
+          enabled: true,
+          priority: 50,
+        });
+        if (asset.visibility === "owner_only") asset.visibility = "selected_representatives";
+      } else if (
+        asset.visibility === "selected_representatives" &&
+        !asset.representativeLinks.some((link) => link.enabled)
+      ) {
+        asset.visibility = "owner_only";
+      }
+      asset.updatedAt = new Date().toISOString();
+      asset.processingLogs.push(
+        demoLog(
+          "representative_binding",
+          "info",
+          isSelected ? "知识已授权给数字代表，等待索引同步。" : "知识已从数字代表撤回，等待索引清理。",
+        ),
+      );
+    }
+    return { changedAssetIds, selectedAssetIds };
+  }
+
+  const scopedOwnerId = requireOwnerId(ownerId);
+  const representative = await prisma.representative.findFirst({
+    where: { slug: representativeSlug, ownerId: scopedOwnerId },
+    select: { id: true, slug: true },
+  });
+  if (!representative) throw new KnowledgeLibraryError("Representative not found.", 404);
+
+  const [selectedAssets, existingLinks] = await Promise.all([
+    prisma.knowledgeAsset.findMany({
+      where: {
+        id: { in: selectedAssetIds },
+        ownerId: scopedOwnerId,
+        status: { not: KnowledgeAssetStatus.ARCHIVED },
+      },
+      select: { id: true, title: true, status: true, visibility: true },
+    }),
+    prisma.knowledgeAssetRepresentative.findMany({
+      where: { representativeId: representative.id },
+      select: { assetId: true, enabled: true },
+    }),
+  ]);
+  if (selectedAssets.length !== selectedAssetIds.length) {
+    throw new KnowledgeLibraryError("Knowledge asset not found or archived.", 404);
+  }
+
+  const existingEnabledIds = new Set(
+    existingLinks.filter((link) => link.enabled).map((link) => link.assetId),
+  );
+  const additions = selectedAssets.filter((asset) => !existingEnabledIds.has(asset.id));
+  const unavailable = additions.find((asset) => asset.status !== KnowledgeAssetStatus.READY);
+  if (unavailable) {
+    throw new KnowledgeLibraryError(`知识“${unavailable.title}”尚未处理完成，暂时不能关联。`, 409);
+  }
+  const selectedSet = new Set(selectedAssetIds);
+  const removedAssetIds = [...existingEnabledIds].filter((assetId) => !selectedSet.has(assetId));
+  const changedAssetIds = [
+    ...additions.map((asset) => asset.id),
+    ...removedAssetIds,
+  ];
+
+  await prisma.$transaction(async (tx) => {
+    await tx.knowledgeAssetRepresentative.deleteMany({
+      where: {
+        representativeId: representative.id,
+        ...(selectedAssetIds.length ? { assetId: { notIn: selectedAssetIds } } : {}),
+      },
+    });
+    for (const asset of selectedAssets) {
+      await tx.knowledgeAssetRepresentative.upsert({
+        where: {
+          assetId_representativeId: {
+            assetId: asset.id,
+            representativeId: representative.id,
+          },
+        },
+        create: {
+          assetId: asset.id,
+          representativeId: representative.id,
+          usageMode:
+            asset.visibility === KnowledgeAssetVisibility.PUBLIC_MATERIAL
+              ? KnowledgeAssetUsageMode.BOTH
+              : KnowledgeAssetUsageMode.QA_SOURCE,
+          reviewStatus: KnowledgeAssetReviewStatus.APPROVED,
+          enabled: true,
+          priority: 50,
+        },
+        update: {
+          reviewStatus: KnowledgeAssetReviewStatus.APPROVED,
+          enabled: true,
+        },
+      });
+      if (asset.visibility === KnowledgeAssetVisibility.OWNER_ONLY) {
+        await tx.knowledgeAsset.update({
+          where: { id: asset.id },
+          data: { visibility: KnowledgeAssetVisibility.SELECTED_REPRESENTATIVES },
+        });
+      }
+    }
+    for (const assetId of removedAssetIds) {
+      const remainingLinks = await tx.knowledgeAssetRepresentative.count({
+        where: { assetId, enabled: true },
+      });
+      if (!remainingLinks) {
+        await tx.knowledgeAsset.updateMany({
+          where: {
+            id: assetId,
+            visibility: KnowledgeAssetVisibility.SELECTED_REPRESENTATIVES,
+          },
+          data: { visibility: KnowledgeAssetVisibility.OWNER_ONLY },
+        });
+      }
+    }
+    if (changedAssetIds.length) {
+      await tx.knowledgeProcessingLog.createMany({
+        data: changedAssetIds.map((assetId) => ({
+          assetId,
+          stage: "representative_binding",
+          message: selectedSet.has(assetId)
+            ? "知识已授权给数字代表，等待索引同步。"
+            : "知识已从数字代表撤回，等待索引清理。",
+        })),
+      });
+    }
+  });
+
+  return { changedAssetIds, selectedAssetIds };
 }
 
 export async function getKnowledgeAsset(

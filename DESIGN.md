@@ -165,6 +165,46 @@
 - **Responsive behavior:** Metrics collapse from five to three to two columns. Filters become a single column on mobile; the data table remains horizontally scrollable instead of hiding permission or status fields. Import becomes a full-screen sheet and details become a full-width drawer.
 - **Accessibility:** Modal and drawer backgrounds are inert, focus enters the active surface, Escape closes it, controls keep visible labels, and semantic status is expressed with text in addition to color.
 
+## Digital Representatives Pattern
+- **Primary hierarchy:** Lead with the active representative identity, lifecycle state, and immutable published version. Configuration is subordinate to operational readiness rather than presented as one unbounded form.
+- **Workspace flow:** Keep three persistent module-level destinations: representative directory and creation, six-step configuration, and publish/operate. Creation opens the new representative's configuration immediately; one Owner may create multiple independently configured representatives.
+- **Draft/public boundary:** Configuration saves update the working draft only. Public profiles, test chat, channel delivery, and asynchronous generation resolve the active published version; public-entry actions stay disabled until a first version exists.
+- **Readiness:** Identity, knowledge, human handoff, pricing, and channel readiness are explicit checklist rows. A publish action remains disabled until every required row is complete, and server validation must match the visual checklist.
+- **Representative knowledge:** Keep authored `Identity / FAQ / Materials / Policies` separate from workspace knowledge assets. The Knowledge step exposes an inline searchable multi-selector for ready, non-archived assets, keeps selected files visible after the selector collapses, and states that selection grants representative retrieval access without duplicating the source.
+- **Knowledge binding feedback:** Count linked workspace assets alongside authored entries. Binding saves return immediately and queue representative-scoped indexing in the background; unavailable assets remain visible with textual processing state but cannot be newly selected.
+- **Configuration feedback:** Save and sync results use a viewport-fixed notification banner so feedback remains visible from long forms. Success notices dismiss automatically after a short interval and remain manually dismissible; actionable errors persist until dismissed.
+- **Version language:** Published versions use compact mono labels such as `v3`. The active version uses teal-safe treatment; historical versions stay neutral and expose a deliberate reactivate action.
+- **Channels:** Web, Matrix, and Telegram appear as operational bindings with textual health states and external identity. Channel colors may distinguish transport, but status cannot rely on color alone.
+- **Trust boundary:** Runtime safety, permission revocation, channel pause, and knowledge withdrawal are real-time policy overlays, not editable historical version fields.
+- **Responsive behavior:** Identity and status stack on narrow screens; readiness rows preserve their description and action; configuration groups become one column.
+
+## Unified Inbox Pattern
+- **Object navigation:** The module uses three persistent views — Conversations, Pending, and Leads. A Contact is identity, a Pending item is work, and a Lead is an opportunity; do not collapse them into one ambiguous row type.
+- **Three-pane desktop layout:** Conversation queue, message timeline, and contact/run inspector. The inspector may collapse below 1180px; the queue stacks above the thread below 880px.
+- **Queue density:** Each row contains contact, last message, time, channel, episode state, paid marker, and unread count. Search and operational state filters stay directly above the queue.
+- **Message authorship:** Audience, digital representative, operator, system, and tool messages must be visually and textually distinct. Human operator messages never masquerade as the representative.
+- **Control state:** The thread header always states whether AI or a named human controls the conversation. Human takeover and return-to-AI are explicit audited actions.
+- **Context strip:** Episode number, pinned representative version, payment state, and current controller stay visible above the timeline.
+- **Knowledge provenance:** Public-safe citation titles and excerpts sit under the relevant representative message. Internal prompts, credentials, and hidden chain-of-thought never appear.
+- **Empty and failure states:** An empty queue, filtered-empty queue, failed generation, and disconnected channel each provide a recovery action and enough vertical space to remain legible.
+- **Composer:** Human reply is an inline composer, enabled only while a named Operator owns the conversation. Internal notes use a separate team-only input in the inspector.
+- **Realtime:** Queue changes arrive without a page reload. Realtime state must preserve the current selection and must not erase unsent operator text.
+
+## Public Representative Chat-first Pattern
+- **Audience:** The public representative page is for the external visitor, never the Owner operating the representative. Owner-facing counts, setup terminology, runtime configuration, channel roadmaps, and skill-pack internals remain in the Dashboard.
+- **First task:** The primary public action is conversation. Use a compact identity hero followed immediately by the durable chat; do not require an extra “start” page or force visitors through representative configuration explanations.
+- **Identity summary:** The first viewport answers who the representative serves, what kind of help it offers, whether replies are AI or human, which languages are available, and how to begin. Do not use knowledge-item, skill, or runtime counts as public proof metrics.
+- **Conversation layout:** On desktop, use a dominant conversation column plus a compact session sidebar for current responder, remaining free use, human handoff, optional service depth, and privacy. On mobile, keep conversation first and stack the sidebar below it.
+- **Task language:** Translate configured skills into visitor outcomes such as answering questions, organizing a request, preparing quote context, finding public resources, requesting a meeting, and asking for a human. Never expose activation modes, package sources, internal routing, or execution terminology.
+- **Public-only language:** Do not expose Dashboard, control-plane, memory-console, source-code, or internal runtime links to ordinary visitors.
+- **Durability:** Restore the server timeline on load. Submission shows an accepted/pending state, final content arrives asynchronously, and refreshing the page never discards persisted messages.
+- **Authorship and handoff:** Digital representative and human Operator messages are visually and textually explicit. When human control is active, keep the composer available for additional context and show the queue state.
+- **Citations:** Show public-safe source titles on the answer that used them; keep long excerpts collapsed by default. Never show internal URIs, prompts, credentials, hidden reasoning, or retrieval diagnostics.
+- **Availability:** Published version, public mode, Web channel, and pause state use one server gate across page and APIs. A paused representative receives a focused offline state, not a partially functional marketing page.
+- **Commercial UI:** Service plans are secondary and contextual. Keep them collapsed while free replies remain, reveal them when the visitor asks or reaches the limit, and never duplicate the full pricing grid elsewhere on the page. Mock recharge, fake QR, roadmap channels, and demo trust claims are development-only and hidden from production.
+- **Trust disclosure:** Explain AI authorship, public knowledge use, privacy limits, and human-confirmation requirements in concise visitor language. Detailed policies may expand from a compact trust section rather than occupying the primary task flow.
+- **Public resources:** Show only actual visitor-ready FAQs, materials, policies, and deliverables. Hide empty categories and zero-count operational states; knowledge provenance belongs primarily on the answer that used it.
+
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
@@ -175,3 +215,7 @@
 | 2026-07-15 | Reframed Dashboard as workspace-level Digital Representative OS | Replaced the representative-centric seven-tab dashboard with a 12-module workspace information architecture; synchronized Dashboard colors, typography, borders, and surface language with the current light teal/indigo Site implementation. |
 | 2026-07-15 | Defined the workspace Knowledge Library interaction pattern | Established file/URL/text intake, operational status language, explicit visibility and representative bindings, traceable processing details, archive-before-delete safety, and responsive/accessibility behavior as the source of truth for knowledge UI. |
 | 2026-07-16 | Added batch file intake and deterministic duplicate handling | Keeps multi-file work visible and recoverable with queue progress and retry, prevents accidental duplicate storage by default, and makes destructive replacement an explicit user choice. |
+| 2026-07-16 | Defined Digital Representative operations and the unified Inbox | Makes publish readiness, immutable versions, explicit AI/human control, citations, and channel state part of the core trust-first dashboard system. |
+| 2026-07-17 | Restored the Owner 1:N representative workspace flow | Makes creation, six-step draft configuration, publish readiness, immutable public runtime, and version reactivation reachable in one module without changing Owner identity from representative settings. |
+| 2026-07-17 | Connected representative setup to the workspace Knowledge Library | Keeps structured public answers and reusable source assets distinct while allowing ready files to be authorized, counted, and indexed for a representative without duplicate storage. |
+| 2026-07-17 | Defined Conversations / Pending / Leads and Chat-first public runtime | Separates identity, work, and opportunity state; makes operator authorship, durable async chat, public citations, and one strict availability gate part of the product contract. |

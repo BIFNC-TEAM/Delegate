@@ -174,6 +174,16 @@ describe("OpenViking env config", () => {
     expect(config.rootApiKey).toBe("root-only-key");
   });
 
+  it("prefers the container-internal URL over the host URL", () => {
+    const config = resolveOpenVikingEnv({
+      OPENVIKING_ENABLED: "true",
+      OPENVIKING_BASE_URL: "http://localhost:1933",
+      OPENVIKING_INTERNAL_BASE_URL: "http://openviking:1933",
+    });
+
+    expect(config.baseUrl).toBe("http://openviking:1933");
+  });
+
   it("accepts a dedicated model credential without enabling the main OpenAI runtime", () => {
     const config = resolveOpenVikingEnv({
       OPENVIKING_ENABLED: "true",
@@ -222,5 +232,38 @@ describe("OpenViking client", () => {
     const request = new URL(requestUrl);
     expect(request.pathname).toBe("/api/v1/fs");
     expect(request.searchParams.get("recursive")).toBe("true");
+  });
+
+  it("lets a blocking resource import use its declared processing timeout", async () => {
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      timeoutMs: 5,
+      fetchImpl: async (_input, init) =>
+        new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            resolve(
+              new Response(JSON.stringify({ status: "ok", result: { status: "processed" } }), {
+                status: 200,
+                headers: { "Content-Type": "application/json" },
+              }),
+            );
+          }, 20);
+
+          init?.signal?.addEventListener("abort", () => {
+            clearTimeout(timer);
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        }),
+    });
+
+    await expect(
+      client.addResource({
+        tempFileId: "temp-resource",
+        to: "viking://resources/delegate/test.md",
+        reason: "Regression test",
+        wait: true,
+        timeout: 1,
+      }),
+    ).resolves.toMatchObject({ status: "processed" });
   });
 });

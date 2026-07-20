@@ -18,6 +18,9 @@ export async function generateAnthropicResponse(params: {
     apiKey: params.env.anthropic.apiKey,
     ...(params.env.anthropic.baseUrl ? { baseURL: params.env.anthropic.baseUrl } : {}),
     timeout: params.env.timeoutMs,
+    // Keep the configured timeout as a real end-to-end budget. Provider
+    // fallback is coordinated by the model runtime instead of the SDK.
+    maxRetries: 0,
   });
 
   const response = await client.messages.create({

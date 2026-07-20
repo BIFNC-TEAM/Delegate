@@ -1,10 +1,10 @@
-import type { PlanTier, Representative } from "@delegate/domain";
-import type { RepresentativeSetupSnapshot } from "@delegate/web-data";
+import type { PlanTier } from "@delegate/domain";
 import type { ModelRuntimeRecentTurn } from "@delegate/model-runtime";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 export type PublicChatRequest = {
   message: string;
+  clientMessageId?: string;
 };
 
 export type PublicChatResponse = {
@@ -27,6 +27,7 @@ export type PublicChatResponse = {
   };
   runtime: {
     usedModel: boolean;
+    runId?: string;
     provider?: "openai" | "anthropic";
     model?: string;
     fallbackReason?: string;
@@ -56,45 +57,18 @@ const PUBLIC_CHAT_TURN_TEXT_LIMIT = 240;
 export const PUBLIC_CHAT_EFFECTIVE_TIER: PlanTier = "free";
 export const PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 
-export function buildPublicChatRepresentative(
-  setup: RepresentativeSetupSnapshot,
-): Representative {
-  return {
-    id: setup.id,
-    slug: setup.slug,
-    ownerName: setup.ownerName,
-    name: setup.name,
-    tagline: setup.tagline,
-    tone: setup.tone,
-    languages: [...setup.languages],
-    groupActivation: setup.groupActivation,
-    skills: [...setup.skills],
-    skillPacks: [],
-    knowledgePack: {
-      identitySummary: setup.knowledgePack.identitySummary,
-      faq: setup.knowledgePack.faq.map((item) => ({ ...item })),
-      materials: setup.knowledgePack.materials.map((item) => ({ ...item })),
-      policies: setup.knowledgePack.policies.map((item) => ({ ...item })),
-    },
-    contract: {
-      freeReplyLimit: setup.contract.freeReplyLimit,
-      freeScope: [...setup.contract.freeScope],
-      paywalledIntents: [...setup.contract.paywalledIntents],
-      handoffWindowHours: setup.contract.handoffWindowHours,
-    },
-    pricing: setup.pricing.map((plan) => ({ ...plan })),
-    handoffPrompt: setup.handoffPrompt,
-    actionGate: { ...setup.actionGate },
-  };
-}
-
 export function normalizePublicChatRequest(payload: unknown): PublicChatRequest {
   const body = (payload ?? {}) as Record<string, unknown>;
   const message =
     typeof body.message === "string" ? body.message.trim() : "";
+  const clientMessageId =
+    typeof body.clientMessageId === "string" && body.clientMessageId.trim().length <= 160
+      ? body.clientMessageId.trim()
+      : undefined;
 
   return {
     message,
+    ...(clientMessageId ? { clientMessageId } : {}),
   };
 }
 

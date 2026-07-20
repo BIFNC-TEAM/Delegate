@@ -5,6 +5,7 @@ import { openVikingCaptureModeSchema, openVikingModeSchema } from "./types";
 const envSchema = z.object({
   OPENVIKING_ENABLED: z.string().optional(),
   OPENVIKING_BASE_URL: z.string().url().optional(),
+  OPENVIKING_INTERNAL_BASE_URL: z.string().url().optional(),
   OPENVIKING_API_KEY: z.string().optional(),
   OPENVIKING_ROOT_API_KEY: z.string().optional(),
   OPENVIKING_TIMEOUT_MS: z.string().optional(),
@@ -49,7 +50,11 @@ export type OpenVikingEnvConfig = {
 export function resolveOpenVikingEnv(env: NodeJS.ProcessEnv = process.env): OpenVikingEnvConfig {
   const parsed = envSchema.parse(env);
   const enabled = parseBoolean(parsed.OPENVIKING_ENABLED, false);
-  const baseUrl = normalizeBaseUrl(parsed.OPENVIKING_BASE_URL ?? "http://localhost:1933");
+  const baseUrl = normalizeBaseUrl(
+    parsed.OPENVIKING_INTERNAL_BASE_URL ??
+      parsed.OPENVIKING_BASE_URL ??
+      "http://localhost:1933",
+  );
   const timeoutMs = parseInteger(parsed.OPENVIKING_TIMEOUT_MS, 8000);
   const rootApiKey = normalizeOptionalString(parsed.OPENVIKING_ROOT_API_KEY);
   const apiKey = normalizeOptionalString(parsed.OPENVIKING_API_KEY) ?? rootApiKey;

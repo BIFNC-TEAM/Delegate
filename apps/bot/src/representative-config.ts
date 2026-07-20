@@ -9,6 +9,10 @@ import {
   type Representative,
 } from "@delegate/domain";
 import {
+  buildRepresentativeRuntimeProfile,
+  getRepresentativeRuntimeSetupSnapshot,
+} from "@delegate/web-data";
+import {
   GroupActivation,
   PricingPlanType,
   type Prisma,
@@ -29,6 +33,14 @@ type RepresentativeConfigRecord = Prisma.RepresentativeGetPayload<{
 export async function getRepresentativeRuntimeConfig(
   representativeSlug: string,
 ): Promise<Representative> {
+  const runtimeSetup = await getRepresentativeRuntimeSetupSnapshot(representativeSlug);
+  if (runtimeSetup) {
+    return buildRepresentativeRuntimeProfile(runtimeSetup);
+  }
+  if (process.env.DATABASE_URL?.trim()) {
+    throw new Error(`Representative "${representativeSlug}" has no active published version.`);
+  }
+
   if (shouldUseStaticFallbackMode(representativeSlug)) {
     return cloneRepresentative(demoRepresentative);
   }

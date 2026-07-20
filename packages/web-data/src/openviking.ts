@@ -1,5 +1,6 @@
 import {
   buildOpenVikingAgentId,
+  buildSessionScopedSearchRoot,
   buildRepresentativeKnowledgeDocuments,
   buildHandoffResolutionPatternDocument,
   buildRepresentativeResourceRootUri,
@@ -9,11 +10,14 @@ import {
   sanitizePublicSafeText,
   type OpenVikingCaptureMode,
   type OpenVikingDocumentSpec,
+  type OpenVikingRecallItem,
 } from "@delegate/openviking";
 import { Prisma, type Representative, type PrismaClient } from "@prisma/client";
 import { z } from "zod";
 
 import { prisma } from "./prisma";
+
+const REPRESENTATIVE_RESOURCE_SYNC_TIMEOUT_SECONDS = 300;
 
 const representativeOpenVikingArgs = Prisma.validator<Prisma.RepresentativeDefaultArgs>()({
   include: {
@@ -453,6 +457,135 @@ export async function maybeSyncRepresentativeOpenVikingResources(params: {
   }
 }
 
+export type RepresentativeRecallContext = {
+  items: OpenVikingRecallItem[];
+  citations: Array<{
+    knowledgeAssetId?: string;
+    title: string;
+    excerpt?: string;
+    score: number;
+  }>;
+};
+
+/**
+ * Recall only the public representative resources plus memory scopes that are
+ * safe for the current contact. The returned URIs are retained internally for
+ * traceability, while public citations intentionally omit OpenViking URIs.
+ */
+export async function recallRepresentativeContext(params: {
+  representativeSlug: string;
+  conversationId: string;
+  contactId: string;
+  queryText: string;
+}): Promise<RepresentativeRecallContext> {
+  const queryText = params.queryText.trim();
+  if (!queryText) return { items: [], citations: [] };
+
+  const representative = await prisma.representative.findUnique({
+    where: { slug: params.representativeSlug },
+    select: {
+      id: true,
+      slug: true,
+      openvikingEnabled: true,
+      openvikingAutoRecall: true,
+      openvikingAgentId: true,
+      openvikingRecallLimit: true,
+      openvikingRecallScoreThreshold: true,
+      knowledgeAssetLinks: {
+        where: {
+          enabled: true,
+          reviewStatus: "APPROVED",
+          asset: { status: "READY", archivedAt: null },
+        },
+        select: { assetId: true },
+      },
+    },
+  });
+  const env = resolveOpenVikingEnv();
+  if (!representative?.openvikingEnabled || !representative.openvikingAutoRecall || !env.enabled || !env.hasModelCredentials) {
+    return { items: [], citations: [] };
+  }
+
+  const client = buildRepresentativeClient(representative);
+  const targetRoots = buildSessionScopedSearchRoot({
+    representativeSlug: representative.slug,
+    contactId: params.contactId,
+  });
+  const searchResults = await Promise.allSettled(
+    targetRoots.map((targetUri) => client.search({
+      query: queryText,
+      targetUri,
+      limit: representative.openvikingRecallLimit,
+      scoreThreshold: representative.openvikingRecallScoreThreshold,
+    })),
+  );
+  const allowedAssetIds = new Set(representative.knowledgeAssetLinks.map((link) => link.assetId));
+  const candidates = searchResults.flatMap((result) => {
+    if (result.status !== "fulfilled") return [];
+    return [
+      ...result.value.resources,
+      ...result.value.memories,
+      ...result.value.skills,
+    ];
+  })
+    .filter((item) => isAllowedRecallUri(item.uri, targetRoots, allowedAssetIds))
+    .filter((item) => !/\/(?:\.overview|\.abstract)\.md$/i.test(item.uri))
+    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+
+  const unique = new Map<string, (typeof candidates)[number]>();
+  for (const candidate of candidates) {
+    if (!unique.has(candidate.uri)) unique.set(candidate.uri, candidate);
+  }
+  const ranked = [...unique.values()];
+  const topScore = ranked[0]?.score ?? 0;
+  const relativeScoreFloor = Math.max(representative.openvikingRecallScoreThreshold, topScore * 0.72);
+  const selected = ranked
+    .filter((candidate) => (candidate.score ?? 0) >= relativeScoreFloor)
+    .slice(0, representative.openvikingRecallLimit);
+  const hydrated = await Promise.all(selected.map(async (item) => {
+    const content = await client.read(item.uri, 100).catch(() => "");
+    const abstract = sanitizePublicSafeText(item.abstract || "", 800) ?? "";
+    const safeContent = sanitizePublicSafeText(content, 4_000) ?? "";
+    const score = item.score ?? 0;
+    return {
+      item: {
+        uri: item.uri,
+        contextType: item.context_type,
+        layer: safeContent ? ("L2" as const) : ("L0" as const),
+        score,
+        abstract,
+        ...(safeContent ? { content: safeContent } : {}),
+      } satisfies OpenVikingRecallItem,
+      citation: {
+        ...resolveKnowledgeAssetId(item.uri),
+        title: resolveRecallTitle(content, item.uri),
+        ...(abstract || safeContent ? { excerpt: (abstract || safeContent).slice(0, 480) } : {}),
+        score,
+      },
+    };
+  }));
+
+  if (hydrated.length) {
+    await prisma.conversationRecallTrace.createMany({
+      data: hydrated.map(({ item }) => ({
+        representativeId: representative.id,
+        conversationId: params.conversationId,
+        contactId: params.contactId,
+        queryText,
+        recalledUri: item.uri,
+        contextType: item.contextType,
+        layer: item.layer,
+        score: item.score,
+      })),
+    });
+  }
+
+  return {
+    items: hydrated.map(({ item }) => item),
+    citations: hydrated.map(({ citation }) => citation),
+  };
+}
+
 export async function getRepresentativeOpenVikingRecallTraces(
   representativeSlug: string,
 ): Promise<
@@ -490,6 +623,27 @@ export async function getRepresentativeOpenVikingRecallTraces(
     score: trace.score,
     createdAt: trace.createdAt.toISOString(),
   }));
+}
+
+function isAllowedRecallUri(uri: string, targetRoots: string[], allowedAssetIds: Set<string>) {
+  const [resourceRoot, contactMemoryRoot, agentMemoryRoot] = targetRoots;
+  if (contactMemoryRoot && uri.startsWith(contactMemoryRoot)) return true;
+  if (agentMemoryRoot && uri.startsWith(agentMemoryRoot)) return true;
+  if (!resourceRoot || !uri.startsWith(resourceRoot)) return false;
+  const assetId = resolveKnowledgeAssetId(uri).knowledgeAssetId;
+  return !assetId || allowedAssetIds.has(assetId);
+}
+
+function resolveKnowledgeAssetId(uri: string): { knowledgeAssetId?: string } {
+  const match = uri.match(/\/knowledge\/([^/]+?)\.md(?:\/|$)/i);
+  return match?.[1] ? { knowledgeAssetId: match[1] } : {};
+}
+
+function resolveRecallTitle(content: string, uri: string) {
+  const heading = content.match(/^#\s+(.+)$/m)?.[1]?.trim();
+  if (heading) return sanitizePublicSafeText(heading, 160) || "Knowledge source";
+  const fileName = uri.split("/").filter(Boolean).at(-1)?.replace(/\.md$/i, "");
+  return sanitizePublicSafeText(fileName || "Knowledge source", 160) || "Knowledge source";
 }
 
 export async function getRepresentativeOpenVikingMemoryPreview(
@@ -704,7 +858,7 @@ async function syncDocumentToOpenViking(params: {
       reason: params.document.reason,
       instruction: "Delegate representative public knowledge sync",
       wait: true,
-      timeout: 60,
+      timeout: REPRESENTATIVE_RESOURCE_SYNC_TIMEOUT_SECONDS,
     });
     return;
   }
@@ -717,7 +871,7 @@ async function syncDocumentToOpenViking(params: {
     reason: params.document.reason,
     instruction: "Delegate memory staging sync",
     wait: true,
-    timeout: 60,
+    timeout: REPRESENTATIVE_RESOURCE_SYNC_TIMEOUT_SECONDS,
   });
   await params.client.move({
     fromUri: stagingUri,

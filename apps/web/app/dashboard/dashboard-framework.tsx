@@ -2,6 +2,12 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { LanguageSwitcher, buildLocalizedHref, type Locale } from "@delegate/web-ui";
+import type {
+  ConversationDetailSnapshot,
+  ConversationInboxSnapshot,
+  RepresentativeDirectoryItem,
+  RepresentativeOperationsSnapshot,
+} from "@delegate/web-data";
 
 import {
   dashboardNavigation,
@@ -11,25 +17,21 @@ import {
   type DashboardView,
 } from "./dashboard-ui-data";
 import { DashboardKnowledgeLibrary } from "./dashboard-knowledge-library";
-
-type RepresentativeDirectoryItem = {
-  id: string;
-  slug: string;
-  ownerName: string;
-  name: string;
-  tagline: string;
-  updatedAt: string;
-};
+import { DashboardInbox } from "./dashboard-inbox";
+import { DashboardRepresentativeOperations } from "./dashboard-representative-operations";
 
 type DashboardFrameworkProps = {
   accountLabel: string;
   activeSlug: string;
   activeView: DashboardView;
+  conversationDetail: ConversationDetailSnapshot | null;
+  inboxSnapshot: ConversationInboxSnapshot | null;
   locale: Locale;
   logoutHref?: string;
   loginHref?: string;
   representativeBaseUrl: string;
   representatives: RepresentativeDirectoryItem[];
+  representativeOperations: RepresentativeOperationsSnapshot | null;
   websiteBaseUrl: string;
 };
 
@@ -100,7 +102,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
     <main
       className="dashboard-v2-shell localized-shell"
       data-locale={props.locale}
-      data-ui-stage={props.activeView === "knowledge" ? "functional" : "framework"}
+      data-ui-stage={["knowledge", "representatives", "inbox"].includes(props.activeView) ? "functional" : "framework"}
       lang={props.locale === "zh" ? "zh-CN" : "en"}
     >
       <div className="dashboard-v2-layout">
@@ -250,7 +252,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
             </div>
           </header>
 
-          {props.activeView !== "knowledge" ? (
+          {!(["knowledge", "representatives", "inbox"] as DashboardView[]).includes(props.activeView) ? (
             <div className="dashboard-v2-framework-note">
               <span>{t.frameworkBadge}</span>
               <p>{t.frameworkHint}</p>
@@ -267,6 +269,22 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               />
             ) : props.activeView === "knowledge" ? (
               <DashboardKnowledgeLibrary activeSlug={props.activeSlug} locale={props.locale} />
+            ) : props.activeView === "representatives" ? (
+              <DashboardRepresentativeOperations
+                accountLabel={props.accountLabel}
+                activeSlug={props.activeSlug}
+                initialSnapshot={props.representativeOperations}
+                locale={props.locale}
+                representativeBaseUrl={props.representativeBaseUrl}
+                representatives={props.representatives}
+              />
+            ) : props.activeView === "inbox" && props.inboxSnapshot ? (
+              <DashboardInbox
+                activeSlug={props.activeSlug}
+                initialDetail={props.conversationDetail}
+                initialSnapshot={props.inboxSnapshot}
+                locale={props.locale}
+              />
             ) : (
               <DashboardSectionFramework
                 blueprint={dashboardSectionBlueprints[props.activeView]}

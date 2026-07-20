@@ -120,6 +120,12 @@ export class OpenVikingClient {
     wait?: boolean;
     timeout?: number;
   }): Promise<{ root_uri?: string; status?: string; source_path?: string; errors?: string[] }> {
+    const waitsForProcessing = params.wait ?? true;
+    const processingTimeoutMs =
+      waitsForProcessing && typeof params.timeout === "number"
+        ? params.timeout * 1000 + 5000
+        : undefined;
+
     return this.request("/api/v1/resources", {
       method: "POST",
       body: JSON.stringify({
@@ -132,6 +138,9 @@ export class OpenVikingClient {
         wait: params.wait ?? true,
         ...(typeof params.timeout === "number" ? { timeout: params.timeout } : {}),
       }),
+      ...(processingTimeoutMs
+        ? { timeoutMs: Math.max(this.timeoutMs, processingTimeoutMs) }
+        : {}),
     });
   }
 
@@ -293,10 +302,14 @@ export class OpenVikingClient {
       authenticated?: boolean;
       json?: boolean;
       raw?: boolean;
+      timeoutMs?: number;
     },
   ): Promise<T> {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      options.timeoutMs ?? this.timeoutMs,
+    );
 
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {

@@ -28,6 +28,12 @@ x-app-environment: &app-environment
   WORKFLOW_RUNNER_PORT: ${WORKFLOW_RUNNER_PORT:-4020}
   WORKFLOW_RUNNER_POLL_MS: ${WORKFLOW_RUNNER_POLL_MS:-5000}
   WORKFLOW_RUNNER_BATCH_SIZE: ${WORKFLOW_RUNNER_BATCH_SIZE:-10}
+  MATRIX_BRIDGE_PORT: ${MATRIX_BRIDGE_PORT:-4030}
+  MATRIX_AS_HS_TOKEN: ${MATRIX_AS_HS_TOKEN:-}
+  MATRIX_AS_TOKEN: ${MATRIX_AS_TOKEN:-}
+  MATRIX_HOMESERVER_URL: ${MATRIX_HOMESERVER_URL:-}
+  CONVERSATION_WORKER_PORT: ${CONVERSATION_WORKER_PORT:-4040}
+  CONVERSATION_WORKER_POLL_MS: ${CONVERSATION_WORKER_POLL_MS:-500}
   WORKFLOW_APPROVAL_TIMEOUT_MINUTES: ${WORKFLOW_APPROVAL_TIMEOUT_MINUTES:-30}
   WORKFLOW_ENGINE: ${WORKFLOW_ENGINE:-local_runner}
   WORKFLOW_TEMPORAL_ADDRESS: ${WORKFLOW_TEMPORAL_ADDRESS:-}
@@ -45,11 +51,12 @@ x-app-environment: &app-environment
   KNOWLEDGE_OBJECT_STORE_REGION: ${KNOWLEDGE_OBJECT_STORE_REGION:-us-east-1}
   KNOWLEDGE_OBJECT_STORE_FORCE_PATH_STYLE: ${KNOWLEDGE_OBJECT_STORE_FORCE_PATH_STYLE:-true}
   OPENVIKING_ENABLED: ${OPENVIKING_ENABLED:-true}
-  OPENVIKING_BASE_URL: ${OPENVIKING_BASE_URL:-http://openviking:1933}
+  OPENVIKING_BASE_URL: ${OPENVIKING_DOCKER_BASE_URL:-http://openviking:1933}
+  OPENVIKING_INTERNAL_BASE_URL: ${OPENVIKING_INTERNAL_BASE_URL:-http://openviking:1933}
   OPENVIKING_API_KEY: ${OPENVIKING_API_KEY:-delegate-local-root-key}
   OPENVIKING_ROOT_API_KEY: ${OPENVIKING_ROOT_API_KEY:-delegate-local-root-key}
   OPENVIKING_TIMEOUT_MS: ${OPENVIKING_TIMEOUT_MS:-8000}
-  OPENVIKING_CONSOLE_URL: ${OPENVIKING_CONSOLE_URL:-http://localhost:8020/docs}
+  OPENVIKING_CONSOLE_URL: ${OPENVIKING_DOCKER_CONSOLE_URL:-http://localhost:1933/studio}
   OPENVIKING_AGENT_ID_PREFIX: ${OPENVIKING_AGENT_ID_PREFIX:-delegate-rep}
   OPENVIKING_RESOURCE_SYNC_ENABLED: ${OPENVIKING_RESOURCE_SYNC_ENABLED:-true}
   OPENVIKING_AUTO_RECALL_DEFAULT: ${OPENVIKING_AUTO_RECALL_DEFAULT:-true}
@@ -60,8 +67,20 @@ x-app-environment: &app-environment
   OPENVIKING_EMBEDDING_DIMENSION: ${OPENVIKING_EMBEDDING_DIMENSION:-3072}
   OPENVIKING_MODEL_API_KEY: ${OPENVIKING_MODEL_API_KEY:-}
   OPENVIKING_MODEL_API_BASE: ${OPENVIKING_MODEL_API_BASE:-}
-  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  DELEGATE_MODEL_ENABLED: ${DELEGATE_MODEL_ENABLED:-true}
+  DELEGATE_MODEL_PROVIDER: ${DELEGATE_MODEL_PROVIDER:-openai}
+  DELEGATE_MODEL_FALLBACK_PROVIDER: ${DELEGATE_MODEL_FALLBACK_PROVIDER:-bailian}
+  DELEGATE_MODEL_TIMEOUT_MS: ${DELEGATE_MODEL_TIMEOUT_MS:-30000}
+  DELEGATE_MODEL_MAX_INPUT_TOKENS: ${DELEGATE_MODEL_MAX_INPUT_TOKENS:-2400}
+  DELEGATE_MODEL_MAX_OUTPUT_TOKENS: ${DELEGATE_MODEL_MAX_OUTPUT_TOKENS:-320}
+  DELEGATE_OPENAI_MODEL: ${DELEGATE_OPENAI_MODEL:-gpt-4o-mini}
+  OPENAI_API_KEY: ${DELEGATE_MODEL_API_KEY:-${OPENVIKING_MODEL_API_KEY:-}}
+  OPENAI_BASE_URL: ${DELEGATE_MODEL_API_BASE:-${OPENVIKING_MODEL_API_BASE:-https://api.openai.com/v1}}
+  DELEGATE_BAILIAN_MODEL: ${DELEGATE_BAILIAN_MODEL:-qwen-plus}
+  DELEGATE_BAILIAN_API_KEY: ${DELEGATE_BAILIAN_API_KEY:-}
+  DELEGATE_BAILIAN_BASE_URL: ${DELEGATE_BAILIAN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+  DELEGATE_BAILIAN_INPUT_COST_USD_PER_1M_TOKENS: ${DELEGATE_BAILIAN_INPUT_COST_USD_PER_1M_TOKENS:-0}
+  DELEGATE_BAILIAN_OUTPUT_COST_USD_PER_1M_TOKENS: ${DELEGATE_BAILIAN_OUTPUT_COST_USD_PER_1M_TOKENS:-0}
   ARK_API_KEY: ${ARK_API_KEY:-}
   ARK_API_BASE: ${ARK_API_BASE:-https://ark.cn-beijing.volces.com/api/v3}
 
@@ -282,6 +301,61 @@ services:
       retries: 10
       start_period: 10s
 
+  matrix-bridge:
+    <<: *app-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: >
+      sh -lc "if [ -n \"$$MATRIX_AS_HS_TOKEN\" ]; then
+        pnpm --filter @delegate/matrix-bridge start;
+      else
+        echo 'MATRIX_AS_HS_TOKEN is empty. Matrix bridge is idle; inject the token through environment secrets to enable it.';
+        tail -f /dev/null;
+      fi"
+    ports:
+      - "4030:4030"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4030/health').then((res)=>{if(!res.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  conversation-worker:
+    <<: *app-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      openviking:
+        condition: service_started
+    command: >
+      sh -lc "pnpm --filter @delegate/conversation-worker start"
+    ports:
+      - "4040:4040"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4040/health').then((res)=>{if(!res.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   temporal-db-init:
     image: postgres:16-alpine
     profiles: ["temporal"]
@@ -372,24 +446,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 40s
-
-  openviking-console:
-    image: delegate-openviking:v0.4.9-compat
-    container_name: delegate-openviking-console
-    restart: unless-stopped
-    depends_on:
-      openviking:
-        condition: service_healthy
-    command: >
-      sh -lc "/app/.venv/bin/python -m openviking.console.bootstrap --host 0.0.0.0 --port 8020 --openviking-url http://openviking:1933"
-    ports:
-      - "8020:8020"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8020/health >/dev/null || exit 1"]
-      interval: 20s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
 
 volumes:
   delegate-postgres-data:

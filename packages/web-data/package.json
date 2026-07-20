@@ -17,6 +17,7 @@
     "@delegate/domain": "workspace:*",
     "@delegate/openviking": "workspace:*",
     "@delegate/registry": "workspace:*",
+    "@delegate/runtime": "workspace:*",
     "@delegate/workflows": "workspace:*",
     "@prisma/client": "^6.19.2",
     "jose": "^6.2.3",

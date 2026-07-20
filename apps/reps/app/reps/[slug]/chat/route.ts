@@ -2,23 +2,19 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import { demoRepresentative } from "@delegate/domain";
-import { generateRepresentativeReply, type ModelRuntimeRecentTurn } from "@delegate/model-runtime";
+import { generateRepresentativeReply } from "@delegate/model-runtime";
+import { createConversationPlan, renderReplyPreview, resolveConversationSubagent } from "@delegate/runtime";
 import {
-  createConversationPlan,
-  renderReplyPreview,
-  resolveConversationSubagent,
-} from "@delegate/runtime";
-import {
-  getRepresentativeSetupSnapshot,
-  loadWebConversationRecentTurns,
-  persistWebConversationExchange,
+  acceptInboundConversationMessage,
+  buildRepresentativeRuntimeProfile,
+  buildWebAudienceKey,
+  getPublicConversationHistory,
+  getPublicRepresentativeRuntime,
   resolveWebAudienceContact,
   resolveWebAudienceConversation,
 } from "@delegate/web-data";
 
 import {
-  appendPublicChatTurns,
-  buildPublicChatRepresentative,
   deriveTierUsage,
   getPublicChatCookieName,
   normalizePublicChatRequest,
@@ -26,70 +22,101 @@ import {
   PUBLIC_CHAT_EFFECTIVE_TIER,
   readPublicChatSessionState,
   shouldUseSecurePublicChatCookie,
-  type PublicChatResponse,
   writePublicChatSessionState,
 } from "../public-chat";
+
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ slug: string }> },
+) {
+  const { slug } = await params;
+  const runtime = await getPublicRepresentativeRuntime(slug);
+  if (runtime.status !== "available") return publicRuntimeError(runtime.status);
+
+  const cookieStore = await cookies();
+  const session = readPublicChatSessionState({
+    representativeSlug: slug,
+    cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
+  });
+  let history = { state: "new", humanActive: false, freeRepliesUsed: 0, messages: [] as Array<unknown> };
+  try {
+    history = await getPublicConversationHistory({
+      representativeSlug: slug,
+      audienceKey: buildWebAudienceKey(session.audienceId),
+    });
+  } catch (error) {
+    if (!shouldUseNonPersistentDemoChat(error, slug)) throw error;
+  }
+
+  const response = NextResponse.json({
+    ...history,
+    usage: deriveTierUsage({
+      freeRepliesUsed: history.freeRepliesUsed,
+      freeReplyLimit: runtime.setup.contract.freeReplyLimit,
+    }),
+  });
+  setPublicChatCookie(response, request, slug, session);
+  return response;
+}
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-
   try {
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") return publicRuntimeError(runtime.status);
     const body = normalizePublicChatRequest(await request.json());
-    if (!body.message) {
-      return NextResponse.json(
-        { error: "Message is required." },
-        { status: 400 },
-      );
-    }
-
-    const setup = await getRepresentativeSetupSnapshot(slug);
-    if (!setup) {
-      return NextResponse.json(
-        { error: `Representative "${slug}" not found.` },
-        { status: 404 },
-      );
-    }
+    if (!body.message) return NextResponse.json({ error: "Message is required." }, { status: 400 });
 
     const cookieStore = await cookies();
-    const sessionState = readPublicChatSessionState({
+    const session = readPublicChatSessionState({
       representativeSlug: slug,
       cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
     });
-    const representative = buildPublicChatRepresentative(setup);
-    let conversationId: string | null = null;
-    let freeRepliesUsed = 0;
-    let recentTurns: ModelRuntimeRecentTurn[] = [];
 
     try {
       const contact = await resolveWebAudienceContact({
-        representativeId: setup.id,
+        representativeId: runtime.setup.id,
         representativeSlug: slug,
-        audienceId: sessionState.audienceId,
+        audienceId: session.audienceId,
       });
       const conversation = await resolveWebAudienceConversation({
-        representativeId: setup.id,
+        representativeId: runtime.setup.id,
         contactId: contact.id,
-        audienceId: sessionState.audienceId,
+        audienceId: session.audienceId,
       });
-      conversationId = conversation.id;
-      freeRepliesUsed = conversation.freeRepliesUsed;
-      recentTurns = await loadWebConversationRecentTurns({
+      const accepted = await acceptInboundConversationMessage({
+        representativeSlug: slug,
         conversationId: conversation.id,
+        text: body.message,
+        senderId: session.audienceId,
+        senderDisplayName: "Web visitor",
+        clientMessageId: body.clientMessageId || `web:${session.audienceId}:${Date.now()}`,
+        channel: "web",
       });
+      const response = NextResponse.json(
+        {
+          status: accepted.heldForOperator ? "waiting_human" : "queued",
+          heldForOperator: accepted.heldForOperator,
+          ...(accepted.run ? { runId: accepted.run.id } : {}),
+          tier: PUBLIC_CHAT_EFFECTIVE_TIER,
+          usage: deriveTierUsage({
+            freeRepliesUsed: conversation.freeRepliesUsed,
+            freeReplyLimit: runtime.setup.contract.freeReplyLimit,
+          }),
+        },
+        { status: 202 },
+      );
+      setPublicChatCookie(response, request, slug, session);
+      return response;
     } catch (error) {
-      if (!shouldUseNonPersistentDemoChat(error, slug)) {
-        throw error;
-      }
+      if (!shouldUseNonPersistentDemoChat(error, slug)) throw error;
     }
 
-    const usage = deriveTierUsage({
-      freeRepliesUsed,
-      freeReplyLimit: representative.contract.freeReplyLimit,
-    });
-
+    const representative = buildRepresentativeRuntimeProfile(runtime.setup);
+    const usage = deriveTierUsage({ freeRepliesUsed: 0, freeReplyLimit: representative.contract.freeReplyLimit });
     const plan = createConversationPlan({
       text: body.message,
       channel: "private_chat",
@@ -97,26 +124,7 @@ export async function POST(
       usage,
     });
     const subagent = resolveConversationSubagent(plan);
-
     let replyText = renderReplyPreview(representative, plan);
-    const response: PublicChatResponse = {
-      reply: {
-        role: "assistant",
-        text: replyText,
-      },
-      plan: {
-        intent: plan.intent,
-        nextStep: plan.nextStep,
-        ...(plan.suggestedPlan ? { suggestedPlan: plan.suggestedPlan } : {}),
-        reasons: plan.reasons,
-      },
-      tier: PUBLIC_CHAT_EFFECTIVE_TIER,
-      usage,
-      runtime: {
-        usedModel: false,
-      },
-    };
-
     if (plan.nextStep === "answer") {
       const generated = await generateRepresentativeReply({
         representative,
@@ -124,77 +132,46 @@ export async function POST(
         subagent,
         userText: body.message,
         recalled: [],
-        recentTurns,
+        recentTurns: [],
         collectorState: null,
       });
-
-      if (generated.ok) {
-        response.reply.text = generated.replyText;
-        response.runtime = {
-          usedModel: true,
-          provider: generated.provider,
-          model: generated.model,
-        };
-      } else {
-        response.runtime = {
-          usedModel: false,
-          fallbackReason: generated.reason,
-        };
-      }
+      if (generated.ok) replyText = generated.replyText;
     }
-
-    const nextSessionState = appendPublicChatTurns({
-      state: sessionState,
-      userMessage: body.message,
-      assistantMessage: response.reply.text,
-      nextStep: response.plan.nextStep,
+    const response = NextResponse.json({
+      status: "completed",
+      reply: { role: "assistant", text: replyText },
+      tier: PUBLIC_CHAT_EFFECTIVE_TIER,
+      usage,
     });
-    if (conversationId) {
-      const updatedConversation = await persistWebConversationExchange({
-        conversationId,
-        userMessage: body.message,
-        assistantMessage: response.reply.text,
-        intent: response.plan.intent,
-        nextStep: response.plan.nextStep,
-      });
-      response.usage = deriveTierUsage({
-        freeRepliesUsed: updatedConversation.freeRepliesUsed,
-        freeReplyLimit: representative.contract.freeReplyLimit,
-      });
-    } else {
-      response.usage = deriveTierUsage({
-        freeRepliesUsed: freeRepliesUsed + 1,
-        freeReplyLimit: representative.contract.freeReplyLimit,
-      });
-    }
-    const nextResponse = NextResponse.json(response);
-    nextResponse.cookies.set(
-      getPublicChatCookieName(slug),
-      writePublicChatSessionState({
-        representativeSlug: slug,
-        state: nextSessionState,
-      }),
-      {
-        httpOnly: true,
-        sameSite: "lax",
-        secure: shouldUseSecurePublicChatCookie(request),
-        maxAge: PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
-        path: `/reps/${slug}`,
-      },
-    );
-
-    return nextResponse;
+    setPublicChatCookie(response, request, slug, session);
+    return response;
   } catch (error) {
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to generate representative reply.",
-      },
+      { error: error instanceof Error ? error.message : "Failed to accept chat message." },
       { status: 500 },
     );
   }
+}
+
+function publicRuntimeError(status: Exclude<Awaited<ReturnType<typeof getPublicRepresentativeRuntime>>["status"], "available">) {
+  if (status === "not_found") return NextResponse.json({ error: "Representative not found." }, { status: 404 });
+  if (status === "paused") return NextResponse.json({ error: "This representative is temporarily paused." }, { status: 423 });
+  return NextResponse.json({ error: "This representative is not publicly available." }, { status: 404 });
+}
+
+function setPublicChatCookie(
+  response: NextResponse,
+  request: Request,
+  slug: string,
+  session: ReturnType<typeof readPublicChatSessionState>,
+) {
+  response.cookies.set(getPublicChatCookieName(slug), writePublicChatSessionState({ representativeSlug: slug, state: session }), {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: shouldUseSecurePublicChatCookie(request),
+    maxAge: PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
+    path: `/reps/${slug}`,
+  });
 }
 
 function shouldUseNonPersistentDemoChat(error: unknown, representativeSlug: string): boolean {
@@ -202,13 +179,5 @@ function shouldUseNonPersistentDemoChat(error: unknown, representativeSlug: stri
 }
 
 function isPrismaUnavailableError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-
-  return (
-    error.message.includes("Can't reach database server") ||
-    error.message.includes("Environment variable not found: DATABASE_URL") ||
-    error.message.includes("P1001")
-  );
+  return error instanceof Error && /Can't reach database server|DATABASE_URL|P1001/i.test(error.message);
 }

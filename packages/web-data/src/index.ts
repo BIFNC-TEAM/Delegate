@@ -10,6 +10,7 @@ export * from "./agent-wallet-withdrawals";
 export * from "./auth-identities";
 export * from "./auth-session";
 export * from "./compute";
+export * from "./conversation-platform";
 export * from "./creator-training";
 export * from "./deliverable-insights";
 export * from "./deliverables";

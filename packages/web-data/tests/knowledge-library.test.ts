@@ -17,6 +17,7 @@ import {
   processKnowledgeAsset,
   replaceKnowledgeAssetSource,
   resolveUniqueKnowledgeAssetTitle,
+  setRepresentativeKnowledgeAssetBindings,
   updateKnowledgeAsset,
 } from "../src/knowledge-library";
 import { checksumKnowledgeSource, readKnowledgeSource, storeKnowledgeSource } from "../src/knowledge-storage";
@@ -86,6 +87,70 @@ describe("workspace knowledge library", () => {
     expect(archived.status).toBe("archived");
     await deleteKnowledgeAsset(null, created.id);
     await expect(getKnowledgeAsset(null, created.id)).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("links ready workspace assets to a representative without duplicating the source", async () => {
+    const existing = await listKnowledgeAssets(null);
+    const existingLinkedIds = existing
+      .filter((asset) =>
+        asset.representativeLinks.some(
+          (link) => link.representativeId === demoRepresentative.id && link.enabled,
+        ),
+      )
+      .map((asset) => asset.id);
+    const created = await createKnowledgeAsset(null, {
+      kind: "text",
+      title: `Representative binding ${Date.now()}`,
+      sourceText: "这是一份工作区知识源，只保存一次，并通过显式授权关系提供给指定数字代表检索使用。",
+      visibility: "owner_only",
+    });
+
+    const linked = await setRepresentativeKnowledgeAssetBindings(
+      null,
+      demoRepresentative.slug,
+      [...existingLinkedIds, created.id],
+    );
+    expect(linked.changedAssetIds).toContain(created.id);
+    expect(linked.selectedAssetIds).toContain(created.id);
+    await expect(getKnowledgeAsset(null, created.id)).resolves.toMatchObject({
+      visibility: "selected_representatives",
+      representativeLinks: [
+        expect.objectContaining({
+          representativeId: demoRepresentative.id,
+          usageMode: "qa_source",
+          enabled: true,
+        }),
+      ],
+    });
+
+    const unlinked = await setRepresentativeKnowledgeAssetBindings(
+      null,
+      demoRepresentative.slug,
+      existingLinkedIds,
+    );
+    expect(unlinked.changedAssetIds).toContain(created.id);
+    await expect(getKnowledgeAsset(null, created.id)).resolves.toMatchObject({
+      visibility: "owner_only",
+      representativeLinks: [],
+    });
+
+    const failed = await createKnowledgeAsset(null, {
+      kind: "url",
+      title: `Unavailable binding ${Date.now()}`,
+      sourceUrl: "http://127.0.0.1/representative-binding",
+    });
+    await expect(
+      setRepresentativeKnowledgeAssetBindings(
+        null,
+        demoRepresentative.slug,
+        [...existingLinkedIds, failed.id],
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+
+    await archiveKnowledgeAsset(null, created.id, true);
+    await deleteKnowledgeAsset(null, created.id);
+    await archiveKnowledgeAsset(null, failed.id, true);
+    await deleteKnowledgeAsset(null, failed.id);
   });
 
   it("blocks private network URL imports and records a useful failed processing state", async () => {

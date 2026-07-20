@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   completeMockRechargeOrder,
-  getRepresentativeSetupSnapshot,
+  getPublicRepresentativeRuntime,
 } from "@delegate/web-data";
 
 export async function POST(
@@ -12,10 +12,8 @@ export async function POST(
   const { slug, id } = await params;
 
   try {
-    const representative = await getRepresentativeSetupSnapshot(slug);
-    if (!representative) {
-      return NextResponse.json({ error: "Representative not found." }, { status: 404 });
-    }
+    const runtime = await getPublicRepresentativeRuntime(slug);
+    if (runtime.status !== "available") return NextResponse.json({ error: "Representative is not publicly available." }, { status: runtime.status === "paused" ? 423 : 404 });
 
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const rechargeOrder = await completeMockRechargeOrder(id, {

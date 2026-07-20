@@ -319,8 +319,8 @@ The first product path to dogfood is the browser representative page at `http://
 
 Delegate uses the **Dispatch Editorial** direction from [DESIGN.md](./DESIGN.md):
 
-- warm paper and parchment surfaces
-- sea-ink and copper signal colors
+- light operational surfaces shared with the public site
+- teal trust/live signals with indigo automation and decision emphasis
 - editorial marketing pages
 - procedural, dense owner dashboard views
 - trust disclosures close to primary actions
@@ -332,6 +332,7 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 - [Architecture](./docs/architecture.md): product thesis, runtime loop, security boundary, and OpenViking rules.
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
 - [Public audience identity](./docs/public-audience-identity.md): web anonymous identity, Contact/Conversation, recharge, and sandbox linkage.
+- [Conversation platform](./docs/conversation-platform.md): channel-neutral messages, episodes, versions, human control, SSE, and Matrix Application Service boundaries.
 - [Creator training loop](./docs/creator-training-loop.md): source registry, creator feedback, suggestion workflow, review, evaluation, and rollback.
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model, outbox, timer, cancellation, and dashboard semantics.
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute and browser isolation model.

@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 
 import {
   getRepresentativeSetupSnapshot,
+  maybeSyncRepresentativeOpenVikingResources,
   updateRepresentativeSetup,
 } from "@delegate/web-data";
 
@@ -57,6 +58,7 @@ export async function PATCH(
     const body = (await request.json()) as Record<string, unknown>;
     const snapshot = await updateRepresentativeSetup({
       representativeSlug: slug,
+      syncOpenViking: false,
       input: {
         ownerName: String(body.ownerName ?? ""),
         name: String(body.name ?? ""),
@@ -242,6 +244,13 @@ export async function PATCH(
                 filesystemMode: "workspace_only",
               },
       },
+    });
+
+    after(async () => {
+      await maybeSyncRepresentativeOpenVikingResources({
+        representativeSlug: snapshot.slug,
+        trigger: "setup_update",
+      });
     });
 
     return NextResponse.json(snapshot);

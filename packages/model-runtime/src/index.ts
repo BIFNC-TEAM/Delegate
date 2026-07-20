@@ -1,4 +1,5 @@
 import { generateAnthropicResponse } from "./anthropic";
+import { generateBailianResponse } from "./bailian";
 import { assembleRepresentativeReplyPrompt } from "./context";
 import { resolveModelRuntimeEnv, resolveProviderAttemptOrder } from "./config";
 import { generateOpenAIResponse } from "./openai";
@@ -41,9 +42,11 @@ export async function generateRepresentativeReply(
       provider: env.provider,
       ...(env.provider === "openai"
         ? { model: env.openai.model }
-        : env.provider === "anthropic"
-          ? { model: env.anthropic.model }
-          : {}),
+        : env.provider === "bailian"
+          ? { model: env.bailian.model }
+          : env.provider === "anthropic"
+            ? { model: env.anthropic.model }
+            : {}),
     };
   }
 
@@ -67,7 +70,7 @@ export async function generateRepresentativeReply(
         ok: true,
         replyText: response.replyText,
         provider,
-        model: provider === "openai" ? env.openai.model : env.anthropic.model,
+        model: resolveProviderModel(provider, env),
         contextTrace: assembled.trace,
         ...(response.usage ? { usage: response.usage } : {}),
       };
@@ -86,9 +89,11 @@ export async function generateRepresentativeReply(
     provider: env.provider,
     ...(env.provider === "openai"
       ? { model: env.openai.model }
-      : env.provider === "anthropic"
-        ? { model: env.anthropic.model }
-        : {}),
+      : env.provider === "bailian"
+        ? { model: env.bailian.model }
+        : env.provider === "anthropic"
+          ? { model: env.anthropic.model }
+          : {}),
   };
 }
 
@@ -101,5 +106,20 @@ async function generateProviderResponse(
     return generateOpenAIResponse({ env, prompt });
   }
 
+  if (provider === "bailian") {
+    return generateBailianResponse({ env, prompt });
+  }
+
   return generateAnthropicResponse({ env, prompt });
+}
+
+function resolveProviderModel(
+  provider: ModelProvider,
+  env: ReturnType<typeof resolveModelRuntimeEnv>,
+): string {
+  if (provider === "openai") {
+    return env.openai.model;
+  }
+
+  return provider === "bailian" ? env.bailian.model : env.anthropic.model;
 }

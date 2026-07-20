@@ -64,6 +64,88 @@ export function buildRepresentativeReplyPrompt(
   return assembleRepresentativeReplyPrompt(params, options).prompt;
 }
 
+/**
+ * Produce a deterministic, citation-friendly answer when the model provider is
+ * unavailable. This keeps successfully recalled public knowledge in the reply
+ * path instead of falling back to a generic representative introduction.
+ */
+export function renderGroundedKnowledgeFallback(params: {
+  userText: string;
+  recalled: OpenVikingRecallItem[];
+}): string | null {
+  const passages = selectGroundedPassages(params.userText, params.recalled);
+  if (!passages.length) return null;
+
+  const chinese = /\p{Script=Han}/u.test(params.userText);
+  const body = passages.join("\n\n");
+  return chinese
+    ? `根据已发布的知识资料：\n\n${body}`
+    : `Based on the published knowledge:\n\n${body}`;
+}
+
+function selectGroundedPassages(userText: string, recalled: OpenVikingRecallItem[]): string[] {
+  const queryTerms = extractQueryTerms(userText);
+  const candidates = recalled.flatMap((item, itemIndex) => {
+    const sourceText = item.content ?? item.overview ?? item.abstract;
+    return splitKnowledgePassages(sourceText).map((passage, passageIndex) => {
+      const normalized = passage.toLocaleLowerCase();
+      const lexicalScore = queryTerms.reduce(
+        (score, term) => score + (normalized.includes(term) ? Math.max(2, term.length) : 0),
+        0,
+      );
+      return {
+        passage,
+        score: lexicalScore * 10 + item.score * 5 - itemIndex - passageIndex / 100,
+        lexicalScore,
+      };
+    });
+  });
+
+  if (!candidates.length) return [];
+  const hasLexicalMatch = candidates.some((candidate) => candidate.lexicalScore > 0);
+  const seen = new Set<string>();
+  return candidates
+    .filter((candidate) => !hasLexicalMatch || candidate.lexicalScore > 0)
+    .sort((left, right) => right.score - left.score)
+    .filter((candidate) => {
+      const key = candidate.passage.toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 3)
+    .map((candidate) => candidate.passage);
+}
+
+function extractQueryTerms(input: string): string[] {
+  const normalized = input.normalize("NFKC").toLocaleLowerCase();
+  const latinTerms = normalized.match(/[a-z0-9][a-z0-9_-]{1,}/g) ?? [];
+  const chineseText = normalized
+    .replace(/根据|知识库|已上传|公开资料|请问|请|帮我|告诉我|你知道|知道|是什么|怎么样|怎么|为什么|为何|有没有|是否|吗|呢|啊|呀/gu, " ");
+  const chineseChunks = chineseText.match(/\p{Script=Han}{2,}/gu) ?? [];
+  const chineseTerms = chineseChunks.flatMap((chunk) => {
+    const terms = [chunk];
+    const maxLength = Math.min(4, chunk.length);
+    for (let size = 2; size <= maxLength; size += 1) {
+      for (let index = 0; index <= chunk.length - size; index += 1) {
+        terms.push(chunk.slice(index, index + size));
+      }
+    }
+    return terms;
+  });
+
+  return [...new Set([...latinTerms, ...chineseTerms])].filter((term) => term.length >= 2);
+}
+
+function splitKnowledgePassages(input: string): string[] {
+  return input
+    .replace(/^#{1,6}\s+.*$/gm, "")
+    .split(/\n{2,}|(?<=[。！？!?])\s*/u)
+    .map((passage) => passage.replace(/^[-*]\s+/, "").replace(/\s+/g, " ").trim())
+    .filter((passage) => passage.length >= 8)
+    .map((passage) => passage.length > 280 ? `${passage.slice(0, 277)}…` : passage);
+}
+
 function buildInstructions(
   representative: Representative,
   plan: ConversationPlan,
@@ -73,6 +155,8 @@ function buildInstructions(
     `You are ${representative.name}, the public web representative for ${representative.ownerName}.`,
     "You are a public-facing representative, not a private assistant and not the owner.",
     "Only use public knowledge, safe recalled context, and the provided conversation snapshot.",
+    "When recalled public-safe context is present, treat it as the authoritative source for factual claims and answer from it before using generic representative information.",
+    "If the recalled context does not contain the requested fact, say that the published knowledge does not provide it instead of guessing.",
     "Never imply access to private workspaces, private memory, local files, credentials, or hidden owner systems.",
     "Do not invent pricing promises, discounts, refunds, owner approval, or human handoff commitments.",
     `The policy engine already selected next_step=${plan.nextStep} for this turn.`,

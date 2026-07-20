@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { posix as pathPosix } from "node:path";
 
 import {
@@ -17,6 +18,7 @@ import {
   type ToolExecutionRequest,
 } from "@delegate/compute-protocol";
 import type { Prisma } from "@prisma/client";
+import { finalizeComputeApprovalConversation } from "@delegate/web-data";
 
 import { createApprovalRequestForExecution } from "./approvals";
 import {
@@ -252,12 +254,17 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
       representativeId: context.session.representativeId,
       contactId: context.session.contactId ?? null,
       conversationId: context.session.conversationId ?? null,
+      generationRunId: context.session.generationRunId ?? null,
       sessionId,
       executionId: execution.id,
       subagentId: sessionSubagentId,
       reason: effectiveDecision.reason,
       requestedActionSummary: summarizeAction(normalized),
       riskSummary: buildRiskSummary(effectiveDecision.reason),
+      ...(requestPayload ? { requestPayloadHash: hashRequestPayload(requestPayload) } : {}),
+      ...(effectiveDecision.matchedRuleId
+        ? { matchedPolicyRuleId: effectiveDecision.matchedRuleId }
+        : {}),
     });
 
     const session = await touchSessionIdle(sessionId);
@@ -322,6 +329,64 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
     throw new SessionError(409, "approval_request_already_resolved");
   }
 
+  const resolutionStartedAt = new Date();
+  if (approval.expiresAt && approval.expiresAt <= resolutionStartedAt) {
+    const didExpire = await prisma.$transaction(async (tx) => {
+      const expired = await tx.approvalRequest.updateMany({
+        where: {
+          id: approval.id,
+          status: "PENDING",
+          expiresAt: { lte: resolutionStartedAt },
+        },
+        data: {
+          status: "EXPIRED",
+          resolvedAt: resolutionStartedAt,
+          resolvedBy: "compute-broker",
+        },
+      });
+      if (expired.count !== 1) return false;
+
+      await tx.toolExecution.updateMany({
+        where: {
+          approvalRequestId: approval.id,
+          status: "BLOCKED",
+        },
+        data: {
+          status: "CANCELED",
+          finishedAt: resolutionStartedAt,
+        },
+      });
+      await tx.eventAudit.create({
+        data: {
+          representativeId: approval.representativeId,
+          contactId: approval.contactId ?? null,
+          conversationId: approval.conversationId ?? null,
+          type: "APPROVAL_RESOLVED",
+          payload: {
+            approvalRequestId: approval.id,
+            resolution: "expired",
+            resolvedBy: "compute-broker",
+          },
+        },
+      });
+      await cancelApprovalWorkflowsTx(tx, {
+        approvalId: approval.id,
+        resolvedAt: resolutionStartedAt,
+        outcome: "canceled_after_expiration",
+      });
+      return true;
+    });
+
+    if (didExpire) {
+      await finalizeComputeApprovalConversation({
+        approvalId: approval.id,
+        outcome: "expired",
+      });
+      throw new SessionError(409, "approval_request_expired");
+    }
+    throw new SessionError(409, "approval_request_already_resolved");
+  }
+
   const blockedExecution =
     approval.toolExecutionId
       ? await prisma.toolExecution.findUnique({
@@ -337,13 +402,20 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
     const resolvedAt = new Date();
     const { updatedApproval, updatedExecution, updatedSession } = await prisma.$transaction(
       async (tx) => {
-        const nextApproval = await tx.approvalRequest.update({
-          where: { id: approval.id },
+        const claimedApproval = await tx.approvalRequest.updateMany({
+          where: { id: approval.id, status: "PENDING" },
           data: {
             status: "REJECTED",
             resolvedAt,
             resolvedBy: input.resolvedBy ?? "owner-dashboard",
+            decisionNote: input.decisionNote ?? null,
           },
+        });
+        if (claimedApproval.count !== 1) {
+          throw new SessionError(409, "approval_request_already_resolved");
+        }
+        const nextApproval = await tx.approvalRequest.findUniqueOrThrow({
+          where: { id: approval.id },
         });
 
         const nextExecution =
@@ -397,6 +469,11 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
       },
     );
 
+    await finalizeComputeApprovalConversation({
+      approvalId: approval.id,
+      outcome: "rejected",
+    });
+
     return resolveApprovalResponseSchema.parse({
       outcome: "rejected",
       approvalRequest: serializeApprovalRequest(updatedApproval),
@@ -406,18 +483,33 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
     });
   }
 
-  const context = approval.sessionId ? await loadSessionPolicyContext(approval.sessionId) : null;
-
   const resolvedAt = new Date();
   const updatedApproval = await prisma.$transaction(async (tx) => {
-    const nextApproval = await tx.approvalRequest.update({
-      where: { id: approval.id },
+    const claimedApproval = await tx.approvalRequest.updateMany({
+      where: { id: approval.id, status: "PENDING" },
       data: {
         status: "APPROVED",
         resolvedAt,
         resolvedBy: input.resolvedBy ?? "owner-dashboard",
+        decisionNote: input.decisionNote ?? null,
       },
     });
+    if (claimedApproval.count !== 1) {
+      throw new SessionError(409, "approval_request_already_resolved");
+    }
+    const nextApproval = await tx.approvalRequest.findUniqueOrThrow({
+      where: { id: approval.id },
+    });
+
+    if (blockedExecution) {
+      const queued = await tx.toolExecution.updateMany({
+        where: { id: blockedExecution.id, status: "BLOCKED" },
+        data: { status: "QUEUED" },
+      });
+      if (queued.count !== 1) {
+        throw new SessionError(409, "approval_request_execution_not_blocked");
+      }
+    }
 
     await tx.eventAudit.create({
       data: {
@@ -452,29 +544,129 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
     return nextApproval;
   });
 
-  if (!blockedExecution || !context) {
-    return resolveApprovalResponseSchema.parse({
-      outcome: "approved",
-      approvalRequest: serializeApprovalRequest(updatedApproval),
-      artifacts: [],
+  return resolveApprovalResponseSchema.parse({
+    outcome: "approved",
+    approvalRequest: serializeApprovalRequest(updatedApproval),
+    execution: blockedExecution
+      ? serializeExecution({ ...blockedExecution, status: "QUEUED" })
+      : null,
+    artifacts: [],
+  });
+}
+
+export async function processNextApprovedExecution() {
+  const queuedExecutions = await prisma.toolExecution.findMany({
+    where: {
+      status: "QUEUED",
+      approvalRequestId: { not: null },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 20,
+  });
+  let execution: (typeof queuedExecutions)[number] | null = null;
+  let approval: Awaited<ReturnType<typeof prisma.approvalRequest.findUnique>> = null;
+  for (const candidate of queuedExecutions) {
+    if (!candidate.approvalRequestId) continue;
+    const candidateApproval = await prisma.approvalRequest.findUnique({
+      where: { id: candidate.approvalRequestId },
+    });
+    if (candidateApproval?.status === "APPROVED") {
+      execution = candidate;
+      approval = candidateApproval;
+      break;
+    }
+  }
+  if (!execution || !approval) return false;
+
+  const claimed = await prisma.toolExecution.updateMany({
+    where: { id: execution.id, status: "QUEUED" },
+    data: { status: "RUNNING" },
+  });
+  if (claimed.count !== 1) return true;
+
+  try {
+    if (
+      approval.requestPayloadHash &&
+      hashRequestPayload(normalizePersistedRequestPayload(execution.requestPayload)) !==
+        approval.requestPayloadHash
+    ) {
+      throw new SessionError(409, "approval_request_payload_changed");
+    }
+    const reconstructed = reconstructExecutionInput(execution);
+    const rawRequest = toToolExecutionRequest(reconstructed);
+    const evaluated = await evaluateExecutionRequest(execution.sessionId, rawRequest);
+    const normalized = normalizeExecutionInput(evaluated.input, evaluated.mcpBinding);
+    const estimatedCredits = estimateCreditUsage({
+      capability: normalized.capability,
+      ...(typeof normalized.estimatedCostCents === "number"
+        ? { estimatedCostCents: normalized.estimatedCostCents }
+        : {}),
+    });
+    const budget = summarizeBudgetAvailability(evaluated.context.session);
+    const decision = resolveEffectiveDecision({
+      context: evaluated.context,
+      input: normalized,
+      decision: evaluated.decision,
+      estimatedCredits,
+      totalAvailableCredits: budget.totalAvailableCredits,
+    });
+
+    if (decision.decision === "deny") {
+      const now = new Date();
+      await prisma.$transaction([
+        prisma.toolExecution.update({
+          where: { id: execution.id },
+          data: { status: "CANCELED", finishedAt: now, policyDecision: "DENY" },
+        }),
+        prisma.computeSession.update({
+          where: { id: execution.sessionId },
+          data: { status: "IDLE", failureReason: decision.reason, lastHeartbeatAt: now },
+        }),
+      ]);
+      await finalizeComputeApprovalConversation({
+        approvalId: approval.id,
+        outcome: "policy_denied",
+        failureReason: decision.reason,
+      });
+      return true;
+    }
+
+    const result = await runAllowedExecution({
+      context: evaluated.context,
+      input: normalized,
+      estimatedCredits,
+      existingExecutionId: execution.id,
+    });
+    await finalizeComputeApprovalConversation({
+      approvalId: approval.id,
+      outcome: result.outcome === "completed" ? "completed" : "failed",
+      artifacts: result.artifacts,
+      ...(typeof result.billing?.actualCredits === "number"
+        ? { actualCredits: result.billing.actualCredits }
+        : {}),
+      ...(result.session.failureReason ? { failureReason: result.session.failureReason } : {}),
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "approved_compute_execution_failed";
+    const now = new Date();
+    await prisma.$transaction([
+      prisma.toolExecution.updateMany({
+        where: { id: execution.id, status: "RUNNING" },
+        data: { status: "FAILED", finishedAt: now },
+      }),
+      prisma.computeSession.updateMany({
+        where: { id: execution.sessionId },
+        data: { status: "IDLE", failureReason: reason.slice(0, 240), lastHeartbeatAt: now },
+      }),
+    ]);
+    await finalizeComputeApprovalConversation({
+      approvalId: approval.id,
+      outcome: "failed",
+      failureReason: reason,
     });
   }
 
-  const normalized = reconstructExecutionInput(blockedExecution);
-  const result = await runAllowedExecution({
-    context,
-    input: normalized,
-    existingExecutionId: blockedExecution.id,
-  });
-
-  return resolveApprovalResponseSchema.parse({
-    outcome: "approved_and_executed",
-    approvalRequest: serializeApprovalRequest(updatedApproval),
-    session: result.session,
-    execution: result.execution,
-    artifacts: result.artifacts,
-    billing: result.billing,
-  });
+  return true;
 }
 
 export async function listSessionArtifacts(sessionId: string) {
@@ -524,12 +716,13 @@ async function runAllowedExecution(params: {
   existingExecutionId?: string;
 }) {
   const startedAt = new Date();
+  const executionContext = resolveExecutionIsolationContext(params.context);
   const leasedSession = await ensureComputeSessionLease({
-    session: params.context.session,
-    networkMode: params.context.profile.networkMode,
-    filesystemMode: params.context.profile.filesystemMode,
+    session: executionContext.session,
+    networkMode: executionContext.profile.networkMode,
+    filesystemMode: executionContext.profile.filesystemMode,
   });
-  const executionDescriptor = describeExecution(params.context, params.input);
+  const executionDescriptor = describeExecution(executionContext, params.input);
   const requestPayload = buildExecutionRequestPayload(params.input);
   const execution = params.existingExecutionId
     ? await prisma.toolExecution.update({
@@ -586,13 +779,13 @@ async function runAllowedExecution(params: {
       try {
         return params.input.capability === "mcp"
           ? await runMcpExecution({
-              context: params.context,
+              context: executionContext,
               leasedSession,
               executionId: execution.id,
               input: params.input,
             })
           : await runContainerExecution({
-              context: params.context,
+              context: executionContext,
               leasedSession,
               executionId: execution.id,
               input: params.input,
@@ -771,6 +964,18 @@ async function runAllowedExecution(params: {
       ...billing,
     },
   });
+}
+
+function resolveExecutionIsolationContext(context: PolicyExecutionContext): PolicyExecutionContext {
+  if (context.session.requestedBy !== "AUDIENCE") return context;
+
+  return {
+    ...context,
+    profile: {
+      ...context.profile,
+      filesystemMode: "ephemeral_full",
+    },
+  };
 }
 
 function describeExecution(
@@ -1498,7 +1703,7 @@ async function blockExecution(params: {
   });
 }
 
-function resolveEffectiveDecision(params: {
+export function resolveEffectiveDecision(params: {
   context: PolicyExecutionContext;
   input: NormalizedExecutionInput;
   decision: {
@@ -1509,6 +1714,10 @@ function resolveEffectiveDecision(params: {
   estimatedCredits: number;
   totalAvailableCredits: number;
 }) {
+  if (params.decision.decision === "deny") {
+    return params.decision;
+  }
+
   if (
     (params.input.capability === "exec" || params.input.capability === "process") &&
     params.input.command &&
@@ -1860,6 +2069,17 @@ function reconstructExecutionInput(execution: {
 }) {
   const capability = mapCapabilityFromDb(execution.capability);
   const subagentId = resolveStoredExecutionSubagentId(execution.subagentId, capability);
+  const persistedPayload =
+    typeof execution.requestPayload === "string"
+      ? safeParseExecutionPayload(execution.requestPayload)
+      : execution.requestPayload && typeof execution.requestPayload === "object"
+        ? (execution.requestPayload as Record<string, unknown>)
+        : null;
+  const hasPaidEntitlement = persistedPayload?.hasPaidEntitlement === true;
+  const estimatedCostCents =
+    typeof persistedPayload?.estimatedCostCents === "number"
+      ? persistedPayload.estimatedCostCents
+      : undefined;
 
   if (capability === "read") {
     if (!execution.requestedPath) {
@@ -1869,7 +2089,8 @@ function reconstructExecutionInput(execution: {
       capability,
       subagentId,
       path: execution.requestedPath,
-      hasPaidEntitlement: true,
+      hasPaidEntitlement,
+      ...(estimatedCostCents !== undefined ? { estimatedCostCents } : {}),
       browserMode: "deterministic",
       maxSteps: 1,
       allowMutations: false,
@@ -1886,7 +2107,8 @@ function reconstructExecutionInput(execution: {
       path: execution.requestedPath,
       content: execution.requestedCommand,
       workingDirectory: execution.workingDirectory ?? undefined,
-      hasPaidEntitlement: true,
+      hasPaidEntitlement,
+      ...(estimatedCostCents !== undefined ? { estimatedCostCents } : {}),
       browserMode: "deterministic",
       maxSteps: 1,
       allowMutations: false,
@@ -1894,12 +2116,7 @@ function reconstructExecutionInput(execution: {
   }
 
   if (capability === "browser") {
-    const payload =
-      typeof execution.requestPayload === "string"
-        ? safeParseExecutionPayload(execution.requestPayload)
-        : execution.requestPayload && typeof execution.requestPayload === "object"
-          ? (execution.requestPayload as Record<string, unknown>)
-          : null;
+    const payload = persistedPayload;
     const browserMode =
       payload?.browserMode === "native" ? "native" : "deterministic";
     const task = typeof payload?.task === "string" ? payload.task : undefined;
@@ -1926,8 +2143,8 @@ function reconstructExecutionInput(execution: {
       url: execution.requestedCommand ?? undefined,
       domain: undefined,
       workingDirectory: undefined,
-      estimatedCostCents: undefined,
-      hasPaidEntitlement: true,
+      ...(estimatedCostCents !== undefined ? { estimatedCostCents } : {}),
+      hasPaidEntitlement,
       browserMode,
       ...(task ? { task } : {}),
       ...(nativeProvider ? { nativeProvider } : {}),
@@ -1937,12 +2154,7 @@ function reconstructExecutionInput(execution: {
   }
 
   if (capability === "mcp") {
-    const payload =
-      typeof execution.requestPayload === "string"
-        ? safeParseExecutionPayload(execution.requestPayload)
-        : execution.requestPayload && typeof execution.requestPayload === "object"
-          ? (execution.requestPayload as Record<string, unknown>)
-          : null;
+    const payload = persistedPayload;
     const bindingId =
       typeof payload?.bindingId === "string" ? payload.bindingId : execution.mcpBindingId ?? undefined;
     const bindingSlug = typeof payload?.bindingSlug === "string" ? payload.bindingSlug : undefined;
@@ -1960,7 +2172,8 @@ function reconstructExecutionInput(execution: {
       bindingSlug,
       toolName,
       toolArguments,
-      hasPaidEntitlement: true,
+      hasPaidEntitlement,
+      ...(estimatedCostCents !== undefined ? { estimatedCostCents } : {}),
       browserMode: "deterministic",
       maxSteps: 1,
       allowMutations: false,
@@ -1980,12 +2193,38 @@ function reconstructExecutionInput(execution: {
     domain: undefined,
     url: undefined,
     ...(execution.workingDirectory ? { workingDirectory: execution.workingDirectory } : {}),
-    estimatedCostCents: undefined,
-    hasPaidEntitlement: true,
+    ...(estimatedCostCents !== undefined ? { estimatedCostCents } : {}),
+    hasPaidEntitlement,
     browserMode: "deterministic",
     maxSteps: 1,
     allowMutations: false,
   });
+}
+
+function toToolExecutionRequest(input: NormalizedExecutionInput): ToolExecutionRequest {
+  return {
+    capability: input.capability,
+    subagentId: input.subagentId,
+    ...(input.command ? { command: input.command } : {}),
+    ...(input.content !== undefined ? { content: input.content } : {}),
+    ...(input.path ? { path: input.path } : {}),
+    ...(input.domain ? { domain: input.domain } : {}),
+    ...(input.url ? { url: input.url } : {}),
+    ...(input.bindingId ? { bindingId: input.bindingId } : {}),
+    ...(input.bindingSlug ? { bindingSlug: input.bindingSlug } : {}),
+    ...(input.toolName ? { toolName: input.toolName } : {}),
+    ...(input.toolArguments ? { toolArguments: input.toolArguments } : {}),
+    ...(input.workingDirectory ? { workingDirectory: input.workingDirectory } : {}),
+    ...(typeof input.estimatedCostCents === "number"
+      ? { estimatedCostCents: input.estimatedCostCents }
+      : {}),
+    hasPaidEntitlement: input.hasPaidEntitlement,
+    browserMode: input.browserMode,
+    ...(input.task ? { task: input.task } : {}),
+    ...(input.nativeProvider ? { nativeProvider: input.nativeProvider } : {}),
+    maxSteps: input.maxSteps,
+    allowMutations: input.allowMutations,
+  };
 }
 
 function resolveStoredExecutionSubagentId(
@@ -2095,26 +2334,15 @@ function getPersistedCommand(input: NormalizedExecutionInput) {
 }
 
 function buildExecutionRequestPayload(input: NormalizedExecutionInput) {
-  if (input.capability === "browser" && input.browserMode === "native") {
-    return JSON.stringify({
-      browserMode: input.browserMode,
-      ...(input.task ? { task: input.task } : {}),
-      ...(input.nativeProvider ? { nativeProvider: input.nativeProvider } : {}),
-      maxSteps: input.maxSteps,
-      allowMutations: input.allowMutations,
-    });
-  }
+  return JSON.stringify(toToolExecutionRequest(input));
+}
 
-  if (input.capability === "mcp") {
-    return JSON.stringify({
-      ...(input.bindingId ? { bindingId: input.bindingId } : {}),
-      ...(input.bindingSlug ? { bindingSlug: input.bindingSlug } : {}),
-      ...(input.toolName ? { toolName: input.toolName } : {}),
-      toolArguments: input.toolArguments ?? {},
-    });
-  }
+function normalizePersistedRequestPayload(value: unknown) {
+  return typeof value === "string" ? value : JSON.stringify(value ?? null);
+}
 
-  return undefined;
+function hashRequestPayload(value: string) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function buildRiskSummary(reason: string): string {

@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockPrisma } = vi.hoisted(() => {
+const { mockPrisma, mockFinalizeComputeApprovalConversation } = vi.hoisted(() => {
   const prismaMock = {
     approvalRequest: {
       findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     contact: {
       update: vi.fn(),
@@ -14,6 +16,7 @@ const { mockPrisma } = vi.hoisted(() => {
     },
     toolExecution: {
       findUnique: vi.fn(),
+      updateMany: vi.fn(),
     },
     workflowCommandOutbox: {
       create: vi.fn(),
@@ -37,11 +40,16 @@ const { mockPrisma } = vi.hoisted(() => {
 
   return {
     mockPrisma: prismaMock,
+    mockFinalizeComputeApprovalConversation: vi.fn(),
   };
 });
 
 vi.mock("../src/prisma", () => ({
   prisma: mockPrisma,
+}));
+
+vi.mock("@delegate/web-data", () => ({
+  finalizeComputeApprovalConversation: mockFinalizeComputeApprovalConversation,
 }));
 
 vi.mock("../src/lifecycle-hooks", () => ({
@@ -64,12 +72,15 @@ describe("approval workflow cancellation", () => {
       return value;
     });
     mockPrisma.approvalRequest.findUnique.mockResolvedValue(buildApproval("PENDING"));
+    mockPrisma.approvalRequest.findUniqueOrThrow.mockResolvedValue(buildApproval("REJECTED"));
+    mockPrisma.approvalRequest.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.approvalRequest.update.mockImplementation(async ({ data }: { data: { status: string; resolvedAt: Date; resolvedBy: string } }) => ({
       ...buildApproval(data.status),
       resolvedAt: data.resolvedAt,
       resolvedBy: data.resolvedBy,
     }));
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
+    mockPrisma.toolExecution.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.workflowRun.findMany.mockResolvedValue([
       {
         id: "workflow-temporal-1",
@@ -114,6 +125,7 @@ describe("approval workflow cancellation", () => {
   });
 
   it("queues a CANCEL command when a pending approval is approved", async () => {
+    mockPrisma.approvalRequest.findUniqueOrThrow.mockResolvedValue(buildApproval("APPROVED"));
     const { resolveApproval } = await import("../src/executions");
 
     await resolveApproval("approval-1", {
@@ -139,6 +151,40 @@ describe("approval workflow cancellation", () => {
           source: "canceled_after_manual_approval",
         }),
       }),
+    });
+  });
+
+  it("expires an overdue approval instead of accepting a late decision", async () => {
+    mockPrisma.approvalRequest.findUnique.mockResolvedValue({
+      ...buildApproval("PENDING"),
+      expiresAt: new Date("2020-01-01T00:00:00.000Z"),
+    });
+    const { resolveApproval } = await import("../src/executions");
+
+    await expect(resolveApproval("approval-1", {
+      resolution: "approved",
+      resolvedBy: "owner-dashboard",
+    })).rejects.toThrow("approval_request_expired");
+
+    expect(mockPrisma.approvalRequest.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "approval-1",
+        status: "PENDING",
+        expiresAt: { lte: expect.any(Date) },
+      },
+      data: {
+        status: "EXPIRED",
+        resolvedAt: expect.any(Date),
+        resolvedBy: "compute-broker",
+      },
+    });
+    expect(mockPrisma.toolExecution.updateMany).toHaveBeenCalledWith({
+      where: { approvalRequestId: "approval-1", status: "BLOCKED" },
+      data: { status: "CANCELED", finishedAt: expect.any(Date) },
+    });
+    expect(mockFinalizeComputeApprovalConversation).toHaveBeenCalledWith({
+      approvalId: "approval-1",
+      outcome: "expired",
     });
   });
 });

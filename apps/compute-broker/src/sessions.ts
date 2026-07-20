@@ -3,15 +3,13 @@ import {
   createComputeSessionRequestSchema,
   createComputeSessionResponseSchema,
 } from "@delegate/compute-protocol";
-import { ensureComputeSessionLease, releaseComputeSessionLease } from "./leases";
+import { releaseComputeSessionLease } from "./leases";
 import { prisma } from "./prisma";
 import { computeBrokerConfig } from "./config";
 import { SessionError } from "./session-error";
 import {
-  mapFilesystemModeFromDb,
   mapRequestedByToDb,
   mapRunnerTypeToDb,
-  mapNetworkModeFromDb,
   mapSessionStatusFromDb,
   serializeSession,
 } from "./serializers";
@@ -56,10 +54,9 @@ export async function createComputeSession(rawInput: unknown) {
   }
 
   const requestedBaseImage =
-    input.requestedBaseImage ??
-    (input.requestedCapabilities.includes("browser")
+    input.requestedCapabilities.includes("browser")
       ? computeBrokerConfig.browserImage
-      : representative.computeBaseImage);
+      : input.requestedBaseImage ?? representative.computeBaseImage;
   const leaseToken = randomBytes(24).toString("hex");
   const leaseTokenHash = sha256(leaseToken);
   const now = new Date();
@@ -70,10 +67,11 @@ export async function createComputeSession(rawInput: unknown) {
       representativeId: input.representativeId,
       contactId: input.contactId ?? null,
       conversationId: input.conversationId ?? null,
+      generationRunId: input.generationRunId ?? null,
       subagentId: input.subagentId,
       policyProfileId: defaultPolicyProfileId,
       requestedBy: mapRequestedByToDb(input.requestedBy),
-      status: "STARTING",
+      status: "REQUESTED",
       runnerType: mapRunnerTypeToDb(computeBrokerConfig.runnerType),
       baseImage: requestedBaseImage,
       leaseTokenHash,
@@ -97,42 +95,18 @@ export async function createComputeSession(rawInput: unknown) {
     },
   });
 
-  let leasedSession: Awaited<ReturnType<typeof ensureComputeSessionLease>>;
-
-  try {
-    leasedSession = await ensureComputeSessionLease({
-      session,
-      networkMode: mapNetworkModeFromDb(defaultPolicyProfile.networkMode),
-      filesystemMode: mapFilesystemModeFromDb(defaultPolicyProfile.filesystemMode),
-    });
-  } catch (error) {
-    const failureReason =
-      error instanceof Error ? error.message.slice(0, 240) : "compute_lease_acquire_failed";
-    await prisma.computeSession.update({
-      where: { id: session.id },
-      data: {
-        status: "FAILED",
-        leaseStatus: "FAILED",
-        failureReason,
-        lastHeartbeatAt: new Date(),
-      },
-    });
-    throw new SessionError(500, "compute_lease_acquire_failed");
-  }
-
   const response = createComputeSessionResponseSchema.parse({
-    session: serializeSession(leasedSession),
+    session: serializeSession(session),
     lease: {
-      sessionId: leasedSession.id,
-      status: mapSessionStatusFromDb(leasedSession.status),
-      leaseStatus: "ready",
+      sessionId: session.id,
+      status: "requested",
+      leaseStatus: "requested",
       runnerType: computeBrokerConfig.runnerType,
-      baseImage: leasedSession.baseImage,
+      baseImage: session.baseImage,
       leaseToken,
-      leaseId: leasedSession.runnerLeaseId ?? undefined,
-      expiresAt: leasedSession.expiresAt?.toISOString(),
-      leaseAcquiredAt: leasedSession.leaseAcquiredAt?.toISOString() ?? null,
-      leaseReleasedAt: leasedSession.leaseReleasedAt?.toISOString() ?? null,
+      expiresAt: session.expiresAt?.toISOString(),
+      leaseAcquiredAt: null,
+      leaseReleasedAt: null,
     },
   });
 

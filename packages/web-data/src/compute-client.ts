@@ -5,16 +5,21 @@ import type {
   ToolExecutionRequest,
 } from "@delegate/compute-protocol";
 
-const baseUrl = (process.env.COMPUTE_BROKER_URL?.trim() || "http://localhost:4010").replace(
-  /\/$/,
-  "",
-);
-const internalToken = process.env.COMPUTE_BROKER_INTERNAL_TOKEN?.trim();
+export class ComputeBrokerError extends Error {
+  constructor(
+    message: string,
+    readonly statusCode: number,
+  ) {
+    super(message);
+    this.name = "ComputeBrokerError";
+  }
+}
 
 export async function createAudienceComputeSession(input: {
   representativeId: string;
   contactId: string;
   conversationId: string;
+  generationRunId?: string;
   subagentId: "compute-agent" | "browser-agent";
   requestedCapabilities: ToolExecutionRequest["capability"][];
   reason: string;
@@ -26,6 +31,7 @@ export async function createAudienceComputeSession(input: {
       representativeId: input.representativeId,
       contactId: input.contactId,
       conversationId: input.conversationId,
+      ...(input.generationRunId ? { generationRunId: input.generationRunId } : {}),
       subagentId: input.subagentId,
       requestedBy: "audience",
       requestedCapabilities: input.requestedCapabilities,
@@ -38,30 +44,27 @@ export async function createAudienceComputeSession(input: {
 export async function executeAudienceTool(sessionId: string, request: ToolExecutionRequest) {
   return callComputeBroker<ExecuteToolResponse>(
     `/internal/compute/sessions/${sessionId}/executions`,
-    {
-      method: "POST",
-      body: JSON.stringify(request),
-    },
+    { method: "POST", body: JSON.stringify(request) },
   );
 }
 
-export async function resolveComputeApproval(approvalId: string, input: {
-  resolution: "approved" | "rejected";
-  resolvedBy?: string;
-}) {
+export async function resolveComputeApproval(
+  approvalId: string,
+  input: { resolution: "approved" | "rejected"; resolvedBy?: string; decisionNote?: string },
+) {
   return callComputeBroker<ResolveApprovalResponse>(
     `/internal/compute/approvals/${approvalId}/resolve`,
-    {
-      method: "POST",
-      body: JSON.stringify(input),
-    },
+    { method: "POST", body: JSON.stringify(input) },
   );
 }
 
-async function callComputeBroker<T>(pathname: string, init: RequestInit): Promise<T> {
-  if (!internalToken) {
-    throw new Error("COMPUTE_BROKER_INTERNAL_TOKEN is not configured.");
-  }
+export async function callComputeBroker<T>(pathname: string, init: RequestInit): Promise<T> {
+  const baseUrl = (process.env.COMPUTE_BROKER_URL?.trim() || "http://localhost:4010").replace(
+    /\/$/,
+    "",
+  );
+  const internalToken = process.env.COMPUTE_BROKER_INTERNAL_TOKEN?.trim();
+  if (!internalToken) throw new Error("COMPUTE_BROKER_INTERNAL_TOKEN is not configured.");
 
   const response = await fetch(`${baseUrl}${pathname}`, {
     ...init,
@@ -72,11 +75,12 @@ async function callComputeBroker<T>(pathname: string, init: RequestInit): Promis
     },
     cache: "no-store",
   });
-
   const payload = (await response.json().catch(() => ({}))) as { error?: string };
   if (!response.ok) {
-    throw new Error(payload.error || "Compute broker request failed.");
+    throw new ComputeBrokerError(
+      payload.error || "Compute broker request failed.",
+      response.status,
+    );
   }
-
   return payload as T;
 }

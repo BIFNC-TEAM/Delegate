@@ -152,6 +152,7 @@ function buildSession(overrides: { contactId: string | null }) {
     representativeId: "rep-1",
     contactId: overrides.contactId,
     conversationId: "conversation-1",
+    generationRunId: null,
     subagentId: "browser-agent",
     policyProfileId: "policy-1",
     sandboxLeaseId: null,

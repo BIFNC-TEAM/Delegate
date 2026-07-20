@@ -10,6 +10,7 @@ import {
   terminateComputeSessionRequestSchema,
 } from "@delegate/compute-protocol";
 import { computeBrokerConfig } from "./config";
+import { startApprovedExecutionLoop } from "./approved-execution-loop";
 import {
   executeTool,
   listSessionApprovals,
@@ -195,6 +196,8 @@ startSandboxLeaseCleanupLoop({
   intervalMs: computeBrokerConfig.sandboxLifecycle.cleanupIntervalMs,
   idleStopMinutes: computeBrokerConfig.sandboxLifecycle.idleStopMinutes,
 });
+
+startApprovedExecutionLoop();
 
 function isAuthorized(authorizationHeader: string | undefined): boolean {
   if (!authorizationHeader?.startsWith("Bearer ")) {

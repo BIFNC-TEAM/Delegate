@@ -13,7 +13,10 @@ import {
   creatorTrainingReviewInputSchema,
   handoffFollowUpInputSchema,
 } from "@delegate/workflows";
-import { buildCreatorTrainingSuggestions } from "@delegate/web-data";
+import {
+  buildCreatorTrainingSuggestions,
+  finalizeComputeApprovalConversation,
+} from "@delegate/web-data";
 
 import { prisma } from "./prisma";
 
@@ -581,6 +584,12 @@ async function processApprovalExpiration(workflow: NonNullable<WorkflowRunRecord
   }
 
   if (approval.status !== ApprovalStatus.PENDING) {
+    if (approval.status === ApprovalStatus.EXPIRED) {
+      await finalizeComputeApprovalConversation({
+        approvalId: approval.id,
+        outcome: "expired",
+      });
+    }
     await completeWorkflowRun(workflow.id, {
       outcome: "skipped_already_resolved",
       approvalId: approval.id,
@@ -589,15 +598,16 @@ async function processApprovalExpiration(workflow: NonNullable<WorkflowRunRecord
     return;
   }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.approvalRequest.update({
-      where: { id: approval.id },
+  const didExpire = await prisma.$transaction(async (tx) => {
+    const expired = await tx.approvalRequest.updateMany({
+      where: { id: approval.id, status: ApprovalStatus.PENDING },
       data: {
         status: ApprovalStatus.EXPIRED,
         resolvedAt: now,
         resolvedBy: "workflow-runner",
       },
     });
+    if (expired.count !== 1) return false;
 
     if (approval.toolExecutionId) {
       await tx.toolExecution.updateMany({
@@ -628,6 +638,20 @@ async function processApprovalExpiration(workflow: NonNullable<WorkflowRunRecord
         },
       },
     });
+    return true;
+  });
+
+  if (!didExpire) {
+    await completeWorkflowRun(workflow.id, {
+      outcome: "skipped_concurrent_resolution",
+      approvalId: approval.id,
+    });
+    return;
+  }
+
+  await finalizeComputeApprovalConversation({
+    approvalId: approval.id,
+    outcome: "expired",
   });
 
   await completeWorkflowRun(workflow.id, {

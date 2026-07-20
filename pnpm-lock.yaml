@@ -96,6 +96,9 @@ importers:
       '@delegate/lifecycle-hooks':
         specifier: workspace:*
         version: link:../../packages/lifecycle-hooks
+      '@delegate/web-data':
+        specifier: workspace:*
+        version: link:../../packages/web-data
       '@delegate/workflows':
         specifier: workspace:*
         version: link:../../packages/workflows
@@ -345,6 +348,9 @@ importers:
 
   packages/runtime:
     dependencies:
+      '@delegate/compute-protocol':
+        specifier: workspace:*
+        version: link:../compute-protocol
       '@delegate/domain':
         specifier: workspace:*
         version: link:../domain

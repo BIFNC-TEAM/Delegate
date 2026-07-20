@@ -4,7 +4,9 @@ import {
 } from "@delegate/model-runtime";
 import {
   createConversationPlan,
+  parseComputeRequest,
   renderReplyPreview,
+  resolveComputeSubagent,
   resolveConversationSubagent,
 } from "@delegate/runtime";
 import {
@@ -13,7 +15,9 @@ import {
   claimNextGenerationWorkItem,
   completeOperatorMessageDelivery,
   completeInlineGenerationRun,
+  createAudienceComputeSession,
   deferGenerationRunForHuman,
+  executeAudienceTool,
   ensureConversationLeadAndHandoff,
   failGenerationRun,
   getRepresentativeRuntimeSetupSnapshot,
@@ -22,6 +26,7 @@ import {
   recallRepresentativeContext,
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
+  waitGenerationRunForComputeApproval,
 } from "@delegate/web-data";
 
 import type { ConversationWorkerConfig } from "./config";
@@ -81,6 +86,46 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       item.representativeVersionId,
     );
     if (!setup) throw new Error(`Representative ${item.representativeSlug} was not found.`);
+
+    const parsedCompute = item.channel === "web" ? parseComputeRequest(item.userText) : null;
+    if (parsedCompute) {
+      const computeReply = await processPublicWebComputeRequest({
+        item,
+        setup,
+        parsed: parsedCompute,
+      });
+
+      if (computeReply.approvalId) {
+        const waiting = await waitGenerationRunForComputeApproval({
+          runId: item.runId,
+          approvalId: computeReply.approvalId,
+          replyText: computeReply.text,
+          senderDisplayName: item.representativeName,
+        });
+        return {
+          processed: true as const,
+          runId: item.runId,
+          status: waiting.run.status === "WAITING_APPROVAL"
+            ? "waiting_approval" as const
+            : "completed" as const,
+        };
+      }
+
+      const completed = await completeInlineGenerationRun({
+        runId: item.runId,
+        replyText: computeReply.text,
+        senderDisplayName: item.representativeName,
+        intent: "compute",
+        completeOutbox: false,
+      });
+      outputMessageId = completed.message.id;
+      await markGenerationDeliveryComplete({
+        runId: item.runId,
+        outputMessageId,
+      });
+      return { processed: true as const, runId: item.runId, status: "completed" as const };
+    }
+
     const representative = buildRepresentativeRuntimeProfile(setup);
     const recentTurns = await loadGenerationRecentTurns({
       conversationId: item.conversationId,
@@ -195,6 +240,69 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     }
     return { processed: true as const, runId: item.runId, status: "failed" as const, error: errorMessage };
   }
+}
+
+async function processPublicWebComputeRequest(input: {
+  item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
+  setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>;
+  parsed: NonNullable<ReturnType<typeof parseComputeRequest>>;
+}): Promise<{ text: string; approvalId?: string }> {
+  if (!input.setup.compute.enabled) {
+    return {
+      text: "这个代表当前没有启用 Compute。请联系代表所有者在 Dashboard 中启用后再试。",
+    };
+  }
+
+  const subagent = resolveComputeSubagent(input.parsed.capability);
+  const session = await createAudienceComputeSession({
+    representativeId: input.setup.id,
+    contactId: input.item.contactId,
+    conversationId: input.item.conversationId,
+    generationRunId: input.item.runId,
+    subagentId: subagent.id,
+    requestedCapabilities: [input.parsed.capability],
+    reason: `web:${input.parsed.capability}`,
+    requestedBaseImage: input.setup.compute.baseImage,
+  });
+  const result = await executeAudienceTool(session.session.id, {
+    ...input.parsed,
+    subagentId: subagent.id,
+    hasPaidEntitlement:
+      input.parsed.hasPaidEntitlement ||
+      input.item.usage.passUnlocked ||
+      input.item.usage.deepHelpUnlocked,
+  });
+
+  if (result.outcome === "pending_approval") {
+    if (!result.approvalRequest) throw new Error("Compute approval response is missing.");
+    return {
+      approvalId: result.approvalRequest.id,
+      text: [
+        `Compute 请求已提交，正在等待代表所有者审批。`,
+        `操作：${result.approvalRequest.requestedActionSummary}`,
+        `风险：${result.approvalRequest.riskSummary}`,
+        "审批通过后会在此对话中自动返回执行结果。",
+      ].join("\n\n"),
+    };
+  }
+
+  const artifactSummary = result.artifacts.length
+    ? result.artifacts
+        .map((artifact) => `${artifact.kind}: ${artifact.summary ?? artifact.objectKey}`)
+        .join("\n")
+    : "没有生成可展示的结果文件。";
+  const billing = result.billing?.actualCredits ?? result.billing?.estimatedCredits;
+  const billingLine = typeof billing === "number" ? `\n\n消耗：${billing} credits` : "";
+
+  if (result.outcome === "blocked") {
+    return { text: `Compute 请求被安全策略拒绝，未执行。${billingLine}` };
+  }
+  if (result.outcome === "failed") {
+    return { text: `Compute 已执行，但任务失败。\n\n${artifactSummary}${billingLine}` };
+  }
+  return {
+    text: `Compute 已在隔离沙盒中执行完成。\n\n${artifactSummary}${billingLine}`,
+  };
 }
 
 async function sendTelegramOperatorMessage(input: {

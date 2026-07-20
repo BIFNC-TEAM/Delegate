@@ -95,7 +95,8 @@ export function buildDockerCreateLeaseArgs(input: Omit<RunnerLeaseInput, "runner
     );
     args.push("--workdir", "/workspace");
   } else {
-    args.push("--workdir", SESSION_ROOT);
+    args.push("--volume", `${volumeName}:/workspace:rw`);
+    args.push("--workdir", "/workspace");
   }
 
   args.push(

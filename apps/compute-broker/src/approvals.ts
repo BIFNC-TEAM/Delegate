@@ -17,19 +17,27 @@ export async function createApprovalRequestForExecution(params: {
   representativeId: string;
   contactId?: string | null;
   conversationId?: string | null;
+  generationRunId?: string | null;
   sessionId: string;
   executionId: string;
   subagentId: string;
   reason: string;
   requestedActionSummary: string;
   riskSummary: string;
+  requestPayloadHash?: string;
+  matchedPolicyRuleId?: string;
 }) {
   return prisma.$transaction(async (tx) => {
+    const scheduledAt = scheduleApprovalExpiration(
+      new Date(),
+      approvalTimeoutMinutes,
+    );
     const approval = await tx.approvalRequest.create({
       data: {
         representativeId: params.representativeId,
         contactId: params.contactId ?? null,
         conversationId: params.conversationId ?? null,
+        generationRunId: params.generationRunId ?? null,
         sessionId: params.sessionId,
         toolExecutionId: params.executionId,
         subagentId: params.subagentId,
@@ -37,6 +45,9 @@ export async function createApprovalRequestForExecution(params: {
         reason: params.reason,
         requestedActionSummary: params.requestedActionSummary,
         riskSummary: params.riskSummary,
+        expiresAt: scheduledAt,
+        requestPayloadHash: params.requestPayloadHash ?? null,
+        matchedPolicyRuleId: params.matchedPolicyRuleId ?? null,
       },
     });
 
@@ -73,10 +84,6 @@ export async function createApprovalRequestForExecution(params: {
     });
 
     if (!existingWorkflow) {
-      const scheduledAt = scheduleApprovalExpiration(
-        new Date(),
-        approvalTimeoutMinutes,
-      );
       const dispatchTarget = resolveWorkflowDispatchTarget({
         config: workflowEngineConfig,
         kind: "approval_expiration",

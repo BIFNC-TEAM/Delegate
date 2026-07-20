@@ -3,6 +3,7 @@ import { z } from "zod";
 export const conversationEpisodeStateSchema = z.enum([
   "active",
   "waiting_user",
+  "waiting_approval",
   "needs_human",
   "human_active",
   "resolved",
@@ -24,8 +25,9 @@ export type ConversationEpisodeState = z.infer<typeof conversationEpisodeStateSc
 export type GenerationRunState = z.infer<typeof generationRunStateSchema>;
 
 const allowedEpisodeTransitions: Record<ConversationEpisodeState, ConversationEpisodeState[]> = {
-  active: ["waiting_user", "needs_human", "human_active", "resolved", "failed"],
-  waiting_user: ["active", "needs_human", "human_active", "resolved"],
+  active: ["waiting_user", "waiting_approval", "needs_human", "human_active", "resolved", "failed"],
+  waiting_user: ["active", "waiting_approval", "needs_human", "human_active", "resolved"],
+  waiting_approval: ["active", "waiting_user", "needs_human", "human_active", "resolved", "failed"],
   needs_human: ["human_active", "active", "resolved"],
   human_active: ["waiting_user", "active", "resolved"],
   resolved: ["active", "archived"],

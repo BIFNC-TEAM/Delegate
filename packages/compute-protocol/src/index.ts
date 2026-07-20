@@ -268,6 +268,7 @@ export const createComputeSessionRequestSchema = refineSubagentCapabilityBoundar
   representativeId: z.string(),
   contactId: z.string().optional(),
   conversationId: z.string().optional(),
+  generationRunId: z.string().optional(),
   subagentId: computeSubagentIdSchema,
   requestedBy: computeRequestedBySchema,
   requestedCapabilities: z.array(capabilityKindSchema).min(1),
@@ -523,19 +524,25 @@ export const approvalRequestSnapshotSchema = z.object({
   conversationId: z.string().nullable(),
   sessionId: z.string().nullable(),
   toolExecutionId: z.string().nullable(),
+  generationRunId: z.string().nullable().optional(),
   subagentId: computeSubagentIdSchema.nullable().optional(),
   status: approvalStatusSchema,
   reason: z.string(),
   requestedActionSummary: z.string(),
   riskSummary: z.string(),
   requestedAt: z.string().datetime(),
+  expiresAt: z.string().datetime().nullable().optional(),
   resolvedAt: z.string().datetime().nullable(),
   resolvedBy: z.string().nullable(),
+  decisionNote: z.string().nullable().optional(),
+  requestPayloadHash: z.string().nullable().optional(),
+  matchedPolicyRuleId: z.string().nullable().optional(),
 });
 
 export const resolveApprovalRequestSchema = z.object({
   resolution: z.enum(["approved", "rejected"]),
   resolvedBy: z.string().trim().min(1).optional(),
+  decisionNote: z.string().trim().max(1000).optional(),
 });
 
 export const artifactSnapshotSchema = z.object({

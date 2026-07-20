@@ -7,9 +7,11 @@ import {
   advanceStructuredCollector,
   beginStructuredCollector,
   createConversationPlan,
+  formatComputeUsageExamples,
   formatStructuredCollectorPrompt,
   formatStructuredCollectorSummary,
   renderReplyPreview,
+  parseComputeRequest,
   resolveCollectorSubagent,
   resolveComputeSubagent,
   resolveConversationSubagent,
@@ -18,10 +20,9 @@ import {
   type ConversationPlan,
   type StructuredCollectorState,
 } from "@delegate/runtime";
+import { createAudienceComputeSession, executeAudienceTool } from "@delegate/web-data";
 import { Bot, InlineKeyboard } from "grammy";
 
-import { createAudienceComputeSession, executeAudienceTool } from "./compute-broker";
-import { formatComputeUsageExamples, parseComputeRequest } from "./compute-parser";
 import { botLifecycleHooks } from "./lifecycle-hooks";
 import {
   buildHandoffPreparation,

@@ -350,14 +350,19 @@ export function serializeApprovalRequest(approvalRequest: {
   conversationId: string | null;
   sessionId: string | null;
   toolExecutionId: string | null;
+  generationRunId?: string | null;
   subagentId: string | null;
   status: string;
   reason: string;
   requestedActionSummary: string;
   riskSummary: string;
   requestedAt: Date;
+  expiresAt?: Date | null;
   resolvedAt: Date | null;
   resolvedBy: string | null;
+  decisionNote?: string | null;
+  requestPayloadHash?: string | null;
+  matchedPolicyRuleId?: string | null;
 }) {
   return approvalRequestSnapshotSchema.parse({
     id: approvalRequest.id,
@@ -366,6 +371,7 @@ export function serializeApprovalRequest(approvalRequest: {
     conversationId: approvalRequest.conversationId,
     sessionId: approvalRequest.sessionId,
     toolExecutionId: approvalRequest.toolExecutionId,
+    generationRunId: approvalRequest.generationRunId ?? null,
     subagentId:
       approvalRequest.subagentId === "compute-agent" || approvalRequest.subagentId === "browser-agent"
         ? approvalRequest.subagentId
@@ -375,8 +381,12 @@ export function serializeApprovalRequest(approvalRequest: {
     requestedActionSummary: approvalRequest.requestedActionSummary,
     riskSummary: approvalRequest.riskSummary,
     requestedAt: approvalRequest.requestedAt.toISOString(),
+    expiresAt: approvalRequest.expiresAt?.toISOString() ?? null,
     resolvedAt: approvalRequest.resolvedAt?.toISOString() ?? null,
     resolvedBy: approvalRequest.resolvedBy,
+    decisionNote: approvalRequest.decisionNote ?? null,
+    requestPayloadHash: approvalRequest.requestPayloadHash ?? null,
+    matchedPolicyRuleId: approvalRequest.matchedPolicyRuleId ?? null,
   });
 }
 

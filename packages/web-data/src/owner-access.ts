@@ -72,6 +72,20 @@ export async function assertOwnerCanAccessRepresentative(
   return representative;
 }
 
+export async function assertOwnerCanApproveCompute(ownerId: string | null | undefined) {
+  const normalizedOwnerId = ownerId?.trim();
+  if (!normalizedOwnerId) {
+    throw new RepresentativeAccessError("Authentication required.", 401);
+  }
+  const member = await prisma.organizationMember.findUnique({
+    where: { ownerId: normalizedOwnerId },
+    select: { canApproveCompute: true },
+  });
+  if (member && !member.canApproveCompute) {
+    throw new RepresentativeAccessError("You do not have permission to approve Compute requests.", 403);
+  }
+}
+
 function shouldAllowDemoRepresentativeAccess(representativeSlug: string): boolean {
   return representativeSlug === demoRepresentative.slug && !process.env.DATABASE_URL?.trim();
 }

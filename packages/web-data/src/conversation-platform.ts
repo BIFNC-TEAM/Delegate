@@ -198,6 +198,7 @@ export type MatrixApplicationServiceEvent = {
 const episodeStateMap: Record<ConversationEpisodeStatus, ConversationEpisodeState> = {
   ACTIVE: "active",
   WAITING_USER: "waiting_user",
+  WAITING_APPROVAL: "waiting_approval",
   NEEDS_HUMAN: "needs_human",
   HUMAN_ACTIVE: "human_active",
   RESOLVED: "resolved",
@@ -780,6 +781,95 @@ export async function completeInlineGenerationRun(input: {
       });
     }
     return { run: completed, message };
+  });
+}
+
+export async function waitGenerationRunForComputeApproval(input: {
+  runId: string;
+  approvalId: string;
+  replyText: string;
+  senderDisplayName: string;
+}) {
+  const replyText = input.replyText.trim();
+  if (!replyText) throw new Error("Approval waiting reply text is required.");
+
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
+    const run = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      include: { outputMessage: true },
+    });
+    if (!run) throw new Error("Generation run not found.");
+    if (run.status === GenerationRunStatus.COMPLETED && run.outputMessage) {
+      return { run, message: run.outputMessage };
+    }
+    if (run.status === GenerationRunStatus.WAITING_APPROVAL && run.outputMessage) {
+      return { run, message: run.outputMessage };
+    }
+    if (run.status === GenerationRunStatus.CANCELED) {
+      throw new Error("Generation run was canceled.");
+    }
+
+    const approval = await tx.approvalRequest.findUnique({
+      where: { id: input.approvalId },
+      select: { id: true, conversationId: true },
+    });
+    if (!approval || approval.conversationId !== run.conversationId) {
+      throw new Error("Compute approval does not belong to this generation run conversation.");
+    }
+
+    const now = new Date();
+    const message = await tx.message.create({
+      data: {
+        conversationId: run.conversationId,
+        episodeId: run.episodeId,
+        senderType: MessageSenderType.REPRESENTATIVE,
+        senderDisplayName: input.senderDisplayName,
+        contentType: MessageContentType.TEXT,
+        text: replyText,
+        content: { kind: "compute_approval_pending", approvalId: input.approvalId },
+        clientMessageId: `compute-approval-pending:${input.approvalId}`,
+        deliveryStatus: MessageDeliveryStatus.SENT,
+        retentionExpiresAt: buildMessageRetentionExpiry(now),
+        createdAt: now,
+      },
+    });
+    const waitingRun = await tx.generationRun.update({
+      where: { id: run.id },
+      data: {
+        outputMessageId: message.id,
+        status: GenerationRunStatus.WAITING_APPROVAL,
+        startedAt: run.startedAt || now,
+        completedAt: null,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+    await tx.approvalRequest.update({
+      where: { id: input.approvalId },
+      data: { generationRunId: run.id },
+    });
+    await tx.message.update({
+      where: { id: run.inputMessageId },
+      data: { deliveryStatus: MessageDeliveryStatus.SENT },
+    });
+    await tx.conversation.update({
+      where: { id: run.conversationId },
+      data: { state: "WAITING_APPROVAL", lastMessageAt: now },
+    });
+    await tx.conversationEpisode.updateMany({
+      where: { id: run.episodeId || "__no_episode__" },
+      data: { status: ConversationEpisodeStatus.WAITING_APPROVAL },
+    });
+    await tx.outboxEvent.updateMany({
+      where: {
+        aggregateType: "generation_run",
+        aggregateId: run.id,
+        status: { in: ["PENDING", "PROCESSING"] },
+      },
+      data: { status: "PROCESSED", processedAt: now },
+    });
+    return { run: waitingRun, message };
   });
 }
 

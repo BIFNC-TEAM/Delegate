@@ -563,6 +563,7 @@ enum RepresentativeChannelKind {
 enum ConversationEpisodeStatus {
   ACTIVE
   WAITING_USER
+  WAITING_APPROVAL
   NEEDS_HUMAN
   HUMAN_ACTIVE
   RESOLVED
@@ -1564,6 +1565,8 @@ model GenerationRun {
   inputMessage            Message                @relation("GenerationInputMessage", fields: [inputMessageId], references: [id], onDelete: Cascade)
   outputMessage           Message?               @relation("GenerationOutputMessage", fields: [outputMessageId], references: [id], onDelete: SetNull)
   representativeVersion   RepresentativeVersion? @relation(fields: [representativeVersionId], references: [id], onDelete: SetNull)
+  approvalRequests         ApprovalRequest[]
+  computeSessions          ComputeSession[]
 
   @@index([conversationId, status, queuedAt])
   @@index([episodeId, queuedAt])
@@ -2046,6 +2049,7 @@ model ComputeSession {
   representativeId String
   contactId        String?
   conversationId   String?
+  generationRunId  String?
   subagentId       String?
   policyProfileId  String?
   sandboxLeaseId   String?
@@ -2070,6 +2074,7 @@ model ComputeSession {
   representative   Representative           @relation(fields: [representativeId], references: [id])
   contact          Contact?                 @relation(fields: [contactId], references: [id])
   conversation     Conversation?            @relation(fields: [conversationId], references: [id])
+  generationRun    GenerationRun?           @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
   policyProfile    CapabilityPolicyProfile? @relation(fields: [policyProfileId], references: [id])
   sandboxLease     SandboxLease?            @relation(fields: [sandboxLeaseId], references: [id], onDelete: SetNull)
   toolExecutions   ToolExecution[]
@@ -2081,6 +2086,7 @@ model ComputeSession {
   @@index([representativeId, status, createdAt])
   @@index([contactId, createdAt])
   @@index([conversationId, createdAt])
+  @@index([generationRunId, createdAt])
   @@index([sandboxLeaseId, createdAt])
 }
 
@@ -2113,6 +2119,9 @@ model SandboxLease {
   id                String              @id @default(cuid())
   sandboxIdentityId String
   provider          SandboxProviderKind @default(DOCKER)
+  networkMode       ComputeNetworkMode @default(NO_NETWORK)
+  filesystemMode    ComputeFilesystemMode @default(WORKSPACE_ONLY)
+  baseImage         String @default("debian:bookworm-slim")
   providerSandboxId String?
   status            SandboxLeaseStatus  @default(STARTING)
   runnerLeaseId     String?
@@ -2172,21 +2181,28 @@ model ApprovalRequest {
   conversationId         String?
   sessionId              String?
   toolExecutionId        String?         @unique
+  generationRunId        String?
   subagentId             String?
   status                 ApprovalStatus  @default(PENDING)
   reason                 String
   requestedActionSummary String
   riskSummary            String
   requestedAt            DateTime        @default(now())
+  expiresAt              DateTime?
   resolvedAt             DateTime?
   resolvedBy             String?
+  decisionNote           String?
+  requestPayloadHash     String?
+  matchedPolicyRuleId    String?
   representative         Representative  @relation(fields: [representativeId], references: [id])
   contact                Contact?        @relation(fields: [contactId], references: [id])
   conversation           Conversation?   @relation(fields: [conversationId], references: [id])
   session                ComputeSession? @relation(fields: [sessionId], references: [id])
+  generationRun          GenerationRun?  @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
   workflowRuns           WorkflowRun[]
 
   @@index([representativeId, status, requestedAt])
+  @@index([generationRunId, status])
 }
 
 model Artifact {

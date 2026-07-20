@@ -100,6 +100,9 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       where: {
         sandboxIdentityId: identity.id,
         provider,
+        networkMode: params.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
+        filesystemMode: params.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
+        baseImage: params.session.baseImage,
         status: {
           in: ["RUNNING", "STOPPED"],
         },
@@ -132,6 +135,9 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
           data: {
             sandboxIdentityId: identity.id,
             provider,
+            networkMode: params.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
+            filesystemMode: params.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
+            baseImage: params.session.baseImage,
             status: "STARTING",
             lastUsedAt: now,
             expiresAt,

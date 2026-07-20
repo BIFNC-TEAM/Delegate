@@ -40,6 +40,7 @@ import {
 } from "./compute-insights";
 import { buildRepresentativeGovernedActionSnapshot } from "./governed-actions";
 import { prisma } from "./prisma";
+import { callComputeBroker } from "./compute-client";
 import { buildRepresentativeResourceGovernanceSnapshot } from "./resource-governance";
 
 const computeSessionInclude = Prisma.validator<Prisma.ComputeSessionDefaultArgs>()({
@@ -77,6 +78,8 @@ const approvalInclude = Prisma.validator<Prisma.ApprovalRequestDefaultArgs>()({
   include: {
     contact: {
       select: {
+        displayName: true,
+        username: true,
         customerAccount: {
           select: {
             id: true,
@@ -459,6 +462,20 @@ export type RepresentativeComputeApprovalSnapshot = {
     };
     workflowStatus?: string;
     workflowScheduledAt?: string;
+    expiresAt?: string;
+    decisionNote?: string;
+    action?: {
+      capability: string;
+      status: string;
+      requestedCommand?: string;
+      requestedPath?: string;
+      workingDirectory?: string;
+      createdAt: string;
+    };
+    contact?: {
+      displayName: string;
+      username?: string;
+    };
     staleWorkflow: boolean;
   }>;
 };
@@ -515,6 +532,7 @@ export type ResolveRepresentativeComputeApprovalInput = {
   approvalId: string;
   resolution: "approved" | "rejected";
   resolvedBy?: string;
+  decisionNote?: string;
 };
 
 export type ExecuteRepresentativeNativeComputerUseInput = {
@@ -600,13 +618,37 @@ export async function getRepresentativeComputeApprovals(
   }
 
   const approvals = await queryRepresentativeApprovals(representative.id, 40);
+  const executionIds = approvals
+    .map((approval) => approval.toolExecutionId)
+    .filter((id): id is string => Boolean(id));
+  const executions = executionIds.length
+    ? await prisma.toolExecution.findMany({
+        where: { id: { in: executionIds } },
+        select: {
+          id: true,
+          capability: true,
+          status: true,
+          requestedCommand: true,
+          requestedPath: true,
+          workingDirectory: true,
+          createdAt: true,
+        },
+      })
+    : [];
+  const executionById = new Map(executions.map((execution) => [execution.id, execution]));
 
   return {
     representative: {
       slug: representative.slug,
       displayName: representative.displayName,
     },
-    approvals: approvals.map((approval) => serializeRepresentativeApproval(approval, representative)),
+    approvals: approvals.map((approval) =>
+      serializeRepresentativeApproval(
+        approval,
+        representative,
+        approval.toolExecutionId ? executionById.get(approval.toolExecutionId) : undefined,
+      ),
+    ),
   };
 }
 
@@ -1130,6 +1172,7 @@ export async function resolveRepresentativeComputeApproval(
       body: JSON.stringify({
         resolution: input.resolution,
         ...(input.resolvedBy ? { resolvedBy: input.resolvedBy } : {}),
+        ...(input.decisionNote ? { decisionNote: input.decisionNote } : {}),
       }),
     },
   );
@@ -2290,6 +2333,14 @@ async function getRepresentativeArtifactRecord(representativeSlug: string, artif
 function serializeRepresentativeApproval(
   approval: ApprovalRecord,
   representative: RepresentativeIdentity,
+  execution?: {
+    capability: string;
+    status: string;
+    requestedCommand: string | null;
+    requestedPath: string | null;
+    workingDirectory: string | null;
+    createdAt: Date;
+  },
 ) {
   const workflow = approval.workflowRuns[0];
   const customerAccount = normalizeCustomerAccount(approval.contact?.customerAccount ?? null);
@@ -2319,6 +2370,30 @@ function serializeRepresentativeApproval(
     staleWorkflow,
     ...(approval.subagentId ? { subagentId: approval.subagentId } : {}),
     requestedAt: approval.requestedAt.toISOString(),
+    ...(approval.expiresAt ? { expiresAt: approval.expiresAt.toISOString() } : {}),
+    ...(approval.decisionNote ? { decisionNote: approval.decisionNote } : {}),
+    ...(approval.contact
+      ? {
+          contact: {
+            displayName: approval.contact.displayName || "Anonymous visitor",
+            ...(approval.contact.username ? { username: approval.contact.username } : {}),
+          },
+        }
+      : {}),
+    ...(execution
+      ? {
+          action: {
+            capability: execution.capability.toLowerCase(),
+            status: execution.status.toLowerCase(),
+            ...(execution.requestedCommand
+              ? { requestedCommand: redactApprovalCommand(execution.requestedCommand) }
+              : {}),
+            ...(execution.requestedPath ? { requestedPath: execution.requestedPath } : {}),
+            ...(execution.workingDirectory ? { workingDirectory: execution.workingDirectory } : {}),
+            createdAt: execution.createdAt.toISOString(),
+          },
+        }
+      : {}),
     ...(approval.resolvedAt ? { resolvedAt: approval.resolvedAt.toISOString() } : {}),
     ...(approval.resolvedBy ? { resolvedBy: approval.resolvedBy } : {}),
     ...(approval.toolExecutionId ? { toolExecutionId: approval.toolExecutionId } : {}),
@@ -2326,6 +2401,11 @@ function serializeRepresentativeApproval(
     ...(workflow ? { workflowStatus: workflow.status.toLowerCase() } : {}),
     ...(workflow ? { workflowScheduledAt: workflow.scheduledAt.toISOString() } : {}),
   };
+}
+
+function redactApprovalCommand(value: string) {
+  const normalized = value.replace(/\b(api[_-]?key|token|password|secret)=\S+/gi, "$1=[redacted]");
+  return normalized.length > 600 ? `${normalized.slice(0, 600)}…` : normalized;
 }
 
 function buildRepresentativeResourceGovernanceSnapshotForRepresentative(
@@ -2776,33 +2856,4 @@ function buildArtifactFileName(artifact: {
             ? "png"
             : objectExtension || "bin";
   return `${artifact.kind.toLowerCase()}-${artifact.id}.${extension}`;
-}
-
-async function callComputeBroker(pathname: string, init: RequestInit): Promise<unknown> {
-  const baseUrl = (process.env.COMPUTE_BROKER_URL?.trim() || "http://localhost:4010").replace(
-    /\/$/,
-    "",
-  );
-  const internalToken = process.env.COMPUTE_BROKER_INTERNAL_TOKEN?.trim();
-
-  if (!internalToken) {
-    throw new Error("COMPUTE_BROKER_INTERNAL_TOKEN is not configured.");
-  }
-
-  const response = await fetch(`${baseUrl}${pathname}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${internalToken}`,
-      "Content-Type": "application/json",
-      ...(init.headers ?? {}),
-    },
-    cache: "no-store",
-  });
-
-  const payload = (await response.json().catch(() => ({}))) as { error?: string };
-  if (!response.ok) {
-    throw new Error(payload.error || "Compute broker request failed.");
-  }
-
-  return payload;
 }

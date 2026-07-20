@@ -39,6 +39,20 @@ describe("docker lease runner", () => {
     expect(args).toContain("none");
   });
 
+  it("mounts only the private lease volume into an ephemeral workspace", () => {
+    const sessionId = "public_session_1234";
+    const args = buildDockerCreateLeaseArgs({
+      image: "debian:bookworm-slim",
+      hostWorkspaceRoot: "/Users/a/repos/Delegate",
+      networkMode: "no_network",
+      filesystemMode: "ephemeral_full",
+      sessionId,
+    });
+
+    expect(args).not.toContain("/Users/a/repos/Delegate:/workspace:rw");
+    expect(args).toContain(`${buildDockerLeaseVolumeName(sessionId)}:/workspace:rw`);
+  });
+
   it("executes commands inside the existing lease container", () => {
     const args = buildDockerExecArgs({
       lease: {

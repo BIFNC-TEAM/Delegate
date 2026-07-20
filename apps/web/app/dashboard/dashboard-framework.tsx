@@ -19,6 +19,7 @@ import {
 import { DashboardKnowledgeLibrary } from "./dashboard-knowledge-library";
 import { DashboardInbox } from "./dashboard-inbox";
 import { DashboardRepresentativeOperations } from "./dashboard-representative-operations";
+import { DashboardApprovals } from "./dashboard-approvals";
 
 type DashboardFrameworkProps = {
   accountLabel: string;
@@ -102,7 +103,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
     <main
       className="dashboard-v2-shell localized-shell"
       data-locale={props.locale}
-      data-ui-stage={["knowledge", "representatives", "inbox"].includes(props.activeView) ? "functional" : "framework"}
+      data-ui-stage={["knowledge", "representatives", "inbox", "approvals"].includes(props.activeView) ? "functional" : "framework"}
       lang={props.locale === "zh" ? "zh-CN" : "en"}
     >
       <div className="dashboard-v2-layout">
@@ -177,7 +178,6 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                     >
                       <span className="dashboard-v2-nav-index">{item.index}</span>
                       <span>{localize(props.locale, item.label)}</span>
-                      {item.id === "approvals" ? <strong className="dashboard-v2-nav-count">5</strong> : null}
                       {item.id === "inbox" ? <strong className="dashboard-v2-nav-dot" aria-label="unread" /> : null}
                     </Link>
                   );
@@ -252,7 +252,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
             </div>
           </header>
 
-          {!(["knowledge", "representatives", "inbox"] as DashboardView[]).includes(props.activeView) ? (
+          {!(["knowledge", "representatives", "inbox", "approvals"] as DashboardView[]).includes(props.activeView) ? (
             <div className="dashboard-v2-framework-note">
               <span>{t.frameworkBadge}</span>
               <p>{t.frameworkHint}</p>
@@ -285,6 +285,8 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                 initialSnapshot={props.inboxSnapshot}
                 locale={props.locale}
               />
+            ) : props.activeView === "approvals" ? (
+              <DashboardApprovals activeSlug={props.activeSlug} locale={props.locale} />
             ) : (
               <DashboardSectionFramework
                 blueprint={dashboardSectionBlueprints[props.activeView]}

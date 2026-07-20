@@ -5,29 +5,18 @@ export type ParsedComputeRequest = Omit<ToolExecutionRequest, "subagentId"> & {
 };
 
 export function parseComputeRequest(input: string): ParsedComputeRequest | null {
-  const trimmed = input.trim();
-  const normalized = extractComputePayload(trimmed);
+  const normalized = extractComputePayload(input.trim());
 
-  if (!normalized) {
-    return null;
-  }
+  if (!normalized) return null;
 
   if (normalized.toLowerCase().startsWith("read ")) {
     const path = normalized.slice(5).trim();
-    if (!path) {
-      return null;
-    }
+    if (!path) return null;
 
-    return {
-      capability: "read",
+    return buildRequest("read", path, {
       path,
       estimatedCostCents: 2,
-      hasPaidEntitlement: false,
-      browserMode: "deterministic",
-      maxSteps: 1,
-      allowMutations: false,
-      displayTarget: path,
-    };
+    });
   }
 
   if (normalized.toLowerCase().startsWith("write ")) {
@@ -36,40 +25,23 @@ export function parseComputeRequest(input: string): ParsedComputeRequest | null 
     const [pathPart, ...rest] = body.split(splitToken);
     const path = pathPart?.trim();
     const content = rest.join(splitToken).trimStart();
+    if (!path || !content) return null;
 
-    if (!path || !content) {
-      return null;
-    }
-
-    return {
-      capability: "write",
+    return buildRequest("write", path, {
       path,
       content,
       estimatedCostCents: 4 + Math.ceil(content.length / 512),
-      hasPaidEntitlement: false,
-      browserMode: "deterministic",
-      maxSteps: 1,
-      allowMutations: false,
-      displayTarget: path,
-    };
+    });
   }
 
   if (normalized.toLowerCase().startsWith("browser ")) {
     const url = normalized.slice(8).trim();
-    if (!isLikelyUrl(url)) {
-      return null;
-    }
+    if (!isLikelyUrl(url)) return null;
 
-    return {
-      capability: "browser",
+    return buildRequest("browser", url, {
       url,
       estimatedCostCents: 10,
-      hasPaidEntitlement: false,
-      browserMode: "deterministic",
-      maxSteps: 1,
-      allowMutations: false,
-      displayTarget: url,
-    };
+    });
   }
 
   if (normalized.toLowerCase().startsWith("mcp ")) {
@@ -77,15 +49,10 @@ export function parseComputeRequest(input: string): ParsedComputeRequest | null 
     const splitToken = body.includes(":::") ? ":::" : "\n";
     const [headPart, ...rest] = body.split(splitToken);
     const head = headPart?.trim();
-
-    if (!head) {
-      return null;
-    }
+    if (!head) return null;
 
     const [bindingSlug, toolName] = head.split(/\s+/, 2);
-    if (!bindingSlug) {
-      return null;
-    }
+    if (!bindingSlug) return null;
 
     let toolArguments: Record<string, unknown> = {};
     const argumentPayload = rest.join(splitToken).trim();
@@ -101,27 +68,17 @@ export function parseComputeRequest(input: string): ParsedComputeRequest | null 
       }
     }
 
-    return {
-      capability: "mcp",
+    return buildRequest("mcp", toolName ? `${bindingSlug}:${toolName}` : bindingSlug, {
       bindingSlug,
       ...(toolName ? { toolName } : {}),
       toolArguments,
       estimatedCostCents: 12 + Math.ceil(JSON.stringify(toolArguments).length / 256),
-      hasPaidEntitlement: false,
-      browserMode: "deterministic",
-      maxSteps: 1,
-      allowMutations: false,
-      displayTarget: toolName ? `${bindingSlug}:${toolName}` : bindingSlug,
-    };
+    });
   }
 
   if (normalized.toLowerCase().startsWith("process ")) {
     const command = normalized.slice(8).trim();
-    if (!command) {
-      return null;
-    }
-
-    return buildCommandRequest("process", command);
+    return command ? buildCommandRequest("process", command) : null;
   }
 
   return buildCommandRequest("exec", normalized);
@@ -138,31 +95,35 @@ export function formatComputeUsageExamples() {
 }
 
 function buildCommandRequest(capability: CapabilityKind, command: string): ParsedComputeRequest {
+  return buildRequest(capability, command, {
+    command,
+    estimatedCostCents:
+      capability === "process"
+        ? 6 + Math.ceil(command.length / 48)
+        : 4 + Math.ceil(command.length / 64),
+  });
+}
+
+function buildRequest(
+  capability: CapabilityKind,
+  displayTarget: string,
+  fields: Partial<ToolExecutionRequest>,
+): ParsedComputeRequest {
   return {
     capability,
-    command,
-    estimatedCostCents: capability === "process" ? 6 + Math.ceil(command.length / 48) : 4 + Math.ceil(command.length / 64),
+    ...fields,
     hasPaidEntitlement: false,
     browserMode: "deterministic",
     maxSteps: 1,
     allowMutations: false,
-    displayTarget: command,
-  };
+    displayTarget,
+  } as ParsedComputeRequest;
 }
 
 function extractComputePayload(input: string) {
-  if (input.startsWith("/compute")) {
-    return input.slice("/compute".length).trim();
-  }
-
-  if (input.toLowerCase().startsWith("compute:")) {
-    return input.slice("compute:".length).trim();
-  }
-
-  if (input.toLowerCase().startsWith("run:")) {
-    return input.slice("run:".length).trim();
-  }
-
+  if (input.startsWith("/compute")) return input.slice("/compute".length).trim();
+  if (input.toLowerCase().startsWith("compute:")) return input.slice("compute:".length).trim();
+  if (input.toLowerCase().startsWith("run:")) return input.slice("run:".length).trim();
   return null;
 }
 

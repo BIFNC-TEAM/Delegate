@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./compute-conversation-results": "./src/compute-conversation-results.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

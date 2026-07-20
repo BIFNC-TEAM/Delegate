@@ -49,7 +49,7 @@ export function DashboardApprovals({ activeSlug, locale }: { activeSlug: string;
       .filter(Boolean)
       .some((value) => value!.toLowerCase().includes(needle));
   }), [approvals, filter, query]);
-  const selected = approvals.find((approval) => approval.id === selectedId) ?? filtered[0] ?? null;
+  const selected = filtered.find((approval) => approval.id === selectedId) ?? filtered[0] ?? null;
   const pending = approvals.filter((approval) => approval.status === "pending");
   const highRisk = pending.filter((approval) => approval.riskScore >= 70);
   const expiringSoon = pending.filter((approval) => {

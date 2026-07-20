@@ -214,7 +214,7 @@ export function RepresentativeChatPanel(props: {
           errorMessage?: string;
           message?: { id: string; text: string; status: string; citations: Citation[] };
         };
-        if (snapshot.status === "completed" && snapshot.message) {
+        if (["completed", "waiting_approval"].includes(snapshot.status) && snapshot.message) {
           appendAssistant({
             id: snapshot.message.id,
             role: "assistant",

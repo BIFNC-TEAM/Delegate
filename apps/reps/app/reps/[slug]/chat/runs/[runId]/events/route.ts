@@ -12,7 +12,7 @@ import {
 } from "../../../../public-chat";
 
 const encoder = new TextEncoder();
-const terminalStates = new Set(["completed", "failed", "canceled"]);
+const terminalStates = new Set(["waiting_approval", "completed", "failed", "canceled"]);
 const RUN_STREAM_WINDOW_MS = 120_000;
 
 export async function GET(
@@ -86,14 +86,16 @@ export async function GET(
 
 function wait(milliseconds: number, signal: AbortSignal) {
   return new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, milliseconds);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal.addEventListener("abort", finish, { once: true });
+    if (signal.aborted) finish();
   });
 }

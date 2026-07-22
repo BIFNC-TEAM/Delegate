@@ -68,6 +68,7 @@ export async function createComputeDelegationTask(input: {
   }>;
   capability: ComputeCapability;
   maxDurationMinutes: number;
+  maxCostCents?: number | null;
   maxCredits?: number | null;
   networkMode: "NO_NETWORK" | "ALLOWLIST" | "FULL";
   filesystemMode: "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL";
@@ -173,6 +174,7 @@ export async function createComputeDelegationTask(input: {
         ...(currentStep ? { stepId: currentStep.id } : {}),
         generationRunId: input.generationRunId,
         inputMessageId: input.inputMessageId,
+        request: input.request,
       });
       return { task: current, step: currentStep ?? null };
     }
@@ -223,6 +225,9 @@ export async function createComputeDelegationTask(input: {
           create: {
             maxDurationMinutes: input.maxDurationMinutes,
             maxComputeMinutes: input.maxDurationMinutes,
+            maxCostCents: input.maxCostCents && input.maxCostCents > 0
+              ? input.maxCostCents
+              : null,
             maxCredits: input.maxCredits ?? null,
             maxToolCalls: planSteps.length,
             maxSteps: planSteps.length,
@@ -300,6 +305,7 @@ export async function createComputeDelegationTask(input: {
       stepId: step.id,
       generationRunId: input.generationRunId,
       inputMessageId: input.inputMessageId,
+      request: planSteps[0]!.request,
     });
     await appendTaskEvent(tx, {
       taskId: task.id,
@@ -582,6 +588,7 @@ export async function continueClarifyingDelegationTask(input: {
       stepId: firstStep.id,
       generationRunId: run.id,
       inputMessageId: run.inputMessageId,
+      request: planSteps[0]!.request,
     });
     await appendTaskEvent(tx, {
       taskId: task.id,
@@ -1399,7 +1406,17 @@ export async function applyRepresentativeDelegationExternalEffectAction(input: {
   externalReferenceId?: string;
   note?: string;
 }) {
-  const finalizeRequests: Array<{ stepId: string; outcome: "completed" | "failed"; failureReason?: string }> = [];
+  const note = input.note?.trim() ? truncate(input.note.trim(), 1_000) : undefined;
+  const externalReferenceId = input.externalReferenceId?.trim()
+    ? truncate(input.externalReferenceId.trim(), 500)
+    : undefined;
+  const finalizeRequests: Array<{
+    effectId: string;
+    effectStatus: "SUCCEEDED" | "FAILED";
+    stepId: string;
+    outcome: "completed" | "failed";
+    failureReason?: string;
+  }> = [];
   await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
     const effect = await tx.delegationTaskExternalEffect.findFirst({
@@ -1428,7 +1445,7 @@ export async function applyRepresentativeDelegationExternalEffectAction(input: {
 
     if (input.action === "reconcile") {
       if (!input.observedOutcome) throw new DelegationTaskActionError("Reconciliation requires an observed remote outcome.", 400);
-      if (!input.note?.trim() && !input.externalReferenceId?.trim()) {
+      if (!note && !externalReferenceId) {
         throw new DelegationTaskActionError("Reconciliation requires a note or external reference as evidence.", 400);
       }
       const nextStatus = input.observedOutcome === "succeeded" ? "SUCCEEDED" : "FAILED";
@@ -1437,14 +1454,14 @@ export async function applyRepresentativeDelegationExternalEffectAction(input: {
         data: {
           status: nextStatus,
           reconciledAt: now,
-          ...(input.externalReferenceId ? { externalReferenceId: input.externalReferenceId } : {}),
-          failureReason: input.observedOutcome === "failed" ? truncate(input.note || "Owner confirmed remote failure.", 1_000) : null,
+          ...(externalReferenceId ? { externalReferenceId } : {}),
+          failureReason: input.observedOutcome === "failed" ? note || "Owner confirmed remote failure." : null,
           responseSnapshot: {
             previous: effect.responseSnapshot ?? null,
             reconciliation: {
               observedOutcome: input.observedOutcome,
-              note: input.note || null,
-              externalReferenceId: input.externalReferenceId || null,
+              note: note || null,
+              externalReferenceId: externalReferenceId || null,
               reconciledBy: input.actorId,
               reconciledAt: now.toISOString(),
             },
@@ -1458,30 +1475,32 @@ export async function applyRepresentativeDelegationExternalEffectAction(input: {
         actorId: input.actorId,
         fromStatus: effect.delegationTask.status,
         toStatus: effect.delegationTask.status,
-        payload: { effectId: effect.id, externalReferenceId: input.externalReferenceId || null, note: input.note || null },
+        payload: { effectId: effect.id, externalReferenceId: externalReferenceId || null, note: note || null },
       });
       finalizeRequests.push({
+        effectId: effect.id,
+        effectStatus: nextStatus,
         stepId: effect.delegationTaskStep.id,
         outcome: input.observedOutcome === "succeeded" ? "completed" : "failed",
-        ...(input.observedOutcome === "failed" ? { failureReason: input.note || "Owner confirmed remote failure." } : {}),
+        ...(input.observedOutcome === "failed" ? { failureReason: note || "Owner confirmed remote failure." } : {}),
       });
       return;
     }
 
     if (input.action === "record_compensation") {
-      if (!input.note?.trim()) throw new DelegationTaskActionError("Compensation evidence note is required.", 400);
+      if (!note) throw new DelegationTaskActionError("Compensation evidence note is required.", 400);
       await tx.delegationTaskExternalEffect.update({
         where: { id: effect.id },
         data: {
           status: "CANCELED",
           reconciledAt: now,
-          ...(input.externalReferenceId ? { externalReferenceId: input.externalReferenceId } : {}),
+          ...(externalReferenceId ? { externalReferenceId } : {}),
           responseSnapshot: {
             previous: effect.responseSnapshot ?? null,
             compensation: {
               mode: "owner_confirmed_external_compensation",
-              note: truncate(input.note, 1_000),
-              externalReferenceId: input.externalReferenceId || null,
+              note,
+              externalReferenceId: externalReferenceId || null,
               recordedBy: input.actorId,
               recordedAt: now.toISOString(),
             },
@@ -1495,11 +1514,11 @@ export async function applyRepresentativeDelegationExternalEffectAction(input: {
         actorId: input.actorId,
         fromStatus: effect.delegationTask.status,
         toStatus: effect.delegationTask.status,
-        payload: { effectId: effect.id, externalReferenceId: input.externalReferenceId || null, note: truncate(input.note, 1_000) },
+        payload: { effectId: effect.id, externalReferenceId: externalReferenceId || null, note },
       });
       await tx.delegationTaskOutput.updateMany({
         where: { externalEffectId: effect.id },
-        data: { summary: `compensated: ${truncate(input.note, 500)}`, isFinal: true },
+        data: { summary: `compensated: ${truncate(note, 500)}`, isFinal: true },
       });
       return;
     }
@@ -1576,14 +1595,57 @@ export async function applyRepresentativeDelegationExternalEffectAction(input: {
   });
   const finalize = finalizeRequests[0];
   if (finalize) {
-    await finalizeComputeDelegationTask({
-      taskId: input.taskId,
-      stepId: finalize.stepId,
-      outcome: finalize.outcome,
-      ...(finalize.failureReason ? { failureReason: finalize.failureReason } : {}),
-    });
+    try {
+      await finalizeComputeDelegationTask({
+        taskId: input.taskId,
+        stepId: finalize.stepId,
+        outcome: finalize.outcome,
+        ...(finalize.failureReason ? { failureReason: finalize.failureReason } : {}),
+      });
+    } catch (error) {
+      await restoreExternalEffectReconciliationAfterFinalizationFailure({
+        taskId: input.taskId,
+        effectId: finalize.effectId,
+        expectedStatus: finalize.effectStatus,
+      });
+      throw error;
+    }
   }
   return getRepresentativeDelegationTaskDetail(input.representativeSlug, input.taskId);
+}
+
+async function restoreExternalEffectReconciliationAfterFinalizationFailure(input: {
+  taskId: string;
+  effectId: string;
+  expectedStatus: "SUCCEEDED" | "FAILED";
+}) {
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
+    const effect = await tx.delegationTaskExternalEffect.findFirst({
+      where: {
+        id: input.effectId,
+        delegationTaskId: input.taskId,
+        status: input.expectedStatus,
+      },
+      include: { delegationTask: { select: { status: true } } },
+    });
+    if (!effect) return;
+    await tx.delegationTaskExternalEffect.update({
+      where: { id: effect.id },
+      data: {
+        status: "RECONCILIATION_REQUIRED",
+        failureReason: "reconciliation_finalization_failed",
+      },
+    });
+    await appendTaskEvent(tx, {
+      taskId: input.taskId,
+      eventType: "external_effect.reconciliation_finalization_failed",
+      actorType: DelegationTaskActorType.SYSTEM,
+      fromStatus: effect.delegationTask.status,
+      toStatus: effect.delegationTask.status,
+      payload: { effectId: effect.id },
+    });
+  });
 }
 
 async function transitionDelegationTask(input: {
@@ -1668,6 +1730,7 @@ async function linkGenerationToTask(
     stepId?: string;
     generationRunId: string;
     inputMessageId: string;
+    request?: ParsedComputeRequest;
   },
 ) {
   await tx.generationRun.update({
@@ -1675,6 +1738,14 @@ async function linkGenerationToTask(
     data: {
       delegationTaskId: input.taskId,
       delegationTaskStepId: input.stepId ?? null,
+      ...(input.request
+        ? {
+            contextSnapshot: {
+              source: "delegation_plan_step",
+              request: input.request as unknown as Prisma.InputJsonValue,
+            },
+          }
+        : {}),
     },
   });
   await tx.message.update({

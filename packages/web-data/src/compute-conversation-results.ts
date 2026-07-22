@@ -187,12 +187,22 @@ export async function finalizeComputeApprovalConversation(input: {
   return result.message;
 }
 
-function formatComputeOutcome(input: {
+export function formatComputeOutcome(input: {
   outcome: ComputeApprovalConversationOutcome;
-  artifacts?: Array<{ kind: string; summary?: string | null; objectKey: string }>;
+  artifacts?: Array<{
+    id: string;
+    kind: string;
+    summary?: string | null;
+    objectKey: string;
+    mimeType: string;
+    fileName?: string;
+  }>;
   actualCredits?: number;
   failureReason?: string;
 }) {
+  const publicFailureReason = input.failureReason
+    ? renderPublicComputeFailureReason(input.failureReason)
+    : null;
   if (input.outcome === "rejected") {
     return "委托任务未获批准，因此没有执行。";
   }
@@ -200,17 +210,27 @@ function formatComputeOutcome(input: {
     return "委托任务审批已超时，任务未执行。如仍需要，请重新提交请求。";
   }
   if (input.outcome === "policy_denied") {
-    return `审批后安全策略复核未通过，任务没有执行。${input.failureReason ? `\n\n原因：${input.failureReason}` : ""}`;
+    return `审批后安全策略复核未通过，任务没有执行。${publicFailureReason ? `\n\n原因：${publicFailureReason}` : ""}`;
   }
 
   const artifacts = input.artifacts?.length
-    ? input.artifacts.map((artifact) => `${artifact.kind}: ${artifact.summary ?? artifact.objectKey}`).join("\n")
+    ? input.artifacts.map((artifact) => {
+        const label = artifact.kind.toLowerCase() === "file" ? "已生成文件" : "已生成结果";
+        return `${label}：${resolveConversationArtifactFileName(artifact)}`;
+      }).join("\n")
     : "没有生成可展示的结果文件。";
   const billing = typeof input.actualCredits === "number" ? `\n\n消耗：${input.actualCredits} credits` : "";
   if (input.outcome === "failed") {
-    return `审批已通过，但委托任务执行失败。\n\n${artifacts}${input.failureReason ? `\n\n原因：${input.failureReason}` : ""}${billing}`;
+    return `审批已通过，但委托任务执行失败。\n\n${artifacts}${publicFailureReason ? `\n\n原因：${publicFailureReason}` : ""}${billing}`;
   }
   return `审批已通过，委托任务执行完成。\n\n${artifacts}${billing}`;
+}
+
+function renderPublicComputeFailureReason(failureReason: string) {
+  if (failureReason.includes("path_outside_allowed_workspace")) {
+    return "输出位置不符合沙盒安全规则；请重新描述希望生成的内容，文件位置将由系统自动管理。";
+  }
+  return "执行过程中出现错误，详细原因已记录供代表所有者查看。";
 }
 
 function resolveConversationArtifactFileName(artifact: {

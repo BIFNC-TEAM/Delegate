@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 import {
   applyRepresentativeDelegationExternalEffectAction,
@@ -10,6 +11,13 @@ import {
   requireDashboardRepresentativeAccess,
 } from "../../../../../../auth";
 
+const externalEffectActionSchema = z.object({
+  action: z.enum(["reconcile", "retry", "record_compensation"]),
+  observedOutcome: z.enum(["succeeded", "failed"]).optional(),
+  externalReferenceId: z.string().trim().max(500).optional(),
+  note: z.string().trim().max(1_000).optional(),
+}).strict();
+
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ slug: string; taskId: string; effectId: string }> },
@@ -17,15 +25,13 @@ export async function PATCH(
   const { slug, taskId, effectId } = await params;
   try {
     const session = await requireDashboardRepresentativeAccess(slug);
-    const body = (await request.json()) as {
-      action?: "reconcile" | "retry" | "record_compensation";
-      observedOutcome?: "succeeded" | "failed";
-      externalReferenceId?: string;
-      note?: string;
-    };
-    if (!body.action || !["reconcile", "retry", "record_compensation"].includes(body.action)) {
+    const parsedBody = externalEffectActionSchema.safeParse(
+      await request.json().catch(() => null),
+    );
+    if (!parsedBody.success) {
       return NextResponse.json({ error: "Invalid external effect action." }, { status: 400 });
     }
+    const body = parsedBody.data;
     if (body.action === "reconcile" && !["succeeded", "failed"].includes(body.observedOutcome || "")) {
       return NextResponse.json({ error: "Reconciliation requires succeeded or failed outcome." }, { status: 400 });
     }
@@ -47,7 +53,7 @@ export async function PATCH(
       return NextResponse.json({ error: error.message }, { status: error.statusCode });
     }
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to update external effect." },
+      { error: "Failed to update external effect." },
       { status: 500 },
     );
   }

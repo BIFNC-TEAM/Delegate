@@ -58,6 +58,25 @@ type PricingPlan = {
 type ComputePolicyMode = "allow" | "ask" | "deny";
 type ComputeNetworkMode = "no_network" | "allowlist" | "full";
 type ComputeFilesystemMode = "workspace_only" | "read_only_workspace" | "ephemeral_full";
+type ComputeCapability = "exec" | "read" | "write" | "process" | "browser" | "mcp";
+type DelegationKnowledgeScope = "user_input_only" | "public_knowledge";
+type ActionGateMode = "allow" | "ask_first" | "deny";
+type ActionGateKey =
+  | "answer_faq"
+  | "collect_lead"
+  | "collect_quote_request"
+  | "collect_scheduling_request"
+  | "deliver_material"
+  | "request_handoff"
+  | "charge_stars"
+  | "issue_refund"
+  | "offer_discount"
+  | "send_sensitive_material"
+  | "modify_owner_calendar"
+  | "run_local_command"
+  | "access_private_memory"
+  | "access_private_files"
+  | "send_outbound_campaign";
 
 type RepresentativeSetupSnapshot = {
   id: string;
@@ -70,6 +89,7 @@ type RepresentativeSetupSnapshot = {
   groupActivation: GroupActivation;
   publicMode: boolean;
   humanInLoop: boolean;
+  actionGate: Record<ActionGateKey, ActionGateMode>;
   contract: {
     freeReplyLimit: number;
     freeScope: InquiryIntent[];
@@ -94,6 +114,15 @@ type RepresentativeSetupSnapshot = {
     networkMode: ComputeNetworkMode;
     networkAllowlist: string[];
     filesystemMode: ComputeFilesystemMode;
+    capabilityModes: Record<ComputeCapability, ComputePolicyMode>;
+  };
+  delegation: {
+    enabled: boolean;
+    naturalLanguageEnabled: boolean;
+    explicitComputeEnabled: boolean;
+    maxSteps: number;
+    maxCostCents: number;
+    knowledgeScope: DelegationKnowledgeScope;
   };
 };
 
@@ -230,6 +259,49 @@ function getComputePolicyModeLabels(locale: Locale): Record<ComputePolicyMode, s
         ask: "ask by default",
         deny: "deny by default",
       };
+}
+
+function getComputeCapabilityLabels(locale: Locale): Record<ComputeCapability, string> {
+  return locale === "zh"
+    ? {
+        exec: "一次性命令",
+        read: "读取工作区",
+        write: "写入工作区",
+        process: "长期进程",
+        browser: "浏览公开网页",
+        mcp: "外部 MCP 工具",
+      }
+    : {
+        exec: "One-shot command",
+        read: "Read workspace",
+        write: "Write workspace",
+        process: "Long-running process",
+        browser: "Browse public web",
+        mcp: "External MCP tool",
+      };
+}
+
+function getActionGateLabels(locale: Locale): Record<ActionGateKey, string> {
+  const labels: Record<ActionGateKey, [string, string]> = {
+    answer_faq: ["回答 FAQ", "Answer FAQ"],
+    collect_lead: ["收集线索", "Collect lead"],
+    collect_quote_request: ["收集报价请求", "Collect quote request"],
+    collect_scheduling_request: ["收集预约请求", "Collect scheduling request"],
+    deliver_material: ["发送公开材料", "Deliver public material"],
+    request_handoff: ["请求人工接手", "Request human handoff"],
+    charge_stars: ["发起 Stars 付费", "Charge Stars"],
+    issue_refund: ["发起退款", "Issue refund"],
+    offer_discount: ["提供折扣", "Offer discount"],
+    send_sensitive_material: ["发送敏感材料", "Send sensitive material"],
+    modify_owner_calendar: ["修改 Owner 日历", "Modify Owner calendar"],
+    run_local_command: ["运行本地命令", "Run local command"],
+    access_private_memory: ["访问私有记忆", "Access private memory"],
+    access_private_files: ["访问私有文件", "Access private files"],
+    send_outbound_campaign: ["发送外呼活动", "Send outbound campaign"],
+  };
+  return Object.fromEntries(
+    Object.entries(labels).map(([key, value]) => [key, value[locale === "zh" ? 0 : 1]]),
+  ) as Record<ActionGateKey, string>;
 }
 
 function getComputeNetworkModeLabels(locale: Locale): Record<ComputeNetworkMode, string> {
@@ -390,6 +462,8 @@ export function DashboardRepresentativeSetup({
   const localizedComputePolicyModeLabels = getComputePolicyModeLabels(locale);
   const localizedComputeNetworkModeLabels = getComputeNetworkModeLabels(locale);
   const localizedComputeFilesystemModeLabels = getComputeFilesystemModeLabels(locale);
+  const localizedComputeCapabilityLabels = getComputeCapabilityLabels(locale);
+  const localizedActionGateLabels = getActionGateLabels(locale);
   const intentOptions = getIntentOptions(locale);
   const materialKindOptions = getMaterialKindOptions(locale);
   const pricingTierLabels = getPricingTierLabels(locale);
@@ -648,7 +722,6 @@ export function DashboardRepresentativeSetup({
     openVikingDraft,
     locale,
     localizedGroupActivationLabels,
-    localizedComputePolicyModeLabels,
     localizedComputeNetworkModeLabels,
     localizedComputeFilesystemModeLabels,
     knowledgeAssetIds.length,
@@ -1001,6 +1074,35 @@ export function DashboardRepresentativeSetup({
                       ))}
                     </div>
                   </div>
+
+                  <div className="field-stack field-span-full">
+                    <span>{t.actionBoundaries}</span>
+                    <div className="setup-grid">
+                      {(Object.keys(localizedActionGateLabels) as ActionGateKey[]).map((action) => (
+                        <label className="field-stack" key={action}>
+                          <span>{localizedActionGateLabels[action]}</span>
+                          <select
+                            className="text-input"
+                            onChange={(event) =>
+                              updateDraft((value) => ({
+                                ...value,
+                                actionGate: {
+                                  ...value.actionGate,
+                                  [action]: event.target.value as ActionGateMode,
+                                },
+                              }))
+                            }
+                            value={draft.actionGate[action]}
+                          >
+                            <option value="allow">{t.actionAllow}</option>
+                            <option value="ask_first">{t.actionAskFirst}</option>
+                            <option value="deny">{t.actionDeny}</option>
+                          </select>
+                        </label>
+                      ))}
+                    </div>
+                    <small className="field-hint">{t.actionBoundaryHint}</small>
+                  </div>
                 </div>
               </DashboardSurface>
             ) : null}
@@ -1217,9 +1319,9 @@ export function DashboardRepresentativeSetup({
             meta={
               <div className="chip-row">
                 <span
-                  className={draft.compute.enabled ? "chip chip-safe" : "chip chip-danger"}
+                  className={draft.compute.enabled && draft.delegation.enabled ? "chip chip-safe" : "chip chip-danger"}
                 >
-                  {draft.compute.enabled ? "enabled" : "disabled"}
+                  {draft.compute.enabled && draft.delegation.enabled ? "delegation enabled" : "delegation disabled"}
                 </span>
                 <span className="chip">
                   {localizedComputePolicyModeLabels[draft.compute.defaultPolicyMode]}
@@ -1252,7 +1354,55 @@ export function DashboardRepresentativeSetup({
                     />
                     <span>{t.enableCompute}</span>
                   </label>
+                  <label className="toggle-row">
+                    <input
+                      checked={draft.delegation.enabled}
+                      onChange={(event) =>
+                        updateDraft((value) => ({
+                          ...value,
+                          delegation: { ...value.delegation, enabled: event.target.checked },
+                        }))
+                      }
+                      type="checkbox"
+                    />
+                    <span>{t.enableDelegation}</span>
+                  </label>
+                  <label className="toggle-row">
+                    <input
+                      checked={draft.delegation.naturalLanguageEnabled}
+                      disabled={!draft.delegation.enabled}
+                      onChange={(event) =>
+                        updateDraft((value) => ({
+                          ...value,
+                          delegation: {
+                            ...value.delegation,
+                            naturalLanguageEnabled: event.target.checked,
+                          },
+                        }))
+                      }
+                      type="checkbox"
+                    />
+                    <span>{t.enableNaturalLanguageDelegation}</span>
+                  </label>
+                  <label className="toggle-row">
+                    <input
+                      checked={draft.delegation.explicitComputeEnabled}
+                      disabled={!draft.delegation.enabled}
+                      onChange={(event) =>
+                        updateDraft((value) => ({
+                          ...value,
+                          delegation: {
+                            ...value.delegation,
+                            explicitComputeEnabled: event.target.checked,
+                          },
+                        }))
+                      }
+                      type="checkbox"
+                    />
+                    <span>{t.enableExplicitCompute}</span>
+                  </label>
                 </div>
+                <small className="field-hint">{t.delegationToggleHint}</small>
               </div>
 
               <label className="field-stack">
@@ -1276,6 +1426,98 @@ export function DashboardRepresentativeSetup({
                     </option>
                   ))}
                 </select>
+              </label>
+
+              <div className="field-stack field-span-full">
+                <span>{t.capabilityPolicies}</span>
+                <div className="setup-grid">
+                  {(Object.keys(localizedComputeCapabilityLabels) as ComputeCapability[]).map((capability) => (
+                    <label className="field-stack" key={capability}>
+                      <span>{localizedComputeCapabilityLabels[capability]}</span>
+                      <select
+                        className="text-input"
+                        onChange={(event) =>
+                          updateDraft((value) => ({
+                            ...value,
+                            compute: {
+                              ...value.compute,
+                              capabilityModes: {
+                                ...value.compute.capabilityModes,
+                                [capability]: event.target.value as ComputePolicyMode,
+                              },
+                            },
+                          }))
+                        }
+                        value={draft.compute.capabilityModes[capability]}
+                      >
+                        {Object.entries(localizedComputePolicyModeLabels).map(([value, label]) => (
+                          <option key={value} value={value}>{label}</option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+                <small className="field-hint">{t.capabilityPolicyHint}</small>
+              </div>
+
+              <label className="field-stack">
+                <span>{t.delegationKnowledgeScope}</span>
+                <select
+                  className="text-input"
+                  onChange={(event) =>
+                    updateDraft((value) => ({
+                      ...value,
+                      delegation: {
+                        ...value.delegation,
+                        knowledgeScope: event.target.value as DelegationKnowledgeScope,
+                      },
+                    }))
+                  }
+                  value={draft.delegation.knowledgeScope}
+                >
+                  <option value="user_input_only">{t.userInputOnly}</option>
+                  <option value="public_knowledge">{t.approvedPublicKnowledge}</option>
+                </select>
+              </label>
+
+              <label className="field-stack">
+                <span>{t.delegationMaxSteps}</span>
+                <input
+                  className="text-input"
+                  min={1}
+                  max={5}
+                  onChange={(event) =>
+                    updateDraft((value) => ({
+                      ...value,
+                      delegation: {
+                        ...value.delegation,
+                        maxSteps: Number(event.target.value || 1),
+                      },
+                    }))
+                  }
+                  type="number"
+                  value={draft.delegation.maxSteps}
+                />
+              </label>
+
+              <label className="field-stack">
+                <span>{t.delegationMaxCost}</span>
+                <input
+                  className="text-input"
+                  min={0}
+                  onChange={(event) =>
+                    updateDraft((value) => ({
+                      ...value,
+                      delegation: {
+                        ...value.delegation,
+                        maxCostCents: Number(event.target.value || 0),
+                      },
+                    }))
+                  }
+                  type="number"
+                  value={draft.delegation.maxCostCents}
+                />
+                <small className="field-hint">{t.zeroMeansUnlimited}</small>
               </label>
 
               <label className="field-stack">
@@ -1794,6 +2036,11 @@ const setupCopy = {
     handoffWindow: "Handoff window (hours)",
     freeScope: "Free scope",
     paywalledIntents: "Paywalled intents",
+    actionBoundaries: "动作边界",
+    actionAllow: "允许",
+    actionAskFirst: "先审批",
+    actionDeny: "禁止",
+    actionBoundaryHint: "这是对话和业务动作边界；Compute 的六类执行能力在 Compute 步骤单独配置。",
     pricingEyebrow: "Pricing Plans",
     pricingTitle: "坚持四档：Free / Pass / Deep Help / Sponsor。",
     nameLabel: "Name",
@@ -1807,12 +2054,24 @@ const setupCopy = {
     materialsTitle: "Materials",
     policiesTitle: "Policies",
     computeEyebrow: "Isolated Compute",
-    computeTitle: "把一般性能力放进默认隔离的 compute plane，再配置默认策略与预算。",
+    computeTitle: "配置委托触发、能力边界、审批策略与隔离沙盒资源上限。",
     enableCompute: "Enable compute",
+    enableDelegation: "接受公开委托任务",
+    enableNaturalLanguageDelegation: "允许自然语言自动触发任务",
+    enableExplicitCompute: "开放高级 /compute 命令",
+    delegationToggleHint: "自然语言负责识别任务；是否执行或审批始终由下方确定性策略决定。",
     defaultPolicyMode: "Default policy mode",
+    capabilityPolicies: "能力策略",
+    capabilityPolicyHint: "需审批会创建 Owner 审批；禁止会在创建沙盒前拦截。平台托管安全规则仍可进一步收紧。",
+    delegationKnowledgeScope: "任务可用数据",
+    userInputOnly: "仅本次会话输入",
+    approvedPublicKnowledge: "会话输入 + 已审核公开知识",
+    delegationMaxSteps: "单任务最大步骤数",
+    delegationMaxCost: "单任务成本上限（美分）",
+    zeroMeansUnlimited: "0 表示不设置额外任务成本上限；仍受平台和账户预算约束。",
     baseImage: "Base image",
     maxSessionMinutes: "Max session minutes",
-    autoApproveBudget: "Auto-approve budget (USD cents)",
+    autoApproveBudget: "免审批成本阈值（美分）",
     artifactRetentionDays: "Artifact retention (days)",
     networkMode: "Network mode",
     networkAllowlist: "Network allowlist",
@@ -1916,6 +2175,11 @@ const setupCopy = {
     handoffWindow: "Handoff window (hours)",
     freeScope: "Free scope",
     paywalledIntents: "Paywalled intents",
+    actionBoundaries: "Action boundaries",
+    actionAllow: "Allow",
+    actionAskFirst: "Ask first",
+    actionDeny: "Deny",
+    actionBoundaryHint: "These govern conversation and business actions. Configure the six execution capabilities separately in Compute.",
     pricingEyebrow: "Pricing plans",
     pricingTitle: "Keep the four access layers: Free / Pass / Deep Help / Sponsor.",
     nameLabel: "Name",
@@ -1929,12 +2193,24 @@ const setupCopy = {
     materialsTitle: "Materials",
     policiesTitle: "Policies",
     computeEyebrow: "Isolated compute",
-    computeTitle: "Move general-purpose capability into a sandboxed compute plane, then tune the default policy and budget.",
+    computeTitle: "Configure delegation triggers, capability gates, approval policy, and sandbox resource limits.",
     enableCompute: "Enable compute",
+    enableDelegation: "Accept public delegation tasks",
+    enableNaturalLanguageDelegation: "Trigger tasks from natural language",
+    enableExplicitCompute: "Expose advanced /compute command",
+    delegationToggleHint: "Natural language identifies the task; deterministic policy still decides whether it runs or requires approval.",
     defaultPolicyMode: "Default policy mode",
+    capabilityPolicies: "Capability policies",
+    capabilityPolicyHint: "Ask creates an Owner approval; deny blocks before sandbox creation. Managed platform safety rules can still tighten these choices.",
+    delegationKnowledgeScope: "Task data scope",
+    userInputOnly: "Current conversation input only",
+    approvedPublicKnowledge: "Conversation input + approved public knowledge",
+    delegationMaxSteps: "Maximum steps per task",
+    delegationMaxCost: "Task cost limit (USD cents)",
+    zeroMeansUnlimited: "0 adds no task-specific cost cap; platform and account budgets still apply.",
     baseImage: "Base image",
     maxSessionMinutes: "Max session minutes",
-    autoApproveBudget: "Auto-approve budget (USD cents)",
+    autoApproveBudget: "Approval-free cost threshold (USD cents)",
     artifactRetentionDays: "Artifact retention (days)",
     networkMode: "Network mode",
     networkAllowlist: "Network allowlist",
@@ -1993,7 +2269,6 @@ function buildSetupStepCards(
   openVikingDraft: RepresentativeOpenVikingSnapshot | null,
   locale: Locale,
   groupActivationLabels: Record<GroupActivation, string>,
-  computePolicyModeLabels: Record<ComputePolicyMode, string>,
   computeNetworkModeLabels: Record<ComputeNetworkMode, string>,
   computeFilesystemModeLabels: Record<ComputeFilesystemMode, string>,
   linkedKnowledgeAssetCount: number,
@@ -2147,15 +2422,15 @@ function buildSetupStepCards(
       if (locale === "en") {
         return [
           {
-            label: "Access",
-            value: draft.compute.enabled ? "Enabled" : "Disabled",
-            detail: "Whether this representative can request isolated compute sessions.",
+            label: "Delegation",
+            value: draft.compute.enabled && draft.delegation.enabled ? "Enabled" : "Disabled",
+            detail: "Whether this representative accepts tasks backed by isolated compute.",
             tone: "accent",
           },
           {
-            label: "Default policy",
-            value: computePolicyModeLabels[draft.compute.defaultPolicyMode],
-            detail: "How unmatched capabilities are handled by default.",
+            label: "Natural language",
+            value: draft.delegation.naturalLanguageEnabled ? "On" : "Off",
+            detail: "Whether ordinary requests can become delegated tasks.",
           },
           {
             label: "Network",
@@ -2172,15 +2447,15 @@ function buildSetupStepCards(
       }
       return [
         {
-          label: "Access",
-          value: draft.compute.enabled ? "Enabled" : "Disabled",
-          detail: "这个代表是否允许申请隔离 compute session。",
+          label: "Delegation",
+          value: draft.compute.enabled && draft.delegation.enabled ? "Enabled" : "Disabled",
+          detail: "这个代表是否接受由隔离 Compute 执行的委托任务。",
           tone: "accent",
         },
         {
-          label: "Default policy",
-          value: computePolicyModeLabels[draft.compute.defaultPolicyMode],
-          detail: "没有命中具体规则时的默认处置方式。",
+          label: "Natural language",
+          value: draft.delegation.naturalLanguageEnabled ? "On" : "Off",
+          detail: "普通自然语言请求是否可以自动形成委托任务。",
         },
         {
           label: "Network",
@@ -2637,6 +2912,7 @@ function cloneSnapshot(snapshot: RepresentativeSetupSnapshot): RepresentativeSet
       handoffWindowHours: snapshot.contract.handoffWindowHours,
     },
     pricing: snapshot.pricing.map((plan) => ({ ...plan })),
+    actionGate: { ...snapshot.actionGate },
     knowledgePack: {
       identitySummary: snapshot.knowledgePack.identitySummary,
       faq: snapshot.knowledgePack.faq.map((item) => ({ ...item })),
@@ -2645,7 +2921,10 @@ function cloneSnapshot(snapshot: RepresentativeSetupSnapshot): RepresentativeSet
     },
     compute: {
       ...snapshot.compute,
+      networkAllowlist: [...snapshot.compute.networkAllowlist],
+      capabilityModes: { ...snapshot.compute.capabilityModes },
     },
+    delegation: { ...snapshot.delegation },
   };
 }
 

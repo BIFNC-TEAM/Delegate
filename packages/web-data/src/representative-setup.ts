@@ -29,6 +29,7 @@ import {
   Channel,
   ComputeFilesystemMode,
   ComputeNetworkMode,
+  DelegationKnowledgeScope,
   GroupActivation,
   PolicyDecision,
   PricingPlanType,
@@ -47,7 +48,32 @@ const representativeSetupInclude = {
   owner: true,
   knowledgePack: true,
   pricingPlans: true,
+  capabilityProfiles: {
+    where: { isDefault: true, isManaged: false },
+    orderBy: { createdAt: "asc" },
+    take: 1,
+    include: { rules: true },
+  },
 } as const;
+
+const capabilityPolicyModeSchema = z.enum(["allow", "ask", "deny"]);
+const capabilityModesSchema = z.object({
+  exec: capabilityPolicyModeSchema,
+  read: capabilityPolicyModeSchema,
+  write: capabilityPolicyModeSchema,
+  process: capabilityPolicyModeSchema,
+  browser: capabilityPolicyModeSchema,
+  mcp: capabilityPolicyModeSchema,
+});
+
+const delegationSetupSchema = z.object({
+  enabled: z.boolean(),
+  naturalLanguageEnabled: z.boolean(),
+  explicitComputeEnabled: z.boolean(),
+  maxSteps: z.number().int().min(1).max(5),
+  maxCostCents: z.number().int().min(0).max(1_000_000),
+  knowledgeScope: z.enum(["user_input_only", "public_knowledge"]),
+});
 
 const editableKnowledgeDocumentSchema = z.object({
   id: z.string().trim().min(1).optional(),
@@ -66,6 +92,7 @@ const representativeSetupUpdateSchema = z.object({
   groupActivation: groupActivationSchema,
   publicMode: z.boolean(),
   humanInLoop: z.boolean(),
+  actionGate: actionGateSchema.default(demoRepresentative.actionGate),
   contract: conversationContractSchema,
   handoffPrompt: z.string().trim().min(1),
   pricing: z
@@ -110,6 +137,22 @@ const representativeSetupUpdateSchema = z.object({
     networkMode: computeNetworkModeSchema,
     networkAllowlist: z.array(z.string().trim().min(1)).max(50),
     filesystemMode: computeFilesystemModeSchema,
+    capabilityModes: capabilityModesSchema.default({
+      exec: "ask",
+      read: "allow",
+      write: "ask",
+      process: "ask",
+      browser: "ask",
+      mcp: "ask",
+    }),
+  }),
+  delegation: delegationSetupSchema.default({
+    enabled: true,
+    naturalLanguageEnabled: true,
+    explicitComputeEnabled: true,
+    maxSteps: 5,
+    maxCostCents: 0,
+    knowledgeScope: "user_input_only",
   }),
 });
 
@@ -157,6 +200,15 @@ export type RepresentativeSetupSnapshot = Pick<
     networkMode: "no_network" | "allowlist" | "full";
     networkAllowlist: string[];
     filesystemMode: "workspace_only" | "read_only_workspace" | "ephemeral_full";
+    capabilityModes: Record<"exec" | "read" | "write" | "process" | "browser" | "mcp", "allow" | "ask" | "deny">;
+  };
+  delegation: {
+    enabled: boolean;
+    naturalLanguageEnabled: boolean;
+    explicitComputeEnabled: boolean;
+    maxSteps: number;
+    maxCostCents: number;
+    knowledgeScope: "user_input_only" | "public_knowledge";
   };
 };
 
@@ -235,6 +287,23 @@ const defaultComputeSetup: RepresentativeSetupSnapshot["compute"] = {
   networkMode: "no_network",
   networkAllowlist: [],
   filesystemMode: "workspace_only",
+  capabilityModes: {
+    exec: "ask",
+    read: "allow",
+    write: "ask",
+    process: "ask",
+    browser: "ask",
+    mcp: "ask",
+  },
+};
+
+const defaultDelegationSetup: RepresentativeSetupSnapshot["delegation"] = {
+  enabled: true,
+  naturalLanguageEnabled: true,
+  explicitComputeEnabled: true,
+  maxSteps: 5,
+  maxCostCents: 0,
+  knowledgeScope: "user_input_only",
 };
 
 export async function listRepresentativeDirectoryItems(ownerId?: string | null): Promise<RepresentativeDirectoryItem[]> {
@@ -342,6 +411,12 @@ export async function createRepresentative(
           computeNetworkMode: mapComputeNetworkModeToDb(template.compute.networkMode),
           computeNetworkAllowlist: sanitizeNetworkAllowlist(template.compute.networkAllowlist),
           computeFilesystemMode: mapComputeFilesystemModeToDb(template.compute.filesystemMode),
+          delegationEnabled: template.delegation.enabled,
+          delegationNaturalLanguageEnabled: template.delegation.naturalLanguageEnabled,
+          delegationExplicitComputeEnabled: template.delegation.explicitComputeEnabled,
+          delegationMaxSteps: template.delegation.maxSteps,
+          delegationMaxCostCents: template.delegation.maxCostCents,
+          delegationKnowledgeScope: mapDelegationKnowledgeScopeToDb(template.delegation.knowledgeScope),
         },
       });
 
@@ -604,6 +679,7 @@ export async function updateRepresentativeSetup(params: {
           paywalledIntents: input.contract.paywalledIntents,
           handoffWindowHours: input.contract.handoffWindowHours,
           handoffPrompt: input.handoffPrompt,
+          actionGate: input.actionGate,
           computeEnabled: input.compute.enabled,
           computeDefaultPolicyMode: mapPolicyDecisionToDb(input.compute.defaultPolicyMode),
           computeBaseImage: input.compute.baseImage,
@@ -613,6 +689,12 @@ export async function updateRepresentativeSetup(params: {
           computeNetworkMode: mapComputeNetworkModeToDb(input.compute.networkMode),
           computeNetworkAllowlist: sanitizeNetworkAllowlist(input.compute.networkAllowlist),
           computeFilesystemMode: mapComputeFilesystemModeToDb(input.compute.filesystemMode),
+          delegationEnabled: input.delegation.enabled,
+          delegationNaturalLanguageEnabled: input.delegation.naturalLanguageEnabled,
+          delegationExplicitComputeEnabled: input.delegation.explicitComputeEnabled,
+          delegationMaxSteps: input.delegation.maxSteps,
+          delegationMaxCostCents: input.delegation.maxCostCents,
+          delegationKnowledgeScope: mapDelegationKnowledgeScopeToDb(input.delegation.knowledgeScope),
         },
       });
 
@@ -766,6 +848,15 @@ function serializeRepresentativeSetup(
       networkMode: mapComputeNetworkModeFromDb(representative.computeNetworkMode),
       networkAllowlist: sanitizeNetworkAllowlist(representative.computeNetworkAllowlist),
       filesystemMode: mapComputeFilesystemModeFromDb(representative.computeFilesystemMode),
+      capabilityModes: resolveCapabilityModesFromProfile(representative.capabilityProfiles[0]),
+    },
+    delegation: {
+      enabled: representative.delegationEnabled,
+      naturalLanguageEnabled: representative.delegationNaturalLanguageEnabled,
+      explicitComputeEnabled: representative.delegationExplicitComputeEnabled,
+      maxSteps: representative.delegationMaxSteps,
+      maxCostCents: representative.delegationMaxCostCents,
+      knowledgeScope: mapDelegationKnowledgeScopeFromDb(representative.delegationKnowledgeScope),
     },
   };
 }
@@ -780,6 +871,7 @@ export function applyRepresentativeVersionSnapshot(
   const identity = asJsonRecord(snapshot.identity);
   const conversation = asJsonRecord(snapshot.conversation);
   const governance = asJsonRecord(snapshot.governance);
+  const delegation = asJsonRecord(snapshot.delegation);
   const knowledge = asJsonRecord(snapshot.knowledge);
   const parsedContract = conversationContractSchema.safeParse(conversation);
   const parsedPricing = parseSnapshotPricing(snapshot.pricing);
@@ -837,6 +929,26 @@ export function applyRepresentativeVersionSnapshot(
     actionGate: governance?.actionGate
       ? parseActionGate(governance.actionGate as Prisma.JsonValue)
       : current.actionGate,
+    delegation: {
+      ...current.delegation,
+      enabled:
+        typeof delegation?.enabled === "boolean"
+          ? delegation.enabled
+          : current.delegation.enabled,
+      naturalLanguageEnabled:
+        typeof delegation?.naturalLanguageEnabled === "boolean"
+          ? delegation.naturalLanguageEnabled
+          : current.delegation.naturalLanguageEnabled,
+      explicitComputeEnabled:
+        typeof delegation?.explicitComputeEnabled === "boolean"
+          ? delegation.explicitComputeEnabled
+          : current.delegation.explicitComputeEnabled,
+      knowledgeScope:
+        delegation?.knowledgeScope === "public_knowledge" ||
+        delegation?.knowledgeScope === "user_input_only"
+          ? delegation.knowledgeScope
+          : current.delegation.knowledgeScope,
+    },
   };
 }
 
@@ -905,7 +1017,8 @@ function getOrCreateDemoFallbackSetupSnapshot(): RepresentativeSetupSnapshot {
       pricing: demoRepresentative.pricing.map((plan) => ({ ...plan })),
       handoffPrompt: demoRepresentative.handoffPrompt,
       actionGate: { ...demoRepresentative.actionGate },
-      compute: { ...defaultComputeSetup },
+      compute: cloneComputeSetup(defaultComputeSetup),
+      delegation: { ...defaultDelegationSetup },
     };
   }
 
@@ -932,6 +1045,7 @@ function updateDemoFallbackRepresentativeSetup(
     handoffWindowHours: input.contract.handoffWindowHours,
   };
   snapshot.handoffPrompt = input.handoffPrompt;
+  snapshot.actionGate = { ...input.actionGate };
   snapshot.pricing = input.pricing.map((plan) => ({ ...plan }));
   snapshot.knowledgePack = {
     identitySummary: input.knowledgePack.identitySummary,
@@ -941,7 +1055,9 @@ function updateDemoFallbackRepresentativeSetup(
   };
   snapshot.compute = {
     ...input.compute,
+    capabilityModes: { ...input.compute.capabilityModes },
   };
+  snapshot.delegation = { ...input.delegation };
 
   return cloneRepresentativeSetupSnapshot(snapshot);
 }
@@ -967,7 +1083,8 @@ function cloneRepresentativeSetupSnapshot(
     },
     pricing: snapshot.pricing.map((plan) => ({ ...plan })),
     actionGate: { ...snapshot.actionGate },
-    compute: { ...snapshot.compute },
+    compute: cloneComputeSetup(snapshot.compute),
+    delegation: { ...snapshot.delegation },
   };
 }
 
@@ -1130,7 +1247,18 @@ function buildRepresentativeTemplate(params: {
     pricing: demoRepresentative.pricing.map((plan) => ({ ...plan })),
     handoffPrompt: `${safeOwnerName} 的真人评估入口已经开启。请留下你的身份、需求摘要、预算区间、目标时间，以及为什么需要真人接手。`,
     actionGate: { ...demoRepresentative.actionGate },
-    compute: { ...defaultComputeSetup },
+    compute: cloneComputeSetup(defaultComputeSetup),
+    delegation: { ...defaultDelegationSetup },
+  };
+}
+
+function cloneComputeSetup(
+  compute: RepresentativeSetupSnapshot["compute"],
+): RepresentativeSetupSnapshot["compute"] {
+  return {
+    ...compute,
+    networkAllowlist: [...compute.networkAllowlist],
+    capabilityModes: { ...compute.capabilityModes },
   };
 }
 
@@ -1199,52 +1327,63 @@ async function upsertDefaultCapabilityPolicyProfile(
   });
 
   await tx.capabilityPolicyRule.createMany({
-    data: [
-      {
-        id: `${profile.id}_exec_safe_readonly`,
-        profileId: profile.id,
-        capability: "EXEC",
-        decision: "ALLOW",
-        commandPattern: "^(pwd|ls|cat|find|grep|head|tail)(?:\\s+[A-Za-z0-9_./:@=-]+)*\\s*$",
-        priority: 100,
-        requiresPaidPlan: false,
-        requiresHumanApproval: false,
-      },
-      {
-        id: `${profile.id}_read_workspace`,
-        profileId: profile.id,
-        capability: "READ",
-        decision: "ALLOW",
-        pathPattern: "^/workspace(?:/|$)",
-        resourceScopeCondition: "WORKSPACE",
-        priority: 90,
-        requiresPaidPlan: false,
-        requiresHumanApproval: false,
-      },
-      {
-        id: `${profile.id}_write_workspace`,
-        profileId: profile.id,
-        capability: "WRITE",
-        decision: "ASK",
-        pathPattern: "^/workspace(?:/|$)",
-        resourceScopeCondition: "WORKSPACE",
-        priority: 80,
-        requiresPaidPlan: false,
-        requiresHumanApproval: true,
-      },
-      {
-        id: `${profile.id}_browser_review`,
-        profileId: profile.id,
-        capability: "BROWSER",
-        decision: "ASK",
-        domainPattern: ".*",
-        resourceScopeCondition: "BROWSER_LANE",
-        priority: 70,
-        requiresPaidPlan: true,
-        requiresHumanApproval: true,
-      },
-    ],
+    data: buildOwnerCapabilityPolicyRules(profile.id, compute.capabilityModes),
   });
+}
+
+function buildOwnerCapabilityPolicyRules(
+  profileId: string,
+  modes: RepresentativeSetupSnapshot["compute"]["capabilityModes"],
+): Prisma.CapabilityPolicyRuleCreateManyInput[] {
+  const specifications: Array<{
+    key: keyof typeof modes;
+    capability: Prisma.CapabilityPolicyRuleCreateManyInput["capability"];
+    commandPattern?: string;
+    pathPattern?: string;
+    domainPattern?: string;
+    resourceScopeCondition?: Prisma.CapabilityPolicyRuleCreateManyInput["resourceScopeCondition"];
+  }> = [
+    { key: "exec", capability: "EXEC", commandPattern: ".*" },
+    { key: "read", capability: "READ", pathPattern: "^/workspace(?:/|$)", resourceScopeCondition: "WORKSPACE" },
+    { key: "write", capability: "WRITE", pathPattern: "^/workspace(?:/|$)", resourceScopeCondition: "WORKSPACE" },
+    { key: "process", capability: "PROCESS", resourceScopeCondition: "WORKSPACE" },
+    { key: "browser", capability: "BROWSER", domainPattern: ".*", resourceScopeCondition: "BROWSER_LANE" },
+    { key: "mcp", capability: "MCP", resourceScopeCondition: "REMOTE_MCP" },
+  ];
+
+  return specifications.map((specification, index) => {
+    const mode = modes[specification.key];
+    return {
+      id: `${profileId}_${specification.key}_owner_mode`,
+      profileId,
+      capability: specification.capability,
+      decision: mapPolicyDecisionToDb(mode),
+      ...(specification.commandPattern ? { commandPattern: specification.commandPattern } : {}),
+      ...(specification.pathPattern ? { pathPattern: specification.pathPattern } : {}),
+      ...(specification.domainPattern ? { domainPattern: specification.domainPattern } : {}),
+      ...(specification.resourceScopeCondition
+        ? { resourceScopeCondition: specification.resourceScopeCondition }
+        : {}),
+      priority: 120 - index,
+      requiresPaidPlan: false,
+      requiresHumanApproval: mode === "ask",
+    };
+  });
+}
+
+function resolveCapabilityModesFromProfile(
+  profile: RepresentativeSetupRecord["capabilityProfiles"][number] | undefined,
+): RepresentativeSetupSnapshot["compute"]["capabilityModes"] {
+  const modes = { ...defaultComputeSetup.capabilityModes };
+  if (!profile) return modes;
+
+  for (const capability of Object.keys(modes) as Array<keyof typeof modes>) {
+    const rule = profile.rules.find((candidate) =>
+      candidate.id.endsWith(`_${capability}_owner_mode`),
+    );
+    if (rule) modes[capability] = mapPolicyDecisionFromDb(rule.decision);
+  }
+  return modes;
 }
 
 async function upsertManagedCapabilityPolicyProfile(
@@ -1770,6 +1909,22 @@ function mapComputeFilesystemModeToDb(
 
 function mapComputeFilesystemModeFromDb(value: ComputeFilesystemMode) {
   return value.toLowerCase() as RepresentativeSetupSnapshot["compute"]["filesystemMode"];
+}
+
+function mapDelegationKnowledgeScopeToDb(
+  value: RepresentativeSetupSnapshot["delegation"]["knowledgeScope"],
+) {
+  return value === "public_knowledge"
+    ? DelegationKnowledgeScope.PUBLIC_KNOWLEDGE
+    : DelegationKnowledgeScope.USER_INPUT_ONLY;
+}
+
+function mapDelegationKnowledgeScopeFromDb(
+  value: DelegationKnowledgeScope,
+): RepresentativeSetupSnapshot["delegation"]["knowledgeScope"] {
+  return value === DelegationKnowledgeScope.PUBLIC_KNOWLEDGE
+    ? "public_knowledge"
+    : "user_input_only";
 }
 
 function mapPricingPlanTypeFromDb(value: PricingPlanType): PricingPlan["tier"] {

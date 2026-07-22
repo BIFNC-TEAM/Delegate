@@ -651,6 +651,11 @@ enum ComputeFilesystemMode {
   EPHEMERAL_FULL
 }
 
+enum DelegationKnowledgeScope {
+  USER_INPUT_ONLY
+  PUBLIC_KNOWLEDGE
+}
+
 enum RepresentativeLifecycleState {
   DRAFT
   CONFIGURING
@@ -1111,97 +1116,103 @@ model CustomerAccount {
 }
 
 model Representative {
-  id                             String                         @id @default(cuid())
-  ownerId                        String
-  slug                           String                         @unique
-  displayName                    String
-  roleSummary                    String
-  tone                           String
-  avatarUrl                      String?
-  publicMode                     Boolean                        @default(true)
-  claimStatus                    RepresentativeClaimStatus      @default(CLAIMED)
-  groupModeEnabled               Boolean                        @default(false)
-  groupActivation                GroupActivation                @default(REPLY_OR_MENTION)
-  humanInLoop                    Boolean                        @default(true)
-  languages                      Json
-  freeReplyLimit                 Int                            @default(4)
-  freeScope                      Json
-  paywalledIntents               Json
-  handoffWindowHours             Int                            @default(24)
-  freeMonthlyCredit              Int                            @default(100)
-  handoffPrompt                  String
-  allowedSkills                  Json
-  actionGate                     Json
-  openvikingEnabled              Boolean                        @default(false)
-  openvikingAgentId              String?
-  openvikingAutoRecall           Boolean                        @default(true)
-  openvikingAutoCapture          Boolean                        @default(true)
-  openvikingCaptureMode          String                         @default("semantic")
-  openvikingRecallLimit          Int                            @default(6)
-  openvikingRecallScoreThreshold Float                          @default(0.01)
-  openvikingTargetUri            String?
-  openvikingLastSyncAt           DateTime?
-  openvikingLastSyncStatus       String?
-  openvikingLastSyncError        String?
-  openvikingLastSyncItemCount    Int?
-  computeEnabled                 Boolean                        @default(false)
-  computeDefaultPolicyMode       PolicyDecision                 @default(ASK)
-  computeBaseImage               String                         @default("debian:bookworm-slim")
-  computeMaxSessionMinutes       Int                            @default(15)
-  computeAutoApproveBudgetCents  Int                            @default(0)
-  computeArtifactRetentionDays   Int                            @default(14)
-  computeNetworkMode             ComputeNetworkMode             @default(NO_NETWORK)
-  computeNetworkAllowlist        String[]                       @default([])
-  computeFilesystemMode          ComputeFilesystemMode          @default(WORKSPACE_ONLY)
-  lifecycleState                 RepresentativeLifecycleState   @default(DRAFT)
-  activeVersionId                String?
-  createdAt                      DateTime                       @default(now())
-  updatedAt                      DateTime                       @updatedAt
-  owner                          Owner                          @relation(fields: [ownerId], references: [id])
-  activeVersion                  RepresentativeVersion?         @relation("RepresentativeActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
-  versions                       RepresentativeVersion[]        @relation("RepresentativeVersions")
-  runtimePolicyOverlays          RuntimePolicyOverlay[]
-  channelBindings                RepresentativeChannelBinding[]
-  matrixVirtualUsers             MatrixVirtualUserBinding[]
-  capabilityProfiles             CapabilityPolicyProfile[]
-  computeSessions                ComputeSession[]
-  sandboxIdentities              SandboxIdentity[]
-  conversations                  Conversation[]
-  contextSyncJobs                RepresentativeContextSync[]
-  contacts                       Contact[]
-  leads                          Lead[]
-  commitTraces                   ConversationCommitTrace[]
-  events                         EventAudit[]
-  handoffRequests                HandoffRequest[]
-  artifacts                      Artifact[]
-  deliverables                   Deliverable[]
-  approvalRequests               ApprovalRequest[]
-  intakeSubmissions              IntakeSubmission[]
-  invoices                       Invoice[]
-  ledgerEntries                  LedgerEntry[]
-  browserSessions                BrowserSession[]
-  browserNavigations             BrowserNavigation[]
-  organizationCustomerAccounts   CustomerAccount[]
-  knowledgePack                  KnowledgePack?
-  memoryRecords                  OpenVikingMemoryRecord[]
-  pricingPlans                   PricingPlan[]
-  recallTraces                   ConversationRecallTrace[]
-  skillPackLinks                 RepresentativeSkillPack[]
-  mcpBindings                    RepresentativeMcpBinding[]
-  chatSessions                   ChatSession[]
-  workflowRuns                   WorkflowRun[]
-  delegationTasks                DelegationTask[]
-  agentWallet                    AgentWallet?
-  tokenPurchases                 AgentTokenPurchase[]
-  usageCharges                   AgentUsageCharge[]
-  knowledgeAssetLinks            KnowledgeAssetRepresentative[]
-  creatorEarnings                CreatorEarning[]
-  withdrawRequests               WithdrawRequest[]
-  walletLedgerEntries            WalletLedgerEntry[]
-  trainingSources                CreatorTrainingSource[]
-  feedbackSignals                CreatorFeedbackSignal[]
-  trainingSuggestions            CreatorTrainingSuggestion[]
-  trainingVersions               CreatorTrainingVersion[]
+  id                               String                         @id @default(cuid())
+  ownerId                          String
+  slug                             String                         @unique
+  displayName                      String
+  roleSummary                      String
+  tone                             String
+  avatarUrl                        String?
+  publicMode                       Boolean                        @default(true)
+  claimStatus                      RepresentativeClaimStatus      @default(CLAIMED)
+  groupModeEnabled                 Boolean                        @default(false)
+  groupActivation                  GroupActivation                @default(REPLY_OR_MENTION)
+  humanInLoop                      Boolean                        @default(true)
+  languages                        Json
+  freeReplyLimit                   Int                            @default(4)
+  freeScope                        Json
+  paywalledIntents                 Json
+  handoffWindowHours               Int                            @default(24)
+  freeMonthlyCredit                Int                            @default(100)
+  handoffPrompt                    String
+  allowedSkills                    Json
+  actionGate                       Json
+  openvikingEnabled                Boolean                        @default(false)
+  openvikingAgentId                String?
+  openvikingAutoRecall             Boolean                        @default(true)
+  openvikingAutoCapture            Boolean                        @default(true)
+  openvikingCaptureMode            String                         @default("semantic")
+  openvikingRecallLimit            Int                            @default(6)
+  openvikingRecallScoreThreshold   Float                          @default(0.01)
+  openvikingTargetUri              String?
+  openvikingLastSyncAt             DateTime?
+  openvikingLastSyncStatus         String?
+  openvikingLastSyncError          String?
+  openvikingLastSyncItemCount      Int?
+  computeEnabled                   Boolean                        @default(false)
+  computeDefaultPolicyMode         PolicyDecision                 @default(ASK)
+  computeBaseImage                 String                         @default("debian:bookworm-slim")
+  computeMaxSessionMinutes         Int                            @default(15)
+  computeAutoApproveBudgetCents    Int                            @default(0)
+  computeArtifactRetentionDays     Int                            @default(14)
+  computeNetworkMode               ComputeNetworkMode             @default(NO_NETWORK)
+  computeNetworkAllowlist          String[]                       @default([])
+  computeFilesystemMode            ComputeFilesystemMode          @default(WORKSPACE_ONLY)
+  delegationEnabled                Boolean                        @default(true)
+  delegationNaturalLanguageEnabled Boolean                        @default(true)
+  delegationExplicitComputeEnabled Boolean                        @default(true)
+  delegationMaxSteps               Int                            @default(5)
+  delegationMaxCostCents           Int                            @default(0)
+  delegationKnowledgeScope         DelegationKnowledgeScope       @default(USER_INPUT_ONLY)
+  lifecycleState                   RepresentativeLifecycleState   @default(DRAFT)
+  activeVersionId                  String?
+  createdAt                        DateTime                       @default(now())
+  updatedAt                        DateTime                       @updatedAt
+  owner                            Owner                          @relation(fields: [ownerId], references: [id])
+  activeVersion                    RepresentativeVersion?         @relation("RepresentativeActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  versions                         RepresentativeVersion[]        @relation("RepresentativeVersions")
+  runtimePolicyOverlays            RuntimePolicyOverlay[]
+  channelBindings                  RepresentativeChannelBinding[]
+  matrixVirtualUsers               MatrixVirtualUserBinding[]
+  capabilityProfiles               CapabilityPolicyProfile[]
+  computeSessions                  ComputeSession[]
+  sandboxIdentities                SandboxIdentity[]
+  conversations                    Conversation[]
+  contextSyncJobs                  RepresentativeContextSync[]
+  contacts                         Contact[]
+  leads                            Lead[]
+  commitTraces                     ConversationCommitTrace[]
+  events                           EventAudit[]
+  handoffRequests                  HandoffRequest[]
+  artifacts                        Artifact[]
+  deliverables                     Deliverable[]
+  approvalRequests                 ApprovalRequest[]
+  intakeSubmissions                IntakeSubmission[]
+  invoices                         Invoice[]
+  ledgerEntries                    LedgerEntry[]
+  browserSessions                  BrowserSession[]
+  browserNavigations               BrowserNavigation[]
+  organizationCustomerAccounts     CustomerAccount[]
+  knowledgePack                    KnowledgePack?
+  memoryRecords                    OpenVikingMemoryRecord[]
+  pricingPlans                     PricingPlan[]
+  recallTraces                     ConversationRecallTrace[]
+  skillPackLinks                   RepresentativeSkillPack[]
+  mcpBindings                      RepresentativeMcpBinding[]
+  chatSessions                     ChatSession[]
+  workflowRuns                     WorkflowRun[]
+  delegationTasks                  DelegationTask[]
+  agentWallet                      AgentWallet?
+  tokenPurchases                   AgentTokenPurchase[]
+  usageCharges                     AgentUsageCharge[]
+  knowledgeAssetLinks              KnowledgeAssetRepresentative[]
+  creatorEarnings                  CreatorEarning[]
+  withdrawRequests                 WithdrawRequest[]
+  walletLedgerEntries              WalletLedgerEntry[]
+  trainingSources                  CreatorTrainingSource[]
+  feedbackSignals                  CreatorFeedbackSignal[]
+  trainingSuggestions              CreatorTrainingSuggestion[]
+  trainingVersions                 CreatorTrainingVersion[]
 
   @@index([ownerId, lifecycleState, updatedAt])
   @@index([activeVersionId])

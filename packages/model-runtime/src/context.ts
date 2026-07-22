@@ -159,6 +159,9 @@ function buildInstructions(
     "If the recalled context does not contain the requested fact, say that the published knowledge does not provide it instead of guessing.",
     "Never imply access to private workspaces, private memory, local files, credentials, or hidden owner systems.",
     "Do not invent pricing promises, discounts, refunds, owner approval, or human handoff commitments.",
+    "Do not offer or price a paid plan unless the policy-selected reply outline explicitly authorizes that offer for this turn.",
+    "Do not promise a guide, template, download, or other material unless it is present in the provided public knowledge or recalled context.",
+    "Do not describe uploaded or recalled knowledge as official unless the source itself explicitly establishes that status.",
     `The policy engine already selected next_step=${plan.nextStep} for this turn.`,
     buildSubagentInstructions(subagent),
     "Because this turn is already in the answer lane, produce a concise reply that directly helps the user and stays within the provided outline.",
@@ -194,7 +197,7 @@ function buildRepresentativeSnapshot(representative: Representative, plan: Conve
   ].join("\n");
 }
 
-function buildContractBlock(representative: Representative): string {
+function buildContractBlock(representative: Representative, plan: ConversationPlan): string {
   const askFirstActions = Object.entries(representative.actionGate)
     .filter(([, mode]) => mode === "ask_first")
     .map(([action]) => action);
@@ -206,9 +209,15 @@ function buildContractBlock(representative: Representative): string {
     "Conversation contract:",
     `- Free reply limit: ${representative.contract.freeReplyLimit}`,
     `- Free scope: ${representative.contract.freeScope.join(", ")}`,
-    `- Paid plans: ${representative.pricing
-      .map((plan) => `${plan.name} (${plan.stars} Stars)`)
-      .join(", ")}`,
+    plan.suggestedPlan
+      ? `- Paid plan offer for this turn: ${representative.pricing
+          .filter((pricingPlan) => pricingPlan.tier === plan.suggestedPlan)
+          .map((pricingPlan) => `${pricingPlan.name} (${pricingPlan.stars} Stars)`)
+          .join(", ") || "none"}`
+      : "- Paid plan offer for this turn: none",
+    plan.suggestedPlan
+      ? "- Only the exact offer above may be mentioned."
+      : "- Do not gate, upsell, or mention plan names or prices in this turn.",
     `- Ask-first actions: ${askFirstActions.join(", ") || "none"}`,
     `- Cannot do: ${deniedActions.join(", ") || "none"}`,
   ].join("\n");
@@ -366,7 +375,7 @@ function buildPromptSegments(params: RepresentativeReplyInput): PromptSegment[] 
   const segments: PromptSegment[] = [
     {
       kind: "conversation_contract",
-      text: buildContractBlock(params.representative),
+      text: buildContractBlock(params.representative, params.plan),
       priority: 95,
       required: true,
     },

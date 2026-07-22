@@ -12,9 +12,10 @@ const { mockPrisma } = vi.hoisted(() => {
     delegationTaskExternalEffect: { findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
     delegationTaskInput: { findFirst: vi.fn(), create: vi.fn() },
     delegationTaskOutput: { count: vi.fn(), create: vi.fn(), createMany: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
-    delegationTaskStep: { update: vi.fn(), updateMany: vi.fn() },
-    generationRun: { create: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
-    message: { upsert: vi.fn() },
+    delegationTaskStep: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    delegationTaskResourcePolicy: { update: vi.fn() },
+    generationRun: { create: vi.fn(), findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    message: { update: vi.fn(), upsert: vi.fn() },
     outboxEvent: { create: vi.fn(), updateMany: vi.fn() },
   };
   return {
@@ -459,6 +460,55 @@ describe("delegation task owner actions", () => {
     });
   });
 
+  it("restores an MCP effect to reconciliation-required when task finalization fails", async () => {
+    const effect = {
+      id: "effect-unknown",
+      status: "RECONCILIATION_REQUIRED",
+      requestPayload: null,
+      responseSnapshot: { outcome: "transport_error" },
+      delegationTaskStepId: "step-1",
+      delegationTaskStep: { id: "step-1" },
+      delegationTask: {
+        id: "task-1",
+        status: "WAITING_FOR_OWNER",
+        generationRuns: [],
+      },
+    };
+    mockPrisma.delegationTaskExternalEffect.findFirst
+      .mockResolvedValueOnce(effect)
+      .mockResolvedValueOnce({
+        id: effect.id,
+        status: "SUCCEEDED",
+        delegationTask: { status: "WAITING_FOR_OWNER" },
+      });
+    mockPrisma.delegationTask.findUnique.mockRejectedValueOnce(new Error("database unavailable"));
+    const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
+
+    await expect(applyRepresentativeDelegationExternalEffectAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      effectId: effect.id,
+      action: "reconcile",
+      observedOutcome: "succeeded",
+      note: "CRM audit log confirms success.",
+      actorId: "owner-1",
+    })).rejects.toThrow("database unavailable");
+
+    expect(mockPrisma.delegationTaskExternalEffect.update).toHaveBeenLastCalledWith({
+      where: { id: effect.id },
+      data: {
+        status: "RECONCILIATION_REQUIRED",
+        failureReason: "reconciliation_finalization_failed",
+      },
+    });
+    expect(mockPrisma.delegationTaskEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "external_effect.reconciliation_finalization_failed",
+        actorType: "SYSTEM",
+      }),
+    });
+  });
+
   it("does not record the same clarification message twice when delivery is retried", async () => {
     mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
       id: "task-clarifying",
@@ -491,6 +541,59 @@ describe("delegation task owner actions", () => {
     expect(mockPrisma.delegationTaskInput.create).not.toHaveBeenCalled();
     expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
     expect(mockPrisma.delegationTaskEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("persists a clarified execution request on the generation run for safe retries", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-clarifying",
+      status: "CLARIFYING",
+      contactId: "contact-1",
+      originConversationId: "conversation-1",
+      blockingReason: "请补充报告要求",
+      planSummary: "生成报告",
+      steps: [{ id: "step-clarifying", kind: "CLARIFICATION", status: "WAITING_INPUT" }],
+      resourcePolicy: { maxDurationMinutes: 15 },
+    });
+    mockPrisma.generationRun.findUnique.mockResolvedValueOnce({
+      id: "run-clarifying",
+      conversationId: "conversation-1",
+      inputMessageId: "message-supplement",
+      inputMessage: { text: "生成面向管理层的季度销售报告" },
+    });
+    mockPrisma.delegationTaskInput.findFirst.mockResolvedValueOnce(null);
+    mockPrisma.delegationTaskStep.create.mockResolvedValueOnce({ id: "step-report", sequence: 2 });
+    const request = {
+      capability: "write" as const,
+      path: "outputs/report-abcd1234.md",
+      content: "# 季度销售报告",
+      displayTarget: "生成季度销售报告",
+      hasPaidEntitlement: false,
+      browserMode: "deterministic" as const,
+      maxSteps: 1,
+      allowMutations: false,
+    };
+    const { continueClarifyingDelegationTask } = await import("../src/delegation-tasks");
+
+    await continueClarifyingDelegationTask({
+      taskId: "task-clarifying",
+      generationRunId: "run-clarifying",
+      inputMessageId: "message-supplement",
+      contactId: "contact-1",
+      planSummary: "生成季度销售报告",
+      planSteps: [{ summary: "生成季度销售报告", request }],
+    });
+
+    expect(mockPrisma.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-clarifying" },
+      data: {
+        delegationTaskId: "task-clarifying",
+        delegationTaskStepId: "step-report",
+        contextSnapshot: {
+          source: "delegation_plan_step",
+          request,
+        },
+      },
+    });
   });
 });
 

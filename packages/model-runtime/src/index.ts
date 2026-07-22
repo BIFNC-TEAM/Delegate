@@ -23,6 +23,7 @@ export * from "./types";
 
 export async function planNaturalLanguageComputeRequest(params: {
   userText: string;
+  maxSteps?: number;
 }): Promise<NaturalLanguageComputePlannerResult> {
   const deterministic = inferDeterministicNaturalLanguageComputePlan(params.userText);
   const env = resolveModelRuntimeEnv();
@@ -39,15 +40,21 @@ export async function planNaturalLanguageComputeRequest(params: {
       : { ok: false, reason: "Model runtime has no credentialed providers available.", state: "missing_credentials" };
   }
 
-  const prompt = buildNaturalLanguageComputePrompt(params.userText);
+  const prompt = buildNaturalLanguageComputePrompt(params.userText, params.maxSteps);
   const failures: string[] = [];
   for (const provider of attemptOrder) {
     try {
       const response = await generateProviderResponse(provider, env, prompt);
       const plan = parseNaturalLanguageComputePlan(response.replyText);
+      const groundedPlan = plan && isNaturalLanguageComputePlanGrounded(plan, params.userText)
+        ? plan
+        : null;
+      if (!groundedPlan && deterministic) {
+        return { ok: true, plan: deterministic, source: "deterministic" };
+      }
       return {
         ok: true,
-        plan: plan && isNaturalLanguageComputePlanGrounded(plan, params.userText) ? plan : null,
+        plan: groundedPlan,
         source: "model",
         provider,
         model: resolveProviderModel(provider, env),
@@ -113,6 +120,14 @@ export async function generateRepresentativeReply(
   for (const provider of attemptOrder) {
     try {
       const response = await generateProviderResponse(provider, env, assembled.prompt);
+      const policyViolation = detectRepresentativeReplyPolicyViolation(
+        response.replyText,
+        params.plan,
+      );
+      if (policyViolation) {
+        failures.push(`${provider}: ${policyViolation}`);
+        continue;
+      }
 
       return {
         ok: true,
@@ -143,6 +158,25 @@ export async function generateRepresentativeReply(
           ? { model: env.anthropic.model }
           : {}),
   };
+}
+
+export function detectRepresentativeReplyPolicyViolation(
+  replyText: string,
+  plan: RepresentativeReplyInput["plan"],
+) {
+  if (plan.nextStep !== "answer") return null;
+  if (
+    /(?:任务|请求).{0,24}(?:已提交|已经提交|自动提交)|(?:已|正在)?等待.{0,12}审批|approval.{0,20}(?:submitted|pending)/i.test(replyText)
+  ) {
+    return "Answer-lane reply invented a task or approval state.";
+  }
+  if (
+    !plan.suggestedPlan &&
+    /\b(?:Pass|Deep Help|Sponsor)\b|\d+\s*Stars|(?:付费|解锁).{0,16}(?:计划|套餐|能力|功能)|升级.{0,12}(?:计划|套餐)/i.test(replyText)
+  ) {
+    return "Answer-lane reply invented or exposed an unauthorized paid offer.";
+  }
+  return null;
 }
 
 async function generateProviderResponse(

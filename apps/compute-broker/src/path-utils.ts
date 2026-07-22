@@ -8,9 +8,13 @@ export function normalizeContainerPath(rawPath: string) {
     trimmed.startsWith("/") ? trimmed : `/workspace/${trimmed}`,
   );
 
-  if (normalized.startsWith("/workspace") || normalized.startsWith("/tmp")) {
+  if (isWithinDirectory(normalized, "/workspace") || isWithinDirectory(normalized, "/tmp")) {
     return normalized;
   }
 
   throw new SessionError(400, "path_outside_allowed_workspace");
+}
+
+function isWithinDirectory(path: string, root: string) {
+  return path === root || path.startsWith(`${root}/`);
 }

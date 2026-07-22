@@ -75,6 +75,7 @@ export async function PATCH(
             : "reply_or_mention",
         publicMode: Boolean(body.publicMode),
         humanInLoop: Boolean(body.humanInLoop),
+        actionGate: normalizeActionGate(body.actionGate),
         handoffPrompt: String(body.handoffPrompt ?? ""),
         contract:
           typeof body.contract === "object" && body.contract
@@ -231,6 +232,9 @@ export async function PATCH(
                           | "ephemeral_full";
                       }).filesystemMode
                     : "workspace_only",
+                capabilityModes: normalizeCapabilityModes(
+                  (body.compute as { capabilityModes?: unknown }).capabilityModes,
+                ),
               }
             : {
                 enabled: false,
@@ -242,7 +246,9 @@ export async function PATCH(
                 networkMode: "no_network",
                 networkAllowlist: [],
                 filesystemMode: "workspace_only",
+                capabilityModes: normalizeCapabilityModes(null),
               },
+        delegation: normalizeDelegationSetup(body.delegation),
       },
     });
 
@@ -268,6 +274,64 @@ export async function PATCH(
       { status: 400 },
     );
   }
+}
+
+const actionGateKeys = [
+  "answer_faq",
+  "collect_lead",
+  "collect_quote_request",
+  "collect_scheduling_request",
+  "deliver_material",
+  "request_handoff",
+  "charge_stars",
+  "issue_refund",
+  "offer_discount",
+  "send_sensitive_material",
+  "modify_owner_calendar",
+  "run_local_command",
+  "access_private_memory",
+  "access_private_files",
+  "send_outbound_campaign",
+] as const;
+
+function normalizeActionGate(value: unknown) {
+  const record = typeof value === "object" && value ? value as Record<string, unknown> : {};
+  return Object.fromEntries(actionGateKeys.map((key) => {
+    const mode = record[key];
+    return [key, mode === "allow" || mode === "ask_first" || mode === "deny" ? mode : "deny"];
+  })) as Record<(typeof actionGateKeys)[number], "allow" | "ask_first" | "deny">;
+}
+
+function normalizeCapabilityModes(value: unknown) {
+  const defaults = {
+    exec: "ask",
+    read: "allow",
+    write: "ask",
+    process: "ask",
+    browser: "ask",
+    mcp: "ask",
+  } as const;
+  const record = typeof value === "object" && value ? value as Record<string, unknown> : {};
+  return Object.fromEntries(Object.entries(defaults).map(([key, fallback]) => {
+    const mode = record[key];
+    return [key, mode === "allow" || mode === "ask" || mode === "deny" ? mode : fallback];
+  })) as Record<keyof typeof defaults, "allow" | "ask" | "deny">;
+}
+
+function normalizeDelegationSetup(value: unknown) {
+  const record = typeof value === "object" && value ? value as Record<string, unknown> : {};
+  return {
+    enabled: record.enabled === undefined ? true : Boolean(record.enabled),
+    naturalLanguageEnabled:
+      record.naturalLanguageEnabled === undefined ? true : Boolean(record.naturalLanguageEnabled),
+    explicitComputeEnabled:
+      record.explicitComputeEnabled === undefined ? true : Boolean(record.explicitComputeEnabled),
+    maxSteps: Number(record.maxSteps ?? 5),
+    maxCostCents: Number(record.maxCostCents ?? 0),
+    knowledgeScope: record.knowledgeScope === "public_knowledge"
+      ? "public_knowledge" as const
+      : "user_input_only" as const,
+  };
 }
 
 function normalizeKnowledgeDocuments(value: unknown): Array<{

@@ -15,7 +15,11 @@ vi.mock("../src/bailian", () => ({
   generateBailianResponse: mocks.generateBailianResponse,
 }));
 
-import { generateRepresentativeReply } from "../src/index";
+import {
+  detectRepresentativeReplyPolicyViolation,
+  generateRepresentativeReply,
+  planNaturalLanguageComputeRequest,
+} from "../src/index";
 
 describe("provider fallback", () => {
   afterEach(() => {
@@ -57,5 +61,49 @@ describe("provider fallback", () => {
       model: "qwen-plus",
       replyText: "百炼备用回答",
     });
+  });
+
+  it("keeps a deterministic clarification when the model returns a false negative", async () => {
+    vi.stubEnv("DELEGATE_MODEL_ENABLED", "true");
+    vi.stubEnv("DELEGATE_MODEL_PROVIDER", "bailian");
+    vi.stubEnv("DELEGATE_BAILIAN_API_KEY", "dashscope-key");
+    mocks.generateBailianResponse.mockResolvedValue({ replyText: '{"needsCompute":false}' });
+
+    const result = await planNaturalLanguageComputeRequest({
+      userText: "帮我生成一个报告",
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      source: "deterministic",
+      plan: {
+        kind: "clarification",
+        missingFields: ["content"],
+      },
+    });
+  });
+
+  it("rejects invented task approval and paid-plan claims in an ordinary answer", async () => {
+    const answerPlan = {
+      intent: "unknown" as const,
+      audienceRole: "other" as const,
+      action: "answer_faq" as const,
+      nextStep: "answer" as const,
+      reasons: ["Public answer allowed."],
+      responseOutline: ["Answer directly."],
+    };
+
+    expect(detectRepresentativeReplyPolicyViolation(
+      "任务已自动提交，正在等待审批。",
+      answerPlan,
+    )).toContain("task or approval");
+    expect(detectRepresentativeReplyPolicyViolation(
+      "定制生成需要解锁 Pass 计划（180 Stars）。",
+      answerPlan,
+    )).toContain("paid offer");
+    expect(detectRepresentativeReplyPolicyViolation(
+      "根据公开资料，目前只能确认文档中已经发布的内容。",
+      answerPlan,
+    )).toBeNull();
   });
 });

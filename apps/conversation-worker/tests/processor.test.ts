@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   findConversationClarifyingDelegationTask: vi.fn(),
   executeAudienceTool: vi.fn(),
   finalizeComputeDelegationTask: vi.fn(),
+  failGenerationRun: vi.fn(),
   markDelegationTaskAwaitingApproval: vi.fn(),
   markDelegationTaskRunning: vi.fn(),
   waitGenerationRunForComputeApproval: vi.fn(),
@@ -61,7 +62,7 @@ vi.mock("@delegate/web-data", () => ({
   executeAudienceTool: mocks.executeAudienceTool,
   finalizeComputeDelegationTask: mocks.finalizeComputeDelegationTask,
   findConversationClarifyingDelegationTask: mocks.findConversationClarifyingDelegationTask,
-  failGenerationRun: vi.fn(),
+  failGenerationRun: mocks.failGenerationRun,
   getRepresentativeRuntimeSetupSnapshot: mocks.getRepresentativeRuntimeSetupSnapshot,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
   markGenerationDeliveryComplete: mocks.markGenerationDeliveryComplete,
@@ -249,7 +250,81 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.waitGenerationRunForComputeApproval).toHaveBeenCalledWith(expect.objectContaining({
       runId: "run-2",
       approvalId: "approval-1",
+      replyText: expect.stringContaining("操作：写入文件：demo.txt"),
     }));
+  });
+
+  it("keeps a system-managed document path out of the public approval message", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-generated-document",
+      runId: "run-generated-document",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-generated-document",
+      contactId: "contact-generated-document",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-generated-document",
+      userText: "生成面向管理层的季度销售报告",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
+    const naturalPlan = {
+      kind: "execution" as const,
+      summary: "生成季度销售报告",
+      steps: [{
+        capability: "write" as const,
+        path: "outputs/report-abcd1234.md",
+        content: "# 季度销售报告",
+        summary: "生成季度销售报告",
+      }],
+    };
+    mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: naturalPlan, source: "model" });
+    mocks.buildComputeRequestsFromDelegationPlan.mockReturnValue([{
+      capability: "write",
+      path: "outputs/report-abcd1234.md",
+      content: "# 季度销售报告",
+      displayTarget: "生成季度销售报告",
+      hasPaidEntitlement: false,
+      browserMode: "deterministic",
+      maxSteps: 1,
+      allowMutations: false,
+    }]);
+    mocks.createAudienceComputeSession.mockResolvedValue({ session: { id: "session-generated-document" } });
+    mocks.executeAudienceTool.mockResolvedValue({
+      outcome: "pending_approval",
+      approvalRequest: {
+        id: "approval-generated-document",
+        requestedActionSummary: 'Write to "/workspace/outputs/report-abcd1234.md".',
+        riskSummary: "Workspace mutation",
+      },
+      artifacts: [],
+    });
+    mocks.waitGenerationRunForComputeApproval.mockResolvedValue({
+      run: { status: "WAITING_APPROVAL" },
+      message: { id: "pending-generated-document" },
+    });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "waiting_approval",
+    });
+
+    expect(mocks.waitGenerationRunForComputeApproval).toHaveBeenCalledWith(expect.objectContaining({
+      replyText: expect.stringContaining("操作：生成并保存文档"),
+    }));
+    expect(mocks.waitGenerationRunForComputeApproval.mock.calls[0]?.[0]?.replyText).not.toContain("/workspace/");
   });
 
   it("returns compute help without creating a sandbox session", async () => {
@@ -359,16 +434,217 @@ describe("conversation worker knowledge recall", () => {
     });
     expect(mocks.planNaturalLanguageComputeRequest).toHaveBeenCalledWith({
       userText: "把 browser QA 保存到 notes/qa.txt",
+      maxSteps: 5,
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       attachments: [expect.objectContaining({ fileName: "qa.txt", artifactId: "artifact-natural" })],
+      replyText: expect.stringContaining("已生成文件：qa.txt"),
     }));
+    expect(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]?.replyText).not.toContain("/workspace/");
+    expect(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]?.replyText).not.toContain("browser QA");
     expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
       taskId: "task-1",
       outcome: "completed",
       artifacts: [expect.objectContaining({ id: "artifact-natural" })],
       actualCredits: 4,
     }));
+  });
+
+  it("keeps natural-language requests as ordinary chat when task triggering is disabled", async () => {
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      delegation: {
+        enabled: true,
+        naturalLanguageEnabled: false,
+        explicitComputeEnabled: true,
+        maxSteps: 5,
+        maxCostCents: 0,
+        knowledgeScope: "user_input_only",
+      },
+      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+    });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.planNaturalLanguageComputeRequest).not.toHaveBeenCalled();
+    expect(mocks.generateRepresentativeReply).toHaveBeenCalled();
+  });
+
+  it("explains that the advanced command is unavailable when /compute is disabled", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-command-disabled",
+      runId: "run-command-disabled",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-command-disabled",
+      contactId: "contact-command-disabled",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-command-disabled",
+      userText: "/compute",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.parseComputeDirective.mockReturnValue({ kind: "help", examples: "/compute pwd" });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      delegation: {
+        enabled: true,
+        naturalLanguageEnabled: true,
+        explicitComputeEnabled: false,
+        maxSteps: 5,
+        maxCostCents: 0,
+        knowledgeScope: "user_input_only",
+      },
+      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+    });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      replyText: expect.stringContaining("未开放高级 /compute 命令"),
+    }));
+    expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
+  });
+
+  it("blocks a denied capability before creating a sandbox session", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-denied",
+      runId: "run-denied",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-denied",
+      contactId: "contact-denied",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-denied",
+      userText: "/compute write notes/denied.txt ::: blocked",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.parseComputeDirective.mockReturnValue({
+      kind: "request",
+      request: {
+        capability: "write",
+        path: "notes/denied.txt",
+        content: "blocked",
+        displayTarget: "notes/denied.txt",
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      delegation: {
+        enabled: true,
+        naturalLanguageEnabled: true,
+        explicitComputeEnabled: true,
+        maxSteps: 5,
+        maxCostCents: 0,
+        knowledgeScope: "user_input_only",
+      },
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        capabilityModes: {
+          exec: "ask",
+          read: "allow",
+          write: "deny",
+          process: "ask",
+          browser: "ask",
+          mcp: "ask",
+        },
+      },
+    });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      replyText: expect.stringContaining("策略禁止写入工作区文件"),
+    }));
+    expect(mocks.createComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
+  });
+
+  it("adds approved public knowledge to the planner only when the owner enables that scope", async () => {
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      delegation: {
+        enabled: true,
+        naturalLanguageEnabled: true,
+        explicitComputeEnabled: true,
+        maxSteps: 3,
+        maxCostCents: 0,
+        knowledgeScope: "public_knowledge",
+      },
+      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+    });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.planNaturalLanguageComputeRequest).toHaveBeenCalledWith({
+      userText: expect.stringContaining("Owner 已授权本任务使用以下已审核公开资料"),
+      maxSteps: 3,
+    });
+    expect(mocks.planNaturalLanguageComputeRequest.mock.calls[0]?.[0]?.userText).toContain(
+      "佩奇临时代课并带大家画恐龙",
+    );
+  });
+
+  it("stops a task whose estimate exceeds the representative cost limit", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-cost",
+      runId: "run-cost",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-cost",
+      contactId: "contact-cost",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-cost",
+      userText: "/compute write notes/cost.txt ::: expensive",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.parseComputeDirective.mockReturnValue({
+      kind: "request",
+      request: {
+        capability: "write",
+        path: "notes/cost.txt",
+        content: "expensive",
+        displayTarget: "notes/cost.txt",
+        estimatedCostCents: 12,
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      delegation: {
+        enabled: true,
+        naturalLanguageEnabled: true,
+        explicitComputeEnabled: true,
+        maxSteps: 5,
+        maxCostCents: 5,
+        knowledgeScope: "user_input_only",
+      },
+      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+    });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      replyText: expect.stringContaining("超过该代表设置的 5 美分上限"),
+    }));
+    expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
   });
 
   it("creates a clarifying task instead of inventing missing execution inputs", async () => {
@@ -617,5 +893,111 @@ describe("conversation worker knowledge recall", () => {
       outcome: "failed",
       failureReason: "broker unavailable",
     });
+  });
+
+  it("returns a terminal task error instead of retrying a user-correctable sandbox path", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-invalid-path",
+      runId: "run-invalid-path",
+      delegationTaskId: "task-invalid-path",
+      delegationTaskStepId: "step-invalid-path",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-invalid-path",
+      contactId: "contact-invalid-path",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-invalid-path",
+      userText: "路径 /AL，内容 佩奇爱上学",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.parseComputeDirective.mockReturnValue({
+      kind: "request",
+      request: {
+        capability: "write",
+        path: "/AL",
+        content: "佩奇爱上学",
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+        displayTarget: "写入文件",
+      },
+    });
+    mocks.createAudienceComputeSession.mockResolvedValue({ session: { id: "session-invalid-path" } });
+    mocks.executeAudienceTool.mockRejectedValue(new Error("path_outside_allowed_workspace"));
+    mocks.completeInlineGenerationRun.mockResolvedValue({ message: { id: "reply-invalid-path" } });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      intent: "delegation_failed",
+      countUsage: false,
+      replyText: expect.stringContaining("无需提供沙盒路径"),
+    }));
+    expect(mocks.failGenerationRun).not.toHaveBeenCalled();
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+  });
+
+  it("never downgrades a bound delegation retry into an ordinary knowledge answer", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-delegation-retry",
+      runId: "run-delegation-retry",
+      delegationTaskId: "task-failed",
+      delegationTaskStepId: "step-failed",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-delegation-retry",
+      contactId: "contact-delegation-retry",
+      controlState: "FAILED",
+      inputMessageId: "message-delegation-retry",
+      userText: "路径 /AL，内容 佩奇爱上学",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValue({ message: { id: "reply-delegation-retry" } });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      intent: "delegation_failed",
+      countUsage: false,
+    }));
+    expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "task-failed",
+      stepId: "step-failed",
+      generationRunId: "run-delegation-retry",
+      outcome: "failed",
+    }));
+    expect(mocks.recallRepresentativeContext).not.toHaveBeenCalled();
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
   });
 });

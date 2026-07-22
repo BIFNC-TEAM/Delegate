@@ -141,11 +141,11 @@ export function shouldConsiderNaturalLanguageCompute(input: string) {
   if (!normalized || extractComputePayload(normalized).matched) return false;
 
   return [
-    /(?:保存|写入|生成|创建|导出|转换).{0,32}(?:文件|文档|markdown|md|txt|json|csv|报告)/i,
+    /(?:保存|写入|生成|创建|撰写|编写|制作|写|做|导出|转换).{0,40}(?:文件|文档|markdown|md|txt|json|csv|报告|总结|方案|教案|故事)/i,
     /(?:打开|访问|浏览|检查|测试).{0,24}(?:https?:\/\/|网页|网站|页面|url)/i,
     /(?:运行|执行).{0,12}(?:命令|脚本|代码)/i,
     /(?:读取|查看|分析).{0,20}(?:文件|\.md\b|\.txt\b|\.json\b|\.csv\b)/i,
-    /\b(?:save|write|create|generate|export|convert)\b.{0,32}\b(?:file|document|markdown|csv|json|report)\b/i,
+    /\b(?:save|write|create|generate|draft|prepare|export|convert)\b.{0,40}\b(?:file|document|markdown|csv|json|report|summary|plan|lesson|story)\b/i,
     /\b(?:open|visit|browse|inspect|test)\b.{0,24}(?:https?:\/\/|\bwebsite\b|\bwebpage\b|\burl\b)/i,
     /\b(?:run|execute)\b.{0,12}\b(?:command|script|code)\b/i,
     /\b(?:read|inspect|analyze)\b.{0,20}\bfile\b/i,

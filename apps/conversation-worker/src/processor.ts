@@ -98,6 +98,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       item.representativeVersionId,
     );
     if (!setup) throw new Error(`Representative ${item.representativeSlug} was not found.`);
+    const delegationConfig = resolveDelegationConfig(setup);
 
     const persistedRequest = readPersistedDelegationStepRequest(
       item.contextSnapshot && typeof item.contextSnapshot === "object"
@@ -114,6 +115,15 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     const computeDirective = item.channel === "web" && !persistedRequest && !clarifyingTask
       ? parseComputeDirective(item.userText)
       : { kind: "none" as const };
+    if (
+      computeDirective.kind !== "none" &&
+      (!delegationConfig.enabled || !delegationConfig.explicitComputeEnabled)
+    ) {
+      const replyText = !delegationConfig.enabled
+        ? "这个代表当前不接受委托任务。你仍然可以继续普通问答。"
+        : "这个代表未开放高级 /compute 命令。请直接用自然语言描述目标；系统会在需要执行能力时自动创建任务。";
+      return completeTerminalDelegationFailure(item, replyText);
+    }
     if (computeDirective.kind === "help" || computeDirective.kind === "invalid") {
       const replyText = computeDirective.kind === "invalid"
         ? `${computeDirective.message}\n\n可用示例：\n${computeDirective.examples}`
@@ -149,12 +159,27 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       !parsedRequests.length &&
       item.channel === "web" &&
       setup.compute.enabled &&
-      (Boolean(clarifyingTask) || shouldConsiderNaturalLanguageCompute(item.userText))
+      delegationConfig.enabled &&
+      (
+        Boolean(clarifyingTask) ||
+        (
+          delegationConfig.naturalLanguageEnabled &&
+          shouldConsiderNaturalLanguageCompute(item.userText)
+        )
+      )
     ) {
-      const plannerInput = clarifyingTask
+      const taskInput = clarifyingTask
         ? `原始任务：${clarifyingTask.objective}\n待补充：${clarifyingTask.blockingReason || "执行输入"}\n用户补充：${item.userText}`
         : item.userText;
-      const planned = await planNaturalLanguageComputeRequest({ userText: plannerInput });
+      const plannerInput = await buildDelegationPlannerInput({
+        setup,
+        item,
+        taskInput,
+      });
+      const planned = await planNaturalLanguageComputeRequest({
+        userText: plannerInput,
+        maxSteps: delegationConfig.maxSteps,
+      });
       if (planned.ok && planned.plan) {
         if (planned.plan.kind === "clarification") {
           if (clarifyingTask) {
@@ -196,6 +221,12 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           await markGenerationDeliveryComplete({ runId: item.runId, outputMessageId });
           return { processed: true as const, runId: item.runId, status: "waiting_input" as const };
         }
+        if (planned.plan.steps.length > delegationConfig.maxSteps) {
+          return completeTerminalDelegationFailure(
+            item,
+            `这个任务需要 ${planned.plan.steps.length} 个执行步骤，超过该代表允许的 ${delegationConfig.maxSteps} 步上限。请缩小任务范围后重试。`,
+          );
+        }
         parsedRequests = buildComputeRequestsFromDelegationPlan(planned.plan);
         planSummary = planned.plan.summary;
         planSteps = planned.plan.steps.map((step, index) => ({
@@ -219,7 +250,31 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         }
       }
     }
+    if (
+      !parsedRequests.length &&
+      item.delegationTaskId &&
+      item.delegationTaskStepId &&
+      !clarifyingTask
+    ) {
+      return completeTerminalDelegationFailure(
+        item,
+        "此前的委托任务未能继续执行，系统已停止本次任务，并且不会把它改成普通问答。请重新描述目标；文件位置将由系统自动管理。",
+      );
+    }
     if (parsedRequests.length) {
+      const estimatedCostCents = parsedRequests.reduce(
+        (total, request) => total + (request.estimatedCostCents ?? 0),
+        0,
+      );
+      if (
+        delegationConfig.maxCostCents > 0 &&
+        estimatedCostCents > delegationConfig.maxCostCents
+      ) {
+        return completeTerminalDelegationFailure(
+          item,
+          `这个任务的预计执行成本为 ${estimatedCostCents} 美分，超过该代表设置的 ${delegationConfig.maxCostCents} 美分上限，系统未执行。请缩小任务范围。`,
+        );
+      }
       const computeReply = await processPublicWebComputeRequest({
         item,
         setup,
@@ -366,6 +421,10 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     return { processed: true as const, runId: item.runId, status: "completed" as const };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Conversation processing failed.";
+    const userFacingFailure = renderUserCorrectableDelegationFailure(errorMessage);
+    if (!outputMessageId && userFacingFailure) {
+      return completeTerminalDelegationFailure(item, userFacingFailure);
+    }
     if (outputMessageId) {
       await retryGenerationDelivery({
         runId: item.runId,
@@ -381,6 +440,97 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     }
     return { processed: true as const, runId: item.runId, status: "failed" as const, error: errorMessage };
   }
+}
+
+async function buildDelegationPlannerInput(input: {
+  setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>;
+  item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
+  taskInput: string;
+}) {
+  if (resolveDelegationConfig(input.setup).knowledgeScope !== "public_knowledge") {
+    return input.taskInput;
+  }
+
+  const recalled = await recallRepresentativeContext({
+    representativeSlug: input.item.representativeSlug,
+    conversationId: input.item.conversationId,
+    contactId: input.item.contactId,
+    queryText: input.taskInput,
+  });
+  const publicKnowledge = recalled.items
+    .slice(0, 3)
+    .map((item, index) => {
+      const content = item.content?.trim() || item.abstract.trim();
+      return content ? `[公开资料 ${index + 1}] ${content.slice(0, 2_000)}` : "";
+    })
+    .filter(Boolean);
+
+  return publicKnowledge.length
+    ? `${input.taskInput}\n\nOwner 已授权本任务使用以下已审核公开资料：\n${publicKnowledge.join("\n")}`
+    : input.taskInput;
+}
+
+function resolveDelegationConfig(
+  setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>,
+) {
+  return (setup as typeof setup & { delegation?: typeof setup.delegation }).delegation ?? {
+    enabled: true,
+    naturalLanguageEnabled: true,
+    explicitComputeEnabled: true,
+    maxSteps: 5,
+    maxCostCents: 0,
+    knowledgeScope: "user_input_only" as const,
+  };
+}
+
+function resolveCapabilityModes(
+  setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>,
+) {
+  return (setup.compute as typeof setup.compute & {
+    capabilityModes?: typeof setup.compute.capabilityModes;
+  }).capabilityModes ?? {
+    exec: "ask" as const,
+    read: "allow" as const,
+    write: "ask" as const,
+    process: "ask" as const,
+    browser: "ask" as const,
+    mcp: "ask" as const,
+  };
+}
+
+async function completeTerminalDelegationFailure(
+  item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>,
+  replyText: string,
+) {
+  if (item.delegationTaskId && item.delegationTaskStepId) {
+    await finalizeComputeDelegationTask({
+      taskId: item.delegationTaskId,
+      stepId: item.delegationTaskStepId,
+      generationRunId: item.runId,
+      outcome: "failed",
+      failureReason: replyText,
+    });
+  }
+  const completed = await completeInlineGenerationRun({
+    runId: item.runId,
+    replyText,
+    senderDisplayName: item.representativeName,
+    intent: "delegation_failed",
+    countUsage: false,
+    completeOutbox: false,
+  });
+  await markGenerationDeliveryComplete({
+    runId: item.runId,
+    outputMessageId: completed.message.id,
+  });
+  return { processed: true as const, runId: item.runId, status: "completed" as const };
+}
+
+function renderUserCorrectableDelegationFailure(errorMessage: string) {
+  if (errorMessage.includes("path_outside_allowed_workspace")) {
+    return "委托任务未能执行：输出位置不符合沙盒安全规则。系统已停止本次任务；普通用户无需提供沙盒路径，请重新描述希望生成的内容，文件位置将由系统自动管理。";
+  }
+  return null;
 }
 
 async function processPublicWebComputeRequest(input: {
@@ -402,18 +552,38 @@ async function processPublicWebComputeRequest(input: {
     url: string;
   }>;
 }> {
-  if (!input.setup.compute.enabled) {
+  const delegationConfig = resolveDelegationConfig(input.setup);
+  if (!input.setup.compute.enabled || !delegationConfig.enabled) {
     if (input.delegation) {
       await finalizeComputeDelegationTask({
         taskId: input.delegation.task.id,
         stepId: input.delegation.step.id,
         generationRunId: input.item.runId,
         outcome: "blocked",
-        failureReason: "Compute was disabled before this delegated step could start.",
+        failureReason: "Delegated execution was disabled before this step could start.",
       });
     }
     return {
-      text: "这个代表当前没有启用 Compute。请联系代表所有者在 Dashboard 中启用后再试。",
+      text: input.setup.compute.enabled
+        ? "这个代表当前不接受委托任务。"
+        : "这个代表当前没有启用 Compute。请联系代表所有者在 Dashboard 中启用后再试。",
+      hasMoreSteps: false,
+    };
+  }
+
+  const capabilityMode = resolveCapabilityModes(input.setup)[input.parsed.capability];
+  if (capabilityMode === "deny") {
+    if (input.delegation) {
+      await finalizeComputeDelegationTask({
+        taskId: input.delegation.task.id,
+        stepId: input.delegation.step.id,
+        generationRunId: input.item.runId,
+        outcome: "blocked",
+        failureReason: `Representative policy denies ${input.parsed.capability}.`,
+      });
+    }
+    return {
+      text: `这个代表的能力策略禁止${renderCapabilityLabel(input.parsed.capability)}，系统未执行。`,
       hasMoreSteps: false,
     };
   }
@@ -434,6 +604,7 @@ async function processPublicWebComputeRequest(input: {
     ...(input.planSteps ? { planSteps: input.planSteps } : {}),
     capability: input.parsed.capability,
     maxDurationMinutes: input.setup.compute.maxSessionMinutes,
+    maxCostCents: delegationConfig.maxCostCents,
     networkMode: input.setup.compute.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
     filesystemMode: input.setup.compute.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
   });
@@ -482,21 +653,16 @@ async function processPublicWebComputeRequest(input: {
     });
     return {
       approvalId: result.approvalRequest.id,
-      hasMoreSteps: false,
-      text: [
-        `委托任务已提交，正在等待代表所有者审批。`,
-        `操作：${result.approvalRequest.requestedActionSummary}`,
-        `风险：${result.approvalRequest.riskSummary}`,
+        hasMoreSteps: false,
+        text: [
+          `委托任务已提交，正在等待代表所有者审批。`,
+          `操作：${renderPublicComputeAction(input.parsed)}`,
+          `风险：${result.approvalRequest.riskSummary}`,
         "审批通过后会在此对话中自动返回执行结果。",
       ].join("\n\n"),
     };
   }
 
-  const artifactSummary = result.artifacts.length
-    ? result.artifacts
-        .map((artifact) => `${artifact.kind}: ${artifact.summary ?? artifact.objectKey}`)
-        .join("\n")
-    : "没有生成可展示的结果文件。";
   const billing = result.billing?.actualCredits ?? result.billing?.estimatedCredits;
   const billingLine = typeof billing === "number" ? `\n\n消耗：${billing} credits` : "";
   const attachments = result.artifacts.map((artifact) => ({
@@ -506,6 +672,9 @@ async function processPublicWebComputeRequest(input: {
     artifactId: artifact.id,
     url: `/reps/${input.item.representativeSlug}/chat/artifacts/${artifact.id}/download`,
   }));
+  const artifactSummary = attachments.length
+    ? attachments.map((attachment) => `已生成文件：${attachment.fileName}`).join("\n")
+    : "没有生成可展示的结果文件。";
 
   const finalization = await finalizeComputeDelegationTask({
     taskId: delegation.task.id,
@@ -556,6 +725,39 @@ function resolvePublicArtifactFileName(
           ? "jpg"
           : "txt";
   return `${artifact.kind}-${artifact.id}.${extension}`;
+}
+
+function renderPublicComputeAction(request: ParsedComputeRequest) {
+  if (request.capability === "write") {
+    if (/^outputs\/report-[a-f0-9]{8}\.md$/i.test(request.path || "")) {
+      return "生成并保存文档";
+    }
+    return `写入文件：${request.path?.split("/").pop() || "系统管理的文件"}`;
+  }
+  if (request.capability === "read") {
+    return `读取文件：${request.path?.split("/").pop() || "系统管理的文件"}`;
+  }
+  if (request.capability === "browser") return "访问用户提供的公开网页";
+  if (request.capability === "mcp") return "调用已授权的外部工具";
+  return "在隔离沙盒中运行用户提供的命令";
+}
+
+function renderCapabilityLabel(capability: ParsedComputeRequest["capability"]) {
+  switch (capability) {
+    case "read":
+      return "读取工作区文件";
+    case "write":
+      return "写入工作区文件";
+    case "browser":
+      return "访问网页";
+    case "mcp":
+      return "调用外部工具";
+    case "process":
+      return "运行长期进程";
+    case "exec":
+    default:
+      return "运行命令";
+  }
 }
 
 async function sendTelegramOperatorMessage(input: {

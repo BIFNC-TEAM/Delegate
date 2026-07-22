@@ -41,5 +41,13 @@
   },
   "dependencies": {
     "@prisma/client": "^6.19.2"
+  },
+  "pnpm": {
+    "overrides": {
+      "@opentelemetry/propagator-jaeger": "2.10.0",
+      "defu": "6.1.7",
+      "effect": "3.22.0",
+      "postcss": "8.5.21"
+    }
   }
 }

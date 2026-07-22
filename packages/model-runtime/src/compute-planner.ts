@@ -32,17 +32,26 @@ const computePlanSchema = z.union([
   }),
 ]);
 
-export function buildNaturalLanguageComputePrompt(userText: string): RepresentativeReplyPrompt {
+export function buildNaturalLanguageComputePrompt(
+  userText: string,
+  maxSteps = 5,
+): RepresentativeReplyPrompt {
+  const boundedMaxSteps = Math.max(1, Math.min(5, Math.floor(maxSteps)));
+  const defaultGeneratedDocumentPath = buildDefaultGeneratedDocumentPath(userText);
   return {
     instructions: [
       "You are a conservative planner for an isolated compute sandbox used by a public AI representative.",
       "Return exactly one JSON object and no markdown.",
       "Set needsCompute=false for questions, explanations, brainstorming, requests about how Compute works, or tasks answerable without executing tools.",
-      "Set needsCompute=true only when the user explicitly asks to read/write files, run concrete commands/scripts, or open concrete public URLs.",
-      "Never invent a path, URL, command, file content, credential, or private input that the user did not supply.",
-      "Return 1-5 ordered steps only when every step is concrete and grounded in the user input.",
+      "Set needsCompute=true only when the user explicitly asks to read/write files, create a report or other document artifact, run concrete commands/scripts, or open concrete public URLs.",
+      "Never invent a user-controlled path, URL, command, credential, or private input that the user did not supply.",
+      `Return 1-${boundedMaxSteps} ordered steps only when every step is concrete and grounded in the planner input.`,
       "If the user clearly requests execution but a required path, URL, command, or complete file content is missing, return clarification instead of steps.",
       "Use write only when both the target path and complete intended content are available.",
+      "Treat requests to generate reports, summaries, plans, lessons, stories, or other documents as generated-document tasks, not as low-level file writes.",
+      "For generated-document tasks, ask only for missing business requirements such as topic, source material, audience, and output format. Never ask the user for a sandbox path or for already-written final content.",
+      `When generated-document requirements are sufficient, author a concise Markdown draft and write it only to this system-owned path: ${defaultGeneratedDocumentPath}`,
+      "Do not claim to have used source material that is not included in the planner input.",
       "Use browser only when an http:// or https:// URL is present.",
       "Use exec/process only when the concrete command or code is present. Prefer exec for one-shot commands.",
       "Schema when no compute is needed: {\"needsCompute\":false}.",
@@ -67,7 +76,10 @@ export function parseNaturalLanguageComputePlan(value: string): NaturalLanguageD
     return {
       kind: "clarification",
       summary: parsed.summary,
-      question: parsed.clarification.question,
+      question: buildSafeClarificationQuestion(
+        parsed.clarification.missingFields,
+        parsed.clarification.question,
+      ),
       missingFields: parsed.clarification.missingFields,
     };
   }
@@ -87,7 +99,17 @@ export function isNaturalLanguageComputePlanGrounded(
   plan: NaturalLanguageDelegationPlan,
   userText: string,
 ) {
+  if (isInformationalRequest(userText.trim())) return false;
   if (plan.kind === "clarification") return true;
+  if (isGeneratedDocumentRequest(userText)) {
+    if (!hasSufficientGeneratedDocumentRequirements(userText) || plan.steps.length !== 1) {
+      return false;
+    }
+    const [step] = plan.steps;
+    return step?.capability === "write" &&
+      step.path === buildDefaultGeneratedDocumentPath(userText) &&
+      typeof step.content === "string" && step.content.trim().length > 0;
+  }
   const source = userText.normalize("NFKC");
   return plan.steps.flatMap((step) => [step.path, step.url, step.command, step.content])
     .filter((value): value is string => typeof value === "string" && value.length > 0)
@@ -98,6 +120,7 @@ export function inferDeterministicNaturalLanguageComputePlan(
   userText: string,
 ): NaturalLanguageDelegationPlan | null {
   const text = userText.trim();
+  if (isInformationalRequest(text)) return null;
   const url = text.match(/https?:\/\/[^\s<>"'，。！？]+/i)?.[0];
   if (url && /(?:打开|访问|浏览|检查|测试|open|visit|browse|inspect|test)/i.test(text)) {
     return executionPlan(`浏览 ${url}`, { capability: "browser", url, summary: `浏览 ${url}` });
@@ -137,16 +160,90 @@ export function inferDeterministicNaturalLanguageComputePlan(
     });
   }
 
-  if (/(?:保存|写入|生成|创建|导出).{0,32}(?:文件|文档|markdown|md|txt|json|csv|报告)/i.test(text)) {
+  if (isGeneratedDocumentRequest(text)) {
+    return {
+      kind: "clarification",
+      summary: "准备生成文档",
+      question: "请说明要生成的内容主题、可用资料、目标读者和期望格式；文件位置由系统自动管理。",
+      missingFields: ["content"],
+    };
+  }
+
+  if (/(?:保存|写入|生成|创建|导出).{0,32}(?:文件|markdown|md|txt|json|csv)/i.test(text)) {
     return {
       kind: "clarification",
       summary: "准备文件",
-      question: "请补充目标文件路径和需要写入的完整内容。",
-      missingFields: ["path", "content"],
+      question: "请说明要生成或保存的具体内容；文件位置由系统自动管理。",
+      missingFields: ["content"],
     };
   }
 
   return null;
+}
+
+function buildSafeClarificationQuestion(
+  missingFields: Array<"command" | "path" | "content" | "url">,
+  languageSample: string,
+) {
+  const fields = new Set(missingFields);
+  const chinese = /\p{Script=Han}/u.test(languageSample);
+
+  if (fields.size === 2 && fields.has("path") && fields.has("content")) {
+    return chinese
+      ? "请说明要生成的内容主题、可用资料、目标读者和期望格式；文件位置由系统自动管理。"
+      : "Please describe the topic, source material, audience, and desired format; the system will manage the file location.";
+  }
+  if (fields.size === 1 && fields.has("content")) {
+    return chinese
+      ? "请说明要生成的内容主题、可用资料、目标读者和期望格式；文件位置由系统自动管理。"
+      : "Please describe the topic, source material, audience, and desired format; the system will manage the file location.";
+  }
+  if (fields.size === 1 && fields.has("command")) {
+    return chinese
+      ? "请提供要在隔离沙盒中运行的完整命令或脚本。"
+      : "Please provide the complete command or script to run in the isolated sandbox.";
+  }
+  if (fields.size === 1 && fields.has("url")) {
+    return chinese
+      ? "请提供需要访问的公开 HTTP(S) URL。"
+      : "Please provide the public HTTP(S) URL to visit.";
+  }
+
+  const labels = chinese
+    ? { command: "完整命令或脚本", path: "目标文件路径", content: "完整文件内容", url: "公开 HTTP(S) URL" }
+    : { command: "complete command or script", path: "target file path", content: "complete file content", url: "public HTTP(S) URL" };
+  const requested = [...fields].map((field) => labels[field]).join(chinese ? "、" : ", ");
+  return chinese
+    ? `请补充以下执行信息：${requested}。`
+    : `Please provide the following execution details: ${requested}.`;
+}
+
+function isInformationalRequest(text: string) {
+  return /(?:如何|怎么|怎样)|^(?:请)?(?:解释|说明|介绍|讲解)|^(?:please\s+)?(?:explain|describe)|\bhow\s+(?:do|can|should|would)\b|\bhow\s+to\b/i.test(text);
+}
+
+export function buildDefaultGeneratedDocumentPath(userText: string) {
+  let hash = 0x811c9dc5;
+  for (const character of userText.normalize("NFKC")) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `outputs/report-${(hash >>> 0).toString(16).padStart(8, "0")}.md`;
+}
+
+function isGeneratedDocumentRequest(text: string) {
+  return /(?:生成|创建|撰写|编写|制作|写|做|导出).{0,40}(?:报告|文档|总结|方案|教案|故事)|\b(?:generate|create|write|draft|prepare|export)\b.{0,40}\b(?:report|document|summary|plan|lesson|story)\b/i.test(text);
+}
+
+function hasSufficientGeneratedDocumentRequirements(text: string) {
+  const supplement = text.match(/(?:用户补充|additional user input)\s*[：:]\s*([\s\S]+)/i)?.[1]?.trim();
+  const candidate = (supplement || text)
+    .replace(/(?:请|帮我|麻烦)?(?:生成|创建|撰写|编写|制作|导出)/gi, "")
+    .replace(/(?:一份|一个)?(?:报告|报告文件|文档|总结|方案|教案|故事|文件)/gi, "")
+    .replace(/(?:原始任务|待补充|用户补充|additional user input)\s*[：:]?/gi, "")
+    .replace(/(?:路径|path)\s*[：:]?\s*\S+/gi, "")
+    .replace(/[\s，。！？、,:;；'“”\"`]/g, "");
+  return candidate.length >= 4;
 }
 
 function executionPlan(summary: string, step: NaturalLanguageComputePlan): NaturalLanguageDelegationPlan {

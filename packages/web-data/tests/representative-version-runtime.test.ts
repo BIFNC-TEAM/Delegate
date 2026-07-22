@@ -44,6 +44,22 @@ function currentDraft(): RepresentativeSetupSnapshot {
       networkMode: "no_network",
       networkAllowlist: [],
       filesystemMode: "workspace_only",
+      capabilityModes: {
+        exec: "ask",
+        read: "allow",
+        write: "ask",
+        process: "ask",
+        browser: "ask",
+        mcp: "ask",
+      },
+    },
+    delegation: {
+      enabled: true,
+      naturalLanguageEnabled: true,
+      explicitComputeEnabled: true,
+      maxSteps: 5,
+      maxCostCents: 0,
+      knowledgeScope: "user_input_only",
     },
   };
 }

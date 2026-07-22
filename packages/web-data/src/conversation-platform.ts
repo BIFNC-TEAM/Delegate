@@ -1387,6 +1387,7 @@ export async function getPublicGenerationRunSnapshot(input: {
         select: {
           id: true,
           text: true,
+          content: true,
           deliveryStatus: true,
           createdAt: true,
           citations: {
@@ -1410,7 +1411,7 @@ export async function getPublicGenerationRunSnapshot(input: {
       ? {
           message: {
             id: run.outputMessage.id,
-            text: run.outputMessage.text || "",
+            text: renderPublicConversationMessageText(run.outputMessage),
             status: run.outputMessage.deliveryStatus.toLowerCase(),
             createdAt: run.outputMessage.createdAt.toISOString(),
             citations: run.outputMessage.citations.map((citation) => ({
@@ -1476,7 +1477,7 @@ export async function getPublicConversationHistory(input: {
       role: message.senderType === MessageSenderType.AUDIENCE ? ("user" as const) : ("assistant" as const),
       senderType: normalizeSenderType(message.senderType),
       ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
-      text: message.text || "",
+      text: renderPublicConversationMessageText(message),
       status: message.deliveryStatus.toLowerCase(),
       createdAt: message.createdAt.toISOString(),
       citations: message.citations.map((citation) => ({
@@ -1493,6 +1494,41 @@ export async function getPublicConversationHistory(input: {
       })),
     })),
   };
+}
+
+export function renderPublicConversationMessageText(message: {
+  text?: string | null;
+  content?: unknown;
+  attachments?: Array<{ fileName: string }>;
+}) {
+  const text = message.text || "";
+  const content = message.content && typeof message.content === "object" && !Array.isArray(message.content)
+    ? message.content as Record<string, unknown>
+    : null;
+  const hasInternalPath = /\/(?:workspace|tmp)(?:\/|\b)/i.test(text);
+  if (!hasInternalPath) return text;
+
+  const attachmentLines = message.attachments?.length
+    ? message.attachments.map((attachment) => `已生成文件：${attachment.fileName.split("/").pop() || "result.txt"}`).join("\n")
+    : "没有生成可展示的结果文件。";
+  const credits = typeof content?.actualCredits === "number"
+    ? `\n\n消耗：${content.actualCredits} credits`
+    : "";
+  if (content?.kind === "compute_approval_result") {
+    const outcome = content.outcome;
+    if (outcome === "completed") return `审批已通过，委托任务执行完成。\n\n${attachmentLines}${credits}`;
+    if (outcome === "rejected") return "委托任务未获批准，因此没有执行。";
+    if (outcome === "expired") return "委托任务审批已超时，任务未执行。如仍需要，请重新提交请求。";
+    if (outcome === "policy_denied") return "审批后安全策略复核未通过，任务没有执行。";
+    return `审批已通过，但委托任务执行失败。\n\n${attachmentLines}${credits}`;
+  }
+  if (content?.kind === "compute_approval_pending") {
+    return text.replace(/操作：[\s\S]*?(?=\n\n风险：)/, "操作：执行已提交的委托任务");
+  }
+  if (content?.intent === "compute") {
+    return `委托任务执行结果。\n\n${attachmentLines}${credits}`;
+  }
+  return text;
 }
 
 export async function ingestMatrixApplicationServiceTransaction(input: {
@@ -2377,6 +2413,10 @@ function buildRepresentativeSnapshot(representative: {
   handoffPrompt: string;
   allowedSkills: Prisma.JsonValue;
   actionGate: Prisma.JsonValue;
+  delegationEnabled: boolean;
+  delegationNaturalLanguageEnabled: boolean;
+  delegationExplicitComputeEnabled: boolean;
+  delegationKnowledgeScope: string;
   knowledgePack: { identitySummary: string; faq: Prisma.JsonValue; materials: Prisma.JsonValue; policies: Prisma.JsonValue } | null;
   pricingPlans: Array<{ type: string; name: string; starsAmount: number; summary: string; includedReplies: number; includesPriorityHandoff: boolean }>;
   skillPackLinks: Array<{ enabled: boolean; skillPack: { slug: string; version: string | null } }>;
@@ -2403,6 +2443,12 @@ function buildRepresentativeSnapshot(representative: {
     governance: {
       allowedSkills: representative.allowedSkills,
       actionGate: representative.actionGate,
+    },
+    delegation: {
+      enabled: representative.delegationEnabled,
+      naturalLanguageEnabled: representative.delegationNaturalLanguageEnabled,
+      explicitComputeEnabled: representative.delegationExplicitComputeEnabled,
+      knowledgeScope: representative.delegationKnowledgeScope.toLowerCase(),
     },
     knowledge: representative.knowledgePack
       ? {

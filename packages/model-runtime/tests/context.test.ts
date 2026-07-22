@@ -49,7 +49,10 @@ describe("buildRepresentativeReplyPrompt", () => {
     expect(prompt.instructions).toContain("authoritative source for factual claims");
     expect(prompt.instructions).toContain("Never imply access to private workspaces");
     expect(prompt.instructions).toContain("Active subagent boundary: Triage Agent");
+    expect(prompt.instructions).toContain("Do not offer or price a paid plan");
     expect(prompt.input).toContain("Recalled public-safe context:");
+    expect(prompt.input).toContain("Paid plan offer for this turn: none");
+    expect(prompt.input).not.toContain("Pass (180 Stars)");
     expect(prompt.input).toContain("Reply outline:");
     expect(prompt.input).toContain("Scoped subagent boundary:");
   });

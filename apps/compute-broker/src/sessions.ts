@@ -15,6 +15,7 @@ import {
 } from "./serializers";
 import { computeLifecycleHooks } from "./lifecycle-hooks";
 import { closeBrowserSessionForComputeSession } from "./browser-sessions";
+import { isDelegationTaskSessionContextValid } from "./delegation-task-context";
 
 export async function createComputeSession(rawInput: unknown) {
   const input = createComputeSessionRequestSchema.parse(rawInput);
@@ -47,6 +48,42 @@ export async function createComputeSession(rawInput: unknown) {
     throw new SessionError(409, "compute_disabled_for_representative");
   }
 
+  if (Boolean(input.delegationTaskId) !== Boolean(input.delegationTaskStepId)) {
+    throw new SessionError(400, "delegation_task_and_step_must_be_provided_together");
+  }
+  if (input.delegationTaskId && input.delegationTaskStepId) {
+    const task = await prisma.delegationTask.findUnique({
+      where: { id: input.delegationTaskId },
+      select: {
+        representativeId: true,
+        contactId: true,
+        originConversationId: true,
+        status: true,
+        generationRuns: {
+          where: { id: input.generationRunId ?? "__no_generation_run__" },
+          select: { id: true },
+          take: 1,
+        },
+        resourcePolicy: { select: { allowedCapabilities: true } },
+        steps: {
+          where: { id: input.delegationTaskStepId },
+          select: { id: true, capability: true },
+          take: 1,
+        },
+      },
+    });
+    if (!isDelegationTaskSessionContextValid({
+      representativeId: input.representativeId,
+      ...(input.contactId ? { contactId: input.contactId } : {}),
+      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+      ...(input.generationRunId ? { generationRunId: input.generationRunId } : {}),
+      delegationTaskStepId: input.delegationTaskStepId,
+      requestedCapabilities: input.requestedCapabilities,
+    }, task)) {
+      throw new SessionError(409, "delegation_task_context_mismatch");
+    }
+  }
+
   const defaultPolicyProfile = representative.capabilityProfiles[0];
   const defaultPolicyProfileId = defaultPolicyProfile?.id;
   if (!defaultPolicyProfileId || !defaultPolicyProfile) {
@@ -68,6 +105,8 @@ export async function createComputeSession(rawInput: unknown) {
       contactId: input.contactId ?? null,
       conversationId: input.conversationId ?? null,
       generationRunId: input.generationRunId ?? null,
+      delegationTaskId: input.delegationTaskId ?? null,
+      delegationTaskStepId: input.delegationTaskStepId ?? null,
       subagentId: input.subagentId,
       policyProfileId: defaultPolicyProfileId,
       requestedBy: mapRequestedByToDb(input.requestedBy),
@@ -84,6 +123,7 @@ export async function createComputeSession(rawInput: unknown) {
       representativeId: input.representativeId,
       contactId: input.contactId ?? null,
       conversationId: input.conversationId ?? null,
+      delegationTaskId: input.delegationTaskId ?? null,
       type: "COMPUTE_SESSION_REQUESTED",
       payload: {
         requestedCapabilities: input.requestedCapabilities,
@@ -91,6 +131,8 @@ export async function createComputeSession(rawInput: unknown) {
         requestedBy: input.requestedBy,
         reason: input.reason,
         sessionId: session.id,
+        delegationTaskId: input.delegationTaskId ?? null,
+        delegationTaskStepId: input.delegationTaskStepId ?? null,
       },
     },
   });
@@ -150,6 +192,7 @@ export async function heartbeatComputeSession(sessionId: string, reason?: string
       representativeId: updated.representativeId,
       contactId: updated.contactId ?? null,
       conversationId: updated.conversationId ?? null,
+      delegationTaskId: updated.delegationTaskId ?? null,
       type: "COMPUTE_SESSION_HEARTBEAT",
       payload: {
         sessionId: updated.id,
@@ -207,6 +250,7 @@ export async function terminateComputeSession(sessionId: string, reason?: string
       representativeId: updated.representativeId,
       contactId: updated.contactId ?? null,
       conversationId: updated.conversationId ?? null,
+      delegationTaskId: updated.delegationTaskId ?? null,
       type: "COMPUTE_SESSION_TERMINATED",
       payload: {
         sessionId: updated.id,

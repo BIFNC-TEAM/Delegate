@@ -83,6 +83,7 @@ export async function applyExecutionBilling(params: {
   conversationId?: string | null;
   sessionId: string;
   toolExecutionId: string;
+  delegationTaskId?: string | null;
   ownerId: string;
   computeCredits: number;
   storageCredits: number;
@@ -194,6 +195,7 @@ export async function applyExecutionBilling(params: {
         conversationId: params.conversationId ?? null,
         sessionId: params.sessionId,
         toolExecutionId: params.toolExecutionId,
+        delegationTaskId: params.delegationTaskId ?? null,
         kind: "COMPUTE_MINUTES",
         quantity: Math.max(params.wallMs / 60000, params.wallMs > 0 ? 1 / 60 : 0),
         unit: "minute",
@@ -210,6 +212,7 @@ export async function applyExecutionBilling(params: {
         conversationId: params.conversationId ?? null,
         sessionId: params.sessionId,
         toolExecutionId: params.toolExecutionId,
+        delegationTaskId: params.delegationTaskId ?? null,
         kind: "STORAGE_BYTES",
         quantity: params.artifactBytes,
         unit: "byte",
@@ -227,6 +230,7 @@ export async function applyExecutionBilling(params: {
           conversationId: params.conversationId ?? null,
           sessionId: params.sessionId,
           toolExecutionId: params.toolExecutionId,
+          delegationTaskId: params.delegationTaskId ?? null,
           kind: "BROWSER_MINUTES",
           quantity: Math.max(params.wallMs / 60000, params.wallMs > 0 ? 1 / 60 : 0),
           unit: "minute",
@@ -245,6 +249,7 @@ export async function applyExecutionBilling(params: {
           conversationId: params.conversationId ?? null,
           sessionId: params.sessionId,
           toolExecutionId: params.toolExecutionId,
+          delegationTaskId: params.delegationTaskId ?? null,
           kind: "MODEL_USAGE",
           quantity: 1,
           unit: "request",
@@ -263,6 +268,7 @@ export async function applyExecutionBilling(params: {
           conversationId: params.conversationId ?? null,
           sessionId: params.sessionId,
           toolExecutionId: params.toolExecutionId,
+          delegationTaskId: params.delegationTaskId ?? null,
           kind: "MCP_CALLS",
           quantity: 1,
           unit: "call",
@@ -304,6 +310,7 @@ export async function applyExecutionBilling(params: {
             conversationId: params.conversationId ?? null,
             sessionId: params.sessionId,
             toolExecutionId: params.toolExecutionId,
+            delegationTaskId: params.delegationTaskId ?? null,
             kind: "PLAN_DEBIT",
             quantity: entry.amount,
             unit: "credit",

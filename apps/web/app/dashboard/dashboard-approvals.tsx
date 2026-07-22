@@ -45,7 +45,7 @@ export function DashboardApprovals({ activeSlug, locale }: { activeSlug: string;
     if (filter === "resolved" && approval.status === "pending") return false;
     const needle = query.trim().toLowerCase();
     if (!needle) return true;
-    return [approval.requestedActionSummary, approval.riskSummary, approval.action?.capability, approval.contact?.displayName]
+    return [approval.requestedActionSummary, approval.riskSummary, approval.action?.capability, approval.contact?.displayName, approval.task?.title]
       .filter(Boolean)
       .some((value) => value!.toLowerCase().includes(needle));
   }), [approvals, filter, query]);
@@ -140,6 +140,7 @@ export function DashboardApprovals({ activeSlug, locale }: { activeSlug: string;
           {selected ? (
             <>
               <dl className="dashboard-approval-facts">
+                <div><dt>{zh ? "委托任务" : "Task"}</dt><dd>{selected.task?.title || "—"}</dd></div>
                 <div><dt>{zh ? "能力" : "Capability"}</dt><dd>{selected.action?.capability || selected.subagentId || "—"}</dd></div>
                 <div><dt>{zh ? "联系人" : "Contact"}</dt><dd>{selected.contact?.displayName || selected.customerAccount.displayName}</dd></div>
                 <div><dt>{zh ? "风险分" : "Risk score"}</dt><dd>{selected.riskScore} / 100</dd></div>

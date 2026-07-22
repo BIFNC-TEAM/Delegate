@@ -89,6 +89,14 @@ const approvalInclude = Prisma.validator<Prisma.ApprovalRequestDefaultArgs>()({
         },
       },
     },
+    delegationTask: {
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        nextActionBy: true,
+      },
+    },
     workflowRuns: {
       where: {
         kind: "APPROVAL_EXPIRATION",
@@ -477,6 +485,12 @@ export type RepresentativeComputeApprovalSnapshot = {
       username?: string;
     };
     staleWorkflow: boolean;
+    task?: {
+      id: string;
+      title: string;
+      status: string;
+      nextActionBy: string;
+    };
   }>;
 };
 
@@ -2368,6 +2382,16 @@ function serializeRepresentativeApproval(
     customerAccount,
     approver,
     staleWorkflow,
+    ...(approval.delegationTask
+      ? {
+          task: {
+            id: approval.delegationTask.id,
+            title: approval.delegationTask.title,
+            status: approval.delegationTask.status.toLowerCase(),
+            nextActionBy: approval.delegationTask.nextActionBy.toLowerCase(),
+          },
+        }
+      : {}),
     ...(approval.subagentId ? { subagentId: approval.subagentId } : {}),
     requestedAt: approval.requestedAt.toISOString(),
     ...(approval.expiresAt ? { expiresAt: approval.expiresAt.toISOString() } : {}),

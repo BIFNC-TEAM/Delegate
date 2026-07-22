@@ -17,7 +17,11 @@ const mocks = vi.hoisted(() => ({
   shouldConsiderNaturalLanguageCompute: vi.fn(),
   buildComputeRequestFromNaturalLanguagePlan: vi.fn(),
   createAudienceComputeSession: vi.fn(),
+  createComputeDelegationTask: vi.fn(),
   executeAudienceTool: vi.fn(),
+  finalizeComputeDelegationTask: vi.fn(),
+  markDelegationTaskAwaitingApproval: vi.fn(),
+  markDelegationTaskRunning: vi.fn(),
   waitGenerationRunForComputeApproval: vi.fn(),
 }));
 
@@ -44,13 +48,17 @@ vi.mock("@delegate/web-data", () => ({
   completeOperatorMessageDelivery: vi.fn(),
   completeInlineGenerationRun: mocks.completeInlineGenerationRun,
   createAudienceComputeSession: mocks.createAudienceComputeSession,
+  createComputeDelegationTask: mocks.createComputeDelegationTask,
   deferGenerationRunForHuman: vi.fn(),
   ensureConversationLeadAndHandoff: mocks.ensureConversationLeadAndHandoff,
   executeAudienceTool: mocks.executeAudienceTool,
+  finalizeComputeDelegationTask: mocks.finalizeComputeDelegationTask,
   failGenerationRun: vi.fn(),
   getRepresentativeRuntimeSetupSnapshot: mocks.getRepresentativeRuntimeSetupSnapshot,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
   markGenerationDeliveryComplete: mocks.markGenerationDeliveryComplete,
+  markDelegationTaskAwaitingApproval: mocks.markDelegationTaskAwaitingApproval,
+  markDelegationTaskRunning: mocks.markDelegationTaskRunning,
   recallRepresentativeContext: mocks.recallRepresentativeContext,
   retryGenerationDelivery: vi.fn(),
   retryOperatorMessageDelivery: vi.fn(),
@@ -66,6 +74,10 @@ describe("conversation worker knowledge recall", () => {
     mocks.parseComputeDirective.mockReturnValue({ kind: "none" });
     mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(false);
     mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: null, source: "model" });
+    mocks.createComputeDelegationTask.mockResolvedValue({
+      task: { id: "task-1" },
+      step: { id: "task-step-1" },
+    });
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-1",
       runId: "run-1",
@@ -170,7 +182,13 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
       id: "rep-1",
-      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
     });
     mocks.parseComputeDirective.mockReturnValue({
       kind: "request",
@@ -207,7 +225,15 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.createAudienceComputeSession).toHaveBeenCalledWith(expect.objectContaining({
       generationRunId: "run-2",
       conversationId: "conversation-2",
+      delegationTaskId: "task-1",
+      delegationTaskStepId: "task-step-1",
     }));
+    expect(mocks.markDelegationTaskRunning).toHaveBeenCalledWith("task-1");
+    expect(mocks.markDelegationTaskAwaitingApproval).toHaveBeenCalledWith({
+      taskId: "task-1",
+      approvalId: "approval-1",
+    });
+    expect(mocks.finalizeComputeDelegationTask).not.toHaveBeenCalled();
     expect(mocks.waitGenerationRunForComputeApproval).toHaveBeenCalledWith(expect.objectContaining({
       runId: "run-2",
       approvalId: "approval-1",
@@ -231,7 +257,13 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
       id: "rep-1",
-      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
     });
     mocks.parseComputeDirective.mockReturnValue({
       kind: "help",
@@ -244,6 +276,7 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
     expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
+    expect(mocks.createComputeDelegationTask).not.toHaveBeenCalled();
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       countUsage: false,
       intent: "compute_help",
@@ -267,7 +300,13 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
       id: "rep-1",
-      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
     });
     mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
     const naturalPlan = {
@@ -311,5 +350,62 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       attachments: [expect.objectContaining({ fileName: "qa.txt", artifactId: "artifact-natural" })],
     }));
+    expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "task-1",
+      outcome: "completed",
+      artifacts: [expect.objectContaining({ id: "artifact-natural" })],
+      actualCredits: 4,
+    }));
+  });
+
+  it("marks a delegated task failed when the compute session cannot be created", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-failed",
+      runId: "run-failed",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-failed",
+      contactId: "contact-failed",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-failed",
+      userText: "/compute read notes/missing.txt",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.parseComputeDirective.mockReturnValue({
+      kind: "request",
+      request: {
+        capability: "read",
+        path: "notes/missing.txt",
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+        displayTarget: "notes/missing.txt",
+      },
+    });
+    mocks.createAudienceComputeSession.mockRejectedValue(new Error("broker unavailable"));
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "failed",
+      error: "broker unavailable",
+    });
+    expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith({
+      taskId: "task-1",
+      outcome: "failed",
+      failureReason: "broker unavailable",
+    });
   });
 });

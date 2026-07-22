@@ -18,7 +18,10 @@ import {
   type ToolExecutionRequest,
 } from "@delegate/compute-protocol";
 import type { Prisma } from "@prisma/client";
-import { finalizeComputeApprovalConversation } from "@delegate/web-data";
+import {
+  finalizeComputeApprovalConversation,
+  markDelegationTaskRunning,
+} from "@delegate/web-data";
 
 import { createApprovalRequestForExecution } from "./approvals";
 import {
@@ -239,6 +242,8 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
     const execution = await prisma.toolExecution.create({
       data: {
         sessionId,
+        delegationTaskId: context.session.delegationTaskId,
+        delegationTaskStepId: context.session.delegationTaskStepId,
         capability: mapCapabilityToDb(normalized.capability),
         subagentId: sessionSubagentId,
         status: "BLOCKED",
@@ -256,6 +261,8 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
       contactId: context.session.contactId ?? null,
       conversationId: context.session.conversationId ?? null,
       generationRunId: context.session.generationRunId ?? null,
+      delegationTaskId: context.session.delegationTaskId ?? null,
+      delegationTaskStepId: context.session.delegationTaskStepId ?? null,
       sessionId,
       executionId: execution.id,
       subagentId: sessionSubagentId,
@@ -275,6 +282,7 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
         representativeId: context.session.representativeId,
         contactId: context.session.contactId ?? null,
         conversationId: context.session.conversationId ?? null,
+        delegationTaskId: context.session.delegationTaskId ?? null,
         type: "TOOL_EXECUTION_BLOCKED",
         payload: {
           sessionId,
@@ -367,6 +375,7 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
           representativeId: approval.representativeId,
           contactId: approval.contactId ?? null,
           conversationId: approval.conversationId ?? null,
+          delegationTaskId: approval.delegationTaskId ?? null,
           type: "APPROVAL_RESOLVED",
           payload: {
             approvalRequestId: approval.id,
@@ -451,6 +460,7 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
             representativeId: approval.representativeId,
             contactId: approval.contactId ?? null,
             conversationId: approval.conversationId ?? null,
+            delegationTaskId: approval.delegationTaskId ?? null,
             type: "APPROVAL_RESOLVED",
             payload: {
               approvalRequestId: approval.id,
@@ -522,6 +532,7 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
         representativeId: approval.representativeId,
         contactId: approval.contactId ?? null,
         conversationId: approval.conversationId ?? null,
+        delegationTaskId: approval.delegationTaskId ?? null,
         type: "APPROVAL_RESOLVED",
         payload: {
           approvalRequestId: approval.id,
@@ -562,6 +573,10 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
 
     return nextApproval;
   });
+
+  if (updatedApproval.delegationTaskId) {
+    await markDelegationTaskRunning(updatedApproval.delegationTaskId);
+  }
 
   return resolveApprovalResponseSchema.parse({
     outcome: "approved",
@@ -773,6 +788,8 @@ async function runAllowedExecution(params: {
       : await prisma.toolExecution.create({
         data: {
           sessionId: params.context.session.id,
+          delegationTaskId: params.context.session.delegationTaskId,
+          delegationTaskStepId: params.context.session.delegationTaskStepId,
           capability: mapCapabilityToDb(executionDescriptor.capability),
           subagentId: params.input.subagentId,
           status: "RUNNING",
@@ -898,6 +915,7 @@ async function runAllowedExecution(params: {
     conversationId: params.context.session.conversationId ?? null,
     sessionId: leasedSession.id,
     toolExecutionId: execution.id,
+    delegationTaskId: params.context.session.delegationTaskId,
     ownerId: params.context.session.representative.owner.id,
     computeCredits,
     storageCredits,
@@ -942,6 +960,7 @@ async function runAllowedExecution(params: {
       representativeId: params.context.session.representativeId,
       contactId: params.context.session.contactId ?? null,
       conversationId: params.context.session.conversationId ?? null,
+      delegationTaskId: params.context.session.delegationTaskId ?? null,
       type: "BILLING_LEDGER_RECORDED",
       payload: {
         sessionId: leasedSession.id,
@@ -1675,6 +1694,8 @@ async function blockExecution(params: {
     representativeId: string;
     contactId: string | null;
     conversationId: string | null;
+    delegationTaskId: string | null;
+    delegationTaskStepId: string | null;
     subagentId: string | null;
     requestedBy: string;
     status: string;
@@ -1709,6 +1730,8 @@ async function blockExecution(params: {
   const execution = await prisma.toolExecution.create({
     data: {
       sessionId: params.session.id,
+      delegationTaskId: params.session.delegationTaskId,
+      delegationTaskStepId: params.session.delegationTaskStepId,
       capability: mapCapabilityToDb(params.capability),
       subagentId: params.subagentId,
       status: "BLOCKED",
@@ -1728,6 +1751,7 @@ async function blockExecution(params: {
       representativeId: params.session.representativeId,
       contactId: params.session.contactId ?? null,
       conversationId: params.session.conversationId ?? null,
+      delegationTaskId: params.session.delegationTaskId ?? null,
       type: "TOOL_EXECUTION_BLOCKED",
       payload: {
         sessionId: params.session.id,

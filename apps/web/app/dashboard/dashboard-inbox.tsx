@@ -320,8 +320,8 @@ export function DashboardInbox({
               </button>
             )) : workspaceTab === "pending" && snapshot.pending.length ? snapshot.pending.map((item) => (
               <button className={item.conversationId === selectedId ? "is-active" : undefined} disabled={!item.conversationId || isPending} key={item.id} onClick={() => item.conversationId && selectConversation(item.conversationId)} type="button">
-                <span className="inbox-contact-avatar">!</span>
-                <span className="inbox-conversation-copy"><span><strong>{item.contactName}</strong><time>P{item.priority}</time></span><small>{item.summary}</small><span className="inbox-conversation-meta"><em className="is-needs_human">{item.status}</em><b>{item.reason}</b></span></span>
+                <span className="inbox-contact-avatar">{item.kind === "delegation_task" ? "T" : "!"}</span>
+                <span className="inbox-conversation-copy"><span><strong>{item.contactName}</strong><time>P{item.priority}</time></span><small>{item.summary}</small><span className="inbox-conversation-meta"><em className={item.kind === "delegation_task" ? "is-waiting_approval" : "is-needs_human"}>{item.status}</em><b>{item.kind === "delegation_task" ? (zh ? "委托任务" : "Delegated task") : item.reason}</b></span></span>
               </button>
             )) : workspaceTab === "leads" && snapshot.leads.length ? snapshot.leads.map((item) => (
               <button className={item.conversationId === selectedId ? "is-active" : undefined} disabled={!item.conversationId || isPending} key={item.id} onClick={() => item.conversationId && selectConversation(item.conversationId)} type="button">
@@ -418,6 +418,20 @@ export function DashboardInbox({
                   <div><dt>{zh ? "阶段" : "Stage"}</dt><dd>{detail.contact.stage}</dd></div>
                   <div><dt>{zh ? "渠道" : "Channel"}</dt><dd>{detail.channel}</dd></div>
                 </dl>
+              </section>
+              <section>
+                <p>{zh ? "委托任务" : "Delegated tasks"}</p>
+                <div className="inbox-run-list">
+                  {detail.tasks.length ? detail.tasks.map((task) => (
+                    <article key={task.id} title={task.blockingReason}>
+                      <span className={`is-${task.status}`} />
+                      <div>
+                        <strong>{task.title}</strong>
+                        <small>{task.status} · {zh ? "下一步" : "next"}: {task.nextActionBy} · {task.outputCount} {zh ? "项产物" : "outputs"}</small>
+                      </div>
+                    </article>
+                  )) : <small>{zh ? "该会话尚无委托任务" : "No delegated tasks in this conversation"}</small>}
+                </div>
               </section>
               <section>
                 <p>{zh ? "最近运行" : "Recent runs"}</p>

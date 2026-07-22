@@ -405,6 +405,112 @@ enum WorkflowEnginePhase {
   CANCELED
 }
 
+enum DelegationTaskKind {
+  SERVICE_REQUEST
+  COMPUTE
+  BROWSER
+  MCP
+  WORKFLOW
+  EXTERNAL_ACTION
+}
+
+enum DelegationTaskInitiatorType {
+  AUDIENCE
+  OWNER
+  OPERATOR
+  SYSTEM
+}
+
+enum DelegationTaskActorType {
+  AUDIENCE
+  OWNER
+  OPERATOR
+  REPRESENTATIVE
+  SYSTEM
+}
+
+enum DelegationTaskStatus {
+  DRAFT
+  CLARIFYING
+  READY
+  AWAITING_APPROVAL
+  QUEUED
+  RUNNING
+  WAITING_FOR_USER
+  WAITING_FOR_OWNER
+  COMPLETED
+  FAILED
+  CANCELED
+  EXPIRED
+}
+
+enum DelegationTaskNextActor {
+  AUDIENCE
+  OWNER
+  OPERATOR
+  SYSTEM
+  NONE
+}
+
+enum DelegationTaskStepKind {
+  CLARIFICATION
+  PLAN
+  MODEL
+  COMPUTE
+  MCP
+  WORKFLOW
+  HUMAN_REVIEW
+  DELIVERY
+  EXTERNAL_ACTION
+}
+
+enum DelegationTaskStepStatus {
+  DRAFT
+  READY
+  WAITING_APPROVAL
+  QUEUED
+  RUNNING
+  WAITING_INPUT
+  COMPLETED
+  FAILED
+  BLOCKED
+  CANCELED
+  SKIPPED
+}
+
+enum DelegationTaskInputKind {
+  MESSAGE
+  MESSAGE_ATTACHMENT
+  KNOWLEDGE_ASSET
+  ARTIFACT
+  EXTERNAL_REFERENCE
+  STRUCTURED_DATA
+}
+
+enum DelegationDataGrantStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum DelegationExternalEffectStatus {
+  PROPOSED
+  WAITING_APPROVAL
+  APPROVED
+  EXECUTING
+  SUCCEEDED
+  FAILED
+  CANCELED
+  RECONCILIATION_REQUIRED
+}
+
+enum DelegationTaskOutputKind {
+  ARTIFACT
+  DELIVERABLE
+  EXTERNAL_EFFECT
+  SUMMARY
+}
+
 enum WorkflowCommandType {
   START
   CANCEL
@@ -695,6 +801,7 @@ model AudienceIdentity {
   conversations     Conversation[]
   userWallets       UserWallet[]
   sandboxIdentities SandboxIdentity[]
+  delegationTasks   DelegationTask[]
   memoryRecords     OpenVikingMemoryRecord[]
   identityLinks     IdentityLink[]
 
@@ -1083,6 +1190,7 @@ model Representative {
   mcpBindings                    RepresentativeMcpBinding[]
   chatSessions                   ChatSession[]
   workflowRuns                   WorkflowRun[]
+  delegationTasks                DelegationTask[]
   agentWallet                    AgentWallet?
   tokenPurchases                 AgentTokenPurchase[]
   usageCharges                   AgentUsageCharge[]
@@ -1113,6 +1221,7 @@ model RepresentativeVersion {
   activeForRepresentatives Representative[]      @relation("RepresentativeActiveVersion")
   episodes                 ConversationEpisode[]
   generationRuns           GenerationRun[]
+  delegationTasks          DelegationTask[]
 
   @@unique([representativeId, versionNumber])
   @@index([representativeId, publishedAt])
@@ -1287,6 +1396,7 @@ model Contact {
   computeTrustTier      String?
   lastApprovalGrantedAt DateTime?
   workflowRuns          WorkflowRun[]
+  delegationTasks       DelegationTask[]
   feedbackSignals       CreatorFeedbackSignal[]
   leads                 Lead[]
 
@@ -1338,6 +1448,7 @@ model Conversation {
   browserSessions               BrowserSession[]
   browserNavigations            BrowserNavigation[]
   workflowRuns                  WorkflowRun[]
+  delegationTasks               DelegationTask[]
   feedbackSignals               CreatorFeedbackSignal[]
   episodes                      ConversationEpisode[]
   messages                      Message[]
@@ -1403,6 +1514,7 @@ model ConversationEpisode {
   handoffRequests         HandoffRequest[]
   internalNotes           ConversationInternalNote[]
   leads                   Lead[]
+  originDelegationTasks   DelegationTask[]
 
   @@unique([conversationId, sequence])
   @@index([conversationId, status, startedAt])
@@ -1460,6 +1572,7 @@ model Message {
   externalMessageId       String?
   replyToMessageId        String?
   threadRootMessageId     String?
+  delegationTaskId        String?
   deliveryStatus          MessageDeliveryStatus       @default(ACCEPTED)
   failureCode             String?
   failureReason           String?
@@ -1476,6 +1589,7 @@ model Message {
   replies                 Message[]                   @relation("MessageReplies")
   threadRoot              Message?                    @relation("MessageThreads", fields: [threadRootMessageId], references: [id], onDelete: SetNull)
   threadMessages          Message[]                   @relation("MessageThreads")
+  delegationTask          DelegationTask?             @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
   revisions               MessageRevision[]
   attachments             MessageAttachment[]
   citations               MessageCitation[]
@@ -1487,6 +1601,7 @@ model Message {
   @@index([conversationId, createdAt])
   @@index([conversationId, deliveryStatus, createdAt])
   @@index([episodeId, createdAt])
+  @@index([delegationTaskId, createdAt])
   @@index([retentionExpiresAt])
 }
 
@@ -1542,6 +1657,8 @@ model GenerationRun {
   inputMessageId          String
   outputMessageId         String?
   representativeVersionId String?
+  delegationTaskId        String?
+  delegationTaskStepId    String?
   status                  GenerationRunStatus    @default(QUEUED)
   idempotencyKey          String                 @unique
   attemptCount            Int                    @default(0)
@@ -1565,11 +1682,15 @@ model GenerationRun {
   inputMessage            Message                @relation("GenerationInputMessage", fields: [inputMessageId], references: [id], onDelete: Cascade)
   outputMessage           Message?               @relation("GenerationOutputMessage", fields: [outputMessageId], references: [id], onDelete: SetNull)
   representativeVersion   RepresentativeVersion? @relation(fields: [representativeVersionId], references: [id], onDelete: SetNull)
-  approvalRequests         ApprovalRequest[]
-  computeSessions          ComputeSession[]
+  delegationTask          DelegationTask?        @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep      DelegationTaskStep?    @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  approvalRequests        ApprovalRequest[]
+  computeSessions         ComputeSession[]
 
   @@index([conversationId, status, queuedAt])
   @@index([episodeId, queuedAt])
+  @@index([delegationTaskId, status, queuedAt])
+  @@index([delegationTaskStepId])
 }
 
 model ConversationAssignment {
@@ -1972,16 +2093,20 @@ model Invoice {
 }
 
 model EventAudit {
-  id               String         @id @default(cuid())
+  id               String          @id @default(cuid())
   representativeId String
   contactId        String?
   conversationId   String?
+  delegationTaskId String?
   type             EventType
   payload          Json
-  createdAt        DateTime       @default(now())
-  representative   Representative @relation(fields: [representativeId], references: [id])
-  contact          Contact?       @relation(fields: [contactId], references: [id])
-  conversation     Conversation?  @relation(fields: [conversationId], references: [id])
+  createdAt        DateTime        @default(now())
+  representative   Representative  @relation(fields: [representativeId], references: [id])
+  contact          Contact?        @relation(fields: [contactId], references: [id])
+  conversation     Conversation?   @relation(fields: [conversationId], references: [id])
+  delegationTask   DelegationTask? @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+
+  @@index([delegationTaskId, createdAt])
 }
 
 model CapabilityPolicyProfile {
@@ -2045,48 +2170,54 @@ model CapabilityPolicyRule {
 }
 
 model ComputeSession {
-  id               String                   @id @default(cuid())
-  representativeId String
-  contactId        String?
-  conversationId   String?
-  generationRunId  String?
-  subagentId       String?
-  policyProfileId  String?
-  sandboxLeaseId   String?
-  requestedBy      ComputeRequestedBy
-  status           ComputeSessionStatus     @default(REQUESTED)
-  leaseStatus      ComputeLeaseStatus       @default(REQUESTED)
-  runnerLeaseId    String?
-  containerId      String?
-  runnerType       ComputeRunnerType        @default(DOCKER)
-  baseImage        String
-  leaseTokenHash   String                   @unique
-  leaseAcquiredAt  DateTime?
-  leaseLastUsedAt  DateTime?
-  leaseReleasedAt  DateTime?
-  startedAt        DateTime?
-  lastHeartbeatAt  DateTime?
-  expiresAt        DateTime?
-  endedAt          DateTime?
-  failureReason    String?
-  createdAt        DateTime                 @default(now())
-  updatedAt        DateTime                 @updatedAt
-  representative   Representative           @relation(fields: [representativeId], references: [id])
-  contact          Contact?                 @relation(fields: [contactId], references: [id])
-  conversation     Conversation?            @relation(fields: [conversationId], references: [id])
-  generationRun    GenerationRun?           @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
-  policyProfile    CapabilityPolicyProfile? @relation(fields: [policyProfileId], references: [id])
-  sandboxLease     SandboxLease?            @relation(fields: [sandboxLeaseId], references: [id], onDelete: SetNull)
-  toolExecutions   ToolExecution[]
-  browserSession   BrowserSession?
-  artifacts        Artifact[]
-  approvalRequests ApprovalRequest[]
-  ledgerEntries    LedgerEntry[]
+  id                   String                   @id @default(cuid())
+  representativeId     String
+  contactId            String?
+  conversationId       String?
+  generationRunId      String?
+  delegationTaskId     String?
+  delegationTaskStepId String?
+  subagentId           String?
+  policyProfileId      String?
+  sandboxLeaseId       String?
+  requestedBy          ComputeRequestedBy
+  status               ComputeSessionStatus     @default(REQUESTED)
+  leaseStatus          ComputeLeaseStatus       @default(REQUESTED)
+  runnerLeaseId        String?
+  containerId          String?
+  runnerType           ComputeRunnerType        @default(DOCKER)
+  baseImage            String
+  leaseTokenHash       String                   @unique
+  leaseAcquiredAt      DateTime?
+  leaseLastUsedAt      DateTime?
+  leaseReleasedAt      DateTime?
+  startedAt            DateTime?
+  lastHeartbeatAt      DateTime?
+  expiresAt            DateTime?
+  endedAt              DateTime?
+  failureReason        String?
+  createdAt            DateTime                 @default(now())
+  updatedAt            DateTime                 @updatedAt
+  representative       Representative           @relation(fields: [representativeId], references: [id])
+  contact              Contact?                 @relation(fields: [contactId], references: [id])
+  conversation         Conversation?            @relation(fields: [conversationId], references: [id])
+  generationRun        GenerationRun?           @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
+  delegationTask       DelegationTask?          @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep   DelegationTaskStep?      @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  policyProfile        CapabilityPolicyProfile? @relation(fields: [policyProfileId], references: [id])
+  sandboxLease         SandboxLease?            @relation(fields: [sandboxLeaseId], references: [id], onDelete: SetNull)
+  toolExecutions       ToolExecution[]
+  browserSession       BrowserSession?
+  artifacts            Artifact[]
+  approvalRequests     ApprovalRequest[]
+  ledgerEntries        LedgerEntry[]
 
   @@index([representativeId, status, createdAt])
   @@index([contactId, createdAt])
   @@index([conversationId, createdAt])
   @@index([generationRunId, createdAt])
+  @@index([delegationTaskId, status, createdAt])
+  @@index([delegationTaskStepId])
   @@index([sandboxLeaseId, createdAt])
 }
 
@@ -2094,7 +2225,7 @@ model SandboxIdentity {
   id                  String                @id @default(cuid())
   representativeId    String
   contactId           String
-  scopeKey             String                @default("contact")
+  scopeKey            String                @default("contact")
   audienceIdentityId  String?
   provider            SandboxProviderKind   @default(DOCKER)
   providerIdentityKey String?
@@ -2118,14 +2249,14 @@ model SandboxIdentity {
 }
 
 model SandboxLease {
-  id                String              @id @default(cuid())
+  id                String                @id @default(cuid())
   sandboxIdentityId String
-  provider          SandboxProviderKind @default(DOCKER)
-  networkMode       ComputeNetworkMode @default(NO_NETWORK)
+  provider          SandboxProviderKind   @default(DOCKER)
+  networkMode       ComputeNetworkMode    @default(NO_NETWORK)
   filesystemMode    ComputeFilesystemMode @default(WORKSPACE_ONLY)
-  baseImage         String @default("debian:bookworm-slim")
+  baseImage         String                @default("debian:bookworm-slim")
   providerSandboxId String?
-  status            SandboxLeaseStatus  @default(STARTING)
+  status            SandboxLeaseStatus    @default(STARTING)
   runnerLeaseId     String?
   containerId       String?
   sessionRoot       String?
@@ -2133,9 +2264,9 @@ model SandboxLease {
   expiresAt         DateTime?
   stoppedAt         DateTime?
   errorReason       String?
-  createdAt         DateTime            @default(now())
-  updatedAt         DateTime            @updatedAt
-  sandboxIdentity   SandboxIdentity     @relation(fields: [sandboxIdentityId], references: [id])
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  sandboxIdentity   SandboxIdentity       @relation(fields: [sandboxIdentityId], references: [id])
   computeSessions   ComputeSession[]
   browserSessions   BrowserSession[]
 
@@ -2146,127 +2277,394 @@ model SandboxLease {
 }
 
 model ToolExecution {
-  id                String                    @id @default(cuid())
-  sessionId         String
-  mcpBindingId      String?
-  capability        CapabilityKind
-  subagentId        String?
-  status            ToolExecutionStatus       @default(QUEUED)
-  requestedCommand  String?
-  requestedPath     String?
-  requestPayload    Json?
-  workingDirectory  String?
-  policyDecision    PolicyDecision?
-  approvalRequestId String?
-  startedAt         DateTime?
-  finishedAt        DateTime?
-  exitCode          Int?
-  cpuMs             Int?
-  wallMs            Int?
-  bytesRead         Int?
-  bytesWritten      Int?
-  createdAt         DateTime                  @default(now())
-  session           ComputeSession            @relation(fields: [sessionId], references: [id])
-  mcpBinding        RepresentativeMcpBinding? @relation(fields: [mcpBindingId], references: [id])
-  artifacts         Artifact[]
-  browserNavigation BrowserNavigation?
+  id                   String                    @id @default(cuid())
+  sessionId            String
+  mcpBindingId         String?
+  capability           CapabilityKind
+  subagentId           String?
+  delegationTaskId     String?
+  delegationTaskStepId String?
+  status               ToolExecutionStatus       @default(QUEUED)
+  requestedCommand     String?
+  requestedPath        String?
+  requestPayload       Json?
+  workingDirectory     String?
+  policyDecision       PolicyDecision?
+  approvalRequestId    String?
+  startedAt            DateTime?
+  finishedAt           DateTime?
+  exitCode             Int?
+  cpuMs                Int?
+  wallMs               Int?
+  bytesRead            Int?
+  bytesWritten         Int?
+  createdAt            DateTime                  @default(now())
+  session              ComputeSession            @relation(fields: [sessionId], references: [id])
+  mcpBinding           RepresentativeMcpBinding? @relation(fields: [mcpBindingId], references: [id])
+  delegationTask       DelegationTask?           @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep   DelegationTaskStep?       @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  artifacts            Artifact[]
+  browserNavigation    BrowserNavigation?
 
   @@index([sessionId, createdAt])
   @@index([status, createdAt])
   @@index([mcpBindingId, createdAt])
+  @@index([delegationTaskId, status, createdAt])
+  @@index([delegationTaskStepId])
 }
 
 model ApprovalRequest {
-  id                     String          @id @default(cuid())
-  representativeId       String
-  contactId              String?
-  conversationId         String?
-  sessionId              String?
-  toolExecutionId        String?         @unique
-  generationRunId        String?
-  subagentId             String?
-  status                 ApprovalStatus  @default(PENDING)
-  reason                 String
-  requestedActionSummary String
-  riskSummary            String
-  requestedAt            DateTime        @default(now())
-  expiresAt              DateTime?
-  resolvedAt             DateTime?
-  resolvedBy             String?
-  decisionNote           String?
-  requestPayloadHash     String?
-  matchedPolicyRuleId    String?
-  representative         Representative  @relation(fields: [representativeId], references: [id])
-  contact                Contact?        @relation(fields: [contactId], references: [id])
-  conversation           Conversation?   @relation(fields: [conversationId], references: [id])
-  session                ComputeSession? @relation(fields: [sessionId], references: [id])
-  generationRun          GenerationRun?  @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
-  workflowRuns           WorkflowRun[]
+  id                       String                        @id @default(cuid())
+  representativeId         String
+  contactId                String?
+  conversationId           String?
+  sessionId                String?
+  toolExecutionId          String?                       @unique
+  generationRunId          String?
+  subagentId               String?
+  delegationTaskId         String?
+  delegationTaskStepId     String?
+  status                   ApprovalStatus                @default(PENDING)
+  reason                   String
+  requestedActionSummary   String
+  riskSummary              String
+  requestedAt              DateTime                      @default(now())
+  expiresAt                DateTime?
+  resolvedAt               DateTime?
+  resolvedBy               String?
+  decisionNote             String?
+  requestPayloadHash       String?
+  matchedPolicyRuleId      String?
+  representative           Representative                @relation(fields: [representativeId], references: [id])
+  contact                  Contact?                      @relation(fields: [contactId], references: [id])
+  conversation             Conversation?                 @relation(fields: [conversationId], references: [id])
+  session                  ComputeSession?               @relation(fields: [sessionId], references: [id])
+  generationRun            GenerationRun?                @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
+  delegationTask           DelegationTask?               @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep       DelegationTaskStep?           @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  delegationExternalEffect DelegationTaskExternalEffect?
+  workflowRuns             WorkflowRun[]
 
   @@index([representativeId, status, requestedAt])
   @@index([generationRunId, status])
+  @@index([delegationTaskId, status, requestedAt])
+  @@index([delegationTaskStepId])
 }
 
 model Artifact {
-  id               String          @id @default(cuid())
-  representativeId String
-  contactId        String?
-  conversationId   String?
-  sessionId        String?
-  toolExecutionId  String?
-  kind             ArtifactKind
-  bucket           String
-  objectKey        String
-  mimeType         String
-  sizeBytes        Int
-  sha256           String
-  isPinned         Boolean         @default(false)
-  pinnedAt         DateTime?
-  pinnedBy         String?
-  downloadCount    Int             @default(0)
-  lastDownloadedAt DateTime?
-  retentionUntil   DateTime?
-  summary          String?
-  createdAt        DateTime        @default(now())
-  representative   Representative  @relation(fields: [representativeId], references: [id])
-  contact          Contact?        @relation(fields: [contactId], references: [id])
-  conversation     Conversation?   @relation(fields: [conversationId], references: [id])
-  session          ComputeSession? @relation(fields: [sessionId], references: [id])
-  toolExecution    ToolExecution?  @relation(fields: [toolExecutionId], references: [id])
-  deliverables     Deliverable[]
+  id                   String                 @id @default(cuid())
+  representativeId     String
+  contactId            String?
+  conversationId       String?
+  sessionId            String?
+  toolExecutionId      String?
+  delegationTaskId     String?
+  delegationTaskStepId String?
+  kind                 ArtifactKind
+  bucket               String
+  objectKey            String
+  mimeType             String
+  sizeBytes            Int
+  sha256               String
+  isPinned             Boolean                @default(false)
+  pinnedAt             DateTime?
+  pinnedBy             String?
+  downloadCount        Int                    @default(0)
+  lastDownloadedAt     DateTime?
+  retentionUntil       DateTime?
+  summary              String?
+  createdAt            DateTime               @default(now())
+  representative       Representative         @relation(fields: [representativeId], references: [id])
+  contact              Contact?               @relation(fields: [contactId], references: [id])
+  conversation         Conversation?          @relation(fields: [conversationId], references: [id])
+  session              ComputeSession?        @relation(fields: [sessionId], references: [id])
+  toolExecution        ToolExecution?         @relation(fields: [toolExecutionId], references: [id])
+  delegationTask       DelegationTask?        @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep   DelegationTaskStep?    @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  deliverables         Deliverable[]
+  delegationOutputs    DelegationTaskOutput[]
 
   @@index([representativeId, createdAt])
   @@index([sessionId, createdAt])
+  @@index([delegationTaskId, createdAt])
+  @@index([delegationTaskStepId])
 }
 
 model Deliverable {
-  id                    String                @id @default(cuid())
+  id                    String                 @id @default(cuid())
   representativeId      String
   artifactId            String?
+  delegationTaskId      String?
   title                 String
   summary               String
   kind                  DeliverableKind
-  visibility            DeliverableVisibility @default(OWNER_ONLY)
+  visibility            DeliverableVisibility  @default(OWNER_ONLY)
   sourceKind            DeliverableSourceKind
   externalUrl           String?
-  bundleItemArtifactIds String[]              @default([])
+  bundleItemArtifactIds String[]               @default([])
   packageObjectKey      String?
   packageMimeType       String?
   packageSizeBytes      Int?
   packageSha256         String?
   packageBuiltAt        DateTime?
   packageCacheKey       String?
-  downloadCount         Int                   @default(0)
+  downloadCount         Int                    @default(0)
   lastDownloadedAt      DateTime?
   createdBy             String?
-  createdAt             DateTime              @default(now())
-  updatedAt             DateTime              @updatedAt
-  representative        Representative        @relation(fields: [representativeId], references: [id])
-  artifact              Artifact?             @relation(fields: [artifactId], references: [id])
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  representative        Representative         @relation(fields: [representativeId], references: [id])
+  artifact              Artifact?              @relation(fields: [artifactId], references: [id])
+  delegationTask        DelegationTask?        @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationOutputs     DelegationTaskOutput[]
 
   @@index([representativeId, visibility, createdAt])
   @@index([artifactId])
   @@index([representativeId, sourceKind, packageBuiltAt])
+  @@index([delegationTaskId, createdAt])
+}
+
+model DelegationTask {
+  id                      String                         @id @default(cuid())
+  representativeId        String
+  representativeVersionId String?
+  contactId               String?
+  audienceIdentityId      String?
+  originConversationId    String?
+  originEpisodeId         String?
+  kind                    DelegationTaskKind             @default(SERVICE_REQUEST)
+  initiatorType           DelegationTaskInitiatorType
+  initiatorId             String?
+  title                   String
+  objective               String
+  desiredOutcome          String
+  status                  DelegationTaskStatus           @default(DRAFT)
+  nextActionBy            DelegationTaskNextActor        @default(SYSTEM)
+  blockingReason          String?
+  priority                Int                            @default(0)
+  idempotencyKey          String?                        @unique
+  planSummary             String?
+  acceptanceCriteria      Json?
+  contextSnapshot         Json?
+  deadlineAt              DateTime?
+  startedAt               DateTime?
+  completedAt             DateTime?
+  failedAt                DateTime?
+  canceledAt              DateTime?
+  version                 Int                            @default(1)
+  createdAt               DateTime                       @default(now())
+  updatedAt               DateTime                       @updatedAt
+  representative          Representative                 @relation(fields: [representativeId], references: [id])
+  representativeVersion   RepresentativeVersion?         @relation(fields: [representativeVersionId], references: [id], onDelete: SetNull)
+  contact                 Contact?                       @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  audienceIdentity        AudienceIdentity?              @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  originConversation      Conversation?                  @relation(fields: [originConversationId], references: [id], onDelete: SetNull)
+  originEpisode           ConversationEpisode?           @relation(fields: [originEpisodeId], references: [id], onDelete: SetNull)
+  messages                Message[]
+  generationRuns          GenerationRun[]
+  computeSessions         ComputeSession[]
+  toolExecutions          ToolExecution[]
+  approvalRequests        ApprovalRequest[]
+  workflowRuns            WorkflowRun[]
+  artifacts               Artifact[]
+  deliverables            Deliverable[]
+  ledgerEntries           LedgerEntry[]
+  auditEvents             EventAudit[]
+  inputs                  DelegationTaskInput[]
+  dataGrants              DelegationTaskDataGrant[]
+  resourcePolicy          DelegationTaskResourcePolicy?
+  steps                   DelegationTaskStep[]
+  externalEffects         DelegationTaskExternalEffect[]
+  outputs                 DelegationTaskOutput[]
+  events                  DelegationTaskEvent[]
+
+  @@index([representativeId, status, updatedAt])
+  @@index([contactId, status, updatedAt])
+  @@index([audienceIdentityId, status, updatedAt])
+  @@index([originConversationId, createdAt])
+  @@index([nextActionBy, status, updatedAt])
+  @@index([deadlineAt, status])
+}
+
+model DelegationTaskInput {
+  id                    String                    @id @default(cuid())
+  delegationTaskId      String
+  kind                  DelegationTaskInputKind
+  referenceType         String
+  referenceId           String?
+  label                 String
+  mimeType              String?
+  sha256                String?
+  providedByType        DelegationTaskActorType
+  providedById          String?
+  authorizationRequired Boolean                   @default(false)
+  metadata              Json?
+  createdAt             DateTime                  @default(now())
+  delegationTask        DelegationTask            @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
+  dataGrants            DelegationTaskDataGrant[]
+
+  @@index([delegationTaskId, createdAt])
+  @@index([referenceType, referenceId])
+}
+
+model DelegationTaskDataGrant {
+  id               String                    @id @default(cuid())
+  delegationTaskId String
+  taskInputId      String?
+  grantorType      DelegationTaskActorType
+  grantorId        String?
+  resourceType     String
+  resourceId       String
+  scopes           String[]                  @default([])
+  purpose          String
+  status           DelegationDataGrantStatus @default(ACTIVE)
+  policySnapshot   Json?
+  grantedAt        DateTime                  @default(now())
+  expiresAt        DateTime?
+  revokedAt        DateTime?
+  createdAt        DateTime                  @default(now())
+  updatedAt        DateTime                  @updatedAt
+  delegationTask   DelegationTask            @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
+  taskInput        DelegationTaskInput?      @relation(fields: [taskInputId], references: [id], onDelete: SetNull)
+
+  @@index([delegationTaskId, status, createdAt])
+  @@index([resourceType, resourceId, status])
+  @@index([taskInputId])
+}
+
+model DelegationTaskResourcePolicy {
+  id                                    String                @id @default(cuid())
+  delegationTaskId                      String                @unique
+  maxDurationMinutes                    Int                   @default(15)
+  maxCostCents                          Int?
+  maxCredits                            Int?
+  maxComputeMinutes                     Int?
+  maxToolCalls                          Int                   @default(1)
+  maxSteps                              Int                   @default(1)
+  maxArtifactBytes                      Int?
+  allowedCapabilities                   CapabilityKind[]      @default([])
+  allowedSkillSlugs                     String[]              @default([])
+  allowedMcpBindingIds                  String[]              @default([])
+  allowedExternalAccountIds             String[]              @default([])
+  networkMode                           ComputeNetworkMode    @default(NO_NETWORK)
+  filesystemMode                        ComputeFilesystemMode @default(WORKSPACE_ONLY)
+  requireApprovalForExternalSideEffects Boolean               @default(true)
+  snapshot                              Json?
+  createdAt                             DateTime              @default(now())
+  updatedAt                             DateTime              @updatedAt
+  delegationTask                        DelegationTask        @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
+}
+
+model DelegationTaskStep {
+  id                 String                         @id @default(cuid())
+  delegationTaskId   String
+  sequence           Int
+  kind               DelegationTaskStepKind
+  title              String
+  description        String?
+  status             DelegationTaskStepStatus       @default(DRAFT)
+  capability         CapabilityKind?
+  skillSlug          String?
+  mcpBindingId       String?
+  externalAccountId  String?
+  dependsOnStepIds   String[]                       @default([])
+  requiresApproval   Boolean                        @default(false)
+  approvedAt         DateTime?
+  maxCostCents       Int?
+  maxDurationSeconds Int?
+  inputSnapshot      Json?
+  outputSnapshot     Json?
+  idempotencyKey     String?                        @unique
+  startedAt          DateTime?
+  completedAt        DateTime?
+  failedAt           DateTime?
+  createdAt          DateTime                       @default(now())
+  updatedAt          DateTime                       @updatedAt
+  delegationTask     DelegationTask                 @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
+  generationRuns     GenerationRun[]
+  computeSessions    ComputeSession[]
+  toolExecutions     ToolExecution[]
+  approvalRequests   ApprovalRequest[]
+  workflowRuns       WorkflowRun[]
+  artifacts          Artifact[]
+  externalEffects    DelegationTaskExternalEffect[]
+  outputs            DelegationTaskOutput[]
+
+  @@unique([delegationTaskId, sequence])
+  @@index([delegationTaskId, status, sequence])
+}
+
+model DelegationTaskExternalEffect {
+  id                   String                         @id @default(cuid())
+  delegationTaskId     String
+  delegationTaskStepId String?
+  approvalRequestId    String?                        @unique
+  type                 String
+  target               String
+  action               String
+  status               DelegationExternalEffectStatus @default(PROPOSED)
+  idempotencyKey       String                         @unique
+  requestPayload       Json?
+  responseSnapshot     Json?
+  externalReferenceId  String?
+  approvedAt           DateTime?
+  executedAt           DateTime?
+  reconciledAt         DateTime?
+  failureReason        String?
+  createdAt            DateTime                       @default(now())
+  updatedAt            DateTime                       @updatedAt
+  delegationTask       DelegationTask                 @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
+  delegationTaskStep   DelegationTaskStep?            @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  approvalRequest      ApprovalRequest?               @relation(fields: [approvalRequestId], references: [id], onDelete: SetNull)
+  output               DelegationTaskOutput?
+
+  @@index([delegationTaskId, status, createdAt])
+  @@index([delegationTaskStepId])
+  @@index([externalReferenceId])
+}
+
+model DelegationTaskOutput {
+  id                   String                        @id @default(cuid())
+  delegationTaskId     String
+  delegationTaskStepId String?
+  kind                 DelegationTaskOutputKind
+  artifactId           String?
+  deliverableId        String?
+  externalEffectId     String?                       @unique
+  title                String
+  summary              String?
+  isFinal              Boolean                       @default(false)
+  createdAt            DateTime                      @default(now())
+  delegationTask       DelegationTask                @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
+  delegationTaskStep   DelegationTaskStep?           @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  artifact             Artifact?                     @relation(fields: [artifactId], references: [id], onDelete: SetNull)
+  deliverable          Deliverable?                  @relation(fields: [deliverableId], references: [id], onDelete: SetNull)
+  externalEffect       DelegationTaskExternalEffect? @relation(fields: [externalEffectId], references: [id], onDelete: SetNull)
+
+  @@index([delegationTaskId, isFinal, createdAt])
+  @@index([delegationTaskStepId])
+  @@index([artifactId])
+  @@index([deliverableId])
+}
+
+model DelegationTaskEvent {
+  id               String                  @id @default(cuid())
+  delegationTaskId String
+  sequence         Int
+  eventType        String
+  actorType        DelegationTaskActorType
+  actorId          String?
+  fromStatus       DelegationTaskStatus?
+  toStatus         DelegationTaskStatus?
+  payload          Json?
+  previousHash     String?
+  eventHash        String
+  occurredAt       DateTime                @default(now())
+  delegationTask   DelegationTask          @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([delegationTaskId, sequence])
+  @@index([delegationTaskId, occurredAt])
+  @@index([eventType, occurredAt])
 }
 
 model WorkflowRun {
@@ -2277,6 +2675,8 @@ model WorkflowRun {
   handoffRequestId     String?
   approvalRequestId    String?
   subagentId           String?
+  delegationTaskId     String?
+  delegationTaskStepId String?
   kind                 WorkflowKind
   engine               WorkflowEngine          @default(LOCAL_RUNNER)
   status               WorkflowStatus          @default(QUEUED)
@@ -2305,6 +2705,8 @@ model WorkflowRun {
   conversation         Conversation?           @relation(fields: [conversationId], references: [id])
   handoffRequest       HandoffRequest?         @relation(fields: [handoffRequestId], references: [id])
   approvalRequest      ApprovalRequest?        @relation(fields: [approvalRequestId], references: [id])
+  delegationTask       DelegationTask?         @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep   DelegationTaskStep?     @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
   commandOutbox        WorkflowCommandOutbox[]
 
   @@index([representativeId, scheduledAt])
@@ -2312,6 +2714,8 @@ model WorkflowRun {
   @@index([status, scheduledAt])
   @@index([handoffRequestId])
   @@index([approvalRequestId])
+  @@index([delegationTaskId, status, scheduledAt])
+  @@index([delegationTaskStepId])
 }
 
 model WorkflowCommandOutbox {
@@ -2399,6 +2803,7 @@ model LedgerEntry {
   conversationId   String?
   sessionId        String?
   toolExecutionId  String?
+  delegationTaskId String?
   invoiceId        String?
   kind             LedgerEntryKind
   quantity         Float
@@ -2412,10 +2817,12 @@ model LedgerEntry {
   contact          Contact?        @relation(fields: [contactId], references: [id])
   conversation     Conversation?   @relation(fields: [conversationId], references: [id])
   session          ComputeSession? @relation(fields: [sessionId], references: [id])
+  delegationTask   DelegationTask? @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
 
   @@index([representativeId, createdAt])
   @@index([sessionId, createdAt])
   @@index([kind, createdAt])
+  @@index([delegationTaskId, createdAt])
 }
 
 model RepresentativeContextSync {

@@ -42,12 +42,12 @@ Delegate currently includes these working surfaces and services:
 
 - **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
 - **Public representative app** in `apps/reps`, including representative profiles, service tiers, web chat, recharge-entry modules, and signed public-chat session state.
-- **Owner dashboard** in `apps/web`, covering representative health, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, and workflow state.
+- **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, and workflow state.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and shared runtime policy, kept as future channel infrastructure rather than the first Delegate product surface.
 - **AMN wallet control plane** covering internal wallet ledger entries, mock recharge, Agent token purchase, usage charging, Creator 20% revenue policy, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
-- **Prisma/Postgres data model** for representatives, contacts, conversations, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
+- **Prisma/Postgres data model** for representatives, contacts, conversations, delegation tasks, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
 - **OpenViking integration** for representative-scoped public resources, recall, session commit traces, and safe memory previews.
 - **ClawHub registry primitives** for future non-privileged representative skill packs.
 
@@ -119,7 +119,7 @@ Telegram remains future channel infrastructure for this product direction. If De
 
 Delegate is built around a few hard boundaries:
 
-- **Postgres is business truth.** Workflow, billing, handoff, approval, and dashboard state come from Postgres records.
+- **Postgres is business truth.** Delegation tasks connect workflow, billing, handoff, approval, outputs, and dashboard state in Postgres without treating a conversation or runtime session as the task itself.
 - **Temporal is orchestration.** Temporal handles start, durable waiting, retry, wake-up, and cancellation delivery for long-running workflow timers.
 - **Public representatives are not private workspaces.** The runtime does not read owner-private files, accounts, secrets, or hidden notes.
 - **Users recharge an Agent, not the platform generically.** The page should make clear which Digital Representative receives the balance.
@@ -333,6 +333,7 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
 - [Public audience identity](./docs/public-audience-identity.md): web anonymous identity, Contact/Conversation, recharge, and sandbox linkage.
 - [Conversation platform](./docs/conversation-platform.md): channel-neutral messages, episodes, versions, human control, SSE, and Matrix Application Service boundaries.
+- [Delegation tasks](./docs/delegation-tasks.md): task aggregate, lifecycle, ownership validation, approvals, outputs, and audit linkage.
 - [Creator training loop](./docs/creator-training-loop.md): source registry, creator feedback, suggestion workflow, review, evaluation, and rollback.
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model, outbox, timer, cancellation, and dashboard semantics.
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute and browser isolation model.

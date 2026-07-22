@@ -19,6 +19,7 @@ import {
   claimNextGenerationWorkItem,
   completeOperatorMessageDelivery,
   completeInlineGenerationRun,
+  createComputeDelegationTask,
   createAudienceComputeSession,
   deferGenerationRunForHuman,
   executeAudienceTool,
@@ -27,6 +28,9 @@ import {
   getRepresentativeRuntimeSetupSnapshot,
   loadGenerationRecentTurns,
   markGenerationDeliveryComplete,
+  markDelegationTaskAwaitingApproval,
+  markDelegationTaskRunning,
+  finalizeComputeDelegationTask,
   recallRepresentativeContext,
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
@@ -305,31 +309,65 @@ async function processPublicWebComputeRequest(input: {
   }
 
   const subagent = resolveComputeSubagent(input.parsed.capability);
-  const session = await createAudienceComputeSession({
+  const delegation = await createComputeDelegationTask({
     representativeId: input.setup.id,
+    representativeVersionId: input.item.representativeVersionId,
     contactId: input.item.contactId,
     conversationId: input.item.conversationId,
+    ...(input.item.episodeId ? { episodeId: input.item.episodeId } : {}),
     generationRunId: input.item.runId,
-    subagentId: subagent.id,
-    requestedCapabilities: [input.parsed.capability],
-    reason: `web:${input.parsed.capability}`,
-    requestedBaseImage: input.setup.compute.baseImage,
+    inputMessageId: input.item.inputMessageId,
+    objective: input.item.userText,
+    actionSummary: input.parsed.displayTarget,
+    capability: input.parsed.capability,
+    maxDurationMinutes: input.setup.compute.maxSessionMinutes,
+    networkMode: input.setup.compute.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
+    filesystemMode: input.setup.compute.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
   });
-  const result = await executeAudienceTool(session.session.id, {
-    ...input.parsed,
-    subagentId: subagent.id,
-    hasPaidEntitlement:
-      input.parsed.hasPaidEntitlement ||
-      input.item.usage.passUnlocked ||
-      input.item.usage.deepHelpUnlocked,
-  });
+  if (!delegation.step) throw new Error("Delegation task is missing its compute step.");
+
+  let result: Awaited<ReturnType<typeof executeAudienceTool>>;
+  try {
+    const session = await createAudienceComputeSession({
+      representativeId: input.setup.id,
+      contactId: input.item.contactId,
+      conversationId: input.item.conversationId,
+      generationRunId: input.item.runId,
+      delegationTaskId: delegation.task.id,
+      delegationTaskStepId: delegation.step.id,
+      subagentId: subagent.id,
+      requestedCapabilities: [input.parsed.capability],
+      reason: `web:${input.parsed.capability}`,
+      requestedBaseImage: input.setup.compute.baseImage,
+    });
+    await markDelegationTaskRunning(delegation.task.id);
+    result = await executeAudienceTool(session.session.id, {
+      ...input.parsed,
+      subagentId: subagent.id,
+      hasPaidEntitlement:
+        input.parsed.hasPaidEntitlement ||
+        input.item.usage.passUnlocked ||
+        input.item.usage.deepHelpUnlocked,
+    });
+  } catch (error) {
+    await finalizeComputeDelegationTask({
+      taskId: delegation.task.id,
+      outcome: "failed",
+      failureReason: error instanceof Error ? error.message : "Compute execution failed.",
+    });
+    throw error;
+  }
 
   if (result.outcome === "pending_approval") {
     if (!result.approvalRequest) throw new Error("Compute approval response is missing.");
+    await markDelegationTaskAwaitingApproval({
+      taskId: delegation.task.id,
+      approvalId: result.approvalRequest.id,
+    });
     return {
       approvalId: result.approvalRequest.id,
       text: [
-        `Compute 请求已提交，正在等待代表所有者审批。`,
+        `委托任务已提交，正在等待代表所有者审批。`,
         `操作：${result.approvalRequest.requestedActionSummary}`,
         `风险：${result.approvalRequest.riskSummary}`,
         "审批通过后会在此对话中自动返回执行结果。",
@@ -352,17 +390,28 @@ async function processPublicWebComputeRequest(input: {
     url: `/reps/${input.item.representativeSlug}/chat/artifacts/${artifact.id}/download`,
   }));
 
+  await finalizeComputeDelegationTask({
+    taskId: delegation.task.id,
+    outcome: result.outcome === "blocked"
+      ? "blocked"
+      : result.outcome === "failed"
+        ? "failed"
+        : "completed",
+    artifacts: result.artifacts,
+    ...(typeof billing === "number" ? { actualCredits: billing } : {}),
+  });
+
   if (result.outcome === "blocked") {
-    return { text: `Compute 请求被安全策略拒绝，未执行。${billingLine}` };
+    return { text: `委托任务被安全策略拒绝，未执行。${billingLine}` };
   }
   if (result.outcome === "failed") {
     return {
-      text: `Compute 已执行，但任务失败。\n\n${artifactSummary}${billingLine}`,
+      text: `委托任务已执行，但未能完成。\n\n${artifactSummary}${billingLine}`,
       ...(attachments.length ? { attachments } : {}),
     };
   }
   return {
-    text: `Compute 已在隔离沙盒中执行完成。\n\n${artifactSummary}${billingLine}`,
+    text: `委托任务已在隔离沙盒中执行完成。\n\n${artifactSummary}${billingLine}`,
     ...(attachments.length ? { attachments } : {}),
   };
 }

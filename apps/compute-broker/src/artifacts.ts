@@ -196,6 +196,10 @@ export async function persistBufferArtifact(params: {
   summary?: string;
 }) {
   const createdAt = new Date();
+  const taskContext = await prisma.computeSession.findUnique({
+    where: { id: params.sessionId },
+    select: { delegationTaskId: true, delegationTaskStepId: true },
+  });
   const artifactId = `artifact_${randomBytes(8).toString("hex")}`;
   const objectKey = buildArtifactObjectKey({
     representativeSlug: params.representativeSlug,
@@ -233,6 +237,8 @@ export async function persistBufferArtifact(params: {
       conversationId: params.conversationId ?? null,
       sessionId: params.sessionId,
       toolExecutionId: params.executionId,
+      delegationTaskId: taskContext?.delegationTaskId ?? null,
+      delegationTaskStepId: taskContext?.delegationTaskStepId ?? null,
       kind: params.kind,
       bucket: computeBrokerConfig.artifactStore.bucket,
       objectKey,
@@ -250,6 +256,7 @@ export async function persistBufferArtifact(params: {
       representativeId: params.representativeId,
       contactId: params.contactId ?? null,
       conversationId: params.conversationId ?? null,
+      delegationTaskId: taskContext?.delegationTaskId ?? null,
       type: "ARTIFACT_STORED",
       payload: {
         artifactId: artifact.id,

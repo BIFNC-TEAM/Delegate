@@ -42,12 +42,12 @@ Delegate 现在包含这些可运行的页面和服务：
 
 - **营销站点** 位于 `apps/site`，使用 Dispatch Editorial 设计系统。
 - **公开 representative 应用** 位于 `apps/reps`，包含代表档案、服务档位、网页聊天、充值入口模块，以及签名 public-chat session state。
-- **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、governed actions、compute sessions、artifacts、deliverables、packages、OpenViking traces 和 workflow state。
+- **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、委托任务、governed actions、compute sessions、artifacts、deliverables、packages、OpenViking traces 和 workflow state。
 - **可选 Telegram bot runtime 基础** 位于 `apps/bot`，基于 grammY 和共享 runtime policy，作为未来渠道基础设施保留，不作为第一版 Delegate 产品主入口。
 - **AMN wallet control plane** 覆盖内部钱包 ledger、mock recharge、Agent token purchase、usage charging、Creator 20% revenue policy、refund/reversal services、withdrawal request freeze、provider adapters，以及 owner/public wallet views。
 - **Compute broker** 位于 `apps/compute-broker`，在 approval 和 policy gate 后提供受治理的 `exec`、`read`、`write`、`process` 和 `browser` 请求。
 - **Workflow runner** 位于 `apps/workflow-runner`，支持 local runner 和 Temporal-backed durable workflow dispatch。
-- **Prisma/Postgres 数据模型** 覆盖 representatives、contacts、conversations、handoffs、approvals、invoices、compute、artifacts、deliverables、workflows 和 audit trails。
+- **Prisma/Postgres 数据模型** 覆盖 representatives、contacts、conversations、delegation tasks、handoffs、approvals、invoices、compute、artifacts、deliverables、workflows 和 audit trails。
 - **OpenViking 集成** 支持 representative-scoped public resources、recall、session commit traces 和 safe memory previews。
 - **ClawHub registry primitives** 为后续非特权 representative skill packs 做准备。
 
@@ -118,7 +118,7 @@ Telegram 是未来渠道基础设施。如果 Delegate 后续提供 bot 内数�
 
 Delegate 围绕几条硬边界构建：
 
-- **Postgres 是业务真相。** Workflow、billing、handoff、approval 和 dashboard state 都来自 Postgres 记录。
+- **Postgres 是业务真相。** 委托任务在 Postgres 中贯穿 workflow、billing、handoff、approval、outputs 和 dashboard state，不再把会话或某个 runtime session 当成任务本身。
 - **Temporal 负责编排。** Temporal 负责长时 workflow timer 的 start、durable waiting、retry、wake-up 和 cancellation delivery。
 - **公共代表不是私人工作区。** Runtime 不读取 owner-private files、accounts、secrets 或 hidden notes。
 - **用户充值给某个 Agent，不是泛泛充值给平台。** 页面应该清楚说明余额属于哪个 Digital Representative。
@@ -327,6 +327,7 @@ Delegate 使用 [DESIGN.md](./DESIGN.md) 中定义的 **Dispatch Editorial** 方
 
 - [Architecture](./docs/architecture.md): product thesis、runtime loop、security boundary 和 OpenViking rules。
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): 更大的系统方向和 tradeoffs。
+- [Delegation tasks](./docs/delegation-tasks.md): 委托任务聚合、生命周期、归属校验、审批、产物和审计关联。
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model、outbox、timer、cancellation 和 dashboard semantics。
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute 和 browser isolation model。
 - [OpenViking integration](./docs/openviking-integration.md): public memory 和 recall integration。

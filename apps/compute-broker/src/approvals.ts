@@ -18,6 +18,8 @@ export async function createApprovalRequestForExecution(params: {
   contactId?: string | null;
   conversationId?: string | null;
   generationRunId?: string | null;
+  delegationTaskId?: string | null;
+  delegationTaskStepId?: string | null;
   sessionId: string;
   executionId: string;
   subagentId: string;
@@ -38,6 +40,8 @@ export async function createApprovalRequestForExecution(params: {
         contactId: params.contactId ?? null,
         conversationId: params.conversationId ?? null,
         generationRunId: params.generationRunId ?? null,
+        delegationTaskId: params.delegationTaskId ?? null,
+        delegationTaskStepId: params.delegationTaskStepId ?? null,
         sessionId: params.sessionId,
         toolExecutionId: params.executionId,
         subagentId: params.subagentId,
@@ -63,9 +67,12 @@ export async function createApprovalRequestForExecution(params: {
         representativeId: params.representativeId,
         contactId: params.contactId ?? null,
         conversationId: params.conversationId ?? null,
+        delegationTaskId: params.delegationTaskId ?? null,
         type: "APPROVAL_REQUESTED",
         payload: {
           approvalRequestId: approval.id,
+          delegationTaskId: params.delegationTaskId ?? null,
+          delegationTaskStepId: params.delegationTaskStepId ?? null,
           executionId: params.executionId,
           subagentId: params.subagentId,
           reason: params.reason,
@@ -96,6 +103,7 @@ export async function createApprovalRequestForExecution(params: {
           representativeId: params.representativeId,
           contactId: params.contactId ?? null,
           conversationId: params.conversationId ?? null,
+          delegationTaskId: params.delegationTaskId ?? null,
           approvalRequestId: approval.id,
           subagentId: params.subagentId,
           kind: "APPROVAL_EXPIRATION",

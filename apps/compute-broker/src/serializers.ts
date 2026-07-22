@@ -124,6 +124,8 @@ export function serializeSession(session: {
   representativeId: string;
   contactId: string | null;
   conversationId: string | null;
+  delegationTaskId: string | null;
+  delegationTaskStepId: string | null;
   subagentId: string | null;
   policyProfileId: string | null;
   requestedBy: string;
@@ -149,6 +151,8 @@ export function serializeSession(session: {
     representativeId: session.representativeId,
     contactId: session.contactId,
     conversationId: session.conversationId,
+    delegationTaskId: session.delegationTaskId,
+    delegationTaskStepId: session.delegationTaskStepId,
     subagentId: session.subagentId
       ? computeSubagentIdSchema.parse(session.subagentId)
       : null,

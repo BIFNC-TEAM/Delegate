@@ -8,6 +8,7 @@ import {
 import { buildMessageRetentionExpiry } from "@delegate/runtime";
 
 import { prisma } from "./prisma";
+import { finalizeComputeDelegationTask } from "./delegation-tasks";
 
 export type ComputeApprovalConversationOutcome =
   | "completed"
@@ -31,7 +32,7 @@ export async function finalizeComputeApprovalConversation(input: {
   actualCredits?: number;
   failureReason?: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.approvalId}))`;
     const approval = await tx.approvalRequest.findUnique({
       where: { id: input.approvalId },
@@ -43,7 +44,8 @@ export async function finalizeComputeApprovalConversation(input: {
     const run = approval?.generationRun;
     if (!approval || !run) return null;
     if (run.status === GenerationRunStatus.COMPLETED && run.outputMessageId) {
-      return tx.message.findUnique({ where: { id: run.outputMessageId } });
+      const message = await tx.message.findUnique({ where: { id: run.outputMessageId } });
+      return { message, delegationTaskId: approval.delegationTaskId };
     }
 
     const now = new Date();
@@ -60,6 +62,7 @@ export async function finalizeComputeApprovalConversation(input: {
         episodeId: run.episodeId,
         senderType: MessageSenderType.REPRESENTATIVE,
         senderDisplayName: approval.representative.displayName,
+        delegationTaskId: approval.delegationTaskId,
         contentType: MessageContentType.TOOL_RESULT,
         text,
         content: {
@@ -125,8 +128,27 @@ export async function finalizeComputeApprovalConversation(input: {
       where: { id: run.episodeId || "__no_episode__" },
       data: { status: ConversationEpisodeStatus.WAITING_USER },
     });
-    return message;
+    return { message, delegationTaskId: approval.delegationTaskId };
   });
+  if (!result) return null;
+  if (result.delegationTaskId) {
+    await finalizeComputeDelegationTask({
+      taskId: result.delegationTaskId,
+      outcome: input.outcome === "completed"
+        ? "completed"
+        : input.outcome === "rejected"
+          ? "rejected"
+          : input.outcome === "expired"
+            ? "expired"
+            : input.outcome === "policy_denied"
+              ? "blocked"
+              : "failed",
+      ...(input.artifacts?.length ? { artifacts: input.artifacts } : {}),
+      ...(input.failureReason ? { failureReason: input.failureReason } : {}),
+      ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
+    });
+  }
+  return result.message;
 }
 
 function formatComputeOutcome(input: {
@@ -136,10 +158,10 @@ function formatComputeOutcome(input: {
   failureReason?: string;
 }) {
   if (input.outcome === "rejected") {
-    return "Compute 请求未获批准，因此没有执行。";
+    return "委托任务未获批准，因此没有执行。";
   }
   if (input.outcome === "expired") {
-    return "Compute 审批已超时，任务未执行。如仍需要，请重新提交请求。";
+    return "委托任务审批已超时，任务未执行。如仍需要，请重新提交请求。";
   }
   if (input.outcome === "policy_denied") {
     return `审批后安全策略复核未通过，任务没有执行。${input.failureReason ? `\n\n原因：${input.failureReason}` : ""}`;
@@ -150,9 +172,9 @@ function formatComputeOutcome(input: {
     : "没有生成可展示的结果文件。";
   const billing = typeof input.actualCredits === "number" ? `\n\n消耗：${input.actualCredits} credits` : "";
   if (input.outcome === "failed") {
-    return `审批已通过，但 Compute 执行失败。\n\n${artifacts}${input.failureReason ? `\n\n原因：${input.failureReason}` : ""}${billing}`;
+    return `审批已通过，但委托任务执行失败。\n\n${artifacts}${input.failureReason ? `\n\n原因：${input.failureReason}` : ""}${billing}`;
   }
-  return `审批已通过，Compute 执行完成。\n\n${artifacts}${billing}`;
+  return `审批已通过，委托任务执行完成。\n\n${artifacts}${billing}`;
 }
 
 function resolveConversationArtifactFileName(artifact: {

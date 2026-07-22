@@ -20,6 +20,8 @@ export async function createAudienceComputeSession(input: {
   contactId: string;
   conversationId: string;
   generationRunId?: string;
+  delegationTaskId?: string;
+  delegationTaskStepId?: string;
   subagentId: "compute-agent" | "browser-agent";
   requestedCapabilities: ToolExecutionRequest["capability"][];
   reason: string;
@@ -32,6 +34,8 @@ export async function createAudienceComputeSession(input: {
       contactId: input.contactId,
       conversationId: input.conversationId,
       ...(input.generationRunId ? { generationRunId: input.generationRunId } : {}),
+      ...(input.delegationTaskId ? { delegationTaskId: input.delegationTaskId } : {}),
+      ...(input.delegationTaskStepId ? { delegationTaskStepId: input.delegationTaskStepId } : {}),
       subagentId: input.subagentId,
       requestedBy: "audience",
       requestedCapabilities: input.requestedCapabilities,

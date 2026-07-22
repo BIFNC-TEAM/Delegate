@@ -61,6 +61,7 @@ export type ConversationInboxSnapshot = {
 export type ConversationPendingItem = {
   id: string;
   conversationId?: string;
+  kind?: "handoff" | "delegation_task";
   contactName: string;
   reason: string;
   summary: string;
@@ -126,6 +127,18 @@ export type ConversationDetailSnapshot = {
     model?: string;
     errorMessage?: string;
     createdAt: string;
+  }>;
+  tasks: Array<{
+    id: string;
+    title: string;
+    kind: string;
+    status: string;
+    nextActionBy: string;
+    blockingReason?: string;
+    stepStatus?: string;
+    outputCount: number;
+    approvalCount: number;
+    updatedAt: string;
   }>;
   notes: Array<{
     id: string;
@@ -231,7 +244,7 @@ export async function listConversationInboxSnapshot(
     });
     if (!representative) return null;
 
-    const [conversations, pending, leads] = await Promise.all([
+    const [conversations, handoffs, delegationTasks, leads] = await Promise.all([
       prisma.conversation.findMany({
       where: { representativeId: representative.id },
       include: {
@@ -273,6 +286,27 @@ export async function listConversationInboxSnapshot(
         },
         include: { contact: true },
         orderBy: [{ recommendedPriority: "desc" }, { createdAt: "asc" }],
+        take: 100,
+      }),
+      prisma.delegationTask.findMany({
+        where: {
+          representativeId: representative.id,
+          status: {
+            in: [
+              "DRAFT",
+              "CLARIFYING",
+              "READY",
+              "AWAITING_APPROVAL",
+              "QUEUED",
+              "RUNNING",
+              "WAITING_FOR_USER",
+              "WAITING_FOR_OWNER",
+              "FAILED",
+            ],
+          },
+        },
+        include: { contact: true },
+        orderBy: [{ priority: "desc" }, { updatedAt: "desc" }],
         take: 100,
       }),
       prisma.lead.findMany({
@@ -320,6 +354,34 @@ export async function listConversationInboxSnapshot(
         needsHuman: episodeState === "needs_human" || episodeState === "human_active",
       };
     });
+    const pending: ConversationPendingItem[] = [
+      ...delegationTasks.map((task) => ({
+        id: task.id,
+        ...(task.originConversationId ? { conversationId: task.originConversationId } : {}),
+        kind: "delegation_task" as const,
+        contactName: task.contact?.displayName || task.contact?.username || `Task ${task.id.slice(-5)}`,
+        reason: task.nextActionBy === "OWNER"
+          ? "owner_action"
+          : task.nextActionBy === "AUDIENCE"
+            ? "user_input"
+            : "delegated_execution",
+        summary: task.title,
+        priority: task.priority,
+        status: task.status.toLowerCase(),
+        createdAt: task.createdAt.toISOString(),
+      })),
+      ...handoffs.map((item) => ({
+        id: item.id,
+        ...(item.conversationId ? { conversationId: item.conversationId } : {}),
+        kind: "handoff" as const,
+        contactName: item.contact.displayName || item.contact.username || `Visitor ${item.contact.id.slice(-5)}`,
+        reason: item.reason,
+        summary: item.summary,
+        priority: item.recommendedPriority,
+        status: item.status.toLowerCase(),
+        createdAt: item.createdAt.toISOString(),
+      })),
+    ];
 
     return {
       representative,
@@ -332,16 +394,7 @@ export async function listConversationInboxSnapshot(
         activeLeads: leads.length,
       },
       conversations: items,
-      pending: pending.map((item) => ({
-        id: item.id,
-        ...(item.conversationId ? { conversationId: item.conversationId } : {}),
-        contactName: item.contact.displayName || item.contact.username || `Visitor ${item.contact.id.slice(-5)}`,
-        reason: item.reason,
-        summary: item.summary,
-        priority: item.recommendedPriority,
-        status: item.status.toLowerCase(),
-        createdAt: item.createdAt.toISOString(),
-      })),
+      pending,
       leads: leads.map((item) => ({
         id: item.id,
         ...(item.conversationId ? { conversationId: item.conversationId } : {}),
@@ -399,6 +452,14 @@ export async function getConversationDetailSnapshot(
         },
         generationRuns: {
           orderBy: { createdAt: "desc" },
+          take: 20,
+        },
+        delegationTasks: {
+          include: {
+            steps: { orderBy: { sequence: "asc" }, take: 1 },
+            _count: { select: { outputs: true, approvalRequests: true } },
+          },
+          orderBy: { updatedAt: "desc" },
           take: 20,
         },
         internalNotes: {
@@ -474,6 +535,18 @@ export async function getConversationDetailSnapshot(
         ...(run.model ? { model: run.model } : {}),
         ...(run.errorMessage ? { errorMessage: run.errorMessage } : {}),
         createdAt: run.createdAt.toISOString(),
+      })),
+      tasks: conversation.delegationTasks.map((task) => ({
+        id: task.id,
+        title: task.title,
+        kind: task.kind.toLowerCase(),
+        status: task.status.toLowerCase(),
+        nextActionBy: task.nextActionBy.toLowerCase(),
+        ...(task.blockingReason ? { blockingReason: task.blockingReason } : {}),
+        ...(task.steps[0] ? { stepStatus: task.steps[0].status.toLowerCase() } : {}),
+        outputCount: task._count.outputs,
+        approvalCount: task._count.approvalRequests,
+        updatedAt: task.updatedAt.toISOString(),
       })),
       notes: conversation.internalNotes.map((note) => ({
         id: note.id,
@@ -730,6 +803,7 @@ export async function completeInlineGenerationRun(input: {
         episodeId: run.episodeId,
         senderType: MessageSenderType.REPRESENTATIVE,
         senderDisplayName: input.senderDisplayName,
+        delegationTaskId: run.delegationTaskId,
         contentType: MessageContentType.TEXT,
         text: replyText,
         ...(input.intent ? { content: { intent: input.intent } } : {}),
@@ -850,6 +924,7 @@ export async function waitGenerationRunForComputeApproval(input: {
         episodeId: run.episodeId,
         senderType: MessageSenderType.REPRESENTATIVE,
         senderDisplayName: input.senderDisplayName,
+        delegationTaskId: run.delegationTaskId,
         contentType: MessageContentType.TEXT,
         text: replyText,
         content: { kind: "compute_approval_pending", approvalId: input.approvalId },
@@ -872,7 +947,11 @@ export async function waitGenerationRunForComputeApproval(input: {
     });
     await tx.approvalRequest.update({
       where: { id: input.approvalId },
-      data: { generationRunId: run.id },
+      data: {
+        generationRunId: run.id,
+        delegationTaskId: run.delegationTaskId,
+        delegationTaskStepId: run.delegationTaskStepId,
+      },
     });
     await tx.message.update({
       where: { id: run.inputMessageId },
@@ -2551,6 +2630,7 @@ function buildDemoConversationDetail(
         createdAt: item.lastMessageAt,
       },
     ],
+    tasks: [],
     notes: [],
   };
 }

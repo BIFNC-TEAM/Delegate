@@ -371,7 +371,7 @@
 .dashboard-approval-decision > div { display: flex; justify-content: flex-end; gap: 8px; }
 .dashboard-approval-decision button:disabled { cursor: wait; opacity: .6; }
 .dashboard-approval-alert { padding: 11px 13px; border: 1px solid #fecaca; border-radius: 9px; color: #991b1b; background: #fef2f2; font-size: .72rem; }
-.dashboard-approval-empty { padding: 24px !important; color: var(--v2-muted) !important; text-align: center; white-space: normal !important; }
+.dashboard-v2-table td.dashboard-approval-empty { padding: 24px; color: var(--v2-muted); text-align: center; white-space: normal; }
 
 @media (max-width: 1240px) {
   .dashboard-v2-metric-grid-six { grid-template-columns: repeat(3,minmax(0,1fr)); }

@@ -2094,6 +2094,7 @@ model SandboxIdentity {
   id                  String                @id @default(cuid())
   representativeId    String
   contactId           String
+  scopeKey             String                @default("contact")
   audienceIdentityId  String?
   provider            SandboxProviderKind   @default(DOCKER)
   providerIdentityKey String?
@@ -2109,9 +2110,10 @@ model SandboxIdentity {
   leases              SandboxLease[]
   browserSessions     BrowserSession[]
 
-  @@unique([representativeId, contactId])
+  @@unique([representativeId, contactId, scopeKey])
   @@index([representativeId, status, updatedAt])
   @@index([contactId, updatedAt])
+  @@index([scopeKey, updatedAt])
   @@index([audienceIdentityId, updatedAt])
 }
 

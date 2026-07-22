@@ -1,13 +1,17 @@
 import {
   generateRepresentativeReply,
+  planNaturalLanguageComputeRequest,
   renderGroundedKnowledgeFallback,
 } from "@delegate/model-runtime";
 import {
+  buildComputeRequestFromNaturalLanguagePlan,
   createConversationPlan,
-  parseComputeRequest,
+  parseComputeDirective,
   renderReplyPreview,
   resolveComputeSubagent,
   resolveConversationSubagent,
+  shouldConsiderNaturalLanguageCompute,
+  type ParsedComputeRequest,
 } from "@delegate/runtime";
 import {
   buildRepresentativeRuntimeProfile,
@@ -87,7 +91,43 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     );
     if (!setup) throw new Error(`Representative ${item.representativeSlug} was not found.`);
 
-    const parsedCompute = item.channel === "web" ? parseComputeRequest(item.userText) : null;
+    const computeDirective = item.channel === "web"
+      ? parseComputeDirective(item.userText)
+      : { kind: "none" as const };
+    if (computeDirective.kind === "help" || computeDirective.kind === "invalid") {
+      const replyText = computeDirective.kind === "invalid"
+        ? `${computeDirective.message}\n\n可用示例：\n${computeDirective.examples}`
+        : [
+            setup.compute.enabled
+              ? "这个代表已启用隔离计算。你也可以直接用自然语言描述需要生成文件、运行命令或浏览网页的任务。"
+              : "这个代表当前没有启用隔离计算。",
+            `高级命令示例：\n${computeDirective.examples}`,
+          ].join("\n\n");
+      const completed = await completeInlineGenerationRun({
+        runId: item.runId,
+        replyText,
+        senderDisplayName: item.representativeName,
+        intent: "compute_help",
+        countUsage: false,
+        completeOutbox: false,
+      });
+      outputMessageId = completed.message.id;
+      await markGenerationDeliveryComplete({ runId: item.runId, outputMessageId });
+      return { processed: true as const, runId: item.runId, status: "completed" as const };
+    }
+
+    let parsedCompute = computeDirective.kind === "request" ? computeDirective.request : null;
+    if (
+      !parsedCompute &&
+      item.channel === "web" &&
+      setup.compute.enabled &&
+      shouldConsiderNaturalLanguageCompute(item.userText)
+    ) {
+      const planned = await planNaturalLanguageComputeRequest({ userText: item.userText });
+      if (planned.ok && planned.plan) {
+        parsedCompute = buildComputeRequestFromNaturalLanguagePlan(planned.plan);
+      }
+    }
     if (parsedCompute) {
       const computeReply = await processPublicWebComputeRequest({
         item,
@@ -116,6 +156,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         replyText: computeReply.text,
         senderDisplayName: item.representativeName,
         intent: "compute",
+        ...(computeReply.attachments?.length ? { attachments: computeReply.attachments } : {}),
         completeOutbox: false,
       });
       outputMessageId = completed.message.id;
@@ -245,8 +286,18 @@ export async function processNextConversationWork(config: ConversationWorkerConf
 async function processPublicWebComputeRequest(input: {
   item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
   setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>;
-  parsed: NonNullable<ReturnType<typeof parseComputeRequest>>;
-}): Promise<{ text: string; approvalId?: string }> {
+  parsed: ParsedComputeRequest;
+}): Promise<{
+  text: string;
+  approvalId?: string;
+  attachments?: Array<{
+    fileName: string;
+    mimeType?: string;
+    sizeBytes?: number;
+    artifactId: string;
+    url: string;
+  }>;
+}> {
   if (!input.setup.compute.enabled) {
     return {
       text: "这个代表当前没有启用 Compute。请联系代表所有者在 Dashboard 中启用后再试。",
@@ -293,16 +344,46 @@ async function processPublicWebComputeRequest(input: {
     : "没有生成可展示的结果文件。";
   const billing = result.billing?.actualCredits ?? result.billing?.estimatedCredits;
   const billingLine = typeof billing === "number" ? `\n\n消耗：${billing} credits` : "";
+  const attachments = result.artifacts.map((artifact) => ({
+    fileName: resolvePublicArtifactFileName(artifact, input.parsed),
+    mimeType: artifact.mimeType,
+    sizeBytes: artifact.sizeBytes,
+    artifactId: artifact.id,
+    url: `/reps/${input.item.representativeSlug}/chat/artifacts/${artifact.id}/download`,
+  }));
 
   if (result.outcome === "blocked") {
     return { text: `Compute 请求被安全策略拒绝，未执行。${billingLine}` };
   }
   if (result.outcome === "failed") {
-    return { text: `Compute 已执行，但任务失败。\n\n${artifactSummary}${billingLine}` };
+    return {
+      text: `Compute 已执行，但任务失败。\n\n${artifactSummary}${billingLine}`,
+      ...(attachments.length ? { attachments } : {}),
+    };
   }
   return {
     text: `Compute 已在隔离沙盒中执行完成。\n\n${artifactSummary}${billingLine}`,
+    ...(attachments.length ? { attachments } : {}),
   };
+}
+
+function resolvePublicArtifactFileName(
+  artifact: { id: string; kind: string; mimeType: string },
+  request: ParsedComputeRequest,
+) {
+  if (artifact.kind === "file" && request.path) {
+    return request.path.split("/").pop() || "result.txt";
+  }
+  const extension = artifact.mimeType.includes("json")
+    ? "json"
+    : artifact.mimeType.includes("csv")
+      ? "csv"
+      : artifact.mimeType.includes("png")
+        ? "png"
+        : artifact.mimeType.includes("jpeg")
+          ? "jpg"
+          : "txt";
+  return `${artifact.kind}-${artifact.id}.${extension}`;
 }
 
 async function sendTelegramOperatorMessage(input: {

@@ -62,6 +62,7 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
 
   const now = new Date();
   const provider = mapSandboxProviderToDb(params.providerKind);
+  const scopeKey = buildSandboxScopeKey(params.session.conversationId);
   const expiresAt = new Date(
     now.getTime() + (params.idleStopMinutes ?? computeBrokerConfig.sandboxLifecycle.idleStopMinutes) * 60 * 1000,
   );
@@ -73,14 +74,16 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
     });
     const identity = await tx.sandboxIdentity.upsert({
       where: {
-        representativeId_contactId: {
+        representativeId_contactId_scopeKey: {
           representativeId: params.session.representativeId,
           contactId: params.session.contactId!,
+          scopeKey,
         },
       },
       update: {
         provider,
         audienceIdentityId: contact?.audienceIdentityId ?? null,
+        scopeKey,
         status: "ACTIVE",
         lastUsedAt: now,
         deletedAt: null,
@@ -88,9 +91,14 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       create: {
         representativeId: params.session.representativeId,
         contactId: params.session.contactId!,
+        scopeKey,
         audienceIdentityId: contact?.audienceIdentityId ?? null,
         provider,
-        providerIdentityKey: buildProviderIdentityKey(params.session.representativeId, params.session.contactId!),
+        providerIdentityKey: buildProviderIdentityKey(
+          params.session.representativeId,
+          params.session.contactId!,
+          scopeKey,
+        ),
         status: "ACTIVE",
         lastUsedAt: now,
       },
@@ -251,8 +259,16 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
   }
 }
 
-export function buildProviderIdentityKey(representativeId: string, contactId: string) {
-  return `delegate:${representativeId}:${contactId}`;
+export function buildSandboxScopeKey(conversationId: string | null | undefined) {
+  return conversationId ? `conversation:${conversationId}` : "contact";
+}
+
+export function buildProviderIdentityKey(
+  representativeId: string,
+  contactId: string,
+  scopeKey = "contact",
+) {
+  return `delegate:${representativeId}:${contactId}:${scopeKey}`;
 }
 
 export function mapSandboxProviderToDb(provider: "docker" | "daytona") {

@@ -12,6 +12,7 @@ export * from "./auth-session";
 export * from "./compute";
 export * from "./compute-client";
 export * from "./compute-conversation-results";
+export * from "./public-compute-artifacts";
 export * from "./conversation-platform";
 export * from "./creator-training";
 export * from "./deliverable-insights";

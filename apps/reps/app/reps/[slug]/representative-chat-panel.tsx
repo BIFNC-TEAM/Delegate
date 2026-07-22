@@ -7,12 +7,14 @@ import type { PlanTier, PricingPlan } from "@delegate/domain";
 import type { PublicChatResponse } from "./public-chat";
 
 type Citation = { title: string; excerpt?: string; uri?: string };
+type ChatAttachment = { id: string; fileName: string; mimeType?: string; sizeBytes?: number; url?: string };
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   text: string;
   status?: string;
   citations?: Citation[];
+  attachments?: ChatAttachment[];
   senderType?: string;
   senderDisplayName?: string;
 };
@@ -42,10 +44,13 @@ export function RepresentativeChatPanel(props: {
   pricing: PricingPlan[];
   locale: "zh" | "en";
   freeReplyLimit: number;
+  computeEnabled: boolean;
 }) {
   const t = props.locale === "zh" ? zhCopy : enCopy;
   const demoCommerceEnabled = process.env.NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS === "true";
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const chatLogRef = useRef<HTMLDivElement>(null);
+  const keepChatPinnedRef = useRef(true);
   const activeRunSourceRef = useRef<EventSource | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
   const [selectedTier, setSelectedTier] = useState<PlanTier>("free");
@@ -66,6 +71,7 @@ export function RepresentativeChatPanel(props: {
   const [error, setError] = useState<string | null>(null);
   const activePlan = props.pricing.find((plan) => plan.tier === selectedTier) ?? props.pricing[0];
   const planAction = resolvePlanSelectionAction(selectedTier, demoCommerceEnabled);
+  const computeAssist = getComputeAssist(input, props.locale, props.computeEnabled);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,6 +89,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
+            ...(message.attachments?.length ? { attachments: message.attachments } : {}),
           })));
         }
         setHumanActive(payload.humanActive);
@@ -112,6 +119,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
+            ...(message.attachments?.length ? { attachments: message.attachments } : {}),
           })));
         }
         setHumanActive(payload.humanActive);
@@ -139,6 +147,15 @@ export function RepresentativeChatPanel(props: {
     }
   }, [props.pricing, selectedTier, usage.freeRepliesRemaining]);
 
+  useEffect(() => {
+    if (!keepChatPinnedRef.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const chatLog = chatLogRef.current;
+      if (chatLog) chatLog.scrollTop = chatLog.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [messages]);
+
   function chooseStarter(starter: string) {
     setInput(starter);
     requestAnimationFrame(() => inputRef.current?.focus());
@@ -148,6 +165,7 @@ export function RepresentativeChatPanel(props: {
     event.preventDefault();
     const text = input.trim();
     if (!text || busy) return;
+    keepChatPinnedRef.current = true;
     const userMessage = { id: createClientMessageId(), role: "user" as const, text, status: "accepted" };
     setMessages((current) => [...current, userMessage]);
     setInput("");
@@ -212,7 +230,7 @@ export function RepresentativeChatPanel(props: {
         const snapshot = JSON.parse((event as MessageEvent<string>).data) as {
           status: string;
           errorMessage?: string;
-          message?: { id: string; text: string; status: string; citations: Citation[] };
+          message?: { id: string; text: string; status: string; citations: Citation[]; attachments?: ChatAttachment[] };
         };
         if (["completed", "waiting_approval"].includes(snapshot.status) && snapshot.message) {
           appendAssistant({
@@ -221,6 +239,7 @@ export function RepresentativeChatPanel(props: {
             text: snapshot.message.text,
             status: snapshot.message.status,
             citations: snapshot.message.citations,
+            ...(snapshot.message.attachments?.length ? { attachments: snapshot.message.attachments } : {}),
           });
           finish();
         } else if (["failed", "canceled"].includes(snapshot.status)) {
@@ -258,7 +277,16 @@ export function RepresentativeChatPanel(props: {
 
       <div className="representative-chat-first-grid">
         <div className={messages.length <= 1 ? "representative-chat-surface is-empty" : "representative-chat-surface"}>
-          <div className="representative-chat-log" aria-live="polite">
+          <div
+            ref={chatLogRef}
+            className="representative-chat-log"
+            aria-live="polite"
+            onScroll={(event) => {
+              const chatLog = event.currentTarget;
+              keepChatPinnedRef.current =
+                chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight <= 80;
+            }}
+          >
             {messages.map((message) => {
               const visibleStatus = getVisitorMessageStatus(message.status, props.locale);
               const isOperator = message.senderType === "operator";
@@ -285,6 +313,23 @@ export function RepresentativeChatPanel(props: {
                       ))}
                     </div>
                   ) : null}
+                  {message.attachments?.length ? (
+                    <div className="representative-chat-artifacts">
+                      <strong>{t.artifactsLabel}</strong>
+                      {message.attachments.map((attachment) => (
+                        <div className="representative-chat-artifact" key={attachment.id}>
+                          {attachment.mimeType?.startsWith("image/") && attachment.url ? (
+                            <img alt={attachment.fileName} src={`${attachment.url}?inline=1`} />
+                          ) : null}
+                          <div>
+                            <span>{attachment.fileName}</span>
+                            <small>{[attachment.mimeType, formatAttachmentBytes(attachment.sizeBytes)].filter(Boolean).join(" · ")}</small>
+                          </div>
+                          {attachment.url ? <a href={attachment.url}>{t.downloadArtifact}</a> : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </article>
               );
             })}
@@ -300,7 +345,15 @@ export function RepresentativeChatPanel(props: {
 
           <form className="representative-chat-form" onSubmit={handleSubmit}>
             <label className="panel-title" htmlFor="representative-chat-input">{t.inputLabel}</label>
-            <textarea className="dashboard-textarea representative-chat-textarea" id="representative-chat-input" onChange={(event) => setInput(event.target.value)} placeholder={t.placeholder} ref={inputRef} rows={3} value={input} />
+            <textarea aria-describedby={computeAssist ? "representative-compute-assist" : undefined} className="dashboard-textarea representative-chat-textarea" id="representative-chat-input" onChange={(event) => setInput(event.target.value)} placeholder={t.placeholder} ref={inputRef} rows={3} value={input} />
+            {computeAssist ? (
+              <div className="representative-compute-assist" id="representative-compute-assist" role="status">
+                <div><strong>{computeAssist.title}</strong><span>{computeAssist.detail}</span></div>
+                {computeAssist.examples.length ? (
+                  <div>{computeAssist.examples.map((example) => <button key={example.value} onClick={() => chooseStarter(example.value)} type="button"><b>{example.label}</b><span>{example.value}</span></button>)}</div>
+                ) : null}
+              </div>
+            ) : null}
             <div className="dashboard-form-footer"><p className="footer-note">{t.footnote}</p><div className="button-row"><button className="button-primary" disabled={busy || hydrating || !input.trim()} type="submit">{hydrating ? t.loadingHistory : busy ? t.sending : t.send}</button></div></div>
           </form>
           {error ? <p className="feedback-error" role="alert">{error}</p> : null}
@@ -383,12 +436,47 @@ function createClientMessageId() {
     : `web-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function formatAttachmentBytes(value: number | undefined) {
+  if (typeof value !== "number") return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getComputeAssist(value: string, locale: "zh" | "en", enabled: boolean) {
+  const normalized = value.trim();
+  if (!/^\/compute(?:\s|$)/i.test(normalized)) return null;
+  const zh = locale === "zh";
+  if (!enabled) {
+    return {
+      title: zh ? "此代表未启用隔离计算" : "Isolated compute is not enabled",
+      detail: zh ? "你仍可继续普通对话，或联系代表所有者启用该能力。" : "Continue chatting normally or ask the representative owner to enable it.",
+      examples: [],
+    };
+  }
+  const examples = [
+    { label: zh ? "查看目录" : "List files", value: "/compute ls" },
+    { label: zh ? "读取文件" : "Read file", value: "/compute read notes/example.txt" },
+    { label: zh ? "生成文件" : "Create file", value: "/compute write notes/example.txt ::: 示例内容" },
+    { label: zh ? "浏览网页" : "Browse URL", value: "/compute browser https://example.com" },
+  ];
+  const exact = /^\/compute$/i.test(normalized);
+  return {
+    title: zh ? "隔离计算" : "Isolated compute",
+    detail: exact
+      ? (zh ? "直接选择示例，或继续输入。需要修改文件、访问网页或执行复杂命令时可能进入审批。" : "Choose an example or keep typing. File changes, web access, and complex commands may require approval.")
+      : (zh ? "命令会先经过权限、费用和安全策略检查。" : "The request will be checked against permission, cost, and safety policies first."),
+    examples: exact ? examples : [],
+  };
+}
+
 const zhCopy = {
   eyebrow: "与数字代表对话",
   title: (name: string) => `向 ${name} 提问`,
   summary: "直接描述你的问题；回答会保留在本次会话中，并在使用公开资料时标明来源。",
   aiStatus: "AI 正在接待", humanStatus: "真人正在接待",
   aiLabel: "AI", humanLabel: "真人", youLabel: "你", citationsLabel: "参考的公开资料", openSource: "打开来源",
+  artifactsLabel: "任务结果", downloadArtifact: "下载",
   startersLabel: "你可以这样开始",
   starters: ["我想了解你们提供什么服务", "我有一个合作需求", "帮我整理报价所需信息", "我希望联系本人"],
   inputLabel: "想解决什么？", placeholder: "描述你的问题、背景和期望结果…", footnote: "请勿发送密码、密钥或不应公开的敏感信息。",
@@ -418,6 +506,7 @@ const enCopy = {
   summary: "Describe what you need. This conversation persists, and answers show the public sources they use.",
   aiStatus: "AI is responding", humanStatus: "Human is responding",
   aiLabel: "AI", humanLabel: "Human", youLabel: "You", citationsLabel: "Public sources used", openSource: "Open source",
+  artifactsLabel: "Task results", downloadArtifact: "Download",
   startersLabel: "Try one of these",
   starters: ["What services do you offer?", "I have a partnership request", "Help me prepare a quote request", "I want to contact the owner"],
   inputLabel: "What do you need?", placeholder: "Describe the problem, context, and outcome you want…", footnote: "Do not send passwords, API keys, or sensitive information that should not be public.",

@@ -127,6 +127,34 @@ export async function persistScreenshotArtifact(params: {
   });
 }
 
+export async function persistFileArtifact(params: {
+  representativeId: string;
+  representativeSlug: string;
+  contactId?: string | null | undefined;
+  conversationId?: string | null | undefined;
+  sessionId: string;
+  executionId: string;
+  retentionDays: number;
+  path: string;
+  content: string;
+}) {
+  const body = Buffer.from(params.content, "utf8");
+  const preview = summarizeArtifact(params.content);
+  return persistBufferArtifact({
+    representativeId: params.representativeId,
+    representativeSlug: params.representativeSlug,
+    contactId: params.contactId,
+    conversationId: params.conversationId,
+    sessionId: params.sessionId,
+    executionId: params.executionId,
+    kind: "FILE",
+    body,
+    mimeType: inferTextFileMimeType(params.path),
+    retentionDays: params.retentionDays,
+    summary: preview ? `${params.path}: ${preview}` : params.path,
+  });
+}
+
 async function persistTextArtifact(params: {
   representativeId: string;
   representativeSlug: string;
@@ -258,6 +286,24 @@ function summarizeArtifact(value: string): string {
   }
 
   return normalized.slice(0, 240);
+}
+
+function inferTextFileMimeType(path: string) {
+  const extension = path.toLowerCase().split(".").pop();
+  switch (extension) {
+    case "json":
+      return "application/json; charset=utf-8";
+    case "csv":
+      return "text/csv; charset=utf-8";
+    case "md":
+    case "markdown":
+      return "text/markdown; charset=utf-8";
+    case "html":
+    case "htm":
+      return "text/html; charset=utf-8";
+    default:
+      return "text/plain; charset=utf-8";
+  }
 }
 
 function sha256(buffer: Buffer): string {

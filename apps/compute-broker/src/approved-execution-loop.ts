@@ -92,7 +92,21 @@ async function reconcileApprovalConversationResults() {
     if (!approval.toolExecutionId) continue;
     const execution = await prisma.toolExecution.findUnique({
       where: { id: approval.toolExecutionId },
-      select: { status: true, session: { select: { failureReason: true } } },
+      select: {
+        status: true,
+        requestedPath: true,
+        session: { select: { failureReason: true } },
+        artifacts: {
+          select: {
+            id: true,
+            kind: true,
+            objectKey: true,
+            mimeType: true,
+            sizeBytes: true,
+            summary: true,
+          },
+        },
+      },
     });
     if (!execution || !["SUCCEEDED", "FAILED", "CANCELED"].includes(execution.status)) continue;
     await finalizeComputeApprovalConversation({
@@ -105,6 +119,21 @@ async function reconcileApprovalConversationResults() {
             : "failed",
       ...(execution.session.failureReason
         ? { failureReason: execution.session.failureReason }
+        : {}),
+      ...(execution.artifacts.length
+        ? {
+            artifacts: execution.artifacts.map((artifact) => ({
+              id: artifact.id,
+              kind: artifact.kind.toLowerCase(),
+              objectKey: artifact.objectKey,
+              mimeType: artifact.mimeType,
+              sizeBytes: artifact.sizeBytes,
+              summary: artifact.summary,
+              ...(artifact.kind === "FILE" && execution.requestedPath
+                ? { fileName: execution.requestedPath.split("/").pop() || "result.txt" }
+                : {}),
+            })),
+          }
         : {}),
     });
   }

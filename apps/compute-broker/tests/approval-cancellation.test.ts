@@ -11,6 +11,9 @@ const { mockPrisma, mockFinalizeComputeApprovalConversation } = vi.hoisted(() =>
     contact: {
       update: vi.fn(),
     },
+    computeSession: {
+      update: vi.fn(),
+    },
     eventAudit: {
       create: vi.fn(),
     },
@@ -80,6 +83,7 @@ describe("approval workflow cancellation", () => {
       resolvedBy: data.resolvedBy,
     }));
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
+    mockPrisma.computeSession.update.mockResolvedValue({ id: "session-1" });
     mockPrisma.toolExecution.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.workflowRun.findMany.mockResolvedValue([
       {
@@ -152,6 +156,33 @@ describe("approval workflow cancellation", () => {
         }),
       }),
     });
+  });
+
+  it("refreshes the compute session lifetime when approval is granted", async () => {
+    mockPrisma.approvalRequest.findUnique.mockResolvedValue({
+      ...buildApproval("PENDING"),
+      sessionId: "session-1",
+      representative: { computeMaxSessionMinutes: 15 },
+    });
+    mockPrisma.approvalRequest.findUniqueOrThrow.mockResolvedValue(buildApproval("APPROVED"));
+    const { resolveApproval } = await import("../src/executions");
+
+    const before = Date.now();
+    await resolveApproval("approval-1", {
+      resolution: "approved",
+      resolvedBy: "owner-dashboard",
+    });
+
+    expect(mockPrisma.computeSession.update).toHaveBeenCalledWith({
+      where: { id: "session-1" },
+      data: expect.objectContaining({
+        expiresAt: expect.any(Date),
+        lastHeartbeatAt: expect.any(Date),
+        failureReason: null,
+      }),
+    });
+    const expiresAt = mockPrisma.computeSession.update.mock.calls.at(-1)?.[0].data.expiresAt as Date;
+    expect(expiresAt.getTime()).toBeGreaterThanOrEqual(before + 14 * 60 * 1000);
   });
 
   it("expires an overdue approval instead of accepting a late decision", async () => {

@@ -11,6 +11,10 @@ const runEventsSource = readFileSync(
   resolve(__dirname, "../app/reps/[slug]/chat/runs/[runId]/events/route.ts"),
   "utf8",
 );
+const conversationEventsSource = readFileSync(
+  resolve(__dirname, "../app/reps/[slug]/chat/events/route.ts"),
+  "utf8",
+);
 const openAiSource = readFileSync(
   resolve(__dirname, "../../../packages/model-runtime/src/openai.ts"),
   "utf8",
@@ -30,6 +34,11 @@ describe("public chat reply resilience", () => {
     expect(panelSource).toContain("RUN_SUBSCRIPTION_DEADLINE_MS = 150_000");
     expect(panelSource).toContain("EventSource reconnects automatically");
     expect(panelSource).not.toContain('source.addEventListener("error", () => {\n      source.close();');
+  });
+
+  it("removes abort listeners after each conversation heartbeat wait settles", () => {
+    expect(conversationEventsSource).toContain('signal.removeEventListener("abort", finish)');
+    expect(conversationEventsSource).toContain("if (signal.aborted) finish()");
   });
 
   it("prevents SDK retries from multiplying the configured provider timeout", () => {

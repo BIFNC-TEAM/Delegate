@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   generateRepresentativeReply: vi.fn(),
+  planNaturalLanguageComputeRequest: vi.fn(),
   renderGroundedKnowledgeFallback: vi.fn(),
   claimNextOperatorMessageWorkItem: vi.fn(),
   claimNextGenerationWorkItem: vi.fn(),
@@ -12,7 +13,9 @@ const mocks = vi.hoisted(() => ({
   recallRepresentativeContext: vi.fn(),
   markGenerationDeliveryComplete: vi.fn(),
   ensureConversationLeadAndHandoff: vi.fn(),
-  parseComputeRequest: vi.fn(),
+  parseComputeDirective: vi.fn(),
+  shouldConsiderNaturalLanguageCompute: vi.fn(),
+  buildComputeRequestFromNaturalLanguagePlan: vi.fn(),
   createAudienceComputeSession: vi.fn(),
   executeAudienceTool: vi.fn(),
   waitGenerationRunForComputeApproval: vi.fn(),
@@ -20,15 +23,18 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@delegate/model-runtime", () => ({
   generateRepresentativeReply: mocks.generateRepresentativeReply,
+  planNaturalLanguageComputeRequest: mocks.planNaturalLanguageComputeRequest,
   renderGroundedKnowledgeFallback: mocks.renderGroundedKnowledgeFallback,
 }));
 
 vi.mock("@delegate/runtime", () => ({
+  buildComputeRequestFromNaturalLanguagePlan: mocks.buildComputeRequestFromNaturalLanguagePlan,
   createConversationPlan: () => ({ intent: "faq", nextStep: "answer" }),
-  parseComputeRequest: mocks.parseComputeRequest,
+  parseComputeDirective: mocks.parseComputeDirective,
   renderReplyPreview: () => "fallback",
   resolveComputeSubagent: () => ({ id: "compute-agent" }),
   resolveConversationSubagent: () => ({ id: "public", allowedConversationSteps: ["answer"] }),
+  shouldConsiderNaturalLanguageCompute: mocks.shouldConsiderNaturalLanguageCompute,
 }));
 
 vi.mock("@delegate/web-data", () => ({
@@ -57,7 +63,9 @@ describe("conversation worker knowledge recall", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.claimNextOperatorMessageWorkItem.mockResolvedValue(null);
-    mocks.parseComputeRequest.mockReturnValue(null);
+    mocks.parseComputeDirective.mockReturnValue({ kind: "none" });
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(false);
+    mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: null, source: "model" });
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-1",
       runId: "run-1",
@@ -72,7 +80,10 @@ describe("conversation worker knowledge recall", () => {
       channel: "web",
       usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
     });
-    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({ id: "rep-1" });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
     mocks.buildRepresentativeRuntimeProfile.mockReturnValue({ id: "rep-1" });
     mocks.loadGenerationRecentTurns.mockResolvedValue([]);
     mocks.recallRepresentativeContext.mockResolvedValue({
@@ -161,15 +172,18 @@ describe("conversation worker knowledge recall", () => {
       id: "rep-1",
       compute: { enabled: true, baseImage: "debian:bookworm-slim" },
     });
-    mocks.parseComputeRequest.mockReturnValue({
-      capability: "write",
-      path: "notes/demo.txt",
-      content: "hello",
-      hasPaidEntitlement: false,
-      browserMode: "deterministic",
-      maxSteps: 1,
-      allowMutations: false,
-      displayTarget: "notes/demo.txt",
+    mocks.parseComputeDirective.mockReturnValue({
+      kind: "request",
+      request: {
+        capability: "write",
+        path: "notes/demo.txt",
+        content: "hello",
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+        displayTarget: "notes/demo.txt",
+      },
     });
     mocks.createAudienceComputeSession.mockResolvedValue({ session: { id: "session-1" } });
     mocks.executeAudienceTool.mockResolvedValue({
@@ -197,6 +211,105 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.waitGenerationRunForComputeApproval).toHaveBeenCalledWith(expect.objectContaining({
       runId: "run-2",
       approvalId: "approval-1",
+    }));
+  });
+
+  it("returns compute help without creating a sandbox session", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-help",
+      runId: "run-help",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-help",
+      contactId: "contact-help",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-help",
+      userText: "/compute",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.parseComputeDirective.mockReturnValue({
+      kind: "help",
+      examples: "/compute pwd",
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValue({ message: { id: "reply-help" } });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      countUsage: false,
+      intent: "compute_help",
+    }));
+  });
+
+  it("routes a high-confidence natural-language task through the compute planner", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-natural",
+      runId: "run-natural",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-natural",
+      contactId: "contact-natural",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-natural",
+      userText: "把 browser QA 保存到 notes/qa.txt",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
+    const naturalPlan = {
+      capability: "write",
+      path: "notes/qa.txt",
+      content: "browser QA",
+      summary: "生成 notes/qa.txt",
+    };
+    const request = {
+      ...naturalPlan,
+      displayTarget: naturalPlan.summary,
+      hasPaidEntitlement: false,
+      browserMode: "deterministic",
+      maxSteps: 1,
+      allowMutations: false,
+    };
+    mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: naturalPlan, source: "model" });
+    mocks.buildComputeRequestFromNaturalLanguagePlan.mockReturnValue(request);
+    mocks.createAudienceComputeSession.mockResolvedValue({ session: { id: "session-natural" } });
+    mocks.executeAudienceTool.mockResolvedValue({
+      outcome: "completed",
+      artifacts: [{
+        id: "artifact-natural",
+        kind: "file",
+        objectKey: "result/file",
+        mimeType: "text/plain; charset=utf-8",
+        sizeBytes: 10,
+        summary: "/workspace/notes/qa.txt: browser QA",
+      }],
+      billing: { actualCredits: 4 },
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValue({ message: { id: "reply-natural" } });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.planNaturalLanguageComputeRequest).toHaveBeenCalledWith({
+      userText: "把 browser QA 保存到 notes/qa.txt",
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      attachments: [expect.objectContaining({ fileName: "qa.txt", artifactId: "artifact-natural" })],
     }));
   });
 });

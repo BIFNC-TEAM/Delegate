@@ -3,8 +3,15 @@ import { generateBailianResponse } from "./bailian";
 import { assembleRepresentativeReplyPrompt } from "./context";
 import { resolveModelRuntimeEnv, resolveProviderAttemptOrder } from "./config";
 import { generateOpenAIResponse } from "./openai";
+import {
+  buildNaturalLanguageComputePrompt,
+  inferDeterministicNaturalLanguageComputePlan,
+  isNaturalLanguageComputePlanGrounded,
+  parseNaturalLanguageComputePlan,
+} from "./compute-planner";
 import type {
   ModelProvider,
+  NaturalLanguageComputePlannerResult,
   RepresentativeReplyInput,
   RepresentativeReplyResult,
 } from "./types";
@@ -13,6 +20,47 @@ export * from "./config";
 export * from "./context";
 export * from "./pricing";
 export * from "./types";
+
+export async function planNaturalLanguageComputeRequest(params: {
+  userText: string;
+}): Promise<NaturalLanguageComputePlannerResult> {
+  const deterministic = inferDeterministicNaturalLanguageComputePlan(params.userText);
+  const env = resolveModelRuntimeEnv();
+  if (env.state !== "ready") {
+    return deterministic
+      ? { ok: true, plan: deterministic, source: "deterministic" }
+      : { ok: false, reason: `Model runtime unavailable: ${env.state}.`, state: env.state };
+  }
+
+  const attemptOrder = resolveProviderAttemptOrder(env);
+  if (!attemptOrder.length) {
+    return deterministic
+      ? { ok: true, plan: deterministic, source: "deterministic" }
+      : { ok: false, reason: "Model runtime has no credentialed providers available.", state: "missing_credentials" };
+  }
+
+  const prompt = buildNaturalLanguageComputePrompt(params.userText);
+  const failures: string[] = [];
+  for (const provider of attemptOrder) {
+    try {
+      const response = await generateProviderResponse(provider, env, prompt);
+      const plan = parseNaturalLanguageComputePlan(response.replyText);
+      return {
+        ok: true,
+        plan: plan && isNaturalLanguageComputePlanGrounded(plan, params.userText) ? plan : null,
+        source: "model",
+        provider,
+        model: resolveProviderModel(provider, env),
+      };
+    } catch (error) {
+      failures.push(`${provider}: ${error instanceof Error ? error.message : "Compute planning failed."}`);
+    }
+  }
+
+  return deterministic
+    ? { ok: true, plan: deterministic, source: "deterministic" }
+    : { ok: false, reason: failures.join(" | "), state: "ready" };
+}
 
 export async function generateRepresentativeReply(
   params: RepresentativeReplyInput,

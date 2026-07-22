@@ -29,4 +29,10 @@ describe("public Compute approval run lifecycle", () => {
     expect(runEventsSource).toContain('signal.removeEventListener("abort", finish)');
     expect(runEventsSource).toContain("if (signal.aborted) finish()");
   });
+
+  it("keeps newly delivered approval results visible at the bottom of the chat log", () => {
+    expect(panelSource).toContain("const keepChatPinnedRef = useRef(true)");
+    expect(panelSource).toContain("if (chatLog) chatLog.scrollTop = chatLog.scrollHeight");
+    expect(panelSource).toContain("chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight <= 80");
+  });
 });

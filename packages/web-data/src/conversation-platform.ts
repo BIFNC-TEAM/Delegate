@@ -691,6 +691,14 @@ export async function completeInlineGenerationRun(input: {
   outputTokens?: number;
   costCents?: number;
   completeOutbox?: boolean;
+  countUsage?: boolean;
+  attachments?: Array<{
+    fileName: string;
+    mimeType?: string;
+    sizeBytes?: number;
+    artifactId: string;
+    url: string;
+  }>;
   citations?: Array<{
     knowledgeAssetId?: string;
     title: string;
@@ -740,6 +748,19 @@ export async function completeInlineGenerationRun(input: {
               },
             }
           : {}),
+        ...(input.attachments?.length
+          ? {
+              attachments: {
+                create: input.attachments.map((attachment) => ({
+                  fileName: attachment.fileName,
+                  mimeType: attachment.mimeType ?? null,
+                  sizeBytes: attachment.sizeBytes ?? null,
+                  objectKey: attachment.artifactId,
+                  externalUrl: attachment.url,
+                })),
+              },
+            }
+          : {}),
       },
     });
     const completed = await tx.generationRun.update({
@@ -764,7 +785,11 @@ export async function completeInlineGenerationRun(input: {
     });
     await tx.conversation.update({
       where: { id: run.conversationId },
-      data: { state: "WAITING_USER", lastMessageAt: now, freeRepliesUsed: { increment: 1 } },
+      data: {
+        state: "WAITING_USER",
+        lastMessageAt: now,
+        ...(input.countUsage === false ? {} : { freeRepliesUsed: { increment: 1 } }),
+      },
     });
     await tx.conversationEpisode.updateMany({
       where: { id: run.episodeId || "__no_episode__" },
@@ -1281,6 +1306,9 @@ export async function getPublicGenerationRunSnapshot(input: {
           citations: {
             select: { title: true, excerpt: true, uri: true },
           },
+          attachments: {
+            select: { id: true, fileName: true, mimeType: true, sizeBytes: true, externalUrl: true },
+          },
         },
       },
     },
@@ -1304,6 +1332,13 @@ export async function getPublicGenerationRunSnapshot(input: {
               ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
               ...(citation.uri ? { uri: citation.uri } : {}),
             })),
+            attachments: run.outputMessage.attachments.map((attachment) => ({
+              id: attachment.id,
+              fileName: attachment.fileName,
+              ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
+              ...(typeof attachment.sizeBytes === "number" ? { sizeBytes: attachment.sizeBytes } : {}),
+              ...(attachment.externalUrl ? { url: attachment.externalUrl } : {}),
+            })),
           },
         }
       : {}),
@@ -1326,6 +1361,9 @@ export async function getPublicConversationHistory(input: {
         include: {
           citations: {
             select: { title: true, excerpt: true, uri: true },
+          },
+          attachments: {
+            select: { id: true, fileName: true, mimeType: true, sizeBytes: true, externalUrl: true },
           },
         },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -1359,6 +1397,13 @@ export async function getPublicConversationHistory(input: {
         title: citation.title,
         ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
         ...(citation.uri ? { uri: citation.uri } : {}),
+      })),
+      attachments: message.attachments.map((attachment) => ({
+        id: attachment.id,
+        fileName: attachment.fileName,
+        ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
+        ...(typeof attachment.sizeBytes === "number" ? { sizeBytes: attachment.sizeBytes } : {}),
+        ...(attachment.externalUrl ? { url: attachment.externalUrl } : {}),
       })),
     })),
   };

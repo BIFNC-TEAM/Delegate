@@ -19,7 +19,15 @@ export type ComputeApprovalConversationOutcome =
 export async function finalizeComputeApprovalConversation(input: {
   approvalId: string;
   outcome: ComputeApprovalConversationOutcome;
-  artifacts?: Array<{ kind: string; summary?: string | null; objectKey: string }>;
+  artifacts?: Array<{
+    id: string;
+    kind: string;
+    summary?: string | null;
+    objectKey: string;
+    mimeType: string;
+    sizeBytes: number;
+    fileName?: string;
+  }>;
   actualCredits?: number;
   failureReason?: string;
 }) {
@@ -29,7 +37,7 @@ export async function finalizeComputeApprovalConversation(input: {
       where: { id: input.approvalId },
       include: {
         generationRun: true,
-        representative: { select: { displayName: true } },
+        representative: { select: { displayName: true, slug: true } },
       },
     });
     const run = approval?.generationRun;
@@ -59,6 +67,7 @@ export async function finalizeComputeApprovalConversation(input: {
           approvalId: approval.id,
           outcome: input.outcome,
           ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
+          artifactIds: input.artifacts?.map((artifact) => artifact.id) ?? [],
         },
         clientMessageId: `compute-approval-result:${approval.id}`,
         deliveryStatus: MessageDeliveryStatus.SENT,
@@ -72,10 +81,25 @@ export async function finalizeComputeApprovalConversation(input: {
           approvalId: approval.id,
           outcome: input.outcome,
           ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
+          artifactIds: input.artifacts?.map((artifact) => artifact.id) ?? [],
         },
         deliveryStatus: MessageDeliveryStatus.SENT,
       },
     });
+
+    await tx.messageAttachment.deleteMany({ where: { messageId: message.id } });
+    if (input.artifacts?.length) {
+      await tx.messageAttachment.createMany({
+        data: input.artifacts.map((artifact) => ({
+          messageId: message.id,
+          fileName: resolveConversationArtifactFileName(artifact),
+          mimeType: artifact.mimeType,
+          sizeBytes: artifact.sizeBytes,
+          objectKey: artifact.id,
+          externalUrl: `/reps/${approval.representative.slug}/chat/artifacts/${artifact.id}/download`,
+        })),
+      });
+    }
 
     await tx.generationRun.update({
       where: { id: run.id },
@@ -129,4 +153,28 @@ function formatComputeOutcome(input: {
     return `审批已通过，但 Compute 执行失败。\n\n${artifacts}${input.failureReason ? `\n\n原因：${input.failureReason}` : ""}${billing}`;
   }
   return `审批已通过，Compute 执行完成。\n\n${artifacts}${billing}`;
+}
+
+function resolveConversationArtifactFileName(artifact: {
+  id: string;
+  kind: string;
+  mimeType: string;
+  summary?: string | null;
+  fileName?: string;
+}) {
+  if (artifact.fileName?.trim()) return artifact.fileName.trim().split("/").pop() || artifact.fileName.trim();
+  if (artifact.kind.toLowerCase() === "file" && artifact.summary?.includes(":")) {
+    const path = artifact.summary.split(":", 1)[0]?.trim();
+    if (path) return path.split("/").pop() || path;
+  }
+  const extension = artifact.mimeType.includes("json")
+    ? "json"
+    : artifact.mimeType.includes("csv")
+      ? "csv"
+      : artifact.mimeType.includes("png")
+        ? "png"
+        : artifact.mimeType.includes("jpeg")
+          ? "jpg"
+          : "txt";
+  return `${artifact.kind.toLowerCase()}-${artifact.id}.${extension}`;
 }

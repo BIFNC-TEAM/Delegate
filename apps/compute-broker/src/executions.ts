@@ -39,6 +39,7 @@ import { computeBrokerConfig } from "./config";
 import { ensureComputeSessionLease } from "./leases";
 import {
   persistExecutionArtifacts,
+  persistFileArtifact,
   persistJsonArtifact,
   persistScreenshotArtifact,
   readPersistedArtifactObject,
@@ -319,6 +320,11 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
 
   const approval = await prisma.approvalRequest.findUnique({
     where: { id: approvalId },
+    include: {
+      representative: {
+        select: { computeMaxSessionMinutes: true },
+      },
+    },
   });
 
   if (!approval) {
@@ -541,6 +547,19 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
       });
     }
 
+    if (approval.sessionId) {
+      await tx.computeSession.update({
+        where: { id: approval.sessionId },
+        data: {
+          expiresAt: new Date(
+            resolvedAt.getTime() + approval.representative.computeMaxSessionMinutes * 60 * 1000,
+          ),
+          lastHeartbeatAt: resolvedAt,
+          failureReason: null,
+        },
+      });
+    }
+
     return nextApproval;
   });
 
@@ -640,7 +659,12 @@ export async function processNextApprovedExecution() {
     await finalizeComputeApprovalConversation({
       approvalId: approval.id,
       outcome: result.outcome === "completed" ? "completed" : "failed",
-      artifacts: result.artifacts,
+      artifacts: result.artifacts.map((artifact) => ({
+        ...artifact,
+        ...(artifact.kind === "file" && normalized.path
+          ? { fileName: normalized.path.split("/").pop() || "result.txt" }
+          : {}),
+      })),
       ...(typeof result.billing?.actualCredits === "number"
         ? { actualCredits: result.billing.actualCredits }
         : {}),
@@ -1063,6 +1087,27 @@ async function runContainerExecution(params: {
           }),
           browserCapture: undefined,
         };
+
+  if (
+    runnerResult.exitCode === 0 &&
+    executionPlan.capability === "write" &&
+    params.input.path &&
+    typeof params.input.content === "string"
+  ) {
+    artifactResult.artifacts.unshift(
+      await persistFileArtifact({
+        representativeId: params.context.session.representativeId,
+        representativeSlug: params.context.session.representative.slug,
+        contactId: params.context.session.contactId ?? null,
+        conversationId: params.context.session.conversationId ?? null,
+        sessionId: params.context.session.id,
+        executionId: params.executionId,
+        retentionDays: params.context.profile.artifactRetentionDays,
+        path: params.input.path,
+        content: params.input.content,
+      }),
+    );
+  }
 
   return {
     exitCode: runnerResult.exitCode,

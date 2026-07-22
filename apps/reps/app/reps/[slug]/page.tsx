@@ -198,6 +198,7 @@ export default async function RepresentativePage({
       </section>
 
       <RepresentativeChatPanel
+        computeEnabled={representative.compute.enabled}
         freeReplyLimit={representative.contract.freeReplyLimit}
         humanInLoop={representative.humanInLoop}
         locale={locale}

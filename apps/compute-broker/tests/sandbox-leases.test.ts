@@ -50,7 +50,7 @@ describe("ensureUserSandboxLease", () => {
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
   });
 
-  it("uses the representative/contact unique key and creates one running lease", async () => {
+  it("uses the representative/contact/conversation scope and creates one running lease", async () => {
     const provider = buildProvider();
     const { ensureUserSandboxLease } = await import("../src/sandbox-leases");
 
@@ -66,9 +66,10 @@ describe("ensureUserSandboxLease", () => {
 
     expect(mockPrisma.sandboxIdentity.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: {
-        representativeId_contactId: {
+        representativeId_contactId_scopeKey: {
           representativeId: "rep-1",
           contactId: "contact-1",
+          scopeKey: "conversation:conversation-1",
         },
       },
       update: expect.objectContaining({
@@ -76,6 +77,7 @@ describe("ensureUserSandboxLease", () => {
       }),
       create: expect.objectContaining({
         audienceIdentityId: "audience-identity-1",
+        scopeKey: "conversation:conversation-1",
       }),
     }));
     expect(mockPrisma.sandboxLease.create).toHaveBeenCalledWith({

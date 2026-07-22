@@ -11,12 +11,13 @@ function modelBlock(name: string) {
 }
 
 describe("per-user sandbox schema", () => {
-  it("keeps one sandbox identity per representative/contact pair", () => {
+  it("keeps one sandbox identity per representative/contact/conversation scope", () => {
     const block = modelBlock("SandboxIdentity");
 
     expect(block).toMatch(/\brepresentativeId\s+String\b/);
     expect(block).toMatch(/\bcontactId\s+String\b/);
-    expect(block).toContain("@@unique([representativeId, contactId])");
+    expect(block).toMatch(/\bscopeKey\s+String\b/);
+    expect(block).toContain("@@unique([representativeId, contactId, scopeKey])");
   });
 
   it("keeps compute sessions as execution records with an optional sandbox lease", () => {

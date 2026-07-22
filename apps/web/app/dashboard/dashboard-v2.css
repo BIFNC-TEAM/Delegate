@@ -792,10 +792,9 @@
 .representative-config-workspace .dashboard-surface-header h3 { color: var(--v2-ink); font-size: .9rem; }
 .representative-config-workspace .setup-plan-card { border-color: var(--v2-line); border-radius: 10px; background: #fafafa; box-shadow: none; }
 .representative-config-workspace .dashboard-form-footer {
-  position: sticky; bottom: 14px; z-index: 5; padding: 12px 14px; border: 1px solid var(--v2-line); border-radius: 12px;
+  position: static; padding: 12px 14px; border: 1px solid var(--v2-line); border-radius: 12px;
   background: rgba(255,255,255,.96); box-shadow: 0 10px 28px rgba(17,24,39,.08); backdrop-filter: blur(12px);
 }
-.representative-config-form:has(.representative-knowledge-picker) .dashboard-form-footer { position: static; }
 .representative-config-workspace .dashboard-form-footer .muted { color: var(--v2-muted); font-size: .61rem; }
 .representative-config-aside {
   position: sticky; top: 88px; display: grid; gap: 15px; padding: 17px; border: 1px solid var(--v2-line);

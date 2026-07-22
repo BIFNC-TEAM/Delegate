@@ -39,6 +39,7 @@ import {
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
   waitGenerationRunForComputeApproval,
+  type AuthorizedDelegationKnowledge,
 } from "@delegate/web-data";
 
 import type { ConversationWorkerConfig } from "./config";
@@ -151,6 +152,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       : computeDirective.kind === "request" ? [computeDirective.request] : [];
     let planSummary = parsedRequests[0]?.displayTarget || "";
     let planSteps: Array<{ summary: string; request: ParsedComputeRequest }> | undefined;
+    let authorizedKnowledge: AuthorizedDelegationKnowledge[] = [];
     let delegationOverride: { task: { id: string }; step: { id: string } } | undefined =
       item.delegationTaskId && item.delegationTaskStepId
         ? { task: { id: item.delegationTaskId }, step: { id: item.delegationTaskStepId } }
@@ -171,13 +173,14 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       const taskInput = clarifyingTask
         ? `原始任务：${clarifyingTask.objective}\n待补充：${clarifyingTask.blockingReason || "执行输入"}\n用户补充：${item.userText}`
         : item.userText;
-      const plannerInput = await buildDelegationPlannerInput({
+      const plannerContext = await buildDelegationPlannerInput({
         setup,
         item,
         taskInput,
       });
+      authorizedKnowledge = plannerContext.authorizedKnowledge;
       const planned = await planNaturalLanguageComputeRequest({
-        userText: plannerInput,
+        userText: plannerContext.text,
         maxSteps: delegationConfig.maxSteps,
       });
       if (planned.ok && planned.plan) {
@@ -190,6 +193,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
               contactId: item.contactId,
               question: planned.plan.question,
               missingFields: planned.plan.missingFields,
+              authorizedKnowledge,
             });
           } else {
             await createClarifyingDelegationTask({
@@ -204,6 +208,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
               summary: planned.plan.summary,
               question: planned.plan.question,
               missingFields: planned.plan.missingFields,
+              authorizedKnowledge,
               maxDurationMinutes: setup.compute.maxSessionMinutes,
               networkMode: setup.compute.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
               filesystemMode: setup.compute.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
@@ -220,12 +225,6 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           outputMessageId = completed.message.id;
           await markGenerationDeliveryComplete({ runId: item.runId, outputMessageId });
           return { processed: true as const, runId: item.runId, status: "waiting_input" as const };
-        }
-        if (planned.plan.steps.length > delegationConfig.maxSteps) {
-          return completeTerminalDelegationFailure(
-            item,
-            `这个任务需要 ${planned.plan.steps.length} 个执行步骤，超过该代表允许的 ${delegationConfig.maxSteps} 步上限。请缩小任务范围后重试。`,
-          );
         }
         parsedRequests = buildComputeRequestsFromDelegationPlan(planned.plan);
         planSummary = planned.plan.summary;
@@ -244,6 +243,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             contactId: item.contactId,
             planSummary,
             planSteps,
+            authorizedKnowledge,
           });
           if (!resumed.ready) throw new Error("Clarifying delegation task did not become ready.");
           delegationOverride = { task: { id: resumed.taskId }, step: { id: resumed.step.id } };
@@ -262,25 +262,13 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       );
     }
     if (parsedRequests.length) {
-      const estimatedCostCents = parsedRequests.reduce(
-        (total, request) => total + (request.estimatedCostCents ?? 0),
-        0,
-      );
-      if (
-        delegationConfig.maxCostCents > 0 &&
-        estimatedCostCents > delegationConfig.maxCostCents
-      ) {
-        return completeTerminalDelegationFailure(
-          item,
-          `这个任务的预计执行成本为 ${estimatedCostCents} 美分，超过该代表设置的 ${delegationConfig.maxCostCents} 美分上限，系统未执行。请缩小任务范围。`,
-        );
-      }
       const computeReply = await processPublicWebComputeRequest({
         item,
         setup,
         parsed: parsedRequests[0]!,
         ...(planSteps ? { planSteps } : {}),
         ...(planSummary ? { planSummary } : {}),
+        ...(authorizedKnowledge.length ? { authorizedKnowledge } : {}),
         ...(delegationOverride ? { delegation: delegationOverride } : {}),
       });
 
@@ -448,7 +436,7 @@ async function buildDelegationPlannerInput(input: {
   taskInput: string;
 }) {
   if (resolveDelegationConfig(input.setup).knowledgeScope !== "public_knowledge") {
-    return input.taskInput;
+    return { text: input.taskInput, authorizedKnowledge: [] };
   }
 
   const recalled = await recallRepresentativeContext({
@@ -465,9 +453,16 @@ async function buildDelegationPlannerInput(input: {
     })
     .filter(Boolean);
 
-  return publicKnowledge.length
-    ? `${input.taskInput}\n\nOwner 已授权本任务使用以下已审核公开资料：\n${publicKnowledge.join("\n")}`
-    : input.taskInput;
+  const authorizedKnowledge = recalled.citations
+    .filter((citation): citation is typeof citation & { knowledgeAssetId: string } => Boolean(citation.knowledgeAssetId))
+    .slice(0, 3)
+    .map((citation) => ({ assetId: citation.knowledgeAssetId, title: citation.title }));
+  return {
+    text: publicKnowledge.length
+      ? `${input.taskInput}\n\nOwner 已授权本任务使用以下已审核公开资料：\n${publicKnowledge.join("\n")}`
+      : input.taskInput,
+    authorizedKnowledge,
+  };
 }
 
 function resolveDelegationConfig(
@@ -539,6 +534,7 @@ async function processPublicWebComputeRequest(input: {
   parsed: ParsedComputeRequest;
   planSummary?: string;
   planSteps?: Array<{ summary: string; request: ParsedComputeRequest }>;
+  authorizedKnowledge?: AuthorizedDelegationKnowledge[];
   delegation?: { task: { id: string }; step: { id: string } };
 }): Promise<{
   text: string;
@@ -571,24 +567,6 @@ async function processPublicWebComputeRequest(input: {
     };
   }
 
-  const capabilityMode = resolveCapabilityModes(input.setup)[input.parsed.capability];
-  if (capabilityMode === "deny") {
-    if (input.delegation) {
-      await finalizeComputeDelegationTask({
-        taskId: input.delegation.task.id,
-        stepId: input.delegation.step.id,
-        generationRunId: input.item.runId,
-        outcome: "blocked",
-        failureReason: `Representative policy denies ${input.parsed.capability}.`,
-      });
-    }
-    return {
-      text: `这个代表的能力策略禁止${renderCapabilityLabel(input.parsed.capability)}，系统未执行。`,
-      hasMoreSteps: false,
-    };
-  }
-
-  const subagent = resolveComputeSubagent(input.parsed.capability);
   const delegation = input.delegation ?? await createComputeDelegationTask({
     representativeId: input.setup.id,
     representativeVersionId: input.item.representativeVersionId,
@@ -605,10 +583,55 @@ async function processPublicWebComputeRequest(input: {
     capability: input.parsed.capability,
     maxDurationMinutes: input.setup.compute.maxSessionMinutes,
     maxCostCents: delegationConfig.maxCostCents,
+    ...(input.authorizedKnowledge?.length ? { authorizedKnowledge: input.authorizedKnowledge } : {}),
     networkMode: input.setup.compute.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
     filesystemMode: input.setup.compute.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
   });
   if (!delegation.step) throw new Error("Delegation task is missing its compute step.");
+  const delegationStepId = delegation.step.id;
+
+  const blockDelegation = async (failureReason: string, text: string) => {
+    await finalizeComputeDelegationTask({
+      taskId: delegation.task.id,
+      stepId: delegationStepId,
+      generationRunId: input.item.runId,
+      outcome: "blocked",
+      failureReason,
+    });
+    return { text, hasMoreSteps: false };
+  };
+
+  const plannedStepCount = input.planSteps?.length ?? 1;
+  if (plannedStepCount > delegationConfig.maxSteps) {
+    return blockDelegation(
+      `Planned step count ${plannedStepCount} exceeds representative limit ${delegationConfig.maxSteps}.`,
+      `这个任务需要 ${plannedStepCount} 个执行步骤，超过该代表允许的 ${delegationConfig.maxSteps} 步上限。系统未创建沙盒，请缩小任务范围后重试。`,
+    );
+  }
+
+  const estimatedCostCents = (input.planSteps ?? [{ request: input.parsed }]).reduce(
+    (total, step) => total + (step.request.estimatedCostCents ?? 0),
+    0,
+  );
+  if (
+    delegationConfig.maxCostCents > 0 &&
+    estimatedCostCents > delegationConfig.maxCostCents
+  ) {
+    return blockDelegation(
+      `Estimated cost ${estimatedCostCents} cents exceeds representative limit ${delegationConfig.maxCostCents} cents.`,
+      `这个任务的预计执行成本为 ${estimatedCostCents} 美分，超过该代表设置的 ${delegationConfig.maxCostCents} 美分上限。系统未创建沙盒，请缩小任务范围。`,
+    );
+  }
+
+  const capabilityMode = resolveCapabilityModes(input.setup)[input.parsed.capability];
+  if (capabilityMode === "deny") {
+    return blockDelegation(
+      `Representative policy denies ${input.parsed.capability}.`,
+      `这个代表的能力策略禁止${renderCapabilityLabel(input.parsed.capability)}，系统未执行。`,
+    );
+  }
+
+  const subagent = resolveComputeSubagent(input.parsed.capability);
 
   let result: Awaited<ReturnType<typeof executeAudienceTool>>;
   try {

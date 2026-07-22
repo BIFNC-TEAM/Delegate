@@ -462,7 +462,13 @@ describe("conversation worker knowledge recall", () => {
         maxCostCents: 0,
         knowledgeScope: "user_input_only",
       },
-      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
     });
 
     await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
@@ -549,6 +555,9 @@ describe("conversation worker knowledge recall", () => {
       compute: {
         enabled: true,
         baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
         capabilityModes: {
           exec: "ask",
           read: "allow",
@@ -567,12 +576,40 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       replyText: expect.stringContaining("策略禁止写入工作区文件"),
     }));
-    expect(mocks.createComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.createComputeDelegationTask).toHaveBeenCalledTimes(1);
+    expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "task-1",
+      outcome: "blocked",
+      failureReason: "Representative policy denies write.",
+    }));
     expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
   });
 
   it("adds approved public knowledge to the planner only when the owner enables that scope", async () => {
     mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
+    mocks.planNaturalLanguageComputeRequest.mockResolvedValue({
+      ok: true,
+      source: "model",
+      plan: {
+        kind: "execution",
+        summary: "生成公开资料摘要",
+        steps: [{
+          capability: "write",
+          summary: "生成公开资料摘要",
+          path: "outputs/public-summary.md",
+          content: "# 摘要",
+        }],
+      },
+    });
+    mocks.buildComputeRequestsFromDelegationPlan.mockReturnValue([{
+      capability: "write",
+      displayTarget: "生成公开资料摘要",
+      path: "outputs/public-summary.md",
+      content: "# 摘要",
+      estimatedCostCents: 5,
+    }]);
+    mocks.createAudienceComputeSession.mockResolvedValue({ session: { id: "session-public-knowledge" } });
+    mocks.executeAudienceTool.mockResolvedValue({ outcome: "completed", artifacts: [] });
     mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
       id: "rep-1",
       delegation: {
@@ -583,7 +620,13 @@ describe("conversation worker knowledge recall", () => {
         maxCostCents: 0,
         knowledgeScope: "public_knowledge",
       },
-      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
     });
 
     await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
@@ -597,6 +640,9 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.planNaturalLanguageComputeRequest.mock.calls[0]?.[0]?.userText).toContain(
       "佩奇临时代课并带大家画恐龙",
     );
+    expect(mocks.createComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
+      authorizedKnowledge: [{ assetId: "asset-1", title: "佩奇当老师" }],
+    }));
   });
 
   it("stops a task whose estimate exceeds the representative cost limit", async () => {
@@ -634,7 +680,13 @@ describe("conversation worker knowledge recall", () => {
         maxCostCents: 5,
         knowledgeScope: "user_input_only",
       },
-      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
     });
 
     await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
@@ -643,6 +695,65 @@ describe("conversation worker knowledge recall", () => {
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       replyText: expect.stringContaining("超过该代表设置的 5 美分上限"),
+    }));
+    expect(mocks.createComputeDelegationTask).toHaveBeenCalledTimes(1);
+    expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "task-1",
+      outcome: "blocked",
+      failureReason: expect.stringContaining("Estimated cost 12 cents"),
+    }));
+    expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
+  });
+
+  it("records a blocked task when the plan exceeds the representative step limit", async () => {
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      delegation: {
+        enabled: true,
+        naturalLanguageEnabled: true,
+        explicitComputeEnabled: true,
+        maxSteps: 1,
+        maxCostCents: 0,
+        knowledgeScope: "user_input_only",
+      },
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.planNaturalLanguageComputeRequest.mockResolvedValue({
+      ok: true,
+      source: "model",
+      plan: {
+        kind: "execution",
+        summary: "生成两份文件",
+        steps: [
+          { capability: "write", summary: "生成第一份", path: "outputs/one.md", content: "one" },
+          { capability: "write", summary: "生成第二份", path: "outputs/two.md", content: "two" },
+        ],
+      },
+    });
+    mocks.buildComputeRequestsFromDelegationPlan.mockReturnValue([
+      { capability: "write", displayTarget: "生成第一份", path: "outputs/one.md", content: "one" },
+      { capability: "write", displayTarget: "生成第二份", path: "outputs/two.md", content: "two" },
+    ]);
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.createComputeDelegationTask).toHaveBeenCalledTimes(1);
+    expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "task-1",
+      outcome: "blocked",
+      failureReason: expect.stringContaining("Planned step count 2"),
+    }));
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      replyText: expect.stringContaining("超过该代表允许的 1 步上限"),
     }));
     expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
   });

@@ -23,11 +23,12 @@ Existing runtime records keep nullable task and step references so historical da
 
 Ordinary question answering remains a conversation and does not create a task. A public web request creates a task only after an explicit `/compute` instruction or the grounded natural-language compute planner has identified a concrete operation. A bare `/compute` request only returns usage guidance.
 
-The compute path currently creates one step per task:
+The compute path creates one step per planned operation, with at most five dependency-ordered steps in the current P1 scheduler:
 
 ```text
 READY -> RUNNING -> COMPLETED
                   -> FAILED
+                  -> BLOCKED (step; task is failed)
           |
           +-> AWAITING_APPROVAL -> RUNNING -> COMPLETED
                                   -> CANCELED (rejected)
@@ -35,6 +36,8 @@ READY -> RUNNING -> COMPLETED
 ```
 
 The task resource policy is a captured business-level limit. The compute broker remains the enforcement boundary for capability policy, sandbox isolation, billing availability, and owner approval.
+
+When the Owner enables the `public_knowledge` delegation scope, each recalled Knowledge Asset used by planning is stored as a task input plus an Owner data grant with task-local read/use scopes. User-input-only mode creates no knowledge grant.
 
 ## Ownership and audit guarantees
 

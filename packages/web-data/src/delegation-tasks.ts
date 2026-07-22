@@ -30,6 +30,11 @@ import {
 
 type ComputeCapability = "exec" | "read" | "write" | "process" | "browser" | "mcp";
 
+export type AuthorizedDelegationKnowledge = {
+  assetId: string;
+  title: string;
+};
+
 export type DelegationTaskTerminalOutcome =
   | "completed"
   | "failed"
@@ -70,6 +75,7 @@ export async function createComputeDelegationTask(input: {
   maxDurationMinutes: number;
   maxCostCents?: number | null;
   maxCredits?: number | null;
+  authorizedKnowledge?: AuthorizedDelegationKnowledge[];
   networkMode: "NO_NETWORK" | "ALLOWLIST" | "FULL";
   filesystemMode: "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL";
 }) {
@@ -254,6 +260,7 @@ export async function createComputeDelegationTask(input: {
         startedAt: now,
       },
     });
+    await recordAuthorizedKnowledge(tx, task.id, input.authorizedKnowledge ?? []);
     const steps: Array<{ id: string; sequence: number }> = [];
     for (const [index, planned] of planSteps.entries()) {
       const dependencyIndexes = planned.dependsOnStepIndexes?.length
@@ -331,6 +338,7 @@ export async function createClarifyingDelegationTask(input: {
   summary: string;
   question: string;
   missingFields: string[];
+  authorizedKnowledge?: AuthorizedDelegationKnowledge[];
   maxDurationMinutes: number;
   networkMode: "NO_NETWORK" | "ALLOWLIST" | "FULL";
   filesystemMode: "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL";
@@ -402,6 +410,7 @@ export async function createClarifyingDelegationTask(input: {
         },
       },
     });
+    await recordAuthorizedKnowledge(tx, task.id, input.authorizedKnowledge ?? []);
     const step = await tx.delegationTaskStep.create({
       data: {
         delegationTaskId: task.id,
@@ -457,6 +466,7 @@ export async function continueClarifyingDelegationTask(input: {
   missingFields?: string[];
   planSummary?: string;
   planSteps?: Array<{ summary: string; request: ParsedComputeRequest; dependsOnStepIndexes?: number[] }>;
+  authorizedKnowledge?: AuthorizedDelegationKnowledge[];
 }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
@@ -479,6 +489,7 @@ export async function continueClarifyingDelegationTask(input: {
     }
     const clarificationStep = task.steps.find((step) => step.kind === "CLARIFICATION");
     if (!clarificationStep) throw new DelegationTaskActionError("Clarification step was not found.");
+    await recordAuthorizedKnowledge(tx, task.id, input.authorizedKnowledge ?? []);
     const existingInput = await tx.delegationTaskInput.findFirst({
       where: {
         delegationTaskId: task.id,
@@ -1754,6 +1765,57 @@ async function linkGenerationToTask(
   });
 }
 
+async function recordAuthorizedKnowledge(
+  tx: Prisma.TransactionClient,
+  taskId: string,
+  knowledge: AuthorizedDelegationKnowledge[],
+) {
+  const uniqueKnowledge = [...new Map(
+    knowledge
+      .filter((item) => item.assetId.trim())
+      .map((item) => [item.assetId.trim(), { assetId: item.assetId.trim(), title: item.title.trim() }]),
+  ).values()];
+  for (const item of uniqueKnowledge) {
+    const existingInput = await tx.delegationTaskInput.findFirst({
+      where: {
+        delegationTaskId: taskId,
+        kind: "KNOWLEDGE_ASSET",
+        referenceType: "KnowledgeAsset",
+        referenceId: item.assetId,
+      },
+      select: { id: true },
+    });
+    if (existingInput) continue;
+    const taskInput = await tx.delegationTaskInput.create({
+      data: {
+        delegationTaskId: taskId,
+        kind: "KNOWLEDGE_ASSET",
+        referenceType: "KnowledgeAsset",
+        referenceId: item.assetId,
+        label: truncate(item.title || "公开知识资料", 240),
+        providedByType: "OWNER",
+        authorizationRequired: false,
+      },
+    });
+    await tx.delegationTaskDataGrant.create({
+      data: {
+        delegationTaskId: taskId,
+        taskInputId: taskInput.id,
+        grantorType: "OWNER",
+        resourceType: "KnowledgeAsset",
+        resourceId: item.assetId,
+        scopes: ["read", "use_for_task"],
+        purpose: "delegated_task_public_knowledge",
+        status: "ACTIVE",
+        policySnapshot: {
+          source: "representative_delegation_knowledge_scope",
+          scope: "public_knowledge",
+        },
+      },
+    });
+  }
+}
+
 async function appendTaskEvent(
   tx: Prisma.TransactionClient,
   input: {
@@ -1876,6 +1938,12 @@ function mapTerminalOutcome(outcome: DelegationTaskTerminalOutcome) {
     return {
       taskStatus: DelegationTaskStatus.EXPIRED,
       stepStatus: DelegationTaskStepStatus.CANCELED,
+    };
+  }
+  if (outcome === "blocked") {
+    return {
+      taskStatus: DelegationTaskStatus.FAILED,
+      stepStatus: DelegationTaskStepStatus.BLOCKED,
     };
   }
   return {

@@ -3900,6 +3900,12 @@ button.skill-row:hover {
   background: var(--marketing-green-soft);
 }
 
+.representative-compute-assist button:focus-visible,
+.representative-chat-artifact > a:focus-visible {
+  outline: 2px solid var(--marketing-green);
+  outline-offset: 2px;
+}
+
 .representative-compute-assist button span {
   overflow: hidden;
   font-family: var(--font-mono), "SFMono-Regular", Consolas, monospace;

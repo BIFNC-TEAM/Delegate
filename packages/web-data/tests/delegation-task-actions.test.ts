@@ -225,6 +225,43 @@ describe("delegation task owner actions", () => {
     });
   });
 
+  it("distinguishes a policy-blocked step from an execution failure", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-1",
+      status: "READY",
+      representativeId: "representative-1",
+      steps: [{ id: "step-1", status: "READY" }],
+      generationRuns: [{
+        id: "run-1",
+        delegationTaskStepId: "step-1",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+      }],
+    });
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    await finalizeComputeDelegationTask({
+      taskId: "task-1",
+      stepId: "step-1",
+      generationRunId: "run-1",
+      outcome: "blocked",
+      failureReason: "Representative policy denies write.",
+    });
+
+    expect(mockPrisma.delegationTaskStep.update).toHaveBeenCalledWith({
+      where: { id: "step-1" },
+      data: expect.objectContaining({
+        status: "BLOCKED",
+        outputSnapshot: expect.objectContaining({ outcome: "blocked" }),
+      }),
+    });
+    expect(mockPrisma.delegationTask.update).toHaveBeenCalledWith({
+      where: { id: "task-1" },
+      data: expect.objectContaining({ status: "FAILED" }),
+    });
+  });
+
   it("queues the next dependency-ready step without completing the business task", async () => {
     mockPrisma.generationRun.create.mockResolvedValueOnce({ id: "run-step-2" });
     mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({

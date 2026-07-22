@@ -33,7 +33,7 @@ Internal enum names may appear in audit data, but product surfaces use the meani
 - Approval is decided by deterministic capability policy. The model may propose an operation but cannot approve it.
 - An approval records the matched rule, policy decision, risk explanation, request fingerprint, approver, decision note, and expiration.
 - Approval applies only to the fingerprinted operation. A changed command, path, payload, external account, or capability requires a new policy evaluation and, when applicable, a new approval.
-- Data grants and resource policy are captured at task creation. Later policy changes do not retroactively broaden an existing task.
+- Data grants and resource policy are captured when their inputs enter the task. Owner-authorized public Knowledge Assets are recorded individually; later policy changes do not retroactively broaden an existing task.
 
 ## Owner actions
 

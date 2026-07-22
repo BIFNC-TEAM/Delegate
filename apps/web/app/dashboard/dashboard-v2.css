@@ -367,7 +367,7 @@
 .dashboard-approval-block p.is-mono { padding: 10px; border-radius: 8px; background: #f3f4f6; font-family: var(--font-mono),monospace; font-size: .65rem; white-space: pre-wrap; }
 .dashboard-approval-decision { display: grid; gap: 8px; padding-top: 14px; border-top: 1px solid var(--v2-line); }
 .dashboard-approval-decision textarea { min-height: 88px; resize: vertical; padding: 10px; border: 1px solid var(--v2-line); border-radius: 8px; outline: 0; color: var(--v2-copy); background: #fff; font: inherit; font-size: .72rem; line-height: 1.5; }
-.dashboard-approval-decision textarea:focus { border-color: rgba(22,163,148,.55); box-shadow: 0 0 0 3px var(--v2-teal-soft); }
+.dashboard-approval-decision textarea:focus-visible { outline: 2px solid var(--v2-teal); outline-offset: 2px; border-color: rgba(22,163,148,.55); box-shadow: 0 0 0 3px var(--v2-teal-soft); }
 .dashboard-approval-decision > div { display: flex; justify-content: flex-end; gap: 8px; }
 .dashboard-approval-decision button:disabled { cursor: wait; opacity: .6; }
 .dashboard-approval-alert { padding: 11px 13px; border: 1px solid #fecaca; border-radius: 9px; color: #991b1b; background: #fef2f2; font-size: .72rem; }
@@ -541,7 +541,7 @@
 .knowledge-row-open:hover { border-color: #99f6e4; color: var(--v2-teal-strong); background: #fff; }
 .knowledge-panel-footer { display: flex; justify-content: space-between; gap: 16px; padding: 12px 22px; border-top: 1px solid var(--v2-line); color: var(--v2-muted); background: #fafafa; font-size: .62rem; }
 .knowledge-panel-footer small { color: var(--v2-faint); }
-.knowledge-loading-row td { display: table-cell !important; }
+.knowledge-table .knowledge-loading-row td { display: table-cell; }
 .knowledge-loading-row span { display: block; width: 100%; height: 24px; border-radius: 6px; background: linear-gradient(90deg,#f3f4f6,#fafafa,#f3f4f6); background-size: 200% 100%; animation: knowledge-shimmer 1.3s infinite; }
 @keyframes knowledge-shimmer { to { background-position: -200% 0; } }
 .knowledge-table tbody tr.knowledge-empty-row { cursor: default; }

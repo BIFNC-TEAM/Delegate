@@ -328,6 +328,7 @@ Delegate 使用 [DESIGN.md](./DESIGN.md) 中定义的 **Dispatch Editorial** 方
 - [Architecture](./docs/architecture.md): product thesis、runtime loop、security boundary 和 OpenViking rules。
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): 更大的系统方向和 tradeoffs。
 - [Delegation tasks](./docs/delegation-tasks.md): 委托任务聚合、生命周期、归属校验、审批、产物和审计关联。
+- [Delegation task product contract](./docs/delegation-task-product-contract.md): 任务创建、可见状态、Owner 操作、审批绑定、完成标准和 P0 边界。
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model、outbox、timer、cancellation 和 dashboard semantics。
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute 和 browser isolation model。
 - [OpenViking integration](./docs/openviking-integration.md): public memory 和 recall integration。

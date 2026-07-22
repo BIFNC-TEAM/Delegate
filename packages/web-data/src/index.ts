@@ -18,6 +18,7 @@ export * from "./creator-training";
 export * from "./deliverable-insights";
 export * from "./deliverables";
 export * from "./delegation-tasks";
+export * from "./delegation-task-product";
 export * from "./governed-actions";
 export * from "./knowledge-library";
 export * from "./knowledge-storage";

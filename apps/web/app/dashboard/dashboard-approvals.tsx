@@ -147,6 +147,8 @@ export function DashboardApprovals({ activeSlug, locale }: { activeSlug: string;
                 <div><dt>{zh ? "过期" : "Expires"}</dt><dd>{formatDate(selected.expiresAt || selected.workflowScheduledAt, locale)}</dd></div>
               </dl>
               <DetailBlock label={zh ? "策略原因" : "Policy reason"} value={selected.reason} />
+              <DetailBlock label={zh ? "确定性判定依据" : "Deterministic decision basis"} value={formatPolicyExplanation(selected.policy, locale)} />
+              <DetailBlock label={zh ? "匹配规则与请求指纹" : "Matched rule & request fingerprint"} value={`${selected.policy.matchedRuleId || "profile-default"}\n${selected.policy.requestFingerprint || "—"}`} mono />
               <DetailBlock label={zh ? "风险说明" : "Risk summary"} value={selected.riskSummary} />
               <DetailBlock label={zh ? "请求目标" : "Requested target"} value={selected.action?.requestedPath || selected.action?.requestedCommand || "—"} mono />
               {selected.status === "pending" ? (
@@ -180,6 +182,15 @@ function DetailBlock({ label, value, mono = false }: { label: string; value: str
 }
 
 function riskTone(score: number) { return score >= 70 ? "high" : score >= 40 ? "medium" : "low"; }
+function formatPolicyExplanation(policy: Approval["policy"], locale: Locale) {
+  if (locale !== "zh") return policy.explanation;
+  const reason = policy.explanation.includes("human_approval_required")
+    ? "该操作要求所有者明确批准。"
+    : policy.explanation.split(". ").at(-1)?.replaceAll("_", " ") || "策略要求人工审批。";
+  return policy.matchedRuleId
+    ? `确定性策略规则“${policy.matchedRuleId}”返回 ASK。${reason}`
+    : `当前生效的默认策略或托管覆盖规则返回 ASK。${reason}`;
+}
 function formatDate(value: string | undefined, locale: Locale) {
   if (!value) return "—";
   return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));

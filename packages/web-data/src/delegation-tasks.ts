@@ -2,15 +2,23 @@ import { createHash } from "node:crypto";
 
 import {
   CapabilityKind,
+  ConversationEpisodeStatus,
   DelegationTaskActorType,
   DelegationTaskNextActor,
   DelegationTaskStatus,
   DelegationTaskStepStatus,
+  GenerationRunStatus,
+  MessageDeliveryStatus,
+  MessageSenderType,
   Prisma,
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
 import { canonicalizeDelegationTaskEvent } from "./delegation-task-events";
+import {
+  buildDelegationApprovalPolicyExplanation,
+  buildDelegationTaskOwnerActionAvailability,
+} from "./delegation-task-product";
 
 type ComputeCapability = "exec" | "read" | "write" | "process" | "browser" | "mcp";
 
@@ -20,6 +28,17 @@ export type DelegationTaskTerminalOutcome =
   | "blocked"
   | "rejected"
   | "expired";
+
+export type DelegationTaskOwnerAction = "cancel" | "retry" | "continue";
+
+export class DelegationTaskActionError extends Error {
+  constructor(message: string, readonly statusCode = 409) {
+    super(message);
+    this.name = "DelegationTaskActionError";
+  }
+}
+
+export type DelegationTaskDetailSnapshot = NonNullable<Awaited<ReturnType<typeof getRepresentativeDelegationTaskDetail>>>;
 
 export async function createComputeDelegationTask(input: {
   representativeId: string;
@@ -47,6 +66,8 @@ export async function createComputeDelegationTask(input: {
           episodeId: true,
           inputMessageId: true,
           representativeVersionId: true,
+          delegationTaskId: true,
+          delegationTaskStepId: true,
         },
       }),
       tx.conversation.findUnique({
@@ -70,13 +91,35 @@ export async function createComputeDelegationTask(input: {
     ) {
       throw new Error("Delegation task context does not match its generation run and conversation.");
     }
-    const existing = await tx.delegationTask.findUnique({
-      where: { idempotencyKey: `compute-generation:${input.generationRunId}` },
-      include: { steps: { orderBy: { sequence: "asc" }, take: 1 } },
-    });
+    if (run.delegationTaskId) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${run.delegationTaskId}))`;
+    }
+    const existing = run.delegationTaskId
+      ? await tx.delegationTask.findFirst({
+          where: {
+            id: run.delegationTaskId,
+            representativeId: input.representativeId,
+            originConversationId: input.conversationId,
+          },
+          include: { steps: { orderBy: { sequence: "asc" }, take: 1 } },
+        })
+      : await tx.delegationTask.findUnique({
+          where: { idempotencyKey: `compute-generation:${input.generationRunId}` },
+          include: { steps: { orderBy: { sequence: "asc" }, take: 1 } },
+        });
     if (existing) {
+      if (run.delegationTaskStepId && existing.steps[0]?.id !== run.delegationTaskStepId) {
+        throw new Error("Generation run delegation step does not match the task execution plan.");
+      }
+      if (
+        existing.status !== DelegationTaskStatus.READY &&
+        existing.status !== DelegationTaskStatus.FAILED
+      ) {
+        throw new Error("Delegation task is no longer executable.");
+      }
+      let current = existing;
       if (existing.status === DelegationTaskStatus.FAILED) {
-        await tx.delegationTask.update({
+        const task = await tx.delegationTask.update({
           where: { id: existing.id },
           data: {
             status: DelegationTaskStatus.READY,
@@ -104,6 +147,7 @@ export async function createComputeDelegationTask(input: {
           toStatus: DelegationTaskStatus.READY,
           payload: { generationRunId: input.generationRunId },
         });
+        current = { ...existing, ...task };
       }
       await linkGenerationToTask(tx, {
         taskId: existing.id,
@@ -111,7 +155,7 @@ export async function createComputeDelegationTask(input: {
         generationRunId: input.generationRunId,
         inputMessageId: input.inputMessageId,
       });
-      return { task: existing, step: existing.steps[0] ?? null };
+      return { task: current, step: existing.steps[0] ?? null };
     }
 
     const now = new Date();
@@ -372,6 +416,10 @@ export async function finalizeComputeDelegationTask(input: {
         select: { artifactId: true },
       });
       const existingArtifactIds = new Set(existingOutputs.map((output) => output.artifactId));
+      await tx.delegationTaskOutput.updateMany({
+        where: { delegationTaskId: task.id, artifactId: { in: artifactIds } },
+        data: { isFinal: input.outcome === "completed" },
+      });
       const missingOutputs = artifacts.filter((artifact) => !existingArtifactIds.has(artifact.id));
       if (missingOutputs.length) {
         await tx.delegationTaskOutput.createMany({
@@ -388,22 +436,16 @@ export async function finalizeComputeDelegationTask(input: {
       }
     }
     if (!(input.artifacts?.length)) {
-      const summaryExists = await tx.delegationTaskOutput.findFirst({
-        where: { delegationTaskId: task.id, kind: "SUMMARY" },
-        select: { id: true },
+      await tx.delegationTaskOutput.create({
+        data: {
+          delegationTaskId: task.id,
+          delegationTaskStepId: step?.id ?? null,
+          kind: "SUMMARY",
+          title: input.outcome === "completed" ? "任务执行完成" : "任务执行结果",
+          summary: input.failureReason ?? input.outcome,
+          isFinal: true,
+        },
       });
-      if (!summaryExists) {
-        await tx.delegationTaskOutput.create({
-          data: {
-            delegationTaskId: task.id,
-            delegationTaskStepId: step?.id ?? null,
-            kind: "SUMMARY",
-            title: input.outcome === "completed" ? "任务执行完成" : "任务执行结果",
-            summary: input.failureReason ?? input.outcome,
-            isFinal: true,
-          },
-        });
-      }
     }
     await appendTaskEvent(tx, {
       taskId: task.id,
@@ -419,6 +461,439 @@ export async function finalizeComputeDelegationTask(input: {
     });
     return { taskId: task.id, status: terminal.taskStatus };
   });
+}
+
+export async function getRepresentativeDelegationTaskDetail(
+  representativeSlug: string,
+  taskId: string,
+) {
+  const task = await prisma.delegationTask.findFirst({
+    where: { id: taskId, representative: { slug: representativeSlug } },
+    include: {
+      representative: { select: { slug: true, displayName: true } },
+      representativeVersion: { select: { versionNumber: true, publishedAt: true } },
+      contact: { select: { id: true, displayName: true, username: true } },
+      resourcePolicy: true,
+      inputs: { orderBy: { createdAt: "asc" } },
+      dataGrants: { orderBy: { createdAt: "asc" } },
+      steps: { orderBy: { sequence: "asc" } },
+      approvalRequests: { orderBy: { requestedAt: "desc" }, take: 20 },
+      outputs: {
+        orderBy: { createdAt: "desc" },
+        include: {
+          artifact: {
+            select: {
+              id: true,
+              kind: true,
+              mimeType: true,
+              sizeBytes: true,
+              summary: true,
+              retentionUntil: true,
+              createdAt: true,
+            },
+          },
+          deliverable: { select: { id: true, title: true, kind: true, visibility: true } },
+          externalEffect: { select: { id: true, type: true, target: true, action: true, status: true } },
+        },
+      },
+      externalEffects: { orderBy: { createdAt: "asc" } },
+      events: { orderBy: { sequence: "desc" }, take: 50 },
+      ledgerEntries: {
+        orderBy: { createdAt: "desc" },
+        select: { id: true, kind: true, creditDelta: true, costCents: true, quantity: true, unit: true, createdAt: true },
+      },
+      generationRuns: {
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: { id: true, status: true, attemptCount: true, errorCode: true, errorMessage: true, createdAt: true },
+      },
+      computeSessions: {
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: { id: true, status: true, leaseStatus: true, runnerType: true, createdAt: true, endedAt: true, failureReason: true },
+      },
+    },
+  });
+  if (!task) return null;
+
+  const pendingApproval = task.approvalRequests.find((approval) => approval.status === "PENDING");
+  const actionAvailability = buildDelegationTaskOwnerActionAvailability({
+    status: task.status,
+    kind: task.kind,
+    hasGenerationRun: task.generationRuns.length > 0,
+    hasPendingApproval: Boolean(pendingApproval),
+  });
+  const creditsUsed = task.ledgerEntries.reduce(
+    (total, entry) => total + Math.max(0, -entry.creditDelta),
+    0,
+  );
+  const costCents = task.ledgerEntries.reduce((total, entry) => total + entry.costCents, 0);
+
+  return {
+    representative: task.representative,
+    task: {
+      id: task.id,
+      title: task.title,
+      objective: task.objective,
+      desiredOutcome: task.desiredOutcome,
+      kind: task.kind.toLowerCase(),
+      initiatorType: task.initiatorType.toLowerCase(),
+      status: task.status.toLowerCase(),
+      nextActionBy: task.nextActionBy.toLowerCase(),
+      ...(task.blockingReason ? { blockingReason: task.blockingReason } : {}),
+      priority: task.priority,
+      version: task.version,
+      ...(task.deadlineAt ? { deadlineAt: task.deadlineAt.toISOString() } : {}),
+      ...(task.startedAt ? { startedAt: task.startedAt.toISOString() } : {}),
+      ...(task.completedAt ? { completedAt: task.completedAt.toISOString() } : {}),
+      ...(task.failedAt ? { failedAt: task.failedAt.toISOString() } : {}),
+      ...(task.canceledAt ? { canceledAt: task.canceledAt.toISOString() } : {}),
+      createdAt: task.createdAt.toISOString(),
+      updatedAt: task.updatedAt.toISOString(),
+      ...(task.originConversationId ? { conversationId: task.originConversationId } : {}),
+      ...(task.representativeVersion
+        ? {
+            representativeVersion: {
+              versionNumber: task.representativeVersion.versionNumber,
+              publishedAt: task.representativeVersion.publishedAt.toISOString(),
+            },
+          }
+        : {}),
+      ...(task.contact
+        ? {
+            contact: {
+              id: task.contact.id,
+              displayName: task.contact.displayName || "Anonymous visitor",
+              ...(task.contact.username ? { username: task.contact.username } : {}),
+            },
+          }
+        : {}),
+    },
+    plan: {
+      summary: task.planSummary || "尚未记录计划摘要。",
+      steps: task.steps.map((step) => ({
+        id: step.id,
+        sequence: step.sequence,
+        kind: step.kind.toLowerCase(),
+        title: step.title,
+        ...(step.description ? { description: step.description } : {}),
+        status: step.status.toLowerCase(),
+        ...(step.capability ? { capability: step.capability.toLowerCase() } : {}),
+        requiresApproval: step.requiresApproval,
+        ...(step.maxCostCents !== null ? { maxCostCents: step.maxCostCents } : {}),
+        ...(step.maxDurationSeconds !== null ? { maxDurationSeconds: step.maxDurationSeconds } : {}),
+        dependsOnStepIds: step.dependsOnStepIds,
+      })),
+      policy: task.resourcePolicy
+        ? {
+            maxDurationMinutes: task.resourcePolicy.maxDurationMinutes,
+            maxCostCents: task.resourcePolicy.maxCostCents,
+            maxCredits: task.resourcePolicy.maxCredits,
+            maxComputeMinutes: task.resourcePolicy.maxComputeMinutes,
+            maxToolCalls: task.resourcePolicy.maxToolCalls,
+            maxSteps: task.resourcePolicy.maxSteps,
+            maxArtifactBytes: task.resourcePolicy.maxArtifactBytes,
+            allowedCapabilities: task.resourcePolicy.allowedCapabilities.map((capability) => capability.toLowerCase()),
+            allowedSkillSlugs: task.resourcePolicy.allowedSkillSlugs,
+            allowedMcpBindingIds: task.resourcePolicy.allowedMcpBindingIds,
+            allowedExternalAccountIds: task.resourcePolicy.allowedExternalAccountIds,
+            networkMode: task.resourcePolicy.networkMode.toLowerCase(),
+            filesystemMode: task.resourcePolicy.filesystemMode.toLowerCase(),
+            requireApprovalForExternalSideEffects: task.resourcePolicy.requireApprovalForExternalSideEffects,
+          }
+        : null,
+    },
+    inputs: task.inputs.map((input) => ({
+      id: input.id,
+      kind: input.kind.toLowerCase(),
+      label: input.label,
+      referenceType: input.referenceType,
+      authorizationRequired: input.authorizationRequired,
+      createdAt: input.createdAt.toISOString(),
+    })),
+    dataGrants: task.dataGrants.map((grant) => ({
+      id: grant.id,
+      resourceType: grant.resourceType,
+      resourceId: grant.resourceId,
+      scopes: grant.scopes,
+      purpose: grant.purpose,
+      status: grant.status.toLowerCase(),
+      grantedAt: grant.grantedAt.toISOString(),
+      ...(grant.expiresAt ? { expiresAt: grant.expiresAt.toISOString() } : {}),
+    })),
+    approvals: task.approvalRequests.map((approval) => ({
+      id: approval.id,
+      status: approval.status.toLowerCase(),
+      requestedActionSummary: approval.requestedActionSummary,
+      riskSummary: approval.riskSummary,
+      reason: approval.reason,
+      policy: {
+        decision: "ask" as const,
+        matchedRuleId: approval.matchedPolicyRuleId || null,
+        requestFingerprint: approval.requestPayloadHash || null,
+        explanation: buildDelegationApprovalPolicyExplanation(approval.reason, approval.matchedPolicyRuleId),
+      },
+      requestedAt: approval.requestedAt.toISOString(),
+      ...(approval.expiresAt ? { expiresAt: approval.expiresAt.toISOString() } : {}),
+      ...(approval.resolvedAt ? { resolvedAt: approval.resolvedAt.toISOString() } : {}),
+      ...(approval.resolvedBy ? { resolvedBy: approval.resolvedBy } : {}),
+      ...(approval.decisionNote ? { decisionNote: approval.decisionNote } : {}),
+    })),
+    outputs: task.outputs.map((output) => ({
+      id: output.id,
+      kind: output.kind.toLowerCase(),
+      title: output.title,
+      ...(output.summary ? { summary: output.summary } : {}),
+      isFinal: output.isFinal,
+      createdAt: output.createdAt.toISOString(),
+      ...(output.artifact
+        ? {
+            artifact: {
+              id: output.artifact.id,
+              kind: output.artifact.kind.toLowerCase(),
+              mimeType: output.artifact.mimeType,
+              sizeBytes: output.artifact.sizeBytes,
+              ...(output.artifact.summary ? { summary: output.artifact.summary } : {}),
+              ...(output.artifact.retentionUntil ? { retentionUntil: output.artifact.retentionUntil.toISOString() } : {}),
+              downloadUrl: `/api/dashboard/representatives/${encodeURIComponent(representativeSlug)}/compute/artifacts/${encodeURIComponent(output.artifact.id)}/download`,
+            },
+          }
+        : {}),
+      ...(output.deliverable ? { deliverable: { ...output.deliverable, kind: output.deliverable.kind.toLowerCase(), visibility: output.deliverable.visibility.toLowerCase() } } : {}),
+      ...(output.externalEffect ? { externalEffect: { ...output.externalEffect, status: output.externalEffect.status.toLowerCase() } } : {}),
+    })),
+    externalEffects: task.externalEffects.map((effect) => ({
+      id: effect.id,
+      type: effect.type,
+      target: effect.target,
+      action: effect.action,
+      status: effect.status.toLowerCase(),
+      ...(effect.externalReferenceId ? { externalReferenceId: effect.externalReferenceId } : {}),
+      ...(effect.failureReason ? { failureReason: effect.failureReason } : {}),
+      createdAt: effect.createdAt.toISOString(),
+    })),
+    usage: { creditsUsed, costCents, ledgerEntryCount: task.ledgerEntries.length },
+    attempts: task.generationRuns.map((run) => ({
+      id: run.id,
+      status: run.status.toLowerCase(),
+      attemptCount: run.attemptCount,
+      ...(run.errorCode ? { errorCode: run.errorCode } : {}),
+      ...(run.errorMessage ? { errorMessage: run.errorMessage } : {}),
+      createdAt: run.createdAt.toISOString(),
+    })),
+    sessions: task.computeSessions.map((session) => ({
+      id: session.id,
+      status: session.status.toLowerCase(),
+      leaseStatus: session.leaseStatus.toLowerCase(),
+      runnerType: session.runnerType.toLowerCase(),
+      createdAt: session.createdAt.toISOString(),
+      ...(session.endedAt ? { endedAt: session.endedAt.toISOString() } : {}),
+      ...(session.failureReason ? { failureReason: session.failureReason } : {}),
+    })),
+    timeline: task.events.map((event) => ({
+      id: event.id,
+      sequence: event.sequence,
+      eventType: event.eventType,
+      actorType: event.actorType.toLowerCase(),
+      ...(event.actorId ? { actorId: event.actorId } : {}),
+      ...(event.fromStatus ? { fromStatus: event.fromStatus.toLowerCase() } : {}),
+      ...(event.toStatus ? { toStatus: event.toStatus.toLowerCase() } : {}),
+      occurredAt: event.occurredAt.toISOString(),
+      eventHash: event.eventHash,
+    })),
+    actions: actionAvailability,
+    pendingApprovalId: pendingApproval?.id ?? null,
+  };
+}
+
+export async function applyRepresentativeDelegationTaskAction(input: {
+  representativeSlug: string;
+  taskId: string;
+  action: DelegationTaskOwnerAction;
+  actorId: string;
+}) {
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
+    const task = await tx.delegationTask.findFirst({
+      where: { id: input.taskId, representative: { slug: input.representativeSlug } },
+      include: {
+        generationRuns: { orderBy: { createdAt: "desc" }, take: 10 },
+        steps: { orderBy: { sequence: "asc" }, take: 1 },
+        approvalRequests: { where: { status: "PENDING" }, take: 1 },
+      },
+    });
+    if (!task) throw new DelegationTaskActionError("Delegation task not found.", 404);
+    const availability = buildDelegationTaskOwnerActionAvailability({
+      status: task.status,
+      kind: task.kind,
+      hasGenerationRun: task.generationRuns.length > 0,
+      hasPendingApproval: task.approvalRequests.length > 0,
+    });
+    const selected = availability[input.action];
+    if (!selected.enabled) throw new DelegationTaskActionError(selected.reason);
+
+    if (input.action === "cancel") {
+      if (task.approvalRequests.length) {
+        throw new DelegationTaskActionError("Pending approval must be rejected through the approval workflow.");
+      }
+      if (task.generationRuns.some((run) => run.status === GenerationRunStatus.PROCESSING)) {
+        throw new DelegationTaskActionError("The task started running before cancellation could be claimed.");
+      }
+      const now = new Date();
+      const queuedRunIds = task.generationRuns
+        .filter((run) => run.status === GenerationRunStatus.QUEUED)
+        .map((run) => run.id);
+      if (queuedRunIds.length) {
+        const claimedOutbox = await tx.outboxEvent.updateMany({
+          where: {
+            aggregateType: "generation_run",
+            aggregateId: { in: queuedRunIds },
+            status: { in: ["PENDING", "FAILED"] },
+          },
+          data: { status: "PROCESSED", processedAt: now, lastError: "delegation_task_canceled" },
+        });
+        if (claimedOutbox.count !== queuedRunIds.length) {
+          throw new DelegationTaskActionError("The task started running before cancellation could claim its queue item.");
+        }
+      }
+      const canceledRuns = await tx.generationRun.updateMany({
+        where: { id: { in: queuedRunIds }, status: GenerationRunStatus.QUEUED },
+        data: { status: GenerationRunStatus.CANCELED, canceledAt: now },
+      });
+      if (canceledRuns.count !== queuedRunIds.length) {
+        throw new DelegationTaskActionError("The task started running before cancellation could update its generation attempt.");
+      }
+      await tx.delegationTask.update({
+        where: { id: task.id },
+        data: {
+          status: DelegationTaskStatus.CANCELED,
+          nextActionBy: DelegationTaskNextActor.NONE,
+          blockingReason: "代表所有者已取消任务",
+          canceledAt: now,
+          version: { increment: 1 },
+        },
+      });
+      await tx.delegationTaskStep.updateMany({
+        where: { delegationTaskId: task.id, status: { notIn: ["COMPLETED", "CANCELED", "SKIPPED"] } },
+        data: { status: DelegationTaskStepStatus.CANCELED, completedAt: now },
+      });
+      await tx.delegationTaskExternalEffect.updateMany({
+        where: { delegationTaskId: task.id, status: { in: ["PROPOSED", "WAITING_APPROVAL", "APPROVED"] } },
+        data: { status: "CANCELED", failureReason: "delegation_task_canceled" },
+      });
+      await createTaskSystemMessage(tx, {
+        taskId: task.id,
+        conversationId: task.originConversationId,
+        episodeId: task.originEpisodeId,
+        clientMessageId: `delegation-task-canceled:${task.id}:${task.version + 1}`,
+        text: "委托任务已由代表所有者取消。",
+      });
+      await settleConversationAfterTaskAction(tx, task.originConversationId, task.originEpisodeId);
+      await appendTaskEvent(tx, {
+        taskId: task.id,
+        eventType: "task.canceled_by_owner",
+        actorType: DelegationTaskActorType.OWNER,
+        actorId: input.actorId,
+        fromStatus: task.status,
+        toStatus: DelegationTaskStatus.CANCELED,
+      });
+      return;
+    }
+
+    const sourceRun = task.generationRuns[0];
+    const step = task.steps[0];
+    if (!sourceRun || !step || !task.originConversationId) {
+      throw new DelegationTaskActionError("The task does not have a resumable execution context.");
+    }
+    const now = new Date();
+    const nextVersion = task.version + 1;
+    const run = await tx.generationRun.create({
+      data: {
+        conversationId: sourceRun.conversationId,
+        episodeId: sourceRun.episodeId,
+        inputMessageId: sourceRun.inputMessageId,
+        representativeVersionId: task.representativeVersionId,
+        delegationTaskId: task.id,
+        delegationTaskStepId: step.id,
+        status: GenerationRunStatus.QUEUED,
+        idempotencyKey: `delegation-task:${task.id}:${input.action}:${nextVersion}`,
+        contextSnapshot: {
+          source: `owner_${input.action}`,
+          previousGenerationRunId: sourceRun.id,
+          requestedBy: input.actorId,
+        },
+      },
+    });
+    await tx.outboxEvent.create({
+      data: {
+        conversationId: sourceRun.conversationId,
+        aggregateType: "generation_run",
+        aggregateId: run.id,
+        eventType: "generation.requested",
+        payload: { runId: run.id, conversationId: sourceRun.conversationId, messageId: sourceRun.inputMessageId, taskId: task.id },
+        idempotencyKey: `generation.requested:${run.id}`,
+      },
+    });
+    await tx.delegationTask.update({
+      where: { id: task.id },
+      data: {
+        status: DelegationTaskStatus.READY,
+        nextActionBy: DelegationTaskNextActor.SYSTEM,
+        blockingReason: null,
+        failedAt: null,
+        canceledAt: null,
+        completedAt: null,
+        version: { increment: 1 },
+      },
+    });
+    await tx.delegationTaskStep.update({
+      where: { id: step.id },
+      data: {
+        status: DelegationTaskStepStatus.READY,
+        requiresApproval: false,
+        approvedAt: null,
+        failedAt: null,
+        completedAt: null,
+        outputSnapshot: Prisma.DbNull,
+      },
+    });
+    if (input.action === "retry") {
+      await tx.delegationTaskOutput.updateMany({
+        where: { delegationTaskId: task.id, isFinal: true },
+        data: { isFinal: false },
+      });
+    }
+    await tx.conversation.update({
+      where: { id: sourceRun.conversationId },
+      data: { state: "AI_QUEUED", lastMessageAt: now },
+    });
+    if (sourceRun.episodeId) {
+      await tx.conversationEpisode.updateMany({
+        where: { id: sourceRun.episodeId },
+        data: { status: ConversationEpisodeStatus.ACTIVE },
+      });
+    }
+    await createTaskSystemMessage(tx, {
+      taskId: task.id,
+      conversationId: sourceRun.conversationId,
+      episodeId: sourceRun.episodeId,
+      clientMessageId: `delegation-task-${input.action}:${task.id}:${nextVersion}`,
+      text: input.action === "retry"
+        ? "代表所有者已重新安排此委托任务，系统会重新检查当前策略后执行。"
+        : "代表所有者已继续此委托任务。",
+    });
+    await appendTaskEvent(tx, {
+      taskId: task.id,
+      eventType: input.action === "retry" ? "task.retry_scheduled" : "task.continued_by_owner",
+      actorType: DelegationTaskActorType.OWNER,
+      actorId: input.actorId,
+      fromStatus: task.status,
+      toStatus: DelegationTaskStatus.READY,
+      payload: { generationRunId: run.id, previousGenerationRunId: sourceRun.id },
+    });
+  });
+
+  return getRepresentativeDelegationTaskDetail(input.representativeSlug, input.taskId);
 }
 
 async function transitionDelegationTask(input: {
@@ -457,6 +932,7 @@ async function transitionDelegationTask(input: {
         data: {
           status: input.stepStatus,
           startedAt: task.steps[0].startedAt ?? now,
+          ...(input.approvalId ? { requiresApproval: true } : {}),
         },
       });
       if (input.externalEffectStatus === "EXECUTING") {
@@ -557,6 +1033,57 @@ async function appendTaskEvent(
       occurredAt,
     },
   });
+}
+
+async function createTaskSystemMessage(
+  tx: Prisma.TransactionClient,
+  input: {
+    taskId: string;
+    conversationId: string | null;
+    episodeId: string | null;
+    clientMessageId: string;
+    text: string;
+  },
+) {
+  if (!input.conversationId) return;
+  await tx.message.upsert({
+    where: {
+      conversationId_clientMessageId: {
+        conversationId: input.conversationId,
+        clientMessageId: input.clientMessageId,
+      },
+    },
+    create: {
+      conversationId: input.conversationId,
+      episodeId: input.episodeId,
+      delegationTaskId: input.taskId,
+      senderType: MessageSenderType.SYSTEM,
+      senderDisplayName: "Delegate",
+      text: input.text,
+      content: { kind: "delegation_task_status" },
+      clientMessageId: input.clientMessageId,
+      deliveryStatus: MessageDeliveryStatus.SENT,
+    },
+    update: {},
+  });
+}
+
+async function settleConversationAfterTaskAction(
+  tx: Prisma.TransactionClient,
+  conversationId: string | null,
+  episodeId: string | null,
+) {
+  if (!conversationId) return;
+  await tx.conversation.update({
+    where: { id: conversationId },
+    data: { state: "WAITING_USER", lastMessageAt: new Date() },
+  });
+  if (episodeId) {
+    await tx.conversationEpisode.updateMany({
+      where: { id: episodeId },
+      data: { status: ConversationEpisodeStatus.WAITING_USER },
+    });
+  }
 }
 
 function mapCapability(capability: ComputeCapability) {

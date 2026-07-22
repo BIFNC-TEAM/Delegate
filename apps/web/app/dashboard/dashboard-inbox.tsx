@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import type {
   ConversationDetailSnapshot,
   ConversationInboxSnapshot,
+  DelegationTaskDetailSnapshot,
 } from "@delegate/web-data";
 import type { Locale } from "@delegate/web-ui";
 
@@ -29,6 +30,11 @@ export function DashboardInbox({
   const [replyText, setReplyText] = useState("");
   const [noteText, setNoteText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [taskDetail, setTaskDetail] = useState<DelegationTaskDetailSnapshot | null>(null);
+  const [taskLoading, setTaskLoading] = useState(false);
+  const [taskError, setTaskError] = useState<string | null>(null);
+  const [taskBusy, setTaskBusy] = useState(false);
+  const taskRequestRef = useRef(0);
   const [isPending, startTransition] = useTransition();
 
   const filtered = useMemo(() => {
@@ -70,6 +76,15 @@ export function DashboardInbox({
     };
   }, [activeSlug, selectedId]);
 
+  useEffect(() => {
+    if (!taskDetail && !taskLoading) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !taskBusy) closeTask();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [taskBusy, taskDetail, taskLoading]);
+
   async function refreshWorkspace(conversationId = detail?.id) {
     const inboxUrl = `/api/dashboard/representatives/${encodeURIComponent(activeSlug)}/conversations`;
     const [inboxResponse, detailResponse] = await Promise.all([
@@ -90,6 +105,7 @@ export function DashboardInbox({
 
   function selectConversation(conversationId: string) {
     setSelectedId(conversationId);
+    closeTask();
     setError(null);
     startTransition(async () => {
       try {
@@ -117,6 +133,60 @@ export function DashboardInbox({
         setError(nextError instanceof Error ? nextError.message : "Failed to load conversation.");
       }
     });
+  }
+
+  async function openTask(taskId: string) {
+    const requestId = ++taskRequestRef.current;
+    setTaskLoading(true);
+    setTaskDetail(null);
+    setTaskError(null);
+    try {
+      const response = await fetch(
+        `/api/dashboard/representatives/${encodeURIComponent(activeSlug)}/tasks/${encodeURIComponent(taskId)}`,
+        { cache: "no-store" },
+      );
+      const payload = (await response.json().catch(() => ({}))) as DelegationTaskDetailSnapshot & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Failed to load delegation task.");
+      if (taskRequestRef.current === requestId) setTaskDetail(payload);
+    } catch (caught) {
+      if (taskRequestRef.current === requestId) {
+        setTaskError(caught instanceof Error ? caught.message : "Failed to load delegation task.");
+      }
+    } finally {
+      if (taskRequestRef.current === requestId) setTaskLoading(false);
+    }
+  }
+
+  function closeTask() {
+    taskRequestRef.current += 1;
+    setTaskLoading(false);
+    setTaskDetail(null);
+    setTaskError(null);
+  }
+
+  async function updateTask(action: "cancel" | "retry" | "continue") {
+    if (!taskDetail || taskBusy) return;
+    if (action === "cancel" && !window.confirm(zh ? "确定取消这个委托任务？审批和审计记录会保留。" : "Cancel this delegated task? Approval and audit evidence will be preserved.")) return;
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      const response = await fetch(
+        `/api/dashboard/representatives/${encodeURIComponent(activeSlug)}/tasks/${encodeURIComponent(taskDetail.task.id)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        },
+      );
+      const payload = (await response.json().catch(() => ({}))) as DelegationTaskDetailSnapshot & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Failed to update delegation task.");
+      setTaskDetail(payload);
+      await refreshWorkspace(detail?.id);
+    } catch (caught) {
+      setTaskError(caught instanceof Error ? caught.message : "Failed to update delegation task.");
+    } finally {
+      setTaskBusy(false);
+    }
   }
 
   function updateControl(action: "assign" | "return_to_ai") {
@@ -242,6 +312,7 @@ export function DashboardInbox({
 
   return (
     <>
+      <div className="inbox-page-main" inert={taskDetail || taskLoading ? true : undefined}>
       <header className="dashboard-v2-page-header inbox-page-header">
         <div>
           <p>INBOX / 03</p>
@@ -423,13 +494,14 @@ export function DashboardInbox({
                 <p>{zh ? "委托任务" : "Delegated tasks"}</p>
                 <div className="inbox-run-list">
                   {detail.tasks.length ? detail.tasks.map((task) => (
-                    <article key={task.id} title={task.blockingReason}>
+                    <button className="inbox-task-link" key={task.id} onClick={() => void openTask(task.id)} title={task.blockingReason} type="button">
                       <span className={`is-${task.status}`} />
                       <div>
                         <strong>{task.title}</strong>
                         <small>{task.status} · {zh ? "下一步" : "next"}: {task.nextActionBy} · {task.outputCount} {zh ? "项产物" : "outputs"}</small>
                       </div>
-                    </article>
+                      <b>→</b>
+                    </button>
                   )) : <small>{zh ? "该会话尚无委托任务" : "No delegated tasks in this conversation"}</small>}
                 </div>
               </section>
@@ -452,8 +524,144 @@ export function DashboardInbox({
           ) : null}
         </aside>
       </section>
+      </div>
+
+      {(taskDetail || taskLoading) ? (
+        <div className="delegation-task-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target && !taskBusy) closeTask(); }}>
+          <aside aria-busy={taskLoading || taskBusy} aria-modal="true" className="delegation-task-drawer" role="dialog">
+            {taskLoading && !taskDetail ? (
+              <div className="delegation-task-loading">
+                <button aria-label={zh ? "关闭任务详情" : "Close task detail"} autoFocus onClick={closeTask} type="button">×</button>
+                <span>{zh ? "正在读取任务契约…" : "Loading task contract…"}</span>
+              </div>
+            ) : null}
+            {taskDetail ? (
+              <DelegationTaskDrawer
+                busy={taskBusy}
+                detail={taskDetail}
+                error={taskError}
+                locale={locale}
+                onAction={(action) => void updateTask(action)}
+                onClose={closeTask}
+              />
+            ) : null}
+          </aside>
+        </div>
+      ) : null}
+      {!taskDetail && taskError ? <div className="inbox-error" role="alert">{taskError}</div> : null}
     </>
   );
+}
+
+function DelegationTaskDrawer({
+  busy,
+  detail,
+  error,
+  locale,
+  onAction,
+  onClose,
+}: {
+  busy: boolean;
+  detail: DelegationTaskDetailSnapshot;
+  error: string | null;
+  locale: Locale;
+  onAction: (action: "cancel" | "retry" | "continue") => void;
+  onClose: () => void;
+}) {
+  const zh = locale === "zh";
+  const task = detail.task;
+  return (
+    <>
+      <header>
+        <div>
+          <span>{zh ? "委托任务" : "Delegated task"} · <code>{task.id.slice(-8)}</code></span>
+          <h2>{task.title}</h2>
+          <p>{task.objective}</p>
+        </div>
+        <span className={`delegation-task-status is-${task.status}`}>{formatTaskStatus(task.status, locale)}</span>
+        <button aria-label={zh ? "关闭任务详情" : "Close task detail"} autoFocus onClick={onClose} type="button">×</button>
+      </header>
+
+      <div className="delegation-task-body">
+        {error ? <div className="dashboard-approval-alert" role="alert">{error}</div> : null}
+        <section className="delegation-task-summary">
+          <span>{zh ? "目标结果" : "Desired outcome"}</span>
+          <p>{task.desiredOutcome}</p>
+        </section>
+        <dl className="delegation-task-facts">
+          <div><dt>{zh ? "下一责任方" : "Next actor"}</dt><dd>{task.nextActionBy}</dd></div>
+          <div><dt>{zh ? "任务版本" : "Task version"}</dt><dd>v{task.version}</dd></div>
+          <div><dt>{zh ? "代表版本" : "Rep version"}</dt><dd>{task.representativeVersion ? `v${task.representativeVersion.versionNumber}` : "—"}</dd></div>
+          <div><dt>{zh ? "资源消耗" : "Usage"}</dt><dd>{detail.usage.creditsUsed} credits · {detail.usage.costCents} cents</dd></div>
+        </dl>
+
+        <TaskSection eyebrow={zh ? "执行计划" : "Execution plan"} title={detail.plan.summary}>
+          <div className="delegation-task-steps">
+            {detail.plan.steps.map((step) => (
+              <article key={step.id}>
+                <i>{String(step.sequence).padStart(2, "0")}</i>
+                <div><strong>{step.title}</strong><p>{step.kind} · {step.capability || "—"}{step.requiresApproval ? ` · ${zh ? "需要审批" : "approval required"}` : ""}</p></div>
+                <span className={`is-${step.status}`}>{step.status}</span>
+              </article>
+            ))}
+          </div>
+        </TaskSection>
+
+        {detail.plan.policy ? (
+          <TaskSection eyebrow={zh ? "资源边界" : "Resource boundary"} title={zh ? "创建任务时捕获，不会被后续策略静默放宽" : "Captured at creation and never silently broadened"}>
+            <dl className="delegation-task-policy">
+              <div><dt>{zh ? "允许能力" : "Capabilities"}</dt><dd>{detail.plan.policy.allowedCapabilities.join(", ") || "—"}</dd></div>
+              <div><dt>{zh ? "最长时间" : "Max duration"}</dt><dd>{detail.plan.policy.maxDurationMinutes} min</dd></div>
+              <div><dt>{zh ? "工具调用" : "Tool calls"}</dt><dd>{detail.plan.policy.maxToolCalls}</dd></div>
+              <div><dt>{zh ? "网络" : "Network"}</dt><dd>{detail.plan.policy.networkMode}</dd></div>
+              <div><dt>{zh ? "文件系统" : "Filesystem"}</dt><dd>{detail.plan.policy.filesystemMode}</dd></div>
+              <div><dt>{zh ? "外部副作用" : "External effects"}</dt><dd>{detail.plan.policy.requireApprovalForExternalSideEffects ? (zh ? "必须审批" : "Approval required") : (zh ? "按策略" : "Policy controlled")}</dd></div>
+            </dl>
+          </TaskSection>
+        ) : null}
+
+        <TaskSection eyebrow={zh ? "审批证据" : "Approval evidence"} title={detail.approvals.length ? (zh ? `${detail.approvals.length} 条决策记录` : `${detail.approvals.length} decision records`) : (zh ? "没有触发审批" : "No approval was triggered")}>
+          <div className="delegation-task-approvals">
+            {detail.approvals.map((approval) => (
+              <article key={approval.id}>
+                <header><strong>{approval.requestedActionSummary}</strong><span className={`is-${approval.status}`}>{approval.status}</span></header>
+                <p>{formatTaskPolicyExplanation(approval.policy, locale)}</p>
+                <code>{approval.policy.matchedRuleId || "profile-default"} · {approval.policy.requestFingerprint?.slice(0, 16) || "no-fingerprint"}</code>
+              </article>
+            ))}
+          </div>
+        </TaskSection>
+
+        <TaskSection eyebrow={zh ? "交付结果" : "Outputs"} title={detail.outputs.length ? (zh ? `${detail.outputs.length} 项已记录结果` : `${detail.outputs.length} recorded outputs`) : (zh ? "尚无产物" : "No outputs yet")}>
+          <div className="delegation-task-outputs">
+            {detail.outputs.map((output) => (
+              <article key={output.id}><div><strong>{output.title}</strong><p>{output.summary || output.kind}</p></div>{output.artifact ? <a href={output.artifact.downloadUrl}>{zh ? "下载" : "Download"}</a> : <span>{output.kind}</span>}</article>
+            ))}
+          </div>
+        </TaskSection>
+
+        <TaskSection eyebrow={zh ? "审计时间线" : "Audit timeline"} title={zh ? "哈希链接的状态证据" : "Hash-linked state evidence"}>
+          <div className="delegation-task-timeline">
+            {detail.timeline.map((event) => (
+              <article key={event.id}><i /><div><strong>{event.eventType}</strong><p>{event.fromStatus || "—"} → {event.toStatus || "—"}</p><code>#{event.sequence} · {event.eventHash.slice(0, 12)}</code></div><time>{formatMessageTime(event.occurredAt, locale)}</time></article>
+            ))}
+          </div>
+        </TaskSection>
+      </div>
+
+      <footer>
+        <div>
+          <button disabled={busy || !detail.actions.cancel.enabled} onClick={() => onAction("cancel")} title={detail.actions.cancel.reason} type="button">{zh ? "取消任务" : "Cancel task"}</button>
+          <button disabled={busy || !detail.actions.retry.enabled} onClick={() => onAction("retry")} title={detail.actions.retry.reason} type="button">{zh ? "重试" : "Retry"}</button>
+        </div>
+        <button className="is-primary" disabled={busy || !detail.actions.continue.enabled} onClick={() => onAction("continue")} title={detail.actions.continue.reason} type="button">{busy ? "…" : (zh ? "继续任务" : "Continue task")}</button>
+      </footer>
+    </>
+  );
+}
+
+function TaskSection({ eyebrow, title, children }: { eyebrow: string; title: string; children: React.ReactNode }) {
+  return <section className="delegation-task-section"><header><span>{eyebrow}</span><h3>{title}</h3></header>{children}</section>;
 }
 
 function InboxMetric({ label, value, tone = "neutral" }: { label: string; value: number; tone?: "neutral" | "teal" | "warning" | "indigo" }) {
@@ -466,6 +674,27 @@ function formatEpisodeState(state: string, locale: Locale) {
   };
   const label = labels[state] || [state, state];
   return locale === "zh" ? label[0] : label[1];
+}
+
+function formatTaskStatus(status: string, locale: Locale) {
+  const labels: Record<string, [string, string]> = {
+    draft: ["草稿", "Draft"], clarifying: ["待澄清", "Clarifying"], ready: ["已就绪", "Ready"], awaiting_approval: ["等待审批", "Waiting approval"], queued: ["排队中", "Queued"], running: ["执行中", "Running"], waiting_for_user: ["等待用户", "Waiting user"], waiting_for_owner: ["等待所有者", "Waiting owner"], completed: ["已完成", "Completed"], failed: ["失败", "Failed"], canceled: ["已取消", "Canceled"], expired: ["已过期", "Expired"],
+  };
+  const label = labels[status] || [status, status];
+  return locale === "zh" ? label[0] : label[1];
+}
+
+function formatTaskPolicyExplanation(
+  policy: DelegationTaskDetailSnapshot["approvals"][number]["policy"],
+  locale: Locale,
+) {
+  if (locale !== "zh") return policy.explanation;
+  const reason = policy.explanation.includes("human_approval_required")
+    ? "该操作要求所有者明确批准。"
+    : policy.explanation.split(". ").at(-1)?.replaceAll("_", " ") || "策略要求人工审批。";
+  return policy.matchedRuleId
+    ? `确定性策略规则“${policy.matchedRuleId}”返回 ASK。${reason}`
+    : `当前生效的默认策略或托管覆盖规则返回 ASK。${reason}`;
 }
 
 function senderLabel(type: string, displayName: string | undefined, locale: Locale) {

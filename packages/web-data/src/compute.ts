@@ -39,6 +39,7 @@ import {
   type RepresentativeApprovalInsightsSnapshot,
 } from "./compute-insights";
 import { buildRepresentativeGovernedActionSnapshot } from "./governed-actions";
+import { buildDelegationApprovalPolicyExplanation } from "./delegation-task-product";
 import { prisma } from "./prisma";
 import { callComputeBroker } from "./compute-client";
 import { buildRepresentativeResourceGovernanceSnapshot } from "./resource-governance";
@@ -450,6 +451,12 @@ export type RepresentativeComputeApprovalSnapshot = {
     requestedActionSummary: string;
     riskSummary: string;
     riskScore: number;
+    policy: {
+      decision: "ask";
+      matchedRuleId?: string;
+      requestFingerprint?: string;
+      explanation: string;
+    };
     subagentId?: string;
     requestedAt: string;
     resolvedAt?: string;
@@ -2379,6 +2386,12 @@ function serializeRepresentativeApproval(
     requestedActionSummary: approval.requestedActionSummary,
     riskSummary: approval.riskSummary,
     riskScore: approvalRiskScore(approval.reason, approval.riskSummary),
+    policy: {
+      decision: "ask" as const,
+      ...(approval.matchedPolicyRuleId ? { matchedRuleId: approval.matchedPolicyRuleId } : {}),
+      ...(approval.requestPayloadHash ? { requestFingerprint: approval.requestPayloadHash } : {}),
+      explanation: buildDelegationApprovalPolicyExplanation(approval.reason, approval.matchedPolicyRuleId),
+    },
     customerAccount,
     approver,
     staleWorkflow,

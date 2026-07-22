@@ -1,5 +1,7 @@
 # Delegation Tasks
 
+The owner and audience behavior is defined by the [delegation task product contract](./delegation-task-product-contract.md).
+
 `DelegationTask` is the business object that connects a visitor's requested outcome to the work Delegate performs. A conversation is communication context; a compute session, model run, approval, or workflow is only one execution detail of a task.
 
 ## Aggregate boundary

@@ -46,8 +46,11 @@ export async function planNaturalLanguageComputeRequest(params: {
     try {
       const response = await generateProviderResponse(provider, env, prompt);
       const plan = parseNaturalLanguageComputePlan(response.replyText);
-      const groundedPlan = plan && isNaturalLanguageComputePlanGrounded(plan, params.userText)
-        ? plan
+      const preferredPlan = plan?.kind === "clarification" && deterministic?.kind === "execution"
+        ? deterministic
+        : plan;
+      const groundedPlan = preferredPlan && isNaturalLanguageComputePlanGrounded(preferredPlan, params.userText)
+        ? preferredPlan
         : null;
       if (!groundedPlan && deterministic) {
         return { ok: true, plan: deterministic, source: "deterministic" };

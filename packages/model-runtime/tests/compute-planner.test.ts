@@ -121,6 +121,30 @@ describe("natural-language compute planner", () => {
     }, request)).toBe(true);
   });
 
+  it("treats records and checklists as generated documents", () => {
+    const request = "请生成一份面向 QA 团队的测试记录，主题是自然语言委托，包含目标、步骤和预期结果，格式为 Markdown。";
+    const defaultPath = buildDefaultGeneratedDocumentPath(request);
+
+    expect(inferDeterministicNaturalLanguageComputePlan(request)).toMatchObject({
+      kind: "execution",
+      steps: [{
+        capability: "write",
+        path: defaultPath,
+        content: expect.stringContaining("## 检查步骤"),
+      }],
+    });
+    expect(isNaturalLanguageComputePlanGrounded({
+      kind: "execution",
+      summary: "生成 QA 测试记录",
+      steps: [{
+        capability: "write",
+        summary: "生成 QA 测试记录",
+        path: defaultPath,
+        content: "# 自然语言委托测试记录\n\n## 目标\n验证委托任务可按预期触发。",
+      }],
+    }, request)).toBe(true);
+  });
+
   it("does not turn an informational report question into a compute task", () => {
     expect(inferDeterministicNaturalLanguageComputePlan("如何生成一个报告文件？")).toBeNull();
     expect(inferDeterministicNaturalLanguageComputePlan("我想知道如何生成一个报告文件")).toBeNull();

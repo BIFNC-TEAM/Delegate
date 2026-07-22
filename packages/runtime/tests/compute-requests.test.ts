@@ -53,6 +53,7 @@ describe("compute request parser", () => {
     expect(shouldConsiderNaturalLanguageCompute("生成一份面向管理层的季度销售总结")).toBe(true);
     expect(shouldConsiderNaturalLanguageCompute("编写一个幼儿园主题教案")).toBe(true);
     expect(shouldConsiderNaturalLanguageCompute("帮我做一份年度报告")).toBe(true);
+    expect(shouldConsiderNaturalLanguageCompute("请生成一份面向 QA 团队的 Markdown 测试记录")).toBe(true);
     expect(shouldConsiderNaturalLanguageCompute("Compute 是什么？")).toBe(false);
     expect(buildComputeRequestFromNaturalLanguagePlan({
       capability: "write",

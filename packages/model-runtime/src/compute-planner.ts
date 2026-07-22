@@ -50,6 +50,7 @@ export function buildNaturalLanguageComputePrompt(
       "Use write only when both the target path and complete intended content are available.",
       "Treat requests to generate reports, summaries, plans, lessons, stories, or other documents as generated-document tasks, not as low-level file writes.",
       "For generated-document tasks, ask only for missing business requirements such as topic, source material, audience, and output format. Never ask the user for a sandbox path or for already-written final content.",
+      "Source material is optional for templates, checklists, meeting notes, test records, specifications, and other documents that can be drafted solely from explicit user requirements.",
       `When generated-document requirements are sufficient, author a concise Markdown draft and write it only to this system-owned path: ${defaultGeneratedDocumentPath}`,
       "Do not claim to have used source material that is not included in the planner input.",
       "Use browser only when an http:// or https:// URL is present.",
@@ -161,6 +162,15 @@ export function inferDeterministicNaturalLanguageComputePlan(
   }
 
   if (isGeneratedDocumentRequest(text)) {
+    if (hasSufficientGeneratedDocumentRequirements(text)) {
+      const path = buildDefaultGeneratedDocumentPath(text);
+      return executionPlan("生成用户请求的文档初稿", {
+        capability: "write",
+        path,
+        content: buildDeterministicGeneratedDocument(text),
+        summary: "生成用户请求的文档初稿",
+      });
+    }
     return {
       kind: "clarification",
       summary: "准备生成文档",
@@ -232,18 +242,64 @@ export function buildDefaultGeneratedDocumentPath(userText: string) {
 }
 
 function isGeneratedDocumentRequest(text: string) {
-  return /(?:生成|创建|撰写|编写|制作|写|做|导出).{0,40}(?:报告|文档|总结|方案|教案|故事)|\b(?:generate|create|write|draft|prepare|export)\b.{0,40}\b(?:report|document|summary|plan|lesson|story)\b/i.test(text);
+  return /(?:生成|创建|撰写|编写|制作|写|做|导出).{0,40}(?:报告|文档|总结|方案|教案|故事|记录|纪要|清单|表格|简历|邮件|说明|规范)|\b(?:generate|create|write|draft|prepare|export)\b.{0,40}\b(?:report|document|summary|plan|lesson|story|record|notes|minutes|checklist|table|resume|email|specification|spec)\b/i.test(text);
 }
 
 function hasSufficientGeneratedDocumentRequirements(text: string) {
   const supplement = text.match(/(?:用户补充|additional user input)\s*[：:]\s*([\s\S]+)/i)?.[1]?.trim();
   const candidate = (supplement || text)
-    .replace(/(?:请|帮我|麻烦)?(?:生成|创建|撰写|编写|制作|导出)/gi, "")
-    .replace(/(?:一份|一个)?(?:报告|报告文件|文档|总结|方案|教案|故事|文件)/gi, "")
+    .replace(/(?:请|帮我|麻烦)?(?:生成|创建|撰写|编写|制作|写|做|导出)/gi, "")
+    .replace(/(?:一份|一个)?(?:报告|报告文件|文档|总结|方案|教案|故事|记录|纪要|清单|表格|简历|邮件|说明|规范|文件)/gi, "")
     .replace(/(?:原始任务|待补充|用户补充|additional user input)\s*[：:]?/gi, "")
     .replace(/(?:路径|path)\s*[：:]?\s*\S+/gi, "")
     .replace(/[\s，。！？、,:;；'“”\"`]/g, "");
-  return candidate.length >= 4;
+  return candidate.length >= 8;
+}
+
+function buildDeterministicGeneratedDocument(userText: string) {
+  const request = userText
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 4_000);
+  const isChecklistOrRecord = /(?:测试|qa|检查|验收|记录|清单|checklist|test|verification)/i.test(request);
+  if (isChecklistOrRecord) {
+    return [
+      "# 检查记录初稿",
+      "",
+      "## 需求摘要",
+      "",
+      request,
+      "",
+      "## 范围",
+      "",
+      "- 按上述需求覆盖目标功能与约束。",
+      "",
+      "## 检查步骤",
+      "",
+      "1. 准备需求中明确的输入与前置条件。",
+      "2. 按目标流程执行并记录实际结果。",
+      "3. 对照预期结果或通过标准完成复核。",
+      "",
+      "## 预期结果 / 通过标准",
+      "",
+      "- 需求中明确的流程可以完成，结果与约束一致。",
+      "- 未出现越权执行、未授权副作用或未说明的失败。",
+      "",
+      "> 本初稿仅依据用户提供的要求生成，未引用未提供的外部事实。",
+    ].join("\n");
+  }
+  return [
+    "# 文档初稿",
+    "",
+    "## 用户要求",
+    "",
+    request,
+    "",
+    "## 初稿说明",
+    "",
+    "本文档依据上述要求整理。需补充的数据、结论或外部事实应由用户或已授权资料提供。",
+  ].join("\n");
 }
 
 function executionPlan(summary: string, step: NaturalLanguageComputePlan): NaturalLanguageDelegationPlan {

@@ -12,9 +12,17 @@ import {
   MessageSenderType,
   Prisma,
 } from "@prisma/client";
+import type { ParsedComputeRequest } from "@delegate/runtime";
 
 import { prisma } from "./prisma";
 import { canonicalizeDelegationTaskEvent } from "./delegation-task-events";
+import {
+  buildExternalEffectActionAvailability,
+  readDelegationExternalEffectRequest,
+  readDelegationTaskStepRequest,
+  selectNextDelegationTaskStep,
+  validateDelegationStepDependencies,
+} from "./delegation-task-orchestration";
 import {
   buildDelegationApprovalPolicyExplanation,
   buildDelegationTaskOwnerActionAvailability,
@@ -30,6 +38,7 @@ export type DelegationTaskTerminalOutcome =
   | "expired";
 
 export type DelegationTaskOwnerAction = "cancel" | "retry" | "continue";
+export type DelegationExternalEffectOwnerAction = "reconcile" | "retry" | "record_compensation";
 
 export class DelegationTaskActionError extends Error {
   constructor(message: string, readonly statusCode = 409) {
@@ -50,6 +59,13 @@ export async function createComputeDelegationTask(input: {
   inputMessageId: string;
   objective: string;
   actionSummary: string;
+  request: ParsedComputeRequest;
+  planSummary?: string;
+  planSteps?: Array<{
+    summary: string;
+    request: ParsedComputeRequest;
+    dependsOnStepIndexes?: number[];
+  }>;
   capability: ComputeCapability;
   maxDurationMinutes: number;
   maxCredits?: number | null;
@@ -101,14 +117,17 @@ export async function createComputeDelegationTask(input: {
             representativeId: input.representativeId,
             originConversationId: input.conversationId,
           },
-          include: { steps: { orderBy: { sequence: "asc" }, take: 1 } },
+          include: { steps: { orderBy: { sequence: "asc" }, take: 8 } },
         })
       : await tx.delegationTask.findUnique({
           where: { idempotencyKey: `compute-generation:${input.generationRunId}` },
-          include: { steps: { orderBy: { sequence: "asc" }, take: 1 } },
+          include: { steps: { orderBy: { sequence: "asc" }, take: 8 } },
         });
     if (existing) {
-      if (run.delegationTaskStepId && existing.steps[0]?.id !== run.delegationTaskStepId) {
+      const currentStep = run.delegationTaskStepId
+        ? existing.steps.find((step) => step.id === run.delegationTaskStepId)
+        : existing.steps[0];
+      if (run.delegationTaskStepId && !currentStep) {
         throw new Error("Generation run delegation step does not match the task execution plan.");
       }
       if (
@@ -129,9 +148,9 @@ export async function createComputeDelegationTask(input: {
             version: { increment: 1 },
           },
         });
-        if (existing.steps[0]) {
+        if (currentStep) {
           await tx.delegationTaskStep.update({
-            where: { id: existing.steps[0].id },
+            where: { id: currentStep.id },
             data: {
               status: DelegationTaskStepStatus.READY,
               failedAt: null,
@@ -151,14 +170,24 @@ export async function createComputeDelegationTask(input: {
       }
       await linkGenerationToTask(tx, {
         taskId: existing.id,
-        ...(existing.steps[0] ? { stepId: existing.steps[0].id } : {}),
+        ...(currentStep ? { stepId: currentStep.id } : {}),
         generationRunId: input.generationRunId,
         inputMessageId: input.inputMessageId,
       });
-      return { task: current, step: existing.steps[0] ?? null };
+      return { task: current, step: currentStep ?? null };
     }
 
     const now = new Date();
+    const planSteps = input.planSteps?.length
+      ? input.planSteps
+      : [{ summary: input.actionSummary, request: input.request }];
+    if (planSteps.length > 5) throw new Error("Delegation task plan exceeds the five-step P1 limit.");
+    if (planSteps[0]?.request.capability !== input.capability) {
+      throw new Error("Delegation task first plan step does not match the requested capability.");
+    }
+    const allowedCapabilities = [...new Set(
+      planSteps.map((planned) => mapCapability(planned.request.capability)),
+    )] as CapabilityKind[];
     const task = await tx.delegationTask.create({
       data: {
         representativeId: input.representativeId,
@@ -167,20 +196,24 @@ export async function createComputeDelegationTask(input: {
         audienceIdentityId: conversation?.audienceIdentityId ?? null,
         originConversationId: input.conversationId,
         originEpisodeId: input.episodeId ?? null,
-        kind: input.capability === "browser"
-          ? "BROWSER"
-          : input.capability === "mcp"
-            ? "MCP"
-            : "COMPUTE",
+        kind: planSteps.length > 1
+          ? "WORKFLOW"
+          : input.capability === "browser"
+            ? "BROWSER"
+            : input.capability === "mcp"
+              ? "MCP"
+              : "COMPUTE",
         initiatorType: "AUDIENCE",
         initiatorId: input.contactId,
-        title: truncate(input.actionSummary, 160),
+        title: truncate(input.planSummary || input.actionSummary, 160),
         objective: truncate(input.objective, 4_000),
-        desiredOutcome: truncate(input.actionSummary, 1_000),
+        desiredOutcome: truncate(input.planSummary || input.actionSummary, 1_000),
         status: DelegationTaskStatus.READY,
         nextActionBy: DelegationTaskNextActor.SYSTEM,
         idempotencyKey: `compute-generation:${input.generationRunId}`,
-        planSummary: "在隔离沙盒中执行一个受策略约束的操作，并把结果返回原会话。",
+        planSummary: input.planSummary || (planSteps.length > 1
+          ? `按依赖顺序执行 ${planSteps.length} 个受策略约束的步骤，并把最终结果返回原会话。`
+          : "在隔离沙盒中执行一个受策略约束的操作，并把结果返回原会话。"),
         contextSnapshot: {
           source: "public_web_conversation",
           generationRunId: input.generationRunId,
@@ -191,9 +224,9 @@ export async function createComputeDelegationTask(input: {
             maxDurationMinutes: input.maxDurationMinutes,
             maxComputeMinutes: input.maxDurationMinutes,
             maxCredits: input.maxCredits ?? null,
-            maxToolCalls: 1,
-            maxSteps: 1,
-            allowedCapabilities: [mapCapability(input.capability)],
+            maxToolCalls: planSteps.length,
+            maxSteps: planSteps.length,
+            allowedCapabilities,
             networkMode: input.networkMode,
             filesystemMode: input.filesystemMode,
             snapshot: {
@@ -213,48 +246,54 @@ export async function createComputeDelegationTask(input: {
             authorizationRequired: false,
           },
         },
-        steps: {
-          create: {
-            sequence: 1,
-            kind: input.capability === "browser"
-              ? "COMPUTE"
-              : input.capability === "mcp"
-                ? "MCP"
-                : "COMPUTE",
-            title: truncate(input.actionSummary, 160),
-            status: DelegationTaskStepStatus.READY,
-            capability: mapCapability(input.capability),
-            maxDurationSeconds: input.maxDurationMinutes * 60,
-            inputSnapshot: {
-              generationRunId: input.generationRunId,
-              capability: input.capability,
-            },
-            idempotencyKey: `compute-step:${input.generationRunId}`,
-          },
-        },
         startedAt: now,
       },
-      include: { steps: { orderBy: { sequence: "asc" }, take: 1 } },
     });
-    const step = task.steps[0];
-    if (!step) throw new Error("Delegation task compute step was not created.");
-    if (input.capability === "mcp") {
-      await tx.delegationTaskExternalEffect.create({
+    const steps: Array<{ id: string; sequence: number }> = [];
+    for (const [index, planned] of planSteps.entries()) {
+      const dependencyIndexes = planned.dependsOnStepIndexes?.length
+        ? planned.dependsOnStepIndexes
+        : index > 0 ? [index - 1] : [];
+      validateDelegationStepDependencies(dependencyIndexes, index);
+      const step = await tx.delegationTaskStep.create({
         data: {
           delegationTaskId: task.id,
-          delegationTaskStepId: step.id,
-          type: "mcp_tool_call",
-          target: truncate(input.actionSummary, 500),
-          action: "invoke",
-          status: "PROPOSED",
-          idempotencyKey: `mcp-effect:${input.generationRunId}`,
-          requestPayload: {
-            objective: truncate(input.objective, 4_000),
-            actionSummary: truncate(input.actionSummary, 1_000),
+          sequence: index + 1,
+          kind: planned.request.capability === "mcp" ? "MCP" : "COMPUTE",
+          title: truncate(planned.summary, 160),
+          status: index === 0 ? DelegationTaskStepStatus.READY : DelegationTaskStepStatus.DRAFT,
+          capability: mapCapability(planned.request.capability),
+          dependsOnStepIds: dependencyIndexes.map((dependencyIndex) => steps[dependencyIndex]!.id),
+          maxDurationSeconds: Math.max(60, Math.floor(input.maxDurationMinutes * 60 / planSteps.length)),
+          inputSnapshot: {
+            request: planned.request as unknown as Prisma.InputJsonValue,
+            source: "delegation_plan",
           },
+          idempotencyKey: `compute-step:${input.generationRunId}:${index + 1}`,
         },
       });
+      steps.push(step);
+      if (planned.request.capability === "mcp") {
+        await tx.delegationTaskExternalEffect.create({
+          data: {
+            delegationTaskId: task.id,
+            delegationTaskStepId: step.id,
+            type: "mcp_tool_call",
+            target: truncate(planned.summary, 500),
+            action: "invoke",
+            status: "PROPOSED",
+            idempotencyKey: `mcp-effect:${task.id}:${step.id}`,
+            requestPayload: {
+              request: planned.request as unknown as Prisma.InputJsonValue,
+              objective: truncate(input.objective, 4_000),
+              actionSummary: truncate(planned.summary, 1_000),
+            },
+          },
+        });
+      }
     }
+    const step = steps[0];
+    if (!step) throw new Error("Delegation task compute step was not created.");
 
     await linkGenerationToTask(tx, {
       taskId: task.id,
@@ -270,13 +309,297 @@ export async function createComputeDelegationTask(input: {
       toStatus: DelegationTaskStatus.READY,
       payload: { capability: input.capability, stepId: step.id },
     });
+    return { task: { ...task, steps }, step };
+  });
+}
+
+export async function createClarifyingDelegationTask(input: {
+  representativeId: string;
+  representativeVersionId?: string | null;
+  contactId: string;
+  conversationId: string;
+  episodeId?: string | null;
+  generationRunId: string;
+  inputMessageId: string;
+  objective: string;
+  summary: string;
+  question: string;
+  missingFields: string[];
+  maxDurationMinutes: number;
+  networkMode: "NO_NETWORK" | "ALLOWLIST" | "FULL";
+  filesystemMode: "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL";
+}) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.generationRunId}))`;
+    const [run, conversation] = await Promise.all([
+      tx.generationRun.findUnique({
+        where: { id: input.generationRunId },
+        include: { inputMessage: { select: { text: true } } },
+      }),
+      tx.conversation.findUnique({ where: { id: input.conversationId } }),
+    ]);
+    if (
+      !run || !conversation || run.conversationId !== input.conversationId ||
+      run.inputMessageId !== input.inputMessageId || conversation.representativeId !== input.representativeId ||
+      conversation.contactId !== input.contactId
+    ) {
+      throw new Error("Clarifying delegation task context does not match its generation run and conversation.");
+    }
+    const existing = await tx.delegationTask.findUnique({
+      where: { idempotencyKey: `compute-generation:${input.generationRunId}` },
+      include: { steps: { orderBy: { sequence: "asc" }, take: 1 } },
+    });
+    if (existing) return { task: existing, step: existing.steps[0] ?? null };
+    const now = new Date();
+    const task = await tx.delegationTask.create({
+      data: {
+        representativeId: input.representativeId,
+        representativeVersionId: input.representativeVersionId ?? null,
+        contactId: input.contactId,
+        audienceIdentityId: conversation.audienceIdentityId,
+        originConversationId: input.conversationId,
+        originEpisodeId: input.episodeId ?? null,
+        kind: "WORKFLOW",
+        initiatorType: "AUDIENCE",
+        initiatorId: input.contactId,
+        title: truncate(input.summary, 160),
+        objective: truncate(input.objective, 4_000),
+        desiredOutcome: truncate(input.summary, 1_000),
+        status: DelegationTaskStatus.CLARIFYING,
+        nextActionBy: DelegationTaskNextActor.AUDIENCE,
+        blockingReason: truncate(input.question, 1_000),
+        idempotencyKey: `compute-generation:${input.generationRunId}`,
+        planSummary: "等待用户补齐执行所需的明确输入，系统不会猜测路径、内容、命令或 URL。",
+        contextSnapshot: { source: "public_web_conversation", generationRunId: input.generationRunId },
+        resourcePolicy: {
+          create: {
+            maxDurationMinutes: input.maxDurationMinutes,
+            maxComputeMinutes: input.maxDurationMinutes,
+            maxToolCalls: 5,
+            maxSteps: 5,
+            allowedCapabilities: [],
+            networkMode: input.networkMode,
+            filesystemMode: input.filesystemMode,
+            snapshot: { source: "representative_compute_policy", capturedAt: now.toISOString() },
+          },
+        },
+        inputs: {
+          create: {
+            kind: "MESSAGE",
+            referenceType: "Message",
+            referenceId: input.inputMessageId,
+            label: truncate(input.objective, 240),
+            providedByType: "AUDIENCE",
+            providedById: input.contactId,
+            authorizationRequired: false,
+          },
+        },
+      },
+    });
+    const step = await tx.delegationTaskStep.create({
+      data: {
+        delegationTaskId: task.id,
+        sequence: 1,
+        kind: "CLARIFICATION",
+        title: truncate(input.question, 160),
+        status: DelegationTaskStepStatus.WAITING_INPUT,
+        inputSnapshot: { missingFields: input.missingFields, question: input.question },
+        idempotencyKey: `clarification-step:${input.generationRunId}`,
+      },
+    });
+    await linkGenerationToTask(tx, {
+      taskId: task.id,
+      stepId: step.id,
+      generationRunId: input.generationRunId,
+      inputMessageId: input.inputMessageId,
+    });
+    await appendTaskEvent(tx, {
+      taskId: task.id,
+      eventType: "task.clarification_requested",
+      actorType: DelegationTaskActorType.SYSTEM,
+      toStatus: DelegationTaskStatus.CLARIFYING,
+      payload: { stepId: step.id, missingFields: input.missingFields },
+    });
     return { task, step };
   });
 }
 
-export async function markDelegationTaskRunning(taskId: string) {
+export async function findConversationClarifyingDelegationTask(input: {
+  representativeId: string;
+  contactId: string;
+  conversationId: string;
+}) {
+  return prisma.delegationTask.findFirst({
+    where: {
+      representativeId: input.representativeId,
+      contactId: input.contactId,
+      originConversationId: input.conversationId,
+      status: DelegationTaskStatus.CLARIFYING,
+      nextActionBy: DelegationTaskNextActor.AUDIENCE,
+    },
+    orderBy: { updatedAt: "desc" },
+    include: { steps: { orderBy: { sequence: "asc" }, take: 8 } },
+  });
+}
+
+export async function continueClarifyingDelegationTask(input: {
+  taskId: string;
+  generationRunId: string;
+  inputMessageId: string;
+  contactId: string;
+  question?: string;
+  missingFields?: string[];
+  planSummary?: string;
+  planSteps?: Array<{ summary: string; request: ParsedComputeRequest; dependsOnStepIndexes?: number[] }>;
+}) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
+    const [task, run] = await Promise.all([
+      tx.delegationTask.findUnique({
+        where: { id: input.taskId },
+        include: { steps: { orderBy: { sequence: "asc" }, take: 8 }, resourcePolicy: true },
+      }),
+      tx.generationRun.findUnique({
+        where: { id: input.generationRunId },
+        include: { inputMessage: { select: { text: true } } },
+      }),
+    ]);
+    if (
+      !task || !run || task.status !== DelegationTaskStatus.CLARIFYING ||
+      task.contactId !== input.contactId || task.originConversationId !== run.conversationId ||
+      run.inputMessageId !== input.inputMessageId
+    ) {
+      throw new DelegationTaskActionError("Clarifying task continuation context is invalid.");
+    }
+    const clarificationStep = task.steps.find((step) => step.kind === "CLARIFICATION");
+    if (!clarificationStep) throw new DelegationTaskActionError("Clarification step was not found.");
+    const existingInput = await tx.delegationTaskInput.findFirst({
+      where: {
+        delegationTaskId: task.id,
+        referenceType: "Message",
+        referenceId: input.inputMessageId,
+      },
+    });
+    if (!existingInput) {
+      await tx.delegationTaskInput.create({
+        data: {
+          delegationTaskId: task.id,
+          kind: "MESSAGE",
+          referenceType: "Message",
+          referenceId: input.inputMessageId,
+          label: truncate(run.inputMessage.text || "用户补充输入", 240),
+          providedByType: "AUDIENCE",
+          providedById: input.contactId,
+          authorizationRequired: false,
+        },
+      });
+    } else if (!input.planSteps?.length) {
+      return {
+        taskId: task.id,
+        step: clarificationStep,
+        ready: false,
+        question: input.question || task.blockingReason || "请继续补充任务所需的信息。",
+      };
+    }
+    if (!input.planSteps?.length) {
+      const question = input.question || task.blockingReason || "请继续补充任务所需的信息。";
+      await tx.delegationTask.update({
+        where: { id: task.id },
+        data: { blockingReason: truncate(question, 1_000), version: { increment: 1 } },
+      });
+      await tx.delegationTaskStep.update({
+        where: { id: clarificationStep.id },
+        data: { inputSnapshot: { question, missingFields: input.missingFields ?? [] } },
+      });
+      await linkGenerationToTask(tx, {
+        taskId: task.id,
+        stepId: clarificationStep.id,
+        generationRunId: run.id,
+        inputMessageId: run.inputMessageId,
+      });
+      await appendTaskEvent(tx, {
+        taskId: task.id,
+        eventType: "task.clarification_updated",
+        actorType: DelegationTaskActorType.AUDIENCE,
+        actorId: input.contactId,
+        fromStatus: DelegationTaskStatus.CLARIFYING,
+        toStatus: DelegationTaskStatus.CLARIFYING,
+        payload: { messageId: input.inputMessageId, missingFields: input.missingFields ?? [] },
+      });
+      return { taskId: task.id, step: clarificationStep, ready: false, question };
+    }
+    const planSteps = input.planSteps;
+    if (planSteps.length > 5) throw new DelegationTaskActionError("Delegation plan exceeds five execution steps.");
+    await tx.delegationTaskStep.update({
+      where: { id: clarificationStep.id },
+      data: { status: DelegationTaskStepStatus.COMPLETED, completedAt: new Date() },
+    });
+    const createdSteps: Array<{ id: string; sequence: number }> = [];
+    for (const [index, planned] of planSteps.entries()) {
+      const dependencyIndexes = planned.dependsOnStepIndexes?.length
+        ? planned.dependsOnStepIndexes
+        : index > 0 ? [index - 1] : [];
+      validateDelegationStepDependencies(dependencyIndexes, index);
+      const step = await tx.delegationTaskStep.create({
+        data: {
+          delegationTaskId: task.id,
+          sequence: index + 2,
+          kind: planned.request.capability === "mcp" ? "MCP" : "COMPUTE",
+          title: truncate(planned.summary, 160),
+          status: index === 0 ? DelegationTaskStepStatus.READY : DelegationTaskStepStatus.DRAFT,
+          capability: mapCapability(planned.request.capability),
+          dependsOnStepIds: index === 0
+            ? [clarificationStep.id]
+            : dependencyIndexes.map((dependencyIndex) => createdSteps[dependencyIndex]!.id),
+          maxDurationSeconds: Math.max(60, Math.floor((task.resourcePolicy?.maxDurationMinutes ?? 15) * 60 / planSteps.length)),
+          inputSnapshot: { request: planned.request as unknown as Prisma.InputJsonValue, source: "clarification_resolved" },
+          idempotencyKey: `clarified-step:${task.id}:${index + 1}`,
+        },
+      });
+      createdSteps.push(step);
+    }
+    const firstStep = createdSteps[0]!;
+    await tx.delegationTaskResourcePolicy.update({
+      where: { delegationTaskId: task.id },
+      data: {
+        maxSteps: planSteps.length,
+        maxToolCalls: planSteps.length,
+        allowedCapabilities: [...new Set(planSteps.map((planned) => mapCapability(planned.request.capability)))] as CapabilityKind[],
+      },
+    });
+    await tx.delegationTask.update({
+      where: { id: task.id },
+      data: {
+        status: DelegationTaskStatus.READY,
+        nextActionBy: DelegationTaskNextActor.SYSTEM,
+        blockingReason: null,
+        planSummary: input.planSummary || task.planSummary,
+        version: { increment: 1 },
+      },
+    });
+    await linkGenerationToTask(tx, {
+      taskId: task.id,
+      stepId: firstStep.id,
+      generationRunId: run.id,
+      inputMessageId: run.inputMessageId,
+    });
+    await appendTaskEvent(tx, {
+      taskId: task.id,
+      eventType: "task.clarification_resolved",
+      actorType: DelegationTaskActorType.AUDIENCE,
+      actorId: input.contactId,
+      fromStatus: DelegationTaskStatus.CLARIFYING,
+      toStatus: DelegationTaskStatus.READY,
+      payload: { messageId: input.inputMessageId, firstStepId: firstStep.id, stepCount: planSteps.length },
+    });
+    return { taskId: task.id, step: firstStep, ready: true };
+  });
+}
+
+export async function markDelegationTaskRunning(taskId: string, stepId?: string) {
   return transitionDelegationTask({
     taskId,
+    ...(stepId ? { stepId } : {}),
     status: DelegationTaskStatus.RUNNING,
     stepStatus: DelegationTaskStepStatus.RUNNING,
     nextActionBy: DelegationTaskNextActor.SYSTEM,
@@ -287,10 +610,12 @@ export async function markDelegationTaskRunning(taskId: string) {
 
 export async function markDelegationTaskAwaitingApproval(input: {
   taskId: string;
+  stepId?: string;
   approvalId: string;
 }) {
   return transitionDelegationTask({
     taskId: input.taskId,
+    ...(input.stepId ? { stepId: input.stepId } : {}),
     status: DelegationTaskStatus.AWAITING_APPROVAL,
     stepStatus: DelegationTaskStepStatus.WAITING_APPROVAL,
     nextActionBy: DelegationTaskNextActor.OWNER,
@@ -304,6 +629,8 @@ export async function markDelegationTaskAwaitingApproval(input: {
 
 export async function finalizeComputeDelegationTask(input: {
   taskId: string;
+  stepId?: string;
+  generationRunId?: string;
   outcome: DelegationTaskTerminalOutcome;
   artifacts?: Array<{ id: string; kind: string; summary?: string | null }>;
   failureReason?: string;
@@ -314,59 +641,61 @@ export async function finalizeComputeDelegationTask(input: {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
     const task = await tx.delegationTask.findUnique({
       where: { id: input.taskId },
-      include: { steps: { orderBy: { sequence: "asc" }, take: 1 } },
+      include: {
+        steps: { orderBy: { sequence: "asc" }, take: 8 },
+        generationRuns: { orderBy: { createdAt: "desc" }, take: 20 },
+      },
     });
     if (!task) return null;
     if (isTerminalStatus(task.status)) {
-      return { taskId: task.id, status: task.status };
+      return { taskId: task.id, status: task.status, hasMoreSteps: false };
     }
-    const step = task.steps[0];
+    const generationRun = input.generationRunId
+      ? task.generationRuns.find((run) => run.id === input.generationRunId)
+      : task.generationRuns.find((run) => run.delegationTaskStepId === input.stepId) ?? task.generationRuns[0];
+    const resolvedStepId = input.stepId ?? generationRun?.delegationTaskStepId ?? null;
+    const step = resolvedStepId
+      ? task.steps.find((candidate) => candidate.id === resolvedStepId)
+      : task.steps.find((candidate) => ["RUNNING", "WAITING_APPROVAL", "READY", "QUEUED"].includes(candidate.status));
+    if (!step) throw new Error("Delegation task finalization could not resolve the active step.");
+    if (step.status === DelegationTaskStepStatus.COMPLETED && input.outcome === "completed") {
+      return { taskId: task.id, status: task.status, hasMoreSteps: !isTerminalStatus(task.status) };
+    }
     const now = new Date();
-    await tx.delegationTask.update({
-      where: { id: task.id },
+    const artifactIds = input.artifacts?.map((artifact) => artifact.id) ?? [];
+    await tx.delegationTaskStep.update({
+      where: { id: step.id },
       data: {
-        status: terminal.taskStatus,
-        nextActionBy: DelegationTaskNextActor.NONE,
-        blockingReason: input.failureReason?.slice(0, 1_000) ?? null,
-        completedAt: terminal.taskStatus === DelegationTaskStatus.COMPLETED ? now : null,
-        failedAt: terminal.taskStatus === DelegationTaskStatus.FAILED ? now : null,
-        canceledAt: terminal.taskStatus === DelegationTaskStatus.CANCELED ? now : null,
-        version: { increment: 1 },
+        status: terminal.stepStatus,
+        outputSnapshot: {
+          outcome: input.outcome,
+          artifactIds,
+          ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
+          ...(input.failureReason ? { failureReason: input.failureReason } : {}),
+        },
+        completedAt: terminal.stepStatus === DelegationTaskStepStatus.COMPLETED ? now : null,
+        failedAt: terminal.stepStatus === DelegationTaskStepStatus.FAILED ? now : null,
       },
     });
-    if (step) {
-      await tx.delegationTaskStep.update({
-        where: { id: step.id },
-        data: {
-          status: terminal.stepStatus,
-          outputSnapshot: {
-            outcome: input.outcome,
-            artifactIds: input.artifacts?.map((artifact) => artifact.id) ?? [],
-            ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
-            ...(input.failureReason ? { failureReason: input.failureReason } : {}),
-          },
-          completedAt: terminal.stepStatus === DelegationTaskStepStatus.COMPLETED ? now : null,
-          failedAt: terminal.stepStatus === DelegationTaskStepStatus.FAILED ? now : null,
-        },
-      });
-    }
     const effects = await tx.delegationTaskExternalEffect.findMany({
-      where: { delegationTaskId: task.id },
-      select: { id: true },
+      where: { delegationTaskId: task.id, delegationTaskStepId: step.id },
+      select: { id: true, status: true, responseSnapshot: true },
     });
+    const hasUnknownExternalOutcome = input.outcome === "failed" && effects.some((effect) => effect.status === "EXECUTING");
     if (effects.length) {
       const effectStatus = input.outcome === "completed"
         ? "SUCCEEDED"
         : input.outcome === "rejected" || input.outcome === "expired"
           ? "CANCELED"
-          : "FAILED";
+          : hasUnknownExternalOutcome ? "RECONCILIATION_REQUIRED" : "FAILED";
       await tx.delegationTaskExternalEffect.updateMany({
-        where: { delegationTaskId: task.id },
+        where: { delegationTaskId: task.id, delegationTaskStepId: step.id },
         data: {
           status: effectStatus,
           responseSnapshot: {
+            previous: effects[0]?.responseSnapshot ?? null,
             outcome: input.outcome,
-            artifactIds: input.artifacts?.map((artifact) => artifact.id) ?? [],
+            artifactIds,
           },
           executedAt: input.outcome === "completed" ? now : null,
           failureReason: input.failureReason?.slice(0, 1_000) ?? null,
@@ -382,12 +711,12 @@ export async function finalizeComputeDelegationTask(input: {
         await tx.delegationTaskOutput.createMany({
           data: missingEffectOutputs.map((effect) => ({
             delegationTaskId: task.id,
-            delegationTaskStepId: step?.id ?? null,
+            delegationTaskStepId: step.id,
             kind: "EXTERNAL_EFFECT",
             externalEffectId: effect.id,
             title: input.outcome === "completed" ? "外部操作已完成" : "外部操作结果",
             summary: input.failureReason ?? input.outcome,
-            isFinal: true,
+            isFinal: false,
           })),
         });
       }
@@ -409,7 +738,7 @@ export async function finalizeComputeDelegationTask(input: {
       }
       await tx.artifact.updateMany({
         where: { id: { in: artifactIds } },
-        data: { delegationTaskId: task.id, delegationTaskStepId: step?.id ?? null },
+        data: { delegationTaskId: task.id, delegationTaskStepId: step.id },
       });
       const existingOutputs = await tx.delegationTaskOutput.findMany({
         where: { delegationTaskId: task.id, artifactId: { in: artifactIds } },
@@ -418,48 +747,201 @@ export async function finalizeComputeDelegationTask(input: {
       const existingArtifactIds = new Set(existingOutputs.map((output) => output.artifactId));
       await tx.delegationTaskOutput.updateMany({
         where: { delegationTaskId: task.id, artifactId: { in: artifactIds } },
-        data: { isFinal: input.outcome === "completed" },
+        data: { isFinal: false },
       });
       const missingOutputs = artifacts.filter((artifact) => !existingArtifactIds.has(artifact.id));
       if (missingOutputs.length) {
         await tx.delegationTaskOutput.createMany({
           data: missingOutputs.map((artifact) => ({
             delegationTaskId: task.id,
-            delegationTaskStepId: step?.id ?? null,
+            delegationTaskStepId: step.id,
             kind: "ARTIFACT",
             artifactId: artifact.id,
             title: truncate(artifact.summary || artifact.kind, 160),
             summary: artifact.summary ?? null,
-            isFinal: input.outcome === "completed",
+            isFinal: false,
           })),
         });
       }
     }
-    if (!(input.artifacts?.length)) {
+    if (!input.artifacts?.length && input.outcome !== "completed") {
       await tx.delegationTaskOutput.create({
         data: {
           delegationTaskId: task.id,
-          delegationTaskStepId: step?.id ?? null,
+          delegationTaskStepId: step.id,
           kind: "SUMMARY",
-          title: input.outcome === "completed" ? "任务执行完成" : "任务执行结果",
+          title: "任务执行结果",
           summary: input.failureReason ?? input.outcome,
-          isFinal: true,
+          isFinal: false,
         },
+      });
+    }
+
+    let orchestrationFailureReason: string | null = null;
+    if (input.outcome === "completed") {
+      const projectedSteps = task.steps.map((candidate) => ({
+          ...candidate,
+          status: candidate.id === step.id ? "COMPLETED" : candidate.status,
+        }));
+      const nextStep = selectNextDelegationTaskStep(projectedSteps);
+      if (nextStep) {
+        const nextRequest = readDelegationTaskStepRequest(nextStep);
+        if (!nextRequest || !generationRun) {
+          throw new Error("Delegation task next step is missing a persisted request or generation context.");
+        }
+        const nextRun = await tx.generationRun.create({
+          data: {
+            conversationId: generationRun.conversationId,
+            episodeId: generationRun.episodeId,
+            inputMessageId: generationRun.inputMessageId,
+            representativeVersionId: task.representativeVersionId,
+            delegationTaskId: task.id,
+            delegationTaskStepId: nextStep.id,
+            status: GenerationRunStatus.QUEUED,
+            idempotencyKey: `delegation-step:${task.id}:${nextStep.id}`,
+            contextSnapshot: {
+              source: "delegation_plan_step",
+              request: nextRequest as unknown as Prisma.InputJsonValue,
+              previousGenerationRunId: generationRun.id,
+            },
+          },
+        });
+        await tx.outboxEvent.create({
+          data: {
+            conversationId: generationRun.conversationId,
+            aggregateType: "generation_run",
+            aggregateId: nextRun.id,
+            eventType: "generation.requested",
+            payload: {
+              runId: nextRun.id,
+              conversationId: generationRun.conversationId,
+              messageId: generationRun.inputMessageId,
+              taskId: task.id,
+              stepId: nextStep.id,
+            },
+            idempotencyKey: `generation.requested:${nextRun.id}`,
+          },
+        });
+        await tx.delegationTaskStep.update({
+          where: { id: nextStep.id },
+          data: { status: DelegationTaskStepStatus.READY },
+        });
+        await tx.delegationTask.update({
+          where: { id: task.id },
+          data: {
+            status: DelegationTaskStatus.READY,
+            nextActionBy: DelegationTaskNextActor.SYSTEM,
+            blockingReason: null,
+            version: { increment: 1 },
+          },
+        });
+        await tx.conversation.update({
+          where: { id: generationRun.conversationId },
+          data: { state: "AI_QUEUED", lastMessageAt: now },
+        });
+        if (generationRun.episodeId) {
+          await tx.conversationEpisode.updateMany({
+            where: { id: generationRun.episodeId },
+            data: { status: ConversationEpisodeStatus.ACTIVE },
+          });
+        }
+        await appendTaskEvent(tx, {
+          taskId: task.id,
+          eventType: "task.step_completed",
+          actorType: DelegationTaskActorType.SYSTEM,
+          fromStatus: task.status,
+          toStatus: DelegationTaskStatus.READY,
+          payload: { stepId: step.id, nextStepId: nextStep.id, generationRunId: nextRun.id, artifactIds },
+        });
+        return {
+          taskId: task.id,
+          status: DelegationTaskStatus.READY,
+          hasMoreSteps: true,
+          nextGenerationRunId: nextRun.id,
+          completedStepId: step.id,
+        };
+      }
+      if (projectedSteps.some((candidate) => !["COMPLETED", "SKIPPED"].includes(candidate.status))) {
+        orchestrationFailureReason = "任务计划仍有未完成步骤，但没有满足依赖条件的下一步。";
+      }
+    }
+
+    const finalTaskStatus = hasUnknownExternalOutcome
+      ? DelegationTaskStatus.WAITING_FOR_OWNER
+      : orchestrationFailureReason
+        ? DelegationTaskStatus.FAILED
+        : terminal.taskStatus;
+    const finalNextActor = hasUnknownExternalOutcome
+      ? DelegationTaskNextActor.OWNER
+      : DelegationTaskNextActor.NONE;
+    const finalReason = hasUnknownExternalOutcome
+      ? "MCP 外部操作结果未知，需要 Owner 对账后才能重试或结束任务。"
+      : orchestrationFailureReason
+        ? orchestrationFailureReason
+        : input.failureReason?.slice(0, 1_000) ?? null;
+    await tx.delegationTask.update({
+      where: { id: task.id },
+      data: {
+        status: finalTaskStatus,
+        nextActionBy: finalNextActor,
+        blockingReason: finalReason,
+        completedAt: finalTaskStatus === DelegationTaskStatus.COMPLETED ? now : null,
+        failedAt: finalTaskStatus === DelegationTaskStatus.FAILED ? now : null,
+        canceledAt: finalTaskStatus === DelegationTaskStatus.CANCELED ? now : null,
+        version: { increment: 1 },
+      },
+    });
+    if (finalTaskStatus !== DelegationTaskStatus.COMPLETED) {
+      await tx.delegationTaskStep.updateMany({
+        where: {
+          delegationTaskId: task.id,
+          id: { not: step.id },
+          status: { in: ["DRAFT", "READY", "QUEUED"] },
+        },
+        data: { status: DelegationTaskStepStatus.BLOCKED },
+      });
+    }
+    if (finalTaskStatus === DelegationTaskStatus.COMPLETED) {
+      const outputCount = await tx.delegationTaskOutput.count({ where: { delegationTaskId: task.id } });
+      if (!outputCount) {
+        await tx.delegationTaskOutput.create({
+          data: {
+            delegationTaskId: task.id,
+            delegationTaskStepId: step.id,
+            kind: "SUMMARY",
+            title: "任务执行完成",
+            summary: "completed",
+            isFinal: true,
+          },
+        });
+      } else {
+        await tx.delegationTaskOutput.updateMany({
+          where: { delegationTaskId: task.id },
+          data: { isFinal: true },
+        });
+      }
+    } else {
+      await tx.delegationTaskOutput.updateMany({
+        where: { delegationTaskId: task.id, delegationTaskStepId: step.id },
+        data: { isFinal: true },
       });
     }
     await appendTaskEvent(tx, {
       taskId: task.id,
-      eventType: `task.${input.outcome}`,
+      eventType: hasUnknownExternalOutcome
+        ? "task.reconciliation_required"
+        : orchestrationFailureReason ? "task.failed" : `task.${input.outcome}`,
       actorType: DelegationTaskActorType.SYSTEM,
       fromStatus: task.status,
-      toStatus: terminal.taskStatus,
+      toStatus: finalTaskStatus,
       payload: {
-        artifactIds: input.artifacts?.map((artifact) => artifact.id) ?? [],
+        stepId: step.id,
+        artifactIds,
         ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
         ...(input.failureReason ? { failureReason: input.failureReason } : {}),
       },
     });
-    return { taskId: task.id, status: terminal.taskStatus };
+    return { taskId: task.id, status: finalTaskStatus, hasMoreSteps: false, completedStepId: step.id };
   });
 }
 
@@ -522,6 +1004,8 @@ export async function getRepresentativeDelegationTaskDetail(
     kind: task.kind,
     hasGenerationRun: task.generationRuns.length > 0,
     hasPendingApproval: Boolean(pendingApproval),
+    hasExternalEffect: task.externalEffects.length > 0,
+    hasUnreconciledExternalEffect: task.externalEffects.some((effect) => effect.status === "RECONCILIATION_REQUIRED"),
   });
   const creditsUsed = task.ledgerEntries.reduce(
     (total, entry) => total + Math.max(0, -entry.creditDelta),
@@ -670,6 +1154,10 @@ export async function getRepresentativeDelegationTaskDetail(
       status: effect.status.toLowerCase(),
       ...(effect.externalReferenceId ? { externalReferenceId: effect.externalReferenceId } : {}),
       ...(effect.failureReason ? { failureReason: effect.failureReason } : {}),
+      actions: buildExternalEffectActionAvailability({
+        status: effect.status,
+        hasPersistedRequest: Boolean(readDelegationExternalEffectRequest(effect)),
+      }),
       createdAt: effect.createdAt.toISOString(),
     })),
     usage: { creditsUsed, costCents, ledgerEntryCount: task.ledgerEntries.length },
@@ -718,8 +1206,9 @@ export async function applyRepresentativeDelegationTaskAction(input: {
       where: { id: input.taskId, representative: { slug: input.representativeSlug } },
       include: {
         generationRuns: { orderBy: { createdAt: "desc" }, take: 10 },
-        steps: { orderBy: { sequence: "asc" }, take: 1 },
+        steps: { orderBy: { sequence: "asc" }, take: 8 },
         approvalRequests: { where: { status: "PENDING" }, take: 1 },
+        externalEffects: { select: { id: true, status: true }, take: 20 },
       },
     });
     if (!task) throw new DelegationTaskActionError("Delegation task not found.", 404);
@@ -728,6 +1217,8 @@ export async function applyRepresentativeDelegationTaskAction(input: {
       kind: task.kind,
       hasGenerationRun: task.generationRuns.length > 0,
       hasPendingApproval: task.approvalRequests.length > 0,
+      hasExternalEffect: task.externalEffects.length > 0,
+      hasUnreconciledExternalEffect: task.externalEffects.some((effect) => effect.status === "RECONCILIATION_REQUIRED"),
     });
     const selected = availability[input.action];
     if (!selected.enabled) throw new DelegationTaskActionError(selected.reason);
@@ -800,8 +1291,10 @@ export async function applyRepresentativeDelegationTaskAction(input: {
       return;
     }
 
-    const sourceRun = task.generationRuns[0];
-    const step = task.steps[0];
+    const step = input.action === "retry"
+      ? [...task.steps].reverse().find((candidate) => ["FAILED", "BLOCKED", "CANCELED"].includes(candidate.status)) ?? task.steps[0]
+      : task.steps.find((candidate) => candidate.status === "WAITING_INPUT") ?? task.steps[0];
+    const sourceRun = task.generationRuns.find((run) => run.delegationTaskStepId === step?.id) ?? task.generationRuns[0];
     if (!sourceRun || !step || !task.originConversationId) {
       throw new DelegationTaskActionError("The task does not have a resumable execution context.");
     }
@@ -896,8 +1389,206 @@ export async function applyRepresentativeDelegationTaskAction(input: {
   return getRepresentativeDelegationTaskDetail(input.representativeSlug, input.taskId);
 }
 
+export async function applyRepresentativeDelegationExternalEffectAction(input: {
+  representativeSlug: string;
+  taskId: string;
+  effectId: string;
+  action: DelegationExternalEffectOwnerAction;
+  actorId: string;
+  observedOutcome?: "succeeded" | "failed";
+  externalReferenceId?: string;
+  note?: string;
+}) {
+  const finalizeRequests: Array<{ stepId: string; outcome: "completed" | "failed"; failureReason?: string }> = [];
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
+    const effect = await tx.delegationTaskExternalEffect.findFirst({
+      where: {
+        id: input.effectId,
+        delegationTaskId: input.taskId,
+        delegationTask: { representative: { slug: input.representativeSlug } },
+      },
+      include: {
+        delegationTask: {
+          include: { generationRuns: { orderBy: { createdAt: "desc" }, take: 20 } },
+        },
+        delegationTaskStep: true,
+      },
+    });
+    if (!effect || !effect.delegationTaskStep) throw new DelegationTaskActionError("External effect not found.", 404);
+    const request = readDelegationExternalEffectRequest(effect);
+    const availability = buildExternalEffectActionAvailability({
+      status: effect.status,
+      hasPersistedRequest: Boolean(request),
+    });
+    const availabilityKey = input.action === "record_compensation" ? "recordCompensation" : input.action;
+    const selected = availability[availabilityKey];
+    if (!selected.enabled) throw new DelegationTaskActionError(selected.reason);
+    const now = new Date();
+
+    if (input.action === "reconcile") {
+      if (!input.observedOutcome) throw new DelegationTaskActionError("Reconciliation requires an observed remote outcome.", 400);
+      if (!input.note?.trim() && !input.externalReferenceId?.trim()) {
+        throw new DelegationTaskActionError("Reconciliation requires a note or external reference as evidence.", 400);
+      }
+      const nextStatus = input.observedOutcome === "succeeded" ? "SUCCEEDED" : "FAILED";
+      await tx.delegationTaskExternalEffect.update({
+        where: { id: effect.id },
+        data: {
+          status: nextStatus,
+          reconciledAt: now,
+          ...(input.externalReferenceId ? { externalReferenceId: input.externalReferenceId } : {}),
+          failureReason: input.observedOutcome === "failed" ? truncate(input.note || "Owner confirmed remote failure.", 1_000) : null,
+          responseSnapshot: {
+            previous: effect.responseSnapshot ?? null,
+            reconciliation: {
+              observedOutcome: input.observedOutcome,
+              note: input.note || null,
+              externalReferenceId: input.externalReferenceId || null,
+              reconciledBy: input.actorId,
+              reconciledAt: now.toISOString(),
+            },
+          },
+        },
+      });
+      await appendTaskEvent(tx, {
+        taskId: input.taskId,
+        eventType: `external_effect.reconciled_${input.observedOutcome}`,
+        actorType: DelegationTaskActorType.OWNER,
+        actorId: input.actorId,
+        fromStatus: effect.delegationTask.status,
+        toStatus: effect.delegationTask.status,
+        payload: { effectId: effect.id, externalReferenceId: input.externalReferenceId || null, note: input.note || null },
+      });
+      finalizeRequests.push({
+        stepId: effect.delegationTaskStep.id,
+        outcome: input.observedOutcome === "succeeded" ? "completed" : "failed",
+        ...(input.observedOutcome === "failed" ? { failureReason: input.note || "Owner confirmed remote failure." } : {}),
+      });
+      return;
+    }
+
+    if (input.action === "record_compensation") {
+      if (!input.note?.trim()) throw new DelegationTaskActionError("Compensation evidence note is required.", 400);
+      await tx.delegationTaskExternalEffect.update({
+        where: { id: effect.id },
+        data: {
+          status: "CANCELED",
+          reconciledAt: now,
+          ...(input.externalReferenceId ? { externalReferenceId: input.externalReferenceId } : {}),
+          responseSnapshot: {
+            previous: effect.responseSnapshot ?? null,
+            compensation: {
+              mode: "owner_confirmed_external_compensation",
+              note: truncate(input.note, 1_000),
+              externalReferenceId: input.externalReferenceId || null,
+              recordedBy: input.actorId,
+              recordedAt: now.toISOString(),
+            },
+          },
+        },
+      });
+      await appendTaskEvent(tx, {
+        taskId: input.taskId,
+        eventType: "external_effect.compensation_recorded",
+        actorType: DelegationTaskActorType.OWNER,
+        actorId: input.actorId,
+        fromStatus: effect.delegationTask.status,
+        toStatus: effect.delegationTask.status,
+        payload: { effectId: effect.id, externalReferenceId: input.externalReferenceId || null, note: truncate(input.note, 1_000) },
+      });
+      await tx.delegationTaskOutput.updateMany({
+        where: { externalEffectId: effect.id },
+        data: { summary: `compensated: ${truncate(input.note, 500)}`, isFinal: true },
+      });
+      return;
+    }
+
+    if (!request) throw new DelegationTaskActionError("External effect retry request is unavailable.");
+    const sourceRun = effect.delegationTask.generationRuns.find(
+      (run) => run.delegationTaskStepId === effect.delegationTaskStepId,
+    );
+    if (!sourceRun) throw new DelegationTaskActionError("External effect retry has no generation context.");
+    const run = await tx.generationRun.create({
+      data: {
+        conversationId: sourceRun.conversationId,
+        episodeId: sourceRun.episodeId,
+        inputMessageId: sourceRun.inputMessageId,
+        representativeVersionId: effect.delegationTask.representativeVersionId,
+        delegationTaskId: input.taskId,
+        delegationTaskStepId: effect.delegationTaskStep.id,
+        status: GenerationRunStatus.QUEUED,
+        idempotencyKey: `external-effect-retry:${effect.id}:${effect.delegationTask.version + 1}`,
+        contextSnapshot: {
+          source: "external_effect_retry",
+          request: request as unknown as Prisma.InputJsonValue,
+          previousGenerationRunId: sourceRun.id,
+          effectId: effect.id,
+          requestedBy: input.actorId,
+        },
+      },
+    });
+    await tx.outboxEvent.create({
+      data: {
+        conversationId: sourceRun.conversationId,
+        aggregateType: "generation_run",
+        aggregateId: run.id,
+        eventType: "generation.requested",
+        payload: { runId: run.id, taskId: input.taskId, stepId: effect.delegationTaskStep.id, effectId: effect.id },
+        idempotencyKey: `generation.requested:${run.id}`,
+      },
+    });
+    await tx.delegationTaskExternalEffect.update({
+      where: { id: effect.id },
+      data: { status: "PROPOSED", failureReason: null, reconciledAt: null },
+    });
+    await tx.delegationTaskStep.update({
+      where: { id: effect.delegationTaskStep.id },
+      data: { status: DelegationTaskStepStatus.READY, failedAt: null, completedAt: null },
+    });
+    await tx.delegationTask.update({
+      where: { id: input.taskId },
+      data: {
+        status: DelegationTaskStatus.READY,
+        nextActionBy: DelegationTaskNextActor.SYSTEM,
+        blockingReason: null,
+        failedAt: null,
+        version: { increment: 1 },
+      },
+    });
+    await tx.delegationTaskOutput.updateMany({
+      where: { delegationTaskId: input.taskId, isFinal: true },
+      data: { isFinal: false },
+    });
+    await tx.conversation.update({
+      where: { id: sourceRun.conversationId },
+      data: { state: "AI_QUEUED", lastMessageAt: now },
+    });
+    await appendTaskEvent(tx, {
+      taskId: input.taskId,
+      eventType: "external_effect.retry_scheduled",
+      actorType: DelegationTaskActorType.OWNER,
+      actorId: input.actorId,
+      fromStatus: effect.delegationTask.status,
+      toStatus: DelegationTaskStatus.READY,
+      payload: { effectId: effect.id, generationRunId: run.id },
+    });
+  });
+  const finalize = finalizeRequests[0];
+  if (finalize) {
+    await finalizeComputeDelegationTask({
+      taskId: input.taskId,
+      stepId: finalize.stepId,
+      outcome: finalize.outcome,
+      ...(finalize.failureReason ? { failureReason: finalize.failureReason } : {}),
+    });
+  }
+  return getRepresentativeDelegationTaskDetail(input.representativeSlug, input.taskId);
+}
+
 async function transitionDelegationTask(input: {
   taskId: string;
+  stepId?: string;
   status: DelegationTaskStatus;
   stepStatus: DelegationTaskStepStatus;
   nextActionBy: DelegationTaskNextActor;
@@ -911,7 +1602,7 @@ async function transitionDelegationTask(input: {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
     const task = await tx.delegationTask.findUnique({
       where: { id: input.taskId },
-      include: { steps: { orderBy: { sequence: "asc" }, take: 1 } },
+      include: { steps: { orderBy: { sequence: "asc" }, take: 8 } },
     });
     if (!task) throw new Error("Delegation task not found.");
     if (isTerminalStatus(task.status)) return task;
@@ -926,25 +1617,32 @@ async function transitionDelegationTask(input: {
         version: { increment: 1 },
       },
     });
-    if (task.steps[0]) {
+    const step = input.stepId
+      ? task.steps.find((candidate) => candidate.id === input.stepId)
+      : task.steps.find((candidate) => ["READY", "QUEUED", "WAITING_APPROVAL", "RUNNING"].includes(candidate.status));
+    if (input.stepId && !step) throw new Error("Delegation task step not found.");
+    if (step) {
       await tx.delegationTaskStep.update({
-        where: { id: task.steps[0].id },
+        where: { id: step.id },
         data: {
           status: input.stepStatus,
-          startedAt: task.steps[0].startedAt ?? now,
+          startedAt: step.startedAt ?? now,
           ...(input.approvalId ? { requiresApproval: true } : {}),
         },
       });
       if (input.externalEffectStatus === "EXECUTING") {
         await tx.delegationTaskExternalEffect.updateMany({
-          where: { delegationTaskId: task.id, approvalRequestId: { not: null } },
+          where: { delegationTaskId: task.id, delegationTaskStepId: step.id, approvalRequestId: { not: null } },
           data: { approvedAt: now },
         });
       }
     }
     if (input.externalEffectStatus) {
       await tx.delegationTaskExternalEffect.updateMany({
-        where: { delegationTaskId: task.id },
+        where: {
+          delegationTaskId: task.id,
+          ...(step ? { delegationTaskStepId: step.id } : {}),
+        },
         data: {
           status: input.externalEffectStatus,
           ...(input.approvalId ? { approvalRequestId: input.approvalId } : {}),

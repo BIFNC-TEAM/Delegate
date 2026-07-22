@@ -2,7 +2,7 @@ import type { Representative } from "@delegate/domain";
 import type { OpenVikingRecallItem } from "@delegate/openviking";
 import type {
   ConversationPlan,
-  NaturalLanguageComputePlan,
+  NaturalLanguageDelegationPlan,
   ResolvedSubagentRoute,
   StructuredCollectorState,
 } from "@delegate/runtime";
@@ -111,7 +111,7 @@ export type RepresentativeReplyResult =
 export type NaturalLanguageComputePlannerResult =
   | {
       ok: true;
-      plan: NaturalLanguageComputePlan | null;
+      plan: NaturalLanguageDelegationPlan | null;
       source: "model" | "deterministic";
       provider?: ModelProvider;
       model?: string;

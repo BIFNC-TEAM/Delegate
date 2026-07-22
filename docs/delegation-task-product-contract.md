@@ -49,6 +49,10 @@ Internal enum names may appear in audit data, but product surfaces use the meani
 - The original conversation receives the final result. The owner task detail exposes outputs, external effects, cost, approvals, and the audit timeline.
 - Failure, rejection, expiration, and cancellation remain visible; they are never rewritten as successful completion.
 
-## Current P0 boundary
+## Current P1 boundary
 
-P0 supports one Compute, browser, or MCP step. The schema may describe multiple steps, but multi-step dependency scheduling, compensation, and user-supplied continuation inputs are not claimed until a workflow orchestrator enforces them.
+- A grounded natural-language plan may contain up to five ordered Compute or browser steps. Each step stores its concrete request, dependencies, policy result, outputs, and execution attempt. The next dependency-ready step is queued only after the current step commits successfully.
+- Missing paths, content, commands, or URLs create a clarifying task instead of guessed execution. The next audience message is recorded as a task input and the grounded planner must revalidate the combined request before execution resumes.
+- MCP failures after a remote call begins are treated as an unknown outcome and move to reconciliation rather than automatic retry. An Owner may confirm remote success or failure with evidence; only confirmed failure can be retried.
+- Delegate does not invent inverse MCP calls. Compensation performed in the external system can be recorded with Owner evidence and remains visible in the hash-linked audit timeline.
+- The current scheduler is fail-fast and runs one dependency-ready step at a time. Parallel branches, automatic inverse-tool contracts, and arbitrary user-authored DAGs remain future scope.

@@ -765,6 +765,7 @@ export async function completeInlineGenerationRun(input: {
   costCents?: number;
   completeOutbox?: boolean;
   countUsage?: boolean;
+  keepConversationQueued?: boolean;
   attachments?: Array<{
     fileName: string;
     mimeType?: string;
@@ -860,14 +861,14 @@ export async function completeInlineGenerationRun(input: {
     await tx.conversation.update({
       where: { id: run.conversationId },
       data: {
-        state: "WAITING_USER",
+        state: input.keepConversationQueued ? "AI_QUEUED" : "WAITING_USER",
         lastMessageAt: now,
         ...(input.countUsage === false ? {} : { freeRepliesUsed: { increment: 1 } }),
       },
     });
     await tx.conversationEpisode.updateMany({
       where: { id: run.episodeId || "__no_episode__" },
-      data: { status: ConversationEpisodeStatus.WAITING_USER },
+      data: { status: input.keepConversationQueued ? ConversationEpisodeStatus.ACTIVE : ConversationEpisodeStatus.WAITING_USER },
     });
     if (input.completeOutbox !== false) {
       await tx.outboxEvent.updateMany({
@@ -980,6 +981,9 @@ export async function waitGenerationRunForComputeApproval(input: {
 export type ClaimedGenerationWorkItem = {
   outboxId: string;
   runId: string;
+  delegationTaskId?: string;
+  delegationTaskStepId?: string;
+  contextSnapshot?: unknown;
   representativeVersionId: string | null;
   representativeSlug: string;
   representativeName: string;
@@ -1083,6 +1087,9 @@ export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWo
     return {
       outboxId: outbox.id,
       runId: run.id,
+      ...(run.delegationTaskId ? { delegationTaskId: run.delegationTaskId } : {}),
+      ...(run.delegationTaskStepId ? { delegationTaskStepId: run.delegationTaskStepId } : {}),
+      ...(run.contextSnapshot !== null ? { contextSnapshot: run.contextSnapshot } : {}),
       representativeVersionId: run.representativeVersionId,
       representativeSlug: run.conversation.representative.slug,
       representativeName: run.conversation.representative.displayName,

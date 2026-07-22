@@ -334,7 +334,7 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 - [Public audience identity](./docs/public-audience-identity.md): web anonymous identity, Contact/Conversation, recharge, and sandbox linkage.
 - [Conversation platform](./docs/conversation-platform.md): channel-neutral messages, episodes, versions, human control, SSE, and Matrix Application Service boundaries.
 - [Delegation tasks](./docs/delegation-tasks.md): task aggregate, lifecycle, ownership validation, approvals, outputs, and audit linkage.
-- [Delegation task product contract](./docs/delegation-task-product-contract.md): creation rules, visible lifecycle, owner actions, approval binding, completion, and P0 boundaries.
+- [Delegation task product contract](./docs/delegation-task-product-contract.md): creation rules, visible lifecycle, owner actions, approval binding, completion, and the current P1 boundary.
 - [Creator training loop](./docs/creator-training-loop.md): source registry, creator feedback, suggestion workflow, review, evaluation, and rollback.
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model, outbox, timer, cancellation, and dashboard semantics.
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute and browser isolation model.

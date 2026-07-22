@@ -30,6 +30,13 @@ describe("delegation task product contract", () => {
     expect(actions("WAITING_FOR_OWNER").continue.enabled).toBe(true);
     expect(actions("WAITING_FOR_USER").continue.enabled).toBe(false);
     expect(actions("WAITING_FOR_USER").continue.reason).toContain("new audience input");
+    const reconciliation = actions("WAITING_FOR_OWNER", {
+      hasExternalEffect: true,
+      hasUnreconciledExternalEffect: true,
+    });
+    expect(reconciliation.cancel.enabled).toBe(false);
+    expect(reconciliation.continue.enabled).toBe(false);
+    expect(reconciliation.cancel.reason).toContain("reconciled");
   });
 
   it("explains whether ASK came from a matched rule or the effective profile", () => {
@@ -42,12 +49,20 @@ describe("delegation task product contract", () => {
 
 function actions(
   status: DelegationTaskProductStatus,
-  overrides: Partial<{ kind: string; hasGenerationRun: boolean; hasPendingApproval: boolean }> = {},
+  overrides: Partial<{
+    kind: string;
+    hasGenerationRun: boolean;
+    hasPendingApproval: boolean;
+    hasExternalEffect: boolean;
+    hasUnreconciledExternalEffect: boolean;
+  }> = {},
 ) {
   return buildDelegationTaskOwnerActionAvailability({
     status,
     kind: overrides.kind ?? "COMPUTE",
     hasGenerationRun: overrides.hasGenerationRun ?? true,
     hasPendingApproval: overrides.hasPendingApproval ?? false,
+    hasExternalEffect: overrides.hasExternalEffect ?? false,
+    hasUnreconciledExternalEffect: overrides.hasUnreconciledExternalEffect ?? false,
   });
 }

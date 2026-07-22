@@ -4,10 +4,11 @@ import {
   renderGroundedKnowledgeFallback,
 } from "@delegate/model-runtime";
 import {
-  buildComputeRequestFromNaturalLanguagePlan,
+  buildComputeRequestsFromDelegationPlan,
   createConversationPlan,
   parseComputeDirective,
   renderReplyPreview,
+  readPersistedDelegationStepRequest,
   resolveComputeSubagent,
   resolveConversationSubagent,
   shouldConsiderNaturalLanguageCompute,
@@ -20,6 +21,7 @@ import {
   completeOperatorMessageDelivery,
   completeInlineGenerationRun,
   createComputeDelegationTask,
+  createClarifyingDelegationTask,
   createAudienceComputeSession,
   deferGenerationRunForHuman,
   executeAudienceTool,
@@ -31,6 +33,8 @@ import {
   markDelegationTaskAwaitingApproval,
   markDelegationTaskRunning,
   finalizeComputeDelegationTask,
+  findConversationClarifyingDelegationTask,
+  continueClarifyingDelegationTask,
   recallRepresentativeContext,
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
@@ -95,7 +99,19 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     );
     if (!setup) throw new Error(`Representative ${item.representativeSlug} was not found.`);
 
-    const computeDirective = item.channel === "web"
+    const persistedRequest = readPersistedDelegationStepRequest(
+      item.contextSnapshot && typeof item.contextSnapshot === "object"
+        ? (item.contextSnapshot as Record<string, unknown>).request
+        : null,
+    );
+    const clarifyingTask = !persistedRequest && item.channel === "web"
+      ? await findConversationClarifyingDelegationTask({
+          representativeId: setup.id,
+          contactId: item.contactId,
+          conversationId: item.conversationId,
+        })
+      : null;
+    const computeDirective = item.channel === "web" && !persistedRequest && !clarifyingTask
       ? parseComputeDirective(item.userText)
       : { kind: "none" as const };
     if (computeDirective.kind === "help" || computeDirective.kind === "invalid") {
@@ -120,23 +136,97 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       return { processed: true as const, runId: item.runId, status: "completed" as const };
     }
 
-    let parsedCompute = computeDirective.kind === "request" ? computeDirective.request : null;
+    let parsedRequests: ParsedComputeRequest[] = persistedRequest
+      ? [persistedRequest]
+      : computeDirective.kind === "request" ? [computeDirective.request] : [];
+    let planSummary = parsedRequests[0]?.displayTarget || "";
+    let planSteps: Array<{ summary: string; request: ParsedComputeRequest }> | undefined;
+    let delegationOverride: { task: { id: string }; step: { id: string } } | undefined =
+      item.delegationTaskId && item.delegationTaskStepId
+        ? { task: { id: item.delegationTaskId }, step: { id: item.delegationTaskStepId } }
+        : undefined;
     if (
-      !parsedCompute &&
+      !parsedRequests.length &&
       item.channel === "web" &&
       setup.compute.enabled &&
-      shouldConsiderNaturalLanguageCompute(item.userText)
+      (Boolean(clarifyingTask) || shouldConsiderNaturalLanguageCompute(item.userText))
     ) {
-      const planned = await planNaturalLanguageComputeRequest({ userText: item.userText });
+      const plannerInput = clarifyingTask
+        ? `原始任务：${clarifyingTask.objective}\n待补充：${clarifyingTask.blockingReason || "执行输入"}\n用户补充：${item.userText}`
+        : item.userText;
+      const planned = await planNaturalLanguageComputeRequest({ userText: plannerInput });
       if (planned.ok && planned.plan) {
-        parsedCompute = buildComputeRequestFromNaturalLanguagePlan(planned.plan);
+        if (planned.plan.kind === "clarification") {
+          if (clarifyingTask) {
+            await continueClarifyingDelegationTask({
+              taskId: clarifyingTask.id,
+              generationRunId: item.runId,
+              inputMessageId: item.inputMessageId,
+              contactId: item.contactId,
+              question: planned.plan.question,
+              missingFields: planned.plan.missingFields,
+            });
+          } else {
+            await createClarifyingDelegationTask({
+              representativeId: setup.id,
+              representativeVersionId: item.representativeVersionId,
+              contactId: item.contactId,
+              conversationId: item.conversationId,
+              ...(item.episodeId ? { episodeId: item.episodeId } : {}),
+              generationRunId: item.runId,
+              inputMessageId: item.inputMessageId,
+              objective: item.userText,
+              summary: planned.plan.summary,
+              question: planned.plan.question,
+              missingFields: planned.plan.missingFields,
+              maxDurationMinutes: setup.compute.maxSessionMinutes,
+              networkMode: setup.compute.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
+              filesystemMode: setup.compute.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
+            });
+          }
+          const completed = await completeInlineGenerationRun({
+            runId: item.runId,
+            replyText: planned.plan.question,
+            senderDisplayName: item.representativeName,
+            intent: "delegation_clarification",
+            countUsage: false,
+            completeOutbox: false,
+          });
+          outputMessageId = completed.message.id;
+          await markGenerationDeliveryComplete({ runId: item.runId, outputMessageId });
+          return { processed: true as const, runId: item.runId, status: "waiting_input" as const };
+        }
+        parsedRequests = buildComputeRequestsFromDelegationPlan(planned.plan);
+        planSummary = planned.plan.summary;
+        planSteps = planned.plan.steps.map((step, index) => ({
+          summary: step.summary,
+          request: parsedRequests[index]!,
+        }));
+        if (parsedRequests.length !== planned.plan.steps.length) {
+          throw new Error("Delegation planner produced an incomplete execution step.");
+        }
+        if (clarifyingTask) {
+          const resumed = await continueClarifyingDelegationTask({
+            taskId: clarifyingTask.id,
+            generationRunId: item.runId,
+            inputMessageId: item.inputMessageId,
+            contactId: item.contactId,
+            planSummary,
+            planSteps,
+          });
+          if (!resumed.ready) throw new Error("Clarifying delegation task did not become ready.");
+          delegationOverride = { task: { id: resumed.taskId }, step: { id: resumed.step.id } };
+        }
       }
     }
-    if (parsedCompute) {
+    if (parsedRequests.length) {
       const computeReply = await processPublicWebComputeRequest({
         item,
         setup,
-        parsed: parsedCompute,
+        parsed: parsedRequests[0]!,
+        ...(planSteps ? { planSteps } : {}),
+        ...(planSummary ? { planSummary } : {}),
+        ...(delegationOverride ? { delegation: delegationOverride } : {}),
       });
 
       if (computeReply.approvalId) {
@@ -162,13 +252,19 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         intent: "compute",
         ...(computeReply.attachments?.length ? { attachments: computeReply.attachments } : {}),
         completeOutbox: false,
+        ...(persistedRequest ? { countUsage: false } : {}),
+        keepConversationQueued: computeReply.hasMoreSteps,
       });
       outputMessageId = completed.message.id;
       await markGenerationDeliveryComplete({
         runId: item.runId,
         outputMessageId,
       });
-      return { processed: true as const, runId: item.runId, status: "completed" as const };
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: computeReply.hasMoreSteps ? "step_completed" as const : "completed" as const,
+      };
     }
 
     const representative = buildRepresentativeRuntimeProfile(setup);
@@ -291,8 +387,12 @@ async function processPublicWebComputeRequest(input: {
   item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
   setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>;
   parsed: ParsedComputeRequest;
+  planSummary?: string;
+  planSteps?: Array<{ summary: string; request: ParsedComputeRequest }>;
+  delegation?: { task: { id: string }; step: { id: string } };
 }): Promise<{
   text: string;
+  hasMoreSteps: boolean;
   approvalId?: string;
   attachments?: Array<{
     fileName: string;
@@ -303,13 +403,23 @@ async function processPublicWebComputeRequest(input: {
   }>;
 }> {
   if (!input.setup.compute.enabled) {
+    if (input.delegation) {
+      await finalizeComputeDelegationTask({
+        taskId: input.delegation.task.id,
+        stepId: input.delegation.step.id,
+        generationRunId: input.item.runId,
+        outcome: "blocked",
+        failureReason: "Compute was disabled before this delegated step could start.",
+      });
+    }
     return {
       text: "这个代表当前没有启用 Compute。请联系代表所有者在 Dashboard 中启用后再试。",
+      hasMoreSteps: false,
     };
   }
 
   const subagent = resolveComputeSubagent(input.parsed.capability);
-  const delegation = await createComputeDelegationTask({
+  const delegation = input.delegation ?? await createComputeDelegationTask({
     representativeId: input.setup.id,
     representativeVersionId: input.item.representativeVersionId,
     contactId: input.item.contactId,
@@ -319,6 +429,9 @@ async function processPublicWebComputeRequest(input: {
     inputMessageId: input.item.inputMessageId,
     objective: input.item.userText,
     actionSummary: input.parsed.displayTarget,
+    request: input.parsed,
+    ...(input.planSummary ? { planSummary: input.planSummary } : {}),
+    ...(input.planSteps ? { planSteps: input.planSteps } : {}),
     capability: input.parsed.capability,
     maxDurationMinutes: input.setup.compute.maxSessionMinutes,
     networkMode: input.setup.compute.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
@@ -340,7 +453,7 @@ async function processPublicWebComputeRequest(input: {
       reason: `web:${input.parsed.capability}`,
       requestedBaseImage: input.setup.compute.baseImage,
     });
-    await markDelegationTaskRunning(delegation.task.id);
+    await markDelegationTaskRunning(delegation.task.id, delegation.step.id);
     result = await executeAudienceTool(session.session.id, {
       ...input.parsed,
       subagentId: subagent.id,
@@ -352,6 +465,8 @@ async function processPublicWebComputeRequest(input: {
   } catch (error) {
     await finalizeComputeDelegationTask({
       taskId: delegation.task.id,
+      stepId: delegation.step.id,
+      generationRunId: input.item.runId,
       outcome: "failed",
       failureReason: error instanceof Error ? error.message : "Compute execution failed.",
     });
@@ -362,10 +477,12 @@ async function processPublicWebComputeRequest(input: {
     if (!result.approvalRequest) throw new Error("Compute approval response is missing.");
     await markDelegationTaskAwaitingApproval({
       taskId: delegation.task.id,
+      stepId: delegation.step.id,
       approvalId: result.approvalRequest.id,
     });
     return {
       approvalId: result.approvalRequest.id,
+      hasMoreSteps: false,
       text: [
         `委托任务已提交，正在等待代表所有者审批。`,
         `操作：${result.approvalRequest.requestedActionSummary}`,
@@ -390,8 +507,10 @@ async function processPublicWebComputeRequest(input: {
     url: `/reps/${input.item.representativeSlug}/chat/artifacts/${artifact.id}/download`,
   }));
 
-  await finalizeComputeDelegationTask({
+  const finalization = await finalizeComputeDelegationTask({
     taskId: delegation.task.id,
+    stepId: delegation.step.id,
+    generationRunId: input.item.runId,
     outcome: result.outcome === "blocked"
       ? "blocked"
       : result.outcome === "failed"
@@ -402,16 +521,20 @@ async function processPublicWebComputeRequest(input: {
   });
 
   if (result.outcome === "blocked") {
-    return { text: `委托任务被安全策略拒绝，未执行。${billingLine}` };
+    return { text: `委托任务被安全策略拒绝，未执行。${billingLine}`, hasMoreSteps: false };
   }
   if (result.outcome === "failed") {
     return {
       text: `委托任务已执行，但未能完成。\n\n${artifactSummary}${billingLine}`,
+      hasMoreSteps: false,
       ...(attachments.length ? { attachments } : {}),
     };
   }
   return {
-    text: `委托任务已在隔离沙盒中执行完成。\n\n${artifactSummary}${billingLine}`,
+    text: finalization?.hasMoreSteps
+      ? `委托任务当前步骤已完成，后续步骤已进入执行队列。\n\n${artifactSummary}${billingLine}`
+      : `委托任务已在隔离沙盒中执行完成。\n\n${artifactSummary}${billingLine}`,
+    hasMoreSteps: Boolean(finalization?.hasMoreSteps),
     ...(attachments.length ? { attachments } : {}),
   };
 }

@@ -575,7 +575,10 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
   });
 
   if (updatedApproval.delegationTaskId) {
-    await markDelegationTaskRunning(updatedApproval.delegationTaskId);
+    await markDelegationTaskRunning(
+      updatedApproval.delegationTaskId,
+      updatedApproval.delegationTaskStepId ?? undefined,
+    );
   }
 
   return resolveApprovalResponseSchema.parse({

@@ -19,6 +19,19 @@ export type NaturalLanguageComputePlan = {
   url?: string;
 };
 
+export type NaturalLanguageDelegationPlan =
+  | {
+      kind: "execution";
+      summary: string;
+      steps: NaturalLanguageComputePlan[];
+    }
+  | {
+      kind: "clarification";
+      summary: string;
+      question: string;
+      missingFields: Array<"command" | "path" | "content" | "url">;
+    };
+
 export function parseComputeRequest(input: string): ParsedComputeRequest | null {
   const directive = parseComputeDirective(input);
   return directive.kind === "request" ? directive.request : null;
@@ -183,6 +196,47 @@ export function buildComputeRequestFromNaturalLanguagePlan(
         : null;
     }
   }
+}
+
+export function buildComputeRequestsFromDelegationPlan(
+  plan: NaturalLanguageDelegationPlan,
+): ParsedComputeRequest[] {
+  if (plan.kind !== "execution") return [];
+  return plan.steps
+    .map(buildComputeRequestFromNaturalLanguagePlan)
+    .filter((request): request is ParsedComputeRequest => Boolean(request));
+}
+
+export function readPersistedDelegationStepRequest(value: unknown): ParsedComputeRequest | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const capability = record.capability;
+  const displayTarget = record.displayTarget;
+  if (
+    !["exec", "read", "write", "process", "browser", "mcp"].includes(String(capability)) ||
+    typeof displayTarget !== "string" ||
+    !displayTarget.trim()
+  ) {
+    return null;
+  }
+  if ((capability === "exec" || capability === "process") && typeof record.command !== "string") return null;
+  if (capability === "read" && typeof record.path !== "string") return null;
+  if (capability === "write" && (typeof record.path !== "string" || typeof record.content !== "string")) return null;
+  if (capability === "browser" && (typeof record.url !== "string" || !isLikelyUrl(record.url))) return null;
+  if (
+    capability === "mcp" &&
+    typeof record.bindingId !== "string" &&
+    typeof record.bindingSlug !== "string"
+  ) return null;
+  return {
+    ...record,
+    capability,
+    displayTarget: displayTarget.trim(),
+    hasPaidEntitlement: record.hasPaidEntitlement === true,
+    browserMode: record.browserMode === "native" ? "native" : "deterministic",
+    maxSteps: typeof record.maxSteps === "number" ? Math.max(1, Math.min(8, Math.floor(record.maxSteps))) : 1,
+    allowMutations: record.allowMutations === true,
+  } as ParsedComputeRequest;
 }
 
 export function formatComputeUsageExamples() {

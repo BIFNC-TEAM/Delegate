@@ -49,4 +49,4 @@ Task transitions use a PostgreSQL advisory transaction lock. Each event receives
 - Conversation detail shows task status, next actor, step state, output count, and approval count.
 - Approval detail shows the task that requested the governed action.
 
-Future multi-step service delegation can use the same aggregate for clarification, planning, MCP calls, external-account actions, delivery, and reconciliation without equating any individual runtime session with the user's task.
+P1 multi-step service delegation uses the same aggregate for clarification, dependency-ordered Compute/browser steps, MCP calls, delivery, and reconciliation without equating any individual runtime session with the user's task. It is intentionally fail-fast and sequential; unknown MCP outcomes require Owner reconciliation before retry.

@@ -45,7 +45,14 @@ export async function finalizeComputeApprovalConversation(input: {
     if (!approval || !run) return null;
     if (run.status === GenerationRunStatus.COMPLETED && run.outputMessageId) {
       const message = await tx.message.findUnique({ where: { id: run.outputMessageId } });
-      return { message, delegationTaskId: approval.delegationTaskId };
+      return {
+        message,
+        delegationTaskId: approval.delegationTaskId,
+        delegationTaskStepId: approval.delegationTaskStepId,
+        generationRunId: run.id,
+        conversationId: run.conversationId,
+        episodeId: run.episodeId,
+      };
     }
 
     const now = new Date();
@@ -128,12 +135,23 @@ export async function finalizeComputeApprovalConversation(input: {
       where: { id: run.episodeId || "__no_episode__" },
       data: { status: ConversationEpisodeStatus.WAITING_USER },
     });
-    return { message, delegationTaskId: approval.delegationTaskId };
+    return {
+      message,
+      delegationTaskId: approval.delegationTaskId,
+      delegationTaskStepId: approval.delegationTaskStepId,
+      generationRunId: run.id,
+      conversationId: run.conversationId,
+      episodeId: run.episodeId,
+    };
   });
   if (!result) return null;
+  if (!result.message) return null;
+  let hasMoreSteps = false;
   if (result.delegationTaskId) {
-    await finalizeComputeDelegationTask({
+    const finalization = await finalizeComputeDelegationTask({
       taskId: result.delegationTaskId,
+      ...(result.delegationTaskStepId ? { stepId: result.delegationTaskStepId } : {}),
+      generationRunId: result.generationRunId,
       outcome: input.outcome === "completed"
         ? "completed"
         : input.outcome === "rejected"
@@ -147,6 +165,24 @@ export async function finalizeComputeApprovalConversation(input: {
       ...(input.failureReason ? { failureReason: input.failureReason } : {}),
       ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
     });
+    hasMoreSteps = Boolean(finalization?.hasMoreSteps);
+  }
+  if (hasMoreSteps) {
+    const text = "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。";
+    const [, message] = await prisma.$transaction([
+      prisma.conversation.update({
+        where: { id: result.conversationId },
+        data: { state: "AI_QUEUED", lastMessageAt: new Date() },
+      }),
+      prisma.message.update({
+        where: { id: result.message.id },
+        data: { text },
+      }),
+      ...(result.episodeId
+        ? [prisma.conversationEpisode.update({ where: { id: result.episodeId }, data: { status: ConversationEpisodeStatus.ACTIVE } })]
+        : []),
+    ]);
+    return message;
   }
   return result.message;
 }

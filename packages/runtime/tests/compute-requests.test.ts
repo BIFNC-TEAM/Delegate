@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildComputeRequestFromNaturalLanguagePlan,
+  buildComputeRequestsFromDelegationPlan,
   formatComputeUsageExamples,
   parseComputeDirective,
   parseComputeRequest,
   shouldConsiderNaturalLanguageCompute,
+  readPersistedDelegationStepRequest,
 } from "../src/compute-requests";
 
 describe("compute request parser", () => {
@@ -60,5 +62,23 @@ describe("compute request parser", () => {
       content: "hello",
       displayTarget: "生成 notes/demo.txt",
     });
+  });
+
+  it("builds and restores bounded multi-step execution requests", () => {
+    const requests = buildComputeRequestsFromDelegationPlan({
+      kind: "execution",
+      summary: "生成并读取文件",
+      steps: [
+        { capability: "write", path: "notes/p1.txt", content: "P1", summary: "写入文件" },
+        { capability: "read", path: "notes/p1.txt", summary: "读取文件" },
+      ],
+    });
+    expect(requests).toHaveLength(2);
+    expect(readPersistedDelegationStepRequest(requests[1])).toMatchObject({
+      capability: "read",
+      path: "notes/p1.txt",
+      displayTarget: "读取文件",
+    });
+    expect(readPersistedDelegationStepRequest({ capability: "write", displayTarget: "缺内容", path: "x.txt" })).toBeNull();
   });
 });

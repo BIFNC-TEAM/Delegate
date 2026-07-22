@@ -17,8 +17,10 @@ export function buildDelegationTaskOwnerActionAvailability(input: {
   kind: string;
   hasGenerationRun: boolean;
   hasPendingApproval: boolean;
+  hasExternalEffect?: boolean;
+  hasUnreconciledExternalEffect?: boolean;
 }) {
-  const cancelable = new Set<DelegationTaskProductStatus>([
+  const cancelable = !input.hasUnreconciledExternalEffect && new Set<DelegationTaskProductStatus>([
     "DRAFT",
     "CLARIFYING",
     "READY",
@@ -31,8 +33,8 @@ export function buildDelegationTaskOwnerActionAvailability(input: {
     "FAILED",
     "CANCELED",
     "EXPIRED",
-  ]).has(input.status) && input.kind !== "MCP" && input.hasGenerationRun;
-  const continuable = input.status === "WAITING_FOR_OWNER" && input.hasGenerationRun;
+  ]).has(input.status) && input.kind !== "MCP" && !input.hasExternalEffect && input.hasGenerationRun;
+  const continuable = input.status === "WAITING_FOR_OWNER" && input.hasGenerationRun && !input.hasExternalEffect;
   return {
     cancel: {
       enabled: cancelable,
@@ -40,7 +42,9 @@ export function buildDelegationTaskOwnerActionAvailability(input: {
         ? input.hasPendingApproval
           ? "Canceling will reject the pending approval and preserve its decision record."
           : "The task has not entered an uncancelable atomic operation."
-        : input.status === "RUNNING"
+        : input.hasUnreconciledExternalEffect
+          ? "The remote side-effect outcome must be reconciled before this task can be canceled."
+          : input.status === "RUNNING"
           ? "The current atomic operation cannot be presented as canceled until broker termination is confirmed."
           : "Only active or waiting tasks can be canceled.",
     },
@@ -48,15 +52,17 @@ export function buildDelegationTaskOwnerActionAvailability(input: {
       enabled: retryable,
       reason: retryable
         ? "Retry creates a new attempt on the same task and re-evaluates current policy."
-        : input.kind === "MCP"
-          ? "MCP retries require external-effect reconciliation and are not available in P0."
+        : input.kind === "MCP" || input.hasExternalEffect
+          ? "Use the external-effect recovery controls so reconciliation happens before any MCP retry."
           : "Retry is available for failed, canceled, or expired single-step tasks with execution context.",
     },
     continue: {
       enabled: continuable,
       reason: continuable
         ? "The task is waiting for an Owner decision and can return to the system queue."
-        : input.status === "WAITING_FOR_USER"
+        : input.hasExternalEffect && input.status === "WAITING_FOR_OWNER"
+          ? "Use the external-effect reconciliation controls before continuing this task."
+          : input.status === "WAITING_FOR_USER"
           ? "This task needs new audience input; the Owner cannot continue it on the audience's behalf."
           : "Continue is available only while a task is waiting for the Owner.",
     },

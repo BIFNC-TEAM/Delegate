@@ -189,6 +189,40 @@ export function DashboardInbox({
     }
   }
 
+  async function updateExternalEffect(
+    effectId: string,
+    action: "reconcile" | "retry" | "record_compensation",
+    observedOutcome?: "succeeded" | "failed",
+  ) {
+    if (!taskDetail || taskBusy) return;
+    const note = action === "record_compensation"
+      ? window.prompt(zh ? "请输入外部补偿已经完成的证据说明：" : "Describe the evidence that external compensation completed:")
+      : action === "reconcile"
+        ? window.prompt(zh ? "请输入远端对账依据：" : "Enter the remote reconciliation evidence:")
+        : null;
+    if ((action === "record_compensation" || action === "reconcile") && !note?.trim()) return;
+    setTaskBusy(true);
+    setTaskError(null);
+    try {
+      const response = await fetch(
+        `/api/dashboard/representatives/${encodeURIComponent(activeSlug)}/tasks/${encodeURIComponent(taskDetail.task.id)}/effects/${encodeURIComponent(effectId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, observedOutcome, ...(note?.trim() ? { note: note.trim() } : {}) }),
+        },
+      );
+      const payload = (await response.json().catch(() => ({}))) as DelegationTaskDetailSnapshot & { error?: string };
+      if (!response.ok) throw new Error(payload.error || "Failed to update external effect.");
+      setTaskDetail(payload);
+      await refreshWorkspace(detail?.id);
+    } catch (caught) {
+      setTaskError(caught instanceof Error ? caught.message : "Failed to update external effect.");
+    } finally {
+      setTaskBusy(false);
+    }
+  }
+
   function updateControl(action: "assign" | "return_to_ai") {
     if (!detail) return;
     setError(null);
@@ -542,6 +576,7 @@ export function DashboardInbox({
                 error={taskError}
                 locale={locale}
                 onAction={(action) => void updateTask(action)}
+                onEffectAction={(effectId, action, observedOutcome) => void updateExternalEffect(effectId, action, observedOutcome)}
                 onClose={closeTask}
               />
             ) : null}
@@ -559,6 +594,7 @@ function DelegationTaskDrawer({
   error,
   locale,
   onAction,
+  onEffectAction,
   onClose,
 }: {
   busy: boolean;
@@ -566,6 +602,7 @@ function DelegationTaskDrawer({
   error: string | null;
   locale: Locale;
   onAction: (action: "cancel" | "retry" | "continue") => void;
+  onEffectAction: (effectId: string, action: "reconcile" | "retry" | "record_compensation", observedOutcome?: "succeeded" | "failed") => void;
   onClose: () => void;
 }) {
   const zh = locale === "zh";
@@ -587,6 +624,7 @@ function DelegationTaskDrawer({
         <section className="delegation-task-summary">
           <span>{zh ? "目标结果" : "Desired outcome"}</span>
           <p>{task.desiredOutcome}</p>
+          {task.blockingReason ? <p className="delegation-task-blocking"><strong>{zh ? "当前阻塞：" : "Blocked: "}</strong>{task.blockingReason}</p> : null}
         </section>
         <dl className="delegation-task-facts">
           <div><dt>{zh ? "下一责任方" : "Next actor"}</dt><dd>{task.nextActionBy}</dd></div>
@@ -600,7 +638,7 @@ function DelegationTaskDrawer({
             {detail.plan.steps.map((step) => (
               <article key={step.id}>
                 <i>{String(step.sequence).padStart(2, "0")}</i>
-                <div><strong>{step.title}</strong><p>{step.kind} · {step.capability || "—"}{step.requiresApproval ? ` · ${zh ? "需要审批" : "approval required"}` : ""}</p></div>
+                <div><strong>{step.title}</strong><p>{step.kind} · {step.capability || "—"}{step.dependsOnStepIds.length ? ` · ${zh ? `依赖 ${step.dependsOnStepIds.length} 步` : `${step.dependsOnStepIds.length} dependencies`}` : ""}{step.requiresApproval ? ` · ${zh ? "需要审批" : "approval required"}` : ""}</p></div>
                 <span className={`is-${step.status}`}>{step.status}</span>
               </article>
             ))}
@@ -620,6 +658,15 @@ function DelegationTaskDrawer({
           </TaskSection>
         ) : null}
 
+        {(detail.inputs.length || detail.dataGrants.length) ? (
+          <TaskSection eyebrow={zh ? "输入与授权" : "Inputs and grants"} title={zh ? "用户补充和授权范围都绑定到同一任务" : "Audience supplements and grants remain bound to this task"}>
+            <div className="delegation-task-inputs">
+              {detail.inputs.map((input) => <article key={input.id}><div><strong>{input.label}</strong><p>{input.kind} · {input.referenceType}</p></div><span>{input.authorizationRequired ? (zh ? "需授权" : "grant required") : (zh ? "已提供" : "provided")}</span></article>)}
+              {detail.dataGrants.map((grant) => <article key={grant.id}><div><strong>{grant.resourceType} · {grant.resourceId}</strong><p>{grant.purpose} · {grant.scopes.join(", ") || "—"}</p></div><span>{grant.status}</span></article>)}
+            </div>
+          </TaskSection>
+        ) : null}
+
         <TaskSection eyebrow={zh ? "审批证据" : "Approval evidence"} title={detail.approvals.length ? (zh ? `${detail.approvals.length} 条决策记录` : `${detail.approvals.length} decision records`) : (zh ? "没有触发审批" : "No approval was triggered")}>
           <div className="delegation-task-approvals">
             {detail.approvals.map((approval) => (
@@ -631,6 +678,24 @@ function DelegationTaskDrawer({
             ))}
           </div>
         </TaskSection>
+
+        {detail.externalEffects.length ? (
+          <TaskSection eyebrow={zh ? "外部副作用" : "External effects"} title={zh ? "未知结果必须先对账，不能直接重试" : "Unknown outcomes must be reconciled before retry"}>
+            <div className="delegation-task-effects">
+              {detail.externalEffects.map((effect) => (
+                <article key={effect.id}>
+                  <header><div><strong>{effect.action} · {effect.target}</strong><p>{effect.type}{effect.failureReason ? ` · ${effect.failureReason}` : ""}</p></div><span className={`is-${effect.status}`}>{effect.status}</span></header>
+                  <div>
+                    <button disabled={busy || !effect.actions.reconcile.enabled} onClick={() => onEffectAction(effect.id, "reconcile", "succeeded")} title={effect.actions.reconcile.reason} type="button">{zh ? "确认远端成功" : "Confirm succeeded"}</button>
+                    <button disabled={busy || !effect.actions.reconcile.enabled} onClick={() => onEffectAction(effect.id, "reconcile", "failed")} title={effect.actions.reconcile.reason} type="button">{zh ? "确认远端失败" : "Confirm failed"}</button>
+                    <button disabled={busy || !effect.actions.retry.enabled} onClick={() => onEffectAction(effect.id, "retry")} title={effect.actions.retry.reason} type="button">{zh ? "安全重试" : "Safe retry"}</button>
+                    <button disabled={busy || !effect.actions.recordCompensation.enabled} onClick={() => onEffectAction(effect.id, "record_compensation")} title={effect.actions.recordCompensation.reason} type="button">{zh ? "记录已补偿" : "Record compensation"}</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </TaskSection>
+        ) : null}
 
         <TaskSection eyebrow={zh ? "交付结果" : "Outputs"} title={detail.outputs.length ? (zh ? `${detail.outputs.length} 项已记录结果` : `${detail.outputs.length} recorded outputs`) : (zh ? "尚无产物" : "No outputs yet")}>
           <div className="delegation-task-outputs">

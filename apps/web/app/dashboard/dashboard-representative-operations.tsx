@@ -1,6 +1,6 @@
 "use client";
 
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, useState, useTransition } from "react";
 
 import type {
@@ -14,8 +14,11 @@ import {
   DashboardRepresentativeSetup,
   type RepresentativeSetupSectionId,
 } from "./dashboard-representative-setup";
-
-type RepresentativeSection = "directory" | "operations" | "setup";
+import {
+  commitRepresentativeSectionNavigation,
+  planRepresentativeSectionNavigation,
+  type RepresentativeSection,
+} from "./representative-section-navigation";
 
 export function DashboardRepresentativeOperations({
   accountLabel,
@@ -34,7 +37,6 @@ export function DashboardRepresentativeOperations({
 }) {
   const zh = locale === "zh";
   const pathname = usePathname();
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [snapshot, setSnapshot] = useState(initialSnapshot);
   const [message, setMessage] = useState<string | null>(null);
@@ -58,19 +60,19 @@ export function DashboardRepresentativeOperations({
     section: RepresentativeSection,
     setupSection?: RepresentativeSetupSectionId,
   ) {
-    const params = new URLSearchParams(searchParams.toString());
-    params.set("view", "representatives");
-    params.set("lang", locale);
-    params.set("repSection", section);
-    if (representatives.some((representative) => representative.slug === activeSlug)) {
-      params.set("rep", activeSlug);
-    }
-    if (section === "setup") {
-      params.set("setupSection", setupSection ?? requestedSetupSection);
-    } else {
-      params.delete("setupSection");
-    }
-    router.push(`${pathname}?${params.toString()}`);
+    const navigation = planRepresentativeSectionNavigation({
+      activeSection,
+      activeSetupSection: requestedSetupSection,
+      activeSlug,
+      currentSearch: searchParams.toString(),
+      locale,
+      pathname,
+      representativeSlugs: representatives.map((representative) => representative.slug),
+      section,
+      setupSection,
+    });
+
+    commitRepresentativeSectionNavigation(window.history, navigation);
   }
 
   function publishVersion() {
@@ -173,9 +175,9 @@ export function DashboardRepresentativeOperations({
     </nav>
   );
 
-  if (activeSection === "directory") {
-    return (
-      <>
+  return (
+    <>
+      {activeSection === "directory" ? (
         <RepresentativeWorkspaceHeader
           actionLabel={zh ? "配置当前代表" : "Configure active representative"}
           canAct={Boolean(snapshot)}
@@ -183,21 +185,7 @@ export function DashboardRepresentativeOperations({
           summary={zh ? "创建多个数字代表，并为每个代表维护独立的身份、知识、价格与发布版本。" : "Create multiple representatives with independent identity, knowledge, pricing, and release history."}
           title={zh ? "管理工作区里的全部数字代表。" : "Manage every representative in this workspace."}
         />
-        {sectionNavigation}
-        <DashboardRepresentativeDirectory
-          activeSlug={activeSlug}
-          initialOwnerName={representatives[0]?.ownerName || accountLabel}
-          initialRepresentatives={representatives}
-          locale={locale}
-          representativeBaseUrl={representativeBaseUrl}
-        />
-      </>
-    );
-  }
-
-  if (activeSection === "setup" && snapshot) {
-    return (
-      <>
+      ) : activeSection === "setup" && snapshot ? (
         <RepresentativeWorkspaceHeader
           actionLabel={zh ? "查看发布检查" : "Review publish readiness"}
           canAct
@@ -205,112 +193,122 @@ export function DashboardRepresentativeOperations({
           summary={zh ? "配置修改先保存在工作草稿中；公开页面和异步会话继续使用当前已发布版本。" : "Edits stay in the working draft while public pages and asynchronous conversations continue using the active published version."}
           title={zh ? `配置 ${snapshot.representative.displayName}` : `Configure ${snapshot.representative.displayName}`}
         />
-        {sectionNavigation}
-        <DashboardRepresentativeSetup
-          initialSection={requestedSetupSection}
-          locale={locale}
-          representativeSlug={activeSlug}
-        />
-      </>
-    );
-  }
-
-  if (!snapshot) {
-    return null;
-  }
-
-  return (
-    <>
-      <header className="dashboard-v2-page-header representative-ops-header">
-        <div>
-          <p>DIGITAL REPRESENTATIVES / 02</p>
-          <h1>{zh ? "从配置、边界到版本，发布一个完整的数字代表。" : "Publish a complete representative from configuration to boundaries and versions."}</h1>
-          <span>{zh ? "当前页面以发布就绪度为主线，知识、渠道、人工接管和版本状态在同一处检查。" : "Use readiness as the operating spine across knowledge, channels, handoff, and versions."}</span>
-        </div>
-        <div className="dashboard-v2-page-actions">
-          <button className="dashboard-v2-button-secondary" onClick={() => navigateSection("setup")} type="button">
-            {zh ? "编辑配置" : "Edit configuration"}
-          </button>
-          {snapshot.representative.activeVersion ? (
-            <a
-              className="dashboard-v2-button-secondary"
-              href={buildLocalizedHref(`${representativeBaseUrl}/reps/${activeSlug}`, locale)}
-            >
-              {zh ? "测试已发布版本" : "Test published version"}
-            </a>
-          ) : (
-            <button className="dashboard-v2-button-secondary" disabled type="button">
-              {zh ? "发布后可测试" : "Publish before testing"}
+      ) : snapshot ? (
+        <header className="dashboard-v2-page-header representative-ops-header">
+          <div>
+            <p>DIGITAL REPRESENTATIVES / 02</p>
+            <h1>{zh ? "从配置、边界到版本，发布一个完整的数字代表。" : "Publish a complete representative from configuration to boundaries and versions."}</h1>
+            <span>{zh ? "当前页面以发布就绪度为主线，知识、渠道、人工接管和版本状态在同一处检查。" : "Use readiness as the operating spine across knowledge, channels, handoff, and versions."}</span>
+          </div>
+          <div className="dashboard-v2-page-actions">
+            <button className="dashboard-v2-button-secondary" onClick={() => navigateSection("setup")} type="button">
+              {zh ? "编辑配置" : "Edit configuration"}
             </button>
-          )}
-          <button className="dashboard-v2-button-primary" disabled={!readyToPublish || isPending} onClick={publishVersion} type="button">{isPending ? (zh ? "发布中…" : "Publishing…") : (zh ? "发布新版本" : "Publish version")}</button>
-        </div>
-      </header>
+            {snapshot.representative.activeVersion ? (
+              <a
+                className="dashboard-v2-button-secondary"
+                href={buildLocalizedHref(`${representativeBaseUrl}/reps/${activeSlug}`, locale)}
+              >
+                {zh ? "测试已发布版本" : "Test published version"}
+              </a>
+            ) : (
+              <button className="dashboard-v2-button-secondary" disabled type="button">
+                {zh ? "发布后可测试" : "Publish before testing"}
+              </button>
+            )}
+            <button className="dashboard-v2-button-primary" disabled={!readyToPublish || isPending} onClick={publishVersion} type="button">{isPending ? (zh ? "发布中…" : "Publishing…") : (zh ? "发布新版本" : "Publish version")}</button>
+          </div>
+        </header>
+      ) : null}
 
       {sectionNavigation}
 
-      {message ? <div className="representative-ops-banner is-success">{message}</div> : null}
-      {error ? <div className="representative-ops-banner is-error">{error}</div> : null}
-
-      <section className="representative-hero-card">
-        <div className="representative-hero-identity">
-          <span>{snapshot.representative.displayName.slice(0, 1).toUpperCase()}</span>
-          <div><small>{snapshot.representative.slug}</small><h2>{snapshot.representative.displayName}</h2><p>{snapshot.representative.roleSummary}</p></div>
-        </div>
-        <div className="representative-hero-status">
-          <span className={`is-${snapshot.representative.lifecycleState}`}>{formatLifecycle(snapshot.representative.lifecycleState, locale)}</span>
-          <strong>v{snapshot.representative.activeVersion || "—"}</strong>
-          <small>{zh ? "当前发布版本" : "Active version"}</small>
-        </div>
-      </section>
-
-      <section className="dashboard-v2-metric-grid">
-        <RepresentativeMetric detail={zh ? "当前代表" : "Current representative"} label={zh ? "历史会话" : "Conversations"} value={snapshot.metrics.conversations} tone="teal" />
-        <RepresentativeMetric detail={zh ? "当前代表" : "Current representative"} label={zh ? "知识资产" : "Knowledge assets"} value={snapshot.metrics.knowledgeAssets} />
-        <RepresentativeMetric detail={zh ? "当前代表" : "Current representative"} label={zh ? "启用技能" : "Enabled skills"} value={snapshot.metrics.enabledSkills} tone="indigo" />
-        <RepresentativeMetric detail={zh ? "当前代表" : "Current representative"} label={zh ? "待人工接手" : "Open handoffs"} value={snapshot.metrics.openHandoffs} tone="warning" />
-      </section>
-
-      <div className="representative-ops-grid">
-        <section className="dashboard-v2-panel representative-readiness-panel">
-          <header><div><p>{zh ? "发布检查" : "Publish readiness"}</p><h2>{completed} / {snapshot.readiness.length} {zh ? "项已完成" : "complete"}</h2></div><span className={readyToPublish ? "is-ready" : undefined}>{readyToPublish ? (zh ? "可以发布" : "Ready") : (zh ? "需要补全" : "Needs work")}</span></header>
-          <div className="representative-readiness-list">
-            {snapshot.readiness.map((item, index) => (
-              <article className={item.complete ? "is-complete" : undefined} key={item.id}>
-                <span>{item.complete ? "✓" : String(index + 1).padStart(2, "0")}</span>
-                <div><strong>{localizeReadiness(item.label, locale)}</strong><small>{localizeReadinessDetail(item.id, item.detail, locale)}</small></div>
-                <button onClick={() => navigateSection("setup", readinessSetupSection[item.id] ?? "basics")} type="button">{zh ? "查看" : "Review"} →</button>
-              </article>
-            ))}
-          </div>
-        </section>
-
-        <aside className="representative-ops-stack">
-          <section className="dashboard-v2-panel">
-            <header><div><p>{zh ? "渠道" : "Channels"}</p><h2>{zh ? "发布与连接状态" : "Publishing and connection"}</h2></div></header>
-            <div className="representative-channel-list">
-              {snapshot.channels.length ? snapshot.channels.map((channel) => (
-                <article key={channel.kind}><span className={`is-${channel.kind}`}>{channel.kind.slice(0, 1).toUpperCase()}</span><div><strong>{channel.kind}</strong><small>{channel.externalUserId || (zh ? "尚未分配身份" : "No identity assigned")}</small></div><em className={`is-${channel.status}`}>{channel.status}</em></article>
-              )) : <p className="representative-empty-copy">{zh ? "公开网页启用后会自动显示 Web 渠道。" : "Web appears automatically when public mode is enabled."}</p>}
-            </div>
-          </section>
-          <section className="dashboard-v2-panel">
-            <header><div><p>{zh ? "配置入口" : "Configuration"}</p><h2>{zh ? "继续完善代表" : "Continue setup"}</h2></div></header>
-            <div className="representative-config-links">
-              {configurationLinks(locale).map((item, index) => <button key={item.label} onClick={() => navigateSection("setup", item.section)} type="button"><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.label}</strong><b>→</b></button>)}
-            </div>
-          </section>
-        </aside>
+      <div className="representative-section-panel" hidden={activeSection !== "directory"}>
+        <DashboardRepresentativeDirectory
+          activeSlug={activeSlug}
+          initialOwnerName={representatives[0]?.ownerName || accountLabel}
+          initialRepresentatives={representatives}
+          locale={locale}
+          representativeBaseUrl={representativeBaseUrl}
+        />
       </div>
 
-      <section className="dashboard-v2-panel representative-version-panel">
-        <header><div><p>{zh ? "版本历史" : "Version history"}</p><h2>{zh ? "每次发布都可追踪、可回滚" : "Every release is traceable and reversible"}</h2></div></header>
-        <div className="representative-version-list">
-          {snapshot.versions.length ? snapshot.versions.map((version) => (
-            <article className={version.active ? "is-active" : undefined} key={version.id}><span>v{version.versionNumber}</span><div><strong>{version.changeSummary || (zh ? "未填写变更摘要" : "No change summary")}</strong><small>{formatVersionDate(version.publishedAt, locale)} · {version.publishedBy || "Owner"}</small></div>{version.active ? <em>{zh ? "当前版本" : "Active"}</em> : <button disabled={isPending} onClick={() => activateVersion(version.id)} type="button">{zh ? "重新激活" : "Reactivate"}</button>}</article>
-          )) : <p className="representative-empty-copy">{zh ? "尚未发布版本。完成检查后发布第一个版本。" : "No published versions yet. Complete readiness and publish v1."}</p>}
-        </div>
-      </section>
+      {snapshot ? (
+        <>
+          <div className="representative-section-panel" hidden={activeSection !== "setup"}>
+            <DashboardRepresentativeSetup
+              initialSection={requestedSetupSection}
+              locale={locale}
+              representativeSlug={activeSlug}
+            />
+          </div>
+
+          <div className="representative-section-panel" hidden={activeSection !== "operations"}>
+            {message ? <div className="representative-ops-banner is-success">{message}</div> : null}
+            {error ? <div className="representative-ops-banner is-error">{error}</div> : null}
+
+            <section className="representative-hero-card">
+              <div className="representative-hero-identity">
+                <span>{snapshot.representative.displayName.slice(0, 1).toUpperCase()}</span>
+                <div><small>{snapshot.representative.slug}</small><h2>{snapshot.representative.displayName}</h2><p>{snapshot.representative.roleSummary}</p></div>
+              </div>
+              <div className="representative-hero-status">
+                <span className={`is-${snapshot.representative.lifecycleState}`}>{formatLifecycle(snapshot.representative.lifecycleState, locale)}</span>
+                <strong>v{snapshot.representative.activeVersion || "—"}</strong>
+                <small>{zh ? "当前发布版本" : "Active version"}</small>
+              </div>
+            </section>
+
+            <section className="dashboard-v2-metric-grid">
+              <RepresentativeMetric detail={zh ? "当前代表" : "Current representative"} label={zh ? "历史会话" : "Conversations"} value={snapshot.metrics.conversations} tone="teal" />
+              <RepresentativeMetric detail={zh ? "当前代表" : "Current representative"} label={zh ? "知识资产" : "Knowledge assets"} value={snapshot.metrics.knowledgeAssets} />
+              <RepresentativeMetric detail={zh ? "当前代表" : "Current representative"} label={zh ? "启用技能" : "Enabled skills"} value={snapshot.metrics.enabledSkills} tone="indigo" />
+              <RepresentativeMetric detail={zh ? "当前代表" : "Current representative"} label={zh ? "待人工接手" : "Open handoffs"} value={snapshot.metrics.openHandoffs} tone="warning" />
+            </section>
+
+            <div className="representative-ops-grid">
+              <section className="dashboard-v2-panel representative-readiness-panel">
+                <header><div><p>{zh ? "发布检查" : "Publish readiness"}</p><h2>{completed} / {snapshot.readiness.length} {zh ? "项已完成" : "complete"}</h2></div><span className={readyToPublish ? "is-ready" : undefined}>{readyToPublish ? (zh ? "可以发布" : "Ready") : (zh ? "需要补全" : "Needs work")}</span></header>
+                <div className="representative-readiness-list">
+                  {snapshot.readiness.map((item, index) => (
+                    <article className={item.complete ? "is-complete" : undefined} key={item.id}>
+                      <span>{item.complete ? "✓" : String(index + 1).padStart(2, "0")}</span>
+                      <div><strong>{localizeReadiness(item.label, locale)}</strong><small>{localizeReadinessDetail(item.id, item.detail, locale)}</small></div>
+                      <button onClick={() => navigateSection("setup", readinessSetupSection[item.id] ?? "basics")} type="button">{zh ? "查看" : "Review"} →</button>
+                    </article>
+                  ))}
+                </div>
+              </section>
+
+              <aside className="representative-ops-stack">
+                <section className="dashboard-v2-panel">
+                  <header><div><p>{zh ? "渠道" : "Channels"}</p><h2>{zh ? "发布与连接状态" : "Publishing and connection"}</h2></div></header>
+                  <div className="representative-channel-list">
+                    {snapshot.channels.length ? snapshot.channels.map((channel) => (
+                      <article key={channel.kind}><span className={`is-${channel.kind}`}>{channel.kind.slice(0, 1).toUpperCase()}</span><div><strong>{channel.kind}</strong><small>{channel.externalUserId || (zh ? "尚未分配身份" : "No identity assigned")}</small></div><em className={`is-${channel.status}`}>{channel.status}</em></article>
+                    )) : <p className="representative-empty-copy">{zh ? "公开网页启用后会自动显示 Web 渠道。" : "Web appears automatically when public mode is enabled."}</p>}
+                  </div>
+                </section>
+                <section className="dashboard-v2-panel">
+                  <header><div><p>{zh ? "配置入口" : "Configuration"}</p><h2>{zh ? "继续完善代表" : "Continue setup"}</h2></div></header>
+                  <div className="representative-config-links">
+                    {configurationLinks(locale).map((item, index) => <button key={item.label} onClick={() => navigateSection("setup", item.section)} type="button"><span>{String(index + 1).padStart(2, "0")}</span><strong>{item.label}</strong><b>→</b></button>)}
+                  </div>
+                </section>
+              </aside>
+            </div>
+
+            <section className="dashboard-v2-panel representative-version-panel">
+              <header><div><p>{zh ? "版本历史" : "Version history"}</p><h2>{zh ? "每次发布都可追踪、可回滚" : "Every release is traceable and reversible"}</h2></div></header>
+              <div className="representative-version-list">
+                {snapshot.versions.length ? snapshot.versions.map((version) => (
+                  <article className={version.active ? "is-active" : undefined} key={version.id}><span>v{version.versionNumber}</span><div><strong>{version.changeSummary || (zh ? "未填写变更摘要" : "No change summary")}</strong><small>{formatVersionDate(version.publishedAt, locale)} · {version.publishedBy || "Owner"}</small></div>{version.active ? <em>{zh ? "当前版本" : "Active"}</em> : <button disabled={isPending} onClick={() => activateVersion(version.id)} type="button">{zh ? "重新激活" : "Reactivate"}</button>}</article>
+                )) : <p className="representative-empty-copy">{zh ? "尚未发布版本。完成检查后发布第一个版本。" : "No published versions yet. Complete readiness and publish v1."}</p>}
+              </div>
+            </section>
+          </div>
+        </>
+      ) : null}
     </>
   );
 }

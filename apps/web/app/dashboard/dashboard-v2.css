@@ -633,6 +633,8 @@
 .representative-section-tabs button:hover:not(:disabled) { color: var(--v2-copy); background: #f3f4f6; }
 .representative-section-tabs button.is-active { color: var(--v2-teal-strong); background: var(--v2-teal-soft); }
 .representative-section-tabs button:disabled { opacity: .45; cursor: not-allowed; }
+.representative-section-panel { display: grid; gap: 22px; min-width: 0; }
+.representative-section-panel[hidden] { display: none; }
 .representative-owner-context {
   display: grid; gap: 3px; padding: 12px 14px; border: 1px solid #ccfbf1; border-radius: 10px;
   background: var(--v2-teal-soft);

@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
 
-import { updateRepresentativeManagedPolicyOverlays } from "@delegate/web-data";
+import {
+  assertOwnerCanManageSkills,
+  updateRepresentativeManagedPolicyOverlays,
+} from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
-  authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccess,
 } from "../../../../auth";
 
 export async function PATCH(
@@ -11,12 +14,9 @@ export async function PATCH(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
-
   try {
+    const session = await requireDashboardRepresentativeAccess(slug);
+    if (session?.ownerId) await assertOwnerCanManageSkills(session.ownerId);
     const body = (await request.json()) as Record<string, unknown>;
     const overlays = await updateRepresentativeManagedPolicyOverlays({
       representativeSlug: slug,

@@ -49,7 +49,7 @@ Delegate 现在包含这些可运行的页面和服务：
 - **Workflow runner** 位于 `apps/workflow-runner`，支持 local runner 和 Temporal-backed durable workflow dispatch。
 - **Prisma/Postgres 数据模型** 覆盖 representatives、contacts、conversations、delegation tasks、handoffs、approvals、invoices、compute、artifacts、deliverables、workflows 和 audit trails。
 - **OpenViking 集成** 支持 representative-scoped public resources、recall、session commit traces 和 safe memory previews。
-- **ClawHub registry primitives** 为后续非特权 representative skill packs 做准备。
+- **工作区技能治理** 支持 ClawHub 元数据发现、不可变版本固定、代表草稿绑定、MCP/Compute 就绪检查、统一审批/审计及签名补丁更新策略；不会执行第三方技能包代码。
 
 当前真正实现的 durable workflow kind 只有两个：
 
@@ -168,7 +168,7 @@ docs/
 
 前置条件：
 
-- Node.js 和 pnpm
+- Node.js 20.18.1 或更高版本，以及 pnpm
 - 如果要跑完整本地栈，需要 Docker
 - 只有在需要真实模型或 OpenViking 调用时，才需要配置 provider API keys
 
@@ -271,6 +271,8 @@ pnpm docker:up:temporal
 - `LOGTO_ENDPOINT`、`LOGTO_APP_ID`、`LOGTO_APP_SECRET`、`LOGTO_REDIRECT_URI` 和 `LOGTO_SCOPES` 启用兼容 Logto OIDC 的 creator dashboard 登录。
 - `DELEGATE_AUTH_SESSION_SECRET` 用于签名 dashboard auth 和 callback-state cookie。生产环境必须使用强 secret。
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` 可以在非生产环境强制开启 dashboard 登录；生产环境始终要求登录。
+- `DELEGATE_SKILL_TRUSTED_KEYS` 是 registry 发布者 key ID 到受信 Ed25519 公钥 PEM 的 JSON 映射；缺少匹配公钥时不会自动采纳签名补丁版本。
+- `DELEGATE_CLAWHUB_URL` 指定不含凭据的 HTTPS Registry origin，`DELEGATE_CLAWHUB_ALLOWED_HOSTS` 限制允许的主机名，`DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` 限制 exact-version 验证的新鲜度（默认 24 小时），且客户端拒绝重定向。采纳或回滚前会重新获取精确发布者/版本的 manifest 与 verdict，拒绝过期或发生漂移的证据，并使用当前受信公钥集合重验签后才改变 release 状态。
 - `TELEGRAM_BOT_TOKEN`、`TELEGRAM_BOT_USERNAME` 和 `TELEGRAM_WEBHOOK_SECRET` 启用可选 Telegram bot 基础设施，但第一版 Delegate 产品先做网页版。
 - `REP_PUBLIC_CHAT_SESSION_SECRET` 可以覆盖 public-chat cookie 签名 secret。如果没有设置，reps app 会依次回退到 `TELEGRAM_WEBHOOK_SECRET` 和本地开发 secret。
 - `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_OPENAI_MODEL` 和 `DELEGATE_ANTHROPIC_MODEL` 控制 model-backed representative replies。
@@ -308,6 +310,120 @@ pnpm docker:down
 
 pnpm registry:search:clawhub "qualification"
 ```
+
+### 工作区技能迁移上线
+
+仓库门禁默认只读，并要求显式声明目标环境，以及一份近期备份凭证。凭证指纹同时覆盖
+PostgreSQL 协议、主机、端口和数据库名。门禁还会读取所有已完成且未回滚的
+`_prisma_migrations.checksum`，并与本地对应 `migration.sql` 的 SHA-256 逐一比较：
+
+```bash
+pnpm test:migration-gate
+
+scripts/workspace-skill-release-gate.sh \
+  --environment staging \
+  --backup-proof /absolute/path/to/backup-proof.json
+```
+
+凭证 JSON 必须包含 `environment`、`databaseTargetFingerprint`、
+`snapshotId`、`createdAt` 和 `restoreVerifiedAt`。请使用门禁实际读取的
+`DATABASE_URL` 生成不含密钥的目标指纹；`restoreVerifiedAt` 必须对应
+这份备份的恢复演练，因此不能早于 `createdAt`：
+
+```bash
+node -e 'const c=require("node:crypto");const u=new URL(process.env.DATABASE_URL);const p=u.protocol.replace(/:$/,"").toLowerCase();const h=u.hostname.replace(/^\[|\]$/g,"").toLowerCase();const n=u.port||"5432";const d=decodeURIComponent(u.pathname.replace(/^\/+/, ""));console.log(c.createHash("sha256").update([p,h,n,d].join("|")).digest("hex").slice(0,16))'
+```
+
+如果宿主机没有安装 `psql`，本地 Compose 数据库可以这样执行同一份只读预检：
+
+```bash
+docker compose exec -T postgres psql \
+  -U postgres \
+  -d delegate \
+  -X \
+  --set ON_ERROR_STOP=1 \
+  --file - \
+  < prisma/preflight/workspace-skill-legacy-version-conflicts.sql
+```
+
+直接调用 `psql` 时必须设置等待上限，避免发布任务无限等待：
+
+```bash
+PGOPTIONS="-c lock_timeout=5s -c statement_timeout=5min" \
+  psql "$DATABASE_URL" \
+  -X \
+  --set ON_ERROR_STOP=1 \
+  --file prisma/preflight/workspace-skill-legacy-version-conflicts.sql
+```
+
+预检的每一行代表一个 owner/skill 歧义组。`issueCodes` 会区分
+`missing_version`、`version_conflict` 和 `status_conflict`；即使所有
+binding 的版本相同，只要 `installed` 与 `update_available` 状态不一致也会报告。
+`bindingCount`、`representativeCount`、`affectedReleaseCount` 和
+`affectedPendingApprovalCount` 用于估算维护窗口；部署前必须保存报告并人工确认选中的 owner/version。
+
+迁移 `20260723220000_reconcile_legacy_multi_representative_skill_versions`
+只会从非空历史 binding 中按 `updatedAt DESC, id DESC` 选择 winner。
+`SkillPack.version` 只是目录元数据，绝不会被当作已经采用的证据。有有效 winner
+时，冲突 binding 会统一到该版本但全部禁用，安装进入 `NEEDS_REVIEW`，其他历史版本保留为
+`REJECTED` 不可运行记录。如果所有历史版本都是 NULL/空白，迁移不会创建 installed release，
+而是清空 installed version 与 binding 采用字段、把 binding 降为 `available` 并禁用，
+同时拒绝由目录元数据迁出的 candidate 及其 pending approval。
+`WorkspaceSkillInstall.installedAt` 是旧 schema 中的 NOT NULL 审计时间，不作为运行授权。
+只有存在具体历史基线时，更高目录版本才能作为未采用
+`CANDIDATE` 保留并等待 owner 审批。迁移不会启用任何 binding，也不会放宽 ClawHub 信任隔离。
+
+叠加式迁移 `20260723224000_workspace_skill_legacy_ambiguity_corrective`
+用于处理已经执行过旧版 backfill 的数据库。它同时识别当前仍可见的歧义，以及旧版
+reconciliation 的精确 review-note 标记，避免已被旧迁移归一化的冲突绕过隔离。
+该迁移可重复收敛；在当前 fresh migration chain 上不会产生数据变更。
+
+批准备份凭证前，必须将备份恢复到一个全新、空白、可随时销毁的 local 或 staging 数据库；严禁恢复到生产库：
+
+```bash
+pg_dump "$DATABASE_URL" \
+  --format=custom \
+  --file /secure/path/delegate-pre-migration.dump
+
+pg_restore \
+  --exit-on-error \
+  --single-transaction \
+  --dbname "$DISPOSABLE_RESTORE_DATABASE_URL" \
+  /secure/path/delegate-pre-migration.dump
+
+DATABASE_URL="$DISPOSABLE_RESTORE_DATABASE_URL" \
+  pnpm exec prisma migrate status --schema prisma/schema.prisma
+```
+
+维护窗口清单：
+
+1. 暂停 Dashboard 写入、worker、bot，以及会修改技能、版本、审批或代表绑定的任务。
+2. 核对备份文件、保留策略、目标指纹和一次成功的可销毁恢复演练；凭证应保存在仓库之外。
+3. 执行只读门禁、归档报告并人工确认每个 winner。已应用迁移的 checksum 不一致会无条件阻断并列出迁移名，
+   不提供自动 override；数据库尚未应用的本地迁移不会误报。存在冲突时，本地演练路径还必须显式传入
+   `--conflicts-reviewed`。
+4. 设置 `lock_timeout` 和 `statement_timeout`，持续观察锁等待、WAL、磁盘、复制延迟和应用错误。
+5. 通过批准的部署流水线执行迁移。脚本会拒绝 staging/production 自动部署；只有显式 localhost 演练可以使用 `--mode deploy --maintenance-confirmed --allow-local-deploy`。
+6. 部署后重新运行预检并要求 0 行；`prisma migrate status` 必须为 up-to-date，随后验证安装、审批、代表发布和 MCP 调用，再恢复写流量。
+
+部署前 `prisma migrate status` 可以显示 pending migration，这是预期状态；failed migration
+或已应用 checksum 不一致必须立即阻断。checksum 不一致必须进入批准后的人工迁移历史排查；
+叠加式数据纠偏不会消除 Prisma 的历史 checksum 警告。部署后 pending 和 failed 都会阻断写流量恢复。
+
+真实 PostgreSQL 并发测试也是发布门禁：
+
+```bash
+pnpm test:postgres:skills
+pnpm test:migration-fixture:pg16
+```
+
+这些测试只能连接可修改、可销毁的 local 或 staging 测试库，严禁指向生产。
+PG16 migration fixture 会自行创建并销毁 Docker 数据库，覆盖 NULL/空白版本、状态混用、
+多版本历史、更高目录版本、release/approval 最终状态和 postflight 收敛。对于大数据量环境，
+它还会复现“旧迁移已应用且目录版本被错误当成 installed”的状态，验证随后只执行一条
+additive corrective、关闭错误 approval、保留但不采用合法目录 candidate，并把 preflight
+收敛为 0 行。应先在 staging 验证锁和 WAL 影响，因为纠偏会在同一事务中更新
+installation、release、approval 和 binding。
 
 第一版产品主路径优先 dogfood 浏览器代表页 `http://localhost:3102/reps/lin-founder-rep`，以及 owner dashboard `http://localhost:3101/dashboard?view=overview`。
 

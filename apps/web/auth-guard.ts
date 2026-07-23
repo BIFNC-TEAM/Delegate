@@ -4,10 +4,13 @@ export const DASHBOARD_LEGACY_AUTH_COOKIE_NAME = "delegate_auth_session";
 export function shouldRequireCreatorDashboardAuth(
   env: Record<string, string | undefined> = process.env,
 ): boolean {
+  if (env.NODE_ENV === "production") {
+    return true;
+  }
   if (env.DELEGATE_DASHBOARD_AUTH_MODE === "optional") {
     return false;
   }
-  return env.DELEGATE_DASHBOARD_AUTH_MODE === "required" || env.NODE_ENV === "production";
+  return env.DELEGATE_DASHBOARD_AUTH_MODE === "required";
 }
 
 export function isCreatorDashboardPath(pathname: string): boolean {

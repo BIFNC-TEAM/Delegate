@@ -1,6 +1,7 @@
 import { after, NextResponse } from "next/server";
 
 import {
+  assertOwnerCanManageSkills,
   getRepresentativeSetupSnapshot,
   maybeSyncRepresentativeOpenVikingResources,
   updateRepresentativeSetup,
@@ -9,6 +10,7 @@ import {
 import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccess,
 } from "../../../auth";
 
 export async function GET(
@@ -49,16 +51,15 @@ export async function PATCH(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
 
   try {
+    const session = await requireDashboardRepresentativeAccess(slug);
+    if (session?.ownerId) await assertOwnerCanManageSkills(session.ownerId);
     const body = (await request.json()) as Record<string, unknown>;
     const snapshot = await updateRepresentativeSetup({
       representativeSlug: slug,
       syncOpenViking: false,
+      changedBy: session?.ownerId ?? "local-owner",
       input: {
         ownerName: String(body.ownerName ?? ""),
         name: String(body.name ?? ""),

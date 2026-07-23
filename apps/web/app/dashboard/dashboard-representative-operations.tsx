@@ -273,7 +273,7 @@ export function DashboardRepresentativeOperations({
                   {snapshot.readiness.map((item, index) => (
                     <article className={item.complete ? "is-complete" : undefined} key={item.id}>
                       <span>{item.complete ? "✓" : String(index + 1).padStart(2, "0")}</span>
-                      <div><strong>{localizeReadiness(item.label, locale)}</strong><small>{localizeReadinessDetail(item.id, item.detail, locale)}</small></div>
+                      <div><strong>{localizeReadiness(item.label, locale)}</strong><small>{localizeReadinessDetail(item.id, item.detail, item.complete, locale)}</small></div>
                       <button onClick={() => navigateSection("setup", readinessSetupSection[item.id] ?? "basics")} type="button">{zh ? "查看" : "Review"} →</button>
                     </article>
                   ))}
@@ -318,6 +318,7 @@ const readinessSetupSection: Record<string, RepresentativeSetupSectionId> = {
   knowledge: "knowledge",
   handoff: "contract",
   pricing: "pricing",
+  skills: "compute",
   channel: "basics",
 };
 
@@ -385,13 +386,13 @@ function formatLifecycle(value: string, locale: Locale) {
 
 function localizeReadiness(value: string, locale: Locale) {
   if (locale === "en") return value;
-  const labels: Record<string, string> = { "Identity and role": "身份与角色", "Knowledge scope": "知识范围", "Human handoff": "人工接管", "Pricing and free scope": "价格与免费范围", "Published channel": "发布渠道" };
+  const labels: Record<string, string> = { "Identity and role": "身份与角色", "Knowledge scope": "知识范围", "Human handoff": "人工接管", "Pricing and free scope": "价格与免费范围", "Skills and tools": "技能与工具", "Published channel": "发布渠道" };
   return labels[value] || value;
 }
 
-function localizeReadinessDetail(id: string, fallback: string, locale: Locale) {
+function localizeReadinessDetail(id: string, fallback: string, complete: boolean, locale: Locale) {
   if (locale === "en") return fallback;
-  const labels: Record<string, string> = { identity: "名称、角色说明与表达语气已配置。", knowledge: "至少包含一份已审核知识或知识包。", handoff: "人工介入路径和提示已经明确。", pricing: "免费、通行、深度帮助与赞助价格已配置。", channel: "至少启用了一个公开或已连接渠道。" };
+  const labels: Record<string, string> = { identity: "名称、角色说明与表达语气已配置。", knowledge: "至少包含一份已审核知识或知识包。", handoff: "人工介入路径和提示已经明确。", pricing: "免费、通行、深度帮助与赞助价格已配置。", skills: complete ? "已启用技能通过当前治理检查。" : "存在尚未满足治理或连接要求的技能绑定。", channel: "至少启用了一个公开或已连接渠道。" };
   return labels[id] || fallback;
 }
 

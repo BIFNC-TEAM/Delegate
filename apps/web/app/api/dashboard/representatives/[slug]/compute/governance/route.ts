@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
 
 import { organizationGovernanceOverlaysSchema } from "@delegate/compute-protocol";
-import { updateRepresentativeOrganizationGovernance } from "@delegate/web-data";
+import {
+  assertOwnerCanManageSkills,
+  updateRepresentativeOrganizationGovernance,
+} from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
-  authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccess,
 } from "../../../../auth";
 
 export async function PATCH(
@@ -12,12 +15,9 @@ export async function PATCH(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
-
   try {
+    const session = await requireDashboardRepresentativeAccess(slug);
+    if (session?.ownerId) await assertOwnerCanManageSkills(session.ownerId);
     const body = organizationGovernanceOverlaysSchema.parse(await request.json());
     const governance = await updateRepresentativeOrganizationGovernance({
       representativeSlug: slug,

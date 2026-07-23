@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
 
-import { setRepresentativeSkillPackEnabled } from "@delegate/web-data";
+import {
+  assertOwnerCanManageSkills,
+  setRepresentativeSkillPackEnabled,
+} from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
-  authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccess,
 } from "../../../../auth";
 
 export async function PATCH(
@@ -11,17 +14,16 @@ export async function PATCH(
   { params }: { params: Promise<{ slug: string; linkId: string }> },
 ) {
   const { slug, linkId } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
-  const body = (await request.json()) as { enabled?: boolean };
-
-  if (typeof body.enabled !== "boolean") {
-    return NextResponse.json({ error: "enabled must be a boolean." }, { status: 400 });
-  }
-
   try {
+    const session = await requireDashboardRepresentativeAccess(slug);
+    if (session?.ownerId) await assertOwnerCanManageSkills(session.ownerId);
+    const body = (await request.json().catch(() => null)) as {
+      enabled?: unknown;
+    } | null;
+    if (typeof body?.enabled !== "boolean") {
+      return NextResponse.json({ error: "enabled must be a boolean." }, { status: 400 });
+    }
+
     const skillPack = await setRepresentativeSkillPackEnabled({
       representativeSlug: slug,
       linkId,

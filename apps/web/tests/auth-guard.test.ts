@@ -21,7 +21,7 @@ describe("creator dashboard auth guard", () => {
         NODE_ENV: "production",
         DELEGATE_DASHBOARD_AUTH_MODE: "optional",
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       shouldRequireCreatorDashboardAuth({
         NODE_ENV: "development",

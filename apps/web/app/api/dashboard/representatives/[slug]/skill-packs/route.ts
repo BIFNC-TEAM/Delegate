@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 
 import {
+  assertOwnerCanManageSkills,
   getRepresentativeSkillPackSnapshot,
   installClawHubSkillPackForRepresentative,
 } from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccess,
 } from "../../../auth";
 
 export async function GET(
@@ -49,20 +51,22 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
-  const body = (await request.json()) as { skillPackSlug?: string };
-
-  if (!body.skillPackSlug?.trim()) {
-    return NextResponse.json({ error: "skillPackSlug is required." }, { status: 400 });
-  }
-
   try {
+    const session = await requireDashboardRepresentativeAccess(slug);
+    if (session?.ownerId) await assertOwnerCanManageSkills(session.ownerId);
+    const body = (await request.json().catch(() => null)) as {
+      skillPackSlug?: unknown;
+    } | null;
+    const skillPackSlug = typeof body?.skillPackSlug === "string"
+      ? body.skillPackSlug.trim()
+      : "";
+    if (!skillPackSlug) {
+      return NextResponse.json({ error: "skillPackSlug is required." }, { status: 400 });
+    }
+
     const skillPack = await installClawHubSkillPackForRepresentative({
       representativeSlug: slug,
-      skillPackSlug: body.skillPackSlug.trim(),
+      skillPackSlug,
     });
 
     return NextResponse.json({ skillPack });

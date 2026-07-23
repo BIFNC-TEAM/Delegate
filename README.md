@@ -49,7 +49,7 @@ Delegate currently includes these working surfaces and services:
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
 - **Prisma/Postgres data model** for representatives, contacts, conversations, delegation tasks, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
 - **OpenViking integration** for representative-scoped public resources, recall, session commit traces, and safe memory previews.
-- **ClawHub registry primitives** for future non-privileged representative skill packs.
+- **Workspace skill governance** with ClawHub metadata discovery, immutable version pinning, representative draft bindings, MCP/Compute readiness checks, unified approvals/audit, and signed patch-update policy. Third-party package code is not executed.
 
 The durable workflow kinds implemented today are:
 
@@ -172,7 +172,7 @@ docs/
 
 Prerequisites:
 
-- Node.js and pnpm
+- Node.js 20.18.1 or newer and pnpm
 - Docker, if you want the full local stack
 - Provider API keys only when you want live model or OpenViking calls
 
@@ -275,6 +275,8 @@ The default `.env.example` is safe for local development. Important settings:
 - `LOGTO_ENDPOINT`, `LOGTO_APP_ID`, `LOGTO_APP_SECRET`, `LOGTO_REDIRECT_URI`, and `LOGTO_SCOPES` enable Logto-compatible OIDC login for creator dashboard sessions.
 - `DELEGATE_AUTH_SESSION_SECRET` signs dashboard auth and callback-state cookies. Set a strong secret in production.
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` forces dashboard auth in non-production environments; production always requires it.
+- `DELEGATE_SKILL_TRUSTED_KEYS` is a JSON object mapping registry publisher key IDs to trusted Ed25519 public-key PEM strings. Signed patch auto-adoption remains disabled when the matching key is absent.
+- `DELEGATE_CLAWHUB_URL` selects a credential-free HTTPS Registry origin, `DELEGATE_CLAWHUB_ALLOWED_HOSTS` allowlists its hostname, and `DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` bounds exact-version verification freshness (24 hours by default). Redirects are rejected. Adoption and rollback re-fetch the exact publisher/version manifest and verdict, reject stale or changed evidence, and re-evaluate signatures against the current trusted-key set before changing release state.
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, and `TELEGRAM_WEBHOOK_SECRET` enable the optional Telegram bot foundation, but the first Delegate product version is web-first.
 - `REP_PUBLIC_CHAT_SESSION_SECRET` can override the public-chat cookie signing secret. If unset, the reps app falls back to `TELEGRAM_WEBHOOK_SECRET` and then a local development secret.
 - `DELEGATE_MODEL_ENABLED`, `DELEGATE_MODEL_PROVIDER`, `DELEGATE_OPENAI_MODEL`, and `DELEGATE_ANTHROPIC_MODEL` control model-backed representative replies.
@@ -312,6 +314,152 @@ pnpm docker:down
 
 pnpm registry:search:clawhub "qualification"
 ```
+
+### Workspace skill migration rollout
+
+The repository gate is read-only by default. It requires an explicit target
+environment and a recent backup proof whose fingerprint covers the PostgreSQL
+protocol, hostname, port, and database name. It also compares every applied,
+non-rolled-back `_prisma_migrations.checksum` with the SHA-256 of the matching
+local `migration.sql`:
+
+```bash
+pnpm test:migration-gate
+
+scripts/workspace-skill-release-gate.sh \
+  --environment staging \
+  --backup-proof /absolute/path/to/backup-proof.json
+```
+
+The proof is JSON containing `environment`, `databaseTargetFingerprint`,
+`snapshotId`, `createdAt`, and `restoreVerifiedAt`. Generate only the
+non-secret target fingerprint from the same `DATABASE_URL` that the gate will
+use. `restoreVerifiedAt` must describe a restore of that backup and therefore
+cannot predate `createdAt`:
+
+```bash
+node -e 'const c=require("node:crypto");const u=new URL(process.env.DATABASE_URL);const p=u.protocol.replace(/:$/,"").toLowerCase();const h=u.hostname.replace(/^\[|\]$/g,"").toLowerCase();const n=u.port||"5432";const d=decodeURIComponent(u.pathname.replace(/^\/+/, ""));console.log(c.createHash("sha256").update([p,h,n,d].join("|")).digest("hex").slice(0,16))'
+```
+
+If `psql` is not installed on the host, the local Compose database supports
+the same read-only preflight:
+
+```bash
+docker compose exec -T postgres psql \
+  -U postgres \
+  -d delegate \
+  -X \
+  --set ON_ERROR_STOP=1 \
+  --file - \
+  < prisma/preflight/workspace-skill-legacy-version-conflicts.sql
+```
+
+For a direct `psql` run, apply bounded waits rather than allowing a release job
+to wait indefinitely:
+
+```bash
+PGOPTIONS="-c lock_timeout=5s -c statement_timeout=5min" \
+  psql "$DATABASE_URL" \
+  -X \
+  --set ON_ERROR_STOP=1 \
+  --file prisma/preflight/workspace-skill-legacy-version-conflicts.sql
+```
+
+Each returned row is one owner/skill ambiguity group. `issueCodes` distinguishes
+`missing_version`, `version_conflict`, and `status_conflict`; the last one also
+detects `installed` versus `update_available` disagreement when every binding
+reports the same version. `bindingCount`, `representativeCount`,
+`affectedReleaseCount`, and `affectedPendingApprovalCount` size the maintenance
+window. Record and review the selected owner/version before deployment.
+
+Migration
+`20260723220000_reconcile_legacy_multi_representative_skill_versions` selects a
+winner only from a non-empty historical binding by `updatedAt DESC, id DESC`.
+`SkillPack.version` is catalog metadata and is never treated as adoption
+evidence. When a valid winner exists, conflicting bindings are normalized to
+that version but disabled, the installation becomes `NEEDS_REVIEW`, and other
+historical versions remain `REJECTED` non-runnable history. When every legacy
+version is null or blank, the migration creates no installed release, clears
+the installed version and binding adoption fields, demotes the bindings to
+`available`, disables them, and rejects any catalog-derived migrated candidate
+and its pending approval. (`WorkspaceSkillInstall.installedAt` is a legacy
+NOT NULL audit timestamp and is not runtime authority.) A higher
+catalog version can remain only as a non-adopted `CANDIDATE` with owner approval
+when a concrete historical baseline exists. The migration never enables a
+binding and does not relax ClawHub trust quarantine.
+
+The additive
+`20260723224000_workspace_skill_legacy_ambiguity_corrective` migration handles
+databases that already ran a former revision of the backfill. It detects both
+currently visible ambiguity and the former reconciliation's exact review-note
+marker, so already-normalized conflicts cannot evade quarantine. It is
+idempotent and has no data effect after the current fresh migration chain.
+
+Before approving a backup proof, perform a restore rehearsal into a new,
+empty, disposable local or staging database—never production:
+
+```bash
+pg_dump "$DATABASE_URL" \
+  --format=custom \
+  --file /secure/path/delegate-pre-migration.dump
+
+pg_restore \
+  --exit-on-error \
+  --single-transaction \
+  --dbname "$DISPOSABLE_RESTORE_DATABASE_URL" \
+  /secure/path/delegate-pre-migration.dump
+
+DATABASE_URL="$DISPOSABLE_RESTORE_DATABASE_URL" \
+  pnpm exec prisma migrate status --schema prisma/schema.prisma
+```
+
+The release maintenance checklist is:
+
+1. Pause dashboard writes, workers, bots, and any job that mutates skill,
+   release, approval, or representative binding rows.
+2. Confirm the backup artifact, its retention, target fingerprint, and a
+   successful disposable restore; save the proof outside the repository.
+3. Run the read-only gate, archive its report, and review every selected
+   version. An applied checksum mismatch always blocks and lists the migration
+   name; there is no automatic override. Unapplied local migrations do not
+   count as mismatches. If conflicts exist, the local rehearsal path
+   additionally requires `--conflicts-reviewed`.
+4. Apply `lock_timeout` and `statement_timeout`, then watch database locks,
+   WAL growth, disk, replica lag, and application errors throughout the
+   maintenance window.
+5. Run the approved deployment workflow. The script deliberately refuses
+   automatic deployment for staging and production; only an explicit localhost
+   rehearsal can use
+   `--mode deploy --maintenance-confirmed --allow-local-deploy`.
+6. Rerun the preflight and require zero rows. Require `prisma migrate status`
+   to report up-to-date before restoring writes, then smoke-test install,
+   approval, representative publish, and MCP execution.
+
+Before deployment, `prisma migrate status` may report pending migrations; that
+is expected. A failed migration or applied checksum mismatch is never expected
+and blocks the gate. A checksum mismatch requires an approved manual migration
+history investigation; the additive data correction does not erase Prisma's
+historical checksum warning. After deployment, both pending and failed
+migrations block write-traffic recovery.
+
+The real PostgreSQL concurrency suite is also a release gate:
+
+```bash
+pnpm test:postgres:skills
+pnpm test:migration-fixture:pg16
+```
+
+Run this suite only against an isolated local or staging test database that can
+be mutated and discarded. Never point it at production. The PG16 migration
+fixture creates and destroys its own Docker database and covers null/blank
+versions, mixed status, multi-version history, higher catalog versions, release
+state, approvals, and postflight convergence. It also reproduces a formerly
+applied catalog-derived installed release, then proves that only the additive
+corrective migration runs, closes the erroneous approval, keeps a legitimate
+catalog update candidate non-adopted, and returns the preflight to zero rows. On
+large installations, validate lock and WAL impact in staging because
+reconciliation updates installation, release, approval, and binding rows in one
+transaction.
 
 The first product path to dogfood is the browser representative page at `http://localhost:3102/reps/lin-founder-rep`, plus the owner dashboard at `http://localhost:3101/dashboard?view=overview`.
 

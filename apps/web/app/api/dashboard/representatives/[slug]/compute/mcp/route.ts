@@ -1,13 +1,17 @@
 import { NextResponse } from "next/server";
 
 import {
-  getRepresentativeComputeSnapshot,
+  assertOwnerCanManageSkills,
+  getRepresentativeMcpBindingsSnapshot,
   upsertRepresentativeMcpBinding,
 } from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccess,
 } from "../../../../auth";
+import { withPrivateNoStore } from "../../../../../private-response";
+import { mcpBindingApiErrorResponse } from "./errors";
 
 export async function GET(
   _request: Request,
@@ -16,33 +20,26 @@ export async function GET(
   const { slug } = await params;
   const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
   if (accessResponse) {
-    return accessResponse;
+    return withPrivateNoStore(accessResponse);
   }
 
   try {
-    const snapshot = await getRepresentativeComputeSnapshot(slug);
+    const snapshot = await getRepresentativeMcpBindingsSnapshot(slug);
     if (!snapshot) {
-      return NextResponse.json({ error: "Representative not found." }, { status: 404 });
+      return withPrivateNoStore(
+        NextResponse.json({ error: "Representative not found." }, { status: 404 }),
+      );
     }
 
-    return NextResponse.json({
-      representative: {
-        slug: snapshot.representative.slug,
-        displayName: snapshot.representative.displayName,
-      },
-      bindings: snapshot.representative.mcpBindings,
-    });
+    return withPrivateNoStore(NextResponse.json(snapshot));
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Failed to load MCP bindings.",
-      },
-      { status: 500 },
+    return withPrivateNoStore(
+      mcpBindingApiErrorResponse(error, "Failed to load MCP bindings."),
     );
   }
 }
@@ -52,15 +49,17 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
-
   try {
-    const body = (await request.json()) as Record<string, unknown>;
+    const session = await requireDashboardRepresentativeAccess(slug);
+    if (session?.ownerId) await assertOwnerCanManageSkills(session.ownerId);
+    const bodyValue: unknown = await request.json().catch(() => null);
+    if (!bodyValue || typeof bodyValue !== "object" || Array.isArray(bodyValue)) {
+      return NextResponse.json({ error: "A valid JSON request body is required." }, { status: 400 });
+    }
+    const body = bodyValue as Record<string, unknown>;
     const binding = await upsertRepresentativeMcpBinding({
       representativeSlug: slug,
+      changedBy: session?.ownerId ?? "local-owner",
       representativeSkillPackLinkId:
         typeof body.representativeSkillPackLinkId === "string"
           ? body.representativeSkillPackLinkId
@@ -87,14 +86,8 @@ export async function POST(
         Number.isFinite(body.estimatedCostCentsPerCall)
           ? Math.max(0, Math.trunc(body.estimatedCostCentsPerCall))
           : 0,
-      maxRetries:
-        typeof body.maxRetries === "number" && Number.isFinite(body.maxRetries)
-          ? Math.max(0, Math.min(5, Math.trunc(body.maxRetries)))
-          : 2,
-      retryBackoffMs:
-        typeof body.retryBackoffMs === "number" && Number.isFinite(body.retryBackoffMs)
-          ? Math.max(100, Math.min(30000, Math.trunc(body.retryBackoffMs)))
-          : 1000,
+      maxRetries: 0,
+      retryBackoffMs: 1000,
     });
 
     return NextResponse.json(binding, { status: 201 });
@@ -104,11 +97,6 @@ export async function POST(
       return authResponse;
     }
 
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Failed to create MCP binding.",
-      },
-      { status: 400 },
-    );
+    return mcpBindingApiErrorResponse(error, "Failed to create MCP binding.");
   }
 }

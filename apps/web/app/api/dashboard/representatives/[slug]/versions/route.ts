@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import {
+  assertOwnerCanManageSkills,
   getRepresentativeOperationsSnapshot,
   publishRepresentativeVersion,
 } from "@delegate/web-data";
@@ -37,11 +38,32 @@ export async function POST(
   const { slug } = await params;
   try {
     const session = await requireDashboardRepresentativeAccess(slug);
-    const body = (await request.json().catch(() => ({}))) as { changeSummary?: string };
+    if (session?.ownerId) await assertOwnerCanManageSkills(session.ownerId);
+    const body = (await request.json().catch(() => ({}))) as {
+      changeSummary?: unknown;
+    };
+    if (
+      body.changeSummary !== undefined
+      && body.changeSummary !== null
+      && typeof body.changeSummary !== "string"
+    ) {
+      return NextResponse.json(
+        { error: "Change summary must be a string." },
+        { status: 400 },
+      );
+    }
+    const changeSummary =
+      typeof body.changeSummary === "string" ? body.changeSummary.trim() : "";
+    if (changeSummary.length > 1000) {
+      return NextResponse.json(
+        { error: "Change summary is too long." },
+        { status: 400 },
+      );
+    }
     const version = await publishRepresentativeVersion({
       representativeSlug: slug,
       publishedBy: session?.ownerId || "Owner",
-      ...(body.changeSummary ? { changeSummary: body.changeSummary } : {}),
+      ...(changeSummary ? { changeSummary } : {}),
     });
     return NextResponse.json({ version }, { status: 201 });
   } catch (error) {

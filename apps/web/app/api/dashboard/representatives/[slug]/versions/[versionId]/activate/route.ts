@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { activateRepresentativeVersion } from "@delegate/web-data";
+import {
+  activateRepresentativeVersion,
+  assertOwnerCanManageSkills,
+} from "@delegate/web-data";
 
 import {
   dashboardAuthErrorResponse,
@@ -14,6 +17,7 @@ export async function POST(
   const { slug, versionId } = await params;
   try {
     const session = await requireDashboardRepresentativeAccess(slug);
+    if (session?.ownerId) await assertOwnerCanManageSkills(session.ownerId);
     const version = await activateRepresentativeVersion({
       representativeSlug: slug,
       versionId,

@@ -10,9 +10,10 @@ import { shouldRequireCreatorDashboardAuth } from "../../../auth-guard";
 
 export async function requireDashboardApiOwnerSession() {
   const session = await getOwnerAuthSession();
-  if (session || !shouldRequireCreatorDashboardAuth()) {
+  if (session?.ownerId?.trim()) {
     return session;
   }
+  if (!session && !shouldRequireCreatorDashboardAuth()) return null;
 
   throw new RepresentativeAccessError("Authentication required.", 401);
 }

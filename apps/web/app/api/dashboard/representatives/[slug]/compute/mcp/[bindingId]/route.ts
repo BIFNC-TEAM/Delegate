@@ -1,26 +1,35 @@
 import { NextResponse } from "next/server";
 
-import { upsertRepresentativeMcpBinding } from "@delegate/web-data";
+import {
+  assertOwnerCanManageSkills,
+  upsertRepresentativeMcpBinding,
+} from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
-  authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccess,
 } from "../../../../../auth";
+import { mcpBindingApiErrorResponse } from "../errors";
 
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ slug: string; bindingId: string }> },
 ) {
   const { slug, bindingId } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
-
   try {
-    const body = (await request.json()) as Record<string, unknown>;
+    const session = await requireDashboardRepresentativeAccess(slug);
+    if (session?.ownerId) await assertOwnerCanManageSkills(session.ownerId);
+    const bodyValue: unknown = await request.json().catch(() => null);
+    if (!bodyValue || typeof bodyValue !== "object" || Array.isArray(bodyValue)) {
+      return NextResponse.json({ error: "A valid JSON request body is required." }, { status: 400 });
+    }
+    const body = bodyValue as Record<string, unknown>;
     const binding = await upsertRepresentativeMcpBinding({
       representativeSlug: slug,
       bindingId,
+      changedBy: session?.ownerId ?? "local-owner",
+      ...(typeof body.expectedUpdatedAt === "string"
+        ? { expectedUpdatedAt: body.expectedUpdatedAt }
+        : {}),
       representativeSkillPackLinkId:
         typeof body.representativeSkillPackLinkId === "string"
           ? body.representativeSkillPackLinkId
@@ -47,14 +56,8 @@ export async function PATCH(
         Number.isFinite(body.estimatedCostCentsPerCall)
           ? Math.max(0, Math.trunc(body.estimatedCostCentsPerCall))
           : 0,
-      maxRetries:
-        typeof body.maxRetries === "number" && Number.isFinite(body.maxRetries)
-          ? Math.max(0, Math.min(5, Math.trunc(body.maxRetries)))
-          : 2,
-      retryBackoffMs:
-        typeof body.retryBackoffMs === "number" && Number.isFinite(body.retryBackoffMs)
-          ? Math.max(100, Math.min(30000, Math.trunc(body.retryBackoffMs)))
-          : 1000,
+      maxRetries: 0,
+      retryBackoffMs: 1000,
     });
 
     return NextResponse.json(binding);
@@ -63,12 +66,6 @@ export async function PATCH(
     if (authResponse) {
       return authResponse;
     }
-
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Failed to update MCP binding.",
-      },
-      { status: 400 },
-    );
+    return mcpBindingApiErrorResponse(error, "Failed to update MCP binding.");
   }
 }

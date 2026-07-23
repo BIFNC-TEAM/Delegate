@@ -632,6 +632,7 @@ type GovernedActionsSnapshot = RepresentativeGovernedActionSnapshot;
 
 type McpBindingFormState = {
   bindingId: string | null;
+  expectedUpdatedAt: string | null;
   slug: string;
   displayName: string;
   description: string;
@@ -1403,6 +1404,9 @@ export function DashboardCompute({
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
+            ...(mcpForm.bindingId && mcpForm.expectedUpdatedAt
+              ? { expectedUpdatedAt: mcpForm.expectedUpdatedAt }
+              : {}),
             slug: mcpForm.slug,
             displayName: mcpForm.displayName,
             description: mcpForm.description,
@@ -1736,6 +1740,7 @@ export function DashboardCompute({
   function startEditMcpBinding(binding: ComputeSnapshot["representative"]["mcpBindings"][number]) {
     setMcpForm({
       bindingId: binding.id,
+      expectedUpdatedAt: binding.updatedAt,
       slug: binding.slug,
       displayName: binding.displayName,
       description: binding.description ?? "",
@@ -1746,7 +1751,7 @@ export function DashboardCompute({
       enabled: binding.enabled,
       approvalRequired: binding.approvalRequired,
       estimatedCostCentsPerCall: binding.estimatedCostCentsPerCall,
-      maxRetries: binding.maxRetries,
+      maxRetries: 0,
       retryBackoffMs: binding.retryBackoffMs,
     });
     setMessage(null);
@@ -2688,13 +2693,19 @@ export function DashboardCompute({
                   <span>{t.mcpFields.serverUrl}</span>
                   <input
                     className="field-input"
+                    maxLength={2048}
                     onChange={(event) =>
                       setMcpForm((current) => ({ ...current, serverUrl: event.target.value }))
                     }
-                    placeholder="http://host.docker.internal:8787/mcp"
+                    placeholder="https://mcp.example.com"
                     type="url"
                     value={mcpForm.serverUrl}
                   />
+                  <small className="footer-note">
+                    {locale === "zh"
+                      ? "仅允许无账号信息的公网 HTTPS；私网地址与重定向会被阻止。"
+                      : "Credential-free public HTTPS only; private targets and redirects are blocked."}
+                  </small>
                 </label>
                 <label className="field-label">
                   <span>{t.mcpFields.transportKind}</span>
@@ -2746,42 +2757,11 @@ export function DashboardCompute({
                     value={mcpForm.estimatedCostCentsPerCall}
                   />
                 </label>
-                <label className="field-label">
-                  <span>{t.mcpFields.maxRetries}</span>
-                  <input
-                    className="field-input"
-                    max={5}
-                    min={0}
-                    onChange={(event) =>
-                      setMcpForm((current) => ({
-                        ...current,
-                        maxRetries: Math.max(0, Math.min(5, Number.parseInt(event.target.value || "0", 10) || 0)),
-                      }))
-                    }
-                    type="number"
-                    value={mcpForm.maxRetries}
-                  />
-                </label>
-                <label className="field-label">
-                  <span>{t.mcpFields.retryBackoffMs}</span>
-                  <input
-                    className="field-input"
-                    max={30000}
-                    min={100}
-                    onChange={(event) =>
-                      setMcpForm((current) => ({
-                        ...current,
-                        retryBackoffMs: Math.max(
-                          100,
-                          Math.min(30000, Number.parseInt(event.target.value || "1000", 10) || 1000),
-                        ),
-                      }))
-                    }
-                    step={100}
-                    type="number"
-                    value={mcpForm.retryBackoffMs}
-                  />
-                </label>
+                <p className="footer-note">
+                  {locale === "zh"
+                    ? "副作用安全模式：每次远程工具调用只执行一次，超时或结果未知时不会自动重试。"
+                    : "Side-effect safe mode: each remote tool call runs once and is never retried after a timeout or unknown outcome."}
+                </p>
                 <label className="field-label">
                   <span>{t.mcpFields.defaultTool}</span>
                   <input
@@ -5083,6 +5063,7 @@ function createEmptyGovernanceForm(): GovernanceFormState {
 function createEmptyMcpBindingForm(): McpBindingFormState {
   return {
     bindingId: null,
+    expectedUpdatedAt: null,
     slug: "",
     displayName: "",
     description: "",
@@ -5093,7 +5074,7 @@ function createEmptyMcpBindingForm(): McpBindingFormState {
     enabled: true,
     approvalRequired: true,
     estimatedCostCentsPerCall: 0,
-    maxRetries: 2,
+    maxRetries: 0,
     retryBackoffMs: 1000,
   };
 }
@@ -5229,7 +5210,7 @@ const copy = {
     noMcpBindings: "还没有 MCP binding。先把一个远程 capability server 绑进来，再让代表通过审批后的 compute 请求去调用它。",
     allowedTools: (value: string) => `Allowed tools · ${value}`,
     mcpEstimatedCost: (value: number) => `估算成本 ${value}¢ / call`,
-    mcpRetries: (retries: number, backoffMs: number) => `重试 ${retries} 次 · ${backoffMs}ms backoff`,
+    mcpRetries: (_retries: number, _backoffMs: number) => "单次执行 · 不自动重试",
     mcpFailures: (count: number) => `${count} 次连续失败`,
     mcpHealthy: "最近健康",
     mcpRequiresApproval: "This binding still requires explicit approval before remote tool calls.",
@@ -5695,7 +5676,7 @@ const copy = {
     noMcpBindings: "No MCP bindings yet. Attach a remote capability server here before routing approved work into it.",
     allowedTools: (value: string) => `Allowed tools · ${value}`,
     mcpEstimatedCost: (value: number) => `Estimated cost ${value}¢ / call`,
-    mcpRetries: (retries: number, backoffMs: number) => `${retries} retries · ${backoffMs}ms backoff`,
+    mcpRetries: (_retries: number, _backoffMs: number) => "Single attempt · no automatic retry",
     mcpFailures: (count: number) => `${count} consecutive failures`,
     mcpHealthy: "healthy lately",
     mcpRequiresApproval: "This binding still requires explicit approval before remote tool calls.",

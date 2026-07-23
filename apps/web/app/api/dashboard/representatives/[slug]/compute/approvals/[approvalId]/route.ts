@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
 
 import {
-  assertOwnerCanApproveCompute,
-  ComputeBrokerError,
+  assertOwnerCanResolveApproval,
   resolveRepresentativeComputeApproval,
+  resolveWorkspaceSkillApproval,
 } from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
   requireDashboardRepresentativeAccess,
 } from "../../../../../auth";
+import { computeApprovalApiErrorResponse } from "../errors";
 
 export async function PATCH(
   request: Request,
@@ -19,8 +20,18 @@ export async function PATCH(
   const { slug, approvalId } = await params;
   try {
     const session = await requireDashboardRepresentativeAccess(slug);
-    if (session?.ownerId) await assertOwnerCanApproveCompute(session.ownerId);
-    const body = (await request.json()) as Record<string, unknown>;
+    if (session?.ownerId) {
+      await assertOwnerCanResolveApproval({
+        ownerId: session.ownerId,
+        representativeSlug: slug,
+        approvalId,
+      });
+    }
+    const bodyValue: unknown = await request.json().catch(() => null);
+    if (!bodyValue || typeof bodyValue !== "object" || Array.isArray(bodyValue)) {
+      return NextResponse.json({ error: "A valid JSON request body is required." }, { status: 400 });
+    }
+    const body = bodyValue as Record<string, unknown>;
     if (body.resolution !== "approved" && body.resolution !== "rejected") {
       return NextResponse.json({ error: "Invalid approval resolution." }, { status: 400 });
     }
@@ -29,6 +40,16 @@ export async function PATCH(
     if (decisionNote.length > 1000) {
       return NextResponse.json({ error: "Decision note is too long." }, { status: 400 });
     }
+
+    const skillDecision = await resolveWorkspaceSkillApproval({
+      ...(session?.ownerId ? { ownerId: session.ownerId } : {}),
+      activeRepresentativeSlug: slug,
+      approvalId,
+      resolution,
+      resolvedBy: session?.ownerId ?? "local-owner",
+      ...(decisionNote ? { decisionNote } : {}),
+    });
+    if (skillDecision.handled) return NextResponse.json(skillDecision.result);
 
     const result = await resolveRepresentativeComputeApproval({
       representativeSlug: slug,
@@ -45,19 +66,6 @@ export async function PATCH(
       return authResponse;
     }
 
-    if (error instanceof ComputeBrokerError) {
-      return NextResponse.json(
-        { error: error.message },
-        { status: error.statusCode },
-      );
-    }
-
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to resolve compute approval.",
-      },
-      { status: 400 },
-    );
+    return computeApprovalApiErrorResponse(error);
   }
 }

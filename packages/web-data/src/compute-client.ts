@@ -7,13 +7,53 @@ import type {
 
 export class ComputeBrokerError extends Error {
   constructor(
-    message: string,
+    readonly code: string,
     readonly statusCode: number,
+    readonly publicMessage: string,
   ) {
-    super(message);
+    super(publicMessage);
     this.name = "ComputeBrokerError";
   }
 }
+
+const publicBrokerErrors: Record<string, { statusCode: number; message: string }> = {
+  approval_request_not_found: {
+    statusCode: 404,
+    message: "Approval request not found.",
+  },
+  approval_request_domain_mismatch: {
+    statusCode: 409,
+    message: "Approval request does not belong to this capability.",
+  },
+  approval_request_already_resolved: {
+    statusCode: 409,
+    message: "Approval is no longer pending.",
+  },
+  approval_request_expired: {
+    statusCode: 409,
+    message: "Approval request has expired.",
+  },
+  approval_request_execution_missing: {
+    statusCode: 409,
+    message: "The approval execution is no longer available.",
+  },
+  approval_request_execution_not_blocked: {
+    statusCode: 409,
+    message: "The approval execution state changed. Refresh and retry.",
+  },
+  approval_request_payload_changed: {
+    statusCode: 409,
+    message: "The approval request changed. Refresh and retry.",
+  },
+  invalid_json: {
+    statusCode: 400,
+    message: "The compute broker received invalid JSON.",
+  },
+  invalid_request: {
+    statusCode: 400,
+    message: "The compute broker rejected the request.",
+  },
+};
 
 export async function createAudienceComputeSession(input: {
   representativeId: string;
@@ -79,11 +119,21 @@ export async function callComputeBroker<T>(pathname: string, init: RequestInit):
     },
     cache: "no-store",
   });
-  const payload = (await response.json().catch(() => ({}))) as { error?: string };
+  const payload = (await response.json().catch(() => ({}))) as { error?: unknown };
   if (!response.ok) {
+    const code = typeof payload.error === "string" ? payload.error : "";
+    const classified = publicBrokerErrors[code];
+    if (!classified) {
+      throw new ComputeBrokerError(
+        "compute_broker_upstream_error",
+        502,
+        "The compute service is temporarily unavailable.",
+      );
+    }
     throw new ComputeBrokerError(
-      payload.error || "Compute broker request failed.",
-      response.status,
+      code,
+      classified.statusCode,
+      classified.message,
     );
   }
   return payload as T;

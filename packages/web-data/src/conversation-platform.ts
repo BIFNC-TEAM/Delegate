@@ -10,6 +10,9 @@ import {
   Prisma,
   RepresentativeChannelKind,
   RepresentativeLifecycleState,
+  WorkspaceSkillInstallStatus,
+  WorkspaceSkillReleaseStatus,
+  WorkspaceSkillReviewStatus,
 } from "@prisma/client";
 import {
   assertConversationEpisodeTransition,
@@ -22,6 +25,7 @@ import {
 } from "@delegate/runtime";
 
 import { prisma } from "./prisma";
+import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
 
 export type ConversationInboxItem = {
   id: string;
@@ -578,7 +582,22 @@ export async function getRepresentativeOperationsSnapshot(
         versions: { orderBy: { versionNumber: "desc" }, take: 20 },
         channelBindings: { orderBy: { kind: "asc" } },
         knowledgeAssetLinks: { where: { enabled: true } },
-        skillPackLinks: { where: { enabled: true } },
+        skillPackLinks: {
+          where: { enabled: true },
+          include: {
+            skillPack: true,
+            workspaceInstall: {
+              include: {
+                releases: {
+                  where: { status: WorkspaceSkillReleaseStatus.INSTALLED },
+                  orderBy: { adoptedAt: "desc" },
+                  take: 1,
+                },
+              },
+            },
+            mcpBindings: { select: { enabled: true } },
+          },
+        },
         knowledgePack: true,
         pricingPlans: true,
         _count: { select: { conversations: true, handoffRequests: true } },
@@ -597,6 +616,8 @@ export async function getRepresentativeOperationsSnapshot(
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
       pricingCount: representative.pricingPlans.length,
       channelCount: representative.channelBindings.length,
+      enabledSkillCount: representative.skillPackLinks.length,
+      skillIssueCount: countRepresentativeSkillIssues(representative.skillPackLinks),
     });
 
     return {
@@ -716,7 +737,7 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
             conversationId: conversation.id,
             episodeId: episode.id,
             inputMessageId: message.id,
-            representativeVersionId: conversation.representative.activeVersionId,
+            representativeVersionId: episode.representativeVersionId,
             status: GenerationRunStatus.QUEUED,
             idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}`,
           },
@@ -1028,6 +1049,11 @@ export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWo
       where: { id: runId },
       include: {
         inputMessage: true,
+        episode: {
+          select: {
+            representativeVersionId: true,
+          },
+        },
         conversation: {
           include: {
             representative: {
@@ -1049,6 +1075,45 @@ export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWo
       await tx.outboxEvent.update({
         where: { id: outbox.id },
         data: { status: "PROCESSED", processedAt: new Date() },
+      });
+      return null;
+    }
+    if (
+      !run.representativeVersionId ||
+      (
+        run.episodeId &&
+        (
+          !run.episode?.representativeVersionId ||
+          run.episode.representativeVersionId !== run.representativeVersionId
+        )
+      )
+    ) {
+      const failedAt = new Date();
+      await tx.generationRun.update({
+        where: { id: run.id },
+        data: {
+          status: GenerationRunStatus.FAILED,
+          errorCode: "representative_version_context_mismatch",
+          errorMessage:
+            "The generation run has no valid representative version pin or differs from its conversation episode.",
+          completedAt: failedAt,
+        },
+      });
+      await tx.message.update({
+        where: { id: run.inputMessageId },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.FAILED,
+          failureCode: "representative_version_context_mismatch",
+          failureReason:
+            "The generation run has no valid representative version pin or differs from its conversation episode.",
+        },
+      });
+      await tx.outboxEvent.update({
+        where: { id: outbox.id },
+        data: {
+          status: "DEAD_LETTER",
+          lastError: "representative_version_context_mismatch",
+        },
       });
       return null;
     }
@@ -2273,7 +2338,30 @@ export async function publishRepresentativeVersion(input: {
         knowledgePack: true,
         knowledgeAssetLinks: { where: { enabled: true } },
         pricingPlans: true,
-        skillPackLinks: { include: { skillPack: true } },
+        capabilityProfiles: {
+          where: { isDefault: true, isManaged: false },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          include: { rules: true },
+        },
+        skillPackLinks: {
+          include: {
+            skillPack: true,
+            workspaceInstall: {
+              include: {
+                releases: {
+                  where: { status: WorkspaceSkillReleaseStatus.INSTALLED },
+                  orderBy: { adoptedAt: "desc" },
+                  take: 1,
+                },
+              },
+            },
+            mcpBindings: { select: { enabled: true } },
+          },
+        },
+        mcpBindings: {
+          orderBy: { createdAt: "asc" },
+        },
         channelBindings: true,
       },
     });
@@ -2290,6 +2378,8 @@ export async function publishRepresentativeVersion(input: {
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
       pricingCount: representative.pricingPlans.length,
       channelCount: representative.channelBindings.length,
+      enabledSkillCount: representative.skillPackLinks.filter((link) => link.enabled).length,
+      skillIssueCount: countRepresentativeSkillIssues(representative.skillPackLinks.filter((link) => link.enabled)),
     });
     const incomplete = readiness.filter((item) => !item.complete);
     if (incomplete.length) {
@@ -2369,9 +2459,61 @@ export async function activateRepresentativeVersion(input: {
         id: input.versionId,
         representative: { slug: input.representativeSlug },
       },
-      include: { representative: { select: { id: true, activeVersionId: true } } },
+      include: {
+        representative: {
+          select: {
+            id: true,
+            activeVersionId: true,
+            skillPackLinks: {
+              where: { enabled: true },
+              select: {
+                id: true,
+                skillPackId: true,
+                installedVersion: true,
+                workspaceInstall: {
+                  select: {
+                    status: true,
+                    reviewStatus: true,
+                    installedVersion: true,
+                    releases: {
+                      where: { status: WorkspaceSkillReleaseStatus.INSTALLED },
+                      orderBy: { adoptedAt: "desc" },
+                      take: 1,
+                      select: {
+                        version: true,
+                        status: true,
+                        executesCode: true,
+                        registryTrustEligible: true,
+                        signatureStatus: true,
+                      },
+                    },
+                  },
+                },
+                skillPack: {
+                  select: {
+                    id: true,
+                    source: true,
+                    slug: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
     });
     if (!version) throw new Error("Representative version not found.");
+    const runtimeFilteredSkillIds = [
+      ...new Set(
+        readSnapshotSkillReleasePins(version.snapshot)
+          .filter((pin) =>
+            !version.representative.skillPackLinks.some((link) =>
+              isRuntimeAvailableSkillLink(link, pin),
+            ),
+          )
+          .map((pin) => pin.skillPackId),
+      ),
+    ];
 
     await tx.representative.update({
       where: { id: version.representative.id },
@@ -2390,10 +2532,14 @@ export async function activateRepresentativeVersion(input: {
           versionNumber: version.versionNumber,
           previousVersionId: version.representative.activeVersionId,
           activatedBy: input.activatedBy,
+          runtimeFilteredSkillIds,
         },
       },
     });
-    return version;
+    return {
+      ...version,
+      runtimeFilteredSkillIds,
+    };
   });
 }
 
@@ -2413,15 +2559,136 @@ function buildRepresentativeSnapshot(representative: {
   handoffPrompt: string;
   allowedSkills: Prisma.JsonValue;
   actionGate: Prisma.JsonValue;
+  computeEnabled: boolean;
+  computeDefaultPolicyMode: string;
+  computeBaseImage: string;
+  computeMaxSessionMinutes: number;
+  computeAutoApproveBudgetCents: number;
+  computeArtifactRetentionDays: number;
+  computeNetworkMode: string;
+  computeNetworkAllowlist: string[];
+  computeFilesystemMode: string;
   delegationEnabled: boolean;
   delegationNaturalLanguageEnabled: boolean;
   delegationExplicitComputeEnabled: boolean;
+  delegationMaxSteps: number;
+  delegationMaxCostCents: number;
   delegationKnowledgeScope: string;
   knowledgePack: { identitySummary: string; faq: Prisma.JsonValue; materials: Prisma.JsonValue; policies: Prisma.JsonValue } | null;
   pricingPlans: Array<{ type: string; name: string; starsAmount: number; summary: string; includedReplies: number; includesPriorityHandoff: boolean }>;
-  skillPackLinks: Array<{ enabled: boolean; skillPack: { slug: string; version: string | null } }>;
+  capabilityProfiles: Array<{
+    defaultDecision: string;
+    rules: Array<{
+      id: string;
+      capability: string;
+      decision: string;
+    }>;
+  }>;
+  skillPackLinks: Array<{
+    id: string;
+    enabled: boolean;
+    installedVersion: string | null;
+    skillPack: {
+      id: string;
+      slug: string;
+      source: string;
+      version: string | null;
+    };
+    workspaceInstall: {
+      status: string;
+      reviewStatus: string;
+      releases: Array<{
+        version: string;
+        displayName: string;
+        summary: string;
+        sourceUrl: string | null;
+        ownerHandle: string | null;
+        verificationTier: string | null;
+        capabilityTags: Prisma.JsonValue;
+        executesCode: boolean;
+        registryTrustEligible: boolean;
+        signatureStatus: string;
+      }>;
+    } | null;
+  }>;
+  mcpBindings: Array<{
+    id: string;
+    representativeSkillPackLinkId: string | null;
+    slug: string;
+    serverUrl: string;
+    transportKind: string;
+    allowedToolNames: Prisma.JsonValue;
+    defaultToolName: string | null;
+    enabled: boolean;
+    approvalRequired: boolean;
+    estimatedCostCentsPerCall: number;
+    maxRetries: number;
+    retryBackoffMs: number;
+  }>;
   channelBindings: Array<{ kind: string; status: string; externalUserId: string | null }>;
 }): Prisma.InputJsonObject {
+  const publishedSkillLinks = representative.skillPackLinks.flatMap((link) => {
+    const install = link.workspaceInstall;
+    const release = install?.releases[0];
+    if (
+      !link.enabled ||
+      !install ||
+      !release ||
+      install.status === WorkspaceSkillInstallStatus.ARCHIVED ||
+      (
+        install.reviewStatus !== WorkspaceSkillReviewStatus.APPROVED
+        && install.status !== WorkspaceSkillInstallStatus.UPDATE_AVAILABLE
+      ) ||
+      !isWorkspaceSkillReleaseRuntimeTrusted({
+        source: link.skillPack.source,
+        executesCode: release.executesCode,
+        registryTrustEligible: release.registryTrustEligible,
+        signatureStatus: release.signatureStatus,
+      })
+    ) {
+      return [];
+    }
+
+    return [{
+      linkId: link.id,
+      snapshot: {
+        id: link.skillPack.id,
+        slug: link.skillPack.slug,
+        displayName: release.displayName,
+        source: link.skillPack.source.toLowerCase(),
+        summary: release.summary,
+        version: release.version,
+        ...(release.sourceUrl ? { sourceUrl: release.sourceUrl } : {}),
+        ...(release.ownerHandle ? { ownerHandle: release.ownerHandle } : {}),
+        ...(release.verificationTier
+          ? { verificationTier: release.verificationTier }
+          : {}),
+        capabilityTags: Array.isArray(release.capabilityTags)
+          ? release.capabilityTags.filter((tag): tag is string => typeof tag === "string")
+          : [],
+        executesCode: false,
+        enabled: true,
+        installStatus: "installed",
+      },
+    }];
+  });
+  const publishedSkillLinkIds = new Set(publishedSkillLinks.map((link) => link.linkId));
+  const publishedSkillReleasePins = new Map(
+    publishedSkillLinks.map((link) => [
+      link.linkId,
+      {
+        linkId: link.linkId,
+        skillPackId: link.snapshot.id,
+        source: link.snapshot.source,
+        slug: link.snapshot.slug,
+        version: link.snapshot.version,
+      },
+    ]),
+  );
+  const capabilityModes = resolveSnapshotCapabilityModes(
+    representative.capabilityProfiles[0],
+  );
+
   return {
     identity: {
       displayName: representative.displayName,
@@ -2444,10 +2711,24 @@ function buildRepresentativeSnapshot(representative: {
       allowedSkills: representative.allowedSkills,
       actionGate: representative.actionGate,
     },
+    compute: {
+      enabled: representative.computeEnabled,
+      defaultPolicyMode: representative.computeDefaultPolicyMode.toLowerCase(),
+      baseImage: representative.computeBaseImage,
+      maxSessionMinutes: representative.computeMaxSessionMinutes,
+      autoApproveBudgetCents: representative.computeAutoApproveBudgetCents,
+      artifactRetentionDays: representative.computeArtifactRetentionDays,
+      networkMode: representative.computeNetworkMode.toLowerCase(),
+      networkAllowlist: representative.computeNetworkAllowlist,
+      filesystemMode: representative.computeFilesystemMode.toLowerCase(),
+      capabilityModes,
+    },
     delegation: {
       enabled: representative.delegationEnabled,
       naturalLanguageEnabled: representative.delegationNaturalLanguageEnabled,
       explicitComputeEnabled: representative.delegationExplicitComputeEnabled,
+      maxSteps: representative.delegationMaxSteps,
+      maxCostCents: representative.delegationMaxCostCents,
       knowledgeScope: representative.delegationKnowledgeScope.toLowerCase(),
     },
     knowledge: representative.knowledgePack
@@ -2466,17 +2747,153 @@ function buildRepresentativeSnapshot(representative: {
       includedReplies: plan.includedReplies,
       includesPriorityHandoff: plan.includesPriorityHandoff,
     })),
-    skills: representative.skillPackLinks.map((link) => ({
-      slug: link.skillPack.slug,
-      version: link.skillPack.version,
-      enabled: link.enabled,
-    })),
+    skills: publishedSkillLinks.map((link) => link.snapshot),
+    mcpBindings: representative.mcpBindings.flatMap((binding) => {
+      if (
+        !binding.enabled ||
+        (
+          binding.representativeSkillPackLinkId &&
+          !publishedSkillLinkIds.has(binding.representativeSkillPackLinkId)
+        )
+      ) {
+        return [];
+      }
+
+      return [{
+        id: binding.id,
+        slug: binding.slug,
+        serverUrl: binding.serverUrl,
+        transportKind: binding.transportKind.toLowerCase(),
+        allowedToolNames: Array.isArray(binding.allowedToolNames)
+          ? binding.allowedToolNames.filter((tool): tool is string => typeof tool === "string")
+          : [],
+        defaultToolName: binding.defaultToolName,
+        enabled: true,
+        approvalRequired: binding.approvalRequired,
+        estimatedCostCentsPerCall: binding.estimatedCostCentsPerCall,
+        maxRetries: binding.maxRetries,
+        retryBackoffMs: binding.retryBackoffMs,
+        skillReleasePin: binding.representativeSkillPackLinkId
+          ? publishedSkillReleasePins.get(binding.representativeSkillPackLinkId)!
+          : null,
+      }];
+    }),
     channels: representative.channelBindings.map((binding) => ({
       kind: binding.kind,
       status: binding.status,
       externalUserId: binding.externalUserId,
     })),
   };
+}
+
+function resolveSnapshotCapabilityModes(profile: {
+  defaultDecision: string;
+  rules: Array<{ id: string; capability: string; decision: string }>;
+} | undefined): Record<
+  "exec" | "read" | "write" | "process" | "browser" | "mcp",
+  "allow" | "ask" | "deny"
+> {
+  const modes: Record<
+    "exec" | "read" | "write" | "process" | "browser" | "mcp",
+    "allow" | "ask" | "deny"
+  > = {
+    exec: "ask",
+    read: "allow",
+    write: "ask",
+    process: "ask",
+    browser: "ask",
+    mcp: "ask",
+  };
+  if (!profile) return modes;
+
+  for (const capability of Object.keys(modes) as Array<keyof typeof modes>) {
+    const rule = profile.rules.find((candidate) =>
+      candidate.id.endsWith(`_${capability}_owner_mode`),
+    );
+    const decision = rule?.decision.toLowerCase();
+    if (decision === "allow" || decision === "ask" || decision === "deny") {
+      modes[capability] = decision;
+    }
+  }
+  return modes;
+}
+
+type SnapshotSkillReleasePin = {
+  skillPackId: string;
+  source: string;
+  slug: string;
+  version: string;
+};
+
+function isRuntimeAvailableSkillLink(link: {
+  id: string;
+  installedVersion: string | null;
+  workspaceInstall: {
+    status: string;
+    reviewStatus: string;
+    installedVersion: string | null;
+    releases: Array<{
+      version: string;
+      status: string;
+      executesCode: boolean;
+      registryTrustEligible: boolean;
+      signatureStatus: string;
+    }>;
+  } | null;
+  skillPack: {
+    id: string;
+    source: string;
+    slug: string;
+  };
+}, pin: SnapshotSkillReleasePin): boolean {
+  const install = link.workspaceInstall;
+  const release = install?.releases[0];
+  return Boolean(
+    install &&
+    release &&
+    link.skillPack.id === pin.skillPackId &&
+    link.skillPack.source.toLowerCase() === pin.source &&
+    link.skillPack.slug === pin.slug &&
+    link.installedVersion === pin.version &&
+    install.installedVersion === pin.version &&
+    release.version === pin.version &&
+    release.status === WorkspaceSkillReleaseStatus.INSTALLED &&
+    install.status !== WorkspaceSkillInstallStatus.ARCHIVED &&
+    (
+      install.reviewStatus === WorkspaceSkillReviewStatus.APPROVED ||
+      install.status === WorkspaceSkillInstallStatus.UPDATE_AVAILABLE
+    ) &&
+    isWorkspaceSkillReleaseRuntimeTrusted({
+      source: link.skillPack.source,
+      executesCode: release.executesCode,
+      registryTrustEligible: release.registryTrustEligible,
+      signatureStatus: release.signatureStatus,
+    }),
+  );
+}
+
+function readSnapshotSkillReleasePins(
+  value: Prisma.JsonValue,
+): SnapshotSkillReleasePin[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const skills = (value as Prisma.JsonObject).skills;
+  if (!Array.isArray(skills)) return [];
+
+  return skills.flatMap((skill) => {
+    if (!skill || typeof skill !== "object" || Array.isArray(skill)) return [];
+    const record = skill as Prisma.JsonObject;
+    const skillPackId =
+      typeof record.id === "string" ? record.id.trim() : "";
+    const source =
+      typeof record.source === "string" ? record.source.trim().toLowerCase() : "";
+    const slug =
+      typeof record.slug === "string" ? record.slug.trim() : "";
+    const version =
+      typeof record.version === "string" ? record.version.trim() : "";
+    return skillPackId && source && slug && version
+      ? [{ skillPackId, source, slug, version }]
+      : [];
+  });
 }
 
 function normalizeChannel(value: string | null): "web" | "matrix" | "telegram" {
@@ -2688,6 +3105,42 @@ function buildDemoConversationDetail(
   };
 }
 
+function countRepresentativeSkillIssues(links: Array<{
+  skillPack: { source: string };
+  workspaceInstall: {
+    status: string;
+    reviewStatus: string;
+    releases: Array<{
+      capabilityTags: Prisma.JsonValue;
+      executesCode: boolean;
+      registryTrustEligible: boolean;
+      signatureStatus: string;
+    }>;
+  } | null;
+  mcpBindings: Array<{ enabled: boolean }>;
+}>): number {
+  return links.filter((link) => {
+    const installedRelease = link.workspaceInstall?.releases[0];
+    if (
+      !link.workspaceInstall
+      || !installedRelease
+      || !isWorkspaceSkillReleaseRuntimeTrusted({
+        source: link.skillPack.source,
+        executesCode: installedRelease.executesCode,
+        registryTrustEligible: installedRelease.registryTrustEligible,
+        signatureStatus: installedRelease.signatureStatus,
+      })
+    ) return true;
+    if (link.workspaceInstall.status === "ARCHIVED") return true;
+    if (link.workspaceInstall.reviewStatus !== "APPROVED" && link.workspaceInstall.status !== "UPDATE_AVAILABLE") return true;
+    const tags = Array.isArray(installedRelease.capabilityTags)
+      ? installedRelease.capabilityTags.filter((tag): tag is string => typeof tag === "string").map((tag) => tag.toLowerCase())
+      : [];
+    const requiresMcp = tags.some((tag) => tag === "mcp" || tag.startsWith("mcp-") || tag.endsWith("-mcp"));
+    return requiresMcp && !link.mcpBindings.some((binding) => binding.enabled);
+  }).length;
+}
+
 function buildRepresentativeReadiness(input: {
   displayName: string;
   roleSummary: string;
@@ -2699,6 +3152,8 @@ function buildRepresentativeReadiness(input: {
   knowledgePackItemCount: number;
   pricingCount: number;
   channelCount: number;
+  enabledSkillCount: number;
+  skillIssueCount: number;
 }): RepresentativeOperationsSnapshot["readiness"] {
   return [
     {
@@ -2724,6 +3179,14 @@ function buildRepresentativeReadiness(input: {
       label: "Pricing and free scope",
       complete: input.pricingCount === 4,
       detail: "Free, pass, deep help, and sponsor tiers are configured.",
+    },
+    {
+      id: "skills",
+      label: "Skills and tools",
+      complete: input.skillIssueCount === 0,
+      detail: input.skillIssueCount
+        ? `${input.skillIssueCount} enabled skill binding(s) have unresolved governance or connection requirements.`
+        : `${input.enabledSkillCount} enabled skill binding(s) satisfy the current governance checks.`,
     },
     {
       id: "channel",
@@ -2757,6 +3220,8 @@ function buildDemoRepresentativeOperations(representativeSlug: string): Represen
       knowledgePackItemCount: 5,
       pricingCount: 4,
       channelCount: 3,
+      enabledSkillCount: 2,
+      skillIssueCount: 0,
     }),
     channels: [
       { kind: "web", status: "connected", externalUserId: `/reps/${representativeSlug}` },

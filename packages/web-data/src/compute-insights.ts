@@ -15,6 +15,7 @@ export type ApprovalInsightsFilters = {
 };
 
 export type ApprovalInsightsOrganizationMember = {
+  ownerId?: string;
   displayName: string;
   role: string;
   canApproveCompute: boolean;
@@ -496,11 +497,13 @@ export function normalizeApprover(
     };
   }
 
-  const member = organizationMembers.find((candidate) => candidate.displayName === resolvedBy);
+  const member = organizationMembers.find(
+    (candidate) => candidate.ownerId === resolvedBy || candidate.displayName === resolvedBy,
+  );
   if (member) {
     return {
-      key: `member:${resolvedBy}`,
-      label: resolvedBy,
+      key: `member:${member.ownerId ?? member.displayName}`,
+      label: member.displayName,
       kind: "org_member",
       role: member.role.toLowerCase(),
     };
@@ -561,7 +564,8 @@ export function approvalRiskScore(reason: string, riskSummary: string): number {
   }
   if (
     normalizedReason.includes("human_approval_required") ||
-    normalizedReason.includes("mcp_binding_requires_approval")
+    normalizedReason.includes("mcp_binding_requires_approval") ||
+    normalizedReason.includes("skill_version_update_review")
   ) {
     return 82;
   }

@@ -9,7 +9,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:postgres:skills": "DELEGATE_POSTGRES_E2E=1 vitest run tests/postgres-skill-concurrency.integration.test.ts tests/postgres-skill-trust.integration.test.ts tests/postgres-runtime-release-pin.integration.test.ts tests/postgres-workspace-audit.integration.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1092.0",

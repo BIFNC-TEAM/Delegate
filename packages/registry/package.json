@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@delegate/domain": "workspace:*"
+    "@delegate/domain": "workspace:*",
+    "yaml": "^2.9.0"
   }
 }

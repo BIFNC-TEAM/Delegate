@@ -6,6 +6,15 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 import { computeBrokerConfig } from "./config";
 import { resolveMcpToolName } from "./mcp-bindings";
+import {
+  assertMcpJsonPayload,
+  assertMcpToolList,
+} from "./mcp-payload-limits";
+import {
+  assertSafePublicMcpUrl,
+  createPublicOnlyMcpFetch,
+} from "./public-endpoint";
+import { normalizeMcpHealthFailureCode } from "./mcp-health-failure";
 import { SessionError } from "./session-error";
 
 type BindingRecord = {
@@ -38,46 +47,41 @@ export async function callRemoteMcpTool(params: {
   requestedToolName?: string | null | undefined;
   toolArguments?: Record<string, unknown> | undefined;
 }) {
-  const bindingUrl = safeParseUrl(params.binding.serverUrl);
-  const maxRetries = Math.max(0, params.binding.maxRetries ?? 0);
-  const retryBackoffMs = Math.max(100, params.binding.retryBackoffMs ?? 1000);
+  const bindingUrl = await assertSafePublicMcpUrl(params.binding.serverUrl);
+  const payloadLimits = computeBrokerConfig.mcpPayloadLimits;
+  assertMcpJsonPayload(params.toolArguments ?? {}, {
+    maxBytes: payloadLimits.maxRequestBytes,
+    maxDepth: payloadLimits.maxJsonDepth,
+    maxNodes: payloadLimits.maxJsonNodes,
+  }, {
+    invalid: "mcp_tool_arguments_invalid",
+    tooLarge: "mcp_tool_arguments_too_large",
+    statusCode: 413,
+    invalidStatusCode: 400,
+  });
 
-  let attempt = 0;
-  let lastError: McpTransportError | SessionError | Error | null = null;
+  // maxRetries remains part of the persisted binding contract for compatibility.
+  // A tool invocation is intentionally attempted only once: a timeout or lost
+  // response cannot prove that the remote side did not already commit a mutation.
+  try {
+    const result = await callRemoteMcpToolOnce({
+      binding: params.binding,
+      bindingUrl,
+      requestedToolName: params.requestedToolName,
+      toolArguments: params.toolArguments,
+    });
 
-  while (attempt <= maxRetries) {
-    attempt += 1;
-
-    try {
-      const result = await callRemoteMcpToolOnce({
-        binding: params.binding,
-        bindingUrl,
-        requestedToolName: params.requestedToolName,
-        toolArguments: params.toolArguments,
-      });
-
-      return {
-        ...result,
-        attempts: attempt,
-        transportKind: params.binding.transportKind,
-      };
-    } catch (error) {
-      if (error instanceof SessionError && !(error instanceof McpTransportError)) {
-        throw error;
-      }
-
-      const normalized = normalizeMcpError(error, params.binding.transportKind, attempt);
-      lastError = normalized;
-
-      if (!normalized.retryable || attempt > maxRetries) {
-        throw normalized;
-      }
-
-      await delay(retryBackoffMs * attempt);
+    return {
+      ...result,
+      attempts: 1,
+      transportKind: params.binding.transportKind,
+    };
+  } catch (error) {
+    if (error instanceof SessionError && !(error instanceof McpTransportError)) {
+      throw error;
     }
+    throw normalizeMcpError(error, params.binding.transportKind, 1);
   }
-
-  throw lastError ?? new SessionError(502, "mcp_transport_failed:unknown_failure");
 }
 
 async function callRemoteMcpToolOnce(params: {
@@ -95,7 +99,13 @@ async function callRemoteMcpToolOnce(params: {
   try {
     await client.connect(transport as unknown as Transport);
 
-    const listedTools = await client.listTools();
+    const listedTools: unknown = await client.listTools();
+    assertMcpToolList(listedTools, {
+      maxBytes: computeBrokerConfig.mcpPayloadLimits.maxToolListBytes,
+      maxDepth: computeBrokerConfig.mcpPayloadLimits.maxJsonDepth,
+      maxNodes: computeBrokerConfig.mcpPayloadLimits.maxJsonNodes,
+      maxItems: computeBrokerConfig.mcpPayloadLimits.maxToolCount,
+    });
     const availableToolNames = listedTools.tools.map((tool) => tool.name);
     const resolved = resolveMcpToolName({
       binding: params.binding,
@@ -106,9 +116,18 @@ async function callRemoteMcpToolOnce(params: {
       throw new SessionError(409, "mcp_tool_not_exposed_by_server");
     }
 
-    const result = await client.callTool({
+    const result: unknown = await client.callTool({
       name: resolved.toolName,
       arguments: params.toolArguments ?? {},
+    });
+    assertMcpJsonPayload(result, {
+      maxBytes: computeBrokerConfig.mcpPayloadLimits.maxResponseBytes,
+      maxDepth: computeBrokerConfig.mcpPayloadLimits.maxJsonDepth,
+      maxNodes: computeBrokerConfig.mcpPayloadLimits.maxJsonNodes,
+    }, {
+      invalid: "mcp_tool_result_invalid",
+      tooLarge: "mcp_tool_result_too_large",
+      statusCode: 502,
     });
 
     return {
@@ -116,7 +135,11 @@ async function callRemoteMcpToolOnce(params: {
       allowedToolNames: resolved.allowedToolNames,
       availableToolNames,
       result,
-      summary: summarizeMcpResult(result.content),
+      summary: summarizeMcpResult(
+        result && typeof result === "object" && "content" in result
+          ? result.content
+          : undefined,
+      ),
     };
   } finally {
     await client.close().catch(() => undefined);
@@ -125,7 +148,14 @@ async function callRemoteMcpToolOnce(params: {
 
 function createTransport(kind: BindingRecord["transportKind"], url: URL) {
   const common = {
-    fetch: createTimedFetch(computeBrokerConfig.mcpTimeoutMs),
+    fetch: createPublicOnlyMcpFetch(
+      url.origin,
+      computeBrokerConfig.mcpTimeoutMs,
+      {
+        maxRequestBytes: computeBrokerConfig.mcpPayloadLimits.maxRequestBytes,
+        maxResponseBytes: computeBrokerConfig.mcpPayloadLimits.maxResponseBytes,
+      },
+    ),
     requestInit: {
       headers: {
         "user-agent": "Delegate-Compute-Broker/0.1",
@@ -140,29 +170,14 @@ function createTransport(kind: BindingRecord["transportKind"], url: URL) {
   return new StreamableHTTPClientTransport(url, common);
 }
 
-function safeParseUrl(value: string) {
-  try {
-    return new URL(value);
-  } catch {
-    throw new SessionError(400, "mcp_binding_invalid_url");
-  }
-}
-
-function createTimedFetch(timeoutMs: number): typeof fetch {
-  return (input, init = {}) => {
-    const signal = AbortSignal.timeout(timeoutMs);
-    return fetch(input, {
-      ...init,
-      signal,
-    });
-  };
-}
-
 type McpFailureClassification =
   | "timeout"
   | "unauthorized"
   | "endpoint_not_found"
   | "server_unavailable"
+  | "request_payload_too_large"
+  | "request_payload_unsupported"
+  | "response_payload_too_large"
   | "transport_connection_failed";
 
 export class McpTransportError extends SessionError {
@@ -171,10 +186,34 @@ export class McpTransportError extends SessionError {
     readonly transportKind: BindingRecord["transportKind"],
     readonly attempt: number,
     readonly retryable: boolean,
-    message: string,
+    _privateMessage?: string,
   ) {
-    super(502, `mcp_${classification}:${message}`);
+    super(502, `mcp_${classification}`);
   }
+}
+
+export function toMcpHealthFailureCode(error: unknown) {
+  if (error instanceof McpTransportError) {
+    return normalizeMcpHealthFailureCode(`mcp_${error.classification}`);
+  }
+
+  if (error instanceof SessionError) {
+    const prefix = /^([a-z][a-z0-9_]{0,79})(?::|$)/u.exec(error.message)?.[1];
+    return normalizeMcpHealthFailureCode(prefix);
+  }
+
+  return "mcp_execution_failed";
+}
+
+export function toMcpExecutionFailureSummary(error: unknown) {
+  if (error instanceof McpTransportError) {
+    return `mcp_${error.classification}`;
+  }
+  if (error instanceof SessionError) {
+    return /^([a-z][a-z0-9_]{0,79})(?::|$)/u.exec(error.message)?.[1]
+      ?? "mcp_execution_failed";
+  }
+  return "mcp_execution_failed";
 }
 
 function normalizeMcpError(
@@ -188,7 +227,6 @@ function normalizeMcpError(
     transportKind,
     attempt,
     details.retryable,
-    details.message,
   );
 }
 
@@ -204,6 +242,30 @@ function classifyMcpTransportFailure(error: unknown): {
   if (error instanceof Error) {
     const message = error.message.trim();
     const lower = message.toLowerCase();
+
+    if (lower.includes("mcp_response_payload_too_large")) {
+      return {
+        classification: "response_payload_too_large",
+        retryable: false,
+        message,
+      };
+    }
+
+    if (lower.includes("mcp_request_payload_too_large")) {
+      return {
+        classification: "request_payload_too_large",
+        retryable: false,
+        message,
+      };
+    }
+
+    if (lower.includes("mcp_request_payload_unsupported")) {
+      return {
+        classification: "request_payload_unsupported",
+        retryable: false,
+        message,
+      };
+    }
 
     if (error.name === "TimeoutError" || error.name === "AbortError" || lower.includes("timeout")) {
       return {
@@ -281,12 +343,6 @@ function classifyByStatus(statusCode: number | undefined, message: string) {
     retryable: true,
     message,
   };
-}
-
-function delay(ms: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 function summarizeMcpResult(content: unknown) {

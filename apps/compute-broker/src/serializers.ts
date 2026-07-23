@@ -122,6 +122,7 @@ export function mapBrowserNavigationStatusFromDb(value: string) {
 export function serializeSession(session: {
   id: string;
   representativeId: string;
+  representativeVersionId: string | null;
   contactId: string | null;
   conversationId: string | null;
   delegationTaskId: string | null;
@@ -149,6 +150,7 @@ export function serializeSession(session: {
   return computeSessionSnapshotSchema.parse({
     id: session.id,
     representativeId: session.representativeId,
+    representativeVersionId: session.representativeVersionId,
     contactId: session.contactId,
     conversationId: session.conversationId,
     delegationTaskId: session.delegationTaskId,

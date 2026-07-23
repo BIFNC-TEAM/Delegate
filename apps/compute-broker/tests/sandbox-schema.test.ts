@@ -25,6 +25,10 @@ describe("per-user sandbox schema", () => {
 
     expect(block).toContain("sandboxLeaseId");
     expect(block).toMatch(/\bsandboxLease\s+SandboxLease\?/);
+    expect(block).toMatch(/\brepresentativeVersionId\s+String\?/);
+    expect(block).toMatch(
+      /\brepresentativeVersion\s+RepresentativeVersion\?/,
+    );
   });
 
   it("lets browser sessions migrate to sandbox identity without breaking compute-session lookup", () => {

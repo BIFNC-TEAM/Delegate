@@ -150,6 +150,7 @@ function buildSession(overrides: { contactId: string | null }) {
   return {
     id: "session-1",
     representativeId: "rep-1",
+    representativeVersionId: "rep-version-1",
     contactId: overrides.contactId,
     conversationId: "conversation-1",
     generationRunId: null,

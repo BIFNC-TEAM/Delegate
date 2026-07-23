@@ -8,7 +8,8 @@
     "start": "tsx src/index.ts",
     "smoke:daytona-opencode": "tsx scripts/daytona-opencode-smoke.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:postgres:mcp-health": "DELEGATE_POSTGRES_E2E=1 vitest run tests/mcp-binding-health-postgres.integration.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.5",
@@ -24,6 +25,7 @@
     "@prisma/client": "^6.19.2",
     "dotenv": "^17.2.3",
     "openai": "^6.32.0",
+    "undici": "^7.28.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

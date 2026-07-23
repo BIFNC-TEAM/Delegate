@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 process.env.COMPUTE_BROKER_INTERNAL_TOKEN ??= "test-internal-token";
+process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS = "true";
 
 type TestServer = {
   url: string;
@@ -79,22 +80,55 @@ describe("callRemoteMcpTool", () => {
     expect(result.transportKind).toBe("sse");
   });
 
-  it("retries a flaky SSE transport before failing the whole execution", async () => {
+  it("rejects non-JSON-safe tool arguments before any remote request", async () => {
     const { callRemoteMcpTool } = await import("../src/mcp");
     const originalFetch = global.fetch;
-    let shouldFail = true;
-
-    global.fetch = (async (...args) => {
-      if (shouldFail) {
-        shouldFail = false;
-        throw new Error("synthetic_network_failure");
-      }
-
-      return originalFetch(...args);
+    let fetchCount = 0;
+    global.fetch = (async () => {
+      fetchCount += 1;
+      return new Response("{}");
     }) as typeof fetch;
 
     try {
-      const result = await callRemoteMcpTool({
+      const invalidArguments: Record<string, unknown> = {};
+      invalidArguments.self = invalidArguments;
+      const error = await callRemoteMcpTool({
+        binding: {
+          id: "binding_invalid_arguments",
+          slug: "invalid-arguments",
+          displayName: "Invalid Arguments MCP",
+          serverUrl: streamableServer!.url,
+          transportKind: "streamable_http",
+          defaultToolName: "lookup",
+          allowedToolNames: ["lookup"],
+          maxRetries: 5,
+          retryBackoffMs: 100,
+        },
+        toolArguments: invalidArguments,
+      }).catch((caught: unknown) => caught);
+
+      expect(error).toMatchObject({
+        statusCode: 400,
+        message: "mcp_tool_arguments_invalid",
+      });
+      expect(fetchCount).toBe(0);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it("does not retry an MCP invocation after an uncertain transport failure", async () => {
+    const { callRemoteMcpTool, McpTransportError } = await import("../src/mcp");
+    const originalFetch = global.fetch;
+    let fetchCount = 0;
+
+    global.fetch = (async () => {
+      fetchCount += 1;
+      throw new Error("synthetic_network_failure token=must-not-leak");
+    }) as typeof fetch;
+
+    try {
+      const error = await callRemoteMcpTool({
         binding: {
           id: "binding_retry",
           slug: "weather-retry",
@@ -109,10 +143,15 @@ describe("callRemoteMcpTool", () => {
         toolArguments: {
           city: "Suzhou",
         },
-      });
+      }).catch((caught: unknown) => caught);
 
-      expect(result.summary).toContain("Weather for Suzhou");
-      expect(result.attempts).toBe(2);
+      expect(error).toBeInstanceOf(McpTransportError);
+      expect(error).toMatchObject({
+        attempt: 1,
+        message: "mcp_transport_connection_failed",
+      });
+      expect(fetchCount).toBe(1);
+      expect(String(error)).not.toContain("must-not-leak");
     } finally {
       global.fetch = originalFetch;
     }

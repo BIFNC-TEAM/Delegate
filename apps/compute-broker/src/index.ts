@@ -18,13 +18,13 @@ import {
   resolveApproval,
 } from "./executions";
 import { getNativeComputerUsePreflight } from "./native-browser";
+import { toPublicBrokerError } from "./public-error";
 import {
   createComputeSession,
   getComputeSession,
   heartbeatComputeSession,
   terminateComputeSession,
 } from "./sessions";
-import { SessionError } from "./session-error";
 import { startSandboxLeaseCleanupLoop } from "./sandbox-leases";
 import { getSandboxMetricSnapshot } from "./sandbox-metrics";
 
@@ -176,15 +176,11 @@ const server = createServer(async (request, response) => {
 
     return sendJson(response, 404, { error: "not_found" });
   } catch (error) {
-    if (error instanceof SessionError) {
-      return sendJson(response, error.statusCode, { error: error.message });
+    const publicError = toPublicBrokerError(error);
+    if (publicError.logPrivateDetail) {
+      console.error("compute_broker_request_failed", error);
     }
-
-    if (error instanceof Error) {
-      return sendJson(response, 400, { error: error.message });
-    }
-
-    return sendJson(response, 500, { error: "internal_error" });
+    return sendJson(response, publicError.statusCode, { error: publicError.code });
   }
 });
 

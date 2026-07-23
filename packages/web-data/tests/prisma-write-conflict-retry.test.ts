@@ -1,0 +1,53 @@
+import { Prisma } from "@prisma/client";
+import { describe, expect, it, vi } from "vitest";
+
+import { runWithPrismaWriteConflictRetry } from "../src/prisma-write-conflict-retry";
+
+describe("Prisma write-conflict retry", () => {
+  it("retries P2034 twice with bounded backoff before succeeding", async () => {
+    const operation = vi.fn()
+      .mockRejectedValueOnce(prismaError("P2034"))
+      .mockRejectedValueOnce(prismaError("P2034"))
+      .mockResolvedValue("saved");
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(runWithPrismaWriteConflictRetry(operation, {
+      retryDelayMs: 10,
+      sleep,
+    })).resolves.toBe("saved");
+    expect(operation).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls).toEqual([[10], [20]]);
+  });
+
+  it("stops after three total attempts", async () => {
+    const conflict = prismaError("P2034");
+    const operation = vi.fn().mockRejectedValue(conflict);
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(runWithPrismaWriteConflictRetry(operation, {
+      retryDelayMs: 10,
+      sleep,
+    })).rejects.toBe(conflict);
+    expect(operation).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls).toEqual([[10], [20]]);
+  });
+
+  it("does not retry non-conflict failures", async () => {
+    const failure = prismaError("P2002");
+    const operation = vi.fn().mockRejectedValue(failure);
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(runWithPrismaWriteConflictRetry(operation, {
+      sleep,
+    })).rejects.toBe(failure);
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+});
+
+function prismaError(code: string) {
+  return new Prisma.PrismaClientKnownRequestError("synthetic Prisma failure", {
+    code,
+    clientVersion: "test",
+  });
+}

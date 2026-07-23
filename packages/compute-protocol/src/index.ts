@@ -297,6 +297,7 @@ export const computeSessionLeaseSchema = z.object({
 export const computeSessionSnapshotSchema = z.object({
   id: z.string(),
   representativeId: z.string(),
+  representativeVersionId: z.string().nullable().optional(),
   contactId: z.string().nullable(),
   conversationId: z.string().nullable(),
   delegationTaskId: z.string().nullable(),
@@ -453,7 +454,7 @@ export const mcpBindingSnapshotSchema = z.object({
   enabled: z.boolean(),
   approvalRequired: z.boolean(),
   estimatedCostCentsPerCall: z.number().int().nonnegative().default(0),
-  maxRetries: z.number().int().min(0).max(5).default(2),
+  maxRetries: z.number().int().min(0).max(5).default(0),
   retryBackoffMs: z.number().int().min(100).max(30_000).default(1000),
   consecutiveFailures: z.number().int().nonnegative().default(0),
   lastFailureAt: z.string().datetime().nullable().optional(),
@@ -463,21 +464,135 @@ export const mcpBindingSnapshotSchema = z.object({
   updatedAt: z.string().datetime(),
 });
 
+const mcpServerUrlSchema = z.string().trim().max(2048).url().superRefine((value, ctx) => {
+  const url = new URL(value);
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$|\.$/gu, "");
+  if (
+    url.protocol !== "https:"
+    || Boolean(url.username)
+    || Boolean(url.password)
+    || isClearlyNonPublicHostname(hostname)
+  ) {
+    ctx.addIssue({
+      code: "custom",
+      message: "MCP serverUrl must be a credential-free public HTTPS endpoint.",
+    });
+  }
+});
+
 const mcpBindingFieldsSchema = z.object({
-  representativeSkillPackLinkId: z.string().min(1).optional(),
-  slug: z.string().trim().min(1),
-  displayName: z.string().trim().min(1),
-  description: z.string().trim().min(1).optional(),
-  serverUrl: z.string().url(),
+  representativeSkillPackLinkId: z.string().trim().min(1).max(128).optional(),
+  slug: z.string().trim().min(1).max(128).regex(/^[a-z0-9][a-z0-9._-]*$/u),
+  displayName: z.string().trim().min(1).max(160),
+  description: z.string().trim().min(1).max(2000).optional(),
+  serverUrl: mcpServerUrlSchema,
   transportKind: mcpTransportKindSchema.default("streamable_http"),
-  allowedToolNames: z.array(z.string().trim().min(1)).min(1),
-  defaultToolName: z.string().trim().min(1).optional(),
+  allowedToolNames: z.array(z.string().trim().min(1).max(128)).min(1).max(100),
+  defaultToolName: z.string().trim().min(1).max(128).optional(),
   enabled: z.boolean().default(true),
   approvalRequired: z.boolean().default(true),
   estimatedCostCentsPerCall: z.number().int().nonnegative().default(0),
-  maxRetries: z.number().int().min(0).max(5).default(2),
+  maxRetries: z.number().int().min(0).max(5).default(0),
   retryBackoffMs: z.number().int().min(100).max(30_000).default(1000),
 });
+
+export function ipv4MappedAddressToIpv4(address: string): string | null {
+  const normalized = address.toLowerCase().replace(/^\[|\]$/gu, "");
+  if (!normalized.includes(":")) return null;
+
+  const compressedParts = normalized.split("::");
+  if (compressedParts.length > 2) return null;
+  const left = parseIpv6Words(compressedParts[0] ?? "");
+  const right = parseIpv6Words(compressedParts[1] ?? "");
+  if (!left || !right) return null;
+
+  let words: number[];
+  if (compressedParts.length === 2) {
+    const missingWordCount = 8 - left.length - right.length;
+    if (missingWordCount < 1) return null;
+    words = [...left, ...Array<number>(missingWordCount).fill(0), ...right];
+  } else {
+    words = left;
+  }
+  if (
+    words.length !== 8
+    || words.slice(0, 5).some((word) => word !== 0)
+    || words[5] !== 0xffff
+  ) {
+    return null;
+  }
+
+  const high = words[6]!;
+  const low = words[7]!;
+  return [
+    high >> 8,
+    high & 0xff,
+    low >> 8,
+    low & 0xff,
+  ].join(".");
+}
+
+function parseIpv6Words(value: string): number[] | null {
+  if (!value) return [];
+  const tokens = value.split(":");
+  const words: number[] = [];
+  for (const [index, token] of tokens.entries()) {
+    if (!token) return null;
+    if (token.includes(".")) {
+      if (index !== tokens.length - 1) return null;
+      const octets = token.split(".");
+      if (
+        octets.length !== 4
+        || octets.some((octet) => !/^\d{1,3}$/u.test(octet))
+      ) {
+        return null;
+      }
+      const values = octets.map(Number);
+      if (values.some((octet) => octet > 255)) return null;
+      words.push((values[0]! << 8) | values[1]!, (values[2]! << 8) | values[3]!);
+      continue;
+    }
+    if (!/^[0-9a-f]{1,4}$/u.test(token)) return null;
+    words.push(Number.parseInt(token, 16));
+  }
+  return words;
+}
+
+function isClearlyNonPublicHostname(hostname: string) {
+  if (
+    hostname === "localhost"
+    || hostname.endsWith(".localhost")
+    || hostname.endsWith(".local")
+    || hostname.endsWith(".internal")
+    || hostname.endsWith(".home.arpa")
+  ) {
+    return true;
+  }
+  const mappedIpv4 = ipv4MappedAddressToIpv4(hostname);
+  if (mappedIpv4) {
+    return isClearlyNonPublicHostname(mappedIpv4);
+  }
+  if (hostname.includes(":")) {
+    return hostname === "::"
+      || hostname === "::1"
+      || hostname.startsWith("fc")
+      || hostname.startsWith("fd")
+      || /^fe[89ab]/u.test(hostname)
+      || hostname.startsWith("ff");
+  }
+  const parts = hostname.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part))) return false;
+  const [first, second] = parts;
+  return first === 0
+    || first === 10
+    || first === 127
+    || (first === 100 && second! >= 64 && second! <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second! >= 16 && second! <= 31)
+    || (first === 192 && second === 168)
+    || (first === 198 && (second === 18 || second === 19))
+    || first! >= 224;
+}
 
 function refineMcpBindingSchema<T extends z.ZodTypeAny>(schema: T) {
   return schema.superRefine((value, ctx) => {
@@ -514,8 +629,19 @@ function refineMcpBindingSchema<T extends z.ZodTypeAny>(schema: T) {
 
 export const upsertMcpBindingRequestSchema = refineMcpBindingSchema(mcpBindingFieldsSchema);
 
-export const updateMcpBindingRequestSchema = refineMcpBindingSchema(mcpBindingFieldsSchema.partial()).refine(
-  (value) => Object.keys(value).length > 0,
+export const updateMcpBindingRequestSchema = refineMcpBindingSchema(
+  mcpBindingFieldsSchema.extend({
+    transportKind: mcpTransportKindSchema,
+    enabled: z.boolean(),
+    approvalRequired: z.boolean(),
+    estimatedCostCentsPerCall: z.number().int().nonnegative(),
+    maxRetries: z.number().int().min(0).max(5),
+    retryBackoffMs: z.number().int().min(100).max(30_000),
+  }).partial().extend({
+    expectedUpdatedAt: z.string().datetime(),
+  }),
+).refine(
+  (value) => Object.keys(value).some((key) => key !== "expectedUpdatedAt"),
   {
     message: "At least one MCP binding field is required.",
   },

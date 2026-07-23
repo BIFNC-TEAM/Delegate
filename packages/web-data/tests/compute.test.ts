@@ -198,6 +198,10 @@ function createSource(): ApprovalInsightsSource {
 }
 
 describe("buildRepresentativeApprovalInsights", () => {
+  it("treats workspace skill adoption as an explicit high-risk decision", () => {
+    expect(approvalRiskScore("skill_version_update_review", "Review a signed skill release.")).toBe(82);
+  });
+
   it("aggregates approvals by customer account, subagent, and resolver", () => {
     const snapshot = buildRepresentativeApprovalInsights(createSource(), {}, new Date("2026-03-26T12:00:00.000Z"));
 

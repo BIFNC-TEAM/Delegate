@@ -51,6 +51,38 @@ enum SkillPackSource {
   CLAWHUB
 }
 
+enum WorkspaceSkillInstallStatus {
+  INSTALLED
+  UPDATE_AVAILABLE
+  ARCHIVED
+}
+
+enum WorkspaceSkillReviewStatus {
+  APPROVED
+  NEEDS_REVIEW
+  REJECTED
+}
+
+enum WorkspaceSkillReleaseStatus {
+  INSTALLED
+  CANDIDATE
+  SUPERSEDED
+  REJECTED
+}
+
+enum WorkspaceSkillUpdatePolicy {
+  MANUAL
+  REVIEW_REQUIRED
+  PATCH_AUTO
+}
+
+enum WorkspaceSkillSignatureStatus {
+  UNAVAILABLE
+  UNVERIFIED
+  VERIFIED
+  INVALID
+}
+
 enum HandoffStatus {
   OPEN
   REVIEWING
@@ -114,6 +146,17 @@ enum EventType {
   WORKFLOW_ENQUEUED
   WORKFLOW_COMPLETED
   WORKFLOW_FAILED
+  SKILL_INSTALLED
+  SKILL_BINDING_CHANGED
+  SKILL_UPDATE_DISCOVERED
+  SKILL_VERSION_ADOPTED
+  SKILL_VERSION_REJECTED
+  SKILL_VERSION_ROLLED_BACK
+  SKILL_ARCHIVED
+  SKILL_RESTORED
+  SKILL_UPDATE_POLICY_CHANGED
+  MCP_BINDING_CHANGED
+  COMPUTE_POLICY_CHANGED
 }
 
 enum CapabilityKind {
@@ -762,6 +805,7 @@ model Owner {
   identityLinks             OwnerIdentityLink[]
   knowledgeAssets           KnowledgeAsset[]
   matrixVirtualUsers        MatrixVirtualUserBinding[]
+  workspaceSkillInstalls    WorkspaceSkillInstall[]
 }
 
 model OwnerIdentityLink {
@@ -1233,6 +1277,7 @@ model RepresentativeVersion {
   episodes                 ConversationEpisode[]
   generationRuns           GenerationRun[]
   delegationTasks          DelegationTask[]
+  computeSessions          ComputeSession[]
 
   @@unique([representativeId, versionNumber])
   @@index([representativeId, publishedAt])
@@ -1317,52 +1362,120 @@ model SkillPack {
   createdAt           DateTime                  @default(now())
   updatedAt           DateTime                  @updatedAt
   representativeLinks RepresentativeSkillPack[]
+  workspaceInstalls   WorkspaceSkillInstall[]
 
   @@unique([source, slug])
 }
 
+model WorkspaceSkillInstall {
+  id                     String                      @id @default(cuid())
+  ownerId                String
+  skillPackId            String
+  status                 WorkspaceSkillInstallStatus @default(INSTALLED)
+  reviewStatus           WorkspaceSkillReviewStatus  @default(APPROVED)
+  updatePolicy           WorkspaceSkillUpdatePolicy  @default(REVIEW_REQUIRED)
+  installedVersion       String?
+  installedBy            String?
+  installedAt            DateTime                    @default(now())
+  createdAt              DateTime                    @default(now())
+  updatedAt              DateTime                    @updatedAt
+  owner                  Owner                       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  skillPack              SkillPack                   @relation(fields: [skillPackId], references: [id], onDelete: Restrict)
+  representativeBindings RepresentativeSkillPack[]
+  releases               WorkspaceSkillRelease[]
+
+  @@unique([ownerId, skillPackId])
+  @@index([ownerId, status, updatedAt])
+  @@index([skillPackId, status])
+}
+
+model WorkspaceSkillRelease {
+  id                    String                        @id @default(cuid())
+  installId             String
+  version               String
+  status                WorkspaceSkillReleaseStatus
+  displayName           String
+  summary               String
+  sourceUrl             String?
+  ownerHandle           String?
+  verificationTier      String?
+  capabilityTags        Json
+  executesCode          Boolean                       @default(false)
+  provenanceDigest      String?
+  signatureStatus       WorkspaceSkillSignatureStatus @default(UNAVAILABLE)
+  signatureAlgorithm    String?
+  signatureKeyId        String?
+  signatureValue        String?
+  sbomUrl               String?
+  attestationUrl        String?
+  registryTrustSource   String?
+  registryVerified      Boolean                       @default(false)
+  registryTrustEligible Boolean                       @default(false)
+  registryTrustEvidence Json?
+  runtimeRequirements   Json?
+  reviewedBy            String?
+  reviewedAt            DateTime?
+  reviewNote            String?
+  discoveredAt          DateTime                      @default(now())
+  adoptedAt             DateTime?
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+  install               WorkspaceSkillInstall         @relation(fields: [installId], references: [id], onDelete: Cascade)
+  approvalRequest       ApprovalRequest?
+
+  @@unique([installId, version])
+  @@index([installId, status, discoveredAt])
+}
+
 model RepresentativeSkillPack {
-  id               String                     @id @default(cuid())
-  representativeId String
-  skillPackId      String
-  enabled          Boolean                    @default(true)
-  installStatus    String                     @default("available")
-  installedVersion String?
-  installedAt      DateTime?
-  createdAt        DateTime                   @default(now())
-  updatedAt        DateTime                   @updatedAt
-  representative   Representative             @relation(fields: [representativeId], references: [id])
-  skillPack        SkillPack                  @relation(fields: [skillPackId], references: [id])
-  mcpBindings      RepresentativeMcpBinding[]
+  id                 String                     @id @default(cuid())
+  representativeId   String
+  skillPackId        String
+  workspaceInstallId String?
+  enabled            Boolean                    @default(true)
+  installStatus      String                     @default("available")
+  installedVersion   String?
+  installedAt        DateTime?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  representative     Representative             @relation(fields: [representativeId], references: [id])
+  skillPack          SkillPack                  @relation(fields: [skillPackId], references: [id])
+  workspaceInstall   WorkspaceSkillInstall?     @relation(fields: [workspaceInstallId], references: [id], onDelete: SetNull)
+  mcpBindings        RepresentativeMcpBinding[]
 
   @@unique([representativeId, skillPackId])
+  @@index([workspaceInstallId, enabled])
 }
 
 model RepresentativeMcpBinding {
-  id                            String                   @id @default(cuid())
-  representativeId              String
-  representativeSkillPackLinkId String?
-  slug                          String
-  displayName                   String
-  description                   String?
-  serverUrl                     String
-  transportKind                 McpTransportKind         @default(STREAMABLE_HTTP)
-  allowedToolNames              Json
-  defaultToolName               String?
-  enabled                       Boolean                  @default(true)
-  approvalRequired              Boolean                  @default(true)
-  estimatedCostCentsPerCall     Int                      @default(0)
-  maxRetries                    Int                      @default(2)
-  retryBackoffMs                Int                      @default(1000)
-  consecutiveFailures           Int                      @default(0)
-  lastFailureAt                 DateTime?
-  lastFailureReason             String?
-  lastSuccessAt                 DateTime?
-  createdAt                     DateTime                 @default(now())
-  updatedAt                     DateTime                 @updatedAt
-  representative                Representative           @relation(fields: [representativeId], references: [id])
-  representativeSkillPackLink   RepresentativeSkillPack? @relation(fields: [representativeSkillPackLinkId], references: [id])
-  toolExecutions                ToolExecution[]
+  id                              String                   @id @default(cuid())
+  representativeId                String
+  representativeSkillPackLinkId   String?
+  slug                            String
+  displayName                     String
+  description                     String?
+  serverUrl                       String
+  transportKind                   McpTransportKind         @default(STREAMABLE_HTTP)
+  allowedToolNames                Json
+  defaultToolName                 String?
+  enabled                         Boolean                  @default(true)
+  approvalRequired                Boolean                  @default(true)
+  estimatedCostCentsPerCall       Int                      @default(0)
+  maxRetries                      Int                      @default(2)
+  retryBackoffMs                  Int                      @default(1000)
+  configRevision                  Int                      @default(1)
+  healthRequestGeneration         BigInt                   @default(0)
+  lastHealthObservationGeneration BigInt                   @default(0)
+  lastHealthObservationStartedAt  DateTime?
+  consecutiveFailures             Int                      @default(0)
+  lastFailureAt                   DateTime?
+  lastFailureReason               String?
+  lastSuccessAt                   DateTime?
+  createdAt                       DateTime                 @default(now())
+  updatedAt                       DateTime                 @updatedAt
+  representative                  Representative           @relation(fields: [representativeId], references: [id])
+  representativeSkillPackLink     RepresentativeSkillPack? @relation(fields: [representativeSkillPackLinkId], references: [id])
+  toolExecutions                  ToolExecution[]
 
   @@unique([representativeId, slug])
   @@index([representativeId, enabled, createdAt])
@@ -2118,6 +2231,7 @@ model EventAudit {
   delegationTask   DelegationTask? @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
 
   @@index([delegationTaskId, createdAt])
+  @@index([representativeId, createdAt])
 }
 
 model CapabilityPolicyProfile {
@@ -2181,49 +2295,52 @@ model CapabilityPolicyRule {
 }
 
 model ComputeSession {
-  id                   String                   @id @default(cuid())
-  representativeId     String
-  contactId            String?
-  conversationId       String?
-  generationRunId      String?
-  delegationTaskId     String?
-  delegationTaskStepId String?
-  subagentId           String?
-  policyProfileId      String?
-  sandboxLeaseId       String?
-  requestedBy          ComputeRequestedBy
-  status               ComputeSessionStatus     @default(REQUESTED)
-  leaseStatus          ComputeLeaseStatus       @default(REQUESTED)
-  runnerLeaseId        String?
-  containerId          String?
-  runnerType           ComputeRunnerType        @default(DOCKER)
-  baseImage            String
-  leaseTokenHash       String                   @unique
-  leaseAcquiredAt      DateTime?
-  leaseLastUsedAt      DateTime?
-  leaseReleasedAt      DateTime?
-  startedAt            DateTime?
-  lastHeartbeatAt      DateTime?
-  expiresAt            DateTime?
-  endedAt              DateTime?
-  failureReason        String?
-  createdAt            DateTime                 @default(now())
-  updatedAt            DateTime                 @updatedAt
-  representative       Representative           @relation(fields: [representativeId], references: [id])
-  contact              Contact?                 @relation(fields: [contactId], references: [id])
-  conversation         Conversation?            @relation(fields: [conversationId], references: [id])
-  generationRun        GenerationRun?           @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
-  delegationTask       DelegationTask?          @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
-  delegationTaskStep   DelegationTaskStep?      @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
-  policyProfile        CapabilityPolicyProfile? @relation(fields: [policyProfileId], references: [id])
-  sandboxLease         SandboxLease?            @relation(fields: [sandboxLeaseId], references: [id], onDelete: SetNull)
-  toolExecutions       ToolExecution[]
-  browserSession       BrowserSession?
-  artifacts            Artifact[]
-  approvalRequests     ApprovalRequest[]
-  ledgerEntries        LedgerEntry[]
+  id                      String                   @id @default(cuid())
+  representativeId        String
+  representativeVersionId String?
+  contactId               String?
+  conversationId          String?
+  generationRunId         String?
+  delegationTaskId        String?
+  delegationTaskStepId    String?
+  subagentId              String?
+  policyProfileId         String?
+  sandboxLeaseId          String?
+  requestedBy             ComputeRequestedBy
+  status                  ComputeSessionStatus     @default(REQUESTED)
+  leaseStatus             ComputeLeaseStatus       @default(REQUESTED)
+  runnerLeaseId           String?
+  containerId             String?
+  runnerType              ComputeRunnerType        @default(DOCKER)
+  baseImage               String
+  leaseTokenHash          String                   @unique
+  leaseAcquiredAt         DateTime?
+  leaseLastUsedAt         DateTime?
+  leaseReleasedAt         DateTime?
+  startedAt               DateTime?
+  lastHeartbeatAt         DateTime?
+  expiresAt               DateTime?
+  endedAt                 DateTime?
+  failureReason           String?
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  representative          Representative           @relation(fields: [representativeId], references: [id])
+  representativeVersion   RepresentativeVersion?   @relation(fields: [representativeVersionId], references: [id], onDelete: SetNull)
+  contact                 Contact?                 @relation(fields: [contactId], references: [id])
+  conversation            Conversation?            @relation(fields: [conversationId], references: [id])
+  generationRun           GenerationRun?           @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
+  delegationTask          DelegationTask?          @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep      DelegationTaskStep?      @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  policyProfile           CapabilityPolicyProfile? @relation(fields: [policyProfileId], references: [id])
+  sandboxLease            SandboxLease?            @relation(fields: [sandboxLeaseId], references: [id], onDelete: SetNull)
+  toolExecutions          ToolExecution[]
+  browserSession          BrowserSession?
+  artifacts               Artifact[]
+  approvalRequests        ApprovalRequest[]
+  ledgerEntries           LedgerEntry[]
 
   @@index([representativeId, status, createdAt])
+  @@index([representativeVersionId, status, createdAt])
   @@index([contactId, createdAt])
   @@index([conversationId, createdAt])
   @@index([generationRunId, createdAt])
@@ -2335,6 +2452,7 @@ model ApprovalRequest {
   subagentId               String?
   delegationTaskId         String?
   delegationTaskStepId     String?
+  workspaceSkillReleaseId  String?                       @unique
   status                   ApprovalStatus                @default(PENDING)
   reason                   String
   requestedActionSummary   String
@@ -2353,6 +2471,7 @@ model ApprovalRequest {
   generationRun            GenerationRun?                @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
   delegationTask           DelegationTask?               @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
   delegationTaskStep       DelegationTaskStep?           @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  workspaceSkillRelease    WorkspaceSkillRelease?        @relation(fields: [workspaceSkillReleaseId], references: [id], onDelete: SetNull)
   delegationExternalEffect DelegationTaskExternalEffect?
   workflowRuns             WorkflowRun[]
 

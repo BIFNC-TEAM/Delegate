@@ -11,6 +11,10 @@ import {
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
+import {
+  installClawHubSkillForWorkspace,
+  setWorkspaceSkillRepresentativeBinding,
+} from "./workspace-skills";
 
 export type DashboardRepresentativeSkillPack = DomainSkillPack & {
   linkId: string;
@@ -31,24 +35,21 @@ export type RepresentativeSkillPackSnapshot = {
 
 const linkedSkillPackInclude = {
   skillPack: true,
+  workspaceInstall: {
+    include: {
+      releases: {
+        where: { status: "INSTALLED" as const },
+        orderBy: { adoptedAt: "desc" as const },
+        take: 1,
+      },
+    },
+  },
 } as const;
 let demoFallbackSnapshot: RepresentativeSkillPackSnapshot | null = null;
 
 type RepresentativeSkillPackWithSkillPack = Prisma.RepresentativeSkillPackGetPayload<{
   include: typeof linkedSkillPackInclude;
 }>;
-
-type PersistableSkillPack = Pick<
-  DomainSkillPack,
-  | "displayName"
-  | "summary"
-  | "version"
-  | "sourceUrl"
-  | "ownerHandle"
-  | "verificationTier"
-  | "capabilityTags"
-  | "executesCode"
->;
 
 export async function getRepresentativeSkillPackSnapshot(
   representativeSlug: string,
@@ -95,82 +96,46 @@ export async function installClawHubSkillPackForRepresentative(params: {
   representativeSlug: string;
   skillPackSlug: string;
 }): Promise<DashboardRepresentativeSkillPack> {
-  const discovered = await fetchClawHubRepresentativeSkill({
-    slug: params.skillPackSlug,
-  });
-  if (!discovered) {
-    throw new Error(`ClawHub skill "${params.skillPackSlug}" was not found.`);
-  }
-
   if (shouldUseStaticFallbackMode(params.representativeSlug)) {
+    const discovered = await fetchClawHubRepresentativeSkill({ slug: params.skillPackSlug });
+    if (!discovered) throw new Error(`ClawHub skill "${params.skillPackSlug}" was not found.`);
     return installClawHubSkillPackInDemoFallback(discovered);
   }
 
   try {
     const representative = await prisma.representative.findUnique({
       where: { slug: params.representativeSlug },
+      select: {
+        ownerId: true,
+        skillPackLinks: {
+          where: { skillPack: { source: SkillPackSource.CLAWHUB, slug: params.skillPackSlug } },
+          select: { enabled: true },
+          take: 1,
+        },
+      },
     });
-    if (!representative) {
-      throw new Error(`Representative "${params.representativeSlug}" not found.`);
-    }
-
-    const now = new Date();
-    const persistedDiscoveredSkillPack = buildPersistedSkillPackFields(discovered);
-
-    const link = await prisma.$transaction(async (tx) => {
-      const skillPack = await tx.skillPack.upsert({
-        where: {
-          source_slug: {
-            source: SkillPackSource.CLAWHUB,
-            slug: discovered.slug,
-          },
-        },
-        create: {
-          source: SkillPackSource.CLAWHUB,
-          slug: discovered.slug,
-          ...persistedDiscoveredSkillPack,
-        },
-        update: persistedDiscoveredSkillPack,
-      });
-
-      const existing = await tx.representativeSkillPack.findUnique({
-        where: {
-          representativeId_skillPackId: {
-            representativeId: representative.id,
-            skillPackId: skillPack.id,
-          },
-        },
-        include: linkedSkillPackInclude,
-      });
-
-      if (existing) {
-        return tx.representativeSkillPack.update({
-          where: { id: existing.id },
-          data: {
-            installStatus: "installed",
-            installedVersion: discovered.version ?? existing.installedVersion ?? null,
-            installedAt: existing.installedAt ?? now,
-          },
-          include: linkedSkillPackInclude,
-        });
-      }
-
-      return tx.representativeSkillPack.create({
-        data: {
-          representativeId: representative.id,
-          skillPackId: skillPack.id,
-          enabled: false,
-          installStatus: "installed",
-          installedVersion: discovered.version ?? null,
-          installedAt: now,
-        },
-        include: linkedSkillPackInclude,
-      });
+    if (!representative) throw new Error(`Representative "${params.representativeSlug}" not found.`);
+    const install = await installClawHubSkillForWorkspace({
+      ownerId: representative.ownerId,
+      activeRepresentativeSlug: params.representativeSlug,
+      skillPackSlug: params.skillPackSlug,
+      installedBy: representative.ownerId,
     });
-
-    return serializeLinkedSkillPack(link);
+    await setWorkspaceSkillRepresentativeBinding({
+      ownerId: representative.ownerId,
+      installId: install.installId,
+      representativeSlug: params.representativeSlug,
+      enabled: representative.skillPackLinks[0]?.enabled ?? false,
+      changedBy: representative.ownerId,
+    });
+    const snapshot = await getRepresentativeSkillPackSnapshot(params.representativeSlug);
+    const linked = snapshot?.skillPacks.find((pack) => pack.slug === params.skillPackSlug);
+    if (!linked) throw new Error("Installed skill could not be resolved after workspace binding.");
+    return linked;
   } catch (error) {
     if (shouldUseDemoFallback(error, params.representativeSlug)) {
+      const discovered = await fetchClawHubRepresentativeSkill({ slug: params.skillPackSlug });
+      if (!discovered) throw new Error(`ClawHub skill "${params.skillPackSlug}" was not found.`);
       return installClawHubSkillPackInDemoFallback(discovered);
     }
     throw error;
@@ -201,18 +166,18 @@ export async function setRepresentativeSkillPackEnabled(params: {
       throw new Error("Representative skill pack link not found.");
     }
 
-    const updated = await prisma.representativeSkillPack.update({
-      where: { id: link.id },
-      data: {
-        enabled: params.enabled,
-        installStatus: link.installStatus === "available" ? "installed" : link.installStatus,
-        installedAt: link.installedAt ?? new Date(),
-        installedVersion: link.installedVersion ?? link.skillPack.version ?? null,
-      },
-      include: linkedSkillPackInclude,
+    if (!link.workspaceInstallId) {
+      throw new Error("Install this skill into the workspace before enabling it for a representative.");
+    }
+    await setWorkspaceSkillRepresentativeBinding({
+      installId: link.workspaceInstallId,
+      representativeSlug: params.representativeSlug,
+      enabled: params.enabled,
     });
-
-    return serializeLinkedSkillPack(updated);
+    const snapshot = await getRepresentativeSkillPackSnapshot(params.representativeSlug);
+    const updated = snapshot?.skillPacks.find((pack) => pack.linkId === link.id);
+    if (!updated) throw new Error("Representative skill binding could not be resolved after update.");
+    return updated;
   } catch (error) {
     if (shouldUseDemoFallback(error, params.representativeSlug)) {
       return setDemoFallbackSkillPackEnabled(params.linkId, params.enabled);
@@ -224,50 +189,26 @@ export async function setRepresentativeSkillPackEnabled(params: {
 function serializeLinkedSkillPack(
   link: RepresentativeSkillPackWithSkillPack,
 ): DashboardRepresentativeSkillPack {
+  const release = link.workspaceInstall?.releases[0];
   return {
     linkId: link.id,
     id: link.skillPack.id,
     slug: link.skillPack.slug,
-    displayName: link.skillPack.displayName,
+    displayName: release?.displayName ?? link.skillPack.displayName,
     source: mapSkillPackSourceFromDb(link.skillPack.source),
-    summary: link.skillPack.summary,
-    ...(link.skillPack.version ? { version: link.skillPack.version } : {}),
-    ...(link.skillPack.sourceUrl ? { sourceUrl: link.skillPack.sourceUrl } : {}),
-    ...(link.skillPack.ownerHandle ? { ownerHandle: link.skillPack.ownerHandle } : {}),
-    ...(link.skillPack.verificationTier
-      ? { verificationTier: link.skillPack.verificationTier }
+    summary: release?.summary ?? link.skillPack.summary,
+    ...(release?.version ?? link.skillPack.version ? { version: release?.version ?? link.skillPack.version ?? undefined } : {}),
+    ...(release?.sourceUrl ?? link.skillPack.sourceUrl ? { sourceUrl: release?.sourceUrl ?? link.skillPack.sourceUrl ?? undefined } : {}),
+    ...(release?.ownerHandle ?? link.skillPack.ownerHandle ? { ownerHandle: release?.ownerHandle ?? link.skillPack.ownerHandle ?? undefined } : {}),
+    ...(release?.verificationTier ?? link.skillPack.verificationTier
+      ? { verificationTier: release?.verificationTier ?? link.skillPack.verificationTier ?? undefined }
       : {}),
-    capabilityTags: parseCapabilityTags(link.skillPack.capabilityTags),
-    executesCode: link.skillPack.executesCode,
+    capabilityTags: parseCapabilityTags(release?.capabilityTags ?? link.skillPack.capabilityTags),
+    executesCode: release?.executesCode ?? link.skillPack.executesCode,
     enabled: link.enabled,
     installStatus: normalizeInstallStatus(link.installStatus),
     ...(link.installedVersion ? { version: link.installedVersion } : {}),
     ...(link.installedAt ? { installedAt: link.installedAt.toISOString() } : {}),
-  };
-}
-
-function buildPersistedSkillPackFields(
-  pack: PersistableSkillPack,
-): Pick<
-  Prisma.SkillPackUncheckedCreateInput,
-  | "displayName"
-  | "summary"
-  | "version"
-  | "sourceUrl"
-  | "ownerHandle"
-  | "verificationTier"
-  | "capabilityTags"
-  | "executesCode"
-> {
-  return {
-    displayName: pack.displayName,
-    summary: pack.summary,
-    version: pack.version ?? null,
-    sourceUrl: pack.sourceUrl ?? null,
-    ownerHandle: pack.ownerHandle ?? null,
-    verificationTier: pack.verificationTier ?? null,
-    capabilityTags: pack.capabilityTags,
-    executesCode: pack.executesCode,
   };
 }
 

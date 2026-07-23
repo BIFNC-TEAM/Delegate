@@ -13,6 +13,7 @@ const { mockPrisma, mockFinalizeComputeApprovalConversation } = vi.hoisted(() =>
     },
     computeSession: {
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     eventAudit: {
       create: vi.fn(),
@@ -84,6 +85,7 @@ describe("approval workflow cancellation", () => {
     }));
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
     mockPrisma.computeSession.update.mockResolvedValue({ id: "session-1" });
+    mockPrisma.computeSession.updateMany.mockResolvedValue({ count: 0 });
     mockPrisma.toolExecution.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.workflowRun.findMany.mockResolvedValue([
       {
@@ -128,6 +130,41 @@ describe("approval workflow cancellation", () => {
     });
   });
 
+  it("rejects workspace skill decisions at the compute approval boundary", async () => {
+    mockPrisma.approvalRequest.findUnique.mockResolvedValue({
+      ...buildApproval("PENDING"),
+      workspaceSkillReleaseId: "release-1",
+    });
+    const { resolveApproval } = await import("../src/executions");
+
+    await expect(resolveApproval("approval-1", {
+      resolution: "approved",
+      resolvedBy: "owner-dashboard",
+    })).rejects.toMatchObject({
+      message: "approval_request_domain_mismatch",
+      statusCode: 409,
+    });
+    expect(mockPrisma.approvalRequest.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects an orphaned workspace skill decision at the compute approval boundary", async () => {
+    mockPrisma.approvalRequest.findUnique.mockResolvedValue({
+      ...buildApproval("PENDING"),
+      reason: "skill_version_update_review",
+      workspaceSkillReleaseId: null,
+    });
+    const { resolveApproval } = await import("../src/executions");
+
+    await expect(resolveApproval("approval-1", {
+      resolution: "approved",
+      resolvedBy: "owner-dashboard",
+    })).rejects.toMatchObject({
+      message: "approval_request_domain_mismatch",
+      statusCode: 409,
+    });
+    expect(mockPrisma.approvalRequest.updateMany).not.toHaveBeenCalled();
+  });
+
   it("queues a CANCEL command when a pending approval is approved", async () => {
     mockPrisma.approvalRequest.findUniqueOrThrow.mockResolvedValue(buildApproval("APPROVED"));
     const { resolveApproval } = await import("../src/executions");
@@ -158,16 +195,17 @@ describe("approval workflow cancellation", () => {
     });
   });
 
-  it("refreshes the compute session lifetime when approval is granted", async () => {
+  it("does not extend the compute session beyond its creation-time expiry", async () => {
+    const existingExpiresAt = new Date(Date.now() + 5 * 60 * 1000);
     mockPrisma.approvalRequest.findUnique.mockResolvedValue({
       ...buildApproval("PENDING"),
       sessionId: "session-1",
-      representative: { computeMaxSessionMinutes: 15 },
+      session: { expiresAt: existingExpiresAt },
+      representative: { computeMaxSessionMinutes: 60 },
     });
     mockPrisma.approvalRequest.findUniqueOrThrow.mockResolvedValue(buildApproval("APPROVED"));
     const { resolveApproval } = await import("../src/executions");
 
-    const before = Date.now();
     await resolveApproval("approval-1", {
       resolution: "approved",
       resolvedBy: "owner-dashboard",
@@ -176,13 +214,65 @@ describe("approval workflow cancellation", () => {
     expect(mockPrisma.computeSession.update).toHaveBeenCalledWith({
       where: { id: "session-1" },
       data: expect.objectContaining({
-        expiresAt: expect.any(Date),
         lastHeartbeatAt: expect.any(Date),
         failureReason: null,
       }),
     });
-    const expiresAt = mockPrisma.computeSession.update.mock.calls.at(-1)?.[0].data.expiresAt as Date;
-    expect(expiresAt.getTime()).toBeGreaterThanOrEqual(before + 14 * 60 * 1000);
+    expect(
+      mockPrisma.computeSession.update.mock.calls.at(-1)?.[0].data,
+    ).not.toHaveProperty("expiresAt");
+    const expiryUpdate =
+      mockPrisma.computeSession.updateMany.mock.calls.at(-1)![0];
+    expect(expiryUpdate.where).toEqual({
+      id: "session-1",
+      expiresAt: { gt: expiryUpdate.data.expiresAt },
+    });
+    expect(expiryUpdate.data.expiresAt.getTime()).toBeGreaterThan(
+      existingExpiresAt.getTime(),
+    );
+  });
+
+  it("allows current policy to shorten, but not lengthen, the stored expiry", async () => {
+    const existingExpiresAt = new Date(Date.now() + 60 * 60 * 1000);
+    mockPrisma.approvalRequest.findUnique.mockResolvedValue({
+      ...buildApproval("PENDING"),
+      sessionId: "session-1",
+      session: { expiresAt: existingExpiresAt },
+      representative: { computeMaxSessionMinutes: 5 },
+    });
+    mockPrisma.approvalRequest.findUniqueOrThrow.mockResolvedValue(buildApproval("APPROVED"));
+    const { resolveApproval } = await import("../src/executions");
+
+    await resolveApproval("approval-1", {
+      resolution: "approved",
+      resolvedBy: "owner-dashboard",
+    });
+
+    const heartbeatUpdate =
+      mockPrisma.computeSession.update.mock.calls.at(-1)![0].data;
+    const expiryUpdate =
+      mockPrisma.computeSession.updateMany.mock.calls.at(-1)![0];
+    expect(expiryUpdate.where).toEqual({
+      id: "session-1",
+      expiresAt: { gt: expiryUpdate.data.expiresAt },
+    });
+    expect(expiryUpdate.data.expiresAt.getTime()).toBe(
+      heartbeatUpdate.lastHeartbeatAt.getTime() + 5 * 60 * 1000,
+    );
+  });
+
+  it("fails closed when a legacy session has no stored expiry ceiling", async () => {
+    const { resolveApprovalSessionExpiryCeiling } = await import(
+      "../src/executions"
+    );
+
+    expect(() =>
+      resolveApprovalSessionExpiryCeiling({
+        existingExpiresAt: null,
+        resolvedAt: new Date("2026-07-23T12:00:00.000Z"),
+        currentMaxSessionMinutes: 15,
+      }),
+    ).toThrow("compute_session_expiry_missing");
   });
 
   it("expires an overdue approval instead of accepting a late decision", async () => {
@@ -229,6 +319,7 @@ function buildApproval(status: string) {
     sessionId: null,
     toolExecutionId: null,
     subagentId: "compute-agent",
+    workspaceSkillReleaseId: null,
     status,
     reason: "policy_requires_approval",
     requestedActionSummary: "Run command",

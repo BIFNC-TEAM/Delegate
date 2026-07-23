@@ -1,6 +1,9 @@
 {
   "name": "delegate",
   "private": true,
+  "engines": {
+    "node": ">=20.18.1"
+  },
   "packageManager": "pnpm@10.23.0",
   "scripts": {
     "build": "turbo run build",
@@ -27,7 +30,11 @@
     "db:migrate:dev": "prisma migrate dev --schema prisma/schema.prisma",
     "db:deploy": "prisma migrate deploy --schema prisma/schema.prisma",
     "db:seed": "tsx prisma/seed.ts",
-    "db:setup": "pnpm db:generate && pnpm db:deploy && pnpm db:seed"
+    "db:setup": "pnpm db:generate && pnpm db:deploy && pnpm db:seed",
+    "test:postgres:skills": "pnpm --filter @delegate/web-data test:postgres:skills",
+    "test:postgres:mcp-health": "pnpm --filter @delegate/compute-broker test:postgres:mcp-health",
+    "test:migration-gate": "vitest run scripts/tests/workspace-skill-release-gate.test.ts",
+    "test:migration-fixture:pg16": "bash scripts/tests/workspace-skill-legacy-migration.pg16.sh"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

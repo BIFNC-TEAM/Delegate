@@ -11,6 +11,7 @@ import {
   ownerManagedPolicyOverlaysSchema,
   updateArtifactRequestSchema,
   updateArtifactResponseSchema,
+  updateMcpBindingRequestSchema,
   upsertMcpBindingRequestSchema,
   type ArtifactDetailResponse,
   type BrowserTransportKind,
@@ -40,9 +41,18 @@ import {
 } from "./compute-insights";
 import { buildRepresentativeGovernedActionSnapshot } from "./governed-actions";
 import { buildDelegationApprovalPolicyExplanation } from "./delegation-task-product";
+import { assertComputeApprovalDomain } from "./compute-approval-domain";
+import {
+  McpBindingOperationError,
+  updateMcpBindingWithOptimisticLock,
+} from "./mcp-binding-concurrency";
 import { prisma } from "./prisma";
 import { callComputeBroker } from "./compute-client";
 import { buildRepresentativeResourceGovernanceSnapshot } from "./resource-governance";
+import {
+  diffWorkspaceSkillRuntimeRequirements,
+  parseWorkspaceSkillRuntimeRequirements,
+} from "./workspace-skills";
 
 const computeSessionInclude = Prisma.validator<Prisma.ComputeSessionDefaultArgs>()({
   include: {
@@ -77,6 +87,12 @@ type BrowserSessionRecord = Prisma.BrowserSessionGetPayload<{
 
 const approvalInclude = Prisma.validator<Prisma.ApprovalRequestDefaultArgs>()({
   include: {
+    representative: {
+      select: {
+        slug: true,
+        displayName: true,
+      },
+    },
     contact: {
       select: {
         displayName: true,
@@ -96,6 +112,24 @@ const approvalInclude = Prisma.validator<Prisma.ApprovalRequestDefaultArgs>()({
         title: true,
         status: true,
         nextActionBy: true,
+      },
+    },
+    workspaceSkillRelease: {
+      include: {
+        install: {
+          include: {
+            skillPack: { select: { slug: true, source: true } },
+            releases: {
+              where: { status: "INSTALLED" },
+              select: { version: true, capabilityTags: true, runtimeRequirements: true },
+              take: 1,
+            },
+            representativeBindings: {
+              where: { enabled: true },
+              select: { id: true },
+            },
+          },
+        },
       },
     },
     workflowRuns: {
@@ -179,6 +213,7 @@ type RepresentativeIdentity = {
       displayName: string;
       members: Array<{
         id: string;
+        ownerId: string;
         displayName: string;
         role: string;
         canApproveCompute: boolean;
@@ -446,6 +481,11 @@ export type RepresentativeComputeApprovalSnapshot = {
   };
   approvals: Array<{
     id: string;
+    representative: {
+      slug: string;
+      displayName: string;
+    };
+    kind: "compute" | "skill_update";
     status: string;
     reason: string;
     requestedActionSummary: string;
@@ -498,6 +538,35 @@ export type RepresentativeComputeApprovalSnapshot = {
       status: string;
       nextActionBy: string;
     };
+    skillRelease?: {
+      installId: string;
+      releaseId: string;
+      slug: string;
+      displayName: string;
+      source: string;
+      installedVersion: string | null;
+      candidateVersion: string;
+      signatureStatus: string;
+      provenanceDigest: string | null;
+      capabilityTags: string[];
+      addedRequirements: string[];
+      runtimeRequirementDiff: {
+        added: string[];
+        removed: string[];
+        changed: boolean;
+      };
+      enabledBindings: number;
+      sbomUrl?: string;
+      attestationUrl?: string;
+      registryTrust?: {
+        source: string;
+        verified: boolean;
+        autoUpdateEligible: boolean;
+        decision: string;
+        securityStatus: string;
+        reasons: string[];
+      };
+    };
   }>;
 };
 
@@ -536,6 +605,8 @@ export type RepresentativeComputeArtifactDetail = ArtifactDetailResponse & {
 export type UpsertRepresentativeMcpBindingInput = {
   representativeSlug: string;
   bindingId?: string;
+  changedBy?: string;
+  expectedUpdatedAt?: string;
 } & UpsertMcpBindingRequest;
 
 export type UpdateRepresentativeManagedPolicyOverlaysInput = {
@@ -566,6 +637,63 @@ export type ExecuteRepresentativeNativeComputerUseInput = {
 };
 
 export type { RepresentativeApprovalInsightsSnapshot } from "./compute-insights";
+
+export async function getRepresentativeMcpBindingsSnapshot(representativeSlug: string) {
+  const representative = await prisma.representative.findUnique({
+    where: { slug: representativeSlug },
+    select: {
+      slug: true,
+      displayName: true,
+      mcpBindings: {
+        orderBy: [{ createdAt: "asc" }],
+        select: {
+          id: true,
+          representativeId: true,
+          representativeSkillPackLinkId: true,
+          slug: true,
+          displayName: true,
+          description: true,
+          serverUrl: true,
+          transportKind: true,
+          allowedToolNames: true,
+          defaultToolName: true,
+          enabled: true,
+          approvalRequired: true,
+          estimatedCostCentsPerCall: true,
+          maxRetries: true,
+          retryBackoffMs: true,
+          consecutiveFailures: true,
+          lastFailureAt: true,
+          lastFailureReason: true,
+          lastSuccessAt: true,
+          createdAt: true,
+          updatedAt: true,
+          representativeSkillPackLink: {
+            select: {
+              skillPack: {
+                select: {
+                  displayName: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+
+  if (!representative) {
+    return null;
+  }
+
+  return {
+    representative: {
+      slug: representative.slug,
+      displayName: representative.displayName,
+    },
+    bindings: representative.mcpBindings.map((binding) => serializeMcpBindingRecord(binding)),
+  };
+}
 
 export async function getRepresentativeComputeSnapshot(
   representativeSlug: string,
@@ -638,7 +766,7 @@ export async function getRepresentativeComputeApprovals(
     return null;
   }
 
-  const approvals = await queryRepresentativeApprovals(representative.id, 40);
+  const approvals = await queryRepresentativeApprovals(representative.id, 100, representative.ownerId);
   const executionIds = approvals
     .map((approval) => approval.toolExecutionId)
     .filter((id): id is string => Boolean(id));
@@ -1179,12 +1307,15 @@ export async function resolveRepresentativeComputeApproval(
     },
     select: {
       id: true,
+      reason: true,
+      workspaceSkillReleaseId: true,
     },
   });
 
   if (!approval) {
     throw new Error("Approval request not found for this representative.");
   }
+  assertComputeApprovalDomain(approval);
 
   const brokerResponse = await callComputeBroker(
     `/internal/compute/approvals/${input.approvalId}/resolve`,
@@ -1736,10 +1867,14 @@ export async function upsertRepresentativeMcpBinding(
   const representative = await getRepresentativeIdentity(input.representativeSlug);
 
   if (!representative) {
-    throw new Error(`Representative "${input.representativeSlug}" not found.`);
+    throw new McpBindingOperationError(
+      `Representative "${input.representativeSlug}" not found.`,
+      404,
+      "Representative not found.",
+    );
   }
 
-  const parsed = upsertMcpBindingRequestSchema.parse({
+  const rawBindingInput = {
     representativeSkillPackLinkId: input.representativeSkillPackLinkId,
     slug: input.slug,
     displayName: input.displayName,
@@ -1751,9 +1886,33 @@ export async function upsertRepresentativeMcpBinding(
     enabled: input.enabled,
     approvalRequired: input.approvalRequired,
     estimatedCostCentsPerCall: input.estimatedCostCentsPerCall,
-    maxRetries: input.maxRetries,
+    // Persist the legacy field as zero. Remote tool results are not provably
+    // idempotent, so the runtime never retries an invocation automatically.
+    maxRetries: 0,
     retryBackoffMs: input.retryBackoffMs,
-  });
+  };
+  const parsedResult = upsertMcpBindingRequestSchema.safeParse(rawBindingInput);
+  if (!parsedResult.success) {
+    throw new McpBindingOperationError(
+      parsedResult.error.issues[0]?.message
+        ?? "The MCP binding configuration is invalid.",
+      400,
+    );
+  }
+  const parsed = parsedResult.data;
+  if (input.bindingId) {
+    const updateResult = updateMcpBindingRequestSchema.safeParse({
+      ...rawBindingInput,
+      expectedUpdatedAt: input.expectedUpdatedAt,
+    });
+    if (!updateResult.success) {
+      throw new McpBindingOperationError(
+        updateResult.error.issues[0]?.message
+          ?? "A valid expectedUpdatedAt timestamp is required when updating an MCP binding.",
+        400,
+      );
+    }
+  }
 
   const linkId = parsed.representativeSkillPackLinkId ?? null;
   if (linkId) {
@@ -1768,65 +1927,116 @@ export async function upsertRepresentativeMcpBinding(
     });
 
     if (!linkedSkillPack) {
-      throw new Error("Representative skill pack link not found for this binding.");
+      throw new McpBindingOperationError(
+        "Representative skill pack link not found for this binding.",
+        404,
+      );
     }
   }
 
   if (parsed.defaultToolName && !parsed.allowedToolNames.includes(parsed.defaultToolName)) {
-    throw new Error("The default MCP tool must be included in allowedToolNames.");
+    throw new McpBindingOperationError(
+      "The default MCP tool must be included in allowedToolNames.",
+      400,
+    );
   }
 
-  const existingBinding =
-    input.bindingId
-      ? await prisma.representativeMcpBinding.findFirst({
-          where: {
-            id: input.bindingId,
-            representativeId: representative.id,
-          },
+  const binding = await prisma.$transaction(async (tx) => {
+    const data = {
+      representativeSkillPackLinkId: linkId,
+      slug: parsed.slug,
+      displayName: parsed.displayName,
+      description: parsed.description ?? null,
+      serverUrl: parsed.serverUrl,
+      transportKind: parsed.transportKind.toUpperCase() as "STREAMABLE_HTTP" | "SSE",
+      allowedToolNames: parsed.allowedToolNames,
+      defaultToolName: parsed.defaultToolName ?? null,
+      enabled: parsed.enabled,
+      approvalRequired: parsed.approvalRequired,
+      estimatedCostCentsPerCall: parsed.estimatedCostCentsPerCall,
+      maxRetries: parsed.maxRetries,
+      retryBackoffMs: parsed.retryBackoffMs,
+    };
+    const bindingId = input.bindingId;
+    const mutation = bindingId
+      ? await updateMcpBindingWithOptimisticLock({
+          expectedUpdatedAt: input.expectedUpdatedAt!,
+          loadCurrent: () => tx.representativeMcpBinding.findFirst({
+            where: {
+              id: bindingId,
+              representativeId: representative.id,
+            },
+          }),
+          claimUpdate: (expectedUpdatedAt) => tx.representativeMcpBinding.updateMany({
+            where: {
+              id: bindingId,
+              representativeId: representative.id,
+              updatedAt: expectedUpdatedAt,
+            },
+            data: {
+              ...data,
+              configRevision: {
+                increment: 1,
+              },
+              healthRequestGeneration: 0,
+              lastHealthObservationGeneration: 0,
+              lastHealthObservationStartedAt: null,
+              consecutiveFailures: 0,
+              lastFailureAt: null,
+              lastFailureReason: null,
+              lastSuccessAt: null,
+            },
+          }),
+          loadUpdated: () => tx.representativeMcpBinding.findUniqueOrThrow({
+            where: { id: bindingId },
+          }),
         })
-      : null;
-
-  if (input.bindingId && !existingBinding) {
-    throw new Error("MCP binding not found for this representative.");
-  }
-
-  const binding = input.bindingId
-    ? await prisma.representativeMcpBinding.update({
-        where: { id: input.bindingId },
-        data: {
-          representativeSkillPackLinkId: linkId,
-          slug: parsed.slug,
-          displayName: parsed.displayName,
-          description: parsed.description ?? null,
-          serverUrl: parsed.serverUrl,
-          transportKind: parsed.transportKind.toUpperCase() as "STREAMABLE_HTTP" | "SSE",
-          allowedToolNames: parsed.allowedToolNames,
-          defaultToolName: parsed.defaultToolName ?? null,
-          enabled: parsed.enabled,
-          approvalRequired: parsed.approvalRequired,
-          estimatedCostCentsPerCall: parsed.estimatedCostCentsPerCall,
-          maxRetries: parsed.maxRetries,
-          retryBackoffMs: parsed.retryBackoffMs,
+      : {
+          previous: null,
+          updated: await tx.representativeMcpBinding.create({
+            data: {
+              representativeId: representative.id,
+              ...data,
+            },
+          }),
+        };
+    const existingBinding = mutation.previous;
+    const saved = mutation.updated;
+    const changedFields = existingBinding
+      ? [
+          existingBinding.representativeSkillPackLinkId !== linkId ? "linked_skill" : null,
+          existingBinding.slug !== parsed.slug ? "slug" : null,
+          existingBinding.displayName !== parsed.displayName ? "display_name" : null,
+          existingBinding.description !== (parsed.description ?? null) ? "description" : null,
+          existingBinding.serverUrl !== parsed.serverUrl ? "server_url" : null,
+          existingBinding.transportKind.toLowerCase() !== parsed.transportKind ? "transport" : null,
+          JSON.stringify(existingBinding.allowedToolNames) !== JSON.stringify(parsed.allowedToolNames) ? "tool_allowlist" : null,
+          existingBinding.defaultToolName !== (parsed.defaultToolName ?? null) ? "default_tool" : null,
+          existingBinding.enabled !== parsed.enabled ? "enabled" : null,
+          existingBinding.approvalRequired !== parsed.approvalRequired ? "approval_required" : null,
+          existingBinding.estimatedCostCentsPerCall !== parsed.estimatedCostCentsPerCall ? "estimated_cost" : null,
+          existingBinding.maxRetries !== parsed.maxRetries || existingBinding.retryBackoffMs !== parsed.retryBackoffMs ? "retry_policy" : null,
+        ].filter((value): value is string => Boolean(value))
+      : ["created"];
+    await tx.eventAudit.create({
+      data: {
+        representativeId: representative.id,
+        type: "MCP_BINDING_CHANGED",
+        payload: {
+          bindingId: saved.id,
+          slug: saved.slug,
+          operation: input.bindingId ? "updated" : "created",
+          changedFields,
+          enabled: saved.enabled,
+          approvalRequired: saved.approvalRequired,
+          allowedToolCount: parsed.allowedToolNames.length,
+          representativeSkillPackLinkId: saved.representativeSkillPackLinkId,
+          changedBy: input.changedBy ?? representative.ownerId,
         },
-      })
-    : await prisma.representativeMcpBinding.create({
-        data: {
-          representativeId: representative.id,
-          representativeSkillPackLinkId: linkId,
-          slug: parsed.slug,
-          displayName: parsed.displayName,
-          description: parsed.description ?? null,
-          serverUrl: parsed.serverUrl,
-          transportKind: parsed.transportKind.toUpperCase() as "STREAMABLE_HTTP" | "SSE",
-          allowedToolNames: parsed.allowedToolNames,
-          defaultToolName: parsed.defaultToolName ?? null,
-          enabled: parsed.enabled,
-          approvalRequired: parsed.approvalRequired,
-          estimatedCostCentsPerCall: parsed.estimatedCostCentsPerCall,
-          maxRetries: parsed.maxRetries,
-          retryBackoffMs: parsed.retryBackoffMs,
-        },
-      });
+      },
+    });
+    return saved;
+  });
 
   return serializeMcpBindingRecord({
     ...binding,
@@ -1839,6 +2049,9 @@ function serializeComputeSession(session: ComputeSessionRecord) {
 
   return {
     id: session.id,
+    ...(session.representativeVersionId
+      ? { representativeVersionId: session.representativeVersionId }
+      : {}),
     status: session.status.toLowerCase(),
     leaseStatus: session.leaseStatus.toLowerCase(),
     requestedBy: session.requestedBy.toLowerCase(),
@@ -1946,6 +2159,7 @@ async function getRepresentativeIdentity(
                 orderBy: [{ createdAt: "asc" }],
                 select: {
                   id: true,
+                  ownerId: true,
                   displayName: true,
                   role: true,
                   canApproveCompute: true,
@@ -2142,11 +2356,24 @@ async function getRepresentativeIdentity(
   });
 }
 
-async function queryRepresentativeApprovals(representativeId: string, take = 20) {
+async function queryRepresentativeApprovals(
+  representativeId: string,
+  take = 20,
+  workspaceOwnerId?: string,
+) {
   return prisma.approvalRequest.findMany({
-    where: { representativeId },
+    where: workspaceOwnerId
+      ? {
+          OR: [
+            { representative: { ownerId: workspaceOwnerId } },
+            { workspaceSkillRelease: { install: { ownerId: workspaceOwnerId } } },
+          ],
+        }
+      : { representativeId },
     ...approvalInclude,
-    orderBy: [{ requestedAt: "desc" }],
+    orderBy: workspaceOwnerId
+      ? [{ status: "asc" }, { requestedAt: "desc" }]
+      : [{ requestedAt: "desc" }],
     take,
   });
 }
@@ -2230,7 +2457,7 @@ async function buildRepresentativeApprovalInsightsSource(
   representative: RepresentativeIdentity,
 ): Promise<ApprovalInsightsSource> {
   const [approvals, blockedEvents, ledgerEntries] = await Promise.all([
-    queryRepresentativeApprovals(representative.id, 120),
+    queryRepresentativeApprovals(representative.id, 120, representative.ownerId),
     prisma.eventAudit.findMany({
       where: {
         representativeId: representative.id,
@@ -2368,6 +2595,7 @@ function serializeRepresentativeApproval(
   const approver = normalizeApprover(
     approval.resolvedBy,
     representative.owner.organization?.members.map((member) => ({
+      ownerId: member.ownerId,
       displayName: member.displayName,
       role: member.role,
       canApproveCompute: member.canApproveCompute,
@@ -2381,6 +2609,11 @@ function serializeRepresentativeApproval(
 
   return {
     id: approval.id,
+    representative: {
+      slug: approval.representative.slug,
+      displayName: approval.representative.displayName,
+    },
+    kind: approval.workspaceSkillRelease ? "skill_update" as const : "compute" as const,
     status: approval.status.toLowerCase(),
     reason: approval.reason,
     requestedActionSummary: approval.requestedActionSummary,
@@ -2390,7 +2623,9 @@ function serializeRepresentativeApproval(
       decision: "ask" as const,
       ...(approval.matchedPolicyRuleId ? { matchedRuleId: approval.matchedPolicyRuleId } : {}),
       ...(approval.requestPayloadHash ? { requestFingerprint: approval.requestPayloadHash } : {}),
-      explanation: buildDelegationApprovalPolicyExplanation(approval.reason, approval.matchedPolicyRuleId),
+      explanation: approval.workspaceSkillRelease
+        ? "A workspace skill update must satisfy provenance, permission-diff, and owner update-policy checks before adoption."
+        : buildDelegationApprovalPolicyExplanation(approval.reason, approval.matchedPolicyRuleId),
     },
     customerAccount,
     approver,
@@ -2406,6 +2641,11 @@ function serializeRepresentativeApproval(
         }
       : {}),
     ...(approval.subagentId ? { subagentId: approval.subagentId } : {}),
+    ...(approval.workspaceSkillRelease
+      ? {
+          skillRelease: serializeApprovalSkillRelease(approval.workspaceSkillRelease),
+        }
+      : {}),
     requestedAt: approval.requestedAt.toISOString(),
     ...(approval.expiresAt ? { expiresAt: approval.expiresAt.toISOString() } : {}),
     ...(approval.decisionNote ? { decisionNote: approval.decisionNote } : {}),
@@ -2430,7 +2670,15 @@ function serializeRepresentativeApproval(
             createdAt: execution.createdAt.toISOString(),
           },
         }
-      : {}),
+      : approval.workspaceSkillRelease
+        ? {
+            action: {
+              capability: "skill_update",
+              status: approval.status.toLowerCase(),
+              createdAt: approval.requestedAt.toISOString(),
+            },
+          }
+        : {}),
     ...(approval.resolvedAt ? { resolvedAt: approval.resolvedAt.toISOString() } : {}),
     ...(approval.resolvedBy ? { resolvedBy: approval.resolvedBy } : {}),
     ...(approval.toolExecutionId ? { toolExecutionId: approval.toolExecutionId } : {}),
@@ -2438,6 +2686,76 @@ function serializeRepresentativeApproval(
     ...(workflow ? { workflowStatus: workflow.status.toLowerCase() } : {}),
     ...(workflow ? { workflowScheduledAt: workflow.scheduledAt.toISOString() } : {}),
   };
+}
+
+function serializeApprovalSkillRelease(
+  release: NonNullable<ApprovalRecord["workspaceSkillRelease"]>,
+) {
+  const installedTags = parseApprovalCapabilityTags(release.install.releases[0]?.capabilityTags);
+  const candidateTags = parseApprovalCapabilityTags(release.capabilityTags);
+  const installedRequirements = deriveApprovalRequirements(installedTags);
+  const candidateRequirements = deriveApprovalRequirements(candidateTags);
+  const runtimeRequirementDiff = diffWorkspaceSkillRuntimeRequirements(
+    parseWorkspaceSkillRuntimeRequirements(release.install.releases[0]?.runtimeRequirements),
+    parseWorkspaceSkillRuntimeRequirements(release.runtimeRequirements),
+  );
+  const registryTrustEvidence = parseApprovalRegistryTrustEvidence(release.registryTrustEvidence);
+  return {
+    installId: release.installId,
+    releaseId: release.id,
+    slug: release.install.skillPack.slug,
+    displayName: release.displayName,
+    source: release.install.skillPack.source.toLowerCase(),
+    installedVersion: release.install.installedVersion,
+    candidateVersion: release.version,
+    signatureStatus: release.signatureStatus.toLowerCase(),
+    provenanceDigest: release.provenanceDigest,
+    capabilityTags: candidateTags,
+    addedRequirements: candidateRequirements.filter((item) => !installedRequirements.includes(item)),
+    runtimeRequirementDiff,
+    enabledBindings: release.install.representativeBindings.length,
+    ...(release.registryTrustSource
+      ? {
+          registryTrust: {
+            source: release.registryTrustSource,
+            verified: release.registryVerified,
+            autoUpdateEligible: release.registryTrustEligible,
+            decision: registryTrustEvidence.decision,
+            securityStatus: registryTrustEvidence.securityStatus,
+            reasons: registryTrustEvidence.reasons,
+          },
+        }
+      : {}),
+    ...(release.sbomUrl ? { sbomUrl: release.sbomUrl } : {}),
+    ...(release.attestationUrl ? { attestationUrl: release.attestationUrl } : {}),
+  };
+}
+
+function parseApprovalRegistryTrustEvidence(value: Prisma.JsonValue | null) {
+  const evidence = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Prisma.JsonObject
+    : null;
+  return {
+    decision: typeof evidence?.decision === "string" ? evidence.decision : "unknown",
+    securityStatus: typeof evidence?.securityStatus === "string" ? evidence.securityStatus : "unknown",
+    reasons: Array.isArray(evidence?.reasons)
+      ? evidence.reasons.filter((reason): reason is string => typeof reason === "string").slice(0, 32)
+      : [],
+  };
+}
+
+function parseApprovalCapabilityTags(value: Prisma.JsonValue | undefined) {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function deriveApprovalRequirements(tags: string[]) {
+  const capabilities = ["exec", "read", "write", "process", "browser", "mcp"];
+  const normalized = tags.map((tag) => tag.toLowerCase());
+  return capabilities.filter((capability) =>
+    normalized.some((tag) => tag === capability || tag.startsWith(`${capability}-`) || tag.endsWith(`-${capability}`)),
+  );
 }
 
 function redactApprovalCommand(value: string) {

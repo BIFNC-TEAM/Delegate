@@ -11,6 +11,7 @@ import { deriveConversationComputeEntitlements } from "./entitlements";
 import { loadRepresentativeMcpBinding, resolveMcpToolName } from "./mcp-bindings";
 import { normalizeContainerPath } from "./path-utils";
 import { prisma } from "./prisma";
+import { loadComputeRuntimeAuthority } from "./runtime-authority";
 import { SessionError } from "./session-error";
 import { serializeCapabilityProfile } from "./serializers";
 
@@ -106,17 +107,63 @@ export async function loadSessionPolicyContext(sessionId: string) {
     throw new SessionError(409, "compute_session_already_terminated");
   }
 
-  if (session.expiresAt && session.expiresAt.getTime() < Date.now()) {
-    throw new SessionError(409, "compute_session_expired");
-  }
+  assertComputeSessionExpiry(session.expiresAt);
 
   if (!session.policyProfile) {
     throw new SessionError(409, "capability_policy_profile_missing");
   }
 
+  const runtimeAuthority = await loadComputeRuntimeAuthority({
+    representativeId: session.representativeId,
+    representativeSlug: session.representative.slug,
+    pinnedRepresentativeVersionId: session.representativeVersionId,
+  });
+  if (!runtimeAuthority.compute.enabled) {
+    throw new SessionError(409, "compute_disabled_for_published_version");
+  }
+  const effectiveExpiresAt = resolveComputeSessionExpiryCeiling({
+    storedExpiresAt: session.expiresAt,
+    createdAt: session.createdAt,
+    runtimeMaxSessionMinutes: runtimeAuthority.compute.maxSessionMinutes,
+  });
+  assertComputeSessionExpiry(effectiveExpiresAt);
+  if (effectiveExpiresAt < session.expiresAt) {
+    await prisma.computeSession.updateMany({
+      where: {
+        id: session.id,
+        expiresAt: { gt: effectiveExpiresAt },
+      },
+      data: {
+        expiresAt: effectiveExpiresAt,
+      },
+    });
+  }
+  const currentProfile = serializeCapabilityProfile(session.policyProfile);
+
   return {
-    session,
-    profile: serializeCapabilityProfile(session.policyProfile),
+    session:
+      effectiveExpiresAt.getTime() === session.expiresAt.getTime()
+        ? session
+        : { ...session, expiresAt: effectiveExpiresAt },
+    profile: {
+      ...currentProfile,
+      defaultDecision: resolveRestrictiveDecision(
+        currentProfile.defaultDecision,
+        runtimeAuthority.compute.defaultPolicyMode,
+      ),
+      maxSessionMinutes: Math.min(
+        currentProfile.maxSessionMinutes,
+        runtimeAuthority.compute.maxSessionMinutes,
+      ),
+      artifactRetentionDays: Math.min(
+        currentProfile.artifactRetentionDays,
+        runtimeAuthority.compute.artifactRetentionDays,
+      ),
+      networkMode: runtimeAuthority.compute.networkMode,
+      networkAllowlist: [...runtimeAuthority.compute.networkAllowlist],
+      filesystemMode: runtimeAuthority.compute.filesystemMode,
+    },
+    runtimeAuthority,
     managedProfiles: [
       ...(session.representative.owner.organization?.capabilityProfiles ?? []),
       ...session.representative.owner.capabilityProfiles,
@@ -145,6 +192,7 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
           representativeId: context.session.representativeId,
           bindingId: input.bindingId,
           bindingSlug: input.bindingSlug,
+          runtimeGrants: context.runtimeAuthority.mcpBindings,
         })
       : null;
   const mcpToolName =
@@ -155,7 +203,7 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
         }).toolName
       : undefined;
   const bindingDomain = mcpBinding ? new URL(mcpBinding.serverUrl).hostname : undefined;
-  const decision = evaluateCapabilityPolicyStack(
+  const evaluatedDecision = evaluateCapabilityPolicyStack(
     [...context.managedProfiles, context.profile],
     {
       capability: input.capability,
@@ -181,6 +229,10 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
         : {}),
     },
   );
+  const decision = restrictEvaluatedDecision(
+    evaluatedDecision,
+    context.runtimeAuthority.compute.capabilityModes[input.capability],
+  );
 
   const sessionSubagentId = resolveSessionComputeSubagentId(
     context.session.subagentId,
@@ -205,6 +257,58 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
     entitlements,
     mcpBinding,
     sessionSubagentId,
+  };
+}
+
+export function assertComputeSessionExpiry(
+  expiresAt: Date | null,
+  nowMs = Date.now(),
+): asserts expiresAt is Date {
+  if (!expiresAt) {
+    throw new SessionError(409, "compute_session_expiry_missing");
+  }
+  if (expiresAt.getTime() <= nowMs) {
+    throw new SessionError(409, "compute_session_expired");
+  }
+}
+
+export function resolveComputeSessionExpiryCeiling(params: {
+  storedExpiresAt: Date | null;
+  createdAt: Date;
+  runtimeMaxSessionMinutes: number;
+}) {
+  if (!params.storedExpiresAt) {
+    throw new SessionError(409, "compute_session_expiry_missing");
+  }
+  const runtimeCeiling = new Date(
+    params.createdAt.getTime() +
+      Math.max(0, params.runtimeMaxSessionMinutes) * 60 * 1000,
+  );
+  return params.storedExpiresAt <= runtimeCeiling
+    ? params.storedExpiresAt
+    : runtimeCeiling;
+}
+
+function resolveRestrictiveDecision(
+  current: "allow" | "ask" | "deny",
+  ceiling: "allow" | "ask" | "deny",
+): "allow" | "ask" | "deny" {
+  const rank = { allow: 0, ask: 1, deny: 2 } as const;
+  return rank[current] >= rank[ceiling] ? current : ceiling;
+}
+
+export function restrictEvaluatedDecision(
+  evaluated: { decision: "allow" | "ask" | "deny"; reason: string; matchedRuleId?: string },
+  ceiling: "allow" | "ask" | "deny",
+) {
+  const decision = resolveRestrictiveDecision(evaluated.decision, ceiling);
+  if (decision === evaluated.decision) return evaluated;
+  return {
+    decision,
+    reason:
+      decision === "deny"
+        ? "published_version_capability_denied"
+        : "published_version_capability_requires_approval",
   };
 }
 

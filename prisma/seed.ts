@@ -338,6 +338,60 @@ export async function seedDatabase(
 
       skillPackIdsBySlug.set(pack.slug, skillPack.id);
 
+      const workspaceInstall = pack.installStatus === "available" ? null : await tx.workspaceSkillInstall.upsert({
+        where: {
+          ownerId_skillPackId: {
+            ownerId: owner.id,
+            skillPackId: skillPack.id,
+          },
+        },
+        create: {
+          id: `workspace_skill_${skillPack.id}`,
+          ownerId: owner.id,
+          skillPackId: skillPack.id,
+          status:
+            pack.installStatus === "update_available" ? "UPDATE_AVAILABLE" : "INSTALLED",
+          reviewStatus: "APPROVED",
+          installedVersion: pack.version ?? null,
+          installedBy: owner.id,
+          installedAt: now,
+        },
+        update: {
+          status:
+            pack.installStatus === "update_available" ? "UPDATE_AVAILABLE" : "INSTALLED",
+          installedVersion: pack.version ?? null,
+          reviewStatus: "APPROVED",
+        },
+      });
+
+      if (workspaceInstall) {
+        await tx.workspaceSkillRelease.upsert({
+          where: {
+            installId_version: {
+              installId: workspaceInstall.id,
+              version: pack.version ?? "unversioned",
+            },
+          },
+          create: {
+            id: `workspace_skill_release_${skillPack.id}_${pack.version ?? "unversioned"}`,
+            installId: workspaceInstall.id,
+            version: pack.version ?? "unversioned",
+            status: "INSTALLED",
+            displayName: pack.displayName,
+            summary: pack.summary,
+            sourceUrl: pack.sourceUrl ?? null,
+            ownerHandle: pack.ownerHandle ?? null,
+            verificationTier: pack.verificationTier ?? null,
+            capabilityTags: pack.capabilityTags,
+            executesCode: pack.executesCode,
+            reviewedBy: owner.id,
+            reviewedAt: now,
+            adoptedAt: now,
+          },
+          update: {},
+        });
+      }
+
       await tx.representativeSkillPack.upsert({
         where: {
           representativeId_skillPackId: {
@@ -349,12 +403,14 @@ export async function seedDatabase(
           id: `rep_skill_pack_${skillPack.id}`,
           representativeId: representative.id,
           skillPackId: skillPack.id,
+          workspaceInstallId: workspaceInstall?.id ?? null,
           enabled: pack.enabled,
           installStatus: pack.installStatus,
           installedVersion: pack.version ?? null,
           installedAt: pack.installStatus === "available" ? null : now,
         },
         update: {
+          workspaceInstallId: workspaceInstall?.id ?? null,
           enabled: pack.enabled,
           installStatus: pack.installStatus,
           installedVersion: pack.version ?? null,

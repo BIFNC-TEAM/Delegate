@@ -16,6 +16,7 @@ import {
 import { computeLifecycleHooks } from "./lifecycle-hooks";
 import { closeBrowserSessionForComputeSession } from "./browser-sessions";
 import { isDelegationTaskSessionContextValid } from "./delegation-task-context";
+import { loadComputeRuntimeAuthority } from "./runtime-authority";
 
 export async function createComputeSession(rawInput: unknown) {
   const input = createComputeSessionRequestSchema.parse(rawInput);
@@ -24,9 +25,8 @@ export async function createComputeSession(rawInput: unknown) {
     select: {
       id: true,
       slug: true,
+      activeVersionId: true,
       computeEnabled: true,
-      computeBaseImage: true,
-      computeMaxSessionMinutes: true,
       capabilityProfiles: {
         where: { isDefault: true },
         orderBy: { createdAt: "desc" },
@@ -84,24 +84,53 @@ export async function createComputeSession(rawInput: unknown) {
     }
   }
 
+  const runtimeAuthority = await loadComputeRuntimeAuthority({
+    representativeId: representative.id,
+    representativeSlug: representative.slug,
+    activeVersionId: representative.activeVersionId,
+    requestedBy: input.requestedBy,
+    ...(input.contactId ? { contactId: input.contactId } : {}),
+    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    ...(input.generationRunId ? { generationRunId: input.generationRunId } : {}),
+    ...(input.delegationTaskId ? { delegationTaskId: input.delegationTaskId } : {}),
+  });
+  if (!runtimeAuthority.compute.enabled) {
+    throw new SessionError(409, "compute_disabled_for_published_version");
+  }
+  for (const capability of input.requestedCapabilities) {
+    if (runtimeAuthority.compute.capabilityModes[capability] === "deny") {
+      throw new SessionError(403, `capability_not_granted_by_published_version:${capability}`);
+    }
+  }
+
   const defaultPolicyProfile = representative.capabilityProfiles[0];
   const defaultPolicyProfileId = defaultPolicyProfile?.id;
   if (!defaultPolicyProfileId || !defaultPolicyProfile) {
     throw new SessionError(409, "capability_policy_profile_missing");
   }
 
+  if (
+    input.requestedBaseImage &&
+    !input.requestedCapabilities.includes("browser") &&
+    input.requestedBaseImage !== runtimeAuthority.compute.baseImage
+  ) {
+    throw new SessionError(403, "requested_base_image_not_granted_by_published_version");
+  }
   const requestedBaseImage =
     input.requestedCapabilities.includes("browser")
       ? computeBrokerConfig.browserImage
-      : input.requestedBaseImage ?? representative.computeBaseImage;
+      : runtimeAuthority.compute.baseImage;
   const leaseToken = randomBytes(24).toString("hex");
   const leaseTokenHash = sha256(leaseToken);
   const now = new Date();
-  const expiresAt = new Date(now.getTime() + representative.computeMaxSessionMinutes * 60 * 1000);
+  const expiresAt = new Date(
+    now.getTime() + runtimeAuthority.compute.maxSessionMinutes * 60 * 1000,
+  );
 
   const session = await prisma.computeSession.create({
     data: {
       representativeId: input.representativeId,
+      representativeVersionId: runtimeAuthority.representativeVersionId,
       contactId: input.contactId ?? null,
       conversationId: input.conversationId ?? null,
       generationRunId: input.generationRunId ?? null,
@@ -133,6 +162,7 @@ export async function createComputeSession(rawInput: unknown) {
         sessionId: session.id,
         delegationTaskId: input.delegationTaskId ?? null,
         delegationTaskStepId: input.delegationTaskStepId ?? null,
+        representativeVersionId: runtimeAuthority.representativeVersionId,
       },
     },
   });

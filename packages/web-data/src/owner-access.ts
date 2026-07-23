@@ -21,6 +21,17 @@ type OwnerAccessClient = {
   };
 };
 
+type OwnerPermissionRecord = {
+  organizationId: string | null;
+  organizationMember: {
+    organizationId: string;
+    canApproveCompute: boolean;
+    canManagePolicies: boolean;
+  } | null;
+};
+
+type OwnerPermissionLoader = (ownerId: string) => Promise<OwnerPermissionRecord | null>;
+
 export class RepresentativeAccessError extends Error {
   statusCode: 401 | 403 | 404;
 
@@ -72,18 +83,93 @@ export async function assertOwnerCanAccessRepresentative(
   return representative;
 }
 
-export async function assertOwnerCanApproveCompute(ownerId: string | null | undefined) {
+export async function assertOwnerCanApproveCompute(
+  ownerId: string | null | undefined,
+  loadOwnerPermissions: OwnerPermissionLoader = loadPersistedOwnerPermissions,
+) {
   const normalizedOwnerId = ownerId?.trim();
   if (!normalizedOwnerId) {
     throw new RepresentativeAccessError("Authentication required.", 401);
   }
-  const member = await prisma.organizationMember.findUnique({
-    where: { ownerId: normalizedOwnerId },
-    select: { canApproveCompute: true },
-  });
-  if (member && !member.canApproveCompute) {
+  const owner = await loadOwnerPermissions(normalizedOwnerId);
+  if (!hasOwnerOrganizationPermission(owner, "canApproveCompute")) {
     throw new RepresentativeAccessError("You do not have permission to approve Compute requests.", 403);
   }
+}
+
+export async function assertOwnerCanManageSkills(
+  ownerId: string | null | undefined,
+  loadOwnerPermissions: OwnerPermissionLoader = loadPersistedOwnerPermissions,
+) {
+  const normalizedOwnerId = ownerId?.trim();
+  if (!normalizedOwnerId) {
+    throw new RepresentativeAccessError("Authentication required.", 401);
+  }
+  const owner = await loadOwnerPermissions(normalizedOwnerId);
+  if (!hasOwnerOrganizationPermission(owner, "canManagePolicies")) {
+    throw new RepresentativeAccessError(
+      "You do not have permission to manage workspace skills or capability policy.",
+      403,
+    );
+  }
+}
+
+export async function assertOwnerCanResolveApproval(input: {
+  ownerId: string | null | undefined;
+  representativeSlug: string;
+  approvalId: string;
+}) {
+  const normalizedOwnerId = input.ownerId?.trim();
+  if (!normalizedOwnerId) {
+    throw new RepresentativeAccessError("Authentication required.", 401);
+  }
+  const approval = await prisma.approvalRequest.findFirst({
+    where: {
+      id: input.approvalId,
+      representative: {
+        slug: input.representativeSlug,
+        ownerId: normalizedOwnerId,
+      },
+    },
+    select: { workspaceSkillReleaseId: true },
+  });
+  if (!approval) {
+    throw new RepresentativeAccessError("Approval request not found.", 404);
+  }
+  if (approval.workspaceSkillReleaseId) {
+    await assertOwnerCanManageSkills(normalizedOwnerId);
+    return "skill_update" as const;
+  }
+  await assertOwnerCanApproveCompute(normalizedOwnerId);
+  return "compute" as const;
+}
+
+function hasOwnerOrganizationPermission(
+  owner: OwnerPermissionRecord | null,
+  permission: "canApproveCompute" | "canManagePolicies",
+) {
+  if (!owner) return false;
+  if (owner.organizationId === null) return true;
+  return owner.organizationMember?.organizationId === owner.organizationId
+    && owner.organizationMember[permission];
+}
+
+async function loadPersistedOwnerPermissions(
+  ownerId: string,
+): Promise<OwnerPermissionRecord | null> {
+  return prisma.owner.findUnique({
+    where: { id: ownerId },
+    select: {
+      organizationId: true,
+      organizationMember: {
+        select: {
+          organizationId: true,
+          canApproveCompute: true,
+          canManagePolicies: true,
+        },
+      },
+    },
+  });
 }
 
 function shouldAllowDemoRepresentativeAccess(representativeSlug: string): boolean {

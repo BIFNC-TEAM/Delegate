@@ -49,12 +49,17 @@ import {
 } from "./artifacts";
 import { computeLifecycleHooks } from "./lifecycle-hooks";
 import {
+  beginRepresentativeMcpBindingHealthObservation,
   loadRepresentativeMcpBinding,
   recordRepresentativeMcpBindingFailure,
   recordRepresentativeMcpBindingSuccess,
   resolveMcpToolName,
 } from "./mcp-bindings";
-import { callRemoteMcpTool, McpTransportError } from "./mcp";
+import {
+  callRemoteMcpTool,
+  toMcpExecutionFailureSummary,
+  toMcpHealthFailureCode,
+} from "./mcp";
 import { executeNativeComputerUseLoop } from "./native-browser";
 import { extractHostname, isHostnameAllowed, normalizeNetworkAllowlist } from "./network-allowlist";
 import { normalizeContainerPath } from "./path-utils";
@@ -332,11 +337,20 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
       representative: {
         select: { computeMaxSessionMinutes: true },
       },
+      session: {
+        select: { expiresAt: true },
+      },
     },
   });
 
   if (!approval) {
     throw new SessionError(404, "approval_request_not_found");
+  }
+  if (
+    approval.workspaceSkillReleaseId !== null
+    || approval.reason === "skill_version_update_review"
+  ) {
+    throw new SessionError(409, "approval_request_domain_mismatch");
   }
 
   if (approval.status !== "PENDING") {
@@ -559,12 +573,24 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
     }
 
     if (approval.sessionId) {
+      const expiryCeiling = resolveApprovalSessionExpiryCeiling({
+        existingExpiresAt: approval.session?.expiresAt ?? null,
+        resolvedAt,
+        currentMaxSessionMinutes:
+          approval.representative.computeMaxSessionMinutes,
+      });
+      await tx.computeSession.updateMany({
+        where: {
+          id: approval.sessionId,
+          expiresAt: { gt: expiryCeiling },
+        },
+        data: {
+          expiresAt: expiryCeiling,
+        },
+      });
       await tx.computeSession.update({
         where: { id: approval.sessionId },
         data: {
-          expiresAt: new Date(
-            resolvedAt.getTime() + approval.representative.computeMaxSessionMinutes * 60 * 1000,
-          ),
           lastHeartbeatAt: resolvedAt,
           failureReason: null,
         },
@@ -589,6 +615,21 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
       : null,
     artifacts: [],
   });
+}
+
+export function resolveApprovalSessionExpiryCeiling(params: {
+  existingExpiresAt: Date | null;
+  resolvedAt: Date;
+  currentMaxSessionMinutes: number;
+}) {
+  if (!params.existingExpiresAt) {
+    throw new SessionError(409, "compute_session_expiry_missing");
+  }
+
+  return new Date(
+    params.resolvedAt.getTime() +
+      Math.max(0, params.currentMaxSessionMinutes) * 60 * 1000,
+  );
 }
 
 export async function processNextApprovedExecution() {
@@ -841,7 +882,11 @@ async function runAllowedExecution(params: {
           bytesRead: 0,
           artifacts: [],
           failureSummary:
-            error instanceof Error ? error.message : "compute_execution_failed",
+            params.input.capability === "mcp"
+              ? toMcpExecutionFailureSummary(error)
+              : error instanceof Error
+                ? error.message
+                : "compute_execution_failed",
           browserCapture: undefined,
           transport: params.input.capability === "mcp" ? ("mcp" as const) : ("docker" as const),
           remoteUrl: undefined,
@@ -1602,12 +1647,18 @@ async function runMcpExecution(params: {
     representativeId: params.context.session.representativeId,
     bindingId: params.input.bindingId,
     bindingSlug: params.input.bindingSlug,
+    runtimeGrants: params.context.runtimeAuthority.mcpBindings,
   });
   const resolved = resolveMcpToolName({
     binding,
     requestedToolName: params.input.toolName,
   });
-  const startedAt = Date.now();
+  const startedAt = new Date();
+  const healthObservation = await beginRepresentativeMcpBindingHealthObservation({
+    bindingId: binding.id,
+    configRevision: binding.configRevision,
+    startedAt,
+  });
   let toolResult: Awaited<ReturnType<typeof callRemoteMcpTool>>;
   try {
     toolResult = await callRemoteMcpTool({
@@ -1618,20 +1669,19 @@ async function runMcpExecution(params: {
       requestedToolName: resolved.toolName,
       toolArguments: params.input.toolArguments,
     });
-    await recordRepresentativeMcpBindingSuccess(binding.id);
   } catch (error) {
-    const failureReason =
-      error instanceof McpTransportError
-        ? truncate(error.message, 180)
-        : error instanceof Error
-          ? truncate(error.message, 180)
-          : truncate(String(error), 180);
-
-    await recordRepresentativeMcpBindingFailure({
-      bindingId: binding.id,
-      failureReason,
-    });
+    if (healthObservation) {
+      await recordRepresentativeMcpBindingFailure({
+        observation: healthObservation,
+        failureReason: toMcpHealthFailureCode(error),
+      });
+    }
     throw error;
+  }
+  if (healthObservation) {
+    await recordRepresentativeMcpBindingSuccess({
+      observation: healthObservation,
+    });
   }
 
   const payload = {
@@ -1665,7 +1715,7 @@ async function runMcpExecution(params: {
 
   return {
     exitCode: 0,
-    wallMs: Date.now() - startedAt,
+    wallMs: Date.now() - startedAt.getTime(),
     bytesRead: Buffer.byteLength(JSON.stringify(payload), "utf8"),
     artifacts: [artifact],
     failureSummary: undefined,
@@ -1871,9 +1921,9 @@ export function resolveEffectiveDecision(params: {
   }
 
   if (
-    params.context.session.representative.computeAutoApproveBudgetCents > 0 &&
     typeof params.input.estimatedCostCents === "number" &&
-    params.input.estimatedCostCents > params.context.session.representative.computeAutoApproveBudgetCents &&
+    params.input.estimatedCostCents >
+      params.context.runtimeAuthority.compute.autoApproveBudgetCents &&
     params.decision.decision === "allow"
   ) {
     return {

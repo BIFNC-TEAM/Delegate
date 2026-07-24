@@ -132,7 +132,7 @@ export async function seedDatabase(
       return id;
     };
 
-    await tx.owner.upsert({
+    const owner = await tx.owner.upsert({
       where: { telegramUserId: DEMO_OWNER_TELEGRAM_ID },
       create: {
         id: DEMO_OWNER_ID,

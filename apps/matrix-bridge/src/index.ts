@@ -58,9 +58,21 @@ const server = createServer(async (request, response) => {
     const userMatch = url.pathname.match(/^\/_matrix\/app\/v1\/users\/(.+)$/);
     if (request.method === "GET" && userMatch?.[1]) {
       const binding = await getMatrixVirtualUserBinding(decodeURIComponent(userMatch[1]));
-      return binding
-        ? json(response, 200, {})
-        : json(response, 404, { errcode: "M_NOT_FOUND", error: "Virtual user is not registered." });
+      if (!binding) {
+        return json(response, 404, {
+          errcode: "M_NOT_FOUND",
+          error: "Virtual user is not registered.",
+        });
+      }
+      const registrationError = await ensureMatrixVirtualUserRegistered(
+        binding.matrixUserId,
+      );
+      return registrationError
+        ? json(response, 503, {
+            errcode: "M_UNKNOWN",
+            error: "Virtual user registration is temporarily unavailable.",
+          })
+        : json(response, 200, {});
     }
 
     if (request.method === "POST" && url.pathname === "/_matrix/app/v1/ping") {
@@ -120,6 +132,16 @@ export async function joinManagedMatrixInvites(
         roomId: event.room_id,
         reason: "matrix_remote_room_validation_failed",
       });
+      continue;
+    }
+
+    const registrationError = await ensureMatrixVirtualUserRegistered(
+      binding.matrixUserId,
+    );
+    if (registrationError) {
+      failures.push(
+        `${event.room_id}:${binding.matrixUserId}:${registrationError}`,
+      );
       continue;
     }
 
@@ -191,6 +213,52 @@ export async function joinManagedMatrixInvites(
     }
   }
   return failures;
+}
+
+export async function ensureMatrixVirtualUserRegistered(
+  matrixUserId: string,
+): Promise<string | null> {
+  if (
+    !config.homeserverUrl
+    || !config.applicationServiceToken
+    || !config.serverName
+  ) {
+    return "virtual_user_registration_unavailable";
+  }
+  const match = matrixUserId.match(/^@([^:]+):(.+)$/);
+  if (!match?.[1] || !match[2]) return "virtual_user_id_invalid";
+  const [, localpart, serverName] = match;
+  if (serverName.toLowerCase() !== config.serverName) {
+    return "virtual_user_server_mismatch";
+  }
+
+  const endpoint = new URL(
+    "/_matrix/client/v3/register",
+    config.homeserverUrl,
+  );
+  try {
+    const response = await fetchWithTimeout(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "m.login.application_service",
+        username: localpart,
+        inhibit_login: true,
+      }),
+    });
+    if (response.ok) return null;
+
+    const payload = await response.json().catch(() => ({})) as {
+      errcode?: string;
+    };
+    return response.status === 400 && payload.errcode === "M_USER_IN_USE"
+      ? null
+      : `register_${response.status}`;
+  } catch (error) {
+    return error instanceof Error && error.name === "AbortError"
+      ? "register_timeout"
+      : "register_failed";
+  }
 }
 
 async function leaveManagedMatrixRoom(

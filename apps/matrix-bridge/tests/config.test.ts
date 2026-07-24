@@ -27,4 +27,27 @@ describe("matrix bridge config", () => {
       }),
     ).toThrow("MATRIX_HOMESERVER_URL and MATRIX_AS_TOKEN");
   });
+
+  it("requires the Matrix server name for virtual-user registration", () => {
+    expect(() =>
+      resolveMatrixBridgeConfig({
+        MATRIX_AS_HS_TOKEN: "a-secure-token-that-is-long-enough",
+        MATRIX_HOMESERVER_URL: "https://matrix.example.com",
+        MATRIX_AS_TOKEN: "application-service-token",
+      }),
+    ).toThrow("MATRIX_SERVER_NAME");
+  });
+
+  it("accepts a valid server name with an explicit port", () => {
+    expect(
+      resolveMatrixBridgeConfig({
+        MATRIX_AS_HS_TOKEN: "a-secure-token-that-is-long-enough",
+        MATRIX_HOMESERVER_URL: "https://matrix.example.com",
+        MATRIX_AS_TOKEN: "application-service-token",
+        MATRIX_SERVER_NAME: "matrix.example.com:8448",
+      }),
+    ).toMatchObject({
+      serverName: "matrix.example.com:8448",
+    });
+  });
 });

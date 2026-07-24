@@ -10,6 +10,7 @@ const {
   process.env.MATRIX_AS_HS_TOKEN = "homeserver-token-that-is-long-enough";
   process.env.MATRIX_HOMESERVER_URL = "https://matrix.example.org";
   process.env.MATRIX_AS_TOKEN = "application-service-token";
+  process.env.MATRIX_SERVER_NAME = "example.org";
   return {
     mockActivateVerifiedMatrixDirectConversation: vi.fn(),
     mockGetMatrixRoomSecuritySnapshot: vi.fn(),
@@ -68,9 +69,9 @@ describe("managed Matrix invite joining", () => {
     mockGetMatrixRoomSecuritySnapshot.mockResolvedValue(
       securitySnapshot("PENDING_REMOTE_VALIDATION"),
     );
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response("", { status: 502 }),
-    );
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ user_id: representativeMatrixUserId }))
+      .mockResolvedValueOnce(new Response("", { status: 502 }));
 
     await expect(
       joinManagedMatrixInvites([directInviteEvent()]),
@@ -82,6 +83,7 @@ describe("managed Matrix invite joining", () => {
 
     vi.mocked(fetch).mockReset();
     vi.mocked(fetch)
+      .mockResolvedValueOnce(matrixUserInUseResponse())
       .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         joined: {
@@ -99,11 +101,90 @@ describe("managed Matrix invite joining", () => {
     expect(mockIsolateMatrixConversationRoom).not.toHaveBeenCalled();
   });
 
+  it("registers the managed virtual user before joining the room", async () => {
+    mockGetMatrixRoomSecuritySnapshot.mockResolvedValue(
+      securitySnapshot("PENDING_REMOTE_VALIDATION"),
+    );
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ user_id: representativeMatrixUserId }))
+      .mockResolvedValueOnce(new Response("", { status: 200 }))
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }));
+    mockActivateVerifiedMatrixDirectConversation.mockResolvedValue(true);
+
+    await expect(
+      joinManagedMatrixInvites([directInviteEvent()]),
+    ).resolves.toEqual([]);
+
+    const [registrationUrl, registrationRequest] =
+      vi.mocked(fetch).mock.calls[0]!;
+    expect(String(registrationUrl)).toBe(
+      "https://matrix.example.org/_matrix/client/v3/register",
+    );
+    expect(registrationRequest).toMatchObject({
+      method: "POST",
+      body: JSON.stringify({
+        type: "m.login.application_service",
+        username: "_delegate_rep",
+        inhibit_login: true,
+      }),
+    });
+    expect(new Headers(registrationRequest?.headers).get("authorization")).toBe(
+      "Bearer application-service-token",
+    );
+  });
+
+  it("keeps a pending room retryable when virtual-user registration fails", async () => {
+    mockGetMatrixRoomSecuritySnapshot.mockResolvedValue(
+      securitySnapshot("PENDING_REMOTE_VALIDATION"),
+    );
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response("", { status: 502 }),
+    );
+
+    await expect(
+      joinManagedMatrixInvites([directInviteEvent()]),
+    ).resolves.toEqual([
+      `${roomId}:${representativeMatrixUserId}:register_502`,
+    ]);
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(mockActivateVerifiedMatrixDirectConversation).not.toHaveBeenCalled();
+    expect(mockIsolateMatrixConversationRoom).not.toHaveBeenCalled();
+  });
+
+  it("does not register or join a virtual user from another server", async () => {
+    mockGetMatrixVirtualUserBinding.mockResolvedValue({
+      matrixUserId: "@_delegate_rep:other.example.org",
+    });
+    mockGetMatrixRoomSecuritySnapshot.mockResolvedValue({
+      ...securitySnapshot("PENDING_REMOTE_VALIDATION"),
+      representativeMatrixUserId: "@_delegate_rep:other.example.org",
+    });
+
+    await expect(
+      joinManagedMatrixInvites([{
+        ...directInviteEvent(),
+        state_key: "@_delegate_rep:other.example.org",
+      }]),
+    ).resolves.toEqual([
+      `${roomId}:@_delegate_rep:other.example.org:virtual_user_server_mismatch`,
+    ]);
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("does not isolate when another replay activates the same pending room first", async () => {
     mockGetMatrixRoomSecuritySnapshot
       .mockResolvedValueOnce(securitySnapshot("PENDING_REMOTE_VALIDATION"))
       .mockResolvedValueOnce(securitySnapshot("ACTIVE"));
     vi.mocked(fetch)
+      .mockResolvedValueOnce(matrixUserInUseResponse())
       .mockResolvedValueOnce(new Response("", { status: 200 }))
       .mockResolvedValueOnce(jsonResponse({
         joined: {
@@ -151,6 +232,13 @@ function securitySnapshot(
 function jsonResponse(value: unknown) {
   return new Response(JSON.stringify(value), {
     status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function matrixUserInUseResponse() {
+  return new Response(JSON.stringify({ errcode: "M_USER_IN_USE" }), {
+    status: 400,
     headers: { "content-type": "application/json" },
   });
 }

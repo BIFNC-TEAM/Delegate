@@ -109,6 +109,15 @@ Web checkout and Telegram Stars are separate payment rails:
 
 `apps/conversation-worker` claims durable generation outbox records with PostgreSQL row locking, invokes the shared representative runtime, persists the reply before delivery, and retries channel delivery without generating duplicate replies. Matrix outbound delivery is enabled only when `MATRIX_HOMESERVER_URL` and `MATRIX_AS_TOKEN` are both injected.
 
+When Synapse queries a managed MXID, the bridge first registers that virtual
+user through `m.login.application_service`, then returns success to the
+homeserver. Registration is idempotent (`M_USER_IN_USE` is accepted), requires
+the MXID domain to match `MATRIX_SERVER_NAME`, and is repeated before room join
+as a recovery guard for old or replayed transactions. Treating
+`M_USER_IN_USE` as idempotent assumes the homeserver registration reserves the
+managed `_delegate_` user namespace with `exclusive: true`; production must not
+enable Matrix without that registration invariant.
+
 Native Matrix must additionally provision or explicitly map rooms, validate the event sender's permitted audience identity, authorize edits and redactions against the original message actor, and move failed inbox work through retry/quarantine/dead-letter states.
 
 ### Matrix MVP room-security gate

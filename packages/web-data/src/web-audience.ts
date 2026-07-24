@@ -246,6 +246,56 @@ type WebAudienceClient = {
       };
     }): Promise<WebAudienceConversation>;
   };
+  representativeChannelBinding?: {
+    findUnique(args: {
+      where: {
+        representativeId_kind: {
+          representativeId: string;
+          kind: "WEB";
+        };
+      };
+      select: {
+        id: true;
+        connectionId: true;
+      };
+    }): Promise<{
+      id: string;
+      connectionId: string | null;
+    } | null>;
+  };
+  conversationChannelBinding?: {
+    upsert(args: {
+      where: {
+        bindingKey: string;
+      };
+      create: {
+        conversationId: string;
+        representativeBindingId: string;
+        kind: "WEB";
+        transport: "WEB";
+        sourceProvider: "WEB";
+        connectionId: string | null;
+        bindingKey: string;
+        externalConversationId: string;
+        externalThreadId: string;
+        metadata: {
+          audienceIdentityId: string;
+          audienceId: string;
+        };
+      };
+      update: {
+        conversationId: string;
+        representativeBindingId: string;
+        connectionId: string | null;
+        externalConversationId: string;
+        externalThreadId: string;
+        metadata: {
+          audienceIdentityId: string;
+          audienceId: string;
+        };
+      };
+    }): Promise<unknown>;
+  };
   conversationTurn: {
     create(args: {
       data: {
@@ -1144,40 +1194,125 @@ export async function resolveWebAudienceConversation(
     const audienceId = normalizeWebAudienceId(input.audienceId);
     const threadId = buildWebConversationThreadId(audienceId);
     const now = input.now ?? new Date();
-    const identity = await resolveAnonymousAudienceIdentity({ audienceId, now }, client);
-
-    return client.conversation.upsert({
-      where: {
-        representativeId_telegramChatId_contactId: {
-          representativeId: input.representativeId,
-          telegramChatId: threadId,
-          contactId: input.contactId,
+    const persistConversation = async (tx: WebAudienceClient) => {
+      const identity = await resolveAnonymousAudienceIdentity(
+        { audienceId, now },
+        tx,
+      );
+      const conversation = await tx.conversation.upsert({
+        where: {
+          representativeId_telegramChatId_contactId: {
+            representativeId: input.representativeId,
+            telegramChatId: threadId,
+            contactId: input.contactId,
+          },
         },
-      },
-      update: {
-        lastMessageAt: now,
-        audienceIdentityId: identity.id,
-        channelThreadId: threadId,
-        sourceChannel: "web",
-      },
-      create: {
-        representativeId: input.representativeId,
-        contactId: input.contactId,
-        audienceIdentityId: identity.id,
-        telegramChatId: threadId,
-        channelThreadId: threadId,
-        channel: "PRIVATE_CHAT",
-        sourceChannel: "web",
-        state: "ACTIVE",
-        lastMessageAt: now,
-      },
-    });
+        update: {
+          lastMessageAt: now,
+          audienceIdentityId: identity.id,
+          channelThreadId: threadId,
+          sourceChannel: "web",
+        },
+        create: {
+          representativeId: input.representativeId,
+          contactId: input.contactId,
+          audienceIdentityId: identity.id,
+          telegramChatId: threadId,
+          channelThreadId: threadId,
+          channel: "PRIVATE_CHAT",
+          sourceChannel: "web",
+          state: "ACTIVE",
+          lastMessageAt: now,
+        },
+      });
+
+      await ensureWebConversationChannelBinding(
+        {
+          representativeId: input.representativeId,
+          conversationId: conversation.id,
+          audienceIdentityId: identity.id,
+          audienceId,
+          threadId,
+        },
+        tx,
+      );
+      return conversation;
+    };
+
+    return client.$transaction
+      ? client.$transaction(persistConversation)
+      : persistConversation(client);
   } catch (error) {
     if (shouldUseDemoConversationErrorFallback(error, input.representativeId, client)) {
       return resolveDemoWebAudienceConversation(input);
     }
     throw error;
   }
+}
+
+async function ensureWebConversationChannelBinding(
+  input: {
+    representativeId: string;
+    conversationId: string;
+    audienceIdentityId: string;
+    audienceId: string;
+    threadId: string;
+  },
+  client: WebAudienceClient,
+) {
+  if (
+    !client.representativeChannelBinding
+    || !client.conversationChannelBinding
+  ) {
+    return;
+  }
+
+  const representativeBinding =
+    await client.representativeChannelBinding.findUnique({
+      where: {
+        representativeId_kind: {
+          representativeId: input.representativeId,
+          kind: "WEB",
+        },
+      },
+      select: {
+        id: true,
+        connectionId: true,
+      },
+    });
+  if (!representativeBinding) {
+    throw new Error("Representative Web channel binding was not found.");
+  }
+
+  const bindingKey =
+    `WEB:${input.representativeId}:${input.threadId}:`;
+  const bindingMetadata = {
+    audienceIdentityId: input.audienceIdentityId,
+    audienceId: input.audienceId,
+  };
+  await client.conversationChannelBinding.upsert({
+    where: { bindingKey },
+    create: {
+      conversationId: input.conversationId,
+      representativeBindingId: representativeBinding.id,
+      kind: "WEB",
+      transport: "WEB",
+      sourceProvider: "WEB",
+      connectionId: representativeBinding.connectionId,
+      bindingKey,
+      externalConversationId: input.threadId,
+      externalThreadId: input.threadId,
+      metadata: bindingMetadata,
+    },
+    update: {
+      conversationId: input.conversationId,
+      representativeBindingId: representativeBinding.id,
+      connectionId: representativeBinding.connectionId,
+      externalConversationId: input.threadId,
+      externalThreadId: input.threadId,
+      metadata: bindingMetadata,
+    },
+  });
 }
 
 export async function persistWebConversationExchange(

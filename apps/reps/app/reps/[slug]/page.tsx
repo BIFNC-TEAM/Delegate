@@ -9,6 +9,7 @@ import {
   getRepresentativePublicDeliverables,
   getPublicRepresentativeRuntime,
   readDelegateAuthSessionSecret,
+  resolvePublicAudiencePrincipal,
   verifyDelegateAuthSession,
 } from "@delegate/web-data";
 import {
@@ -91,8 +92,27 @@ export default async function RepresentativePage({
       cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value,
     readDelegateAuthSessionSecret(),
   );
-  const audienceSession =
-    authSession?.actor === "audience" && authSession.audienceIdentityId ? authSession : null;
+  let audienceSession =
+    authSession?.actor === "audience"
+    && authSession.audienceIdentityId
+    && authSession.audienceId
+      ? authSession
+      : null;
+  if (audienceSession) {
+    const audienceId = audienceSession.audienceId;
+    if (!audienceId) {
+      audienceSession = null;
+    } else {
+      try {
+        await resolvePublicAudiencePrincipal({
+          audienceId,
+          verifiedAuthSession: audienceSession,
+        });
+      } catch {
+        audienceSession = null;
+      }
+    }
+  }
   const audienceLoginHref = buildPublicAudienceLoginHref(representative.slug, locale);
   const audienceLogoutHref = buildPublicAudienceLogoutHref(representative.slug, locale);
   const publicDeliverables = deliverableSnapshot?.deliverables ?? [];

@@ -9,6 +9,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   assertMockRechargeMutationsEnabled,
   completeMockRechargeOrder,
   createMockRechargeOrder,
@@ -117,6 +118,37 @@ describe("agent wallet mock recharge", () => {
 
     expect(client.rechargeOrders).toHaveLength(1);
     expect(client.userWallets).toHaveLength(1);
+  });
+
+  it("persists representative product intent and rejects cross-context replay", async () => {
+    const client = new FakeRechargeClient();
+    await createMockRechargeOrder(
+      {
+        externalUserId: "user_1",
+        representativeId: "rep_1",
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        amountCents: 1200,
+        idempotencyKey: "recharge_purchase_intent",
+      },
+      client,
+    );
+
+    expect(client.rechargeOrders[0]).toMatchObject({
+      representativeId: "rep_1",
+      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+    });
+    await expect(
+      createMockRechargeOrder(
+        {
+          externalUserId: "user_1",
+          representativeId: "rep_other",
+          productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          amountCents: 1200,
+          idempotencyKey: "recharge_purchase_intent",
+        },
+        client,
+      ),
+    ).rejects.toThrow("different representative");
   });
 
   it("does not collapse separate keyless same-amount recharge operations", async () => {
@@ -371,6 +403,8 @@ type UserWalletRow = {
 type RechargeOrderRow = {
   id: string;
   userWalletId: string;
+  representativeId: string | null;
+  productCode: string | null;
   provider: PaymentProvider;
   providerOrderId: string | null;
   amountCents: number;
@@ -508,6 +542,8 @@ class FakeRechargeClient {
       const order: RechargeOrderRow = {
         id: args.data.id ?? `recharge_${this.rechargeOrders.length + 1}`,
         userWalletId: args.data.userWalletId,
+        representativeId: args.data.representativeId ?? null,
+        productCode: args.data.productCode ?? null,
         provider: args.data.provider,
         providerOrderId: args.data.providerOrderId ?? null,
         amountCents: args.data.amountCents,

@@ -12,13 +12,16 @@ The short-term web path is still backward-compatible with the existing Telegram-
 4. Server code resolves one `Contact` per representative and audience.
 5. Server code resolves one `Conversation` per representative, contact, and web audience thread.
 6. Chat writes the channel-neutral `Message` / `GenerationRun` path, returns `202 Accepted`, and completes asynchronously in the conversation worker; history and recent context come from Postgres, never from cookies.
-7. Recharge uses the same cookie-derived audience identity and writes `UserWallet.audienceIdentityId`.
+7. Recharge uses the same cookie-derived audience identity, writes `UserWallet.audienceIdentityId`, and persists the immutable representative/product purchase intent on the recharge order.
 8. Logto login links `IdentityLink(provider=LOGTO)` to the current `AudienceIdentity`.
 9. If the Logto subject already belongs to another audience identity, the current anonymous identity is merged into the registered target.
-10. Later cookie reuse of a merged anonymous identity resolves to the target identity, so contacts, wallets, memory, and sandbox identity do not regress.
-11. Payment external ids are linked through `IdentityLink(provider=PAYMENT_EXTERNAL_USER)`.
-12. Public compute session creation uses the same `contactId` and `conversationId`.
-13. Compute broker creates or reuses `SandboxIdentity` from `representativeId + contactId` and copies `Contact.audienceIdentityId`.
+10. Every authenticated business request revalidates the signed session against the current verified, unrevoked Logto link and its canonical identity.
+11. The canonical identity owns all linked state, while each signed browser keeps its existing `web:{audienceId}` conversation thread so pre-login history and artifacts remain reachable.
+12. Reuse of a merged anonymous cookie without its valid authenticated session rotates to a fresh anonymous identity instead of inheriting registered state.
+13. Wallet lookup prefers the one CNY wallet attached to the canonical identity; multiple wallets fail closed for reconciliation.
+14. Payment external ids are linked through `IdentityLink(provider=PAYMENT_EXTERNAL_USER)`.
+15. Public compute session creation uses the canonical identity and the active browser's `contactId` and `conversationId`.
+16. Compute broker creates or reuses `SandboxIdentity` from `representativeId + contactId` and copies `Contact.audienceIdentityId`.
 
 ## Public Runtime Gate
 
@@ -71,7 +74,24 @@ When a visitor logs in after using the public web chat, Delegate moves source re
 - `OpenVikingMemoryRecord.audienceIdentityId`
 - `IdentityLink.audienceIdentityId`
 
-If the original anonymous cookie is used again after merge, `resolveAnonymousAudienceIdentity` returns the merge target and refreshes `lastSeenAt`. This prevents later chat, recharge, or computer-use requests from reattaching state to the merged source identity.
+Authenticated Chat, SSE, artifact, Compute, recharge, mock-payment confirmation,
+and unused-credit reversal requests resolve a server-authoritative public
+principal. They verify that:
+
+- the signed auth session still points to a verified, unrevoked Logto link;
+- the session identity, Logto link target, and device Web identity share one
+  canonical registered identity;
+- accessed contacts, conversations, runs, artifacts, orders, and wallets belong
+  to that identity and the signed browser's Web thread;
+- long-lived SSE streams revalidate the captured authenticated session at least
+  every two seconds and close when the link is revoked or the session expires;
+- mock recharge completion matches the order's immutable representative and
+  product intent before any payment or token purchase is finalized.
+
+If the original anonymous cookie is later presented without its matching valid
+auth session, it is rotated to a fresh anonymous identity. Revoked links and
+ambiguous same-currency wallets fail closed rather than silently restoring,
+merging, or selecting financial state.
 
 ## Creator Dashboard Login
 
@@ -105,8 +125,8 @@ The runtime is on-demand:
 Useful focused checks:
 
 ```bash
-./node_modules/.bin/vitest run apps/reps/tests/public-chat-identity.test.ts apps/reps/tests/public-web-compute.test.ts
-./node_modules/.bin/vitest run packages/web-data/tests/web-audience.test.ts packages/web-data/tests/agent-wallet-recharge.test.ts
+./node_modules/.bin/vitest run apps/reps/tests/public-chat-identity.test.ts apps/reps/tests/public-web-compute.test.ts apps/reps/tests/public-recharge-security.test.ts
+./node_modules/.bin/vitest run packages/web-data/tests/public-audience-principal.test.ts packages/web-data/tests/web-audience.test.ts packages/web-data/tests/agent-wallet-recharge.test.ts
 ./node_modules/.bin/vitest run packages/web-data/tests/auth-identities.test.ts packages/web-data/tests/auth-session.test.ts packages/web-data/tests/owner-access.test.ts
 ./node_modules/.bin/vitest run apps/web/tests/auth-guard.test.ts
 ./node_modules/.bin/vitest run apps/compute-broker/tests/sandbox-leases.test.ts apps/compute-broker/tests/compute-session-sandbox-path.test.ts apps/compute-broker/tests/sandbox-schema.test.ts

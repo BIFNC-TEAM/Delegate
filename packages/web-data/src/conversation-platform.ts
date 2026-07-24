@@ -61,6 +61,7 @@ import {
   type ConversationEntitlementReservation,
   type ServiceEntitlementClient,
 } from "./service-entitlements";
+import { buildWebConversationThreadId } from "./web-audience";
 
 export type GenerationWalletReservation = {
   usageChargeId: string;
@@ -1688,7 +1689,7 @@ export function isGenerationWorkLeaseLostError(
     );
 }
 
-async function fenceGenerationWorkLease(
+export async function fenceGenerationWorkLease(
   tx: Prisma.TransactionClient,
   input: GenerationWorkLease & { runId: string },
 ) {
@@ -2919,14 +2920,17 @@ export async function failGenerationRun(input: {
 export async function getPublicGenerationRunSnapshot(input: {
   representativeSlug: string;
   runId: string;
-  audienceKey: string;
+  audienceIdentityId: string;
+  audienceId: string;
 }) {
   const run = await prisma.generationRun.findFirst({
     where: {
       id: input.runId,
       conversation: {
         representative: { slug: input.representativeSlug },
-        audienceIdentity: { audienceKey: input.audienceKey },
+        audienceIdentityId: input.audienceIdentityId,
+        sourceChannel: "web",
+        channelThreadId: buildWebConversationThreadId(input.audienceId),
       },
     },
     include: {
@@ -2981,13 +2985,16 @@ export async function getPublicGenerationRunSnapshot(input: {
 
 export async function getPublicConversationHistory(input: {
   representativeSlug: string;
-  audienceKey: string;
+  audienceIdentityId: string;
+  audienceId: string;
   limit?: number;
 }) {
   const conversation = await prisma.conversation.findFirst({
     where: {
       representative: { slug: input.representativeSlug },
-      audienceIdentity: { audienceKey: input.audienceKey },
+      audienceIdentityId: input.audienceIdentityId,
+      sourceChannel: "web",
+      channelThreadId: buildWebConversationThreadId(input.audienceId),
     },
     include: {
       messages: {

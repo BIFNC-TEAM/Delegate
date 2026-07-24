@@ -2,17 +2,18 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
-  buildWebAudienceExternalUserId,
   getPublicRepresentativeRuntime,
   getUserAgentWalletBalance,
   prisma,
+  resolvePublicAudienceWalletExternalUserId,
   reverseAgentTokenPurchase,
 } from "@delegate/web-data";
 
 import {
-  getPublicChatCookieName,
-  readPublicChatSessionState,
-} from "../../../public-chat";
+  publicAudiencePrincipalErrorStatus,
+  resolvePublicAudienceRequestPrincipal,
+  setPublicAudienceSessionCookie,
+} from "../../../public-principal";
 
 export async function POST(
   _request: Request,
@@ -33,23 +34,39 @@ export async function POST(
     }
 
     const cookieStore = await cookies();
-    const sessionState = readPublicChatSessionState({
+    const { principal, sessionState } = await resolvePublicAudienceRequestPrincipal({
       representativeSlug: slug,
-      cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
+      cookieStore,
     });
-    const externalUserId = buildWebAudienceExternalUserId(
-      slug,
-      sessionState.audienceId,
-    );
+    const expectedExternalUserId = await resolvePublicAudienceWalletExternalUserId({
+      audienceIdentityId: principal.audienceIdentityId,
+      representativeSlug: slug,
+      audienceId: principal.audienceId,
+      currency: "CNY",
+    });
     const purchase = await prisma.agentTokenPurchase.findFirst({
       where: {
         rechargeOrderId,
         representativeId: runtime.setup.id,
         userWallet: {
-          externalUserId,
+          ...(principal.mode === "authenticated"
+            ? { audienceIdentityId: principal.audienceIdentityId }
+            : {
+                OR: [
+                  { audienceIdentityId: principal.audienceIdentityId },
+                  { externalUserId: expectedExternalUserId },
+                ],
+              }),
         },
       },
-      select: { id: true },
+      select: {
+        id: true,
+        userWallet: {
+          select: {
+            externalUserId: true,
+          },
+        },
+      },
     });
     if (!purchase) {
       return privateJson({ error: "Recharge purchase not found." }, 404);
@@ -60,13 +77,26 @@ export async function POST(
       idempotencyKey: `public_demo_reversal:${purchase.id}`,
     });
     const walletBalance = await getUserAgentWalletBalance({
-      externalUserId,
+      externalUserId: purchase.userWallet.externalUserId,
       representativeId: runtime.setup.id,
     });
 
-    return privateJson({ reversal, walletBalance }, 200);
+    const response = privateJson({ reversal, walletBalance }, 200);
+    setPublicAudienceSessionCookie(response, _request, slug, sessionState);
+    return response;
   } catch (error) {
     console.error("Failed to reverse public demo service credits.", error);
+    const principalErrorStatus = publicAudiencePrincipalErrorStatus(error);
+    if (principalErrorStatus) {
+      return privateJson(
+        {
+          error: principalErrorStatus === 401
+            ? "登录状态已失效，请重新登录后再试。"
+            : "钱包身份需要人工核对，当前操作未执行。",
+        },
+        principalErrorStatus,
+      );
+    }
     return privateJson(
       {
         error:

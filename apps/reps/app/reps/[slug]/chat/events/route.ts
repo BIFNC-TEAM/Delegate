@@ -1,20 +1,25 @@
 import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
 
 import {
   buildWebAudienceExternalUserId,
-  buildWebAudienceKey,
   getUserAgentWalletBalance,
   getPublicConversationHistory,
   getPublicRepresentativeRuntime,
+  resolvePublicAudienceWalletExternalUserId,
 } from "@delegate/web-data";
 
 import {
   deriveTierUsage,
-  getPublicChatCookieName,
-  readPublicChatSessionState,
 } from "../../public-chat";
+import {
+  publicAudiencePrincipalErrorStatus,
+  resolvePublicAudienceRequestPrincipal,
+  setPublicAudienceSessionCookie,
+} from "../../public-principal";
 
 const encoder = new TextEncoder();
+const PRINCIPAL_REVALIDATION_INTERVAL_MS = 2_000;
 
 export async function GET(
   request: Request,
@@ -29,24 +34,61 @@ export async function GET(
     });
   }
 
-  const cookieStore = await cookies();
-  const session = readPublicChatSessionState({
-    representativeSlug: slug,
-    cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
-  });
-  const audienceKey = buildWebAudienceKey(session.audienceId);
-  const externalUserId = buildWebAudienceExternalUserId(slug, session.audienceId);
+  let audienceRequest: Awaited<
+    ReturnType<typeof resolvePublicAudienceRequestPrincipal>
+  >;
+  let externalUserId: string;
+  try {
+    audienceRequest = await resolvePublicAudienceRequestPrincipal({
+      representativeSlug: slug,
+      cookieStore: await cookies(),
+    });
+    externalUserId = process.env.DATABASE_URL?.trim()
+      ? await resolvePublicAudienceWalletExternalUserId({
+          audienceIdentityId:
+            audienceRequest.principal.audienceIdentityId,
+          representativeSlug: slug,
+          audienceId: audienceRequest.principal.audienceId,
+        })
+      : buildWebAudienceExternalUserId(
+          slug,
+          audienceRequest.principal.audienceId,
+        );
+  } catch (error) {
+    const status = publicAudiencePrincipalErrorStatus(error);
+    if (!status) throw error;
+    return NextResponse.json(
+      {
+        error:
+          status === 401
+            ? "Authentication required."
+            : "Audience account requires reconciliation.",
+      },
+      {
+        status,
+        headers: { "Cache-Control": "private, no-store" },
+      },
+    );
+  }
+  const { principal, revalidate, sessionState } = audienceRequest;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let previous = "";
       let serviceBalance: Awaited<ReturnType<typeof getUserAgentWalletBalance>> = null;
       let nextBalanceRefreshAt = 0;
+      let nextPrincipalRevalidationAt = 0;
       try {
         while (!request.signal.aborted) {
+          if (Date.now() >= nextPrincipalRevalidationAt) {
+            await revalidate();
+            nextPrincipalRevalidationAt =
+              Date.now() + PRINCIPAL_REVALIDATION_INTERVAL_MS;
+          }
           const history = await getPublicConversationHistory({
             representativeSlug: slug,
-            audienceKey,
+            audienceIdentityId: principal.audienceIdentityId,
+            audienceId: principal.audienceId,
           });
           if (
             process.env.DATABASE_URL?.trim()
@@ -91,7 +133,7 @@ export async function GET(
     },
   });
 
-  return new Response(stream, {
+  const response = new NextResponse(stream, {
     headers: {
       "Cache-Control": "private, no-cache, no-transform",
       Connection: "keep-alive",
@@ -99,6 +141,13 @@ export async function GET(
       "X-Accel-Buffering": "no",
     },
   });
+  setPublicAudienceSessionCookie(
+    response,
+    request,
+    slug,
+    sessionState,
+  );
+  return response;
 }
 
 function wait(milliseconds: number, signal: AbortSignal) {

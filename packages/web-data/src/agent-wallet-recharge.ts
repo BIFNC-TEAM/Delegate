@@ -45,6 +45,8 @@ type UserWalletRecord = {
 type RechargeOrderRecord = {
   id: string;
   userWalletId: string;
+  representativeId: string | null;
+  productCode: string | null;
   provider: PaymentProvider;
   providerOrderId: string | null;
   amountCents: number;
@@ -111,6 +113,8 @@ export type RechargeOrderSnapshot = {
 export type CreateMockRechargeOrderInput = {
   externalUserId: string;
   audienceIdentityId?: string;
+  representativeId?: string;
+  productCode?: string;
   amountCents: number;
   currency?: string;
   displayName?: string;
@@ -138,6 +142,8 @@ export type CompleteMockRechargeAndPurchaseSnapshot = {
 };
 
 const SUPPORTED_RECHARGE_CURRENCIES = new Set(["CNY", "USD"]);
+export const AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE =
+  "agent-wallet:service-credit:v1";
 
 export function assertMockRechargeMutationsEnabled(
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -194,6 +200,12 @@ export async function createMockRechargeOrder(
     const order = await tx.rechargeOrder.create({
       data: {
         userWalletId: userWallet.id,
+        ...(normalized.representativeId
+          ? { representativeId: normalized.representativeId }
+          : {}),
+        ...(normalized.productCode
+          ? { productCode: normalized.productCode }
+          : {}),
         provider: PaymentProvider.MOCK,
         providerOrderId: checkout.providerOrderId,
         amountCents: normalized.amountCents,
@@ -418,6 +430,22 @@ export async function completeMockRechargeAndPurchaseAgentTokens(
   if (!representativeId) throw new Error("representativeId is required.");
 
   return runWalletWriteTransaction(client, async (tx) => {
+    const purchaseIntent = await tx.rechargeOrder.findUnique({
+      where: { id: rechargeOrderId },
+      select: {
+        representativeId: true,
+        productCode: true,
+      },
+    });
+    if (
+      purchaseIntent?.representativeId !== representativeId
+      || purchaseIntent.productCode !==
+        AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+    ) {
+      throw new Error(
+        "Recharge order does not match the intended representative service product.",
+      );
+    }
     const rechargeOrder = await completeMockRechargeOrder(
       rechargeOrderId,
       {
@@ -496,7 +524,14 @@ export async function completeMockRechargeAndPurchaseAgentTokens(
 function normalizeCreateMockRechargeOrderInput(
   input: CreateMockRechargeOrderInput,
 ): Required<Pick<CreateMockRechargeOrderInput, "externalUserId" | "amountCents" | "currency" | "idempotencyKey">> &
-  Pick<CreateMockRechargeOrderInput, "audienceIdentityId" | "displayName" | "telegramUserId"> {
+  Pick<
+    CreateMockRechargeOrderInput,
+    | "audienceIdentityId"
+    | "representativeId"
+    | "productCode"
+    | "displayName"
+    | "telegramUserId"
+  > {
   const externalUserId = input.externalUserId.trim();
   if (!externalUserId) {
     throw new Error("externalUserId is required.");
@@ -505,6 +540,13 @@ function normalizeCreateMockRechargeOrderInput(
   const currency = input.currency ?? "CNY";
   if (!SUPPORTED_RECHARGE_CURRENCIES.has(currency)) {
     throw new Error(`Unsupported recharge currency: ${currency}`);
+  }
+  const representativeId = input.representativeId?.trim() || undefined;
+  const productCode = input.productCode?.trim() || undefined;
+  if (Boolean(representativeId) !== Boolean(productCode)) {
+    throw new Error(
+      "representativeId and productCode must be provided together.",
+    );
   }
   return {
     externalUserId,
@@ -515,6 +557,8 @@ function normalizeCreateMockRechargeOrderInput(
       "mock_recharge",
     ),
     ...(input.audienceIdentityId?.trim() ? { audienceIdentityId: input.audienceIdentityId.trim() } : {}),
+    ...(representativeId ? { representativeId } : {}),
+    ...(productCode ? { productCode } : {}),
     ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
     ...(input.telegramUserId?.trim() ? { telegramUserId: input.telegramUserId.trim() } : {}),
   };
@@ -619,6 +663,10 @@ function assertExistingRechargeOrderMatches(
   const mismatches = [
     order.provider !== PaymentProvider.MOCK ? "provider" : null,
     !ownerMatches ? "owner" : null,
+    order.representativeId !== (normalized.representativeId ?? null)
+      ? "representative"
+      : null,
+    order.productCode !== (normalized.productCode ?? null) ? "product" : null,
     order.amountCents !== normalized.amountCents ? "amount" : null,
     order.currency !== normalized.currency ? "currency" : null,
   ].filter((value): value is string => value !== null);

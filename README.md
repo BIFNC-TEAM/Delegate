@@ -104,7 +104,7 @@ Current status against the wallet plan:
 | Area | Status | Notes |
 | --- | --- | --- |
 | Account types | Implemented | User cash, deferred service credit, Creator pending/withdrawable/frozen, platform deferred/earned revenue, provider cost, external settlement, and payout clearing are modeled in Prisma. |
-| Data models | Mostly implemented | `UserWallet`, aggregate `AgentWallet`, scoped `UserAgentWallet`, `WalletTransaction`, append-only `WalletLedgerEntry`, purchase/usage/withdrawal allocation records, recharge/provider events, Creator earnings, and withdrawal requests are implemented. There is no standalone generic `User` table yet; public users are represented by `UserWallet.externalUserId`. |
+| Data models | Mostly implemented | `UserWallet`, aggregate `AgentWallet`, scoped `UserAgentWallet`, `WalletTransaction`, append-only `WalletLedgerEntry`, purchase/usage/withdrawal allocation records, recharge/provider events, Creator earnings, and withdrawal requests are implemented. Public users resolve through canonical `AudienceIdentity`; `UserWallet.externalUserId` remains a legacy payment selector while wallet ownership is checked through `audienceIdentityId`. |
 | Integer money and tokens | Implemented | Money uses integer smallest currency units such as CNY fen and USD cents. Agent tokens are integers. |
 | User recharge | Implemented for development mock flow | Recharge creation, idempotent provider events, payment completion, cash credit, and representative-scoped service-credit purchase can complete atomically. Mock endpoints are unavailable in production. |
 | User buys Agent service credits | Implemented | The service checks `UserWallet`, debits cash, credits the exact `UserAgentWallet`, creates a FIFO purchase lot and Creator pending earnings, updates the aggregate Agent projection, and writes balanced ledger entries. |
@@ -210,10 +210,12 @@ pnpm docker:up
 Run the standard checks:
 
 ```bash
-pnpm typecheck
-pnpm test
+pnpm verify
 pnpm build
 ```
+
+`pnpm verify` generates the Prisma client first, validates the checked-in schema,
+then runs workspace typechecks and tests in that order.
 
 Useful local URLs for the default Docker profile:
 
@@ -302,6 +304,9 @@ The default `.env.example` is safe for local development. Important settings:
 - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `ARK_API_KEY` enable live provider calls.
 - `OPENVIKING_*` controls public memory sync, recall, and commit behavior.
 - `COMPUTE_*` controls the broker, Docker runner, browser image, and native computer-use readiness.
+- `CONVERSATION_OUTBOX_PROCESSING_LEASE_MS` defaults to the five-minute
+  renewable conversation-worker lease and cannot be configured below five
+  minutes.
 - `WORKFLOW_*` controls local-runner versus Temporal workflow execution.
 - `ARTIFACT_STORE_*` controls MinIO-backed artifact storage.
 - `KNOWLEDGE_OBJECT_STORE_*` controls private knowledge source storage. Its default bucket is fixed to `delegate-1324808004`; Tencent COS can be used through its S3-compatible endpoint with `FORCE_PATH_STYLE=false`.

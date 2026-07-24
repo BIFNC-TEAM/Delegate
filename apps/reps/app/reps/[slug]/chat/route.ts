@@ -7,26 +7,28 @@ import { createConversationPlan, renderReplyPreview, resolveConversationSubagent
 import {
   acceptInboundConversationMessage,
   buildRepresentativeRuntimeProfile,
-  buildWebAudienceKey,
   buildWebAudienceExternalUserId,
   getUserAgentWalletBalance,
   getPublicConversationHistory,
   getPublicRepresentativeRuntime,
+  resolvePublicAudienceWalletExternalUserId,
   resolveWebAudienceContact,
   resolveWebAudienceConversation,
   ServiceCreditRequiredError,
+  type PublicAudiencePrincipal,
 } from "@delegate/web-data";
 
 import {
   deriveTierUsage,
-  getPublicChatCookieName,
   normalizePublicChatRequest,
-  PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
-  readPublicChatSessionState,
   resolvePublicChatTier,
-  shouldUseSecurePublicChatCookie,
-  writePublicChatSessionState,
 } from "../public-chat";
+import {
+  assertPublicAudienceResourceOwner,
+  publicAudiencePrincipalErrorStatus,
+  resolvePublicAudienceRequestPrincipal,
+  setPublicAudienceSessionCookie,
+} from "../public-principal";
 
 export async function GET(
   request: Request,
@@ -36,34 +38,44 @@ export async function GET(
   const runtime = await getPublicRepresentativeRuntime(slug);
   if (runtime.status !== "available") return publicRuntimeError(runtime.status);
 
-  const cookieStore = await cookies();
-  const session = readPublicChatSessionState({
-    representativeSlug: slug,
-    cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
-  });
-  let history = { state: "new", humanActive: false, freeRepliesUsed: 0, messages: [] as Array<unknown> };
   try {
-    history = await getPublicConversationHistory({
+    const audienceRequest = await resolvePublicAudienceRequestPrincipal({
       representativeSlug: slug,
-      audienceKey: buildWebAudienceKey(session.audienceId),
+      cookieStore: await cookies(),
     });
-  } catch (error) {
-    if (!shouldUseNonPersistentDemoChat(error, slug)) throw error;
-  }
-
-  const response = NextResponse.json({
-    ...history,
-    usage: await derivePublicWalletUsage({
-      representativeId: runtime.setup.id,
+    const { principal, sessionState } = audienceRequest;
+    let history = { state: "new", humanActive: false, freeRepliesUsed: 0, messages: [] as Array<unknown> };
+    try {
+      history = await getPublicConversationHistory({
+        representativeSlug: slug,
+        audienceIdentityId: principal.audienceIdentityId,
+        audienceId: principal.audienceId,
+      });
+    } catch (error) {
+      if (!shouldUseNonPersistentDemoChat(error, slug)) throw error;
+    }
+    const externalUserId = await resolvePublicWalletExternalUserId({
+      principal,
       representativeSlug: slug,
-      audienceId: session.audienceId,
-      freeRepliesUsed: history.freeRepliesUsed,
-      freeReplyLimit: runtime.setup.contract.freeReplyLimit,
-    }),
-  });
-  response.headers.set("Cache-Control", "private, no-store");
-  setPublicChatCookie(response, request, slug, session);
-  return response;
+    });
+
+    const response = NextResponse.json({
+      ...history,
+      usage: await derivePublicWalletUsage({
+        representativeId: runtime.setup.id,
+        externalUserId,
+        freeRepliesUsed: history.freeRepliesUsed,
+        freeReplyLimit: runtime.setup.contract.freeReplyLimit,
+      }),
+    });
+    response.headers.set("Cache-Control", "private, no-store");
+    setPublicAudienceSessionCookie(response, request, slug, sessionState);
+    return response;
+  } catch (error) {
+    const principalError = publicPrincipalErrorResponse(error);
+    if (principalError) return principalError;
+    throw error;
+  }
 }
 
 export async function POST(
@@ -77,36 +89,44 @@ export async function POST(
     const body = normalizePublicChatRequest(await request.json());
     if (!body.message) return privateJson({ error: "Message is required." }, 400);
 
-    const cookieStore = await cookies();
-    const session = readPublicChatSessionState({
+    const { principal, sessionState } =
+      await resolvePublicAudienceRequestPrincipal({
       representativeSlug: slug,
-      cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
+      cookieStore: await cookies(),
     });
 
     try {
       const contact = await resolveWebAudienceContact({
         representativeId: runtime.setup.id,
         representativeSlug: slug,
-        audienceId: session.audienceId,
+        audienceId: principal.audienceId,
       });
+      assertPublicAudienceResourceOwner(
+        principal,
+        contact.audienceIdentityId,
+      );
       const conversation = await resolveWebAudienceConversation({
         representativeId: runtime.setup.id,
         contactId: contact.id,
-        audienceId: session.audienceId,
+        audienceId: principal.audienceId,
       });
-      const clientMessageId =
-        body.clientMessageId || `web:${session.audienceId}:${Date.now()}`;
-      const externalUserId = buildWebAudienceExternalUserId(
-        slug,
-        session.audienceId,
+      assertPublicAudienceResourceOwner(
+        principal,
+        conversation.audienceIdentityId,
       );
+      const clientMessageId =
+        body.clientMessageId || `web:${principal.audienceId}:${Date.now()}`;
+      const externalUserId = await resolvePublicWalletExternalUserId({
+        principal,
+        representativeSlug: slug,
+      });
       let accepted: Awaited<ReturnType<typeof acceptInboundConversationMessage>>;
       try {
         accepted = await acceptInboundConversationMessage({
           representativeSlug: slug,
           conversationId: conversation.id,
           text: body.message,
-          senderId: session.audienceId,
+          senderId: principal.audienceId,
           senderDisplayName: "Web visitor",
           clientMessageId,
           channel: "web",
@@ -122,8 +142,7 @@ export async function POST(
         if (acceptError instanceof ServiceCreditRequiredError) {
           const usage = await derivePublicWalletUsage({
             representativeId: runtime.setup.id,
-            representativeSlug: slug,
-            audienceId: session.audienceId,
+            externalUserId,
             freeRepliesUsed: acceptError.effectiveFreeRepliesUsed,
             freeReplyLimit: runtime.setup.contract.freeReplyLimit,
           });
@@ -136,15 +155,19 @@ export async function POST(
             },
             402,
           );
-          setPublicChatCookie(response, request, slug, session);
+          setPublicAudienceSessionCookie(
+            response,
+            request,
+            slug,
+            sessionState,
+          );
           return response;
         }
         throw acceptError;
       }
       const usage = await derivePublicWalletUsage({
         representativeId: runtime.setup.id,
-        representativeSlug: slug,
-        audienceId: session.audienceId,
+        externalUserId,
         freeRepliesUsed: conversation.freeRepliesUsed,
         freeReplyLimit: runtime.setup.contract.freeReplyLimit,
       });
@@ -159,7 +182,12 @@ export async function POST(
         { status: 202 },
       );
       response.headers.set("Cache-Control", "private, no-store");
-      setPublicChatCookie(response, request, slug, session);
+      setPublicAudienceSessionCookie(
+        response,
+        request,
+        slug,
+        sessionState,
+      );
       return response;
     } catch (error) {
       if (!shouldUseNonPersistentDemoChat(error, slug)) throw error;
@@ -197,9 +225,11 @@ export async function POST(
       usage,
     });
     response.headers.set("Cache-Control", "private, no-store");
-    setPublicChatCookie(response, request, slug, session);
+    setPublicAudienceSessionCookie(response, request, slug, sessionState);
     return response;
   } catch (error) {
+    const principalError = publicPrincipalErrorResponse(error);
+    if (principalError) return principalError;
     console.error("Failed to accept public chat message.", error);
     return NextResponse.json(
       { error: "Failed to accept chat message." },
@@ -213,17 +243,13 @@ export async function POST(
 
 async function derivePublicWalletUsage(input: {
   representativeId: string;
-  representativeSlug: string;
-  audienceId: string;
+  externalUserId: string;
   freeRepliesUsed: number;
   freeReplyLimit: number;
 }) {
   const balance = process.env.DATABASE_URL?.trim()
     ? await getUserAgentWalletBalance({
-        externalUserId: buildWebAudienceExternalUserId(
-          input.representativeSlug,
-          input.audienceId,
-        ),
+        externalUserId: input.externalUserId,
         representativeId: input.representativeId,
       })
     : null;
@@ -232,6 +258,23 @@ async function derivePublicWalletUsage(input: {
     freeReplyLimit: input.freeReplyLimit,
     serviceCreditsAvailable: balance?.availableTokenAmount ?? 0,
     serviceCreditsReserved: balance?.reservedTokenAmount ?? 0,
+  });
+}
+
+async function resolvePublicWalletExternalUserId(input: {
+  principal: PublicAudiencePrincipal;
+  representativeSlug: string;
+}) {
+  if (!process.env.DATABASE_URL?.trim()) {
+    return buildWebAudienceExternalUserId(
+      input.representativeSlug,
+      input.principal.audienceId,
+    );
+  }
+  return resolvePublicAudienceWalletExternalUserId({
+    audienceIdentityId: input.principal.audienceIdentityId,
+    representativeSlug: input.representativeSlug,
+    audienceId: input.principal.audienceId,
   });
 }
 
@@ -248,19 +291,18 @@ function publicRuntimeError(status: Exclude<Awaited<ReturnType<typeof getPublicR
   return NextResponse.json({ error: "This representative is not publicly available." }, { status: 404 });
 }
 
-function setPublicChatCookie(
-  response: NextResponse,
-  request: Request,
-  slug: string,
-  session: ReturnType<typeof readPublicChatSessionState>,
-) {
-  response.cookies.set(getPublicChatCookieName(slug), writePublicChatSessionState({ representativeSlug: slug, state: session }), {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: shouldUseSecurePublicChatCookie(request),
-    maxAge: PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
-    path: `/reps/${slug}`,
-  });
+function publicPrincipalErrorResponse(error: unknown) {
+  const status = publicAudiencePrincipalErrorStatus(error);
+  if (!status) return null;
+  return privateJson(
+    {
+      error:
+        status === 401
+          ? "Authentication required."
+          : "Audience account requires reconciliation.",
+    },
+    status,
+  );
 }
 
 function shouldUseNonPersistentDemoChat(error: unknown, representativeSlug: string): boolean {

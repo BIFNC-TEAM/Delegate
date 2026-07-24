@@ -2,21 +2,26 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
-  DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
-  LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   createIdentityBindingChallenge,
   listActivePrivateChannelIdentityBindings,
   privateChannelIdentityProviders,
-  readDelegateAuthSessionSecret,
   resolveMatrixApplicationServiceConnectionId,
-  verifyDelegateAuthSession,
 } from "@delegate/web-data";
 
-export async function GET() {
+import {
+  publicAudiencePrincipalErrorStatus,
+  resolvePublicAudienceRequestPrincipal,
+} from "../public-principal";
+
+export async function GET(
+  _request: Request,
+  { params }: { params: Promise<{ slug: string }> },
+) {
   try {
-    const session = await requireAudienceSession();
+    const { slug } = await params;
+    const principal = await requireAudiencePrincipal(slug);
     const bindings = await listActivePrivateChannelIdentityBindings(
-      session.audienceIdentityId,
+      principal.audienceIdentityId,
     );
     return noStoreJson({ bindings });
   } catch (error) {
@@ -30,7 +35,7 @@ export async function POST(
 ) {
   try {
     const { slug } = await params;
-    const session = await requireAudienceSession();
+    const principal = await requireAudiencePrincipal(slug);
     const body = await readBindingRequest(request);
     const provider = privateChannelIdentityProviders[body.provider];
     const expectedProviderSubject = body.providerSubject || undefined;
@@ -43,7 +48,7 @@ export async function POST(
         ? resolveMatrixApplicationServiceConnectionId()
         : telegramBotConnectionId();
     const grant = await createIdentityBindingChallenge({
-      audienceIdentityId: session.audienceIdentityId,
+      audienceIdentityId: principal.audienceIdentityId,
       provider,
       issuer,
       connectionId,
@@ -70,23 +75,15 @@ export async function POST(
   }
 }
 
-async function requireAudienceSession() {
-  const cookieStore = await cookies();
-  const session = verifyDelegateAuthSession(
-    cookieStore.get(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE)?.value
-      ?? cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value,
-    readDelegateAuthSessionSecret(),
-  );
-  if (
-    session?.actor !== "audience"
-    || !session.audienceIdentityId?.trim()
-  ) {
+async function requireAudiencePrincipal(representativeSlug: string) {
+  const { principal } = await resolvePublicAudienceRequestPrincipal({
+    representativeSlug,
+    cookieStore: await cookies(),
+  });
+  if (principal.mode !== "authenticated") {
     throw new IdentityBindingHttpError(401, "Sign in before binding a channel.");
   }
-  return {
-    ...session,
-    audienceIdentityId: session.audienceIdentityId.trim(),
-  };
+  return principal;
 }
 
 async function readBindingRequest(request: Request) {
@@ -154,12 +151,16 @@ function noStoreJson(body: unknown, status = 200) {
 }
 
 function bindingError(error: unknown) {
-  const status = error instanceof IdentityBindingHttpError ? error.status : 400;
+  const status =
+    publicAudiencePrincipalErrorStatus(error)
+    ?? (error instanceof IdentityBindingHttpError ? error.status : 400);
   return noStoreJson(
     {
       error:
-        error instanceof Error
-          ? error.message
+        status === 401
+          ? "Sign in before binding a channel."
+          : error instanceof IdentityBindingHttpError
+            ? error.message
           : "Unable to manage identity bindings.",
     },
     status,

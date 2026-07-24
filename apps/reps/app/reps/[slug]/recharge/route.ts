@@ -3,19 +3,18 @@ import { NextResponse } from "next/server";
 import { randomUUID } from "node:crypto";
 
 import {
-  buildWebAudienceExternalUserId,
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   createMockRechargeOrder,
   getPublicRepresentativeRuntime,
+  resolvePublicAudienceWalletExternalUserId,
   resolveWebAudienceContact,
 } from "@delegate/web-data";
 
 import {
-  getPublicChatCookieName,
-  PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
-  readPublicChatSessionState,
-  shouldUseSecurePublicChatCookie,
-  writePublicChatSessionState,
-} from "../public-chat";
+  publicAudiencePrincipalErrorStatus,
+  resolvePublicAudienceRequestPrincipal,
+  setPublicAudienceSessionCookie,
+} from "../public-principal";
 
 export async function POST(
   request: Request,
@@ -39,16 +38,24 @@ export async function POST(
     const body = (await request.json()) as Record<string, unknown>;
     const amountCents = Number(body.amountCents ?? 0);
     const cookieStore = await cookies();
-    const sessionState = readPublicChatSessionState({
+    const { principal, sessionState } = await resolvePublicAudienceRequestPrincipal({
       representativeSlug: slug,
-      cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
+      cookieStore,
     });
     const contact = await resolveWebAudienceContact({
       representativeId: representative.id,
       representativeSlug: slug,
-      audienceId: sessionState.audienceId,
+      audienceId: principal.audienceId,
     });
-    const externalUserId = buildWebAudienceExternalUserId(slug, sessionState.audienceId);
+    if (contact.audienceIdentityId !== principal.audienceIdentityId) {
+      return privateJson({ error: "Audience identity conflict." }, 409);
+    }
+    const externalUserId = await resolvePublicAudienceWalletExternalUserId({
+      audienceIdentityId: principal.audienceIdentityId,
+      representativeSlug: slug,
+      audienceId: principal.audienceId,
+      currency: "CNY",
+    });
     const requestedIdempotencyKey =
       request.headers.get("idempotency-key")?.trim()
       || (typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "");
@@ -60,15 +67,13 @@ export async function POST(
     }
     const operationId = requestedIdempotencyKey || randomUUID();
     const idempotencyKey =
-      `public_recharge:${slug}:${sessionState.audienceId}:${operationId}`;
-    const sessionCookieValue = writePublicChatSessionState({
-      representativeSlug: slug,
-      state: sessionState,
-    });
+      `public_recharge:${slug}:${principal.businessKey}:${operationId}`;
 
     const rechargeOrder = await createMockRechargeOrder({
       externalUserId,
-      ...(contact.audienceIdentityId ? { audienceIdentityId: contact.audienceIdentityId } : {}),
+      audienceIdentityId: principal.audienceIdentityId,
+      representativeId: representative.id,
+      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
       displayName: typeof body.displayName === "string" ? body.displayName : contact.displayName ?? externalUserId,
       amountCents,
       currency: "CNY",
@@ -76,21 +81,22 @@ export async function POST(
     });
 
     const response = privateJson({ rechargeOrder }, 201);
-    response.cookies.set(
-      getPublicChatCookieName(slug),
-      sessionCookieValue,
-      {
-        httpOnly: true,
-        sameSite: "lax",
-        secure: shouldUseSecurePublicChatCookie(request),
-        maxAge: PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
-        path: `/reps/${slug}`,
-      },
-    );
+    setPublicAudienceSessionCookie(response, request, slug, sessionState);
 
     return response;
   } catch (error) {
     console.error("Failed to create public recharge order.", error);
+    const principalErrorStatus = publicAudiencePrincipalErrorStatus(error);
+    if (principalErrorStatus) {
+      return privateJson(
+        {
+          error: principalErrorStatus === 401
+            ? "登录状态已失效，请重新登录后再试。"
+            : "钱包身份需要人工核对，当前操作未执行。",
+        },
+        principalErrorStatus,
+      );
+    }
     return privateJson(
       {
         error: "充值单创建失败，请稍后重试；如果问题持续，请联系代表主人检查支付配置。",

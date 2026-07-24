@@ -939,15 +939,15 @@ model Wallet {
 }
 
 model AudienceIdentity {
-  id                   String                     @id @default(cuid())
-  audienceKey          String                     @unique
-  status               AudienceIdentityStatus     @default(ANONYMOUS)
+  id                   String                      @id @default(cuid())
+  audienceKey          String                      @unique
+  status               AudienceIdentityStatus      @default(ANONYMOUS)
   mergedIntoId         String?
-  createdAt            DateTime                   @default(now())
-  updatedAt            DateTime                   @updatedAt
-  lastSeenAt           DateTime                   @default(now())
-  mergedInto           AudienceIdentity?          @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
-  mergedFrom           AudienceIdentity[]         @relation("AudienceIdentityMerge")
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
+  lastSeenAt           DateTime                    @default(now())
+  mergedInto           AudienceIdentity?           @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedFrom           AudienceIdentity[]          @relation("AudienceIdentityMerge")
   contacts             Contact[]
   conversations        Conversation[]
   userWallets          UserWallet[]
@@ -1178,26 +1178,30 @@ model WalletLedgerEntry {
 }
 
 model RechargeOrder {
-  id              String                 @id @default(cuid())
-  userWalletId    String
-  provider        PaymentProvider        @default(MOCK)
-  providerOrderId String?                @unique
-  amountCents     Int
-  currency        String                 @default("CNY")
-  status          RechargeOrderStatus    @default(CREATED)
-  idempotencyKey  String                 @unique
-  checkoutUrl     String?
-  providerPayload Json?
-  paidAt          DateTime?
-  refundedAt      DateTime?
-  createdAt       DateTime               @default(now())
-  updatedAt       DateTime               @updatedAt
-  userWallet      UserWallet             @relation(fields: [userWalletId], references: [id])
-  providerEvents  PaymentProviderEvent[]
-  ledgerEntries   WalletLedgerEntry[]
-  tokenPurchases  AgentTokenPurchase[]
+  id               String                 @id @default(cuid())
+  userWalletId     String
+  representativeId String?
+  productCode      String?
+  provider         PaymentProvider        @default(MOCK)
+  providerOrderId  String?                @unique
+  amountCents      Int
+  currency         String                 @default("CNY")
+  status           RechargeOrderStatus    @default(CREATED)
+  idempotencyKey   String                 @unique
+  checkoutUrl      String?
+  providerPayload  Json?
+  paidAt           DateTime?
+  refundedAt       DateTime?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  userWallet       UserWallet             @relation(fields: [userWalletId], references: [id])
+  representative   Representative?        @relation(fields: [representativeId], references: [id], onDelete: SetNull)
+  providerEvents   PaymentProviderEvent[]
+  ledgerEntries    WalletLedgerEntry[]
+  tokenPurchases   AgentTokenPurchase[]
 
   @@index([userWalletId, status, createdAt])
+  @@index([representativeId, status, createdAt])
   @@index([provider, status, createdAt])
 }
 
@@ -1222,7 +1226,7 @@ model PaymentProviderEvent {
 }
 
 model AgentTokenPurchase {
-  id                     String                   @id @default(cuid())
+  id                     String                     @id @default(cuid())
   userWalletId           String
   userAgentWalletId      String?
   agentWalletId          String
@@ -1231,24 +1235,24 @@ model AgentTokenPurchase {
   entitlementAccountId   String?
   rechargeOrderId        String?
   amountCents            Int
-  currency               String                   @default("CNY")
+  currency               String                     @default("CNY")
   tokenAmount            Int
   remainingTokenAmount   Int?
   tokenUnitPriceCents    Int
-  creatorRevenueShareBps Int                      @default(2000)
+  creatorRevenueShareBps Int                        @default(2000)
   creatorPendingCents    Int
-  status                 AgentTokenPurchaseStatus @default(COMPLETED)
-  idempotencyKey         String                   @unique
+  status                 AgentTokenPurchaseStatus   @default(COMPLETED)
+  idempotencyKey         String                     @unique
   refundedAt             DateTime?
-  createdAt              DateTime                 @default(now())
-  updatedAt              DateTime                 @updatedAt
-  userWallet             UserWallet               @relation(fields: [userWalletId], references: [id])
-  userAgentWallet        UserAgentWallet?         @relation(fields: [userAgentWalletId], references: [id], onDelete: SetNull)
-  agentWallet            AgentWallet              @relation(fields: [agentWalletId], references: [id])
-  representative         Representative           @relation(fields: [representativeId], references: [id])
-  audienceIdentity       AudienceIdentity?         @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  createdAt              DateTime                   @default(now())
+  updatedAt              DateTime                   @updatedAt
+  userWallet             UserWallet                 @relation(fields: [userWalletId], references: [id])
+  userAgentWallet        UserAgentWallet?           @relation(fields: [userAgentWalletId], references: [id], onDelete: SetNull)
+  agentWallet            AgentWallet                @relation(fields: [agentWalletId], references: [id])
+  representative         Representative             @relation(fields: [representativeId], references: [id])
+  audienceIdentity       AudienceIdentity?          @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
   entitlementAccount     ServiceEntitlementAccount? @relation(fields: [entitlementAccountId], references: [id], onDelete: SetNull)
-  rechargeOrder          RechargeOrder?           @relation(fields: [rechargeOrderId], references: [id])
+  rechargeOrder          RechargeOrder?             @relation(fields: [rechargeOrderId], references: [id])
   usageCharges           AgentUsageCharge[]
   usageAllocations       AgentUsageAllocation[]
   creatorEarnings        CreatorEarning[]
@@ -1263,7 +1267,7 @@ model AgentTokenPurchase {
 }
 
 model AgentUsageCharge {
-  id                   String                 @id @default(cuid())
+  id                   String                     @id @default(cuid())
   userAgentWalletId    String?
   agentWalletId        String
   representativeId     String
@@ -1273,30 +1277,30 @@ model AgentUsageCharge {
   generationRunId      String?
   tokenPurchaseId      String?
   kind                 AgentUsageChargeKind
-  status               AgentUsageChargeStatus @default(CREATED)
-  quantity             Int                    @default(1)
+  status               AgentUsageChargeStatus     @default(CREATED)
+  quantity             Int                        @default(1)
   tokenAmount          Int
-  reservedTokenAmount  Int                    @default(0)
-  settledTokenAmount   Int                    @default(0)
-  releasedTokenAmount  Int                    @default(0)
-  providerCostCents    Int                    @default(0)
-  platformRevenueCents Int                    @default(0)
-  currency             String                 @default("CNY")
-  idempotencyKey       String                 @unique
-  createdAt            DateTime               @default(now())
-  updatedAt            DateTime               @updatedAt
+  reservedTokenAmount  Int                        @default(0)
+  settledTokenAmount   Int                        @default(0)
+  releasedTokenAmount  Int                        @default(0)
+  providerCostCents    Int                        @default(0)
+  platformRevenueCents Int                        @default(0)
+  currency             String                     @default("CNY")
+  idempotencyKey       String                     @unique
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
   reservedAt           DateTime?
   settledAt            DateTime?
   releasedAt           DateTime?
   reversedAt           DateTime?
-  userAgentWallet      UserAgentWallet?       @relation(fields: [userAgentWalletId], references: [id], onDelete: SetNull)
-  agentWallet          AgentWallet            @relation(fields: [agentWalletId], references: [id])
-  representative       Representative         @relation(fields: [representativeId], references: [id])
-  audienceIdentity     AudienceIdentity?       @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  userAgentWallet      UserAgentWallet?           @relation(fields: [userAgentWalletId], references: [id], onDelete: SetNull)
+  agentWallet          AgentWallet                @relation(fields: [agentWalletId], references: [id])
+  representative       Representative             @relation(fields: [representativeId], references: [id])
+  audienceIdentity     AudienceIdentity?          @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
   entitlementAccount   ServiceEntitlementAccount? @relation(fields: [entitlementAccountId], references: [id], onDelete: SetNull)
-  conversation         Conversation?           @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  generationRun        GenerationRun?          @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
-  tokenPurchase        AgentTokenPurchase?    @relation(fields: [tokenPurchaseId], references: [id])
+  conversation         Conversation?              @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  generationRun        GenerationRun?             @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
+  tokenPurchase        AgentTokenPurchase?        @relation(fields: [tokenPurchaseId], references: [id])
   creatorEarnings      CreatorEarning[]
   allocations          AgentUsageAllocation[]
   ledgerEntries        WalletLedgerEntry[]
@@ -1311,20 +1315,20 @@ model AgentUsageCharge {
 }
 
 model ServiceEntitlementAccount {
-  id                 String                   @id @default(cuid())
+  id                 String                          @id @default(cuid())
   audienceIdentityId String
   representativeId   String
   productCode        String
-  unitName           String                   @default("credit")
-  status             ServiceEntitlementStatus @default(ACTIVE)
-  grantedUnits       Int                      @default(0)
-  remainingUnits     Int                      @default(0)
-  reservedUnits      Int                      @default(0)
+  unitName           String                          @default("credit")
+  status             ServiceEntitlementStatus        @default(ACTIVE)
+  grantedUnits       Int                             @default(0)
+  remainingUnits     Int                             @default(0)
+  reservedUnits      Int                             @default(0)
   expiresAt          DateTime?
-  createdAt          DateTime                 @default(now())
-  updatedAt          DateTime                 @updatedAt
-  audienceIdentity   AudienceIdentity         @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
-  representative     Representative           @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  createdAt          DateTime                        @default(now())
+  updatedAt          DateTime                        @updatedAt
+  audienceIdentity   AudienceIdentity                @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
+  representative     Representative                  @relation(fields: [representativeId], references: [id], onDelete: Cascade)
   ledgerEntries      ServiceEntitlementLedgerEntry[]
   tokenPurchases     AgentTokenPurchase[]
   usageCharges       AgentUsageCharge[]
@@ -1335,28 +1339,28 @@ model ServiceEntitlementAccount {
 }
 
 model ServicePaymentOrder {
-  id                      String              @id @default(cuid())
+  id                      String                          @id @default(cuid())
   payerAudienceIdentityId String
   representativeId        String
   provider                PaymentProvider
   providerAccountId       String
   providerOrderId         String?
-  providerOrderKey        String?             @unique
+  providerOrderKey        String?                         @unique
   productCode             String
   amountMinor             Int
   currency                String
   entitlementUnits        Int
-  status                  RechargeOrderStatus @default(CREATED)
+  status                  RechargeOrderStatus             @default(CREATED)
   priceSnapshot           Json
   checkoutUrl             String?
   providerPayload         Json?
-  fulfillmentKey          String?             @unique
+  fulfillmentKey          String?                         @unique
   paidAt                  DateTime?
   refundedAt              DateTime?
-  createdAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
-  payerAudienceIdentity   AudienceIdentity    @relation(fields: [payerAudienceIdentityId], references: [id], onDelete: Restrict)
-  representative          Representative      @relation(fields: [representativeId], references: [id], onDelete: Restrict)
+  createdAt               DateTime                        @default(now())
+  updatedAt               DateTime                        @updatedAt
+  payerAudienceIdentity   AudienceIdentity                @relation(fields: [payerAudienceIdentityId], references: [id], onDelete: Restrict)
+  representative          Representative                  @relation(fields: [representativeId], references: [id], onDelete: Restrict)
   providerEvents          ServicePaymentEvent[]
   entitlementEntries      ServiceEntitlementLedgerEntry[]
 
@@ -1644,6 +1648,7 @@ model Representative {
   withdrawRequests                 WithdrawRequest[]
   walletTransactions               WalletTransaction[]
   walletLedgerEntries              WalletLedgerEntry[]
+  rechargeOrders                   RechargeOrder[]
   trainingSources                  CreatorTrainingSource[]
   feedbackSignals                  CreatorFeedbackSignal[]
   trainingSuggestions              CreatorTrainingSuggestion[]
@@ -1703,7 +1708,7 @@ model RepresentativeChannelBinding {
   sourceProvider    ChannelSourceProvider?
   connectionId      String?
   desiredState      ChannelDesiredState          @default(ACTIVE)
-  healthStatus      ChannelHealthStatus           @default(UNKNOWN)
+  healthStatus      ChannelHealthStatus          @default(UNKNOWN)
   externalUserId    String?
   status            String                       @default("CONNECTED")
   displayName       String?
@@ -2181,7 +2186,7 @@ model MessageCitation {
 }
 
 model GenerationRun {
-  id                      String                 @id @default(cuid())
+  id                      String                          @id @default(cuid())
   conversationId          String
   episodeId               String?
   inputMessageId          String
@@ -2189,9 +2194,9 @@ model GenerationRun {
   representativeVersionId String?
   delegationTaskId        String?
   delegationTaskStepId    String?
-  status                  GenerationRunStatus    @default(QUEUED)
-  idempotencyKey          String                 @unique
-  attemptCount            Int                    @default(0)
+  status                  GenerationRunStatus             @default(QUEUED)
+  idempotencyKey          String                          @unique
+  attemptCount            Int                             @default(0)
   contextSnapshot         Json?
   runtimePolicySnapshot   Json?
   provider                String?
@@ -2201,19 +2206,19 @@ model GenerationRun {
   costCents               Int?
   errorCode               String?
   errorMessage            String?
-  queuedAt                DateTime               @default(now())
+  queuedAt                DateTime                        @default(now())
   startedAt               DateTime?
   completedAt             DateTime?
   canceledAt              DateTime?
-  createdAt               DateTime               @default(now())
-  updatedAt               DateTime               @updatedAt
-  conversation            Conversation           @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  episode                 ConversationEpisode?   @relation(fields: [episodeId], references: [id], onDelete: SetNull)
-  inputMessage            Message                @relation("GenerationInputMessage", fields: [inputMessageId], references: [id], onDelete: Cascade)
-  outputMessage           Message?               @relation("GenerationOutputMessage", fields: [outputMessageId], references: [id], onDelete: SetNull)
-  representativeVersion   RepresentativeVersion? @relation(fields: [representativeVersionId], references: [id], onDelete: SetNull)
-  delegationTask          DelegationTask?        @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
-  delegationTaskStep      DelegationTaskStep?    @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  createdAt               DateTime                        @default(now())
+  updatedAt               DateTime                        @updatedAt
+  conversation            Conversation                    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  episode                 ConversationEpisode?            @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+  inputMessage            Message                         @relation("GenerationInputMessage", fields: [inputMessageId], references: [id], onDelete: Cascade)
+  outputMessage           Message?                        @relation("GenerationOutputMessage", fields: [outputMessageId], references: [id], onDelete: SetNull)
+  representativeVersion   RepresentativeVersion?          @relation(fields: [representativeVersionId], references: [id], onDelete: SetNull)
+  delegationTask          DelegationTask?                 @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep      DelegationTaskStep?             @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
   approvalRequests        ApprovalRequest[]
   computeSessions         ComputeSession[]
   entitlementEntries      ServiceEntitlementLedgerEntry[]
@@ -2315,7 +2320,7 @@ model ChannelEventInbox {
 }
 
 model OutboxEvent {
-  id             String              @id @default(cuid())
+  id             String                 @id @default(cuid())
   conversationId String?
   aggregateType  String
   aggregateId    String
@@ -2324,15 +2329,15 @@ model OutboxEvent {
   sourceProvider ChannelSourceProvider?
   connectionId   String?
   payload        Json
-  status         ReliableEventStatus @default(PENDING)
-  idempotencyKey String              @unique
-  attemptCount   Int                 @default(0)
-  availableAt    DateTime            @default(now())
+  status         ReliableEventStatus    @default(PENDING)
+  idempotencyKey String                 @unique
+  attemptCount   Int                    @default(0)
+  availableAt    DateTime               @default(now())
   processedAt    DateTime?
   lastError      String?
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
-  conversation   Conversation?       @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  conversation   Conversation?          @relation(fields: [conversationId], references: [id], onDelete: SetNull)
 
   @@index([status, availableAt, createdAt])
   @@index([aggregateType, aggregateId, createdAt])

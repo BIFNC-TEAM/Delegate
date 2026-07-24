@@ -284,6 +284,61 @@ describe("web audience identity resolver", () => {
     });
   });
 
+  it("rejects a revoked authenticated identity link without restoring or merging it", async () => {
+    const client = new FakeWebAudienceClient();
+    const current = await resolveAnonymousAudienceIdentity(
+      {
+        audienceId: "aud_revoked_current",
+      },
+      client,
+    );
+    const registered = await resolveAnonymousAudienceIdentity(
+      {
+        audienceId: "aud_revoked_registered",
+      },
+      client,
+    );
+    registerIdentity(client, registered.id);
+    const revokedAt = new Date("2026-07-04T12:30:00.000Z");
+    const originalVerifiedAt = new Date("2026-07-04T12:00:00.000Z");
+    client.identityLinks.push({
+      id: "identity-link-revoked-logto",
+      audienceIdentityId: registered.id,
+      provider: "LOGTO",
+      providerSubject: "RevokedLogtoUser",
+      issuer: null,
+      connectionId: null,
+      verifiedAt: originalVerifiedAt,
+      revokedAt,
+      metadata: null,
+    });
+
+    await expect(
+      resolveAuthenticatedAudienceIdentity(
+        {
+          audienceIdentityId: current.id,
+          provider: "LOGTO",
+          providerSubject: "RevokedLogtoUser",
+          verifiedAt: new Date("2026-07-04T13:00:00.000Z"),
+          now: new Date("2026-07-04T13:00:00.000Z"),
+        },
+        client,
+      ),
+    ).rejects.toThrow(/authenticated identity link has been revoked/i);
+
+    expect(client.audienceIdentities.find((identity) => identity.id === current.id)).toMatchObject({
+      status: "ANONYMOUS",
+      mergedIntoId: null,
+    });
+    expect(
+      client.identityLinks.find((link) => link.id === "identity-link-revoked-logto"),
+    ).toMatchObject({
+      audienceIdentityId: registered.id,
+      verifiedAt: originalVerifiedAt,
+      revokedAt,
+    });
+  });
+
   it("keeps contacts attached to the merged target on later anonymous cookie reuse", async () => {
     const client = new FakeWebAudienceClient();
     const contact = await resolveWebAudienceContact(
@@ -817,6 +872,7 @@ type IdentityLinkRow = {
   issuer: string | null;
   connectionId: string | null;
   verifiedAt: Date | null;
+  revokedAt?: Date | null;
   metadata: unknown;
 };
 
@@ -901,6 +957,7 @@ class FakeWebAudienceClient {
             audienceIdentityId: link.audienceIdentityId,
             ...(link.issuer ? { issuer: link.issuer } : {}),
             connectionId: link.connectionId,
+            revokedAt: link.revokedAt ?? null,
           }
         : null;
     },

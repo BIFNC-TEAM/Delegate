@@ -41,6 +41,24 @@ describe("public chat reply resilience", () => {
     expect(conversationEventsSource).toContain("if (signal.aborted) finish()");
   });
 
+  it.each([
+    ["conversation", conversationEventsSource, "getPublicConversationHistory"],
+    ["run", runEventsSource, "getPublicGenerationRunSnapshot"],
+  ])(
+    "revalidates the captured principal at most every two seconds in the %s stream",
+    (_name, source, protectedRead) => {
+      expect(source).toContain(
+        "PRINCIPAL_REVALIDATION_INTERVAL_MS = 2_000",
+      );
+      expect(source).toContain("await revalidate()");
+      expect(source.indexOf("await revalidate()")).toBeLessThan(
+        source.indexOf(`${protectedRead}({`),
+      );
+      expect(source).toContain('error: "stream_failed"');
+      expect(source).toContain("controller.close()");
+    },
+  );
+
   it("prevents SDK retries from multiplying the configured provider timeout", () => {
     expect(openAiSource).toContain("maxRetries: 0");
     expect(anthropicSource).toContain("maxRetries: 0");

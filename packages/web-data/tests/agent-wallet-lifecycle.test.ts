@@ -16,6 +16,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   completeMockRechargeAndPurchaseAgentTokens,
   completeMockRechargeOrder,
   createMockRechargeOrder,
@@ -30,6 +31,8 @@ describe("agent wallet lifecycle acceptance", () => {
     const recharge = await createMockRechargeOrder(
       {
         externalUserId: "user_atomic",
+        representativeId: "rep_1",
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
         amountCents: 1000,
         idempotencyKey: "lifecycle_atomic_recharge",
       },
@@ -57,6 +60,38 @@ describe("agent wallet lifecycle acceptance", () => {
       cashBalanceCents: 0,
     });
     expect(client.rechargeOrders[0]?.status).toBe(RechargeOrderStatus.PAID);
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(0);
+  });
+
+  it("rejects completing a recharge against a different representative intent", async () => {
+    const client = new FakeAmnLifecycleClient();
+    const recharge = await createMockRechargeOrder(
+      {
+        externalUserId: "user_atomic",
+        representativeId: "rep_1",
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        amountCents: 1000,
+        idempotencyKey: "lifecycle_cross_rep_recharge",
+      },
+      client,
+    );
+
+    await expect(
+      completeMockRechargeAndPurchaseAgentTokens(
+        {
+          rechargeOrderId: recharge.id,
+          externalUserId: "user_atomic",
+          representativeId: "rep_other",
+          purchaseIdempotencyKey: "lifecycle_cross_rep_purchase",
+        },
+        client as never,
+      ),
+    ).rejects.toThrow("intended representative service product");
+
+    expect(client.rechargeOrders[0]?.status).toBe(
+      RechargeOrderStatus.REQUIRES_PAYMENT,
+    );
+    expect(client.tokenPurchases).toHaveLength(0);
     expect(client.userWallets[0]?.cashBalanceCents).toBe(0);
   });
 
@@ -205,6 +240,8 @@ type UserAgentWalletRow = {
 type RechargeOrderRow = {
   id: string;
   userWalletId: string;
+  representativeId: string | null;
+  productCode: string | null;
   provider: PaymentProvider;
   providerOrderId: string | null;
   amountCents: number;
@@ -524,6 +561,8 @@ class FakeAmnLifecycleClient {
       const order: RechargeOrderRow = {
         id: `recharge_${this.rechargeOrders.length + 1}`,
         userWalletId: args.data.userWalletId,
+        representativeId: args.data.representativeId ?? null,
+        productCode: args.data.productCode ?? null,
         provider: args.data.provider,
         providerOrderId: args.data.providerOrderId ?? null,
         amountCents: args.data.amountCents,

@@ -1,19 +1,21 @@
 import { cookies } from "next/headers";
+import { NextResponse } from "next/server";
 
 import {
-  buildWebAudienceKey,
   getPublicGenerationRunSnapshot,
   getPublicRepresentativeRuntime,
 } from "@delegate/web-data";
 
 import {
-  getPublicChatCookieName,
-  readPublicChatSessionState,
-} from "../../../../public-chat";
+  publicAudiencePrincipalErrorStatus,
+  resolvePublicAudienceRequestPrincipal,
+  setPublicAudienceSessionCookie,
+} from "../../../../public-principal";
 
 const encoder = new TextEncoder();
 const terminalStates = new Set(["waiting_approval", "completed", "failed", "canceled"]);
 const RUN_STREAM_WINDOW_MS = 120_000;
+const PRINCIPAL_REVALIDATION_INTERVAL_MS = 2_000;
 
 export async function GET(
   request: Request,
@@ -27,23 +29,49 @@ export async function GET(
       headers: { "Content-Type": "application/json" },
     });
   }
-  const cookieStore = await cookies();
-  const session = readPublicChatSessionState({
-    representativeSlug: slug,
-    cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
-  });
-  const audienceKey = buildWebAudienceKey(session.audienceId);
+  let audienceRequest: Awaited<
+    ReturnType<typeof resolvePublicAudienceRequestPrincipal>
+  >;
+  try {
+    audienceRequest = await resolvePublicAudienceRequestPrincipal({
+      representativeSlug: slug,
+      cookieStore: await cookies(),
+    });
+  } catch (error) {
+    const status = publicAudiencePrincipalErrorStatus(error);
+    if (!status) throw error;
+    return NextResponse.json(
+      {
+        error:
+          status === 401
+            ? "Authentication required."
+            : "Audience account requires reconciliation.",
+      },
+      {
+        status,
+        headers: { "Cache-Control": "private, no-store" },
+      },
+    );
+  }
+  const { principal, revalidate, sessionState } = audienceRequest;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const startedAt = Date.now();
       let previous = "";
+      let nextPrincipalRevalidationAt = 0;
       try {
         while (!request.signal.aborted && Date.now() - startedAt < RUN_STREAM_WINDOW_MS) {
+          if (Date.now() >= nextPrincipalRevalidationAt) {
+            await revalidate();
+            nextPrincipalRevalidationAt =
+              Date.now() + PRINCIPAL_REVALIDATION_INTERVAL_MS;
+          }
           const snapshot = await getPublicGenerationRunSnapshot({
             representativeSlug: slug,
             runId,
-            audienceKey,
+            audienceIdentityId: principal.audienceIdentityId,
+            audienceId: principal.audienceId,
           });
           if (!snapshot) {
             controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: "run_not_found" })}\n\n`));
@@ -64,9 +92,10 @@ export async function GET(
         if (!request.signal.aborted) {
           controller.enqueue(
             encoder.encode(
-              `event: error\ndata: ${JSON.stringify({ error: error instanceof Error ? error.message : "stream_failed" })}\n\n`,
+              `event: error\ndata: ${JSON.stringify({ error: "stream_failed" })}\n\n`,
             ),
           );
+          console.error("Public generation run event stream failed.", error);
         }
       } finally {
         controller.close();
@@ -74,7 +103,7 @@ export async function GET(
     },
   });
 
-  return new Response(stream, {
+  const response = new NextResponse(stream, {
     headers: {
       "Cache-Control": "no-cache, no-transform",
       "Content-Type": "text/event-stream; charset=utf-8",
@@ -82,6 +111,13 @@ export async function GET(
       "X-Accel-Buffering": "no",
     },
   });
+  setPublicAudienceSessionCookie(
+    response,
+    request,
+    slug,
+    sessionState,
+  );
+  return response;
 }
 
 function wait(milliseconds: number, signal: AbortSignal) {

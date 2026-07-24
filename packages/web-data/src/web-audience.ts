@@ -763,6 +763,9 @@ export async function resolveAuthenticatedAudienceIdentity(
     let targetIdentity = currentIdentity;
 
     if (existingLink) {
+      if (existingLink.revokedAt) {
+        throw new Error("Authenticated identity link has been revoked.");
+      }
       targetIdentity = await resolveCanonicalAudienceIdentity(
         {
           audienceIdentityId: existingLink.audienceIdentityId,

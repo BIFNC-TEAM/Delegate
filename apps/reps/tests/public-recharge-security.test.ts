@@ -1,29 +1,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  buildWebAudienceExternalUserId: vi.fn(
-    (slug: string, audienceId: string) => `web:${slug}:${audienceId}`,
-  ),
   completeMockRechargeAndPurchaseAgentTokens: vi.fn(),
   createMockRechargeOrder: vi.fn(),
   getPublicRepresentativeRuntime: vi.fn(),
   getUserAgentWalletBalance: vi.fn(),
+  resolvePublicAudienceWalletExternalUserId: vi.fn(),
   agentTokenPurchaseFindFirst: vi.fn(),
   rechargeOrderFindUnique: vi.fn(),
   reverseAgentTokenPurchase: vi.fn(),
   resolveWebAudienceContact: vi.fn(),
+  publicAudiencePrincipalErrorStatus: vi.fn(),
+  resolvePublicAudienceRequestPrincipal: vi.fn(),
+  setPublicAudienceSessionCookie: vi.fn(),
   cookieGet: vi.fn(),
-  readPublicChatSessionState: vi.fn(),
-  writePublicChatSessionState: vi.fn(),
 }));
 
 vi.mock("@delegate/web-data", () => ({
-  buildWebAudienceExternalUserId: mocks.buildWebAudienceExternalUserId,
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE:
+    "agent-wallet:service-credit:v1",
   completeMockRechargeAndPurchaseAgentTokens:
     mocks.completeMockRechargeAndPurchaseAgentTokens,
   createMockRechargeOrder: mocks.createMockRechargeOrder,
   getPublicRepresentativeRuntime: mocks.getPublicRepresentativeRuntime,
   getUserAgentWalletBalance: mocks.getUserAgentWalletBalance,
+  resolvePublicAudienceWalletExternalUserId:
+    mocks.resolvePublicAudienceWalletExternalUserId,
   prisma: {
     agentTokenPurchase: {
       findFirst: mocks.agentTokenPurchaseFindFirst,
@@ -42,12 +44,11 @@ vi.mock("next/headers", () => ({
   }),
 }));
 
-vi.mock("../app/reps/[slug]/public-chat", () => ({
-  getPublicChatCookieName: (slug: string) => `delegate-public-chat-${slug}`,
-  PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS: 604800,
-  readPublicChatSessionState: mocks.readPublicChatSessionState,
-  shouldUseSecurePublicChatCookie: () => false,
-  writePublicChatSessionState: mocks.writePublicChatSessionState,
+vi.mock("../app/reps/[slug]/public-principal", () => ({
+  publicAudiencePrincipalErrorStatus: mocks.publicAudiencePrincipalErrorStatus,
+  resolvePublicAudienceRequestPrincipal:
+    mocks.resolvePublicAudienceRequestPrincipal,
+  setPublicAudienceSessionCookie: mocks.setPublicAudienceSessionCookie,
 }));
 
 import { POST as createRecharge } from "../app/reps/[slug]/recharge/route";
@@ -64,12 +65,23 @@ describe("public mock recharge security", () => {
       status: "available",
       setup: { id: "rep-1", slug: "delegate" },
     });
-    mocks.readPublicChatSessionState.mockReturnValue({
-      audienceId: "aud_current_visitor",
-      sessionToken: "session-token",
-      expiresAt: "2026-07-30T00:00:00.000Z",
+    mocks.resolvePublicAudienceRequestPrincipal.mockResolvedValue({
+      principal: {
+        mode: "anonymous",
+        audienceId: "aud_current_visitor",
+        audienceIdentityId: "identity-1",
+        businessKey: "audience:identity-1",
+      },
+      sessionState: {
+        audienceId: "aud_current_visitor",
+        sessionToken: "session-token",
+        expiresAt: "2026-07-30T00:00:00.000Z",
+      },
     });
-    mocks.writePublicChatSessionState.mockReturnValue("signed-session-cookie");
+    mocks.resolvePublicAudienceWalletExternalUserId.mockResolvedValue(
+      "web:delegate:aud_current_visitor",
+    );
+    mocks.publicAudiencePrincipalErrorStatus.mockReturnValue(null);
     mocks.resolveWebAudienceContact.mockResolvedValue({
       audienceIdentityId: "identity-1",
       displayName: "Visitor",
@@ -92,7 +104,12 @@ describe("public mock recharge security", () => {
         availableTokenAmount: 2000,
       },
     });
-    mocks.agentTokenPurchaseFindFirst.mockResolvedValue({ id: "purchase-1" });
+    mocks.agentTokenPurchaseFindFirst.mockResolvedValue({
+      id: "purchase-1",
+      userWallet: {
+        externalUserId: "web:delegate:aud_current_visitor",
+      },
+    });
     mocks.reverseAgentTokenPurchase.mockResolvedValue({
       purchaseId: "purchase-1",
       status: "reversed",
@@ -182,6 +199,8 @@ describe("public mock recharge security", () => {
 
   it("completes only an order belonging to the signed browser audience and representative", async () => {
     mocks.rechargeOrderFindUnique.mockResolvedValue({
+      representativeId: "rep-1",
+      productCode: "agent-wallet:service-credit:v1",
       userWallet: { externalUserId: "web:delegate:aud_current_visitor" },
     });
 
@@ -216,6 +235,118 @@ describe("public mock recharge security", () => {
     );
   });
 
+  it("does not complete a canonical wallet order through another representative", async () => {
+    mocks.resolvePublicAudienceRequestPrincipal.mockResolvedValue({
+      principal: {
+        mode: "authenticated",
+        audienceId: "aud_current_visitor",
+        audienceIdentityId: "identity-1",
+        businessKey: "audience:identity-1",
+      },
+      sessionState: {
+        audienceId: "aud_current_visitor",
+        sessionToken: "session-token",
+        expiresAt: "2026-07-30T00:00:00.000Z",
+      },
+    });
+    mocks.rechargeOrderFindUnique.mockResolvedValue({
+      representativeId: "rep-other",
+      productCode: "agent-wallet:service-credit:v1",
+      userWallet: {
+        audienceIdentityId: "identity-1",
+        externalUserId: "web:delegate:aud_current_visitor",
+      },
+    });
+
+    const response = await completeRecharge(
+      new Request("http://localhost/reps/delegate/recharge/order-1/mock-success", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ slug: "delegate", id: "order-1" }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(mocks.completeMockRechargeAndPurchaseAgentTokens).not.toHaveBeenCalled();
+  });
+
+  it("uses the canonical wallet owner after the same Logto user signs in on another browser", async () => {
+    mocks.resolvePublicAudienceRequestPrincipal.mockResolvedValue({
+      principal: {
+        mode: "authenticated",
+        audienceId: "aud_first_browser",
+        audienceIdentityId: "identity-1",
+        businessKey: "audience:identity-1",
+      },
+      sessionState: {
+        audienceId: "aud_second_browser",
+        sessionToken: "second-browser-session",
+        expiresAt: "2026-07-30T00:00:00.000Z",
+      },
+    });
+    mocks.resolvePublicAudienceWalletExternalUserId.mockResolvedValue(
+      "web:delegate:aud_first_browser",
+    );
+    mocks.rechargeOrderFindUnique.mockResolvedValue({
+      representativeId: "rep-1",
+      productCode: "agent-wallet:service-credit:v1",
+      userWallet: {
+        audienceIdentityId: "identity-1",
+        externalUserId: "web:delegate:aud_first_browser",
+      },
+    });
+
+    const response = await completeRecharge(
+      new Request("http://localhost/reps/delegate/recharge/order-1/mock-success", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ slug: "delegate", id: "order-1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.completeMockRechargeAndPurchaseAgentTokens).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rechargeOrderId: "order-1",
+        externalUserId: "web:delegate:aud_first_browser",
+        representativeId: "rep-1",
+      }),
+    );
+  });
+
+  it("does not authorize an authenticated user from a matching external id alone", async () => {
+    mocks.resolvePublicAudienceRequestPrincipal.mockResolvedValue({
+      principal: {
+        mode: "authenticated",
+        audienceId: "aud_first_browser",
+        audienceIdentityId: "identity-1",
+        businessKey: "audience:identity-1",
+      },
+      sessionState: {
+        audienceId: "aud_second_browser",
+        sessionToken: "second-browser-session",
+        expiresAt: "2026-07-30T00:00:00.000Z",
+      },
+    });
+    mocks.resolvePublicAudienceWalletExternalUserId.mockResolvedValue(
+      "web:delegate:aud_first_browser",
+    );
+    mocks.rechargeOrderFindUnique.mockResolvedValue({
+      userWallet: {
+        audienceIdentityId: "identity-other",
+        externalUserId: "web:delegate:aud_first_browser",
+      },
+    });
+
+    const response = await completeRecharge(
+      new Request("http://localhost/reps/delegate/recharge/order-other/mock-success", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ slug: "delegate", id: "order-other" }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(mocks.completeMockRechargeAndPurchaseAgentTokens).not.toHaveBeenCalled();
+  });
+
   it("returns only the signed visitor's unused representative credits to wallet cash", async () => {
     const response = await reverseRechargePurchase(
       new Request("http://localhost/reps/delegate/recharge/order-1/mock-reversal", {
@@ -231,10 +362,20 @@ describe("public mock recharge security", () => {
         rechargeOrderId: "order-1",
         representativeId: "rep-1",
         userWallet: {
-          externalUserId: "web:delegate:aud_current_visitor",
+          OR: [
+            { audienceIdentityId: "identity-1" },
+            { externalUserId: "web:delegate:aud_current_visitor" },
+          ],
         },
       },
-      select: { id: true },
+      select: {
+        id: true,
+        userWallet: {
+          select: {
+            externalUserId: true,
+          },
+        },
+      },
     });
     expect(mocks.reverseAgentTokenPurchase).toHaveBeenCalledWith(
       "purchase-1",
@@ -309,8 +450,10 @@ describe("public mock recharge security", () => {
     expect(mocks.createMockRechargeOrder).toHaveBeenCalledWith(
       expect.objectContaining({
         externalUserId: "web:delegate:aud_current_visitor",
+        representativeId: "rep-1",
+        productCode: "agent-wallet:service-credit:v1",
         idempotencyKey:
-          "public_recharge:delegate:aud_current_visitor:checkout-click-1",
+          "public_recharge:delegate:audience:identity-1:checkout-click-1",
       }),
     );
   });
@@ -335,10 +478,10 @@ describe("public mock recharge security", () => {
     const firstKey = mocks.createMockRechargeOrder.mock.calls[0]?.[0]?.idempotencyKey;
     const secondKey = mocks.createMockRechargeOrder.mock.calls[1]?.[0]?.idempotencyKey;
     expect(firstKey).toMatch(
-      /^public_recharge:delegate:aud_current_visitor:[0-9a-f-]{36}$/,
+      /^public_recharge:delegate:audience:identity-1:[0-9a-f-]{36}$/,
     );
     expect(secondKey).toMatch(
-      /^public_recharge:delegate:aud_current_visitor:[0-9a-f-]{36}$/,
+      /^public_recharge:delegate:audience:identity-1:[0-9a-f-]{36}$/,
     );
     expect(secondKey).not.toBe(firstKey);
   });

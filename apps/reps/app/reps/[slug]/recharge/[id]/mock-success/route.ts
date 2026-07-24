@@ -1,17 +1,19 @@
 import { NextResponse } from "next/server";
 
 import {
-  buildWebAudienceExternalUserId,
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   completeMockRechargeAndPurchaseAgentTokens,
   getPublicRepresentativeRuntime,
   prisma,
+  resolvePublicAudienceWalletExternalUserId,
 } from "@delegate/web-data";
 
 import { cookies } from "next/headers";
 import {
-  getPublicChatCookieName,
-  readPublicChatSessionState,
-} from "../../../public-chat";
+  publicAudiencePrincipalErrorStatus,
+  resolvePublicAudienceRequestPrincipal,
+  setPublicAudienceSessionCookie,
+} from "../../../public-principal";
 
 export async function POST(
   request: Request,
@@ -32,32 +34,45 @@ export async function POST(
     }
 
     const cookieStore = await cookies();
-    const sessionState = readPublicChatSessionState({
+    const { principal, sessionState } = await resolvePublicAudienceRequestPrincipal({
       representativeSlug: slug,
-      cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
+      cookieStore,
     });
-    const expectedExternalUserId = buildWebAudienceExternalUserId(
-      slug,
-      sessionState.audienceId,
-    );
+    const expectedExternalUserId = await resolvePublicAudienceWalletExternalUserId({
+      audienceIdentityId: principal.audienceIdentityId,
+      representativeSlug: slug,
+      audienceId: principal.audienceId,
+      currency: "CNY",
+    });
     const rechargeOrder = await prisma.rechargeOrder.findUnique({
       where: { id },
       select: {
+        representativeId: true,
+        productCode: true,
         userWallet: {
           select: {
+            audienceIdentityId: true,
             externalUserId: true,
           },
         },
       },
     });
-    if (rechargeOrder?.userWallet.externalUserId !== expectedExternalUserId) {
+    const ownedByPrincipal = rechargeOrder?.userWallet.audienceIdentityId
+      ? rechargeOrder.userWallet.audienceIdentityId === principal.audienceIdentityId
+      : principal.mode === "anonymous"
+        && rechargeOrder?.userWallet.externalUserId === expectedExternalUserId;
+    const matchesPurchaseIntent =
+      rechargeOrder?.representativeId === runtime.setup.id
+      && rechargeOrder.productCode ===
+        AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE;
+    if (!ownedByPrincipal || !matchesPurchaseIntent || !rechargeOrder) {
       return privateJson({ error: "Recharge order not found." }, 404);
     }
 
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const result = await completeMockRechargeAndPurchaseAgentTokens({
       rechargeOrderId: id,
-      externalUserId: expectedExternalUserId,
+      externalUserId: rechargeOrder.userWallet.externalUserId,
       representativeId: runtime.setup.id,
       ...(typeof body.amountCents === "number"
         ? { amountCents: body.amountCents }
@@ -68,9 +83,22 @@ export async function POST(
       purchaseIdempotencyKey: `public_token_purchase:${id}`,
     });
 
-    return privateJson(result, 200);
+    const response = privateJson(result, 200);
+    setPublicAudienceSessionCookie(response, request, slug, sessionState);
+    return response;
   } catch (error) {
     console.error("Failed to complete public mock recharge.", error);
+    const principalErrorStatus = publicAudiencePrincipalErrorStatus(error);
+    if (principalErrorStatus) {
+      return privateJson(
+        {
+          error: principalErrorStatus === 401
+            ? "登录状态已失效，请重新登录后再试。"
+            : "钱包身份需要人工核对，当前操作未执行。",
+        },
+        principalErrorStatus,
+      );
+    }
     return privateJson(
       {
         error: "模拟支付确认失败，请刷新后重试；如果问题持续，请联系代表主人检查支付配置。",

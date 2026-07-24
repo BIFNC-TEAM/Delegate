@@ -37,6 +37,7 @@ export * from "./matrix-room-security";
 export * from "./openviking";
 export * from "./owner-access";
 export * from "./owner-dashboard";
+export * from "./public-audience-principal";
 export * from "./prisma";
 export * from "./representative-setup";
 export * from "./representative-skill-packs";

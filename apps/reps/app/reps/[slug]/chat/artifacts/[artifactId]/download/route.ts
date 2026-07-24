@@ -2,15 +2,15 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
-  buildWebAudienceKey,
   getPublicConversationArtifactDownload,
   getPublicRepresentativeRuntime,
 } from "@delegate/web-data";
 
 import {
-  getPublicChatCookieName,
-  readPublicChatSessionState,
-} from "../../../../public-chat";
+  publicAudiencePrincipalErrorStatus,
+  resolvePublicAudienceRequestPrincipal,
+  setPublicAudienceSessionCookie,
+} from "../../../../public-principal";
 
 export async function GET(
   request: Request,
@@ -25,22 +25,43 @@ export async function GET(
     );
   }
 
-  const cookieStore = await cookies();
-  const session = readPublicChatSessionState({
-    representativeSlug: slug,
-    cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
-  });
+  let audienceRequest: Awaited<
+    ReturnType<typeof resolvePublicAudienceRequestPrincipal>
+  >;
+  try {
+    audienceRequest = await resolvePublicAudienceRequestPrincipal({
+      representativeSlug: slug,
+      cookieStore: await cookies(),
+    });
+  } catch (error) {
+    const status = publicAudiencePrincipalErrorStatus(error);
+    if (!status) throw error;
+    return NextResponse.json(
+      {
+        error:
+          status === 401
+            ? "Authentication required."
+            : "Audience account requires reconciliation.",
+      },
+      {
+        status,
+        headers: { "Cache-Control": "private, no-store" },
+      },
+    );
+  }
+  const { principal, sessionState } = audienceRequest;
   const artifact = await getPublicConversationArtifactDownload({
     representativeSlug: slug,
     artifactId,
-    audienceKey: buildWebAudienceKey(session.audienceId),
+    audienceIdentityId: principal.audienceIdentityId,
+    audienceId: principal.audienceId,
   });
   if (!artifact) {
     return NextResponse.json({ error: "Artifact not found." }, { status: 404 });
   }
 
   const inline = new URL(request.url).searchParams.get("inline") === "1";
-  return new NextResponse(new Uint8Array(artifact.buffer), {
+  const response = new NextResponse(new Uint8Array(artifact.buffer), {
     status: 200,
     headers: {
       "Cache-Control": "private, no-store",
@@ -49,4 +70,11 @@ export async function GET(
       "X-Content-Type-Options": "nosniff",
     },
   });
+  setPublicAudienceSessionCookie(
+    response,
+    request,
+    slug,
+    sessionState,
+  );
+  return response;
 }

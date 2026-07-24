@@ -6,14 +6,47 @@ import {
   RechargeOrderStatus,
   type Prisma,
 } from "@prisma/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  assertMockRechargeMutationsEnabled,
   completeMockRechargeOrder,
   createMockRechargeOrder,
 } from "../src/agent-wallet-recharge";
 
 describe("agent wallet mock recharge", () => {
+  it("disables mock recharge mutations in production", () => {
+    expect(() =>
+      assertMockRechargeMutationsEnabled({ NODE_ENV: "production" }),
+    ).toThrow("disabled in production");
+    expect(() =>
+      assertMockRechargeMutationsEnabled({ NODE_ENV: "development" }),
+    ).not.toThrow();
+    expect(() =>
+      assertMockRechargeMutationsEnabled({}),
+    ).toThrow("production-like");
+  });
+
+  it("rejects direct mock recharge writes before touching storage in production", async () => {
+    const client = new FakeRechargeClient();
+    vi.stubEnv("NODE_ENV", "production");
+    try {
+      await expect(
+        createMockRechargeOrder(
+          {
+            externalUserId: "user_1",
+            amountCents: 1200,
+          },
+          client,
+        ),
+      ).rejects.toThrow("disabled in production");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(client.userWallets).toHaveLength(0);
+    expect(client.rechargeOrders).toHaveLength(0);
+  });
+
   it("creates a mock recharge order idempotently", async () => {
     const client = new FakeRechargeClient();
     const first = await createMockRechargeOrder(
@@ -41,6 +74,53 @@ describe("agent wallet mock recharge", () => {
       externalUserId: "user_1",
       cashBalanceCents: 0,
     });
+  });
+
+  it("rejects an idempotency key reused by another owner, amount, or currency", async () => {
+    const client = new FakeRechargeClient();
+    await createMockRechargeOrder(
+      {
+        externalUserId: "user_1",
+        amountCents: 1200,
+        currency: "CNY",
+        idempotencyKey: "recharge_facts_bound",
+      },
+      client,
+    );
+
+    await expect(
+      createMockRechargeOrder(
+        {
+          externalUserId: "user_2",
+          amountCents: 1200,
+          currency: "CNY",
+          idempotencyKey: "recharge_facts_bound",
+        },
+        client,
+      ),
+    ).rejects.toThrow("different owner");
+    await expect(
+      createMockRechargeOrder(
+        {
+          externalUserId: "user_1",
+          amountCents: 1201,
+          currency: "CNY",
+          idempotencyKey: "recharge_facts_bound",
+        },
+        client,
+      ),
+    ).rejects.toThrow("different amount");
+    await expect(
+      createMockRechargeOrder(
+        {
+          externalUserId: "user_1",
+          amountCents: 1200,
+          currency: "USD",
+          idempotencyKey: "recharge_facts_bound",
+        },
+        client,
+      ),
+    ).rejects.toThrow("different currency");
   });
 
   it("attaches mock recharge wallets to an audience identity when provided", async () => {
@@ -101,6 +181,32 @@ describe("agent wallet mock recharge", () => {
     ]);
   });
 
+  it("does not change the currency of an existing user wallet", async () => {
+    const client = new FakeRechargeClient();
+    await createMockRechargeOrder(
+      {
+        externalUserId: "user_1",
+        amountCents: 1200,
+        currency: "CNY",
+        idempotencyKey: "recharge_cny",
+      },
+      client,
+    );
+
+    await expect(
+      createMockRechargeOrder(
+        {
+          externalUserId: "user_1",
+          amountCents: 1200,
+          currency: "USD",
+          idempotencyKey: "recharge_usd",
+        },
+        client,
+      ),
+    ).rejects.toThrow("currency cannot be changed");
+    expect(client.userWallets[0]?.currency).toBe("CNY");
+  });
+
   it("completes payment once and credits the user wallet ledger", async () => {
     const client = new FakeRechargeClient();
     const created = await createMockRechargeOrder(
@@ -143,6 +249,41 @@ describe("agent wallet mock recharge", () => {
     ).rejects.toThrow("amount does not match");
     expect(client.userWallets[0]?.cashBalanceCents).toBe(0);
     expect(client.ledgerEntries).toHaveLength(0);
+  });
+
+  it("does not allow a provider event id to be attached to another order", async () => {
+    const client = new FakeRechargeClient();
+    const first = await createMockRechargeOrder(
+      {
+        externalUserId: "user_1",
+        amountCents: 1200,
+        idempotencyKey: "recharge_first",
+      },
+      client,
+    );
+    const second = await createMockRechargeOrder(
+      {
+        externalUserId: "user_1",
+        amountCents: 1200,
+        idempotencyKey: "recharge_second",
+      },
+      client,
+    );
+
+    await completeMockRechargeOrder(
+      first.id,
+      { providerEventId: "evt_bound_once" },
+      client,
+    );
+    await expect(
+      completeMockRechargeOrder(
+        second.id,
+        { providerEventId: "evt_bound_once" },
+        client,
+      ),
+    ).rejects.toThrow("already attached to another");
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+    expect(client.ledgerEntries).toHaveLength(1);
   });
 
   it("rejects invalid recharge input", async () => {
@@ -338,9 +479,33 @@ class FakeRechargeClient {
       Object.assign(order, args.data);
       return order;
     },
+    updateMany: async (args: any) => {
+      const order = this.rechargeOrders.find((row) => row.id === args.where.id);
+      if (
+        !order ||
+        (args.where.provider && order.provider !== args.where.provider) ||
+        (typeof args.where.amountCents === "number" &&
+          order.amountCents !== args.where.amountCents) ||
+        (args.where.currency && order.currency !== args.where.currency) ||
+        (args.where.status && order.status !== args.where.status)
+      ) {
+        return { count: 0 };
+      }
+      Object.assign(order, args.data);
+      return { count: 1 };
+    },
   };
 
   paymentProviderEvent = {
+    findUnique: async (args: any) => {
+      const key = args.where.provider_providerEventId;
+      return (
+        this.providerEvents.find(
+          (event) =>
+            event.provider === key.provider && event.providerEventId === key.providerEventId,
+        ) ?? null
+      );
+    },
     upsert: async (args: any) => {
       const key = args.where.provider_providerEventId;
       const existing = this.providerEvents.find(

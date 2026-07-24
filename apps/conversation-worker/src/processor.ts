@@ -16,6 +16,7 @@ import {
 } from "@delegate/runtime";
 import {
   buildRepresentativeRuntimeProfile,
+  assertConversationChannelDeliveryAvailable,
   claimNextOperatorMessageWorkItem,
   claimNextGenerationWorkItem,
   completeOperatorMessageDelivery,
@@ -23,11 +24,13 @@ import {
   createComputeDelegationTask,
   createClarifyingDelegationTask,
   createAudienceComputeSession,
+  deferOperatorMessageDelivery,
   deferGenerationRunForHuman,
   executeAudienceTool,
   ensureConversationLeadAndHandoff,
   failGenerationRun,
   getRepresentativeRuntimeSetupSnapshot,
+  hasUnifiedConversationEntitlement,
   loadGenerationRecentTurns,
   markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval,
@@ -36,28 +39,47 @@ import {
   findConversationClarifyingDelegationTask,
   continueClarifyingDelegationTask,
   recallRepresentativeContext,
+  releaseConversationEntitlement,
+  reserveConversationEntitlement,
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
   waitGenerationRunForComputeApproval,
   type AuthorizedDelegationKnowledge,
+  type ConversationEntitlementReservation,
 } from "@delegate/web-data";
 
 import type { ConversationWorkerConfig } from "./config";
 import { sendMatrixRepresentativeMessage } from "./matrix-outbound";
 
 export async function processNextConversationWork(config: ConversationWorkerConfig) {
-  const operatorItem = await claimNextOperatorMessageWorkItem();
+  const telegramWorkerEnabled =
+    config.telegramConversationPlatformMode === "worker";
+  const operatorItem = await claimNextOperatorMessageWorkItem({
+    telegramWorkerEnabled,
+    ...(config.outboxProcessingLeaseMs
+      ? { processingLeaseMs: config.outboxProcessingLeaseMs }
+      : {}),
+  });
   if (operatorItem) {
     try {
+      await assertConversationChannelDeliveryAvailable({
+        conversationId: operatorItem.conversationId,
+        channel: operatorItem.channel,
+      });
       let externalMessageId: string | undefined;
       if (operatorItem.channel === "matrix") {
-        if (!operatorItem.matrixSenderUserId) throw new Error("Matrix Operator virtual user is missing.");
+        if (!operatorItem.matrixSenderUserId) {
+          throw new Error(
+            "Matrix representative transport user is missing for Operator delivery.",
+          );
+        }
         externalMessageId = await sendMatrixRepresentativeMessage({
           config,
           roomId: operatorItem.externalConversationId,
           senderUserId: operatorItem.matrixSenderUserId,
-          generationRunId: `operator-${operatorItem.messageId}`,
-          text: operatorItem.text,
+          deliveryId: `operator-${operatorItem.messageId}`,
+          senderMode: "human_operator",
+          text: `${operatorItem.operatorName.trim().slice(0, 80) || "Operator"}: ${operatorItem.text}`,
         });
       } else {
         externalMessageId = await sendTelegramOperatorMessage({
@@ -75,6 +97,18 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       return { processed: true as const, runId: operatorItem.messageId, status: "completed" as const };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Operator message delivery failed.";
+      if (isRecoverableOperatorPause(error)) {
+        await deferOperatorMessageDelivery({
+          outboxId: operatorItem.outboxId,
+          messageId: operatorItem.messageId,
+          reason: error.code,
+        });
+        return {
+          processed: true as const,
+          runId: operatorItem.messageId,
+          status: "deferred" as const,
+        };
+      }
       await retryOperatorMessageDelivery({
         outboxId: operatorItem.outboxId,
         messageId: operatorItem.messageId,
@@ -84,10 +118,64 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     }
   }
 
-  const item = await claimNextGenerationWorkItem();
+  const item = await claimNextGenerationWorkItem({
+    telegramWorkerEnabled,
+    ...(config.outboxProcessingLeaseMs
+      ? { processingLeaseMs: config.outboxProcessingLeaseMs }
+      : {}),
+  });
   if (!item) return { processed: false as const };
 
+  if (item.deliveryOnly) {
+    if (!item.outputMessageId || !item.outputText) {
+      const errorMessage = "Completed generation is missing its persisted delivery output.";
+      await retryGenerationDelivery({
+        runId: item.runId,
+        ...(item.outputMessageId ? { outputMessageId: item.outputMessageId } : {}),
+        errorMessage,
+      });
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "failed" as const,
+        error: errorMessage,
+      };
+    }
+    try {
+      const externalMessageId = await deliverGenerationOutput({
+        config,
+        item,
+        text: item.outputText,
+      });
+      await markGenerationDeliveryComplete({
+        runId: item.runId,
+        outputMessageId: item.outputMessageId,
+        ...(externalMessageId ? { externalMessageId } : {}),
+      });
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "completed" as const,
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : "Conversation delivery retry failed.";
+      await retryGenerationDelivery({
+        runId: item.runId,
+        outputMessageId: item.outputMessageId,
+        errorMessage,
+      });
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "failed" as const,
+        error: errorMessage,
+      };
+    }
+  }
+
   let outputMessageId: string | undefined;
+  let entitlementReservation: ConversationEntitlementReservation | null = null;
   try {
     if (item.controlState === "HUMAN_ACTIVE" || item.controlState === "NEEDS_HUMAN") {
       await deferGenerationRunForHuman(item.runId);
@@ -311,6 +399,38 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     }
 
     const representative = buildRepresentativeRuntimeProfile(setup);
+    let unifiedEntitlementAuthority = false;
+    if (
+      item.audienceIdentityId
+      && item.usage.freeRepliesUsed >= representative.contract.freeReplyLimit
+    ) {
+      entitlementReservation = await reserveConversationEntitlement({
+        audienceIdentityId: item.audienceIdentityId,
+        representativeId: setup.id,
+        generationRunId: item.runId,
+      });
+      if (!entitlementReservation) {
+        unifiedEntitlementAuthority = await hasUnifiedConversationEntitlement({
+          audienceIdentityId: item.audienceIdentityId,
+          representativeId: setup.id,
+        });
+      }
+    }
+    const effectiveUsage = entitlementReservation
+      ? {
+          ...item.usage,
+          passUnlocked: true,
+          deepHelpUnlocked:
+            item.usage.deepHelpUnlocked
+            || entitlementReservation.productCode === "plan:deep_help",
+        }
+      : unifiedEntitlementAuthority
+        ? {
+            ...item.usage,
+            passUnlocked: false,
+            deepHelpUnlocked: false,
+          }
+        : item.usage;
     const recentTurns = await loadGenerationRecentTurns({
       conversationId: item.conversationId,
       beforeMessageId: item.inputMessageId,
@@ -319,7 +439,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       text: item.userText,
       channel: "private_chat",
       representative,
-      usage: item.usage,
+      usage: effectiveUsage,
     });
     const subagent = resolveConversationSubagent(plan);
     const recalled = plan.nextStep === "answer"
@@ -367,6 +487,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       senderDisplayName: item.representativeName,
       intent: plan.intent,
       completeOutbox: false,
+      ...(entitlementReservation ? { entitlementReservation } : {}),
       ...(citations.length ? { citations } : {}),
       ...runtime,
     });
@@ -385,21 +506,11 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       });
     }
 
-    let externalMessageId: string | undefined;
-    if (item.channel === "matrix") {
-      if (!item.externalConversationId || !item.matrixSenderUserId) {
-        throw new Error("Matrix room or representative virtual user is missing.");
-      }
-      externalMessageId = await sendMatrixRepresentativeMessage({
-        config,
-        roomId: item.externalConversationId,
-        senderUserId: item.matrixSenderUserId,
-        generationRunId: item.runId,
-        text: replyText,
-      });
-    } else if (item.channel === "telegram") {
-      throw new Error("Telegram generation delivery remains owned by the existing bot adapter.");
-    }
+    const externalMessageId = await deliverGenerationOutput({
+      config,
+      item,
+      text: replyText,
+    });
 
     await markGenerationDeliveryComplete({
       runId: item.runId,
@@ -409,6 +520,16 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     return { processed: true as const, runId: item.runId, status: "completed" as const };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Conversation processing failed.";
+    if (entitlementReservation && !outputMessageId) {
+      try {
+        await releaseConversationEntitlement(entitlementReservation);
+      } catch (releaseError) {
+        console.error(
+          "Unable to release conversation entitlement reservation:",
+          releaseError,
+        );
+      }
+    }
     const userFacingFailure = renderUserCorrectableDelegationFailure(errorMessage);
     if (!outputMessageId && userFacingFailure) {
       return completeTerminalDelegationFailure(item, userFacingFailure);
@@ -428,6 +549,23 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     }
     return { processed: true as const, runId: item.runId, status: "failed" as const, error: errorMessage };
   }
+}
+
+function isRecoverableOperatorPause(
+  error: unknown,
+): error is Error & {
+  code: "channel_paused" | "representative_paused" | "policy_disabled";
+} {
+  if (!error || typeof error !== "object") return false;
+  const code = "code" in error ? error.code : null;
+  return (
+    (error instanceof Error || ("name" in error && error.name === "ChannelUnavailableError"))
+    && (
+      code === "channel_paused"
+      || code === "representative_paused"
+      || code === "policy_disabled"
+    )
+  );
 }
 
 async function buildDelegationPlannerInput(input: {
@@ -789,18 +927,85 @@ async function sendTelegramOperatorMessage(input: {
   operatorName: string;
   text: string;
 }) {
+  if (input.config.telegramConversationPlatformMode !== "worker") {
+    throw new Error("Telegram conversation worker is not the active delivery owner.");
+  }
+  return sendTelegramMessage({
+    config: input.config,
+    chatId: input.chatId,
+    text: `${input.operatorName}: ${input.text}`,
+  });
+}
+
+async function sendTelegramRepresentativeMessage(input: {
+  config: ConversationWorkerConfig;
+  chatId: string;
+  text: string;
+}) {
+  return sendTelegramMessage(input);
+}
+
+async function sendTelegramMessage(input: {
+  config: ConversationWorkerConfig;
+  chatId: string;
+  text: string;
+}) {
   if (!input.config.telegramBotToken) throw new Error("TELEGRAM_BOT_TOKEN is not configured.");
   const response = await fetch(`https://api.telegram.org/bot${input.config.telegramBotToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: input.chatId,
-      text: `${input.operatorName}: ${input.text}`,
+      text: input.text,
     }),
+    signal: AbortSignal.timeout(input.config.telegramRequestTimeoutMs ?? 15_000),
   });
-  const payload = (await response.json()) as { ok?: boolean; result?: { message_id?: number }; description?: string };
+  const payload = (await response.json().catch(() => ({}))) as {
+    ok?: boolean;
+    result?: { message_id?: number };
+    description?: string;
+  };
   if (!response.ok || !payload.ok || !payload.result?.message_id) {
     throw new Error(payload.description || `Telegram operator delivery failed (${response.status}).`);
   }
   return String(payload.result.message_id);
+}
+
+async function deliverGenerationOutput(input: {
+  config: ConversationWorkerConfig;
+  item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
+  text: string;
+}) {
+  await assertConversationChannelDeliveryAvailable({
+    conversationId: input.item.conversationId,
+    channel: input.item.channel,
+  });
+  if (input.item.channel === "matrix") {
+    if (!input.item.externalConversationId || !input.item.matrixSenderUserId) {
+      throw new Error("Matrix room or representative virtual user is missing.");
+    }
+    return sendMatrixRepresentativeMessage({
+      config: input.config,
+      roomId: input.item.externalConversationId,
+      senderUserId: input.item.matrixSenderUserId,
+      deliveryId: input.item.runId,
+      senderMode: "ai",
+      generationRunId: input.item.runId,
+      text: input.text,
+    });
+  }
+  if (input.item.channel === "telegram") {
+    if (input.config.telegramConversationPlatformMode !== "worker") {
+      throw new Error("Telegram conversation worker is not the active delivery owner.");
+    }
+    if (!input.item.externalConversationId) {
+      throw new Error("Telegram chat binding is missing.");
+    }
+    return sendTelegramRepresentativeMessage({
+      config: input.config,
+      chatId: input.item.externalConversationId,
+      text: input.text,
+    });
+  }
+  return undefined;
 }

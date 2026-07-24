@@ -68,7 +68,7 @@ type CreatorEarningRecord = {
 type UsageChargeClient = Omit<WalletLedgerClient, "$transaction"> & {
   agentWallet: {
     findUnique(args: unknown): Promise<AgentWalletRecord | null>;
-    update(args: unknown): Promise<AgentWalletRecord>;
+    updateMany(args: unknown): Promise<{ count: number }>;
   };
   agentUsageCharge: {
     findUnique(args: unknown): Promise<AgentUsageChargeRecord | null>;
@@ -76,7 +76,8 @@ type UsageChargeClient = Omit<WalletLedgerClient, "$transaction"> & {
   };
   creatorEarning: {
     findFirst(args: unknown): Promise<CreatorEarningRecord | null>;
-    update(args: unknown): Promise<CreatorEarningRecord>;
+    findUnique(args: unknown): Promise<CreatorEarningRecord | null>;
+    updateMany(args: unknown): Promise<{ count: number }>;
     create(args: unknown): Promise<CreatorEarningRecord>;
   };
   $transaction?<T>(fn: (tx: UsageChargeClient) => Promise<T>): Promise<T>;
@@ -127,6 +128,7 @@ export async function applyAgentUsageCharge(
       },
     });
     if (existing) {
+      assertExistingUsageChargeMatches(existing, normalized);
       return serializeAgentUsageCharge(existing);
     }
 
@@ -144,6 +146,39 @@ export async function applyAgentUsageCharge(
       throw new Error("Insufficient agent token balance.");
     }
     assertPositiveInteger(agentWallet.tokenUnitPriceCents, "tokenUnitPriceCents");
+
+    const tokenDebit = await tx.agentWallet.updateMany({
+      where: {
+        id: agentWallet.id,
+        currency: normalized.currency,
+        tokenBalance: {
+          equals: agentWallet.tokenBalance,
+          gte: normalized.tokenAmount,
+        },
+      },
+      data: {
+        tokenBalance: {
+          decrement: normalized.tokenAmount,
+        },
+        totalConsumedTokens: {
+          increment: normalized.tokenAmount,
+        },
+      },
+    });
+    if (tokenDebit.count !== 1) {
+      const concurrent = await tx.agentUsageCharge.findUnique({
+        where: { idempotencyKey: normalized.idempotencyKey },
+        include: {
+          agentWallet: true,
+          creatorEarnings: true,
+        },
+      });
+      if (concurrent) {
+        assertExistingUsageChargeMatches(concurrent, normalized);
+        return serializeAgentUsageCharge(concurrent);
+      }
+      throw new Error("Insufficient agent token balance.");
+    }
 
     const tokenValueCents = normalized.tokenAmount * agentWallet.tokenUnitPriceCents;
     const releaseSource = await tx.creatorEarning.findFirst({
@@ -185,21 +220,37 @@ export async function applyAgentUsageCharge(
       },
     });
 
-    const updatedPendingEarning =
-      releaseSource && creatorWithdrawableCents > 0
-        ? await tx.creatorEarning.update({
-            where: { id: releaseSource.id },
-            data: {
-              pendingCents: {
-                decrement: creatorWithdrawableCents,
-              },
-              status:
-                releaseSource.pendingCents === creatorWithdrawableCents
-                  ? CreatorEarningStatus.WITHDRAWABLE
-                  : CreatorEarningStatus.PENDING,
-            },
-          })
-        : null;
+    let updatedPendingEarning: CreatorEarningRecord | null = null;
+    if (releaseSource && creatorWithdrawableCents > 0) {
+      const release = await tx.creatorEarning.updateMany({
+        where: {
+          id: releaseSource.id,
+          status: CreatorEarningStatus.PENDING,
+          pendingCents: {
+            equals: releaseSource.pendingCents,
+            gte: creatorWithdrawableCents,
+          },
+        },
+        data: {
+          pendingCents: {
+            decrement: creatorWithdrawableCents,
+          },
+          status:
+            releaseSource.pendingCents === creatorWithdrawableCents
+              ? CreatorEarningStatus.WITHDRAWABLE
+              : CreatorEarningStatus.PENDING,
+        },
+      });
+      if (release.count !== 1) {
+        throw new Error("Creator pending earning changed concurrently.");
+      }
+      updatedPendingEarning = await tx.creatorEarning.findUnique({
+        where: { id: releaseSource.id },
+      });
+      if (!updatedPendingEarning) {
+        throw new Error("Creator pending earning disappeared during usage charge.");
+      }
+    }
     const withdrawableEarning =
       releaseSource && updatedPendingEarning && creatorWithdrawableCents > 0
         ? await tx.creatorEarning.create({
@@ -255,17 +306,12 @@ export async function applyAgentUsageCharge(
       tx,
     );
 
-    const updatedAgentWallet = await tx.agentWallet.update({
+    const updatedAgentWallet = await tx.agentWallet.findUnique({
       where: { id: agentWallet.id },
-      data: {
-        tokenBalance: {
-          decrement: normalized.tokenAmount,
-        },
-        totalConsumedTokens: {
-          increment: normalized.tokenAmount,
-        },
-      },
     });
+    if (!updatedAgentWallet) {
+      throw new Error("Agent wallet disappeared during usage charge.");
+    }
 
     return serializeAgentUsageCharge({
       ...usageCharge,
@@ -395,10 +441,43 @@ function normalizeApplyAgentUsageChargeInput(
     providerCostCents,
     currency,
     idempotencyKey:
-      input.idempotencyKey ??
+      normalizeOptionalIdempotencyKey(input.idempotencyKey) ??
       `agent_usage:${representativeId}:${kind}:${input.tokenAmount}:${providerCostCents}`,
-    ...(input.tokenPurchaseId ? { tokenPurchaseId: input.tokenPurchaseId } : {}),
+    ...(input.tokenPurchaseId?.trim() ? { tokenPurchaseId: input.tokenPurchaseId.trim() } : {}),
   };
+}
+
+function assertExistingUsageChargeMatches(
+  charge: AgentUsageChargeRecord,
+  normalized: ReturnType<typeof normalizeApplyAgentUsageChargeInput>,
+): void {
+  const mismatches = [
+    charge.representativeId !== normalized.representativeId ? "representative" : null,
+    charge.tokenAmount !== normalized.tokenAmount ? "token amount" : null,
+    charge.kind !== normalized.kind ? "kind" : null,
+    charge.quantity !== normalized.quantity ? "quantity" : null,
+    charge.providerCostCents !== normalized.providerCostCents ? "provider cost" : null,
+    charge.currency !== normalized.currency ? "currency" : null,
+    charge.tokenPurchaseId !== (normalized.tokenPurchaseId ?? null)
+      ? "token purchase"
+      : null,
+  ].filter((value): value is string => value !== null);
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Usage charge idempotency key was reused with different ${mismatches.join(", ")}.`,
+    );
+  }
+}
+
+function normalizeOptionalIdempotencyKey(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error("idempotencyKey must not be empty.");
+  }
+  return normalized;
 }
 
 function serializeAgentUsageCharge(

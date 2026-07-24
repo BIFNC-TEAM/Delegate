@@ -4,6 +4,7 @@ import { prisma } from "./prisma";
 
 const WEB_RECENT_TURN_LIMIT = 8;
 const WEB_RECENT_TURN_TEXT_LIMIT = 240;
+const MAX_AUDIENCE_IDENTITY_MERGE_DEPTH = 64;
 
 type DemoWebAudienceTurn = {
   conversationId: string;
@@ -44,10 +45,14 @@ export type WebAudienceIdentityLinkProvider =
   | "EMAIL"
   | "PHONE"
   | "TELEGRAM"
+  | "MATRIX"
   | "PAYMENT_EXTERNAL_USER";
 
 type WebAudienceClient = {
-  $transaction?: <T>(callback: (client: WebAudienceClient) => Promise<T>) => Promise<T>;
+  $transaction?: <T>(
+    callback: (client: WebAudienceClient) => Promise<T>,
+    options?: { isolationLevel: "Serializable" },
+  ) => Promise<T>;
   audienceIdentity: {
     upsert(args: {
       where: {
@@ -72,6 +77,23 @@ type WebAudienceClient = {
         lastSeenAt?: Date;
       };
     }): Promise<WebAudienceIdentity>;
+    updateMany(args: {
+      where: {
+        id: string;
+        status?: "MERGED" | "ANONYMOUS" | "REGISTERED" | "DISABLED";
+        mergedIntoId?: string | null;
+      };
+      data: {
+        status?: "MERGED" | "ANONYMOUS" | "REGISTERED" | "DISABLED";
+        mergedIntoId?: string | null;
+        lastSeenAt?: Date;
+      };
+    }): Promise<{ count: number }>;
+    findUnique(args: {
+      where: {
+        id: string;
+      };
+    }): Promise<WebAudienceIdentity | null>;
   };
   identityLink: {
     findUnique(args: {
@@ -83,8 +105,29 @@ type WebAudienceClient = {
       };
       select: {
         audienceIdentityId: true;
+        issuer: true;
+        connectionId: true;
+        revokedAt: true;
       };
-    }): Promise<{ audienceIdentityId: string } | null>;
+    }): Promise<{
+      audienceIdentityId: string;
+      issuer?: string;
+      connectionId?: string | null;
+      revokedAt?: Date | null;
+    } | null>;
+    create(args: {
+      data: {
+        audienceIdentityId: string;
+        provider: WebAudienceIdentityLinkProvider;
+        providerSubject: string;
+        issuer?: string;
+        connectionId?: string | null;
+        verifiedAt?: Date | null;
+        assuranceLevel?: "UNVERIFIED" | "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+        proofMetadata?: unknown;
+        metadata?: unknown;
+      };
+    }): Promise<unknown>;
     upsert(args: {
       where: {
         provider_providerSubject: {
@@ -94,23 +137,39 @@ type WebAudienceClient = {
       };
       update: {
         audienceIdentityId: string;
+        issuer?: string;
+        connectionId?: string | null;
         verifiedAt?: Date | null;
+        assuranceLevel?: "UNVERIFIED" | "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+        proofMetadata?: unknown;
         metadata?: unknown;
       };
       create: {
         audienceIdentityId: string;
         provider: WebAudienceIdentityLinkProvider;
         providerSubject: string;
+        issuer?: string;
+        connectionId?: string | null;
         verifiedAt?: Date | null;
+        assuranceLevel?: "UNVERIFIED" | "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+        proofMetadata?: unknown;
         metadata?: unknown;
       };
     }): Promise<unknown>;
     updateMany(args: {
       where: {
-        audienceIdentityId: string;
+        audienceIdentityId?: string;
+        provider?: WebAudienceIdentityLinkProvider;
+        providerSubject?: string;
       };
       data: {
-        audienceIdentityId: string;
+        audienceIdentityId?: string;
+        issuer?: string;
+        connectionId?: string | null;
+        verifiedAt?: Date | null;
+        assuranceLevel?: "UNVERIFIED" | "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+        proofMetadata?: unknown;
+        metadata?: unknown;
       };
     }): Promise<{ count: number }>;
   };
@@ -220,6 +279,9 @@ type WebAudienceClient = {
     }>>;
   };
   userWallet: {
+    count(args: {
+      where: { audienceIdentityId: string };
+    }): Promise<number>;
     updateMany(args: {
       where: { audienceIdentityId: string };
       data: { audienceIdentityId: string };
@@ -232,6 +294,78 @@ type WebAudienceClient = {
     }): Promise<{ count: number }>;
   };
   openVikingMemoryRecord: {
+    updateMany(args: {
+      where: { audienceIdentityId: string };
+      data: { audienceIdentityId: string };
+    }): Promise<{ count: number }>;
+  };
+  delegationTask: {
+    updateMany(args: {
+      where: { audienceIdentityId: string };
+      data: { audienceIdentityId: string };
+    }): Promise<{ count: number }>;
+  };
+  identityBindingChallenge?: {
+    updateMany(args: {
+      where: {
+        audienceIdentityId: string;
+        consumedAt?: null;
+        revokedAt?: null;
+      };
+      data: { revokedAt: Date };
+    }): Promise<{ count: number }>;
+  };
+  bridgeIdentityMapping?: {
+    updateMany(args: {
+      where: { audienceIdentityId: string };
+      data: { audienceIdentityId: string };
+    }): Promise<{ count: number }>;
+  };
+  serviceEntitlementAccount?: {
+    count(args: {
+      where: { audienceIdentityId: string };
+    }): Promise<number>;
+    findMany(args: {
+      where: { audienceIdentityId: string };
+      select: {
+        id: true;
+        representativeId: true;
+        productCode: true;
+      };
+    }): Promise<
+      Array<{
+        id: string;
+        representativeId: string;
+        productCode: string;
+      }>
+    >;
+    updateMany(args: {
+      where: { audienceIdentityId: string };
+      data: { audienceIdentityId: string };
+    }): Promise<{ count: number }>;
+  };
+  servicePaymentOrder?: {
+    count(args: {
+      where: { payerAudienceIdentityId: string };
+    }): Promise<number>;
+    updateMany(args: {
+      where: { payerAudienceIdentityId: string };
+      data: { payerAudienceIdentityId: string };
+    }): Promise<{ count: number }>;
+  };
+  agentTokenPurchase?: {
+    count(args: {
+      where: { audienceIdentityId: string };
+    }): Promise<number>;
+    updateMany(args: {
+      where: { audienceIdentityId: string };
+      data: { audienceIdentityId: string };
+    }): Promise<{ count: number }>;
+  };
+  agentUsageCharge?: {
+    count(args: {
+      where: { audienceIdentityId: string };
+    }): Promise<number>;
     updateMany(args: {
       where: { audienceIdentityId: string };
       data: { audienceIdentityId: string };
@@ -284,35 +418,115 @@ export async function resolveAnonymousAudienceIdentity(
     },
   });
 
-  if (identity.status === "MERGED" && identity.mergedIntoId) {
-    return client.audienceIdentity.update({
-      where: {
-        id: identity.mergedIntoId,
-      },
-      data: {
-        lastSeenAt: now,
-      },
-    });
-  }
+  const canonicalIdentity = await resolveCanonicalAudienceIdentity(
+    {
+      audienceIdentityId: identity.id,
+    },
+    client,
+  );
+  const resolvedIdentity =
+    canonicalIdentity.id === identity.id
+      ? identity
+      : await client.audienceIdentity.update({
+          where: {
+            id: canonicalIdentity.id,
+          },
+          data: {
+            lastSeenAt: now,
+          },
+        });
 
-  await client.identityLink.upsert({
-    where: {
-      provider_providerSubject: {
-        provider: "WEB_ANONYMOUS",
-        providerSubject: audienceKey,
-      },
-    },
-    update: {
-      audienceIdentityId: identity.id,
-    },
-    create: {
-      audienceIdentityId: identity.id,
+  await linkAudienceIdentity(
+    {
+      audienceIdentityId: resolvedIdentity.id,
       provider: "WEB_ANONYMOUS",
       providerSubject: audienceKey,
     },
-  });
+    client,
+  );
 
-  return identity;
+  return resolvedIdentity;
+}
+
+/**
+ * Resolves a provider-authenticated channel user to a provisional canonical
+ * identity. The identity remains ANONYMOUS until the user proves ownership of
+ * a registered Web account through a private binding challenge.
+ */
+export async function resolveChannelAudienceIdentity(
+  input: {
+    provider: "TELEGRAM" | "MATRIX";
+    providerSubject: string;
+    issuer?: string;
+    connectionId?: string;
+    now?: Date;
+  },
+  client: WebAudienceClient = prisma as unknown as WebAudienceClient,
+): Promise<WebAudienceIdentity> {
+  const providerSubject = normalizeIdentityProviderSubject(
+    input.provider,
+    input.providerSubject,
+  );
+  const issuer = input.issuer?.trim().toLowerCase() || "delegate";
+  const connectionId = input.connectionId?.trim().toLowerCase();
+  if (!connectionId) {
+    throw new Error("Channel identity resolution requires a connection id.");
+  }
+  const now = input.now ?? new Date();
+  const existingLink = await findIdentityLink(client, input.provider, providerSubject);
+  if (existingLink) {
+    if (existingLink.revokedAt) {
+      throw new Error("Channel identity link has been revoked.");
+    }
+    if (existingLink.issuer && existingLink.issuer !== issuer) {
+      throw new Error("Channel identity belongs to a different issuer realm.");
+    }
+    if (!existingLink.connectionId) {
+      throw new Error(
+        "Channel identity is missing verified connection scope and requires reconciliation.",
+      );
+    }
+    if (existingLink.connectionId.toLowerCase() !== connectionId) {
+      throw new Error("Channel identity belongs to a different provider connection.");
+    }
+    const identity = await resolveCanonicalAudienceIdentity(
+      { audienceIdentityId: existingLink.audienceIdentityId },
+      client,
+    );
+    return client.audienceIdentity.update({
+      where: { id: identity.id },
+      data: { lastSeenAt: now },
+    });
+  }
+
+  const audienceKey = `channel:${input.provider.toLowerCase()}:${encodeURIComponent(issuer)}:${encodeURIComponent(providerSubject)}`;
+  const provisional = await client.audienceIdentity.upsert({
+    where: { audienceKey },
+    update: { lastSeenAt: now },
+    create: {
+      audienceKey,
+      status: "ANONYMOUS",
+      lastSeenAt: now,
+    },
+  });
+  await linkAudienceIdentity(
+    {
+      audienceIdentityId: provisional.id,
+      provider: input.provider,
+      providerSubject,
+      issuer,
+      connectionId,
+      verifiedAt: now,
+      assuranceLevel: "PLATFORM_VERIFIED",
+      proofMetadata: {
+        method: "authenticated_channel_adapter",
+        issuer,
+      },
+      metadata: { provisional: true },
+    },
+    client,
+  );
+  return provisional;
 }
 
 export async function linkAudienceIdentity(
@@ -320,33 +534,155 @@ export async function linkAudienceIdentity(
     audienceIdentityId: string;
     provider: WebAudienceIdentityLinkProvider;
     providerSubject: string;
+    issuer?: string;
+    connectionId?: string | null;
     verifiedAt?: Date | null | undefined;
+    assuranceLevel?: "UNVERIFIED" | "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+    proofMetadata?: unknown;
     metadata?: unknown;
   },
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ) {
   const providerSubject = normalizeIdentityProviderSubject(input.provider, input.providerSubject);
+  const requestedIdentity = await resolveCanonicalAudienceIdentity(
+    {
+      audienceIdentityId: input.audienceIdentityId,
+    },
+    client,
+  );
+  const existingLink = await findIdentityLink(client, input.provider, providerSubject);
 
-  return client.identityLink.upsert({
-    where: {
-      provider_providerSubject: {
-        provider: input.provider,
-        providerSubject,
-      },
-    },
-    update: {
-      audienceIdentityId: input.audienceIdentityId,
-      ...(input.verifiedAt !== undefined ? { verifiedAt: input.verifiedAt } : {}),
-      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-    },
-    create: {
-      audienceIdentityId: input.audienceIdentityId,
+  if (existingLink) {
+    return updateOwnedIdentityLink({
+      client,
+      existingAudienceIdentityId: existingLink.audienceIdentityId,
+      requestedAudienceIdentityId: requestedIdentity.id,
       provider: input.provider,
       providerSubject,
+      ...(existingLink.issuer !== undefined
+        ? { existingIssuer: existingLink.issuer }
+        : {}),
+      ...(existingLink.connectionId !== undefined
+        ? { existingConnectionId: existingLink.connectionId }
+        : {}),
+      ...(input.issuer !== undefined ? { issuer: input.issuer } : {}),
+      ...(input.connectionId !== undefined
+        ? { connectionId: input.connectionId }
+        : {}),
       ...(input.verifiedAt !== undefined ? { verifiedAt: input.verifiedAt } : {}),
+      ...(input.assuranceLevel !== undefined
+        ? { assuranceLevel: input.assuranceLevel }
+        : {}),
+      ...(input.proofMetadata !== undefined
+        ? { proofMetadata: input.proofMetadata }
+        : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
-    },
-  });
+    });
+  }
+
+  try {
+    return await client.identityLink.create({
+      data: {
+        audienceIdentityId: requestedIdentity.id,
+        provider: input.provider,
+        providerSubject,
+        ...(input.issuer !== undefined ? { issuer: input.issuer } : {}),
+        ...(input.connectionId !== undefined ? { connectionId: input.connectionId } : {}),
+        ...(input.verifiedAt !== undefined ? { verifiedAt: input.verifiedAt } : {}),
+        ...(input.assuranceLevel !== undefined
+          ? { assuranceLevel: input.assuranceLevel }
+          : {}),
+        ...(input.proofMetadata !== undefined
+          ? { proofMetadata: input.proofMetadata }
+          : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+      },
+    });
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) {
+      throw error;
+    }
+
+    const concurrentLink = await findIdentityLink(client, input.provider, providerSubject);
+    if (!concurrentLink) {
+      throw error;
+    }
+    return updateOwnedIdentityLink({
+      client,
+      existingAudienceIdentityId: concurrentLink.audienceIdentityId,
+      requestedAudienceIdentityId: requestedIdentity.id,
+      provider: input.provider,
+      providerSubject,
+      ...(concurrentLink.issuer !== undefined
+        ? { existingIssuer: concurrentLink.issuer }
+        : {}),
+      ...(concurrentLink.connectionId !== undefined
+        ? { existingConnectionId: concurrentLink.connectionId }
+        : {}),
+      ...(input.issuer !== undefined ? { issuer: input.issuer } : {}),
+      ...(input.connectionId !== undefined
+        ? { connectionId: input.connectionId }
+        : {}),
+      ...(input.verifiedAt !== undefined ? { verifiedAt: input.verifiedAt } : {}),
+      ...(input.assuranceLevel !== undefined
+        ? { assuranceLevel: input.assuranceLevel }
+        : {}),
+      ...(input.proofMetadata !== undefined
+        ? { proofMetadata: input.proofMetadata }
+        : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    });
+  }
+}
+
+export async function resolveCanonicalAudienceIdentity(
+  input: {
+    audienceIdentityId: string;
+  },
+  client: WebAudienceClient = prisma as unknown as WebAudienceClient,
+): Promise<WebAudienceIdentity> {
+  const initialAudienceIdentityId = normalizeRequiredId(
+    input.audienceIdentityId,
+    "audienceIdentityId",
+  );
+  const visited = new Set<string>();
+  let currentAudienceIdentityId = initialAudienceIdentityId;
+
+  for (let depth = 0; depth < MAX_AUDIENCE_IDENTITY_MERGE_DEPTH; depth += 1) {
+    if (visited.has(currentAudienceIdentityId)) {
+      throw new Error(
+        `Audience identity merge cycle detected while resolving ${initialAudienceIdentityId}.`,
+      );
+    }
+    visited.add(currentAudienceIdentityId);
+
+    const identity = await client.audienceIdentity.findUnique({
+      where: {
+        id: currentAudienceIdentityId,
+      },
+    });
+    if (!identity) {
+      throw new Error(`Audience identity ${currentAudienceIdentityId} was not found.`);
+    }
+    if (identity.status === "DISABLED") {
+      throw new Error(`Audience identity ${currentAudienceIdentityId} is disabled.`);
+    }
+    if (identity.status !== "MERGED") {
+      return identity;
+    }
+
+    const mergedIntoId = identity.mergedIntoId?.trim();
+    if (!mergedIntoId) {
+      throw new Error(
+        `Merged audience identity ${currentAudienceIdentityId} has no canonical target.`,
+      );
+    }
+    currentAudienceIdentityId = mergedIntoId;
+  }
+
+  throw new Error(
+    `Audience identity merge chain exceeded ${MAX_AUDIENCE_IDENTITY_MERGE_DEPTH} hops.`,
+  );
 }
 
 export async function resolveAuthenticatedAudienceIdentity(
@@ -366,62 +702,104 @@ export async function resolveAuthenticatedAudienceIdentity(
     "audienceIdentityId",
   );
   const now = input.now ?? new Date();
-  const existingLink = await client.identityLink.findUnique({
-    where: {
-      provider_providerSubject: {
+  const run = async (tx: WebAudienceClient) => {
+    const currentIdentity = await resolveCanonicalAudienceIdentity(
+      {
+        audienceIdentityId: currentAudienceIdentityId,
+      },
+      tx,
+    );
+    const existingLink = await findIdentityLink(tx, input.provider, providerSubject);
+    let targetIdentity = currentIdentity;
+
+    if (existingLink) {
+      targetIdentity = await resolveCanonicalAudienceIdentity(
+        {
+          audienceIdentityId: existingLink.audienceIdentityId,
+        },
+        tx,
+      );
+
+      if (targetIdentity.id !== currentIdentity.id) {
+        if (currentIdentity.status !== "ANONYMOUS") {
+          throw new Error(
+            "Authenticated identity conflict: automatic registered-to-registered merge is not allowed.",
+          );
+        }
+
+        if (targetIdentity.status === "ANONYMOUS") {
+          targetIdentity = await tx.audienceIdentity.update({
+            where: { id: targetIdentity.id },
+            data: {
+              status: "REGISTERED",
+              lastSeenAt: now,
+            },
+          });
+        }
+
+        await mergeAudienceIdentity(
+          {
+            sourceAudienceIdentityId: currentIdentity.id,
+            targetAudienceIdentityId: targetIdentity.id,
+            now,
+          },
+          tx,
+        );
+      }
+    }
+
+    await linkAudienceIdentity(
+      {
+        audienceIdentityId: targetIdentity.id,
         provider: input.provider,
         providerSubject,
+        verifiedAt: input.verifiedAt ?? now,
+        assuranceLevel: "PLATFORM_VERIFIED",
+        proofMetadata: {
+          method: "authenticated_web_session",
+          provider: input.provider,
+        },
+        metadata: input.metadata,
       },
-    },
-    select: {
-      audienceIdentityId: true,
-    },
-  });
-  const targetAudienceIdentityId = existingLink?.audienceIdentityId ?? currentAudienceIdentityId;
-
-  if (existingLink && existingLink.audienceIdentityId !== currentAudienceIdentityId) {
-    await mergeAudienceIdentity(
-      {
-        sourceAudienceIdentityId: currentAudienceIdentityId,
-        targetAudienceIdentityId: existingLink.audienceIdentityId,
-        now,
-      },
-      client,
+      tx,
     );
-  }
 
-  const audienceIdentity = await client.audienceIdentity.update({
-    where: { id: targetAudienceIdentityId },
-    data: {
-      status: "REGISTERED",
-      lastSeenAt: now,
-    },
-  });
+    return tx.audienceIdentity.update({
+      where: { id: targetIdentity.id },
+      data: {
+        status: "REGISTERED",
+        lastSeenAt: now,
+      },
+    });
+  };
 
-  await linkAudienceIdentity(
-    {
-      audienceIdentityId: targetAudienceIdentityId,
-      provider: input.provider,
-      providerSubject,
-      verifiedAt: input.verifiedAt,
-      metadata: input.metadata,
-    },
-    client,
-  );
-
-  return audienceIdentity;
+  return client.$transaction
+    ? client.$transaction(run, { isolationLevel: "Serializable" })
+    : run(client);
 }
 
 export async function mergeAudienceIdentity(
   input: {
     sourceAudienceIdentityId: string;
     targetAudienceIdentityId: string;
+    /**
+     * Enables a proof-gated transfer of a provisional channel identity's
+     * financial records. This must only be set after the same private-channel
+     * account has consumed a binding challenge for the registered target.
+     */
+    transferVerifiedProvisionalAssets?: boolean;
     now?: Date | undefined;
   },
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ) {
-  const sourceAudienceIdentityId = input.sourceAudienceIdentityId.trim();
-  const targetAudienceIdentityId = input.targetAudienceIdentityId.trim();
+  const sourceAudienceIdentityId = normalizeRequiredId(
+    input.sourceAudienceIdentityId,
+    "sourceAudienceIdentityId",
+  );
+  const targetAudienceIdentityId = normalizeRequiredId(
+    input.targetAudienceIdentityId,
+    "targetAudienceIdentityId",
+  );
   if (!sourceAudienceIdentityId || !targetAudienceIdentityId) {
     throw new Error("sourceAudienceIdentityId and targetAudienceIdentityId are required.");
   }
@@ -431,42 +809,263 @@ export async function mergeAudienceIdentity(
 
   const now = input.now ?? new Date();
   const run = async (tx: WebAudienceClient) => {
-    await tx.contact.updateMany({
-      where: { audienceIdentityId: sourceAudienceIdentityId },
-      data: { audienceIdentityId: targetAudienceIdentityId },
-    });
-    await tx.conversation.updateMany({
-      where: { audienceIdentityId: sourceAudienceIdentityId },
-      data: { audienceIdentityId: targetAudienceIdentityId },
-    });
-    await tx.userWallet.updateMany({
-      where: { audienceIdentityId: sourceAudienceIdentityId },
-      data: { audienceIdentityId: targetAudienceIdentityId },
-    });
-    await tx.sandboxIdentity.updateMany({
-      where: { audienceIdentityId: sourceAudienceIdentityId },
-      data: { audienceIdentityId: targetAudienceIdentityId },
-    });
-    await tx.openVikingMemoryRecord.updateMany({
-      where: { audienceIdentityId: sourceAudienceIdentityId },
-      data: { audienceIdentityId: targetAudienceIdentityId },
-    });
-    await tx.identityLink.updateMany({
-      where: { audienceIdentityId: sourceAudienceIdentityId },
-      data: { audienceIdentityId: targetAudienceIdentityId },
-    });
+    const sourceIdentity = await resolveCanonicalAudienceIdentity(
+      {
+        audienceIdentityId: sourceAudienceIdentityId,
+      },
+      tx,
+    );
+    const targetIdentity = await resolveCanonicalAudienceIdentity(
+      {
+        audienceIdentityId: targetAudienceIdentityId,
+      },
+      tx,
+    );
 
-    return tx.audienceIdentity.update({
-      where: { id: sourceAudienceIdentityId },
+    if (sourceIdentity.id === targetIdentity.id) {
+      if (sourceIdentity.id === sourceAudienceIdentityId) {
+        throw new Error("Cannot merge an audience identity into one of its merged descendants.");
+      }
+      return sourceIdentity;
+    }
+    if (sourceIdentity.status !== "ANONYMOUS") {
+      throw new Error(
+        "Only an anonymous audience identity can be merged automatically.",
+      );
+    }
+    if (targetIdentity.status !== "REGISTERED") {
+      throw new Error(
+        "An anonymous audience identity can only be merged into a registered identity.",
+      );
+    }
+
+    const [
+      sourceWalletCount,
+      targetWalletCount,
+      sourceEntitlementCount,
+      sourcePaymentOrderCount,
+      sourceTokenPurchaseCount,
+      sourceUsageChargeCount,
+    ] = await Promise.all([
+      tx.userWallet.count({
+        where: { audienceIdentityId: sourceIdentity.id },
+      }),
+      tx.userWallet.count({
+        where: { audienceIdentityId: targetIdentity.id },
+      }),
+      tx.serviceEntitlementAccount?.count({
+        where: { audienceIdentityId: sourceIdentity.id },
+      }) ?? Promise.resolve(0),
+      tx.servicePaymentOrder?.count({
+        where: { payerAudienceIdentityId: sourceIdentity.id },
+      }) ?? Promise.resolve(0),
+      tx.agentTokenPurchase?.count({
+        where: { audienceIdentityId: sourceIdentity.id },
+      }) ?? Promise.resolve(0),
+      tx.agentUsageCharge?.count({
+        where: { audienceIdentityId: sourceIdentity.id },
+      }) ?? Promise.resolve(0),
+    ]);
+    if (sourceWalletCount > 0 && targetWalletCount > 0) {
+      throw new Error(
+        "Audience identity wallet conflict: both identities own wallets and require explicit reconciliation.",
+      );
+    }
+    if (
+      sourceEntitlementCount > 0
+      || sourcePaymentOrderCount > 0
+      || sourceTokenPurchaseCount > 0
+      || sourceUsageChargeCount > 0
+    ) {
+      if (!input.transferVerifiedProvisionalAssets) {
+        throw new Error(
+          "Audience identity financial conflict: the anonymous identity owns entitlements or payment history and requires explicit reconciliation.",
+        );
+      }
+      await assertProvisionalFinancialTransferIsConflictFree({
+        sourceAudienceIdentityId: sourceIdentity.id,
+        targetAudienceIdentityId: targetIdentity.id,
+        sourceEntitlementCount,
+        tx,
+      });
+    }
+
+    const claimed = await tx.audienceIdentity.updateMany({
+      where: {
+        id: sourceIdentity.id,
+        status: "ANONYMOUS",
+        mergedIntoId: null,
+      },
       data: {
         status: "MERGED",
-        mergedIntoId: targetAudienceIdentityId,
+        mergedIntoId: targetIdentity.id,
         lastSeenAt: now,
       },
     });
+    if (claimed.count !== 1) {
+      throw new Error(
+        "Audience identity merge conflict: the source identity changed concurrently.",
+      );
+    }
+
+    await tx.contact.updateMany({
+      where: { audienceIdentityId: sourceIdentity.id },
+      data: { audienceIdentityId: targetIdentity.id },
+    });
+    await tx.conversation.updateMany({
+      where: { audienceIdentityId: sourceIdentity.id },
+      data: { audienceIdentityId: targetIdentity.id },
+    });
+    await tx.userWallet.updateMany({
+      where: { audienceIdentityId: sourceIdentity.id },
+      data: { audienceIdentityId: targetIdentity.id },
+    });
+    if (input.transferVerifiedProvisionalAssets) {
+      await transferProvisionalFinancialRecords({
+        sourceAudienceIdentityId: sourceIdentity.id,
+        targetAudienceIdentityId: targetIdentity.id,
+        sourceEntitlementCount,
+        sourcePaymentOrderCount,
+        sourceTokenPurchaseCount,
+        sourceUsageChargeCount,
+        tx,
+      });
+    }
+    await tx.sandboxIdentity.updateMany({
+      where: { audienceIdentityId: sourceIdentity.id },
+      data: { audienceIdentityId: targetIdentity.id },
+    });
+    await tx.openVikingMemoryRecord.updateMany({
+      where: { audienceIdentityId: sourceIdentity.id },
+      data: { audienceIdentityId: targetIdentity.id },
+    });
+    await tx.delegationTask.updateMany({
+      where: { audienceIdentityId: sourceIdentity.id },
+      data: { audienceIdentityId: targetIdentity.id },
+    });
+    await tx.identityBindingChallenge?.updateMany({
+      where: {
+        audienceIdentityId: sourceIdentity.id,
+        consumedAt: null,
+        revokedAt: null,
+      },
+      data: { revokedAt: now },
+    });
+    await tx.bridgeIdentityMapping?.updateMany({
+      where: { audienceIdentityId: sourceIdentity.id },
+      data: { audienceIdentityId: targetIdentity.id },
+    });
+    await tx.identityLink.updateMany({
+      where: { audienceIdentityId: sourceIdentity.id },
+      data: { audienceIdentityId: targetIdentity.id },
+    });
+
+    const mergedIdentity = await tx.audienceIdentity.findUnique({
+      where: { id: sourceIdentity.id },
+    });
+    if (!mergedIdentity) {
+      throw new Error(`Audience identity ${sourceIdentity.id} was not found after merge.`);
+    }
+    return mergedIdentity;
   };
 
-  return client.$transaction ? client.$transaction(run) : run(client);
+  return client.$transaction
+    ? client.$transaction(run, { isolationLevel: "Serializable" })
+    : run(client);
+}
+
+async function assertProvisionalFinancialTransferIsConflictFree(input: {
+  sourceAudienceIdentityId: string;
+  targetAudienceIdentityId: string;
+  sourceEntitlementCount: number;
+  tx: WebAudienceClient;
+}) {
+  if (input.sourceEntitlementCount === 0) return;
+  const accountClient = input.tx.serviceEntitlementAccount;
+  if (!accountClient) {
+    throw new Error(
+      "Audience identity financial transfer is unavailable for this persistence client.",
+    );
+  }
+
+  const [sourceAccounts, targetAccounts] = await Promise.all([
+    accountClient.findMany({
+      where: { audienceIdentityId: input.sourceAudienceIdentityId },
+      select: {
+        id: true,
+        representativeId: true,
+        productCode: true,
+      },
+    }),
+    accountClient.findMany({
+      where: { audienceIdentityId: input.targetAudienceIdentityId },
+      select: {
+        id: true,
+        representativeId: true,
+        productCode: true,
+      },
+    }),
+  ]);
+  const targetKeys = new Set(
+    targetAccounts.map(
+      (account) => `${account.representativeId}\u0000${account.productCode}`,
+    ),
+  );
+  const conflict = sourceAccounts.find((account) =>
+    targetKeys.has(`${account.representativeId}\u0000${account.productCode}`),
+  );
+  if (conflict) {
+    throw new Error(
+      `Audience identity entitlement conflict for representative ${conflict.representativeId} and product ${conflict.productCode}; explicit balance consolidation is required.`,
+    );
+  }
+}
+
+async function transferProvisionalFinancialRecords(input: {
+  sourceAudienceIdentityId: string;
+  targetAudienceIdentityId: string;
+  sourceEntitlementCount: number;
+  sourcePaymentOrderCount: number;
+  sourceTokenPurchaseCount: number;
+  sourceUsageChargeCount: number;
+  tx: WebAudienceClient;
+}) {
+  if (input.sourceEntitlementCount > 0) {
+    const result = await input.tx.serviceEntitlementAccount?.updateMany({
+      where: { audienceIdentityId: input.sourceAudienceIdentityId },
+      data: { audienceIdentityId: input.targetAudienceIdentityId },
+    });
+    assertTransferredCount("entitlement accounts", result?.count, input.sourceEntitlementCount);
+  }
+  if (input.sourcePaymentOrderCount > 0) {
+    const result = await input.tx.servicePaymentOrder?.updateMany({
+      where: { payerAudienceIdentityId: input.sourceAudienceIdentityId },
+      data: { payerAudienceIdentityId: input.targetAudienceIdentityId },
+    });
+    assertTransferredCount("payment orders", result?.count, input.sourcePaymentOrderCount);
+  }
+  if (input.sourceTokenPurchaseCount > 0) {
+    const result = await input.tx.agentTokenPurchase?.updateMany({
+      where: { audienceIdentityId: input.sourceAudienceIdentityId },
+      data: { audienceIdentityId: input.targetAudienceIdentityId },
+    });
+    assertTransferredCount("token purchases", result?.count, input.sourceTokenPurchaseCount);
+  }
+  if (input.sourceUsageChargeCount > 0) {
+    const result = await input.tx.agentUsageCharge?.updateMany({
+      where: { audienceIdentityId: input.sourceAudienceIdentityId },
+      data: { audienceIdentityId: input.targetAudienceIdentityId },
+    });
+    assertTransferredCount("usage charges", result?.count, input.sourceUsageChargeCount);
+  }
+}
+
+function assertTransferredCount(label: string, actual: number | undefined, expected: number) {
+  if (actual !== expected) {
+    throw new Error(
+      `Audience identity financial transfer moved ${actual ?? 0} of ${expected} ${label}.`,
+    );
+  }
 }
 
 export async function resolveWebAudienceContact(
@@ -708,11 +1307,124 @@ function normalizeRequiredId(value: string, name: string) {
 }
 
 function normalizeIdentityProviderSubject(provider: WebAudienceIdentityLinkProvider, value: string) {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) {
+  const trimmed = value.trim();
+  if (!trimmed) {
     throw new Error("providerSubject is required.");
   }
-  return provider === "LOGTO" ? value.trim() : normalized;
+  if (provider === "LOGTO") return trimmed;
+  if (provider === "MATRIX") {
+    const separator = trimmed.lastIndexOf(":");
+    return separator > 0
+      ? `${trimmed.slice(0, separator)}:${trimmed.slice(separator + 1).toLowerCase()}`
+      : trimmed;
+  }
+  return trimmed.toLowerCase();
+}
+
+async function findIdentityLink(
+  client: WebAudienceClient,
+  provider: WebAudienceIdentityLinkProvider,
+  providerSubject: string,
+) {
+  return client.identityLink.findUnique({
+    where: {
+      provider_providerSubject: {
+        provider,
+        providerSubject,
+      },
+    },
+    select: {
+      audienceIdentityId: true,
+      issuer: true,
+      connectionId: true,
+      revokedAt: true,
+    },
+  });
+}
+
+async function updateOwnedIdentityLink(input: {
+  client: WebAudienceClient;
+  existingAudienceIdentityId: string;
+  requestedAudienceIdentityId: string;
+  provider: WebAudienceIdentityLinkProvider;
+  providerSubject: string;
+  existingIssuer?: string;
+  existingConnectionId?: string | null;
+  issuer?: string;
+  connectionId?: string | null;
+  verifiedAt?: Date | null | undefined;
+  assuranceLevel?: "UNVERIFIED" | "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+  proofMetadata?: unknown;
+  metadata?: unknown;
+}) {
+  const existingIdentity = await resolveCanonicalAudienceIdentity(
+    {
+      audienceIdentityId: input.existingAudienceIdentityId,
+    },
+    input.client,
+  );
+  if (existingIdentity.id !== input.requestedAudienceIdentityId) {
+    throw new Error(
+      `Identity link conflict: ${input.provider} subject is already linked to another audience identity.`,
+    );
+  }
+  if (
+    input.issuer !== undefined
+    && input.existingIssuer !== undefined
+    && input.existingIssuer !== input.issuer
+  ) {
+    throw new Error(
+      `Identity link conflict: ${input.provider} subject belongs to a different issuer realm.`,
+    );
+  }
+  if (
+    typeof input.connectionId === "string"
+    && input.existingConnectionId
+    && input.existingConnectionId.toLowerCase() !== input.connectionId.toLowerCase()
+  ) {
+    throw new Error(
+      `Identity link conflict: ${input.provider} subject belongs to a different provider connection.`,
+    );
+  }
+
+  const updated = await input.client.identityLink.updateMany({
+    where: {
+      audienceIdentityId: input.existingAudienceIdentityId,
+      provider: input.provider,
+      providerSubject: input.providerSubject,
+    },
+    data: {
+      audienceIdentityId: input.requestedAudienceIdentityId,
+      ...(input.issuer !== undefined ? { issuer: input.issuer } : {}),
+      ...(input.connectionId !== undefined ? { connectionId: input.connectionId } : {}),
+      ...(input.verifiedAt !== undefined ? { verifiedAt: input.verifiedAt } : {}),
+      ...(input.assuranceLevel !== undefined
+        ? { assuranceLevel: input.assuranceLevel }
+        : {}),
+      ...(input.proofMetadata !== undefined
+        ? { proofMetadata: input.proofMetadata }
+        : {}),
+      ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    },
+  });
+  if (updated.count !== 1) {
+    throw new Error(
+      `Identity link conflict: ${input.provider} subject changed concurrently.`,
+    );
+  }
+  return updated;
+}
+
+function isUniqueConstraintError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { code?: unknown; message?: unknown };
+  return (
+    candidate.code === "P2002" ||
+    (typeof candidate.message === "string" &&
+      candidate.message.toLowerCase().includes("unique constraint"))
+  );
 }
 
 function truncateRecentTurnText(value: string) {

@@ -23,6 +23,7 @@ import {
 } from "@delegate/web-ui";
 
 import { RepresentativeChatPanel } from "./representative-chat-panel";
+import { RepresentativeIdentityBindingPanel } from "./representative-identity-binding-panel";
 import { getUsablePublicUrl } from "./public-materials";
 import { RepresentativeMaterialPreview } from "./representative-material-preview";
 import { RepresentativeRechargePanel } from "./representative-recharge-panel";
@@ -207,6 +208,24 @@ export default async function RepresentativePage({
         representativeName={representative.name}
         representativeSlug={representative.slug}
       />
+
+      {audienceSession ? (
+        <section className="representative-visitor-section" id="identity-bindings">
+          <div className="representative-visitor-section-heading">
+            <p className="eyebrow">{locale === "zh" ? "跨渠道身份" : "CROSS-CHANNEL IDENTITY"}</p>
+            <h2>{locale === "zh" ? "绑定你的私聊账户" : "Link your private-channel accounts"}</h2>
+            <p>
+              {locale === "zh"
+                ? "绑定后，Web、Telegram 和 Matrix 会对应到同一个 Delegate 用户与服务权益；各渠道的原始会话记录仍然分开。"
+                : "Once linked, Web, Telegram, and Matrix resolve to the same Delegate user and service entitlements while each channel keeps its own conversation timeline."}
+            </p>
+          </div>
+          <RepresentativeIdentityBindingPanel
+            locale={locale}
+            representativeSlug={representative.slug}
+          />
+        </section>
+      ) : null}
 
       <section className="representative-visitor-section" id="about">
         <div className="representative-visitor-section-heading">

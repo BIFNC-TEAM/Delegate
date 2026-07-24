@@ -84,6 +84,42 @@ describe("agent wallet token purchase", () => {
     expect(client.ledgerEntries).toHaveLength(4);
   });
 
+  it("rejects an idempotency key reused by another owner or amount", async () => {
+    const client = new FakeTokenPurchaseClient();
+    await purchaseAgentTokens(
+      {
+        externalUserId: "user_1",
+        representativeId: "rep_1",
+        amountCents: 500,
+        idempotencyKey: "purchase_owner_bound",
+      },
+      client,
+    );
+
+    await expect(
+      purchaseAgentTokens(
+        {
+          externalUserId: "attacker",
+          representativeId: "rep_1",
+          amountCents: 500,
+          idempotencyKey: "purchase_owner_bound",
+        },
+        client,
+      ),
+    ).rejects.toThrow("different owner");
+    await expect(
+      purchaseAgentTokens(
+        {
+          externalUserId: "user_1",
+          representativeId: "rep_1",
+          amountCents: 600,
+          idempotencyKey: "purchase_owner_bound",
+        },
+        client,
+      ),
+    ).rejects.toThrow("different amount");
+  });
+
   it("rejects insufficient user wallet balance without partial writes", async () => {
     const client = new FakeTokenPurchaseClient({
       userCashBalanceCents: 300,
@@ -104,6 +140,39 @@ describe("agent wallet token purchase", () => {
     expect(client.tokenPurchases).toHaveLength(0);
     expect(client.creatorEarnings).toHaveLength(0);
     expect(client.ledgerEntries).toHaveLength(0);
+  });
+
+  it("allows only one concurrent debit when two purchases exceed the same cash balance", async () => {
+    const client = new FakeTokenPurchaseClient({
+      userCashBalanceCents: 1200,
+    });
+    (client as { $transaction?: unknown }).$transaction = undefined;
+
+    const results = await Promise.allSettled([
+      purchaseAgentTokens(
+        {
+          externalUserId: "user_1",
+          representativeId: "rep_1",
+          amountCents: 800,
+          idempotencyKey: "purchase_concurrent_1",
+        },
+        client,
+      ),
+      purchaseAgentTokens(
+        {
+          externalUserId: "user_1",
+          representativeId: "rep_1",
+          amountCents: 800,
+          idempotencyKey: "purchase_concurrent_2",
+        },
+        client,
+      ),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(400);
+    expect(client.tokenPurchases).toHaveLength(1);
   });
 
   it("updates only the selected representative agent wallet", async () => {
@@ -253,10 +322,17 @@ class FakeTokenPurchaseClient {
         ) ?? null
       );
     },
-    update: async (args: any) => {
+    updateMany: async (args: any) => {
       const wallet = this.userWallets.find((row) => row.id === args.where.id);
-      if (!wallet) {
-        throw new Error("user wallet not found");
+      if (
+        !wallet ||
+        (args.where.currency && wallet.currency !== args.where.currency) ||
+        (typeof args.where.cashBalanceCents?.equals === "number" &&
+          wallet.cashBalanceCents !== args.where.cashBalanceCents.equals) ||
+        (typeof args.where.cashBalanceCents?.gte === "number" &&
+          wallet.cashBalanceCents < args.where.cashBalanceCents.gte)
+      ) {
+        return { count: 0 };
       }
       if (typeof args.data.cashBalanceCents?.decrement === "number") {
         wallet.cashBalanceCents -= args.data.cashBalanceCents.decrement;
@@ -264,7 +340,7 @@ class FakeTokenPurchaseClient {
       if (typeof args.data.cashBalanceCents?.increment === "number") {
         wallet.cashBalanceCents += args.data.cashBalanceCents.increment;
       }
-      return wallet;
+      return { count: 1 };
     },
   };
 

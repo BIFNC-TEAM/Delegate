@@ -20,6 +20,9 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
+  if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+    return new NextResponse(null, { status: 404 });
+  }
   const { slug } = await params;
 
   try {

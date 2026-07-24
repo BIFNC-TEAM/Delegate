@@ -30,6 +30,7 @@ export type NormalizedPaymentProviderEvent = {
   providerEventId: string;
   eventType: PaymentProviderEventType;
   rechargeOrderId: string | null;
+  providerOrderId: string | null;
   amountCents: number | null;
   currency: string | null;
   rawPayload: Prisma.InputJsonValue;
@@ -86,6 +87,9 @@ export type StripePaymentProviderConfig = {
   successUrl: string;
   cancelUrl?: string;
   productName?: string;
+  verifyAndParseWebhook?: (
+    input: PaymentProviderWebhookInput,
+  ) => Promise<PaymentProviderWebhookVerification>;
 };
 
 export type SignedWalletCheckoutRecord = {
@@ -102,8 +106,18 @@ export type SignedWalletProviderConfig = {
   ) => Promise<SignedWalletCheckoutRecord>;
   verifyAndParseWebhook?: (
     input: PaymentProviderWebhookInput,
-  ) => Promise<Record<string, unknown>>;
+  ) => Promise<PaymentProviderWebhookVerification>;
 };
+
+export type PaymentProviderWebhookVerification =
+  | {
+      verified: true;
+      payload: Record<string, unknown>;
+    }
+  | {
+      verified: false;
+      reason?: string;
+    };
 
 const SUPPORTED_PAYMENT_CURRENCIES = new Set(["CNY", "USD"]);
 
@@ -151,6 +165,7 @@ export const mockPaymentProviderAdapter: PaymentProviderAdapter = {
       providerEventId,
       eventType,
       rechargeOrderId,
+      providerOrderId: optionalString(payload.providerOrderId) ?? null,
       amountCents,
       currency,
       rawPayload: toJsonValue(payload),
@@ -223,22 +238,31 @@ export function createStripePaymentProviderAdapter(
       };
     },
     async normalizeWebhookEvent(input) {
-      const payload = parseWebhookPayload(input);
+      if (!config.verifyAndParseWebhook) {
+        throw new Error("STRIPE webhooks require signature verification before parsing.");
+      }
+      const payload = requireVerifiedWebhookPayload(
+        await config.verifyAndParseWebhook(input),
+        "STRIPE",
+      );
       const eventId = requiredString(payload.id, "id");
       const eventType = requiredString(payload.type, "type");
       const data = readObject(payload.data, "data");
       const object = readObject(data.object, "data.object");
       const metadata = readStringRecord(object.metadata);
-      const normalizedType = normalizeStripeEventType(eventType);
+      const normalizedType = normalizeStripeEventType(eventType, object);
       const amountCents = readStripeAmountCents(object, metadata);
       const currency = readStripeCurrency(object, metadata);
       const rechargeOrderId = optionalString(metadata.rechargeOrderId) ?? null;
+      const providerOrderId =
+        optionalString(metadata.providerOrderId) ?? optionalString(object.id) ?? null;
 
       return {
         provider: PaymentProvider.STRIPE,
         providerEventId: eventId,
         eventType: normalizedType,
         rechargeOrderId,
+        providerOrderId,
         amountCents,
         currency,
         rawPayload: toJsonValue(payload),
@@ -252,6 +276,7 @@ export function createStripePaymentProviderAdapter(
           provider: "stripe",
           stripeEventType: eventType,
           rechargeOrderId,
+          providerOrderId,
           amountCents,
           currency,
         },
@@ -327,17 +352,22 @@ function parseWebhookPayload(input: PaymentProviderWebhookInput): Record<string,
   throw new Error("Payment provider webhook payload must be a JSON object.");
 }
 
-function normalizeStripeEventType(eventType: string): PaymentProviderEventType {
+function normalizeStripeEventType(
+  eventType: string,
+  object: Record<string, unknown>,
+): PaymentProviderEventType {
+  if (eventType === "checkout.session.completed") {
+    return object.payment_status === "paid"
+      ? PaymentProviderEventType.RECHARGE_PAID
+      : PaymentProviderEventType.UNKNOWN;
+  }
   if (
-    eventType === "checkout.session.completed" ||
-    eventType === "checkout.session.async_payment_succeeded" ||
-    eventType === "payment_intent.succeeded"
+    eventType === "checkout.session.async_payment_succeeded"
   ) {
     return PaymentProviderEventType.RECHARGE_PAID;
   }
   if (
-    eventType === "checkout.session.async_payment_failed" ||
-    eventType === "payment_intent.payment_failed"
+    eventType === "checkout.session.async_payment_failed"
   ) {
     return PaymentProviderEventType.RECHARGE_FAILED;
   }
@@ -378,7 +408,10 @@ function createSignedWalletPaymentProviderAdapter(
       if (!config.verifyAndParseWebhook) {
         throw new Error(`${provider} webhooks require signature verification before parsing.`);
       }
-      const parsed = await config.verifyAndParseWebhook(input);
+      const parsed = requireVerifiedWebhookPayload(
+        await config.verifyAndParseWebhook(input),
+        provider,
+      );
       return normalizeSignedWalletPaymentEvent(provider, providerName, parsed);
     },
   };
@@ -393,12 +426,16 @@ function normalizeSignedWalletPaymentEvent(
     payload.providerEventId ?? payload.transactionId ?? payload.tradeNo,
     "providerEventId",
   );
-  const rechargeOrderId = optionalString(payload.rechargeOrderId) ?? null;
+  const rechargeOrderId = requiredString(payload.rechargeOrderId, "rechargeOrderId");
+  const providerOrderId = requiredString(
+    payload.providerOrderId ?? payload.outTradeNo,
+    "providerOrderId",
+  );
   const amountCents = Number(payload.amountCents ?? payload.totalAmountCents);
   assertPositiveInteger(amountCents, "amountCents");
-  const currency = requiredString(payload.currency ?? "CNY", "currency").toUpperCase();
+  const currency = requiredString(payload.currency, "currency").toUpperCase();
   assertSupportedCurrency(currency);
-  const status = String(payload.status ?? payload.tradeStatus ?? "paid").toLowerCase();
+  const status = requiredString(payload.status ?? payload.tradeStatus, "status").toLowerCase();
   const eventType =
     status === "success" ||
     status === "paid" ||
@@ -416,6 +453,7 @@ function normalizeSignedWalletPaymentEvent(
     providerEventId,
     eventType,
     rechargeOrderId,
+    providerOrderId,
     amountCents,
     currency,
     rawPayload: toJsonValue(payload),
@@ -430,6 +468,7 @@ function normalizeSignedWalletPaymentEvent(
               : "PaymentProviderEvent",
       provider: providerName,
       rechargeOrderId,
+      providerOrderId,
       amountCents,
       currency,
     },
@@ -457,15 +496,15 @@ function readStripeAmountCents(
   object: Record<string, unknown>,
   metadata: Record<string, string>,
 ): number | null {
-  const metadataAmount = Number(metadata.amountCents);
-  if (Number.isInteger(metadataAmount) && metadataAmount > 0) {
-    return metadataAmount;
-  }
   for (const key of ["amount_total", "amount_received", "amount"]) {
     const value = object[key];
     if (typeof value === "number" && Number.isInteger(value) && value > 0) {
       return value;
     }
+  }
+  const metadataAmount = Number(metadata.amountCents);
+  if (Number.isInteger(metadataAmount) && metadataAmount > 0) {
+    return metadataAmount;
   }
   return null;
 }
@@ -474,12 +513,29 @@ function readStripeCurrency(
   object: Record<string, unknown>,
   metadata: Record<string, string>,
 ): string | null {
-  const metadataCurrency = optionalString(metadata.currency);
-  if (metadataCurrency) {
-    return metadataCurrency.toUpperCase();
-  }
   const objectCurrency = optionalString(object.currency);
-  return objectCurrency ? objectCurrency.toUpperCase() : null;
+  if (objectCurrency) {
+    return objectCurrency.toUpperCase();
+  }
+  const metadataCurrency = optionalString(metadata.currency);
+  return metadataCurrency ? metadataCurrency.toUpperCase() : null;
+}
+
+function requireVerifiedWebhookPayload(
+  verification: PaymentProviderWebhookVerification,
+  provider: string,
+): Record<string, unknown> {
+  if (verification?.verified !== true) {
+    throw new Error(`${provider} webhook signature verification failed.`);
+  }
+  if (
+    typeof verification.payload !== "object" ||
+    verification.payload === null ||
+    Array.isArray(verification.payload)
+  ) {
+    throw new Error(`${provider} verified webhook payload must be an object.`);
+  }
+  return verification.payload;
 }
 
 function toJsonValue(value: unknown): Prisma.InputJsonValue {

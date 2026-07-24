@@ -1,6 +1,11 @@
 import {
+  ChannelDesiredState,
+  ChannelHealthStatus,
+  ChannelSourceProvider,
+  ChannelTransport,
   ConversationAssignmentStatus,
   ConversationEpisodeStatus,
+  ConversationParticipantKind,
   GenerationRunStatus,
   HandoffStatus,
   LeadStatus,
@@ -26,6 +31,25 @@ import {
 
 import { prisma } from "./prisma";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
+import {
+  ChannelUnavailableError,
+  resolveChannelAvailability,
+} from "./channel-availability";
+import {
+  consumeIdentityBindingChallenge,
+  privateChannelIdentityProviders,
+} from "./audience-identity-binding";
+import {
+  provisionMatrixDirectConversation,
+  resolveMatrixApplicationServiceConnectionId,
+} from "./matrix-provisioning";
+import { lockMatrixRoomSecurityState } from "./matrix-room-security";
+import {
+  consumeConversationEntitlement,
+  releaseConversationEntitlementByGenerationRunId,
+  type ConversationEntitlementReservation,
+  type ServiceEntitlementClient,
+} from "./service-entitlements";
 
 export type ConversationInboxItem = {
   id: string;
@@ -200,6 +224,7 @@ export type AcceptInboundMessageInput = {
   clientMessageId: string;
   channel?: "web" | "matrix" | "telegram";
   externalMessageId?: string;
+  queueGeneration?: boolean;
 };
 
 export type MatrixApplicationServiceEvent = {
@@ -207,10 +232,44 @@ export type MatrixApplicationServiceEvent = {
   type?: string;
   room_id?: string;
   sender?: string;
+  state_key?: string;
   origin_server_ts?: number;
   redacts?: string;
   content?: Record<string, unknown>;
 };
+
+export type MatrixApplicationServiceIngestResult = {
+  eventId: string;
+  status: "processed" | "duplicate" | "ignored" | "failed";
+  reason?: string;
+};
+
+type PersistedMatrixApplicationServiceEvent = {
+  eventId: string;
+  eventType: string;
+  event: MatrixApplicationServiceEvent;
+  inboxId: string;
+  inboxStatus: string;
+  attemptCount: number;
+  lastError: string | null;
+};
+
+const matrixEventProcessingLeaseMs = 30_000;
+const matrixEventRetryDelayMs = 2_000;
+const matrixEventMaximumAttempts = 5;
+// Public compute sessions are capped at 240 minutes. Keep the default claim
+// lease above that hard limit so a healthy long-running worker cannot be
+// reclaimed concurrently; deployments may override it, but never below 30s.
+// The public compute contract permits runs up to 240 minutes. Until lease
+// heartbeats exist, never reclaim a live run inside that window.
+const conversationOutboxProcessingLeaseMs = 5 * 60 * 60_000;
+const telegramWorkerOwnershipRetryMs = 30_000;
+const cancellableGenerationStatuses: GenerationRunStatus[] = [
+  GenerationRunStatus.QUEUED,
+  GenerationRunStatus.PROCESSING,
+  GenerationRunStatus.WAITING_APPROVAL,
+  GenerationRunStatus.WAITING_HUMAN,
+];
 
 const episodeStateMap: Record<ConversationEpisodeStatus, ConversationEpisodeState> = {
   ACTIVE: "active",
@@ -673,12 +732,82 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
     const conversation = await tx.conversation.findFirst({
       where: { id: input.conversationId, representative: { slug: input.representativeSlug } },
       include: {
-        representative: { select: { id: true, activeVersionId: true } },
+        representative: {
+          select: {
+            id: true,
+            activeVersionId: true,
+            lifecycleState: true,
+            publicMode: true,
+            runtimePolicyOverlays: {
+              where: { enabled: true },
+              select: {
+                enabled: true,
+                priority: true,
+                startsAt: true,
+                expiresAt: true,
+                payload: true,
+              },
+            },
+          },
+        },
         episodes: { orderBy: { sequence: "desc" }, take: 1 },
-        channelBindings: true,
+        channelBindings: {
+          include: {
+            representativeBinding: {
+              select: {
+                status: true,
+                desiredState: true,
+                healthStatus: true,
+              },
+            },
+          },
+        },
       },
     });
     if (!conversation) throw new Error("Conversation not found.");
+
+    const normalizedChannel = normalizeChannel(input.channel ?? null);
+    const channelKind = mapChannelKind(input.channel);
+    const binding = conversation.channelBindings.find((item) => item.kind === channelKind);
+    const availability = resolveChannelAvailability({
+      channel: normalizedChannel,
+      lifecycleState: conversation.representative.lifecycleState,
+      activeVersionId: conversation.representative.activeVersionId,
+      publicMode: conversation.representative.publicMode,
+      binding: binding
+        ? binding.representativeBinding
+          ? {
+              legacyStatus: binding.representativeBinding.status,
+              desiredState: binding.representativeBinding.desiredState,
+              healthStatus: binding.representativeBinding.healthStatus,
+            }
+          : normalizedChannel === "web"
+            ? {
+                legacyStatus: "CONNECTED",
+                desiredState: "ACTIVE",
+                healthStatus: "UNKNOWN",
+              }
+            : null
+        : null,
+      overlays: (conversation.representative.runtimePolicyOverlays ?? []).map((overlay) => ({
+        ...overlay,
+        payload: isJsonRecord(overlay.payload) ? overlay.payload : {},
+      })),
+    });
+    if (!availability.available) {
+      throw new ChannelUnavailableError(availability.code);
+    }
+    if (input.channel === "matrix") {
+      const matrixBindingSafe = binding
+        ? await lockAndVerifyMatrixDirectBinding(tx, {
+            id: binding.id,
+            externalConversationId: binding.externalConversationId,
+          })
+        : false;
+      if (!matrixBindingSafe) {
+        throw new Error("matrix_private_room_not_verified");
+      }
+    }
 
     const latestEpisode = conversation.episodes[0];
     const latestState = latestEpisode ? episodeStateMap[latestEpisode.status] : "active";
@@ -701,8 +830,6 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       });
     }
 
-    const channelKind = mapChannelKind(input.channel);
-    const binding = conversation.channelBindings.find((item) => item.kind === channelKind);
     const createdAt = new Date();
     const message = await tx.message.upsert({
       where: {
@@ -722,14 +849,17 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
         text,
         clientMessageId: input.clientMessageId,
         ...(input.externalMessageId ? { externalMessageId: input.externalMessageId } : {}),
-        deliveryStatus: MessageDeliveryStatus.QUEUED,
+        deliveryStatus:
+          input.queueGeneration === false
+            ? MessageDeliveryStatus.SENT
+            : MessageDeliveryStatus.QUEUED,
         retentionExpiresAt: buildMessageRetentionExpiry(createdAt),
         createdAt,
       },
       update: {},
     });
 
-    const shouldQueueAi = action !== "hold_for_operator";
+    const shouldQueueAi = action !== "hold_for_operator" && input.queueGeneration !== false;
     const run = shouldQueueAi
       ? await tx.generationRun.upsert({
           where: { idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}` },
@@ -764,14 +894,89 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       where: { id: conversation.id },
       data: {
         activeEpisodeId: episode.id,
-        state: action === "hold_for_operator" ? "HUMAN_ACTIVE" : "AI_QUEUED",
+        state:
+          action === "hold_for_operator"
+            ? "HUMAN_ACTIVE"
+            : run
+              ? "AI_QUEUED"
+              : conversation.state,
         unreadCount: { increment: 1 },
         lastMessageAt: createdAt,
       },
     });
 
-    return { message, run, heldForOperator: !shouldQueueAi };
+    return { message, run, heldForOperator: action === "hold_for_operator" };
   });
+}
+
+export async function assertConversationChannelDeliveryAvailable(input: {
+  conversationId: string;
+  channel: "web" | "matrix" | "telegram";
+}) {
+  const kind = mapChannelKind(input.channel);
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: input.conversationId },
+    select: {
+      representative: {
+        select: {
+          lifecycleState: true,
+          activeVersionId: true,
+          publicMode: true,
+          runtimePolicyOverlays: {
+            where: { enabled: true },
+            select: {
+              enabled: true,
+              priority: true,
+              startsAt: true,
+              expiresAt: true,
+              payload: true,
+            },
+          },
+        },
+      },
+      channelBindings: {
+        where: { kind },
+        take: 1,
+        select: {
+          metadata: true,
+          representativeBinding: {
+            select: {
+              status: true,
+              desiredState: true,
+              healthStatus: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  if (!conversation) throw new Error("Conversation not found.");
+  const channelBinding = conversation.channelBindings[0];
+  if (
+    input.channel === "matrix"
+    && (!channelBinding || !isMatrixDirectBindingSafe(channelBinding.metadata))
+  ) {
+    throw new ChannelUnavailableError("matrix_private_room_not_verified");
+  }
+  const binding = channelBinding?.representativeBinding;
+  const availability = resolveChannelAvailability({
+    channel: input.channel,
+    lifecycleState: conversation.representative.lifecycleState,
+    activeVersionId: conversation.representative.activeVersionId,
+    publicMode: conversation.representative.publicMode,
+    binding: binding
+      ? {
+          legacyStatus: binding.status,
+          desiredState: binding.desiredState,
+          healthStatus: binding.healthStatus,
+        }
+      : null,
+    overlays: conversation.representative.runtimePolicyOverlays.map((overlay) => ({
+      ...overlay,
+      payload: isJsonRecord(overlay.payload) ? overlay.payload : {},
+    })),
+  });
+  if (!availability.available) throw new ChannelUnavailableError(availability.code);
 }
 
 export async function completeInlineGenerationRun(input: {
@@ -787,6 +992,7 @@ export async function completeInlineGenerationRun(input: {
   completeOutbox?: boolean;
   countUsage?: boolean;
   keepConversationQueued?: boolean;
+  entitlementReservation?: ConversationEntitlementReservation;
   attachments?: Array<{
     fileName: string;
     mimeType?: string;
@@ -804,11 +1010,31 @@ export async function completeInlineGenerationRun(input: {
   const replyText = input.replyText.trim();
   if (!replyText) throw new Error("Reply text is required.");
 
-  return prisma.$transaction(async (tx) => {
+  const completedResult = await prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
     const run = await tx.generationRun.findUnique({
       where: { id: input.runId },
-      include: { outputMessage: true },
+      include: {
+        outputMessage: true,
+        inputMessage: {
+          select: {
+            id: true,
+            channelBinding: {
+              select: {
+                id: true,
+                kind: true,
+                externalConversationId: true,
+              },
+            },
+          },
+        },
+        conversation: {
+          select: {
+            audienceIdentityId: true,
+            representativeId: true,
+          },
+        },
+      },
     });
     if (!run) throw new Error("Generation run not found.");
     if (run.status === GenerationRunStatus.COMPLETED && run.outputMessage) {
@@ -816,6 +1042,106 @@ export async function completeInlineGenerationRun(input: {
     }
     if (run.status === GenerationRunStatus.CANCELED) {
       throw new Error("Generation run was canceled.");
+    }
+    const matrixBinding =
+      run.inputMessage.channelBinding?.kind === RepresentativeChannelKind.MATRIX
+        ? run.inputMessage.channelBinding
+        : null;
+    if (
+      matrixBinding
+      && !await lockAndVerifyMatrixDirectBinding(tx, {
+        id: matrixBinding.id,
+        externalConversationId: matrixBinding.externalConversationId,
+      })
+    ) {
+      const failureCode = "matrix_private_room_not_verified";
+      const canceledAt = new Date();
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: failureCode,
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
+      await tx.generationRun.updateMany({
+        where: {
+          id: run.id,
+          status: { in: cancellableGenerationStatuses },
+        },
+        data: {
+          status: GenerationRunStatus.CANCELED,
+          errorCode: failureCode,
+          errorMessage:
+            "Generation canceled because the Matrix room is no longer a verified private conversation.",
+          canceledAt,
+        },
+      });
+      await tx.message.update({
+        where: { id: run.inputMessageId },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.CANCELED,
+          failureCode,
+          failureReason:
+            "The Matrix room is no longer a verified private conversation.",
+        },
+      });
+      await tx.conversation.updateMany({
+        where: {
+          id: run.conversationId,
+          state: { in: ["AI_QUEUED", "PROCESSING", "WAITING_APPROVAL"] },
+        },
+        data: { state: "FAILED" },
+      });
+      if (run.episodeId) {
+        await tx.conversationEpisode.updateMany({
+          where: {
+            id: run.episodeId,
+            status: {
+              in: [
+                ConversationEpisodeStatus.ACTIVE,
+                ConversationEpisodeStatus.WAITING_APPROVAL,
+              ],
+            },
+          },
+          data: { status: ConversationEpisodeStatus.FAILED },
+        });
+      }
+      await tx.outboxEvent.updateMany({
+        where: {
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          status: { in: ["PENDING", "PROCESSING", "FAILED"] },
+        },
+        data: {
+          status: "DEAD_LETTER",
+          processedAt: canceledAt,
+          lastError: failureCode,
+        },
+      });
+      return null;
+    }
+    if (input.entitlementReservation) {
+      const reservation = input.entitlementReservation;
+      if (
+        reservation.generationRunId !== run.id
+        || reservation.representativeId !== run.conversation.representativeId
+      ) {
+        throw new Error(
+          "Conversation entitlement reservation does not belong to this generation run.",
+        );
+      }
+      const consumedEntitlement = await consumeConversationEntitlement(
+        reservation,
+        tx as unknown as ServiceEntitlementClient,
+      );
+      if (
+        consumedEntitlement.audienceIdentityId
+        !== run.conversation.audienceIdentityId
+      ) {
+        throw new Error(
+          "Conversation entitlement reservation belongs to a different audience identity.",
+        );
+      }
     }
 
     const now = new Date();
@@ -829,7 +1155,10 @@ export async function completeInlineGenerationRun(input: {
         contentType: MessageContentType.TEXT,
         text: replyText,
         ...(input.intent ? { content: { intent: input.intent } } : {}),
-        deliveryStatus: MessageDeliveryStatus.SENT,
+        deliveryStatus:
+          input.completeOutbox === false
+            ? MessageDeliveryStatus.PROCESSING
+            : MessageDeliveryStatus.SENT,
         retentionExpiresAt: buildMessageRetentionExpiry(now),
         createdAt: now,
         ...(input.citations?.length
@@ -903,6 +1232,10 @@ export async function completeInlineGenerationRun(input: {
     }
     return { run: completed, message };
   });
+  if (!completedResult) {
+    throw new ChannelUnavailableError("matrix_private_room_not_verified");
+  }
+  return completedResult;
 }
 
 export async function waitGenerationRunForComputeApproval(input: {
@@ -1010,6 +1343,7 @@ export type ClaimedGenerationWorkItem = {
   representativeName: string;
   conversationId: string;
   contactId: string;
+  audienceIdentityId?: string;
   controlState: string;
   episodeId?: string;
   inputMessageId: string;
@@ -1017,6 +1351,9 @@ export type ClaimedGenerationWorkItem = {
   channel: "web" | "matrix" | "telegram";
   externalConversationId?: string;
   matrixSenderUserId?: string;
+  deliveryOnly?: boolean;
+  outputMessageId?: string;
+  outputText?: string;
   usage: {
     freeRepliesUsed: number;
     passUnlocked: boolean;
@@ -1024,31 +1361,138 @@ export type ClaimedGenerationWorkItem = {
   };
 };
 
-export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWorkItem | null> {
+export async function claimNextGenerationWorkItem(
+  options: {
+    telegramWorkerEnabled?: boolean;
+    processingLeaseMs?: number;
+  } = {},
+): Promise<ClaimedGenerationWorkItem | null> {
   return prisma.$transaction(async (tx) => {
-    const candidates = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT "id"
+    const candidates = await tx.$queryRaw<Array<{
+      id: string;
+      aggregateId: string;
+      attemptCount: number;
+    }>>`
+      SELECT "id", "aggregateId", "attemptCount"
       FROM "OutboxEvent"
-      WHERE "status" IN ('PENDING', 'FAILED')
+      WHERE "status" IN ('PENDING', 'FAILED', 'PROCESSING')
         AND "eventType" = 'generation.requested'
         AND "availableAt" <= NOW()
-        AND "attemptCount" < 5
       ORDER BY "createdAt" ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     `;
-    const outboxId = candidates[0]?.id;
+    const candidate = candidates[0];
+    const outboxId = candidate?.id;
     if (!outboxId) return null;
+    if ((candidate.attemptCount ?? 0) >= 5) {
+      const exhaustedAt = new Date();
+      const exhaustedRun = await tx.generationRun.findUnique({
+        where: { id: candidate.aggregateId },
+        select: {
+          id: true,
+          status: true,
+          inputMessageId: true,
+          conversationId: true,
+          episodeId: true,
+        },
+      });
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: candidate.aggregateId,
+          reason: "conversation_outbox_attempts_exhausted",
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
+      if (exhaustedRun && cancellableGenerationStatuses.includes(exhaustedRun.status)) {
+        const failed = await tx.generationRun.updateMany({
+          where: {
+            id: exhaustedRun.id,
+            status: { in: cancellableGenerationStatuses },
+          },
+          data: {
+            status: GenerationRunStatus.FAILED,
+            errorCode: "conversation_outbox_attempts_exhausted",
+            errorMessage: "Generation work exhausted its retry budget.",
+            completedAt: exhaustedAt,
+          },
+        });
+        if (failed.count === 1) {
+          await tx.message.update({
+            where: { id: exhaustedRun.inputMessageId },
+            data: {
+              deliveryStatus: MessageDeliveryStatus.FAILED,
+              failureCode: "conversation_outbox_attempts_exhausted",
+              failureReason: "Generation work exhausted its retry budget.",
+            },
+          });
+          await tx.conversation.updateMany({
+            where: {
+              id: exhaustedRun.conversationId,
+              state: { in: ["AI_QUEUED", "PROCESSING", "WAITING_APPROVAL"] },
+            },
+            data: { state: "FAILED" },
+          });
+          if (exhaustedRun.episodeId) {
+            await tx.conversationEpisode.updateMany({
+              where: {
+                id: exhaustedRun.episodeId,
+                status: {
+                  in: [
+                    ConversationEpisodeStatus.ACTIVE,
+                    ConversationEpisodeStatus.WAITING_APPROVAL,
+                  ],
+                },
+              },
+              data: { status: ConversationEpisodeStatus.FAILED },
+            });
+          }
+        }
+      }
+      await tx.outboxEvent.update({
+        where: { id: outboxId },
+        data: {
+          status: "DEAD_LETTER",
+          lastError: "conversation_outbox_attempts_exhausted",
+        },
+      });
+      return null;
+    }
 
+    const processingLeaseMs = Math.max(
+      conversationOutboxProcessingLeaseMs,
+      options.processingLeaseMs ?? conversationOutboxProcessingLeaseMs,
+    );
     const outbox = await tx.outboxEvent.update({
       where: { id: outboxId },
-      data: { status: "PROCESSING", attemptCount: { increment: 1 }, lastError: null },
+      data: {
+        status: "PROCESSING",
+        attemptCount: { increment: 1 },
+        availableAt: new Date(Date.now() + processingLeaseMs),
+        processedAt: null,
+        lastError: null,
+      },
     });
     const runId = outbox.aggregateId;
     const run = await tx.generationRun.findUnique({
       where: { id: runId },
       include: {
-        inputMessage: true,
+        inputMessage: {
+          include: {
+            channelBinding: {
+              include: {
+                representativeBinding: {
+                  select: {
+                    status: true,
+                    desiredState: true,
+                    healthStatus: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+        outputMessage: true,
         episode: {
           select: {
             representativeVersionId: true,
@@ -1057,9 +1501,35 @@ export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWo
         conversation: {
           include: {
             representative: {
-              select: { slug: true, displayName: true },
+              select: {
+                slug: true,
+                displayName: true,
+                lifecycleState: true,
+                activeVersionId: true,
+                publicMode: true,
+                runtimePolicyOverlays: {
+                  where: { enabled: true },
+                  select: {
+                    enabled: true,
+                    priority: true,
+                    startsAt: true,
+                    expiresAt: true,
+                    payload: true,
+                  },
+                },
+              },
             },
-            channelBindings: true,
+            channelBindings: {
+              include: {
+                representativeBinding: {
+                  select: {
+                    status: true,
+                    desiredState: true,
+                    healthStatus: true,
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -1071,7 +1541,14 @@ export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWo
       });
       return null;
     }
-    if (run.status === GenerationRunStatus.COMPLETED || run.status === GenerationRunStatus.CANCELED) {
+    if (run.status === GenerationRunStatus.CANCELED) {
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: "generation_run_canceled",
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
       await tx.outboxEvent.update({
         where: { id: outbox.id },
         data: { status: "PROCESSED", processedAt: new Date() },
@@ -1079,16 +1556,26 @@ export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWo
       return null;
     }
     if (
-      !run.representativeVersionId ||
-      (
-        run.episodeId &&
+      run.status !== GenerationRunStatus.COMPLETED
+      && (
+        !run.representativeVersionId ||
         (
-          !run.episode?.representativeVersionId ||
-          run.episode.representativeVersionId !== run.representativeVersionId
+          run.episodeId
+          && (
+            !run.episode?.representativeVersionId
+            || run.episode.representativeVersionId !== run.representativeVersionId
+          )
         )
       )
     ) {
       const failedAt = new Date();
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: "representative_version_context_mismatch",
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
       await tx.generationRun.update({
         where: { id: run.id },
         data: {
@@ -1118,13 +1605,210 @@ export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWo
       return null;
     }
 
-    const matrixBinding = run.conversation.channelBindings.find(
+    const inputBinding = run.inputMessage.channelBinding;
+    const matrixBinding = inputBinding?.kind === RepresentativeChannelKind.MATRIX
+      ? inputBinding
+      : run.conversation.channelBindings.find(
       (binding) => binding.kind === RepresentativeChannelKind.MATRIX,
-    );
-    const telegramBinding = run.conversation.channelBindings.find(
+      );
+    const telegramBinding = inputBinding?.kind === RepresentativeChannelKind.TELEGRAM
+      ? inputBinding
+      : run.conversation.channelBindings.find(
       (binding) => binding.kind === RepresentativeChannelKind.TELEGRAM,
-    );
-    const channel = matrixBinding ? "matrix" : telegramBinding ? "telegram" : "web";
+      );
+    const channel = inputBinding
+      ? inputBinding.kind === RepresentativeChannelKind.MATRIX
+        ? "matrix"
+        : inputBinding.kind === RepresentativeChannelKind.TELEGRAM
+          ? "telegram"
+          : "web"
+      : matrixBinding
+        ? "matrix"
+        : telegramBinding
+          ? "telegram"
+          : "web";
+    const activeBinding = channel === "matrix"
+      ? matrixBinding
+      : channel === "telegram"
+        ? telegramBinding
+        : inputBinding?.kind === RepresentativeChannelKind.WEB
+          ? inputBinding
+          : run.conversation.channelBindings.find(
+              (binding) => binding.kind === RepresentativeChannelKind.WEB,
+            );
+
+    if (channel === "telegram" && options.telegramWorkerEnabled === false) {
+      await tx.outboxEvent.update({
+        where: { id: outbox.id },
+        data: {
+          status: "PENDING",
+          attemptCount: { decrement: 1 },
+          availableAt: new Date(Date.now() + telegramWorkerOwnershipRetryMs),
+          lastError: "telegram_worker_not_delivery_owner",
+        },
+      });
+      return null;
+    }
+
+    if (channel === "matrix") {
+      const matrixBindingSafe = matrixBinding
+        ? await lockAndVerifyMatrixDirectBinding(tx, {
+            id: matrixBinding.id,
+            externalConversationId: matrixBinding.externalConversationId,
+          })
+        : false;
+      if (!matrixBindingSafe) {
+        const failureCode = "matrix_private_room_not_verified";
+        await releaseConversationEntitlementByGenerationRunId(
+          {
+            generationRunId: run.id,
+            reason: failureCode,
+          },
+          tx as unknown as ServiceEntitlementClient,
+        );
+        if (run.status === GenerationRunStatus.COMPLETED) {
+          if (run.outputMessage) {
+            await tx.message.update({
+              where: { id: run.outputMessage.id },
+              data: {
+                deliveryStatus: MessageDeliveryStatus.CANCELED,
+                failureCode,
+                failureReason:
+                  "Matrix delivery was canceled because the room is no longer a verified private conversation.",
+              },
+            });
+          }
+        } else {
+          const canceledAt = new Date();
+          await tx.generationRun.update({
+            where: { id: run.id },
+            data: {
+              status: GenerationRunStatus.CANCELED,
+              errorCode: failureCode,
+              errorMessage:
+                "Generation canceled because the Matrix room is no longer a verified private conversation.",
+              canceledAt,
+            },
+          });
+          await tx.message.update({
+            where: { id: run.inputMessageId },
+            data: {
+              deliveryStatus: MessageDeliveryStatus.CANCELED,
+              failureCode,
+              failureReason:
+                "The Matrix room is no longer a verified private conversation.",
+            },
+          });
+        }
+        await tx.outboxEvent.update({
+          where: { id: outbox.id },
+          data: { status: "DEAD_LETTER", lastError: failureCode },
+        });
+        return null;
+      }
+    }
+
+    if (run.status === GenerationRunStatus.COMPLETED) {
+      if (!run.outputMessage?.text) {
+        await tx.outboxEvent.update({
+          where: { id: outbox.id },
+          data: {
+            status: "DEAD_LETTER",
+            lastError: "completed_generation_output_missing",
+          },
+        });
+        return null;
+      }
+      if (channel === "web" || run.outputMessage.externalMessageId) {
+        await tx.message.update({
+          where: { id: run.outputMessage.id },
+          data: {
+            deliveryStatus: MessageDeliveryStatus.SENT,
+            failureCode: null,
+            failureReason: null,
+          },
+        });
+        await tx.outboxEvent.update({
+          where: { id: outbox.id },
+          data: {
+            status: "PROCESSED",
+            processedAt: new Date(),
+            lastError: null,
+          },
+        });
+        return null;
+      }
+    }
+
+    const availability = resolveChannelAvailability({
+      channel,
+      lifecycleState: run.conversation.representative.lifecycleState,
+      activeVersionId: run.conversation.representative.activeVersionId,
+      publicMode: run.conversation.representative.publicMode,
+      binding: activeBinding
+        ? activeBinding.representativeBinding
+          ? {
+              legacyStatus: activeBinding.representativeBinding.status,
+              desiredState: activeBinding.representativeBinding.desiredState,
+              healthStatus: activeBinding.representativeBinding.healthStatus,
+            }
+          : channel === "web"
+            ? {
+                legacyStatus: "CONNECTED",
+                desiredState: "ACTIVE",
+                healthStatus: "UNKNOWN",
+              }
+            : null
+        : null,
+      overlays: (run.conversation.representative.runtimePolicyOverlays ?? []).map((overlay) => ({
+        ...overlay,
+        payload: isJsonRecord(overlay.payload) ? overlay.payload : {},
+      })),
+    });
+    if (!availability.available) {
+      if (run.status === GenerationRunStatus.COMPLETED) {
+        await tx.outboxEvent.update({
+          where: { id: outbox.id },
+          data: {
+            status: "FAILED",
+            attemptCount: { decrement: 1 },
+            availableAt: new Date(Date.now() + telegramWorkerOwnershipRetryMs),
+            lastError: availability.code,
+          },
+        });
+        return null;
+      }
+      const canceledAt = new Date();
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: availability.code,
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
+      await tx.generationRun.update({
+        where: { id: run.id },
+        data: {
+          status: GenerationRunStatus.CANCELED,
+          errorCode: availability.code,
+          errorMessage: `Generation canceled because ${availability.code}.`,
+          canceledAt,
+        },
+      });
+      await tx.message.update({
+        where: { id: run.inputMessageId },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.CANCELED,
+          failureCode: availability.code,
+          failureReason: "The channel is not currently available.",
+        },
+      });
+      await tx.outboxEvent.update({
+        where: { id: outbox.id },
+        data: { status: "DEAD_LETTER", lastError: availability.code },
+      });
+      return null;
+    }
     const matrixVirtualUser = channel === "matrix"
       ? await tx.matrixVirtualUserBinding.findFirst({
           where: {
@@ -1136,18 +1820,20 @@ export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWo
         })
       : null;
 
-    await tx.generationRun.update({
-      where: { id: run.id },
-      data: {
-        status: GenerationRunStatus.PROCESSING,
-        startedAt: run.startedAt || new Date(),
-        attemptCount: { increment: 1 },
-      },
-    });
-    await tx.message.update({
-      where: { id: run.inputMessageId },
-      data: { deliveryStatus: MessageDeliveryStatus.PROCESSING },
-    });
+    if (run.status !== GenerationRunStatus.COMPLETED) {
+      await tx.generationRun.update({
+        where: { id: run.id },
+        data: {
+          status: GenerationRunStatus.PROCESSING,
+          startedAt: run.startedAt || new Date(),
+          attemptCount: { increment: 1 },
+        },
+      });
+      await tx.message.update({
+        where: { id: run.inputMessageId },
+        data: { deliveryStatus: MessageDeliveryStatus.PROCESSING },
+      });
+    }
 
     return {
       outboxId: outbox.id,
@@ -1160,13 +1846,25 @@ export async function claimNextGenerationWorkItem(): Promise<ClaimedGenerationWo
       representativeName: run.conversation.representative.displayName,
       conversationId: run.conversationId,
       contactId: run.conversation.contactId,
+      ...(run.conversation.audienceIdentityId
+        ? { audienceIdentityId: run.conversation.audienceIdentityId }
+        : {}),
       controlState: run.conversation.state,
       ...(run.episodeId ? { episodeId: run.episodeId } : {}),
       inputMessageId: run.inputMessageId,
       userText: run.inputMessage.text || "",
       channel,
-      ...(matrixBinding ? { externalConversationId: matrixBinding.externalConversationId } : {}),
+      ...(activeBinding
+        ? { externalConversationId: activeBinding.externalConversationId }
+        : {}),
       ...(matrixVirtualUser ? { matrixSenderUserId: matrixVirtualUser.matrixUserId } : {}),
+      ...(run.status === GenerationRunStatus.COMPLETED && run.outputMessage
+        ? {
+            deliveryOnly: true,
+            outputMessageId: run.outputMessage.id,
+            outputText: run.outputMessage.text!,
+          }
+        : {}),
       usage: {
         freeRepliesUsed: run.conversation.freeRepliesUsed,
         passUnlocked: Boolean(run.conversation.passUnlockedAt),
@@ -1204,15 +1902,36 @@ export async function loadGenerationRecentTurns(input: {
 }
 
 export async function deferGenerationRunForHuman(runId: string) {
-  const run = await prisma.generationRun.update({
-    where: { id: runId },
-    data: { status: GenerationRunStatus.WAITING_HUMAN },
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${runId}))`;
+    const current = await tx.generationRun.findUnique({
+      where: { id: runId },
+    });
+    if (!current) throw new Error("Generation run not found.");
+    if (
+      current.status === GenerationRunStatus.CANCELED
+      || current.status === GenerationRunStatus.COMPLETED
+      || current.status === GenerationRunStatus.FAILED
+    ) {
+      return current;
+    }
+    await releaseConversationEntitlementByGenerationRunId(
+      {
+        generationRunId: runId,
+        reason: "generation_deferred_for_human",
+      },
+      tx as unknown as ServiceEntitlementClient,
+    );
+    const run = await tx.generationRun.update({
+      where: { id: runId },
+      data: { status: GenerationRunStatus.WAITING_HUMAN },
+    });
+    await tx.outboxEvent.updateMany({
+      where: { aggregateType: "generation_run", aggregateId: run.id },
+      data: { status: "PROCESSED", processedAt: new Date() },
+    });
+    return run;
   });
-  await prisma.outboxEvent.updateMany({
-    where: { aggregateType: "generation_run", aggregateId: run.id },
-    data: { status: "PROCESSED", processedAt: new Date() },
-  });
-  return run;
 }
 
 export async function markGenerationDeliveryComplete(input: {
@@ -1272,6 +1991,7 @@ export async function retryGenerationDelivery(input: {
 export type ClaimedOperatorMessageWorkItem = {
   outboxId: string;
   messageId: string;
+  conversationId: string;
   text: string;
   operatorName: string;
   channel: "matrix" | "telegram";
@@ -1279,36 +1999,103 @@ export type ClaimedOperatorMessageWorkItem = {
   matrixSenderUserId?: string;
 };
 
-export async function claimNextOperatorMessageWorkItem(): Promise<ClaimedOperatorMessageWorkItem | null> {
+export async function claimNextOperatorMessageWorkItem(
+  options: {
+    telegramWorkerEnabled?: boolean;
+    processingLeaseMs?: number;
+  } = {},
+): Promise<ClaimedOperatorMessageWorkItem | null> {
   return prisma.$transaction(async (tx) => {
-    const candidates = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT "id"
+    const candidates = await tx.$queryRaw<Array<{
+      id: string;
+      aggregateId: string;
+      attemptCount: number;
+    }>>`
+      SELECT "id", "aggregateId", "attemptCount"
       FROM "OutboxEvent"
-      WHERE "status" IN ('PENDING', 'FAILED')
+      WHERE "status" IN ('PENDING', 'FAILED', 'PROCESSING')
         AND "eventType" = 'operator.message.requested'
         AND "availableAt" <= NOW()
-        AND "attemptCount" < 5
       ORDER BY "createdAt" ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     `;
-    const outboxId = candidates[0]?.id;
+    const candidate = candidates[0];
+    const outboxId = candidate?.id;
     if (!outboxId) return null;
+    if ((candidate.attemptCount ?? 0) >= 5) {
+      await tx.message.updateMany({
+        where: { id: candidate.aggregateId },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.FAILED,
+          failureCode: "operator_channel_delivery_attempts_exhausted",
+          failureReason: "Operator message delivery exhausted its retry budget.",
+        },
+      });
+      await tx.outboxEvent.update({
+        where: { id: outboxId },
+        data: {
+          status: "DEAD_LETTER",
+          lastError: "conversation_outbox_attempts_exhausted",
+        },
+      });
+      return null;
+    }
     const outbox = await tx.outboxEvent.update({
       where: { id: outboxId },
-      data: { status: "PROCESSING", attemptCount: { increment: 1 }, lastError: null },
+      data: {
+        status: "PROCESSING",
+        attemptCount: { increment: 1 },
+        availableAt: new Date(
+          Date.now()
+          + Math.max(
+            conversationOutboxProcessingLeaseMs,
+            options.processingLeaseMs ?? conversationOutboxProcessingLeaseMs,
+          ),
+        ),
+        processedAt: null,
+        lastError: null,
+      },
     });
     const message = await tx.message.findUnique({
       where: { id: outbox.aggregateId },
       include: {
         channelBinding: true,
-        conversation: { include: { representative: { select: { ownerId: true } } } },
+        conversation: {
+          include: {
+            representative: {
+              select: {
+                id: true,
+                ownerId: true,
+              },
+            },
+          },
+        },
       },
     });
     if (!message?.channelBinding || !message.text) {
       await tx.outboxEvent.update({
         where: { id: outbox.id },
         data: { status: "DEAD_LETTER", lastError: "operator_message_or_channel_missing" },
+      });
+      return null;
+    }
+    if (message.externalMessageId) {
+      await tx.message.update({
+        where: { id: message.id },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.SENT,
+          failureCode: null,
+          failureReason: null,
+        },
+      });
+      await tx.outboxEvent.update({
+        where: { id: outbox.id },
+        data: {
+          status: "PROCESSED",
+          processedAt: new Date(),
+          lastError: null,
+        },
       });
       return null;
     }
@@ -1324,11 +2111,27 @@ export async function claimNextOperatorMessageWorkItem(): Promise<ClaimedOperato
       });
       return null;
     }
-    const operatorVirtualUser = channel === "matrix"
+    if (channel === "telegram" && options.telegramWorkerEnabled === false) {
+      await tx.outboxEvent.update({
+        where: { id: outbox.id },
+        data: {
+          status: "PENDING",
+          attemptCount: { decrement: 1 },
+          availableAt: new Date(Date.now() + telegramWorkerOwnershipRetryMs),
+          lastError: "telegram_worker_not_delivery_owner",
+        },
+      });
+      return null;
+    }
+    // Matrix MVP rooms are exact two-member rooms. Human replies retain
+    // Message.senderType=OPERATOR in Delegate, but use the already joined
+    // representative MXID for transport; a third Operator MXID would isolate
+    // the room.
+    const matrixTransportUser = channel === "matrix"
       ? await tx.matrixVirtualUserBinding.findFirst({
           where: {
-            ownerId: message.conversation.representative.ownerId,
-            kind: "OPERATOR",
+            representativeId: message.conversation.representative.id,
+            kind: "REPRESENTATIVE",
             enabled: true,
           },
           select: { matrixUserId: true },
@@ -1337,11 +2140,14 @@ export async function claimNextOperatorMessageWorkItem(): Promise<ClaimedOperato
     return {
       outboxId: outbox.id,
       messageId: message.id,
+      conversationId: message.conversationId,
       text: message.text,
       operatorName: message.senderDisplayName || "Operator",
       channel,
       externalConversationId: message.channelBinding.externalConversationId,
-      ...(operatorVirtualUser ? { matrixSenderUserId: operatorVirtualUser.matrixUserId } : {}),
+      ...(matrixTransportUser
+        ? { matrixSenderUserId: matrixTransportUser.matrixUserId }
+        : {}),
     };
   });
 }
@@ -1366,6 +2172,44 @@ export async function completeOperatorMessageDelivery(input: {
       data: { status: "PROCESSED", processedAt: new Date(), lastError: null },
     }),
   ]);
+}
+
+export async function deferOperatorMessageDelivery(input: {
+  outboxId: string;
+  messageId: string;
+  reason: string;
+  retryAfterMs?: number;
+}) {
+  const retryAfterMs = Math.max(
+    telegramWorkerOwnershipRetryMs,
+    input.retryAfterMs ?? telegramWorkerOwnershipRetryMs,
+  );
+  return prisma.$transaction(async (tx) => {
+    const deferred = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        status: "PROCESSING",
+        attemptCount: { gt: 0 },
+      },
+      data: {
+        status: "PENDING",
+        attemptCount: { decrement: 1 },
+        availableAt: new Date(Date.now() + retryAfterMs),
+        processedAt: null,
+        lastError: input.reason,
+      },
+    });
+    if (deferred.count === 0) return false;
+    await tx.message.update({
+      where: { id: input.messageId },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.QUEUED,
+        failureCode: null,
+        failureReason: null,
+      },
+    });
+    return true;
+  });
 }
 
 export async function retryOperatorMessageDelivery(input: {
@@ -1405,6 +2249,25 @@ export async function failGenerationRun(input: {
 }) {
   const now = new Date();
   return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
+    const current = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+    });
+    if (!current) throw new Error("Generation run not found.");
+    if (
+      current.status === GenerationRunStatus.CANCELED
+      || current.status === GenerationRunStatus.COMPLETED
+      || current.status === GenerationRunStatus.FAILED
+    ) {
+      return current;
+    }
+    await releaseConversationEntitlementByGenerationRunId(
+      {
+        generationRunId: input.runId,
+        reason: input.errorCode,
+      },
+      tx as unknown as ServiceEntitlementClient,
+    );
     const run = await tx.generationRun.update({
       where: { id: input.runId },
       data: {
@@ -1600,55 +2463,277 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
   transactionId: string;
   events: MatrixApplicationServiceEvent[];
 }) {
-  const results: Array<{ eventId: string; status: "processed" | "duplicate" | "ignored" }> = [];
+  const results: MatrixApplicationServiceIngestResult[] = [];
+  const persistedEvents: PersistedMatrixApplicationServiceEvent[] = [];
 
+  // Persist the whole transaction before applying any business side effects. Matrix
+  // homeservers retry transactions, so the event id is the durable idempotency key.
   for (const event of input.events) {
     const eventId = event.event_id?.trim();
     const eventType = event.type?.trim();
     if (!eventId || !eventType) continue;
 
-    const existing = await prisma.channelEventInbox.findUnique({
+    const inbox = await prisma.channelEventInbox.upsert({
       where: {
         kind_externalEventId: {
           kind: RepresentativeChannelKind.MATRIX,
           externalEventId: eventId,
         },
       },
-      select: { id: true, status: true },
+      create: {
+        kind: RepresentativeChannelKind.MATRIX,
+        transport: ChannelTransport.MATRIX,
+        sourceProvider: ChannelSourceProvider.MATRIX,
+        originKey: `matrix:${eventId}`,
+        transactionId: input.transactionId,
+        externalEventId: eventId,
+        eventType,
+        payload: event as Prisma.InputJsonObject,
+        status: "PENDING",
+        attemptCount: 0,
+      },
+      // The first payload is canonical. A replay with the same Matrix event id
+      // must not be allowed to replace the forensic record or side effects.
+      update: {},
+      select: {
+        id: true,
+        status: true,
+        attemptCount: true,
+        eventType: true,
+        payload: true,
+        lastError: true,
+      },
     });
-    if (existing?.status === "PROCESSED") {
+
+    persistedEvents.push({
+      eventId,
+      eventType: inbox.eventType,
+      event: isJsonRecord(inbox.payload)
+        ? inbox.payload as MatrixApplicationServiceEvent
+        : event,
+      inboxId: inbox.id,
+      inboxStatus: inbox.status,
+      attemptCount: inbox.attemptCount,
+      lastError: inbox.lastError,
+    });
+  }
+
+  // An encryption state event and a direct invite can be delivered in the
+  // same transaction. Refuse to create the room even when the invite happens
+  // to appear first in the array; ordering must not weaken the MVP boundary.
+  const encryptedRoomIds = new Set(
+    persistedEvents.flatMap(({ eventType, event }) =>
+      eventType === "m.room.encryption" && event.room_id?.trim()
+        ? [event.room_id.trim()]
+        : [],
+    ),
+  );
+
+  for (const persisted of persistedEvents) {
+    const {
+      eventId,
+      eventType,
+      event,
+      inboxId,
+      inboxStatus,
+      attemptCount,
+      lastError,
+    } = persisted;
+    if (inboxStatus === "PROCESSED") {
       results.push({ eventId, status: "duplicate" });
       continue;
     }
+    if (inboxStatus === "DEAD_LETTER") {
+      results.push({
+        eventId,
+        status: "ignored",
+        reason: "matrix_event_dead_lettered",
+      });
+      continue;
+    }
+    if (attemptCount >= matrixEventMaximumAttempts) {
+      await prisma.channelEventInbox.update({
+        where: { id: inboxId },
+        data: {
+          status: "DEAD_LETTER",
+          processedAt: new Date(),
+          lastError: lastError || "matrix_event_attempts_exhausted",
+        },
+      });
+      results.push({
+        eventId,
+        status: "ignored",
+        reason: "matrix_event_attempts_exhausted",
+      });
+      continue;
+    }
 
-    const inbox = existing
-      ? await prisma.channelEventInbox.update({
-          where: { id: existing.id },
-          data: {
-            transactionId: input.transactionId,
-            payload: event as Prisma.InputJsonObject,
-            status: "PROCESSING",
-            attemptCount: { increment: 1 },
-            lastError: null,
+    const claimedAt = new Date();
+    const claim = await prisma.channelEventInbox.updateMany({
+      where: {
+        id: inboxId,
+        OR: [
+          {
+            status: { in: ["PENDING", "FAILED"] },
+            availableAt: { lte: claimedAt },
           },
-        })
-      : await prisma.channelEventInbox.create({
-          data: {
-            kind: RepresentativeChannelKind.MATRIX,
-            transactionId: input.transactionId,
-            externalEventId: eventId,
-            eventType,
-            payload: event as Prisma.InputJsonObject,
+          {
             status: "PROCESSING",
-            attemptCount: 1,
+            availableAt: { lte: claimedAt },
           },
+        ],
+      },
+      data: {
+        status: "PROCESSING",
+        attemptCount: { increment: 1 },
+        availableAt: new Date(claimedAt.getTime() + matrixEventProcessingLeaseMs),
+        processedAt: null,
+        lastError: null,
+      },
+    });
+    if (claim.count === 0) {
+      const current = await prisma.channelEventInbox.findUnique({
+        where: { id: inboxId },
+        select: { status: true, lastError: true },
+      });
+      if (current?.status === "PROCESSED") {
+        results.push({ eventId, status: "duplicate" });
+      } else if (current?.status === "DEAD_LETTER") {
+        results.push({
+          eventId,
+          status: "ignored",
+          reason: "matrix_event_dead_lettered",
         });
+      } else {
+        results.push({
+          eventId,
+          status: "failed",
+          reason: current?.lastError
+            || lastError
+            || (current?.status === "PROCESSING"
+              ? "matrix_event_already_processing"
+              : "matrix_event_retry_not_ready"),
+        });
+      }
+      continue;
+    }
 
     try {
       const roomId = event.room_id?.trim();
-      if (!roomId || !["m.room.message", "m.room.redaction"].includes(eventType)) {
-        await markMatrixInboxProcessed(inbox.id);
-        results.push({ eventId, status: "ignored" });
+      if (
+        !roomId
+        || ![
+          "m.room.message",
+          "m.room.redaction",
+          "m.room.member",
+          "m.room.encryption",
+        ].includes(eventType)
+      ) {
+        await markMatrixInboxProcessed(inboxId);
+        results.push({
+          eventId,
+          status: "ignored",
+          reason: !roomId ? "matrix_room_id_missing" : "matrix_event_type_unsupported",
+        });
+        continue;
+      }
+
+      if (eventType === "m.room.encryption") {
+        await isolateMatrixConversationRoom({
+          roomId,
+          reason: "matrix_room_encrypted",
+          eventId,
+          ...(event.sender?.trim() ? { observedMemberId: event.sender.trim() } : {}),
+        });
+        await markMatrixInboxProcessed(inboxId);
+        results.push({ eventId, status: "ignored", reason: "matrix_room_encrypted" });
+        continue;
+      }
+
+      if (eventType === "m.room.member") {
+        const membership = typeof event.content?.membership === "string"
+          ? event.content.membership
+          : "";
+        const managedMatrixUserId = event.state_key?.trim();
+        const audienceMatrixUserId = event.sender?.trim();
+        const managedTarget = managedMatrixUserId
+          ? await prisma.matrixVirtualUserBinding.findUnique({
+              where: { matrixUserId: managedMatrixUserId },
+              select: {
+                representativeId: true,
+                matrixUserId: true,
+                enabled: true,
+              },
+            })
+          : null;
+        const isDirectInvite = isExplicitMatrixDirectInvite(event);
+        if (
+          membership === "invite"
+          && managedTarget?.enabled
+          && managedTarget.representativeId
+          && audienceMatrixUserId
+          && audienceMatrixUserId !== managedTarget.matrixUserId
+          && isDirectInvite
+        ) {
+          if (encryptedRoomIds.has(roomId)) {
+            await markMatrixInboxProcessed(inboxId);
+            results.push({ eventId, status: "ignored", reason: "matrix_room_encrypted" });
+            continue;
+          }
+          const provisioned = await provisionMatrixDirectConversation({
+            representativeId: managedTarget.representativeId,
+            roomId,
+            audienceMatrixUserId,
+            representativeMatrixUserId: managedTarget.matrixUserId,
+            directInvite: true,
+          });
+          await markMatrixInboxProcessed(inboxId);
+          results.push(
+            provisioned.status === "isolated_conflict"
+              ? {
+                  eventId,
+                  status: "ignored",
+                  reason: provisioned.reason,
+                }
+              : { eventId, status: "processed" },
+          );
+          continue;
+        }
+
+        // Do not provision on an ordinary invite. Matrix clients may emit room
+        // invitations for groups without a reliable 1:1 signal.
+        if (membership === "invite" && managedTarget) {
+          await markMatrixInboxProcessed(inboxId);
+          results.push({
+            eventId,
+            status: "ignored",
+            reason: "matrix_membership_not_explicit_direct_invite",
+          });
+          continue;
+        }
+
+        const membershipUpdate = managedMatrixUserId
+          ? await recordMatrixRoomMembership({
+              roomId,
+              memberId: managedMatrixUserId,
+              membership,
+              eventId,
+            })
+          : null;
+        await markMatrixInboxProcessed(inboxId);
+        results.push(membershipUpdate
+          ? {
+              eventId,
+              status: "ignored",
+              reason: membershipUpdate.isolated
+                ? "matrix_room_membership_isolated"
+                : "matrix_room_membership_updated",
+            }
+          : {
+              eventId,
+              status: "ignored",
+              reason: "matrix_membership_not_managed_invite",
+            });
         continue;
       }
 
@@ -1659,8 +2744,8 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
           })
         : null;
       if (virtualSender) {
-        await markMatrixInboxProcessed(inbox.id);
-        results.push({ eventId, status: "ignored" });
+        await markMatrixInboxProcessed(inboxId);
+        results.push({ eventId, status: "ignored", reason: "matrix_managed_sender_echo" });
         continue;
       }
 
@@ -1671,36 +2756,82 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         },
         include: {
           conversation: {
-            include: { representative: { select: { slug: true } } },
+            include: {
+              representative: { select: { slug: true } },
+              contact: {
+                select: {
+                  id: true,
+                  channelUserId: true,
+                  externalUserId: true,
+                },
+              },
+              participants: {
+                select: {
+                  kind: true,
+                  participantId: true,
+                  leftAt: true,
+                  metadata: true,
+                },
+              },
+            },
           },
         },
       });
       if (!binding) {
-        await markMatrixInboxProcessed(inbox.id);
-        results.push({ eventId, status: "ignored" });
-        continue;
+        throw new Error("matrix_room_not_provisioned");
       }
 
       await prisma.channelEventInbox.update({
-        where: { id: inbox.id },
+        where: { id: inboxId },
         data: { conversationId: binding.conversationId },
       });
 
+      if (!isMatrixDirectBindingSafe(binding.metadata)) {
+        await markMatrixInboxProcessed(inboxId);
+        results.push({ eventId, status: "ignored", reason: "matrix_room_not_private_unencrypted" });
+        continue;
+      }
+
+      const sender = event.sender?.trim();
+      if (!sender || !isMatrixAudienceSenderAuthorized({
+        sender,
+        contact: binding.conversation.contact,
+        participants: binding.conversation.participants,
+      })) {
+        await markMatrixInboxProcessed(inboxId);
+        results.push({ eventId, status: "ignored", reason: "matrix_sender_not_authorized" });
+        continue;
+      }
+
       if (eventType === "m.room.redaction") {
-        const redactedEventId = event.redacts?.trim();
+        const eventContent = event.content || {};
+        const redactedEventId = event.redacts?.trim()
+          || (typeof eventContent.redacts === "string" ? eventContent.redacts.trim() : "");
         if (redactedEventId) {
           const target = await prisma.message.findFirst({
             where: { channelBindingId: binding.id, externalMessageId: redactedEventId },
-            select: { id: true },
+            select: { id: true, senderId: true, senderType: true },
           });
-          if (target) {
+          if (target && isMatrixMessageOwnedBySender(target, sender)) {
             await redactConversationMessage({
               representativeSlug: binding.conversation.representative.slug,
               conversationId: binding.conversationId,
               messageId: target.id,
               reason: "matrix_redaction",
             });
+          } else {
+            await markMatrixInboxProcessed(inboxId);
+            results.push({
+              eventId,
+              status: "ignored",
+              reason: target ? "matrix_redaction_author_mismatch" : "matrix_redaction_target_not_found",
+            });
+            continue;
           }
+        } else {
+          await markMatrixInboxProcessed(inboxId);
+          results.push({ eventId, status: "ignored", reason: "matrix_redaction_target_missing" });
+          continue;
         }
       } else {
         const content = event.content || {};
@@ -1710,9 +2841,51 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
           ? content["m.relates_to"]
           : null;
         const relationType = relatesTo && typeof relatesTo.rel_type === "string" ? relatesTo.rel_type : null;
-        const targetEventId = relatesTo && typeof relatesTo.event_id === "string" ? relatesTo.event_id : null;
+        const targetEventId = relatesTo && typeof relatesTo.event_id === "string"
+          ? relatesTo.event_id.trim()
+          : null;
+        const identityBindingToken =
+          msgtype === "m.text" ? parsePrivateChannelBindingCommand(body) : null;
 
-        if (relationType === "m.replace" && targetEventId) {
+        if (identityBindingToken) {
+          await prisma.channelEventInbox.update({
+            where: { id: inboxId },
+            data: {
+              payload: {
+                ...event,
+                content: {
+                  ...content,
+                  body: "!bind [redacted]",
+                },
+              } as Prisma.InputJsonObject,
+            },
+          });
+          try {
+            await consumeIdentityBindingChallenge({
+              token: identityBindingToken,
+              provider: privateChannelIdentityProviders.matrix,
+              providerSubject: sender,
+              issuer: matrixHomeserverFromUserId(sender),
+              connectionId:
+                binding.connectionId
+                || resolveMatrixApplicationServiceConnectionId(),
+              proofMetadata: {
+                matrixRoomId: roomId,
+                matrixEventId: eventId,
+                directMessage: true,
+              },
+            });
+          } catch (error) {
+            if (isRetryableMatrixIdentityBindingError(error)) throw error;
+            await markMatrixInboxProcessed(inboxId);
+            results.push({
+              eventId,
+              status: "ignored",
+              reason: "matrix_identity_binding_rejected",
+            });
+            continue;
+          }
+        } else if (relationType === "m.replace" && targetEventId) {
           const replacement = isJsonRecord(content["m.new_content"])
             ? content["m.new_content"]
             : null;
@@ -1721,42 +2894,70 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
             : body.replace(/^\*\s*/, "");
           const target = await prisma.message.findFirst({
             where: { channelBindingId: binding.id, externalMessageId: targetEventId },
-            select: { id: true },
+            select: { id: true, senderId: true, senderType: true },
           });
-          if (target && replacementText) {
+          if (target && replacementText && isMatrixMessageOwnedBySender(target, sender)) {
             await editConversationMessage({
               representativeSlug: binding.conversation.representative.slug,
               conversationId: binding.conversationId,
               messageId: target.id,
               text: replacementText,
-              editedBy: event.sender || "matrix-user",
+              editedBy: sender,
             });
+          } else {
+            await markMatrixInboxProcessed(inboxId);
+            results.push({
+              eventId,
+              status: "ignored",
+              reason: !target
+                ? "matrix_edit_target_not_found"
+                : !isMatrixMessageOwnedBySender(target, sender)
+                  ? "matrix_edit_author_mismatch"
+                  : "matrix_edit_body_missing",
+            });
+            continue;
           }
         } else if (msgtype === "m.text" && body) {
           await acceptInboundConversationMessage({
             representativeSlug: binding.conversation.representative.slug,
             conversationId: binding.conversationId,
             text: body,
-            ...(event.sender ? { senderId: event.sender, senderDisplayName: event.sender } : {}),
+            senderId: sender,
+            senderDisplayName: sender,
             clientMessageId: eventId,
             channel: "matrix",
             externalMessageId: eventId,
           });
+        } else {
+          await markMatrixInboxProcessed(inboxId);
+          results.push({ eventId, status: "ignored", reason: "matrix_message_type_unsupported" });
+          continue;
         }
       }
 
-      await markMatrixInboxProcessed(inbox.id);
+      await markMatrixInboxProcessed(inboxId);
       results.push({ eventId, status: "processed" });
     } catch (error) {
+      const nextAttemptCount = attemptCount + 1;
+      const deadLetter = nextAttemptCount >= matrixEventMaximumAttempts;
       await prisma.channelEventInbox.update({
-        where: { id: inbox.id },
+        where: { id: inboxId },
         data: {
-          status: "FAILED",
+          status: deadLetter ? "DEAD_LETTER" : "FAILED",
+          ...(deadLetter ? { processedAt: new Date() } : {}),
           lastError: error instanceof Error ? error.message : "matrix_event_processing_failed",
-          availableAt: new Date(Date.now() + 2_000),
+          availableAt: new Date(Date.now() + matrixEventRetryDelayMs),
         },
       });
-      throw error;
+      results.push({
+        eventId,
+        status: deadLetter ? "ignored" : "failed",
+        reason: deadLetter
+          ? "matrix_event_attempts_exhausted"
+          : error instanceof Error
+            ? error.message
+            : "matrix_event_processing_failed",
+      });
     }
   }
 
@@ -1819,6 +3020,13 @@ export async function editConversationMessage(input: {
     });
 
     if (run && (action === "replace_queued_run" || action === "cancel_and_requeue")) {
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: "generation_replaced_after_message_edit",
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
       await tx.generationRun.update({
         where: { id: run.id },
         data: { status: GenerationRunStatus.CANCELED, canceledAt: new Date() },
@@ -1856,23 +3064,121 @@ export async function redactConversationMessage(input: {
   reason?: string;
 }) {
   const redactedAt = new Date();
-  const message = await prisma.message.findFirst({
-    where: {
-      id: input.messageId,
-      conversationId: input.conversationId,
-      conversation: { representative: { slug: input.representativeSlug } },
-    },
-    select: { id: true },
-  });
-  if (!message) throw new Error("Message not found.");
-  return prisma.message.update({
-    where: { id: message.id },
-    data: {
-      deliveryStatus: MessageDeliveryStatus.REDACTED,
-      redactedAt,
-      redactionReason: input.reason?.trim() || null,
-      retentionExpiresAt: buildRedactionPurgeAt(redactedAt),
-    },
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
+    `;
+    const message = await tx.message.findFirst({
+      where: {
+        id: input.messageId,
+        conversationId: input.conversationId,
+        conversation: { representative: { slug: input.representativeSlug } },
+      },
+      select: {
+        id: true,
+        conversationId: true,
+        episodeId: true,
+        inputForGenerationRuns: {
+          orderBy: { createdAt: "asc" },
+          select: { id: true },
+        },
+      },
+    });
+    if (!message) throw new Error("Message not found.");
+
+    let canceledRunCount = 0;
+    const runIds = message.inputForGenerationRuns
+      .map((run) => run.id)
+      .sort();
+    for (const runId of runIds) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${runId}))`;
+      const run = await tx.generationRun.findUnique({
+        where: { id: runId },
+        select: { id: true, status: true },
+      });
+      if (!run || !cancellableGenerationStatuses.includes(run.status)) continue;
+
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: "input_message_redacted",
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
+      const canceled = await tx.generationRun.updateMany({
+        where: {
+          id: run.id,
+          status: { in: cancellableGenerationStatuses },
+        },
+        data: {
+          status: GenerationRunStatus.CANCELED,
+          errorCode: "input_message_redacted",
+          errorMessage: "Generation canceled because its input message was redacted.",
+          canceledAt: redactedAt,
+        },
+      });
+      if (canceled.count !== 1) continue;
+      canceledRunCount += 1;
+
+      await tx.outboxEvent.updateMany({
+        where: {
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          status: { in: ["PENDING", "PROCESSING", "FAILED"] },
+        },
+        data: {
+          status: "PROCESSED",
+          processedAt: redactedAt,
+          lastError: null,
+        },
+      });
+      await tx.approvalRequest.updateMany({
+        where: {
+          generationRunId: run.id,
+          status: "PENDING",
+        },
+        data: {
+          status: "REJECTED",
+          resolvedAt: redactedAt,
+          resolvedBy: "system",
+          decisionNote: "Input message was redacted.",
+        },
+      });
+    }
+
+    const redacted = await tx.message.update({
+      where: { id: message.id },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.REDACTED,
+        redactedAt,
+        redactionReason: input.reason?.trim() || null,
+        retentionExpiresAt: buildRedactionPurgeAt(redactedAt),
+      },
+    });
+    if (canceledRunCount > 0) {
+      await tx.conversation.updateMany({
+        where: {
+          id: message.conversationId,
+          state: { in: ["AI_QUEUED", "PROCESSING", "WAITING_APPROVAL"] },
+        },
+        data: { state: "WAITING_USER" },
+      });
+      if (message.episodeId) {
+        await tx.conversationEpisode.updateMany({
+          where: {
+            id: message.episodeId,
+            status: {
+              in: [
+                ConversationEpisodeStatus.ACTIVE,
+                ConversationEpisodeStatus.WAITING_APPROVAL,
+              ],
+            },
+          },
+          data: { status: ConversationEpisodeStatus.WAITING_USER },
+        });
+      }
+    }
+    return redacted;
   });
 }
 
@@ -2419,6 +3725,10 @@ export async function publishRepresentativeVersion(input: {
         create: {
           representativeId: representative.id,
           kind: RepresentativeChannelKind.WEB,
+          transport: ChannelTransport.WEB,
+          sourceProvider: ChannelSourceProvider.WEB,
+          desiredState: ChannelDesiredState.ACTIVE,
+          healthStatus: ChannelHealthStatus.HEALTHY,
           externalUserId: `/reps/${representative.slug}`,
           status: "CONNECTED",
           displayName: representative.displayName,
@@ -2427,8 +3737,9 @@ export async function publishRepresentativeVersion(input: {
         update: {
           externalUserId: `/reps/${representative.slug}`,
           status: "CONNECTED",
+          transport: ChannelTransport.WEB,
+          sourceProvider: ChannelSourceProvider.WEB,
           displayName: representative.displayName,
-          lastError: null,
         },
       });
     }
@@ -2931,11 +4242,366 @@ function isConversationPlatformUnavailable(error: unknown): boolean {
   );
 }
 
+function isRetryableMatrixIdentityBindingError(error: unknown): boolean {
+  if (isConversationPlatformUnavailable(error)) return true;
+  const code =
+    typeof error === "object"
+    && error !== null
+    && "code" in error
+    && typeof error.code === "string"
+      ? error.code
+      : "";
+  if (["P1001", "P1002", "P1008", "P2024", "P2034"].includes(code)) {
+    return true;
+  }
+  return error instanceof Error
+    && /deadlock|transaction.*(?:conflict|timeout)|connection.*(?:closed|reset)|temporar(?:y|ily)/i.test(
+      error.message,
+    );
+}
+
 async function markMatrixInboxProcessed(id: string) {
   await prisma.channelEventInbox.update({
     where: { id },
-    data: { status: "PROCESSED", processedAt: new Date(), lastError: null },
+    data: {
+      status: "PROCESSED",
+      processedAt: new Date(),
+      availableAt: new Date(),
+      lastError: null,
+    },
   });
+}
+
+/**
+ * Matrix MVP deliberately supports only plaintext 1:1 rooms. A missing or
+ * malformed safety marker is unsafe too: it may be a legacy/group binding, so
+ * it must not reach the generation queue.
+ */
+function isMatrixDirectBindingSafe(metadata: unknown): boolean {
+  if (!isJsonRecord(metadata)) return false;
+  return metadata.directMessageOnly === true
+    && metadata.encrypted === false
+    && metadata.securityState === "ACTIVE"
+    && typeof metadata.audienceMatrixUserId === "string"
+    && typeof metadata.representativeMatrixUserId === "string";
+}
+
+async function lockAndVerifyMatrixDirectBinding(
+  tx: Prisma.TransactionClient,
+  binding: {
+    id: string;
+    externalConversationId: string;
+  },
+) {
+  await lockMatrixRoomSecurityState(tx, binding.externalConversationId);
+  const currentBinding = await tx.conversationChannelBinding.findFirst({
+    where: {
+      id: binding.id,
+      kind: RepresentativeChannelKind.MATRIX,
+      externalConversationId: binding.externalConversationId,
+    },
+    select: {
+      kind: true,
+      externalConversationId: true,
+      metadata: true,
+    },
+  });
+  return currentBinding?.kind === RepresentativeChannelKind.MATRIX
+    && currentBinding.externalConversationId === binding.externalConversationId
+    && isMatrixDirectBindingSafe(currentBinding.metadata);
+}
+
+function isExplicitMatrixDirectInvite(event: MatrixApplicationServiceEvent): boolean {
+  return event.content?.is_direct === true;
+}
+
+type MatrixRoomMembershipUpdate = {
+  isolated: boolean;
+};
+
+/**
+ * Mirror Matrix membership evidence into the Conversation Platform. We cannot
+ * safely infer a room's current member list from a single event, therefore any
+ * unexpected member or either expected member leaving isolates the binding.
+ * The bridge's post-join state check can later provide the positive proof that
+ * the room contains exactly the two expected MXIDs.
+ */
+async function recordMatrixRoomMembership(input: {
+  roomId: string;
+  memberId: string;
+  membership: string;
+  eventId: string;
+}): Promise<MatrixRoomMembershipUpdate | null> {
+  return prisma.$transaction(async (tx) => {
+    await lockMatrixRoomSecurityState(tx, input.roomId);
+    const binding = await tx.conversationChannelBinding.findFirst({
+      where: {
+        kind: RepresentativeChannelKind.MATRIX,
+        externalConversationId: input.roomId,
+      },
+      select: {
+        id: true,
+        conversationId: true,
+        metadata: true,
+      },
+    });
+    if (!binding) return null;
+
+    const metadata = isJsonRecord(binding.metadata) ? binding.metadata : {};
+    const audienceMatrixUserId = typeof metadata.audienceMatrixUserId === "string"
+      ? metadata.audienceMatrixUserId
+      : null;
+    const representativeMatrixUserId = typeof metadata.representativeMatrixUserId === "string"
+      ? metadata.representativeMatrixUserId
+      : null;
+    const expectedKind = input.memberId === audienceMatrixUserId
+      ? ConversationParticipantKind.AUDIENCE
+      : input.memberId === representativeMatrixUserId
+        ? ConversationParticipantKind.REPRESENTATIVE
+        : ConversationParticipantKind.SYSTEM;
+    const isExpectedMember = expectedKind !== ConversationParticipantKind.SYSTEM;
+    const remainsSafe = isExpectedMember && input.membership === "join";
+    const now = new Date();
+    const reason = !isMatrixDirectBindingSafe(metadata)
+      ? "matrix_room_safety_metadata_missing"
+      : !isExpectedMember
+        ? "matrix_third_member_observed"
+        : input.membership === "leave" || input.membership === "ban"
+          ? "matrix_expected_member_left"
+          : "matrix_unexpected_membership_state";
+
+    await tx.conversationParticipant.upsert({
+      where: {
+        conversationId_kind_participantId: {
+          conversationId: binding.conversationId,
+          kind: expectedKind,
+          participantId: input.memberId,
+        },
+      },
+      create: {
+        conversationId: binding.conversationId,
+        kind: expectedKind,
+        participantId: input.memberId,
+        metadata: {
+          provider: "MATRIX",
+          matrixUserId: input.memberId,
+          observedMembership: input.membership,
+          ...(isExpectedMember ? {} : { untrustedMember: true }),
+        },
+        ...(remainsSafe ? {} : { leftAt: now }),
+      },
+      update: {
+        ...(remainsSafe ? { leftAt: null } : { leftAt: now }),
+        metadata: {
+          provider: "MATRIX",
+          matrixUserId: input.memberId,
+          observedMembership: input.membership,
+          ...(isExpectedMember ? {} : { untrustedMember: true }),
+        },
+      },
+    });
+    if (!remainsSafe) {
+      await tx.conversation.update({
+        where: { id: binding.conversationId },
+        data: { state: "FAILED" },
+      });
+      await tx.conversationChannelBinding.update({
+        where: { id: binding.id },
+        data: {
+          metadata: {
+            ...metadata,
+            securityState: "ISOLATED",
+            encrypted: metadata.encrypted === true,
+            isolationReason: reason,
+            isolationEventId: input.eventId,
+            isolatedAt: now.toISOString(),
+          },
+        },
+      });
+    }
+    return { isolated: !remainsSafe };
+  });
+}
+
+/** Called by the Application Service for a room-level encryption signal. */
+export async function isolateMatrixConversationRoom(input: {
+  roomId: string;
+  reason: "matrix_room_encrypted" | "matrix_remote_room_validation_failed";
+  eventId?: string;
+  observedMemberId?: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    await lockMatrixRoomSecurityState(tx, input.roomId);
+    const binding = await tx.conversationChannelBinding.findFirst({
+      where: {
+        kind: RepresentativeChannelKind.MATRIX,
+        externalConversationId: input.roomId,
+      },
+      select: { id: true, conversationId: true, metadata: true },
+    });
+    if (!binding) return false;
+
+    const metadata = isJsonRecord(binding.metadata) ? binding.metadata : {};
+    const now = new Date();
+    if (input.observedMemberId) {
+      await tx.conversationParticipant.upsert({
+        where: {
+          conversationId_kind_participantId: {
+            conversationId: binding.conversationId,
+            kind: ConversationParticipantKind.SYSTEM,
+            participantId: input.observedMemberId,
+          },
+        },
+        create: {
+          conversationId: binding.conversationId,
+          kind: ConversationParticipantKind.SYSTEM,
+          participantId: input.observedMemberId,
+          metadata: { provider: "MATRIX", matrixUserId: input.observedMemberId, untrustedMember: true },
+        },
+        update: {},
+      });
+    }
+    await tx.conversation.update({
+      where: { id: binding.conversationId },
+      data: { state: "FAILED" },
+    });
+    await tx.conversationChannelBinding.update({
+      where: { id: binding.id },
+      data: {
+        metadata: {
+          ...metadata,
+          securityState: "ISOLATED",
+          encrypted:
+            input.reason === "matrix_room_encrypted"
+            || metadata.encrypted === true,
+          isolationReason: input.reason,
+          ...(input.eventId ? { isolationEventId: input.eventId } : {}),
+          isolatedAt: now.toISOString(),
+        },
+      },
+    });
+    return true;
+  });
+}
+
+/**
+ * The bridge invokes this only after its homeserver read proves the exact
+ * two-member, plaintext state. Keeping this separate from invite provisioning
+ * makes a missing AS token/permission fail closed rather than best-effort.
+ */
+export async function activateVerifiedMatrixDirectConversation(input: {
+  roomId: string;
+  audienceMatrixUserId: string;
+  representativeMatrixUserId: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    await lockMatrixRoomSecurityState(tx, input.roomId);
+    const binding = await tx.conversationChannelBinding.findFirst({
+      where: {
+        kind: RepresentativeChannelKind.MATRIX,
+        externalConversationId: input.roomId,
+      },
+      select: { id: true, metadata: true },
+    });
+    if (!binding || !isJsonRecord(binding.metadata)) return false;
+    const metadata = binding.metadata;
+    if (
+      metadata.directMessageOnly !== true
+      || metadata.encrypted !== false
+      || metadata.audienceMatrixUserId !== input.audienceMatrixUserId
+      || metadata.representativeMatrixUserId !== input.representativeMatrixUserId
+      || metadata.securityState !== "PENDING_REMOTE_VALIDATION"
+    ) {
+      return false;
+    }
+    await tx.conversationChannelBinding.update({
+      where: { id: binding.id },
+      data: {
+        metadata: {
+          ...metadata,
+          securityState: "ACTIVE",
+          verifiedAt: new Date().toISOString(),
+          isolationReason: null,
+        },
+      },
+    });
+    return true;
+  });
+}
+
+function isMatrixAudienceSenderAuthorized(input: {
+  sender: string;
+  contact: {
+    id: string;
+    channelUserId: string | null;
+    externalUserId: string | null;
+  };
+  participants: Array<{
+    kind: string;
+    participantId: string;
+    leftAt: Date | null;
+    metadata: unknown;
+  }>;
+}) {
+  const allowedSenderIds = new Set<string>();
+  addMatrixSenderId(allowedSenderIds, input.contact.channelUserId);
+  addMatrixSenderId(allowedSenderIds, input.contact.externalUserId);
+
+  for (const participant of input.participants) {
+    if (participant.kind !== "AUDIENCE" || participant.leftAt) continue;
+    addMatrixSenderId(allowedSenderIds, participant.participantId);
+    addMatrixSenderIdsFromMetadata(allowedSenderIds, participant.metadata);
+  }
+
+  return allowedSenderIds.has(input.sender);
+}
+
+function addMatrixSenderIdsFromMetadata(target: Set<string>, metadata: unknown) {
+  if (!isJsonRecord(metadata)) return;
+  for (const key of [
+    "matrixUserId",
+    "matrix_user_id",
+    "audienceMatrixUserId",
+    "channelUserId",
+    "externalUserId",
+  ]) {
+    addMatrixSenderId(target, metadata[key]);
+  }
+  for (const key of ["matrixUserIds", "allowedSenderIds"]) {
+    const values = metadata[key];
+    if (!Array.isArray(values)) continue;
+    for (const value of values) addMatrixSenderId(target, value);
+  }
+}
+
+function addMatrixSenderId(target: Set<string>, value: unknown) {
+  if (typeof value !== "string") return;
+  const normalized = value.trim();
+  if (normalized) target.add(normalized);
+}
+
+function isMatrixMessageOwnedBySender(
+  message: { senderId: string | null; senderType: MessageSenderType },
+  sender: string,
+) {
+  return message.senderType === MessageSenderType.AUDIENCE && message.senderId === sender;
+}
+
+function parsePrivateChannelBindingCommand(body: string): string | null {
+  const match = body.match(/^(?:!|\/)bind\s+([A-Za-z0-9_-]{32,128})$/);
+  return match?.[1] ?? null;
+}
+
+function matrixHomeserverFromUserId(matrixUserId: string): string {
+  const separator = matrixUserId.lastIndexOf(":");
+  if (
+    !matrixUserId.startsWith("@")
+    || separator <= 1
+    || separator === matrixUserId.length - 1
+  ) {
+    throw new Error("Matrix sender must be a full MXID.");
+  }
+  return matrixUserId.slice(separator + 1).toLowerCase();
 }
 
 function isJsonRecord(value: unknown): value is Record<string, unknown> {

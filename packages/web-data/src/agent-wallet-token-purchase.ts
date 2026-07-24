@@ -73,7 +73,7 @@ type CreatorEarningRecord = {
 type TokenPurchaseClient = Omit<WalletLedgerClient, "$transaction"> & {
   userWallet: {
     findUnique(args: unknown): Promise<UserWalletRecord | null>;
-    update(args: unknown): Promise<UserWalletRecord>;
+    updateMany(args: unknown): Promise<{ count: number }>;
   };
   agentWallet: {
     findUnique(args: unknown): Promise<AgentWalletRecord | null>;
@@ -133,6 +133,7 @@ export async function purchaseAgentTokens(
       },
     });
     if (existing) {
+      assertExistingTokenPurchaseMatches(existing, normalized);
       return serializeAgentTokenPurchase(existing);
     }
 
@@ -148,6 +149,7 @@ export async function purchaseAgentTokens(
     if (userWallet.cashBalanceCents < normalized.amountCents) {
       throw new Error("Insufficient user wallet balance.");
     }
+    const initialUserCashBalanceCents = userWallet.cashBalanceCents;
 
     const agentWallet = await tx.agentWallet.findUnique({
       where: { representativeId: normalized.representativeId },
@@ -169,6 +171,37 @@ export async function purchaseAgentTokens(
       grossAmountCents: normalized.amountCents,
       creatorRevenueShareBps: agentWallet.creatorRevenueShareBps,
     });
+
+    const debit = await tx.userWallet.updateMany({
+      where: {
+        id: userWallet.id,
+        currency: normalized.currency,
+        cashBalanceCents: {
+          equals: initialUserCashBalanceCents,
+          gte: normalized.amountCents,
+        },
+      },
+      data: {
+        cashBalanceCents: {
+          decrement: normalized.amountCents,
+        },
+      },
+    });
+    if (debit.count !== 1) {
+      const concurrent = await tx.agentTokenPurchase.findUnique({
+        where: { idempotencyKey: normalized.idempotencyKey },
+        include: {
+          userWallet: true,
+          agentWallet: true,
+          creatorEarnings: true,
+        },
+      });
+      if (concurrent) {
+        assertExistingTokenPurchaseMatches(concurrent, normalized);
+        return serializeAgentTokenPurchase(concurrent);
+      }
+      throw new Error("Insufficient user wallet balance.");
+    }
 
     const purchase = await tx.agentTokenPurchase.create({
       data: {
@@ -208,7 +241,7 @@ export async function purchaseAgentTokens(
         requireBalancedAmount: true,
         initialBalances: {
           [`${AmnWalletAccountType.USER_CASH}:${userWallet.id}`]: {
-            amountCents: userWallet.cashBalanceCents,
+            amountCents: initialUserCashBalanceCents,
           },
           [`${AmnWalletAccountType.AGENT_TOKEN}:${agentWallet.id}`]: {
             tokenAmount: agentWallet.tokenBalance,
@@ -261,13 +294,8 @@ export async function purchaseAgentTokens(
     );
 
     const [updatedUserWallet, updatedAgentWallet] = await Promise.all([
-      tx.userWallet.update({
+      tx.userWallet.findUnique({
         where: { id: userWallet.id },
-        data: {
-          cashBalanceCents: {
-            decrement: normalized.amountCents,
-          },
-        },
       }),
       tx.agentWallet.update({
         where: { id: agentWallet.id },
@@ -281,6 +309,9 @@ export async function purchaseAgentTokens(
         },
       }),
     ]);
+    if (!updatedUserWallet) {
+      throw new Error("User wallet disappeared during token purchase.");
+    }
 
     return serializeAgentTokenPurchase({
       ...purchase,
@@ -321,10 +352,44 @@ function normalizePurchaseAgentTokensInput(
     amountCents: input.amountCents,
     currency,
     idempotencyKey:
-      input.idempotencyKey ??
+      normalizeOptionalIdempotencyKey(input.idempotencyKey) ??
       `agent_token_purchase:${externalUserId}:${representativeId}:${currency}:${input.amountCents}`,
     ...(input.rechargeOrderId ? { rechargeOrderId: input.rechargeOrderId } : {}),
   };
+}
+
+function assertExistingTokenPurchaseMatches(
+  purchase: AgentTokenPurchaseRecord,
+  normalized: ReturnType<typeof normalizePurchaseAgentTokensInput>,
+): void {
+  if (!purchase.userWallet || !purchase.agentWallet) {
+    throw new Error("Existing token purchase is missing wallet relations.");
+  }
+  const mismatches = [
+    purchase.userWallet.externalUserId !== normalized.externalUserId ? "owner" : null,
+    purchase.representativeId !== normalized.representativeId ? "representative" : null,
+    purchase.amountCents !== normalized.amountCents ? "amount" : null,
+    purchase.currency !== normalized.currency ? "currency" : null,
+    purchase.rechargeOrderId !== (normalized.rechargeOrderId ?? null)
+      ? "recharge order"
+      : null,
+  ].filter((value): value is string => value !== null);
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Token purchase idempotency key was reused with different ${mismatches.join(", ")}.`,
+    );
+  }
+}
+
+function normalizeOptionalIdempotencyKey(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error("idempotencyKey must not be empty.");
+  }
+  return normalized;
 }
 
 function serializeAgentTokenPurchase(

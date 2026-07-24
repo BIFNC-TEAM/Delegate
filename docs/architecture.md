@@ -2,7 +2,7 @@
 
 ## Product thesis
 
-Delegate is not a private assistant exposed to the public. It is a separate public runtime that represents a founder or business on Telegram using only public knowledge and explicitly allowed actions.
+Delegate is not a private assistant exposed to the public. It is a separate public runtime that represents a founder or business across Web and optional messaging channels using only public knowledge and explicitly allowed actions.
 
 That single decision drives the whole system:
 
@@ -12,11 +12,13 @@ That single decision drives the whole system:
 - paid continuation instead of unlimited free chat
 - structured human handoff instead of vague escalation
 
-## Scope locked for v1
+The channel architecture is governed by [the Unified Conversation Platform ADR](./adr-channel-conversation-platform.md). It replaces the earlier assumption that Telegram must be the primary runtime or that Matrix should become a mandatory hub.
+
+## Scope locked for the current wedge and first channel migration
 
 ### In
 
-- Telegram private chat as the primary entry
+- Web as the primary shipped entry
 - public representative page
 - FAQ answering from structured knowledge
 - lead qualification and intake
@@ -24,11 +26,16 @@ That single decision drives the whole system:
 - paid continuation with `Free`, `Pass`, `Deep Help`, `Sponsor`
 - owner inbox for human handoff
 - action gate and event audit trail
+- native Matrix direct rooms as an optional channel
+- Telegram private chat through a thin Telegram adapter
+- private-chat/plain-text Telegram-to-Matrix bridge canary only after the direct path is stable
 
 ### Out
 
 - WhatsApp
 - WeChat
+- mandatory Telegram routing through Matrix
+- group chat, media parity, history import, full puppeting, and Matrix E2EE in the first channel migration
 - private knowledge access
 - arbitrary tool calling
 - direct calendar mutation
@@ -39,11 +46,20 @@ That single decision drives the whole system:
 
 ```mermaid
 flowchart TD
-    TG["Telegram Gateway Layer"] --> RT["Representative Runtime Layer"]
+    WEB["Web Adapter"] --> IN["Channel Acceptance Layer"]
+    MX["Native Matrix Adapter"] --> IN
+    TG["Telegram Adapter"] --> IN
+    BR["Optional Telegram to Matrix Bridge"] -. "transport only" .-> MX
+    IN --> RT["Conversation Platform + Worker"]
+    RT --> DB["PostgreSQL Business Truth"]
     RT --> KG["Public Knowledge + Skill Layer"]
     RT --> MEM["OpenViking Context Layer"]
-    RT --> BILL["Billing + Wallet Layer"]
+    RT --> BILL["Entitlement + Provider Payment Rails"]
     RT --> HAND["Handoff + Analytics Layer"]
+    RT --> OUT["Durable Outbox"]
+    OUT --> WEB
+    OUT --> MX
+    OUT --> TG
     HAND --> DASH["Owner Dashboard"]
     KG --> DASH
     MEM --> DASH
@@ -111,14 +127,18 @@ Defines:
 - when to move to paid continuation
 - when human handoff is allowed
 
-### Wallet and billing
+### Identity, entitlement, and billing
+
+External provider subjects link directly to `AudienceIdentity` after provider-specific proof. Matrix ghosts, Telegram bridge puppets, usernames, and display names are not Delegate account identities. A Contact remains the representative-scoped relationship, while raw conversations stay source-specific.
 
 Tracks:
 
-- owner credits
-- sponsor pool credits
-- Stars plan purchases
-- paywall decisions and invoice lifecycle
+- audience-and-representative-scoped service entitlements
+- provider-specific purchase and refund references
+- Web checkout and Telegram Stars as separate payment rails
+- paywall decisions, invoice lifecycle, and append-only audit
+
+Provider money is not one fungible balance. Web money and XTR retain their own settlement and refund semantics even when they grant the same product entitlement.
 
 ### Handoff and analytics
 
@@ -175,18 +195,28 @@ The boundary is a first-class product feature, not a prompt convention.
 ## Recommended stack
 
 - `Next.js` for three separate web services: marketing site, representative app, and owner dashboard
-- `grammY` for the Telegram runtime
+- `grammY` for Telegram-specific Bot API, command, callback, deep-link, and Stars behavior at the provider edge
+- Matrix Application Service APIs for native Matrix ingress and delivery
 - `Prisma + Postgres` for persisted conversations, leads, handoffs, and billing state
 - shared `zod` schemas for the boundary between runtime, UI, and future APIs
 - `ClawHub` as a discovery source for non-privileged representative skill packs
 
 ## Telegram-specific product choices
 
-- Start with private chat only, but keep group mention mode in the runtime contract.
-- Treat group activation as a first-class policy: default to `reply_or_mention`, not ambient listening.
+- Start the shared-runtime migration with private chat and plain text only.
 - Use deep links as the main acquisition primitive.
-- Treat Stars as the default payment surface for user-facing continuation plans.
-- Default to conservative group behavior: only answer in groups when explicitly addressed.
+- Use Stars when paid digital service is offered inside Telegram; otherwise keep Telegram paid features disabled and continue the paid interaction on Web.
+- Keep commands, callbacks, payment confirmation, refund references, and provider support at the Telegram edge.
+- Preserve `sourceProvider=TELEGRAM` even when an optional Matrix bridge carries the event.
+- Add group mode only after participant identity, payer/beneficiary, history, and mention-policy semantics are explicitly designed.
+
+## Channel identity and transport rules
+
+- `sourceProvider` identifies the audience-facing provider and determines identity, payment, analytics, and retention semantics.
+- `transport` identifies the delivery path and may change without changing the source conversation.
+- Web, Matrix MXID, and Telegram numeric user ID bind to `AudienceIdentity` through separate verified links.
+- Cross-channel entitlement and approved public-safe memory may be shared; raw message timelines are not automatically merged.
+- Inbound acceptance, generation, and outbound delivery enforce the same representative lifecycle, published version, channel state, runtime overlay, entitlement, and human-takeover checks.
 
 ## External skill registry policy
 
@@ -201,4 +231,5 @@ OpenClaw's ClawHub pattern is worth adopting, but with a narrower trust boundary
 
 - Deep links: <https://core.telegram.org/api/links>
 - Bot payments: <https://core.telegram.org/bots/payments>
+- Telegram Stars payments: <https://core.telegram.org/bots/payments-stars>
 - Bot API: <https://core.telegram.org/bots/api>

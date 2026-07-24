@@ -46,6 +46,7 @@ import {
 import { z } from "zod";
 
 import { prisma } from "./prisma";
+import { resolveChannelAvailability } from "./channel-availability";
 import { maybeSyncRepresentativeOpenVikingResources } from "./openviking";
 import { getDemoCreatorTrainingKnowledgeOverlay } from "./creator-training";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
@@ -303,12 +304,51 @@ export function resolvePublicRepresentativeAvailability(input: {
   publicMode: boolean;
   activeVersionId?: string | null;
   webChannelStatuses: string[];
+  webChannelBindings?: Array<{
+    status: string;
+    desiredState?: string | null;
+    healthStatus?: string | null;
+  }>;
+  overlays?: Array<{
+    enabled: boolean;
+    priority: number;
+    startsAt: Date;
+    expiresAt?: Date | null;
+    payload: Record<string, unknown>;
+  }>;
 }): PublicRepresentativeRuntimeResult["status"] {
-  if (input.lifecycleState.toUpperCase() === "PAUSED") return "paused";
-  if (input.lifecycleState.toUpperCase() !== "PUBLISHED" || !input.activeVersionId) return "unpublished";
-  if (!input.publicMode) return "private";
-  if (!input.webChannelStatuses.some((status) => status.toUpperCase() === "CONNECTED")) return "web_disabled";
-  return "available";
+  const binding = input.webChannelBindings?.[0];
+  const legacyStatus = binding?.status ?? input.webChannelStatuses[0];
+  const availability = resolveChannelAvailability({
+    channel: "web",
+    lifecycleState: input.lifecycleState,
+    publicMode: input.publicMode,
+    activeVersionId: input.activeVersionId ?? null,
+    binding: legacyStatus
+      ? {
+          legacyStatus,
+          desiredState: binding?.desiredState ?? null,
+          healthStatus: binding?.healthStatus ?? null,
+        }
+      : null,
+    ...(input.overlays ? { overlays: input.overlays } : {}),
+  });
+  if (availability.available) return "available";
+  if (
+    availability.code === "representative_paused"
+    || availability.code === "channel_paused"
+    || availability.code === "policy_disabled"
+  ) {
+    return "paused";
+  }
+  if (availability.code === "public_web_disabled") return "private";
+  if (
+    availability.code === "representative_unpublished"
+    || availability.code === "representative_archived"
+  ) {
+    return "unpublished";
+  }
+  return "web_disabled";
 }
 
 /** Build the canonical domain profile used by every conversation channel. */
@@ -888,7 +928,17 @@ export async function getPublicRepresentativeRuntime(
       activeVersionId: true,
       channelBindings: {
         where: { kind: RepresentativeChannelKind.WEB },
-        select: { status: true },
+        select: { status: true, desiredState: true, healthStatus: true },
+      },
+      runtimePolicyOverlays: {
+        where: { enabled: true },
+        select: {
+          enabled: true,
+          priority: true,
+          startsAt: true,
+          expiresAt: true,
+          payload: true,
+        },
       },
     },
   });
@@ -898,6 +948,14 @@ export async function getPublicRepresentativeRuntime(
     publicMode: representative.publicMode,
     activeVersionId: representative.activeVersionId,
     webChannelStatuses: representative.channelBindings.map((binding) => binding.status),
+    webChannelBindings: representative.channelBindings,
+    overlays: representative.runtimePolicyOverlays.map((overlay) => ({
+      ...overlay,
+      payload:
+        overlay.payload && typeof overlay.payload === "object" && !Array.isArray(overlay.payload)
+          ? overlay.payload as Record<string, unknown>
+          : {},
+    })),
   });
   if (availability !== "available") return { status: availability };
 

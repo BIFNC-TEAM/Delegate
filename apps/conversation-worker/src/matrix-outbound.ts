@@ -4,14 +4,16 @@ export async function sendMatrixRepresentativeMessage(input: {
   config: ConversationWorkerConfig;
   roomId: string;
   senderUserId: string;
-  generationRunId: string;
+  deliveryId: string;
+  senderMode: "ai" | "human_operator";
+  generationRunId?: string;
   text: string;
 }) {
   if (!input.config.matrixHomeserverUrl || !input.config.matrixApplicationServiceToken) {
     throw new Error("Matrix outbound delivery is not configured.");
   }
 
-  const transactionId = `delegate-${input.generationRunId}`;
+  const transactionId = `delegate-${input.deliveryId}`;
   const url = new URL(
     `/_matrix/client/v3/rooms/${encodeURIComponent(input.roomId)}/send/m.room.message/${encodeURIComponent(transactionId)}`,
     input.config.matrixHomeserverUrl,
@@ -27,8 +29,10 @@ export async function sendMatrixRepresentativeMessage(input: {
     body: JSON.stringify({
       msgtype: "m.text",
       body: input.text,
-      "com.delegate.sender_mode": "ai",
-      "com.delegate.generation_run_id": input.generationRunId,
+      "com.delegate.sender_mode": input.senderMode,
+      ...(input.generationRunId
+        ? { "com.delegate.generation_run_id": input.generationRunId }
+        : {}),
     }),
     signal: AbortSignal.timeout(15_000),
   });

@@ -106,6 +106,7 @@ type OwnerIdentityLinkRow = {
 type AudienceIdentityRow = {
   id: string;
   status: string;
+  mergedIntoId?: string | null;
   lastSeenAt: Date;
 };
 
@@ -179,6 +180,8 @@ class FakeAuthIdentityClient {
       Object.assign(identity, args.data);
       return identity;
     },
+    findUnique: async (args: any) =>
+      this.audienceIdentities.find((identity) => identity.id === args.where.id) ?? null,
   };
 
   identityLink = {
@@ -188,6 +191,28 @@ class FakeAuthIdentityClient {
         (item) => item.provider === key.provider && item.providerSubject === key.providerSubject,
       );
       return link ? { audienceIdentityId: link.audienceIdentityId } : null;
+    },
+    create: async (args: any) => {
+      const existing = this.identityLinks.find(
+        (link) =>
+          link.provider === args.data.provider &&
+          link.providerSubject === args.data.providerSubject,
+      );
+      if (existing) {
+        throw Object.assign(new Error("Unique constraint failed on identity link"), {
+          code: "P2002",
+        });
+      }
+      const link: IdentityLinkRow = {
+        id: `identity-link-${this.identityLinks.length + 1}`,
+        audienceIdentityId: args.data.audienceIdentityId,
+        provider: args.data.provider,
+        providerSubject: args.data.providerSubject,
+        verifiedAt: args.data.verifiedAt ?? null,
+        metadata: args.data.metadata ?? null,
+      };
+      this.identityLinks.push(link);
+      return link;
     },
     upsert: async (args: any) => {
       const key = args.where.provider_providerSubject;
@@ -208,6 +233,22 @@ class FakeAuthIdentityClient {
       };
       this.identityLinks.push(link);
       return link;
+    },
+    updateMany: async (args: any) => {
+      let count = 0;
+      for (const link of this.identityLinks) {
+        if (
+          (args.where.audienceIdentityId === undefined ||
+            link.audienceIdentityId === args.where.audienceIdentityId) &&
+          (args.where.provider === undefined || link.provider === args.where.provider) &&
+          (args.where.providerSubject === undefined ||
+            link.providerSubject === args.where.providerSubject)
+        ) {
+          Object.assign(link, args.data);
+          count += 1;
+        }
+      }
+      return { count };
     },
   };
 }

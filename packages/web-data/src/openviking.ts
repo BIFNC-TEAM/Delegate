@@ -682,7 +682,9 @@ export async function getRepresentativeOpenVikingMemoryPreview(
             displayName:
               memory.contact.displayName ??
               memory.contact.username ??
-              memory.contact.telegramUserId,
+              memory.contact.telegramUserId ??
+              memory.contact.channelUserId ??
+              "Unknown audience",
           },
         }
       : {}),

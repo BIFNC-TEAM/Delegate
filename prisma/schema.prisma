@@ -259,7 +259,14 @@ enum IdentityLinkProvider {
   EMAIL
   PHONE
   TELEGRAM
+  MATRIX
   PAYMENT_EXTERNAL_USER
+}
+
+enum IdentityAssuranceLevel {
+  UNVERIFIED
+  PLATFORM_VERIFIED
+  STEP_UP_VERIFIED
 }
 
 enum OwnerIdentityLinkProvider {
@@ -714,6 +721,55 @@ enum RepresentativeChannelKind {
   TELEGRAM
 }
 
+enum ChannelTransport {
+  WEB
+  MATRIX
+  TELEGRAM
+}
+
+enum ChannelSourceProvider {
+  WEB
+  MATRIX
+  TELEGRAM
+}
+
+enum ChannelDesiredState {
+  ACTIVE
+  PAUSED
+  DISCONNECTED
+}
+
+enum ChannelHealthStatus {
+  UNKNOWN
+  HEALTHY
+  DEGRADED
+  UNHEALTHY
+}
+
+enum ChannelInteractionMode {
+  PRIVATE_CHAT
+  GROUP_MENTION
+  GROUP_REPLY
+  CHANNEL_ENTRY
+}
+
+enum ServiceEntitlementStatus {
+  ACTIVE
+  FROZEN
+  EXHAUSTED
+  EXPIRED
+}
+
+enum ServiceEntitlementLedgerKind {
+  GRANT
+  RESERVE
+  CONSUME
+  RELEASE
+  REFUND
+  EXPIRE
+  ADJUST
+}
+
 enum ConversationEpisodeStatus {
   ACTIVE
   WAITING_USER
@@ -837,40 +893,95 @@ model Wallet {
 }
 
 model AudienceIdentity {
-  id                String                   @id @default(cuid())
-  audienceKey       String                   @unique
-  status            AudienceIdentityStatus   @default(ANONYMOUS)
-  mergedIntoId      String?
-  createdAt         DateTime                 @default(now())
-  updatedAt         DateTime                 @updatedAt
-  lastSeenAt        DateTime                 @default(now())
-  mergedInto        AudienceIdentity?        @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
-  mergedFrom        AudienceIdentity[]       @relation("AudienceIdentityMerge")
-  contacts          Contact[]
-  conversations     Conversation[]
-  userWallets       UserWallet[]
-  sandboxIdentities SandboxIdentity[]
-  delegationTasks   DelegationTask[]
-  memoryRecords     OpenVikingMemoryRecord[]
-  identityLinks     IdentityLink[]
+  id                   String                     @id @default(cuid())
+  audienceKey          String                     @unique
+  status               AudienceIdentityStatus     @default(ANONYMOUS)
+  mergedIntoId         String?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  lastSeenAt           DateTime                   @default(now())
+  mergedInto           AudienceIdentity?          @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedFrom           AudienceIdentity[]         @relation("AudienceIdentityMerge")
+  contacts             Contact[]
+  conversations        Conversation[]
+  userWallets          UserWallet[]
+  sandboxIdentities    SandboxIdentity[]
+  delegationTasks      DelegationTask[]
+  memoryRecords        OpenVikingMemoryRecord[]
+  identityLinks        IdentityLink[]
+  bindingChallenges    IdentityBindingChallenge[]
+  bridgeMappings       BridgeIdentityMapping[]
+  entitlementAccounts  ServiceEntitlementAccount[]
+  servicePaymentOrders ServicePaymentOrder[]
+  tokenPurchases       AgentTokenPurchase[]
+  usageCharges         AgentUsageCharge[]
 
   @@index([status, lastSeenAt])
   @@index([mergedIntoId])
 }
 
 model IdentityLink {
-  id                 String               @id @default(cuid())
+  id                 String                 @id @default(cuid())
   audienceIdentityId String
   provider           IdentityLinkProvider
   providerSubject    String
+  issuer             String                 @default("delegate")
+  connectionId       String?
   verifiedAt         DateTime?
+  assuranceLevel     IdentityAssuranceLevel @default(UNVERIFIED)
+  revokedAt          DateTime?
+  proofMetadata      Json?
   metadata           Json?
-  createdAt          DateTime             @default(now())
-  updatedAt          DateTime             @updatedAt
-  audienceIdentity   AudienceIdentity     @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  audienceIdentity   AudienceIdentity       @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerSubject])
   @@index([audienceIdentityId, provider])
+  @@index([provider, issuer, providerSubject])
+  @@index([revokedAt])
+}
+
+model IdentityBindingChallenge {
+  id                      String               @id @default(cuid())
+  audienceIdentityId      String
+  provider                IdentityLinkProvider
+  issuer                  String               @default("delegate")
+  connectionId            String
+  expectedProviderSubject String?
+  tokenHash               String               @unique
+  expiresAt               DateTime
+  consumedAt              DateTime?
+  revokedAt               DateTime?
+  metadata                Json?
+  createdAt               DateTime             @default(now())
+  updatedAt               DateTime             @updatedAt
+  audienceIdentity        AudienceIdentity     @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
+
+  @@index([audienceIdentityId, provider, createdAt])
+  @@index([provider, issuer, connectionId, expiresAt])
+  @@index([expiresAt, consumedAt, revokedAt])
+}
+
+model BridgeIdentityMapping {
+  id                 String                @id @default(cuid())
+  audienceIdentityId String?
+  transport          ChannelTransport
+  sourceProvider     ChannelSourceProvider
+  connectionId       String
+  transportSubject   String
+  sourceSubject      String
+  verifiedAt         DateTime?
+  revokedAt          DateTime?
+  metadata           Json?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  audienceIdentity   AudienceIdentity?     @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+
+  @@unique([connectionId, transport, transportSubject])
+  @@unique([connectionId, sourceProvider, sourceSubject])
+  @@index([audienceIdentityId, sourceProvider])
+  @@index([revokedAt])
 }
 
 model UserWallet {
@@ -1006,6 +1117,8 @@ model AgentTokenPurchase {
   userWalletId           String
   agentWalletId          String
   representativeId       String
+  audienceIdentityId     String?
+  entitlementAccountId   String?
   rechargeOrderId        String?
   amountCents            Int
   currency               String                   @default("CNY")
@@ -1021,6 +1134,8 @@ model AgentTokenPurchase {
   userWallet             UserWallet               @relation(fields: [userWalletId], references: [id])
   agentWallet            AgentWallet              @relation(fields: [agentWalletId], references: [id])
   representative         Representative           @relation(fields: [representativeId], references: [id])
+  audienceIdentity       AudienceIdentity?         @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  entitlementAccount     ServiceEntitlementAccount? @relation(fields: [entitlementAccountId], references: [id], onDelete: SetNull)
   rechargeOrder          RechargeOrder?           @relation(fields: [rechargeOrderId], references: [id])
   usageCharges           AgentUsageCharge[]
   creatorEarnings        CreatorEarning[]
@@ -1029,12 +1144,18 @@ model AgentTokenPurchase {
   @@index([userWalletId, createdAt])
   @@index([agentWalletId, createdAt])
   @@index([representativeId, status, createdAt])
+  @@index([audienceIdentityId, representativeId, createdAt])
+  @@index([entitlementAccountId, createdAt])
 }
 
 model AgentUsageCharge {
   id                   String                 @id @default(cuid())
   agentWalletId        String
   representativeId     String
+  audienceIdentityId   String?
+  entitlementAccountId String?
+  conversationId       String?
+  generationRunId      String?
   tokenPurchaseId      String?
   kind                 AgentUsageChargeKind
   status               AgentUsageChargeStatus @default(CREATED)
@@ -1049,12 +1170,117 @@ model AgentUsageCharge {
   reversedAt           DateTime?
   agentWallet          AgentWallet            @relation(fields: [agentWalletId], references: [id])
   representative       Representative         @relation(fields: [representativeId], references: [id])
+  audienceIdentity     AudienceIdentity?       @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  entitlementAccount   ServiceEntitlementAccount? @relation(fields: [entitlementAccountId], references: [id], onDelete: SetNull)
+  conversation         Conversation?           @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  generationRun        GenerationRun?          @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
   tokenPurchase        AgentTokenPurchase?    @relation(fields: [tokenPurchaseId], references: [id])
   creatorEarnings      CreatorEarning[]
   ledgerEntries        WalletLedgerEntry[]
 
   @@index([agentWalletId, status, createdAt])
   @@index([representativeId, kind, createdAt])
+  @@index([audienceIdentityId, representativeId, createdAt])
+  @@index([entitlementAccountId, status, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([generationRunId])
+}
+
+model ServiceEntitlementAccount {
+  id                 String                   @id @default(cuid())
+  audienceIdentityId String
+  representativeId   String
+  productCode        String
+  unitName           String                   @default("credit")
+  status             ServiceEntitlementStatus @default(ACTIVE)
+  grantedUnits       Int                      @default(0)
+  remainingUnits     Int                      @default(0)
+  reservedUnits      Int                      @default(0)
+  expiresAt          DateTime?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+  audienceIdentity   AudienceIdentity         @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
+  representative     Representative           @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  ledgerEntries      ServiceEntitlementLedgerEntry[]
+  tokenPurchases     AgentTokenPurchase[]
+  usageCharges       AgentUsageCharge[]
+
+  @@unique([audienceIdentityId, representativeId, productCode])
+  @@index([representativeId, status, updatedAt])
+  @@index([audienceIdentityId, status, updatedAt])
+}
+
+model ServicePaymentOrder {
+  id                      String              @id @default(cuid())
+  payerAudienceIdentityId String
+  representativeId        String
+  provider                PaymentProvider
+  providerAccountId       String
+  providerOrderId         String?
+  providerOrderKey        String?             @unique
+  productCode             String
+  amountMinor             Int
+  currency                String
+  entitlementUnits        Int
+  status                  RechargeOrderStatus @default(CREATED)
+  priceSnapshot           Json
+  checkoutUrl             String?
+  providerPayload         Json?
+  fulfillmentKey          String?             @unique
+  paidAt                  DateTime?
+  refundedAt              DateTime?
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  payerAudienceIdentity   AudienceIdentity    @relation(fields: [payerAudienceIdentityId], references: [id], onDelete: Restrict)
+  representative          Representative      @relation(fields: [representativeId], references: [id], onDelete: Restrict)
+  providerEvents          ServicePaymentEvent[]
+  entitlementEntries      ServiceEntitlementLedgerEntry[]
+
+  @@index([payerAudienceIdentityId, status, createdAt])
+  @@index([representativeId, status, createdAt])
+  @@index([provider, providerAccountId, status, createdAt])
+}
+
+model ServicePaymentEvent {
+  id                String                   @id @default(cuid())
+  paymentOrderId    String?
+  provider          PaymentProvider
+  providerAccountId String
+  providerEventId   String
+  eventType         PaymentProviderEventType @default(UNKNOWN)
+  verifiedAt        DateTime?
+  rawPayload        Json
+  normalizedPayload Json?
+  processingError   String?
+  processedAt       DateTime?
+  receivedAt        DateTime                 @default(now())
+  paymentOrder      ServicePaymentOrder?     @relation(fields: [paymentOrderId], references: [id], onDelete: SetNull)
+
+  @@unique([provider, providerAccountId, providerEventId])
+  @@index([paymentOrderId, receivedAt])
+  @@index([provider, eventType, receivedAt])
+}
+
+model ServiceEntitlementLedgerEntry {
+  id                   String                       @id @default(cuid())
+  entitlementAccountId String
+  paymentOrderId       String?
+  generationRunId      String?
+  kind                 ServiceEntitlementLedgerKind
+  units                Int
+  balanceAfter         Int
+  reservedAfter        Int                          @default(0)
+  idempotencyKey       String                       @unique
+  notes                String?
+  metadata             Json?
+  createdAt            DateTime                     @default(now())
+  entitlementAccount   ServiceEntitlementAccount    @relation(fields: [entitlementAccountId], references: [id], onDelete: Cascade)
+  paymentOrder         ServicePaymentOrder?         @relation(fields: [paymentOrderId], references: [id], onDelete: SetNull)
+  generationRun        GenerationRun?               @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
+
+  @@index([entitlementAccountId, createdAt])
+  @@index([paymentOrderId, createdAt])
+  @@index([generationRunId, createdAt])
 }
 
 model CreatorEarning {
@@ -1257,6 +1483,8 @@ model Representative {
   feedbackSignals                  CreatorFeedbackSignal[]
   trainingSuggestions              CreatorTrainingSuggestion[]
   trainingVersions                 CreatorTrainingVersion[]
+  entitlementAccounts              ServiceEntitlementAccount[]
+  servicePaymentOrders             ServicePaymentOrder[]
 
   @@index([ownerId, lifecycleState, updatedAt])
   @@index([activeVersionId])
@@ -1306,6 +1534,11 @@ model RepresentativeChannelBinding {
   id                String                       @id @default(cuid())
   representativeId  String
   kind              RepresentativeChannelKind
+  transport         ChannelTransport?
+  sourceProvider    ChannelSourceProvider?
+  connectionId      String?
+  desiredState      ChannelDesiredState          @default(ACTIVE)
+  healthStatus      ChannelHealthStatus           @default(UNKNOWN)
   externalUserId    String?
   status            String                       @default("CONNECTED")
   displayName       String?
@@ -1319,6 +1552,8 @@ model RepresentativeChannelBinding {
 
   @@unique([representativeId, kind])
   @@index([kind, status, updatedAt])
+  @@index([desiredState, healthStatus, updatedAt])
+  @@index([sourceProvider, transport, updatedAt])
 }
 
 model KnowledgePack {
@@ -1486,7 +1721,7 @@ model Contact {
   representativeId      String
   audienceIdentityId    String?
   customerAccountId     String?
-  telegramUserId        String
+  telegramUserId        String?
   channelUserId         String?
   externalUserId        String?
   username              String?
@@ -1534,7 +1769,7 @@ model Conversation {
   representativeId              String
   contactId                     String
   audienceIdentityId            String?
-  telegramChatId                String
+  telegramChatId                String?
   channelThreadId               String?
   channel                       Channel
   sourceChannel                 String?
@@ -1586,6 +1821,7 @@ model Conversation {
   readStates                    ConversationReadState[]
   internalNotes                 ConversationInternalNote[]
   leads                         Lead[]
+  usageCharges                  AgentUsageCharge[]
 
   @@unique([representativeId, telegramChatId, contactId])
   @@index([audienceIdentityId, lastMessageAt])
@@ -1666,6 +1902,11 @@ model ConversationChannelBinding {
   conversationId          String
   representativeBindingId String?
   kind                    RepresentativeChannelKind
+  transport               ChannelTransport?
+  sourceProvider          ChannelSourceProvider?
+  interactionMode         ChannelInteractionMode        @default(PRIVATE_CHAT)
+  connectionId            String?
+  bindingKey              String?                       @unique
   externalConversationId  String
   externalThreadId        String?
   syncCursor              String?
@@ -1676,9 +1917,9 @@ model ConversationChannelBinding {
   representativeBinding   RepresentativeChannelBinding? @relation(fields: [representativeBindingId], references: [id], onDelete: SetNull)
   messages                Message[]
 
-  @@unique([kind, externalConversationId, externalThreadId])
   @@index([conversationId, kind])
   @@index([representativeBindingId])
+  @@index([sourceProvider, transport, externalConversationId])
 }
 
 model Message {
@@ -1810,6 +2051,8 @@ model GenerationRun {
   delegationTaskStep      DelegationTaskStep?    @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
   approvalRequests        ApprovalRequest[]
   computeSessions         ComputeSession[]
+  entitlementEntries      ServiceEntitlementLedgerEntry[]
+  usageCharges            AgentUsageCharge[]
 
   @@index([conversationId, status, queuedAt])
   @@index([episodeId, queuedAt])
@@ -1882,6 +2125,11 @@ model ChannelEventInbox {
   id              String                    @id @default(cuid())
   conversationId  String?
   kind            RepresentativeChannelKind
+  transport       ChannelTransport?
+  sourceProvider  ChannelSourceProvider?
+  connectionId    String?
+  originKey       String?                   @unique
+  isBackfill      Boolean                   @default(false)
   transactionId   String?
   externalEventId String
   eventType       String
@@ -1898,6 +2146,7 @@ model ChannelEventInbox {
   @@unique([kind, externalEventId])
   @@index([status, availableAt, createdAt])
   @@index([transactionId])
+  @@index([sourceProvider, transport, createdAt])
 }
 
 model OutboxEvent {
@@ -1906,6 +2155,9 @@ model OutboxEvent {
   aggregateType  String
   aggregateId    String
   eventType      String
+  transport      ChannelTransport?
+  sourceProvider ChannelSourceProvider?
+  connectionId   String?
   payload        Json
   status         ReliableEventStatus @default(PENDING)
   idempotencyKey String              @unique
@@ -2202,7 +2454,7 @@ model Invoice {
   payload                 String          @unique
   starsAmount             Int
   invoiceLink             String?
-  telegramPaymentChargeId String?
+  telegramPaymentChargeId String?         @unique
   providerPaymentChargeId String?
   status                  InvoiceStatus   @default(PENDING)
   paidAt                  DateTime?

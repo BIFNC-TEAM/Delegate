@@ -328,6 +328,21 @@ class FakeAmnLifecycleClient {
       applyIncrementDecrement(wallet, "cashBalanceCents", args.data.cashBalanceCents);
       return wallet;
     },
+    updateMany: async (args: any) => {
+      const wallet = this.userWallets.find((row) => row.id === args.where.id);
+      if (
+        !wallet ||
+        (args.where.currency && wallet.currency !== args.where.currency) ||
+        (typeof args.where.cashBalanceCents?.equals === "number" &&
+          wallet.cashBalanceCents !== args.where.cashBalanceCents.equals) ||
+        (typeof args.where.cashBalanceCents?.gte === "number" &&
+          wallet.cashBalanceCents < args.where.cashBalanceCents.gte)
+      ) {
+        return { count: 0 };
+      }
+      applyIncrementDecrement(wallet, "cashBalanceCents", args.data.cashBalanceCents);
+      return { count: 1 };
+    },
   };
 
   agentWallet = {
@@ -347,6 +362,22 @@ class FakeAmnLifecycleClient {
       applyIncrementDecrement(wallet, "totalPurchasedTokens", args.data.totalPurchasedTokens);
       applyIncrementDecrement(wallet, "totalConsumedTokens", args.data.totalConsumedTokens);
       return wallet;
+    },
+    updateMany: async (args: any) => {
+      const wallet = this.agentWallets.find((row) => row.id === args.where.id);
+      if (
+        !wallet ||
+        (args.where.currency && wallet.currency !== args.where.currency) ||
+        (typeof args.where.tokenBalance?.equals === "number" &&
+          wallet.tokenBalance !== args.where.tokenBalance.equals) ||
+        (typeof args.where.tokenBalance?.gte === "number" &&
+          wallet.tokenBalance < args.where.tokenBalance.gte)
+      ) {
+        return { count: 0 };
+      }
+      applyIncrementDecrement(wallet, "tokenBalance", args.data.tokenBalance);
+      applyIncrementDecrement(wallet, "totalConsumedTokens", args.data.totalConsumedTokens);
+      return { count: 1 };
     },
   };
 
@@ -383,9 +414,33 @@ class FakeAmnLifecycleClient {
       Object.assign(order, args.data);
       return order;
     },
+    updateMany: async (args: any) => {
+      const order = this.rechargeOrders.find((row) => row.id === args.where.id);
+      if (
+        !order ||
+        (args.where.provider && order.provider !== args.where.provider) ||
+        (typeof args.where.amountCents === "number" &&
+          order.amountCents !== args.where.amountCents) ||
+        (args.where.currency && order.currency !== args.where.currency) ||
+        (args.where.status && order.status !== args.where.status)
+      ) {
+        return { count: 0 };
+      }
+      Object.assign(order, args.data);
+      return { count: 1 };
+    },
   };
 
   paymentProviderEvent = {
+    findUnique: async (args: any) => {
+      const key = args.where.provider_providerEventId;
+      return (
+        this.providerEvents.find(
+          (event) =>
+            event.provider === key.provider && event.providerEventId === key.providerEventId,
+        ) ?? null
+      );
+    },
     upsert: async (args: any) => {
       const key = args.where.provider_providerEventId;
       const existing = this.providerEvents.find(
@@ -462,6 +517,9 @@ class FakeAmnLifecycleClient {
   };
 
   creatorEarning = {
+    findUnique: async (args: any) => {
+      return this.creatorEarnings.find((earning) => earning.id === args.where.id) ?? null;
+    },
     findFirst: async (args: any) => {
       return (
         this.creatorEarnings.find((earning) => {
@@ -536,6 +594,24 @@ class FakeAmnLifecycleClient {
         earning.status = args.data.status;
       }
       return earning;
+    },
+    updateMany: async (args: any) => {
+      const earning = this.creatorEarnings.find((row) => row.id === args.where.id);
+      if (
+        !earning ||
+        (args.where.status && earning.status !== args.where.status) ||
+        (typeof args.where.pendingCents?.equals === "number" &&
+          earning.pendingCents !== args.where.pendingCents.equals) ||
+        (typeof args.where.pendingCents?.gte === "number" &&
+          earning.pendingCents < args.where.pendingCents.gte)
+      ) {
+        return { count: 0 };
+      }
+      applyIncrementDecrement(earning, "pendingCents", args.data.pendingCents);
+      if (args.data.status) {
+        earning.status = args.data.status;
+      }
+      return { count: 1 };
     },
   };
 

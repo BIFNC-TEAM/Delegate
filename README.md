@@ -11,7 +11,7 @@
 
 Think of Delegate as an AI front desk.
 
-When people reach you on the web today, and later through channels like Telegram, WhatsApp, or Feishu, Delegate lets your AI representative handle the first reception pass:
+When people reach you on the web today, and later through channels like Matrix, Telegram, WhatsApp, or Feishu, Delegate lets your AI representative handle the first reception pass:
 
 - answer what it can answer
 - charge when the interaction should be paid
@@ -43,7 +43,8 @@ Delegate currently includes these working surfaces and services:
 - **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
 - **Public representative app** in `apps/reps`, including representative profiles, service tiers, web chat, recharge-entry modules, and signed public-chat session state.
 - **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, and workflow state.
-- **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and shared runtime policy, kept as future channel infrastructure rather than the first Delegate product surface.
+- **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and retained as the Telegram-specific edge while business behavior moves toward the shared Conversation Platform.
+- **Matrix Application Service foundation** in `apps/matrix-bridge`, providing authenticated Matrix transaction ingestion and channel event mapping. Native Matrix is an optional channel; it is not required for Telegram availability.
 - **AMN wallet control plane** covering internal wallet ledger entries, mock recharge, Agent token purchase, usage charging, Creator 20% revenue policy, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
@@ -66,7 +67,7 @@ AMN is the broader network Delegate is growing toward. The target model is:
 ```text
 Creator creates an Agent
   -> Agent receives its own Agent Wallet
-  -> Users discover the Agent on the web first, then later on Telegram, WhatsApp, Feishu, WeCom, or an app
+  -> Users discover the Agent on the web first, then later on Matrix, Telegram, WhatsApp, Feishu, WeCom, or an app
   -> Users recharge that specific Agent
   -> Agent serves the user
   -> Billing charges for tokens, tasks, or subscriptions
@@ -115,11 +116,27 @@ Current status against the wallet plan:
 
 Telegram remains future channel infrastructure for this product direction. If Delegate later ships bot-based digital goods and services, they should follow Telegram's rules, including Telegram Stars where required. AMN Pay is a future web/unified recharge path, not a reason to bypass platform policy.
 
+## Channel Architecture Direction
+
+Delegate is web-first today and is moving toward one channel-neutral Conversation Platform with thin provider adapters:
+
+- PostgreSQL remains business truth for identity, messages, generation, handoff, entitlement, and audit.
+- Web, native Matrix, and Telegram are external sources. Matrix is not a mandatory Telegram hub.
+- `sourceProvider` records where an interaction originated; `transport` records how it was carried. Telegram transported through a Matrix bridge is still a Telegram interaction.
+- Telegram and Matrix subjects bind directly to `AudienceIdentity` only after provider-specific proof. Matrix ghosts or bridge puppets are transport identities, not Delegate users.
+- Web checkout and Telegram Stars remain separate payment rails. They may grant the same audience-and-representative-scoped service entitlement, but their balances and refunds are not mixed.
+- The first channel migration is private-chat and plain-text only, with per-representative rollout and a direct Telegram fallback.
+
+The accepted decision, migration order, and rollback invariants are documented in [the channel Conversation Platform ADR](./docs/adr-channel-conversation-platform.md).
+
 ## Architecture Principles
 
 Delegate is built around a few hard boundaries:
 
 - **Postgres is business truth.** Delegation tasks connect workflow, billing, handoff, approval, outputs, and dashboard state in Postgres without treating a conversation or runtime session as the task itself.
+- **Channels share a business runtime, not necessarily a transport.** Provider adapters converge on the Conversation Platform; Matrix remains optional infrastructure rather than a required Telegram dependency.
+- **Provider identity requires provider proof.** External subjects bind to `AudienceIdentity`; usernames, display names, room membership, ghosts, and puppets are not account-linking evidence.
+- **Entitlement is unified, payment rails are not.** Web money and Telegram Stars retain their own settlement and refund semantics while granting audience-scoped service access.
 - **Temporal is orchestration.** Temporal handles start, durable waiting, retry, wake-up, and cancellation delivery for long-running workflow timers.
 - **Public representatives are not private workspaces.** The runtime does not read owner-private files, accounts, secrets, or hidden notes.
 - **Users recharge an Agent, not the platform generically.** The page should make clear which Digital Representative receives the balance.
@@ -158,6 +175,7 @@ prisma/
 
 docs/
   architecture.md
+  adr-channel-conversation-platform.md
   delegate-architecture-decisions.md
   public-audience-identity.md
   per-user-sandbox-runtime.md
@@ -277,7 +295,7 @@ The default `.env.example` is safe for local development. Important settings:
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` forces dashboard auth in non-production environments; production always requires it.
 - `DELEGATE_SKILL_TRUSTED_KEYS` is a JSON object mapping registry publisher key IDs to trusted Ed25519 public-key PEM strings. Signed patch auto-adoption remains disabled when the matching key is absent.
 - `DELEGATE_CLAWHUB_URL` selects a credential-free HTTPS Registry origin, `DELEGATE_CLAWHUB_ALLOWED_HOSTS` allowlists its hostname, and `DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` bounds exact-version verification freshness (24 hours by default). Redirects are rejected. Adoption and rollback re-fetch the exact publisher/version manifest and verdict, reject stale or changed evidence, and re-evaluate signatures against the current trusted-key set before changing release state.
-- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, and `TELEGRAM_WEBHOOK_SECRET` enable the optional Telegram bot foundation, but the first Delegate product version is web-first.
+- `TELEGRAM_BOT_TOKEN`, numeric `TELEGRAM_BOT_ID`, `TELEGRAM_BOT_USERNAME`, and `TELEGRAM_WEBHOOK_SECRET` enable the optional Telegram bot foundation, but the first Delegate product version is web-first. Channel binding fails closed when the numeric bot ID cannot be configured or derived from the token.
 - `REP_PUBLIC_CHAT_SESSION_SECRET` can override the public-chat cookie signing secret. If unset, the reps app falls back to `TELEGRAM_WEBHOOK_SECRET` and then a local development secret.
 - `DELEGATE_MODEL_ENABLED`, `DELEGATE_MODEL_PROVIDER`, `DELEGATE_OPENAI_MODEL`, and `DELEGATE_ANTHROPIC_MODEL` control model-backed representative replies.
 - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `ARK_API_KEY` enable live provider calls.
@@ -308,12 +326,23 @@ pnpm db:deploy
 pnpm db:seed
 pnpm db:setup
 
+pnpm test:channels
+pnpm test:channels:pg16
+
 pnpm docker:ps
 pnpm docker:logs
 pnpm docker:down
 
 pnpm registry:search:clawhub "qualification"
 ```
+
+`pnpm test:channels` is the credential-free, offline channel gate. It clears
+developer-machine provider credentials, then tests and typechecks the Web,
+Matrix, Telegram, worker, dashboard, and public representative packages.
+`pnpm test:channels:pg16` adds disposable PostgreSQL 16 fixtures for the native
+cross-channel identity/message/entitlement loop, entitlement concurrency, and
+migration compatibility. These fixtures do not use the configured application
+database.
 
 ### Workspace skill migration rollout
 
@@ -481,6 +510,7 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
 - [Public audience identity](./docs/public-audience-identity.md): web anonymous identity, Contact/Conversation, recharge, and sandbox linkage.
 - [Conversation platform](./docs/conversation-platform.md): channel-neutral messages, episodes, versions, human control, SSE, and Matrix Application Service boundaries.
+- [Channel Conversation Platform ADR](./docs/adr-channel-conversation-platform.md): source/transport separation, identity proof, Web/Stars entitlement, channel MVP, migration, and rollback decisions.
 - [Delegation tasks](./docs/delegation-tasks.md): task aggregate, lifecycle, ownership validation, approvals, outputs, and audit linkage.
 - [Delegation task product contract](./docs/delegation-task-product-contract.md): creation rules, visible lifecycle, owner actions, approval binding, completion, and the current P1 boundary.
 - [Creator training loop](./docs/creator-training-loop.md): source registry, creator feedback, suggestion workflow, review, evaluation, and rollback.

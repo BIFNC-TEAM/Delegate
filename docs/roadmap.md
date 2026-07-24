@@ -1,15 +1,16 @@
 # Delegate Roadmap
 
-This roadmap reflects two truths at once:
+This roadmap reflects three truths at once:
 
-- Delegate still needs to win the narrow founder-representative wedge on Telegram.
+- Delegate is web-first today and must preserve that working wedge.
+- Web, Matrix, and Telegram should converge on one business runtime without making Matrix a mandatory Telegram dependency.
 - Delegate is now targeting an isolated compute plane behind that public interface, not just bounded FAQ workflows.
 
-The sequence below is ordered to protect the product thesis first, then add general compute without collapsing the trust boundary.
+The sequence below is ordered to protect identity, entitlement, and delivery correctness first, then add channels and general compute without collapsing the trust boundary. Channel decisions are fixed in [the Unified Conversation Platform ADR](./adr-channel-conversation-platform.md).
 
 ## V1: Public Representative Core
 
-Goal: prove that a stranger can understand the representative in 10 seconds and get value in one private chat session.
+Goal: prove that a stranger can understand the representative in 10 seconds and get value in one Web chat session.
 
 Build:
 
@@ -30,28 +31,65 @@ Success:
 - first paid unlock happens without custom explanation
 - memory improves replies without leaking owner-private context
 
-## V1.5: Deep Service and Group Mode
+## V1.5: Conversation Platform Hardening
 
-Goal: turn Telegram into a real inbound channel that can qualify, route, and convert more than one-off FAQ traffic.
+Goal: make identity, entitlement, policy, and delivery safe before expanding messaging channels.
 
 Build:
 
-- mention/reply group mode
-- group-to-private-chat routing
-- source attribution on leads
-- sponsor pool messaging
-- structured intake forms
-- quote request collector
-- scheduling intent collector
-- paid priority routing
-- "should the owner take this?" summary
+- explicit `sourceProvider`, `transport`, and interaction mode
+- typed channel desired state and observed health
+- one availability gate across inbound acceptance, generation, and outbound delivery
+- verified, short-lived, single-use provider identity links to `AudienceIdentity`
+- audience-and-representative-scoped service entitlement with append-only ledger
+- Web checkout and Telegram Stars as separate provider rails with original-rail refunds
+- atomic balance checks, provider-event idempotency, retry, and dead letter
+- restartable backfill and reconciliation for legacy Web and Telegram data
 
 Success:
 
-- group mentions convert into private chat continuations
-- repeat paid usage emerges
-- owner dashboard shows clear follow-up priorities
-- no noisy unsolicited replies in groups
+- one audience member cannot consume another member's entitlement
+- repeated provider events do not duplicate messages, replies, balance, or usage
+- paused, unpublished, or human-controlled conversations never start AI generation
+- identity conflicts fail closed and retain a complete audit trail
+
+## V1.75: Native Matrix and Thin Telegram Adapters
+
+Goal: make native Matrix and Telegram private chat use the same Conversation Platform without duplicating business behavior.
+
+Build:
+
+- native, unencrypted Matrix direct-room provisioning and membership validation
+- durable Matrix transaction ingestion with asynchronous processing, retry, quarantine, and dead letter
+- grammY reduced to a Telegram-specific edge for Bot API, commands, callbacks, deep links, Stars, and support
+- shared message acceptance, pinned-version generation, policy, handoff, entitlement, and outbox delivery
+- provider origin IDs, edit/redaction authorization, and bridge-loop prevention
+- per-representative adapter ownership and rollback controls
+
+Success:
+
+- each provider event creates at most one business message and one generation
+- unknown Matrix rooms are provisioned or quarantined instead of silently discarded
+- adapter restarts and provider retries do not produce duplicate replies
+- direct Telegram remains recoverable throughout migration
+
+## V1.9: Optional Telegram-to-Matrix Canary
+
+Goal: determine whether Matrix transport provides measurable operating value without making it part of the product identity or business truth.
+
+Build:
+
+- one managed test bot, private chat, plain text, and no encryption
+- explicit Telegram source identity carried through Matrix transport metadata
+- portal mapping, origin idempotency, echo/history suppression, and high-water marks
+- per-representative feature flag, health split by source and transport, and direct Telegram fallback
+- delivery, latency, loss, loop, and operator-workflow measurements
+
+Success:
+
+- no message loss, duplicate generation, loop, or identity drift under retries and restarts
+- failure can be rolled back without regenerating completed replies
+- the bridge is adopted only if its measured value exceeds its availability and operations cost
 
 ## V2: Isolated Compute Plane
 
@@ -121,6 +159,8 @@ Build:
 - source-level conversion analysis
 - compute and browser margin analytics
 - richer intake templates by representative type
+- source-versus-transport reliability analytics
+- carefully scoped Telegram group and media experiments after participant and entitlement semantics are approved
 - memory promotion policies based on owner feedback
 - cross-representative capability graph and marketplace experiments
 
@@ -130,3 +170,17 @@ Success:
 - fewer low-value manual handoffs
 - clearer operating playbook for each representative template
 - viable path from public representative product to broader capability network
+
+## Channel migration exclusions
+
+The first migration does not include:
+
+- WhatsApp, WeChat, Feishu, or WeCom;
+- Matrix E2EE or an encrypted Telegram bridge;
+- group billing, ambient group listening, or automatic payer/beneficiary inference;
+- media parity, reactions, typing, read receipts, or history import;
+- full puppeting, multiple owner bots, or multiple homeservers;
+- automatic identity matching by username, display name, email-like text, or room membership;
+- automatic merging of raw Web, Matrix, and Telegram timelines;
+- conversion between XTR and Web currencies;
+- removal of direct Telegram fallback before the canary and reconciliation windows close.

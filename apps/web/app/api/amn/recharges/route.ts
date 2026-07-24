@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { createMockRechargeOrder } from "@delegate/web-data";
 
 export async function POST(request: Request) {
+  if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+    return new NextResponse(null, { status: 404 });
+  }
   try {
     const body = (await request.json()) as Record<string, unknown>;
     const order = await createMockRechargeOrder({

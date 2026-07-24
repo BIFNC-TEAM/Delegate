@@ -1,6 +1,12 @@
 import type { PlanTier } from "@delegate/domain";
 import type { ModelContextSegmentTrace } from "@delegate/lifecycle-hooks";
 import {
+  assertConversationChannelDeliveryAvailable,
+  createServicePaymentOrder,
+  fulfillServicePaymentOrder,
+  resolveChannelAudienceIdentity,
+} from "@delegate/web-data";
+import {
   handoffFollowUpDedupeKey,
   getWorkflowEngineConfig,
   resolveWorkflowDispatchTarget,
@@ -22,17 +28,24 @@ import {
 import {
   AudienceRole,
   Channel,
+  ChannelDesiredState,
+  ChannelHealthStatus,
+  ChannelSourceProvider,
+  ChannelTransport,
   ComputeFilesystemMode,
   ComputeNetworkMode,
   ContactStage,
   EventType,
   HandoffStatus,
   InvoiceStatus,
+  PaymentProvider,
   Prisma,
   PricingPlanType,
+  RepresentativeChannelKind,
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
+import { assertTelegramStarsLivePaymentEnabled } from "./conversation-platform-mode";
 
 export type TelegramActor = {
   telegramUserId: number;
@@ -45,6 +58,7 @@ export type TelegramActor = {
 export type ConversationContextRecord = {
   representativeId: string;
   representativeSlug: string;
+  audienceIdentityId: string;
   contactId: string;
   conversationId: string;
   contactIsPaid: boolean;
@@ -103,9 +117,33 @@ type StoredPlan = {
 type SuccessfulPaymentInput = {
   invoicePayload: string;
   totalAmount: number;
+  currency: string;
+  telegramUserId: number;
   telegramPaymentChargeId: string;
   providerPaymentChargeId?: string;
 };
+
+export type TelegramPaymentConfirmation = {
+  planName: string;
+  starsAmount: number;
+  representativeSlug: string;
+  representativeId: string;
+  contactId: string;
+  conversationId?: string;
+  planType: PlanTier;
+};
+
+export type TelegramPaymentProcessingResult =
+  | {
+      status: "confirmed";
+      confirmation: TelegramPaymentConfirmation;
+    }
+  | {
+      status: "retrying";
+    };
+
+const telegramPaymentProcessingLeaseMs = 30_000;
+const telegramPaymentMaximumBackoffMs = 15 * 60_000;
 
 export async function getConversationContext(
   representativeSlug: string,
@@ -123,29 +161,47 @@ export async function getConversationContext(
   }
 
   const now = new Date();
+  const telegramUserId = String(actor.telegramUserId);
+  const channelUserId = `telegram:${telegramUserId}`;
+  const connectionId = telegramBotConnectionId();
+  const audienceIdentity = await resolveChannelAudienceIdentity({
+    provider: "TELEGRAM",
+    providerSubject: telegramUserId,
+    issuer: "delegate-managed-bot",
+    connectionId,
+    now,
+  });
 
   const contact = await prisma.contact.upsert({
     where: {
       representativeId_telegramUserId: {
         representativeId: representative.id,
-        telegramUserId: String(actor.telegramUserId),
+        telegramUserId,
       },
     },
     create: {
       representativeId: representative.id,
-      telegramUserId: String(actor.telegramUserId),
+      audienceIdentityId: audienceIdentity.id,
+      telegramUserId,
+      channelUserId,
+      externalUserId: channelUserId,
       username: actor.username ?? null,
       displayName: actor.displayName ?? actor.username ?? String(actor.telegramUserId),
       role: AudienceRole.OTHER,
       stage: ContactStage.NEW,
       isPaid: false,
       source: actor.channel.toLowerCase(),
+      sourceChannel: "telegram",
       lastSeenAt: now,
     },
     update: {
+      audienceIdentityId: audienceIdentity.id,
+      channelUserId,
+      externalUserId: channelUserId,
       username: actor.username ?? null,
       displayName: actor.displayName ?? actor.username ?? String(actor.telegramUserId),
       source: actor.channel.toLowerCase(),
+      sourceChannel: "telegram",
       lastSeenAt: now,
     },
   });
@@ -161,21 +217,87 @@ export async function getConversationContext(
     create: {
       representativeId: representative.id,
       contactId: contact.id,
+      audienceIdentityId: audienceIdentity.id,
       telegramChatId: String(actor.chatId),
       channel: actor.channel,
+      sourceChannel: "telegram",
+      externalConversationId: String(actor.chatId),
       state: "ACTIVE",
       freeRepliesUsed: 0,
       lastMessageAt: now,
     },
     update: {
+      audienceIdentityId: audienceIdentity.id,
       channel: actor.channel,
+      sourceChannel: "telegram",
+      externalConversationId: String(actor.chatId),
       lastMessageAt: now,
+    },
+  });
+
+  const representativeBinding = await prisma.representativeChannelBinding.upsert({
+    where: {
+      representativeId_kind: {
+        representativeId: representative.id,
+        kind: "TELEGRAM",
+      },
+    },
+    create: {
+      representativeId: representative.id,
+      kind: "TELEGRAM",
+      transport: ChannelTransport.TELEGRAM,
+      sourceProvider: ChannelSourceProvider.TELEGRAM,
+      connectionId,
+      desiredState: ChannelDesiredState.ACTIVE,
+      healthStatus: ChannelHealthStatus.HEALTHY,
+      externalUserId: process.env.TELEGRAM_BOT_USERNAME
+        ? `@${process.env.TELEGRAM_BOT_USERNAME.replace(/^@/, "")}`
+        : `telegram:${representative.slug}`,
+      status: "CONNECTED",
+      displayName: representative.displayName,
+      configuration: { managed: true, source: "telegram_bot" },
+      lastHealthCheckAt: now,
+    },
+    update: {
+      transport: ChannelTransport.TELEGRAM,
+      sourceProvider: ChannelSourceProvider.TELEGRAM,
+      connectionId,
+      healthStatus: ChannelHealthStatus.HEALTHY,
+      status: "CONNECTED",
+      lastHealthCheckAt: now,
+      lastError: null,
+    },
+  });
+  const bindingKey = `TELEGRAM:${representative.id}:${String(actor.chatId)}:`;
+  await prisma.conversationChannelBinding.upsert({
+    where: { bindingKey },
+    create: {
+      conversationId: conversation.id,
+      representativeBindingId: representativeBinding.id,
+      kind: "TELEGRAM",
+      transport: ChannelTransport.TELEGRAM,
+      sourceProvider: ChannelSourceProvider.TELEGRAM,
+      connectionId: representativeBinding.connectionId,
+      bindingKey,
+      externalConversationId: String(actor.chatId),
+      metadata: {
+        source: "telegram_bot",
+        telegramUserId,
+      },
+    },
+    update: {
+      conversationId: conversation.id,
+      representativeBindingId: representativeBinding.id,
+      transport: ChannelTransport.TELEGRAM,
+      sourceProvider: ChannelSourceProvider.TELEGRAM,
+      connectionId: representativeBinding.connectionId,
     },
   });
 
   return {
     representativeId: representative.id,
     representativeSlug: representative.slug,
+    audienceIdentityId: audienceIdentity.id,
     contactId: contact.id,
     conversationId: conversation.id,
     contactIsPaid: contact.isPaid,
@@ -1053,12 +1175,14 @@ export async function submitStructuredCollector(params: {
 export async function createPlanInvoice(params: {
   context: ConversationContextRecord;
   tier: PlanTier;
+  providerAccountId: string;
 }): Promise<{
   invoiceId: string;
   payload: string;
   title: string;
   starsAmount: number;
 }> {
+  assertTelegramStarsLivePaymentEnabled();
   const plan = params.context.plans[params.tier];
   if (!plan) {
     throw new Error(`Plan "${params.tier}" is not configured for this representative.`);
@@ -1067,32 +1191,60 @@ export async function createPlanInvoice(params: {
   const invoiceId = `${params.context.conversationId}_${plan.tier}_${Date.now()}`;
   const payload = buildInvoicePayload(invoiceId);
 
-  const invoice = await prisma.invoice.create({
-    data: {
-      id: invoiceId,
-      representativeId: params.context.representativeId,
-      contactId: params.context.contactId,
-      conversationId: params.context.conversationId,
-      planType: mapPricingPlanTypeToDb(plan.tier),
-      title: plan.name,
-      payload,
-      starsAmount: plan.starsAmount,
-      status: InvoiceStatus.PENDING,
-    },
-  });
-
-  await prisma.eventAudit.create({
-    data: {
-      representativeId: params.context.representativeId,
-      contactId: params.context.contactId,
-      conversationId: params.context.conversationId,
-      type: EventType.PAYMENT_INVOICE_CREATED,
-      payload: {
-        invoiceId: invoice.id,
-        planType: plan.tier,
+  const invoice = await prisma.$transaction(async (tx) => {
+    const createdInvoice = await tx.invoice.create({
+      data: {
+        id: invoiceId,
+        representativeId: params.context.representativeId,
+        contactId: params.context.contactId,
+        conversationId: params.context.conversationId,
+        planType: mapPricingPlanTypeToDb(plan.tier),
+        title: plan.name,
+        payload,
         starsAmount: plan.starsAmount,
+        status: InvoiceStatus.PENDING,
       },
-    },
+    });
+
+    if (plan.tier !== "sponsor") {
+      await createServicePaymentOrder(
+        {
+          id: `service-payment:${createdInvoice.id}`,
+          payerAudienceIdentityId: params.context.audienceIdentityId,
+          representativeId: params.context.representativeId,
+          provider: PaymentProvider.TELEGRAM_STARS,
+          providerAccountId: params.providerAccountId,
+          providerOrderId: createdInvoice.payload,
+          productCode: `plan:${plan.tier}`,
+          amountMinor: plan.starsAmount,
+          currency: "XTR",
+          entitlementUnits: Math.max(1, plan.includedReplies),
+          priceSnapshot: {
+            source: "telegram_stars",
+            planId: plan.id,
+            planType: plan.tier,
+            title: plan.name,
+            includedReplies: plan.includedReplies,
+          },
+        },
+        tx as never,
+      );
+    }
+
+    await tx.eventAudit.create({
+      data: {
+        representativeId: params.context.representativeId,
+        contactId: params.context.contactId,
+        conversationId: params.context.conversationId,
+        type: EventType.PAYMENT_INVOICE_CREATED,
+        payload: {
+          invoiceId: createdInvoice.id,
+          planType: plan.tier,
+          starsAmount: plan.starsAmount,
+        },
+      },
+    });
+    return createdInvoice;
   });
 
   return {
@@ -1209,24 +1361,46 @@ async function enqueueHandoffFollowUpWorkflowTx(
   return workflow.id;
 }
 
-export async function markInvoiceDeliveryFailed(invoiceId: string): Promise<void> {
+export async function markInvoiceDeliveryUncertain(
+  invoiceId: string,
+  errorMessage?: string,
+): Promise<void> {
   const invoice = await prisma.invoice.findUnique({
     where: { id: invoiceId },
+    select: {
+      id: true,
+      representativeId: true,
+      contactId: true,
+      conversationId: true,
+      status: true,
+    },
   });
 
   if (!invoice || invoice.status !== InvoiceStatus.PENDING) {
     return;
   }
 
-  await prisma.invoice.update({
-    where: { id: invoiceId },
+  await prisma.eventAudit.create({
     data: {
-      status: InvoiceStatus.FAILED,
+      representativeId: invoice.representativeId,
+      contactId: invoice.contactId,
+      conversationId: invoice.conversationId,
+      type: EventType.PAYMENT_INVOICE_CREATED,
+      payload: {
+        invoiceId: invoice.id,
+        deliveryStatus: "UNCERTAIN",
+        ...(errorMessage ? { errorMessage: errorMessage.slice(0, 500) } : {}),
+      },
     },
   });
 }
 
-export async function validatePendingInvoice(payload: string, telegramUserId: number): Promise<void> {
+export async function validatePendingInvoice(
+  payload: string,
+  telegramUserId: number,
+  payment: { currency: string; totalAmount: number },
+): Promise<void> {
+  assertTelegramStarsLivePaymentEnabled();
   const invoice = await prisma.invoice.findUnique({
     where: { payload },
     include: {
@@ -1245,19 +1419,240 @@ export async function validatePendingInvoice(payload: string, telegramUserId: nu
   if (invoice.contact.telegramUserId !== String(telegramUserId)) {
     throw new Error("Invoice owner mismatch.");
   }
+  if (payment.currency !== "XTR") {
+    throw new Error("Telegram digital-service payments must use XTR.");
+  }
+  if (payment.totalAmount !== invoice.starsAmount || payment.totalAmount <= 0) {
+    throw new Error("Telegram payment amount does not match the invoice.");
+  }
+  if (!invoice.conversationId) {
+    throw new Error("Telegram invoice is not attached to a conversation.");
+  }
+  await assertConversationChannelDeliveryAvailable({
+    conversationId: invoice.conversationId,
+    channel: "telegram",
+  });
+}
+
+export async function persistAndProcessTelegramSuccessfulPayment(
+  params: SuccessfulPaymentInput,
+): Promise<TelegramPaymentProcessingResult> {
+  const normalized = normalizeSuccessfulPaymentInput(params);
+  const connectionId = telegramBotConnectionId();
+  const externalEventId = `${connectionId}:${normalized.telegramPaymentChargeId}`;
+  const inbox = await prisma.channelEventInbox.upsert({
+    where: {
+      kind_externalEventId: {
+        kind: RepresentativeChannelKind.TELEGRAM,
+        externalEventId,
+      },
+    },
+    create: {
+      kind: RepresentativeChannelKind.TELEGRAM,
+      transport: ChannelTransport.TELEGRAM,
+      sourceProvider: ChannelSourceProvider.TELEGRAM,
+      connectionId,
+      originKey: `telegram:successful-payment:${externalEventId}`,
+      transactionId: normalized.invoicePayload,
+      externalEventId,
+      eventType: "telegram.successful_payment",
+      payload: successfulPaymentInputToJson(normalized),
+      status: "PENDING",
+      attemptCount: 0,
+    },
+    update: {},
+    select: {
+      id: true,
+      status: true,
+      payload: true,
+    },
+  });
+  const persisted = parseSuccessfulPaymentPayload(inbox.payload);
+  assertMatchingSuccessfulPayment(normalized, persisted);
+  await associateTelegramPaymentInboxConversation(
+    inbox.id,
+    persisted.invoicePayload,
+  );
+  return processTelegramSuccessfulPaymentInbox(inbox.id, persisted);
+}
+
+export async function retryPendingTelegramSuccessfulPayments(
+  limit = 20,
+): Promise<{ examined: number; confirmed: number; retrying: number }> {
+  const connectionId = telegramBotConnectionId();
+  const rows = await prisma.channelEventInbox.findMany({
+    where: {
+      kind: RepresentativeChannelKind.TELEGRAM,
+      connectionId,
+      eventType: "telegram.successful_payment",
+      status: { in: ["PENDING", "FAILED", "PROCESSING", "DEAD_LETTER"] },
+      availableAt: { lte: new Date() },
+    },
+    orderBy: { createdAt: "asc" },
+    take: Math.max(1, Math.min(100, Math.trunc(limit))),
+    select: {
+      id: true,
+      payload: true,
+    },
+  });
+  let confirmed = 0;
+  let retrying = 0;
+  for (const row of rows) {
+    let payment: SuccessfulPaymentInput;
+    try {
+      payment = parseSuccessfulPaymentPayload(row.payload);
+    } catch (error) {
+      retrying += 1;
+      await markTelegramPaymentInboxRetryable(
+        row.id,
+        error,
+        telegramPaymentMaximumBackoffMs,
+        true,
+      );
+      continue;
+    }
+    await associateTelegramPaymentInboxConversation(
+      row.id,
+      payment.invoicePayload,
+    );
+    const result = await processTelegramSuccessfulPaymentInbox(
+      row.id,
+      payment,
+    );
+    if (result.status === "confirmed") confirmed += 1;
+    else retrying += 1;
+  }
+  return { examined: rows.length, confirmed, retrying };
+}
+
+async function processTelegramSuccessfulPaymentInbox(
+  inboxId: string,
+  payment: SuccessfulPaymentInput,
+): Promise<TelegramPaymentProcessingResult> {
+  const now = new Date();
+  const claim = await prisma.channelEventInbox.updateMany({
+    where: {
+      id: inboxId,
+      OR: [
+        {
+          status: { in: ["PENDING", "FAILED", "DEAD_LETTER"] },
+          availableAt: { lte: now },
+        },
+        {
+          status: "PROCESSING",
+          availableAt: { lte: now },
+        },
+      ],
+    },
+    data: {
+      status: "PROCESSING",
+      attemptCount: { increment: 1 },
+      availableAt: new Date(now.getTime() + telegramPaymentProcessingLeaseMs),
+      processedAt: null,
+      lastError: null,
+    },
+  });
+  if (claim.count === 0) {
+    const current = await prisma.channelEventInbox.findUnique({
+      where: { id: inboxId },
+      select: { status: true },
+    });
+    if (current?.status === "PROCESSED") {
+      return {
+        status: "confirmed",
+        confirmation: await confirmInvoicePayment(payment),
+      };
+    }
+    return { status: "retrying" };
+  }
+
+  try {
+    const confirmation = await confirmInvoicePayment(payment);
+    await prisma.channelEventInbox.update({
+      where: { id: inboxId },
+      data: {
+        status: "PROCESSED",
+        processedAt: new Date(),
+        availableAt: new Date(),
+        lastError: null,
+      },
+    });
+    return { status: "confirmed", confirmation };
+  } catch (error) {
+    const claimed = await prisma.channelEventInbox.findUnique({
+      where: { id: inboxId },
+      select: { attemptCount: true },
+    });
+    const attemptCount = claimed?.attemptCount ?? 1;
+    await markTelegramPaymentInboxRetryable(
+      inboxId,
+      error,
+      Math.min(
+        telegramPaymentMaximumBackoffMs,
+        2 ** Math.min(attemptCount, 10) * 1_000,
+      ),
+    );
+    return { status: "retrying" };
+  }
+}
+
+async function associateTelegramPaymentInboxConversation(
+  inboxId: string,
+  invoicePayload: string,
+): Promise<void> {
+  try {
+    const invoice = await prisma.invoice.findUnique({
+      where: { payload: invoicePayload },
+      select: { conversationId: true },
+    });
+    if (!invoice?.conversationId) return;
+    await prisma.channelEventInbox.updateMany({
+      where: {
+        id: inboxId,
+        conversationId: null,
+      },
+      data: {
+        conversationId: invoice.conversationId,
+      },
+    });
+  } catch (error) {
+    // The payment event is already durable. Association is observability
+    // enrichment and must never turn a safely persisted charge back into an
+    // unacknowledged long-polling update.
+    console.error(
+      "Unable to associate Telegram payment inbox with its conversation:",
+      error,
+    );
+  }
+}
+
+async function markTelegramPaymentInboxRetryable(
+  inboxId: string,
+  error: unknown,
+  retryAfterMs: number,
+  incrementAttempt = false,
+): Promise<void> {
+  await prisma.channelEventInbox.update({
+    where: { id: inboxId },
+    data: {
+      status: "FAILED",
+      ...(incrementAttempt ? { attemptCount: { increment: 1 } } : {}),
+      processedAt: null,
+      availableAt: new Date(
+        Date.now()
+        + Math.max(1_000, Math.min(telegramPaymentMaximumBackoffMs, retryAfterMs)),
+      ),
+      lastError:
+        error instanceof Error
+          ? error.message.slice(0, 1_000)
+          : "telegram_payment_fulfillment_failed",
+    },
+  });
 }
 
 export async function confirmInvoicePayment(
   params: SuccessfulPaymentInput,
-): Promise<{
-  planName: string;
-  starsAmount: number;
-  representativeSlug: string;
-  representativeId: string;
-  contactId: string;
-  conversationId?: string;
-  planType: PlanTier;
-}> {
+): Promise<TelegramPaymentConfirmation> {
   return prisma.$transaction(async (tx) => {
     const invoice = await tx.invoice.findUnique({
       where: { payload: params.invoicePayload },
@@ -1280,7 +1675,26 @@ export async function confirmInvoicePayment(
       throw new Error("Unknown payment payload.");
     }
 
+    if (params.currency !== "XTR") {
+      throw new Error("Telegram digital-service payments must use XTR.");
+    }
+    if (params.totalAmount !== invoice.starsAmount || params.totalAmount <= 0) {
+      throw new Error("Telegram payment amount does not match the invoice.");
+    }
+    if (
+      !invoice.contact.telegramUserId
+      || invoice.contact.telegramUserId !== String(params.telegramUserId)
+    ) {
+      throw new Error("Invoice owner mismatch.");
+    }
+    if (!params.telegramPaymentChargeId.trim()) {
+      throw new Error("Telegram payment charge id is required.");
+    }
+
     if (invoice.status === InvoiceStatus.PAID || invoice.status === InvoiceStatus.FULFILLED) {
+      if (invoice.telegramPaymentChargeId !== params.telegramPaymentChargeId) {
+        throw new Error("Invoice was already paid by a different Telegram charge.");
+      }
       return {
         planName: invoice.title,
         starsAmount: invoice.starsAmount,
@@ -1291,11 +1705,40 @@ export async function confirmInvoicePayment(
         planType: mapPricingPlanTypeFromDb(invoice.planType),
       };
     }
+    if (invoice.status !== InvoiceStatus.PENDING) {
+      throw new Error(`Invoice cannot be paid from status ${invoice.status}.`);
+    }
+
+    const duplicateCharge = await tx.invoice.findUnique({
+      where: { telegramPaymentChargeId: params.telegramPaymentChargeId },
+      select: { id: true },
+    });
+    if (duplicateCharge && duplicateCharge.id !== invoice.id) {
+      throw new Error("Telegram payment charge was already used for another invoice.");
+    }
+
+    const servicePaymentOrder =
+      invoice.planType === PricingPlanType.SPONSOR
+        ? null
+        : await tx.servicePaymentOrder.findUnique({
+            where: { id: `service-payment:${invoice.id}` },
+            select: { providerAccountId: true },
+          });
+    if (
+      invoice.planType !== PricingPlanType.SPONSOR &&
+      !servicePaymentOrder
+    ) {
+      throw new Error("Telegram service payment order is missing.");
+    }
 
     const paidAt = new Date();
 
-    await tx.invoice.update({
-      where: { id: invoice.id },
+    const claimed = await tx.invoice.updateMany({
+      where: {
+        id: invoice.id,
+        status: InvoiceStatus.PENDING,
+        telegramPaymentChargeId: null,
+      },
       data: {
         status: invoice.planType === PricingPlanType.SPONSOR ? InvoiceStatus.FULFILLED : InvoiceStatus.PAID,
         paidAt,
@@ -1303,6 +1746,9 @@ export async function confirmInvoicePayment(
         providerPaymentChargeId: params.providerPaymentChargeId ?? null,
       },
     });
+    if (claimed.count !== 1) {
+      throw new Error("Invoice payment was confirmed concurrently.");
+    }
 
     if (invoice.representative.owner.wallet) {
       await tx.wallet.update({
@@ -1332,12 +1778,7 @@ export async function confirmInvoicePayment(
     }
 
     await tx.contact.update({
-      where: {
-        representativeId_telegramUserId: {
-          representativeId: invoice.representativeId,
-          telegramUserId: invoice.contact.telegramUserId,
-        },
-      },
+      where: { id: invoice.contactId },
       data: {
         isPaid: true,
         stage:
@@ -1370,6 +1811,32 @@ export async function confirmInvoicePayment(
       });
     }
 
+    if (invoice.planType !== PricingPlanType.SPONSOR) {
+      if (!invoice.contact.audienceIdentityId) {
+        throw new Error("Telegram payer does not have a canonical audience identity.");
+      }
+      await fulfillServicePaymentOrder(
+        {
+          paymentOrderId: `service-payment:${invoice.id}`,
+          provider: PaymentProvider.TELEGRAM_STARS,
+          providerAccountId: servicePaymentOrder!.providerAccountId,
+          providerOrderId: invoice.payload,
+          providerEventId: params.telegramPaymentChargeId,
+          payerAudienceIdentityId: invoice.contact.audienceIdentityId,
+          amountMinor: params.totalAmount,
+          currency: params.currency,
+          verifiedAt: paidAt,
+          rawPayload: {
+            invoicePayload: params.invoicePayload,
+            telegramPaymentChargeId: params.telegramPaymentChargeId,
+            providerPaymentChargeId: params.providerPaymentChargeId ?? null,
+            telegramUserId: params.telegramUserId,
+          },
+        },
+        tx as never,
+      );
+    }
+
     await tx.eventAudit.create({
       data: {
         representativeId: invoice.representativeId,
@@ -1399,6 +1866,110 @@ export async function confirmInvoicePayment(
 
 export function buildInvoicePayload(invoiceId: string): string {
   return `delegate:invoice:${invoiceId}`;
+}
+
+function normalizeSuccessfulPaymentInput(
+  input: SuccessfulPaymentInput,
+): SuccessfulPaymentInput {
+  const invoicePayload = input.invoicePayload.trim();
+  const currency = input.currency.trim().toUpperCase();
+  const telegramPaymentChargeId = input.telegramPaymentChargeId.trim();
+  const providerPaymentChargeId = input.providerPaymentChargeId?.trim();
+  if (!invoicePayload) throw new Error("Telegram payment invoice payload is required.");
+  if (!telegramPaymentChargeId) {
+    throw new Error("Telegram payment charge id is required.");
+  }
+  if (!Number.isSafeInteger(input.totalAmount) || input.totalAmount <= 0) {
+    throw new Error("Telegram payment amount must be a positive integer.");
+  }
+  if (!Number.isSafeInteger(input.telegramUserId) || input.telegramUserId <= 0) {
+    throw new Error("Telegram payer id must be a positive integer.");
+  }
+  return {
+    invoicePayload,
+    totalAmount: input.totalAmount,
+    currency,
+    telegramUserId: input.telegramUserId,
+    telegramPaymentChargeId,
+    ...(providerPaymentChargeId ? { providerPaymentChargeId } : {}),
+  };
+}
+
+function successfulPaymentInputToJson(
+  input: SuccessfulPaymentInput,
+): Prisma.InputJsonObject {
+  return {
+    invoicePayload: input.invoicePayload,
+    totalAmount: input.totalAmount,
+    currency: input.currency,
+    telegramUserId: input.telegramUserId,
+    telegramPaymentChargeId: input.telegramPaymentChargeId,
+    ...(input.providerPaymentChargeId
+      ? { providerPaymentChargeId: input.providerPaymentChargeId }
+      : {}),
+  };
+}
+
+function parseSuccessfulPaymentPayload(payload: unknown): SuccessfulPaymentInput {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Persisted Telegram payment event is malformed.");
+  }
+  const value = payload as Record<string, unknown>;
+  if (
+    typeof value.invoicePayload !== "string"
+    || typeof value.totalAmount !== "number"
+    || typeof value.currency !== "string"
+    || typeof value.telegramUserId !== "number"
+    || typeof value.telegramPaymentChargeId !== "string"
+    || (
+      value.providerPaymentChargeId !== undefined
+      && value.providerPaymentChargeId !== null
+      && typeof value.providerPaymentChargeId !== "string"
+    )
+  ) {
+    throw new Error("Persisted Telegram payment event is malformed.");
+  }
+  return normalizeSuccessfulPaymentInput({
+    invoicePayload: value.invoicePayload,
+    totalAmount: value.totalAmount,
+    currency: value.currency,
+    telegramUserId: value.telegramUserId,
+    telegramPaymentChargeId: value.telegramPaymentChargeId,
+    ...(typeof value.providerPaymentChargeId === "string"
+      ? { providerPaymentChargeId: value.providerPaymentChargeId }
+      : {}),
+  });
+}
+
+function assertMatchingSuccessfulPayment(
+  incoming: SuccessfulPaymentInput,
+  persisted: SuccessfulPaymentInput,
+) {
+  if (
+    incoming.invoicePayload !== persisted.invoicePayload
+    || incoming.totalAmount !== persisted.totalAmount
+    || incoming.currency !== persisted.currency
+    || incoming.telegramUserId !== persisted.telegramUserId
+    || incoming.telegramPaymentChargeId !== persisted.telegramPaymentChargeId
+    || (incoming.providerPaymentChargeId ?? null)
+      !== (persisted.providerPaymentChargeId ?? null)
+  ) {
+    throw new Error(
+      "Telegram payment charge was replayed with conflicting payment data.",
+    );
+  }
+}
+
+function telegramBotConnectionId(): string {
+  const configuredId = process.env.TELEGRAM_BOT_ID?.trim();
+  const tokenId = process.env.TELEGRAM_BOT_TOKEN?.trim().match(/^([1-9]\d*):/)?.[1];
+  const connectionId = configuredId || tokenId;
+  if (!connectionId || !/^[1-9]\d*$/.test(connectionId)) {
+    throw new Error(
+      "Telegram runtime requires TELEGRAM_BOT_ID or a token with a numeric bot id.",
+    );
+  }
+  return connectionId;
 }
 
 function buildOwnerAction(plan: ConversationPlan): string {

@@ -37,6 +37,7 @@ describe("agent wallet payment provider adapters", () => {
       payload: {
         providerEventId: "evt_mock_paid_1",
         rechargeOrderId: "recharge_1",
+        providerOrderId: "mock_order_1",
         amountCents: 1200,
         currency: "CNY",
         status: "paid",
@@ -48,6 +49,7 @@ describe("agent wallet payment provider adapters", () => {
       providerEventId: "evt_mock_paid_1",
       eventType: PaymentProviderEventType.RECHARGE_PAID,
       rechargeOrderId: "recharge_1",
+      providerOrderId: "mock_order_1",
       amountCents: 1200,
       currency: "CNY",
       idempotencyKey: "mock:evt_mock_paid_1",
@@ -150,6 +152,10 @@ describe("agent wallet payment provider adapters", () => {
       checkoutSessions: {
         create: async () => ({ id: "cs_unused" }),
       },
+      verifyAndParseWebhook: async (input) => ({
+        verified: true,
+        payload: input.payload as Record<string, unknown>,
+      }),
     });
 
     const paid = await adapter.normalizeWebhookEvent({
@@ -159,6 +165,7 @@ describe("agent wallet payment provider adapters", () => {
         data: {
           object: {
             id: "cs_test_123",
+            payment_status: "paid",
             amount_total: 2500,
             currency: "cny",
             metadata: {
@@ -190,11 +197,68 @@ describe("agent wallet payment provider adapters", () => {
       providerEventId: "evt_paid_1",
       eventType: PaymentProviderEventType.RECHARGE_PAID,
       rechargeOrderId: "recharge_1",
+      providerOrderId: "cs_test_123",
       amountCents: 2500,
       currency: "CNY",
       idempotencyKey: "stripe:evt_paid_1",
     });
     expect(failed.eventType).toBe(PaymentProviderEventType.RECHARGE_FAILED);
+  });
+
+  it("fails Stripe webhooks closed without an explicit successful verification result", async () => {
+    const withoutVerifier = createStripePaymentProviderAdapter({
+      successUrl: "https://delegate.example/success",
+      checkoutSessions: {
+        create: async () => ({ id: "cs_unused" }),
+      },
+    });
+    await expect(
+      withoutVerifier.normalizeWebhookEvent({ payload: { id: "evt_unverified" } }),
+    ).rejects.toThrow("signature verification");
+
+    const rejectedVerifier = createStripePaymentProviderAdapter({
+      successUrl: "https://delegate.example/success",
+      checkoutSessions: {
+        create: async () => ({ id: "cs_unused" }),
+      },
+      verifyAndParseWebhook: async () => ({
+        verified: false,
+      }),
+    });
+    await expect(
+      rejectedVerifier.normalizeWebhookEvent({ rawBody: "{}" }),
+    ).rejects.toThrow("verification failed");
+  });
+
+  it("does not treat an unpaid Stripe Checkout completion as a paid recharge", async () => {
+    const adapter = createStripePaymentProviderAdapter({
+      successUrl: "https://delegate.example/success",
+      checkoutSessions: {
+        create: async () => ({ id: "cs_unused" }),
+      },
+      verifyAndParseWebhook: async (input) => ({
+        verified: true,
+        payload: input.payload as Record<string, unknown>,
+      }),
+    });
+
+    const event = await adapter.normalizeWebhookEvent({
+      payload: {
+        id: "evt_unpaid",
+        type: "checkout.session.completed",
+        data: {
+          object: {
+            id: "cs_unpaid",
+            payment_status: "unpaid",
+            amount_total: 1200,
+            currency: "cny",
+            metadata: { rechargeOrderId: "recharge_1" },
+          },
+        },
+      },
+    });
+
+    expect(event.eventType).toBe(PaymentProviderEventType.UNKNOWN);
   });
 
   it("returns a configured Stripe adapter from the provider registry", async () => {
@@ -254,11 +318,15 @@ describe("agent wallet payment provider adapters", () => {
         checkoutUrl: "weixin://wxpay/bizpayurl?pr=demo",
       }),
       verifyAndParseWebhook: async () => ({
-        providerEventId: "wx_txn_1",
-        rechargeOrderId: "recharge_1",
-        amountCents: 1200,
-        currency: "CNY",
-        status: "transaction_success",
+        verified: true,
+        payload: {
+          providerEventId: "wx_txn_1",
+          rechargeOrderId: "recharge_1",
+          providerOrderId: "wx_order_1",
+          amountCents: 1200,
+          currency: "CNY",
+          status: "transaction_success",
+        },
       }),
     });
 
@@ -279,6 +347,7 @@ describe("agent wallet payment provider adapters", () => {
       providerEventId: "wx_txn_1",
       eventType: PaymentProviderEventType.RECHARGE_PAID,
       rechargeOrderId: "recharge_1",
+      providerOrderId: "wx_order_1",
       idempotencyKey: "wechat_pay:wx_txn_1",
     });
   });
@@ -293,11 +362,15 @@ describe("agent wallet payment provider adapters", () => {
           checkoutUrl: "https://openapi.alipay.com/gateway.do?demo=1",
         }),
         verifyAndParseWebhook: async () => ({
-          tradeNo: "alipay_trade_1",
-          rechargeOrderId: "recharge_1",
-          totalAmountCents: 1200,
-          currency: "CNY",
-          tradeStatus: "TRADE_SUCCESS",
+          verified: true,
+          payload: {
+            tradeNo: "alipay_trade_1",
+            rechargeOrderId: "recharge_1",
+            providerOrderId: "alipay_trade_1",
+            totalAmountCents: 1200,
+            currency: "CNY",
+            tradeStatus: "TRADE_SUCCESS",
+          },
         }),
       },
     });

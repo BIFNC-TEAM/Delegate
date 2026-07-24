@@ -10,7 +10,10 @@ import {
   recordWalletLedgerTransaction,
   type WalletLedgerClient,
 } from "./agent-wallet-ledger";
-import { mockPaymentProviderAdapter } from "./agent-wallet-payment-providers";
+import {
+  mockPaymentProviderAdapter,
+  type NormalizedPaymentProviderEvent,
+} from "./agent-wallet-payment-providers";
 import { prisma } from "./prisma";
 
 type UserWalletRecord = {
@@ -47,6 +50,10 @@ type PaymentProviderEventRecord = {
   rechargeOrderId: string | null;
 };
 
+type IdentityLinkRecord = {
+  audienceIdentityId: string;
+};
+
 type RechargeClient = Omit<WalletLedgerClient, "$transaction"> & {
   userWallet: {
     findFirst?(args: unknown): Promise<UserWalletRecord | null>;
@@ -54,14 +61,15 @@ type RechargeClient = Omit<WalletLedgerClient, "$transaction"> & {
     update(args: unknown): Promise<UserWalletRecord>;
   };
   identityLink?: {
-    upsert(args: unknown): Promise<unknown>;
+    upsert(args: unknown): Promise<IdentityLinkRecord>;
   };
   rechargeOrder: {
     findUnique(args: unknown): Promise<RechargeOrderRecord | null>;
     create(args: unknown): Promise<RechargeOrderRecord>;
-    update(args: unknown): Promise<RechargeOrderRecord>;
+    updateMany(args: unknown): Promise<{ count: number }>;
   };
   paymentProviderEvent: {
+    findUnique(args: unknown): Promise<PaymentProviderEventRecord | null>;
     upsert(args: unknown): Promise<PaymentProviderEventRecord>;
   };
   $transaction?<T>(fn: (tx: RechargeClient) => Promise<T>): Promise<T>;
@@ -98,10 +106,19 @@ export type CompleteMockRechargeOrderInput = {
 
 const SUPPORTED_RECHARGE_CURRENCIES = new Set(["CNY", "USD"]);
 
+export function assertMockRechargeMutationsEnabled(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): void {
+  if (env.NODE_ENV !== "development" && env.NODE_ENV !== "test") {
+    throw new Error("Mock recharge mutations are disabled in production-like environments.");
+  }
+}
+
 export async function createMockRechargeOrder(
   input: CreateMockRechargeOrderInput,
   client: RechargeClient = prisma,
 ): Promise<RechargeOrderSnapshot> {
+  assertMockRechargeMutationsEnabled();
   const normalized = normalizeCreateMockRechargeOrderInput(input);
   const run = async (tx: RechargeClient) => {
     const existing = await tx.rechargeOrder.findUnique({
@@ -109,6 +126,7 @@ export async function createMockRechargeOrder(
       include: { userWallet: true },
     });
     if (existing) {
+      assertExistingRechargeOrderMatches(existing, normalized);
       return serializeRechargeOrder(existing);
     }
 
@@ -147,6 +165,7 @@ export async function completeMockRechargeOrder(
   input: CompleteMockRechargeOrderInput = {},
   client: RechargeClient = prisma,
 ): Promise<RechargeOrderSnapshot> {
+  assertMockRechargeMutationsEnabled();
   if (!rechargeOrderId.trim()) {
     throw new Error("Recharge order id is required.");
   }
@@ -158,6 +177,9 @@ export async function completeMockRechargeOrder(
     });
     if (!order?.userWallet) {
       throw new Error("Recharge order not found.");
+    }
+    if (order.provider !== PaymentProvider.MOCK) {
+      throw new Error("Only mock recharge orders can be completed by this operation.");
     }
     if (typeof input.amountCents === "number" && input.amountCents !== order.amountCents) {
       throw new Error("Mock payment amount does not match recharge order.");
@@ -173,6 +195,7 @@ export async function completeMockRechargeOrder(
       payload: {
         providerEventId: input.providerEventId ?? `mock_recharge_paid_${order.id}`,
         rechargeOrderId: order.id,
+        providerOrderId: order.providerOrderId,
         amountCents: order.amountCents,
         currency: order.currency,
         status: "paid",
@@ -181,8 +204,43 @@ export async function completeMockRechargeOrder(
     if (normalizedEvent.eventType !== PaymentProviderEventType.RECHARGE_PAID) {
       throw new Error("Mock payment event is not a paid recharge event.");
     }
+    assertPaymentEventMatchesRechargeOrder(normalizedEvent, order);
 
     const paidAt = new Date();
+    const existingProviderEvent = await tx.paymentProviderEvent.findUnique({
+      where: {
+        provider_providerEventId: {
+          provider: normalizedEvent.provider,
+          providerEventId: normalizedEvent.providerEventId,
+        },
+      },
+    });
+    assertProviderEventCanAttach(existingProviderEvent, normalizedEvent, order);
+
+    const claimed = await tx.rechargeOrder.updateMany({
+      where: {
+        id: order.id,
+        provider: order.provider,
+        amountCents: order.amountCents,
+        currency: order.currency,
+        status: RechargeOrderStatus.REQUIRES_PAYMENT,
+      },
+      data: {
+        status: RechargeOrderStatus.PAID,
+        paidAt,
+      },
+    });
+    if (claimed.count !== 1) {
+      const current = await tx.rechargeOrder.findUnique({
+        where: { id: order.id },
+        include: { userWallet: true },
+      });
+      if (current?.status === RechargeOrderStatus.PAID && current.userWallet) {
+        return serializeRechargeOrder(current);
+      }
+      throw new Error("Recharge order state changed concurrently.");
+    }
+
     const providerEvent = await tx.paymentProviderEvent.upsert({
       where: {
         provider_providerEventId: {
@@ -204,6 +262,7 @@ export async function completeMockRechargeOrder(
         processedAt: paidAt,
       },
     });
+    assertProviderEventCanAttach(providerEvent, normalizedEvent, order);
 
     await recordWalletLedgerTransaction(
       {
@@ -231,25 +290,21 @@ export async function completeMockRechargeOrder(
       tx,
     );
 
-    const [updatedWallet, updatedOrder] = await Promise.all([
-      tx.userWallet.update({
-        where: { id: order.userWallet.id },
-        data: {
-          cashBalanceCents: {
-            increment: order.amountCents,
-          },
+    const updatedWallet = await tx.userWallet.update({
+      where: { id: order.userWallet.id },
+      data: {
+        cashBalanceCents: {
+          increment: order.amountCents,
         },
-      }),
-      tx.rechargeOrder.update({
-        where: { id: order.id },
-        data: {
-          status: RechargeOrderStatus.PAID,
-          paidAt,
-        },
-      }),
-    ]);
+      },
+    });
 
-    return serializeRechargeOrder({ ...updatedOrder, userWallet: updatedWallet });
+    return serializeRechargeOrder({
+      ...order,
+      status: RechargeOrderStatus.PAID,
+      paidAt,
+      userWallet: updatedWallet,
+    });
   };
 
   return client.$transaction ? client.$transaction(run) : run(client);
@@ -273,7 +328,8 @@ function normalizeCreateMockRechargeOrderInput(
     amountCents: input.amountCents,
     currency,
     idempotencyKey:
-      input.idempotencyKey ?? `mock_recharge:${externalUserId}:${currency}:${input.amountCents}`,
+      normalizeOptionalIdempotencyKey(input.idempotencyKey) ??
+      `mock_recharge:${externalUserId}:${currency}:${input.amountCents}`,
     ...(input.audienceIdentityId?.trim() ? { audienceIdentityId: input.audienceIdentityId.trim() } : {}),
     ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
     ...(input.telegramUserId?.trim() ? { telegramUserId: input.telegramUserId.trim() } : {}),
@@ -293,17 +349,19 @@ async function resolveRechargeUserWallet(
       : null;
 
   if (existingByAudienceIdentity) {
+    if (existingByAudienceIdentity.currency !== normalized.currency) {
+      throw new Error("Existing user wallet currency cannot be changed.");
+    }
     return tx.userWallet.update({
       where: { id: existingByAudienceIdentity.id },
       data: {
         ...(normalized.telegramUserId ? { telegramUserId: normalized.telegramUserId } : {}),
         ...(normalized.displayName ? { displayName: normalized.displayName } : {}),
-        currency: normalized.currency,
       },
     });
   }
 
-  return tx.userWallet.upsert({
+  const wallet = await tx.userWallet.upsert({
     where: { externalUserId: normalized.externalUserId },
     create: {
       externalUserId: normalized.externalUserId,
@@ -314,12 +372,27 @@ async function resolveRechargeUserWallet(
       cashBalanceCents: 0,
     },
     update: {
-      ...(normalized.audienceIdentityId ? { audienceIdentityId: normalized.audienceIdentityId } : {}),
       ...(normalized.telegramUserId ? { telegramUserId: normalized.telegramUserId } : {}),
       ...(normalized.displayName ? { displayName: normalized.displayName } : {}),
-      currency: normalized.currency,
     },
   });
+  if (wallet.currency !== normalized.currency) {
+    throw new Error("Existing user wallet currency cannot be changed.");
+  }
+  if (
+    wallet.audienceIdentityId &&
+    normalized.audienceIdentityId &&
+    wallet.audienceIdentityId !== normalized.audienceIdentityId
+  ) {
+    throw new Error("Existing user wallet belongs to another audience identity.");
+  }
+  if (!wallet.audienceIdentityId && normalized.audienceIdentityId) {
+    return tx.userWallet.update({
+      where: { id: wallet.id },
+      data: { audienceIdentityId: normalized.audienceIdentityId },
+    });
+  }
+  return wallet;
 }
 
 async function linkPaymentExternalUserId(
@@ -330,22 +403,89 @@ async function linkPaymentExternalUserId(
     return;
   }
 
-  await tx.identityLink.upsert({
+  const link = await tx.identityLink.upsert({
     where: {
       provider_providerSubject: {
         provider: "PAYMENT_EXTERNAL_USER",
         providerSubject: normalized.externalUserId,
       },
     },
-    update: {
-      audienceIdentityId: normalized.audienceIdentityId,
-    },
+    update: {},
     create: {
       audienceIdentityId: normalized.audienceIdentityId,
       provider: "PAYMENT_EXTERNAL_USER",
       providerSubject: normalized.externalUserId,
     },
   });
+  if (link.audienceIdentityId !== normalized.audienceIdentityId) {
+    throw new Error("Payment external user id is already linked to another audience identity.");
+  }
+}
+
+function assertExistingRechargeOrderMatches(
+  order: RechargeOrderRecord,
+  normalized: ReturnType<typeof normalizeCreateMockRechargeOrderInput>,
+): void {
+  if (!order.userWallet) {
+    throw new Error("Existing recharge order is missing its user wallet.");
+  }
+  const ownerMatches = normalized.audienceIdentityId
+    ? order.userWallet.audienceIdentityId === normalized.audienceIdentityId
+    : order.userWallet.externalUserId === normalized.externalUserId;
+  const mismatches = [
+    order.provider !== PaymentProvider.MOCK ? "provider" : null,
+    !ownerMatches ? "owner" : null,
+    order.amountCents !== normalized.amountCents ? "amount" : null,
+    order.currency !== normalized.currency ? "currency" : null,
+  ].filter((value): value is string => value !== null);
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Recharge idempotency key was reused with different ${mismatches.join(", ")}.`,
+    );
+  }
+}
+
+function assertPaymentEventMatchesRechargeOrder(
+  event: NormalizedPaymentProviderEvent,
+  order: RechargeOrderRecord,
+): void {
+  const mismatches = [
+    event.provider !== order.provider ? "provider" : null,
+    event.rechargeOrderId !== order.id ? "order" : null,
+    event.providerOrderId !== order.providerOrderId ? "provider order" : null,
+    event.amountCents !== order.amountCents ? "amount" : null,
+    event.currency?.toUpperCase() !== order.currency.toUpperCase() ? "currency" : null,
+  ].filter((value): value is string => value !== null);
+  if (mismatches.length > 0) {
+    throw new Error(`Payment provider event does not match recharge order: ${mismatches.join(", ")}.`);
+  }
+}
+
+function assertProviderEventCanAttach(
+  providerEvent: PaymentProviderEventRecord | null,
+  normalizedEvent: NormalizedPaymentProviderEvent,
+  order: RechargeOrderRecord,
+): void {
+  if (!providerEvent) {
+    return;
+  }
+  if (providerEvent.rechargeOrderId !== order.id) {
+    throw new Error("Payment provider event is already attached to another recharge order.");
+  }
+  if (providerEvent.eventType !== normalizedEvent.eventType) {
+    throw new Error("Payment provider event id was reused for a different event type.");
+  }
+}
+
+function normalizeOptionalIdempotencyKey(value: string | undefined): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim();
+  if (!normalized) {
+    throw new Error("idempotencyKey must not be empty.");
+  }
+  return normalized;
 }
 
 function serializeRechargeOrder(order: RechargeOrderRecord): RechargeOrderSnapshot {

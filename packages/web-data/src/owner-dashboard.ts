@@ -417,7 +417,12 @@ export async function getDashboardOverviewSnapshot(
       ],
       handoffRequests: representative.handoffRequests.map((handoff) => ({
         id: handoff.id,
-        who: handoff.contact.displayName ?? handoff.contact.username ?? handoff.contact.telegramUserId,
+        who:
+          handoff.contact.displayName ??
+          handoff.contact.username ??
+          handoff.contact.telegramUserId ??
+          handoff.contact.channelUserId ??
+          "Unknown audience",
         why: handoff.summary,
         score: mapPriorityToLabel(handoff.recommendedPriority),
         status: normalizeHandoffStatus(handoff.status),
@@ -428,7 +433,12 @@ export async function getDashboardOverviewSnapshot(
       })),
       recentInvoices: representative.invoices.map((invoice) => ({
         id: invoice.id,
-        who: invoice.contact.displayName ?? invoice.contact.username ?? invoice.contact.telegramUserId,
+        who:
+          invoice.contact.displayName ??
+          invoice.contact.username ??
+          invoice.contact.telegramUserId ??
+          invoice.contact.channelUserId ??
+          "Unknown audience",
         planName: invoice.title,
         planType: mapPricingPlanTypeFromDb(invoice.planType),
         starsAmount: invoice.starsAmount,
@@ -553,7 +563,12 @@ export async function setHandoffRequestStatus(params: {
 
     return {
       id: updated.id,
-      who: updated.contact.displayName ?? updated.contact.username ?? updated.contact.telegramUserId,
+      who:
+        updated.contact.displayName ??
+        updated.contact.username ??
+        updated.contact.telegramUserId ??
+        updated.contact.channelUserId ??
+        "Unknown audience",
       why: updated.summary,
       score: mapPriorityToLabel(updated.recommendedPriority),
       status: normalizeHandoffStatus(updated.status),

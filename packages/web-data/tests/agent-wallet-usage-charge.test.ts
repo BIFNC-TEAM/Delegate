@@ -96,6 +96,31 @@ describe("agent wallet usage charge", () => {
     expect(client.ledgerEntries).toHaveLength(5);
   });
 
+  it("rejects an idempotency key reused with different usage facts", async () => {
+    const client = new FakeUsageChargeClient();
+    await applyAgentUsageCharge(
+      {
+        representativeId: "rep_1",
+        tokenAmount: 200,
+        providerCostCents: 10,
+        idempotencyKey: "usage_facts_bound",
+      },
+      client,
+    );
+
+    await expect(
+      applyAgentUsageCharge(
+        {
+          representativeId: "rep_1",
+          tokenAmount: 201,
+          providerCostCents: 10,
+          idempotencyKey: "usage_facts_bound",
+        },
+        client,
+      ),
+    ).rejects.toThrow("different token amount");
+  });
+
   it("rejects insufficient agent token balance without partial writes", async () => {
     const client = new FakeUsageChargeClient({
       tokenBalance: 100,
@@ -115,6 +140,37 @@ describe("agent wallet usage charge", () => {
     expect(client.usageCharges).toHaveLength(0);
     expect(client.creatorEarnings).toHaveLength(1);
     expect(client.ledgerEntries).toHaveLength(0);
+  });
+
+  it("allows only one concurrent usage debit when both charges exceed the token balance", async () => {
+    const client = new FakeUsageChargeClient({
+      tokenBalance: 1000,
+    });
+    (client as { $transaction?: unknown }).$transaction = undefined;
+
+    const results = await Promise.allSettled([
+      applyAgentUsageCharge(
+        {
+          representativeId: "rep_1",
+          tokenAmount: 800,
+          idempotencyKey: "usage_concurrent_1",
+        },
+        client,
+      ),
+      applyAgentUsageCharge(
+        {
+          representativeId: "rep_1",
+          tokenAmount: 800,
+          idempotencyKey: "usage_concurrent_2",
+        },
+        client,
+      ),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(client.agentWallets[0]?.tokenBalance).toBe(200);
+    expect(client.usageCharges).toHaveLength(1);
   });
 
   it("does not create withdrawable creator money when no pending earning exists", async () => {
@@ -260,10 +316,17 @@ class FakeUsageChargeClient {
             );
       return wallet ? this.withRepresentative(wallet) : null;
     },
-    update: async (args: any) => {
+    updateMany: async (args: any) => {
       const wallet = this.agentWallets.find((row) => row.id === args.where.id);
-      if (!wallet) {
-        throw new Error("agent wallet not found");
+      if (
+        !wallet ||
+        (args.where.currency && wallet.currency !== args.where.currency) ||
+        (typeof args.where.tokenBalance?.equals === "number" &&
+          wallet.tokenBalance !== args.where.tokenBalance.equals) ||
+        (typeof args.where.tokenBalance?.gte === "number" &&
+          wallet.tokenBalance < args.where.tokenBalance.gte)
+      ) {
+        return { count: 0 };
       }
       if (typeof args.data.tokenBalance?.decrement === "number") {
         wallet.tokenBalance -= args.data.tokenBalance.decrement;
@@ -271,7 +334,7 @@ class FakeUsageChargeClient {
       if (typeof args.data.totalConsumedTokens?.increment === "number") {
         wallet.totalConsumedTokens += args.data.totalConsumedTokens.increment;
       }
-      return wallet;
+      return { count: 1 };
     },
   };
 
@@ -325,10 +388,20 @@ class FakeUsageChargeClient {
         }) ?? null
       );
     },
-    update: async (args: any) => {
+    findUnique: async (args: any) => {
+      return this.creatorEarnings.find((row) => row.id === args.where.id) ?? null;
+    },
+    updateMany: async (args: any) => {
       const earning = this.creatorEarnings.find((row) => row.id === args.where.id);
-      if (!earning) {
-        throw new Error("creator earning not found");
+      if (
+        !earning ||
+        (args.where.status && earning.status !== args.where.status) ||
+        (typeof args.where.pendingCents?.equals === "number" &&
+          earning.pendingCents !== args.where.pendingCents.equals) ||
+        (typeof args.where.pendingCents?.gte === "number" &&
+          earning.pendingCents < args.where.pendingCents.gte)
+      ) {
+        return { count: 0 };
       }
       if (typeof args.data.pendingCents?.decrement === "number") {
         earning.pendingCents -= args.data.pendingCents.decrement;
@@ -336,7 +409,7 @@ class FakeUsageChargeClient {
       if (args.data.status) {
         earning.status = args.data.status;
       }
-      return earning;
+      return { count: 1 };
     },
     create: async (args: any) => {
       const earning: CreatorEarningRow = {

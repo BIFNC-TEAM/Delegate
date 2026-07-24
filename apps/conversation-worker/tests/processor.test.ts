@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   claimNextOperatorMessageWorkItem: vi.fn(),
   claimNextGenerationWorkItem: vi.fn(),
   completeInlineGenerationRun: vi.fn(),
+  createConversationPlan: vi.fn(),
   getRepresentativeRuntimeSetupSnapshot: vi.fn(),
   buildRepresentativeRuntimeProfile: vi.fn(),
   loadGenerationRecentTurns: vi.fn(),
@@ -21,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   createComputeDelegationTask: vi.fn(),
   createClarifyingDelegationTask: vi.fn(),
   continueClarifyingDelegationTask: vi.fn(),
+  completeOperatorMessageDelivery: vi.fn(),
+  deferOperatorMessageDelivery: vi.fn(),
   findConversationClarifyingDelegationTask: vi.fn(),
   executeAudienceTool: vi.fn(),
   finalizeComputeDelegationTask: vi.fn(),
@@ -28,6 +31,12 @@ const mocks = vi.hoisted(() => ({
   markDelegationTaskAwaitingApproval: vi.fn(),
   markDelegationTaskRunning: vi.fn(),
   waitGenerationRunForComputeApproval: vi.fn(),
+  assertConversationChannelDeliveryAvailable: vi.fn(),
+  hasUnifiedConversationEntitlement: vi.fn(),
+  reserveConversationEntitlement: vi.fn(),
+  releaseConversationEntitlement: vi.fn(),
+  retryGenerationDelivery: vi.fn(),
+  retryOperatorMessageDelivery: vi.fn(),
 }));
 
 vi.mock("@delegate/model-runtime", () => ({
@@ -38,7 +47,7 @@ vi.mock("@delegate/model-runtime", () => ({
 
 vi.mock("@delegate/runtime", () => ({
   buildComputeRequestsFromDelegationPlan: mocks.buildComputeRequestsFromDelegationPlan,
-  createConversationPlan: () => ({ intent: "faq", nextStep: "answer" }),
+  createConversationPlan: mocks.createConversationPlan,
   parseComputeDirective: mocks.parseComputeDirective,
   renderReplyPreview: () => "fallback",
   readPersistedDelegationStepRequest: mocks.readPersistedDelegationStepRequest,
@@ -48,29 +57,34 @@ vi.mock("@delegate/runtime", () => ({
 }));
 
 vi.mock("@delegate/web-data", () => ({
+  assertConversationChannelDeliveryAvailable: mocks.assertConversationChannelDeliveryAvailable,
   buildRepresentativeRuntimeProfile: mocks.buildRepresentativeRuntimeProfile,
   claimNextOperatorMessageWorkItem: mocks.claimNextOperatorMessageWorkItem,
   claimNextGenerationWorkItem: mocks.claimNextGenerationWorkItem,
-  completeOperatorMessageDelivery: vi.fn(),
+  completeOperatorMessageDelivery: mocks.completeOperatorMessageDelivery,
   completeInlineGenerationRun: mocks.completeInlineGenerationRun,
   createAudienceComputeSession: mocks.createAudienceComputeSession,
   createComputeDelegationTask: mocks.createComputeDelegationTask,
   createClarifyingDelegationTask: mocks.createClarifyingDelegationTask,
   continueClarifyingDelegationTask: mocks.continueClarifyingDelegationTask,
   deferGenerationRunForHuman: vi.fn(),
+  deferOperatorMessageDelivery: mocks.deferOperatorMessageDelivery,
   ensureConversationLeadAndHandoff: mocks.ensureConversationLeadAndHandoff,
   executeAudienceTool: mocks.executeAudienceTool,
   finalizeComputeDelegationTask: mocks.finalizeComputeDelegationTask,
   findConversationClarifyingDelegationTask: mocks.findConversationClarifyingDelegationTask,
   failGenerationRun: mocks.failGenerationRun,
   getRepresentativeRuntimeSetupSnapshot: mocks.getRepresentativeRuntimeSetupSnapshot,
+  hasUnifiedConversationEntitlement: mocks.hasUnifiedConversationEntitlement,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
   markGenerationDeliveryComplete: mocks.markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval: mocks.markDelegationTaskAwaitingApproval,
   markDelegationTaskRunning: mocks.markDelegationTaskRunning,
   recallRepresentativeContext: mocks.recallRepresentativeContext,
-  retryGenerationDelivery: vi.fn(),
-  retryOperatorMessageDelivery: vi.fn(),
+  releaseConversationEntitlement: mocks.releaseConversationEntitlement,
+  reserveConversationEntitlement: mocks.reserveConversationEntitlement,
+  retryGenerationDelivery: mocks.retryGenerationDelivery,
+  retryOperatorMessageDelivery: mocks.retryOperatorMessageDelivery,
   waitGenerationRunForComputeApproval: mocks.waitGenerationRunForComputeApproval,
 }));
 
@@ -86,6 +100,13 @@ describe("conversation worker knowledge recall", () => {
     mocks.findConversationClarifyingDelegationTask.mockResolvedValue(null);
     mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: null, source: "model" });
     mocks.finalizeComputeDelegationTask.mockResolvedValue({ hasMoreSteps: false });
+    mocks.assertConversationChannelDeliveryAvailable.mockResolvedValue(undefined);
+    mocks.hasUnifiedConversationEntitlement.mockResolvedValue(false);
+    mocks.reserveConversationEntitlement.mockResolvedValue(null);
+    mocks.releaseConversationEntitlement.mockResolvedValue(undefined);
+    mocks.deferOperatorMessageDelivery.mockResolvedValue(true);
+    mocks.retryGenerationDelivery.mockResolvedValue(undefined);
+    mocks.retryOperatorMessageDelivery.mockResolvedValue(undefined);
     mocks.createComputeDelegationTask.mockResolvedValue({
       task: { id: "task-1" },
       step: { id: "task-step-1" },
@@ -109,6 +130,10 @@ describe("conversation worker knowledge recall", () => {
       compute: { enabled: false, baseImage: "debian:bookworm-slim" },
     });
     mocks.buildRepresentativeRuntimeProfile.mockReturnValue({ id: "rep-1" });
+    mocks.createConversationPlan.mockReturnValue({
+      intent: "faq",
+      nextStep: "answer",
+    });
     mocks.loadGenerationRecentTurns.mockResolvedValue([]);
     mocks.recallRepresentativeContext.mockResolvedValue({
       items: [{
@@ -175,6 +200,232 @@ describe("conversation worker knowledge recall", () => {
       replyText: expect.stringContaining("佩奇临时代课"),
       citations: [expect.objectContaining({ title: "佩奇当老师" })],
     }));
+  });
+
+  it("retries only persisted delivery for a completed Telegram generation", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        result: { message_id: 90210 },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-delivery-retry",
+      runId: "run-delivery-retry",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-telegram",
+      contactId: "contact-telegram",
+      controlState: "WAITING_USER",
+      inputMessageId: "message-inbound",
+      userText: "original inbound",
+      channel: "telegram",
+      externalConversationId: "123456",
+      deliveryOnly: true,
+      outputMessageId: "message-output",
+      outputText: "persisted reply",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramBotToken: "telegram-token-long-enough",
+      telegramConversationPlatformMode: "worker",
+      telegramRequestTimeoutMs: 8_000,
+    })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.claimNextGenerationWorkItem).toHaveBeenCalledWith({
+      telegramWorkerEnabled: true,
+    });
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/sendMessage"),
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        body: JSON.stringify({
+          chat_id: "123456",
+          text: "persisted reply",
+        }),
+      }),
+    );
+    expect(mocks.markGenerationDeliveryComplete).toHaveBeenCalledWith({
+      runId: "run-delivery-retry",
+      outputMessageId: "message-output",
+      externalMessageId: "90210",
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("does not claim Telegram generation ownership outside worker mode", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue(null);
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "shadow",
+    })).resolves.toEqual({ processed: false });
+
+    expect(mocks.claimNextGenerationWorkItem).toHaveBeenCalledWith({
+      telegramWorkerEnabled: false,
+    });
+    expect(mocks.claimNextOperatorMessageWorkItem).toHaveBeenCalledWith({
+      telegramWorkerEnabled: false,
+    });
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+    expect(mocks.markGenerationDeliveryComplete).not.toHaveBeenCalled();
+  });
+
+  it("defers an operator message paused by channel policy without consuming retries", async () => {
+    mocks.claimNextOperatorMessageWorkItem.mockResolvedValue({
+      outboxId: "operator-outbox-paused",
+      messageId: "operator-message-paused",
+      conversationId: "conversation-paused",
+      text: "operator reply",
+      operatorName: "Owner",
+      channel: "telegram",
+      externalConversationId: "123456",
+    });
+    const paused = Object.assign(
+      new Error("Channel is unavailable: channel_paused."),
+      {
+        name: "ChannelUnavailableError",
+        code: "channel_paused",
+      },
+    );
+    mocks.assertConversationChannelDeliveryAvailable.mockRejectedValue(paused);
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+      telegramBotToken: "telegram-token-long-enough",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "operator-message-paused",
+      status: "deferred",
+    });
+
+    expect(mocks.deferOperatorMessageDelivery).toHaveBeenCalledWith({
+      outboxId: "operator-outbox-paused",
+      messageId: "operator-message-paused",
+      reason: "channel_paused",
+    });
+    expect(mocks.retryOperatorMessageDelivery).not.toHaveBeenCalled();
+    expect(mocks.claimNextGenerationWorkItem).not.toHaveBeenCalled();
+  });
+
+  it("reserves and atomically consumes a shared entitlement after free replies are exhausted", async () => {
+    const reservation = {
+      audienceIdentityId: "audience-1",
+      representativeId: "rep-1",
+      productCode: "plan:pass",
+      generationRunId: "run-1",
+      operationKey: "generation:run-1:attempt:1",
+      accountId: "entitlement-1",
+      attempt: 1,
+    };
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-1",
+      runId: "run-1",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-1",
+      contactId: "contact-1",
+      audienceIdentityId: "audience-1",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-1",
+      userText: "继续回答",
+      channel: "web",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: false,
+        deepHelpUnlocked: false,
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 4 },
+    });
+    mocks.reserveConversationEntitlement.mockResolvedValue(reservation);
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.reserveConversationEntitlement).toHaveBeenCalledWith({
+      audienceIdentityId: "audience-1",
+      representativeId: "rep-1",
+      generationRunId: "run-1",
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entitlementReservation: reservation,
+      }),
+    );
+    expect(mocks.releaseConversationEntitlement).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to legacy unlock flags once unified entitlements are authoritative", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-legacy",
+      runId: "run-legacy",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-legacy",
+      contactId: "contact-legacy",
+      audienceIdentityId: "audience-1",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-legacy",
+      userText: "继续回答",
+      channel: "web",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: true,
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 4 },
+    });
+    mocks.hasUnifiedConversationEntitlement.mockResolvedValue(true);
+
+    await processNextConversationWork({ port: 4040, pollMs: 500 });
+
+    expect(mocks.createConversationPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usage: {
+          freeRepliesUsed: 4,
+          passUnlocked: false,
+          deepHelpUnlocked: false,
+        },
+      }),
+    );
   });
 
   it("moves an explicit web compute request into the approval waiting state", async () => {

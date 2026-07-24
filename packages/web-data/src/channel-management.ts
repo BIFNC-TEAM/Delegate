@@ -16,7 +16,13 @@ const channelKinds = [
   RepresentativeChannelKind.MATRIX,
   RepresentativeChannelKind.TELEGRAM,
 ] as const;
-const healthyLegacyStatuses = new Set(["CONNECTED", "ACTIVE", "HEALTHY", "DEGRADED"]);
+const healthyLegacyStatuses = new Set([
+  "CONFIGURED",
+  "CONNECTED",
+  "ACTIVE",
+  "HEALTHY",
+  "DEGRADED",
+]);
 const recentEventLimit = 1_000;
 const healthFailureWindowMs = 24 * 60 * 60 * 1_000;
 

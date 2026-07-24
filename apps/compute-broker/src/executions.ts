@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { posix as pathPosix } from "node:path";
 
 import {
@@ -14,13 +14,15 @@ import {
   type BrowserExecutionMode,
   type ComputeFilesystemMode,
   type ComputeSubagentId,
+  type ExecuteToolResponse,
   type NativeComputerProvider,
   type ToolExecutionRequest,
 } from "@delegate/compute-protocol";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import {
   finalizeComputeApprovalConversation,
-  markDelegationTaskRunning,
+  markDelegationTaskRunningAfterApprovalInTransaction,
+  validateDelegationApprovedExecutionInTransaction,
 } from "@delegate/web-data";
 
 import { createApprovalRequestForExecution } from "./approvals";
@@ -82,6 +84,7 @@ import {
   serializeSession,
 } from "./serializers";
 import { SessionError } from "./session-error";
+import { claimDelegatedGenerationExecution } from "./generation-work-fence";
 
 type PolicyExecutionContext = Awaited<ReturnType<typeof loadSessionPolicyContext>>;
 type LeasedSessionRecord = {
@@ -193,7 +196,6 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
     estimatedCredits,
     totalAvailableCredits: budgetAvailability.totalAvailableCredits,
   });
-
   await computeLifecycleHooks.emit({
     kind: "tool_preflight",
     scope: {
@@ -219,6 +221,16 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
         }
       : {}),
   });
+  const delegatedAdmission = await admitDelegatedGenerationExecution({
+    context,
+    input: normalized,
+    generationWorkLease: input.generationWorkLease,
+    decision: effectiveDecision.decision,
+    subagentId: sessionSubagentId,
+  });
+  if (delegatedAdmission?.response) {
+    return delegatedAdmission.response;
+  }
 
   if (effectiveDecision.decision === "deny") {
     const requestPayload = buildExecutionRequestPayload(normalized);
@@ -239,27 +251,29 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
         ownerBalanceCredits: budgetAvailability.ownerBalanceCredits,
         sponsorPoolCredit: budgetAvailability.sponsorPoolCredit,
       },
+      existingExecutionId: delegatedAdmission?.execution.id,
     });
   }
 
   if (effectiveDecision.decision === "ask") {
     const requestPayload = buildExecutionRequestPayload(normalized);
-    const execution = await prisma.toolExecution.create({
-      data: {
-        sessionId,
-        delegationTaskId: context.session.delegationTaskId,
-        delegationTaskStepId: context.session.delegationTaskStepId,
-        capability: mapCapabilityToDb(normalized.capability),
-        subagentId: sessionSubagentId,
-        status: "BLOCKED",
-        requestedCommand: getPersistedCommand(normalized) ?? null,
-        requestedPath: normalized.path ?? null,
-        ...(requestPayload ? { requestPayload } : {}),
-        workingDirectory: normalized.workingDirectory ?? null,
-        mcpBindingId: normalized.bindingId ?? null,
-        policyDecision: mapPolicyDecisionToDb("ask"),
-      },
-    });
+    const execution = delegatedAdmission?.execution
+      ?? await prisma.toolExecution.create({
+        data: {
+          sessionId,
+          delegationTaskId: context.session.delegationTaskId,
+          delegationTaskStepId: context.session.delegationTaskStepId,
+          capability: mapCapabilityToDb(normalized.capability),
+          subagentId: sessionSubagentId,
+          status: "BLOCKED",
+          requestedCommand: getPersistedCommand(normalized) ?? null,
+          requestedPath: normalized.path ?? null,
+          ...(requestPayload ? { requestPayload } : {}),
+          workingDirectory: normalized.workingDirectory ?? null,
+          mcpBindingId: normalized.bindingId ?? null,
+          policyDecision: mapPolicyDecisionToDb("ask"),
+        },
+      });
 
     const approval = await createApprovalRequestForExecution({
       representativeId: context.session.representativeId,
@@ -300,7 +314,7 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
       },
     });
 
-    return executeToolResponseSchema.parse({
+    const response = executeToolResponseSchema.parse({
       outcome: "pending_approval",
       session: serializeSession(session),
       execution: serializeExecution({
@@ -316,6 +330,8 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
         sponsorPoolCredit: budgetAvailability.sponsorPoolCredit,
       },
     });
+    await persistDelegatedExecutionResponse(execution.id, response);
+    return response;
   }
 
   return runAllowedExecution({
@@ -325,6 +341,17 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
       subagentId: sessionSubagentId,
     },
     estimatedCredits,
+    ...(delegatedAdmission
+      ? delegatedAdmission.execution.executionLeaseToken
+        ? {
+            existingExecutionId: delegatedAdmission.execution.id,
+            expectedExecutionLeaseToken:
+              delegatedAdmission.execution.executionLeaseToken,
+          }
+        : {
+          existingExecutionId: delegatedAdmission.execution.id,
+        }
+      : {}),
   });
 }
 
@@ -513,8 +540,50 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
     });
   }
 
+  const delegatedApprovalContext =
+    approval.delegationTaskId
+      ? {
+          taskId: approval.delegationTaskId,
+          stepId: approval.delegationTaskStepId,
+          generationRunId: approval.generationRunId,
+          originConversationId: approval.conversationId,
+          approvalId: approval.id,
+        }
+      : null;
+  if (
+    delegatedApprovalContext
+    && (
+      !delegatedApprovalContext.stepId
+      || !delegatedApprovalContext.generationRunId
+      || !delegatedApprovalContext.originConversationId
+    )
+  ) {
+    throw new SessionError(409, "delegation_approval_context_incomplete");
+  }
+
   const resolvedAt = new Date();
   const updatedApproval = await prisma.$transaction(async (tx) => {
+    if (
+      delegatedApprovalContext?.stepId
+      && delegatedApprovalContext.generationRunId
+      && delegatedApprovalContext.originConversationId
+    ) {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtext(${delegatedApprovalContext.originConversationId})
+        )
+      `;
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtext(${delegatedApprovalContext.generationRunId})
+        )
+      `;
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtext(${delegatedApprovalContext.taskId})
+        )
+      `;
+    }
     const claimedApproval = await tx.approvalRequest.updateMany({
       where: { id: approval.id, status: "PENDING" },
       data: {
@@ -531,10 +600,31 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
       where: { id: approval.id },
     });
 
+    if (
+      delegatedApprovalContext?.stepId
+      && delegatedApprovalContext.generationRunId
+      && delegatedApprovalContext.originConversationId
+    ) {
+      await markDelegationTaskRunningAfterApprovalInTransaction(tx, {
+        taskId: delegatedApprovalContext.taskId,
+        stepId: delegatedApprovalContext.stepId,
+        generationRunId: delegatedApprovalContext.generationRunId,
+        originConversationId: delegatedApprovalContext.originConversationId,
+        approvalId: delegatedApprovalContext.approvalId,
+        actorId: input.resolvedBy ?? "owner-dashboard",
+      });
+    }
+
     if (blockedExecution) {
       const queued = await tx.toolExecution.updateMany({
         where: { id: blockedExecution.id, status: "BLOCKED" },
-        data: { status: "QUEUED" },
+        data: {
+          status: "QUEUED",
+          startedAt: null,
+          finishedAt: null,
+          executionLeaseToken: null,
+          responseSnapshot: Prisma.DbNull,
+        },
       });
       if (queued.count !== 1) {
         throw new SessionError(409, "approval_request_execution_not_blocked");
@@ -600,13 +690,6 @@ export async function resolveApproval(approvalId: string, rawInput: unknown) {
     return nextApproval;
   });
 
-  if (updatedApproval.delegationTaskId) {
-    await markDelegationTaskRunning(
-      updatedApproval.delegationTaskId,
-      updatedApproval.delegationTaskStepId ?? undefined,
-    );
-  }
-
   return resolveApprovalResponseSchema.parse({
     outcome: "approved",
     approvalRequest: serializeApprovalRequest(updatedApproval),
@@ -641,26 +724,133 @@ export async function processNextApprovedExecution() {
     orderBy: { createdAt: "asc" },
     take: 20,
   });
-  let execution: (typeof queuedExecutions)[number] | null = null;
-  let approval: Awaited<ReturnType<typeof prisma.approvalRequest.findUnique>> = null;
+  let claim:
+    | {
+        kind: "claimed";
+        execution: (typeof queuedExecutions)[number];
+        approval: NonNullable<
+          Awaited<ReturnType<typeof prisma.approvalRequest.findUnique>>
+        >;
+        executionLeaseToken: string;
+      }
+    | {
+        kind: "invalid";
+        approvalId: string;
+        reason: string;
+      }
+    | null = null;
   for (const candidate of queuedExecutions) {
     if (!candidate.approvalRequestId) continue;
-    const candidateApproval = await prisma.approvalRequest.findUnique({
-      where: { id: candidate.approvalRequestId },
+    const candidateClaim = await prisma.$transaction(async (tx) => {
+      const [currentExecution, candidateApproval] = await Promise.all([
+        tx.toolExecution.findUnique({
+          where: { id: candidate.id },
+        }),
+        tx.approvalRequest.findUnique({
+          where: { id: candidate.approvalRequestId! },
+        }),
+      ]);
+      if (
+        !currentExecution
+        || currentExecution.status !== "QUEUED"
+        || currentExecution.approvalRequestId !== candidate.approvalRequestId
+        || candidateApproval?.status !== "APPROVED"
+        || candidateApproval.toolExecutionId !== currentExecution.id
+      ) {
+        return null;
+      }
+
+      if (candidateApproval.delegationTaskId) {
+        const invalidContext =
+          !candidateApproval.delegationTaskStepId
+          || !candidateApproval.generationRunId
+          || !candidateApproval.conversationId
+          || currentExecution.delegationTaskId
+            !== candidateApproval.delegationTaskId
+          || currentExecution.delegationTaskStepId
+            !== candidateApproval.delegationTaskStepId;
+        const validation = invalidContext
+          ? {
+              ready: false as const,
+              reason: "delegation_approval_context_mismatch",
+            }
+          : await validateDelegationApprovedExecutionInTransaction(tx, {
+              taskId: candidateApproval.delegationTaskId,
+              stepId: candidateApproval.delegationTaskStepId!,
+              generationRunId: candidateApproval.generationRunId!,
+              originConversationId: candidateApproval.conversationId!,
+              approvalId: candidateApproval.id,
+            });
+        if (!validation.ready) {
+          const now = new Date();
+          await tx.toolExecution.updateMany({
+            where: {
+              id: currentExecution.id,
+              status: "QUEUED",
+            },
+            data: {
+              status: "CANCELED",
+              finishedAt: now,
+              executionLeaseToken: null,
+            },
+          });
+          await tx.computeSession.updateMany({
+            where: { id: currentExecution.sessionId },
+            data: {
+              status: "IDLE",
+              failureReason: validation.reason,
+              lastHeartbeatAt: now,
+            },
+          });
+          return {
+            kind: "invalid" as const,
+            approvalId: candidateApproval.id,
+            reason: validation.reason,
+          };
+        }
+      }
+
+      const executionLeaseToken = createExecutionLeaseToken();
+      const startedAt = new Date();
+      const claimed = await tx.toolExecution.updateMany({
+        where: {
+          id: currentExecution.id,
+          status: "QUEUED",
+          approvalRequestId: candidateApproval.id,
+        },
+        data: {
+          status: "RUNNING",
+          startedAt,
+          finishedAt: null,
+          executionLeaseToken,
+        },
+      });
+      if (claimed.count !== 1) return null;
+      const claimedExecution = await tx.toolExecution.findUniqueOrThrow({
+        where: { id: currentExecution.id },
+      });
+      return {
+        kind: "claimed" as const,
+        execution: claimedExecution,
+        approval: candidateApproval,
+        executionLeaseToken,
+      };
     });
-    if (candidateApproval?.status === "APPROVED") {
-      execution = candidate;
-      approval = candidateApproval;
+    if (candidateClaim) {
+      claim = candidateClaim;
       break;
     }
   }
-  if (!execution || !approval) return false;
-
-  const claimed = await prisma.toolExecution.updateMany({
-    where: { id: execution.id, status: "QUEUED" },
-    data: { status: "RUNNING" },
-  });
-  if (claimed.count !== 1) return true;
+  if (!claim) return false;
+  if (claim.kind === "invalid") {
+    await finalizeComputeApprovalConversation({
+      approvalId: claim.approvalId,
+      outcome: "failed",
+      failureReason: claim.reason,
+    });
+    return true;
+  }
+  const { execution, approval, executionLeaseToken } = claim;
 
   try {
     if (
@@ -691,16 +881,34 @@ export async function processNextApprovedExecution() {
 
     if (decision.decision === "deny") {
       const now = new Date();
-      await prisma.$transaction([
-        prisma.toolExecution.update({
-          where: { id: execution.id },
-          data: { status: "CANCELED", finishedAt: now, policyDecision: "DENY" },
-        }),
-        prisma.computeSession.update({
+      const denied = await prisma.$transaction(async (tx) => {
+        const canceled = await tx.toolExecution.updateMany({
+          where: {
+            id: execution.id,
+            status: "RUNNING",
+            executionLeaseToken,
+          },
+          data: {
+            status: "CANCELED",
+            finishedAt: now,
+            policyDecision: "DENY",
+            executionLeaseToken: null,
+          },
+        });
+        if (canceled.count !== 1) return false;
+        await tx.computeSession.update({
           where: { id: execution.sessionId },
-          data: { status: "IDLE", failureReason: decision.reason, lastHeartbeatAt: now },
-        }),
-      ]);
+          data: {
+            status: "IDLE",
+            failureReason: decision.reason,
+            lastHeartbeatAt: now,
+          },
+        });
+        return true;
+      });
+      if (!denied) {
+        throw new SessionError(409, "compute_execution_claim_lost");
+      }
       await finalizeComputeApprovalConversation({
         approvalId: approval.id,
         outcome: "policy_denied",
@@ -709,11 +917,64 @@ export async function processNextApprovedExecution() {
       return true;
     }
 
+    if (
+      approval.delegationTaskId
+      && approval.delegationTaskStepId
+      && approval.generationRunId
+      && approval.conversationId
+    ) {
+      const validation = await prisma.$transaction(async (tx) => {
+        const ready =
+          await validateDelegationApprovedExecutionInTransaction(tx, {
+            taskId: approval.delegationTaskId!,
+            stepId: approval.delegationTaskStepId!,
+            generationRunId: approval.generationRunId!,
+            originConversationId: approval.conversationId!,
+            approvalId: approval.id,
+          });
+        if (!ready.ready) return ready;
+        const retained = await tx.toolExecution.updateMany({
+          where: {
+            id: execution.id,
+            status: "RUNNING",
+            executionLeaseToken,
+            approvalRequestId: approval.id,
+          },
+          data: {
+            startedAt: execution.startedAt ?? new Date(),
+          },
+        });
+        if (retained.count !== 1) {
+          return {
+            ready: false as const,
+            reason: "compute_execution_claim_lost",
+          };
+        }
+        await tx.delegationTaskExternalEffect.updateMany({
+          where: {
+            delegationTaskId: approval.delegationTaskId!,
+            delegationTaskStepId: approval.delegationTaskStepId!,
+            approvalRequestId: approval.id,
+            status: "APPROVED",
+          },
+          data: {
+            status: "EXECUTING",
+            failureReason: null,
+          },
+        });
+        return ready;
+      });
+      if (!validation.ready) {
+        throw new SessionError(409, validation.reason);
+      }
+    }
+
     const result = await runAllowedExecution({
       context: evaluated.context,
       input: normalized,
       estimatedCredits,
       existingExecutionId: execution.id,
+      expectedExecutionLeaseToken: executionLeaseToken,
     });
     await finalizeComputeApprovalConversation({
       approvalId: approval.id,
@@ -730,23 +991,45 @@ export async function processNextApprovedExecution() {
       ...(result.session.failureReason ? { failureReason: result.session.failureReason } : {}),
     });
   } catch (error) {
+    if (
+      error instanceof SessionError
+      && error.message === "compute_execution_claim_lost"
+    ) {
+      return true;
+    }
     const reason = error instanceof Error ? error.message : "approved_compute_execution_failed";
     const now = new Date();
-    await prisma.$transaction([
-      prisma.toolExecution.updateMany({
-        where: { id: execution.id, status: "RUNNING" },
-        data: { status: "FAILED", finishedAt: now },
-      }),
-      prisma.computeSession.updateMany({
+    const failed = await prisma.$transaction(async (tx) => {
+      const terminalized = await tx.toolExecution.updateMany({
+        where: {
+          id: execution.id,
+          status: "RUNNING",
+          executionLeaseToken,
+        },
+        data: {
+          status: "FAILED",
+          finishedAt: now,
+          executionLeaseToken: null,
+        },
+      });
+      if (terminalized.count !== 1) return false;
+      await tx.computeSession.updateMany({
         where: { id: execution.sessionId },
-        data: { status: "IDLE", failureReason: reason.slice(0, 240), lastHeartbeatAt: now },
-      }),
-    ]);
-    await finalizeComputeApprovalConversation({
-      approvalId: approval.id,
-      outcome: "failed",
-      failureReason: reason,
+        data: {
+          status: "IDLE",
+          failureReason: reason.slice(0, 240),
+          lastHeartbeatAt: now,
+        },
+      });
+      return true;
     });
+    if (failed) {
+      await finalizeComputeApprovalConversation({
+        approvalId: approval.id,
+        outcome: "failed",
+        failureReason: reason,
+      });
+    }
   }
 
   return true;
@@ -792,43 +1075,232 @@ export async function listSessionApprovals(sessionId: string) {
   });
 }
 
+async function admitDelegatedGenerationExecution(params: {
+  context: PolicyExecutionContext;
+  input: NormalizedExecutionInput;
+  generationWorkLease?: ToolExecutionRequest["generationWorkLease"];
+  decision: "allow" | "ask" | "deny";
+  subagentId: ComputeSubagentId;
+}): Promise<{
+  execution: Awaited<
+    ReturnType<typeof claimDelegatedGenerationExecution>
+  >["execution"];
+  response?: ExecuteToolResponse;
+} | null> {
+  const session = params.context.session;
+  const isDelegated = Boolean(
+    session.delegationTaskId || session.delegationTaskStepId,
+  );
+  if (!isDelegated) return null;
+  if (
+    !session.conversationId
+    || !session.generationRunId
+    || !session.delegationTaskId
+    || !session.delegationTaskStepId
+    || !params.generationWorkLease
+  ) {
+    throw new SessionError(409, "delegation_generation_lease_required");
+  }
+
+  const descriptor = describeExecution(params.context, params.input);
+  const requestPayload = buildExecutionRequestPayload(params.input);
+  const requestPayloadHash = hashRequestPayload(requestPayload);
+  const startedAt = params.decision === "allow" ? new Date() : null;
+  const executionLeaseToken =
+    params.decision === "allow" ? createExecutionLeaseToken() : null;
+  const admission = await prisma.$transaction((tx) =>
+    claimDelegatedGenerationExecution(tx, {
+      sessionId: session.id,
+      conversationId: session.conversationId!,
+      generationRunId: session.generationRunId!,
+      delegationTaskId: session.delegationTaskId!,
+      delegationTaskStepId: session.delegationTaskStepId!,
+      ...params.generationWorkLease!,
+      requestPayloadHash,
+      execution: {
+        delegationTaskId: session.delegationTaskId,
+        delegationTaskStepId: session.delegationTaskStepId,
+        capability: mapCapabilityToDb(descriptor.capability),
+        subagentId: params.subagentId,
+        status: params.decision === "allow" ? "RUNNING" : "BLOCKED",
+        requestedCommand: descriptor.requestedCommand ?? null,
+        requestedPath: descriptor.requestedPath ?? null,
+        requestPayload,
+        workingDirectory: descriptor.workingDirectory ?? null,
+        mcpBindingId: params.input.bindingId ?? null,
+        policyDecision: mapPolicyDecisionToDb(params.decision),
+        startedAt,
+        executionLeaseToken,
+      },
+    }),
+  );
+  if (admission.claimed) {
+    return { execution: admission.execution };
+  }
+
+  const response = await replayDelegatedGenerationExecution({
+    context: params.context,
+    execution: admission.execution,
+    decision: params.decision,
+  });
+  return response
+    ? { execution: admission.execution, response }
+    : { execution: admission.execution };
+}
+
+async function replayDelegatedGenerationExecution(params: {
+  context: PolicyExecutionContext;
+  execution: Awaited<
+    ReturnType<typeof claimDelegatedGenerationExecution>
+  >["execution"];
+  decision: "allow" | "ask" | "deny";
+}): Promise<ExecuteToolResponse | null> {
+  if (params.execution.status === "RUNNING" || params.execution.status === "QUEUED") {
+    throw new SessionError(409, "generation_execution_in_progress");
+  }
+
+  const approval = await prisma.approvalRequest.findUnique({
+    where: { toolExecutionId: params.execution.id },
+  });
+  if (
+    params.execution.status === "BLOCKED"
+    && params.decision === "ask"
+    && !approval
+  ) {
+    return null;
+  }
+  if (
+    params.execution.responseSnapshot
+    && (
+      params.execution.status === "SUCCEEDED"
+      || params.execution.status === "FAILED"
+      || (
+        params.execution.status === "BLOCKED"
+        && approval?.status === "PENDING"
+      )
+    )
+  ) {
+    return executeToolResponseSchema.parse(params.execution.responseSnapshot);
+  }
+
+  const [session, artifacts, ledgerEntries] = await Promise.all([
+    prisma.computeSession.findUnique({
+      where: { id: params.execution.sessionId },
+    }),
+    prisma.artifact.findMany({
+      where: { toolExecutionId: params.execution.id },
+      orderBy: { createdAt: "asc" },
+    }),
+    prisma.ledgerEntry.findMany({
+      where: { toolExecutionId: params.execution.id },
+    }),
+  ]);
+  if (!session) {
+    throw new SessionError(409, "generation_execution_context_mismatch");
+  }
+
+  const budget = summarizeBudgetAvailability(params.context.session);
+  const actualCredits = ledgerEntries
+    .filter((entry) => entry.kind === "PLAN_DEBIT")
+    .reduce((total, entry) => total + Math.max(0, -entry.creditDelta), 0);
+  const costFor = (kind: string) =>
+    ledgerEntries
+      .filter((entry) => entry.kind === kind)
+      .reduce((total, entry) => total + Math.max(0, entry.costCents), 0);
+  const outcome = approval?.status === "PENDING"
+    ? "pending_approval"
+    : params.execution.status === "SUCCEEDED"
+      ? "completed"
+      : params.execution.status === "BLOCKED"
+        ? "blocked"
+        : "failed";
+  return executeToolResponseSchema.parse({
+    outcome,
+    session: serializeSession(session),
+    execution: serializeExecution(params.execution),
+    ...(approval ? { approvalRequest: serializeApprovalRequest(approval) } : {}),
+    artifacts: artifacts.map((artifact) => serializeArtifact(artifact)),
+    billing: {
+      ...(actualCredits > 0 ? { actualCredits } : {}),
+      computeCostCents: costFor("COMPUTE_MINUTES"),
+      browserCostCents: costFor("BROWSER_MINUTES"),
+      providerCostCents: costFor("MODEL_USAGE"),
+      mcpCostCents: costFor("MCP_CALLS"),
+      storageCostCents: costFor("STORAGE_BYTES"),
+      conversationBudgetRemainingCredits: budget.conversationCredits,
+      ownerBalanceCredits: budget.ownerBalanceCredits,
+      sponsorPoolCredit: budget.sponsorPoolCredit,
+    },
+  });
+}
+
+async function persistDelegatedExecutionResponse(
+  executionId: string,
+  response: ExecuteToolResponse,
+) {
+  await prisma.toolExecution.updateMany({
+    where: {
+      id: executionId,
+      generationOutboxId: { not: null },
+    },
+    data: {
+      responseSnapshot: response as Prisma.InputJsonValue,
+    },
+  });
+}
+
 async function runAllowedExecution(params: {
   context: PolicyExecutionContext;
   input: NormalizedExecutionInput;
   estimatedCredits?: number;
   existingExecutionId?: string;
+  expectedExecutionLeaseToken?: string;
 }) {
   const startedAt = new Date();
   const executionContext = resolveExecutionIsolationContext(params.context);
-  const leasedSession = await ensureComputeSessionLease({
-    session: executionContext.session,
-    networkMode: executionContext.profile.networkMode,
-    filesystemMode: executionContext.profile.filesystemMode,
-  });
   const executionDescriptor = describeExecution(executionContext, params.input);
   const requestPayload = buildExecutionRequestPayload(params.input);
-  const execution = params.existingExecutionId
-    ? await prisma.toolExecution.update({
-        where: { id: params.existingExecutionId },
-        data: {
-          status: "RUNNING",
-          capability: mapCapabilityToDb(executionDescriptor.capability),
-          subagentId: params.input.subagentId,
-          requestedCommand: executionDescriptor.requestedCommand ?? null,
-          requestedPath: executionDescriptor.requestedPath ?? null,
-          ...(requestPayload ? { requestPayload } : {}),
-          workingDirectory: executionDescriptor.workingDirectory ?? null,
-          mcpBindingId: params.input.bindingId ?? null,
-          policyDecision: mapPolicyDecisionToDb("allow"),
-          startedAt,
-          finishedAt: null,
-          exitCode: null,
-          cpuMs: null,
-          wallMs: null,
-          bytesRead: null,
-          bytesWritten: null,
-        },
-      })
+  const existingExecutionId = params.existingExecutionId;
+  const executionLeaseToken =
+    existingExecutionId
+      ? params.expectedExecutionLeaseToken
+      : createExecutionLeaseToken();
+  if (!executionLeaseToken) {
+    throw new SessionError(409, "compute_execution_claim_missing");
+  }
+  const execution = existingExecutionId
+    ? await (async () => {
+        const claimed = await prisma.toolExecution.updateMany({
+          where: {
+            id: existingExecutionId,
+            status: "RUNNING",
+            executionLeaseToken,
+          },
+          data: {
+            capability: mapCapabilityToDb(executionDescriptor.capability),
+            subagentId: params.input.subagentId,
+            requestedCommand: executionDescriptor.requestedCommand ?? null,
+            requestedPath: executionDescriptor.requestedPath ?? null,
+            ...(requestPayload ? { requestPayload } : {}),
+            workingDirectory: executionDescriptor.workingDirectory ?? null,
+            mcpBindingId: params.input.bindingId ?? null,
+            policyDecision: mapPolicyDecisionToDb("allow"),
+            startedAt,
+            finishedAt: null,
+            exitCode: null,
+            cpuMs: null,
+            wallMs: null,
+            bytesRead: null,
+            bytesWritten: null,
+          },
+        });
+        if (claimed.count !== 1) {
+          throw new SessionError(409, "compute_execution_claim_lost");
+        }
+        return prisma.toolExecution.findUniqueOrThrow({
+          where: { id: existingExecutionId },
+        });
+      })()
       : await prisma.toolExecution.create({
         data: {
           sessionId: params.context.session.id,
@@ -844,8 +1316,14 @@ async function runAllowedExecution(params: {
           mcpBindingId: params.input.bindingId ?? null,
           policyDecision: mapPolicyDecisionToDb("allow"),
           startedAt,
+          executionLeaseToken,
         },
       });
+  const leasedSession = await ensureComputeSessionLease({
+    session: executionContext.session,
+    networkMode: executionContext.profile.networkMode,
+    filesystemMode: executionContext.profile.filesystemMode,
+  });
 
   await prisma.computeSession.update({
     where: { id: leasedSession.id },
@@ -899,30 +1377,6 @@ async function runAllowedExecution(params: {
     (sum, artifact) => sum + artifact.sizeBytes,
     0,
   );
-  const updatedExecution = await prisma.toolExecution.update({
-    where: { id: execution.id },
-    data: {
-      status: runtimeResult.exitCode === 0 ? "SUCCEEDED" : "FAILED",
-      finishedAt,
-      exitCode: runtimeResult.exitCode,
-      wallMs: runtimeResult.wallMs,
-      cpuMs: null,
-      bytesRead: runtimeResult.bytesRead,
-      bytesWritten: totalArtifactBytes,
-    },
-  });
-
-  const updatedSession = await prisma.computeSession.update({
-    where: { id: leasedSession.id },
-    data: {
-      status: "IDLE",
-      leaseLastUsedAt: finishedAt,
-      lastHeartbeatAt: finishedAt,
-      failureReason:
-        runtimeResult.exitCode === 0 ? null : truncate(runtimeResult.failureSummary ?? "", 240),
-    },
-  });
-
   if (executionDescriptor.capability === "browser") {
     await recordBrowserNavigation({
       representativeId: params.context.session.representativeId,
@@ -976,6 +1430,7 @@ async function runAllowedExecution(params: {
     wallMs: runtimeResult.wallMs,
     artifactBytes: totalArtifactBytes,
     finishedAt,
+    expectedExecutionLeaseToken: executionLeaseToken,
   });
 
   await computeLifecycleHooks.emit({
@@ -993,7 +1448,9 @@ async function runAllowedExecution(params: {
     exitCode: runtimeResult.exitCode,
     wallMs: runtimeResult.wallMs,
     artifactCount: runtimeResult.artifacts.length,
-    actualCredits: billing.actualCredits,
+    ...(typeof billing.actualCredits === "number"
+      ? { actualCredits: billing.actualCredits }
+      : {}),
     ...(runtimeResult.transport
       ? {
           transport: runtimeResult.transport,
@@ -1031,8 +1488,49 @@ async function runAllowedExecution(params: {
     },
   });
 
+  const [updatedExecution, updatedSession] = await prisma.$transaction(
+    async (tx) => {
+      const finalized = await tx.toolExecution.updateMany({
+        where: {
+          id: execution.id,
+          status: "RUNNING",
+          executionLeaseToken,
+        },
+        data: {
+          status: runtimeResult.exitCode === 0 ? "SUCCEEDED" : "FAILED",
+          finishedAt,
+          exitCode: runtimeResult.exitCode,
+          wallMs: runtimeResult.wallMs,
+          cpuMs: null,
+          bytesRead: runtimeResult.bytesRead,
+          bytesWritten: totalArtifactBytes,
+          executionLeaseToken: null,
+        },
+      });
+      if (finalized.count !== 1) {
+        throw new SessionError(409, "compute_execution_claim_lost");
+      }
+      const updatedExecution = await tx.toolExecution.findUniqueOrThrow({
+        where: { id: execution.id },
+      });
+      const updatedSession = await tx.computeSession.update({
+      where: { id: leasedSession.id },
+      data: {
+        status: "IDLE",
+        leaseLastUsedAt: finishedAt,
+        lastHeartbeatAt: finishedAt,
+        failureReason:
+          runtimeResult.exitCode === 0
+            ? null
+            : truncate(runtimeResult.failureSummary ?? "", 240),
+      },
+      });
+      return [updatedExecution, updatedSession] as const;
+    },
+  );
+
   if (runtimeResult.nativeComputerUse) {
-    return nativeComputerUseExecutionResponseSchema.parse({
+    const response = nativeComputerUseExecutionResponseSchema.parse({
       outcome: runtimeResult.exitCode === 0 ? "completed" : "failed",
       session: serializeSession(updatedSession),
       execution: serializeExecution(updatedExecution),
@@ -1043,9 +1541,11 @@ async function runAllowedExecution(params: {
       },
       nativeComputerUse: runtimeResult.nativeComputerUse,
     });
+    await persistDelegatedExecutionResponse(execution.id, response);
+    return response;
   }
 
-  return executeToolResponseSchema.parse({
+  const response = executeToolResponseSchema.parse({
     outcome: runtimeResult.exitCode === 0 ? "completed" : "failed",
     session: serializeSession(updatedSession),
     execution: serializeExecution(updatedExecution),
@@ -1055,6 +1555,8 @@ async function runAllowedExecution(params: {
       ...billing,
     },
   });
+  await persistDelegatedExecutionResponse(execution.id, response);
+  return response;
 }
 
 function resolveExecutionIsolationContext(context: PolicyExecutionContext): PolicyExecutionContext {
@@ -1779,23 +2281,37 @@ async function blockExecution(params: {
   requestPayload?: string | undefined;
   mcpBindingId?: string | undefined;
   billing?: ExecutionBillingSummary;
+  existingExecutionId?: string | undefined;
 }) {
-  const execution = await prisma.toolExecution.create({
-    data: {
-      sessionId: params.session.id,
-      delegationTaskId: params.session.delegationTaskId,
-      delegationTaskStepId: params.session.delegationTaskStepId,
-      capability: mapCapabilityToDb(params.capability),
-      subagentId: params.subagentId,
-      status: "BLOCKED",
-      requestedCommand: params.requestedCommand ?? null,
-      requestedPath: params.requestedPath ?? null,
-      ...(params.requestPayload ? { requestPayload: params.requestPayload } : {}),
-      workingDirectory: params.workingDirectory ?? null,
-      mcpBindingId: params.mcpBindingId ?? null,
-      policyDecision: mapPolicyDecisionToDb(params.policyDecision),
-    },
-  });
+  const execution = params.existingExecutionId
+    ? await prisma.toolExecution.update({
+        where: { id: params.existingExecutionId },
+        data: {
+          status: "BLOCKED",
+          requestedCommand: params.requestedCommand ?? null,
+          requestedPath: params.requestedPath ?? null,
+          ...(params.requestPayload ? { requestPayload: params.requestPayload } : {}),
+          workingDirectory: params.workingDirectory ?? null,
+          mcpBindingId: params.mcpBindingId ?? null,
+          policyDecision: mapPolicyDecisionToDb(params.policyDecision),
+        },
+      })
+    : await prisma.toolExecution.create({
+        data: {
+          sessionId: params.session.id,
+          delegationTaskId: params.session.delegationTaskId,
+          delegationTaskStepId: params.session.delegationTaskStepId,
+          capability: mapCapabilityToDb(params.capability),
+          subagentId: params.subagentId,
+          status: "BLOCKED",
+          requestedCommand: params.requestedCommand ?? null,
+          requestedPath: params.requestedPath ?? null,
+          ...(params.requestPayload ? { requestPayload: params.requestPayload } : {}),
+          workingDirectory: params.workingDirectory ?? null,
+          mcpBindingId: params.mcpBindingId ?? null,
+          policyDecision: mapPolicyDecisionToDb(params.policyDecision),
+        },
+      });
 
   const session = await touchSessionIdle(params.session.id);
 
@@ -1816,13 +2332,15 @@ async function blockExecution(params: {
     },
   });
 
-  return executeToolResponseSchema.parse({
+  const response = executeToolResponseSchema.parse({
     outcome: "blocked",
     session: serializeSession(session),
     execution: serializeExecution(execution),
     artifacts: [],
     billing: params.billing,
   });
+  await persistDelegatedExecutionResponse(execution.id, response);
+  return response;
 }
 
 export function resolveEffectiveDecision(params: {
@@ -2465,6 +2983,10 @@ function normalizePersistedRequestPayload(value: unknown) {
 
 function hashRequestPayload(value: string) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function createExecutionLeaseToken() {
+  return randomBytes(24).toString("hex");
 }
 
 function buildRiskSummary(reason: string): string {

@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockPrisma, tx } = vi.hoisted(() => {
+const { mockPrisma, tx, mockAbortDelegationTaskForGenerationFailure } =
+vi.hoisted(() => {
   const transactionClient = {
     $executeRaw: vi.fn(),
     $queryRaw: vi.fn(),
@@ -28,11 +29,30 @@ const { mockPrisma, tx } = vi.hoisted(() => {
     },
     generationRun: {
       upsert: vi.fn(),
+      findFirst: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    delegationTask: {
+      updateMany: vi.fn(),
+    },
+    delegationTaskStep: {
+      findUnique: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    delegationTaskExternalEffect: {
+      updateMany: vi.fn(),
+    },
+    toolExecution: {
+      findUnique: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    computeSession: {
+      updateMany: vi.fn(),
+    },
     outboxEvent: {
+      create: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
@@ -57,10 +77,15 @@ const { mockPrisma, tx } = vi.hoisted(() => {
           callback(transactionClient),
       ),
     },
+    mockAbortDelegationTaskForGenerationFailure: vi.fn(),
   };
 });
 
 vi.mock("../src/prisma", () => ({ prisma: mockPrisma }));
+vi.mock("../src/delegation-tasks", () => ({
+  abortDelegationTaskForGenerationFailureInTransaction:
+    mockAbortDelegationTaskForGenerationFailure,
+}));
 
 import {
   acceptInboundConversationMessage,
@@ -82,12 +107,23 @@ describe("conversation runtime version pin", () => {
     tx.outboxEvent.upsert.mockResolvedValue({ id: "outbox-1" });
     tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
     tx.generationRun.updateMany.mockResolvedValue({ count: 1 });
+    tx.delegationTask.updateMany.mockResolvedValue({ count: 1 });
+    tx.delegationTaskStep.updateMany.mockResolvedValue({ count: 1 });
+    tx.delegationTaskExternalEffect.updateMany.mockResolvedValue({ count: 0 });
+    tx.toolExecution.findUnique.mockResolvedValue(null);
+    tx.toolExecution.updateMany.mockResolvedValue({ count: 0 });
+    tx.computeSession.updateMany.mockResolvedValue({ count: 0 });
     tx.message.updateMany.mockResolvedValue({ count: 1 });
     tx.conversation.updateMany.mockResolvedValue({ count: 1 });
     tx.conversationEpisode.updateMany.mockResolvedValue({ count: 1 });
     tx.serviceEntitlementLedgerEntry.findMany.mockResolvedValue([]);
     tx.serviceEntitlementLedgerEntry.findUnique.mockResolvedValue(null);
     tx.conversation.update.mockResolvedValue({ id: "conversation-1" });
+    mockAbortDelegationTaskForGenerationFailure.mockResolvedValue({
+      taskId: "task-1",
+      status: "FAILED",
+      aborted: true,
+    });
   });
 
   it("does not grant paid entitlement from an incomplete runtime snapshot", () => {
@@ -136,7 +172,7 @@ describe("conversation runtime version pin", () => {
 
     await acceptInboundConversationMessage({
       representativeSlug: "representative",
-      conversationId: "conversation-1",
+      conversationId: "conversation-matrix-1",
       text: "continue the existing conversation",
       clientMessageId: "client-message-1",
     });
@@ -345,6 +381,7 @@ describe("conversation runtime version pin", () => {
     });
 
     await expect(completeInlineGenerationRun({
+      conversationId: "conversation-matrix-1",
       runId: "run-matrix-complete",
       outboxId: "outbox-matrix-complete",
       leaseAttempt: 1,
@@ -366,8 +403,8 @@ describe("conversation runtime version pin", () => {
       code: "matrix_private_room_not_verified",
     });
 
-    expect(tx.$executeRaw).toHaveBeenCalledTimes(2);
-    expect(tx.$executeRaw.mock.calls[1]?.[1]).toBe(
+    expect(tx.$executeRaw).toHaveBeenCalledTimes(3);
+    expect(tx.$executeRaw.mock.calls[2]?.[1]).toBe(
       "matrix-room-security:!room:example.org",
     );
     expect(tx.serviceEntitlementLedgerEntry.create).toHaveBeenCalledTimes(1);
@@ -498,6 +535,15 @@ describe("conversation runtime version pin", () => {
     tx.generationRun.findUnique.mockResolvedValue({
       id: "run-legacy",
       status: "QUEUED",
+      delegationTaskId: "task-legacy",
+      delegationTaskStepId: "step-legacy",
+      delegationTask: { status: "READY" },
+      delegationTaskStep: {
+        kind: "COMPUTE",
+        status: "READY",
+        externalEffects: [],
+        outputs: [],
+      },
       representativeVersionId: "representative-version-2",
       episodeId: "episode-1",
       episode: {
@@ -528,6 +574,18 @@ describe("conversation runtime version pin", () => {
 
     await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
 
+    expect(
+      mockAbortDelegationTaskForGenerationFailure,
+    ).toHaveBeenCalledWith(
+      tx,
+      {
+        taskId: "task-legacy",
+        generationRunId: "run-legacy",
+        stepId: "step-legacy",
+        failureReason:
+          "The generation run has no valid representative version pin or differs from its conversation episode.",
+      },
+    );
     expect(tx.generationRun.update).toHaveBeenCalledWith({
       where: { id: "run-legacy" },
       data: expect.objectContaining({
@@ -683,9 +741,615 @@ describe("conversation runtime version pin", () => {
     });
   });
 
+  it("requeues a fresh recovery outbox when the latest terminal delegation result exhausts its lease", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-terminal-exhausted",
+      aggregateId: "run-terminal-exhausted",
+      status: "PROCESSING",
+      attemptCount: 5,
+    }]);
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-terminal-exhausted",
+      status: "PROCESSING",
+      inputMessageId: "message-terminal-exhausted",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      delegationTaskId: "task-terminal-exhausted",
+      delegationTaskStepId: "step-terminal-exhausted",
+      runtimePolicySnapshot: null,
+    });
+    tx.delegationTaskStep.findUnique.mockResolvedValue({
+      status: "COMPLETED",
+    });
+    tx.generationRun.findFirst.mockResolvedValue({
+      id: "run-terminal-exhausted",
+    });
+    tx.outboxEvent.create.mockResolvedValue({
+      id: "outbox-terminal-recovery",
+      attemptCount: 0,
+    });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+
+    expect(tx.outboxEvent.update).toHaveBeenCalledWith({
+      where: { id: "outbox-terminal-exhausted" },
+      data: {
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: null,
+      },
+    });
+    expect(tx.outboxEvent.create).toHaveBeenCalledWith({
+      data: {
+        conversationId: "conversation-1",
+        aggregateType: "generation_run",
+        aggregateId: "run-terminal-exhausted",
+        eventType: "generation.requested",
+        payload: {
+          runId: "run-terminal-exhausted",
+          conversationId: "conversation-1",
+          messageId: "message-terminal-exhausted",
+          recoveryOfOutboxId: "outbox-terminal-exhausted",
+        },
+        status: "PENDING",
+        attemptCount: 0,
+        idempotencyKey:
+          "generation.requested:run-terminal-exhausted:recovery:outbox-terminal-exhausted",
+      },
+    });
+    expect(tx.generationRun.update).not.toHaveBeenCalled();
+    expect(tx.message.update).not.toHaveBeenCalled();
+  });
+
+  it("cancels an exhausted terminal delegation run when a newer step run exists", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-terminal-exhausted-old",
+      aggregateId: "run-terminal-exhausted-old",
+      status: "PROCESSING",
+      attemptCount: 5,
+    }]);
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-terminal-exhausted-old",
+      status: "PROCESSING",
+      inputMessageId: "message-terminal-exhausted-old",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      delegationTaskId: "task-terminal-exhausted",
+      delegationTaskStepId: "step-terminal-exhausted",
+      runtimePolicySnapshot: null,
+    });
+    tx.delegationTaskStep.findUnique.mockResolvedValue({
+      status: "COMPLETED",
+    });
+    tx.generationRun.findFirst.mockResolvedValue({
+      id: "run-terminal-newer",
+    });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+
+    expect(tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-terminal-exhausted-old" },
+      data: {
+        status: "CANCELED",
+        errorCode: "delegation_step_already_finalized",
+        errorMessage:
+          "Generation was superseded after its delegation step advanced.",
+        canceledAt: expect.any(Date),
+      },
+    });
+    expect(tx.outboxEvent.update).toHaveBeenCalledWith({
+      where: { id: "outbox-terminal-exhausted-old" },
+      data: {
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: null,
+      },
+    });
+    expect(tx.outboxEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("moves an uncertain external effect to reconciliation on the first expired lease", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-uncertain-effect",
+      aggregateId: "run-uncertain-effect",
+      status: "PROCESSING",
+      attemptCount: 1,
+    }]);
+    tx.outboxEvent.update
+      .mockResolvedValueOnce({
+        id: "outbox-uncertain-effect",
+        aggregateId: "run-uncertain-effect",
+        attemptCount: 2,
+      })
+      .mockResolvedValueOnce({});
+    tx.generationRun.findUnique
+      .mockResolvedValueOnce({
+        id: "run-uncertain-effect",
+        status: "PROCESSING",
+        delegationTaskId: "task-uncertain-effect",
+        delegationTaskStepId: "step-uncertain-effect",
+        delegationTaskStep: {
+          status: "RUNNING",
+          externalEffects: [{ id: "effect-uncertain" }],
+        },
+      })
+      .mockResolvedValueOnce({
+        id: "run-uncertain-effect",
+        status: "PROCESSING",
+        inputMessageId: "message-uncertain-effect",
+        outputMessageId: null,
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        delegationTaskId: "task-uncertain-effect",
+        delegationTaskStepId: "step-uncertain-effect",
+        runtimePolicySnapshot: null,
+      });
+    tx.delegationTaskStep.findUnique.mockResolvedValueOnce({
+      status: "RUNNING",
+    });
+    tx.delegationTaskExternalEffect.updateMany.mockResolvedValueOnce({
+      count: 1,
+    });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+
+    expect(tx.delegationTaskExternalEffect.updateMany).toHaveBeenCalledWith({
+      where: {
+        delegationTaskId: "task-uncertain-effect",
+        delegationTaskStepId: "step-uncertain-effect",
+        status: "EXECUTING",
+      },
+      data: {
+        status: "RECONCILIATION_REQUIRED",
+        failureReason: "delegation_external_effect_lease_lost",
+      },
+    });
+    expect(tx.delegationTask.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "task-uncertain-effect",
+        status: {
+          notIn: ["COMPLETED", "FAILED", "CANCELED", "EXPIRED"],
+        },
+      },
+      data: {
+        status: "WAITING_FOR_OWNER",
+        nextActionBy: "OWNER",
+        blockingReason:
+          "Worker lease expired during an external effect. Reconcile the remote outcome before continuing.",
+      },
+    });
+    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
+      where: { id: "outbox-uncertain-effect" },
+      data: {
+        status: "DEAD_LETTER",
+        lastError: "delegation_external_effect_lease_lost",
+      },
+    });
+  });
+
+  it("fences a permanently in-flight compute execution before Owner recovery", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-inflight-compute",
+      aggregateId: "run-inflight-compute",
+      conversationId: "conversation-1",
+      delegationTaskId: "task-inflight-compute",
+      status: "PROCESSING",
+      attemptCount: 5,
+    }]);
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-inflight-compute",
+      status: "PROCESSING",
+      inputMessageId: "message-inflight-compute",
+      outputMessageId: null,
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      delegationTaskId: "task-inflight-compute",
+      delegationTaskStepId: "step-inflight-compute",
+      runtimePolicySnapshot: null,
+    });
+    tx.delegationTaskStep.findUnique.mockResolvedValue({
+      status: "RUNNING",
+    });
+    tx.toolExecution.findUnique.mockResolvedValue({
+      id: "execution-inflight-compute",
+      sessionId: "session-inflight-compute",
+      status: "RUNNING",
+      delegationTaskId: "task-inflight-compute",
+      delegationTaskStepId: "step-inflight-compute",
+      session: {
+        generationRunId: "run-inflight-compute",
+      },
+    });
+    tx.toolExecution.updateMany.mockResolvedValue({ count: 1 });
+    tx.delegationTaskExternalEffect.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+
+    expect(tx.toolExecution.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "execution-inflight-compute",
+        status: "RUNNING",
+      },
+      data: {
+        status: "FAILED",
+        finishedAt: expect.any(Date),
+        executionLeaseToken: null,
+      },
+    });
+    expect(tx.computeSession.updateMany).toHaveBeenCalledWith({
+      where: { id: "session-inflight-compute" },
+      data: {
+        status: "IDLE",
+        failureReason: "generation_execution_result_unknown",
+        lastHeartbeatAt: expect.any(Date),
+      },
+    });
+    expect(tx.delegationTask.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "task-inflight-compute",
+        status: {
+          notIn: ["COMPLETED", "FAILED", "CANCELED", "EXPIRED"],
+        },
+      },
+      data: {
+        status: "WAITING_FOR_OWNER",
+        nextActionBy: "OWNER",
+        blockingReason:
+          "Worker lease expired while compute execution was still in flight. Review the unknown result before continuing.",
+      },
+    });
+    expect(tx.delegationTaskStep.updateMany).not.toHaveBeenCalled();
+    expect(
+      tx.$executeRaw.mock.calls.slice(0, 3).map((call) => call[1]),
+    ).toEqual([
+      "conversation-1",
+      "run-inflight-compute",
+      "task-inflight-compute",
+    ]);
+  });
+
+  it("replays a durable terminal compute result instead of failing its run", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-terminal-compute",
+      aggregateId: "run-terminal-compute",
+      conversationId: "conversation-1",
+      delegationTaskId: "task-terminal-compute",
+      status: "PROCESSING",
+      attemptCount: 5,
+    }]);
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-terminal-compute",
+      status: "PROCESSING",
+      inputMessageId: "message-terminal-compute",
+      outputMessageId: null,
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      delegationTaskId: "task-terminal-compute",
+      delegationTaskStepId: "step-terminal-compute",
+      runtimePolicySnapshot: null,
+    });
+    tx.delegationTaskStep.findUnique.mockResolvedValue({
+      status: "RUNNING",
+    });
+    tx.toolExecution.findUnique.mockResolvedValue({
+      id: "execution-terminal-compute",
+      sessionId: "session-terminal-compute",
+      status: "SUCCEEDED",
+      delegationTaskId: "task-terminal-compute",
+      delegationTaskStepId: "step-terminal-compute",
+      session: {
+        generationRunId: "run-terminal-compute",
+      },
+    });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+
+    expect(tx.outboxEvent.update).toHaveBeenCalledWith({
+      where: { id: "outbox-terminal-compute" },
+      data: {
+        status: "PENDING",
+        attemptCount: 0,
+        availableAt: expect.any(Date),
+        processedAt: null,
+        lastError: "generation_execution_replay_pending",
+      },
+    });
+    expect(tx.toolExecution.updateMany).not.toHaveBeenCalled();
+    expect(tx.generationRun.update).not.toHaveBeenCalled();
+    expect(tx.delegationTask.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("allows a completed-and-sent predecessor before returning terminal delegation recovery", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-terminal-recovery",
+      aggregateId: "run-terminal-recovery",
+      status: "PENDING",
+      attemptCount: 0,
+    }]);
+    tx.outboxEvent.update.mockResolvedValue({
+      id: "outbox-terminal-recovery",
+      aggregateId: "run-terminal-recovery",
+      attemptCount: 1,
+    });
+    tx.generationRun.findUnique
+      .mockResolvedValueOnce({
+        id: "run-terminal-recovery",
+        status: "PROCESSING",
+        delegationTaskId: "task-terminal-recovery",
+        delegationTaskStepId: "step-terminal-recovery",
+        delegationTask: {
+          status: "WAITING_FOR_OWNER",
+        },
+        delegationTaskStep: {
+          status: "BLOCKED",
+          externalEffects: [],
+          outputs: [{
+            artifact: {
+              id: "artifact-terminal-recovery",
+              kind: "REPORT",
+              mimeType: "application/pdf",
+              sizeBytes: 4096,
+            },
+          }],
+        },
+        contextSnapshot: {
+          source: "delegation_plan_step",
+          previousGenerationRunId: "run-terminal-recovery-previous",
+        },
+        representativeVersionId: "representative-version-1",
+        episodeId: "episode-1",
+        episode: {
+          representativeVersionId: "representative-version-1",
+        },
+        inputMessageId: "message-terminal-recovery",
+        inputMessage: {
+          id: "message-terminal-recovery",
+          text: "recover the finalized step",
+          channelBinding: {
+            id: "web-binding-terminal-recovery",
+            kind: "WEB",
+            externalConversationId: "web:conversation-1",
+            representativeBinding: {
+              status: "CONNECTED",
+              desiredState: "ACTIVE",
+              healthStatus: "HEALTHY",
+            },
+          },
+        },
+        outputMessage: null,
+        runtimePolicySnapshot: null,
+        startedAt: new Date("2026-07-23T00:00:00.000Z"),
+        conversationId: "conversation-1",
+        conversation: {
+          id: "conversation-1",
+          representativeId: "representative-1",
+          contactId: "contact-1",
+          audienceIdentityId: "audience-1",
+          state: "AI_QUEUED",
+          freeRepliesUsed: 0,
+          passUnlockedAt: null,
+          deepHelpUnlockedAt: null,
+          representative: {
+            slug: "representative",
+            displayName: "Representative",
+            lifecycleState: "PUBLISHED",
+            activeVersionId: "representative-version-1",
+            publicMode: true,
+            runtimePolicyOverlays: [],
+          },
+          channelBindings: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        status: "COMPLETED",
+        outputMessage: {
+          deliveryStatus: "SENT",
+        },
+      });
+    tx.generationRun.findFirst.mockResolvedValue({
+      id: "run-terminal-recovery",
+    });
+    tx.generationRun.update.mockResolvedValue({
+      id: "run-terminal-recovery",
+    });
+    tx.message.update.mockResolvedValue({
+      id: "message-terminal-recovery",
+    });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toMatchObject({
+      outboxId: "outbox-terminal-recovery",
+      runId: "run-terminal-recovery",
+      delegationTerminalRecovery: {
+        taskStatus: "WAITING_FOR_OWNER",
+        stepStatus: "BLOCKED",
+        attachments: [{
+          fileName: "report-artifact-terminal-recovery.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: 4096,
+          artifactId: "artifact-terminal-recovery",
+          url:
+            "/reps/representative/chat/artifacts/artifact-terminal-recovery/download",
+        }],
+      },
+    });
+
+    expect(tx.generationRun.findFirst).toHaveBeenCalledWith({
+      where: {
+        delegationTaskId: "task-terminal-recovery",
+        delegationTaskStepId: "step-terminal-recovery",
+      },
+      orderBy: { createdAt: "desc" },
+      select: { id: true },
+    });
+    expect(tx.generationRun.findUnique).toHaveBeenNthCalledWith(2, {
+      where: { id: "run-terminal-recovery-previous" },
+      select: {
+        status: true,
+        outputMessage: {
+          select: { deliveryStatus: true },
+        },
+      },
+    });
+    expect(tx.generationRun.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "CANCELED" }),
+      }),
+    );
+    expect(tx.outboxEvent.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "PROCESSED" }),
+      }),
+    );
+  });
+
+  it("cancels a terminal delegation run when a newer run exists for the step", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-superseded-terminal",
+      aggregateId: "run-superseded-terminal",
+      status: "PENDING",
+      attemptCount: 0,
+    }]);
+    tx.outboxEvent.update
+      .mockResolvedValueOnce({
+        id: "outbox-superseded-terminal",
+        aggregateId: "run-superseded-terminal",
+        attemptCount: 1,
+      })
+      .mockResolvedValueOnce({ id: "outbox-superseded-terminal" });
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-superseded-terminal",
+      status: "PROCESSING",
+      delegationTaskId: "task-superseded-terminal",
+      delegationTaskStepId: "step-superseded-terminal",
+      delegationTask: {
+        status: "WAITING_FOR_OWNER",
+      },
+      delegationTaskStep: {
+        status: "BLOCKED",
+        externalEffects: [],
+        outputs: [],
+      },
+      contextSnapshot: null,
+    });
+    tx.generationRun.findFirst.mockResolvedValue({
+      id: "run-newer-terminal",
+    });
+    tx.generationRun.update.mockResolvedValue({
+      id: "run-superseded-terminal",
+    });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+
+    expect(tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-superseded-terminal" },
+      data: {
+        status: "CANCELED",
+        errorCode: "delegation_step_already_finalized",
+        errorMessage:
+          "Generation was superseded after its delegation step advanced.",
+        canceledAt: expect.any(Date),
+      },
+    });
+    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
+      where: { id: "outbox-superseded-terminal" },
+      data: {
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: null,
+      },
+    });
+  });
+
+  it.each([
+    [
+      "is still processing",
+      {
+        status: "PROCESSING",
+        outputMessage: null,
+      },
+    ],
+    [
+      "failed and remains retryable",
+      {
+        status: "FAILED",
+        outputMessage: {
+          deliveryStatus: "FAILED",
+        },
+      },
+    ],
+    [
+      "completed but its output is still queued",
+      {
+        status: "COMPLETED",
+        outputMessage: {
+          deliveryStatus: "QUEUED",
+        },
+      },
+    ],
+  ])("defers a delegated run while its predecessor %s", async (
+    _description,
+    previousRun,
+  ) => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-next-delegation-run",
+      aggregateId: "run-next-delegation",
+      status: "PENDING",
+      attemptCount: 0,
+    }]);
+    tx.outboxEvent.update
+      .mockResolvedValueOnce({
+        id: "outbox-next-delegation-run",
+        aggregateId: "run-next-delegation",
+        attemptCount: 1,
+      })
+      .mockResolvedValueOnce({ id: "outbox-next-delegation-run" });
+    tx.generationRun.findUnique
+      .mockResolvedValueOnce({
+        id: "run-next-delegation",
+        status: "QUEUED",
+        delegationTaskId: "task-sequential",
+        delegationTaskStepId: "step-next",
+        delegationTaskStep: {
+          status: "QUEUED",
+          externalEffects: [],
+          outputs: [],
+        },
+        contextSnapshot: {
+          source: "delegation_plan_step",
+          previousGenerationRunId: "run-previous-delegation",
+        },
+      })
+      .mockResolvedValueOnce(previousRun);
+
+    await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+
+    expect(tx.generationRun.findUnique).toHaveBeenLastCalledWith({
+      where: { id: "run-previous-delegation" },
+      select: {
+        status: true,
+        outputMessage: {
+          select: { deliveryStatus: true },
+        },
+      },
+    });
+    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
+      where: { id: "outbox-next-delegation-run" },
+      data: {
+        status: "PENDING",
+        attemptCount: { decrement: 1 },
+        availableAt: expect.any(Date),
+        lastError: "delegation_previous_generation_not_completed",
+      },
+    });
+    expect(tx.generationRun.update).not.toHaveBeenCalled();
+    expect(tx.message.update).not.toHaveBeenCalled();
+  });
+
   it("reclaims an expired processing lease and returns only persisted delivery for a completed run", async () => {
     tx.$queryRaw.mockResolvedValue([{
       id: "outbox-delivery",
+      aggregateId: "run-delivery",
+      status: "PROCESSING",
       attemptCount: 1,
     }]);
     tx.outboxEvent.update.mockResolvedValue({
@@ -695,6 +1359,11 @@ describe("conversation runtime version pin", () => {
     tx.generationRun.findUnique.mockResolvedValue({
       id: "run-delivery",
       status: "COMPLETED",
+      delegationTaskId: "task-completed",
+      delegationTaskStep: {
+        status: "COMPLETED",
+        externalEffects: [],
+      },
       representativeVersionId: "representative-version-1",
       episodeId: "episode-1",
       episode: {

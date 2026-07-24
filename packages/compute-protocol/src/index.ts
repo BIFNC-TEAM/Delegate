@@ -269,6 +269,10 @@ export const createComputeSessionRequestSchema = refineSubagentCapabilityBoundar
   contactId: z.string().optional(),
   conversationId: z.string().optional(),
   generationRunId: z.string().optional(),
+  generationWorkLease: z.object({
+    outboxId: z.string().min(1),
+    leaseAttempt: z.number().int().positive(),
+  }).optional(),
   delegationTaskId: z.string().optional(),
   delegationTaskStepId: z.string().optional(),
   subagentId: computeSubagentIdSchema,
@@ -410,6 +414,10 @@ export const heartbeatComputeSessionResponseSchema = z.object({
 export const toolExecutionRequestSchema = refineSubagentCapabilityBoundary(z.object({
   capability: capabilityKindSchema,
   subagentId: computeSubagentIdSchema,
+  generationWorkLease: z.object({
+    outboxId: z.string().min(1),
+    leaseAttempt: z.number().int().positive(),
+  }).optional(),
   command: z.string().min(1).optional(),
   content: z.string().optional(),
   path: z.string().min(1).optional(),

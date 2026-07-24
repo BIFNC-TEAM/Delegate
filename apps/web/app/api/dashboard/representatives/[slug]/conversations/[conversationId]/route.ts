@@ -94,6 +94,26 @@ export async function PATCH(
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) return authResponse;
+    if (
+      error
+      && typeof error === "object"
+      && "code" in error
+      && (
+        error.code === "ACTIVE_DELEGATION_TASK"
+        || error.code === "CONVERSATION_WORK_IN_FLIGHT"
+      )
+    ) {
+      const code = error.code;
+      return NextResponse.json(
+        {
+          error: error instanceof Error
+            ? error.message
+            : "An active delegation task must finish before operator takeover.",
+          code,
+        },
+        { status: 409 },
+      );
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to update conversation." },
       { status: 500 },

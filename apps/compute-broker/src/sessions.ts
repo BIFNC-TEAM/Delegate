@@ -17,6 +17,7 @@ import { computeLifecycleHooks } from "./lifecycle-hooks";
 import { closeBrowserSessionForComputeSession } from "./browser-sessions";
 import { isDelegationTaskSessionContextValid } from "./delegation-task-context";
 import { requireAudienceGenerationRunAuthorization } from "./entitlements";
+import { lockAndFenceDelegatedGenerationWork } from "./generation-work-fence";
 import { loadComputeRuntimeAuthority } from "./runtime-authority";
 
 export async function createComputeSession(rawInput: unknown) {
@@ -52,37 +53,18 @@ export async function createComputeSession(rawInput: unknown) {
   if (Boolean(input.delegationTaskId) !== Boolean(input.delegationTaskStepId)) {
     throw new SessionError(400, "delegation_task_and_step_must_be_provided_together");
   }
-  if (input.delegationTaskId && input.delegationTaskStepId) {
-    const task = await prisma.delegationTask.findUnique({
-      where: { id: input.delegationTaskId },
-      select: {
-        representativeId: true,
-        contactId: true,
-        originConversationId: true,
-        status: true,
-        generationRuns: {
-          where: { id: input.generationRunId ?? "__no_generation_run__" },
-          select: { id: true },
-          take: 1,
-        },
-        resourcePolicy: { select: { allowedCapabilities: true } },
-        steps: {
-          where: { id: input.delegationTaskStepId },
-          select: { id: true, capability: true },
-          take: 1,
-        },
-      },
-    });
-    if (!isDelegationTaskSessionContextValid({
-      representativeId: input.representativeId,
-      ...(input.contactId ? { contactId: input.contactId } : {}),
-      ...(input.conversationId ? { conversationId: input.conversationId } : {}),
-      ...(input.generationRunId ? { generationRunId: input.generationRunId } : {}),
-      delegationTaskStepId: input.delegationTaskStepId,
-      requestedCapabilities: input.requestedCapabilities,
-    }, task)) {
-      throw new SessionError(409, "delegation_task_context_mismatch");
-    }
+  const isDelegatedGeneration = Boolean(
+    input.delegationTaskId && input.delegationTaskStepId,
+  );
+  if (
+    isDelegatedGeneration
+    && (
+      !input.conversationId
+      || !input.generationRunId
+      || !input.generationWorkLease
+    )
+  ) {
+    throw new SessionError(400, "delegation_generation_lease_required");
   }
 
   await requireAudienceGenerationRunAuthorization({
@@ -136,45 +118,157 @@ export async function createComputeSession(rawInput: unknown) {
     now.getTime() + runtimeAuthority.compute.maxSessionMinutes * 60 * 1000,
   );
 
-  const session = await prisma.computeSession.create({
-    data: {
-      representativeId: input.representativeId,
-      representativeVersionId: runtimeAuthority.representativeVersionId,
-      contactId: input.contactId ?? null,
-      conversationId: input.conversationId ?? null,
-      generationRunId: input.generationRunId ?? null,
+  const sessionData = {
+    representativeId: input.representativeId,
+    representativeVersionId: runtimeAuthority.representativeVersionId,
+    contactId: input.contactId ?? null,
+    conversationId: input.conversationId ?? null,
+    generationRunId: input.generationRunId ?? null,
+    delegationTaskId: input.delegationTaskId ?? null,
+    delegationTaskStepId: input.delegationTaskStepId ?? null,
+    subagentId: input.subagentId,
+    policyProfileId: defaultPolicyProfileId,
+    requestedBy: mapRequestedByToDb(input.requestedBy),
+    status: "REQUESTED" as const,
+    runnerType: mapRunnerTypeToDb(computeBrokerConfig.runnerType),
+    baseImage: requestedBaseImage,
+    leaseTokenHash,
+    expiresAt,
+  };
+  const createAuditData = (sessionId: string) => ({
+    representativeId: input.representativeId,
+    contactId: input.contactId ?? null,
+    conversationId: input.conversationId ?? null,
+    delegationTaskId: input.delegationTaskId ?? null,
+    type: "COMPUTE_SESSION_REQUESTED" as const,
+    payload: {
+      requestedCapabilities: input.requestedCapabilities,
+      subagentId: input.subagentId,
+      requestedBy: input.requestedBy,
+      reason: input.reason,
+      sessionId,
       delegationTaskId: input.delegationTaskId ?? null,
       delegationTaskStepId: input.delegationTaskStepId ?? null,
-      subagentId: input.subagentId,
-      policyProfileId: defaultPolicyProfileId,
-      requestedBy: mapRequestedByToDb(input.requestedBy),
-      status: "REQUESTED",
-      runnerType: mapRunnerTypeToDb(computeBrokerConfig.runnerType),
-      baseImage: requestedBaseImage,
-      leaseTokenHash,
-      expiresAt,
+      representativeVersionId: runtimeAuthority.representativeVersionId,
+      ...(input.generationWorkLease
+        ? {
+            generationOutboxId: input.generationWorkLease.outboxId,
+            generationLeaseAttempt: input.generationWorkLease.leaseAttempt,
+          }
+        : {}),
     },
   });
 
-  await prisma.eventAudit.create({
-    data: {
-      representativeId: input.representativeId,
-      contactId: input.contactId ?? null,
-      conversationId: input.conversationId ?? null,
-      delegationTaskId: input.delegationTaskId ?? null,
-      type: "COMPUTE_SESSION_REQUESTED",
-      payload: {
-        requestedCapabilities: input.requestedCapabilities,
-        subagentId: input.subagentId,
-        requestedBy: input.requestedBy,
-        reason: input.reason,
-        sessionId: session.id,
-        delegationTaskId: input.delegationTaskId ?? null,
-        delegationTaskStepId: input.delegationTaskStepId ?? null,
-        representativeVersionId: runtimeAuthority.representativeVersionId,
-      },
-    },
-  });
+  const session = isDelegatedGeneration
+    ? await prisma.$transaction(async (tx) => {
+        const conversationId = input.conversationId!;
+        const generationRunId = input.generationRunId!;
+        const delegationTaskId = input.delegationTaskId!;
+        const delegationTaskStepId = input.delegationTaskStepId!;
+        const generationWorkLease = input.generationWorkLease!;
+        await lockAndFenceDelegatedGenerationWork(tx, {
+          conversationId,
+          generationRunId,
+          delegationTaskId,
+          ...generationWorkLease,
+        });
+        const task = await tx.delegationTask.findUnique({
+          where: { id: delegationTaskId },
+          select: {
+            representativeId: true,
+            contactId: true,
+            originConversationId: true,
+            status: true,
+            generationRuns: {
+              where: { delegationTaskStepId },
+              orderBy: { createdAt: "desc" },
+              select: {
+                id: true,
+                status: true,
+                delegationTaskStepId: true,
+              },
+              take: 1,
+            },
+            resourcePolicy: { select: { allowedCapabilities: true } },
+            steps: {
+              where: { id: delegationTaskStepId },
+              select: { id: true, capability: true, status: true },
+              take: 1,
+            },
+          },
+        });
+        if (!isDelegationTaskSessionContextValid({
+          representativeId: input.representativeId,
+          ...(input.contactId ? { contactId: input.contactId } : {}),
+          conversationId,
+          generationRunId,
+          delegationTaskStepId,
+          requestedCapabilities: input.requestedCapabilities,
+        }, task)) {
+          throw new SessionError(409, "delegation_task_context_mismatch");
+        }
+
+        let existing = await tx.computeSession.findUnique({
+          where: { generationOutboxId: generationWorkLease.outboxId },
+        });
+        if (!existing) {
+          const legacySession = await tx.computeSession.findFirst({
+            where: {
+              generationRunId,
+              delegationTaskId,
+              delegationTaskStepId,
+              generationOutboxId: null,
+            },
+            orderBy: { createdAt: "asc" },
+          });
+          if (legacySession) {
+            existing = await tx.computeSession.update({
+              where: { id: legacySession.id },
+              data: {
+                generationOutboxId: generationWorkLease.outboxId,
+                generationLeaseAttempt: generationWorkLease.leaseAttempt,
+                leaseTokenHash,
+              },
+            });
+          }
+        }
+        if (existing) {
+          if (
+            existing.representativeId !== input.representativeId
+            || existing.contactId !== (input.contactId ?? null)
+            || existing.conversationId !== conversationId
+            || existing.generationRunId !== generationRunId
+            || existing.delegationTaskId !== delegationTaskId
+            || existing.delegationTaskStepId !== delegationTaskStepId
+          ) {
+            throw new SessionError(409, "generation_execution_context_mismatch");
+          }
+          return existing.generationLeaseAttempt === generationWorkLease.leaseAttempt
+            && existing.leaseTokenHash === leaseTokenHash
+            ? existing
+            : tx.computeSession.update({
+                where: { id: existing.id },
+                data: {
+                  generationLeaseAttempt: generationWorkLease.leaseAttempt,
+                  leaseTokenHash,
+                },
+              });
+        }
+
+        const created = await tx.computeSession.create({
+          data: {
+            ...sessionData,
+            generationOutboxId: generationWorkLease.outboxId,
+            generationLeaseAttempt: generationWorkLease.leaseAttempt,
+          },
+        });
+        await tx.eventAudit.create({ data: createAuditData(created.id) });
+        return created;
+      })
+    : await prisma.computeSession.create({ data: sessionData });
+  if (!isDelegatedGeneration) {
+    await prisma.eventAudit.create({ data: createAuditData(session.id) });
+  }
 
   const response = createComputeSessionResponseSchema.parse({
     session: serializeSession(session),

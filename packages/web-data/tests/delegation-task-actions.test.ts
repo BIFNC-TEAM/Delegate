@@ -10,9 +10,14 @@ const {
 } = vi.hoisted(() => {
   const client = {
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
     agentUsageCharge: { findUnique: vi.fn() },
     approvalRequest: {},
-    conversation: { update: vi.fn() },
+    conversation: {
+      findUnique: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+    },
     conversationEpisode: { updateMany: vi.fn() },
     artifact: { findMany: vi.fn(), updateMany: vi.fn() },
     delegationTask: { findFirst: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
@@ -22,9 +27,17 @@ const {
     delegationTaskOutput: { count: vi.fn(), create: vi.fn(), createMany: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
     delegationTaskStep: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
     delegationTaskResourcePolicy: { update: vi.fn() },
-    generationRun: { create: vi.fn(), findUnique: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
-    message: { update: vi.fn(), upsert: vi.fn() },
-    outboxEvent: { create: vi.fn(), updateMany: vi.fn() },
+    generationRun: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    message: { update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
+    outboxEvent: { create: vi.fn(), findFirst: vi.fn(), updateMany: vi.fn() },
   };
   return {
     mockPrisma: {
@@ -54,13 +67,37 @@ describe("delegation task owner actions", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockPrisma.$transaction.mockImplementation(async (callback: (tx: typeof mockPrisma) => unknown) => callback(mockPrisma));
+    mockPrisma.$queryRaw.mockResolvedValue([
+      { originConversationId: "conversation-1" },
+    ]);
     mockPrisma.delegationTaskEvent.findFirst.mockResolvedValue(null);
     mockPrisma.delegationTaskEvent.create.mockResolvedValue({ id: "event-1" });
     mockPrisma.generationRun.create.mockResolvedValue({ id: "run-retry-1" });
+    mockPrisma.generationRun.findFirst.mockResolvedValue({
+      id: "run-1",
+      status: "FAILED",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      inputMessageId: "message-1",
+      representativeVersionId: "rep-version-1",
+    });
+    mockPrisma.generationRun.findMany.mockResolvedValue([]);
+    mockPrisma.generationRun.upsert.mockResolvedValue({
+      id: "run-terminal-recovery",
+      status: "QUEUED",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      inputMessageId: "message-1",
+      representativeVersionId: "rep-version-1",
+    });
     mockPrisma.generationRun.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.outboxEvent.findFirst.mockResolvedValue(null);
     mockPrisma.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.delegationTaskExternalEffect.findMany.mockResolvedValue([]);
     mockPrisma.delegationTaskOutput.count.mockResolvedValue(0);
+    mockPrisma.delegationTaskOutput.findMany.mockResolvedValue([]);
+    mockPrisma.conversation.findUnique.mockResolvedValue({ state: "AI_QUEUED" });
+    mockPrisma.conversation.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.agentUsageCharge.findUnique.mockResolvedValue({
       status: "RESERVED",
     });
@@ -75,6 +112,9 @@ describe("delegation task owner actions", () => {
     mockPrisma.delegationTask.findFirst
       .mockResolvedValueOnce(buildTask("FAILED"))
       .mockResolvedValueOnce(null);
+    mockPrisma.generationRun.findMany.mockResolvedValueOnce([
+      { id: "run-1", status: "FAILED" },
+    ]);
     const { applyRepresentativeDelegationTaskAction } = await import("../src/delegation-tasks");
 
     await applyRepresentativeDelegationTaskAction({
@@ -90,8 +130,21 @@ describe("delegation task owner actions", () => {
         delegationTaskStepId: "step-1",
         inputMessageId: "message-1",
         status: "QUEUED",
+        contextSnapshot: expect.objectContaining({
+          source: "owner_retry",
+          request: expect.objectContaining({
+            capability: "read",
+            path: "notes/source.txt",
+          }),
+          retryOfGenerationRunId: "run-1",
+          requestedBy: "owner-1",
+        }),
       }),
     });
+    expect(
+      mockPrisma.generationRun.create.mock.calls.at(-1)?.[0]
+        .data.contextSnapshot,
+    ).not.toHaveProperty("previousGenerationRunId");
     expect(mockPrisma.outboxEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         aggregateType: "generation_run",
@@ -106,6 +159,19 @@ describe("delegation task owner actions", () => {
       },
       mockPrisma,
     );
+    expect(mockPrisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        aggregateType: "generation_run",
+        aggregateId: { in: ["run-1"] },
+        eventType: "generation.requested",
+        status: { in: ["PENDING", "FAILED"] },
+      },
+      data: {
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: "delegation_attempt_superseded",
+      },
+    });
     expect(mockPrisma.delegationTask.update).toHaveBeenCalledWith({
       where: { id: "task-1" },
       data: expect.objectContaining({ status: "READY", nextActionBy: "SYSTEM" }),
@@ -125,6 +191,229 @@ describe("delegation task owner actions", () => {
     });
   });
 
+  it("retries the failed step instead of a later blocked dependent step", async () => {
+    const task = buildTask("FAILED");
+    mockPrisma.delegationTask.findFirst
+      .mockResolvedValueOnce({
+        ...task,
+        generationRuns: [{
+          ...task.generationRuns[0]!,
+          delegationTaskStepId: "step-failed",
+        }],
+        steps: [
+          {
+            ...task.steps[0]!,
+            id: "step-failed",
+            sequence: 1,
+            status: "FAILED",
+            inputSnapshot: {
+              request: {
+                ...task.steps[0]!.inputSnapshot.request,
+                path: "inputs/failed-step.txt",
+              },
+            },
+          },
+          {
+            ...task.steps[0]!,
+            id: "step-blocked",
+            sequence: 2,
+            status: "BLOCKED",
+            dependsOnStepIds: ["step-failed"],
+            inputSnapshot: {
+              request: {
+                ...task.steps[0]!.inputSnapshot.request,
+                path: "outputs/dependent-step.txt",
+              },
+            },
+          },
+        ],
+      })
+      .mockResolvedValueOnce(null);
+    mockPrisma.generationRun.findMany.mockResolvedValueOnce([
+      { id: "run-1", status: "FAILED" },
+    ]);
+    const { applyRepresentativeDelegationTaskAction } =
+      await import("../src/delegation-tasks");
+
+    await applyRepresentativeDelegationTaskAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      action: "retry",
+      actorId: "owner-1",
+    });
+
+    expect(mockPrisma.generationRun.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        delegationTaskStepId: "step-failed",
+        contextSnapshot: expect.objectContaining({
+          source: "owner_retry",
+          request: expect.objectContaining({
+            path: "inputs/failed-step.txt",
+          }),
+          retryOfGenerationRunId: "run-1",
+        }),
+      }),
+    });
+  });
+
+  it("copies the persisted step request when the owner continues a waiting task", async () => {
+    mockPrisma.delegationTask.findFirst
+      .mockResolvedValueOnce(buildTask("WAITING_FOR_OWNER"))
+      .mockResolvedValueOnce(null);
+    const { applyRepresentativeDelegationTaskAction } = await import("../src/delegation-tasks");
+
+    await applyRepresentativeDelegationTaskAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      action: "continue",
+      actorId: "owner-1",
+    });
+
+    expect(mockPrisma.generationRun.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        contextSnapshot: expect.objectContaining({
+          source: "owner_continue",
+          request: expect.objectContaining({
+            capability: "read",
+            path: "notes/source.txt",
+          }),
+          retryOfGenerationRunId: "run-1",
+          requestedBy: "owner-1",
+        }),
+      }),
+    });
+  });
+
+  it.each([
+    { action: "retry" as const, status: "FAILED" },
+    { action: "continue" as const, status: "WAITING_FOR_OWNER" },
+  ])("atomically refuses owner $action when the step request is missing", async ({
+    action,
+    status,
+  }) => {
+    const task = buildTask(status);
+    mockPrisma.delegationTask.findFirst.mockResolvedValueOnce({
+      ...task,
+      steps: [{
+        ...task.steps[0],
+        inputSnapshot: {},
+      }],
+    });
+    const { applyRepresentativeDelegationTaskAction } = await import("../src/delegation-tasks");
+
+    await expect(applyRepresentativeDelegationTaskAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      action,
+      actorId: "owner-1",
+    })).rejects.toThrow("persisted execution request");
+
+    expect(mockPrisma.generationRun.findMany).not.toHaveBeenCalled();
+    expect(mockPrisma.generationRun.create).not.toHaveBeenCalled();
+    expect(mockPrisma.outboxEvent.create).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
+  });
+
+  it("does not schedule a retry while the previous attempt is still running", async () => {
+    mockPrisma.delegationTask.findFirst.mockResolvedValueOnce(buildTask("FAILED"));
+    mockPrisma.generationRun.findMany.mockResolvedValueOnce([
+      { id: "run-1", status: "PROCESSING" },
+    ]);
+    const { applyRepresentativeDelegationTaskAction } = await import("../src/delegation-tasks");
+
+    await expect(applyRepresentativeDelegationTaskAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      action: "retry",
+      actorId: "owner-1",
+    })).rejects.toThrow("still running");
+
+    expect(mockPrisma.generationRun.create).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
+    expect(mockPrisma.outboxEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("cancels an older completed reply before scheduling a newer attempt", async () => {
+    mockPrisma.delegationTask.findFirst
+      .mockResolvedValueOnce(buildTask("FAILED"))
+      .mockResolvedValueOnce(null);
+    mockPrisma.generationRun.findMany.mockResolvedValueOnce([{
+      id: "run-completed-old",
+      status: "COMPLETED",
+      outputMessage: {
+        id: "message-output-old",
+        deliveryStatus: "QUEUED",
+      },
+    }]);
+    mockPrisma.outboxEvent.findFirst.mockResolvedValueOnce({
+      status: "PENDING",
+      availableAt: new Date(Date.now() - 1_000),
+    });
+    const { applyRepresentativeDelegationTaskAction } = await import("../src/delegation-tasks");
+
+    await applyRepresentativeDelegationTaskAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      action: "retry",
+      actorId: "owner-1",
+    });
+
+    expect(mockPrisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        aggregateType: "generation_run",
+        aggregateId: "run-completed-old",
+        eventType: "generation.requested",
+        status: { in: ["PENDING", "FAILED", "PROCESSING"] },
+      },
+      data: {
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: "delegation_attempt_superseded_before_delivery",
+      },
+    });
+    expect(mockPrisma.message.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "message-output-old",
+        deliveryStatus: { in: ["PROCESSING", "QUEUED", "FAILED"] },
+      },
+      data: {
+        deliveryStatus: "CANCELED",
+        failureCode: "delegation_attempt_superseded_before_delivery",
+        failureReason:
+          "Delivery was canceled because the task was scheduled for a newer attempt.",
+      },
+    });
+    expect(mockPrisma.generationRun.create).toHaveBeenCalled();
+  });
+
+  it("does not retry while an older completed reply is being delivered", async () => {
+    mockPrisma.delegationTask.findFirst.mockResolvedValueOnce(buildTask("FAILED"));
+    mockPrisma.generationRun.findMany.mockResolvedValueOnce([{
+      id: "run-completed-old",
+      status: "COMPLETED",
+      outputMessage: {
+        id: "message-output-old",
+        deliveryStatus: "PROCESSING",
+      },
+    }]);
+    mockPrisma.outboxEvent.findFirst.mockResolvedValueOnce({
+      status: "PROCESSING",
+      availableAt: new Date(Date.now() + 60_000),
+    });
+    const { applyRepresentativeDelegationTaskAction } = await import("../src/delegation-tasks");
+
+    await expect(applyRepresentativeDelegationTaskAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      action: "retry",
+      actorId: "owner-1",
+    })).rejects.toThrow("currently being delivered");
+
+    expect(mockPrisma.generationRun.create).not.toHaveBeenCalled();
+    expect(mockPrisma.outboxEvent.create).not.toHaveBeenCalled();
+    expect(mockPrisma.message.updateMany).not.toHaveBeenCalled();
+  });
+
   it("does not reuse a released paid reservation when an owner retries a task", async () => {
     const task = buildTask("FAILED");
     mockPrisma.delegationTask.findFirst.mockResolvedValueOnce({
@@ -140,7 +429,11 @@ describe("delegation task owner actions", () => {
           },
         },
       }],
-      steps: [{ id: "step-1", kind: "COMPUTE", status: "FAILED" }],
+      steps: [{
+        ...task.steps[0],
+        kind: "COMPUTE",
+        status: "FAILED",
+      }],
     });
     mockPrisma.agentUsageCharge.findUnique.mockResolvedValueOnce({
       status: "RELEASED",
@@ -332,6 +625,46 @@ describe("delegation task owner actions", () => {
     expect(settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
     expect(finalizeConversationEntitlementForGenerationRuns).not.toHaveBeenCalled();
+  });
+
+  it("ignores finalization from an older generation attempt after a retry", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-1",
+      status: "READY",
+      representativeId: "representative-1",
+      steps: [{ id: "step-1", status: "READY" }],
+      generationRuns: [
+        {
+          id: "run-new",
+          delegationTaskStepId: "step-1",
+          conversationId: "conversation-1",
+        },
+        {
+          id: "run-old",
+          delegationTaskStepId: "step-1",
+          conversationId: "conversation-1",
+        },
+      ],
+    });
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    const result = await finalizeComputeDelegationTask({
+      taskId: "task-1",
+      stepId: "step-1",
+      generationRunId: "run-old",
+      outcome: "failed",
+      failureReason: "late worker result",
+    });
+
+    expect(result).toMatchObject({
+      taskId: "task-1",
+      status: "READY",
+      superseded: true,
+    });
+    expect(mockPrisma.delegationTaskStep.update).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskExternalEffect.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskOutput.create).not.toHaveBeenCalled();
   });
 
   it("distinguishes a policy-blocked step from an execution failure", async () => {
@@ -782,6 +1115,9 @@ describe("delegation task owner actions", () => {
       },
     });
     mockPrisma.generationRun.create.mockResolvedValueOnce({ id: "run-effect-retry" });
+    mockPrisma.generationRun.findMany.mockResolvedValueOnce([
+      { id: "run-1", status: "FAILED" },
+    ]);
     mockPrisma.delegationTask.findFirst.mockResolvedValueOnce(null);
     const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
 
@@ -804,6 +1140,67 @@ describe("delegation task owner actions", () => {
       where: { id: "effect-1" },
       data: { status: "PROPOSED", failureReason: null, reconciledAt: null },
     });
+    expect(mockPrisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        aggregateId: { in: ["run-1"] },
+        status: { in: ["PENDING", "FAILED"] },
+      }),
+      data: expect.objectContaining({
+        status: "PROCESSED",
+        lastError: "delegation_attempt_superseded",
+      }),
+    });
+  });
+
+  it("does not retry one external effect while a sibling outcome is still uncertain", async () => {
+    const failedEffect = {
+      id: "effect-failed",
+      status: "FAILED",
+      requestPayload: {
+        request: {
+          capability: "mcp",
+          bindingSlug: "crm",
+          toolName: "create_lead",
+          toolArguments: { name: "Ada" },
+          displayTarget: "Create CRM lead",
+          hasPaidEntitlement: false,
+          browserMode: "deterministic",
+          maxSteps: 1,
+          allowMutations: false,
+        },
+      },
+      delegationTaskStepId: "step-1",
+      delegationTaskStep: { id: "step-1" },
+      delegationTask: {
+        id: "task-1",
+        status: "WAITING_FOR_OWNER",
+        version: 4,
+        representativeVersionId: "rep-version-1",
+        generationRuns: [{
+          id: "run-1",
+          delegationTaskStepId: "step-1",
+          conversationId: "conversation-1",
+          episodeId: "episode-1",
+          inputMessageId: "message-1",
+        }],
+      },
+    };
+    mockPrisma.delegationTaskExternalEffect.findFirst
+      .mockResolvedValueOnce(failedEffect)
+      .mockResolvedValueOnce({ id: "effect-uncertain-sibling" });
+    const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
+
+    await expect(applyRepresentativeDelegationExternalEffectAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      effectId: "effect-failed",
+      action: "retry",
+      actorId: "owner-1",
+    })).rejects.toThrow("Reconcile every uncertain external effect");
+
+    expect(mockPrisma.generationRun.create).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskExternalEffect.update).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
   });
 
   it("requires evidence before resolving an unknown MCP outcome", async () => {
@@ -848,7 +1245,18 @@ describe("delegation task owner actions", () => {
         generationRuns: [],
       },
     });
-    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({ id: "task-1", status: "COMPLETED" });
+    mockPrisma.delegationTaskExternalEffect.findMany
+      .mockResolvedValueOnce([{ status: "SUCCEEDED" }])
+      .mockResolvedValueOnce([
+        {
+          id: "effect-unknown",
+          status: "SUCCEEDED",
+          responseSnapshot: { outcome: "transport_error" },
+        },
+      ]);
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce(
+      buildReconciliationTask(),
+    );
     const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
 
     await applyRepresentativeDelegationExternalEffectAction({
@@ -880,9 +1288,367 @@ describe("delegation task owner actions", () => {
         actorType: "OWNER",
       }),
     });
+    expect(mockPrisma.delegationTask.update).toHaveBeenCalledWith({
+      where: { id: "task-1" },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        nextActionBy: "NONE",
+      }),
+    });
+    expect(mockPrisma.delegationTaskExternalEffect.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.outboxEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        aggregateType: "generation_run",
+        aggregateId: "run-1",
+        eventType: "generation.requested",
+        idempotencyKey:
+          "generation.requested:terminal-recovery:run-1:effect-unknown:reconciled_succeeded",
+        payload: expect.objectContaining({
+          runId: "run-1",
+          taskId: "task-1",
+          stepId: "step-1",
+          effectId: "effect-unknown",
+          terminalRecovery: true,
+          resolution: "reconciled_succeeded",
+        }),
+      }),
+    });
+    expect(mockPrisma.conversation.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "conversation-1",
+        state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
+      },
+      data: {
+        state: "AI_QUEUED",
+        lastMessageAt: expect.any(Date),
+      },
+    });
+    expect(mockPrisma.message.update).toHaveBeenCalledWith({
+      where: { id: "message-1" },
+      data: {
+        deliveryStatus: "QUEUED",
+        failureCode: null,
+        failureReason: null,
+      },
+    });
+    expect(mockPrisma.generationRun.create).not.toHaveBeenCalled();
   });
 
-  it("restores an MCP effect to reconciliation-required when task finalization fails", async () => {
+  it("queues a terminal recovery conclusion after the owner confirms failure", async () => {
+    mockPrisma.delegationTaskExternalEffect.findFirst.mockResolvedValueOnce(
+      buildExternalEffect("RECONCILIATION_REQUIRED"),
+    );
+    mockPrisma.delegationTaskExternalEffect.findMany
+      .mockResolvedValueOnce([{ status: "FAILED" }])
+      .mockResolvedValueOnce([{
+        id: "effect-unknown",
+        status: "FAILED",
+        responseSnapshot: { outcome: "transport_error" },
+      }]);
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce(
+      buildReconciliationTask(),
+    );
+    const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
+
+    await applyRepresentativeDelegationExternalEffectAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      effectId: "effect-unknown",
+      action: "reconcile",
+      observedOutcome: "failed",
+      note: "CRM audit log confirms that the create operation failed.",
+      actorId: "owner-1",
+    });
+
+    expect(mockPrisma.delegationTask.update).toHaveBeenCalledWith({
+      where: { id: "task-1" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        nextActionBy: "NONE",
+      }),
+    });
+    expect(mockPrisma.outboxEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        aggregateId: "run-1",
+        eventType: "generation.requested",
+        idempotencyKey:
+          "generation.requested:terminal-recovery:run-1:effect-unknown:reconciled_failed",
+        payload: expect.objectContaining({
+          terminalRecovery: true,
+          resolution: "reconciled_failed",
+        }),
+      }),
+    });
+    expect(mockPrisma.message.update).toHaveBeenCalledWith({
+      where: { id: "message-1" },
+      data: expect.objectContaining({ deliveryStatus: "QUEUED" }),
+    });
+  });
+
+  it("queues a terminal recovery conclusion after compensation is recorded", async () => {
+    mockPrisma.delegationTaskExternalEffect.findFirst.mockResolvedValueOnce(
+      buildExternalEffect("SUCCEEDED"),
+    );
+    mockPrisma.delegationTaskExternalEffect.findMany
+      .mockResolvedValueOnce([{ status: "CANCELED" }])
+      .mockResolvedValueOnce([{
+        id: "effect-unknown",
+        status: "CANCELED",
+        responseSnapshot: { outcome: "completed" },
+      }]);
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce(
+      buildReconciliationTask(),
+    );
+    const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
+
+    await applyRepresentativeDelegationExternalEffectAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      effectId: "effect-unknown",
+      action: "record_compensation",
+      note: "The CRM lead was removed manually.",
+      externalReferenceId: "crm-audit-42",
+      actorId: "owner-1",
+    });
+
+    expect(mockPrisma.delegationTaskExternalEffect.update).toHaveBeenCalledWith({
+      where: { id: "effect-unknown" },
+      data: expect.objectContaining({
+        status: "CANCELED",
+        reconciledAt: expect.any(Date),
+        externalReferenceId: "crm-audit-42",
+      }),
+    });
+    expect(mockPrisma.outboxEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        aggregateId: "run-1",
+        eventType: "generation.requested",
+        idempotencyKey:
+          "generation.requested:terminal-recovery:run-1:effect-unknown:compensated",
+        payload: expect.objectContaining({
+          terminalRecovery: true,
+          resolution: "compensated",
+        }),
+      }),
+    });
+    expect(mockPrisma.delegationTaskOutput.updateMany).toHaveBeenCalledWith({
+      where: { externalEffectId: "effect-unknown" },
+      data: {
+        summary: "compensated: The CRM lead was removed manually.",
+        isFinal: true,
+      },
+    });
+  });
+
+  it("creates a dedicated recovery run instead of reusing a completed effect run", async () => {
+    const completedTask = buildReconciliationTask();
+    mockPrisma.delegationTaskExternalEffect.findFirst.mockResolvedValueOnce({
+      ...buildExternalEffect("SUCCEEDED"),
+      delegationTask: {
+        ...buildExternalEffect("SUCCEEDED").delegationTask,
+        status: "COMPLETED",
+      },
+    });
+    mockPrisma.delegationTaskExternalEffect.findMany.mockResolvedValueOnce([
+      { status: "CANCELED" },
+    ]);
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      ...completedTask,
+      status: "COMPLETED",
+      steps: [{
+        ...completedTask.steps[0],
+        status: "COMPLETED",
+      }],
+    });
+    mockPrisma.generationRun.findFirst.mockResolvedValueOnce({
+      id: "run-completed-effect",
+      status: "COMPLETED",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      inputMessageId: "message-1",
+      representativeVersionId: "rep-version-1",
+    });
+    const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
+
+    await applyRepresentativeDelegationExternalEffectAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      effectId: "effect-unknown",
+      action: "record_compensation",
+      note: "The remote mutation was manually reversed.",
+      actorId: "owner-1",
+    });
+
+    expect(mockPrisma.generationRun.upsert).toHaveBeenCalledWith({
+      where: {
+        idempotencyKey:
+          "delegation-terminal-recovery:run-completed-effect:effect-unknown:compensated",
+      },
+      update: {},
+      create: expect.objectContaining({
+        status: "QUEUED",
+        delegationTaskId: "task-1",
+        delegationTaskStepId: "step-1",
+        contextSnapshot: {
+          source: "delegation_terminal_recovery",
+          sourceGenerationRunId: "run-completed-effect",
+          effectId: "effect-unknown",
+          resolution: "compensated",
+        },
+      }),
+      select: expect.any(Object),
+    });
+    expect(mockPrisma.outboxEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        aggregateId: "run-terminal-recovery",
+        idempotencyKey:
+          "generation.requested:terminal-recovery:run-terminal-recovery:effect-unknown:compensated",
+        payload: expect.objectContaining({
+          terminalRecovery: true,
+          resolution: "compensated",
+        }),
+      }),
+    });
+    expect(mockPrisma.generationRun.create).not.toHaveBeenCalled();
+  });
+
+  it("records the terminal conclusion in conversation history without taking human control", async () => {
+    mockPrisma.delegationTaskExternalEffect.findFirst.mockResolvedValueOnce(
+      buildExternalEffect("RECONCILIATION_REQUIRED"),
+    );
+    mockPrisma.delegationTaskExternalEffect.findMany
+      .mockResolvedValueOnce([{ status: "SUCCEEDED" }])
+      .mockResolvedValueOnce([{
+        id: "effect-unknown",
+        status: "SUCCEEDED",
+        responseSnapshot: { outcome: "transport_error" },
+      }]);
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce(
+      buildReconciliationTask(),
+    );
+    mockPrisma.conversation.findUnique.mockResolvedValueOnce({
+      state: "HUMAN_ACTIVE",
+    });
+    const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
+
+    await applyRepresentativeDelegationExternalEffectAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      effectId: "effect-unknown",
+      action: "reconcile",
+      observedOutcome: "succeeded",
+      note: "CRM audit log confirms success.",
+      actorId: "owner-1",
+    });
+
+    expect(mockPrisma.message.upsert).toHaveBeenCalledWith({
+      where: {
+        conversationId_clientMessageId: {
+          conversationId: "conversation-1",
+          clientMessageId:
+            "delegation-external-effect-conclusion:effect-unknown:reconciled_succeeded:run-1",
+        },
+      },
+      create: expect.objectContaining({
+        conversationId: "conversation-1",
+        delegationTaskId: "task-1",
+        senderType: "SYSTEM",
+        deliveryStatus: "SENT",
+        text: expect.stringContaining("确认外部操作成功"),
+      }),
+      update: {},
+    });
+    expect(mockPrisma.outboxEvent.create).not.toHaveBeenCalled();
+    expect(mockPrisma.conversation.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.message.update).not.toHaveBeenCalled();
+  });
+
+  it("reuses an existing pending terminal recovery outbox idempotently", async () => {
+    mockPrisma.delegationTaskExternalEffect.findFirst.mockResolvedValueOnce(
+      buildExternalEffect("RECONCILIATION_REQUIRED"),
+    );
+    mockPrisma.delegationTaskExternalEffect.findMany
+      .mockResolvedValueOnce([{ status: "SUCCEEDED" }])
+      .mockResolvedValueOnce([{
+        id: "effect-unknown",
+        status: "SUCCEEDED",
+        responseSnapshot: { outcome: "transport_error" },
+      }]);
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce(
+      buildReconciliationTask(),
+    );
+    mockPrisma.outboxEvent.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "outbox-terminal-recovery",
+        status: "PENDING",
+        attemptCount: 1,
+        availableAt: new Date(Date.now() - 1_000),
+      });
+    const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
+
+    await applyRepresentativeDelegationExternalEffectAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      effectId: "effect-unknown",
+      action: "reconcile",
+      observedOutcome: "succeeded",
+      note: "CRM audit log confirms success.",
+      actorId: "owner-1",
+    });
+
+    expect(mockPrisma.outboxEvent.create).not.toHaveBeenCalled();
+    expect(mockPrisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "outbox-terminal-recovery",
+        status: "PENDING",
+        attemptCount: 1,
+      },
+      data: {
+        status: "PENDING",
+        availableAt: expect.any(Date),
+        processedAt: null,
+        lastError: null,
+      },
+    });
+  });
+
+  it("keeps the task waiting until every external effect is reconciled", async () => {
+    mockPrisma.delegationTaskExternalEffect.findFirst.mockResolvedValueOnce({
+      id: "effect-unknown-1",
+      status: "RECONCILIATION_REQUIRED",
+      requestPayload: null,
+      responseSnapshot: { outcome: "transport_error" },
+      delegationTaskStepId: "step-1",
+      delegationTaskStep: { id: "step-1" },
+      delegationTask: {
+        id: "task-1",
+        status: "WAITING_FOR_OWNER",
+        generationRuns: [],
+      },
+    });
+    mockPrisma.delegationTaskExternalEffect.findMany.mockResolvedValueOnce([
+      { status: "SUCCEEDED" },
+      { status: "RECONCILIATION_REQUIRED" },
+    ]);
+    const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
+
+    await applyRepresentativeDelegationExternalEffectAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      effectId: "effect-unknown-1",
+      action: "reconcile",
+      observedOutcome: "succeeded",
+      note: "First remote operation is confirmed.",
+      actorId: "owner-1",
+    });
+
+    expect(mockPrisma.delegationTask.findUnique).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskStep.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps effect evidence and task finalization in one transaction", async () => {
     const effect = {
       id: "effect-unknown",
       status: "RECONCILIATION_REQUIRED",
@@ -896,13 +1662,10 @@ describe("delegation task owner actions", () => {
         generationRuns: [],
       },
     };
-    mockPrisma.delegationTaskExternalEffect.findFirst
-      .mockResolvedValueOnce(effect)
-      .mockResolvedValueOnce({
-        id: effect.id,
-        status: "SUCCEEDED",
-        delegationTask: { status: "WAITING_FOR_OWNER" },
-      });
+    mockPrisma.delegationTaskExternalEffect.findFirst.mockResolvedValueOnce(effect);
+    mockPrisma.delegationTaskExternalEffect.findMany.mockResolvedValueOnce([
+      { status: "SUCCEEDED" },
+    ]);
     mockPrisma.delegationTask.findUnique.mockRejectedValueOnce(new Error("database unavailable"));
     const { applyRepresentativeDelegationExternalEffectAction } = await import("../src/delegation-tasks");
 
@@ -916,23 +1679,297 @@ describe("delegation task owner actions", () => {
       actorId: "owner-1",
     })).rejects.toThrow("database unavailable");
 
-    expect(mockPrisma.delegationTaskExternalEffect.update).toHaveBeenLastCalledWith({
+    expect(mockPrisma.delegationTaskExternalEffect.update).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.delegationTaskExternalEffect.update).toHaveBeenCalledWith({
       where: { id: effect.id },
+      data: expect.objectContaining({ status: "SUCCEEDED" }),
+    });
+    expect(mockPrisma.$transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("atomically aborts a delegation task when generation preflight fails", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce(
+      buildGenerationPreflightTask("RUNNING"),
+    );
+    const {
+      abortDelegationTaskForGenerationFailureInTransaction,
+    } = await import("../src/delegation-tasks");
+
+    const result =
+      await abortDelegationTaskForGenerationFailureInTransaction(
+        mockPrisma as never,
+        {
+          taskId: "task-preflight",
+          generationRunId: "run-current",
+          stepId: "step-current",
+          failureReason: "Representative version context is invalid.",
+        },
+      );
+
+    expect(result).toEqual({
+      taskId: "task-preflight",
+      status: "FAILED",
+      aborted: true,
+    });
+    expect(mockPrisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        aggregateType: "generation_run",
+        aggregateId: { in: ["run-queued-other"] },
+        eventType: "generation.requested",
+        status: { in: ["PENDING", "FAILED", "PROCESSING"] },
+      },
+      data: {
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: "delegation_task_generation_preflight_failed",
+      },
+    });
+    expect(mockPrisma.generationRun.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["run-queued-other"] },
+        status: "QUEUED",
+      },
+      data: {
+        status: "CANCELED",
+        errorCode: "delegation_task_generation_preflight_failed",
+        errorMessage:
+          "Generation was canceled because another task attempt failed preflight.",
+        canceledAt: expect.any(Date),
+      },
+    });
+    expect(mockPrisma.delegationTaskStep.updateMany).toHaveBeenNthCalledWith(
+      1,
+      {
+        where: {
+          id: "step-current",
+          delegationTaskId: "task-preflight",
+          status: {
+            notIn: [
+              "COMPLETED",
+              "FAILED",
+              "BLOCKED",
+              "CANCELED",
+              "SKIPPED",
+            ],
+          },
+        },
+        data: {
+          status: "FAILED",
+          outputSnapshot: {
+            outcome: "failed",
+            failureReason: "Representative version context is invalid.",
+            source: "generation_preflight",
+          },
+          failedAt: expect.any(Date),
+        },
+      },
+    );
+    expect(mockPrisma.delegationTaskStep.updateMany).toHaveBeenNthCalledWith(
+      2,
+      {
+        where: {
+          delegationTaskId: "task-preflight",
+          id: { not: "step-current" },
+          status: {
+            notIn: [
+              "COMPLETED",
+              "FAILED",
+              "BLOCKED",
+              "CANCELED",
+              "SKIPPED",
+            ],
+          },
+        },
+        data: { status: "BLOCKED" },
+      },
+    );
+    expect(mockPrisma.delegationTask.update).toHaveBeenCalledWith({
+      where: { id: "task-preflight" },
+      data: expect.objectContaining({
+        status: "FAILED",
+        nextActionBy: "NONE",
+        blockingReason: "Representative version context is invalid.",
+        failedAt: expect.any(Date),
+      }),
+    });
+    expect(releaseConversationWalletUsage).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-preflight",
+        failed: true,
+        reason: "delegation_task_failed",
+        idempotencyKey: "delegation-task:task-preflight:release",
+      },
+      mockPrisma,
+    );
+    expect(mockPrisma.delegationTaskEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        delegationTaskId: "task-preflight",
+        eventType: "task.generation_preflight_failed",
+        actorType: "SYSTEM",
+        fromStatus: "RUNNING",
+        toStatus: "FAILED",
+        payload: {
+          generationRunId: "run-current",
+          stepId: "step-current",
+          failureReason: "Representative version context is invalid.",
+        },
+      }),
+    });
+    expect(mockPrisma.message.upsert).toHaveBeenCalledWith({
+      where: {
+        conversationId_clientMessageId: {
+          conversationId: "conversation-1",
+          clientMessageId:
+            "delegation-task-generation-preflight-failed:task-preflight:8",
+        },
+      },
+      create: expect.objectContaining({
+        delegationTaskId: "task-preflight",
+        senderType: "SYSTEM",
+        text: expect.stringContaining("Representative version context is invalid."),
+      }),
+      update: {},
+    });
+  });
+
+  it("leaves an already terminal task unchanged when preflight abort is retried", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce(
+      buildGenerationPreflightTask("FAILED"),
+    );
+    const {
+      abortDelegationTaskForGenerationFailureInTransaction,
+    } = await import("../src/delegation-tasks");
+
+    const result =
+      await abortDelegationTaskForGenerationFailureInTransaction(
+        mockPrisma as never,
+        {
+          taskId: "task-preflight",
+          generationRunId: "run-current",
+          failureReason: "Repeated preflight failure.",
+        },
+      );
+
+    expect(result).toEqual({
+      taskId: "task-preflight",
+      status: "FAILED",
+      aborted: false,
+    });
+    expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskStep.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.generationRun.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.outboxEvent.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskOutput.create).not.toHaveBeenCalled();
+    expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskEvent.create).not.toHaveBeenCalled();
+    expect(mockPrisma.message.upsert).not.toHaveBeenCalled();
+  });
+
+  it("preserves billing and requires owner reconciliation when an external outcome is unknown", async () => {
+    const task = buildGenerationPreflightTask("RUNNING");
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      ...task,
+      externalEffects: [{
+        id: "effect-executing",
+        status: "EXECUTING",
+      }],
+    });
+    const {
+      abortDelegationTaskForGenerationFailureInTransaction,
+    } = await import("../src/delegation-tasks");
+
+    const result =
+      await abortDelegationTaskForGenerationFailureInTransaction(
+        mockPrisma as never,
+        {
+          taskId: "task-preflight",
+          generationRunId: "run-current",
+          stepId: "step-current",
+          failureReason: "Representative version context is invalid.",
+        },
+      );
+
+    expect(result).toEqual({
+      taskId: "task-preflight",
+      status: "WAITING_FOR_OWNER",
+      aborted: false,
+    });
+    expect(mockPrisma.delegationTaskExternalEffect.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["effect-executing"] },
+        status: "EXECUTING",
+      },
       data: {
         status: "RECONCILIATION_REQUIRED",
-        failureReason: "reconciliation_finalization_failed",
+        failureReason:
+          "generation_preflight_failed_while_external_effect_outcome_unknown",
+      },
+    });
+    expect(mockPrisma.delegationTask.update).toHaveBeenCalledWith({
+      where: { id: "task-preflight" },
+      data: {
+        status: "WAITING_FOR_OWNER",
+        nextActionBy: "OWNER",
+        blockingReason: expect.stringContaining(
+          "Representative version context is invalid.",
+        ),
+        version: { increment: 1 },
       },
     });
     expect(mockPrisma.delegationTaskEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
-        eventType: "external_effect.reconciliation_finalization_failed",
-        actorType: "SYSTEM",
+        eventType: "task.reconciliation_required",
+        fromStatus: "RUNNING",
+        toStatus: "WAITING_FOR_OWNER",
+        payload: expect.objectContaining({
+          uncertainExternalEffectIds: ["effect-executing"],
+        }),
       }),
     });
+    expect(mockPrisma.outboxEvent.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.generationRun.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskStep.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskOutput.create).not.toHaveBeenCalled();
+    expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
+  });
+
+  it("idempotently leaves an existing reconciliation hold unchanged", async () => {
+    const task = buildGenerationPreflightTask("WAITING_FOR_OWNER");
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      ...task,
+      externalEffects: [{
+        id: "effect-unknown",
+        status: "RECONCILIATION_REQUIRED",
+      }],
+    });
+    const {
+      abortDelegationTaskForGenerationFailureInTransaction,
+    } = await import("../src/delegation-tasks");
+
+    const result =
+      await abortDelegationTaskForGenerationFailureInTransaction(
+        mockPrisma as never,
+        {
+          taskId: "task-preflight",
+          generationRunId: "run-current",
+          failureReason: "Repeated version preflight failure.",
+        },
+      );
+
+    expect(result).toEqual({
+      taskId: "task-preflight",
+      status: "WAITING_FOR_OWNER",
+      aborted: false,
+    });
+    expect(mockPrisma.delegationTaskExternalEffect.updateMany).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskEvent.create).not.toHaveBeenCalled();
+    expect(mockPrisma.message.upsert).not.toHaveBeenCalled();
+    expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
   });
 
   it("does not record the same clarification message twice when delivery is retried", async () => {
-    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+    mockPrisma.delegationTask.findUnique.mockResolvedValue({
       id: "task-clarifying",
       status: "CLARIFYING",
       contactId: "contact-1",
@@ -966,7 +2003,7 @@ describe("delegation task owner actions", () => {
   });
 
   it("persists a clarified execution request on the generation run for safe retries", async () => {
-    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+    mockPrisma.delegationTask.findUnique.mockResolvedValue({
       id: "task-clarifying",
       status: "CLARIFYING",
       contactId: "contact-1",
@@ -1035,8 +2072,122 @@ function buildTask(status: string) {
       inputMessageId: "message-1",
       status: "FAILED",
     }],
-    steps: [{ id: "step-1" }],
+    steps: [{
+      id: "step-1",
+      kind: "COMPUTE",
+      sequence: 1,
+      status: status === "FAILED" ? "FAILED" : "READY",
+      dependsOnStepIds: [],
+      inputSnapshot: {
+        request: {
+          capability: "read",
+          path: "notes/source.txt",
+          displayTarget: "读取 notes/source.txt",
+          hasPaidEntitlement: false,
+          browserMode: "deterministic",
+          maxSteps: 1,
+          allowMutations: false,
+        },
+      },
+    }],
     approvalRequests: [],
+    externalEffects: [],
+  };
+}
+
+function buildReconciliationTask() {
+  return {
+    id: "task-1",
+    status: "WAITING_FOR_OWNER",
+    representativeId: "representative-1",
+    representativeVersionId: "rep-version-1",
+    steps: [{
+      id: "step-1",
+      kind: "MCP",
+      sequence: 1,
+      status: "FAILED",
+      dependsOnStepIds: [],
+      inputSnapshot: {},
+    }],
+    generationRuns: [{
+      id: "run-1",
+      delegationTaskStepId: "step-1",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      inputMessageId: "message-1",
+      runtimePolicySnapshot: null,
+    }],
+  };
+}
+
+function buildExternalEffect(status: string) {
+  return {
+    id: "effect-unknown",
+    status,
+    requestPayload: null,
+    responseSnapshot: { outcome: "transport_error" },
+    delegationTaskStepId: "step-1",
+    delegationTaskStep: { id: "step-1" },
+    delegationTask: {
+      id: "task-1",
+      status: "WAITING_FOR_OWNER",
+      originConversationId: "conversation-1",
+      generationRuns: [],
+    },
+  };
+}
+
+function buildGenerationPreflightTask(status: string) {
+  return {
+    id: "task-preflight",
+    status,
+    version: 7,
+    originConversationId: "conversation-1",
+    originEpisodeId: "episode-1",
+    steps: [
+      {
+        id: "step-current",
+        kind: "MCP",
+        sequence: 1,
+        status: "RUNNING",
+        dependsOnStepIds: [],
+        inputSnapshot: {},
+      },
+      {
+        id: "step-next",
+        kind: "COMPUTE",
+        sequence: 2,
+        status: "READY",
+        dependsOnStepIds: ["step-current"],
+        inputSnapshot: {},
+      },
+    ],
+    generationRuns: [
+      {
+        id: "run-current",
+        status: "PROCESSING",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+        delegationTaskStepId: "step-current",
+        runtimePolicySnapshot: {
+          billingMode: "service_credit",
+          walletReservation: {
+            usageChargeId: "usage-preflight",
+            tokenAmount: 1,
+          },
+        },
+      },
+      {
+        id: "run-queued-other",
+        status: "QUEUED",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+        delegationTaskStepId: "step-next",
+        runtimePolicySnapshot: null,
+      },
+    ],
     externalEffects: [],
   };
 }

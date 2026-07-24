@@ -42,6 +42,7 @@ import {
   isGenerationWorkLeaseLostError,
   continueClarifyingDelegationTask,
   recallRepresentativeContext,
+  prepareGenerationMessageChannelDelivery,
   reserveGenerationConversationEntitlement,
   renewGenerationWorkItemLease,
   retryGenerationDelivery,
@@ -52,6 +53,10 @@ import {
 } from "@delegate/web-data";
 
 import type { ConversationWorkerConfig } from "./config";
+import {
+  isComputeExecutionClaimLostError,
+  isComputeGenerationExecutionInProgressError,
+} from "./compute-client";
 import { sendMatrixRepresentativeMessage } from "./matrix-outbound";
 
 export async function processNextConversationWork(config: ConversationWorkerConfig) {
@@ -68,6 +73,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       await assertConversationChannelDeliveryAvailable({
         conversationId: operatorItem.conversationId,
         channel: operatorItem.channel,
+        senderMode: "operator",
       });
       let externalMessageId: string | undefined;
       if (operatorItem.channel === "matrix") {
@@ -156,25 +162,24 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           error: errorMessage,
         };
       }
-      const externalMessageId = await deliverGenerationOutput({
+      await deliverGenerationOutput({
         config,
         item,
         text: item.outputText,
+        outputMessageId: item.outputMessageId,
       });
       leaseGuard.assertOwned();
-      await markGenerationDeliveryComplete({
-        runId: item.runId,
-        ...workLease,
-        outputMessageId: item.outputMessageId,
-        ...(externalMessageId ? { externalMessageId } : {}),
-      });
       return {
         processed: true as const,
         runId: item.runId,
         status: "completed" as const,
       };
     } catch (error) {
-      if (leaseGuard.isLost() || isGenerationWorkLeaseLostError(error)) {
+      if (
+        leaseGuard.isLost()
+        || isGenerationWorkLeaseLostError(error)
+        || isConversationHumanControlError(error)
+      ) {
         return {
           processed: true as const,
           runId: item.runId,
@@ -228,6 +233,41 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       return { processed: true as const, runId: item.runId, status: "waiting_human" as const };
     }
 
+    if (item.delegationTerminalRecovery) {
+      const recovery = renderDelegationTerminalRecovery(
+        item.delegationTerminalRecovery,
+      );
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText: recovery.text,
+        senderDisplayName: item.representativeName,
+        intent: "delegation_terminal_recovery",
+        completeOutbox: false,
+        countUsage: false,
+        keepConversationQueued: recovery.keepConversationQueued,
+        ...(item.delegationTerminalRecovery.attachments.length
+          ? { attachments: item.delegationTerminalRecovery.attachments }
+          : {}),
+      });
+      outputMessageId = completed.message.id;
+      await deliverGenerationOutput({
+        config,
+        item,
+        text: recovery.text,
+        outputMessageId,
+      });
+      leaseGuard.assertOwned();
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: recovery.keepConversationQueued
+          ? "step_completed" as const
+          : "completed" as const,
+      };
+    }
+
     const setup = await getRepresentativeRuntimeSetupSnapshot(
       item.representativeSlug,
       item.representativeVersionId,
@@ -235,6 +275,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     leaseGuard.assertOwned();
     if (!setup) throw new Error(`Representative ${item.representativeSlug} was not found.`);
     const delegationConfig = resolveDelegationConfig(setup);
+    const representative = buildRepresentativeRuntimeProfile(setup);
 
     const persistedRequest = readPersistedDelegationStepRequest(
       item.contextSnapshot && typeof item.contextSnapshot === "object"
@@ -270,6 +311,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             `高级命令示例：\n${computeDirective.examples}`,
           ].join("\n\n");
       const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
         runId: item.runId,
         ...workLease,
         replyText,
@@ -310,6 +352,49 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         )
       )
     ) {
+      const knownPaidContinuationRequired =
+        item.usage.freeRepliesUsed >= representative.contract.freeReplyLimit;
+      if (
+        knownPaidContinuationRequired
+        && !item.walletReservation
+        && !entitlementReservation
+        && item.audienceIdentityId
+      ) {
+        entitlementReservation = await reserveGenerationConversationEntitlement({
+          runId: item.runId,
+          ...workLease,
+          audienceIdentityId: item.audienceIdentityId,
+          representativeId: setup.id,
+        });
+      }
+      if (
+        knownPaidContinuationRequired
+        && !item.walletReservation
+        && !entitlementReservation
+      ) {
+        const completed = await completeInlineGenerationRun({
+          conversationId: item.conversationId,
+          runId: item.runId,
+          ...workLease,
+          replyText:
+            "免费额度已用完，当前没有可预占的服务权益。请先充值或购买服务额度后再继续委托任务。",
+          senderDisplayName: item.representativeName,
+          intent: "delegation_payment_required",
+          countUsage: false,
+          completeOutbox: false,
+        });
+        outputMessageId = completed.message.id;
+        await markGenerationDeliveryComplete({
+          runId: item.runId,
+          ...workLease,
+          outputMessageId,
+        });
+        return {
+          processed: true as const,
+          runId: item.runId,
+          status: "completed" as const,
+        };
+      }
       const taskInput = clarifyingTask
         ? `原始任务：${clarifyingTask.objective}\n待补充：${clarifyingTask.blockingReason || "执行输入"}\n用户补充：${item.userText}`
         : item.userText;
@@ -356,6 +441,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             });
           }
           const completed = await completeInlineGenerationRun({
+            conversationId: item.conversationId,
             runId: item.runId,
             ...workLease,
             replyText: planned.plan.question,
@@ -363,6 +449,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             intent: "delegation_clarification",
             countUsage: false,
             completeOutbox: false,
+            ...(entitlementReservation ? { entitlementReservation } : {}),
           });
           outputMessageId = completed.message.id;
           await markGenerationDeliveryComplete({
@@ -408,7 +495,6 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       );
     }
 
-    const representative = buildRepresentativeRuntimeProfile(setup);
     let paidContinuationRequired =
       item.usage.freeRepliesUsed >= representative.contract.freeReplyLimit;
     if (!item.walletReservation && !paidContinuationRequired) {
@@ -423,6 +509,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       item.audienceIdentityId
       && paidContinuationRequired
       && !item.walletReservation
+      && !entitlementReservation
     ) {
       entitlementReservation = await reserveGenerationConversationEntitlement({
         runId: item.runId,
@@ -442,10 +529,17 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       : paidContinuationRequired && !item.walletReservation
         ? {
             ...item.usage,
+            freeRepliesUsed: Math.max(
+              item.usage.freeRepliesUsed,
+              representative.contract.freeReplyLimit,
+            ),
             passUnlocked: false,
             deepHelpUnlocked: false,
           }
         : item.usage;
+    const continuationAuthorized =
+      !paidContinuationRequired
+      || Boolean(item.walletReservation || entitlementReservation);
 
     if (
       parsedRequests.length
@@ -473,6 +567,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
 
       if (computeReply.approvalId) {
         const waiting = await waitGenerationRunForComputeApproval({
+          conversationId: item.conversationId,
           runId: item.runId,
           ...workLease,
           approvalId: computeReply.approvalId,
@@ -489,6 +584,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       }
 
       const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
         runId: item.runId,
         ...workLease,
         replyText: computeReply.text,
@@ -564,52 +660,72 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       }
     }
 
+    const requestHandoff =
+      plan.nextStep === "handoff" || plan.nextStep === "ask_owner";
     const completed = await completeInlineGenerationRun({
+      conversationId: item.conversationId,
       runId: item.runId,
       ...workLease,
       replyText,
       senderDisplayName: item.representativeName,
       intent: plan.intent,
       completeOutbox: false,
-      countUsage: true,
+      countUsage: continuationAuthorized,
+      ...(requestHandoff
+        ? {
+            humanHandoff: {
+              reason: "AI requested human follow-up",
+              summary: item.userText.slice(0, 600),
+              kind: plan.intent,
+              priority: 80,
+              source: item.channel,
+            },
+          }
+        : {}),
       ...(entitlementReservation ? { entitlementReservation } : {}),
       ...(citations.length ? { citations } : {}),
       ...runtime,
     });
     outputMessageId = completed.message.id;
 
-    if (["collect_intake", "handoff", "ask_owner"].includes(plan.nextStep)) {
+    if (plan.nextStep === "collect_intake") {
       leaseGuard.assertOwned();
-      const requestHandoff = plan.nextStep === "handoff" || plan.nextStep === "ask_owner";
       await ensureConversationLeadAndHandoff({
         conversationId: item.conversationId,
-        reason: requestHandoff ? "AI requested human follow-up" : "Qualified conversation intent",
+        reason: "Qualified conversation intent",
         summary: item.userText.slice(0, 600),
         kind: plan.intent,
-        priority: requestHandoff ? 80 : 50,
+        priority: 50,
         source: item.channel,
-        requestHandoff,
+        requestHandoff: false,
       });
       leaseGuard.assertOwned();
     }
 
     leaseGuard.assertOwned();
-    const externalMessageId = await deliverGenerationOutput({
+    await deliverGenerationOutput({
       config,
       item,
       text: replyText,
+      outputMessageId,
     });
     leaseGuard.assertOwned();
-
-    await markGenerationDeliveryComplete({
-      runId: item.runId,
-      ...workLease,
-      outputMessageId,
-      ...(externalMessageId ? { externalMessageId } : {}),
-    });
     return { processed: true as const, runId: item.runId, status: "completed" as const };
   } catch (error) {
-    if (leaseGuard.isLost() || isGenerationWorkLeaseLostError(error)) {
+    if (isComputeGenerationExecutionInProgressError(error)) {
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "execution_in_progress" as const,
+      };
+    }
+    if (
+      leaseGuard.isLost()
+      || isGenerationWorkLeaseLostError(error)
+      || isComputeGenerationLeaseLostError(error)
+      || isComputeExecutionClaimLostError(error)
+      || isConversationHumanControlError(error)
+    ) {
       return {
         processed: true as const,
         runId: item.runId,
@@ -635,6 +751,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         });
       } else {
         await failGenerationRun({
+          conversationId: item.conversationId,
           runId: item.runId,
           ...workLease,
           errorCode: "conversation_worker_failed",
@@ -682,6 +799,7 @@ function startGenerationLeaseHeartbeat(
   if (!Number.isSafeInteger(item.leaseAttempt)) {
     return {
       assertOwned: () => {},
+      confirmOwned: async () => {},
       isLost: () => false,
       stop: () => {},
     };
@@ -730,6 +848,23 @@ function startGenerationLeaseHeartbeat(
   return {
     assertOwned() {
       if (lostError) throw lostError;
+    },
+    async confirmOwned() {
+      if (lostError) throw lostError;
+      let renewed: boolean;
+      try {
+        renewed = await renewGenerationWorkItemLease({
+          outboxId: item.outboxId,
+          leaseAttempt: item.leaseAttempt,
+        });
+      } catch (error) {
+        markLost();
+        throw error;
+      }
+      if (!renewed) {
+        markLost();
+        throw lostError;
+      }
     },
     isLost() {
       return Boolean(lostError);
@@ -804,6 +939,65 @@ function resolveCapabilityModes(
   };
 }
 
+function renderDelegationTerminalRecovery(
+  input: NonNullable<
+    NonNullable<
+      Awaited<ReturnType<typeof claimNextGenerationWorkItem>>
+    >["delegationTerminalRecovery"]
+  >,
+) {
+  const artifactSummary = input.attachments.length
+    ? input.attachments
+      .map((attachment) => `已生成文件：${attachment.fileName}`)
+      .join("\n")
+    : "没有生成可展示的结果文件。";
+  const keepConversationQueued =
+    input.taskStatus === "READY" && input.stepStatus === "COMPLETED";
+
+  if (keepConversationQueued) {
+    return {
+      text: `委托任务当前步骤已完成，后续步骤已进入执行队列。\n\n${artifactSummary}`,
+      keepConversationQueued,
+    };
+  }
+  if (
+    input.taskStatus === "COMPLETED"
+    && input.stepStatus === "COMPLETED"
+  ) {
+    return {
+      text: `委托任务已在隔离沙盒中执行完成。\n\n${artifactSummary}`,
+      keepConversationQueued,
+    };
+  }
+  if (input.stepStatus === "BLOCKED") {
+    return {
+      text: "委托任务被安全策略拒绝，未执行。",
+      keepConversationQueued,
+    };
+  }
+  if (input.taskStatus === "WAITING_FOR_OWNER") {
+    return {
+      text: "委托任务的外部操作结果需要代表所有者核对，确认前不会自动重试。",
+      keepConversationQueued,
+    };
+  }
+  if (
+    input.taskStatus === "CANCELED"
+    || input.taskStatus === "EXPIRED"
+    || input.stepStatus === "CANCELED"
+    || input.stepStatus === "SKIPPED"
+  ) {
+    return {
+      text: "委托任务已取消或过期，系统不会继续执行。",
+      keepConversationQueued,
+    };
+  }
+  return {
+    text: `委托任务已停止，未能完成。\n\n${artifactSummary}`,
+    keepConversationQueued,
+  };
+}
+
 async function completeTerminalDelegationFailure(
   item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>,
   replyText: string,
@@ -820,6 +1014,7 @@ async function completeTerminalDelegationFailure(
     });
   }
   const completed = await completeInlineGenerationRun({
+    conversationId: item.conversationId,
     runId: item.runId,
     outboxId: item.outboxId,
     leaseAttempt: item.leaseAttempt,
@@ -868,7 +1063,7 @@ async function processPublicWebComputeRequest(input: {
     url: string;
   }>;
 }> {
-  input.leaseGuard.assertOwned();
+  await input.leaseGuard.confirmOwned();
   const delegationConfig = resolveDelegationConfig(input.setup);
   if (!input.setup.compute.enabled || !delegationConfig.enabled) {
     if (input.delegation) {
@@ -892,7 +1087,7 @@ async function processPublicWebComputeRequest(input: {
     };
   }
 
-  input.leaseGuard.assertOwned();
+  await input.leaseGuard.confirmOwned();
   const delegation = input.delegation ?? await createComputeDelegationTask({
     representativeId: input.setup.id,
     representativeVersionId: input.item.representativeVersionId,
@@ -965,12 +1160,16 @@ async function processPublicWebComputeRequest(input: {
 
   let result: Awaited<ReturnType<typeof executeAudienceTool>>;
   try {
-    input.leaseGuard.assertOwned();
+    await input.leaseGuard.confirmOwned();
     const session = await createAudienceComputeSession({
       representativeId: input.setup.id,
       contactId: input.item.contactId,
       conversationId: input.item.conversationId,
       generationRunId: input.item.runId,
+      generationWorkLease: {
+        outboxId: input.item.outboxId,
+        leaseAttempt: input.item.leaseAttempt,
+      },
       delegationTaskId: delegation.task.id,
       delegationTaskStepId: delegation.step.id,
       subagentId: subagent.id,
@@ -980,16 +1179,27 @@ async function processPublicWebComputeRequest(input: {
     });
     input.leaseGuard.assertOwned();
     await markDelegationTaskRunning(delegation.task.id, delegation.step.id);
-    input.leaseGuard.assertOwned();
+    await input.leaseGuard.confirmOwned();
     result = await executeAudienceTool(session.session.id, {
       ...input.parsed,
       subagentId: subagent.id,
+      generationWorkLease: {
+        outboxId: input.item.outboxId,
+        leaseAttempt: input.item.leaseAttempt,
+      },
       // The compute broker derives paid plan authority from its server-side
       // conversation and generation-run context. Never elevate a client payload.
       hasPaidEntitlement: false,
     });
     input.leaseGuard.assertOwned();
   } catch (error) {
+    if (
+      isComputeGenerationLeaseLostError(error)
+      || isComputeExecutionClaimLostError(error)
+      || isComputeGenerationExecutionInProgressError(error)
+    ) {
+      throw error;
+    }
     input.leaseGuard.assertOwned();
     await finalizeComputeDelegationTask({
       taskId: delegation.task.id,
@@ -1038,7 +1248,7 @@ async function processPublicWebComputeRequest(input: {
     ? attachments.map((attachment) => `已生成文件：${attachment.fileName}`).join("\n")
     : "没有生成可展示的结果文件。";
 
-  input.leaseGuard.assertOwned();
+  await input.leaseGuard.confirmOwned();
   const finalization = await finalizeComputeDelegationTask({
     taskId: delegation.task.id,
     stepId: delegation.step.id,
@@ -1052,7 +1262,7 @@ async function processPublicWebComputeRequest(input: {
     artifacts: result.artifacts,
     ...(typeof billing === "number" ? { actualCredits: billing } : {}),
   });
-  input.leaseGuard.assertOwned();
+  await input.leaseGuard.confirmOwned();
 
   if (result.outcome === "blocked") {
     return {
@@ -1196,16 +1406,28 @@ async function deliverGenerationOutput(input: {
   config: ConversationWorkerConfig;
   item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
   text: string;
+  outputMessageId: string;
 }) {
+  const deliveryPreparation = await prepareGenerationMessageChannelDelivery({
+    conversationId: input.item.conversationId,
+    runId: input.item.runId,
+    outboxId: input.item.outboxId,
+    leaseAttempt: input.item.leaseAttempt,
+    outputMessageId: input.outputMessageId,
+  });
   await assertConversationChannelDeliveryAvailable({
     conversationId: input.item.conversationId,
     channel: input.item.channel,
+    senderMode: "ai",
+    allowNeedsHumanDelivery:
+      deliveryPreparation.allowNeedsHumanDelivery,
   });
+  let externalMessageId: string | undefined;
   if (input.item.channel === "matrix") {
     if (!input.item.externalConversationId || !input.item.matrixSenderUserId) {
       throw new Error("Matrix room or representative virtual user is missing.");
     }
-    return sendMatrixRepresentativeMessage({
+    externalMessageId = await sendMatrixRepresentativeMessage({
       config: input.config,
       roomId: input.item.externalConversationId,
       senderUserId: input.item.matrixSenderUserId,
@@ -1214,19 +1436,41 @@ async function deliverGenerationOutput(input: {
       generationRunId: input.item.runId,
       text: input.text,
     });
-  }
-  if (input.item.channel === "telegram") {
+  } else if (input.item.channel === "telegram") {
     if (input.config.telegramConversationPlatformMode !== "worker") {
       throw new Error("Telegram conversation worker is not the active delivery owner.");
     }
     if (!input.item.externalConversationId) {
       throw new Error("Telegram chat binding is missing.");
     }
-    return sendTelegramRepresentativeMessage({
+    externalMessageId = await sendTelegramRepresentativeMessage({
       config: input.config,
       chatId: input.item.externalConversationId,
       text: input.text,
     });
   }
-  return undefined;
+  await markGenerationDeliveryComplete({
+    runId: input.item.runId,
+    outboxId: input.item.outboxId,
+    leaseAttempt: input.item.leaseAttempt,
+    outputMessageId: input.outputMessageId,
+    ...(externalMessageId ? { externalMessageId } : {}),
+  });
+  return externalMessageId;
+}
+
+function isConversationHumanControlError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) {
+    return false;
+  }
+  return error.code === "CONVERSATION_HUMAN_ACTIVE";
+}
+
+function isComputeGenerationLeaseLostError(error: unknown): boolean {
+  return Boolean(
+    error
+    && typeof error === "object"
+    && "code" in error
+    && error.code === "generation_work_lease_lost",
+  );
 }

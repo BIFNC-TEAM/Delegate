@@ -16,9 +16,13 @@ const task = {
   contactId: "contact-1",
   originConversationId: "conversation-1",
   status: "READY",
-  generationRuns: [{ id: "run-1" }],
+  generationRuns: [{
+    id: "run-1",
+    status: "PROCESSING",
+    delegationTaskStepId: "step-1",
+  }],
   resourcePolicy: { allowedCapabilities: ["WRITE"] },
-  steps: [{ id: "step-1", capability: "WRITE" }],
+  steps: [{ id: "step-1", capability: "WRITE", status: "READY" }],
 };
 
 describe("delegation task compute session context", () => {
@@ -31,8 +35,42 @@ describe("delegation task compute session context", () => {
     ["contact", { ...task, contactId: "contact-2" }],
     ["conversation", { ...task, originConversationId: "conversation-2" }],
     ["generation", { ...task, generationRuns: [] }],
-    ["step", { ...task, steps: [{ id: "step-2", capability: "WRITE" }] }],
-    ["step capability", { ...task, steps: [{ id: "step-1", capability: "READ" }] }],
+    ["newer generation", {
+      ...task,
+      generationRuns: [{
+        id: "run-2",
+        status: "PROCESSING",
+        delegationTaskStepId: "step-1",
+      }],
+    }],
+    ["run status", {
+      ...task,
+      generationRuns: [{
+        id: "run-1",
+        status: "COMPLETED",
+        delegationTaskStepId: "step-1",
+      }],
+    }],
+    ["run step", {
+      ...task,
+      generationRuns: [{
+        id: "run-1",
+        status: "PROCESSING",
+        delegationTaskStepId: "step-2",
+      }],
+    }],
+    ["step", {
+      ...task,
+      steps: [{ id: "step-2", capability: "WRITE", status: "READY" }],
+    }],
+    ["step capability", {
+      ...task,
+      steps: [{ id: "step-1", capability: "READ", status: "READY" }],
+    }],
+    ["step status", {
+      ...task,
+      steps: [{ id: "step-1", capability: "WRITE", status: "COMPLETED" }],
+    }],
     ["resource policy", { ...task, resourcePolicy: { allowedCapabilities: ["READ"] } }],
     ["terminal status", { ...task, status: "COMPLETED" }],
   ])("rejects a mismatched %s", (_label, candidate) => {

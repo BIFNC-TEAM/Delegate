@@ -31,38 +31,56 @@ export function startApprovedExecutionLoop(input: { intervalMs?: number } = {}) 
   return () => clearInterval(timer);
 }
 
-async function recoverInterruptedApprovedExecutions() {
-  await prisma.toolExecution.updateMany({
-    where: {
-      status: "RUNNING",
-      approvalRequestId: { not: null },
-      startedAt: null,
-    },
-    data: { status: "QUEUED" },
-  });
-
-  const staleBefore = new Date(Date.now() - 10 * 60 * 1000);
+export async function recoverInterruptedApprovedExecutions() {
+  const now = new Date();
+  const staleBefore = new Date(now.getTime() - 10 * 60 * 1000);
   const stale = await prisma.toolExecution.findMany({
     where: {
       status: "RUNNING",
       approvalRequestId: { not: null },
-      startedAt: { lt: staleBefore },
+      AND: [
+        {
+          OR: [
+            { startedAt: { lt: staleBefore } },
+            {
+              startedAt: null,
+              createdAt: { lt: staleBefore },
+            },
+          ],
+        },
+        {
+          session: {
+            expiresAt: { lte: now },
+          },
+        },
+      ],
     },
-    select: { id: true, sessionId: true },
+    select: {
+      id: true,
+      sessionId: true,
+      executionLeaseToken: true,
+    },
     take: 20,
   });
-  const now = new Date();
   for (const execution of stale) {
     const failed = await prisma.toolExecution.updateMany({
-      where: { id: execution.id, status: "RUNNING" },
-      data: { status: "FAILED", finishedAt: now },
+      where: {
+        id: execution.id,
+        status: "RUNNING",
+        executionLeaseToken: execution.executionLeaseToken,
+      },
+      data: {
+        status: "FAILED",
+        finishedAt: now,
+        executionLeaseToken: null,
+      },
     });
     if (failed.count === 1) {
       await prisma.computeSession.updateMany({
         where: { id: execution.sessionId },
         data: {
           status: "IDLE",
-          failureReason: "approved_execution_interrupted",
+          failureReason: "approved_execution_result_unknown",
           lastHeartbeatAt: now,
         },
       });

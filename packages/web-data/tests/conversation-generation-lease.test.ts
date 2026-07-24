@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => {
     },
     conversation: {
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     conversationEpisode: {
       updateMany: vi.fn(),
@@ -160,6 +161,8 @@ describe("conversation generation work leases", () => {
     mocks.tx.$queryRaw.mockResolvedValue([{
       id: "outbox-stale",
       aggregateId: "run-stale",
+      conversationId: "conversation-1",
+      delegationTaskId: null,
       status: "PROCESSING",
       attemptCount: 2,
     }]);
@@ -170,12 +173,25 @@ describe("conversation generation work leases", () => {
       runId: "run-stale",
     });
 
-    const rawQuery = Array.from(
+    const candidateQuery = Array.from(
       mocks.tx.$queryRaw.mock.calls[0]?.[0] as TemplateStringsArray,
     ).join("?");
-    expect(rawQuery).toContain("\"status\" = 'PROCESSING'");
-    expect(rawQuery).toContain("\"availableAt\" <= NOW()");
-    expect(rawQuery).toContain("FOR UPDATE SKIP LOCKED");
+    const lockedQuery = Array.from(
+      mocks.tx.$queryRaw.mock.calls[1]?.[0] as TemplateStringsArray,
+    ).join("?");
+    expect(candidateQuery).toContain("outbox.\"status\" = 'PROCESSING'");
+    expect(candidateQuery).toContain("outbox.\"availableAt\" <= NOW()");
+    expect(candidateQuery).not.toContain("FOR UPDATE SKIP LOCKED");
+    expect(lockedQuery).toContain("FOR UPDATE OF outbox SKIP LOCKED");
+    expect(lockedQuery).toContain(
+      "run.\"conversationId\"\n          IS NOT DISTINCT FROM ?",
+    );
+    expect(lockedQuery).toContain(
+      "run.\"delegationTaskId\"\n          IS NOT DISTINCT FROM ?",
+    );
+    expect(
+      mocks.tx.$executeRaw.mock.calls.map((call) => call[1]),
+    ).toEqual(["conversation-1", "run-stale"]);
     expect(mocks.tx.outboxEvent.update).toHaveBeenCalledWith({
       where: { id: "outbox-stale" },
       data: {
@@ -194,6 +210,8 @@ describe("conversation generation work leases", () => {
     mocks.tx.$queryRaw.mockResolvedValue([{
       id: "outbox-stale",
       aggregateId: "run-stale",
+      conversationId: "conversation-1",
+      delegationTaskId: null,
       status: "PROCESSING",
       attemptCount: 5,
     }]);
@@ -332,6 +350,7 @@ describe("conversation generation work leases", () => {
     mocks.tx.outboxEvent.updateMany.mockResolvedValueOnce({ count: 0 });
 
     await expect(failGenerationRun({
+      conversationId: "conversation-stale",
       runId: "run-stale",
       outboxId: "outbox-stale",
       leaseAttempt: 2,
@@ -341,6 +360,41 @@ describe("conversation generation work leases", () => {
 
     expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
     expect(mocks.tx.message.update).not.toHaveBeenCalled();
-    expect(mocks.tx.conversation.update).not.toHaveBeenCalled();
+    expect(mocks.tx.conversation.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps delegated MCP billing reserved while its owner reconciliation is pending", async () => {
+    mocks.tx.generationRun.update.mockResolvedValue({
+      ...validRun,
+      delegationTaskId: "task-uncertain-effect",
+      delegationTaskStepId: "step-uncertain-effect",
+      delegationTaskStep: { kind: "MCP" },
+    });
+
+    await failGenerationRun({
+      conversationId: validRun.conversationId,
+      runId: validRun.id,
+      outboxId: "outbox-stale",
+      leaseAttempt: 5,
+      errorCode: "conversation_worker_failed",
+      errorMessage: "The remote effect requires owner reconciliation.",
+    });
+
+    expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.tx.outboxEvent.updateMany).toHaveBeenLastCalledWith({
+      where: {
+        id: "outbox-stale",
+        aggregateType: "generation_run",
+        aggregateId: validRun.id,
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: 5,
+      },
+      data: {
+        status: "DEAD_LETTER",
+        lastError: "The remote effect requires owner reconciliation.",
+        availableAt: expect.any(Date),
+      },
+    });
   });
 });

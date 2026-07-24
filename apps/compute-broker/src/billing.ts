@@ -1,6 +1,8 @@
 import type { CapabilityKind } from "@delegate/compute-protocol";
+import type { Prisma } from "@prisma/client";
 
 import { prisma } from "./prisma";
+import { SessionError } from "./session-error";
 
 type BudgetContext = {
   conversationId?: string | null;
@@ -96,8 +98,54 @@ export async function applyExecutionBilling(params: {
   wallMs: number;
   artifactBytes: number;
   finishedAt: Date;
+  expectedExecutionLeaseToken: string;
 }) {
   return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT "id"
+      FROM "ToolExecution"
+      WHERE "id" = ${params.toolExecutionId}
+      FOR UPDATE
+    `;
+    const execution = await tx.toolExecution.findUnique({
+      where: { id: params.toolExecutionId },
+      select: {
+        billingSnapshot: true,
+        executionLeaseToken: true,
+        status: true,
+      },
+    });
+    if (!execution) {
+      throw new Error("tool_execution_not_found_for_billing");
+    }
+    if (
+      execution.status !== "RUNNING"
+      || execution.executionLeaseToken !== params.expectedExecutionLeaseToken
+    ) {
+      throw new SessionError(409, "compute_execution_claim_lost");
+    }
+    const existingBilling = readExecutionBillingSummary(
+      execution.billingSnapshot,
+    );
+    if (existingBilling) {
+      return existingBilling;
+    }
+
+    await tx.$executeRaw`
+      SELECT "ownerId"
+      FROM "Wallet"
+      WHERE "ownerId" = ${params.ownerId}
+      FOR UPDATE
+    `;
+    if (params.conversationId) {
+      await tx.$executeRaw`
+        SELECT "id"
+        FROM "Conversation"
+        WHERE "id" = ${params.conversationId}
+        FOR UPDATE
+      `;
+    }
+
     const conversation =
       params.conversationId
         ? await tx.conversation.findUnique({
@@ -294,10 +342,10 @@ export async function applyExecutionBilling(params: {
       },
     ].filter((entry) => entry.amount > 0);
 
-    if (!debitEntries.length && totalCreditsToCharge > 0) {
+    if (creditsLeftToCharge > 0) {
       debitEntries.push({
         source: "unsettled",
-        amount: totalCreditsToCharge,
+        amount: creditsLeftToCharge,
       });
     }
 
@@ -322,7 +370,7 @@ export async function applyExecutionBilling(params: {
       ),
     );
 
-    return {
+    const summary = {
       actualCredits: totalCreditsToCharge,
       computeCostCents: params.computeCostCents,
       browserCostCents: params.browserCostCents,
@@ -333,5 +381,38 @@ export async function applyExecutionBilling(params: {
       ownerBalanceCredits: remainingOwnerBalanceCredits,
       sponsorPoolCredit: remainingSponsorPoolCredits,
     } satisfies ExecutionBillingSummary;
+    const finalized = await tx.toolExecution.updateMany({
+      where: {
+        id: params.toolExecutionId,
+        status: "RUNNING",
+        executionLeaseToken: params.expectedExecutionLeaseToken,
+        billingFinalizedAt: null,
+      },
+      data: {
+        billingFinalizedAt: params.finishedAt,
+        billingSnapshot: summary as Prisma.InputJsonValue,
+      },
+    });
+    if (finalized.count !== 1) {
+      throw new SessionError(409, "compute_execution_claim_lost");
+    }
+    return summary;
   });
+}
+
+function readExecutionBillingSummary(
+  value: unknown,
+): ExecutionBillingSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.actualCredits !== "number"
+    || typeof record.computeCostCents !== "number"
+    || typeof record.storageCostCents !== "number"
+  ) {
+    return null;
+  }
+  return value as ExecutionBillingSummary;
 }

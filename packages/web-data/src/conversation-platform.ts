@@ -6,6 +6,9 @@ import {
   ConversationAssignmentStatus,
   ConversationEpisodeStatus,
   ConversationParticipantKind,
+  DelegationTaskNextActor,
+  DelegationTaskStatus,
+  DelegationTaskStepStatus,
   GenerationRunStatus,
   HandoffStatus,
   LeadStatus,
@@ -59,6 +62,7 @@ import {
   releaseConversationEntitlement,
   releaseConversationEntitlementByGenerationRunId,
   reserveConversationEntitlement,
+  transferConversationEntitlementByGenerationRunId,
   type ConversationEntitlementReservation,
   type ServiceEntitlementClient,
 } from "./service-entitlements";
@@ -312,6 +316,66 @@ export class ServiceCreditRequiredError extends Error {
   }
 }
 
+export class ActiveDelegationTaskControlError extends Error {
+  readonly code = "ACTIVE_DELEGATION_TASK";
+  readonly statusCode = 409;
+
+  constructor() {
+    super(
+      "Wait for the active delegation task to finish, or cancel or reconcile it when those controls become available, before assigning a human operator.",
+    );
+    this.name = "ActiveDelegationTaskControlError";
+  }
+}
+
+export class DelegationMessageEditConflictError extends Error {
+  readonly code = "DELEGATION_MESSAGE_EDIT_CONFLICT";
+  readonly statusCode = 409;
+
+  constructor() {
+    super(
+      "Messages already used by a delegation task cannot be edited. Cancel the task and submit a new message instead.",
+    );
+    this.name = "DelegationMessageEditConflictError";
+  }
+}
+
+export class DelegationMessageRedactionConflictError extends Error {
+  readonly code = "DELEGATION_MESSAGE_REDACTION_CONFLICT";
+  readonly statusCode = 409;
+
+  constructor() {
+    super(
+      "Messages used by an active delegation task cannot be redacted. Cancel or reconcile the task first.",
+    );
+    this.name = "DelegationMessageRedactionConflictError";
+  }
+}
+
+export class ConversationAiDeliveryControlError extends Error {
+  readonly code = "CONVERSATION_HUMAN_ACTIVE";
+  readonly statusCode = 409;
+
+  constructor() {
+    super(
+      "AI delivery was canceled because the conversation is waiting for, or controlled by, a human operator.",
+    );
+    this.name = "ConversationAiDeliveryControlError";
+  }
+}
+
+export class ConversationWorkInFlightControlError extends Error {
+  readonly code = "CONVERSATION_WORK_IN_FLIGHT";
+  readonly statusCode = 409;
+
+  constructor() {
+    super(
+      "Conversation work is crossing its delivery boundary. Retry operator takeover after it finishes.",
+    );
+    this.name = "ConversationWorkInFlightControlError";
+  }
+}
+
 export type MatrixApplicationServiceEvent = {
   event_id?: string;
   type?: string;
@@ -376,6 +440,57 @@ const generationStateMap: Record<GenerationRunStatus, GenerationRunState> = {
   FAILED: "failed",
   CANCELED: "canceled",
 };
+
+const activeGenerationOutboxStatuses = [
+  "PENDING",
+  "PROCESSING",
+  "FAILED",
+] as const;
+
+function markGenerationWalletTransferred(
+  snapshot: Prisma.JsonValue | null,
+  replacementRunId: string,
+): Prisma.InputJsonObject | null {
+  if (!isJsonRecord(snapshot) || !readGenerationWalletReservation(snapshot)) {
+    return null;
+  }
+  const {
+    walletReservation: _walletReservation,
+    ...rest
+  } = snapshot;
+  return {
+    ...rest,
+    billingMode: `${String(snapshot["billingMode"] ?? "service_credit")}_transferred`,
+    billingTransferredToGenerationRunId: replacementRunId,
+    walletReservationTransferredTo: replacementRunId,
+  } as Prisma.InputJsonObject;
+}
+
+function markGenerationWalletReleased(
+  snapshot: Prisma.JsonValue | null,
+  now: Date,
+): Prisma.InputJsonObject | null {
+  if (!isJsonRecord(snapshot) || !readGenerationWalletReservation(snapshot)) {
+    return null;
+  }
+  const {
+    walletReservation: _walletReservation,
+    ...rest
+  } = snapshot;
+  return {
+    ...rest,
+    billingMode: "service_credit_released",
+    billingFinalizedAt: now.toISOString(),
+  } as Prisma.InputJsonObject;
+}
+
+function delegationTaskOwnsGenerationBilling(input: {
+  delegationTaskId?: string | null;
+  delegationTaskStep?: { kind: string } | null;
+}): boolean {
+  if (!input.delegationTaskId) return false;
+  return input.delegationTaskStep?.kind !== "CLARIFICATION";
+}
 
 export async function listConversationInboxSnapshot(
   representativeSlug: string,
@@ -1126,8 +1241,12 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
         activeEpisodeId: episode.id,
         state:
           action === "hold_for_operator"
-            ? "HUMAN_ACTIVE"
-            : conversation.state,
+            ? latestState === "human_active"
+              ? "HUMAN_ACTIVE"
+              : "NEEDS_HUMAN"
+            : run
+              ? "AI_QUEUED"
+              : conversation.state,
         unreadCount: { increment: 1 },
         lastMessageAt: createdAt,
       },
@@ -1146,11 +1265,14 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
 export async function assertConversationChannelDeliveryAvailable(input: {
   conversationId: string;
   channel: "web" | "matrix" | "telegram";
+  senderMode?: "ai" | "operator";
+  allowNeedsHumanDelivery?: boolean;
 }) {
   const kind = mapChannelKind(input.channel);
   const conversation = await prisma.conversation.findUnique({
     where: { id: input.conversationId },
     select: {
+      state: true,
       representative: {
         select: {
           lifecycleState: true,
@@ -1185,6 +1307,18 @@ export async function assertConversationChannelDeliveryAvailable(input: {
     },
   });
   if (!conversation) throw new Error("Conversation not found.");
+  if (
+    input.senderMode === "ai"
+    && (
+      conversation.state === "HUMAN_ACTIVE"
+      || (
+        conversation.state === "NEEDS_HUMAN"
+        && !input.allowNeedsHumanDelivery
+      )
+    )
+  ) {
+    throw new ConversationAiDeliveryControlError();
+  }
   const channelBinding = conversation.channelBindings[0];
   if (
     input.channel === "matrix"
@@ -1332,6 +1466,7 @@ export async function authorizeGenerationRunFreeUsage(input: {
 }
 
 export async function completeInlineGenerationRun(input: {
+  conversationId: string;
   runId: string;
   outboxId: string;
   leaseAttempt: number;
@@ -1346,6 +1481,13 @@ export async function completeInlineGenerationRun(input: {
   completeOutbox?: boolean;
   countUsage: boolean;
   keepConversationQueued?: boolean;
+  humanHandoff?: {
+    reason: string;
+    summary: string;
+    kind?: string;
+    priority?: number;
+    source?: string;
+  };
   entitlementReservation?: ConversationEntitlementReservation;
   attachments?: Array<{
     fileName: string;
@@ -1363,8 +1505,16 @@ export async function completeInlineGenerationRun(input: {
 }) {
   const replyText = input.replyText.trim();
   if (!replyText) throw new Error("Reply text is required.");
+  if (input.keepConversationQueued && input.humanHandoff) {
+    throw new Error(
+      "A generation run cannot queue another AI step while requesting human handoff.",
+    );
+  }
 
   const completedResult = await runConversationWriteTransaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
+    `;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
     await fenceGenerationWorkLease(tx, input);
     const run = await tx.generationRun.findUnique({
@@ -1385,6 +1535,8 @@ export async function completeInlineGenerationRun(input: {
         },
         conversation: {
           select: {
+            id: true,
+            state: true,
             audienceIdentityId: true,
             representativeId: true,
           },
@@ -1393,19 +1545,89 @@ export async function completeInlineGenerationRun(input: {
       },
     });
     if (!run) throw new Error("Generation run not found.");
+    if (run.conversationId !== input.conversationId) {
+      throw new Error("Generation run does not belong to the conversation.");
+    }
     if (run.status === GenerationRunStatus.COMPLETED && run.outputMessage) {
       return { run, message: run.outputMessage };
     }
     if (run.status === GenerationRunStatus.CANCELED) {
       throw new Error("Generation run was canceled.");
     }
-    const delegationTaskOwnsBilling = Boolean(
-      run.delegationTaskId
-      && (
-        run.delegationTaskStep?.kind === "COMPUTE"
-        || run.delegationTaskStep?.kind === "MCP"
-      ),
-    );
+    const delegationTaskOwnsBilling =
+      delegationTaskOwnsGenerationBilling(run);
+    if (
+      run.conversation.state === "HUMAN_ACTIVE"
+      || run.conversation.state === "NEEDS_HUMAN"
+    ) {
+      const deferredAt = new Date();
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: "generation_deferred_for_human",
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
+      const walletReservation = readGenerationWalletReservation(
+        run.runtimePolicySnapshot,
+      );
+      let releasedSnapshot: Prisma.InputJsonObject | null = null;
+      if (walletReservation && !delegationTaskOwnsBilling) {
+        await releaseConversationWalletUsage(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            reason: "generation_deferred_to_human",
+            idempotencyKey: `generation:${run.id}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+        releasedSnapshot = markGenerationWalletReleased(
+          run.runtimePolicySnapshot,
+          deferredAt,
+        );
+      }
+      await tx.generationRun.update({
+        where: { id: run.id },
+        data: {
+          status: GenerationRunStatus.WAITING_HUMAN,
+          completedAt: null,
+          canceledAt: null,
+          ...(releasedSnapshot
+            ? { runtimePolicySnapshot: releasedSnapshot }
+            : {}),
+        },
+      });
+      await tx.message.update({
+        where: { id: run.inputMessageId },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.SENT,
+          failureCode: null,
+          failureReason: null,
+        },
+      });
+      const completedOutbox = await tx.outboxEvent.updateMany({
+        where: {
+          id: input.outboxId,
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          eventType: "generation.requested",
+          status: "PROCESSING",
+          attemptCount: input.leaseAttempt,
+        },
+        data: {
+          status: "PROCESSED",
+          processedAt: deferredAt,
+          lastError: null,
+        },
+      });
+      if (completedOutbox.count !== 1) {
+        throw new GenerationWorkLeaseLostError(
+          input.outboxId,
+          input.leaseAttempt,
+        );
+      }
+      return { deferredForHuman: true as const };
+    }
     const matrixBinding =
       run.inputMessage?.channelBinding?.kind === RepresentativeChannelKind.MATRIX
         ? run.inputMessage.channelBinding
@@ -1429,7 +1651,7 @@ export async function completeInlineGenerationRun(input: {
       const walletReservation = readGenerationWalletReservation(
         run.runtimePolicySnapshot,
       );
-      if (walletReservation) {
+      if (walletReservation && !delegationTaskOwnsBilling) {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
@@ -1547,10 +1769,24 @@ export async function completeInlineGenerationRun(input: {
         delegationTaskId: run.delegationTaskId,
         contentType: MessageContentType.TEXT,
         text: replyText,
-        ...(input.intent ? { content: { intent: input.intent } } : {}),
+        ...(input.intent || input.humanHandoff
+          ? {
+              content: {
+                ...(input.intent ? { intent: input.intent } : {}),
+                ...(input.humanHandoff
+                  ? {
+                      deliveryControl: {
+                        allowNeedsHuman: true,
+                        generationRunId: run.id,
+                      },
+                    }
+                  : {}),
+              },
+            }
+          : {}),
         deliveryStatus:
           input.completeOutbox === false
-            ? MessageDeliveryStatus.PROCESSING
+            ? MessageDeliveryStatus.QUEUED
             : MessageDeliveryStatus.SENT,
         retentionExpiresAt: buildMessageRetentionExpiry(now),
         createdAt: now,
@@ -1601,10 +1837,22 @@ export async function completeInlineGenerationRun(input: {
       where: { id: run.inputMessageId },
       data: { deliveryStatus: MessageDeliveryStatus.SENT },
     });
+    await tx.conversation.updateMany({
+      where: {
+        id: run.conversationId,
+        state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
+      },
+      data: {
+        state: input.humanHandoff
+          ? "NEEDS_HUMAN"
+          : input.keepConversationQueued
+            ? "AI_QUEUED"
+            : "WAITING_USER",
+      },
+    });
     await tx.conversation.update({
       where: { id: run.conversationId },
       data: {
-        state: input.keepConversationQueued ? "AI_QUEUED" : "WAITING_USER",
         lastMessageAt: now,
         ...(!input.countUsage || walletReservation || delegationTaskOwnsBilling
           ? {}
@@ -1612,9 +1860,30 @@ export async function completeInlineGenerationRun(input: {
       },
     });
     await tx.conversationEpisode.updateMany({
-      where: { id: run.episodeId || "__no_episode__" },
-      data: { status: input.keepConversationQueued ? ConversationEpisodeStatus.ACTIVE : ConversationEpisodeStatus.WAITING_USER },
+      where: {
+        id: run.episodeId || "__no_episode__",
+        status: {
+          notIn: [
+            ConversationEpisodeStatus.HUMAN_ACTIVE,
+            ConversationEpisodeStatus.NEEDS_HUMAN,
+          ],
+        },
+      },
+      data: {
+        status: input.humanHandoff
+          ? ConversationEpisodeStatus.NEEDS_HUMAN
+          : input.keepConversationQueued
+            ? ConversationEpisodeStatus.ACTIVE
+            : ConversationEpisodeStatus.WAITING_USER,
+      },
     });
+    if (input.humanHandoff) {
+      await ensureConversationLeadAndHandoffInTransaction(tx, {
+        conversationId: run.conversationId,
+        ...input.humanHandoff,
+        requestHandoff: true,
+      });
+    }
     if (input.completeOutbox !== false) {
       const completedOutbox = await tx.outboxEvent.updateMany({
         where: {
@@ -1664,10 +1933,14 @@ export async function completeInlineGenerationRun(input: {
   if (!completedResult) {
     throw new ChannelUnavailableError("matrix_private_room_not_verified");
   }
+  if ("deferredForHuman" in completedResult) {
+    throw new ConversationAiDeliveryControlError();
+  }
   return completedResult;
 }
 
 export async function waitGenerationRunForComputeApproval(input: {
+  conversationId: string;
   runId: string;
   outboxId: string;
   leaseAttempt: number;
@@ -1679,6 +1952,9 @@ export async function waitGenerationRunForComputeApproval(input: {
   if (!replyText) throw new Error("Approval waiting reply text is required.");
 
   return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
+    `;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
     await fenceGenerationWorkLease(tx, input);
     const run = await tx.generationRun.findUnique({
@@ -1686,6 +1962,9 @@ export async function waitGenerationRunForComputeApproval(input: {
       include: { outputMessage: true },
     });
     if (!run) throw new Error("Generation run not found.");
+    if (run.conversationId !== input.conversationId) {
+      throw new Error("Generation run does not belong to the conversation.");
+    }
     if (run.status === GenerationRunStatus.COMPLETED && run.outputMessage) {
       return { run, message: run.outputMessage };
     }
@@ -1694,6 +1973,17 @@ export async function waitGenerationRunForComputeApproval(input: {
     }
     if (run.status === GenerationRunStatus.CANCELED) {
       throw new Error("Generation run was canceled.");
+    }
+    const conversation = await tx.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { state: true },
+    });
+    if (!conversation) throw new Error("Conversation not found.");
+    if (
+      conversation.state === "HUMAN_ACTIVE"
+      || conversation.state === "NEEDS_HUMAN"
+    ) {
+      throw new ConversationAiDeliveryControlError();
     }
 
     const approval = await tx.approvalRequest.findUnique({
@@ -1801,6 +2091,17 @@ export type ClaimedGenerationWorkItem = {
   deliveryOnly?: boolean;
   outputMessageId?: string;
   outputText?: string;
+  delegationTerminalRecovery?: {
+    taskStatus: string;
+    stepStatus: string;
+    attachments: Array<{
+      fileName: string;
+      mimeType?: string;
+      sizeBytes?: number;
+      artifactId: string;
+      url: string;
+    }>;
+  };
   walletReservation?: GenerationWalletReservation;
   usage: {
     freeRepliesUsed: number;
@@ -1814,6 +2115,8 @@ export const GENERATION_WORK_LEASE_DURATION_MS = 5 * 60_000;
 
 const GENERATION_WORK_LEASE_EXHAUSTED_ERROR = "generation_work_lease_exhausted";
 const GENERATION_WORK_LEASE_LOST_ERROR = "generation_work_lease_lost";
+const DELEGATION_EXTERNAL_EFFECT_LEASE_LOST_ERROR =
+  "delegation_external_effect_lease_lost";
 
 export type GenerationWorkLease = {
   outboxId: string;
@@ -1909,35 +2212,95 @@ export async function claimNextGenerationWorkItem(
   } = {},
 ): Promise<ClaimedGenerationWorkItem | null> {
   return runConversationWriteTransaction(async (tx) => {
-    const candidates = await tx.$queryRaw<Array<{
+    const selectedCandidates = await tx.$queryRaw<Array<{
+      id: string;
+      aggregateId: string;
+      conversationId: string | null;
+      delegationTaskId: string | null;
+      status: string;
+      attemptCount: number;
+    }>>`
+      SELECT
+        outbox."id",
+        outbox."aggregateId",
+        run."conversationId" AS "conversationId",
+        outbox."status",
+        outbox."attemptCount",
+        run."delegationTaskId" AS "delegationTaskId"
+      FROM "OutboxEvent" AS outbox
+      LEFT JOIN "GenerationRun" AS run
+        ON run."id" = outbox."aggregateId"
+      WHERE outbox."eventType" = 'generation.requested'
+        AND outbox."availableAt" <= NOW()
+        AND (
+          (
+            outbox."status" IN ('PENDING', 'FAILED')
+            AND outbox."attemptCount" < ${GENERATION_WORK_MAX_ATTEMPTS}
+          )
+          OR outbox."status" = 'PROCESSING'
+        )
+      ORDER BY
+        CASE
+          WHEN outbox."status" = 'PROCESSING'
+            AND outbox."attemptCount" >= ${GENERATION_WORK_MAX_ATTEMPTS}
+          THEN 0
+          ELSE 1
+        END,
+        outbox."createdAt" ASC
+      LIMIT 1
+    `;
+    const selectedCandidate = selectedCandidates[0];
+    if (!selectedCandidate) return null;
+
+    if (selectedCandidate.conversationId) {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtext(${selectedCandidate.conversationId})
+        )
+      `;
+    }
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${selectedCandidate.aggregateId}))
+    `;
+    if (selectedCandidate.delegationTaskId) {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtext(${selectedCandidate.delegationTaskId})
+        )
+      `;
+    }
+
+    const lockedCandidates = await tx.$queryRaw<Array<{
       id: string;
       aggregateId: string;
       status: string;
       attemptCount: number;
     }>>`
-      SELECT "id", "aggregateId", "status", "attemptCount"
-      FROM "OutboxEvent"
-      WHERE "eventType" = 'generation.requested'
-        AND "availableAt" <= NOW()
+      SELECT
+        outbox."id",
+        outbox."aggregateId",
+        outbox."status",
+        outbox."attemptCount"
+      FROM "OutboxEvent" AS outbox
+      LEFT JOIN "GenerationRun" AS run
+        ON run."id" = outbox."aggregateId"
+      WHERE outbox."id" = ${selectedCandidate.id}
+        AND outbox."eventType" = 'generation.requested'
+        AND outbox."availableAt" <= NOW()
+        AND run."conversationId"
+          IS NOT DISTINCT FROM ${selectedCandidate.conversationId}
+        AND run."delegationTaskId"
+          IS NOT DISTINCT FROM ${selectedCandidate.delegationTaskId}
         AND (
           (
-            "status" IN ('PENDING', 'FAILED')
-            AND "attemptCount" < ${GENERATION_WORK_MAX_ATTEMPTS}
+            outbox."status" IN ('PENDING', 'FAILED')
+            AND outbox."attemptCount" < ${GENERATION_WORK_MAX_ATTEMPTS}
           )
-          OR "status" = 'PROCESSING'
+          OR outbox."status" = 'PROCESSING'
         )
-      ORDER BY
-        CASE
-          WHEN "status" = 'PROCESSING'
-            AND "attemptCount" >= ${GENERATION_WORK_MAX_ATTEMPTS}
-          THEN 0
-          ELSE 1
-        END,
-        "createdAt" ASC
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
+      FOR UPDATE OF outbox SKIP LOCKED
     `;
-    const candidate = candidates[0];
+    const candidate = lockedCandidates[0];
     if (!candidate) return null;
 
     if (
@@ -1948,6 +2311,7 @@ export async function claimNextGenerationWorkItem(
         tx,
         candidate.aggregateId,
         candidate.id,
+        { recoverLatestTerminalDelegationResult: true },
       );
       return null;
     }
@@ -1986,6 +2350,34 @@ export async function claimNextGenerationWorkItem(
           },
         },
         outputMessage: true,
+        delegationTask: {
+          select: { status: true },
+        },
+        delegationTaskStep: {
+          select: {
+            kind: true,
+            status: true,
+            externalEffects: {
+              where: { status: "EXECUTING" },
+              select: { id: true },
+              take: 1,
+            },
+            outputs: {
+              where: { artifactId: { not: null } },
+              select: {
+                artifact: {
+                  select: {
+                    id: true,
+                    kind: true,
+                    mimeType: true,
+                    sizeBytes: true,
+                  },
+                },
+              },
+              take: 20,
+            },
+          },
+        },
         episode: {
           select: {
             representativeVersionId: true,
@@ -2045,7 +2437,10 @@ export async function claimNextGenerationWorkItem(
       const walletReservation = readGenerationWalletReservation(
         run.runtimePolicySnapshot,
       );
-      if (walletReservation) {
+      if (
+        walletReservation
+        && !delegationTaskOwnsGenerationBilling(run)
+      ) {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
@@ -2062,6 +2457,119 @@ export async function claimNextGenerationWorkItem(
       });
       return null;
     }
+    let delegationTerminalRecovery:
+      | ClaimedGenerationWorkItem["delegationTerminalRecovery"]
+      | undefined;
+    if (
+      candidate.status === "PROCESSING"
+      && run.status !== GenerationRunStatus.COMPLETED
+      && run.delegationTaskStep?.externalEffects.length
+    ) {
+      await terminalizeExpiredGenerationLease(
+        tx,
+        run.id,
+        outbox.id,
+        {
+          errorCode: DELEGATION_EXTERNAL_EFFECT_LEASE_LOST_ERROR,
+          errorMessage:
+            "The worker lease expired while an external effect may have reached the remote system.",
+        },
+      );
+      return null;
+    }
+    const previousDelegationRunId =
+      isJsonRecord(run.contextSnapshot)
+      && run.contextSnapshot["source"] === "delegation_plan_step"
+      && typeof run.contextSnapshot["previousGenerationRunId"] === "string"
+        ? run.contextSnapshot["previousGenerationRunId"]
+        : null;
+    if (previousDelegationRunId) {
+      const previousRun = await tx.generationRun.findUnique({
+        where: { id: previousDelegationRunId },
+        select: {
+          status: true,
+          outputMessage: {
+            select: { deliveryStatus: true },
+          },
+        },
+      });
+      if (
+        previousRun?.status !== GenerationRunStatus.COMPLETED
+        || previousRun.outputMessage?.deliveryStatus
+          !== MessageDeliveryStatus.SENT
+      ) {
+        await tx.outboxEvent.update({
+          where: { id: outbox.id },
+          data: {
+            status: "PENDING",
+            attemptCount: { decrement: 1 },
+            availableAt: new Date(Date.now() + telegramWorkerOwnershipRetryMs),
+            lastError: "delegation_previous_generation_not_completed",
+          },
+        });
+        return null;
+      }
+    }
+    if (
+      run.status !== GenerationRunStatus.COMPLETED
+      &&
+      run.delegationTaskId
+      && run.delegationTaskStep
+      && isTerminalDelegationTaskStepStatus(
+        run.delegationTaskStep.status,
+      )
+    ) {
+      const latestStepRun = await tx.generationRun.findFirst({
+        where: {
+          delegationTaskId: run.delegationTaskId,
+          delegationTaskStepId: run.delegationTaskStepId,
+        },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      if (latestStepRun?.id === run.id) {
+        delegationTerminalRecovery = {
+          taskStatus: run.delegationTask?.status ?? "FAILED",
+          stepStatus: run.delegationTaskStep.status,
+          attachments: run.delegationTaskStep.outputs.flatMap((output) => {
+            const artifact = output.artifact;
+            if (!artifact) return [];
+            return [{
+              fileName: buildDelegationRecoveryArtifactFileName({
+                artifactId: artifact.id,
+                kind: artifact.kind,
+                mimeType: artifact.mimeType,
+              }),
+              mimeType: artifact.mimeType,
+              sizeBytes: artifact.sizeBytes,
+              artifactId: artifact.id,
+              url: `/reps/${encodeURIComponent(run.conversation.representative.slug)}/chat/artifacts/${encodeURIComponent(artifact.id)}/download`,
+            }];
+          }),
+        };
+      } else {
+        const supersededAt = new Date();
+        await tx.generationRun.update({
+          where: { id: run.id },
+          data: {
+            status: GenerationRunStatus.CANCELED,
+            errorCode: "delegation_step_already_finalized",
+            errorMessage:
+              "Generation was superseded after its delegation step advanced.",
+            canceledAt: supersededAt,
+          },
+        });
+        await tx.outboxEvent.update({
+          where: { id: outbox.id },
+          data: {
+            status: "PROCESSED",
+            processedAt: supersededAt,
+            lastError: null,
+          },
+        });
+        return null;
+      }
+    }
     if (
       run.status !== GenerationRunStatus.COMPLETED
       && (
@@ -2076,6 +2584,9 @@ export async function claimNextGenerationWorkItem(
       )
     ) {
       const failedAt = new Date();
+      const failureReason =
+        "The generation run has no valid representative version pin or differs from its conversation episode.";
+      await abortDelegatedTaskForGenerationClaimFailure(tx, run, failureReason);
       await releaseConversationEntitlementByGenerationRunId(
         {
           generationRunId: run.id,
@@ -2088,8 +2599,7 @@ export async function claimNextGenerationWorkItem(
         data: {
           status: GenerationRunStatus.FAILED,
           errorCode: "representative_version_context_mismatch",
-          errorMessage:
-            "The generation run has no valid representative version pin or differs from its conversation episode.",
+          errorMessage: failureReason,
           completedAt: failedAt,
         },
       });
@@ -2112,7 +2622,10 @@ export async function claimNextGenerationWorkItem(
       const walletReservation = readGenerationWalletReservation(
         run.runtimePolicySnapshot,
       );
-      if (walletReservation) {
+      if (
+        walletReservation
+        && !delegationTaskOwnsGenerationBilling(run)
+      ) {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
@@ -2180,6 +2693,13 @@ export async function claimNextGenerationWorkItem(
         : false;
       if (!matrixBindingSafe) {
         const failureCode = "matrix_private_room_not_verified";
+        const failureReason =
+          "Generation canceled because the Matrix room is no longer a verified private conversation.";
+        await abortDelegatedTaskForGenerationClaimFailure(
+          tx,
+          run,
+          failureReason,
+        );
         await releaseConversationEntitlementByGenerationRunId(
           {
             generationRunId: run.id,
@@ -2203,7 +2723,10 @@ export async function claimNextGenerationWorkItem(
           const walletReservation = readGenerationWalletReservation(
             run.runtimePolicySnapshot,
           );
-          if (walletReservation) {
+          if (
+            walletReservation
+            && !delegationTaskOwnsGenerationBilling(run)
+          ) {
             await releaseConversationWalletUsage(
               {
                 usageChargeId: walletReservation.usageChargeId,
@@ -2220,8 +2743,7 @@ export async function claimNextGenerationWorkItem(
             data: {
               status: GenerationRunStatus.CANCELED,
               errorCode: failureCode,
-              errorMessage:
-                "Generation canceled because the Matrix room is no longer a verified private conversation.",
+              errorMessage: failureReason,
               canceledAt,
             },
           });
@@ -2314,6 +2836,11 @@ export async function claimNextGenerationWorkItem(
         return null;
       }
       const canceledAt = new Date();
+      await abortDelegatedTaskForGenerationClaimFailure(
+        tx,
+        run,
+        `Generation canceled because ${availability.code}.`,
+      );
       await releaseConversationEntitlementByGenerationRunId(
         {
           generationRunId: run.id,
@@ -2324,7 +2851,10 @@ export async function claimNextGenerationWorkItem(
       const walletReservation = readGenerationWalletReservation(
         run.runtimePolicySnapshot,
       );
-      if (walletReservation) {
+      if (
+        walletReservation
+        && !delegationTaskOwnsGenerationBilling(run)
+      ) {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
@@ -2418,6 +2948,9 @@ export async function claimNextGenerationWorkItem(
             outputText: run.outputMessage.text!,
           }
         : {}),
+      ...(delegationTerminalRecovery
+        ? { delegationTerminalRecovery }
+        : {}),
       ...(walletReservation ? { walletReservation } : {}),
       usage: {
         freeRepliesUsed: run.conversation.freeRepliesUsed,
@@ -2427,6 +2960,48 @@ export async function claimNextGenerationWorkItem(
         deepHelpUnlocked: Boolean(run.conversation.deepHelpUnlockedAt),
       },
     };
+  });
+}
+
+function buildDelegationRecoveryArtifactFileName(input: {
+  artifactId: string;
+  kind: string;
+  mimeType: string;
+}) {
+  const extension = input.mimeType.includes("json")
+    ? "json"
+    : input.mimeType.includes("csv")
+      ? "csv"
+      : input.mimeType.includes("png")
+        ? "png"
+        : input.mimeType.includes("jpeg")
+          ? "jpg"
+          : input.mimeType.includes("pdf")
+            ? "pdf"
+            : "txt";
+  return `${input.kind.toLowerCase()}-${input.artifactId}.${extension}`;
+}
+
+async function abortDelegatedTaskForGenerationClaimFailure(
+  tx: Prisma.TransactionClient,
+  run: {
+    id: string;
+    delegationTaskId?: string | null;
+    delegationTaskStepId?: string | null;
+  },
+  failureReason: string,
+) {
+  if (!run.delegationTaskId) return null;
+  const {
+    abortDelegationTaskForGenerationFailureInTransaction,
+  } = await import("./delegation-tasks");
+  return abortDelegationTaskForGenerationFailureInTransaction(tx, {
+    taskId: run.delegationTaskId,
+    generationRunId: run.id,
+    ...(run.delegationTaskStepId
+      ? { stepId: run.delegationTaskStepId }
+      : {}),
+    failureReason,
   });
 }
 
@@ -2458,16 +3033,29 @@ async function terminalizeExpiredGenerationLease(
   tx: Prisma.TransactionClient,
   runId: string,
   outboxId: string,
+  options: {
+    errorCode?: string;
+    errorMessage?: string;
+    recoverLatestTerminalDelegationResult?: boolean;
+  } = {},
 ) {
   const now = new Date();
+  const errorCode =
+    options.errorCode ?? GENERATION_WORK_LEASE_EXHAUSTED_ERROR;
+  const errorMessage =
+    options.errorMessage
+    ?? "The conversation worker stopped renewing its lease and exhausted all retry attempts.";
   const run = await tx.generationRun.findUnique({
     where: { id: runId },
     select: {
       id: true,
       status: true,
       inputMessageId: true,
+      outputMessageId: true,
       conversationId: true,
       episodeId: true,
+      delegationTaskId: true,
+      delegationTaskStepId: true,
       runtimePolicySnapshot: true,
     },
   });
@@ -2481,10 +3069,37 @@ async function terminalizeExpiredGenerationLease(
     });
     return;
   }
-  if (
-    run.status === GenerationRunStatus.COMPLETED
-    || run.status === GenerationRunStatus.CANCELED
-  ) {
+  if (run.status === GenerationRunStatus.COMPLETED) {
+    if (run.outputMessageId) {
+      await tx.message.updateMany({
+        where: {
+          id: run.outputMessageId,
+          deliveryStatus: {
+            in: [
+              MessageDeliveryStatus.QUEUED,
+              MessageDeliveryStatus.PROCESSING,
+              MessageDeliveryStatus.FAILED,
+            ],
+          },
+        },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.FAILED,
+          failureCode: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+          failureReason:
+            "The channel delivery worker exhausted all retry attempts.",
+        },
+      });
+    }
+    await tx.outboxEvent.update({
+      where: { id: outboxId },
+      data: {
+        status: "DEAD_LETTER",
+        lastError: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+      },
+    });
+    return;
+  }
+  if (run.status === GenerationRunStatus.CANCELED) {
     await tx.outboxEvent.update({
       where: { id: outboxId },
       data: {
@@ -2495,14 +3110,164 @@ async function terminalizeExpiredGenerationLease(
     });
     return;
   }
+  if (run.delegationTaskId && run.delegationTaskStepId) {
+    const step = await tx.delegationTaskStep.findUnique({
+      where: { id: run.delegationTaskStepId },
+      select: { status: true },
+    });
+    if (
+      step
+      && isTerminalDelegationTaskStepStatus(step.status)
+    ) {
+      if (options.recoverLatestTerminalDelegationResult) {
+        const latestStepRun = await tx.generationRun.findFirst({
+          where: {
+            delegationTaskId: run.delegationTaskId,
+            delegationTaskStepId: run.delegationTaskStepId,
+          },
+          orderBy: { createdAt: "desc" },
+          select: { id: true },
+        });
+        if (latestStepRun?.id === run.id) {
+          await tx.outboxEvent.update({
+            where: { id: outboxId },
+            data: {
+              status: "PROCESSED",
+              processedAt: now,
+              lastError: null,
+            },
+          });
+          await tx.outboxEvent.create({
+            data: {
+              conversationId: run.conversationId,
+              aggregateType: "generation_run",
+              aggregateId: run.id,
+              eventType: "generation.requested",
+              payload: {
+                runId: run.id,
+                conversationId: run.conversationId,
+                messageId: run.inputMessageId,
+                recoveryOfOutboxId: outboxId,
+              },
+              status: "PENDING",
+              attemptCount: 0,
+              idempotencyKey:
+                `generation.requested:${run.id}:recovery:${outboxId}`,
+            },
+          });
+          return;
+        }
+      }
+      await tx.generationRun.update({
+        where: { id: run.id },
+        data: {
+          status: GenerationRunStatus.CANCELED,
+          errorCode: "delegation_step_already_finalized",
+          errorMessage:
+            "Generation was superseded after its delegation step advanced.",
+          canceledAt: now,
+        },
+      });
+      await tx.outboxEvent.update({
+        where: { id: outboxId },
+        data: {
+          status: "PROCESSED",
+          processedAt: now,
+          lastError: null,
+        },
+      });
+      return;
+    }
+  }
+
+  const executionReference =
+    run.delegationTaskId
+      ? await tx.toolExecution.findUnique({
+          where: { generationOutboxId: outboxId },
+          select: { id: true },
+        })
+      : null;
+  if (executionReference) {
+    await tx.$executeRaw`
+      SELECT "id"
+      FROM "ToolExecution"
+      WHERE "id" = ${executionReference.id}
+      FOR UPDATE
+    `;
+  }
+  const inFlightExecution =
+    executionReference
+      ? await tx.toolExecution.findUnique({
+          where: { id: executionReference.id },
+          select: {
+            id: true,
+            sessionId: true,
+            status: true,
+            delegationTaskId: true,
+            delegationTaskStepId: true,
+            session: {
+              select: {
+                generationRunId: true,
+              },
+            },
+          },
+        })
+      : null;
+  const executionMatchesGeneration = Boolean(
+    inFlightExecution
+    && inFlightExecution.delegationTaskId === run.delegationTaskId
+    && inFlightExecution.delegationTaskStepId
+      === run.delegationTaskStepId
+    && inFlightExecution.session.generationRunId === run.id,
+  );
+  if (
+    inFlightExecution
+    && executionMatchesGeneration
+    && inFlightExecution.status !== "RUNNING"
+  ) {
+    await tx.outboxEvent.update({
+      where: { id: outboxId },
+      data: {
+        status: "PENDING",
+        attemptCount: 0,
+        availableAt: now,
+        processedAt: null,
+        lastError: "generation_execution_replay_pending",
+      },
+    });
+    return;
+  }
+  const fencedInFlightExecution =
+    inFlightExecution && executionMatchesGeneration
+      ? await tx.toolExecution.updateMany({
+          where: {
+            id: inFlightExecution.id,
+            status: "RUNNING",
+          },
+          data: {
+            status: "FAILED",
+            finishedAt: now,
+            executionLeaseToken: null,
+          },
+        })
+      : { count: 0 };
+  if (fencedInFlightExecution.count === 1 && inFlightExecution) {
+    await tx.computeSession.updateMany({
+      where: { id: inFlightExecution.sessionId },
+      data: {
+        status: "IDLE",
+        failureReason: "generation_execution_result_unknown",
+        lastHeartbeatAt: now,
+      },
+    });
+  }
 
   await tx.generationRun.update({
     where: { id: run.id },
     data: {
       status: GenerationRunStatus.FAILED,
-      errorCode: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
-      errorMessage:
-        "The conversation worker stopped renewing its lease and exhausted all retry attempts.",
+      errorCode,
+      errorMessage,
       completedAt: now,
     },
   });
@@ -2510,13 +3275,15 @@ async function terminalizeExpiredGenerationLease(
     where: { id: run.inputMessageId },
     data: {
       deliveryStatus: MessageDeliveryStatus.FAILED,
-      failureCode: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
-      failureReason:
-        "The conversation worker stopped renewing its lease and exhausted all retry attempts.",
+      failureCode: errorCode,
+      failureReason: errorMessage,
     },
   });
-  await tx.conversation.update({
-    where: { id: run.conversationId },
+  await tx.conversation.updateMany({
+    where: {
+      id: run.conversationId,
+      state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
+    },
     data: { state: "FAILED" },
   });
   if (run.episodeId) {
@@ -2537,26 +3304,114 @@ async function terminalizeExpiredGenerationLease(
     where: { id: outboxId },
     data: {
       status: "DEAD_LETTER",
-      lastError: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+      lastError: errorCode,
     },
   });
 
-  await releaseConversationEntitlementByGenerationRunId(
-    {
-      generationRunId: run.id,
-      reason: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
-    },
-    tx as unknown as ServiceEntitlementClient,
-  );
+  let delegatedExecutionRequiresReconciliation =
+    fencedInFlightExecution.count === 1;
+  if (run.delegationTaskId) {
+    const uncertainEffects =
+      await tx.delegationTaskExternalEffect.updateMany({
+        where: {
+          delegationTaskId: run.delegationTaskId,
+          ...(run.delegationTaskStepId
+            ? { delegationTaskStepId: run.delegationTaskStepId }
+            : {}),
+          status: "EXECUTING",
+        },
+        data: {
+          status: "RECONCILIATION_REQUIRED",
+          failureReason: errorCode,
+        },
+      });
+    if (
+      uncertainEffects.count > 0
+      || delegatedExecutionRequiresReconciliation
+    ) {
+      delegatedExecutionRequiresReconciliation = true;
+      await tx.delegationTask.updateMany({
+        where: {
+          id: run.delegationTaskId,
+          status: {
+            notIn: [
+              DelegationTaskStatus.COMPLETED,
+              DelegationTaskStatus.FAILED,
+              DelegationTaskStatus.CANCELED,
+              DelegationTaskStatus.EXPIRED,
+            ],
+          },
+        },
+        data: {
+          status: DelegationTaskStatus.WAITING_FOR_OWNER,
+          nextActionBy: DelegationTaskNextActor.OWNER,
+          blockingReason:
+            uncertainEffects.count > 0
+              ? "Worker lease expired during an external effect. Reconcile the remote outcome before continuing."
+              : "Worker lease expired while compute execution was still in flight. Review the unknown result before continuing.",
+        },
+      });
+    } else {
+      await tx.delegationTask.updateMany({
+        where: {
+          id: run.delegationTaskId,
+          status: {
+            notIn: [
+              DelegationTaskStatus.COMPLETED,
+              DelegationTaskStatus.FAILED,
+              DelegationTaskStatus.CANCELED,
+              DelegationTaskStatus.EXPIRED,
+            ],
+          },
+        },
+        data: {
+          status: DelegationTaskStatus.FAILED,
+          nextActionBy: DelegationTaskNextActor.OWNER,
+          blockingReason:
+            "The worker lease expired before the delegated task could finish.",
+          failedAt: now,
+        },
+      });
+      if (run.delegationTaskStepId) {
+        await tx.delegationTaskStep.updateMany({
+          where: {
+            id: run.delegationTaskStepId,
+            status: {
+              notIn: [
+                DelegationTaskStepStatus.COMPLETED,
+                DelegationTaskStepStatus.FAILED,
+                DelegationTaskStepStatus.CANCELED,
+                DelegationTaskStepStatus.SKIPPED,
+              ],
+            },
+          },
+          data: {
+            status: DelegationTaskStepStatus.FAILED,
+            failedAt: now,
+          },
+        });
+      }
+    }
+  }
+
+  if (!delegatedExecutionRequiresReconciliation) {
+    await releaseConversationEntitlementByGenerationRunId(
+      {
+        generationRunId: run.id,
+        reason: errorCode,
+      },
+      tx as unknown as ServiceEntitlementClient,
+    );
+  }
   const walletReservation = readGenerationWalletReservation(
     run.runtimePolicySnapshot,
   );
-  if (walletReservation) {
+  if (walletReservation && !delegatedExecutionRequiresReconciliation) {
     await releaseConversationWalletUsage(
       {
         usageChargeId: walletReservation.usageChargeId,
         failed: true,
-        reason: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+        reason: errorCode,
         idempotencyKey: `generation:${run.id}:release`,
       },
       tx as unknown as UsageChargeClient,
@@ -2599,7 +3454,14 @@ export async function deferGenerationRunForHuman(input: {
   return runConversationWriteTransaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
     await fenceGenerationWorkLease(tx, input);
-    const current = await tx.generationRun.findUnique({ where: { id: input.runId } });
+    const current = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      include: {
+        delegationTaskStep: {
+          select: { kind: true },
+        },
+      },
+    });
     if (!current) throw new Error("Generation run not found.");
     if (
       current.status === GenerationRunStatus.COMPLETED ||
@@ -2615,23 +3477,36 @@ export async function deferGenerationRunForHuman(input: {
       },
       tx as unknown as ServiceEntitlementClient,
     );
-    const run = await tx.generationRun.update({
-      where: { id: input.runId },
-      data: { status: GenerationRunStatus.WAITING_HUMAN },
-    });
     const walletReservation = readGenerationWalletReservation(
-      run.runtimePolicySnapshot,
+      current.runtimePolicySnapshot,
     );
-    if (walletReservation) {
+    let releasedSnapshot: Prisma.InputJsonObject | null = null;
+    if (
+      walletReservation
+      && !delegationTaskOwnsGenerationBilling(current)
+    ) {
       await releaseConversationWalletUsage(
         {
           usageChargeId: walletReservation.usageChargeId,
           reason: "generation_deferred_to_human",
-          idempotencyKey: `generation:${run.id}:release`,
+          idempotencyKey: `generation:${current.id}:release`,
         },
         tx as unknown as UsageChargeClient,
       );
+      releasedSnapshot = markGenerationWalletReleased(
+        current.runtimePolicySnapshot,
+        new Date(),
+      );
     }
+    const run = await tx.generationRun.update({
+      where: { id: input.runId },
+      data: {
+        status: GenerationRunStatus.WAITING_HUMAN,
+        ...(releasedSnapshot
+          ? { runtimePolicySnapshot: releasedSnapshot }
+          : {}),
+      },
+    });
     const completedOutbox = await tx.outboxEvent.updateMany({
       where: {
         id: input.outboxId,
@@ -2686,6 +3561,111 @@ export async function markGenerationDeliveryComplete(input: {
         input.leaseAttempt,
       );
     }
+  });
+}
+
+export async function prepareGenerationMessageChannelDelivery(input: {
+  conversationId: string;
+  runId: string;
+  outboxId: string;
+  leaseAttempt: number;
+  outputMessageId: string;
+}) {
+  return runConversationWriteTransaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
+    `;
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${input.runId}))
+    `;
+    await fenceGenerationWorkLease(tx, input);
+    const conversation = await tx.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { state: true },
+    });
+    if (!conversation) throw new Error("Conversation not found.");
+    const run = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      select: {
+        conversationId: true,
+        outputMessageId: true,
+        outputMessage: {
+          select: { content: true },
+        },
+      },
+    });
+    if (
+      !run
+      || run.conversationId !== input.conversationId
+      || run.outputMessageId !== input.outputMessageId
+    ) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+    const allowNeedsHumanDelivery =
+      isNeedsHumanDeliveryAuthorized(
+        run.outputMessage?.content,
+        input.runId,
+      );
+    if (
+      conversation.state === "HUMAN_ACTIVE"
+      || (
+        conversation.state === "NEEDS_HUMAN"
+        && !allowNeedsHumanDelivery
+      )
+    ) {
+      throw new ConversationAiDeliveryControlError();
+    }
+    const prepared = await tx.message.updateMany({
+      where: {
+        id: input.outputMessageId,
+        deliveryStatus: {
+          in: [
+            MessageDeliveryStatus.QUEUED,
+            MessageDeliveryStatus.PROCESSING,
+            MessageDeliveryStatus.FAILED,
+          ],
+        },
+      },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.PROCESSING,
+        failureCode: null,
+        failureReason: null,
+      },
+    });
+    if (prepared.count !== 1) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+    const renewed = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
+      data: {
+        availableAt: new Date(
+          Date.now() + GENERATION_WORK_LEASE_DURATION_MS,
+        ),
+      },
+    });
+    if (renewed.count !== 1) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+    return {
+      conversationState: conversation.state,
+      allowNeedsHumanDelivery,
+      leaseExpiresAt: new Date(
+        Date.now() + GENERATION_WORK_LEASE_DURATION_MS,
+      ),
+    };
   });
 }
 
@@ -2988,6 +3968,7 @@ export async function retryOperatorMessageDelivery(input: {
 }
 
 export async function failGenerationRun(input: {
+  conversationId: string;
   runId: string;
   outboxId: string;
   leaseAttempt: number;
@@ -2996,6 +3977,9 @@ export async function failGenerationRun(input: {
 }) {
   const now = new Date();
   return runConversationWriteTransaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
+    `;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
     await fenceGenerationWorkLease(tx, input);
     const terminalFailure = input.leaseAttempt >= GENERATION_WORK_MAX_ATTEMPTS;
@@ -3016,7 +4000,15 @@ export async function failGenerationRun(input: {
         errorMessage: input.errorMessage,
         completedAt: now,
       },
+      include: {
+        delegationTaskStep: {
+          select: { kind: true },
+        },
+      },
     });
+    if (run.conversationId !== input.conversationId) {
+      throw new Error("Generation run does not belong to the conversation.");
+    }
     await tx.message.update({
       where: { id: run.inputMessageId },
       data: {
@@ -3025,8 +4017,11 @@ export async function failGenerationRun(input: {
         failureReason: input.errorMessage,
       },
     });
-    await tx.conversation.update({
-      where: { id: run.conversationId },
+    await tx.conversation.updateMany({
+      where: {
+        id: run.conversationId,
+        state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
+      },
       data: { state: "FAILED" },
     });
     const failedOutbox = await tx.outboxEvent.updateMany({
@@ -3053,7 +4048,11 @@ export async function failGenerationRun(input: {
     const walletReservation = readGenerationWalletReservation(
       run.runtimePolicySnapshot,
     );
-    if (walletReservation && terminalFailure) {
+    if (
+      walletReservation
+      && terminalFailure
+      && !delegationTaskOwnsGenerationBilling(run)
+    ) {
       await releaseConversationWalletUsage(
         {
           usageChargeId: walletReservation.usageChargeId,
@@ -3590,12 +4589,45 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
             select: { id: true, senderId: true, senderType: true },
           });
           if (target && isMatrixMessageOwnedBySender(target, sender)) {
-            await redactConversationMessage({
-              representativeSlug: binding.conversation.representative.slug,
-              conversationId: binding.conversationId,
-              messageId: target.id,
-              reason: "matrix_redaction",
-            });
+            try {
+              await redactConversationMessage({
+                representativeSlug: binding.conversation.representative.slug,
+                conversationId: binding.conversationId,
+                messageId: target.id,
+                reason: "matrix_redaction",
+              });
+            } catch (error) {
+              if (error instanceof ConversationWorkInFlightControlError) {
+                await prisma.channelEventInbox.update({
+                  where: { id: inboxId },
+                  data: {
+                    status: "FAILED",
+                    attemptCount: { decrement: 1 },
+                    processedAt: null,
+                    availableAt: new Date(
+                      Date.now() + matrixEventRetryDelayMs,
+                    ),
+                    lastError: "matrix_redaction_delivery_in_flight",
+                  },
+                });
+                results.push({
+                  eventId,
+                  status: "failed",
+                  reason: "matrix_redaction_delivery_in_flight",
+                });
+                continue;
+              }
+              if (!(error instanceof DelegationMessageRedactionConflictError)) {
+                throw error;
+              }
+              await markMatrixInboxProcessed(inboxId);
+              results.push({
+                eventId,
+                status: "ignored",
+                reason: "matrix_redaction_delegation_active",
+              });
+              continue;
+            }
           } else {
             await markMatrixInboxProcessed(inboxId);
             results.push({
@@ -3674,13 +4706,26 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
             select: { id: true, senderId: true, senderType: true },
           });
           if (target && replacementText && isMatrixMessageOwnedBySender(target, sender)) {
-            await editConversationMessage({
-              representativeSlug: binding.conversation.representative.slug,
-              conversationId: binding.conversationId,
-              messageId: target.id,
-              text: replacementText,
-              editedBy: sender,
-            });
+            try {
+              await editConversationMessage({
+                representativeSlug: binding.conversation.representative.slug,
+                conversationId: binding.conversationId,
+                messageId: target.id,
+                text: replacementText,
+                editedBy: sender,
+              });
+            } catch (error) {
+              if (!(error instanceof DelegationMessageEditConflictError)) {
+                throw error;
+              }
+              await markMatrixInboxProcessed(inboxId);
+              results.push({
+                eventId,
+                status: "ignored",
+                reason: "matrix_edit_delegation_active",
+              });
+              continue;
+            }
           } else {
             await markMatrixInboxProcessed(inboxId);
             results.push({
@@ -3777,21 +4822,60 @@ export async function editConversationMessage(input: {
       },
       include: {
         revisions: { orderBy: { version: "desc" }, take: 1 },
-        inputForGenerationRuns: { orderBy: { createdAt: "desc" }, take: 1 },
+        conversation: {
+          select: { state: true },
+        },
+        inputForGenerationRuns: {
+          orderBy: { createdAt: "desc" },
+          select: { id: true, delegationTaskId: true },
+        },
       },
     });
     if (!message) throw new Error("Message not found.");
     if (message.redactedAt) throw new Error("Redacted messages cannot be edited.");
-
-    let run = message.inputForGenerationRuns[0] ?? null;
-    if (run) {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${run.id}))`;
-      run = await tx.generationRun.findUnique({ where: { id: run.id } });
-      if (!run) throw new Error("Generation run not found.");
+    if (message.text?.trim() === text) {
+      return {
+        revision: message.revisions[0] ?? null,
+        action: "update_only" as const,
+      };
     }
-    const action = run
-      ? resolveMessageEditAction(generationStateMap[run.status])
-      : "update_only";
+    if (message.inputForGenerationRuns.some((run) => run.delegationTaskId)) {
+      throw new DelegationMessageEditConflictError();
+    }
+
+    const runReference = message.inputForGenerationRuns[0];
+    if (runReference) {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(hashtext(${runReference.id}))
+      `;
+    }
+    const run = runReference
+      ? await tx.generationRun.findUnique({ where: { id: runReference.id } })
+      : null;
+    if (runReference && !run) {
+      throw new Error("Generation run not found.");
+    }
+    const activeOutboxes = run
+      ? await tx.outboxEvent.findMany({
+          where: {
+            aggregateType: "generation_run",
+            aggregateId: run.id,
+            eventType: "generation.requested",
+            status: { in: [...activeGenerationOutboxStatuses] },
+          },
+          select: { id: true },
+        })
+      : [];
+    const humanControlsConversation =
+      message.conversation.state === "HUMAN_ACTIVE"
+      || message.conversation.state === "NEEDS_HUMAN";
+    const action = humanControlsConversation || !run
+      ? "update_only"
+      : run.status === GenerationRunStatus.WAITING_HUMAN
+        ? "update_only"
+        : run.status === GenerationRunStatus.FAILED && activeOutboxes.length > 0
+          ? "cancel_and_requeue"
+          : resolveMessageEditAction(generationStateMap[run.status]);
     const revision = await tx.messageRevision.create({
       data: {
         messageId: message.id,
@@ -3810,13 +4894,20 @@ export async function editConversationMessage(input: {
       const walletReservation = readGenerationWalletReservation(
         run.runtimePolicySnapshot,
       );
-      await releaseConversationEntitlementByGenerationRunId(
-        {
-          generationRunId: run.id,
-          reason: "generation_replaced_after_message_edit",
+      const replacedAt = new Date();
+      await tx.outboxEvent.updateMany({
+        where: {
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          eventType: "generation.requested",
+          status: { in: [...activeGenerationOutboxStatuses] },
         },
-        tx as unknown as ServiceEntitlementClient,
-      );
+        data: {
+          status: "PROCESSED",
+          processedAt: replacedAt,
+          lastError: null,
+        },
+      });
       const replacement = await tx.generationRun.create({
         data: {
           conversationId: message.conversationId,
@@ -3836,6 +4927,13 @@ export async function editConversationMessage(input: {
             : {}),
         },
       });
+      await transferConversationEntitlementByGenerationRunId(
+        {
+          fromGenerationRunId: run.id,
+          toGenerationRunId: replacement.id,
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
       if (walletReservation) {
         await transferAgentUsageEntitlementReservation(
           {
@@ -3847,44 +4945,28 @@ export async function editConversationMessage(input: {
           tx as unknown as UsageChargeClient,
         );
       }
-      const canceledAt = new Date();
-      const runtimePolicySnapshot =
-        run.runtimePolicySnapshot
-        && typeof run.runtimePolicySnapshot === "object"
-        && !Array.isArray(run.runtimePolicySnapshot)
-          ? run.runtimePolicySnapshot as Prisma.JsonObject
-          : {};
+      const transferredSnapshot = markGenerationWalletTransferred(
+        run.runtimePolicySnapshot,
+        replacement.id,
+      );
       const canceled = await tx.generationRun.updateMany({
-        where: { id: run.id, status: run.status },
+        where: {
+          id: run.id,
+          status: { in: [run.status] },
+        },
         data: {
           status: GenerationRunStatus.CANCELED,
-          canceledAt,
-          ...(walletReservation
-            ? {
-                runtimePolicySnapshot: {
-                  ...runtimePolicySnapshot,
-                  walletReservation: null,
-                  walletReservationTransferredTo: replacement.id,
-                },
-              }
+          canceledAt: replacedAt,
+          ...(transferredSnapshot
+            ? { runtimePolicySnapshot: transferredSnapshot }
             : {}),
         },
       });
       if (canceled.count !== 1) {
-        throw new Error("Generation run changed while its message was edited.");
+        throw new Error(
+          "Generation changed while its input message was being edited.",
+        );
       }
-      await tx.outboxEvent.updateMany({
-        where: {
-          aggregateType: "generation_run",
-          aggregateId: run.id,
-          status: { in: ["PENDING", "PROCESSING", "FAILED"] },
-        },
-        data: {
-          status: "PROCESSED",
-          processedAt: canceledAt,
-          lastError: null,
-        },
-      });
       await tx.approvalRequest.updateMany({
         where: {
           generationRunId: run.id,
@@ -3892,9 +4974,9 @@ export async function editConversationMessage(input: {
         },
         data: {
           status: "REJECTED",
-          resolvedAt: canceledAt,
-          resolvedBy: "system",
-          decisionNote: "Input message was edited and generation was replaced.",
+          resolvedAt: replacedAt,
+          resolvedBy: input.editedBy,
+          decisionNote: "The input message was edited and the generation was replaced.",
         },
       });
       await tx.outboxEvent.create({
@@ -3907,6 +4989,27 @@ export async function editConversationMessage(input: {
           idempotencyKey: `generation.requested:${replacement.id}`,
         },
       });
+      await tx.message.update({
+        where: { id: message.id },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.QUEUED,
+          failureCode: null,
+          failureReason: null,
+        },
+      });
+      await tx.conversation.update({
+        where: { id: message.conversationId },
+        data: {
+          state: "AI_QUEUED",
+          lastMessageAt: replacedAt,
+        },
+      });
+      if (message.episodeId) {
+        await tx.conversationEpisode.updateMany({
+          where: { id: message.episodeId },
+          data: { status: ConversationEpisodeStatus.ACTIVE },
+        });
+      }
     }
 
     return { revision, action };
@@ -3951,42 +5054,140 @@ export async function redactConversationMessage(input: {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${runId}))`;
       const run = await tx.generationRun.findUnique({
         where: { id: runId },
-        select: { id: true, status: true, runtimePolicySnapshot: true },
+        select: {
+          id: true,
+          status: true,
+          delegationTaskId: true,
+          delegationTask: {
+            select: { status: true },
+          },
+          outputMessageId: true,
+          outputMessage: {
+            select: {
+              id: true,
+              deliveryStatus: true,
+            },
+          },
+          runtimePolicySnapshot: true,
+        },
       });
       if (!run) continue;
-      const retryableFailedOutbox =
-        run.status === GenerationRunStatus.FAILED
-          ? await tx.outboxEvent.findFirst({
-              where: {
-                aggregateType: "generation_run",
-                aggregateId: run.id,
-                eventType: "generation.requested",
-                status: "FAILED",
-                attemptCount: { lt: GENERATION_WORK_MAX_ATTEMPTS },
-              },
-              select: { id: true },
-            })
-          : null;
       if (
-        !cancellableGenerationStatuses.includes(run.status)
-        && !retryableFailedOutbox
+        run.delegationTaskId
+        && (
+          !run.delegationTask
+          || !["COMPLETED", "FAILED", "CANCELED", "EXPIRED"].includes(
+            run.delegationTask.status,
+          )
+        )
       ) {
+        throw new DelegationMessageRedactionConflictError();
+      }
+      const activeOutbox = await tx.outboxEvent.findFirst({
+        where: {
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          eventType: "generation.requested",
+          status: { in: [...activeGenerationOutboxStatuses] },
+        },
+        select: {
+          id: true,
+          status: true,
+          availableAt: true,
+          attemptCount: true,
+        },
+      });
+      if (run.status === GenerationRunStatus.COMPLETED) {
+        const outputDeliveryInterruptible = Boolean(
+          run.outputMessage
+          && (
+            run.outputMessage.deliveryStatus
+              === MessageDeliveryStatus.PROCESSING
+            || run.outputMessage.deliveryStatus
+              === MessageDeliveryStatus.QUEUED
+            || run.outputMessage.deliveryStatus
+              === MessageDeliveryStatus.FAILED
+          ),
+        );
+        if (
+          !run.outputMessage
+          || !outputDeliveryInterruptible
+        ) {
+          continue;
+        }
+        if (
+          run.outputMessage.deliveryStatus === MessageDeliveryStatus.PROCESSING
+          && activeOutbox?.status === "PROCESSING"
+          && activeOutbox.availableAt > redactedAt
+        ) {
+          throw new ConversationWorkInFlightControlError();
+        }
+        await tx.outboxEvent.updateMany({
+          where: {
+            aggregateType: "generation_run",
+            aggregateId: run.id,
+            eventType: "generation.requested",
+            status: { in: [...activeGenerationOutboxStatuses] },
+          },
+          data: {
+            status: "PROCESSED",
+            processedAt: redactedAt,
+            lastError: "input_message_redacted_before_delivery",
+          },
+        });
+        await tx.message.updateMany({
+          where: {
+            id: run.outputMessage.id,
+            deliveryStatus: {
+              in: [
+                MessageDeliveryStatus.PROCESSING,
+                MessageDeliveryStatus.QUEUED,
+                MessageDeliveryStatus.FAILED,
+              ],
+            },
+          },
+          data: {
+            deliveryStatus: MessageDeliveryStatus.CANCELED,
+            failureCode: "input_message_redacted_before_delivery",
+            failureReason:
+              "AI delivery was canceled because its input message was redacted.",
+          },
+        });
         continue;
       }
-      const redactionCancellableStatuses = retryableFailedOutbox
-        ? [...cancellableGenerationStatuses, GenerationRunStatus.FAILED]
-        : cancellableGenerationStatuses;
+      const interruptible = cancellableGenerationStatuses.includes(run.status)
+        || (
+          run.status === GenerationRunStatus.FAILED
+          && Boolean(activeOutbox)
+        );
+      if (!interruptible) continue;
 
+      const walletReservation = readGenerationWalletReservation(
+        run.runtimePolicySnapshot,
+      );
+      const releasedSnapshot = walletReservation
+        ? markGenerationWalletReleased(
+            run.runtimePolicySnapshot,
+            redactedAt,
+          )
+        : null;
       const canceled = await tx.generationRun.updateMany({
         where: {
           id: run.id,
-          status: { in: redactionCancellableStatuses },
+          status: {
+            in: run.status === GenerationRunStatus.FAILED
+              ? [GenerationRunStatus.FAILED]
+              : cancellableGenerationStatuses,
+          },
         },
         data: {
           status: GenerationRunStatus.CANCELED,
           errorCode: "input_message_redacted",
           errorMessage: "Generation canceled because its input message was redacted.",
           canceledAt: redactedAt,
+          ...(releasedSnapshot
+            ? { runtimePolicySnapshot: releasedSnapshot }
+            : {}),
         },
       });
       if (canceled.count !== 1) continue;
@@ -3996,9 +5197,6 @@ export async function redactConversationMessage(input: {
           reason: "input_message_redacted",
         },
         tx as unknown as ServiceEntitlementClient,
-      );
-      const walletReservation = readGenerationWalletReservation(
-        run.runtimePolicySnapshot,
       );
       if (
         walletReservation
@@ -4284,12 +5482,38 @@ export async function ensureConversationLeadAndHandoff(input: {
 }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
-    const conversation = await tx.conversation.findUnique({
+    return ensureConversationLeadAndHandoffInTransaction(tx, input);
+  });
+}
+
+async function ensureConversationLeadAndHandoffInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    conversationId: string;
+    reason: string;
+    summary: string;
+    kind?: string;
+    priority?: number;
+    source?: string;
+    requestHandoff?: boolean;
+  },
+) {
+  const conversation = await tx.conversation.findUnique({
       where: { id: input.conversationId },
       include: { contact: true, episodes: { orderBy: { sequence: "desc" }, take: 1 } },
     });
     if (!conversation) throw new Error("Conversation not found.");
     const episode = conversation.episodes[0];
+    if (
+      conversation.state === "HUMAN_ACTIVE"
+      || episode?.status === ConversationEpisodeStatus.HUMAN_ACTIVE
+    ) {
+      return {
+        handoff: null,
+        lead: null,
+        skipped: "human_active" as const,
+      };
+    }
     const priority = Math.max(0, Math.min(100, Math.round(input.priority || 50)));
     const shouldRequestHandoff = input.requestHandoff !== false;
     const existingHandoff = shouldRequestHandoff
@@ -4365,7 +5589,7 @@ export async function ensureConversationLeadAndHandoff(input: {
           },
         });
 
-    if (shouldRequestHandoff && episode && episode.status !== ConversationEpisodeStatus.HUMAN_ACTIVE) {
+    if (shouldRequestHandoff && episode) {
       await tx.conversationEpisode.update({
         where: { id: episode.id },
         data: { status: ConversationEpisodeStatus.NEEDS_HUMAN },
@@ -4382,7 +5606,6 @@ export async function ensureConversationLeadAndHandoff(input: {
       data: { stage: "QUALIFIED" },
     });
     return { handoff, lead };
-  });
 }
 
 export async function assignConversationOperator(input: {
@@ -4391,7 +5614,10 @@ export async function assignConversationOperator(input: {
   operatorId: string;
   operatorName: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  return runConversationWriteTransaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
+    `;
     const conversation = await tx.conversation.findFirst({
       where: { id: input.conversationId, representative: { slug: input.representativeSlug } },
       include: { episodes: { orderBy: { sequence: "desc" }, take: 1 } },
@@ -4401,11 +5627,250 @@ export async function assignConversationOperator(input: {
     if (!episode) throw new Error("Conversation has no active episode.");
     assertConversationEpisodeTransition(episodeStateMap[episode.status], "human_active");
 
+    const taskRows = await tx.delegationTask.findMany({
+      where: {
+        originConversationId: conversation.id,
+        status: {
+          notIn: [
+            "COMPLETED",
+            "FAILED",
+            "CANCELED",
+            "EXPIRED",
+          ],
+        },
+      },
+      select: { id: true },
+      orderBy: { id: "asc" },
+    });
+    const runRows = await tx.generationRun.findMany({
+      where: {
+        conversationId: conversation.id,
+        OR: [
+          {
+            status: {
+              in: [
+                ...cancellableGenerationStatuses,
+                GenerationRunStatus.FAILED,
+              ],
+            },
+          },
+          {
+            status: GenerationRunStatus.COMPLETED,
+            outputMessage: {
+              is: {
+                deliveryStatus: {
+                  in: [
+                    MessageDeliveryStatus.PROCESSING,
+                    MessageDeliveryStatus.QUEUED,
+                    MessageDeliveryStatus.FAILED,
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      },
+      select: {
+        id: true,
+        delegationTaskId: true,
+        status: true,
+        outputMessage: {
+          select: { deliveryStatus: true },
+        },
+      },
+      orderBy: { id: "asc" },
+    });
+    if (taskRows.length > 0) {
+      throw new ActiveDelegationTaskControlError();
+    }
+    const runIds = runRows.map((run) => run.id).sort();
+    for (const runId of runIds) {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(hashtext(${runId}))
+      `;
+    }
+    const activeOutboxes = runIds.length
+      ? await tx.outboxEvent.findMany({
+          where: {
+            aggregateType: "generation_run",
+            aggregateId: { in: runIds },
+            eventType: "generation.requested",
+            status: { in: [...activeGenerationOutboxStatuses] },
+          },
+          select: {
+            aggregateId: true,
+            status: true,
+            availableAt: true,
+          },
+        })
+      : [];
+    const takeoverAt = new Date();
+    const inFlightRunIds = new Set(
+      activeOutboxes
+        .filter((event) =>
+          event.status === "PROCESSING"
+          && event.availableAt > takeoverAt
+        )
+        .map((event) => event.aggregateId),
+    );
+    if (
+      runRows.some((run) =>
+        inFlightRunIds.has(run.id)
+        && (
+          (
+            run.status === GenerationRunStatus.COMPLETED
+            && run.outputMessage?.deliveryStatus
+              === MessageDeliveryStatus.PROCESSING
+          )
+          || Boolean(run.delegationTaskId)
+        )
+      )
+    ) {
+      throw new ConversationWorkInFlightControlError();
+    }
+    const runIdsWithActiveOutbox = new Set(
+      activeOutboxes.map((event) => event.aggregateId),
+    );
+    for (const runId of runIds) {
+      const run = await tx.generationRun.findUnique({
+        where: { id: runId },
+      });
+      if (!run) continue;
+      const interruptible = cancellableGenerationStatuses.includes(run.status)
+        || (
+          run.status === GenerationRunStatus.FAILED
+          && runIdsWithActiveOutbox.has(run.id)
+        )
+        || (
+          run.status === GenerationRunStatus.COMPLETED
+          && runIdsWithActiveOutbox.has(run.id)
+        );
+      if (!interruptible) continue;
+      await tx.outboxEvent.updateMany({
+        where: {
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          eventType: "generation.requested",
+          status: { in: [...activeGenerationOutboxStatuses] },
+        },
+        data: {
+          status: "PROCESSED",
+          processedAt: takeoverAt,
+          lastError: null,
+        },
+      });
+      if (run.status === GenerationRunStatus.COMPLETED) {
+        if (run.outputMessageId) {
+          await tx.message.updateMany({
+            where: {
+              id: run.outputMessageId,
+              deliveryStatus: {
+                in: [
+                  MessageDeliveryStatus.PROCESSING,
+                  MessageDeliveryStatus.QUEUED,
+                  MessageDeliveryStatus.FAILED,
+                ],
+              },
+            },
+            data: {
+              deliveryStatus: MessageDeliveryStatus.CANCELED,
+              failureCode: "operator_takeover_before_delivery",
+              failureReason:
+                "AI delivery was canceled because a human operator took control.",
+            },
+          });
+        }
+        continue;
+      }
+      if (run.status !== GenerationRunStatus.WAITING_HUMAN) {
+        await releaseConversationEntitlementByGenerationRunId(
+          {
+            generationRunId: run.id,
+            reason: "generation_deferred_for_human",
+          },
+          tx as unknown as ServiceEntitlementClient,
+        );
+      }
+      const walletReservation = readGenerationWalletReservation(
+        run.runtimePolicySnapshot,
+      );
+      let releasedSnapshot: Prisma.InputJsonObject | null = null;
+      if (
+        walletReservation
+        && !run.delegationTaskId
+        && run.status !== GenerationRunStatus.WAITING_HUMAN
+      ) {
+        await releaseConversationWalletUsage(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            reason: "generation_deferred_to_human",
+            idempotencyKey: `generation:${run.id}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+        releasedSnapshot = markGenerationWalletReleased(
+          run.runtimePolicySnapshot,
+          takeoverAt,
+        );
+      }
+      const paused = await tx.generationRun.updateMany({
+        where: {
+          id: run.id,
+          status: { in: [run.status] },
+        },
+        data: {
+          status: GenerationRunStatus.WAITING_HUMAN,
+          completedAt: null,
+          canceledAt: null,
+          ...(releasedSnapshot
+            ? { runtimePolicySnapshot: releasedSnapshot }
+            : {}),
+        },
+      });
+      if (paused.count !== 1) {
+        throw new Error(
+          "Generation changed while the operator was taking control.",
+        );
+      }
+      await tx.approvalRequest.updateMany({
+        where: {
+          generationRunId: run.id,
+          status: "PENDING",
+        },
+        data: {
+          status: "REJECTED",
+          resolvedAt: takeoverAt,
+          resolvedBy: input.operatorId,
+          decisionNote: "A human operator took control of the conversation.",
+        },
+      });
+      await tx.message.update({
+        where: { id: run.inputMessageId },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.SENT,
+          failureCode: null,
+          failureReason: null,
+        },
+      });
+    }
+    await tx.approvalRequest.updateMany({
+      where: {
+        conversationId: conversation.id,
+        status: "PENDING",
+      },
+      data: {
+        status: "REJECTED",
+        resolvedAt: takeoverAt,
+        resolvedBy: input.operatorId,
+        decisionNote: "A human operator took control of the conversation.",
+      },
+    });
+
     await tx.conversationAssignment.updateMany({
       where: { conversationId: conversation.id, status: ConversationAssignmentStatus.ACTIVE },
       data: {
         status: ConversationAssignmentStatus.TRANSFERRED,
-        releasedAt: new Date(),
+        releasedAt: takeoverAt,
         releaseReason: "operator_reassigned",
       },
     });
@@ -4451,7 +5916,7 @@ export async function assignConversationOperator(input: {
         contentType: MessageContentType.SYSTEM,
         text: `Human operator ${input.operatorName} joined the conversation.`,
         deliveryStatus: MessageDeliveryStatus.SENT,
-        retentionExpiresAt: buildMessageRetentionExpiry(new Date()),
+        retentionExpiresAt: buildMessageRetentionExpiry(takeoverAt),
       },
     });
     await tx.conversationStateTransition.create({
@@ -5508,6 +6973,31 @@ function matrixHomeserverFromUserId(matrixUserId: string): string {
 
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isTerminalDelegationTaskStepStatus(
+  status: DelegationTaskStepStatus,
+): boolean {
+  return (
+    status === DelegationTaskStepStatus.COMPLETED
+    || status === DelegationTaskStepStatus.FAILED
+    || status === DelegationTaskStepStatus.BLOCKED
+    || status === DelegationTaskStepStatus.CANCELED
+    || status === DelegationTaskStepStatus.SKIPPED
+  );
+}
+
+function isNeedsHumanDeliveryAuthorized(
+  content: unknown,
+  generationRunId: string,
+): boolean {
+  if (!isJsonRecord(content)) return false;
+  const deliveryControl = content.deliveryControl;
+  return (
+    isJsonRecord(deliveryControl)
+    && deliveryControl.allowNeedsHuman === true
+    && deliveryControl.generationRunId === generationRunId
+  );
 }
 
 function buildDemoInboxSnapshot(representativeSlug: string): ConversationInboxSnapshot {

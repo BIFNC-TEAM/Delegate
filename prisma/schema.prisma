@@ -2723,6 +2723,8 @@ model ComputeSession {
   contactId               String?
   conversationId          String?
   generationRunId         String?
+  generationOutboxId      String?                  @unique
+  generationLeaseAttempt  Int?
   delegationTaskId        String?
   delegationTaskStepId    String?
   subagentId              String?
@@ -2827,34 +2829,41 @@ model SandboxLease {
 }
 
 model ToolExecution {
-  id                   String                    @id @default(cuid())
-  sessionId            String
-  mcpBindingId         String?
-  capability           CapabilityKind
-  subagentId           String?
-  delegationTaskId     String?
-  delegationTaskStepId String?
-  status               ToolExecutionStatus       @default(QUEUED)
-  requestedCommand     String?
-  requestedPath        String?
-  requestPayload       Json?
-  workingDirectory     String?
-  policyDecision       PolicyDecision?
-  approvalRequestId    String?
-  startedAt            DateTime?
-  finishedAt           DateTime?
-  exitCode             Int?
-  cpuMs                Int?
-  wallMs               Int?
-  bytesRead            Int?
-  bytesWritten         Int?
-  createdAt            DateTime                  @default(now())
-  session              ComputeSession            @relation(fields: [sessionId], references: [id])
-  mcpBinding           RepresentativeMcpBinding? @relation(fields: [mcpBindingId], references: [id])
-  delegationTask       DelegationTask?           @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
-  delegationTaskStep   DelegationTaskStep?       @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
-  artifacts            Artifact[]
-  browserNavigation    BrowserNavigation?
+  id                     String                    @id @default(cuid())
+  sessionId              String
+  mcpBindingId           String?
+  capability             CapabilityKind
+  subagentId             String?
+  delegationTaskId       String?
+  delegationTaskStepId   String?
+  generationOutboxId     String?                   @unique
+  generationLeaseAttempt Int?
+  requestPayloadHash     String?
+  responseSnapshot       Json?
+  executionLeaseToken    String?                   @unique
+  billingFinalizedAt     DateTime?
+  billingSnapshot        Json?
+  status                 ToolExecutionStatus       @default(QUEUED)
+  requestedCommand       String?
+  requestedPath          String?
+  requestPayload         Json?
+  workingDirectory       String?
+  policyDecision         PolicyDecision?
+  approvalRequestId      String?
+  startedAt              DateTime?
+  finishedAt             DateTime?
+  exitCode               Int?
+  cpuMs                  Int?
+  wallMs                 Int?
+  bytesRead              Int?
+  bytesWritten           Int?
+  createdAt              DateTime                  @default(now())
+  session                ComputeSession            @relation(fields: [sessionId], references: [id])
+  mcpBinding             RepresentativeMcpBinding? @relation(fields: [mcpBindingId], references: [id])
+  delegationTask         DelegationTask?           @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep     DelegationTaskStep?       @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  artifacts              Artifact[]
+  browserNavigation      BrowserNavigation?
 
   @@index([sessionId, createdAt])
   @@index([status, createdAt])

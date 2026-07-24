@@ -6,6 +6,7 @@ const {
   mockProvisionMatrixDirectConversation,
   mockConsumeIdentityBindingChallenge,
   mockReleaseConversationEntitlement,
+  mockReleaseConversationWalletUsage,
 } = vi.hoisted(() => {
   const transactionClient = {
     $executeRaw: vi.fn(),
@@ -39,6 +40,7 @@ const {
     },
     outboxEvent: {
       upsert: vi.fn(),
+      findFirst: vi.fn(),
       updateMany: vi.fn(),
     },
     approvalRequest: {
@@ -69,6 +71,7 @@ const {
     mockProvisionMatrixDirectConversation: vi.fn(),
     mockConsumeIdentityBindingChallenge: vi.fn(),
     mockReleaseConversationEntitlement: vi.fn(),
+    mockReleaseConversationWalletUsage: vi.fn(),
   };
 });
 
@@ -88,9 +91,18 @@ vi.mock("../src/service-entitlements", () => ({
   consumeConversationEntitlement: vi.fn(),
   releaseConversationEntitlementByGenerationRunId: mockReleaseConversationEntitlement,
 }));
+vi.mock("../src/agent-wallet-usage-charge", () => ({
+  InsufficientAgentUsageCreditsError:
+    class InsufficientAgentUsageCreditsError extends Error {},
+  releaseConversationWalletUsage: mockReleaseConversationWalletUsage,
+  reserveConversationWalletUsage: vi.fn(),
+  settleConversationWalletUsage: vi.fn(),
+}));
 
 import {
+  ConversationWorkInFlightControlError,
   ingestMatrixApplicationServiceTransaction,
+  redactConversationMessage,
   type MatrixApplicationServiceEvent,
 } from "../src/conversation-platform";
 
@@ -129,6 +141,7 @@ describe("Matrix application service ingress", () => {
       audienceIdentityId: "registered-audience-1",
     });
     mockReleaseConversationEntitlement.mockResolvedValue(null);
+    mockReleaseConversationWalletUsage.mockResolvedValue({ status: "released" });
     mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(buildMatrixBinding());
     tx.conversationChannelBinding.findFirst.mockResolvedValue(buildMatrixBinding());
     tx.message.findFirst.mockResolvedValue({
@@ -139,6 +152,7 @@ describe("Matrix application service ingress", () => {
     });
     mockPrisma.message.update.mockResolvedValue({});
     tx.message.update.mockResolvedValue({});
+    tx.outboxEvent.findFirst.mockResolvedValue(null);
 
     mockPrisma.$transaction.mockImplementation(
       async (callback: (client: typeof tx) => unknown) => callback(tx),
@@ -677,6 +691,107 @@ describe("Matrix application service ingress", () => {
     expect(mockPrisma.$transaction).not.toHaveBeenCalled();
   });
 
+  it("treats edits to delegated input as a permanent Matrix conflict", async () => {
+    mockPrisma.message.findFirst.mockResolvedValue({
+      id: "message-delegated",
+      senderId: aliceMatrixUserId,
+      senderType: "AUDIENCE",
+    });
+    tx.message.findFirst.mockResolvedValue({
+      id: "message-delegated",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      text: "original request",
+      redactedAt: null,
+      revisions: [],
+      inputForGenerationRuns: [{
+        id: "run-delegated",
+        delegationTaskId: "task-delegated",
+      }],
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-delegated-edit",
+      events: [{
+        event_id: "$event-delegated-edit",
+        type: "m.room.message",
+        room_id: "!room:example.org",
+        sender: aliceMatrixUserId,
+        content: {
+          msgtype: "m.text",
+          body: "* revised",
+          "m.new_content": { msgtype: "m.text", body: "revised" },
+          "m.relates_to": {
+            rel_type: "m.replace",
+            event_id: "$event-original-delegated",
+          },
+        },
+      }],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-delegated-edit",
+      status: "ignored",
+      reason: "matrix_edit_delegation_active",
+    }]);
+    expect(mockPrisma.channelEventInbox.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "FAILED" }),
+      }),
+    );
+  });
+
+  it("keeps inbound messages waiting for an operator without inventing an active assignment", async () => {
+    tx.conversation.findFirst.mockResolvedValue({
+      id: "conversation-1",
+      state: "NEEDS_HUMAN",
+      representative: {
+        id: "representative-1",
+        activeVersionId: "version-1",
+        lifecycleState: "PUBLISHED",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+      episodes: [{
+        id: "episode-1",
+        sequence: 1,
+        status: "NEEDS_HUMAN",
+        representativeVersionId: "version-1",
+      }],
+      channelBindings: [{
+        id: "matrix-binding-1",
+        kind: "MATRIX",
+        externalConversationId: "!room:example.org",
+        metadata: matrixSafetyMetadata(),
+        representativeBinding: {
+          status: "CONNECTED",
+          desiredState: "ACTIVE",
+          healthStatus: "HEALTHY",
+        },
+      }],
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-needs-human-inbound",
+      events: [matrixTextEvent(
+        "$event-needs-human-inbound",
+        aliceMatrixUserId,
+      )],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-needs-human-inbound",
+      status: "processed",
+    }]);
+    expect(tx.generationRun.upsert).not.toHaveBeenCalled();
+    expect(tx.conversation.update).toHaveBeenCalledWith({
+      where: { id: "conversation-1" },
+      data: expect.objectContaining({
+        state: "NEEDS_HUMAN",
+      }),
+    });
+  });
+
   it("does not let one authorized audience participant redact another author's message", async () => {
     mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
       buildMatrixBinding({
@@ -741,6 +856,47 @@ describe("Matrix application service ingress", () => {
     });
   });
 
+  it("treats redaction of active delegated input as a permanent Matrix conflict", async () => {
+    mockPrisma.message.findFirst.mockResolvedValueOnce({
+      id: "message-delegated",
+      senderId: aliceMatrixUserId,
+      senderType: "AUDIENCE",
+    });
+    tx.message.findFirst.mockResolvedValueOnce({
+      id: "message-delegated",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      inputForGenerationRuns: [{ id: "run-delegated" }],
+    });
+    tx.generationRun.findUnique.mockResolvedValueOnce({
+      id: "run-delegated",
+      status: "PROCESSING",
+      delegationTaskId: "task-delegated",
+      runtimePolicySnapshot: null,
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-redact-delegated",
+      events: [{
+        event_id: "$event-redact-delegated",
+        type: "m.room.redaction",
+        room_id: "!room:example.org",
+        sender: aliceMatrixUserId,
+        redacts: "$event-original-delegated",
+        content: {},
+      }],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-redact-delegated",
+      status: "ignored",
+      reason: "matrix_redaction_delegation_active",
+    }]);
+    expect(tx.generationRun.updateMany).not.toHaveBeenCalled();
+    expect(tx.outboxEvent.updateMany).not.toHaveBeenCalled();
+    expect(tx.message.update).not.toHaveBeenCalled();
+  });
+
   it("cancels queued generation and releases its entitlement when the input is redacted", async () => {
     mockPrisma.message.findFirst.mockResolvedValueOnce({
       id: "message-alice",
@@ -756,6 +912,14 @@ describe("Matrix application service ingress", () => {
     tx.generationRun.findUnique.mockResolvedValueOnce({
       id: "run-redacted",
       status: "QUEUED",
+      delegationTaskId: null,
+      runtimePolicySnapshot: {
+        billingMode: "service_credit",
+        walletReservation: {
+          usageChargeId: "usage-redacted",
+          tokenAmount: 1,
+        },
+      },
     });
     tx.generationRun.updateMany.mockResolvedValueOnce({ count: 1 });
 
@@ -782,6 +946,15 @@ describe("Matrix application service ingress", () => {
       },
       tx,
     );
+    expect(mockReleaseConversationWalletUsage).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-redacted",
+        reason: "input_message_redacted",
+        idempotencyKey:
+          "message:message-alice:redaction:usage-redacted:release",
+      },
+      tx,
+    );
     expect(tx.generationRun.updateMany).toHaveBeenCalledWith({
       where: {
         id: "run-redacted",
@@ -791,6 +964,9 @@ describe("Matrix application service ingress", () => {
         status: "CANCELED",
         errorCode: "input_message_redacted",
         canceledAt: expect.any(Date),
+        runtimePolicySnapshot: expect.not.objectContaining({
+          walletReservation: expect.anything(),
+        }),
       }),
     });
     expect(tx.outboxEvent.updateMany).toHaveBeenCalledWith({
@@ -802,6 +978,256 @@ describe("Matrix application service ingress", () => {
       data: expect.objectContaining({
         status: "PROCESSED",
         processedAt: expect.any(Date),
+      }),
+    });
+  });
+
+  it("rejects redaction when a failed run still belongs to an active delegation task", async () => {
+    mockPrisma.message.findFirst.mockResolvedValueOnce({
+      id: "message-delegated-failed",
+      senderId: aliceMatrixUserId,
+      senderType: "AUDIENCE",
+    });
+    tx.message.findFirst.mockResolvedValueOnce({
+      id: "message-delegated-failed",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      inputForGenerationRuns: [{ id: "run-delegated-failed" }],
+    });
+    tx.generationRun.findUnique.mockResolvedValueOnce({
+      id: "run-delegated-failed",
+      status: "FAILED",
+      delegationTaskId: "task-delegated",
+      delegationTask: { status: "WAITING_FOR_OWNER" },
+      outputMessageId: null,
+      outputMessage: null,
+      runtimePolicySnapshot: null,
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-redact-failed-delegated",
+      events: [{
+        event_id: "$event-redact-failed-delegated",
+        type: "m.room.redaction",
+        room_id: "!room:example.org",
+        sender: aliceMatrixUserId,
+        redacts: "$event-original-delegated",
+        content: {},
+      }],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-redact-failed-delegated",
+      status: "ignored",
+      reason: "matrix_redaction_delegation_active",
+    }]);
+    expect(tx.outboxEvent.updateMany).not.toHaveBeenCalled();
+    expect(tx.generationRun.updateMany).not.toHaveBeenCalled();
+    expect(tx.message.update).not.toHaveBeenCalled();
+  });
+
+  it("cancels completed output that has not crossed the delivery boundary", async () => {
+    tx.message.findFirst.mockResolvedValueOnce({
+      id: "message-completed-input",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      inputForGenerationRuns: [{ id: "run-completed" }],
+    });
+    tx.generationRun.findUnique.mockResolvedValueOnce({
+      id: "run-completed",
+      status: "COMPLETED",
+      delegationTaskId: null,
+      delegationTask: null,
+      outputMessageId: "message-completed-output",
+      outputMessage: {
+        id: "message-completed-output",
+        deliveryStatus: "QUEUED",
+      },
+      runtimePolicySnapshot: null,
+    });
+    tx.outboxEvent.findFirst.mockResolvedValueOnce({
+      status: "PENDING",
+      availableAt: new Date(Date.now() - 1_000),
+    });
+
+    await redactConversationMessage({
+      representativeSlug: "sktone",
+      conversationId: "conversation-1",
+      messageId: "message-completed-input",
+      reason: "matrix_redaction",
+    });
+
+    expect(tx.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        aggregateType: "generation_run",
+        aggregateId: "run-completed",
+        eventType: "generation.requested",
+        status: { in: ["PENDING", "PROCESSING", "FAILED"] },
+      },
+      data: {
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: "input_message_redacted_before_delivery",
+      },
+    });
+    expect(tx.message.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "message-completed-output",
+        deliveryStatus: { in: ["PROCESSING", "QUEUED", "FAILED"] },
+      },
+      data: {
+        deliveryStatus: "CANCELED",
+        failureCode: "input_message_redacted_before_delivery",
+        failureReason:
+          "AI delivery was canceled because its input message was redacted.",
+      },
+    });
+    expect(tx.generationRun.updateMany).not.toHaveBeenCalled();
+    expect(mockReleaseConversationEntitlement).not.toHaveBeenCalled();
+    expect(mockReleaseConversationWalletUsage).not.toHaveBeenCalled();
+  });
+
+  it("rejects redaction while completed output has a valid delivery lease", async () => {
+    tx.message.findFirst.mockResolvedValueOnce({
+      id: "message-delivery-in-flight",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      inputForGenerationRuns: [{ id: "run-delivery-in-flight" }],
+    });
+    tx.generationRun.findUnique.mockResolvedValueOnce({
+      id: "run-delivery-in-flight",
+      status: "COMPLETED",
+      delegationTaskId: null,
+      delegationTask: null,
+      outputMessageId: "message-output-in-flight",
+      outputMessage: {
+        id: "message-output-in-flight",
+        deliveryStatus: "PROCESSING",
+      },
+      runtimePolicySnapshot: null,
+    });
+    tx.outboxEvent.findFirst.mockResolvedValueOnce({
+      status: "PROCESSING",
+      availableAt: new Date(Date.now() + 60_000),
+    });
+
+    await expect(redactConversationMessage({
+      representativeSlug: "sktone",
+      conversationId: "conversation-1",
+      messageId: "message-delivery-in-flight",
+      reason: "matrix_redaction",
+    })).rejects.toBeInstanceOf(ConversationWorkInFlightControlError);
+
+    expect(tx.outboxEvent.updateMany).not.toHaveBeenCalled();
+    expect(tx.message.updateMany).not.toHaveBeenCalled();
+    expect(tx.message.update).not.toHaveBeenCalled();
+  });
+
+  it("defers an in-flight redaction without consuming its retry budget and applies it after delivery", async () => {
+    const event: MatrixApplicationServiceEvent = {
+      event_id: "$event-redaction-after-delivery",
+      type: "m.room.redaction",
+      room_id: "!room:example.org",
+      sender: aliceMatrixUserId,
+      redacts: "$event-audience-message",
+      content: {},
+    };
+    const inbox = {
+      id: "inbox:$event-redaction-after-delivery",
+      status: "PENDING",
+      attemptCount: 4,
+      eventType: event.type!,
+      payload: event,
+      lastError: null,
+    };
+    mockPrisma.channelEventInbox.upsert
+      .mockResolvedValueOnce(inbox)
+      .mockResolvedValueOnce({
+        ...inbox,
+        status: "FAILED",
+      });
+    mockPrisma.message.findFirst.mockResolvedValue({
+      id: "message-audience-redacted",
+      senderId: aliceMatrixUserId,
+      senderType: "AUDIENCE",
+    });
+    tx.message.findFirst.mockResolvedValue({
+      id: "message-audience-redacted",
+      conversationId: "conversation-1",
+      episodeId: "episode-1",
+      inputForGenerationRuns: [{ id: "run-delivery-redaction" }],
+    });
+    tx.generationRun.findUnique
+      .mockResolvedValueOnce({
+        id: "run-delivery-redaction",
+        status: "COMPLETED",
+        delegationTaskId: null,
+        delegationTask: null,
+        outputMessageId: "message-output-delivery-redaction",
+        outputMessage: {
+          id: "message-output-delivery-redaction",
+          deliveryStatus: "PROCESSING",
+        },
+        runtimePolicySnapshot: null,
+      })
+      .mockResolvedValueOnce({
+        id: "run-delivery-redaction",
+        status: "COMPLETED",
+        delegationTaskId: null,
+        delegationTask: null,
+        outputMessageId: "message-output-delivery-redaction",
+        outputMessage: {
+          id: "message-output-delivery-redaction",
+          deliveryStatus: "SENT",
+        },
+        runtimePolicySnapshot: null,
+      });
+    tx.outboxEvent.findFirst
+      .mockResolvedValueOnce({
+        status: "PROCESSING",
+        availableAt: new Date(Date.now() + 60_000),
+      })
+      .mockResolvedValueOnce(null);
+
+    const deferred = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-redaction-after-delivery-1",
+      events: [event],
+    });
+    const processed = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-redaction-after-delivery-2",
+      events: [event],
+    });
+
+    expect(deferred).toEqual([{
+      eventId: event.event_id,
+      status: "failed",
+      reason: "matrix_redaction_delivery_in_flight",
+    }]);
+    expect(processed).toEqual([{
+      eventId: event.event_id,
+      status: "processed",
+    }]);
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenCalledWith({
+      where: { id: inbox.id },
+      data: {
+        status: "FAILED",
+        attemptCount: { decrement: 1 },
+        processedAt: null,
+        availableAt: expect.any(Date),
+        lastError: "matrix_redaction_delivery_in_flight",
+      },
+    });
+    expect(mockPrisma.channelEventInbox.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "DEAD_LETTER" }),
+      }),
+    );
+    expect(tx.message.update).toHaveBeenCalledWith({
+      where: { id: "message-audience-redacted" },
+      data: expect.objectContaining({
+        deliveryStatus: "REDACTED",
+        redactedAt: expect.any(Date),
+        redactionReason: "matrix_redaction",
       }),
     });
   });

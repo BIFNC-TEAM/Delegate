@@ -17,6 +17,30 @@ export class ComputeBrokerError extends Error {
 }
 
 const publicBrokerErrors: Record<string, { statusCode: number; message: string }> = {
+  generation_execution_in_progress: {
+    statusCode: 409,
+    message: "This delegated execution is still in progress.",
+  },
+  generation_execution_request_mismatch: {
+    statusCode: 409,
+    message: "This delegated execution does not match the claimed request.",
+  },
+  generation_execution_context_mismatch: {
+    statusCode: 409,
+    message: "This delegated execution context is no longer current.",
+  },
+  generation_work_lease_lost: {
+    statusCode: 409,
+    message: "This delegated execution lease is no longer current.",
+  },
+  compute_execution_claim_lost: {
+    statusCode: 409,
+    message: "This compute execution is now owned by a newer recovery attempt.",
+  },
+  compute_execution_claim_missing: {
+    statusCode: 409,
+    message: "This compute execution does not have a valid execution claim.",
+  },
   approval_request_not_found: {
     statusCode: 404,
     message: "Approval request not found.",
@@ -60,6 +84,10 @@ export async function createAudienceComputeSession(input: {
   contactId: string;
   conversationId: string;
   generationRunId?: string;
+  generationWorkLease?: {
+    outboxId: string;
+    leaseAttempt: number;
+  };
   delegationTaskId?: string;
   delegationTaskStepId?: string;
   subagentId: "compute-agent" | "browser-agent";
@@ -74,6 +102,9 @@ export async function createAudienceComputeSession(input: {
       contactId: input.contactId,
       conversationId: input.conversationId,
       ...(input.generationRunId ? { generationRunId: input.generationRunId } : {}),
+      ...(input.generationWorkLease
+        ? { generationWorkLease: input.generationWorkLease }
+        : {}),
       ...(input.delegationTaskId ? { delegationTaskId: input.delegationTaskId } : {}),
       ...(input.delegationTaskStepId ? { delegationTaskStepId: input.delegationTaskStepId } : {}),
       subagentId: input.subagentId,

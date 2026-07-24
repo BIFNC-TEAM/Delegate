@@ -4,6 +4,7 @@ import {
   MessageContentType,
   MessageDeliveryStatus,
   MessageSenderType,
+  Prisma,
 } from "@prisma/client";
 import { buildMessageRetentionExpiry } from "@delegate/runtime";
 
@@ -46,8 +47,27 @@ export async function finalizeComputeApprovalConversation(input: {
   actualCredits?: number;
   failureReason?: string;
 }) {
+  const approvalReference = await prisma.approvalRequest.findUnique({
+    where: { id: input.approvalId },
+    select: {
+      generationRun: {
+        select: {
+          id: true,
+          conversationId: true,
+        },
+      },
+    },
+  });
+  const runReference = approvalReference?.generationRun;
+  if (!runReference) return null;
+
   const result = await runConversationWriteTransaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.approvalId}))`;
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${runReference.conversationId}))
+    `;
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${runReference.id}))
+    `;
     const approval = await tx.approvalRequest.findUnique({
       where: { id: input.approvalId },
       include: {
@@ -57,6 +77,12 @@ export async function finalizeComputeApprovalConversation(input: {
     });
     const run = approval?.generationRun;
     if (!approval || !run) return null;
+    if (
+      run.id !== runReference.id
+      || run.conversationId !== runReference.conversationId
+    ) {
+      return null;
+    }
     if (run.status === GenerationRunStatus.COMPLETED && run.outputMessageId) {
       const message = await tx.message.findUnique({ where: { id: run.outputMessageId } });
       return {
@@ -68,14 +94,76 @@ export async function finalizeComputeApprovalConversation(input: {
         episodeId: run.episodeId,
       };
     }
+    if (run.status !== GenerationRunStatus.WAITING_APPROVAL) {
+      return null;
+    }
 
     const now = new Date();
+    const conversation = await tx.conversation.findUnique({
+      where: { id: run.conversationId },
+      select: { state: true },
+    });
+    if (!conversation) {
+      throw new Error("Compute approval conversation not found.");
+    }
     const walletReservation = readGenerationWalletReservation(
       run.runtimePolicySnapshot,
     );
     const delegationTaskOwnsBilling = Boolean(
       approval.delegationTaskId && approval.delegationTaskStepId,
     );
+    if (
+      conversation.state === "HUMAN_ACTIVE"
+      || conversation.state === "NEEDS_HUMAN"
+    ) {
+      const releasedSnapshot =
+        walletReservation && !delegationTaskOwnsBilling
+          ? markComputeGenerationWalletReleased(
+              run.runtimePolicySnapshot,
+              now,
+            )
+          : null;
+      const deferred = await tx.generationRun.updateMany({
+        where: {
+          id: run.id,
+          status: GenerationRunStatus.WAITING_APPROVAL,
+        },
+        data: {
+          status: GenerationRunStatus.WAITING_HUMAN,
+          completedAt: null,
+          canceledAt: null,
+          ...(releasedSnapshot
+            ? { runtimePolicySnapshot: releasedSnapshot }
+            : {}),
+        },
+      });
+      if (deferred.count !== 1) {
+        throw new Error(
+          "Compute generation changed while deferring its approval result to human control.",
+        );
+      }
+      if (!delegationTaskOwnsBilling) {
+        await releaseConversationEntitlementByGenerationRunId(
+          {
+            generationRunId: run.id,
+            reason: "generation_deferred_for_human",
+          },
+          tx as unknown as ServiceEntitlementClient,
+        );
+      }
+      if (walletReservation && !delegationTaskOwnsBilling) {
+        await releaseConversationWalletUsage(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            reason: "generation_deferred_to_human",
+            idempotencyKey: `generation:${run.id}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
+      return null;
+    }
+
     const text = formatComputeOutcome(input);
     const message = await tx.message.upsert({
       where: {
@@ -131,8 +219,11 @@ export async function finalizeComputeApprovalConversation(input: {
       });
     }
 
-    await tx.generationRun.update({
-      where: { id: run.id },
+    const completedRun = await tx.generationRun.updateMany({
+      where: {
+        id: run.id,
+        status: GenerationRunStatus.WAITING_APPROVAL,
+      },
       data: {
         status: GenerationRunStatus.COMPLETED,
         outputMessageId: message.id,
@@ -143,6 +234,48 @@ export async function finalizeComputeApprovalConversation(input: {
         errorMessage: input.failureReason?.slice(0, 1000) ?? null,
       },
     });
+    if (completedRun.count !== 1) {
+      throw new Error(
+        "Compute generation changed while completing its approval result.",
+      );
+    }
+    const settledConversation = await tx.conversation.updateMany({
+      where: {
+        id: run.conversationId,
+        state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
+      },
+      data: {
+        state: "WAITING_USER",
+        lastMessageAt: now,
+        ...(walletReservation || delegationTaskOwnsBilling || input.outcome !== "completed"
+          ? {}
+          : { freeRepliesUsed: { increment: 1 } }),
+      },
+    });
+    if (settledConversation.count !== 1) {
+      throw new Error(
+        "Compute approval conversation changed while completing its result.",
+      );
+    }
+    if (run.episodeId) {
+      const settledEpisode = await tx.conversationEpisode.updateMany({
+        where: {
+          id: run.episodeId,
+          status: {
+            notIn: [
+              ConversationEpisodeStatus.HUMAN_ACTIVE,
+              ConversationEpisodeStatus.NEEDS_HUMAN,
+            ],
+          },
+        },
+        data: { status: ConversationEpisodeStatus.WAITING_USER },
+      });
+      if (settledEpisode.count !== 1) {
+        throw new Error(
+          "Compute approval episode changed while completing its result.",
+        );
+      }
+    }
     if (!delegationTaskOwnsBilling) {
       if (input.outcome === "completed") {
         await consumeConversationEntitlementByGenerationRunId(
@@ -184,20 +317,6 @@ export async function finalizeComputeApprovalConversation(input: {
         );
       }
     }
-    await tx.conversation.update({
-      where: { id: run.conversationId },
-      data: {
-        state: "WAITING_USER",
-        lastMessageAt: now,
-        ...(walletReservation || delegationTaskOwnsBilling || input.outcome !== "completed"
-          ? {}
-          : { freeRepliesUsed: { increment: 1 } }),
-      },
-    });
-    await tx.conversationEpisode.updateMany({
-      where: { id: run.episodeId || "__no_episode__" },
-      data: { status: ConversationEpisodeStatus.WAITING_USER },
-    });
     return {
       message,
       delegationTaskId: approval.delegationTaskId,
@@ -209,6 +328,7 @@ export async function finalizeComputeApprovalConversation(input: {
   });
   if (!result) return null;
   if (!result.message) return null;
+  const resultMessage = result.message;
   let hasMoreSteps = false;
   if (result.delegationTaskId) {
     const finalization = await finalizeComputeDelegationTask({
@@ -232,20 +352,35 @@ export async function finalizeComputeApprovalConversation(input: {
   }
   if (hasMoreSteps) {
     const text = "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。";
-    const [, message] = await prisma.$transaction([
-      prisma.conversation.update({
+    return runConversationWriteTransaction(async (tx) => {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(hashtext(${result.conversationId}))
+      `;
+      const writable = await tx.$executeRaw`
+        UPDATE "Conversation"
+        SET "state" = "state"
+        WHERE "id" = ${result.conversationId}
+          AND "state" NOT IN ('HUMAN_ACTIVE', 'NEEDS_HUMAN')
+      `;
+      if (writable !== 1) {
+        return resultMessage;
+      }
+      await tx.conversation.update({
         where: { id: result.conversationId },
         data: { state: "AI_QUEUED", lastMessageAt: new Date() },
-      }),
-      prisma.message.update({
-        where: { id: result.message.id },
+      });
+      const message = await tx.message.update({
+        where: { id: resultMessage.id },
         data: { text },
-      }),
-      ...(result.episodeId
-        ? [prisma.conversationEpisode.update({ where: { id: result.episodeId }, data: { status: ConversationEpisodeStatus.ACTIVE } })]
-        : []),
-    ]);
-    return message;
+      });
+      if (result.episodeId) {
+        await tx.conversationEpisode.update({
+          where: { id: result.episodeId },
+          data: { status: ConversationEpisodeStatus.ACTIVE },
+        });
+      }
+      return message;
+    });
   }
   return result.message;
 }
@@ -287,6 +422,29 @@ export function formatComputeOutcome(input: {
     return `审批已通过，但委托任务执行失败。\n\n${artifacts}${publicFailureReason ? `\n\n原因：${publicFailureReason}` : ""}${billing}`;
   }
   return `审批已通过，委托任务执行完成。\n\n${artifacts}${billing}`;
+}
+
+function markComputeGenerationWalletReleased(
+  snapshot: Prisma.JsonValue | null,
+  now: Date,
+): Prisma.InputJsonObject | null {
+  if (
+    !snapshot
+    || typeof snapshot !== "object"
+    || Array.isArray(snapshot)
+    || !readGenerationWalletReservation(snapshot)
+  ) {
+    return null;
+  }
+  const {
+    walletReservation: _walletReservation,
+    ...rest
+  } = snapshot as Prisma.JsonObject;
+  return {
+    ...rest,
+    billingMode: "service_credit_released",
+    billingFinalizedAt: now.toISOString(),
+  } as Prisma.InputJsonObject;
 }
 
 function renderPublicComputeFailureReason(failureReason: string) {

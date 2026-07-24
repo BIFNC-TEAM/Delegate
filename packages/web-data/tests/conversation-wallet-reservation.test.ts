@@ -96,7 +96,14 @@ const reservedRun = {
   episodeId: "episode-1",
   inputMessageId: "message-in",
   delegationTaskId: null,
+  delegationTaskStep: null,
   startedAt: null,
+  conversation: {
+    id: "conversation-1",
+    state: "PROCESSING",
+    audienceIdentityId: "audience-1",
+    representativeId: "representative-1",
+  },
   runtimePolicySnapshot: {
     walletReservation: {
       usageChargeId: "usage-reserved",
@@ -216,6 +223,7 @@ describe("generation wallet reservation lifecycle", () => {
 
   it("settles a paid reservation atomically with generation completion", async () => {
     await completeInlineGenerationRun({
+      conversationId: reservedRun.conversationId,
       runId: reservedRun.id,
       outboxId: "outbox-paid",
       leaseAttempt: 1,
@@ -237,12 +245,16 @@ describe("generation wallet reservation lifecycle", () => {
       mocks.tx,
     );
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.tx.conversation.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "conversation-1",
+        state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
+      },
+      data: { state: "WAITING_USER" },
+    });
     expect(mocks.tx.conversation.update).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
-      data: {
-        state: "WAITING_USER",
-        lastMessageAt: expect.any(Date),
-      },
+      data: { lastMessageAt: expect.any(Date) },
     });
   });
 
@@ -308,6 +320,7 @@ describe("generation wallet reservation lifecycle", () => {
       episodeId: "episode-1",
       redactedAt: null,
       revisions: [],
+      conversation: { state: "PROCESSING" },
       inputForGenerationRuns: [paidRun],
     });
     mocks.tx.generationRun.findUnique.mockResolvedValue(paidRun);
@@ -337,13 +350,13 @@ describe("generation wallet reservation lifecycle", () => {
       mocks.tx,
     );
     expect(mocks.tx.generationRun.updateMany).toHaveBeenCalledWith({
-      where: { id: "run-paid", status: "PROCESSING" },
+      where: { id: "run-paid", status: { in: ["PROCESSING"] } },
       data: {
         status: "CANCELED",
         canceledAt: expect.any(Date),
         runtimePolicySnapshot: {
-          billingMode: "service_credit",
-          walletReservation: null,
+          billingMode: "service_credit_transferred",
+          billingTransferredToGenerationRunId: "run-replacement",
           walletReservationTransferredTo: "run-replacement",
         },
       },
@@ -405,7 +418,7 @@ describe("generation wallet reservation lifecycle", () => {
     );
   });
 
-  it("cancels and releases a failed paid run only while its outbox is retryable", async () => {
+  it("cancels and releases a failed paid run only while its outbox remains active", async () => {
     mocks.tx.message.findFirst.mockResolvedValue({
       id: "message-in",
       conversationId: "conversation-1",
@@ -438,10 +451,14 @@ describe("generation wallet reservation lifecycle", () => {
         aggregateType: "generation_run",
         aggregateId: "run-paid",
         eventType: "generation.requested",
-        status: "FAILED",
-        attemptCount: { lt: 5 },
+        status: { in: ["PENDING", "PROCESSING", "FAILED"] },
       },
-      select: { id: true },
+      select: {
+        id: true,
+        status: true,
+        availableAt: true,
+        attemptCount: true,
+      },
     });
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledTimes(1);
     expect(mocks.tx.generationRun.updateMany).toHaveBeenCalledWith(
@@ -449,13 +466,7 @@ describe("generation wallet reservation lifecycle", () => {
         where: {
           id: "run-paid",
           status: {
-            in: [
-              "QUEUED",
-              "PROCESSING",
-              "WAITING_APPROVAL",
-              "WAITING_HUMAN",
-              "FAILED",
-            ],
+            in: ["FAILED"],
           },
         },
       }),
@@ -509,6 +520,7 @@ describe("generation wallet reservation lifecycle", () => {
     });
 
     await completeInlineGenerationRun({
+      conversationId: reservedRun.conversationId,
       runId: "run-task-step-1",
       outboxId: "outbox-task-step-1",
       leaseAttempt: 1,
@@ -520,12 +532,16 @@ describe("generation wallet reservation lifecycle", () => {
 
     expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.tx.conversation.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "conversation-1",
+        state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
+      },
+      data: { state: "AI_QUEUED" },
+    });
     expect(mocks.tx.conversation.update).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
-      data: {
-        state: "AI_QUEUED",
-        lastMessageAt: expect.any(Date),
-      },
+      data: { lastMessageAt: expect.any(Date) },
     });
   });
 
@@ -813,6 +829,7 @@ describe("generation wallet reservation lifecycle", () => {
 
   it("releases a reservation when a completed response is not billable", async () => {
     await completeInlineGenerationRun({
+      conversationId: reservedRun.conversationId,
       runId: reservedRun.id,
       outboxId: "outbox-paid",
       leaseAttempt: 1,
@@ -832,17 +849,79 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
   });
 
+  it("defers and releases a stale completion after human handoff wins", async () => {
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      ...reservedRun,
+      status: "PROCESSING",
+      conversation: {
+        ...reservedRun.conversation,
+        state: "NEEDS_HUMAN",
+      },
+    });
+
+    await expect(completeInlineGenerationRun({
+      conversationId: reservedRun.conversationId,
+      runId: reservedRun.id,
+      outboxId: "outbox-paid",
+      leaseAttempt: 1,
+      replyText: "This stale answer must not be persisted.",
+      senderDisplayName: "Representative",
+      countUsage: true,
+      completeOutbox: false,
+    })).rejects.toMatchObject({
+      code: "CONVERSATION_HUMAN_ACTIVE",
+    });
+
+    expect(mocks.tx.message.create).not.toHaveBeenCalled();
+    expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-reserved",
+        reason: "generation_deferred_to_human",
+        idempotencyKey: "generation:run-paid:release",
+      },
+      mocks.tx,
+    );
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: reservedRun.id },
+      data: expect.objectContaining({
+        status: "WAITING_HUMAN",
+        runtimePolicySnapshot: expect.not.objectContaining({
+          walletReservation: expect.anything(),
+        }),
+      }),
+    });
+    expect(mocks.tx.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "outbox-paid",
+        aggregateType: "generation_run",
+        aggregateId: reservedRun.id,
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: 1,
+      },
+      data: {
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: null,
+      },
+    });
+  });
+
   it("releases an active service entitlement when a completed response is not billable", async () => {
     mockActiveServiceEntitlement();
     mocks.tx.generationRun.findUnique.mockResolvedValue({
       ...reservedRun,
       conversation: {
+        id: reservedRun.conversationId,
+        state: "PROCESSING",
         audienceIdentityId: activeServiceEntitlementReservation.audienceIdentityId,
         representativeId: activeServiceEntitlementReservation.representativeId,
       },
     });
 
     await completeInlineGenerationRun({
+      conversationId: reservedRun.conversationId,
       runId: reservedRun.id,
       outboxId: "outbox-paid",
       leaseAttempt: 1,
@@ -869,6 +948,7 @@ describe("generation wallet reservation lifecycle", () => {
     mockActiveServiceEntitlement();
 
     await completeInlineGenerationRun({
+      conversationId: reservedRun.conversationId,
       runId: reservedRun.id,
       outboxId: "outbox-paid",
       leaseAttempt: 1,
@@ -894,6 +974,7 @@ describe("generation wallet reservation lifecycle", () => {
     mockActiveServiceEntitlement();
 
     await failGenerationRun({
+      conversationId: reservedRun.conversationId,
       runId: reservedRun.id,
       outboxId: "outbox-paid",
       leaseAttempt: 4,
@@ -926,6 +1007,7 @@ describe("generation wallet reservation lifecycle", () => {
     mockActiveServiceEntitlement();
 
     await failGenerationRun({
+      conversationId: reservedRun.conversationId,
       runId: reservedRun.id,
       outboxId: "outbox-paid",
       leaseAttempt: 5,
@@ -1001,6 +1083,21 @@ describe("generation wallet reservation lifecycle", () => {
       },
       mocks.tx,
     );
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: reservedRun.id },
+      data: {
+        status: "WAITING_HUMAN",
+        runtimePolicySnapshot: expect.objectContaining({
+          billingMode: "service_credit_released",
+          billingFinalizedAt: expect.any(String),
+        }),
+      },
+    });
+    const deferredRunUpdate =
+      mocks.tx.generationRun.update.mock.calls.at(-1)?.[0];
+    expect(
+      deferredRunUpdate.data.runtimePolicySnapshot,
+    ).not.toHaveProperty("walletReservation");
     expect(mocks.tx.serviceEntitlementLedgerEntry.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         generationRunId: reservedRun.id,
@@ -1008,6 +1105,40 @@ describe("generation wallet reservation lifecycle", () => {
         idempotencyKey:
           `conversation-entitlement:${reservedRun.id}:1:release`,
       }),
+    });
+  });
+
+  it("releases a clarification-step reservation when human control defers it", async () => {
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      ...reservedRun,
+      delegationTaskId: "task-clarifying",
+      delegationTaskStepId: "step-clarifying",
+      delegationTaskStep: { kind: "CLARIFICATION" },
+    });
+
+    await deferGenerationRunForHuman({
+      runId: reservedRun.id,
+      outboxId: "outbox-paid",
+      leaseAttempt: 1,
+    });
+
+    expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-reserved",
+        reason: "generation_deferred_to_human",
+        idempotencyKey: "generation:run-paid:release",
+      },
+      mocks.tx,
+    );
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: reservedRun.id },
+      data: {
+        status: "WAITING_HUMAN",
+        runtimePolicySnapshot: expect.objectContaining({
+          billingMode: "service_credit_released",
+          billingFinalizedAt: expect.any(String),
+        }),
+      },
     });
   });
 });

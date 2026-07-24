@@ -9,6 +9,7 @@
     "smoke:daytona-opencode": "tsx scripts/daytona-opencode-smoke.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
+    "test:postgres:billing": "DELEGATE_POSTGRES_E2E=1 vitest run tests/billing-postgres.integration.test.ts",
     "test:postgres:mcp-health": "DELEGATE_POSTGRES_E2E=1 vitest run tests/mcp-binding-health-postgres.integration.test.ts"
   },
   "dependencies": {

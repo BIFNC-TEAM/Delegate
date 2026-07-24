@@ -1789,8 +1789,21 @@ export async function confirmInvoicePayment(
     });
 
     if (invoice.conversationId) {
+      await tx.$executeRaw`
+        SELECT "id"
+        FROM "Conversation"
+        WHERE "id" = ${invoice.conversationId}
+        FOR UPDATE
+      `;
+      const lockedConversation = await tx.conversation.findUnique({
+        where: { id: invoice.conversationId },
+        select: { computeBudgetRemainingCredits: true },
+      });
+      if (!lockedConversation) {
+        throw new Error("Invoice conversation is no longer available.");
+      }
       const nextComputeBudget =
-        (invoice.conversation?.computeBudgetRemainingCredits ?? 0) +
+        (lockedConversation.computeBudgetRemainingCredits ?? 0) +
         computeCreditsForPlan(invoice.planType);
       await tx.conversation.update({
         where: { id: invoice.conversationId },

@@ -154,6 +154,8 @@ function buildSession(overrides: { contactId: string | null }) {
     contactId: overrides.contactId,
     conversationId: "conversation-1",
     generationRunId: null,
+    generationOutboxId: null,
+    generationLeaseAttempt: null,
     delegationTaskId: null,
     delegationTaskStepId: null,
     subagentId: "browser-agent",

@@ -66,3 +66,7 @@ DATABASE_URL="$FIXTURE_DATABASE_URL" \
 printf 'phase=run_service_entitlement_concurrency_gate\n'
 DATABASE_URL="$FIXTURE_DATABASE_URL" \
   pnpm --dir "$REPO_ROOT" --filter @delegate/web-data test:postgres:entitlements
+
+printf 'phase=run_compute_billing_concurrency_gate\n'
+DATABASE_URL="$FIXTURE_DATABASE_URL" \
+  pnpm --dir "$REPO_ROOT" --filter @delegate/compute-broker test:postgres:billing

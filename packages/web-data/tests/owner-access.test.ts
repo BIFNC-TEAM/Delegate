@@ -4,6 +4,7 @@ import {
   RepresentativeAccessError,
   assertOwnerCanAccessRepresentative,
   assertOwnerCanApproveCompute,
+  assertOwnerCanManageBilling,
   assertOwnerCanManageSkills,
 } from "../src/owner-access";
 
@@ -74,6 +75,7 @@ describe("owner organization permissions", () => {
     });
 
     await expect(assertOwnerCanApproveCompute("owner-1", loadOwner)).resolves.toBeUndefined();
+    await expect(assertOwnerCanManageBilling("owner-1", loadOwner)).resolves.toBeUndefined();
     await expect(assertOwnerCanManageSkills("owner-1", loadOwner)).resolves.toBeUndefined();
   });
 
@@ -83,11 +85,13 @@ describe("owner organization permissions", () => {
       organizationMember: {
         organizationId: "org-1",
         canApproveCompute: true,
+        canManageBilling: true,
         canManagePolicies: true,
       },
     });
 
     await expect(assertOwnerCanApproveCompute("owner-1", loadOwner)).resolves.toBeUndefined();
+    await expect(assertOwnerCanManageBilling("owner-1", loadOwner)).resolves.toBeUndefined();
     await expect(assertOwnerCanManageSkills("owner-1", loadOwner)).resolves.toBeUndefined();
   });
 
@@ -101,6 +105,7 @@ describe("owner organization permissions", () => {
       organizationMember: {
         organizationId: "org-2",
         canApproveCompute: true,
+        canManageBilling: true,
         canManagePolicies: true,
       },
     }],
@@ -108,6 +113,9 @@ describe("owner organization permissions", () => {
     const loadOwner = async () => owner;
 
     await expect(assertOwnerCanApproveCompute("owner-1", loadOwner)).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    await expect(assertOwnerCanManageBilling("owner-1", loadOwner)).rejects.toMatchObject({
       statusCode: 403,
     });
     await expect(assertOwnerCanManageSkills("owner-1", loadOwner)).rejects.toMatchObject({
@@ -121,11 +129,15 @@ describe("owner organization permissions", () => {
       organizationMember: {
         organizationId: "org-1",
         canApproveCompute: false,
+        canManageBilling: false,
         canManagePolicies: true,
       },
     });
 
     await expect(assertOwnerCanApproveCompute("owner-1", loadOwner)).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    await expect(assertOwnerCanManageBilling("owner-1", loadOwner)).rejects.toMatchObject({
       statusCode: 403,
     });
     await expect(assertOwnerCanManageSkills("owner-1", loadOwner)).resolves.toBeUndefined();
@@ -135,6 +147,9 @@ describe("owner organization permissions", () => {
     const loadOwner = async () => null;
 
     await expect(assertOwnerCanApproveCompute("owner-missing", loadOwner)).rejects.toMatchObject({
+      statusCode: 403,
+    });
+    await expect(assertOwnerCanManageBilling("owner-missing", loadOwner)).rejects.toMatchObject({
       statusCode: 403,
     });
     await expect(assertOwnerCanManageSkills("owner-missing", loadOwner)).rejects.toMatchObject({

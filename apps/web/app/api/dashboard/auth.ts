@@ -3,10 +3,12 @@ import { NextResponse } from "next/server";
 import {
   RepresentativeAccessError,
   assertOwnerCanAccessRepresentative,
+  assertOwnerCanManageBilling,
 } from "@delegate/web-data";
 
 import { getOwnerAuthSession } from "../../auth/owner-session";
 import { shouldRequireCreatorDashboardAuth } from "../../../auth-guard";
+import { withPrivateNoStore } from "../private-response";
 
 export async function requireDashboardApiOwnerSession() {
   const session = await getOwnerAuthSession();
@@ -31,6 +33,28 @@ export async function requireDashboardRepresentativeAccess(representativeSlug: s
   return session;
 }
 
+export async function requireDashboardBillingAccess() {
+  const session = await requireDashboardApiOwnerSession();
+  const ownerId = session?.ownerId?.trim();
+  if (!ownerId) {
+    throw new RepresentativeAccessError("Authentication required.", 401);
+  }
+
+  await assertOwnerCanManageBilling(ownerId);
+  return { ...session, ownerId };
+}
+
+export async function requireDashboardRepresentativeBillingAccess(
+  representativeSlug: string,
+) {
+  const session = await requireDashboardBillingAccess();
+  await assertOwnerCanAccessRepresentative({
+    ownerId: session.ownerId,
+    representativeSlug,
+  });
+  return session;
+}
+
 export async function authorizeDashboardRepresentativeAccess(representativeSlug: string) {
   try {
     await requireDashboardRepresentativeAccess(representativeSlug);
@@ -40,13 +64,17 @@ export async function authorizeDashboardRepresentativeAccess(representativeSlug:
     if (authResponse) {
       return authResponse;
     }
-    return NextResponse.json({ error: "Failed to authorize dashboard access." }, { status: 500 });
+    return withPrivateNoStore(
+      NextResponse.json({ error: "Failed to authorize dashboard access." }, { status: 500 }),
+    );
   }
 }
 
 export function dashboardAuthErrorResponse(error: unknown) {
   if (error instanceof RepresentativeAccessError) {
-    return NextResponse.json({ error: error.message }, { status: error.statusCode });
+    return withPrivateNoStore(
+      NextResponse.json({ error: error.message }, { status: error.statusCode }),
+    );
   }
   return null;
 }

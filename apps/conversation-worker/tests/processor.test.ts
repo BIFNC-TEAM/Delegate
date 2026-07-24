@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   generateRepresentativeReply: vi.fn(),
@@ -28,14 +28,15 @@ const mocks = vi.hoisted(() => ({
   executeAudienceTool: vi.fn(),
   finalizeComputeDelegationTask: vi.fn(),
   failGenerationRun: vi.fn(),
+  renewGenerationWorkItemLease: vi.fn(),
+  retryGenerationDelivery: vi.fn(),
   markDelegationTaskAwaitingApproval: vi.fn(),
   markDelegationTaskRunning: vi.fn(),
   waitGenerationRunForComputeApproval: vi.fn(),
   assertConversationChannelDeliveryAvailable: vi.fn(),
   hasUnifiedConversationEntitlement: vi.fn(),
-  reserveConversationEntitlement: vi.fn(),
+  reserveGenerationConversationEntitlement: vi.fn(),
   releaseConversationEntitlement: vi.fn(),
-  retryGenerationDelivery: vi.fn(),
   retryOperatorMessageDelivery: vi.fn(),
 }));
 
@@ -74,6 +75,10 @@ vi.mock("@delegate/web-data", () => ({
   finalizeComputeDelegationTask: mocks.finalizeComputeDelegationTask,
   findConversationClarifyingDelegationTask: mocks.findConversationClarifyingDelegationTask,
   failGenerationRun: mocks.failGenerationRun,
+  GENERATION_WORK_LEASE_DURATION_MS: 3_000,
+  GenerationWorkLeaseLostError: class GenerationWorkLeaseLostError extends Error {
+    readonly code = "generation_work_lease_lost";
+  },
   getRepresentativeRuntimeSetupSnapshot: mocks.getRepresentativeRuntimeSetupSnapshot,
   hasUnifiedConversationEntitlement: mocks.hasUnifiedConversationEntitlement,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
@@ -82,11 +87,18 @@ vi.mock("@delegate/web-data", () => ({
   markDelegationTaskRunning: mocks.markDelegationTaskRunning,
   recallRepresentativeContext: mocks.recallRepresentativeContext,
   releaseConversationEntitlement: mocks.releaseConversationEntitlement,
-  reserveConversationEntitlement: mocks.reserveConversationEntitlement,
+  reserveGenerationConversationEntitlement: mocks.reserveGenerationConversationEntitlement,
+  renewGenerationWorkItemLease: mocks.renewGenerationWorkItemLease,
   retryGenerationDelivery: mocks.retryGenerationDelivery,
   retryOperatorMessageDelivery: mocks.retryOperatorMessageDelivery,
+  isGenerationWorkLeaseLostError: (error: unknown) =>
+    error instanceof Error
+    && "code" in error
+    && error.code === "generation_work_lease_lost",
   waitGenerationRunForComputeApproval: mocks.waitGenerationRunForComputeApproval,
 }));
+
+import { GenerationWorkLeaseLostError } from "@delegate/web-data";
 
 import { processNextConversationWork } from "../src/processor";
 
@@ -102,8 +114,9 @@ describe("conversation worker knowledge recall", () => {
     mocks.finalizeComputeDelegationTask.mockResolvedValue({ hasMoreSteps: false });
     mocks.assertConversationChannelDeliveryAvailable.mockResolvedValue(undefined);
     mocks.hasUnifiedConversationEntitlement.mockResolvedValue(false);
-    mocks.reserveConversationEntitlement.mockResolvedValue(null);
+    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(null);
     mocks.releaseConversationEntitlement.mockResolvedValue(undefined);
+    mocks.renewGenerationWorkItemLease.mockResolvedValue(true);
     mocks.deferOperatorMessageDelivery.mockResolvedValue(true);
     mocks.retryGenerationDelivery.mockResolvedValue(undefined);
     mocks.retryOperatorMessageDelivery.mockResolvedValue(undefined);
@@ -113,6 +126,7 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-1",
+      leaseAttempt: 1,
       runId: "run-1",
       representativeVersionId: "version-1",
       representativeSlug: "sktone",
@@ -158,6 +172,10 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.renderGroundedKnowledgeFallback.mockReturnValue("根据已发布的知识资料：佩奇临时代课并带大家画恐龙。");
     mocks.completeInlineGenerationRun.mockResolvedValue({ message: { id: "reply-1" } });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("passes recalled knowledge to the model and persists its citation", async () => {
@@ -213,6 +231,7 @@ describe("conversation worker knowledge recall", () => {
     vi.stubGlobal("fetch", fetchMock);
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-delivery-retry",
+      leaseAttempt: 2,
       runId: "run-delivery-retry",
       representativeVersionId: "version-1",
       representativeSlug: "sktone",
@@ -262,6 +281,8 @@ describe("conversation worker knowledge recall", () => {
     );
     expect(mocks.markGenerationDeliveryComplete).toHaveBeenCalledWith({
       runId: "run-delivery-retry",
+      outboxId: "outbox-delivery-retry",
+      leaseAttempt: 2,
       outputMessageId: "message-output",
       externalMessageId: "90210",
     });
@@ -338,6 +359,7 @@ describe("conversation worker knowledge recall", () => {
     };
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-1",
+      leaseAttempt: 1,
       runId: "run-1",
       representativeVersionId: "version-1",
       representativeSlug: "sktone",
@@ -363,7 +385,7 @@ describe("conversation worker knowledge recall", () => {
       id: "rep-1",
       contract: { freeReplyLimit: 4 },
     });
-    mocks.reserveConversationEntitlement.mockResolvedValue(reservation);
+    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(reservation);
 
     await expect(
       processNextConversationWork({ port: 4040, pollMs: 500 }),
@@ -372,10 +394,12 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
 
-    expect(mocks.reserveConversationEntitlement).toHaveBeenCalledWith({
+    expect(mocks.reserveGenerationConversationEntitlement).toHaveBeenCalledWith({
+      runId: "run-1",
+      outboxId: "outbox-1",
+      leaseAttempt: 1,
       audienceIdentityId: "audience-1",
       representativeId: "rep-1",
-      generationRunId: "run-1",
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -383,6 +407,239 @@ describe("conversation worker knowledge recall", () => {
       }),
     );
     expect(mocks.releaseConversationEntitlement).not.toHaveBeenCalled();
+  });
+
+  it("stops before generation when fenced entitlement reservation loses its lease", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-stale-reserve",
+      leaseAttempt: 1,
+      runId: "run-stale-reserve",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-stale-reserve",
+      contactId: "contact-stale-reserve",
+      audienceIdentityId: "audience-stale-reserve",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-stale-reserve",
+      userText: "继续回答",
+      channel: "web",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: false,
+        deepHelpUnlocked: false,
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 4 },
+    });
+    mocks.reserveGenerationConversationEntitlement.mockRejectedValue(
+      new GenerationWorkLeaseLostError("outbox-stale-reserve", 1),
+    );
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      runId: "run-stale-reserve",
+      status: "lease_lost",
+    });
+
+    expect(mocks.reserveGenerationConversationEntitlement).toHaveBeenCalledWith({
+      runId: "run-stale-reserve",
+      outboxId: "outbox-stale-reserve",
+      leaseAttempt: 1,
+      audienceIdentityId: "audience-stale-reserve",
+      representativeId: "rep-1",
+    });
+    expect(mocks.completeInlineGenerationRun).not.toHaveBeenCalled();
+    expect(mocks.failGenerationRun).not.toHaveBeenCalled();
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+  });
+
+  it("leaves a reserved entitlement for fenced terminal cleanup when generation fails", async () => {
+    const reservation = {
+      audienceIdentityId: "audience-terminal-1",
+      representativeId: "rep-1",
+      productCode: "plan:pass",
+      generationRunId: "run-terminal-entitlement",
+      operationKey: "generation:run-terminal-entitlement:attempt:1",
+      accountId: "entitlement-terminal-1",
+      attempt: 1,
+    };
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-terminal-entitlement",
+      leaseAttempt: 1,
+      runId: "run-terminal-entitlement",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-terminal-entitlement",
+      contactId: "contact-terminal-entitlement",
+      audienceIdentityId: reservation.audienceIdentityId,
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-terminal-entitlement",
+      userText: "继续回答",
+      channel: "web",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: false,
+        deepHelpUnlocked: false,
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 4 },
+    });
+    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(reservation);
+    mocks.generateRepresentativeReply.mockRejectedValue(new Error("model upstream unavailable"));
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      runId: reservation.generationRunId,
+      status: "failed",
+    });
+
+    expect(mocks.releaseConversationEntitlement).not.toHaveBeenCalled();
+    expect(mocks.failGenerationRun).toHaveBeenCalledWith({
+      runId: reservation.generationRunId,
+      outboxId: "outbox-terminal-entitlement",
+      leaseAttempt: 1,
+      errorCode: "conversation_worker_failed",
+      errorMessage: "model upstream unavailable",
+    });
+    expect(mocks.completeInlineGenerationRun).not.toHaveBeenCalled();
+  });
+
+  it("passes a reserved entitlement through a countUsage=false terminal reply", async () => {
+    const reservation = {
+      audienceIdentityId: "audience-correctable-1",
+      representativeId: "rep-1",
+      productCode: "plan:pass",
+      generationRunId: "run-correctable-entitlement",
+      operationKey: "generation:run-correctable-entitlement:attempt:1",
+      accountId: "entitlement-correctable-1",
+      attempt: 1,
+    };
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-correctable-entitlement",
+      leaseAttempt: 1,
+      runId: "run-correctable-entitlement",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-correctable-entitlement",
+      contactId: "contact-correctable-entitlement",
+      audienceIdentityId: reservation.audienceIdentityId,
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-correctable-entitlement",
+      userText: "继续回答",
+      channel: "web",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: false,
+        deepHelpUnlocked: false,
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 4 },
+    });
+    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(reservation);
+    mocks.generateRepresentativeReply.mockRejectedValue(
+      new Error("path_outside_allowed_workspace"),
+    );
+    mocks.completeInlineGenerationRun.mockResolvedValue({
+      message: { id: "reply-correctable-entitlement" },
+    });
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      runId: reservation.generationRunId,
+      status: "completed",
+    });
+
+    expect(mocks.releaseConversationEntitlement).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: reservation.generationRunId,
+        countUsage: false,
+        entitlementReservation: reservation,
+      }),
+    );
+    expect(mocks.failGenerationRun).not.toHaveBeenCalled();
+  });
+
+  it("does not double-reserve unified entitlement when wallet credit already owns billing", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-wallet",
+      leaseAttempt: 1,
+      runId: "run-wallet",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-wallet",
+      contactId: "contact-wallet",
+      audienceIdentityId: "audience-1",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-wallet",
+      userText: "继续回答",
+      channel: "web",
+      walletReservation: {
+        usageChargeId: "usage-charge-1",
+        tokenAmount: 1,
+      },
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 4 },
+    });
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.reserveGenerationConversationEntitlement).not.toHaveBeenCalled();
+    expect(mocks.hasUnifiedConversationEntitlement).not.toHaveBeenCalled();
+    expect(mocks.createConversationPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usage: expect.objectContaining({ passUnlocked: true }),
+      }),
+    );
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        entitlementReservation: expect.anything(),
+      }),
+    );
   });
 
   it("does not fall back to legacy unlock flags once unified entitlements are authoritative", async () => {
@@ -656,7 +913,7 @@ describe("conversation worker knowledge recall", () => {
     const request = {
       ...naturalStep,
       displayTarget: naturalStep.summary,
-      hasPaidEntitlement: false,
+      hasPaidEntitlement: true,
       browserMode: "deterministic",
       maxSteps: 1,
       allowMutations: false,
@@ -689,8 +946,15 @@ describe("conversation worker knowledge recall", () => {
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       attachments: [expect.objectContaining({ fileName: "qa.txt", artifactId: "artifact-natural" })],
+      countUsage: true,
       replyText: expect.stringContaining("已生成文件：qa.txt"),
     }));
+    expect(mocks.executeAudienceTool).toHaveBeenCalledWith(
+      "session-natural",
+      expect.objectContaining({
+        hasPaidEntitlement: false,
+      }),
+    );
     expect(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]?.replyText).not.toContain("/workspace/");
     expect(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]?.replyText).not.toContain("browser QA");
     expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
@@ -698,6 +962,72 @@ describe("conversation worker knowledge recall", () => {
       outcome: "completed",
       artifacts: [expect.objectContaining({ id: "artifact-natural" })],
       actualCredits: 4,
+    }));
+  });
+
+  it("marks a failed compute result as non-billable", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-compute-failed",
+      runId: "run-compute-failed",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-compute-failed",
+      contactId: "contact-compute-failed",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-compute-failed",
+      userText: "/compute process npm test",
+      channel: "web",
+      usage: { freeRepliesUsed: 3, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.parseComputeDirective.mockReturnValue({
+      kind: "request",
+      request: {
+        capability: "process",
+        command: "npm test",
+        displayTarget: "npm test",
+        hasPaidEntitlement: true,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+      },
+    });
+    mocks.createAudienceComputeSession.mockResolvedValue({
+      session: { id: "session-compute-failed" },
+    });
+    mocks.executeAudienceTool.mockResolvedValue({
+      outcome: "failed",
+      artifacts: [],
+      billing: { actualCredits: 4 },
+    });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.executeAudienceTool).toHaveBeenCalledWith(
+      "session-compute-failed",
+      expect.objectContaining({
+        hasPaidEntitlement: false,
+      }),
+    );
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      countUsage: false,
+      replyText: expect.stringContaining("未能完成"),
+    }));
+    expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "task-1",
+      outcome: "failed",
     }));
   });
 
@@ -825,6 +1155,7 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      countUsage: false,
       replyText: expect.stringContaining("策略禁止写入工作区文件"),
     }));
     expect(mocks.createComputeDelegationTask).toHaveBeenCalledTimes(1);
@@ -945,6 +1276,7 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      countUsage: false,
       replyText: expect.stringContaining("超过该代表设置的 5 美分上限"),
     }));
     expect(mocks.createComputeDelegationTask).toHaveBeenCalledTimes(1);
@@ -1004,6 +1336,7 @@ describe("conversation worker knowledge recall", () => {
       failureReason: expect.stringContaining("Planned step count 2"),
     }));
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      countUsage: false,
       replyText: expect.stringContaining("超过该代表允许的 1 步上限"),
     }));
     expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
@@ -1361,5 +1694,105 @@ describe("conversation worker knowledge recall", () => {
     }));
     expect(mocks.recallRepresentativeContext).not.toHaveBeenCalled();
     expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+  });
+
+  it("stops attempt A after lease loss and lets reclaimed attempt B commit", async () => {
+    vi.useFakeTimers();
+    const baseItem = {
+      runId: "run-reclaimed",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-reclaimed",
+      contactId: "contact-reclaimed",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-reclaimed",
+      userText: "请回答",
+      channel: "web",
+      usage: {
+        freeRepliesUsed: 0,
+        passUnlocked: false,
+        deepHelpUnlocked: false,
+      },
+    };
+    mocks.claimNextGenerationWorkItem
+      .mockResolvedValueOnce({
+        ...baseItem,
+        outboxId: "outbox-reclaimed",
+        leaseAttempt: 1,
+      })
+      .mockResolvedValueOnce({
+        ...baseItem,
+        outboxId: "outbox-reclaimed",
+        leaseAttempt: 2,
+      });
+    mocks.renewGenerationWorkItemLease
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    let releaseAttemptA!: (value: {
+      ok: true;
+      replyText: string;
+      provider: "openai";
+      model: string;
+    }) => void;
+    mocks.generateRepresentativeReply.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseAttemptA = resolve;
+      }),
+    );
+
+    const attemptA = processNextConversationWork({ port: 4040, pollMs: 500 });
+    await vi.waitFor(() => {
+      expect(mocks.generateRepresentativeReply).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    releaseAttemptA({
+      ok: true,
+      replyText: "attempt A stale reply",
+      provider: "openai",
+      model: "test-model",
+    });
+
+    await expect(attemptA).resolves.toMatchObject({
+      processed: true,
+      runId: "run-reclaimed",
+      status: "lease_lost",
+    });
+    expect(mocks.completeInlineGenerationRun).not.toHaveBeenCalled();
+    expect(mocks.failGenerationRun).not.toHaveBeenCalled();
+    expect(mocks.retryGenerationDelivery).not.toHaveBeenCalled();
+
+    mocks.generateRepresentativeReply.mockResolvedValueOnce({
+      ok: true,
+      replyText: "attempt B authoritative reply",
+      provider: "openai",
+      model: "test-model",
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValueOnce({
+      message: { id: "reply-reclaimed" },
+    });
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      runId: "run-reclaimed",
+      status: "completed",
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-reclaimed",
+        outboxId: "outbox-reclaimed",
+        leaseAttempt: 2,
+        replyText: "attempt B authoritative reply",
+      }),
+    );
+    expect(mocks.markGenerationDeliveryComplete).toHaveBeenCalledWith({
+      runId: "run-reclaimed",
+      outboxId: "outbox-reclaimed",
+      leaseAttempt: 2,
+      outputMessageId: "reply-reclaimed",
+    });
   });
 });

@@ -19,8 +19,21 @@ describe("deriveConversationComputeEntitlements", () => {
         passUnlockedAt: null,
         deepHelpUnlockedAt: null,
       },
-      requestedPaidEntitlement: false,
     });
+
+    expect(result.hasPaidEntitlement).toBe(false);
+    expect(result.activePlanTier).toBeUndefined();
+  });
+
+  it("ignores a request-supplied paid-entitlement boolean", async () => {
+    const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
+    const result = deriveConversationComputeEntitlements({
+      conversation: {
+        passUnlockedAt: null,
+        deepHelpUnlockedAt: null,
+      },
+      requestedPaidEntitlement: true,
+    } as never);
 
     expect(result.hasPaidEntitlement).toBe(false);
     expect(result.activePlanTier).toBeUndefined();
@@ -52,6 +65,171 @@ describe("deriveConversationComputeEntitlements", () => {
 
     expect(result.hasPaidEntitlement).toBe(true);
     expect(result.activePlanTier).toBe("deep_help");
+  });
+
+  it("derives a run-scoped pass from a server-stored service-credit reservation", async () => {
+    const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
+    const result = deriveConversationComputeEntitlements({
+      conversation: {
+        passUnlockedAt: null,
+        deepHelpUnlockedAt: null,
+      },
+      generationRuntimePolicySnapshot: {
+        billingMode: "service_credit",
+        walletReservation: {
+          usageChargeId: "usage-reserved",
+          tokenAmount: 1,
+        },
+      },
+    });
+
+    expect(result.hasPaidEntitlement).toBe(true);
+    expect(result.activePlanTier).toBe("pass");
+  });
+
+  it("does not derive a run-scoped pass from an incomplete wallet snapshot", async () => {
+    const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
+    const result = deriveConversationComputeEntitlements({
+      conversation: {
+        passUnlockedAt: null,
+        deepHelpUnlockedAt: null,
+      },
+      generationRuntimePolicySnapshot: {
+        billingMode: "service_credit",
+        walletReservation: {
+          usageChargeId: "usage-reserved",
+          tokenAmount: 0,
+        },
+      },
+    });
+
+    expect(result.hasPaidEntitlement).toBe(false);
+    expect(result.activePlanTier).toBeUndefined();
+  });
+
+  it("verifies the run-scoped reservation against the current wallet charge", async () => {
+    const { verifyRunScopedServiceCreditReservation } = await import("../src/policy");
+    const findFirst = vi.fn().mockResolvedValue({ id: "usage-reserved" });
+    const result = await verifyRunScopedServiceCreditReservation(
+      {
+        representativeId: "rep-1",
+        generationRuntimePolicySnapshot: {
+          billingMode: "service_credit",
+          walletReservation: {
+            usageChargeId: "usage-reserved",
+            tokenAmount: 1,
+          },
+        },
+      },
+      {
+        agentUsageCharge: { findFirst },
+      } as never,
+    );
+
+    expect(result).toBe(true);
+    expect(findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "usage-reserved",
+        representativeId: "rep-1",
+        status: "RESERVED",
+        tokenAmount: 1,
+        reservedTokenAmount: 1,
+      },
+      select: { id: true },
+    });
+
+    findFirst.mockResolvedValueOnce(null);
+    await expect(
+      verifyRunScopedServiceCreditReservation(
+        {
+          representativeId: "rep-1",
+          generationRuntimePolicySnapshot: {
+            billingMode: "service_credit",
+            walletReservation: {
+              usageChargeId: "usage-reserved",
+              tokenAmount: 1,
+            },
+          },
+        },
+        {
+          agentUsageCharge: { findFirst },
+        } as never,
+      ),
+    ).resolves.toBe(false);
+  });
+
+  it("lets the run-scoped pass satisfy the default browser, process, and MCP plan gates", async () => {
+    const [
+      { deriveConversationComputeEntitlements },
+      { verifyRunScopedServiceCreditReservation },
+      { evaluateCapabilityPolicyStack },
+    ] =
+      await Promise.all([
+        import("../src/entitlements"),
+        import("../src/policy"),
+        import("@delegate/capability-policy"),
+      ]);
+    const generationRuntimePolicySnapshot = {
+      billingMode: "service_credit",
+      walletReservation: {
+        usageChargeId: "usage-reserved",
+        tokenAmount: 1,
+      },
+    };
+    const verified = await verifyRunScopedServiceCreditReservation(
+      {
+        representativeId: "rep-1",
+        generationRuntimePolicySnapshot,
+      },
+      {
+        agentUsageCharge: {
+          findFirst: vi.fn().mockResolvedValue({ id: "usage-reserved" }),
+        },
+      } as never,
+    );
+    const entitlements = deriveConversationComputeEntitlements({
+      conversation: {
+        passUnlockedAt: null,
+        deepHelpUnlockedAt: null,
+      },
+      generationRuntimePolicySnapshot: verified
+        ? generationRuntimePolicySnapshot
+        : undefined,
+    });
+    const cases = [
+      { capability: "browser", resourceScope: "browser_lane" },
+      { capability: "process", resourceScope: "workspace" },
+      { capability: "mcp", resourceScope: "remote_mcp" },
+    ] as const;
+    const profile = {
+      isManaged: false,
+      isDefault: true,
+      enabled: true,
+      precedence: 0,
+      defaultDecision: "deny",
+      rules: cases.map(({ capability }, index) => ({
+        id: `paid-${capability}`,
+        capability,
+        decision: "ask",
+        requiredPlanTier: "pass",
+        requiresPaidPlan: true,
+        requiresHumanApproval: true,
+        priority: 100 - index,
+      })),
+    } as never;
+
+    for (const request of cases) {
+      const result = evaluateCapabilityPolicyStack([profile], {
+        ...request,
+        activePlanTier: entitlements.activePlanTier,
+        hasPaidEntitlement: entitlements.hasPaidEntitlement,
+      });
+      expect(result).toMatchObject({
+        decision: "ask",
+        reason: "human_approval_required",
+        matchedRuleId: `paid-${request.capability}`,
+      });
+    }
   });
 });
 

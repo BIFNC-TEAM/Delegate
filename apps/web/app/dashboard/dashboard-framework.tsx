@@ -23,6 +23,17 @@ import { DashboardApprovals } from "./dashboard-approvals";
 import { DashboardSkills } from "./dashboard-skills";
 import { DashboardAuditLogs } from "./dashboard-audit-logs";
 import { DashboardChannels } from "./dashboard-channels";
+import { DashboardWallet } from "./dashboard-wallet";
+
+const channelControlPlaneViews = ["channels", "audit"] as const;
+const functionalDashboardViews = new Set<DashboardView>([
+  "knowledge",
+  "representatives",
+  "inbox",
+  "approvals",
+  "skills", "wallet", "audit",
+  ...channelControlPlaneViews,
+]);
 
 type DashboardFrameworkProps = {
   accountLabel: string;
@@ -106,7 +117,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
     <main
       className="dashboard-v2-shell localized-shell"
       data-locale={props.locale}
-      data-ui-stage={["knowledge", "representatives", "inbox", "approvals", "skills", "channels", "audit"].includes(props.activeView) ? "functional" : "framework"}
+      data-ui-stage={functionalDashboardViews.has(props.activeView) ? "functional" : "framework"}
       lang={props.locale === "zh" ? "zh-CN" : "en"}
     >
       <div className="dashboard-v2-layout">
@@ -255,7 +266,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
             </div>
           </header>
 
-          {!(["knowledge", "representatives", "inbox", "approvals", "skills", "channels", "audit"] as DashboardView[]).includes(props.activeView) ? (
+          {!functionalDashboardViews.has(props.activeView) ? (
             <div className="dashboard-v2-framework-note">
               <span>{t.frameworkBadge}</span>
               <p>{t.frameworkHint}</p>
@@ -294,6 +305,15 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               <DashboardSkills activeSlug={props.activeSlug} locale={props.locale} />
             ) : props.activeView === "channels" ? (
               <DashboardChannels activeSlug={props.activeSlug} locale={props.locale} />
+            ) : props.activeView === "wallet" ? (
+              <DashboardWallet
+                activeSlug={props.activeSlug}
+                locale={props.locale}
+                representatives={props.representatives.map((representative) => ({
+                  slug: representative.slug,
+                  name: representative.name,
+                }))}
+              />
             ) : props.activeView === "audit" ? (
               <DashboardAuditLogs activeSlug={props.activeSlug} locale={props.locale} />
             ) : (

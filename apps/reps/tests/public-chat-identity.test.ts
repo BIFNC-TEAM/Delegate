@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   createPublicChatSessionState,
+  deriveTierUsage,
   getPublicChatCookieName,
   readPublicChatSessionState,
+  resolvePublicChatTier,
   shouldUseSecurePublicChatCookie,
   writePublicChatSessionState,
 } from "../app/reps/[slug]/public-chat";
@@ -102,6 +104,34 @@ describe("public chat audience identity cookie", () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it("unlocks paid continuation only from representative-scoped service credits", () => {
+    const free = deriveTierUsage({
+      freeRepliesUsed: 3,
+      freeReplyLimit: 3,
+    });
+    const paid = deriveTierUsage({
+      freeRepliesUsed: 3,
+      freeReplyLimit: 3,
+      serviceCreditsAvailable: 4,
+      serviceCreditsReserved: 1,
+    });
+
+    expect(free).toMatchObject({
+      freeRepliesRemaining: 0,
+      serviceCreditsAvailable: 0,
+      serviceCreditsReserved: 0,
+      passUnlocked: false,
+    });
+    expect(resolvePublicChatTier(free)).toBe("free");
+    expect(paid).toMatchObject({
+      freeRepliesRemaining: 0,
+      serviceCreditsAvailable: 4,
+      serviceCreditsReserved: 1,
+      passUnlocked: true,
+    });
+    expect(resolvePublicChatTier(paid)).toBe("pass");
   });
 });
 

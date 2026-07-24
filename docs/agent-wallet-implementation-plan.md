@@ -12,6 +12,61 @@ Delegate should evolve from an early wallet-like control plane into a real Agent
 
 Payment providers such as Stripe, WeChat Pay, and Alipay should only handle money movement, signatures, provider order state, webhooks, refunds, and payouts. Delegate remains the source of truth for wallet balances, Agent tokens, creator earnings, and product ledger state.
 
+## Implementation Status (2026-07-24)
+
+The transactional MVP described by this plan is implemented on
+`codex/dashboard-optimization`:
+
+- credits are owned by one `UserWallet × AgentWallet × currency` scope through
+  `UserAgentWallet`; one visitor can never spend another visitor's purchase.
+- every business operation has a `WalletTransaction` header and balanced,
+  traceable `WalletLedgerEntry` movements.
+- recharge, purchase, reservation, settlement, release, partial refund, and
+  withdrawal state transitions run at Serializable isolation with conflict
+  retry and parameter-checked idempotency.
+- service-credit lots are consumed FIFO through `AgentUsageAllocation`, and
+  withdrawals freeze exact creator-earning lots through
+  `WithdrawalAllocation`.
+- public conversation acceptance atomically chooses a free slot or reserves a
+  paid service credit. Completion settles it; non-billable and terminal
+  failure paths release it. Missing visitor wallets return payment-required
+  semantics rather than internal errors, and the worker recognizes the
+  reservation as entitlement for that run without granting a permanent pass.
+- Compute ignores client-supplied paid-entitlement flags. The broker grants a
+  run-scoped `pass` only after the server-stored reservation is revalidated
+  against the same representative, token amount, and current `RESERVED`
+  wallet charge; blocked, failed, over-budget, and policy-rejected results are
+  explicitly non-billable. Multi-step Compute/MCP tasks transfer that single
+  billing context between runs and settle or release it exactly once at the
+  task terminal state.
+- retryable generation failures continue to occupy their free-reply slot during
+  backoff. Claimed generation work uses a renewable five-minute outbox lease;
+  every completion and failure write is fenced by the current lease attempt,
+  stale work can be reclaimed atomically, and exhausting the retry budget
+  dead-letters the run and releases any wallet reservation.
+- newly created representatives receive an Agent wallet atomically; paid
+  representatives cannot publish with an invalid billing wallet.
+- the development public flow refreshes chat balances immediately after
+  purchase and lets the same audience return unreserved, unconsumed credits to
+  wallet cash.
+- the owner Dashboard has workspace Overview, Transactions, Settlements, and
+  Ledger views with owner/billing authorization, single-currency metrics,
+  filter-bound cursor pagination, trace details, creator withdrawal submission,
+  and cancellation.
+- non-production environments expose a private mock operations action for
+  withdrawal review and settlement so the full ledger lifecycle can be
+  exercised without pretending that a real payout occurred. It returns 404 in
+  production.
+- the migration reconstructs historical scoped balances only when legacy
+  purchase, usage, creator-income, and aggregate wallet projections reconcile
+  exactly. It fails before schema changes when manual reconciliation is
+  required.
+
+Still intentionally excluded from this MVP: real Stripe/WeChat/Alipay
+collection, signed live webhooks, automated payout submission, chargeback
+automation, FX conversion, and a generic public Wallet API. Mock recharge and
+mock payment completion return 404 in production.
+
 ## Current Delegate Baseline
 
 - `Owner.wallet` currently stores coarse credits through `Wallet.balanceCredits`, `Wallet.sponsorPoolCredit`, and `Wallet.starsBalance`.
@@ -27,11 +82,16 @@ These pieces should be reused, but they are not enough for AMN because they do n
 The MVP should introduce explicit wallet account types:
 
 - `USER_CASH`: spendable cash balance owned by a user.
-- `AGENT_TOKEN`: token balance scoped to one Agent or Digital Representative.
+- `SERVICE_CREDIT_DEFERRED`: purchased service credits scoped to one user and
+  one Agent, with available and reserved projections.
 - `CREATOR_PENDING`: creator revenue share that is not withdrawable yet.
 - `CREATOR_WITHDRAWABLE`: creator revenue share eligible for a withdrawal request.
-- `PLATFORM_REVENUE`: platform service fee and retained margin.
+- `CREATOR_FROZEN`: creator earnings reserved by an active withdrawal.
+- `PLATFORM_DEFERRED_REVENUE`: the platform share before service fulfillment.
+- `PLATFORM_EARNED_REVENUE`: the platform share recognized after fulfillment.
 - `PROVIDER_COST`: model, compute, payment channel, and infrastructure costs.
+- `EXTERNAL_SETTLEMENT` and `PAYOUT_CLEARING`: provider cash and payout
+  clearing counterparts used to keep fiat movements balanced.
 
 Amounts must be stored as integers:
 
@@ -46,14 +106,23 @@ No wallet logic should use floating point money.
 New AMN wallet models should be added alongside existing models first, then old wallet paths can be migrated gradually:
 
 - `UserWallet`: cash balance projection/cache for one user identity.
-- `AgentWallet`: token balance projection/cache for one representative.
+- `AgentWallet`: aggregate service-credit projection and pricing policy for one
+  representative.
+- `UserAgentWallet`: spendable and reserved service-credit projection for one
+  user, one representative, and one currency.
+- `WalletTransaction`: immutable business-event header with source,
+  idempotency, status, owner, representative, user, and event time.
 - `WalletLedgerEntry`: append-only AMN ledger entries with account type, amount, token amount, currency, idempotency key, and event grouping.
 - `RechargeOrder`: one user recharge attempt created before payment.
 - `PaymentProviderEvent`: raw normalized webhook/provider event with a unique provider event id.
 - `AgentTokenPurchase`: user cash converted into tokens for one Agent.
 - `AgentUsageCharge`: token consumption event for model, compute, browser, MCP, or fixed task usage.
+- `AgentUsageAllocation`: FIFO link from one usage settlement to the purchase
+  lots it consumed.
 - `CreatorEarning`: pending and withdrawable creator revenue for an Agent.
 - `WithdrawRequest`: manual-review payout request for creator earnings.
+- `WithdrawalAllocation`: exact creator-earning lots frozen, released, or paid
+  by a withdrawal request.
 
 Existing `Wallet`, `Invoice`, and `LedgerEntry` should remain until old dashboard and compute paths are explicitly migrated. The first implementation should avoid breaking current owner dashboard and compute billing behavior.
 
@@ -95,7 +164,8 @@ Provider adapters must normalize provider-specific events into internal events s
 
 ```text
 UserWallet USER_CASH decreases
-AgentWallet AGENT_TOKEN increases
+UserAgentWallet available service credits increase
+AgentWallet aggregate service credits increase
 AgentTokenPurchase records price and token quantity
 CreatorEarning pending increases by purchase amount * revenue share
 WalletLedgerEntry records all movements atomically
@@ -106,15 +176,18 @@ Default creator revenue share is 20%, represented as `2000` basis points. The pe
 ### Agent Token Consumption
 
 ```text
+Request acceptance reserves UserAgentWallet service credits
 Agent service runs
-Billing calculates token charge
-AgentWallet AGENT_TOKEN decreases
+Completion settles only the actual reserved amount
+UserAgentWallet and AgentWallet projections decrease
 Provider/platform costs are recorded
 Creator pending earnings are released proportionally
 Creator withdrawable earnings increase
 ```
 
-This should later replace the current owner-credit debit path for public Agent usage, while compute owner-budget behavior remains compatible during migration.
+Non-billable completion, cancellation, rejection, and terminal failure release
+the reservation. Retryable failures retain it. Existing owner compute-budget
+behavior remains compatible during migration.
 
 ### Refund And Reversal
 
@@ -192,41 +265,49 @@ All values should come from ledger projection rather than static mock data.
 
 ## Implementation Steps
 
-1. Add this implementation plan and keep it aligned with the schema work.
-2. Add wallet domain models and migrations without changing runtime behavior.
-3. Implement the append-only wallet ledger engine and balance projection.
-4. Add mock recharge order and mock payment success flow.
-5. Add payment provider adapter boundaries.
-6. Add user cash to Agent token purchase flow.
-7. Add Agent token usage charge flow.
-8. Extract creator revenue policy with default 20% share.
-9. Add refund and reversal handling.
-10. Add creator withdrawal request state machine.
-11. Add owner dashboard wallet and creator revenue view.
-12. Add representative page token purchase entry.
-13. Add Stripe provider implementation.
-14. Add WeChat Pay and Alipay provider skeletons.
-15. Add end-to-end AMN Wallet acceptance tests and run final validation.
+1. [x] Add this implementation plan and keep it aligned with the schema work.
+2. [x] Add wallet transaction, scoped balance, allocation, and migration models.
+3. [x] Implement the append-only wallet ledger engine and projections.
+4. [x] Add mock recharge and atomic recharge-to-purchase flow.
+5. [x] Keep payment providers behind adapter boundaries.
+6. [x] Add user cash to representative-scoped service-credit purchase.
+7. [x] Add reserve, settle, release, and FIFO usage allocation.
+8. [x] Apply the configurable creator revenue policy (20% default).
+9. [x] Add unconsumed-credit partial refund and reversal handling.
+10. [x] Add creator withdrawal allocation and lifecycle state machine.
+11. [x] Add workspace owner Dashboard wallet and billing views.
+12. [x] Add public representative demo purchase and paid continuation.
+13. [x] Add concurrency, idempotency, authorization, and acceptance tests.
+14. [x] Close the development business loop through paid continuation,
+    unused-credit return, creator withdrawal submission/cancel, and private
+    mock review/settlement.
+15. [ ] Reconcile production legacy data and deploy the migration.
+16. [ ] Implement a real payment provider and signed webhook flow.
+17. [ ] Implement reviewed payout submission and reconciliation.
 
 ## Migration Strategy
 
-The old `Wallet` and `LedgerEntry` paths should remain live while AMN Wallet is introduced. New AMN logic should use the new wallet ledger engine. Existing compute billing can keep writing old `LedgerEntry` rows until Agent token billing is explicitly wired into compute/model usage paths.
+The old `Wallet` and `LedgerEntry` paths should remain live while AMN Wallet is introduced. New AMN logic should use the new wallet ledger engine. Public-conversation Compute/MCP usage is now wired to the scoped reservation flow; remaining runtime lanes can keep writing old `LedgerEntry` rows until they adopt the same reserve/settle contract.
 
-The bridge should be one-way at first:
+The bridge remains one-way:
 
-- old dashboard keeps reading old owner wallet fields.
-- new AMN dashboard reads new wallet projections.
-- seed data can populate both worlds for demo continuity.
+- existing compute billing can continue reading the old owner-credit models.
+- public representative service credits and the new Wallet Dashboard use the
+  new scoped wallet models.
+- production deployment must run the migration preflight against a backup and
+  reconcile any rejected legacy rows before retrying.
 
 ## Acceptance Criteria
 
 - User cash recharge is recorded through provider events and ledger entries.
 - User cash can be converted into tokens for one Agent only.
-- Agent token balances are isolated per Agent.
+- Service-credit balances are isolated per user and per Agent.
 - Creator pending earnings are exactly 20% by default.
 - Pending earnings are not withdrawable.
 - Token usage releases earnings into withdrawable state.
 - Refunds create reversal entries and do not delete old ledger rows.
 - Withdrawals require claimed/verified creator state.
 - Provider adapters never mutate wallet balances directly.
-- Tests cover idempotency, insufficient funds, cross-Agent isolation, refund reversal, and withdrawal guards.
+- Tests cover idempotency, insufficient funds, cross-user and cross-Agent
+  isolation, reservation rollback, concurrent writes, partial refund,
+  withdrawal guards, authorization, and cursor stability.

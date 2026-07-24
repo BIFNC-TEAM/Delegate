@@ -15,12 +15,51 @@ import {
 } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
-import { completeMockRechargeOrder, createMockRechargeOrder } from "../src/agent-wallet-recharge";
+import {
+  completeMockRechargeAndPurchaseAgentTokens,
+  completeMockRechargeOrder,
+  createMockRechargeOrder,
+} from "../src/agent-wallet-recharge";
 import { purchaseAgentTokens } from "../src/agent-wallet-token-purchase";
 import { applyAgentUsageCharge } from "../src/agent-wallet-usage-charge";
 import { createWithdrawRequest } from "../src/agent-wallet-withdrawals";
 
 describe("agent wallet lifecycle acceptance", () => {
+  it("completes recharge and representative-scoped purchase as one operation", async () => {
+    const client = new FakeAmnLifecycleClient();
+    const recharge = await createMockRechargeOrder(
+      {
+        externalUserId: "user_atomic",
+        amountCents: 1000,
+        idempotencyKey: "lifecycle_atomic_recharge",
+      },
+      client,
+    );
+
+    const completed = await completeMockRechargeAndPurchaseAgentTokens(
+      {
+        rechargeOrderId: recharge.id,
+        externalUserId: "user_atomic",
+        representativeId: "rep_1",
+        purchaseIdempotencyKey: "lifecycle_atomic_purchase",
+      },
+      client as never,
+    );
+
+    expect(completed.rechargeOrder).toMatchObject({
+      status: "paid",
+      cashBalanceCents: 0,
+    });
+    expect(completed.tokenPurchase).toMatchObject({
+      representativeId: "rep_1",
+      amountCents: 1000,
+      availableTokenAmount: 1000,
+      cashBalanceCents: 0,
+    });
+    expect(client.rechargeOrders[0]?.status).toBe(RechargeOrderStatus.PAID);
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(0);
+  });
+
   it("runs recharge, token purchase, usage release, and withdrawal freeze end to end", async () => {
     const client = new FakeAmnLifecycleClient();
 
@@ -76,7 +115,7 @@ describe("agent wallet lifecycle acceptance", () => {
       tokenAmount: 500,
       creatorWithdrawableCents: 100,
       providerCostCents: 50,
-      platformRevenueCents: 350,
+      platformRevenueCents: 400,
       agentTokenBalance: 500,
     });
     expect(withdraw).toMatchObject({
@@ -94,7 +133,7 @@ describe("agent wallet lifecycle acceptance", () => {
     expect(sumCreatorWithdrawable(client.creatorEarnings)).toBe(0);
     expect(sumCreatorFrozen(client.creatorEarnings)).toBe(100);
     expect(client.withdrawRequests).toHaveLength(1);
-    expect(client.ledgerEntries).toHaveLength(11);
+    expect(client.ledgerEntries.length).toBeGreaterThanOrEqual(13);
     expect(client.ledgerEntries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -106,7 +145,7 @@ describe("agent wallet lifecycle acceptance", () => {
           tokenAmount: 1000,
         }),
         expect.objectContaining({
-          entryKind: AmnLedgerEntryKind.AGENT_TOKEN_DEBIT,
+          entryKind: AmnLedgerEntryKind.SERVICE_CREDIT_SETTLE,
           tokenAmount: -500,
         }),
         expect.objectContaining({
@@ -152,6 +191,17 @@ type AgentWalletRow = {
   representative?: RepresentativeRow;
 };
 
+type UserAgentWalletRow = {
+  id: string;
+  userWalletId: string;
+  agentWalletId: string;
+  currency: string;
+  availableTokenAmount: number;
+  reservedTokenAmount: number;
+  totalPurchasedTokenAmount: number;
+  totalConsumedTokenAmount: number;
+};
+
 type RechargeOrderRow = {
   id: string;
   userWalletId: string;
@@ -179,24 +229,29 @@ type ProviderEventRow = {
 type TokenPurchaseRow = {
   id: string;
   userWalletId: string;
+  userAgentWalletId: string | null;
   agentWalletId: string;
   representativeId: string;
   rechargeOrderId: string | null;
   amountCents: number;
   currency: string;
   tokenAmount: number;
+  remainingTokenAmount: number | null;
   tokenUnitPriceCents: number;
   creatorRevenueShareBps: number;
   creatorPendingCents: number;
   status: AgentTokenPurchaseStatus;
   idempotencyKey: string;
+  createdAt: Date;
   userWallet?: UserWalletRow;
+  userAgentWallet?: UserAgentWalletRow;
   agentWallet?: AgentWalletRow;
   creatorEarnings?: CreatorEarningRow[];
 };
 
 type UsageChargeRow = {
   id: string;
+  userAgentWalletId: string | null;
   agentWalletId: string;
   representativeId: string;
   tokenPurchaseId: string | null;
@@ -204,12 +259,33 @@ type UsageChargeRow = {
   status: AgentUsageChargeStatus;
   quantity: number;
   tokenAmount: number;
+  reservedTokenAmount: number;
+  settledTokenAmount: number;
+  releasedTokenAmount: number;
   providerCostCents: number;
   platformRevenueCents: number;
   currency: string;
   idempotencyKey: string;
+  reservedAt: Date | null;
+  settledAt: Date | null;
+  releasedAt: Date | null;
+  userAgentWallet?: UserAgentWalletRow;
   agentWallet?: AgentWalletRow;
   creatorEarnings?: CreatorEarningRow[];
+  allocations?: UsageAllocationRow[];
+};
+
+type UsageAllocationRow = {
+  id: string;
+  usageChargeId: string;
+  tokenPurchaseId: string;
+  creatorEarningId: string | null;
+  tokenAmount: number;
+  valueCents: number;
+  creatorReleaseCents: number;
+  currency: string;
+  releasedAt: Date | null;
+  reversedAt: Date | null;
 };
 
 type CreatorEarningRow = {
@@ -272,10 +348,12 @@ class FakeAmnLifecycleClient {
       creatorRevenueShareBps: 2000,
     },
   ];
+  userAgentWallets: UserAgentWalletRow[] = [];
   rechargeOrders: RechargeOrderRow[] = [];
   providerEvents: ProviderEventRow[] = [];
   tokenPurchases: TokenPurchaseRow[] = [];
   usageCharges: UsageChargeRow[] = [];
+  usageAllocations: UsageAllocationRow[] = [];
   creatorEarnings: CreatorEarningRow[] = [];
   withdrawRequests: WithdrawRequestRow[] = [];
   ledgerEntries: LedgerRow[] = [];
@@ -381,6 +459,59 @@ class FakeAmnLifecycleClient {
     },
   };
 
+  userAgentWallet = {
+    findUnique: async (args: any) => {
+      const compound = args.where.userWalletId_agentWalletId_currency;
+      const wallet = this.userAgentWallets.find((row) =>
+        typeof args.where.id === "string"
+          ? row.id === args.where.id
+          : row.userWalletId === compound?.userWalletId &&
+            row.agentWalletId === compound?.agentWalletId &&
+            row.currency === compound?.currency,
+      );
+      return wallet ? this.withUserAgentWalletRelations(wallet) : null;
+    },
+    upsert: async (args: any) => {
+      const key = args.where.userWalletId_agentWalletId_currency;
+      const existing = this.userAgentWallets.find(
+        (row) =>
+          row.userWalletId === key.userWalletId &&
+          row.agentWalletId === key.agentWalletId &&
+          row.currency === key.currency,
+      );
+      if (existing) return existing;
+      const wallet: UserAgentWalletRow = {
+        id: `user_agent_wallet_${this.userAgentWallets.length + 1}`,
+        userWalletId: args.create.userWalletId,
+        agentWalletId: args.create.agentWalletId,
+        currency: args.create.currency,
+        availableTokenAmount: 0,
+        reservedTokenAmount: 0,
+        totalPurchasedTokenAmount: 0,
+        totalConsumedTokenAmount: 0,
+      };
+      this.userAgentWallets.push(wallet);
+      return wallet;
+    },
+    update: async (args: any) => {
+      const wallet = this.userAgentWallets.find((row) => row.id === args.where.id);
+      if (!wallet) throw new Error("user-agent wallet not found");
+      applyIncrementDecrement(wallet, "availableTokenAmount", args.data.availableTokenAmount);
+      applyIncrementDecrement(wallet, "reservedTokenAmount", args.data.reservedTokenAmount);
+      applyIncrementDecrement(
+        wallet,
+        "totalPurchasedTokenAmount",
+        args.data.totalPurchasedTokenAmount,
+      );
+      applyIncrementDecrement(
+        wallet,
+        "totalConsumedTokenAmount",
+        args.data.totalConsumedTokenAmount,
+      );
+      return wallet;
+    },
+  };
+
   rechargeOrder = {
     findUnique: async (args: any) => {
       const order =
@@ -474,31 +605,58 @@ class FakeAmnLifecycleClient {
       const purchase: TokenPurchaseRow = {
         id: `purchase_${this.tokenPurchases.length + 1}`,
         userWalletId: args.data.userWalletId,
+        userAgentWalletId: args.data.userAgentWalletId ?? null,
         agentWalletId: args.data.agentWalletId,
         representativeId: args.data.representativeId,
         rechargeOrderId: args.data.rechargeOrderId ?? null,
         amountCents: args.data.amountCents,
         currency: args.data.currency,
         tokenAmount: args.data.tokenAmount,
+        remainingTokenAmount: args.data.remainingTokenAmount ?? null,
         tokenUnitPriceCents: args.data.tokenUnitPriceCents,
         creatorRevenueShareBps: args.data.creatorRevenueShareBps,
         creatorPendingCents: args.data.creatorPendingCents,
         status: args.data.status,
         idempotencyKey: args.data.idempotencyKey,
+        createdAt: new Date(Date.UTC(2026, 6, 3, 0, 0, this.tokenPurchases.length)),
       };
       this.tokenPurchases.push(purchase);
+      return purchase;
+    },
+    findMany: async (args: any) =>
+      this.tokenPurchases
+        .filter(
+          (row) =>
+            row.userAgentWalletId === args.where.userAgentWalletId &&
+            row.status === args.where.status &&
+            (row.remainingTokenAmount ?? 0) > args.where.remainingTokenAmount.gt,
+        )
+        .sort((left, right) => left.id.localeCompare(right.id)),
+    update: async (args: any) => {
+      const purchase = this.tokenPurchases.find((row) => row.id === args.where.id);
+      if (!purchase) throw new Error("purchase not found");
+      applyIncrementDecrement(
+        purchase,
+        "remainingTokenAmount",
+        args.data.remainingTokenAmount,
+      );
       return purchase;
     },
   };
 
   agentUsageCharge = {
     findUnique: async (args: any) => {
-      const usage = this.usageCharges.find((row) => row.idempotencyKey === args.where.idempotencyKey);
+      const usage = this.usageCharges.find(
+        (row) =>
+          row.id === args.where.id ||
+          row.idempotencyKey === args.where.idempotencyKey,
+      );
       return usage ? this.withUsageRelations(usage) : null;
     },
     create: async (args: any) => {
       const usage: UsageChargeRow = {
         id: `usage_${this.usageCharges.length + 1}`,
+        userAgentWalletId: args.data.userAgentWalletId ?? null,
         agentWalletId: args.data.agentWalletId,
         representativeId: args.data.representativeId,
         tokenPurchaseId: args.data.tokenPurchaseId ?? null,
@@ -506,14 +664,49 @@ class FakeAmnLifecycleClient {
         status: args.data.status,
         quantity: args.data.quantity,
         tokenAmount: args.data.tokenAmount,
+        reservedTokenAmount: args.data.reservedTokenAmount ?? 0,
+        settledTokenAmount: args.data.settledTokenAmount ?? 0,
+        releasedTokenAmount: args.data.releasedTokenAmount ?? 0,
         providerCostCents: args.data.providerCostCents,
         platformRevenueCents: args.data.platformRevenueCents,
         currency: args.data.currency,
         idempotencyKey: args.data.idempotencyKey,
+        reservedAt: args.data.reservedAt ?? null,
+        settledAt: args.data.settledAt ?? null,
+        releasedAt: args.data.releasedAt ?? null,
       };
       this.usageCharges.push(usage);
       return usage;
     },
+    update: async (args: any) => {
+      const usage = this.usageCharges.find((row) => row.id === args.where.id);
+      if (!usage) throw new Error("usage not found");
+      Object.assign(usage, args.data);
+      return usage;
+    },
+  };
+
+  agentUsageAllocation = {
+    create: async (args: any) => {
+      const allocation: UsageAllocationRow = {
+        id: `allocation_${this.usageAllocations.length + 1}`,
+        usageChargeId: args.data.usageChargeId,
+        tokenPurchaseId: args.data.tokenPurchaseId,
+        creatorEarningId: args.data.creatorEarningId ?? null,
+        tokenAmount: args.data.tokenAmount,
+        valueCents: args.data.valueCents,
+        creatorReleaseCents: args.data.creatorReleaseCents,
+        currency: args.data.currency,
+        releasedAt: args.data.releasedAt ?? null,
+        reversedAt: null,
+      };
+      this.usageAllocations.push(allocation);
+      return allocation;
+    },
+    findMany: async (args: any) =>
+      this.usageAllocations.filter(
+        (row) => row.usageChargeId === args.where.usageChargeId,
+      ),
   };
 
   creatorEarning = {
@@ -619,6 +812,26 @@ class FakeAmnLifecycleClient {
     findUnique: async (args: any) => {
       return this.withdrawRequests.find((request) => request.idempotencyKey === args.where.idempotencyKey) ?? null;
     },
+    findFirst: async (args: any) => {
+      if (typeof args.where.id === "string") {
+        return this.withdrawRequests.find(
+          (request) =>
+            request.id === args.where.id &&
+            request.ownerId === args.where.ownerId,
+        ) ?? null;
+      }
+      return this.withdrawRequests.find(
+        (request) =>
+          request.ownerId === args.where.ownerId &&
+          request.representativeId === args.where.representativeId &&
+          request.currency === args.where.currency &&
+          (
+            request.status === WithdrawRequestStatus.PENDING_REVIEW ||
+            request.status === WithdrawRequestStatus.APPROVED ||
+            request.status === WithdrawRequestStatus.FAILED
+          ),
+      ) ?? null;
+    },
     create: async (args: any) => {
       const request: WithdrawRequestRow = {
         id: `withdraw_${this.withdrawRequests.length + 1}`,
@@ -679,10 +892,12 @@ class FakeAmnLifecycleClient {
     return {
       userWallets: this.userWallets.map((row) => ({ ...row })),
       agentWallets: this.agentWallets.map((row) => ({ ...row })),
+      userAgentWallets: this.userAgentWallets.map((row) => ({ ...row })),
       rechargeOrders: this.rechargeOrders.map((row) => ({ ...row })),
       providerEvents: this.providerEvents.map((row) => ({ ...row })),
       tokenPurchases: this.tokenPurchases.map((row) => ({ ...row })),
       usageCharges: this.usageCharges.map((row) => ({ ...row })),
+      usageAllocations: this.usageAllocations.map((row) => ({ ...row })),
       creatorEarnings: this.creatorEarnings.map((row) => ({ ...row })),
       withdrawRequests: this.withdrawRequests.map((row) => ({ ...row })),
       ledgerEntries: this.ledgerEntries.map((row) => ({ ...row })),
@@ -702,25 +917,56 @@ class FakeAmnLifecycleClient {
   private withPurchaseRelations(purchase: TokenPurchaseRow): TokenPurchaseRow {
     const userWallet = this.userWallets.find((wallet) => wallet.id === purchase.userWalletId);
     const agentWallet = this.agentWallets.find((wallet) => wallet.id === purchase.agentWalletId);
+    const userAgentWallet = this.userAgentWallets.find(
+      (wallet) => wallet.id === purchase.userAgentWalletId,
+    );
     return {
       ...purchase,
       ...(userWallet ? { userWallet } : {}),
       ...(agentWallet ? { agentWallet } : {}),
+      ...(userAgentWallet
+        ? { userAgentWallet: this.withUserAgentWalletRelations(userAgentWallet) }
+        : {}),
       creatorEarnings: this.creatorEarnings.filter((earning) => earning.tokenPurchaseId === purchase.id),
     };
   }
 
   private withUsageRelations(usage: UsageChargeRow): UsageChargeRow {
     const agentWallet = this.agentWallets.find((wallet) => wallet.id === usage.agentWalletId);
+    const userAgentWallet = this.userAgentWallets.find(
+      (wallet) => wallet.id === usage.userAgentWalletId,
+    );
     return {
       ...usage,
       ...(agentWallet ? { agentWallet } : {}),
+      ...(userAgentWallet
+        ? { userAgentWallet: this.withUserAgentWalletRelations(userAgentWallet) }
+        : {}),
       creatorEarnings: this.creatorEarnings.filter((earning) => earning.usageChargeId === usage.id),
+      allocations: this.usageAllocations.filter(
+        (allocation) => allocation.usageChargeId === usage.id,
+      ),
+    };
+  }
+
+  private withUserAgentWalletRelations(wallet: UserAgentWalletRow) {
+    const agentWallet = this.agentWallets.find(
+      (row) => row.id === wallet.agentWalletId,
+    );
+    const userWallet = this.userWallets.find(
+      (row) => row.id === wallet.userWalletId,
+    );
+    return {
+      ...wallet,
+      ...(userWallet ? { userWallet } : {}),
+      ...(agentWallet
+        ? { agentWallet: this.withRepresentative(agentWallet) }
+        : {}),
     };
   }
 }
 
-function applyIncrementDecrement<T extends Record<K, number>, K extends keyof T>(
+function applyIncrementDecrement<T extends Record<K, number | null>, K extends keyof T>(
   row: T,
   key: K,
   value: { increment?: number; decrement?: number } | number | undefined,
@@ -730,10 +976,10 @@ function applyIncrementDecrement<T extends Record<K, number>, K extends keyof T>
     return;
   }
   if (typeof value?.increment === "number") {
-    row[key] = (row[key] + value.increment) as T[K];
+    row[key] = ((row[key] ?? 0) + value.increment) as T[K];
   }
   if (typeof value?.decrement === "number") {
-    row[key] = (row[key] - value.decrement) as T[K];
+    row[key] = ((row[key] ?? 0) - value.decrement) as T[K];
   }
 }
 

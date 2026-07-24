@@ -29,7 +29,16 @@ import {
   type GenerationRunState,
 } from "@delegate/runtime";
 
+import {
+  InsufficientAgentUsageCreditsError,
+  releaseAgentUsageCredits,
+  reserveAgentUsageCredits,
+  settleAgentUsageCredits,
+  type AgentUsageChargeSnapshot,
+  type UsageChargeClient,
+} from "./agent-wallet-usage-charge";
 import { prisma } from "./prisma";
+import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
 import {
   ChannelUnavailableError,
@@ -46,10 +55,65 @@ import {
 import { lockMatrixRoomSecurityState } from "./matrix-room-security";
 import {
   consumeConversationEntitlement,
+  releaseConversationEntitlement,
   releaseConversationEntitlementByGenerationRunId,
+  reserveConversationEntitlement,
   type ConversationEntitlementReservation,
   type ServiceEntitlementClient,
 } from "./service-entitlements";
+
+export type GenerationWalletReservation = {
+  usageChargeId: string;
+  tokenAmount: number;
+};
+
+export function readGenerationWalletReservation(
+  snapshot: Prisma.JsonValue | null,
+): GenerationWalletReservation | null {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return null;
+  }
+  const reservation = (snapshot as Prisma.JsonObject)["walletReservation"];
+  if (!reservation || typeof reservation !== "object" || Array.isArray(reservation)) {
+    return null;
+  }
+  const usageChargeId = (reservation as Prisma.JsonObject)["usageChargeId"];
+  const tokenAmount = (reservation as Prisma.JsonObject)["tokenAmount"];
+  if (
+    typeof usageChargeId !== "string" ||
+    !usageChargeId.trim() ||
+    typeof tokenAmount !== "number" ||
+    !Number.isSafeInteger(tokenAmount) ||
+    tokenAmount <= 0
+  ) {
+    return null;
+  }
+  return { usageChargeId, tokenAmount };
+}
+
+export function hasGenerationServiceCreditEntitlement(
+  snapshot: Prisma.JsonValue | null,
+): boolean {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return false;
+  }
+  return (
+    (snapshot as Prisma.JsonObject)["billingMode"] === "service_credit"
+    && readGenerationWalletReservation(snapshot) !== null
+  );
+}
+
+export function runConversationWriteTransaction<T>(
+  operation: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return runWithPrismaWriteConflictRetry(
+    () => prisma.$transaction(
+      operation,
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    ),
+    { additionalRetryableCodes: ["P2002"] },
+  );
+}
 
 export type ConversationInboxItem = {
   id: string;
@@ -225,7 +289,30 @@ export type AcceptInboundMessageInput = {
   channel?: "web" | "matrix" | "telegram";
   externalMessageId?: string;
   queueGeneration?: boolean;
+  walletReservation?: {
+    usageChargeId: string;
+    tokenAmount: number;
+  };
+  walletBilling?: {
+    externalUserId: string;
+    representativeId: string;
+    freeReplyLimit: number;
+    tokenAmount: number;
+    currency?: string;
+    idempotencyKey: string;
+  };
 };
+
+export class ServiceCreditRequiredError extends Error {
+  readonly code = "SERVICE_CREDIT_REQUIRED";
+  readonly effectiveFreeRepliesUsed: number;
+
+  constructor(effectiveFreeRepliesUsed = 0) {
+    super("No service credits remain for paid continuation.");
+    this.name = "ServiceCreditRequiredError";
+    this.effectiveFreeRepliesUsed = effectiveFreeRepliesUsed;
+  }
+}
 
 export type MatrixApplicationServiceEvent = {
   event_id?: string;
@@ -659,6 +746,7 @@ export async function getRepresentativeOperationsSnapshot(
         },
         knowledgePack: true,
         pricingPlans: true,
+        agentWallet: true,
         _count: { select: { conversations: true, handoffRequests: true } },
       },
     });
@@ -674,6 +762,10 @@ export async function getRepresentativeOperationsSnapshot(
       knowledgeCount: representative.knowledgeAssetLinks.length,
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
       pricingCount: representative.pricingPlans.length,
+      paidPricingCount: representative.pricingPlans.filter(
+        (plan) => plan.starsAmount > 0,
+      ).length,
+      agentWallet: representative.agentWallet,
       channelCount: representative.channelBindings.length,
       enabledSkillCount: representative.skillPackLinks.length,
       skillIssueCount: countRepresentativeSkillIssues(representative.skillPackLinks),
@@ -727,7 +819,7 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
   if (!text) throw new Error("Message text is required.");
   if (!input.clientMessageId.trim()) throw new Error("clientMessageId is required.");
 
-  return prisma.$transaction(async (tx) => {
+  return runConversationWriteTransaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
     const conversation = await tx.conversation.findFirst({
       where: { id: input.conversationId, representative: { slug: input.representativeSlug } },
@@ -809,9 +901,27 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       }
     }
 
+    const existingRun = await tx.generationRun.findUnique({
+      where: {
+        idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}`,
+      },
+      include: { inputMessage: true },
+    });
+    if (existingRun) {
+      return {
+        message: existingRun.inputMessage,
+        run: existingRun,
+        heldForOperator: false,
+        walletReservation: null,
+        replayed: true,
+      };
+    }
+
     const latestEpisode = conversation.episodes[0];
     const latestState = latestEpisode ? episodeStateMap[latestEpisode.status] : "active";
     const action = resolveInboundEpisodeAction(latestState);
+    const shouldQueueAi =
+      action !== "hold_for_operator" && input.queueGeneration !== false;
     let episode = latestEpisode;
 
     if (!episode || action === "start_new_episode") {
@@ -830,6 +940,83 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       });
     }
 
+    let reservedUsage: AgentUsageChargeSnapshot | null = null;
+    let billingMode: "free" | "service_credit" | null = null;
+    if (shouldQueueAi && input.walletBilling) {
+      const retryableFailedRunIds = (
+        await tx.outboxEvent.findMany({
+          where: {
+            conversationId: conversation.id,
+            aggregateType: "generation_run",
+            eventType: "generation.requested",
+            status: "FAILED",
+            attemptCount: { lt: 5 },
+          },
+          select: { aggregateId: true },
+        })
+      ).map((event) => event.aggregateId);
+      const freeInFlight = await tx.generationRun.count({
+        where: {
+          conversationId: conversation.id,
+          OR: [
+            {
+              status: {
+                in: [
+                  GenerationRunStatus.QUEUED,
+                  GenerationRunStatus.PROCESSING,
+                  GenerationRunStatus.WAITING_APPROVAL,
+                ],
+              },
+            },
+            {
+              id: { in: retryableFailedRunIds },
+              status: GenerationRunStatus.FAILED,
+            },
+          ],
+          runtimePolicySnapshot: {
+            path: ["billingMode"],
+            equals: "free",
+          },
+        },
+      });
+      const requiresPaidCredit =
+        conversation.freeRepliesUsed + freeInFlight
+        >= input.walletBilling.freeReplyLimit;
+      if (requiresPaidCredit) {
+        try {
+          reservedUsage = await reserveAgentUsageCredits(
+            {
+              externalUserId: input.walletBilling.externalUserId,
+              representativeId: input.walletBilling.representativeId,
+              tokenAmount: input.walletBilling.tokenAmount,
+              ...(input.walletBilling.currency
+                ? { currency: input.walletBilling.currency }
+                : {}),
+              idempotencyKey: input.walletBilling.idempotencyKey,
+            },
+            tx as unknown as UsageChargeClient,
+          );
+        } catch (error) {
+          if (error instanceof InsufficientAgentUsageCreditsError) {
+            throw new ServiceCreditRequiredError(
+              conversation.freeRepliesUsed + freeInFlight,
+            );
+          }
+          throw error;
+        }
+        billingMode = "service_credit";
+      } else {
+        billingMode = "free";
+      }
+    } else if (input.walletReservation) {
+      billingMode = "service_credit";
+    }
+    const walletReservation = reservedUsage
+      ? {
+          usageChargeId: reservedUsage.id,
+          tokenAmount: reservedUsage.reservedTokenAmount,
+        }
+      : input.walletReservation ?? null;
     const createdAt = new Date();
     const message = await tx.message.upsert({
       where: {
@@ -859,7 +1046,6 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       update: {},
     });
 
-    const shouldQueueAi = action !== "hold_for_operator" && input.queueGeneration !== false;
     const run = shouldQueueAi
       ? await tx.generationRun.upsert({
           where: { idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}` },
@@ -870,6 +1056,14 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
             representativeVersionId: episode.representativeVersionId,
             status: GenerationRunStatus.QUEUED,
             idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}`,
+            ...(billingMode
+              ? {
+                  runtimePolicySnapshot: {
+                    billingMode,
+                    ...(walletReservation ? { walletReservation } : {}),
+                  },
+                }
+              : {}),
           },
           update: {},
         })
@@ -905,7 +1099,13 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       },
     });
 
-    return { message, run, heldForOperator: action === "hold_for_operator" };
+    return {
+      message,
+      run,
+      heldForOperator: !shouldQueueAi,
+      walletReservation: reservedUsage,
+      replayed: false,
+    };
   });
 }
 
@@ -981,6 +1181,8 @@ export async function assertConversationChannelDeliveryAvailable(input: {
 
 export async function completeInlineGenerationRun(input: {
   runId: string;
+  outboxId: string;
+  leaseAttempt: number;
   replyText: string;
   senderDisplayName: string;
   intent?: string;
@@ -990,7 +1192,7 @@ export async function completeInlineGenerationRun(input: {
   outputTokens?: number;
   costCents?: number;
   completeOutbox?: boolean;
-  countUsage?: boolean;
+  countUsage: boolean;
   keepConversationQueued?: boolean;
   entitlementReservation?: ConversationEntitlementReservation;
   attachments?: Array<{
@@ -1010,8 +1212,9 @@ export async function completeInlineGenerationRun(input: {
   const replyText = input.replyText.trim();
   if (!replyText) throw new Error("Reply text is required.");
 
-  const completedResult = await prisma.$transaction(async (tx) => {
+  const completedResult = await runConversationWriteTransaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
+    await fenceGenerationWorkLease(tx, input);
     const run = await tx.generationRun.findUnique({
       where: { id: input.runId },
       include: {
@@ -1034,6 +1237,7 @@ export async function completeInlineGenerationRun(input: {
             representativeId: true,
           },
         },
+        delegationTaskStep: { select: { kind: true } },
       },
     });
     if (!run) throw new Error("Generation run not found.");
@@ -1044,7 +1248,7 @@ export async function completeInlineGenerationRun(input: {
       throw new Error("Generation run was canceled.");
     }
     const matrixBinding =
-      run.inputMessage.channelBinding?.kind === RepresentativeChannelKind.MATRIX
+      run.inputMessage?.channelBinding?.kind === RepresentativeChannelKind.MATRIX
         ? run.inputMessage.channelBinding
         : null;
     if (
@@ -1063,6 +1267,20 @@ export async function completeInlineGenerationRun(input: {
         },
         tx as unknown as ServiceEntitlementClient,
       );
+      const walletReservation = readGenerationWalletReservation(
+        run.runtimePolicySnapshot,
+      );
+      if (walletReservation) {
+        await releaseAgentUsageCredits(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            failed: true,
+            reason: failureCode,
+            idempotencyKey: `generation:${run.id}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
       await tx.generationRun.updateMany({
         where: {
           id: run.id,
@@ -1130,20 +1348,43 @@ export async function completeInlineGenerationRun(input: {
           "Conversation entitlement reservation does not belong to this generation run.",
         );
       }
-      const consumedEntitlement = await consumeConversationEntitlement(
-        reservation,
-        tx as unknown as ServiceEntitlementClient,
-      );
+      const finalizedEntitlement = input.countUsage
+        ? await consumeConversationEntitlement(
+            reservation,
+            tx as unknown as ServiceEntitlementClient,
+          )
+        : await releaseConversationEntitlement(
+            reservation,
+            tx as unknown as ServiceEntitlementClient,
+          );
       if (
-        consumedEntitlement.audienceIdentityId
+        finalizedEntitlement.audienceIdentityId
         !== run.conversation.audienceIdentityId
       ) {
         throw new Error(
           "Conversation entitlement reservation belongs to a different audience identity.",
         );
       }
+    } else if (!input.countUsage) {
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: "generation_usage_not_counted",
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
     }
 
+    const walletReservation = readGenerationWalletReservation(
+      run.runtimePolicySnapshot,
+    );
+    const delegationTaskOwnsBilling = Boolean(
+      run.delegationTaskId
+      && (
+        run.delegationTaskStep?.kind === "COMPUTE"
+        || run.delegationTaskStep?.kind === "MCP"
+      ),
+    );
     const now = new Date();
     const message = await tx.message.create({
       data: {
@@ -1213,7 +1454,9 @@ export async function completeInlineGenerationRun(input: {
       data: {
         state: input.keepConversationQueued ? "AI_QUEUED" : "WAITING_USER",
         lastMessageAt: now,
-        ...(input.countUsage === false ? {} : { freeRepliesUsed: { increment: 1 } }),
+        ...(!input.countUsage || walletReservation || delegationTaskOwnsBilling
+          ? {}
+          : { freeRepliesUsed: { increment: 1 } }),
       },
     });
     await tx.conversationEpisode.updateMany({
@@ -1221,14 +1464,48 @@ export async function completeInlineGenerationRun(input: {
       data: { status: input.keepConversationQueued ? ConversationEpisodeStatus.ACTIVE : ConversationEpisodeStatus.WAITING_USER },
     });
     if (input.completeOutbox !== false) {
-      await tx.outboxEvent.updateMany({
+      const completedOutbox = await tx.outboxEvent.updateMany({
         where: {
+          id: input.outboxId,
           aggregateType: "generation_run",
           aggregateId: run.id,
-          status: { in: ["PENDING", "PROCESSING"] },
+          eventType: "generation.requested",
+          status: "PROCESSING",
+          attemptCount: input.leaseAttempt,
         },
         data: { status: "PROCESSED", processedAt: now },
       });
+      if (completedOutbox.count !== 1) {
+        throw new GenerationWorkLeaseLostError(
+          input.outboxId,
+          input.leaseAttempt,
+        );
+      }
+    }
+    if (walletReservation && !delegationTaskOwnsBilling) {
+      if (!input.countUsage) {
+        await releaseAgentUsageCredits(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            reason: "generation_usage_not_counted",
+            idempotencyKey: `generation:${run.id}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      } else {
+        await settleAgentUsageCredits(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            settledTokenAmount: walletReservation.tokenAmount,
+            ...(input.costCents !== undefined
+              ? { providerCostCents: input.costCents }
+              : {}),
+            ...(input.provider ? { provider: input.provider } : {}),
+            idempotencyKey: `generation:${run.id}:settle`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
     }
     return { run: completed, message };
   });
@@ -1240,6 +1517,8 @@ export async function completeInlineGenerationRun(input: {
 
 export async function waitGenerationRunForComputeApproval(input: {
   runId: string;
+  outboxId: string;
+  leaseAttempt: number;
   approvalId: string;
   replyText: string;
   senderDisplayName: string;
@@ -1249,6 +1528,7 @@ export async function waitGenerationRunForComputeApproval(input: {
 
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
+    await fenceGenerationWorkLease(tx, input);
     const run = await tx.generationRun.findUnique({
       where: { id: input.runId },
       include: { outputMessage: true },
@@ -1320,20 +1600,35 @@ export async function waitGenerationRunForComputeApproval(input: {
       where: { id: run.episodeId || "__no_episode__" },
       data: { status: ConversationEpisodeStatus.WAITING_APPROVAL },
     });
-    await tx.outboxEvent.updateMany({
+    const completedOutbox = await tx.outboxEvent.updateMany({
       where: {
+        id: input.outboxId,
         aggregateType: "generation_run",
         aggregateId: run.id,
-        status: { in: ["PENDING", "PROCESSING"] },
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
       },
       data: { status: "PROCESSED", processedAt: now },
     });
+    if (completedOutbox.count !== 1) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
     return { run: waitingRun, message };
   });
 }
 
 export type ClaimedGenerationWorkItem = {
   outboxId: string;
+  /**
+   * The outbox attempt that owns the current visibility lease. Workers pass
+   * this value back when renewing so an older worker cannot extend a lease
+   * after a newer attempt has reclaimed the item.
+   */
+  leaseAttempt: number;
   runId: string;
   delegationTaskId?: string;
   delegationTaskStepId?: string;
@@ -1354,6 +1649,7 @@ export type ClaimedGenerationWorkItem = {
   deliveryOnly?: boolean;
   outputMessageId?: string;
   outputText?: string;
+  walletReservation?: GenerationWalletReservation;
   usage: {
     freeRepliesUsed: number;
     passUnlocked: boolean;
@@ -1361,110 +1657,155 @@ export type ClaimedGenerationWorkItem = {
   };
 };
 
+export const GENERATION_WORK_MAX_ATTEMPTS = 5;
+export const GENERATION_WORK_LEASE_DURATION_MS = 5 * 60_000;
+
+const GENERATION_WORK_LEASE_EXHAUSTED_ERROR = "generation_work_lease_exhausted";
+const GENERATION_WORK_LEASE_LOST_ERROR = "generation_work_lease_lost";
+
+export type GenerationWorkLease = {
+  outboxId: string;
+  leaseAttempt: number;
+};
+
+export class GenerationWorkLeaseLostError extends Error {
+  readonly code = GENERATION_WORK_LEASE_LOST_ERROR;
+
+  constructor(readonly outboxId: string, readonly leaseAttempt: number) {
+    super("The conversation worker no longer owns this generation work lease.");
+    this.name = "GenerationWorkLeaseLostError";
+  }
+}
+
+export function isGenerationWorkLeaseLostError(
+  error: unknown,
+): error is GenerationWorkLeaseLostError {
+  return error instanceof GenerationWorkLeaseLostError
+    || (
+      error instanceof Error
+      && "code" in error
+      && error.code === GENERATION_WORK_LEASE_LOST_ERROR
+    );
+}
+
+async function fenceGenerationWorkLease(
+  tx: Prisma.TransactionClient,
+  input: GenerationWorkLease & { runId: string },
+) {
+  if (
+    !input.outboxId
+    || !Number.isSafeInteger(input.leaseAttempt)
+    || input.leaseAttempt < 1
+  ) {
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+
+  // The no-op status assignment deliberately takes a row lock. Any concurrent
+  // reclaim must either happen first (and make this predicate miss) or wait
+  // until this transaction commits. All business writes after this point are
+  // therefore owned by exactly one lease attempt and roll back with the fence.
+  const fenced = await tx.outboxEvent.updateMany({
+    where: {
+      id: input.outboxId,
+      aggregateType: "generation_run",
+      aggregateId: input.runId,
+      eventType: "generation.requested",
+      status: "PROCESSING",
+      attemptCount: input.leaseAttempt,
+      availableAt: { gt: new Date() },
+    },
+    data: { status: "PROCESSING" },
+  });
+  if (fenced.count !== 1) {
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+}
+
+export async function reserveGenerationConversationEntitlement(input: {
+  runId: string;
+  outboxId: string;
+  leaseAttempt: number;
+  audienceIdentityId: string;
+  representativeId: string;
+  productCodes?: string[];
+}) {
+  return runConversationWriteTransaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
+    await fenceGenerationWorkLease(tx, input);
+    return reserveConversationEntitlement(
+      {
+        audienceIdentityId: input.audienceIdentityId,
+        representativeId: input.representativeId,
+        generationRunId: input.runId,
+        ...(input.productCodes ? { productCodes: input.productCodes } : {}),
+      },
+      tx as unknown as ServiceEntitlementClient,
+    );
+  });
+}
+
 export async function claimNextGenerationWorkItem(
   options: {
     telegramWorkerEnabled?: boolean;
     processingLeaseMs?: number;
   } = {},
 ): Promise<ClaimedGenerationWorkItem | null> {
-  return prisma.$transaction(async (tx) => {
+  return runConversationWriteTransaction(async (tx) => {
     const candidates = await tx.$queryRaw<Array<{
       id: string;
       aggregateId: string;
+      status: string;
       attemptCount: number;
     }>>`
-      SELECT "id", "aggregateId", "attemptCount"
+      SELECT "id", "aggregateId", "status", "attemptCount"
       FROM "OutboxEvent"
-      WHERE "status" IN ('PENDING', 'FAILED', 'PROCESSING')
-        AND "eventType" = 'generation.requested'
+      WHERE "eventType" = 'generation.requested'
         AND "availableAt" <= NOW()
-      ORDER BY "createdAt" ASC
+        AND (
+          (
+            "status" IN ('PENDING', 'FAILED')
+            AND "attemptCount" < ${GENERATION_WORK_MAX_ATTEMPTS}
+          )
+          OR "status" = 'PROCESSING'
+        )
+      ORDER BY
+        CASE
+          WHEN "status" = 'PROCESSING'
+            AND "attemptCount" >= ${GENERATION_WORK_MAX_ATTEMPTS}
+          THEN 0
+          ELSE 1
+        END,
+        "createdAt" ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     `;
     const candidate = candidates[0];
-    const outboxId = candidate?.id;
-    if (!outboxId) return null;
-    if ((candidate.attemptCount ?? 0) >= 5) {
-      const exhaustedAt = new Date();
-      const exhaustedRun = await tx.generationRun.findUnique({
-        where: { id: candidate.aggregateId },
-        select: {
-          id: true,
-          status: true,
-          inputMessageId: true,
-          conversationId: true,
-          episodeId: true,
-        },
-      });
-      await releaseConversationEntitlementByGenerationRunId(
-        {
-          generationRunId: candidate.aggregateId,
-          reason: "conversation_outbox_attempts_exhausted",
-        },
-        tx as unknown as ServiceEntitlementClient,
+    if (!candidate) return null;
+
+    if (
+      candidate.status === "PROCESSING"
+      && candidate.attemptCount >= GENERATION_WORK_MAX_ATTEMPTS
+    ) {
+      await terminalizeExpiredGenerationLease(
+        tx,
+        candidate.aggregateId,
+        candidate.id,
       );
-      if (exhaustedRun && cancellableGenerationStatuses.includes(exhaustedRun.status)) {
-        const failed = await tx.generationRun.updateMany({
-          where: {
-            id: exhaustedRun.id,
-            status: { in: cancellableGenerationStatuses },
-          },
-          data: {
-            status: GenerationRunStatus.FAILED,
-            errorCode: "conversation_outbox_attempts_exhausted",
-            errorMessage: "Generation work exhausted its retry budget.",
-            completedAt: exhaustedAt,
-          },
-        });
-        if (failed.count === 1) {
-          await tx.message.update({
-            where: { id: exhaustedRun.inputMessageId },
-            data: {
-              deliveryStatus: MessageDeliveryStatus.FAILED,
-              failureCode: "conversation_outbox_attempts_exhausted",
-              failureReason: "Generation work exhausted its retry budget.",
-            },
-          });
-          await tx.conversation.updateMany({
-            where: {
-              id: exhaustedRun.conversationId,
-              state: { in: ["AI_QUEUED", "PROCESSING", "WAITING_APPROVAL"] },
-            },
-            data: { state: "FAILED" },
-          });
-          if (exhaustedRun.episodeId) {
-            await tx.conversationEpisode.updateMany({
-              where: {
-                id: exhaustedRun.episodeId,
-                status: {
-                  in: [
-                    ConversationEpisodeStatus.ACTIVE,
-                    ConversationEpisodeStatus.WAITING_APPROVAL,
-                  ],
-                },
-              },
-              data: { status: ConversationEpisodeStatus.FAILED },
-            });
-          }
-        }
-      }
-      await tx.outboxEvent.update({
-        where: { id: outboxId },
-        data: {
-          status: "DEAD_LETTER",
-          lastError: "conversation_outbox_attempts_exhausted",
-        },
-      });
       return null;
     }
 
     const processingLeaseMs = Math.max(
-      conversationOutboxProcessingLeaseMs,
-      options.processingLeaseMs ?? conversationOutboxProcessingLeaseMs,
+      GENERATION_WORK_LEASE_DURATION_MS,
+      options.processingLeaseMs ?? GENERATION_WORK_LEASE_DURATION_MS,
     );
     const outbox = await tx.outboxEvent.update({
-      where: { id: outboxId },
+      where: { id: candidate.id },
       data: {
         status: "PROCESSING",
         attemptCount: { increment: 1 },
@@ -1549,6 +1890,20 @@ export async function claimNextGenerationWorkItem(
         },
         tx as unknown as ServiceEntitlementClient,
       );
+      const walletReservation = readGenerationWalletReservation(
+        run.runtimePolicySnapshot,
+      );
+      if (walletReservation) {
+        await releaseAgentUsageCredits(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            failed: true,
+            reason: "generation_run_canceled",
+            idempotencyKey: `generation:${run.id}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
       await tx.outboxEvent.update({
         where: { id: outbox.id },
         data: { status: "PROCESSED", processedAt: new Date() },
@@ -1602,6 +1957,20 @@ export async function claimNextGenerationWorkItem(
           lastError: "representative_version_context_mismatch",
         },
       });
+      const walletReservation = readGenerationWalletReservation(
+        run.runtimePolicySnapshot,
+      );
+      if (walletReservation) {
+        await releaseAgentUsageCredits(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            failed: true,
+            reason: "representative_version_context_mismatch",
+            idempotencyKey: `generation:${run.id}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
       return null;
     }
 
@@ -1679,6 +2048,20 @@ export async function claimNextGenerationWorkItem(
             });
           }
         } else {
+          const walletReservation = readGenerationWalletReservation(
+            run.runtimePolicySnapshot,
+          );
+          if (walletReservation) {
+            await releaseAgentUsageCredits(
+              {
+                usageChargeId: walletReservation.usageChargeId,
+                failed: true,
+                reason: failureCode,
+                idempotencyKey: `generation:${run.id}:release`,
+              },
+              tx as unknown as UsageChargeClient,
+            );
+          }
           const canceledAt = new Date();
           await tx.generationRun.update({
             where: { id: run.id },
@@ -1786,6 +2169,20 @@ export async function claimNextGenerationWorkItem(
         },
         tx as unknown as ServiceEntitlementClient,
       );
+      const walletReservation = readGenerationWalletReservation(
+        run.runtimePolicySnapshot,
+      );
+      if (walletReservation) {
+        await releaseAgentUsageCredits(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            failed: true,
+            reason: availability.code,
+            idempotencyKey: `generation:${run.id}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
       await tx.generationRun.update({
         where: { id: run.id },
         data: {
@@ -1819,6 +2216,9 @@ export async function claimNextGenerationWorkItem(
           select: { matrixUserId: true },
         })
       : null;
+    const walletReservation = readGenerationWalletReservation(
+      run.runtimePolicySnapshot,
+    );
 
     if (run.status !== GenerationRunStatus.COMPLETED) {
       await tx.generationRun.update({
@@ -1837,6 +2237,7 @@ export async function claimNextGenerationWorkItem(
 
     return {
       outboxId: outbox.id,
+      leaseAttempt: outbox.attemptCount,
       runId: run.id,
       ...(run.delegationTaskId ? { delegationTaskId: run.delegationTaskId } : {}),
       ...(run.delegationTaskStepId ? { delegationTaskStepId: run.delegationTaskStepId } : {}),
@@ -1865,13 +2266,150 @@ export async function claimNextGenerationWorkItem(
             outputText: run.outputMessage.text!,
           }
         : {}),
+      ...(walletReservation ? { walletReservation } : {}),
       usage: {
         freeRepliesUsed: run.conversation.freeRepliesUsed,
-        passUnlocked: Boolean(run.conversation.passUnlockedAt),
+        passUnlocked:
+          Boolean(run.conversation.passUnlockedAt)
+          || Boolean(walletReservation),
         deepHelpUnlocked: Boolean(run.conversation.deepHelpUnlockedAt),
       },
     };
   });
+}
+
+/**
+ * Extend a claimed work item's visibility lease.
+ *
+ * `attemptCount` fences stale workers: once another worker reclaims the row,
+ * the older attempt can no longer renew it.
+ */
+export async function renewGenerationWorkItemLease(input: {
+  outboxId: string;
+  leaseAttempt: number;
+}): Promise<boolean> {
+  const leaseExpiresAt = new Date(
+    Date.now() + GENERATION_WORK_LEASE_DURATION_MS,
+  );
+  const renewed = await prisma.outboxEvent.updateMany({
+    where: {
+      id: input.outboxId,
+      status: "PROCESSING",
+      attemptCount: input.leaseAttempt,
+    },
+    data: { availableAt: leaseExpiresAt },
+  });
+  return renewed.count === 1;
+}
+
+async function terminalizeExpiredGenerationLease(
+  tx: Prisma.TransactionClient,
+  runId: string,
+  outboxId: string,
+) {
+  const now = new Date();
+  const run = await tx.generationRun.findUnique({
+    where: { id: runId },
+    select: {
+      id: true,
+      status: true,
+      inputMessageId: true,
+      conversationId: true,
+      episodeId: true,
+      runtimePolicySnapshot: true,
+    },
+  });
+  if (!run) {
+    await tx.outboxEvent.update({
+      where: { id: outboxId },
+      data: {
+        status: "DEAD_LETTER",
+        lastError: "generation_run_not_found",
+      },
+    });
+    return;
+  }
+  if (
+    run.status === GenerationRunStatus.COMPLETED
+    || run.status === GenerationRunStatus.CANCELED
+  ) {
+    await tx.outboxEvent.update({
+      where: { id: outboxId },
+      data: {
+        status: "PROCESSED",
+        processedAt: now,
+        lastError: null,
+      },
+    });
+    return;
+  }
+
+  await tx.generationRun.update({
+    where: { id: run.id },
+    data: {
+      status: GenerationRunStatus.FAILED,
+      errorCode: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+      errorMessage:
+        "The conversation worker stopped renewing its lease and exhausted all retry attempts.",
+      completedAt: now,
+    },
+  });
+  await tx.message.update({
+    where: { id: run.inputMessageId },
+    data: {
+      deliveryStatus: MessageDeliveryStatus.FAILED,
+      failureCode: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+      failureReason:
+        "The conversation worker stopped renewing its lease and exhausted all retry attempts.",
+    },
+  });
+  await tx.conversation.update({
+    where: { id: run.conversationId },
+    data: { state: "FAILED" },
+  });
+  if (run.episodeId) {
+    await tx.conversationEpisode.updateMany({
+      where: {
+        id: run.episodeId,
+        status: {
+          in: [
+            ConversationEpisodeStatus.ACTIVE,
+            ConversationEpisodeStatus.WAITING_APPROVAL,
+          ],
+        },
+      },
+      data: { status: ConversationEpisodeStatus.FAILED },
+    });
+  }
+  await tx.outboxEvent.update({
+    where: { id: outboxId },
+    data: {
+      status: "DEAD_LETTER",
+      lastError: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+    },
+  });
+
+  await releaseConversationEntitlementByGenerationRunId(
+    {
+      generationRunId: run.id,
+      reason: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+    },
+    tx as unknown as ServiceEntitlementClient,
+  );
+  const walletReservation = readGenerationWalletReservation(
+    run.runtimePolicySnapshot,
+  );
+  if (walletReservation) {
+    await releaseAgentUsageCredits(
+      {
+        usageChargeId: walletReservation.usageChargeId,
+        failed: true,
+        reason: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+        idempotencyKey: `generation:${run.id}:release`,
+      },
+      tx as unknown as UsageChargeClient,
+    );
+  }
 }
 
 export async function loadGenerationRecentTurns(input: {
@@ -1901,91 +2439,146 @@ export async function loadGenerationRecentTurns(input: {
   }));
 }
 
-export async function deferGenerationRunForHuman(runId: string) {
-  return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${runId}))`;
-    const current = await tx.generationRun.findUnique({
-      where: { id: runId },
-    });
+export async function deferGenerationRunForHuman(input: {
+  runId: string;
+  outboxId: string;
+  leaseAttempt: number;
+}) {
+  return runConversationWriteTransaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
+    await fenceGenerationWorkLease(tx, input);
+    const current = await tx.generationRun.findUnique({ where: { id: input.runId } });
     if (!current) throw new Error("Generation run not found.");
     if (
+      current.status === GenerationRunStatus.COMPLETED ||
       current.status === GenerationRunStatus.CANCELED
-      || current.status === GenerationRunStatus.COMPLETED
-      || current.status === GenerationRunStatus.FAILED
     ) {
       return current;
     }
+
     await releaseConversationEntitlementByGenerationRunId(
       {
-        generationRunId: runId,
+        generationRunId: input.runId,
         reason: "generation_deferred_for_human",
       },
       tx as unknown as ServiceEntitlementClient,
     );
     const run = await tx.generationRun.update({
-      where: { id: runId },
+      where: { id: input.runId },
       data: { status: GenerationRunStatus.WAITING_HUMAN },
     });
-    await tx.outboxEvent.updateMany({
-      where: { aggregateType: "generation_run", aggregateId: run.id },
+    const walletReservation = readGenerationWalletReservation(
+      run.runtimePolicySnapshot,
+    );
+    if (walletReservation) {
+      await releaseAgentUsageCredits(
+        {
+          usageChargeId: walletReservation.usageChargeId,
+          reason: "generation_deferred_to_human",
+          idempotencyKey: `generation:${run.id}:release`,
+        },
+        tx as unknown as UsageChargeClient,
+      );
+    }
+    const completedOutbox = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "generation_run",
+        aggregateId: run.id,
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
       data: { status: "PROCESSED", processedAt: new Date() },
     });
+    if (completedOutbox.count !== 1) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
     return run;
   });
 }
 
 export async function markGenerationDeliveryComplete(input: {
   runId: string;
+  outboxId: string;
+  leaseAttempt: number;
   outputMessageId: string;
   externalMessageId?: string;
 }) {
-  await prisma.$transaction([
-    prisma.message.update({
+  await runConversationWriteTransaction(async (tx) => {
+    await fenceGenerationWorkLease(tx, input);
+    await tx.message.update({
       where: { id: input.outputMessageId },
       data: {
         deliveryStatus: MessageDeliveryStatus.SENT,
         ...(input.externalMessageId ? { externalMessageId: input.externalMessageId } : {}),
       },
-    }),
-    prisma.outboxEvent.updateMany({
-      where: { aggregateType: "generation_run", aggregateId: input.runId },
+    });
+    const completedOutbox = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "generation_run",
+        aggregateId: input.runId,
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
       data: { status: "PROCESSED", processedAt: new Date(), lastError: null },
-    }),
-  ]);
+    });
+    if (completedOutbox.count !== 1) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+  });
 }
 
 export async function retryGenerationDelivery(input: {
   runId: string;
+  outboxId: string;
+  leaseAttempt: number;
   outputMessageId?: string;
   errorMessage: string;
 }) {
-  const outbox = await prisma.outboxEvent.findFirst({
-    where: { aggregateType: "generation_run", aggregateId: input.runId },
-    select: { attemptCount: true },
-  });
-  const deadLetter = (outbox?.attemptCount || 0) >= 5;
-  await prisma.$transaction([
-    ...(input.outputMessageId
-      ? [
-          prisma.message.update({
-            where: { id: input.outputMessageId },
-            data: {
-              deliveryStatus: MessageDeliveryStatus.FAILED,
-              failureCode: "channel_delivery_failed",
-              failureReason: input.errorMessage,
-            },
-          }),
-        ]
-      : []),
-    prisma.outboxEvent.updateMany({
-      where: { aggregateType: "generation_run", aggregateId: input.runId },
+  const deadLetter = input.leaseAttempt >= GENERATION_WORK_MAX_ATTEMPTS;
+  await runConversationWriteTransaction(async (tx) => {
+    await fenceGenerationWorkLease(tx, input);
+    if (input.outputMessageId) {
+      await tx.message.update({
+        where: { id: input.outputMessageId },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.FAILED,
+          failureCode: "channel_delivery_failed",
+          failureReason: input.errorMessage,
+        },
+      });
+    }
+    const failedOutbox = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "generation_run",
+        aggregateId: input.runId,
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
       data: {
         status: deadLetter ? "DEAD_LETTER" : "FAILED",
         lastError: input.errorMessage,
-        availableAt: new Date(Date.now() + Math.min(60_000, 2 ** (outbox?.attemptCount || 1) * 1000)),
+        availableAt: new Date(Date.now() + Math.min(60_000, 2 ** input.leaseAttempt * 1000)),
       },
-    }),
-  ]);
+    });
+    if (failedOutbox.count !== 1) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+  });
 }
 
 export type ClaimedOperatorMessageWorkItem = {
@@ -2244,30 +2837,25 @@ export async function retryOperatorMessageDelivery(input: {
 
 export async function failGenerationRun(input: {
   runId: string;
+  outboxId: string;
+  leaseAttempt: number;
   errorCode: string;
   errorMessage: string;
 }) {
   const now = new Date();
-  return prisma.$transaction(async (tx) => {
+  return runConversationWriteTransaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
-    const current = await tx.generationRun.findUnique({
-      where: { id: input.runId },
-    });
-    if (!current) throw new Error("Generation run not found.");
-    if (
-      current.status === GenerationRunStatus.CANCELED
-      || current.status === GenerationRunStatus.COMPLETED
-      || current.status === GenerationRunStatus.FAILED
-    ) {
-      return current;
+    await fenceGenerationWorkLease(tx, input);
+    const terminalFailure = input.leaseAttempt >= GENERATION_WORK_MAX_ATTEMPTS;
+    if (terminalFailure) {
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: input.runId,
+          reason: input.errorCode,
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
     }
-    await releaseConversationEntitlementByGenerationRunId(
-      {
-        generationRunId: input.runId,
-        reason: input.errorCode,
-      },
-      tx as unknown as ServiceEntitlementClient,
-    );
     const run = await tx.generationRun.update({
       where: { id: input.runId },
       data: {
@@ -2289,10 +2877,41 @@ export async function failGenerationRun(input: {
       where: { id: run.conversationId },
       data: { state: "FAILED" },
     });
-    await tx.outboxEvent.updateMany({
-      where: { aggregateType: "generation_run", aggregateId: run.id },
-      data: { status: "FAILED", lastError: input.errorMessage, availableAt: new Date(now.getTime() + 2_000) },
+    const failedOutbox = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "generation_run",
+        aggregateId: run.id,
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
+      data: {
+        status: terminalFailure ? "DEAD_LETTER" : "FAILED",
+        lastError: input.errorMessage,
+        availableAt: new Date(now.getTime() + 2_000),
+      },
     });
+    if (failedOutbox.count !== 1) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+    const walletReservation = readGenerationWalletReservation(
+      run.runtimePolicySnapshot,
+    );
+    if (walletReservation && terminalFailure) {
+      await releaseAgentUsageCredits(
+        {
+          usageChargeId: walletReservation.usageChargeId,
+          failed: true,
+          reason: input.errorCode,
+          idempotencyKey: `generation:${run.id}:release`,
+        },
+        tx as unknown as UsageChargeClient,
+      );
+    }
     return run;
   });
 }
@@ -3039,6 +3658,9 @@ export async function editConversationMessage(input: {
           representativeVersionId: run.representativeVersionId,
           status: GenerationRunStatus.QUEUED,
           idempotencyKey: `reply:${message.conversationId}:${message.id}:revision:${revision.version}`,
+          ...(run.runtimePolicySnapshot !== null
+            ? { runtimePolicySnapshot: run.runtimePolicySnapshot }
+            : {}),
         },
       });
       await tx.outboxEvent.create({
@@ -3644,6 +4266,7 @@ export async function publishRepresentativeVersion(input: {
         knowledgePack: true,
         knowledgeAssetLinks: { where: { enabled: true } },
         pricingPlans: true,
+        agentWallet: true,
         capabilityProfiles: {
           where: { isDefault: true, isManaged: false },
           orderBy: { createdAt: "desc" },
@@ -3683,6 +4306,10 @@ export async function publishRepresentativeVersion(input: {
       knowledgeCount: representative.knowledgeAssetLinks.length,
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
       pricingCount: representative.pricingPlans.length,
+      paidPricingCount: representative.pricingPlans.filter(
+        (plan) => plan.starsAmount > 0,
+      ).length,
+      agentWallet: representative.agentWallet,
       channelCount: representative.channelBindings.length,
       enabledSkillCount: representative.skillPackLinks.filter((link) => link.enabled).length,
       skillIssueCount: countRepresentativeSkillIssues(representative.skillPackLinks.filter((link) => link.enabled)),
@@ -4807,7 +5434,7 @@ function countRepresentativeSkillIssues(links: Array<{
   }).length;
 }
 
-function buildRepresentativeReadiness(input: {
+export function buildRepresentativeReadiness(input: {
   displayName: string;
   roleSummary: string;
   tone: string;
@@ -4817,10 +5444,26 @@ function buildRepresentativeReadiness(input: {
   knowledgeCount: number;
   knowledgePackItemCount: number;
   pricingCount: number;
+  paidPricingCount: number;
+  agentWallet: {
+    currency: string;
+    tokenUnitPriceCents: number;
+    creatorRevenueShareBps: number;
+  } | null;
   channelCount: number;
   enabledSkillCount: number;
   skillIssueCount: number;
 }): RepresentativeOperationsSnapshot["readiness"] {
+  const billingReady =
+    input.paidPricingCount === 0
+    || (
+      ["CNY", "USD"].includes(input.agentWallet?.currency.trim() ?? "")
+      && Number.isSafeInteger(input.agentWallet?.tokenUnitPriceCents)
+      && (input.agentWallet?.tokenUnitPriceCents ?? 0) > 0
+      && Number.isSafeInteger(input.agentWallet?.creatorRevenueShareBps)
+      && (input.agentWallet?.creatorRevenueShareBps ?? -1) >= 0
+      && (input.agentWallet?.creatorRevenueShareBps ?? 10_001) <= 10_000
+    );
   return [
     {
       id: "identity",
@@ -4843,8 +5486,11 @@ function buildRepresentativeReadiness(input: {
     {
       id: "pricing",
       label: "Pricing and free scope",
-      complete: input.pricingCount === 4,
-      detail: "Free, pass, deep help, and sponsor tiers are configured.",
+      complete: input.pricingCount === 4 && billingReady,
+      detail:
+        input.paidPricingCount > 0 && !billingReady
+          ? "Paid plans require an initialized service-credit wallet with valid pricing and revenue-share settings."
+          : "Free, pass, deep help, and sponsor tiers are configured.",
     },
     {
       id: "skills",
@@ -4885,6 +5531,12 @@ function buildDemoRepresentativeOperations(representativeSlug: string): Represen
       knowledgeCount: 12,
       knowledgePackItemCount: 5,
       pricingCount: 4,
+      paidPricingCount: 3,
+      agentWallet: {
+        currency: "CNY",
+        tokenUnitPriceCents: 1,
+        creatorRevenueShareBps: 2000,
+      },
       channelCount: 3,
       enabledSkillCount: 2,
       skillIssueCount: 0,

@@ -2,16 +2,23 @@ import { NextResponse } from "next/server";
 
 import { completeMockRechargeOrder } from "@delegate/web-data";
 
+import {
+  dashboardAuthErrorResponse,
+  requireDashboardBillingAccess,
+} from "../../../../dashboard/auth";
+import { withPrivateNoStore } from "../../../../private-response";
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
-    return new NextResponse(null, { status: 404 });
+    return privateJson({ error: "Not found." }, 404);
   }
-  const { id } = await params;
 
   try {
+    await requireDashboardBillingAccess();
+    const { id } = await params;
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const order = await completeMockRechargeOrder(id, {
       ...(typeof body.amountCents === "number" ? { amountCents: body.amountCents } : {}),
@@ -20,14 +27,16 @@ export async function POST(
         : {}),
     });
 
-    return NextResponse.json({ order });
+    return privateJson({ order }, 200);
   } catch (error) {
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to complete mock recharge.",
-      },
-      { status: 400 },
-    );
+    const authResponse = dashboardAuthErrorResponse(error);
+    if (authResponse) return authResponse;
+
+    console.error("Failed to complete dashboard mock recharge.", error);
+    return privateJson({ error: "Failed to complete mock recharge." }, 400);
   }
+}
+
+function privateJson(body: unknown, status: number) {
+  return withPrivateNoStore(NextResponse.json(body, { status }));
 }

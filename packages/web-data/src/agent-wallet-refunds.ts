@@ -6,12 +6,24 @@ import {
   PaymentProvider,
   PaymentProviderEventType,
   RechargeOrderStatus,
+  WalletTransactionEventType,
 } from "@prisma/client";
 
 import {
   recordWalletLedgerTransaction,
   type WalletLedgerClient,
 } from "./agent-wallet-ledger";
+import {
+  findWalletTransactionByIdempotencyKey,
+  recordWalletTransaction,
+  type WalletTransactionClient,
+} from "./agent-wallet-transactions";
+import {
+  assertWalletIdempotencyField,
+  resolveWalletOperationId,
+  runWalletWriteTransaction,
+  type WalletWriteTransactionOptions,
+} from "./agent-wallet-write";
 import { prisma } from "./prisma";
 
 type UserWalletRecord = {
@@ -28,6 +40,17 @@ type AgentWalletRecord = {
   tokenBalance: number;
   totalPurchasedTokens: number;
   totalConsumedTokens: number;
+};
+
+type UserAgentWalletRecord = {
+  id: string;
+  userWalletId: string;
+  agentWalletId: string;
+  currency: string;
+  availableTokenAmount: number;
+  reservedTokenAmount: number;
+  totalPurchasedTokenAmount: number;
+  totalConsumedTokenAmount: number;
 };
 
 type RechargeOrderRecord = {
@@ -53,16 +76,20 @@ type PaymentProviderEventRecord = {
 type AgentTokenPurchaseRecord = {
   id: string;
   userWalletId: string;
+  userAgentWalletId: string | null;
   agentWalletId: string;
   representativeId: string;
   amountCents: number;
   currency: string;
   tokenAmount: number;
+  remainingTokenAmount: number | null;
+  tokenUnitPriceCents: number;
   creatorPendingCents: number;
   status: AgentTokenPurchaseStatus;
   idempotencyKey: string;
   refundedAt: Date | null;
   userWallet?: UserWalletRecord;
+  userAgentWallet?: UserAgentWalletRecord;
   agentWallet?: AgentWalletRecord;
   creatorEarnings?: CreatorEarningRecord[];
 };
@@ -79,7 +106,8 @@ type CreatorEarningRecord = {
   currency: string;
 };
 
-type RechargeRefundClient = Omit<WalletLedgerClient, "$transaction"> & {
+type RechargeRefundClient = Omit<WalletLedgerClient, "$transaction"> &
+  WalletTransactionClient & {
   userWallet: {
     update(args: unknown): Promise<UserWalletRecord>;
   };
@@ -90,15 +118,22 @@ type RechargeRefundClient = Omit<WalletLedgerClient, "$transaction"> & {
   paymentProviderEvent: {
     upsert(args: unknown): Promise<PaymentProviderEventRecord>;
   };
-  $transaction?<T>(fn: (tx: RechargeRefundClient) => Promise<T>): Promise<T>;
+  $transaction?<T>(
+    fn: (tx: RechargeRefundClient) => Promise<T>,
+    options?: WalletWriteTransactionOptions,
+  ): Promise<T>;
 };
 
-type PurchaseReversalClient = Omit<WalletLedgerClient, "$transaction"> & {
+type PurchaseReversalClient = Omit<WalletLedgerClient, "$transaction"> &
+  WalletTransactionClient & {
   userWallet: {
     update(args: unknown): Promise<UserWalletRecord>;
   };
   agentWallet: {
     update(args: unknown): Promise<AgentWalletRecord>;
+  };
+  userAgentWallet: {
+    update(args: unknown): Promise<UserAgentWalletRecord>;
   };
   agentTokenPurchase: {
     findUnique(args: unknown): Promise<AgentTokenPurchaseRecord | null>;
@@ -108,7 +143,10 @@ type PurchaseReversalClient = Omit<WalletLedgerClient, "$transaction"> & {
     findFirst(args: unknown): Promise<CreatorEarningRecord | null>;
     update(args: unknown): Promise<CreatorEarningRecord>;
   };
-  $transaction?<T>(fn: (tx: PurchaseReversalClient) => Promise<T>): Promise<T>;
+  $transaction?<T>(
+    fn: (tx: PurchaseReversalClient) => Promise<T>,
+    options?: WalletWriteTransactionOptions,
+  ): Promise<T>;
 };
 
 export type RefundRechargeOrderInput = {
@@ -128,6 +166,8 @@ export type RechargeRefundSnapshot = {
 
 export type ReverseAgentTokenPurchaseInput = {
   reason?: string;
+  tokenAmount?: number;
+  idempotencyKey?: string;
 };
 
 export type AgentTokenPurchaseReversalSnapshot = {
@@ -136,6 +176,8 @@ export type AgentTokenPurchaseReversalSnapshot = {
   amountCents: number;
   currency: string;
   tokenAmount: number;
+  remainingTokenAmount: number;
+  reversedAmountCents: number;
   cashBalanceCents: number;
   agentTokenBalance: number;
   creatorReversedCents: number;
@@ -203,12 +245,44 @@ export async function refundRechargeOrder(
         processedAt: refundedAt,
       },
     });
+    assertWalletIdempotencyField(
+      "recharge refund event",
+      "rechargeOrderId",
+      providerEvent.rechargeOrderId,
+      order.id,
+    );
+    assertWalletIdempotencyField(
+      "recharge refund event",
+      "eventType",
+      providerEvent.eventType,
+      PaymentProviderEventType.REFUND_SUCCEEDED,
+    );
+
+    const walletTransaction = await recordWalletTransaction(
+      {
+        eventGroupId: `recharge_refund:${order.id}`,
+        idempotencyKey: `recharge_refund:${order.id}:completed`,
+        sourceType: "RechargeOrder",
+        sourceId: order.id,
+        eventType: WalletTransactionEventType.REFUND,
+        currency: order.currency,
+        userWalletId: order.userWallet.id,
+        metadata: {
+          amountCents: order.amountCents,
+          paymentProvider: order.provider,
+          paymentProviderEventId: providerEvent.id,
+          reason: input.reason ?? null,
+        },
+      },
+      tx,
+    );
 
     await recordWalletLedgerTransaction(
       {
         eventGroupId: `recharge_refund:${order.id}`,
         idempotencyKey: `recharge_refund:${order.id}:completed`,
         currency: order.currency,
+        requireBalancedAmount: true,
         initialBalances: {
           [`${AmnWalletAccountType.USER_CASH}:${order.userWallet.id}`]: {
             amountCents: order.userWallet.cashBalanceCents,
@@ -219,11 +293,25 @@ export async function refundRechargeOrder(
             entryKey: "user_cash_refund_debit",
             accountType: AmnWalletAccountType.USER_CASH,
             entryKind: AmnLedgerEntryKind.REFUND_REVERSAL,
+            transactionId: walletTransaction?.id ?? null,
             userWalletId: order.userWallet.id,
             rechargeOrderId: order.id,
             paymentProviderEventId: providerEvent.id,
             amountCents: -order.amountCents,
             notes: input.reason ?? "recharge_refund",
+          },
+          {
+            entryKey: "external_settlement_refund_credit",
+            accountType: AmnWalletAccountType.EXTERNAL_SETTLEMENT,
+            entryKind: AmnLedgerEntryKind.EXTERNAL_SETTLEMENT_CREDIT,
+            transactionId: walletTransaction?.id ?? null,
+            rechargeOrderId: order.id,
+            paymentProviderEventId: providerEvent.id,
+            amountCents: order.amountCents,
+            notes: input.reason ?? "recharge_refund",
+            metadata: {
+              provider: order.provider,
+            },
           },
         ],
       },
@@ -254,7 +342,7 @@ export async function refundRechargeOrder(
     );
   };
 
-  return client.$transaction ? client.$transaction(run) : run(client);
+  return runWalletWriteTransaction(client, run);
 }
 
 export async function reverseAgentTokenPurchase(
@@ -265,30 +353,85 @@ export async function reverseAgentTokenPurchase(
   if (!purchaseId.trim()) {
     throw new Error("Agent token purchase id is required.");
   }
+  if (typeof input.tokenAmount !== "undefined") {
+    assertPositiveInteger(input.tokenAmount, "tokenAmount");
+  }
+  const operationId = resolveWalletOperationId(
+    input.idempotencyKey,
+    "agent_token_purchase_reversal",
+  );
+  const transactionIdempotencyKey = `token_purchase_reversal:${operationId}`;
 
   const run = async (tx: PurchaseReversalClient) => {
+    const existingTransaction = await findWalletTransactionByIdempotencyKey(
+      transactionIdempotencyKey,
+      tx,
+    );
     const purchase = await tx.agentTokenPurchase.findUnique({
       where: { id: purchaseId },
       include: {
         userWallet: true,
+        userAgentWallet: true,
         agentWallet: true,
         creatorEarnings: true,
       },
     });
-    if (!purchase?.userWallet || !purchase.agentWallet) {
+    if (
+      !purchase?.userWallet ||
+      !purchase.agentWallet ||
+      !purchase.userAgentWalletId ||
+      !purchase.userAgentWallet ||
+      purchase.remainingTokenAmount === null
+    ) {
       throw new Error("Agent token purchase not found.");
+    }
+    if (existingTransaction) {
+      assertWalletIdempotencyField(
+        "agent token purchase reversal",
+        "purchaseId",
+        existingTransaction.sourceId,
+        purchase.id,
+      );
+      const metadata = jsonRecord(existingTransaction.metadata);
+      if (typeof input.tokenAmount === "number") {
+        assertWalletIdempotencyField(
+          "agent token purchase reversal",
+          "tokenAmount",
+          metadata.tokenAmount,
+          input.tokenAmount,
+        );
+      }
+      if (typeof input.reason !== "undefined") {
+        assertWalletIdempotencyField(
+          "agent token purchase reversal",
+          "reason",
+          metadata.reason,
+          input.reason,
+        );
+      }
+      return serializePurchaseReversal(
+        purchase,
+        numberMetadata(metadata, "creatorReversedCents"),
+        numberMetadata(metadata, "tokenAmount"),
+        numberMetadata(metadata, "amountCents"),
+      );
     }
     if (
       purchase.status === AgentTokenPurchaseStatus.REVERSED ||
       purchase.status === AgentTokenPurchaseStatus.REFUNDED
     ) {
-      return serializePurchaseReversal(purchase, 0);
+      throw new Error("Agent token purchase was already refunded by another operation.");
     }
     if (purchase.status !== AgentTokenPurchaseStatus.COMPLETED) {
       throw new Error(`Agent token purchase cannot be reversed from status ${purchase.status}.`);
     }
-    if (purchase.agentWallet.tokenBalance < purchase.tokenAmount) {
-      throw new Error("Cannot reverse purchase after tokens are consumed.");
+    const tokenAmount = input.tokenAmount ?? purchase.remainingTokenAmount;
+    assertPositiveInteger(tokenAmount, "tokenAmount");
+    if (tokenAmount > purchase.remainingTokenAmount) {
+      throw new Error("Cannot refund more than the purchase's unconsumed service credits.");
+    }
+    if (purchase.userAgentWallet.availableTokenAmount < tokenAmount) {
+      throw new Error("Cannot refund reserved or consumed service credits.");
     }
 
     const pendingEarning = await tx.creatorEarning.findFirst({
@@ -299,8 +442,35 @@ export async function reverseAgentTokenPurchase(
       },
       orderBy: { createdAt: "asc" },
     });
-    const creatorReversedCents = pendingEarning?.pendingCents ?? 0;
-    const platformReversedCents = purchase.amountCents - creatorReversedCents;
+    const remainingAfter = purchase.remainingTokenAmount - tokenAmount;
+    const pendingBefore =
+      purchase.remainingTokenAmount === 0
+        ? 0
+        : purchase.creatorPendingCents -
+          Math.floor(
+            (purchase.creatorPendingCents *
+              (purchase.tokenAmount - purchase.remainingTokenAmount)) /
+              purchase.tokenAmount,
+          );
+    const pendingAfter =
+      remainingAfter === 0
+        ? 0
+        : purchase.creatorPendingCents -
+          Math.floor(
+            (purchase.creatorPendingCents *
+              (purchase.tokenAmount - remainingAfter)) /
+              purchase.tokenAmount,
+          );
+    if (
+      pendingBefore > 0 &&
+      (!pendingEarning || pendingEarning.pendingCents !== pendingBefore)
+    ) {
+      throw new Error("Creator pending earning is inconsistent with purchase remainder.");
+    }
+    const creatorReversedCents = pendingBefore - pendingAfter;
+    const reversedAmountCents = tokenAmount * purchase.tokenUnitPriceCents;
+    const platformReversedCents =
+      reversedAmountCents - creatorReversedCents;
     const refundedAt = new Date();
 
     const updatedPendingEarning =
@@ -308,52 +478,79 @@ export async function reverseAgentTokenPurchase(
         ? await tx.creatorEarning.update({
             where: { id: pendingEarning.id },
             data: {
-              pendingCents: 0,
-              status: CreatorEarningStatus.REVERSED,
+              pendingCents: {
+                decrement: creatorReversedCents,
+              },
+              status:
+                pendingAfter === 0
+                  ? CreatorEarningStatus.REVERSED
+                  : CreatorEarningStatus.PENDING,
             },
           })
         : null;
 
+    const walletTransaction = await recordWalletTransaction(
+      {
+        eventGroupId: `token_purchase_reversal:${purchase.id}:${operationId}`,
+        idempotencyKey: transactionIdempotencyKey,
+        sourceType: "AgentTokenPurchase",
+        sourceId: purchase.id,
+        eventType: WalletTransactionEventType.REVERSAL,
+        currency: purchase.currency,
+        ownerId: pendingEarning?.ownerId ?? null,
+        representativeId: purchase.representativeId,
+        userWalletId: purchase.userWallet.id,
+        metadata: {
+          tokenAmount,
+          amountCents: reversedAmountCents,
+          creatorReversedCents,
+          platformReversedCents,
+          reason: input.reason ?? null,
+          userAgentWalletId: purchase.userAgentWallet.id,
+        },
+      },
+      tx,
+    );
+
     await recordWalletLedgerTransaction(
       {
-        eventGroupId: `token_purchase_reversal:${purchase.id}`,
-        idempotencyKey: `token_purchase_reversal:${purchase.id}:completed`,
+        eventGroupId: `token_purchase_reversal:${purchase.id}:${operationId}`,
+        idempotencyKey: transactionIdempotencyKey,
         currency: purchase.currency,
         requireBalancedAmount: true,
         initialBalances: {
           [`${AmnWalletAccountType.USER_CASH}:${purchase.userWallet.id}`]: {
             amountCents: purchase.userWallet.cashBalanceCents,
           },
-          [`${AmnWalletAccountType.AGENT_TOKEN}:${purchase.agentWallet.id}`]: {
-            tokenAmount: purchase.agentWallet.tokenBalance,
-          },
-          ...(pendingEarning
-            ? {
-                [`${AmnWalletAccountType.CREATOR_PENDING}:${pendingEarning.ownerId}:${pendingEarning.representativeId}`]:
-                  {
-                    amountCents: pendingEarning.pendingCents,
-                  },
-              }
-            : {}),
+          [`${AmnWalletAccountType.SERVICE_CREDIT_DEFERRED}:${purchase.userAgentWallet.id}`]:
+            {
+              tokenAmount:
+                purchase.userAgentWallet.availableTokenAmount +
+                purchase.userAgentWallet.reservedTokenAmount,
+            },
         },
         movements: [
           {
             entryKey: "user_cash_refund_credit",
             accountType: AmnWalletAccountType.USER_CASH,
             entryKind: AmnLedgerEntryKind.REFUND_REVERSAL,
+            transactionId: walletTransaction?.id ?? null,
             userWalletId: purchase.userWallet.id,
             tokenPurchaseId: purchase.id,
-            amountCents: purchase.amountCents,
+            amountCents: reversedAmountCents,
             notes: input.reason ?? "agent_token_purchase_reversal",
           },
           {
-            entryKey: "agent_token_reversal_debit",
-            accountType: AmnWalletAccountType.AGENT_TOKEN,
+            entryKey: "service_credit_reversal_debit",
+            accountType: AmnWalletAccountType.SERVICE_CREDIT_DEFERRED,
             entryKind: AmnLedgerEntryKind.REFUND_REVERSAL,
+            transactionId: walletTransaction?.id ?? null,
+            userWalletId: purchase.userWallet.id,
+            userAgentWalletId: purchase.userAgentWallet.id,
             agentWalletId: purchase.agentWallet.id,
             representativeId: purchase.representativeId,
             tokenPurchaseId: purchase.id,
-            tokenAmount: -purchase.tokenAmount,
+            tokenAmount: -tokenAmount,
             notes: input.reason ?? "agent_token_purchase_reversal",
           },
           ...(updatedPendingEarning
@@ -362,6 +559,7 @@ export async function reverseAgentTokenPurchase(
                   entryKey: "creator_pending_reversal_debit",
                   accountType: AmnWalletAccountType.CREATOR_PENDING,
                   entryKind: AmnLedgerEntryKind.REFUND_REVERSAL,
+                  transactionId: walletTransaction?.id ?? null,
                   ownerId: updatedPendingEarning.ownerId,
                   representativeId: updatedPendingEarning.representativeId,
                   agentWalletId: updatedPendingEarning.agentWalletId,
@@ -373,9 +571,10 @@ export async function reverseAgentTokenPurchase(
               ]
             : []),
           {
-            entryKey: "platform_revenue_reversal_debit",
-            accountType: AmnWalletAccountType.PLATFORM_REVENUE,
+            entryKey: "platform_deferred_revenue_reversal_debit",
+            accountType: AmnWalletAccountType.PLATFORM_DEFERRED_REVENUE,
             entryKind: AmnLedgerEntryKind.REFUND_REVERSAL,
+            transactionId: walletTransaction?.id ?? null,
             representativeId: purchase.representativeId,
             tokenPurchaseId: purchase.id,
             amountCents: -platformReversedCents,
@@ -386,12 +585,23 @@ export async function reverseAgentTokenPurchase(
       tx,
     );
 
-    const [updatedUserWallet, updatedAgentWallet, updatedPurchase] = await Promise.all([
+    const [updatedUserWallet, updatedUserAgentWallet, updatedAgentWallet, updatedPurchase] = await Promise.all([
       tx.userWallet.update({
         where: { id: purchase.userWallet.id },
         data: {
           cashBalanceCents: {
-            increment: purchase.amountCents,
+            increment: reversedAmountCents,
+          },
+        },
+      }),
+      tx.userAgentWallet.update({
+        where: { id: purchase.userAgentWallet.id },
+        data: {
+          availableTokenAmount: {
+            decrement: tokenAmount,
+          },
+          totalPurchasedTokenAmount: {
+            decrement: tokenAmount,
           },
         },
       }),
@@ -399,17 +609,25 @@ export async function reverseAgentTokenPurchase(
         where: { id: purchase.agentWallet.id },
         data: {
           tokenBalance: {
-            decrement: purchase.tokenAmount,
+            decrement: tokenAmount,
           },
           totalPurchasedTokens: {
-            decrement: purchase.tokenAmount,
+            decrement: tokenAmount,
           },
         },
       }),
       tx.agentTokenPurchase.update({
         where: { id: purchase.id },
         data: {
-          status: AgentTokenPurchaseStatus.REVERSED,
+          remainingTokenAmount: {
+            decrement: tokenAmount,
+          },
+          status:
+            remainingAfter === 0
+              ? purchase.tokenAmount === tokenAmount
+                ? AgentTokenPurchaseStatus.REVERSED
+                : AgentTokenPurchaseStatus.REFUNDED
+              : AgentTokenPurchaseStatus.COMPLETED,
           refundedAt,
         },
       }),
@@ -419,14 +637,17 @@ export async function reverseAgentTokenPurchase(
       {
         ...updatedPurchase,
         userWallet: updatedUserWallet,
+        userAgentWallet: updatedUserAgentWallet,
         agentWallet: updatedAgentWallet,
         creatorEarnings: updatedPendingEarning ? [updatedPendingEarning] : [],
       },
       creatorReversedCents,
+      tokenAmount,
+      reversedAmountCents,
     );
   };
 
-  return client.$transaction ? client.$transaction(run) : run(client);
+  return runWalletWriteTransaction(client, run);
 }
 
 function serializeRechargeRefund(
@@ -450,6 +671,8 @@ function serializeRechargeRefund(
 function serializePurchaseReversal(
   purchase: AgentTokenPurchaseRecord,
   creatorReversedCents: number,
+  reversedTokenAmount: number,
+  reversedAmountCents: number,
 ): AgentTokenPurchaseReversalSnapshot {
   if (!purchase.userWallet) {
     throw new Error("Purchase reversal is missing user wallet.");
@@ -462,10 +685,36 @@ function serializePurchaseReversal(
     status: purchase.status.toLowerCase() as AgentTokenPurchaseReversalSnapshot["status"],
     amountCents: purchase.amountCents,
     currency: purchase.currency,
-    tokenAmount: purchase.tokenAmount,
+    tokenAmount: reversedTokenAmount,
+    remainingTokenAmount:
+      purchase.remainingTokenAmount ?? purchase.tokenAmount,
+    reversedAmountCents,
     cashBalanceCents: purchase.userWallet.cashBalanceCents,
     agentTokenBalance: purchase.agentWallet.tokenBalance,
     creatorReversedCents,
     refundedAt: purchase.refundedAt ? purchase.refundedAt.toISOString() : null,
   };
+}
+
+function jsonRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function numberMetadata(
+  metadata: Record<string, unknown>,
+  key: string,
+): number {
+  const value = metadata[key];
+  if (!Number.isInteger(value)) {
+    throw new Error(`Wallet transaction metadata is missing ${key}.`);
+  }
+  return value as number;
+}
+
+function assertPositiveInteger(value: number, label: string): void {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer.`);
+  }
 }

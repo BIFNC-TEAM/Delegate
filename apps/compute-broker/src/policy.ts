@@ -7,7 +7,10 @@ import {
   type ComputeSubagentId,
 } from "@delegate/compute-protocol";
 
-import { deriveConversationComputeEntitlements } from "./entitlements";
+import {
+  deriveConversationComputeEntitlements,
+  readServerStoredServiceCreditReservation,
+} from "./entitlements";
 import { loadRepresentativeMcpBinding, resolveMcpToolName } from "./mcp-bindings";
 import { normalizeContainerPath } from "./path-utils";
 import { prisma } from "./prisma";
@@ -89,6 +92,11 @@ export async function loadSessionPolicyContext(sessionId: string) {
         },
       },
       conversation: true,
+      generationRun: {
+        select: {
+          runtimePolicySnapshot: true,
+        },
+      },
       policyProfile: {
         include: {
           rules: {
@@ -182,9 +190,17 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
       ? normalizeContainerPath(input.path)
       : input.path;
   const context = await loadSessionPolicyContext(sessionId);
+  const generationRuntimePolicySnapshot =
+    context.session.generationRun?.runtimePolicySnapshot;
+  const hasVerifiedRunScopedPass = await verifyRunScopedServiceCreditReservation({
+    representativeId: context.session.representativeId,
+    generationRuntimePolicySnapshot,
+  });
   const entitlements = deriveConversationComputeEntitlements({
     conversation: context.session.conversation,
-    requestedPaidEntitlement: input.hasPaidEntitlement,
+    generationRuntimePolicySnapshot: hasVerifiedRunScopedPass
+      ? generationRuntimePolicySnapshot
+      : undefined,
   });
   const mcpBinding =
     input.capability === "mcp"
@@ -258,6 +274,31 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
     mcpBinding,
     sessionSubagentId,
   };
+}
+
+export async function verifyRunScopedServiceCreditReservation(
+  params: {
+    representativeId: string;
+    generationRuntimePolicySnapshot: unknown;
+  },
+  client: Pick<typeof prisma, "agentUsageCharge"> = prisma,
+): Promise<boolean> {
+  const reservation = readServerStoredServiceCreditReservation(
+    params.generationRuntimePolicySnapshot,
+  );
+  if (!reservation) return false;
+
+  const usageCharge = await client.agentUsageCharge.findFirst({
+    where: {
+      id: reservation.usageChargeId,
+      representativeId: params.representativeId,
+      status: "RESERVED",
+      tokenAmount: reservation.tokenAmount,
+      reservedTokenAmount: reservation.tokenAmount,
+    },
+    select: { id: true },
+  });
+  return usageCharge !== null;
 }
 
 export function assertComputeSessionExpiry(

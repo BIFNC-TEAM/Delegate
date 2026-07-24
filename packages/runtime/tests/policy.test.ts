@@ -65,6 +65,22 @@ describe("conversation planning", () => {
     expect(plan.suggestedPlan).toBe("pass");
   });
 
+  it("continues the requested service when the exhausted conversation has current paid entitlement", () => {
+    const plan = createConversationPlan({
+      text: "我想问一下报价和预算怎么安排？",
+      channel: "private_chat",
+      representative: demoRepresentative,
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+
+    expect(plan.intent).toBe("pricing");
+    expect(plan.nextStep).toBe("collect_intake");
+  });
+
   it("creates structured intake for collaboration requests", () => {
     const plan = createConversationPlan({
       text: "我们想聊一个合作试点，可以先了解下吗？",

@@ -4,6 +4,7 @@ import {
   PaymentProvider,
   PaymentProviderEventType,
   RechargeOrderStatus,
+  WalletTransactionEventType,
 } from "@prisma/client";
 
 import {
@@ -14,6 +15,20 @@ import {
   mockPaymentProviderAdapter,
   type NormalizedPaymentProviderEvent,
 } from "./agent-wallet-payment-providers";
+import {
+  recordWalletTransaction,
+  type WalletTransactionClient,
+} from "./agent-wallet-transactions";
+import {
+  assertWalletIdempotencyField,
+  resolveWalletOperationId,
+  runWalletWriteTransaction,
+  type WalletWriteTransactionOptions,
+} from "./agent-wallet-write";
+import {
+  purchaseAgentTokens,
+  type AgentTokenPurchaseSnapshot,
+} from "./agent-wallet-token-purchase";
 import { prisma } from "./prisma";
 
 type UserWalletRecord = {
@@ -54,7 +69,8 @@ type IdentityLinkRecord = {
   audienceIdentityId: string;
 };
 
-type RechargeClient = Omit<WalletLedgerClient, "$transaction"> & {
+type RechargeClient = Omit<WalletLedgerClient, "$transaction"> &
+  WalletTransactionClient & {
   userWallet: {
     findFirst?(args: unknown): Promise<UserWalletRecord | null>;
     upsert(args: unknown): Promise<UserWalletRecord>;
@@ -72,7 +88,10 @@ type RechargeClient = Omit<WalletLedgerClient, "$transaction"> & {
     findUnique(args: unknown): Promise<PaymentProviderEventRecord | null>;
     upsert(args: unknown): Promise<PaymentProviderEventRecord>;
   };
-  $transaction?<T>(fn: (tx: RechargeClient) => Promise<T>): Promise<T>;
+  $transaction?<T>(
+    fn: (tx: RechargeClient) => Promise<T>,
+    options?: WalletWriteTransactionOptions,
+  ): Promise<T>;
 };
 
 export type RechargeOrderSnapshot = {
@@ -104,6 +123,20 @@ export type CompleteMockRechargeOrderInput = {
   providerEventId?: string;
 };
 
+export type CompleteMockRechargeAndPurchaseInput = {
+  rechargeOrderId: string;
+  externalUserId: string;
+  representativeId: string;
+  amountCents?: number;
+  providerEventId?: string;
+  purchaseIdempotencyKey?: string;
+};
+
+export type CompleteMockRechargeAndPurchaseSnapshot = {
+  rechargeOrder: RechargeOrderSnapshot;
+  tokenPurchase: AgentTokenPurchaseSnapshot;
+};
+
 const SUPPORTED_RECHARGE_CURRENCIES = new Set(["CNY", "USD"]);
 
 export function assertMockRechargeMutationsEnabled(
@@ -126,6 +159,24 @@ export async function createMockRechargeOrder(
       include: { userWallet: true },
     });
     if (existing) {
+      assertWalletIdempotencyField(
+        "mock recharge",
+        "externalUserId",
+        existing.userWallet?.externalUserId,
+        normalized.externalUserId,
+      );
+      assertWalletIdempotencyField(
+        "mock recharge",
+        "amountCents",
+        existing.amountCents,
+        normalized.amountCents,
+      );
+      assertWalletIdempotencyField(
+        "mock recharge",
+        "currency",
+        existing.currency,
+        normalized.currency,
+      );
       assertExistingRechargeOrderMatches(existing, normalized);
       return serializeRechargeOrder(existing);
     }
@@ -157,7 +208,7 @@ export async function createMockRechargeOrder(
     return serializeRechargeOrder({ ...order, userWallet });
   };
 
-  return client.$transaction ? client.$transaction(run) : run(client);
+  return runWalletWriteTransaction(client, run);
 }
 
 export async function completeMockRechargeOrder(
@@ -262,13 +313,44 @@ export async function completeMockRechargeOrder(
         processedAt: paidAt,
       },
     });
+    assertWalletIdempotencyField(
+      "mock recharge payment event",
+      "rechargeOrderId",
+      providerEvent.rechargeOrderId,
+      order.id,
+    );
+    assertWalletIdempotencyField(
+      "mock recharge payment event",
+      "eventType",
+      providerEvent.eventType,
+      PaymentProviderEventType.RECHARGE_PAID,
+    );
     assertProviderEventCanAttach(providerEvent, normalizedEvent, order);
+
+    const walletTransaction = await recordWalletTransaction(
+      {
+        eventGroupId: `recharge:${order.id}`,
+        idempotencyKey: `recharge:${order.id}:paid`,
+        sourceType: "RechargeOrder",
+        sourceId: order.id,
+        eventType: WalletTransactionEventType.USER_RECHARGE,
+        currency: order.currency,
+        userWalletId: order.userWallet.id,
+        metadata: {
+          amountCents: order.amountCents,
+          paymentProvider: order.provider,
+          paymentProviderEventId: providerEvent.id,
+        },
+      },
+      tx,
+    );
 
     await recordWalletLedgerTransaction(
       {
         eventGroupId: `recharge:${order.id}`,
         idempotencyKey: `recharge:${order.id}:paid`,
         currency: order.currency,
+        requireBalancedAmount: true,
         initialBalances: {
           [`${AmnWalletAccountType.USER_CASH}:${order.userWallet.id}`]: {
             amountCents: order.userWallet.cashBalanceCents,
@@ -279,11 +361,25 @@ export async function completeMockRechargeOrder(
             entryKey: "user_cash_recharge",
             accountType: AmnWalletAccountType.USER_CASH,
             entryKind: AmnLedgerEntryKind.USER_RECHARGE,
+            transactionId: walletTransaction?.id ?? null,
             userWalletId: order.userWallet.id,
             rechargeOrderId: order.id,
             paymentProviderEventId: providerEvent.id,
             amountCents: order.amountCents,
             notes: "mock_recharge_paid",
+          },
+          {
+            entryKey: "external_settlement_debit",
+            accountType: AmnWalletAccountType.EXTERNAL_SETTLEMENT,
+            entryKind: AmnLedgerEntryKind.EXTERNAL_SETTLEMENT_DEBIT,
+            transactionId: walletTransaction?.id ?? null,
+            rechargeOrderId: order.id,
+            paymentProviderEventId: providerEvent.id,
+            amountCents: -order.amountCents,
+            notes: "mock_recharge_paid",
+            metadata: {
+              provider: order.provider,
+            },
           },
         ],
       },
@@ -307,7 +403,94 @@ export async function completeMockRechargeOrder(
     });
   };
 
-  return client.$transaction ? client.$transaction(run) : run(client);
+  return runWalletWriteTransaction(client, run);
+}
+
+export async function completeMockRechargeAndPurchaseAgentTokens(
+  input: CompleteMockRechargeAndPurchaseInput,
+  client: typeof prisma = prisma,
+): Promise<CompleteMockRechargeAndPurchaseSnapshot> {
+  const rechargeOrderId = input.rechargeOrderId.trim();
+  const externalUserId = input.externalUserId.trim();
+  const representativeId = input.representativeId.trim();
+  if (!rechargeOrderId) throw new Error("Recharge order id is required.");
+  if (!externalUserId) throw new Error("externalUserId is required.");
+  if (!representativeId) throw new Error("representativeId is required.");
+
+  return runWalletWriteTransaction(client, async (tx) => {
+    const rechargeOrder = await completeMockRechargeOrder(
+      rechargeOrderId,
+      {
+        ...(input.amountCents !== undefined
+          ? { amountCents: input.amountCents }
+          : {}),
+        ...(input.providerEventId
+          ? { providerEventId: input.providerEventId }
+          : {}),
+      },
+      tx as unknown as NonNullable<
+        Parameters<typeof completeMockRechargeOrder>[2]
+      >,
+    );
+    if (rechargeOrder.externalUserId !== externalUserId) {
+      throw new Error("Recharge order does not belong to this external user.");
+    }
+
+    const tokenPurchase = await purchaseAgentTokens(
+      {
+        externalUserId,
+        representativeId,
+        amountCents: rechargeOrder.amountCents,
+        currency: rechargeOrder.currency,
+        rechargeOrderId: rechargeOrder.id,
+        idempotencyKey:
+          input.purchaseIdempotencyKey
+          ?? `recharge_purchase:${rechargeOrder.id}:${representativeId}`,
+      },
+      tx as unknown as NonNullable<
+        Parameters<typeof purchaseAgentTokens>[1]
+      >,
+    );
+    const representative = await tx.representative.findUnique({
+      where: { id: representativeId },
+      select: { ownerId: true },
+    });
+    if (!representative) {
+      throw new Error("Representative not found.");
+    }
+    const attributionClient = tx as unknown as {
+      walletTransaction?: {
+        updateMany(args: unknown): Promise<unknown>;
+      };
+      walletLedgerEntry: {
+        updateMany?(args: unknown): Promise<unknown>;
+      };
+    };
+    await Promise.all([
+      attributionClient.walletTransaction?.updateMany({
+        where: { eventGroupId: `recharge:${rechargeOrder.id}` },
+        data: {
+          ownerId: representative.ownerId,
+          representativeId,
+        },
+      }) ?? Promise.resolve(),
+      attributionClient.walletLedgerEntry.updateMany?.({
+        where: { eventGroupId: `recharge:${rechargeOrder.id}` },
+        data: {
+          ownerId: representative.ownerId,
+          representativeId,
+        },
+      }) ?? Promise.resolve(),
+    ]);
+
+    return {
+      rechargeOrder: {
+        ...rechargeOrder,
+        cashBalanceCents: tokenPurchase.cashBalanceCents,
+      },
+      tokenPurchase,
+    };
+  });
 }
 
 function normalizeCreateMockRechargeOrderInput(
@@ -327,9 +510,10 @@ function normalizeCreateMockRechargeOrderInput(
     externalUserId,
     amountCents: input.amountCents,
     currency,
-    idempotencyKey:
-      normalizeOptionalIdempotencyKey(input.idempotencyKey) ??
-      `mock_recharge:${externalUserId}:${currency}:${input.amountCents}`,
+    idempotencyKey: resolveWalletOperationId(
+      input.idempotencyKey,
+      "mock_recharge",
+    ),
     ...(input.audienceIdentityId?.trim() ? { audienceIdentityId: input.audienceIdentityId.trim() } : {}),
     ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
     ...(input.telegramUserId?.trim() ? { telegramUserId: input.telegramUserId.trim() } : {}),
@@ -475,17 +659,6 @@ function assertProviderEventCanAttach(
   if (providerEvent.eventType !== normalizedEvent.eventType) {
     throw new Error("Payment provider event id was reused for a different event type.");
   }
-}
-
-function normalizeOptionalIdempotencyKey(value: string | undefined): string | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  const normalized = value.trim();
-  if (!normalized) {
-    throw new Error("idempotencyKey must not be empty.");
-  }
-  return normalized;
 }
 
 function serializeRechargeOrder(order: RechargeOrderRecord): RechargeOrderSnapshot {

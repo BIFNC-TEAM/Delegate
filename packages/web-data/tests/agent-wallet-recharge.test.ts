@@ -88,39 +88,56 @@ describe("agent wallet mock recharge", () => {
       client,
     );
 
-    await expect(
-      createMockRechargeOrder(
-        {
+    const mismatchedRequests = [
+      {
           externalUserId: "user_2",
           amountCents: 1200,
           currency: "CNY",
           idempotencyKey: "recharge_facts_bound",
-        },
-        client,
-      ),
-    ).rejects.toThrow("different owner");
-    await expect(
-      createMockRechargeOrder(
-        {
+      },
+      {
           externalUserId: "user_1",
           amountCents: 1201,
           currency: "CNY",
           idempotencyKey: "recharge_facts_bound",
-        },
-        client,
-      ),
-    ).rejects.toThrow("different amount");
-    await expect(
-      createMockRechargeOrder(
-        {
+      },
+      {
           externalUserId: "user_1",
           amountCents: 1200,
           currency: "USD",
           idempotencyKey: "recharge_facts_bound",
-        },
-        client,
-      ),
-    ).rejects.toThrow("different currency");
+      },
+    ];
+
+    for (const request of mismatchedRequests) {
+      await expect(
+        createMockRechargeOrder(request, client),
+      ).rejects.toThrow();
+    }
+
+    expect(client.rechargeOrders).toHaveLength(1);
+    expect(client.userWallets).toHaveLength(1);
+  });
+
+  it("does not collapse separate keyless same-amount recharge operations", async () => {
+    const client = new FakeRechargeClient();
+    const first = await createMockRechargeOrder(
+      {
+        externalUserId: "user_1",
+        amountCents: 1200,
+      },
+      client,
+    );
+    const second = await createMockRechargeOrder(
+      {
+        externalUserId: "user_1",
+        amountCents: 1200,
+      },
+      client,
+    );
+
+    expect(second.id).not.toBe(first.id);
+    expect(client.rechargeOrders).toHaveLength(2);
   });
 
   it("attaches mock recharge wallets to an audience identity when provided", async () => {
@@ -225,12 +242,14 @@ describe("agent wallet mock recharge", () => {
     expect(paid.cashBalanceCents).toBe(1200);
     expect(paidAgain.cashBalanceCents).toBe(1200);
     expect(client.providerEvents).toHaveLength(1);
-    expect(client.ledgerEntries).toHaveLength(1);
+    expect(client.ledgerEntries).toHaveLength(2);
+    expect(client.walletTransactions).toHaveLength(1);
     expect(client.ledgerEntries[0]).toMatchObject({
       amountCents: 1200,
       currency: "CNY",
       idempotencyKey: `recharge:${created.id}:paid:user_cash_recharge`,
     });
+    expect(sumLedgerAmount(client.ledgerEntries)).toBe(0);
   });
 
   it("rejects a mock payment with the wrong amount", async () => {
@@ -283,7 +302,10 @@ describe("agent wallet mock recharge", () => {
       ),
     ).rejects.toThrow("already attached to another");
     expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
-    expect(client.ledgerEntries).toHaveLength(1);
+    expect(client.providerEvents).toHaveLength(1);
+    expect(client.walletTransactions).toHaveLength(1);
+    expect(client.ledgerEntries).toHaveLength(2);
+    expect(sumLedgerAmount(client.ledgerEntries)).toBe(0);
   });
 
   it("rejects invalid recharge input", async () => {
@@ -306,6 +328,32 @@ describe("agent wallet mock recharge", () => {
         client,
       ),
     ).rejects.toThrow("positive integer");
+  });
+
+  it("does not relabel an existing wallet into another currency", async () => {
+    const client = new FakeRechargeClient();
+    await createMockRechargeOrder(
+      {
+        externalUserId: "user_1",
+        amountCents: 1200,
+        currency: "CNY",
+        idempotencyKey: "recharge_cny",
+      },
+      client,
+    );
+
+    await expect(
+      createMockRechargeOrder(
+        {
+          externalUserId: "user_1",
+          amountCents: 1200,
+          currency: "USD",
+          idempotencyKey: "recharge_usd",
+        },
+        client,
+      ),
+    ).rejects.toThrow("currency cannot be changed");
+    expect(client.userWallets[0]?.currency).toBe("CNY");
   });
 });
 
@@ -353,6 +401,7 @@ type LedgerRow = {
   amountCents: number;
   tokenAmount: number;
   currency: string;
+  transactionId: string | null;
   createdAt: Date;
 };
 
@@ -369,6 +418,7 @@ class FakeRechargeClient {
   providerEvents: ProviderEventRow[] = [];
   ledgerEntries: LedgerRow[] = [];
   identityLinks: IdentityLinkRow[] = [];
+  walletTransactions: any[] = [];
 
   userWallet = {
     findFirst: async (args: any) => {
@@ -529,6 +579,31 @@ class FakeRechargeClient {
     },
   };
 
+  walletTransaction = {
+    findUnique: async (args: any) =>
+      this.walletTransactions.find(
+        (row) => row.idempotencyKey === args.where.idempotencyKey,
+      ) ?? null,
+    create: async (args: any) => {
+      const row = {
+        id: `wallet_transaction_${this.walletTransactions.length + 1}`,
+        eventGroupId: args.data.eventGroupId,
+        idempotencyKey: args.data.idempotencyKey,
+        sourceType: args.data.sourceType,
+        sourceId: args.data.sourceId ?? null,
+        eventType: args.data.eventType,
+        status: args.data.status,
+        currency: args.data.currency,
+        ownerId: args.data.ownerId ?? null,
+        representativeId: args.data.representativeId ?? null,
+        userWalletId: args.data.userWalletId ?? null,
+        metadata: args.data.metadata ?? null,
+      };
+      this.walletTransactions.push(row);
+      return row;
+    },
+  };
+
   walletLedgerEntry = {
     findFirst: async (args: any) => {
       return (
@@ -552,6 +627,7 @@ class FakeRechargeClient {
         amountCents: args.data.amountCents ?? 0,
         tokenAmount: args.data.tokenAmount ?? 0,
         currency: args.data.currency ?? "CNY",
+        transactionId: args.data.transactionId ?? null,
         createdAt: new Date(Date.UTC(2026, 6, 3, 0, 0, this.ledgerEntries.length)),
       };
       this.ledgerEntries.push(entry);
@@ -565,6 +641,7 @@ class FakeRechargeClient {
     const providerEvents = this.providerEvents.map((row) => ({ ...row }));
     const ledgerEntries = this.ledgerEntries.map((row) => ({ ...row }));
     const identityLinks = this.identityLinks.map((row) => ({ ...row }));
+    const walletTransactions = this.walletTransactions.map((row) => ({ ...row }));
     try {
       return await fn(this);
     } catch (error) {
@@ -573,6 +650,7 @@ class FakeRechargeClient {
       this.providerEvents = providerEvents;
       this.ledgerEntries = ledgerEntries;
       this.identityLinks = identityLinks;
+      this.walletTransactions = walletTransactions;
       throw error;
     }
   }
@@ -584,4 +662,8 @@ class FakeRechargeClient {
     }
     return { ...order, userWallet };
   }
+}
+
+function sumLedgerAmount(entries: LedgerRow[]): number {
+  return entries.reduce((sum, entry) => sum + entry.amountCents, 0);
 }

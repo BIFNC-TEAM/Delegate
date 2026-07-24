@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockPrisma } = vi.hoisted(() => {
+const {
+  mockPrisma,
+  releaseAgentUsageCredits,
+  settleAgentUsageCredits,
+} = vi.hoisted(() => {
   const client = {
     $executeRaw: vi.fn(),
+    agentUsageCharge: { findUnique: vi.fn() },
     approvalRequest: {},
     conversation: { update: vi.fn() },
     conversationEpisode: { updateMany: vi.fn() },
@@ -23,10 +28,16 @@ const { mockPrisma } = vi.hoisted(() => {
       ...client,
       $transaction: vi.fn(async (callback: (tx: typeof client) => unknown) => callback(client)),
     },
+    releaseAgentUsageCredits: vi.fn(),
+    settleAgentUsageCredits: vi.fn(),
   };
 });
 
 vi.mock("../src/prisma", () => ({ prisma: mockPrisma }));
+vi.mock("../src/agent-wallet-usage-charge", () => ({
+  releaseAgentUsageCredits,
+  settleAgentUsageCredits,
+}));
 
 describe("delegation task owner actions", () => {
   beforeEach(() => {
@@ -39,6 +50,11 @@ describe("delegation task owner actions", () => {
     mockPrisma.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.delegationTaskExternalEffect.findMany.mockResolvedValue([]);
     mockPrisma.delegationTaskOutput.count.mockResolvedValue(0);
+    mockPrisma.agentUsageCharge.findUnique.mockResolvedValue({
+      status: "RESERVED",
+    });
+    releaseAgentUsageCredits.mockResolvedValue({ status: "released" });
+    settleAgentUsageCredits.mockResolvedValue({ status: "settled" });
   });
 
   it("queues a new generation attempt on the same failed task", async () => {
@@ -86,6 +102,38 @@ describe("delegation task owner actions", () => {
         toStatus: "READY",
       }),
     });
+  });
+
+  it("does not reuse a released paid reservation when an owner retries a task", async () => {
+    const task = buildTask("FAILED");
+    mockPrisma.delegationTask.findFirst.mockResolvedValueOnce({
+      ...task,
+      generationRuns: [{
+        ...task.generationRuns[0],
+        delegationTaskStepId: "step-1",
+        runtimePolicySnapshot: {
+          billingMode: "service_credit",
+          walletReservation: {
+            usageChargeId: "usage-released",
+            tokenAmount: 1,
+          },
+        },
+      }],
+      steps: [{ id: "step-1", kind: "COMPUTE", status: "FAILED" }],
+    });
+    mockPrisma.agentUsageCharge.findUnique.mockResolvedValueOnce({
+      status: "RELEASED",
+    });
+    const { applyRepresentativeDelegationTaskAction } = await import("../src/delegation-tasks");
+
+    await expect(applyRepresentativeDelegationTaskAction({
+      representativeSlug: "sktone",
+      taskId: "task-1",
+      action: "retry",
+      actorId: "owner-1",
+    })).rejects.toThrow("no longer reserved");
+
+    expect(mockPrisma.generationRun.create).not.toHaveBeenCalled();
   });
 
   it("refuses to bypass a pending approval during direct cancellation", async () => {
@@ -270,9 +318,10 @@ describe("delegation task owner actions", () => {
       representativeId: "representative-1",
       representativeVersionId: "rep-version-1",
       steps: [
-        { id: "step-1", sequence: 1, status: "RUNNING", dependsOnStepIds: [], inputSnapshot: {} },
+        { id: "step-1", kind: "COMPUTE", sequence: 1, status: "RUNNING", dependsOnStepIds: [], inputSnapshot: {} },
         {
           id: "step-2",
+          kind: "COMPUTE",
           sequence: 2,
           status: "DRAFT",
           dependsOnStepIds: ["step-1"],
@@ -295,6 +344,13 @@ describe("delegation task owner actions", () => {
         conversationId: "conversation-1",
         episodeId: "episode-1",
         inputMessageId: "message-1",
+        runtimePolicySnapshot: {
+          billingMode: "service_credit",
+          walletReservation: {
+            usageChargeId: "usage-task-1",
+            tokenAmount: 1,
+          },
+        },
       }],
     });
     const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
@@ -312,8 +368,26 @@ describe("delegation task owner actions", () => {
         delegationTaskId: "task-1",
         delegationTaskStepId: "step-2",
         idempotencyKey: "delegation-step:task-1:step-2",
+        runtimePolicySnapshot: {
+          billingMode: "service_credit",
+          walletReservation: {
+            usageChargeId: "usage-task-1",
+            tokenAmount: 1,
+          },
+        },
       }),
     });
+    expect(mockPrisma.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-step-1" },
+      data: {
+        runtimePolicySnapshot: {
+          billingMode: "service_credit_transferred",
+          billingTransferredToGenerationRunId: "run-step-2",
+        },
+      },
+    });
+    expect(settleAgentUsageCredits).not.toHaveBeenCalled();
+    expect(releaseAgentUsageCredits).not.toHaveBeenCalled();
     expect(mockPrisma.outboxEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ aggregateId: "run-step-2", eventType: "generation.requested" }),
     });
@@ -321,6 +395,224 @@ describe("delegation task owner actions", () => {
       where: { id: "task-1" },
       data: expect.objectContaining({ status: "READY", nextActionBy: "SYSTEM" }),
     });
+  });
+
+  it("settles the single task reservation only after the second approved step succeeds", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-1",
+      status: "AWAITING_APPROVAL",
+      representativeId: "representative-1",
+      representativeVersionId: "rep-version-1",
+      steps: [
+        {
+          id: "step-1",
+          kind: "COMPUTE",
+          sequence: 1,
+          status: "COMPLETED",
+          dependsOnStepIds: [],
+          inputSnapshot: {},
+        },
+        {
+          id: "step-2",
+          kind: "COMPUTE",
+          sequence: 2,
+          status: "WAITING_APPROVAL",
+          dependsOnStepIds: ["step-1"],
+          inputSnapshot: {},
+        },
+      ],
+      generationRuns: [
+        {
+          id: "run-step-2",
+          delegationTaskStepId: "step-2",
+          conversationId: "conversation-1",
+          episodeId: "episode-1",
+          inputMessageId: "message-1",
+          runtimePolicySnapshot: {
+            billingMode: "service_credit",
+            walletReservation: {
+              usageChargeId: "usage-task-1",
+              tokenAmount: 1,
+            },
+          },
+        },
+        {
+          id: "run-step-1",
+          delegationTaskStepId: "step-1",
+          conversationId: "conversation-1",
+          episodeId: "episode-1",
+          inputMessageId: "message-1",
+          runtimePolicySnapshot: {
+            billingMode: "service_credit_transferred",
+            billingTransferredToGenerationRunId: "run-step-2",
+          },
+        },
+      ],
+    });
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    const result = await finalizeComputeDelegationTask({
+      taskId: "task-1",
+      stepId: "step-2",
+      generationRunId: "run-step-2",
+      outcome: "completed",
+    });
+
+    expect(result).toMatchObject({
+      status: "COMPLETED",
+      hasMoreSteps: false,
+      completedStepId: "step-2",
+    });
+    expect(settleAgentUsageCredits).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-task-1",
+        settledTokenAmount: 1,
+        provider: "compute",
+        idempotencyKey: "delegation-task:task-1:settle",
+      },
+      mockPrisma,
+    );
+    expect(releaseAgentUsageCredits).not.toHaveBeenCalled();
+    expect(mockPrisma.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-step-2" },
+      data: {
+        runtimePolicySnapshot: expect.objectContaining({
+          billingMode: "service_credit_settled",
+          billingFinalizedAt: expect.any(String),
+        }),
+      },
+    });
+    expect(mockPrisma.conversation.update.mock.calls).not.toContainEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          freeRepliesUsed: expect.anything(),
+        }),
+      }),
+    ]);
+  });
+
+  it("releases the single task reservation when the second approved step fails", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-1",
+      status: "AWAITING_APPROVAL",
+      representativeId: "representative-1",
+      representativeVersionId: "rep-version-1",
+      steps: [
+        {
+          id: "step-1",
+          kind: "COMPUTE",
+          sequence: 1,
+          status: "COMPLETED",
+          dependsOnStepIds: [],
+          inputSnapshot: {},
+        },
+        {
+          id: "step-2",
+          kind: "COMPUTE",
+          sequence: 2,
+          status: "WAITING_APPROVAL",
+          dependsOnStepIds: ["step-1"],
+          inputSnapshot: {},
+        },
+      ],
+      generationRuns: [{
+        id: "run-step-2",
+        delegationTaskStepId: "step-2",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+        runtimePolicySnapshot: {
+          billingMode: "service_credit",
+          walletReservation: {
+            usageChargeId: "usage-task-1",
+            tokenAmount: 1,
+          },
+        },
+      }],
+    });
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    const result = await finalizeComputeDelegationTask({
+      taskId: "task-1",
+      stepId: "step-2",
+      generationRunId: "run-step-2",
+      outcome: "failed",
+      failureReason: "sandbox_failed",
+    });
+
+    expect(result).toMatchObject({
+      status: "FAILED",
+      hasMoreSteps: false,
+      completedStepId: "step-2",
+    });
+    expect(releaseAgentUsageCredits).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-task-1",
+        failed: true,
+        reason: "delegation_task_failed",
+        idempotencyKey: "delegation-task:task-1:release",
+      },
+      mockPrisma,
+    );
+    expect(settleAgentUsageCredits).not.toHaveBeenCalled();
+    expect(mockPrisma.conversation.update.mock.calls).not.toContainEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          freeRepliesUsed: expect.anything(),
+        }),
+      }),
+    ]);
+  });
+
+  it("consumes one free reply only when the full multi-step task succeeds", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-free",
+      status: "AWAITING_APPROVAL",
+      representativeId: "representative-1",
+      representativeVersionId: "rep-version-1",
+      steps: [
+        {
+          id: "step-1",
+          kind: "COMPUTE",
+          sequence: 1,
+          status: "COMPLETED",
+          dependsOnStepIds: [],
+          inputSnapshot: {},
+        },
+        {
+          id: "step-2",
+          kind: "COMPUTE",
+          sequence: 2,
+          status: "WAITING_APPROVAL",
+          dependsOnStepIds: ["step-1"],
+          inputSnapshot: {},
+        },
+      ],
+      generationRuns: [{
+        id: "run-free-step-2",
+        delegationTaskStepId: "step-2",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+        runtimePolicySnapshot: { billingMode: "free" },
+      }],
+    });
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    await finalizeComputeDelegationTask({
+      taskId: "task-free",
+      stepId: "step-2",
+      generationRunId: "run-free-step-2",
+      outcome: "completed",
+    });
+
+    expect(mockPrisma.conversation.update).toHaveBeenCalledTimes(1);
+    expect(mockPrisma.conversation.update).toHaveBeenCalledWith({
+      where: { id: "conversation-1" },
+      data: { freeRepliesUsed: { increment: 1 } },
+    });
+    expect(settleAgentUsageCredits).not.toHaveBeenCalled();
+    expect(releaseAgentUsageCredits).not.toHaveBeenCalled();
   });
 
   it("fails the task instead of reporting completion when remaining step dependencies cannot be satisfied", async () => {

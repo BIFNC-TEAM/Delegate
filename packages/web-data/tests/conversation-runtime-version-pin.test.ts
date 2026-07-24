@@ -68,6 +68,7 @@ import {
   claimNextOperatorMessageWorkItem,
   completeInlineGenerationRun,
   deferOperatorMessageDelivery,
+  hasGenerationServiceCreditEntitlement,
 } from "../src/conversation-platform";
 
 describe("conversation runtime version pin", () => {
@@ -87,6 +88,22 @@ describe("conversation runtime version pin", () => {
     tx.serviceEntitlementLedgerEntry.findMany.mockResolvedValue([]);
     tx.serviceEntitlementLedgerEntry.findUnique.mockResolvedValue(null);
     tx.conversation.update.mockResolvedValue({ id: "conversation-1" });
+  });
+
+  it("does not grant paid entitlement from an incomplete runtime snapshot", () => {
+    expect(
+      hasGenerationServiceCreditEntitlement({
+        walletReservation: {
+          usageChargeId: "usage-reserved",
+          tokenAmount: 1,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      hasGenerationServiceCreditEntitlement({
+        billingMode: "service_credit",
+      }),
+    ).toBe(false);
   });
 
   it("keeps subsequent runs on the episode version after the representative active version changes", async () => {
@@ -329,9 +346,12 @@ describe("conversation runtime version pin", () => {
 
     await expect(completeInlineGenerationRun({
       runId: "run-matrix-complete",
+      outboxId: "outbox-matrix-complete",
+      leaseAttempt: 1,
       replyText: "must never be persisted",
       senderDisplayName: "Representative",
       completeOutbox: false,
+      countUsage: true,
       entitlementReservation: {
         audienceIdentityId: "audience-1",
         representativeId: "representative-1",
@@ -383,6 +403,87 @@ describe("conversation runtime version pin", () => {
         status: "DEAD_LETTER",
         lastError: "matrix_private_room_not_verified",
       }),
+    });
+  });
+
+  it("treats the current service-credit reservation as paid entitlement after free replies are exhausted", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-paid",
+      aggregateId: "run-paid",
+      status: "PENDING",
+      attemptCount: 0,
+    }]);
+    tx.outboxEvent.update.mockResolvedValue({
+      id: "outbox-paid",
+      aggregateId: "run-paid",
+      attemptCount: 1,
+    });
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-paid",
+      status: "QUEUED",
+      representativeVersionId: "representative-version-1",
+      episodeId: "episode-1",
+      delegationTaskId: null,
+      delegationTaskStepId: null,
+      contextSnapshot: null,
+      inputMessageId: "message-paid",
+      inputMessage: {
+        id: "message-paid",
+        text: "continue with my paid credit",
+      },
+      runtimePolicySnapshot: {
+        billingMode: "service_credit",
+        walletReservation: {
+          usageChargeId: "usage-reserved",
+          tokenAmount: 1,
+        },
+      },
+      startedAt: null,
+      episode: {
+        representativeVersionId: "representative-version-1",
+      },
+      conversation: {
+        id: "conversation-1",
+        representativeId: "representative-1",
+        contactId: "contact-1",
+        state: "AI_QUEUED",
+        freeRepliesUsed: 3,
+        passUnlockedAt: null,
+        deepHelpUnlockedAt: null,
+        representative: {
+          slug: "representative",
+          displayName: "Representative",
+          lifecycleState: "PUBLISHED",
+          activeVersionId: "representative-version-1",
+          publicMode: true,
+          runtimePolicyOverlays: [],
+        },
+        channelBindings: [{
+          id: "web-binding-paid",
+          kind: "WEB",
+          externalConversationId: "web:conversation-1",
+          representativeBinding: {
+            status: "CONNECTED",
+            desiredState: "ACTIVE",
+            healthStatus: "HEALTHY",
+          },
+        }],
+      },
+    });
+    tx.generationRun.update.mockResolvedValue({ id: "run-paid" });
+    tx.message.update.mockResolvedValue({ id: "message-paid" });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toMatchObject({
+      runId: "run-paid",
+      walletReservation: {
+        usageChargeId: "usage-reserved",
+        tokenAmount: 1,
+      },
+      usage: {
+        freeRepliesUsed: 3,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
     });
   });
 
@@ -545,6 +646,7 @@ describe("conversation runtime version pin", () => {
     tx.$queryRaw.mockResolvedValue([{
       id: "outbox-exhausted",
       aggregateId: "run-exhausted",
+      status: "PROCESSING",
       attemptCount: 5,
     }]);
     tx.generationRun.findUnique.mockResolvedValue({
@@ -557,14 +659,11 @@ describe("conversation runtime version pin", () => {
 
     await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
 
-    expect(tx.generationRun.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: "run-exhausted",
-        status: { in: ["QUEUED", "PROCESSING", "WAITING_APPROVAL", "WAITING_HUMAN"] },
-      },
+    expect(tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-exhausted" },
       data: expect.objectContaining({
         status: "FAILED",
-        errorCode: "conversation_outbox_attempts_exhausted",
+        errorCode: "generation_work_lease_exhausted",
         completedAt: expect.any(Date),
       }),
     });
@@ -572,14 +671,14 @@ describe("conversation runtime version pin", () => {
       where: { id: "message-exhausted" },
       data: expect.objectContaining({
         deliveryStatus: "FAILED",
-        failureCode: "conversation_outbox_attempts_exhausted",
+        failureCode: "generation_work_lease_exhausted",
       }),
     });
     expect(tx.outboxEvent.update).toHaveBeenCalledWith({
       where: { id: "outbox-exhausted" },
       data: {
         status: "DEAD_LETTER",
-        lastError: "conversation_outbox_attempts_exhausted",
+        lastError: "generation_work_lease_exhausted",
       },
     });
   });

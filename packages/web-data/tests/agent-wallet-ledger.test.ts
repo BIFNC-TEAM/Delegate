@@ -23,6 +23,16 @@ type StoredLedgerEntry = {
   tokenAmount: number;
   currency: string;
   createdAt: Date;
+  userWalletId: string | null;
+  agentWalletId: string | null;
+  representativeId: string | null;
+  ownerId: string | null;
+  creatorEarningId: string | null;
+  rechargeOrderId: string | null;
+  paymentProviderEventId: string | null;
+  tokenPurchaseId: string | null;
+  usageChargeId: string | null;
+  withdrawRequestId: string | null;
 };
 
 function purchaseInput(overrides: Partial<WalletLedgerTransactionInput> = {}): WalletLedgerTransactionInput {
@@ -48,6 +58,7 @@ function purchaseInput(overrides: Partial<WalletLedgerTransactionInput> = {}): W
         entryKey: "platform_revenue_credit",
         accountType: AmnWalletAccountType.PLATFORM_REVENUE,
         entryKind: AmnLedgerEntryKind.PLATFORM_REVENUE_CREDIT,
+        representativeId: "rep_1",
         amountCents: 800,
       },
       {
@@ -88,7 +99,10 @@ describe("agent wallet ledger", () => {
     });
     expect(entries.find((entry) => entry.entryKind === "AGENT_TOKEN_CREDIT")).toMatchObject({
       tokenAmount: 1000,
-      tokenBalanceAfter: 1000,
+      tokenBalanceAfter: null,
+    });
+    expect(entries.find((entry) => entry.entryKind === "PLATFORM_REVENUE_CREDIT")).toMatchObject({
+      balanceAfterCents: null,
     });
   });
 
@@ -104,6 +118,101 @@ describe("agent wallet ledger", () => {
       amountCents: 0,
       tokenAmount: 1000,
     });
+  });
+
+  it("stores a running after-balance only when the opening dimension is known", () => {
+    const entries = buildWalletLedgerCreateInputs({
+      eventGroupId: "running_balance",
+      idempotencyKey: "running_balance",
+      currency: "CNY",
+      initialBalances: {
+        [`${AmnWalletAccountType.USER_CASH}:user_wallet_1`]: {
+          amountCents: 100,
+        },
+      },
+      movements: [
+        {
+          entryKey: "first_debit",
+          accountType: AmnWalletAccountType.USER_CASH,
+          entryKind: AmnLedgerEntryKind.USER_CASH_DEBIT,
+          userWalletId: "user_wallet_1",
+          amountCents: -30,
+        },
+        {
+          entryKey: "second_debit",
+          accountType: AmnWalletAccountType.USER_CASH,
+          entryKind: AmnLedgerEntryKind.USER_CASH_DEBIT,
+          userWalletId: "user_wallet_1",
+          amountCents: -20,
+        },
+        {
+          entryKey: "unknown_platform_credit",
+          accountType: AmnWalletAccountType.PLATFORM_REVENUE,
+          entryKind: AmnLedgerEntryKind.PLATFORM_REVENUE_CREDIT,
+          representativeId: "rep_1",
+          amountCents: 50,
+        },
+      ],
+    });
+
+    expect(entries[0]).toMatchObject({
+      balanceAfterCents: 70,
+      tokenBalanceAfter: null,
+    });
+    expect(entries[1]).toMatchObject({
+      balanceAfterCents: 50,
+      tokenBalanceAfter: null,
+    });
+    expect(entries[2]).toMatchObject({
+      balanceAfterCents: null,
+      tokenBalanceAfter: null,
+    });
+  });
+
+  it("uses an explicit after-balance as the running seed for later movements", () => {
+    const entries = buildWalletLedgerCreateInputs({
+      eventGroupId: "override_seed",
+      idempotencyKey: "override_seed",
+      currency: "CNY",
+      movements: [
+        {
+          entryKey: "reconciled_snapshot",
+          accountType: AmnWalletAccountType.USER_CASH,
+          entryKind: AmnLedgerEntryKind.USER_RECHARGE,
+          userWalletId: "user_wallet_1",
+          amountCents: 0,
+          balanceAfterCents: 100,
+        },
+        {
+          entryKey: "later_debit",
+          accountType: AmnWalletAccountType.USER_CASH,
+          entryKind: AmnLedgerEntryKind.USER_CASH_DEBIT,
+          userWalletId: "user_wallet_1",
+          amountCents: -20,
+        },
+      ],
+    });
+
+    expect(entries.map((entry) => entry.balanceAfterCents)).toEqual([100, 80]);
+  });
+
+  it("scopes service, platform, settlement, and payout accounts explicitly", () => {
+    expect(walletLedgerAccountKey({
+      accountType: AmnWalletAccountType.SERVICE_CREDIT_DEFERRED,
+      userAgentWalletId: "user_agent_wallet_1",
+    })).toBe("SERVICE_CREDIT_DEFERRED:user_agent_wallet_1");
+    expect(walletLedgerAccountKey({
+      accountType: AmnWalletAccountType.PLATFORM_EARNED_REVENUE,
+      representativeId: "rep_1",
+    })).toBe("PLATFORM_EARNED_REVENUE:rep_1");
+    expect(walletLedgerAccountKey({
+      accountType: AmnWalletAccountType.EXTERNAL_SETTLEMENT,
+      metadata: { provider: "stripe" },
+    })).toBe("EXTERNAL_SETTLEMENT:stripe");
+    expect(walletLedgerAccountKey({
+      accountType: AmnWalletAccountType.PAYOUT_CLEARING,
+      ownerId: "owner_1",
+    })).toBe("PAYOUT_CLEARING:owner_1");
   });
 
   it("rejects unbalanced internal cash transfers", () => {
@@ -163,6 +272,28 @@ describe("agent wallet ledger", () => {
     expect(client.entries).toHaveLength(4);
   });
 
+  it("rejects reuse of a ledger idempotency key with different movements", async () => {
+    const client = new FakeLedgerClient();
+    await recordWalletLedgerTransaction(purchaseInput(), client);
+
+    const changedMovements = purchaseInput().movements.map((movement) => {
+      if (movement.entryKey === "user_cash_debit") {
+        return { ...movement, amountCents: -900 };
+      }
+      if (movement.entryKey === "platform_revenue_credit") {
+        return { ...movement, amountCents: 700 };
+      }
+      return movement;
+    });
+    await expect(
+      recordWalletLedgerTransaction(
+        purchaseInput({ movements: changedMovements }),
+        client,
+      ),
+    ).rejects.toThrow("Idempotency key was already used");
+    expect(client.entries).toHaveLength(4);
+  });
+
   it("rolls back all entries when a transaction fails", async () => {
     const client = new FakeLedgerClient({ failOnCreateNumber: 2 });
 
@@ -215,6 +346,16 @@ class FakeLedgerClient {
         tokenAmount: args.data.tokenAmount ?? 0,
         currency: args.data.currency ?? "CNY",
         createdAt: new Date(Date.UTC(2026, 6, 3, 0, 0, this.entries.length)),
+        userWalletId: args.data.userWalletId ?? null,
+        agentWalletId: args.data.agentWalletId ?? null,
+        representativeId: args.data.representativeId ?? null,
+        ownerId: args.data.ownerId ?? null,
+        creatorEarningId: args.data.creatorEarningId ?? null,
+        rechargeOrderId: args.data.rechargeOrderId ?? null,
+        paymentProviderEventId: args.data.paymentProviderEventId ?? null,
+        tokenPurchaseId: args.data.tokenPurchaseId ?? null,
+        usageChargeId: args.data.usageChargeId ?? null,
+        withdrawRequestId: args.data.withdrawRequestId ?? null,
       };
       this.entries.push(entry);
       return entry;

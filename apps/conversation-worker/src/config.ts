@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-const minimumOutboxProcessingLeaseMs = 5 * 60 * 60_000;
+const defaultOutboxProcessingLeaseMs = 5 * 60_000;
+const minimumOutboxProcessingLeaseMs = defaultOutboxProcessingLeaseMs;
 
 const configSchema = z.object({
   port: z.number().int().min(1).max(65535),
@@ -47,7 +48,7 @@ export function resolveConversationWorkerConfig(
     telegramConversationPlatformMode,
     telegramRequestTimeoutMs: Number(env.TELEGRAM_REQUEST_TIMEOUT_MS || 15_000),
     outboxProcessingLeaseMs: Number(
-      env.CONVERSATION_OUTBOX_PROCESSING_LEASE_MS || 5 * 60 * 60_000,
+      env.CONVERSATION_OUTBOX_PROCESSING_LEASE_MS || defaultOutboxProcessingLeaseMs,
     ),
   });
 }

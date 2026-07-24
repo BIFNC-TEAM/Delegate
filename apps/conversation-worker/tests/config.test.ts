@@ -9,7 +9,7 @@ describe("conversation worker config", () => {
       pollMs: 500,
       telegramConversationPlatformMode: "worker",
       telegramRequestTimeoutMs: 15_000,
-      outboxProcessingLeaseMs: 5 * 60 * 60_000,
+      outboxProcessingLeaseMs: 5 * 60_000,
     });
   });
 
@@ -47,8 +47,13 @@ describe("conversation worker config", () => {
     ).toThrow();
     expect(() =>
       resolveConversationWorkerConfig({
-        CONVERSATION_OUTBOX_PROCESSING_LEASE_MS: "1000",
+        CONVERSATION_OUTBOX_PROCESSING_LEASE_MS: String(5 * 60_000 - 1),
       })
     ).toThrow();
+    expect(resolveConversationWorkerConfig({
+      CONVERSATION_OUTBOX_PROCESSING_LEASE_MS: String(5 * 60_000),
+    })).toMatchObject({
+      outboxProcessingLeaseMs: 5 * 60_000,
+    });
   });
 });

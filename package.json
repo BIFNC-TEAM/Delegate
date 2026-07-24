@@ -7,6 +7,7 @@
   "packageManager": "pnpm@10.23.0",
   "scripts": {
     "build": "turbo run build",
+    "verify": "pnpm db:generate && pnpm db:validate && pnpm typecheck && pnpm test",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "dev:web": "pnpm --filter @delegate/dashboard dev",

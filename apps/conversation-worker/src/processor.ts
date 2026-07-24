@@ -796,6 +796,7 @@ async function completeTerminalDelegationFailure(
       taskId: item.delegationTaskId,
       stepId: item.delegationTaskStepId,
       generationRunId: item.runId,
+      ...delegationLeaseFence(item),
       outcome: "failed",
       failureReason: replyText,
     });
@@ -858,6 +859,7 @@ async function processPublicWebComputeRequest(input: {
         taskId: input.delegation.task.id,
         stepId: input.delegation.step.id,
         generationRunId: input.item.runId,
+        ...delegationLeaseFence(input.item),
         outcome: "blocked",
         failureReason: "Delegated execution was disabled before this step could start.",
       });
@@ -903,6 +905,7 @@ async function processPublicWebComputeRequest(input: {
       taskId: delegation.task.id,
       stepId: delegationStepId,
       generationRunId: input.item.runId,
+      ...delegationLeaseFence(input.item),
       outcome: "blocked",
       failureReason,
     });
@@ -974,6 +977,7 @@ async function processPublicWebComputeRequest(input: {
       taskId: delegation.task.id,
       stepId: delegation.step.id,
       generationRunId: input.item.runId,
+      ...delegationLeaseFence(input.item),
       outcome: "failed",
       failureReason: error instanceof Error ? error.message : "Compute execution failed.",
     });
@@ -1021,6 +1025,7 @@ async function processPublicWebComputeRequest(input: {
     taskId: delegation.task.id,
     stepId: delegation.step.id,
     generationRunId: input.item.runId,
+    ...delegationLeaseFence(input.item),
     outcome: result.outcome === "blocked"
       ? "blocked"
       : result.outcome === "failed"
@@ -1054,6 +1059,17 @@ async function processPublicWebComputeRequest(input: {
     hasMoreSteps: Boolean(finalization?.hasMoreSteps),
     ...(attachments.length ? { attachments } : {}),
   };
+}
+
+function delegationLeaseFence(
+  item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>,
+) {
+  return Number.isSafeInteger(item.leaseAttempt)
+    ? {
+        outboxId: item.outboxId,
+        leaseAttempt: item.leaseAttempt,
+      }
+    : {};
 }
 
 function resolvePublicArtifactFileName(

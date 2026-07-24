@@ -1448,6 +1448,7 @@ describe("conversation worker knowledge recall", () => {
     };
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-next-step",
+      leaseAttempt: 4,
       runId: "run-next-step",
       delegationTaskId: "task-existing",
       delegationTaskStepId: "step-existing-2",
@@ -1486,6 +1487,8 @@ describe("conversation worker knowledge recall", () => {
       taskId: "task-existing",
       stepId: "step-existing-2",
       generationRunId: "run-next-step",
+      outboxId: "outbox-next-step",
+      leaseAttempt: 4,
     }));
   });
 

@@ -250,10 +250,25 @@ describe("delegation task owner actions", () => {
 
     await finalizeComputeDelegationTask({
       taskId: "task-1",
+      generationRunId: "run-1",
+      outboxId: "outbox-run-1",
+      leaseAttempt: 3,
       outcome: "completed",
       actualCredits: 4,
     });
 
+    expect(mockPrisma.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "outbox-run-1",
+        aggregateType: "generation_run",
+        aggregateId: "run-1",
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: 3,
+        availableAt: { gt: expect.any(Date) },
+      },
+      data: { status: "PROCESSING" },
+    });
     expect(mockPrisma.delegationTaskOutput.create).toHaveBeenCalledWith({
       data: {
         delegationTaskId: "task-1",
@@ -271,6 +286,30 @@ describe("delegation task owner actions", () => {
         toStatus: "COMPLETED",
       }),
     });
+  });
+
+  it("rolls back task and billing finalization when the worker lease is stale", async () => {
+    mockPrisma.outboxEvent.updateMany.mockResolvedValueOnce({ count: 0 });
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    await expect(
+      finalizeComputeDelegationTask({
+        taskId: "task-1",
+        stepId: "step-1",
+        generationRunId: "run-1",
+        outboxId: "outbox-run-1",
+        leaseAttempt: 2,
+        outcome: "completed",
+      }),
+    ).rejects.toMatchObject({
+      code: "generation_work_lease_lost",
+    });
+
+    expect(mockPrisma.delegationTask.findUnique).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTaskStep.update).not.toHaveBeenCalled();
+    expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
+    expect(settleAgentUsageCredits).not.toHaveBeenCalled();
+    expect(releaseAgentUsageCredits).not.toHaveBeenCalled();
   });
 
   it("distinguishes a policy-blocked step from an execution failure", async () => {

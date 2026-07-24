@@ -20,7 +20,10 @@ import {
   settleAgentUsageCredits,
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
-import { readGenerationWalletReservation } from "./conversation-platform";
+import {
+  fenceGenerationWorkLease,
+  readGenerationWalletReservation,
+} from "./conversation-platform";
 import { prisma } from "./prisma";
 import { canonicalizeDelegationTaskEvent } from "./delegation-task-events";
 import {
@@ -656,6 +659,8 @@ export async function finalizeComputeDelegationTask(input: {
   taskId: string;
   stepId?: string;
   generationRunId?: string;
+  outboxId?: string;
+  leaseAttempt?: number;
   outcome: DelegationTaskTerminalOutcome;
   artifacts?: Array<{ id: string; kind: string; summary?: string | null }>;
   failureReason?: string;
@@ -664,6 +669,24 @@ export async function finalizeComputeDelegationTask(input: {
   const terminal = mapTerminalOutcome(input.outcome);
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
+    const hasLeaseFence =
+      input.outboxId !== undefined || input.leaseAttempt !== undefined;
+    if (hasLeaseFence) {
+      if (
+        !input.generationRunId
+        || !input.outboxId
+        || input.leaseAttempt === undefined
+      ) {
+        throw new Error(
+          "Delegation task lease fencing requires generationRunId, outboxId, and leaseAttempt.",
+        );
+      }
+      await fenceGenerationWorkLease(tx, {
+        runId: input.generationRunId,
+        outboxId: input.outboxId,
+        leaseAttempt: input.leaseAttempt,
+      });
+    }
     const task = await tx.delegationTask.findUnique({
       where: { id: input.taskId },
       include: {

@@ -50,6 +50,13 @@ describePostgres("fresh PostgreSQL seed", () => {
       slug: representativeSlug,
       owner: {
         displayName: "Lin",
+        identityLinks: [
+          {
+            email: "creator@delegate.local",
+            providerSubject: "delegate-dev-owner",
+            verifiedAt: expect.any(Date),
+          },
+        ],
       },
     });
     expect(seeded.skillInstallCount).toBeGreaterThan(0);
@@ -72,6 +79,17 @@ async function readSeedSnapshot() {
       owner: {
         select: {
           displayName: true,
+          identityLinks: {
+            where: {
+              provider: "LOGTO",
+              providerSubject: "delegate-dev-owner",
+            },
+            select: {
+              email: true,
+              providerSubject: true,
+              verifiedAt: true,
+            },
+          },
         },
       },
     },

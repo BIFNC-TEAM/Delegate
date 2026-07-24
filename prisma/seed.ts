@@ -15,6 +15,7 @@ import {
   GroupActivation,
   HandoffStatus,
   InvoiceStatus,
+  OwnerIdentityLinkProvider,
   Prisma,
   PolicyDecision,
   PricingPlanType,
@@ -37,6 +38,7 @@ try {
 const prisma = new PrismaClient();
 
 const DEMO_OWNER_ID = "owner_lin_demo";
+const DEMO_OWNER_DEV_AUTH_SUBJECT = "delegate-dev-owner";
 const DEMO_WALLET_ID = "wallet_lin_demo";
 const DEMO_USER_WALLET_ID = "user_wallet_demo_public";
 const DEMO_AGENT_WALLET_ID = "agent_wallet_lin_demo";
@@ -147,6 +149,51 @@ export async function seedDatabase(
         handle: "lin",
         timezone: "Asia/Shanghai",
         creatorVerificationStatus: CreatorVerificationStatus.VERIFIED,
+      },
+    });
+
+    const existingDevAuthLink = await tx.ownerIdentityLink.findUnique({
+      where: {
+        provider_providerSubject: {
+          provider: OwnerIdentityLinkProvider.LOGTO,
+          providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
+        },
+      },
+      select: { ownerId: true },
+    });
+    if (existingDevAuthLink && existingDevAuthLink.ownerId !== owner.id) {
+      throw new Error(
+        `Seed development auth subject "${DEMO_OWNER_DEV_AUTH_SUBJECT}" already belongs to another owner.`,
+      );
+    }
+    await tx.ownerIdentityLink.upsert({
+      where: {
+        provider_providerSubject: {
+          provider: OwnerIdentityLinkProvider.LOGTO,
+          providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
+        },
+      },
+      create: {
+        id: "owner_identity_link_dev_demo",
+        ownerId: owner.id,
+        provider: OwnerIdentityLinkProvider.LOGTO,
+        providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
+        email: "creator@delegate.local",
+        verifiedAt: now,
+        metadata: {
+          mode: "development",
+          actor: "owner",
+          fixture: "prisma-seed",
+        },
+      },
+      update: {
+        email: "creator@delegate.local",
+        verifiedAt: now,
+        metadata: {
+          mode: "development",
+          actor: "owner",
+          fixture: "prisma-seed",
+        },
       },
     });
 

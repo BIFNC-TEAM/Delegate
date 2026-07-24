@@ -26,6 +26,7 @@ type OwnerPermissionRecord = {
   organizationMember: {
     organizationId: string;
     canApproveCompute: boolean;
+    canManageBilling: boolean;
     canManagePolicies: boolean;
   } | null;
 };
@@ -114,6 +115,23 @@ export async function assertOwnerCanManageSkills(
   }
 }
 
+export async function assertOwnerCanManageBilling(
+  ownerId: string | null | undefined,
+  loadOwnerPermissions: OwnerPermissionLoader = loadPersistedOwnerPermissions,
+) {
+  const normalizedOwnerId = ownerId?.trim();
+  if (!normalizedOwnerId) {
+    throw new RepresentativeAccessError("Authentication required.", 401);
+  }
+  const owner = await loadOwnerPermissions(normalizedOwnerId);
+  if (!hasOwnerOrganizationPermission(owner, "canManageBilling")) {
+    throw new RepresentativeAccessError(
+      "You do not have permission to manage workspace billing.",
+      403,
+    );
+  }
+}
+
 export async function assertOwnerCanResolveApproval(input: {
   ownerId: string | null | undefined;
   representativeSlug: string;
@@ -146,7 +164,7 @@ export async function assertOwnerCanResolveApproval(input: {
 
 function hasOwnerOrganizationPermission(
   owner: OwnerPermissionRecord | null,
-  permission: "canApproveCompute" | "canManagePolicies",
+  permission: "canApproveCompute" | "canManageBilling" | "canManagePolicies",
 ) {
   if (!owner) return false;
   if (owner.organizationId === null) return true;
@@ -165,6 +183,7 @@ async function loadPersistedOwnerPermissions(
         select: {
           organizationId: true,
           canApproveCompute: true,
+          canManageBilling: true,
           canManagePolicies: true,
         },
       },

@@ -190,6 +190,19 @@
 - **Composer:** Human reply is an inline composer, enabled only while a named Operator owns the conversation. Internal notes use a separate team-only input in the inspector.
 - **Realtime:** Queue changes arrive without a page reload. Realtime state must preserve the current selection and must not erase unsent operator text.
 
+## Wallet & Billing Pattern
+- **Scope:** Wallet is a workspace money view first. It opens on all owned representatives and narrows by representative, currency, date, and event type without changing the active representative used to authorize the Dashboard session.
+- **Currency boundary:** Every metric and table request resolves exactly one currency. Never add unlike currencies or present a converted total unless an explicit exchange-rate product is introduced later.
+- **Primary hierarchy:** Lead with period gross sales and released creator income, then current pending earnings, withdrawable earnings, and payout-in-progress funds. Every value pairs a mono amount with a short operational interpretation.
+- **Navigation:** Keep four persistent destinations: Overview, Transactions, Settlements, and Ledger. Transactions are human-readable business events; Ledger is the immutable movement trail and must not become the default owner experience.
+- **Traceability:** Selecting a transaction, withdrawal, or ledger entry reveals its representative, status, time, source, transaction ID, and event group. Business events explain what happened; linked ledger entries prove how value moved.
+- **Filters and time:** Representative, currency, date range, event type, and search stay directly above the current view. The server anchors listed records at an explicit `asOf` event cutoff and uses cursor pagination so appended events do not corrupt page boundaries. `asOf` is not a historical balance snapshot: current balance cards, period totals, actions, and filter facets are calculated with the first page and remain fixed while later event pages append.
+- **Status language:** Use textual states in addition to color. Teal means completed/trusted, amber means pending review or processing, red means actionable failure, and neutral gray means canceled, refunded, or reversed.
+- **Primary action:** Show withdrawal only when verified, withdrawable funds exist, and no incompatible payout state blocks it. Otherwise show the concrete prerequisite or no action; never render a decorative button that implies money will move.
+- **Empty and framework states:** Live zero states say that no matching records exist. Sample values are never shown as production balances, and incomplete payout integrations remain explicitly labeled.
+- **Responsive behavior:** Desktop uses a horizontally scrollable operational table with a trace detail rail. On mobile, preserve every financial column through horizontal scrolling and open details as a full-screen sheet with Escape, focus containment, visible close control, and at least 44px touch targets.
+- **Security:** Wallet responses are owner- and billing-permission scoped, private, and non-cacheable. UI and exports contain normalized references only, never raw provider payloads, credentials, or internal exception text.
+
 ## Public Representative Chat-first Pattern
 - **Audience:** The public representative page is for the external visitor, never the Owner operating the representative. Owner-facing counts, setup terminology, runtime configuration, channel roadmaps, and skill-pack internals remain in the Dashboard.
 - **First task:** The primary public action is conversation. Use a compact identity hero followed immediately by the durable chat; do not require an extra “start” page or force visitors through representative configuration explanations.
@@ -219,3 +232,4 @@
 | 2026-07-17 | Restored the Owner 1:N representative workspace flow | Makes creation, six-step draft configuration, publish readiness, immutable public runtime, and version reactivation reachable in one module without changing Owner identity from representative settings. |
 | 2026-07-17 | Connected representative setup to the workspace Knowledge Library | Keeps structured public answers and reusable source assets distinct while allowing ready files to be authorized, counted, and indexed for a representative without duplicate storage. |
 | 2026-07-17 | Defined Conversations / Pending / Leads and Chat-first public runtime | Separates identity, work, and opportunity state; makes operator authorship, durable async chat, public citations, and one strict availability gate part of the product contract. |
+| 2026-07-23 | Defined workspace Wallet & Billing | Separates explainable money events from immutable ledger movements, enforces single-currency totals, makes payout prerequisites explicit, and establishes traceable desktop/mobile behavior for owner financial operations. |

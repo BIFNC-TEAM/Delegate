@@ -32,10 +32,14 @@ import {
   markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval,
   markDelegationTaskRunning,
+  GENERATION_WORK_LEASE_DURATION_MS,
+  GenerationWorkLeaseLostError,
   finalizeComputeDelegationTask,
   findConversationClarifyingDelegationTask,
+  isGenerationWorkLeaseLostError,
   continueClarifyingDelegationTask,
   recallRepresentativeContext,
+  renewGenerationWorkItemLease,
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
   waitGenerationRunForComputeApproval,
@@ -87,10 +91,19 @@ export async function processNextConversationWork(config: ConversationWorkerConf
   const item = await claimNextGenerationWorkItem();
   if (!item) return { processed: false as const };
 
+  const leaseGuard = startGenerationLeaseHeartbeat(item);
+  const workLease = {
+    outboxId: item.outboxId,
+    leaseAttempt: item.leaseAttempt,
+  };
   let outputMessageId: string | undefined;
   try {
+    leaseGuard.assertOwned();
     if (item.controlState === "HUMAN_ACTIVE" || item.controlState === "NEEDS_HUMAN") {
-      await deferGenerationRunForHuman(item.runId);
+      await deferGenerationRunForHuman({
+        runId: item.runId,
+        ...workLease,
+      });
       return { processed: true as const, runId: item.runId, status: "waiting_human" as const };
     }
 
@@ -98,6 +111,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       item.representativeSlug,
       item.representativeVersionId,
     );
+    leaseGuard.assertOwned();
     if (!setup) throw new Error(`Representative ${item.representativeSlug} was not found.`);
     const delegationConfig = resolveDelegationConfig(setup);
 
@@ -136,6 +150,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           ].join("\n\n");
       const completed = await completeInlineGenerationRun({
         runId: item.runId,
+        ...workLease,
         replyText,
         senderDisplayName: item.representativeName,
         intent: "compute_help",
@@ -143,7 +158,11 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         completeOutbox: false,
       });
       outputMessageId = completed.message.id;
-      await markGenerationDeliveryComplete({ runId: item.runId, outputMessageId });
+      await markGenerationDeliveryComplete({
+        runId: item.runId,
+        ...workLease,
+        outputMessageId,
+      });
       return { processed: true as const, runId: item.runId, status: "completed" as const };
     }
 
@@ -183,6 +202,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         userText: plannerContext.text,
         maxSteps: delegationConfig.maxSteps,
       });
+      leaseGuard.assertOwned();
       if (planned.ok && planned.plan) {
         if (planned.plan.kind === "clarification") {
           if (clarifyingTask) {
@@ -216,6 +236,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           }
           const completed = await completeInlineGenerationRun({
             runId: item.runId,
+            ...workLease,
             replyText: planned.plan.question,
             senderDisplayName: item.representativeName,
             intent: "delegation_clarification",
@@ -223,7 +244,11 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             completeOutbox: false,
           });
           outputMessageId = completed.message.id;
-          await markGenerationDeliveryComplete({ runId: item.runId, outputMessageId });
+          await markGenerationDeliveryComplete({
+            runId: item.runId,
+            ...workLease,
+            outputMessageId,
+          });
           return { processed: true as const, runId: item.runId, status: "waiting_input" as const };
         }
         parsedRequests = buildComputeRequestsFromDelegationPlan(planned.plan);
@@ -265,6 +290,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       const computeReply = await processPublicWebComputeRequest({
         item,
         setup,
+        leaseGuard,
         parsed: parsedRequests[0]!,
         ...(planSteps ? { planSteps } : {}),
         ...(planSummary ? { planSummary } : {}),
@@ -275,6 +301,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       if (computeReply.approvalId) {
         const waiting = await waitGenerationRunForComputeApproval({
           runId: item.runId,
+          ...workLease,
           approvalId: computeReply.approvalId,
           replyText: computeReply.text,
           senderDisplayName: item.representativeName,
@@ -290,17 +317,19 @@ export async function processNextConversationWork(config: ConversationWorkerConf
 
       const completed = await completeInlineGenerationRun({
         runId: item.runId,
+        ...workLease,
         replyText: computeReply.text,
         senderDisplayName: item.representativeName,
         intent: "compute",
         ...(computeReply.attachments?.length ? { attachments: computeReply.attachments } : {}),
         completeOutbox: false,
-        ...(persistedRequest ? { countUsage: false } : {}),
+        countUsage: computeReply.billable && !persistedRequest,
         keepConversationQueued: computeReply.hasMoreSteps,
       });
       outputMessageId = completed.message.id;
       await markGenerationDeliveryComplete({
         runId: item.runId,
+        ...workLease,
         outputMessageId,
       });
       return {
@@ -344,6 +373,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         recentTurns,
         collectorState: null,
       });
+      leaseGuard.assertOwned();
       if (generated.ok) {
         replyText = generated.replyText;
         runtime = {
@@ -363,16 +393,19 @@ export async function processNextConversationWork(config: ConversationWorkerConf
 
     const completed = await completeInlineGenerationRun({
       runId: item.runId,
+      ...workLease,
       replyText,
       senderDisplayName: item.representativeName,
       intent: plan.intent,
       completeOutbox: false,
+      countUsage: true,
       ...(citations.length ? { citations } : {}),
       ...runtime,
     });
     outputMessageId = completed.message.id;
 
     if (["collect_intake", "handoff", "ask_owner"].includes(plan.nextStep)) {
+      leaseGuard.assertOwned();
       const requestHandoff = plan.nextStep === "handoff" || plan.nextStep === "ask_owner";
       await ensureConversationLeadAndHandoff({
         conversationId: item.conversationId,
@@ -383,10 +416,12 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         source: item.channel,
         requestHandoff,
       });
+      leaseGuard.assertOwned();
     }
 
     let externalMessageId: string | undefined;
     if (item.channel === "matrix") {
+      leaseGuard.assertOwned();
       if (!item.externalConversationId || !item.matrixSenderUserId) {
         throw new Error("Matrix room or representative virtual user is missing.");
       }
@@ -397,37 +432,128 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         generationRunId: item.runId,
         text: replyText,
       });
+      leaseGuard.assertOwned();
     } else if (item.channel === "telegram") {
       throw new Error("Telegram generation delivery remains owned by the existing bot adapter.");
     }
 
     await markGenerationDeliveryComplete({
       runId: item.runId,
+      ...workLease,
       outputMessageId,
       ...(externalMessageId ? { externalMessageId } : {}),
     });
     return { processed: true as const, runId: item.runId, status: "completed" as const };
   } catch (error) {
+    if (leaseGuard.isLost() || isGenerationWorkLeaseLostError(error)) {
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "lease_lost" as const,
+      };
+    }
     const errorMessage = error instanceof Error ? error.message : "Conversation processing failed.";
     const userFacingFailure = renderUserCorrectableDelegationFailure(errorMessage);
-    if (!outputMessageId && userFacingFailure) {
-      return completeTerminalDelegationFailure(item, userFacingFailure);
-    }
-    if (outputMessageId) {
-      await retryGenerationDelivery({
-        runId: item.runId,
-        outputMessageId,
-        errorMessage,
-      });
-    } else {
-      await failGenerationRun({
-        runId: item.runId,
-        errorCode: "conversation_worker_failed",
-        errorMessage,
-      });
+    try {
+      if (!outputMessageId && userFacingFailure) {
+        return await completeTerminalDelegationFailure(item, userFacingFailure);
+      }
+      if (outputMessageId) {
+        await retryGenerationDelivery({
+          runId: item.runId,
+          ...workLease,
+          outputMessageId,
+          errorMessage,
+        });
+      } else {
+        await failGenerationRun({
+          runId: item.runId,
+          ...workLease,
+          errorCode: "conversation_worker_failed",
+          errorMessage,
+        });
+      }
+    } catch (commitError) {
+      if (leaseGuard.isLost() || isGenerationWorkLeaseLostError(commitError)) {
+        return {
+          processed: true as const,
+          runId: item.runId,
+          status: "lease_lost" as const,
+        };
+      }
+      throw commitError;
     }
     return { processed: true as const, runId: item.runId, status: "failed" as const, error: errorMessage };
+  } finally {
+    leaseGuard.stop();
   }
+}
+
+function startGenerationLeaseHeartbeat(
+  item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>,
+) {
+  // Runtime guard keeps older queued fixtures/workers harmless during a
+  // rolling deploy even though new claims always include the lease attempt.
+  if (!Number.isSafeInteger(item.leaseAttempt)) {
+    return {
+      assertOwned: () => {},
+      isLost: () => false,
+      stop: () => {},
+    };
+  }
+
+  let renewing = false;
+  let lostError: GenerationWorkLeaseLostError | undefined;
+  let stopped = false;
+  let heartbeat: ReturnType<typeof setInterval>;
+  const markLost = () => {
+    if (lostError) return;
+    lostError = new GenerationWorkLeaseLostError(
+      item.outboxId,
+      item.leaseAttempt,
+    );
+    if (heartbeat) clearInterval(heartbeat);
+  };
+  heartbeat = setInterval(() => {
+    if (renewing || stopped || lostError) return;
+    renewing = true;
+    void renewGenerationWorkItemLease({
+      outboxId: item.outboxId,
+      leaseAttempt: item.leaseAttempt,
+    })
+      .then((renewed) => {
+        if (!renewed) {
+          markLost();
+          console.warn(
+            `Conversation work lease was lost for generation run ${item.runId}.`,
+          );
+        }
+      })
+      .catch((error) => {
+        markLost();
+        console.error(
+          `Conversation work lease renewal failed for generation run ${item.runId}.`,
+          error,
+        );
+      })
+      .finally(() => {
+        renewing = false;
+      });
+  }, Math.max(1_000, Math.floor(GENERATION_WORK_LEASE_DURATION_MS / 3)));
+  heartbeat.unref?.();
+
+  return {
+    assertOwned() {
+      if (lostError) throw lostError;
+    },
+    isLost() {
+      return Boolean(lostError);
+    },
+    stop() {
+      stopped = true;
+      clearInterval(heartbeat);
+    },
+  };
 }
 
 async function buildDelegationPlannerInput(input: {
@@ -508,6 +634,8 @@ async function completeTerminalDelegationFailure(
   }
   const completed = await completeInlineGenerationRun({
     runId: item.runId,
+    outboxId: item.outboxId,
+    leaseAttempt: item.leaseAttempt,
     replyText,
     senderDisplayName: item.representativeName,
     intent: "delegation_failed",
@@ -516,6 +644,8 @@ async function completeTerminalDelegationFailure(
   });
   await markGenerationDeliveryComplete({
     runId: item.runId,
+    outboxId: item.outboxId,
+    leaseAttempt: item.leaseAttempt,
     outputMessageId: completed.message.id,
   });
   return { processed: true as const, runId: item.runId, status: "completed" as const };
@@ -531,6 +661,7 @@ function renderUserCorrectableDelegationFailure(errorMessage: string) {
 async function processPublicWebComputeRequest(input: {
   item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
   setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>;
+  leaseGuard: ReturnType<typeof startGenerationLeaseHeartbeat>;
   parsed: ParsedComputeRequest;
   planSummary?: string;
   planSteps?: Array<{ summary: string; request: ParsedComputeRequest }>;
@@ -538,6 +669,7 @@ async function processPublicWebComputeRequest(input: {
   delegation?: { task: { id: string }; step: { id: string } };
 }): Promise<{
   text: string;
+  billable: boolean;
   hasMoreSteps: boolean;
   approvalId?: string;
   attachments?: Array<{
@@ -548,9 +680,11 @@ async function processPublicWebComputeRequest(input: {
     url: string;
   }>;
 }> {
+  input.leaseGuard.assertOwned();
   const delegationConfig = resolveDelegationConfig(input.setup);
   if (!input.setup.compute.enabled || !delegationConfig.enabled) {
     if (input.delegation) {
+      input.leaseGuard.assertOwned();
       await finalizeComputeDelegationTask({
         taskId: input.delegation.task.id,
         stepId: input.delegation.step.id,
@@ -558,15 +692,18 @@ async function processPublicWebComputeRequest(input: {
         outcome: "blocked",
         failureReason: "Delegated execution was disabled before this step could start.",
       });
+      input.leaseGuard.assertOwned();
     }
     return {
       text: input.setup.compute.enabled
         ? "这个代表当前不接受委托任务。"
         : "这个代表当前没有启用 Compute。请联系代表所有者在 Dashboard 中启用后再试。",
+      billable: false,
       hasMoreSteps: false,
     };
   }
 
+  input.leaseGuard.assertOwned();
   const delegation = input.delegation ?? await createComputeDelegationTask({
     representativeId: input.setup.id,
     representativeVersionId: input.item.representativeVersionId,
@@ -587,10 +724,12 @@ async function processPublicWebComputeRequest(input: {
     networkMode: input.setup.compute.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
     filesystemMode: input.setup.compute.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
   });
+  input.leaseGuard.assertOwned();
   if (!delegation.step) throw new Error("Delegation task is missing its compute step.");
   const delegationStepId = delegation.step.id;
 
   const blockDelegation = async (failureReason: string, text: string) => {
+    input.leaseGuard.assertOwned();
     await finalizeComputeDelegationTask({
       taskId: delegation.task.id,
       stepId: delegationStepId,
@@ -598,7 +737,8 @@ async function processPublicWebComputeRequest(input: {
       outcome: "blocked",
       failureReason,
     });
-    return { text, hasMoreSteps: false };
+    input.leaseGuard.assertOwned();
+    return { text, billable: false, hasMoreSteps: false };
   };
 
   const plannedStepCount = input.planSteps?.length ?? 1;
@@ -635,6 +775,7 @@ async function processPublicWebComputeRequest(input: {
 
   let result: Awaited<ReturnType<typeof executeAudienceTool>>;
   try {
+    input.leaseGuard.assertOwned();
     const session = await createAudienceComputeSession({
       representativeId: input.setup.id,
       contactId: input.item.contactId,
@@ -647,16 +788,19 @@ async function processPublicWebComputeRequest(input: {
       reason: `web:${input.parsed.capability}`,
       requestedBaseImage: input.setup.compute.baseImage,
     });
+    input.leaseGuard.assertOwned();
     await markDelegationTaskRunning(delegation.task.id, delegation.step.id);
+    input.leaseGuard.assertOwned();
     result = await executeAudienceTool(session.session.id, {
       ...input.parsed,
       subagentId: subagent.id,
-      hasPaidEntitlement:
-        input.parsed.hasPaidEntitlement ||
-        input.item.usage.passUnlocked ||
-        input.item.usage.deepHelpUnlocked,
+      // The compute broker derives paid plan authority from its server-side
+      // conversation and generation-run context. Never elevate a client payload.
+      hasPaidEntitlement: false,
     });
+    input.leaseGuard.assertOwned();
   } catch (error) {
+    input.leaseGuard.assertOwned();
     await finalizeComputeDelegationTask({
       taskId: delegation.task.id,
       stepId: delegation.step.id,
@@ -664,23 +808,27 @@ async function processPublicWebComputeRequest(input: {
       outcome: "failed",
       failureReason: error instanceof Error ? error.message : "Compute execution failed.",
     });
+    input.leaseGuard.assertOwned();
     throw error;
   }
 
   if (result.outcome === "pending_approval") {
     if (!result.approvalRequest) throw new Error("Compute approval response is missing.");
+    input.leaseGuard.assertOwned();
     await markDelegationTaskAwaitingApproval({
       taskId: delegation.task.id,
       stepId: delegation.step.id,
       approvalId: result.approvalRequest.id,
     });
+    input.leaseGuard.assertOwned();
     return {
       approvalId: result.approvalRequest.id,
-        hasMoreSteps: false,
-        text: [
-          `委托任务已提交，正在等待代表所有者审批。`,
-          `操作：${renderPublicComputeAction(input.parsed)}`,
-          `风险：${result.approvalRequest.riskSummary}`,
+      billable: false,
+      hasMoreSteps: false,
+      text: [
+        `委托任务已提交，正在等待代表所有者审批。`,
+        `操作：${renderPublicComputeAction(input.parsed)}`,
+        `风险：${result.approvalRequest.riskSummary}`,
         "审批通过后会在此对话中自动返回执行结果。",
       ].join("\n\n"),
     };
@@ -699,6 +847,7 @@ async function processPublicWebComputeRequest(input: {
     ? attachments.map((attachment) => `已生成文件：${attachment.fileName}`).join("\n")
     : "没有生成可展示的结果文件。";
 
+  input.leaseGuard.assertOwned();
   const finalization = await finalizeComputeDelegationTask({
     taskId: delegation.task.id,
     stepId: delegation.step.id,
@@ -711,13 +860,19 @@ async function processPublicWebComputeRequest(input: {
     artifacts: result.artifacts,
     ...(typeof billing === "number" ? { actualCredits: billing } : {}),
   });
+  input.leaseGuard.assertOwned();
 
   if (result.outcome === "blocked") {
-    return { text: `委托任务被安全策略拒绝，未执行。${billingLine}`, hasMoreSteps: false };
+    return {
+      text: `委托任务被安全策略拒绝，未执行。${billingLine}`,
+      billable: false,
+      hasMoreSteps: false,
+    };
   }
   if (result.outcome === "failed") {
     return {
       text: `委托任务已执行，但未能完成。\n\n${artifactSummary}${billingLine}`,
+      billable: false,
       hasMoreSteps: false,
       ...(attachments.length ? { attachments } : {}),
     };
@@ -726,6 +881,7 @@ async function processPublicWebComputeRequest(input: {
     text: finalization?.hasMoreSteps
       ? `委托任务当前步骤已完成，后续步骤已进入执行队列。\n\n${artifactSummary}${billingLine}`
       : `委托任务已在隔离沙盒中执行完成。\n\n${artifactSummary}${billingLine}`,
+    billable: true,
     hasMoreSteps: Boolean(finalization?.hasMoreSteps),
     ...(attachments.length ? { attachments } : {}),
   };

@@ -37,7 +37,7 @@ describe("agent wallet refunds and reversals", () => {
     expect(client.userWallets[0]?.cashBalanceCents).toBe(0);
     expect(client.rechargeOrders[0]?.status).toBe(RechargeOrderStatus.REFUNDED);
     expect(client.providerEvents).toHaveLength(1);
-    expect(client.ledgerEntries).toHaveLength(1);
+    expect(client.ledgerEntries).toHaveLength(2);
     expect(client.ledgerEntries[0]).toMatchObject({
       accountType: AmnWalletAccountType.USER_CASH,
       entryKind: AmnLedgerEntryKind.REFUND_REVERSAL,
@@ -65,16 +65,29 @@ describe("agent wallet refunds and reversals", () => {
 
     const reversal = await reverseAgentTokenPurchase(
       "purchase_1",
-      { reason: "user_request" },
+      { reason: "user_request", idempotencyKey: "reversal_1" },
       client,
     );
-    const reversedAgain = await reverseAgentTokenPurchase("purchase_1", {}, client);
+    const reversedAgain = await reverseAgentTokenPurchase(
+      "purchase_1",
+      { idempotencyKey: "reversal_1" },
+      client,
+    );
+    await expect(
+      reverseAgentTokenPurchase(
+        "purchase_1",
+        { tokenAmount: 999, idempotencyKey: "reversal_1" },
+        client,
+      ),
+    ).rejects.toThrow("Idempotency key was already used");
 
     expect(reversal).toMatchObject({
       purchaseId: "purchase_1",
       status: "reversed",
       amountCents: 1000,
       tokenAmount: 1000,
+      remainingTokenAmount: 0,
+      reversedAmountCents: 1000,
       cashBalanceCents: 1200,
       agentTokenBalance: 0,
       creatorReversedCents: 200,
@@ -95,7 +108,7 @@ describe("agent wallet refunds and reversals", () => {
           amountCents: 1000,
         }),
         expect.objectContaining({
-          accountType: AmnWalletAccountType.AGENT_TOKEN,
+          accountType: AmnWalletAccountType.SERVICE_CREDIT_DEFERRED,
           tokenAmount: -1000,
         }),
         expect.objectContaining({
@@ -103,25 +116,63 @@ describe("agent wallet refunds and reversals", () => {
           amountCents: -200,
         }),
         expect.objectContaining({
-          accountType: AmnWalletAccountType.PLATFORM_REVENUE,
+          accountType: AmnWalletAccountType.PLATFORM_DEFERRED_REVENUE,
           amountCents: -800,
         }),
       ]),
     );
   });
 
-  it("rejects token purchase reversal after tokens are consumed", async () => {
+  it("refunds only the unconsumed remainder after partial usage", async () => {
     const client = new FakeRefundClient({
       agentTokenBalance: 500,
     });
 
-    await expect(reverseAgentTokenPurchase("purchase_1", {}, client)).rejects.toThrow(
-      "after tokens are consumed",
+    await expect(
+      reverseAgentTokenPurchase(
+        "purchase_1",
+        { tokenAmount: 501, idempotencyKey: "too_much" },
+        client,
+      ),
+    ).rejects.toThrow("unconsumed service credits");
+
+    const reversal = await reverseAgentTokenPurchase(
+      "purchase_1",
+      { idempotencyKey: "remaining_refund" },
+      client,
     );
-    expect(client.tokenPurchases[0]?.status).toBe(AgentTokenPurchaseStatus.COMPLETED);
-    expect(client.agentWallets[0]?.tokenBalance).toBe(500);
-    expect(client.creatorEarnings[0]?.pendingCents).toBe(200);
+
+    expect(reversal).toMatchObject({
+      status: "refunded",
+      tokenAmount: 500,
+      remainingTokenAmount: 0,
+      reversedAmountCents: 500,
+      creatorReversedCents: 100,
+      cashBalanceCents: 1700,
+    });
+    expect(client.agentWallets[0]?.tokenBalance).toBe(0);
+    expect(client.userAgentWallets[0]?.availableTokenAmount).toBe(0);
+  });
+
+  it("rejects a reversal when the purchase has no unconsumed credits", async () => {
+    const client = new FakeRefundClient({
+      agentTokenBalance: 0,
+    });
+
+    await expect(
+      reverseAgentTokenPurchase(
+        "purchase_1",
+        { idempotencyKey: "fully_consumed_refund" },
+        client,
+      ),
+    ).rejects.toThrow("tokenAmount must be a positive integer");
+    expect(client.walletTransactions).toHaveLength(0);
     expect(client.ledgerEntries).toHaveLength(0);
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+    expect(client.tokenPurchases[0]).toMatchObject({
+      remainingTokenAmount: 0,
+      status: AgentTokenPurchaseStatus.COMPLETED,
+    });
   });
 });
 
@@ -139,6 +190,17 @@ type AgentWalletRow = {
   tokenBalance: number;
   totalPurchasedTokens: number;
   totalConsumedTokens: number;
+};
+
+type UserAgentWalletRow = {
+  id: string;
+  userWalletId: string;
+  agentWalletId: string;
+  currency: string;
+  availableTokenAmount: number;
+  reservedTokenAmount: number;
+  totalPurchasedTokenAmount: number;
+  totalConsumedTokenAmount: number;
 };
 
 type RechargeOrderRow = {
@@ -164,16 +226,20 @@ type ProviderEventRow = {
 type TokenPurchaseRow = {
   id: string;
   userWalletId: string;
+  userAgentWalletId: string | null;
   agentWalletId: string;
   representativeId: string;
   amountCents: number;
   currency: string;
   tokenAmount: number;
+  remainingTokenAmount: number | null;
+  tokenUnitPriceCents: number;
   creatorPendingCents: number;
   status: AgentTokenPurchaseStatus;
   idempotencyKey: string;
   refundedAt: Date | null;
   userWallet?: UserWalletRow;
+  userAgentWallet?: UserAgentWalletRow;
   agentWallet?: AgentWalletRow;
   creatorEarnings?: CreatorEarningRow[];
 };
@@ -205,11 +271,13 @@ type LedgerRow = {
 class FakeRefundClient {
   userWallets: UserWalletRow[];
   agentWallets: AgentWalletRow[];
+  userAgentWallets: UserAgentWalletRow[];
   rechargeOrders: RechargeOrderRow[];
   providerEvents: ProviderEventRow[] = [];
   tokenPurchases: TokenPurchaseRow[];
   creatorEarnings: CreatorEarningRow[];
   ledgerEntries: LedgerRow[] = [];
+  walletTransactions: any[] = [];
 
   constructor(
     options: {
@@ -232,7 +300,19 @@ class FakeRefundClient {
         currency: "CNY",
         tokenBalance: options.agentTokenBalance ?? 1000,
         totalPurchasedTokens: 1000,
-        totalConsumedTokens: 0,
+        totalConsumedTokens: 1000 - (options.agentTokenBalance ?? 1000),
+      },
+    ];
+    this.userAgentWallets = [
+      {
+        id: "user_agent_wallet_1",
+        userWalletId: "user_wallet_1",
+        agentWalletId: "agent_wallet_1",
+        currency: "CNY",
+        availableTokenAmount: options.agentTokenBalance ?? 1000,
+        reservedTokenAmount: 0,
+        totalPurchasedTokenAmount: 1000,
+        totalConsumedTokenAmount: 1000 - (options.agentTokenBalance ?? 1000),
       },
     ];
     this.rechargeOrders = [
@@ -251,11 +331,14 @@ class FakeRefundClient {
       {
         id: "purchase_1",
         userWalletId: "user_wallet_1",
+        userAgentWalletId: "user_agent_wallet_1",
         agentWalletId: "agent_wallet_1",
         representativeId: "rep_1",
         amountCents: 1000,
         currency: "CNY",
         tokenAmount: 1000,
+        remainingTokenAmount: options.agentTokenBalance ?? 1000,
+        tokenUnitPriceCents: 1,
         creatorPendingCents: 200,
         status: AgentTokenPurchaseStatus.COMPLETED,
         idempotencyKey: "purchase_1_key",
@@ -270,7 +353,7 @@ class FakeRefundClient {
         agentWalletId: "agent_wallet_1",
         tokenPurchaseId: "purchase_1",
         status: CreatorEarningStatus.PENDING,
-        pendingCents: 200,
+        pendingCents: (options.agentTokenBalance ?? 1000) / 5,
         withdrawableCents: 0,
         currency: "CNY",
       },
@@ -305,6 +388,22 @@ class FakeRefundClient {
       if (typeof args.data.totalPurchasedTokens?.decrement === "number") {
         wallet.totalPurchasedTokens -= args.data.totalPurchasedTokens.decrement;
       }
+      return wallet;
+    },
+  };
+
+  userAgentWallet = {
+    update: async (args: any) => {
+      const wallet = this.userAgentWallets.find((row) => row.id === args.where.id);
+      if (!wallet) {
+        throw new Error("user-agent wallet not found");
+      }
+      applyDelta(wallet, "availableTokenAmount", args.data.availableTokenAmount);
+      applyDelta(
+        wallet,
+        "totalPurchasedTokenAmount",
+        args.data.totalPurchasedTokenAmount,
+      );
       return wallet;
     },
   };
@@ -356,7 +455,13 @@ class FakeRefundClient {
       if (!purchase) {
         throw new Error("purchase not found");
       }
-      Object.assign(purchase, args.data);
+      applyDelta(
+        purchase,
+        "remainingTokenAmount",
+        args.data.remainingTokenAmount,
+      );
+      if (args.data.status) purchase.status = args.data.status;
+      if (args.data.refundedAt) purchase.refundedAt = args.data.refundedAt;
       return purchase;
     },
   };
@@ -380,8 +485,34 @@ class FakeRefundClient {
       if (!earning) {
         throw new Error("creator earning not found");
       }
-      Object.assign(earning, args.data);
+      applyDelta(earning, "pendingCents", args.data.pendingCents);
+      if (args.data.status) earning.status = args.data.status;
       return earning;
+    },
+  };
+
+  walletTransaction = {
+    findUnique: async (args: any) =>
+      this.walletTransactions.find(
+        (row) => row.idempotencyKey === args.where.idempotencyKey,
+      ) ?? null,
+    create: async (args: any) => {
+      const row = {
+        id: `wallet_transaction_${this.walletTransactions.length + 1}`,
+        eventGroupId: args.data.eventGroupId,
+        idempotencyKey: args.data.idempotencyKey,
+        sourceType: args.data.sourceType,
+        sourceId: args.data.sourceId ?? null,
+        eventType: args.data.eventType,
+        status: args.data.status,
+        currency: args.data.currency,
+        ownerId: args.data.ownerId ?? null,
+        representativeId: args.data.representativeId ?? null,
+        userWalletId: args.data.userWalletId ?? null,
+        metadata: args.data.metadata ?? null,
+      };
+      this.walletTransactions.push(row);
+      return row;
     },
   };
 
@@ -418,21 +549,25 @@ class FakeRefundClient {
   async $transaction<T>(fn: (tx: FakeRefundClient) => Promise<T>): Promise<T> {
     const userWallets = this.userWallets.map((row) => ({ ...row }));
     const agentWallets = this.agentWallets.map((row) => ({ ...row }));
+    const userAgentWallets = this.userAgentWallets.map((row) => ({ ...row }));
     const rechargeOrders = this.rechargeOrders.map((row) => ({ ...row }));
     const providerEvents = this.providerEvents.map((row) => ({ ...row }));
     const tokenPurchases = this.tokenPurchases.map((row) => ({ ...row }));
     const creatorEarnings = this.creatorEarnings.map((row) => ({ ...row }));
     const ledgerEntries = this.ledgerEntries.map((row) => ({ ...row }));
+    const walletTransactions = this.walletTransactions.map((row) => ({ ...row }));
     try {
       return await fn(this);
     } catch (error) {
       this.userWallets = userWallets;
       this.agentWallets = agentWallets;
+      this.userAgentWallets = userAgentWallets;
       this.rechargeOrders = rechargeOrders;
       this.providerEvents = providerEvents;
       this.tokenPurchases = tokenPurchases;
       this.creatorEarnings = creatorEarnings;
       this.ledgerEntries = ledgerEntries;
+      this.walletTransactions = walletTransactions;
       throw error;
     }
   }
@@ -447,13 +582,35 @@ class FakeRefundClient {
     const agentWallet = this.agentWallets.find(
       (wallet) => wallet.id === purchase.agentWalletId,
     );
+    const userAgentWallet = this.userAgentWallets.find(
+      (wallet) => wallet.id === purchase.userAgentWalletId,
+    );
     return {
       ...purchase,
       ...(userWallet ? { userWallet } : {}),
       ...(agentWallet ? { agentWallet } : {}),
+      ...(userAgentWallet ? { userAgentWallet } : {}),
       creatorEarnings: this.creatorEarnings.filter(
         (earning) => earning.tokenPurchaseId === purchase.id,
       ),
     };
+  }
+}
+
+function applyDelta<T extends Record<K, number | null>, K extends keyof T>(
+  row: T,
+  key: K,
+  value: { increment?: number; decrement?: number } | number | undefined,
+) {
+  if (typeof value === "number") {
+    row[key] = value as T[K];
+    return;
+  }
+  if (value) {
+    row[key] = (
+      (row[key] ?? 0) +
+      (value.increment ?? 0) -
+      (value.decrement ?? 0)
+    ) as T[K];
   }
 }

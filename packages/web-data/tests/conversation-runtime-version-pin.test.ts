@@ -42,6 +42,7 @@ vi.mock("../src/prisma", () => ({ prisma: mockPrisma }));
 import {
   acceptInboundConversationMessage,
   claimNextGenerationWorkItem,
+  hasGenerationServiceCreditEntitlement,
 } from "../src/conversation-platform";
 
 describe("conversation runtime version pin", () => {
@@ -54,6 +55,22 @@ describe("conversation runtime version pin", () => {
     tx.generationRun.upsert.mockResolvedValue({ id: "run-1" });
     tx.outboxEvent.upsert.mockResolvedValue({ id: "outbox-1" });
     tx.conversation.update.mockResolvedValue({ id: "conversation-1" });
+  });
+
+  it("does not grant paid entitlement from an incomplete runtime snapshot", () => {
+    expect(
+      hasGenerationServiceCreditEntitlement({
+        walletReservation: {
+          usageChargeId: "usage-reserved",
+          tokenAmount: 1,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      hasGenerationServiceCreditEntitlement({
+        billingMode: "service_credit",
+      }),
+    ).toBe(false);
   });
 
   it("keeps subsequent runs on the episode version after the representative active version changes", async () => {
@@ -90,6 +107,64 @@ describe("conversation runtime version pin", () => {
         representativeVersionId: "representative-version-1",
       }),
       update: {},
+    });
+  });
+
+  it("treats the current service-credit reservation as paid entitlement after free replies are exhausted", async () => {
+    tx.$queryRaw.mockResolvedValue([{ id: "outbox-paid" }]);
+    tx.outboxEvent.update.mockResolvedValue({
+      id: "outbox-paid",
+      aggregateId: "run-paid",
+    });
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-paid",
+      status: "QUEUED",
+      representativeVersionId: "representative-version-1",
+      episodeId: "episode-1",
+      delegationTaskId: null,
+      delegationTaskStepId: null,
+      contextSnapshot: null,
+      inputMessageId: "message-paid",
+      inputMessage: {
+        id: "message-paid",
+        text: "continue with my paid credit",
+      },
+      runtimePolicySnapshot: {
+        billingMode: "service_credit",
+        walletReservation: {
+          usageChargeId: "usage-reserved",
+          tokenAmount: 1,
+        },
+      },
+      startedAt: null,
+      episode: {
+        representativeVersionId: "representative-version-1",
+      },
+      conversation: {
+        id: "conversation-1",
+        representativeId: "representative-1",
+        contactId: "contact-1",
+        state: "AI_QUEUED",
+        freeRepliesUsed: 3,
+        passUnlockedAt: null,
+        deepHelpUnlockedAt: null,
+        representative: {
+          slug: "representative",
+          displayName: "Representative",
+        },
+        channelBindings: [],
+      },
+    });
+    tx.generationRun.update.mockResolvedValue({ id: "run-paid" });
+    tx.message.update.mockResolvedValue({ id: "message-paid" });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toMatchObject({
+      runId: "run-paid",
+      usage: {
+        freeRepliesUsed: 3,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
     });
   });
 

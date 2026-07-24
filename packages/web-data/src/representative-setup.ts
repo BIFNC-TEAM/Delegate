@@ -489,6 +489,13 @@ export async function createRepresentative(
           delegationMaxSteps: template.delegation.maxSteps,
           delegationMaxCostCents: template.delegation.maxCostCents,
           delegationKnowledgeScope: mapDelegationKnowledgeScopeToDb(template.delegation.knowledgeScope),
+          agentWallet: {
+            create: {
+              currency: "CNY",
+              tokenUnitPriceCents: 1,
+              creatorRevenueShareBps: 2000,
+            },
+          },
         },
       });
 

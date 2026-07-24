@@ -128,7 +128,7 @@ export async function seedDatabase(
       return id;
     };
 
-    await tx.owner.upsert({
+    const seedOwner = await tx.owner.upsert({
       where: { telegramUserId: DEMO_OWNER_TELEGRAM_ID },
       create: {
         id: DEMO_OWNER_ID,
@@ -341,19 +341,19 @@ export async function seedDatabase(
       const workspaceInstall = pack.installStatus === "available" ? null : await tx.workspaceSkillInstall.upsert({
         where: {
           ownerId_skillPackId: {
-            ownerId: owner.id,
+            ownerId: seedOwner.id,
             skillPackId: skillPack.id,
           },
         },
         create: {
           id: `workspace_skill_${skillPack.id}`,
-          ownerId: owner.id,
+          ownerId: seedOwner.id,
           skillPackId: skillPack.id,
           status:
             pack.installStatus === "update_available" ? "UPDATE_AVAILABLE" : "INSTALLED",
           reviewStatus: "APPROVED",
           installedVersion: pack.version ?? null,
-          installedBy: owner.id,
+          installedBy: seedOwner.id,
           installedAt: now,
         },
         update: {
@@ -384,7 +384,7 @@ export async function seedDatabase(
             verificationTier: pack.verificationTier ?? null,
             capabilityTags: pack.capabilityTags,
             executesCode: pack.executesCode,
-            reviewedBy: owner.id,
+            reviewedBy: seedOwner.id,
             reviewedAt: now,
             adoptedAt: now,
           },

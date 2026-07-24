@@ -26,9 +26,11 @@ describe("agent wallet token purchase", () => {
     expect(purchase).toMatchObject({
       amountCents: 1000,
       tokenAmount: 1000,
+      remainingTokenAmount: 1000,
       creatorPendingCents: 200,
       cashBalanceCents: 200,
       agentTokenBalance: 1000,
+      availableTokenAmount: 1000,
       status: "completed",
     });
     expect(client.userWallets[0]?.cashBalanceCents).toBe(200);
@@ -39,6 +41,12 @@ describe("agent wallet token purchase", () => {
       status: CreatorEarningStatus.PENDING,
     });
     expect(client.ledgerEntries).toHaveLength(4);
+    expect(client.walletTransactions).toHaveLength(1);
+    expect(
+      client.ledgerEntries.every(
+        (entry) => entry.transactionId === client.walletTransactions[0]?.id,
+      ),
+    ).toBe(true);
     expect(sumLedgerAmount(client.ledgerEntries)).toBe(0);
     expect(client.ledgerEntries).toEqual(
       expect.arrayContaining([
@@ -48,7 +56,7 @@ describe("agent wallet token purchase", () => {
           amountCents: -1000,
         }),
         expect.objectContaining({
-          accountType: AmnWalletAccountType.AGENT_TOKEN,
+          accountType: AmnWalletAccountType.SERVICE_CREDIT_DEFERRED,
           entryKind: AmnLedgerEntryKind.AGENT_TOKEN_CREDIT,
           tokenAmount: 1000,
         }),
@@ -57,7 +65,7 @@ describe("agent wallet token purchase", () => {
           amountCents: 200,
         }),
         expect.objectContaining({
-          accountType: AmnWalletAccountType.PLATFORM_REVENUE,
+          accountType: AmnWalletAccountType.PLATFORM_DEFERRED_REVENUE,
           amountCents: 800,
         }),
       ]),
@@ -82,6 +90,32 @@ describe("agent wallet token purchase", () => {
     expect(client.tokenPurchases).toHaveLength(1);
     expect(client.creatorEarnings).toHaveLength(1);
     expect(client.ledgerEntries).toHaveLength(4);
+  });
+
+  it("rejects reuse of a purchase idempotency key with different parameters", async () => {
+    const client = new FakeTokenPurchaseClient();
+    await purchaseAgentTokens(
+      {
+        externalUserId: "user_1",
+        representativeId: "rep_1",
+        amountCents: 500,
+        idempotencyKey: "purchase_conflict",
+      },
+      client,
+    );
+
+    await expect(
+      purchaseAgentTokens(
+        {
+          externalUserId: "user_1",
+          representativeId: "rep_1",
+          amountCents: 600,
+          idempotencyKey: "purchase_conflict",
+        },
+        client,
+      ),
+    ).rejects.toThrow("Idempotency key was already used");
+    expect(client.tokenPurchases).toHaveLength(1);
   });
 
   it("rejects insufficient user wallet balance without partial writes", async () => {
@@ -168,20 +202,34 @@ type AgentWalletRow = {
 type TokenPurchaseRow = {
   id: string;
   userWalletId: string;
+  userAgentWalletId: string | null;
   agentWalletId: string;
   representativeId: string;
   rechargeOrderId: string | null;
   amountCents: number;
   currency: string;
   tokenAmount: number;
+  remainingTokenAmount: number | null;
   tokenUnitPriceCents: number;
   creatorRevenueShareBps: number;
   creatorPendingCents: number;
   status: AgentTokenPurchaseStatus;
   idempotencyKey: string;
   userWallet?: UserWalletRow;
+  userAgentWallet?: UserAgentWalletRow;
   agentWallet?: AgentWalletRow;
   creatorEarnings?: CreatorEarningRow[];
+};
+
+type UserAgentWalletRow = {
+  id: string;
+  userWalletId: string;
+  agentWalletId: string;
+  currency: string;
+  availableTokenAmount: number;
+  reservedTokenAmount: number;
+  totalPurchasedTokenAmount: number;
+  totalConsumedTokenAmount: number;
 };
 
 type CreatorEarningRow = {
@@ -208,6 +256,7 @@ type LedgerRow = {
   amountCents: number;
   tokenAmount: number;
   currency: string;
+  transactionId: string | null;
   createdAt: Date;
 };
 
@@ -218,9 +267,11 @@ class FakeTokenPurchaseClient {
     { id: "rep_2", ownerId: "owner_2" },
   ];
   agentWallets: AgentWalletRow[];
+  userAgentWallets: UserAgentWalletRow[] = [];
   tokenPurchases: TokenPurchaseRow[] = [];
   creatorEarnings: CreatorEarningRow[] = [];
   ledgerEntries: LedgerRow[] = [];
+  walletTransactions: any[] = [];
 
   constructor(
     options: {
@@ -293,6 +344,46 @@ class FakeTokenPurchaseClient {
     },
   };
 
+  userAgentWallet = {
+    upsert: async (args: any) => {
+      const key = args.where.userWalletId_agentWalletId_currency;
+      const existing = this.userAgentWallets.find(
+        (wallet) =>
+          wallet.userWalletId === key.userWalletId &&
+          wallet.agentWalletId === key.agentWalletId &&
+          wallet.currency === key.currency,
+      );
+      if (existing) {
+        return existing;
+      }
+      const wallet: UserAgentWalletRow = {
+        id: `user_agent_wallet_${this.userAgentWallets.length + 1}`,
+        userWalletId: args.create.userWalletId,
+        agentWalletId: args.create.agentWalletId,
+        currency: args.create.currency,
+        availableTokenAmount: 0,
+        reservedTokenAmount: 0,
+        totalPurchasedTokenAmount: 0,
+        totalConsumedTokenAmount: 0,
+      };
+      this.userAgentWallets.push(wallet);
+      return wallet;
+    },
+    update: async (args: any) => {
+      const wallet = this.userAgentWallets.find((row) => row.id === args.where.id);
+      if (!wallet) {
+        throw new Error("user-agent wallet not found");
+      }
+      applyDelta(wallet, "availableTokenAmount", args.data.availableTokenAmount);
+      applyDelta(
+        wallet,
+        "totalPurchasedTokenAmount",
+        args.data.totalPurchasedTokenAmount,
+      );
+      return wallet;
+    },
+  };
+
   agentTokenPurchase = {
     findUnique: async (args: any) => {
       const purchase = this.tokenPurchases.find(
@@ -304,12 +395,14 @@ class FakeTokenPurchaseClient {
       const purchase: TokenPurchaseRow = {
         id: args.data.id ?? `purchase_${this.tokenPurchases.length + 1}`,
         userWalletId: args.data.userWalletId,
+        userAgentWalletId: args.data.userAgentWalletId ?? null,
         agentWalletId: args.data.agentWalletId,
         representativeId: args.data.representativeId,
         rechargeOrderId: args.data.rechargeOrderId ?? null,
         amountCents: args.data.amountCents,
         currency: args.data.currency,
         tokenAmount: args.data.tokenAmount,
+        remainingTokenAmount: args.data.remainingTokenAmount ?? null,
         tokenUnitPriceCents: args.data.tokenUnitPriceCents,
         creatorRevenueShareBps: args.data.creatorRevenueShareBps,
         creatorPendingCents: args.data.creatorPendingCents,
@@ -342,6 +435,31 @@ class FakeTokenPurchaseClient {
     },
   };
 
+  walletTransaction = {
+    findUnique: async (args: any) =>
+      this.walletTransactions.find(
+        (row) => row.idempotencyKey === args.where.idempotencyKey,
+      ) ?? null,
+    create: async (args: any) => {
+      const row = {
+        id: `wallet_transaction_${this.walletTransactions.length + 1}`,
+        eventGroupId: args.data.eventGroupId,
+        idempotencyKey: args.data.idempotencyKey,
+        sourceType: args.data.sourceType,
+        sourceId: args.data.sourceId ?? null,
+        eventType: args.data.eventType,
+        status: args.data.status,
+        currency: args.data.currency,
+        ownerId: args.data.ownerId ?? null,
+        representativeId: args.data.representativeId ?? null,
+        userWalletId: args.data.userWalletId ?? null,
+        metadata: args.data.metadata ?? null,
+      };
+      this.walletTransactions.push(row);
+      return row;
+    },
+  };
+
   walletLedgerEntry = {
     findFirst: async (args: any) => {
       return (
@@ -365,6 +483,7 @@ class FakeTokenPurchaseClient {
         amountCents: args.data.amountCents ?? 0,
         tokenAmount: args.data.tokenAmount ?? 0,
         currency: args.data.currency ?? "CNY",
+        transactionId: args.data.transactionId ?? null,
         createdAt: new Date(Date.UTC(2026, 6, 3, 0, 0, this.ledgerEntries.length)),
       };
       this.ledgerEntries.push(entry);
@@ -376,16 +495,20 @@ class FakeTokenPurchaseClient {
     const userWallets = this.userWallets.map((row) => ({ ...row }));
     const agentWallets = this.agentWallets.map((row) => ({ ...row }));
     const tokenPurchases = this.tokenPurchases.map((row) => ({ ...row }));
+    const userAgentWallets = this.userAgentWallets.map((row) => ({ ...row }));
     const creatorEarnings = this.creatorEarnings.map((row) => ({ ...row }));
     const ledgerEntries = this.ledgerEntries.map((row) => ({ ...row }));
+    const walletTransactions = this.walletTransactions.map((row) => ({ ...row }));
     try {
       return await fn(this);
     } catch (error) {
       this.userWallets = userWallets;
       this.agentWallets = agentWallets;
       this.tokenPurchases = tokenPurchases;
+      this.userAgentWallets = userAgentWallets;
       this.creatorEarnings = creatorEarnings;
       this.ledgerEntries = ledgerEntries;
+      this.walletTransactions = walletTransactions;
       throw error;
     }
   }
@@ -419,14 +542,31 @@ class FakeTokenPurchaseClient {
     const agentWallet = this.agentWallets.find(
       (wallet) => wallet.id === purchase.agentWalletId,
     );
+    const userAgentWallet = this.userAgentWallets.find(
+      (wallet) => wallet.id === purchase.userAgentWalletId,
+    );
     return {
       ...purchase,
       ...(userWallet ? { userWallet } : {}),
       ...(agentWallet ? { agentWallet } : {}),
+      ...(userAgentWallet ? { userAgentWallet } : {}),
       creatorEarnings: this.creatorEarnings.filter(
         (earning) => earning.tokenPurchaseId === purchase.id,
       ),
     };
+  }
+}
+
+function applyDelta<T extends Record<K, number>, K extends keyof T>(
+  row: T,
+  key: K,
+  value: { increment?: number; decrement?: number } | undefined,
+) {
+  if (typeof value?.increment === "number") {
+    row[key] = (row[key] + value.increment) as T[K];
+  }
+  if (typeof value?.decrement === "number") {
+    row[key] = (row[key] - value.decrement) as T[K];
   }
 }
 

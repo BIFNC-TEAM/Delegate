@@ -34,7 +34,8 @@
     "test:postgres:skills": "pnpm --filter @delegate/web-data test:postgres:skills",
     "test:postgres:mcp-health": "pnpm --filter @delegate/compute-broker test:postgres:mcp-health",
     "test:migration-gate": "vitest run scripts/tests/workspace-skill-release-gate.test.ts",
-    "test:migration-fixture:pg16": "bash scripts/tests/workspace-skill-legacy-migration.pg16.sh"
+    "test:migration-fixture:pg16": "bash scripts/tests/workspace-skill-legacy-migration.pg16.sh",
+    "test:wallet-migration-fixture:pg16": "bash scripts/tests/wallet-scoped-migration.pg16.sh"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

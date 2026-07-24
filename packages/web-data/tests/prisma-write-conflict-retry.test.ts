@@ -43,6 +43,19 @@ describe("Prisma write-conflict retry", () => {
     expect(operation).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
   });
+
+  it("can retry an explicitly allowed unique-key race", async () => {
+    const operation = vi.fn()
+      .mockRejectedValueOnce(prismaError("P2002"))
+      .mockResolvedValue("replayed");
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(runWithPrismaWriteConflictRetry(operation, {
+      additionalRetryableCodes: ["P2002"],
+      sleep,
+    })).resolves.toBe("replayed");
+    expect(operation).toHaveBeenCalledTimes(2);
+  });
 });
 
 function prismaError(code: string) {

@@ -8,10 +8,13 @@ import {
   acceptInboundConversationMessage,
   buildRepresentativeRuntimeProfile,
   buildWebAudienceKey,
+  buildWebAudienceExternalUserId,
+  getUserAgentWalletBalance,
   getPublicConversationHistory,
   getPublicRepresentativeRuntime,
   resolveWebAudienceContact,
   resolveWebAudienceConversation,
+  ServiceCreditRequiredError,
 } from "@delegate/web-data";
 
 import {
@@ -19,8 +22,8 @@ import {
   getPublicChatCookieName,
   normalizePublicChatRequest,
   PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS,
-  PUBLIC_CHAT_EFFECTIVE_TIER,
   readPublicChatSessionState,
+  resolvePublicChatTier,
   shouldUseSecurePublicChatCookie,
   writePublicChatSessionState,
 } from "../public-chat";
@@ -50,11 +53,15 @@ export async function GET(
 
   const response = NextResponse.json({
     ...history,
-    usage: deriveTierUsage({
+    usage: await derivePublicWalletUsage({
+      representativeId: runtime.setup.id,
+      representativeSlug: slug,
+      audienceId: session.audienceId,
       freeRepliesUsed: history.freeRepliesUsed,
       freeReplyLimit: runtime.setup.contract.freeReplyLimit,
     }),
   });
+  response.headers.set("Cache-Control", "private, no-store");
   setPublicChatCookie(response, request, slug, session);
   return response;
 }
@@ -68,7 +75,7 @@ export async function POST(
     const runtime = await getPublicRepresentativeRuntime(slug);
     if (runtime.status !== "available") return publicRuntimeError(runtime.status);
     const body = normalizePublicChatRequest(await request.json());
-    if (!body.message) return NextResponse.json({ error: "Message is required." }, { status: 400 });
+    if (!body.message) return privateJson({ error: "Message is required." }, 400);
 
     const cookieStore = await cookies();
     const session = readPublicChatSessionState({
@@ -87,28 +94,71 @@ export async function POST(
         contactId: contact.id,
         audienceId: session.audienceId,
       });
-      const accepted = await acceptInboundConversationMessage({
+      const clientMessageId =
+        body.clientMessageId || `web:${session.audienceId}:${Date.now()}`;
+      const externalUserId = buildWebAudienceExternalUserId(
+        slug,
+        session.audienceId,
+      );
+      let accepted: Awaited<ReturnType<typeof acceptInboundConversationMessage>>;
+      try {
+        accepted = await acceptInboundConversationMessage({
+          representativeSlug: slug,
+          conversationId: conversation.id,
+          text: body.message,
+          senderId: session.audienceId,
+          senderDisplayName: "Web visitor",
+          clientMessageId,
+          channel: "web",
+          walletBilling: {
+            externalUserId,
+            representativeId: runtime.setup.id,
+            freeReplyLimit: runtime.setup.contract.freeReplyLimit,
+            tokenAmount: 1,
+            idempotencyKey: `public_chat:${conversation.id}:${clientMessageId}:reserve`,
+          },
+        });
+      } catch (acceptError) {
+        if (acceptError instanceof ServiceCreditRequiredError) {
+          const usage = await derivePublicWalletUsage({
+            representativeId: runtime.setup.id,
+            representativeSlug: slug,
+            audienceId: session.audienceId,
+            freeRepliesUsed: acceptError.effectiveFreeRepliesUsed,
+            freeReplyLimit: runtime.setup.contract.freeReplyLimit,
+          });
+          const response = privateJson(
+            {
+              error: acceptError.message,
+              code: "service_credit_required",
+              tier: resolvePublicChatTier(usage),
+              usage,
+            },
+            402,
+          );
+          setPublicChatCookie(response, request, slug, session);
+          return response;
+        }
+        throw acceptError;
+      }
+      const usage = await derivePublicWalletUsage({
+        representativeId: runtime.setup.id,
         representativeSlug: slug,
-        conversationId: conversation.id,
-        text: body.message,
-        senderId: session.audienceId,
-        senderDisplayName: "Web visitor",
-        clientMessageId: body.clientMessageId || `web:${session.audienceId}:${Date.now()}`,
-        channel: "web",
+        audienceId: session.audienceId,
+        freeRepliesUsed: conversation.freeRepliesUsed,
+        freeReplyLimit: runtime.setup.contract.freeReplyLimit,
       });
       const response = NextResponse.json(
         {
           status: accepted.heldForOperator ? "waiting_human" : "queued",
           heldForOperator: accepted.heldForOperator,
           ...(accepted.run ? { runId: accepted.run.id } : {}),
-          tier: PUBLIC_CHAT_EFFECTIVE_TIER,
-          usage: deriveTierUsage({
-            freeRepliesUsed: conversation.freeRepliesUsed,
-            freeReplyLimit: runtime.setup.contract.freeReplyLimit,
-          }),
+          tier: resolvePublicChatTier(usage),
+          usage,
         },
         { status: 202 },
       );
+      response.headers.set("Cache-Control", "private, no-store");
       setPublicChatCookie(response, request, slug, session);
       return response;
     } catch (error) {
@@ -116,7 +166,10 @@ export async function POST(
     }
 
     const representative = buildRepresentativeRuntimeProfile(runtime.setup);
-    const usage = deriveTierUsage({ freeRepliesUsed: 0, freeReplyLimit: representative.contract.freeReplyLimit });
+    const usage = deriveTierUsage({
+      freeRepliesUsed: 0,
+      freeReplyLimit: representative.contract.freeReplyLimit,
+    });
     const plan = createConversationPlan({
       text: body.message,
       channel: "private_chat",
@@ -140,17 +193,53 @@ export async function POST(
     const response = NextResponse.json({
       status: "completed",
       reply: { role: "assistant", text: replyText },
-      tier: PUBLIC_CHAT_EFFECTIVE_TIER,
+      tier: resolvePublicChatTier(usage),
       usage,
     });
+    response.headers.set("Cache-Control", "private, no-store");
     setPublicChatCookie(response, request, slug, session);
     return response;
   } catch (error) {
+    console.error("Failed to accept public chat message.", error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to accept chat message." },
-      { status: 500 },
+      { error: "Failed to accept chat message." },
+      {
+        status: 500,
+        headers: { "Cache-Control": "private, no-store" },
+      },
     );
   }
+}
+
+async function derivePublicWalletUsage(input: {
+  representativeId: string;
+  representativeSlug: string;
+  audienceId: string;
+  freeRepliesUsed: number;
+  freeReplyLimit: number;
+}) {
+  const balance = process.env.DATABASE_URL?.trim()
+    ? await getUserAgentWalletBalance({
+        externalUserId: buildWebAudienceExternalUserId(
+          input.representativeSlug,
+          input.audienceId,
+        ),
+        representativeId: input.representativeId,
+      })
+    : null;
+  return deriveTierUsage({
+    freeRepliesUsed: input.freeRepliesUsed,
+    freeReplyLimit: input.freeReplyLimit,
+    serviceCreditsAvailable: balance?.availableTokenAmount ?? 0,
+    serviceCreditsReserved: balance?.reservedTokenAmount ?? 0,
+  });
+}
+
+function privateJson(body: unknown, status: number) {
+  return NextResponse.json(body, {
+    status,
+    headers: { "Cache-Control": "private, no-store" },
+  });
 }
 
 function publicRuntimeError(status: Exclude<Awaited<ReturnType<typeof getPublicRepresentativeRuntime>>["status"], "available">) {

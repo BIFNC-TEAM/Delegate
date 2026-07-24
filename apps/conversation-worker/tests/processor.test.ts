@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   generateRepresentativeReply: vi.fn(),
@@ -25,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   executeAudienceTool: vi.fn(),
   finalizeComputeDelegationTask: vi.fn(),
   failGenerationRun: vi.fn(),
+  renewGenerationWorkItemLease: vi.fn(),
+  retryGenerationDelivery: vi.fn(),
   markDelegationTaskAwaitingApproval: vi.fn(),
   markDelegationTaskRunning: vi.fn(),
   waitGenerationRunForComputeApproval: vi.fn(),
@@ -63,14 +65,23 @@ vi.mock("@delegate/web-data", () => ({
   finalizeComputeDelegationTask: mocks.finalizeComputeDelegationTask,
   findConversationClarifyingDelegationTask: mocks.findConversationClarifyingDelegationTask,
   failGenerationRun: mocks.failGenerationRun,
+  GENERATION_WORK_LEASE_DURATION_MS: 3_000,
+  GenerationWorkLeaseLostError: class GenerationWorkLeaseLostError extends Error {
+    readonly code = "generation_work_lease_lost";
+  },
   getRepresentativeRuntimeSetupSnapshot: mocks.getRepresentativeRuntimeSetupSnapshot,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
   markGenerationDeliveryComplete: mocks.markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval: mocks.markDelegationTaskAwaitingApproval,
   markDelegationTaskRunning: mocks.markDelegationTaskRunning,
   recallRepresentativeContext: mocks.recallRepresentativeContext,
-  retryGenerationDelivery: vi.fn(),
+  renewGenerationWorkItemLease: mocks.renewGenerationWorkItemLease,
+  retryGenerationDelivery: mocks.retryGenerationDelivery,
   retryOperatorMessageDelivery: vi.fn(),
+  isGenerationWorkLeaseLostError: (error: unknown) =>
+    error instanceof Error
+    && "code" in error
+    && error.code === "generation_work_lease_lost",
   waitGenerationRunForComputeApproval: mocks.waitGenerationRunForComputeApproval,
 }));
 
@@ -133,6 +144,10 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.renderGroundedKnowledgeFallback.mockReturnValue("根据已发布的知识资料：佩奇临时代课并带大家画恐龙。");
     mocks.completeInlineGenerationRun.mockResolvedValue({ message: { id: "reply-1" } });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("passes recalled knowledge to the model and persists its citation", async () => {
@@ -405,7 +420,7 @@ describe("conversation worker knowledge recall", () => {
     const request = {
       ...naturalStep,
       displayTarget: naturalStep.summary,
-      hasPaidEntitlement: false,
+      hasPaidEntitlement: true,
       browserMode: "deterministic",
       maxSteps: 1,
       allowMutations: false,
@@ -438,8 +453,15 @@ describe("conversation worker knowledge recall", () => {
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       attachments: [expect.objectContaining({ fileName: "qa.txt", artifactId: "artifact-natural" })],
+      countUsage: true,
       replyText: expect.stringContaining("已生成文件：qa.txt"),
     }));
+    expect(mocks.executeAudienceTool).toHaveBeenCalledWith(
+      "session-natural",
+      expect.objectContaining({
+        hasPaidEntitlement: false,
+      }),
+    );
     expect(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]?.replyText).not.toContain("/workspace/");
     expect(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]?.replyText).not.toContain("browser QA");
     expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
@@ -447,6 +469,72 @@ describe("conversation worker knowledge recall", () => {
       outcome: "completed",
       artifacts: [expect.objectContaining({ id: "artifact-natural" })],
       actualCredits: 4,
+    }));
+  });
+
+  it("marks a failed compute result as non-billable", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-compute-failed",
+      runId: "run-compute-failed",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-compute-failed",
+      contactId: "contact-compute-failed",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-compute-failed",
+      userText: "/compute process npm test",
+      channel: "web",
+      usage: { freeRepliesUsed: 3, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.parseComputeDirective.mockReturnValue({
+      kind: "request",
+      request: {
+        capability: "process",
+        command: "npm test",
+        displayTarget: "npm test",
+        hasPaidEntitlement: true,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+      },
+    });
+    mocks.createAudienceComputeSession.mockResolvedValue({
+      session: { id: "session-compute-failed" },
+    });
+    mocks.executeAudienceTool.mockResolvedValue({
+      outcome: "failed",
+      artifacts: [],
+      billing: { actualCredits: 4 },
+    });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+    expect(mocks.executeAudienceTool).toHaveBeenCalledWith(
+      "session-compute-failed",
+      expect.objectContaining({
+        hasPaidEntitlement: false,
+      }),
+    );
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      countUsage: false,
+      replyText: expect.stringContaining("未能完成"),
+    }));
+    expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: "task-1",
+      outcome: "failed",
     }));
   });
 
@@ -574,6 +662,7 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      countUsage: false,
       replyText: expect.stringContaining("策略禁止写入工作区文件"),
     }));
     expect(mocks.createComputeDelegationTask).toHaveBeenCalledTimes(1);
@@ -694,6 +783,7 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      countUsage: false,
       replyText: expect.stringContaining("超过该代表设置的 5 美分上限"),
     }));
     expect(mocks.createComputeDelegationTask).toHaveBeenCalledTimes(1);
@@ -753,6 +843,7 @@ describe("conversation worker knowledge recall", () => {
       failureReason: expect.stringContaining("Planned step count 2"),
     }));
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      countUsage: false,
       replyText: expect.stringContaining("超过该代表允许的 1 步上限"),
     }));
     expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
@@ -1110,5 +1201,105 @@ describe("conversation worker knowledge recall", () => {
     }));
     expect(mocks.recallRepresentativeContext).not.toHaveBeenCalled();
     expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+  });
+
+  it("stops attempt A after lease loss and lets reclaimed attempt B commit", async () => {
+    vi.useFakeTimers();
+    const baseItem = {
+      runId: "run-reclaimed",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-reclaimed",
+      contactId: "contact-reclaimed",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-reclaimed",
+      userText: "请回答",
+      channel: "web",
+      usage: {
+        freeRepliesUsed: 0,
+        passUnlocked: false,
+        deepHelpUnlocked: false,
+      },
+    };
+    mocks.claimNextGenerationWorkItem
+      .mockResolvedValueOnce({
+        ...baseItem,
+        outboxId: "outbox-reclaimed",
+        leaseAttempt: 1,
+      })
+      .mockResolvedValueOnce({
+        ...baseItem,
+        outboxId: "outbox-reclaimed",
+        leaseAttempt: 2,
+      });
+    mocks.renewGenerationWorkItemLease
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    let releaseAttemptA!: (value: {
+      ok: true;
+      replyText: string;
+      provider: "openai";
+      model: string;
+    }) => void;
+    mocks.generateRepresentativeReply.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseAttemptA = resolve;
+      }),
+    );
+
+    const attemptA = processNextConversationWork({ port: 4040, pollMs: 500 });
+    await vi.waitFor(() => {
+      expect(mocks.generateRepresentativeReply).toHaveBeenCalledTimes(1);
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    releaseAttemptA({
+      ok: true,
+      replyText: "attempt A stale reply",
+      provider: "openai",
+      model: "test-model",
+    });
+
+    await expect(attemptA).resolves.toMatchObject({
+      processed: true,
+      runId: "run-reclaimed",
+      status: "lease_lost",
+    });
+    expect(mocks.completeInlineGenerationRun).not.toHaveBeenCalled();
+    expect(mocks.failGenerationRun).not.toHaveBeenCalled();
+    expect(mocks.retryGenerationDelivery).not.toHaveBeenCalled();
+
+    mocks.generateRepresentativeReply.mockResolvedValueOnce({
+      ok: true,
+      replyText: "attempt B authoritative reply",
+      provider: "openai",
+      model: "test-model",
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValueOnce({
+      message: { id: "reply-reclaimed" },
+    });
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      runId: "run-reclaimed",
+      status: "completed",
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-reclaimed",
+        outboxId: "outbox-reclaimed",
+        leaseAttempt: 2,
+        replyText: "attempt B authoritative reply",
+      }),
+    );
+    expect(mocks.markGenerationDeliveryComplete).toHaveBeenCalledWith({
+      runId: "run-reclaimed",
+      outboxId: "outbox-reclaimed",
+      leaseAttempt: 2,
+      outputMessageId: "reply-reclaimed",
+    });
   });
 });

@@ -5,6 +5,10 @@ import { useEffect, useRef, useState } from "react";
 import type { PlanTier, PricingPlan } from "@delegate/domain";
 
 import type { PublicChatResponse } from "./public-chat";
+import {
+  PUBLIC_WALLET_UPDATED_EVENT,
+  type PublicWalletUpdatedDetail,
+} from "./public-wallet-client";
 
 type Citation = { title: string; excerpt?: string; uri?: string };
 type ChatAttachment = { id: string; fileName: string; mimeType?: string; sizeBytes?: number; url?: string };
@@ -62,6 +66,8 @@ export function RepresentativeChatPanel(props: {
   const [usage, setUsage] = useState<PublicChatResponse["usage"]>({
     freeRepliesUsed: 0,
     freeRepliesRemaining: props.freeReplyLimit,
+    serviceCreditsAvailable: 0,
+    serviceCreditsReserved: 0,
     passUnlocked: false,
     deepHelpUnlocked: false,
   });
@@ -70,7 +76,11 @@ export function RepresentativeChatPanel(props: {
   const [hydrating, setHydrating] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const activePlan = props.pricing.find((plan) => plan.tier === selectedTier) ?? props.pricing[0];
-  const planAction = resolvePlanSelectionAction(selectedTier, demoCommerceEnabled);
+  const planAction = resolvePlanSelectionAction(
+    selectedTier,
+    demoCommerceEnabled,
+    usage.passUnlocked,
+  );
   const computeAssist = getComputeAssist(input, props.locale, props.computeEnabled);
 
   useEffect(() => {
@@ -140,12 +150,41 @@ export function RepresentativeChatPanel(props: {
 
   useEffect(() => {
     if (usage.freeRepliesRemaining > 0 || selectedTier !== "free") return;
+    if (usage.passUnlocked) {
+      setSelectedTier("pass");
+      setShowPlans(false);
+      return;
+    }
     const recommended = props.pricing.find((plan) => plan.tier === "pass");
     if (recommended) {
       setSelectedTier(recommended.tier);
       setShowPlans(true);
     }
-  }, [props.pricing, selectedTier, usage.freeRepliesRemaining]);
+  }, [props.pricing, selectedTier, usage.freeRepliesRemaining, usage.passUnlocked]);
+
+  useEffect(() => {
+    const handleWalletUpdate = (event: Event) => {
+      const detail = (event as CustomEvent<PublicWalletUpdatedDetail>).detail;
+      if (!detail || detail.representativeSlug !== props.representativeSlug) {
+        return;
+      }
+      setUsage((current) => ({
+        ...current,
+        serviceCreditsAvailable: detail.serviceCreditsAvailable,
+        serviceCreditsReserved: detail.serviceCreditsReserved,
+        passUnlocked: detail.serviceCreditsAvailable > 0,
+      }));
+      if (detail.serviceCreditsAvailable > 0) {
+        setSelectedTier("pass");
+        setShowPlans(false);
+        setError(null);
+      }
+    };
+    window.addEventListener(PUBLIC_WALLET_UPDATED_EVENT, handleWalletUpdate);
+    return () => {
+      window.removeEventListener(PUBLIC_WALLET_UPDATED_EVENT, handleWalletUpdate);
+    };
+  }, [props.representativeSlug]);
 
   useEffect(() => {
     if (!keepChatPinnedRef.current) return;
@@ -178,7 +217,16 @@ export function RepresentativeChatPanel(props: {
         body: JSON.stringify({ message: text, clientMessageId: userMessage.id }),
       });
       const payload = (await response.json()) as PublicChatAccepted;
-      if (!response.ok) throw new Error(payload.error || t.errorGeneric);
+      if (!response.ok) {
+        if (response.status === 402 && payload.usage) {
+          setUsage(payload.usage);
+          if (props.pricing.some((plan) => plan.tier === "pass")) {
+            setSelectedTier("pass");
+            setShowPlans(true);
+          }
+        }
+        throw new Error(payload.error || t.errorGeneric);
+      }
       setUsage(payload.usage);
       setSelectedTier(payload.tier);
       if (payload.reply) {
@@ -194,6 +242,10 @@ export function RepresentativeChatPanel(props: {
         throw new Error(t.errorGeneric);
       }
     } catch (submitError) {
+      setMessages((current) => current.map((message) =>
+        message.id === userMessage.id
+          ? { ...message, status: "failed" }
+          : message));
       setError(submitError instanceof Error ? submitError.message : t.errorGeneric);
       setBusy(false);
     }
@@ -364,6 +416,7 @@ export function RepresentativeChatPanel(props: {
             <span className="panel-title">{t.sessionLabel}</span>
             <div className="representative-session-row"><span>{t.currentResponder}</span><strong>{humanActive ? t.humanStatus : t.aiStatus}</strong></div>
             <div className="representative-session-row"><span>{t.freeRepliesLabel}</span><strong>{usage.freeRepliesRemaining}/{props.freeReplyLimit}</strong></div>
+            <div className="representative-session-row"><span>{t.serviceCreditsLabel}</span><strong>{usage.serviceCreditsAvailable}</strong></div>
             <p>{humanActive ? t.humanActiveDetail : t.aiActiveDetail}</p>
           </section>
 
@@ -386,7 +439,7 @@ export function RepresentativeChatPanel(props: {
                 {activePlan ? (
                   <div aria-live="polite" className={`representative-chat-plan-action is-${planAction}`} role="status">
                     <span className="panel-title">{t.selectedPlan}</span><strong>{activePlan.name}</strong>
-                    <p>{planAction === "current" ? t.currentPlanDetail(usage.freeRepliesRemaining, props.freeReplyLimit) : planAction === "demo_recharge" ? t.demoRechargeDetail : t.commerceUnavailableDetail}</p>
+                    <p>{planAction === "current" ? selectedTier === "free" ? t.currentPlanDetail(usage.freeRepliesRemaining, props.freeReplyLimit) : t.creditPlanDetail(usage.serviceCreditsAvailable, usage.serviceCreditsReserved) : planAction === "demo_recharge" ? t.demoRechargeDetail : t.commerceUnavailableDetail}</p>
                     {planAction === "demo_recharge" ? <a className="button-primary" href="#recharge">{t.openDemoRecharge}</a> : planAction === "unavailable" ? <a className="button-secondary" href="#handoff">{t.contactOwner}</a> : null}
                   </div>
                 ) : null}
@@ -425,8 +478,10 @@ function getVisitorMessageStatus(status: string | undefined, locale: "zh" | "en"
 export function resolvePlanSelectionAction(
   tier: PlanTier,
   demoCommerceEnabled: boolean,
+  paidUnlocked = false,
 ): "current" | "demo_recharge" | "unavailable" {
   if (tier === "free") return "current";
+  if (tier === "pass" && paidUnlocked) return "current";
   return demoCommerceEnabled ? "demo_recharge" : "unavailable";
 }
 
@@ -483,7 +538,7 @@ const zhCopy = {
   sending: "正在处理…", send: "发送", thinking: "正在结合公开知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
   sessionLabel: "本次会话",
-  currentResponder: "当前接待", freeRepliesLabel: "免费回复",
+  currentResponder: "当前接待", freeRepliesLabel: "免费回复", serviceCreditsLabel: "服务额度",
   aiActiveDetail: "你正在与数字代表对话；需要真人判断时会明确提示。",
   humanActiveDetail: "真人已经接手，你仍可以继续补充背景和要求。",
   handoffLabel: "需要真人？", handoffTitle: (ownerName: string) => `申请 ${ownerName} 查看`, handoffDetail: "先在对话中留下目标和关键背景，转接时会一起提交。", handoffAction: "了解转接方式",
@@ -492,7 +547,8 @@ const zhCopy = {
   repliesChip: (count: number) => count > 0 ? `${count} 次回复` : "公共额度支持",
   priorityHandoff: "优先人工评估",
   currentPlanDetail: (remaining: number, limit: number) => `当前免费方案剩余 ${remaining}/${limit} 次回复，无需付款。`,
-  demoRechargeDetail: "当前为本地演示支付：可以验证充值单与余额入账，但不会真实扣款，也不会自动开通正式权益。",
+  creditPlanDetail: (available: number, reserved: number) => `当前还有 ${available} 个可用服务额度${reserved > 0 ? `，${reserved} 个正在处理中` : ""}；每次付费继续会先预留，再按实际完成结算。`,
+  demoRechargeDetail: "当前为本地演示支付：模拟支付后会自动购买仅限当前代表的服务额度，可用于验证付费继续；不会真实扣款。",
   commerceUnavailableDetail: "真实支付和套餐解锁尚未接入。当前选择不会扣费；你可以先申请真人确认后续服务。",
   openDemoRecharge: "前往演示充值",
   contactOwner: "申请真人协助",
@@ -513,7 +569,7 @@ const enCopy = {
   sending: "Working…", send: "Send", thinking: "Reviewing public knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
   humanQueueNotice: "This conversation is now in the human queue. You can keep adding context while the operator reviews the full thread.",
   sessionLabel: "This conversation",
-  currentResponder: "Current responder", freeRepliesLabel: "Free replies",
+  currentResponder: "Current responder", freeRepliesLabel: "Free replies", serviceCreditsLabel: "Service credits",
   aiActiveDetail: "You are talking to the digital representative. It will say when a human decision is needed.",
   humanActiveDetail: "A human has taken over. You can keep adding context and requirements.",
   handoffLabel: "Need a human?", handoffTitle: (ownerName: string) => `Ask ${ownerName} to review`, handoffDetail: "Leave the goal and key context in the conversation so it can travel with the handoff.", handoffAction: "How handoff works",
@@ -522,7 +578,8 @@ const enCopy = {
   repliesChip: (count: number) => count > 0 ? `${count} replies` : "Supports the public pool",
   priorityHandoff: "Priority human review",
   currentPlanDetail: (remaining: number, limit: number) => `The free plan has ${remaining} of ${limit} replies left and requires no payment.`,
-  demoRechargeDetail: "This is local demo commerce: it verifies order creation and wallet crediting without a real charge or automatic production entitlement.",
+  creditPlanDetail: (available: number, reserved: number) => `${available} service credits remain${reserved > 0 ? `, with ${reserved} currently reserved` : ""}. Paid continuation reserves first and settles only after completion.`,
+  demoRechargeDetail: "This local demo automatically buys service credits scoped to this representative after simulated payment, so paid continuation can be verified without a real charge.",
   commerceUnavailableDetail: "Live payment and plan entitlement are not connected yet. Selecting this plan will not charge you; contact the representative owner for next steps.",
   openDemoRecharge: "Open demo recharge",
   contactOwner: "Request human help",

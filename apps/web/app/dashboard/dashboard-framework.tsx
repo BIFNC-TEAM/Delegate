@@ -22,6 +22,7 @@ import { DashboardRepresentativeOperations } from "./dashboard-representative-op
 import { DashboardApprovals } from "./dashboard-approvals";
 import { DashboardSkills } from "./dashboard-skills";
 import { DashboardAuditLogs } from "./dashboard-audit-logs";
+import { DashboardWallet } from "./dashboard-wallet";
 
 type DashboardFrameworkProps = {
   accountLabel: string;
@@ -105,7 +106,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
     <main
       className="dashboard-v2-shell localized-shell"
       data-locale={props.locale}
-      data-ui-stage={["knowledge", "representatives", "inbox", "approvals", "skills", "audit"].includes(props.activeView) ? "functional" : "framework"}
+      data-ui-stage={["knowledge", "representatives", "inbox", "approvals", "skills", "wallet", "audit"].includes(props.activeView) ? "functional" : "framework"}
       lang={props.locale === "zh" ? "zh-CN" : "en"}
     >
       <div className="dashboard-v2-layout">
@@ -254,7 +255,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
             </div>
           </header>
 
-          {!(["knowledge", "representatives", "inbox", "approvals", "skills", "audit"] as DashboardView[]).includes(props.activeView) ? (
+          {!(["knowledge", "representatives", "inbox", "approvals", "skills", "wallet", "audit"] as DashboardView[]).includes(props.activeView) ? (
             <div className="dashboard-v2-framework-note">
               <span>{t.frameworkBadge}</span>
               <p>{t.frameworkHint}</p>
@@ -291,6 +292,15 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               <DashboardApprovals activeSlug={props.activeSlug} locale={props.locale} />
             ) : props.activeView === "skills" ? (
               <DashboardSkills activeSlug={props.activeSlug} locale={props.locale} />
+            ) : props.activeView === "wallet" ? (
+              <DashboardWallet
+                activeSlug={props.activeSlug}
+                locale={props.locale}
+                representatives={props.representatives.map((representative) => ({
+                  slug: representative.slug,
+                  name: representative.name,
+                }))}
+              />
             ) : props.activeView === "audit" ? (
               <DashboardAuditLogs activeSlug={props.activeSlug} locale={props.locale} />
             ) : (

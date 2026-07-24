@@ -7,6 +7,15 @@ import {
 } from "@prisma/client";
 import { buildMessageRetentionExpiry } from "@delegate/runtime";
 
+import {
+  readGenerationWalletReservation,
+  runConversationWriteTransaction,
+} from "./conversation-platform";
+import {
+  releaseAgentUsageCredits,
+  settleAgentUsageCredits,
+  type UsageChargeClient,
+} from "./agent-wallet-usage-charge";
 import { prisma } from "./prisma";
 import { finalizeComputeDelegationTask } from "./delegation-tasks";
 
@@ -32,7 +41,7 @@ export async function finalizeComputeApprovalConversation(input: {
   actualCredits?: number;
   failureReason?: string;
 }) {
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await runConversationWriteTransaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.approvalId}))`;
     const approval = await tx.approvalRequest.findUnique({
       where: { id: input.approvalId },
@@ -56,6 +65,12 @@ export async function finalizeComputeApprovalConversation(input: {
     }
 
     const now = new Date();
+    const walletReservation = readGenerationWalletReservation(
+      run.runtimePolicySnapshot,
+    );
+    const delegationTaskOwnsBilling = Boolean(
+      approval.delegationTaskId && approval.delegationTaskStepId,
+    );
     const text = formatComputeOutcome(input);
     const message = await tx.message.upsert({
       where: {
@@ -123,12 +138,39 @@ export async function finalizeComputeApprovalConversation(input: {
         errorMessage: input.failureReason?.slice(0, 1000) ?? null,
       },
     });
+    if (walletReservation && !delegationTaskOwnsBilling) {
+      if (input.outcome === "completed") {
+        await settleAgentUsageCredits(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            settledTokenAmount: walletReservation.tokenAmount,
+            provider: "compute",
+            idempotencyKey: `generation:${run.id}:settle`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      } else {
+        await releaseAgentUsageCredits(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            failed:
+              input.outcome === "failed"
+              || input.outcome === "policy_denied",
+            reason: `compute_${input.outcome}`,
+            idempotencyKey: `generation:${run.id}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
+    }
     await tx.conversation.update({
       where: { id: run.conversationId },
       data: {
         state: "WAITING_USER",
         lastMessageAt: now,
-        freeRepliesUsed: { increment: 1 },
+        ...(walletReservation || delegationTaskOwnsBilling || input.outcome !== "completed"
+          ? {}
+          : { freeRepliesUsed: { increment: 1 } }),
       },
     });
     await tx.conversationEpisode.updateMany({

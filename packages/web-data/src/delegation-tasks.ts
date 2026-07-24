@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  AgentUsageChargeStatus,
   CapabilityKind,
   ConversationEpisodeStatus,
   DelegationTaskActorType,
@@ -14,6 +15,12 @@ import {
 } from "@prisma/client";
 import type { ParsedComputeRequest } from "@delegate/runtime";
 
+import {
+  releaseAgentUsageCredits,
+  settleAgentUsageCredits,
+  type UsageChargeClient,
+} from "./agent-wallet-usage-charge";
+import { readGenerationWalletReservation } from "./conversation-platform";
 import { prisma } from "./prisma";
 import { canonicalizeDelegationTaskEvent } from "./delegation-task-events";
 import {
@@ -807,6 +814,11 @@ export async function finalizeComputeDelegationTask(input: {
         if (!nextRequest || !generationRun) {
           throw new Error("Delegation task next step is missing a persisted request or generation context.");
         }
+        const billingContext = await prepareDelegationBillingTransfer(
+          tx,
+          task.steps,
+          task.generationRuns,
+        );
         const nextRun = await tx.generationRun.create({
           data: {
             conversationId: generationRun.conversationId,
@@ -822,8 +834,25 @@ export async function finalizeComputeDelegationTask(input: {
               request: nextRequest as unknown as Prisma.InputJsonValue,
               previousGenerationRunId: generationRun.id,
             },
+            ...(billingContext
+              ? {
+                  runtimePolicySnapshot:
+                    billingContext.runtimePolicySnapshot as Prisma.InputJsonValue,
+                }
+              : {}),
           },
         });
+        if (billingContext) {
+          await tx.generationRun.update({
+            where: { id: billingContext.ownerRunId },
+            data: {
+              runtimePolicySnapshot: markDelegationBillingTransferred(
+                billingContext.runtimePolicySnapshot,
+                nextRun.id,
+              ),
+            },
+          });
+        }
         await tx.outboxEvent.create({
           data: {
             conversationId: generationRun.conversationId,
@@ -942,6 +971,14 @@ export async function finalizeComputeDelegationTask(input: {
       await tx.delegationTaskOutput.updateMany({
         where: { delegationTaskId: task.id, delegationTaskStepId: step.id },
         data: { isFinal: true },
+      });
+    }
+    if (isTerminalStatus(finalTaskStatus)) {
+      await finalizeDelegationTaskBilling(tx, {
+        taskId: task.id,
+        status: finalTaskStatus,
+        steps: task.steps,
+        generationRuns: task.generationRuns,
       });
     }
     await appendTaskEvent(tx, {
@@ -1282,6 +1319,12 @@ export async function applyRepresentativeDelegationTaskAction(input: {
           version: { increment: 1 },
         },
       });
+      await finalizeDelegationTaskBilling(tx, {
+        taskId: task.id,
+        status: DelegationTaskStatus.CANCELED,
+        steps: task.steps,
+        generationRuns: task.generationRuns,
+      });
       await tx.delegationTaskStep.updateMany({
         where: { delegationTaskId: task.id, status: { notIn: ["COMPLETED", "CANCELED", "SKIPPED"] } },
         data: { status: DelegationTaskStepStatus.CANCELED, completedAt: now },
@@ -1318,6 +1361,11 @@ export async function applyRepresentativeDelegationTaskAction(input: {
     }
     const now = new Date();
     const nextVersion = task.version + 1;
+    const billingContext = await prepareDelegationBillingTransfer(
+      tx,
+      task.steps,
+      task.generationRuns,
+    );
     const run = await tx.generationRun.create({
       data: {
         conversationId: sourceRun.conversationId,
@@ -1333,8 +1381,25 @@ export async function applyRepresentativeDelegationTaskAction(input: {
           previousGenerationRunId: sourceRun.id,
           requestedBy: input.actorId,
         },
+        ...(billingContext
+          ? {
+              runtimePolicySnapshot:
+                billingContext.runtimePolicySnapshot as Prisma.InputJsonValue,
+            }
+          : {}),
       },
     });
+    if (billingContext) {
+      await tx.generationRun.update({
+        where: { id: billingContext.ownerRunId },
+        data: {
+          runtimePolicySnapshot: markDelegationBillingTransferred(
+            billingContext.runtimePolicySnapshot,
+            run.id,
+          ),
+        },
+      });
+    }
     await tx.outboxEvent.create({
       data: {
         conversationId: sourceRun.conversationId,
@@ -1539,6 +1604,11 @@ export async function applyRepresentativeDelegationExternalEffectAction(input: {
       (run) => run.delegationTaskStepId === effect.delegationTaskStepId,
     );
     if (!sourceRun) throw new DelegationTaskActionError("External effect retry has no generation context.");
+    const billingContext = await prepareDelegationBillingTransfer(
+      tx,
+      [effect.delegationTaskStep],
+      effect.delegationTask.generationRuns,
+    );
     const run = await tx.generationRun.create({
       data: {
         conversationId: sourceRun.conversationId,
@@ -1556,8 +1626,25 @@ export async function applyRepresentativeDelegationExternalEffectAction(input: {
           effectId: effect.id,
           requestedBy: input.actorId,
         },
+        ...(billingContext
+          ? {
+              runtimePolicySnapshot:
+                billingContext.runtimePolicySnapshot as Prisma.InputJsonValue,
+            }
+          : {}),
       },
     });
+    if (billingContext) {
+      await tx.generationRun.update({
+        where: { id: billingContext.ownerRunId },
+        data: {
+          runtimePolicySnapshot: markDelegationBillingTransferred(
+            billingContext.runtimePolicySnapshot,
+            run.id,
+          ),
+        },
+      });
+    }
     await tx.outboxEvent.create({
       data: {
         conversationId: sourceRun.conversationId,
@@ -1915,6 +2002,271 @@ async function settleConversationAfterTaskAction(
       data: { status: ConversationEpisodeStatus.WAITING_USER },
     });
   }
+}
+
+type DelegationBillingStep = {
+  id: string;
+  kind: string;
+};
+
+type DelegationBillingRun = {
+  id: string;
+  conversationId: string;
+  delegationTaskStepId: string | null;
+  runtimePolicySnapshot: Prisma.JsonValue | null;
+};
+
+type DelegationBillingContext =
+  | {
+      mode: "free";
+      ownerRunId: string;
+      conversationId: string;
+      runtimePolicySnapshot: Prisma.JsonObject;
+    }
+  | {
+      mode: "service_credit";
+      ownerRunId: string;
+      conversationId: string;
+      runtimePolicySnapshot: Prisma.JsonObject;
+      walletReservation: {
+        usageChargeId: string;
+        tokenAmount: number;
+      };
+    };
+
+function resolveDelegationBillingContext(
+  steps: DelegationBillingStep[],
+  generationRuns: DelegationBillingRun[],
+): DelegationBillingContext | null {
+  const executionStepIds = new Set(
+    steps
+      .filter((step) => step.kind !== "CLARIFICATION")
+      .map((step) => step.id),
+  );
+  const contexts: DelegationBillingContext[] = [];
+  for (const run of generationRuns) {
+    if (
+      !run.delegationTaskStepId
+      || !executionStepIds.has(run.delegationTaskStepId)
+      || !run.runtimePolicySnapshot
+      || typeof run.runtimePolicySnapshot !== "object"
+      || Array.isArray(run.runtimePolicySnapshot)
+    ) {
+      continue;
+    }
+    const snapshot = run.runtimePolicySnapshot as Prisma.JsonObject;
+    if (snapshot["billingMode"] === "free") {
+      contexts.push({
+        mode: "free" as const,
+        ownerRunId: run.id,
+        conversationId: run.conversationId,
+        runtimePolicySnapshot: snapshot,
+      });
+      continue;
+    }
+    if (snapshot["billingMode"] !== "service_credit") continue;
+    const walletReservation = readGenerationWalletReservation(snapshot);
+    if (!walletReservation) {
+      throw new Error("Delegation task paid billing context is invalid.");
+    }
+    contexts.push({
+      mode: "service_credit" as const,
+      ownerRunId: run.id,
+      conversationId: run.conversationId,
+      runtimePolicySnapshot: snapshot,
+      walletReservation,
+    });
+  }
+  if (contexts.length > 1) {
+    throw new Error("Delegation task has multiple active billing context owners.");
+  }
+  return contexts[0] ?? null;
+}
+
+async function prepareDelegationBillingTransfer(
+  tx: Prisma.TransactionClient,
+  steps: DelegationBillingStep[],
+  generationRuns: DelegationBillingRun[],
+) {
+  const context = resolveDelegationBillingContext(steps, generationRuns);
+  if (!context) {
+    const executionStepIds = new Set(
+      steps
+        .filter((step) => step.kind !== "CLARIFICATION")
+        .map((step) => step.id),
+    );
+    const finalizedPaidContext = generationRuns.some((run) => {
+      if (
+        !run.delegationTaskStepId
+        || !executionStepIds.has(run.delegationTaskStepId)
+        || !run.runtimePolicySnapshot
+        || typeof run.runtimePolicySnapshot !== "object"
+        || Array.isArray(run.runtimePolicySnapshot)
+      ) {
+        return false;
+      }
+      const billingMode = (run.runtimePolicySnapshot as Prisma.JsonObject)["billingMode"];
+      return typeof billingMode === "string"
+        && billingMode.startsWith("service_credit_");
+    });
+    if (finalizedPaidContext) {
+      throw new DelegationTaskActionError(
+        "The paid authorization for this task has ended. The audience must submit a new request.",
+      );
+    }
+    return null;
+  }
+  if (context.mode === "free") return context;
+  const usageCharge = await tx.agentUsageCharge.findUnique({
+    where: { id: context.walletReservation.usageChargeId },
+    select: { status: true },
+  });
+  if (usageCharge?.status !== AgentUsageChargeStatus.RESERVED) {
+    throw new DelegationTaskActionError(
+      "The paid authorization for this task is no longer reserved. The audience must submit a new request.",
+    );
+  }
+  return context;
+}
+
+function markDelegationBillingTransferred(
+  snapshot: Prisma.JsonObject,
+  nextGenerationRunId: string,
+): Prisma.InputJsonObject {
+  const {
+    walletReservation: _walletReservation,
+    ...rest
+  } = snapshot;
+  return {
+    ...rest,
+    billingMode: `${String(snapshot["billingMode"])}_transferred`,
+    billingTransferredToGenerationRunId: nextGenerationRunId,
+  } as Prisma.InputJsonObject;
+}
+
+function markDelegationPaidBillingFinalized(
+  snapshot: Prisma.JsonObject,
+  outcome: "settled" | "released",
+): Prisma.InputJsonObject {
+  const {
+    walletReservation: _walletReservation,
+    ...rest
+  } = snapshot;
+  return {
+    ...rest,
+    billingMode: `service_credit_${outcome}`,
+    billingFinalizedAt: new Date().toISOString(),
+  } as Prisma.InputJsonObject;
+}
+
+async function finalizeDelegationTaskBilling(
+  tx: Prisma.TransactionClient,
+  input: {
+    taskId: string;
+    status: DelegationTaskStatus;
+    steps: DelegationBillingStep[];
+    generationRuns: DelegationBillingRun[];
+  },
+) {
+  const context = resolveDelegationBillingContext(
+    input.steps,
+    input.generationRuns,
+  );
+  if (!context) return;
+  if (context.mode === "free") {
+    if (input.status === DelegationTaskStatus.COMPLETED) {
+      await tx.conversation.update({
+        where: { id: context.conversationId },
+        data: { freeRepliesUsed: { increment: 1 } },
+      });
+    }
+    return;
+  }
+
+  const usageCharge = await tx.agentUsageCharge.findUnique({
+    where: { id: context.walletReservation.usageChargeId },
+    select: { status: true },
+  });
+  if (!usageCharge) {
+    throw new Error("Delegation task usage reservation was not found.");
+  }
+  if (input.status === DelegationTaskStatus.COMPLETED) {
+    if (usageCharge.status === AgentUsageChargeStatus.SETTLED) {
+      await tx.generationRun.update({
+        where: { id: context.ownerRunId },
+        data: {
+          runtimePolicySnapshot: markDelegationPaidBillingFinalized(
+            context.runtimePolicySnapshot,
+            "settled",
+          ),
+        },
+      });
+      return;
+    }
+    if (usageCharge.status !== AgentUsageChargeStatus.RESERVED) {
+      throw new Error(
+        `Delegation task usage reservation cannot settle from ${usageCharge.status}.`,
+      );
+    }
+    await settleAgentUsageCredits(
+      {
+        usageChargeId: context.walletReservation.usageChargeId,
+        settledTokenAmount: context.walletReservation.tokenAmount,
+        provider: "compute",
+        idempotencyKey: `delegation-task:${input.taskId}:settle`,
+      },
+      tx as unknown as UsageChargeClient,
+    );
+    await tx.generationRun.update({
+      where: { id: context.ownerRunId },
+      data: {
+        runtimePolicySnapshot: markDelegationPaidBillingFinalized(
+          context.runtimePolicySnapshot,
+          "settled",
+        ),
+      },
+    });
+    return;
+  }
+
+  if (
+    usageCharge.status === AgentUsageChargeStatus.RELEASED
+    || usageCharge.status === AgentUsageChargeStatus.FAILED
+  ) {
+    await tx.generationRun.update({
+      where: { id: context.ownerRunId },
+      data: {
+        runtimePolicySnapshot: markDelegationPaidBillingFinalized(
+          context.runtimePolicySnapshot,
+          "released",
+        ),
+      },
+    });
+    return;
+  }
+  if (usageCharge.status !== AgentUsageChargeStatus.RESERVED) {
+    throw new Error(
+      `Delegation task usage reservation cannot release from ${usageCharge.status}.`,
+    );
+  }
+  await releaseAgentUsageCredits(
+    {
+      usageChargeId: context.walletReservation.usageChargeId,
+      failed: input.status === DelegationTaskStatus.FAILED,
+      reason: `delegation_task_${input.status.toLowerCase()}`,
+      idempotencyKey: `delegation-task:${input.taskId}:release`,
+    },
+    tx as unknown as UsageChargeClient,
+  );
+  await tx.generationRun.update({
+    where: { id: context.ownerRunId },
+    data: {
+      runtimePolicySnapshot: markDelegationPaidBillingFinalized(
+        context.runtimePolicySnapshot,
+        "released",
+      ),
+    },
+  });
 }
 
 function mapCapability(capability: ComputeCapability) {

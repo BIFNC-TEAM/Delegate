@@ -589,6 +589,12 @@ enum AmnWalletAccountType {
   CREATOR_WITHDRAWABLE
   PLATFORM_REVENUE
   PROVIDER_COST
+  SERVICE_CREDIT_DEFERRED
+  CREATOR_FROZEN
+  PLATFORM_DEFERRED_REVENUE
+  PLATFORM_EARNED_REVENUE
+  EXTERNAL_SETTLEMENT
+  PAYOUT_CLEARING
 }
 
 enum AmnLedgerEntryKind {
@@ -605,6 +611,41 @@ enum AmnLedgerEntryKind {
   REFUND_REVERSAL
   WITHDRAWAL_FREEZE
   WITHDRAWAL_PAYOUT
+  SERVICE_CREDIT_RESERVE
+  SERVICE_CREDIT_SETTLE
+  SERVICE_CREDIT_RELEASE
+  CREATOR_FROZEN_CREDIT
+  CREATOR_FROZEN_DEBIT
+  PLATFORM_DEFERRED_REVENUE_CREDIT
+  PLATFORM_DEFERRED_REVENUE_DEBIT
+  PLATFORM_EARNED_REVENUE_CREDIT
+  EXTERNAL_SETTLEMENT_CREDIT
+  EXTERNAL_SETTLEMENT_DEBIT
+  PAYOUT_CLEARING_CREDIT
+  PAYOUT_CLEARING_DEBIT
+}
+
+enum WalletTransactionEventType {
+  USER_RECHARGE
+  AGENT_TOKEN_PURCHASE
+  USAGE_RESERVATION
+  USAGE_SETTLEMENT
+  USAGE_RELEASE
+  CREATOR_EARNING_RELEASE
+  WITHDRAWAL_REQUEST
+  WITHDRAWAL_PAYOUT
+  REFUND
+  REVERSAL
+  ADJUSTMENT
+}
+
+enum WalletTransactionStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  REVERSED
+  CANCELED
 }
 
 enum PaymentProvider {
@@ -652,6 +693,10 @@ enum AgentUsageChargeStatus {
   CREATED
   APPLIED
   REVERSED
+  RESERVED
+  SETTLED
+  RELEASED
+  FAILED
 }
 
 enum CreatorEarningStatus {
@@ -801,6 +846,7 @@ model Owner {
   representatives           Representative[]
   creatorEarnings           CreatorEarning[]
   withdrawRequests          WithdrawRequest[]
+  walletTransactions        WalletTransaction[]
   walletLedgerEntries       WalletLedgerEntry[]
   identityLinks             OwnerIdentityLink[]
   knowledgeAssets           KnowledgeAsset[]
@@ -888,6 +934,8 @@ model UserWallet {
   ledgerEntries      WalletLedgerEntry[]
   rechargeOrders     RechargeOrder[]
   tokenPurchases     AgentTokenPurchase[]
+  userAgentWallets   UserAgentWallet[]
+  walletTransactions WalletTransaction[]
 
   @@index([currency, createdAt])
   @@index([audienceIdentityId, updatedAt])
@@ -906,11 +954,66 @@ model AgentWallet {
   updatedAt              DateTime             @updatedAt
   representative         Representative       @relation(fields: [representativeId], references: [id])
   ledgerEntries          WalletLedgerEntry[]
+  userAgentWallets       UserAgentWallet[]
   tokenPurchases         AgentTokenPurchase[]
   usageCharges           AgentUsageCharge[]
   creatorEarnings        CreatorEarning[]
 
   @@index([currency, updatedAt])
+}
+
+model UserAgentWallet {
+  id                        String               @id @default(cuid())
+  userWalletId              String
+  agentWalletId             String
+  currency                  String               @default("CNY")
+  availableTokenAmount      Int                  @default(0)
+  reservedTokenAmount       Int                  @default(0)
+  totalPurchasedTokenAmount Int                  @default(0)
+  totalConsumedTokenAmount  Int                  @default(0)
+  createdAt                 DateTime             @default(now())
+  updatedAt                 DateTime             @updatedAt
+  userWallet                UserWallet           @relation(fields: [userWalletId], references: [id], onDelete: Restrict)
+  agentWallet               AgentWallet          @relation(fields: [agentWalletId], references: [id], onDelete: Restrict)
+  tokenPurchases            AgentTokenPurchase[]
+  usageCharges              AgentUsageCharge[]
+  ledgerEntries             WalletLedgerEntry[]
+
+  @@unique([userWalletId, agentWalletId, currency])
+  @@index([agentWalletId, currency, updatedAt])
+  @@index([userWalletId, currency, updatedAt])
+}
+
+model WalletTransaction {
+  id               String                     @id @default(cuid())
+  eventGroupId     String                     @unique
+  idempotencyKey   String                     @unique
+  sourceType       String
+  sourceId         String?
+  eventType        WalletTransactionEventType
+  status           WalletTransactionStatus    @default(PENDING)
+  currency         String                     @default("CNY")
+  ownerId          String?
+  representativeId String?
+  userWalletId     String?
+  occurredAt       DateTime                   @default(now())
+  completedAt      DateTime?
+  failedAt         DateTime?
+  reversedAt       DateTime?
+  metadata         Json?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  owner            Owner?                     @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  representative   Representative?            @relation(fields: [representativeId], references: [id], onDelete: SetNull)
+  userWallet       UserWallet?                @relation(fields: [userWalletId], references: [id], onDelete: SetNull)
+  ledgerEntries    WalletLedgerEntry[]
+
+  @@index([sourceType, sourceId])
+  @@index([ownerId, status, occurredAt])
+  @@index([representativeId, status, occurredAt])
+  @@index([userWalletId, status, occurredAt])
+  @@index([eventType, status, occurredAt])
+  @@index([currency, occurredAt])
 }
 
 model WalletLedgerEntry {
@@ -919,7 +1022,9 @@ model WalletLedgerEntry {
   idempotencyKey         String                @unique
   accountType            AmnWalletAccountType
   entryKind              AmnLedgerEntryKind
+  transactionId          String?
   userWalletId           String?
+  userAgentWalletId      String?
   agentWalletId          String?
   representativeId       String?
   ownerId                String?
@@ -937,7 +1042,9 @@ model WalletLedgerEntry {
   notes                  String?
   metadata               Json?
   createdAt              DateTime              @default(now())
+  transaction            WalletTransaction?    @relation(fields: [transactionId], references: [id], onDelete: SetNull)
   userWallet             UserWallet?           @relation(fields: [userWalletId], references: [id])
+  userAgentWallet        UserAgentWallet?      @relation(fields: [userAgentWalletId], references: [id], onDelete: SetNull)
   agentWallet            AgentWallet?          @relation(fields: [agentWalletId], references: [id])
   representative         Representative?       @relation(fields: [representativeId], references: [id])
   owner                  Owner?                @relation(fields: [ownerId], references: [id])
@@ -949,9 +1056,11 @@ model WalletLedgerEntry {
   withdrawRequest        WithdrawRequest?      @relation(fields: [withdrawRequestId], references: [id])
 
   @@index([eventGroupId, createdAt])
+  @@index([transactionId, createdAt])
   @@index([accountType, createdAt])
   @@index([entryKind, createdAt])
   @@index([userWalletId, createdAt])
+  @@index([userAgentWalletId, createdAt])
   @@index([agentWalletId, createdAt])
   @@index([representativeId, createdAt])
   @@index([ownerId, createdAt])
@@ -1004,12 +1113,14 @@ model PaymentProviderEvent {
 model AgentTokenPurchase {
   id                     String                   @id @default(cuid())
   userWalletId           String
+  userAgentWalletId      String?
   agentWalletId          String
   representativeId       String
   rechargeOrderId        String?
   amountCents            Int
   currency               String                   @default("CNY")
   tokenAmount            Int
+  remainingTokenAmount   Int?
   tokenUnitPriceCents    Int
   creatorRevenueShareBps Int                      @default(2000)
   creatorPendingCents    Int
@@ -1019,20 +1130,24 @@ model AgentTokenPurchase {
   createdAt              DateTime                 @default(now())
   updatedAt              DateTime                 @updatedAt
   userWallet             UserWallet               @relation(fields: [userWalletId], references: [id])
+  userAgentWallet        UserAgentWallet?         @relation(fields: [userAgentWalletId], references: [id], onDelete: SetNull)
   agentWallet            AgentWallet              @relation(fields: [agentWalletId], references: [id])
   representative         Representative           @relation(fields: [representativeId], references: [id])
   rechargeOrder          RechargeOrder?           @relation(fields: [rechargeOrderId], references: [id])
   usageCharges           AgentUsageCharge[]
+  usageAllocations       AgentUsageAllocation[]
   creatorEarnings        CreatorEarning[]
   ledgerEntries          WalletLedgerEntry[]
 
   @@index([userWalletId, createdAt])
+  @@index([userAgentWalletId, status, createdAt])
   @@index([agentWalletId, createdAt])
   @@index([representativeId, status, createdAt])
 }
 
 model AgentUsageCharge {
   id                   String                 @id @default(cuid())
+  userAgentWalletId    String?
   agentWalletId        String
   representativeId     String
   tokenPurchaseId      String?
@@ -1040,46 +1155,78 @@ model AgentUsageCharge {
   status               AgentUsageChargeStatus @default(CREATED)
   quantity             Int                    @default(1)
   tokenAmount          Int
+  reservedTokenAmount  Int                    @default(0)
+  settledTokenAmount   Int                    @default(0)
+  releasedTokenAmount  Int                    @default(0)
   providerCostCents    Int                    @default(0)
   platformRevenueCents Int                    @default(0)
   currency             String                 @default("CNY")
   idempotencyKey       String                 @unique
   createdAt            DateTime               @default(now())
   updatedAt            DateTime               @updatedAt
+  reservedAt           DateTime?
+  settledAt            DateTime?
+  releasedAt           DateTime?
   reversedAt           DateTime?
+  userAgentWallet      UserAgentWallet?       @relation(fields: [userAgentWalletId], references: [id], onDelete: SetNull)
   agentWallet          AgentWallet            @relation(fields: [agentWalletId], references: [id])
   representative       Representative         @relation(fields: [representativeId], references: [id])
   tokenPurchase        AgentTokenPurchase?    @relation(fields: [tokenPurchaseId], references: [id])
   creatorEarnings      CreatorEarning[]
+  allocations          AgentUsageAllocation[]
   ledgerEntries        WalletLedgerEntry[]
 
+  @@index([userAgentWalletId, status, createdAt])
   @@index([agentWalletId, status, createdAt])
   @@index([representativeId, kind, createdAt])
 }
 
+model AgentUsageAllocation {
+  id                  String             @id @default(cuid())
+  usageChargeId       String
+  tokenPurchaseId     String
+  creatorEarningId    String?
+  tokenAmount         Int
+  valueCents          Int                @default(0)
+  creatorReleaseCents Int                @default(0)
+  currency            String             @default("CNY")
+  releasedAt          DateTime?
+  reversedAt          DateTime?
+  createdAt           DateTime           @default(now())
+  usageCharge         AgentUsageCharge   @relation(fields: [usageChargeId], references: [id], onDelete: Restrict)
+  tokenPurchase       AgentTokenPurchase @relation(fields: [tokenPurchaseId], references: [id], onDelete: Restrict)
+  creatorEarning      CreatorEarning?    @relation(fields: [creatorEarningId], references: [id], onDelete: SetNull)
+
+  @@unique([usageChargeId, tokenPurchaseId])
+  @@index([tokenPurchaseId, createdAt])
+  @@index([creatorEarningId, createdAt])
+}
+
 model CreatorEarning {
-  id                String               @id @default(cuid())
-  ownerId           String
-  representativeId  String
-  agentWalletId     String
-  tokenPurchaseId   String?
-  usageChargeId     String?
-  status            CreatorEarningStatus @default(PENDING)
-  pendingCents      Int                  @default(0)
-  withdrawableCents Int                  @default(0)
-  frozenCents       Int                  @default(0)
-  withdrawnCents    Int                  @default(0)
-  currency          String               @default("CNY")
-  revenueShareBps   Int                  @default(2000)
-  idempotencyKey    String               @unique
-  createdAt         DateTime             @default(now())
-  updatedAt         DateTime             @updatedAt
-  owner             Owner                @relation(fields: [ownerId], references: [id])
-  representative    Representative       @relation(fields: [representativeId], references: [id])
-  agentWallet       AgentWallet          @relation(fields: [agentWalletId], references: [id])
-  tokenPurchase     AgentTokenPurchase?  @relation(fields: [tokenPurchaseId], references: [id])
-  usageCharge       AgentUsageCharge?    @relation(fields: [usageChargeId], references: [id])
-  ledgerEntries     WalletLedgerEntry[]
+  id                    String                 @id @default(cuid())
+  ownerId               String
+  representativeId      String
+  agentWalletId         String
+  tokenPurchaseId       String?
+  usageChargeId         String?
+  status                CreatorEarningStatus   @default(PENDING)
+  pendingCents          Int                    @default(0)
+  withdrawableCents     Int                    @default(0)
+  frozenCents           Int                    @default(0)
+  withdrawnCents        Int                    @default(0)
+  currency              String                 @default("CNY")
+  revenueShareBps       Int                    @default(2000)
+  idempotencyKey        String                 @unique
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  owner                 Owner                  @relation(fields: [ownerId], references: [id])
+  representative        Representative         @relation(fields: [representativeId], references: [id])
+  agentWallet           AgentWallet            @relation(fields: [agentWalletId], references: [id])
+  tokenPurchase         AgentTokenPurchase?    @relation(fields: [tokenPurchaseId], references: [id])
+  usageCharge           AgentUsageCharge?      @relation(fields: [usageChargeId], references: [id])
+  usageAllocations      AgentUsageAllocation[]
+  withdrawalAllocations WithdrawalAllocation[]
+  ledgerEntries         WalletLedgerEntry[]
 
   @@index([ownerId, status, createdAt])
   @@index([representativeId, status, createdAt])
@@ -1087,28 +1234,45 @@ model CreatorEarning {
 }
 
 model WithdrawRequest {
-  id               String                @id @default(cuid())
+  id               String                 @id @default(cuid())
   ownerId          String
   representativeId String?
-  status           WithdrawRequestStatus @default(PENDING_REVIEW)
+  status           WithdrawRequestStatus  @default(PENDING_REVIEW)
   amountCents      Int
-  currency         String                @default("CNY")
-  requestedAt      DateTime              @default(now())
+  currency         String                 @default("CNY")
+  requestedAt      DateTime               @default(now())
   reviewedAt       DateTime?
   reviewedBy       String?
   paidAt           DateTime?
   provider         PaymentProvider?
-  providerPayoutId String?               @unique
+  providerPayoutId String?                @unique
   failureReason    String?
-  idempotencyKey   String                @unique
-  createdAt        DateTime              @default(now())
-  updatedAt        DateTime              @updatedAt
-  owner            Owner                 @relation(fields: [ownerId], references: [id])
-  representative   Representative?       @relation(fields: [representativeId], references: [id])
+  idempotencyKey   String                 @unique
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  owner            Owner                  @relation(fields: [ownerId], references: [id])
+  representative   Representative?        @relation(fields: [representativeId], references: [id])
+  allocations      WithdrawalAllocation[]
   ledgerEntries    WalletLedgerEntry[]
 
   @@index([ownerId, status, requestedAt])
   @@index([representativeId, status, requestedAt])
+}
+
+model WithdrawalAllocation {
+  id                String          @id @default(cuid())
+  withdrawRequestId String
+  creatorEarningId  String
+  amountCents       Int
+  currency          String          @default("CNY")
+  releasedAt        DateTime?
+  paidAt            DateTime?
+  createdAt         DateTime        @default(now())
+  withdrawRequest   WithdrawRequest @relation(fields: [withdrawRequestId], references: [id], onDelete: Restrict)
+  creatorEarning    CreatorEarning  @relation(fields: [creatorEarningId], references: [id], onDelete: Restrict)
+
+  @@unique([withdrawRequestId, creatorEarningId])
+  @@index([creatorEarningId, createdAt])
 }
 
 model Organization {
@@ -1252,6 +1416,7 @@ model Representative {
   knowledgeAssetLinks              KnowledgeAssetRepresentative[]
   creatorEarnings                  CreatorEarning[]
   withdrawRequests                 WithdrawRequest[]
+  walletTransactions               WalletTransaction[]
   walletLedgerEntries              WalletLedgerEntry[]
   trainingSources                  CreatorTrainingSource[]
   feedbackSignals                  CreatorFeedbackSignal[]

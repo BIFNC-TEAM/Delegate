@@ -1,7 +1,9 @@
 import { cookies } from "next/headers";
 
 import {
+  buildWebAudienceExternalUserId,
   buildWebAudienceKey,
+  getUserAgentWalletBalance,
   getPublicConversationHistory,
   getPublicRepresentativeRuntime,
 } from "@delegate/web-data";
@@ -33,21 +35,38 @@ export async function GET(
     cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
   });
   const audienceKey = buildWebAudienceKey(session.audienceId);
+  const externalUserId = buildWebAudienceExternalUserId(slug, session.audienceId);
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let previous = "";
+      let serviceBalance: Awaited<ReturnType<typeof getUserAgentWalletBalance>> = null;
+      let nextBalanceRefreshAt = 0;
       try {
         while (!request.signal.aborted) {
           const history = await getPublicConversationHistory({
             representativeSlug: slug,
             audienceKey,
           });
+          if (
+            process.env.DATABASE_URL?.trim()
+            && Date.now() >= nextBalanceRefreshAt
+          ) {
+            serviceBalance = await getUserAgentWalletBalance({
+              externalUserId,
+              representativeId: runtime.setup.id,
+            });
+            nextBalanceRefreshAt = Date.now() + 2_000;
+          }
           const snapshot = {
             ...history,
             usage: deriveTierUsage({
               freeRepliesUsed: history.freeRepliesUsed,
               freeReplyLimit: runtime.setup.contract.freeReplyLimit,
+              serviceCreditsAvailable:
+                serviceBalance?.availableTokenAmount ?? 0,
+              serviceCreditsReserved:
+                serviceBalance?.reservedTokenAmount ?? 0,
             }),
           };
           const serialized = JSON.stringify(snapshot);
@@ -62,8 +81,9 @@ export async function GET(
       } catch (error) {
         if (!request.signal.aborted) {
           controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
-            error: error instanceof Error ? error.message : "stream_failed",
+            error: "stream_failed",
           })}\n\n`));
+          console.error("Public conversation event stream failed.", error);
         }
       } finally {
         controller.close();
@@ -73,7 +93,7 @@ export async function GET(
 
   return new Response(stream, {
     headers: {
-      "Cache-Control": "no-cache, no-transform",
+      "Cache-Control": "private, no-cache, no-transform",
       Connection: "keep-alive",
       "Content-Type": "text/event-stream; charset=utf-8",
       "X-Accel-Buffering": "no",

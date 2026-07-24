@@ -22,6 +22,8 @@ export type PublicChatResponse = {
   usage: {
     freeRepliesUsed: number;
     freeRepliesRemaining: number;
+    serviceCreditsAvailable: number;
+    serviceCreditsReserved: number;
     passUnlocked: boolean;
     deepHelpUnlocked: boolean;
   };
@@ -75,16 +77,34 @@ export function normalizePublicChatRequest(payload: unknown): PublicChatRequest 
 export function deriveTierUsage(params: {
   freeRepliesUsed: number;
   freeReplyLimit: number;
+  serviceCreditsAvailable?: number;
+  serviceCreditsReserved?: number;
 }) {
+  const serviceCreditsAvailable = Math.max(
+    0,
+    Math.trunc(params.serviceCreditsAvailable ?? 0),
+  );
+  const serviceCreditsReserved = Math.max(
+    0,
+    Math.trunc(params.serviceCreditsReserved ?? 0),
+  );
   return {
     freeRepliesUsed: params.freeRepliesUsed,
     freeRepliesRemaining: Math.max(
       0,
       params.freeReplyLimit - params.freeRepliesUsed,
     ),
-    passUnlocked: false,
+    serviceCreditsAvailable,
+    serviceCreditsReserved,
+    passUnlocked: serviceCreditsAvailable > 0 || serviceCreditsReserved > 0,
     deepHelpUnlocked: false,
   };
+}
+
+export function resolvePublicChatTier(
+  usage: ReturnType<typeof deriveTierUsage>,
+): PlanTier {
+  return usage.passUnlocked ? "pass" : "free";
 }
 
 export function sanitizeRecentTurns(value: unknown): ModelRuntimeRecentTurn[] {

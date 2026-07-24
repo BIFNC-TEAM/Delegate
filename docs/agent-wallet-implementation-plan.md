@@ -28,19 +28,27 @@ The transactional MVP described by this plan is implemented on
   withdrawals freeze exact creator-earning lots through
   `WithdrawalAllocation`.
 - public conversation acceptance atomically chooses a free slot or reserves a
-  paid service credit. Completion settles it; non-billable and terminal
-  failure paths release it. Missing visitor wallets return payment-required
-  semantics rather than internal errors, and the worker recognizes the
-  reservation as entitlement for that run without granting a permanent pass.
+  paid service credit in both `UserAgentWallet` and the canonical
+  `ServiceEntitlement` account. Completion settles both; non-billable and
+  terminal failure paths release both. Purchase grants and unused-credit
+  reversal retracts both projections in the same transaction. Any parity
+  mismatch fails closed before a balance-dependent mutation. Balance reads use
+  one Serializable snapshot, and low-level wallet-only usage mutations are not
+  exported from the package root.
 - Compute ignores client-supplied paid-entitlement flags. The broker grants a
-  run-scoped `pass` only after the server-stored reservation is revalidated
-  against the same representative, token amount, and current `RESERVED`
-  wallet charge; blocked, failed, over-budget, and policy-rejected results are
-  explicitly non-billable. Multi-step Compute/MCP tasks transfer that single
-  billing context between runs and settle or release it exactly once at the
-  task terminal state.
+  run-scoped capability only after revalidating an active server-owned
+  GenerationRun and one of three explicit authorities: a persisted free slot,
+  a wallet reservation with a matching entitlement RESERVE, or an active plan
+  entitlement reservation. Legacy unlock flags are not authorization.
+  Blocked, failed, over-budget, and policy-rejected results are explicitly
+  non-billable. Multi-step Compute/MCP tasks transfer that single billing
+  context between runs and settle or release it exactly once at the task
+  terminal state.
 - retryable generation failures continue to occupy their free-reply slot during
-  backoff. Claimed generation work uses a renewable five-minute outbox lease;
+  backoff. Free-slot decisions share the conversation advisory lock across
+  channels. Editing transfers an active paid reservation to the replacement
+  run; redaction cancels and releases both active and retry-backoff runs.
+  Claimed generation work uses a renewable five-minute outbox lease;
   every completion and failure write is fenced by the current lease attempt,
   stale work can be reclaimed atomically, and exhausting the retry budget
   dead-letters the run and releases any wallet reservation.
@@ -177,17 +185,24 @@ Default creator revenue share is 20%, represented as `2000` basis points. The pe
 
 ```text
 Request acceptance reserves UserAgentWallet service credits
+The same transaction reserves canonical ServiceEntitlement units
 Agent service runs
 Completion settles only the actual reserved amount
-UserAgentWallet and AgentWallet projections decrease
+UserAgentWallet, AgentWallet, and ServiceEntitlement projections decrease
 Provider/platform costs are recorded
 Creator pending earnings are released proportionally
 Creator withdrawable earnings increase
 ```
 
 Non-billable completion, cancellation, rejection, and terminal failure release
-the reservation. Retryable failures retain it. Existing owner compute-budget
-behavior remains compatible during migration.
+the reservation. Editing transfers it to the replacement run. Redaction also
+terminates a retryable failed run and releases its reservation; other retryable
+failures retain it. Existing owner compute-budget behavior remains compatible
+during migration.
+
+Time-limited generic grants are not part of this MVP. Before adding them, persist
+the original expiry in the entitlement ledger and include it in idempotent
+replay validation.
 
 ### Refund And Reversal
 
@@ -289,11 +304,13 @@ All values should come from ledger projection rather than static mock data.
 
 The old `Wallet` and `LedgerEntry` paths should remain live while AMN Wallet is introduced. New AMN logic should use the new wallet ledger engine. Public-conversation Compute/MCP usage is now wired to the scoped reservation flow; remaining runtime lanes can keep writing old `LedgerEntry` rows until they adopt the same reserve/settle contract.
 
-The bridge remains one-way:
+The public service-credit bridge is now atomic:
 
 - existing compute billing can continue reading the old owner-credit models.
-- public representative service credits and the new Wallet Dashboard use the
-  new scoped wallet models.
+- public representative purchases, usage, and reversals update the scoped
+  wallet and canonical entitlement ledgers together.
+- Compute authorization reads active run-scoped entitlement evidence and never
+  treats legacy contact unlock fields or a client boolean as paid authority.
 - production deployment must run the migration preflight against a backup and
   reconcile any rejected legacy rows before retrying.
 

@@ -30,6 +30,7 @@ import {
   type AgentTokenPurchaseSnapshot,
 } from "./agent-wallet-token-purchase";
 import { prisma } from "./prisma";
+import { AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE } from "./service-entitlements";
 
 type UserWalletRecord = {
   id: string;
@@ -142,8 +143,6 @@ export type CompleteMockRechargeAndPurchaseSnapshot = {
 };
 
 const SUPPORTED_RECHARGE_CURRENCIES = new Set(["CNY", "USD"]);
-export const AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE =
-  "agent-wallet:service-credit:v1";
 
 export function assertMockRechargeMutationsEnabled(
   env: Readonly<Record<string, string | undefined>> = process.env,

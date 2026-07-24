@@ -1,28 +1,270 @@
-export function deriveConversationComputeEntitlements(params: {
-  conversation?:
-    | {
-        passUnlockedAt: Date | null;
-        deepHelpUnlockedAt: Date | null;
-      }
-    | null
-    | undefined;
-  generationRuntimePolicySnapshot?: unknown;
-}) {
-  const passUnlocked = Boolean(params.conversation?.passUnlockedAt);
-  const deepHelpUnlocked = Boolean(params.conversation?.deepHelpUnlockedAt);
-  const runScopedPass = hasServerStoredServiceCreditReservation(
-    params.generationRuntimePolicySnapshot,
-  );
-  const activePlanTier = deepHelpUnlocked
-    ? "deep_help"
-    : passUnlocked || runScopedPass
-      ? "pass"
-      : undefined;
+import {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  verifyAgentUsageEntitlementReservation,
+  type VerifiedAgentUsageEntitlementReservation,
+} from "@delegate/web-data";
 
-  return {
-    hasPaidEntitlement: activePlanTier !== undefined,
-    activePlanTier,
-  } as const;
+import { prisma } from "./prisma";
+import { SessionError } from "./session-error";
+
+const ACTIVE_AUDIENCE_RUN_STATUSES = new Set([
+  "PROCESSING",
+  "WAITING_APPROVAL",
+]);
+const PLAN_PRODUCT_CODES = new Set(["plan:pass", "plan:deep_help"]);
+const CONVERSATION_ENTITLEMENT_PREFIX = "conversation-entitlement:";
+
+type AudienceAuthorizationClient = Pick<
+  typeof prisma,
+  "generationRun" | "serviceEntitlementAccount" | "serviceEntitlementLedgerEntry"
+>;
+
+type WalletReservationVerifier = typeof verifyAgentUsageEntitlementReservation;
+
+type AudienceGenerationRunAuthorizationBase = {
+  audienceIdentityId: string;
+  generationRunId: string;
+  representativeId: string;
+};
+
+export type AudienceGenerationRunAuthorization =
+  | (AudienceGenerationRunAuthorizationBase & {
+      kind: "free";
+      productCode: null;
+      activePlanTier: undefined;
+      hasPaidEntitlement: false;
+    })
+  | (AudienceGenerationRunAuthorizationBase & {
+      kind: "wallet" | "plan";
+      productCode: string;
+      activePlanTier: "pass" | "deep_help";
+      hasPaidEntitlement: true;
+    });
+
+export type AudienceGenerationRunAuthorizationInput = {
+  requestedBy: string;
+  representativeId: string;
+  contactId?: string | null;
+  conversationId?: string | null;
+  generationRunId?: string | null;
+};
+
+/**
+ * Revalidates the server-owned authorization for audience compute. This must
+ * run both before a session is created and immediately before each execution,
+ * because an approval wait can outlive the underlying reservation.
+ */
+export async function requireAudienceGenerationRunAuthorization(
+  input: AudienceGenerationRunAuthorizationInput,
+  client: AudienceAuthorizationClient = prisma,
+  walletVerifier: WalletReservationVerifier =
+    verifyAgentUsageEntitlementReservation,
+): Promise<AudienceGenerationRunAuthorization | null> {
+  if (input.requestedBy.trim().toLowerCase() !== "audience") return null;
+
+  const generationRunId = input.generationRunId?.trim();
+  if (!generationRunId) {
+    throw new SessionError(403, "audience_generation_run_required");
+  }
+  const representativeId = input.representativeId.trim();
+  const contactId = input.contactId?.trim();
+  const conversationId = input.conversationId?.trim();
+  if (!representativeId || !contactId || !conversationId) {
+    throwAudienceAuthorizationDenied();
+  }
+
+  const run = await client.generationRun.findUnique({
+    where: { id: generationRunId },
+    select: {
+      id: true,
+      status: true,
+      conversationId: true,
+      runtimePolicySnapshot: true,
+      conversation: {
+        select: {
+          id: true,
+          representativeId: true,
+          contactId: true,
+          audienceIdentityId: true,
+          audienceIdentity: {
+            select: {
+              id: true,
+              status: true,
+              mergedIntoId: true,
+            },
+          },
+          contact: {
+            select: {
+              id: true,
+              audienceIdentityId: true,
+              audienceIdentity: {
+                select: {
+                  id: true,
+                  status: true,
+                  mergedIntoId: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  if (
+    !run
+    || run.id !== generationRunId
+    || !ACTIVE_AUDIENCE_RUN_STATUSES.has(run.status)
+    || run.conversationId !== conversationId
+    || run.conversation.id !== conversationId
+    || run.conversation.representativeId !== representativeId
+    || run.conversation.contactId !== contactId
+    || run.conversation.contact.id !== contactId
+  ) {
+    throwAudienceAuthorizationDenied();
+  }
+
+  const audienceIdentityId = requireMatchingActiveAudienceIdentity(run.conversation);
+  const snapshot = readRuntimePolicySnapshot(run.runtimePolicySnapshot);
+  const billingMode =
+    typeof snapshot?.billingMode === "string"
+      ? snapshot.billingMode
+      : null;
+  const hasWalletReservationField =
+    snapshot !== null
+    && Object.prototype.hasOwnProperty.call(snapshot, "walletReservation");
+
+  if (billingMode === "service_credit") {
+    const reservation = readServerStoredServiceCreditReservation(snapshot);
+    if (!reservation) throwAudienceAuthorizationDenied();
+
+    let verified: VerifiedAgentUsageEntitlementReservation;
+    try {
+      verified = await verifyRunScopedServiceCreditReservation(
+        {
+          audienceIdentityId,
+          representativeId,
+          generationRunId,
+          usageChargeId: reservation.usageChargeId,
+          tokenAmount: reservation.tokenAmount,
+        },
+        walletVerifier,
+      );
+    } catch {
+      throwAudienceAuthorizationDenied();
+    }
+    if (
+      verified.audienceIdentityId !== audienceIdentityId
+      || verified.representativeId !== representativeId
+      || verified.generationRunId !== generationRunId
+      || verified.usageChargeId !== reservation.usageChargeId
+      || verified.tokenAmount !== reservation.tokenAmount
+      || verified.productCode !== AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+    ) {
+      throwAudienceAuthorizationDenied();
+    }
+
+    const account = await client.serviceEntitlementAccount.findUnique({
+      where: { id: verified.entitlementAccountId },
+      select: {
+        id: true,
+        audienceIdentityId: true,
+        representativeId: true,
+        productCode: true,
+        status: true,
+        reservedUnits: true,
+        expiresAt: true,
+      },
+    });
+    if (
+      !account
+      || account.id !== verified.entitlementAccountId
+      || account.audienceIdentityId !== audienceIdentityId
+      || account.representativeId !== representativeId
+      || account.productCode !== AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+      || account.status !== "ACTIVE"
+      || account.reservedUnits < reservation.tokenAmount
+      || isExpired(account.expiresAt)
+    ) {
+      throwAudienceAuthorizationDenied();
+    }
+
+    return {
+      kind: "wallet",
+      audienceIdentityId,
+      generationRunId,
+      representativeId,
+      productCode: account.productCode,
+      activePlanTier: "pass",
+      hasPaidEntitlement: true,
+    };
+  }
+
+  // A wallet marker without its one active billing mode is terminal or
+  // malformed. Never fall back to another rail for the same run.
+  if (
+    hasWalletReservationField
+    || (billingMode !== null && billingMode.startsWith("service_credit"))
+  ) {
+    throwAudienceAuthorizationDenied();
+  }
+
+  if (billingMode === "free") {
+    return {
+      kind: "free",
+      audienceIdentityId,
+      generationRunId,
+      representativeId,
+      productCode: null,
+      activePlanTier: undefined,
+      hasPaidEntitlement: false,
+    };
+  }
+  if (billingMode !== null) throwAudienceAuthorizationDenied();
+
+  const planAuthorization = await verifyActivePlanReservation(
+    {
+      audienceIdentityId,
+      representativeId,
+      generationRunId,
+    },
+    client,
+  );
+  if (!planAuthorization) throwAudienceAuthorizationDenied();
+  return planAuthorization;
+}
+
+export async function verifyRunScopedServiceCreditReservation(
+  input: {
+    audienceIdentityId: string;
+    representativeId: string;
+    generationRunId: string;
+    usageChargeId: string;
+    tokenAmount: number;
+  },
+  verifier: WalletReservationVerifier =
+    verifyAgentUsageEntitlementReservation,
+) {
+  return verifier({
+    audienceIdentityId: input.audienceIdentityId,
+    representativeId: input.representativeId,
+    generationRunId: input.generationRunId,
+    usageChargeId: input.usageChargeId,
+    tokenAmount: input.tokenAmount,
+  });
+}
+
+export function deriveConversationComputeEntitlements(
+  authorization: AudienceGenerationRunAuthorization | null,
+) {
+  return authorization?.hasPaidEntitlement
+    ? {
+        hasPaidEntitlement: true as const,
+        activePlanTier: authorization.activePlanTier,
+      }
+    : {
+        hasPaidEntitlement: false as const,
+        activePlanTier: undefined,
+      };
 }
 
 export function hasServerStoredServiceCreditReservation(snapshot: unknown): boolean {
@@ -33,11 +275,8 @@ export function readServerStoredServiceCreditReservation(snapshot: unknown): {
   usageChargeId: string;
   tokenAmount: number;
 } | null {
-  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
-    return null;
-  }
-  const record = snapshot as Record<string, unknown>;
-  if (record.billingMode !== "service_credit") {
+  const record = readRuntimePolicySnapshot(snapshot);
+  if (!record || record.billingMode !== "service_credit") {
     return null;
   }
   const reservation = record.walletReservation;
@@ -59,4 +298,211 @@ export function readServerStoredServiceCreditReservation(snapshot: unknown): {
     usageChargeId: usageChargeId.trim(),
     tokenAmount,
   };
+}
+
+async function verifyActivePlanReservation(
+  input: {
+    audienceIdentityId: string;
+    representativeId: string;
+    generationRunId: string;
+  },
+  client: AudienceAuthorizationClient,
+): Promise<AudienceGenerationRunAuthorization | null> {
+  const encodedRunId = encodeURIComponent(input.generationRunId);
+  const keyPrefix = `${CONVERSATION_ENTITLEMENT_PREFIX}${encodedRunId}:`;
+  const entries = await client.serviceEntitlementLedgerEntry.findMany({
+    where: {
+      generationRunId: input.generationRunId,
+      idempotencyKey: { startsWith: keyPrefix },
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    include: {
+      entitlementAccount: {
+        select: {
+          id: true,
+          audienceIdentityId: true,
+          representativeId: true,
+          productCode: true,
+          status: true,
+          reservedUnits: true,
+          expiresAt: true,
+        },
+      },
+    },
+  });
+  if (entries.length === 0) return null;
+
+  const pattern = new RegExp(
+    `^${escapeRegExp(keyPrefix)}(\\d+):(reserve|consume|release)$`,
+  );
+  const attempts = new Map<
+    number,
+    {
+      reserve?: (typeof entries)[number];
+      consume?: (typeof entries)[number];
+      release?: (typeof entries)[number];
+    }
+  >();
+  for (const entry of entries) {
+    const match = pattern.exec(entry.idempotencyKey);
+    const attempt = match ? Number(match[1]) : 0;
+    const action = match?.[2] as "reserve" | "consume" | "release" | undefined;
+    const expectedKind =
+      action === "reserve"
+        ? "RESERVE"
+        : action === "consume"
+          ? "CONSUME"
+          : action === "release"
+            ? "RELEASE"
+            : null;
+    if (
+      !match
+      || !Number.isSafeInteger(attempt)
+      || attempt <= 0
+      || !action
+      || entry.kind !== expectedKind
+      || entry.units !== 1
+      || entry.generationRunId !== input.generationRunId
+    ) {
+      throwAudienceAuthorizationDenied();
+    }
+    const current = attempts.get(attempt) ?? {};
+    if (current[action]) throwAudienceAuthorizationDenied();
+    current[action] = entry;
+    attempts.set(attempt, current);
+  }
+
+  const orderedAttempts = [...attempts.entries()].sort(
+    ([left], [right]) => left - right,
+  );
+  for (let index = 0; index < orderedAttempts.length; index += 1) {
+    const [attempt, lifecycle] = orderedAttempts[index]!;
+    const reserveAccount = lifecycle.reserve?.entitlementAccount;
+    if (
+      attempt !== index + 1
+      || !lifecycle.reserve
+      || !reserveAccount
+      || reserveAccount.id !== lifecycle.reserve.entitlementAccountId
+      || reserveAccount.audienceIdentityId !== input.audienceIdentityId
+      || reserveAccount.representativeId !== input.representativeId
+      || !PLAN_PRODUCT_CODES.has(reserveAccount.productCode)
+      || (lifecycle.consume && lifecycle.release)
+      || (
+        index < orderedAttempts.length - 1
+        && (!lifecycle.release || lifecycle.consume)
+      )
+      || (
+        lifecycle.consume
+        && lifecycle.consume.entitlementAccountId
+          !== lifecycle.reserve.entitlementAccountId
+      )
+      || (
+        lifecycle.release
+        && lifecycle.release.entitlementAccountId
+          !== lifecycle.reserve.entitlementAccountId
+      )
+    ) {
+      throwAudienceAuthorizationDenied();
+    }
+  }
+
+  const activeAttempts = orderedAttempts.filter(
+    ([, lifecycle]) => !lifecycle.consume && !lifecycle.release,
+  );
+  const latest = orderedAttempts.at(-1);
+  if (
+    activeAttempts.length !== 1
+    || !latest
+    || activeAttempts[0]![0] !== latest[0]
+  ) {
+    return null;
+  }
+  const reserve = latest[1].reserve!;
+  const account = reserve.entitlementAccount;
+  if (
+    account.id !== reserve.entitlementAccountId
+    || account.audienceIdentityId !== input.audienceIdentityId
+    || account.representativeId !== input.representativeId
+    || !PLAN_PRODUCT_CODES.has(account.productCode)
+    || account.status !== "ACTIVE"
+    || account.reservedUnits < 1
+    || reserve.reservedAfter < 1
+    || isExpired(account.expiresAt)
+  ) {
+    return null;
+  }
+
+  return {
+    kind: "plan",
+    audienceIdentityId: input.audienceIdentityId,
+    generationRunId: input.generationRunId,
+    representativeId: input.representativeId,
+    productCode: account.productCode,
+    activePlanTier:
+      account.productCode === "plan:deep_help" ? "deep_help" : "pass",
+    hasPaidEntitlement: true,
+  };
+}
+
+function requireMatchingActiveAudienceIdentity(conversation: {
+  audienceIdentityId: string | null;
+  audienceIdentity: {
+    id: string;
+    status: string;
+    mergedIntoId: string | null;
+  } | null;
+  contact: {
+    audienceIdentityId: string | null;
+    audienceIdentity: {
+      id: string;
+      status: string;
+      mergedIntoId: string | null;
+    } | null;
+  };
+}) {
+  const conversationIdentity = conversation.audienceIdentity;
+  const contactIdentity = conversation.contact.audienceIdentity;
+  if (
+    !conversation.audienceIdentityId
+    || !conversationIdentity
+    || conversationIdentity.id !== conversation.audienceIdentityId
+    || conversation.contact.audienceIdentityId !== conversation.audienceIdentityId
+    || !contactIdentity
+    || contactIdentity.id !== conversation.audienceIdentityId
+    || !isActiveAudienceIdentity(conversationIdentity)
+    || !isActiveAudienceIdentity(contactIdentity)
+  ) {
+    throwAudienceAuthorizationDenied();
+  }
+  return conversation.audienceIdentityId;
+}
+
+function isActiveAudienceIdentity(identity: {
+  status: string;
+  mergedIntoId: string | null;
+}) {
+  return (
+    (identity.status === "ANONYMOUS" || identity.status === "REGISTERED")
+    && identity.mergedIntoId === null
+  );
+}
+
+function readRuntimePolicySnapshot(
+  snapshot: unknown,
+): Record<string, unknown> | null {
+  return snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+    ? snapshot as Record<string, unknown>
+    : null;
+}
+
+function isExpired(expiresAt: Date | null) {
+  return expiresAt !== null && expiresAt.getTime() <= Date.now();
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function throwAudienceAuthorizationDenied(): never {
+  throw new SessionError(403, "audience_generation_run_authorization_denied");
 }

@@ -31,9 +31,10 @@ import {
 
 import {
   InsufficientAgentUsageCreditsError,
-  releaseAgentUsageCredits,
-  reserveAgentUsageCredits,
-  settleAgentUsageCredits,
+  releaseConversationWalletUsage,
+  reserveConversationWalletUsage,
+  settleConversationWalletUsage,
+  transferAgentUsageEntitlementReservation,
   type AgentUsageChargeSnapshot,
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
@@ -290,10 +291,6 @@ export type AcceptInboundMessageInput = {
   channel?: "web" | "matrix" | "telegram";
   externalMessageId?: string;
   queueGeneration?: boolean;
-  walletReservation?: {
-    usageChargeId: string;
-    tokenAmount: number;
-  };
   walletBilling?: {
     externalUserId: string;
     representativeId: string;
@@ -941,9 +938,14 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       });
     }
 
-    let reservedUsage: AgentUsageChargeSnapshot | null = null;
     let billingMode: "free" | "service_credit" | null = null;
+    let effectiveFreeRepliesUsed = conversation.freeRepliesUsed;
     if (shouldQueueAi && input.walletBilling) {
+      if (input.walletBilling.representativeId !== conversation.representative.id) {
+        throw new Error(
+          "Wallet billing representative does not match the conversation.",
+        );
+      }
       const retryableFailedRunIds = (
         await tx.outboxEvent.findMany({
           where: {
@@ -980,44 +982,12 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
           },
         },
       });
-      const requiresPaidCredit =
-        conversation.freeRepliesUsed + freeInFlight
-        >= input.walletBilling.freeReplyLimit;
-      if (requiresPaidCredit) {
-        try {
-          reservedUsage = await reserveAgentUsageCredits(
-            {
-              externalUserId: input.walletBilling.externalUserId,
-              representativeId: input.walletBilling.representativeId,
-              tokenAmount: input.walletBilling.tokenAmount,
-              ...(input.walletBilling.currency
-                ? { currency: input.walletBilling.currency }
-                : {}),
-              idempotencyKey: input.walletBilling.idempotencyKey,
-            },
-            tx as unknown as UsageChargeClient,
-          );
-        } catch (error) {
-          if (error instanceof InsufficientAgentUsageCreditsError) {
-            throw new ServiceCreditRequiredError(
-              conversation.freeRepliesUsed + freeInFlight,
-            );
-          }
-          throw error;
-        }
-        billingMode = "service_credit";
-      } else {
-        billingMode = "free";
-      }
-    } else if (input.walletReservation) {
-      billingMode = "service_credit";
+      effectiveFreeRepliesUsed = conversation.freeRepliesUsed + freeInFlight;
+      billingMode =
+        effectiveFreeRepliesUsed >= input.walletBilling.freeReplyLimit
+          ? "service_credit"
+          : "free";
     }
-    const walletReservation = reservedUsage
-      ? {
-          usageChargeId: reservedUsage.id,
-          tokenAmount: reservedUsage.reservedTokenAmount,
-        }
-      : input.walletReservation ?? null;
     const createdAt = new Date();
     const message = await tx.message.upsert({
       where: {
@@ -1047,7 +1017,7 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       update: {},
     });
 
-    const run = shouldQueueAi
+    let run = shouldQueueAi
       ? await tx.generationRun.upsert({
           where: { idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}` },
           create: {
@@ -1061,7 +1031,6 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
               ? {
                   runtimePolicySnapshot: {
                     billingMode,
-                    ...(walletReservation ? { walletReservation } : {}),
                   },
                 }
               : {}),
@@ -1071,6 +1040,54 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       : null;
 
     if (run) {
+      let reservedUsage: AgentUsageChargeSnapshot | null = null;
+      if (billingMode === "service_credit") {
+        if (!input.walletBilling) {
+          throw new Error(
+            "Service-credit billing requires server-owned wallet coordinates.",
+          );
+        }
+        if (!conversation.audienceIdentityId) {
+          throw new Error(
+            "Paid conversation does not have a canonical audience identity.",
+          );
+        }
+        try {
+          const reservation = await reserveConversationWalletUsage(
+            {
+              externalUserId: input.walletBilling.externalUserId,
+              audienceIdentityId: conversation.audienceIdentityId,
+              representativeId: conversation.representative.id,
+              conversationId: conversation.id,
+              generationRunId: run.id,
+              tokenAmount: input.walletBilling.tokenAmount,
+              ...(input.walletBilling.currency
+                ? { currency: input.walletBilling.currency }
+                : {}),
+              idempotencyKey: input.walletBilling.idempotencyKey,
+            },
+            tx as unknown as UsageChargeClient,
+          );
+          reservedUsage = reservation.usageCharge;
+        } catch (error) {
+          if (error instanceof InsufficientAgentUsageCreditsError) {
+            throw new ServiceCreditRequiredError(effectiveFreeRepliesUsed);
+          }
+          throw error;
+        }
+        run = await tx.generationRun.update({
+          where: { id: run.id },
+          data: {
+            runtimePolicySnapshot: {
+              billingMode,
+              walletReservation: {
+                usageChargeId: reservedUsage.id,
+                tokenAmount: reservedUsage.reservedTokenAmount,
+              },
+            },
+          },
+        });
+      }
       await tx.outboxEvent.upsert({
         where: { idempotencyKey: `generation.requested:${run.id}` },
         create: {
@@ -1083,6 +1100,24 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
         },
         update: {},
       });
+
+      await tx.conversation.update({
+        where: { id: conversation.id },
+        data: {
+          activeEpisodeId: episode.id,
+          state: "AI_QUEUED",
+          unreadCount: { increment: 1 },
+          lastMessageAt: createdAt,
+        },
+      });
+
+      return {
+        message,
+        run,
+        heldForOperator: false,
+        walletReservation: reservedUsage,
+        replayed: false,
+      };
     }
 
     await tx.conversation.update({
@@ -1092,9 +1127,7 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
         state:
           action === "hold_for_operator"
             ? "HUMAN_ACTIVE"
-            : run
-              ? "AI_QUEUED"
-              : conversation.state,
+            : conversation.state,
         unreadCount: { increment: 1 },
         lastMessageAt: createdAt,
       },
@@ -1102,9 +1135,9 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
 
     return {
       message,
-      run,
+      run: null,
       heldForOperator: !shouldQueueAi,
-      walletReservation: reservedUsage,
+      walletReservation: null,
       replayed: false,
     };
   });
@@ -1180,6 +1213,124 @@ export async function assertConversationChannelDeliveryAvailable(input: {
   if (!availability.available) throw new ChannelUnavailableError(availability.code);
 }
 
+/**
+ * Persists the worker's free-quota decision on the leased generation run so
+ * Compute Broker can authorize the exact server-owned run without consulting
+ * legacy contact unlock flags or trusting a client payload.
+ */
+export async function authorizeGenerationRunFreeUsage(input: {
+  runId: string;
+  outboxId: string;
+  leaseAttempt: number;
+  freeReplyLimit: number;
+}) {
+  if (
+    !Number.isSafeInteger(input.freeReplyLimit)
+    || input.freeReplyLimit < 0
+  ) {
+    throw new Error("freeReplyLimit must be a non-negative integer.");
+  }
+  return runConversationWriteTransaction(async (tx) => {
+    const runScope = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      select: { conversationId: true },
+    });
+    if (!runScope) throw new Error("Generation run not found.");
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${runScope.conversationId}))
+    `;
+    await fenceGenerationWorkLease(tx, input);
+    const run = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      select: {
+        id: true,
+        conversationId: true,
+        runtimePolicySnapshot: true,
+        conversation: { select: { freeRepliesUsed: true } },
+      },
+    });
+    if (!run) throw new Error("Generation run not found.");
+    if (run.conversationId !== runScope.conversationId) {
+      throw new Error("Generation run conversation changed during free authorization.");
+    }
+    const snapshot =
+      run.runtimePolicySnapshot
+      && typeof run.runtimePolicySnapshot === "object"
+      && !Array.isArray(run.runtimePolicySnapshot)
+        ? run.runtimePolicySnapshot as Prisma.JsonObject
+        : {};
+    if (readGenerationWalletReservation(snapshot)) {
+      throw new Error(
+        "Wallet-authorized generation cannot be downgraded to free usage.",
+      );
+    }
+    const billingMode = snapshot["billingMode"];
+    if (
+      typeof billingMode === "string"
+      && billingMode !== "free"
+    ) {
+      throw new Error(
+        `Generation billing mode ${billingMode} cannot be changed to free.`,
+      );
+    }
+    if (billingMode === "free") return true;
+
+    const retryableFailedRunIds = (
+      await tx.outboxEvent.findMany({
+        where: {
+          conversationId: run.conversationId,
+          aggregateType: "generation_run",
+          eventType: "generation.requested",
+          status: "FAILED",
+          attemptCount: { lt: 5 },
+        },
+        select: { aggregateId: true },
+      })
+    ).map((event) => event.aggregateId);
+    const freeInFlight = await tx.generationRun.count({
+      where: {
+        conversationId: run.conversationId,
+        id: { not: run.id },
+        OR: [
+          {
+            status: {
+              in: [
+                GenerationRunStatus.QUEUED,
+                GenerationRunStatus.PROCESSING,
+                GenerationRunStatus.WAITING_APPROVAL,
+              ],
+            },
+          },
+          {
+            id: { in: retryableFailedRunIds },
+            status: GenerationRunStatus.FAILED,
+          },
+        ],
+        runtimePolicySnapshot: {
+          path: ["billingMode"],
+          equals: "free",
+        },
+      },
+    });
+    if (
+      run.conversation.freeRepliesUsed + freeInFlight
+      >= input.freeReplyLimit
+    ) {
+      return false;
+    }
+    await tx.generationRun.update({
+      where: { id: run.id },
+      data: {
+        runtimePolicySnapshot: {
+          ...snapshot,
+          billingMode: "free",
+        },
+      },
+    });
+    return true;
+  });
+}
+
 export async function completeInlineGenerationRun(input: {
   runId: string;
   outboxId: string;
@@ -1248,6 +1399,13 @@ export async function completeInlineGenerationRun(input: {
     if (run.status === GenerationRunStatus.CANCELED) {
       throw new Error("Generation run was canceled.");
     }
+    const delegationTaskOwnsBilling = Boolean(
+      run.delegationTaskId
+      && (
+        run.delegationTaskStep?.kind === "COMPUTE"
+        || run.delegationTaskStep?.kind === "MCP"
+      ),
+    );
     const matrixBinding =
       run.inputMessage?.channelBinding?.kind === RepresentativeChannelKind.MATRIX
         ? run.inputMessage.channelBinding
@@ -1272,7 +1430,7 @@ export async function completeInlineGenerationRun(input: {
         run.runtimePolicySnapshot,
       );
       if (walletReservation) {
-        await releaseAgentUsageCredits(
+        await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
             failed: true,
@@ -1339,7 +1497,7 @@ export async function completeInlineGenerationRun(input: {
       });
       return null;
     }
-    if (input.entitlementReservation) {
+    if (!delegationTaskOwnsBilling && input.entitlementReservation) {
       const reservation = input.entitlementReservation;
       if (
         reservation.generationRunId !== run.id
@@ -1366,7 +1524,7 @@ export async function completeInlineGenerationRun(input: {
           "Conversation entitlement reservation belongs to a different audience identity.",
         );
       }
-    } else if (!input.countUsage) {
+    } else if (!delegationTaskOwnsBilling && !input.countUsage) {
       await releaseConversationEntitlementByGenerationRunId(
         {
           generationRunId: run.id,
@@ -1378,13 +1536,6 @@ export async function completeInlineGenerationRun(input: {
 
     const walletReservation = readGenerationWalletReservation(
       run.runtimePolicySnapshot,
-    );
-    const delegationTaskOwnsBilling = Boolean(
-      run.delegationTaskId
-      && (
-        run.delegationTaskStep?.kind === "COMPUTE"
-        || run.delegationTaskStep?.kind === "MCP"
-      ),
     );
     const now = new Date();
     const message = await tx.message.create({
@@ -1485,7 +1636,7 @@ export async function completeInlineGenerationRun(input: {
     }
     if (walletReservation && !delegationTaskOwnsBilling) {
       if (!input.countUsage) {
-        await releaseAgentUsageCredits(
+        await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
             reason: "generation_usage_not_counted",
@@ -1494,7 +1645,7 @@ export async function completeInlineGenerationRun(input: {
           tx as unknown as UsageChargeClient,
         );
       } else {
-        await settleAgentUsageCredits(
+        await settleConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
             settledTokenAmount: walletReservation.tokenAmount,
@@ -1895,7 +2046,7 @@ export async function claimNextGenerationWorkItem(
         run.runtimePolicySnapshot,
       );
       if (walletReservation) {
-        await releaseAgentUsageCredits(
+        await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
             failed: true,
@@ -1962,7 +2113,7 @@ export async function claimNextGenerationWorkItem(
         run.runtimePolicySnapshot,
       );
       if (walletReservation) {
-        await releaseAgentUsageCredits(
+        await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
             failed: true,
@@ -2053,7 +2204,7 @@ export async function claimNextGenerationWorkItem(
             run.runtimePolicySnapshot,
           );
           if (walletReservation) {
-            await releaseAgentUsageCredits(
+            await releaseConversationWalletUsage(
               {
                 usageChargeId: walletReservation.usageChargeId,
                 failed: true,
@@ -2174,7 +2325,7 @@ export async function claimNextGenerationWorkItem(
         run.runtimePolicySnapshot,
       );
       if (walletReservation) {
-        await releaseAgentUsageCredits(
+        await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
             failed: true,
@@ -2401,7 +2552,7 @@ async function terminalizeExpiredGenerationLease(
     run.runtimePolicySnapshot,
   );
   if (walletReservation) {
-    await releaseAgentUsageCredits(
+    await releaseConversationWalletUsage(
       {
         usageChargeId: walletReservation.usageChargeId,
         failed: true,
@@ -2472,7 +2623,7 @@ export async function deferGenerationRunForHuman(input: {
       run.runtimePolicySnapshot,
     );
     if (walletReservation) {
-      await releaseAgentUsageCredits(
+      await releaseConversationWalletUsage(
         {
           usageChargeId: walletReservation.usageChargeId,
           reason: "generation_deferred_to_human",
@@ -2903,7 +3054,7 @@ export async function failGenerationRun(input: {
       run.runtimePolicySnapshot,
     );
     if (walletReservation && terminalFailure) {
-      await releaseAgentUsageCredits(
+      await releaseConversationWalletUsage(
         {
           usageChargeId: walletReservation.usageChargeId,
           failed: true,
@@ -3614,7 +3765,10 @@ export async function editConversationMessage(input: {
   const text = input.text.trim();
   if (!text) throw new Error("Edited message text is required.");
 
-  return prisma.$transaction(async (tx) => {
+  return runConversationWriteTransaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
+    `;
     const message = await tx.message.findFirst({
       where: {
         id: input.messageId,
@@ -3629,6 +3783,15 @@ export async function editConversationMessage(input: {
     if (!message) throw new Error("Message not found.");
     if (message.redactedAt) throw new Error("Redacted messages cannot be edited.");
 
+    let run = message.inputForGenerationRuns[0] ?? null;
+    if (run) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${run.id}))`;
+      run = await tx.generationRun.findUnique({ where: { id: run.id } });
+      if (!run) throw new Error("Generation run not found.");
+    }
+    const action = run
+      ? resolveMessageEditAction(generationStateMap[run.status])
+      : "update_only";
     const revision = await tx.messageRevision.create({
       data: {
         messageId: message.id,
@@ -3637,8 +3800,6 @@ export async function editConversationMessage(input: {
         editedBy: input.editedBy,
       },
     });
-    const run = message.inputForGenerationRuns[0];
-    const action = run ? resolveMessageEditAction(generationStateMap[run.status]) : "update_only";
 
     await tx.message.update({
       where: { id: message.id },
@@ -3646,6 +3807,9 @@ export async function editConversationMessage(input: {
     });
 
     if (run && (action === "replace_queued_run" || action === "cancel_and_requeue")) {
+      const walletReservation = readGenerationWalletReservation(
+        run.runtimePolicySnapshot,
+      );
       await releaseConversationEntitlementByGenerationRunId(
         {
           generationRunId: run.id,
@@ -3653,21 +3817,84 @@ export async function editConversationMessage(input: {
         },
         tx as unknown as ServiceEntitlementClient,
       );
-      await tx.generationRun.update({
-        where: { id: run.id },
-        data: { status: GenerationRunStatus.CANCELED, canceledAt: new Date() },
-      });
       const replacement = await tx.generationRun.create({
         data: {
           conversationId: message.conversationId,
           episodeId: message.episodeId,
           inputMessageId: message.id,
           representativeVersionId: run.representativeVersionId,
+          ...(run.delegationTaskId
+            ? { delegationTaskId: run.delegationTaskId }
+            : {}),
+          ...(run.delegationTaskStepId
+            ? { delegationTaskStepId: run.delegationTaskStepId }
+            : {}),
           status: GenerationRunStatus.QUEUED,
           idempotencyKey: `reply:${message.conversationId}:${message.id}:revision:${revision.version}`,
           ...(run.runtimePolicySnapshot !== null
             ? { runtimePolicySnapshot: run.runtimePolicySnapshot }
             : {}),
+        },
+      });
+      if (walletReservation) {
+        await transferAgentUsageEntitlementReservation(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            fromGenerationRunId: run.id,
+            toGenerationRunId: replacement.id,
+            conversationId: message.conversationId,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
+      const canceledAt = new Date();
+      const runtimePolicySnapshot =
+        run.runtimePolicySnapshot
+        && typeof run.runtimePolicySnapshot === "object"
+        && !Array.isArray(run.runtimePolicySnapshot)
+          ? run.runtimePolicySnapshot as Prisma.JsonObject
+          : {};
+      const canceled = await tx.generationRun.updateMany({
+        where: { id: run.id, status: run.status },
+        data: {
+          status: GenerationRunStatus.CANCELED,
+          canceledAt,
+          ...(walletReservation
+            ? {
+                runtimePolicySnapshot: {
+                  ...runtimePolicySnapshot,
+                  walletReservation: null,
+                  walletReservationTransferredTo: replacement.id,
+                },
+              }
+            : {}),
+        },
+      });
+      if (canceled.count !== 1) {
+        throw new Error("Generation run changed while its message was edited.");
+      }
+      await tx.outboxEvent.updateMany({
+        where: {
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          status: { in: ["PENDING", "PROCESSING", "FAILED"] },
+        },
+        data: {
+          status: "PROCESSED",
+          processedAt: canceledAt,
+          lastError: null,
+        },
+      });
+      await tx.approvalRequest.updateMany({
+        where: {
+          generationRunId: run.id,
+          status: "PENDING",
+        },
+        data: {
+          status: "REJECTED",
+          resolvedAt: canceledAt,
+          resolvedBy: "system",
+          decisionNote: "Input message was edited and generation was replaced.",
         },
       });
       await tx.outboxEvent.create({
@@ -3693,7 +3920,7 @@ export async function redactConversationMessage(input: {
   reason?: string;
 }) {
   const redactedAt = new Date();
-  return prisma.$transaction(async (tx) => {
+  return runConversationWriteTransaction(async (tx) => {
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
     `;
@@ -3716,6 +3943,7 @@ export async function redactConversationMessage(input: {
     if (!message) throw new Error("Message not found.");
 
     let canceledRunCount = 0;
+    const releasedWalletReservations = new Set<string>();
     const runIds = message.inputForGenerationRuns
       .map((run) => run.id)
       .sort();
@@ -3723,21 +3951,36 @@ export async function redactConversationMessage(input: {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${runId}))`;
       const run = await tx.generationRun.findUnique({
         where: { id: runId },
-        select: { id: true, status: true },
+        select: { id: true, status: true, runtimePolicySnapshot: true },
       });
-      if (!run || !cancellableGenerationStatuses.includes(run.status)) continue;
+      if (!run) continue;
+      const retryableFailedOutbox =
+        run.status === GenerationRunStatus.FAILED
+          ? await tx.outboxEvent.findFirst({
+              where: {
+                aggregateType: "generation_run",
+                aggregateId: run.id,
+                eventType: "generation.requested",
+                status: "FAILED",
+                attemptCount: { lt: GENERATION_WORK_MAX_ATTEMPTS },
+              },
+              select: { id: true },
+            })
+          : null;
+      if (
+        !cancellableGenerationStatuses.includes(run.status)
+        && !retryableFailedOutbox
+      ) {
+        continue;
+      }
+      const redactionCancellableStatuses = retryableFailedOutbox
+        ? [...cancellableGenerationStatuses, GenerationRunStatus.FAILED]
+        : cancellableGenerationStatuses;
 
-      await releaseConversationEntitlementByGenerationRunId(
-        {
-          generationRunId: run.id,
-          reason: "input_message_redacted",
-        },
-        tx as unknown as ServiceEntitlementClient,
-      );
       const canceled = await tx.generationRun.updateMany({
         where: {
           id: run.id,
-          status: { in: cancellableGenerationStatuses },
+          status: { in: redactionCancellableStatuses },
         },
         data: {
           status: GenerationRunStatus.CANCELED,
@@ -3747,6 +3990,31 @@ export async function redactConversationMessage(input: {
         },
       });
       if (canceled.count !== 1) continue;
+      await releaseConversationEntitlementByGenerationRunId(
+        {
+          generationRunId: run.id,
+          reason: "input_message_redacted",
+        },
+        tx as unknown as ServiceEntitlementClient,
+      );
+      const walletReservation = readGenerationWalletReservation(
+        run.runtimePolicySnapshot,
+      );
+      if (
+        walletReservation
+        && !releasedWalletReservations.has(walletReservation.usageChargeId)
+      ) {
+        await releaseConversationWalletUsage(
+          {
+            usageChargeId: walletReservation.usageChargeId,
+            reason: "input_message_redacted",
+            idempotencyKey:
+              `message:${message.id}:redaction:${walletReservation.usageChargeId}:release`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+        releasedWalletReservations.add(walletReservation.usageChargeId);
+      }
       canceledRunCount += 1;
 
       await tx.outboxEvent.updateMany({

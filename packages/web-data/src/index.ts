@@ -6,7 +6,27 @@ export * from "./agent-wallet-refunds";
 export * from "./agent-wallet-revenue-policy";
 export * from "./agent-wallet-token-purchase";
 export * from "./agent-wallet-transactions";
-export * from "./agent-wallet-usage-charge";
+export {
+  AgentWalletReconciliationError,
+  InsufficientAgentUsageCreditsError,
+  getUserAgentWalletBalance,
+  releaseConversationWalletUsage,
+  reserveConversationWalletUsage,
+  settleConversationWalletUsage,
+  transferAgentUsageEntitlementReservation,
+  verifyAgentUsageEntitlementReservation,
+  type AgentUsageChargeSnapshot,
+  type AgentUsageEntitlementVerificationClient,
+  type ConversationWalletUsageSnapshot,
+  type GetUserAgentWalletBalanceInput,
+  type ReleaseConversationWalletUsageInput,
+  type ReserveConversationWalletUsageInput,
+  type SettleConversationWalletUsageInput,
+  type TransferAgentUsageEntitlementReservationInput,
+  type UserAgentWalletBalanceSnapshot,
+  type VerifiedAgentUsageEntitlementReservation,
+  type VerifyAgentUsageEntitlementReservationInput,
+} from "./agent-wallet-usage-charge";
 export * from "./agent-wallet-withdrawals";
 export * from "./agent-wallet-write";
 export * from "./auth-identities";

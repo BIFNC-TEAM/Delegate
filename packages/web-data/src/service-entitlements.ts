@@ -3,6 +3,7 @@ import {
   PaymentProviderEventType,
   Prisma,
   RechargeOrderStatus,
+  type ServiceEntitlementLedgerKind,
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
@@ -23,10 +24,12 @@ const LEDGER_KINDS = {
   REFUND: "REFUND",
 } as const;
 
+export const AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE =
+  "agent-wallet:service-credit:v1";
+
 type EntitlementStatus =
   (typeof ENTITLEMENT_STATUSES)[keyof typeof ENTITLEMENT_STATUSES];
-type EntitlementLedgerKind =
-  (typeof LEDGER_KINDS)[keyof typeof LEDGER_KINDS];
+type EntitlementLedgerKind = ServiceEntitlementLedgerKind;
 
 type EntitlementAccountRecord = {
   id: string;
@@ -199,6 +202,12 @@ export type ReleaseServiceEntitlementInput = ServiceEntitlementCoordinates &
     units: number;
   };
 
+export type RefundGrantedServiceEntitlementInput =
+  ServiceEntitlementCoordinates &
+    MutationMetadata & {
+      units: number;
+    };
+
 export type ServiceEntitlementSnapshot = {
   accountId: string;
   audienceIdentityId: string;
@@ -225,6 +234,17 @@ export type ConversationEntitlementReservation = {
   accountId: string;
   attempt: number;
 };
+
+export function resolveServiceEntitlementAudienceIdentityId(
+  audienceIdentityId: string,
+  client: ServiceEntitlementClient =
+    prisma as unknown as ServiceEntitlementClient,
+) {
+  return resolveEntitlementAudienceIdentityId(
+    requiredText(audienceIdentityId, "audienceIdentityId"),
+    client,
+  );
+}
 
 export type CreateServicePaymentOrderInput = {
   id: string;
@@ -351,19 +371,26 @@ export async function grantServiceEntitlement(
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ServiceEntitlementSnapshot> {
   const normalized = normalizeGrantInput(input);
-  return runAtomically(client, (tx) =>
-    grantWithinTransaction(
+  return runAtomically(client, async (tx) => {
+    const canonical = {
+      ...normalized,
+      audienceIdentityId: await resolveEntitlementAudienceIdentityId(
+        normalized.audienceIdentityId,
+        tx,
+      ),
+    };
+    return grantWithinTransaction(
       {
-        ...normalized,
+        ...canonical,
         idempotencyKey: serviceEntitlementOperationKey(
           LEDGER_KINDS.GRANT,
-          normalized,
-          normalized.operationKey,
+          canonical,
+          canonical.operationKey,
         ),
       },
       tx,
-    ),
-  );
+    );
+  });
 }
 
 export async function reserveServiceEntitlement(
@@ -371,17 +398,24 @@ export async function reserveServiceEntitlement(
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ServiceEntitlementSnapshot> {
   const normalized = normalizeUnitMutationInput(input);
-  return runAtomically(client, (tx) =>
-    moveAvailableToReserved(
-      normalized,
+  return runAtomically(client, async (tx) => {
+    const canonical = {
+      ...normalized,
+      audienceIdentityId: await resolveEntitlementAudienceIdentityId(
+        normalized.audienceIdentityId,
+        tx,
+      ),
+    };
+    return moveAvailableToReserved(
+      canonical,
       serviceEntitlementOperationKey(
         LEDGER_KINDS.RESERVE,
-        normalized,
-        normalized.operationKey,
+        canonical,
+        canonical.operationKey,
       ),
       tx,
-    ),
-  );
+    );
+  });
 }
 
 export async function consumeServiceEntitlement(
@@ -389,17 +423,24 @@ export async function consumeServiceEntitlement(
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ServiceEntitlementSnapshot> {
   const normalized = normalizeUnitMutationInput(input);
-  return runAtomically(client, (tx) =>
-    consumeReserved(
-      normalized,
+  return runAtomically(client, async (tx) => {
+    const canonical = {
+      ...normalized,
+      audienceIdentityId: await resolveEntitlementAudienceIdentityId(
+        normalized.audienceIdentityId,
+        tx,
+      ),
+    };
+    return consumeReserved(
+      canonical,
       serviceEntitlementOperationKey(
         LEDGER_KINDS.CONSUME,
-        normalized,
-        normalized.operationKey,
+        canonical,
+        canonical.operationKey,
       ),
       tx,
-    ),
-  );
+    );
+  });
 }
 
 export async function releaseServiceEntitlement(
@@ -407,17 +448,54 @@ export async function releaseServiceEntitlement(
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ServiceEntitlementSnapshot> {
   const normalized = normalizeUnitMutationInput(input);
-  return runAtomically(client, (tx) =>
-    releaseReserved(
-      normalized,
+  return runAtomically(client, async (tx) => {
+    const canonical = {
+      ...normalized,
+      audienceIdentityId: await resolveEntitlementAudienceIdentityId(
+        normalized.audienceIdentityId,
+        tx,
+      ),
+    };
+    return releaseReserved(
+      canonical,
       serviceEntitlementOperationKey(
         LEDGER_KINDS.RELEASE,
-        normalized,
-        normalized.operationKey,
+        canonical,
+        canonical.operationKey,
       ),
       tx,
-    ),
-  );
+    );
+  });
+}
+
+/**
+ * Revokes only units that are still available on an entitlement account.
+ * Reserved or consumed units cannot be refunded. The coordinate-scoped
+ * operation key makes partial wallet reversals safely replayable.
+ */
+export async function refundGrantedServiceEntitlement(
+  input: RefundGrantedServiceEntitlementInput,
+  client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
+): Promise<ServiceEntitlementSnapshot> {
+  const normalized = normalizeUnitMutationInput(input);
+  return runAtomically(client, async (tx) => {
+    const canonical = {
+      ...normalized,
+      audienceIdentityId: await resolveEntitlementAudienceIdentityId(
+        normalized.audienceIdentityId,
+        tx,
+      ),
+    };
+    return refundAvailableEntitlement(
+      canonical,
+      serviceEntitlementOperationKey(
+        LEDGER_KINDS.REFUND,
+        canonical,
+        canonical.operationKey,
+      ),
+      tx,
+    );
+  });
 }
 
 /**
@@ -574,58 +652,7 @@ export function consumeConversationEntitlement(
 ) {
   return runAtomically(client, async (tx) => {
     const normalized = normalizeConversationReservation(reservation);
-    const reserveEntry = await requireConversationReserveEntry(normalized, tx);
-    const consumeKey = conversationEntitlementLedgerKey(
-      "consume",
-      normalized.generationRunId,
-      normalized.attempt,
-    );
-    const releaseKey = conversationEntitlementLedgerKey(
-      "release",
-      normalized.generationRunId,
-      normalized.attempt,
-    );
-    const existingConsume = await tx.serviceEntitlementLedgerEntry.findUnique({
-      where: { idempotencyKey: consumeKey },
-    });
-    if (existingConsume) {
-      return serializeExistingConversationMutation(
-        existingConsume,
-        LEDGER_KINDS.CONSUME,
-        normalized,
-        tx,
-      );
-    }
-    if (
-      await tx.serviceEntitlementLedgerEntry.findUnique({
-        where: { idempotencyKey: releaseKey },
-      })
-    ) {
-      throw new ServiceEntitlementError(
-        "ACCOUNT_UNAVAILABLE",
-        "Conversation entitlement reservation was already released.",
-      );
-    }
-
-    const account = await requireAccountById(reserveEntry.entitlementAccountId, tx);
-    assertConversationReservationAccount(account, normalized);
-    return consumeReserved(
-      normalizeUnitMutationInput({
-        audienceIdentityId: account.audienceIdentityId,
-        representativeId: account.representativeId,
-        productCode: account.productCode,
-        units: 1,
-        operationKey: normalized.operationKey,
-        generationRunId: normalized.generationRunId,
-        notes: "Consumed by a completed cross-channel conversation reply.",
-        metadata: {
-          scope: "conversation_reply",
-          reservationAttempt: normalized.attempt,
-        },
-      }),
-      consumeKey,
-      tx,
-    );
+    return consumeConversationReservationInTransaction(normalized, tx);
   });
 }
 
@@ -636,6 +663,134 @@ export function releaseConversationEntitlement(
   return runAtomically(client, async (tx) => {
     const normalized = normalizeConversationReservation(reservation);
     return releaseConversationReservationInTransaction(normalized, tx);
+  });
+}
+
+/**
+ * Atomically hands an active plan reservation to the next run in a delegated
+ * task. The immutable source reserve is released and an equal reservation is
+ * created for the target run, so authorization remains run-scoped without
+ * consuming another paid unit.
+ */
+export function transferConversationEntitlementByGenerationRunId(
+  input: {
+    fromGenerationRunId: string;
+    toGenerationRunId: string;
+  },
+  client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
+): Promise<ConversationEntitlementReservation | null> {
+  const fromGenerationRunId = requiredText(
+    input.fromGenerationRunId,
+    "fromGenerationRunId",
+  );
+  const toGenerationRunId = requiredText(
+    input.toGenerationRunId,
+    "toGenerationRunId",
+  );
+
+  return runAtomically(client, async (tx) => {
+    const sourceHistory = await loadConversationEntitlementHistory(
+      fromGenerationRunId,
+      tx,
+    );
+    const sourceActive = sourceHistory.filter(
+      (attempt) => !attempt.consume && !attempt.release,
+    );
+    if (sourceActive.length > 1) {
+      throw new ServiceEntitlementError(
+        "INVARIANT_VIOLATION",
+        "Source generation run contains multiple active entitlement reservations.",
+      );
+    }
+    if (fromGenerationRunId === toGenerationRunId) {
+      return sourceActive[0]
+        ? recoverConversationReservation(
+            sourceActive[0],
+            fromGenerationRunId,
+            tx,
+          )
+        : null;
+    }
+
+    const targetHistory = await loadConversationEntitlementHistory(
+      toGenerationRunId,
+      tx,
+    );
+    const targetActive = targetHistory.filter(
+      (attempt) => !attempt.consume && !attempt.release,
+    );
+    if (targetActive.length > 1) {
+      throw new ServiceEntitlementError(
+        "INVARIANT_VIOLATION",
+        "Target generation run contains multiple active entitlement reservations.",
+      );
+    }
+    if (targetActive.length === 1) {
+      if (sourceActive.length === 1) {
+        throw new ServiceEntitlementError(
+          "INVARIANT_VIOLATION",
+          "Both source and target generation runs own active entitlement reservations.",
+        );
+      }
+      const targetReservation = await recoverConversationReservation(
+        targetActive[0]!,
+        toGenerationRunId,
+        tx,
+      );
+      const latestSource =
+        latestConversationEntitlementAttempt(sourceHistory);
+      if (
+        !latestSource?.release
+        || latestSource.release.notes
+          !== `Transferred to generation run ${toGenerationRunId}.`
+        || latestSource.reserve.entitlementAccountId
+          !== targetReservation.accountId
+      ) {
+        throw new ServiceEntitlementError(
+          "ACCOUNT_UNAVAILABLE",
+          "Target entitlement reservation is not an exact transfer replay.",
+        );
+      }
+      return targetReservation;
+    }
+    if (sourceActive.length === 0) {
+      if (sourceHistory.length === 0) return null;
+      throw new ServiceEntitlementError(
+        "ACCOUNT_UNAVAILABLE",
+        "Source generation run no longer has an active entitlement reservation.",
+      );
+    }
+
+    const sourceReservation = await recoverConversationReservation(
+      sourceActive[0]!,
+      fromGenerationRunId,
+      tx,
+    );
+    await releaseConversationReservationInTransaction(
+      sourceReservation,
+      tx,
+      `Transferred to generation run ${toGenerationRunId}.`,
+    );
+    const targetReservation = await reserveConversationEntitlement(
+      {
+        audienceIdentityId: sourceReservation.audienceIdentityId,
+        representativeId: sourceReservation.representativeId,
+        generationRunId: toGenerationRunId,
+        productCodes: [sourceReservation.productCode],
+      },
+      tx,
+    );
+    if (
+      !targetReservation
+      || targetReservation.accountId !== sourceReservation.accountId
+      || targetReservation.productCode !== sourceReservation.productCode
+    ) {
+      throw new ServiceEntitlementError(
+        "INVARIANT_VIOLATION",
+        "Entitlement reservation transfer did not preserve its account.",
+      );
+    }
+    return targetReservation;
   });
 }
 
@@ -688,6 +843,129 @@ export function releaseConversationEntitlementByGenerationRunId(
         ? `Released after generation run termination: ${reason}.`
         : "Released after generation run termination.",
     );
+  });
+}
+
+/**
+ * Recovers and consumes a durable conversation reservation by generation run.
+ * This is used when execution crosses an approval boundary and the in-memory
+ * reservation handle is no longer available.
+ */
+export function consumeConversationEntitlementByGenerationRunId(
+  input: {
+    generationRunId: string;
+  },
+  client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
+): Promise<ServiceEntitlementSnapshot | null> {
+  const generationRunId = requiredText(input.generationRunId, "generationRunId");
+  return runAtomically(client, async (tx) => {
+    const history = await loadConversationEntitlementHistory(generationRunId, tx);
+    if (history.length === 0) return null;
+
+    const activeAttempts = history.filter(
+      (attempt) => !attempt.consume && !attempt.release,
+    );
+    if (activeAttempts.length > 1) {
+      throw new ServiceEntitlementError(
+        "INVARIANT_VIOLATION",
+        "Generation run contains multiple active conversation entitlement reservations.",
+      );
+    }
+    if (activeAttempts.length === 1) {
+      const reservation = await recoverConversationReservation(
+        activeAttempts[0]!,
+        generationRunId,
+        tx,
+      );
+      return consumeConversationReservationInTransaction(reservation, tx);
+    }
+
+    const latest = latestConversationEntitlementAttempt(history)!;
+    if (latest.release) {
+      throw new ServiceEntitlementError(
+        "ACCOUNT_UNAVAILABLE",
+        "Conversation entitlement reservation was already released.",
+      );
+    }
+    if (!latest.consume) {
+      throw new ServiceEntitlementError(
+        "INVARIANT_VIOLATION",
+        "Generation run has no consumable conversation entitlement reservation.",
+      );
+    }
+    const reservation = await recoverConversationReservation(
+      latest,
+      generationRunId,
+      tx,
+    );
+    return serializeExistingConversationMutation(
+      latest.consume,
+      LEDGER_KINDS.CONSUME,
+      reservation,
+      tx,
+    );
+  });
+}
+
+/**
+ * Finalizes the single active plan reservation owned by a delegated task.
+ * Transfer keeps at most one run active; multiple active reservations are an
+ * invariant violation and must never be charged independently.
+ */
+export function finalizeConversationEntitlementForGenerationRuns(
+  input: {
+    generationRunIds: string[];
+    outcome: "consume" | "release";
+    reason?: string;
+  },
+  client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
+): Promise<ServiceEntitlementSnapshot | null> {
+  const generationRunIds = Array.from(
+    new Set(
+      input.generationRunIds.map((generationRunId) =>
+        requiredText(generationRunId, "generationRunId"),
+      ),
+    ),
+  );
+  const reason = optionalText(input.reason);
+  return runAtomically(client, async (tx) => {
+    const active: Array<{
+      generationRunId: string;
+      attempt: ConversationEntitlementAttempt;
+    }> = [];
+    for (const generationRunId of generationRunIds) {
+      const history = await loadConversationEntitlementHistory(
+        generationRunId,
+        tx,
+      );
+      for (const attempt of history) {
+        if (!attempt.consume && !attempt.release) {
+          active.push({ generationRunId, attempt });
+        }
+      }
+    }
+    if (active.length === 0) return null;
+    if (active.length > 1) {
+      throw new ServiceEntitlementError(
+        "INVARIANT_VIOLATION",
+        "Delegation task contains multiple active conversation entitlement reservations.",
+      );
+    }
+    const owner = active[0]!;
+    const reservation = await recoverConversationReservation(
+      owner.attempt,
+      owner.generationRunId,
+      tx,
+    );
+    return input.outcome === "consume"
+      ? consumeConversationReservationInTransaction(reservation, tx)
+      : releaseConversationReservationInTransaction(
+          reservation,
+          tx,
+          reason
+            ? `Released after delegation task termination: ${reason}.`
+            : "Released after delegation task termination.",
+        );
   });
 }
 
@@ -1211,6 +1489,63 @@ async function releaseReserved(
   return serializeEntitlement(updatedAccount, entry);
 }
 
+async function refundAvailableEntitlement(
+  input: ReturnType<typeof normalizeUnitMutationInput>,
+  idempotencyKey: string,
+  tx: ServiceEntitlementClient,
+): Promise<ServiceEntitlementSnapshot> {
+  const existing = await tx.serviceEntitlementLedgerEntry.findUnique({
+    where: { idempotencyKey },
+  });
+  if (existing) {
+    return serializeExistingMutation(
+      existing,
+      LEDGER_KINDS.REFUND,
+      input.units,
+      input,
+      tx,
+    );
+  }
+
+  const account = await requireAccountByCoordinates(input, tx);
+  const refunded = await tx.serviceEntitlementAccount.updateMany({
+    where: {
+      id: account.id,
+      remainingUnits: { gte: input.units },
+    },
+    data: {
+      remainingUnits: { decrement: input.units },
+    },
+  });
+  if (refunded.count !== 1) {
+    throw new ServiceEntitlementError(
+      "INSUFFICIENT_UNITS",
+      "Entitlement refund requires granted units to remain available.",
+    );
+  }
+
+  let updatedAccount = await requireAccountById(account.id, tx);
+  if (
+    updatedAccount.remainingUnits === 0 &&
+    updatedAccount.reservedUnits === 0 &&
+    updatedAccount.status !== ENTITLEMENT_STATUSES.FROZEN
+  ) {
+    updatedAccount = await tx.serviceEntitlementAccount.update({
+      where: { id: account.id },
+      data: { status: ENTITLEMENT_STATUSES.EXHAUSTED },
+    });
+  }
+
+  const entry = await createMutationLedger(
+    updatedAccount,
+    LEDGER_KINDS.REFUND,
+    input,
+    idempotencyKey,
+    tx,
+  );
+  return serializeEntitlement(updatedAccount, entry);
+}
+
 async function createMutationLedger(
   account: EntitlementAccountRecord,
   kind: EntitlementLedgerKind,
@@ -1237,13 +1572,23 @@ async function serializeExistingMutation(
   entry: EntitlementLedgerRecord,
   expectedKind: EntitlementLedgerKind,
   expectedUnits: number,
-  expectedCoordinates: ServiceEntitlementCoordinates,
+  expectedCoordinates: ServiceEntitlementCoordinates & {
+    generationRunId?: string | undefined;
+    unitName?: string | undefined;
+    paymentOrderId?: string | undefined;
+  },
   tx: ServiceEntitlementClient,
 ) {
   const account = await requireAccountById(entry.entitlementAccountId, tx);
   if (
     entry.kind !== expectedKind ||
     entry.units !== expectedUnits ||
+    (entry.generationRunId ?? null)
+      !== (expectedCoordinates.generationRunId ?? null) ||
+    (expectedCoordinates.unitName !== undefined
+      && account.unitName !== expectedCoordinates.unitName) ||
+    (entry.paymentOrderId ?? null)
+      !== (expectedCoordinates.paymentOrderId ?? null) ||
     account.audienceIdentityId !== expectedCoordinates.audienceIdentityId ||
     account.representativeId !== expectedCoordinates.representativeId ||
     account.productCode !== expectedCoordinates.productCode
@@ -1610,6 +1955,9 @@ async function loadConversationEntitlementHistory(
   const entries = await tx.serviceEntitlementLedgerEntry.findMany({
     where: {
       generationRunId,
+      idempotencyKey: {
+        startsWith: "conversation-entitlement:",
+      },
       kind: {
         in: [
           LEDGER_KINDS.RESERVE,
@@ -1812,6 +2160,85 @@ function normalizeConversationReservation(
     accountId: requiredText(reservation.accountId, "accountId"),
     attempt,
   };
+}
+
+async function recoverConversationReservation(
+  attempt: ConversationEntitlementAttempt,
+  generationRunId: string,
+  tx: ServiceEntitlementClient,
+) {
+  const account = await requireAccountById(
+    attempt.reserve.entitlementAccountId,
+    tx,
+  );
+  return normalizeConversationReservation(
+    serializeConversationReservation({
+      account,
+      generationRunId,
+      attempt: attempt.attempt,
+    }),
+  );
+}
+
+async function consumeConversationReservationInTransaction(
+  normalized: ReturnType<typeof normalizeConversationReservation>,
+  tx: ServiceEntitlementClient,
+) {
+  const reserveEntry = await requireConversationReserveEntry(normalized, tx);
+  const consumeKey = conversationEntitlementLedgerKey(
+    "consume",
+    normalized.generationRunId,
+    normalized.attempt,
+  );
+  const releaseKey = conversationEntitlementLedgerKey(
+    "release",
+    normalized.generationRunId,
+    normalized.attempt,
+  );
+  const existingConsume = await tx.serviceEntitlementLedgerEntry.findUnique({
+    where: { idempotencyKey: consumeKey },
+  });
+  if (existingConsume) {
+    return serializeExistingConversationMutation(
+      existingConsume,
+      LEDGER_KINDS.CONSUME,
+      normalized,
+      tx,
+    );
+  }
+  if (
+    await tx.serviceEntitlementLedgerEntry.findUnique({
+      where: { idempotencyKey: releaseKey },
+    })
+  ) {
+    throw new ServiceEntitlementError(
+      "ACCOUNT_UNAVAILABLE",
+      "Conversation entitlement reservation was already released.",
+    );
+  }
+
+  const account = await requireAccountById(
+    reserveEntry.entitlementAccountId,
+    tx,
+  );
+  assertConversationReservationAccount(account, normalized);
+  return consumeReserved(
+    normalizeUnitMutationInput({
+      audienceIdentityId: account.audienceIdentityId,
+      representativeId: account.representativeId,
+      productCode: account.productCode,
+      units: 1,
+      operationKey: normalized.operationKey,
+      generationRunId: normalized.generationRunId,
+      notes: "Consumed by a completed cross-channel conversation reply.",
+      metadata: {
+        scope: "conversation_reply",
+        reservationAttempt: normalized.attempt,
+      },
+    }),
+    consumeKey,
+    tx,
+  );
 }
 
 async function releaseConversationReservationInTransaction(

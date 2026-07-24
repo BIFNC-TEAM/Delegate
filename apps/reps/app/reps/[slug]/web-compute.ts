@@ -20,6 +20,7 @@ export type PublicComputeCapability =
 export type PublicComputeSubagentId = "compute-agent" | "browser-agent";
 
 export type PublicComputeSessionRequest = {
+  generationRunId: string;
   subagentId: PublicComputeSubagentId;
   requestedCapabilities: PublicComputeCapability[];
   reason: string;
@@ -40,6 +41,10 @@ export function normalizePublicComputeSessionRequest(
   payload: unknown,
 ): PublicComputeSessionRequest {
   const body = (payload ?? {}) as Record<string, unknown>;
+  const generationRunId =
+    typeof body.generationRunId === "string"
+      ? body.generationRunId.trim()
+      : "";
   const subagentId = normalizeSubagentId(body.subagentId);
   const requestedCapabilities = normalizeCapabilities(body.requestedCapabilities);
   const reason = typeof body.reason === "string" ? body.reason.trim() : "";
@@ -51,12 +56,16 @@ export function normalizePublicComputeSessionRequest(
   if (!requestedCapabilities.length) {
     throw new Error("requestedCapabilities is required.");
   }
+  if (!generationRunId) {
+    throw new Error("generationRunId is required.");
+  }
   if (!reason) {
     throw new Error("reason is required.");
   }
   assertSubagentCapabilities(subagentId, requestedCapabilities);
 
   return {
+    generationRunId,
     subagentId,
     requestedCapabilities,
     reason,
@@ -82,6 +91,7 @@ export async function createWebAudienceComputeSession(
       representativeId: input.representativeId,
       contactId: input.contactId,
       conversationId: input.conversationId,
+      generationRunId: input.generationRunId,
       subagentId: input.subagentId,
       requestedBy: "audience",
       requestedCapabilities: input.requestedCapabilities,

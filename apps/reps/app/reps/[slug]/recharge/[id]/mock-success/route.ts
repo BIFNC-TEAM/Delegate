@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  AgentWalletReconciliationError,
   completeMockRechargeAndPurchaseAgentTokens,
   getPublicRepresentativeRuntime,
   prisma,
@@ -88,6 +89,15 @@ export async function POST(
     return response;
   } catch (error) {
     console.error("Failed to complete public mock recharge.", error);
+    if (error instanceof AgentWalletReconciliationError) {
+      return privateJson(
+        {
+          error: "钱包与服务额度账目不一致，当前操作未执行。",
+          code: "wallet_reconciliation_required",
+        },
+        409,
+      );
+    }
     const principalErrorStatus = publicAudiencePrincipalErrorStatus(error);
     if (principalErrorStatus) {
       return privateJson(

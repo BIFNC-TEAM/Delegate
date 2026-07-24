@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  getPublicGenerationRunSnapshot: vi.fn(),
   getPublicRepresentativeRuntime: vi.fn(),
   resolveWebAudienceContact: vi.fn(),
   resolveWebAudienceConversation: vi.fn(),
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@delegate/web-data", () => ({
+  getPublicGenerationRunSnapshot: mocks.getPublicGenerationRunSnapshot,
   getPublicRepresentativeRuntime: mocks.getPublicRepresentativeRuntime,
   resolveWebAudienceContact: mocks.resolveWebAudienceContact,
   resolveWebAudienceConversation: mocks.resolveWebAudienceConversation,
@@ -75,7 +77,12 @@ describe("public principal compute route", () => {
       id: "conversation-1",
       audienceIdentityId: "identity-account",
     });
+    mocks.getPublicGenerationRunSnapshot.mockResolvedValue({
+      id: "run-1",
+      status: "processing",
+    });
     mocks.normalizePublicComputeSessionRequest.mockReturnValue({
+      generationRunId: "run-1",
       subagentId: "browser-agent",
       requestedCapabilities: ["browser"],
       reason: "Open the account dashboard.",
@@ -117,6 +124,18 @@ describe("public principal compute route", () => {
         audienceIdentityId: "identity-account",
       }),
       "identity-account",
+    );
+    expect(mocks.getPublicGenerationRunSnapshot).toHaveBeenCalledWith({
+      representativeSlug: "delegate",
+      runId: "run-1",
+      audienceIdentityId: "identity-account",
+      audienceId: "signed-device-audience",
+    });
+    expect(mocks.createWebAudienceComputeSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        generationRunId: "run-1",
+        conversationId: "conversation-1",
+      }),
     );
     expect(mocks.setPublicAudienceSessionCookie).toHaveBeenCalledWith(
       response,
@@ -166,6 +185,33 @@ describe("public principal compute route", () => {
     expect(mocks.resolveWebAudienceContact).not.toHaveBeenCalled();
     expect(mocks.createWebAudienceComputeSession).not.toHaveBeenCalled();
   });
+
+  it("rejects a generation run outside the signed device thread", async () => {
+    mocks.getPublicGenerationRunSnapshot.mockResolvedValue(null);
+
+    const response = await createComputeSession(
+      computeRequest(),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(mocks.createWebAudienceComputeSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects a queued generation run before asking the broker for a session", async () => {
+    mocks.getPublicGenerationRunSnapshot.mockResolvedValue({
+      id: "run-1",
+      status: "queued",
+    });
+
+    const response = await createComputeSession(
+      computeRequest(),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(409);
+    expect(mocks.createWebAudienceComputeSession).not.toHaveBeenCalled();
+  });
 });
 
 describe("public principal route coverage", () => {
@@ -192,6 +238,7 @@ function computeRequest() {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
+      generationRunId: "run-1",
       subagentId: "browser-agent",
       requestedCapabilities: ["browser"],
       reason: "Open the account dashboard.",

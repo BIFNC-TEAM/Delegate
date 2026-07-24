@@ -2,8 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   mockPrisma,
-  releaseAgentUsageCredits,
-  settleAgentUsageCredits,
+  finalizeConversationEntitlementForGenerationRuns,
+  releaseConversationWalletUsage,
+  settleConversationWalletUsage,
+  transferAgentUsageEntitlementReservation,
+  transferConversationEntitlementByGenerationRunId,
 } = vi.hoisted(() => {
   const client = {
     $executeRaw: vi.fn(),
@@ -28,20 +31,28 @@ const {
       ...client,
       $transaction: vi.fn(async (callback: (tx: typeof client) => unknown) => callback(client)),
     },
-    releaseAgentUsageCredits: vi.fn(),
-    settleAgentUsageCredits: vi.fn(),
+    finalizeConversationEntitlementForGenerationRuns: vi.fn(),
+    releaseConversationWalletUsage: vi.fn(),
+    settleConversationWalletUsage: vi.fn(),
+    transferAgentUsageEntitlementReservation: vi.fn(),
+    transferConversationEntitlementByGenerationRunId: vi.fn(),
   };
 });
 
 vi.mock("../src/prisma", () => ({ prisma: mockPrisma }));
 vi.mock("../src/agent-wallet-usage-charge", () => ({
-  releaseAgentUsageCredits,
-  settleAgentUsageCredits,
+  releaseConversationWalletUsage,
+  settleConversationWalletUsage,
+  transferAgentUsageEntitlementReservation,
+}));
+vi.mock("../src/service-entitlements", () => ({
+  finalizeConversationEntitlementForGenerationRuns,
+  transferConversationEntitlementByGenerationRunId,
 }));
 
 describe("delegation task owner actions", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockPrisma.$transaction.mockImplementation(async (callback: (tx: typeof mockPrisma) => unknown) => callback(mockPrisma));
     mockPrisma.delegationTaskEvent.findFirst.mockResolvedValue(null);
     mockPrisma.delegationTaskEvent.create.mockResolvedValue({ id: "event-1" });
@@ -53,8 +64,11 @@ describe("delegation task owner actions", () => {
     mockPrisma.agentUsageCharge.findUnique.mockResolvedValue({
       status: "RESERVED",
     });
-    releaseAgentUsageCredits.mockResolvedValue({ status: "released" });
-    settleAgentUsageCredits.mockResolvedValue({ status: "settled" });
+    finalizeConversationEntitlementForGenerationRuns.mockResolvedValue(null);
+    releaseConversationWalletUsage.mockResolvedValue({ status: "released" });
+    settleConversationWalletUsage.mockResolvedValue({ status: "settled" });
+    transferAgentUsageEntitlementReservation.mockResolvedValue({ status: "RESERVED" });
+    transferConversationEntitlementByGenerationRunId.mockResolvedValue(null);
   });
 
   it("queues a new generation attempt on the same failed task", async () => {
@@ -85,6 +99,13 @@ describe("delegation task owner actions", () => {
         eventType: "generation.requested",
       }),
     });
+    expect(transferConversationEntitlementByGenerationRunId).toHaveBeenCalledWith(
+      {
+        fromGenerationRunId: "run-1",
+        toGenerationRunId: "run-retry-1",
+      },
+      mockPrisma,
+    );
     expect(mockPrisma.delegationTask.update).toHaveBeenCalledWith({
       where: { id: "task-1" },
       data: expect.objectContaining({ status: "READY", nextActionBy: "SYSTEM" }),
@@ -308,8 +329,9 @@ describe("delegation task owner actions", () => {
     expect(mockPrisma.delegationTask.findUnique).not.toHaveBeenCalled();
     expect(mockPrisma.delegationTaskStep.update).not.toHaveBeenCalled();
     expect(mockPrisma.delegationTask.update).not.toHaveBeenCalled();
-    expect(settleAgentUsageCredits).not.toHaveBeenCalled();
-    expect(releaseAgentUsageCredits).not.toHaveBeenCalled();
+    expect(settleConversationWalletUsage).not.toHaveBeenCalled();
+    expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
+    expect(finalizeConversationEntitlementForGenerationRuns).not.toHaveBeenCalled();
   });
 
   it("distinguishes a policy-blocked step from an execution failure", async () => {
@@ -425,8 +447,24 @@ describe("delegation task owner actions", () => {
         },
       },
     });
-    expect(settleAgentUsageCredits).not.toHaveBeenCalled();
-    expect(releaseAgentUsageCredits).not.toHaveBeenCalled();
+    expect(settleConversationWalletUsage).not.toHaveBeenCalled();
+    expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
+    expect(transferConversationEntitlementByGenerationRunId).toHaveBeenCalledWith(
+      {
+        fromGenerationRunId: "run-step-1",
+        toGenerationRunId: "run-step-2",
+      },
+      mockPrisma,
+    );
+    expect(transferAgentUsageEntitlementReservation).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-task-1",
+        fromGenerationRunId: "run-step-1",
+        toGenerationRunId: "run-step-2",
+        conversationId: "conversation-1",
+      },
+      mockPrisma,
+    );
     expect(mockPrisma.outboxEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({ aggregateId: "run-step-2", eventType: "generation.requested" }),
     });
@@ -502,7 +540,7 @@ describe("delegation task owner actions", () => {
       hasMoreSteps: false,
       completedStepId: "step-2",
     });
-    expect(settleAgentUsageCredits).toHaveBeenCalledWith(
+    expect(settleConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-task-1",
         settledTokenAmount: 1,
@@ -511,7 +549,15 @@ describe("delegation task owner actions", () => {
       },
       mockPrisma,
     );
-    expect(releaseAgentUsageCredits).not.toHaveBeenCalled();
+    expect(finalizeConversationEntitlementForGenerationRuns).toHaveBeenCalledWith(
+      {
+        generationRunIds: ["run-step-2", "run-step-1"],
+        outcome: "consume",
+        reason: "delegation_task_completed",
+      },
+      mockPrisma,
+    );
+    expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
     expect(mockPrisma.generationRun.update).toHaveBeenCalledWith({
       where: { id: "run-step-2" },
       data: {
@@ -584,7 +630,7 @@ describe("delegation task owner actions", () => {
       hasMoreSteps: false,
       completedStepId: "step-2",
     });
-    expect(releaseAgentUsageCredits).toHaveBeenCalledWith(
+    expect(releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-task-1",
         failed: true,
@@ -593,7 +639,15 @@ describe("delegation task owner actions", () => {
       },
       mockPrisma,
     );
-    expect(settleAgentUsageCredits).not.toHaveBeenCalled();
+    expect(finalizeConversationEntitlementForGenerationRuns).toHaveBeenCalledWith(
+      {
+        generationRunIds: ["run-step-2"],
+        outcome: "release",
+        reason: "delegation_task_failed",
+      },
+      mockPrisma,
+    );
+    expect(settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(mockPrisma.conversation.update.mock.calls).not.toContainEqual([
       expect.objectContaining({
         data: expect.objectContaining({
@@ -650,8 +704,8 @@ describe("delegation task owner actions", () => {
       where: { id: "conversation-1" },
       data: { freeRepliesUsed: { increment: 1 } },
     });
-    expect(settleAgentUsageCredits).not.toHaveBeenCalled();
-    expect(releaseAgentUsageCredits).not.toHaveBeenCalled();
+    expect(settleConversationWalletUsage).not.toHaveBeenCalled();
+    expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
   });
 
   it("fails the task instead of reporting completion when remaining step dependencies cannot be satisfied", async () => {

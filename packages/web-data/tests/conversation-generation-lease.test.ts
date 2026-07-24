@@ -37,7 +37,7 @@ const mocks = vi.hoisted(() => {
   };
   return {
     tx,
-    releaseAgentUsageCredits: vi.fn(),
+    releaseConversationWalletUsage: vi.fn(),
     prisma: {
       $transaction: vi.fn(
         async (callback: (client: typeof tx) => unknown) => callback(tx),
@@ -53,9 +53,9 @@ vi.mock("../src/prisma", () => ({ prisma: mocks.prisma }));
 vi.mock("../src/agent-wallet-usage-charge", () => ({
   InsufficientAgentUsageCreditsError:
     class InsufficientAgentUsageCreditsError extends Error {},
-  releaseAgentUsageCredits: mocks.releaseAgentUsageCredits,
-  reserveAgentUsageCredits: vi.fn(),
-  settleAgentUsageCredits: vi.fn(),
+  releaseConversationWalletUsage: mocks.releaseConversationWalletUsage,
+  reserveConversationWalletUsage: vi.fn(),
+  settleConversationWalletUsage: vi.fn(),
 }));
 
 import {
@@ -149,7 +149,7 @@ describe("conversation generation work leases", () => {
     mocks.tx.serviceEntitlementAccount.update.mockResolvedValue({ id: "entitlement-1" });
     mocks.tx.serviceEntitlementAccount.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.serviceEntitlementLedgerEntry.create.mockResolvedValue({ id: "ledger-1" });
-    mocks.releaseAgentUsageCredits.mockResolvedValue({ status: "failed" });
+    mocks.releaseConversationWalletUsage.mockResolvedValue({ status: "failed" });
   });
 
   afterEach(() => {
@@ -233,7 +233,7 @@ describe("conversation generation work leases", () => {
         lastError: "generation_work_lease_exhausted",
       },
     });
-    expect(mocks.releaseAgentUsageCredits).toHaveBeenCalledWith(
+    expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-reserved",
         failed: true,

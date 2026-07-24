@@ -17,16 +17,24 @@ import {
   type WalletTransactionClient,
 } from "./agent-wallet-transactions";
 import {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  grantServiceEntitlement,
+  resolveServiceEntitlementAudienceIdentityId,
+  type ServiceEntitlementClient,
+} from "./service-entitlements";
+import {
   assertWalletIdempotencyField,
   resolveWalletOperationId,
   runWalletWriteTransaction,
   type WalletWriteTransactionOptions,
 } from "./agent-wallet-write";
+import { AgentWalletReconciliationError } from "./agent-wallet-usage-charge";
 import { prisma } from "./prisma";
 
 type UserWalletRecord = {
   id: string;
   externalUserId: string;
+  audienceIdentityId: string | null;
   currency: string;
   cashBalanceCents: number;
 };
@@ -75,6 +83,8 @@ type AgentTokenPurchaseRecord = {
   creatorPendingCents: number;
   status: AgentTokenPurchaseStatus;
   idempotencyKey: string;
+  audienceIdentityId: string | null;
+  entitlementAccountId: string | null;
   userWallet?: UserWalletRecord;
   userAgentWallet?: UserAgentWalletRecord;
   agentWallet?: AgentWalletRecord;
@@ -98,6 +108,9 @@ type CreatorEarningRecord = {
 
 type TokenPurchaseClient = Omit<WalletLedgerClient, "$transaction"> &
   WalletTransactionClient & {
+  audienceIdentity?: ServiceEntitlementClient["audienceIdentity"];
+  serviceEntitlementAccount: ServiceEntitlementClient["serviceEntitlementAccount"];
+  serviceEntitlementLedgerEntry: ServiceEntitlementClient["serviceEntitlementLedgerEntry"];
   userWallet: {
     findUnique(args: unknown): Promise<UserWalletRecord | null>;
     updateMany(args: unknown): Promise<{ count: number }>;
@@ -155,6 +168,8 @@ export type AgentTokenPurchaseSnapshot = {
   creatorPendingCents: number;
   status: "pending" | "completed" | "failed" | "refunded" | "reversed";
   idempotencyKey: string;
+  audienceIdentityId: string;
+  entitlementAccountId: string;
   cashBalanceCents: number;
   agentTokenBalance: number;
   availableTokenAmount: number;
@@ -166,7 +181,7 @@ const SUPPORTED_PURCHASE_CURRENCIES = new Set(["CNY", "USD"]);
 
 export async function purchaseAgentTokens(
   input: PurchaseAgentTokensInput,
-  client: TokenPurchaseClient = prisma,
+  client: TokenPurchaseClient = prisma as unknown as TokenPurchaseClient,
 ): Promise<AgentTokenPurchaseSnapshot> {
   const normalized = normalizePurchaseAgentTokensInput(input);
   const run = async (tx: TokenPurchaseClient) => {
@@ -223,6 +238,11 @@ export async function purchaseAgentTokens(
     if (userWallet.currency !== normalized.currency) {
       throw new Error("User wallet currency does not match purchase currency.");
     }
+    if (!userWallet.audienceIdentityId) {
+      throw new Error(
+        "User wallet must be linked to an audience identity before purchasing agent tokens.",
+      );
+    }
     if (userWallet.cashBalanceCents < normalized.amountCents) {
       throw new Error("Insufficient user wallet balance.");
     }
@@ -259,6 +279,11 @@ export async function purchaseAgentTokens(
     }
 
     const tokenAmount = normalized.amountCents / agentWallet.tokenUnitPriceCents;
+    const entitlementAudienceIdentityId =
+      await resolveServiceEntitlementAudienceIdentityId(
+        userWallet.audienceIdentityId,
+        tx as unknown as ServiceEntitlementClient,
+      );
     const revenueSplit = calculateAgentWalletRevenueSplit({
       grossAmountCents: normalized.amountCents,
       creatorRevenueShareBps: agentWallet.creatorRevenueShareBps,
@@ -278,6 +303,15 @@ export async function purchaseAgentTokens(
       },
       update: {},
     });
+    await assertPurchaseWalletEntitlementParity(
+      {
+        audienceIdentityId: entitlementAudienceIdentityId,
+        representativeId: agentWallet.representativeId,
+        userAgentWallet,
+        scope: "Before agent token purchase",
+      },
+      tx,
+    );
 
     const debit = await tx.userWallet.updateMany({
       where: {
@@ -311,6 +345,24 @@ export async function purchaseAgentTokens(
       throw new Error("Insufficient user wallet balance.");
     }
 
+    const entitlement = await grantServiceEntitlement(
+      {
+        audienceIdentityId: entitlementAudienceIdentityId,
+        representativeId: agentWallet.representativeId,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        units: tokenAmount,
+        operationKey: `agent-token-purchase:${normalized.idempotencyKey}`,
+        notes: "Granted from an agent token purchase.",
+        metadata: {
+          purchaseIdempotencyKey: normalized.idempotencyKey,
+          userWalletId: userWallet.id,
+          amountCents: normalized.amountCents,
+          currency: normalized.currency,
+        },
+      },
+      tx as unknown as ServiceEntitlementClient,
+    );
+
     const purchase = await tx.agentTokenPurchase.create({
       data: {
         userWalletId: userWallet.id,
@@ -327,6 +379,8 @@ export async function purchaseAgentTokens(
         creatorPendingCents: revenueSplit.creatorShareCents,
         status: AgentTokenPurchaseStatus.COMPLETED,
         idempotencyKey: normalized.idempotencyKey,
+        audienceIdentityId: entitlement.audienceIdentityId,
+        entitlementAccountId: entitlement.accountId,
       },
     });
     const creatorEarning = await tx.creatorEarning.create({
@@ -358,6 +412,8 @@ export async function purchaseAgentTokens(
           amountCents: normalized.amountCents,
           tokenAmount,
           userAgentWalletId: userAgentWallet.id,
+          audienceIdentityId: entitlement.audienceIdentityId,
+          entitlementAccountId: entitlement.accountId,
           tokenUnitPriceCents: agentWallet.tokenUnitPriceCents,
           creatorRevenueShareBps: revenueSplit.creatorRevenueShareBps,
         },
@@ -464,6 +520,14 @@ export async function purchaseAgentTokens(
     if (!updatedUserWallet) {
       throw new Error("User wallet disappeared during token purchase.");
     }
+    if (
+      entitlement.remainingUnits !== updatedUserAgentWallet.availableTokenAmount
+      || entitlement.reservedUnits !== updatedUserAgentWallet.reservedTokenAmount
+    ) {
+      throw new AgentWalletReconciliationError(
+        "Agent token purchase left wallet and service entitlement balances inconsistent.",
+      );
+    }
 
     return serializeAgentTokenPurchase({
       ...purchase,
@@ -475,6 +539,47 @@ export async function purchaseAgentTokens(
   };
 
   return runWalletWriteTransaction(client, run);
+}
+
+async function assertPurchaseWalletEntitlementParity(
+  input: {
+    audienceIdentityId: string;
+    representativeId: string;
+    userAgentWallet: UserAgentWalletRecord;
+    scope: string;
+  },
+  tx: TokenPurchaseClient,
+) {
+  const entitlementAccount = await tx.serviceEntitlementAccount.findUnique({
+    where: {
+      audienceIdentityId_representativeId_productCode: {
+        audienceIdentityId: input.audienceIdentityId,
+        representativeId: input.representativeId,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      },
+    },
+  });
+  if (!entitlementAccount) {
+    if (
+      input.userAgentWallet.availableTokenAmount !== 0
+      || input.userAgentWallet.reservedTokenAmount !== 0
+    ) {
+      throw new AgentWalletReconciliationError(
+        `${input.scope}: wallet has a balance but its service entitlement account is missing.`,
+      );
+    }
+    return;
+  }
+  if (
+    entitlementAccount.remainingUnits
+      !== input.userAgentWallet.availableTokenAmount
+    || entitlementAccount.reservedUnits
+      !== input.userAgentWallet.reservedTokenAmount
+  ) {
+    throw new AgentWalletReconciliationError(
+      `${input.scope}: wallet and service entitlement balances do not match.`,
+    );
+  }
 }
 
 function normalizePurchaseAgentTokensInput(
@@ -518,6 +623,11 @@ function assertExistingTokenPurchaseMatches(
 ): void {
   if (!purchase.userWallet || !purchase.agentWallet) {
     throw new Error("Existing token purchase is missing wallet relations.");
+  }
+  if (!purchase.audienceIdentityId || !purchase.entitlementAccountId) {
+    throw new Error(
+      "Existing token purchase is missing its service entitlement link.",
+    );
   }
   const mismatches = [
     purchase.userWallet.externalUserId !== normalized.externalUserId ? "owner" : null,
@@ -564,6 +674,16 @@ function serializeAgentTokenPurchase(
     creatorPendingCents: purchase.creatorPendingCents,
     status: purchase.status.toLowerCase() as AgentTokenPurchaseSnapshot["status"],
     idempotencyKey: purchase.idempotencyKey,
+    audienceIdentityId:
+      purchase.audienceIdentityId ??
+      missingScopedWallet(
+        "Agent token purchase is missing its audience identity.",
+      ),
+    entitlementAccountId:
+      purchase.entitlementAccountId ??
+      missingScopedWallet(
+        "Agent token purchase is missing its service entitlement account.",
+      ),
     cashBalanceCents: purchase.userWallet.cashBalanceCents,
     agentTokenBalance: purchase.agentWallet.tokenBalance,
     availableTokenAmount:

@@ -6,6 +6,7 @@ import { generateRepresentativeReply } from "@delegate/model-runtime";
 import { createConversationPlan, renderReplyPreview, resolveConversationSubagent } from "@delegate/runtime";
 import {
   acceptInboundConversationMessage,
+  AgentWalletReconciliationError,
   buildRepresentativeRuntimeProfile,
   buildWebAudienceExternalUserId,
   getUserAgentWalletBalance,
@@ -74,6 +75,8 @@ export async function GET(
   } catch (error) {
     const principalError = publicPrincipalErrorResponse(error);
     if (principalError) return principalError;
+    const reconciliationError = walletReconciliationErrorResponse(error);
+    if (reconciliationError) return reconciliationError;
     throw error;
   }
 }
@@ -230,6 +233,8 @@ export async function POST(
   } catch (error) {
     const principalError = publicPrincipalErrorResponse(error);
     if (principalError) return principalError;
+    const reconciliationError = walletReconciliationErrorResponse(error);
+    if (reconciliationError) return reconciliationError;
     console.error("Failed to accept public chat message.", error);
     return NextResponse.json(
       { error: "Failed to accept chat message." },
@@ -305,8 +310,21 @@ function publicPrincipalErrorResponse(error: unknown) {
   );
 }
 
+function walletReconciliationErrorResponse(error: unknown) {
+  if (!(error instanceof AgentWalletReconciliationError)) return null;
+  return privateJson(
+    {
+      error: "Wallet balance requires reconciliation.",
+      code: "wallet_reconciliation_required",
+    },
+    409,
+  );
+}
+
 function shouldUseNonPersistentDemoChat(error: unknown, representativeSlug: string): boolean {
-  return representativeSlug === demoRepresentative.slug && isPrismaUnavailableError(error);
+  return process.env.NODE_ENV !== "production"
+    && representativeSlug === demoRepresentative.slug
+    && isPrismaUnavailableError(error);
 }
 
 function isPrismaUnavailableError(error: unknown): boolean {

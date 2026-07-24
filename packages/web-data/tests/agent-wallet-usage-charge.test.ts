@@ -10,13 +10,22 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  AgentWalletReconciliationError,
   applyAgentUsageCharge,
   getUserAgentWalletBalance,
   InsufficientAgentUsageCreditsError,
+  releaseConversationWalletUsage,
   releaseAgentUsageCredits,
+  reserveConversationWalletUsage,
   reserveAgentUsageCredits,
+  settleConversationWalletUsage,
   settleAgentUsageCredits,
+  transferAgentUsageEntitlementReservation,
+  verifyAgentUsageEntitlementReservation,
 } from "../src/agent-wallet-usage-charge";
+import {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+} from "../src/service-entitlements";
 
 describe("user-scoped service-credit usage", () => {
   it("rolls back the reservation when the compatibility settlement fails", async () => {
@@ -297,6 +306,610 @@ describe("user-scoped service-credit usage", () => {
     });
   });
 
+  it("reserves and verifies wallet and entitlement credits as one idempotent unit", async () => {
+    const client = new FakeServiceCreditUsageClient();
+    const input = {
+      externalUserId: "user_1",
+      audienceIdentityId: "audience_1",
+      representativeId: "rep_1",
+      conversationId: "conversation_1",
+      generationRunId: "generation_run_1",
+      tokenAmount: 200,
+      idempotencyKey: "dual_reservation_1",
+    };
+
+    const first = await reserveConversationWalletUsage(input, client);
+    const replay = await reserveConversationWalletUsage(input, client);
+
+    expect(replay.usageCharge.id).toBe(first.usageCharge.id);
+    expect(first.usageCharge).toMatchObject({
+      status: "reserved",
+      audienceIdentityId: "audience_1",
+      entitlementAccountId: "entitlement_account_1",
+      conversationId: "conversation_1",
+      generationRunId: "generation_run_1",
+      availableTokenAmount: 800,
+      walletReservedTokenAmount: 200,
+    });
+    expect(client.serviceEntitlementAccounts[0]).toMatchObject({
+      remainingUnits: 800,
+      reservedUnits: 200,
+    });
+    expect(
+      client.serviceEntitlementLedgerEntries.filter(
+        (entry) => entry.kind === "RESERVE",
+      ),
+    ).toHaveLength(1);
+    expect(client.usageCharges).toHaveLength(1);
+
+    await expect(
+      verifyAgentUsageEntitlementReservation(
+        {
+          usageChargeId: first.usageCharge.id,
+          representativeId: "rep_1",
+          generationRunId: "generation_run_1",
+          audienceIdentityId: "audience_1",
+          tokenAmount: 200,
+        },
+        client,
+      ),
+    ).resolves.toMatchObject({
+      usageChargeId: first.usageCharge.id,
+      entitlementAccountId: "entitlement_account_1",
+      generationRunId: "generation_run_1",
+      reserveGenerationRunId: "generation_run_1",
+      tokenAmount: 200,
+      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+    });
+  });
+
+  it("canonicalizes the audience and rejects cross-user dual-ledger reservations", async () => {
+    const mergedClient = new FakeServiceCreditUsageClient();
+    mergedClient.identities.push({
+      id: "audience_merged",
+      status: "MERGED",
+      mergedIntoId: "audience_1",
+    });
+    const mergedReservation = await reserveConversationWalletUsage(
+      {
+        externalUserId: "user_1",
+        audienceIdentityId: "audience_merged",
+        representativeId: "rep_1",
+        conversationId: "conversation_1",
+        generationRunId: "generation_run_1",
+        tokenAmount: 200,
+        idempotencyKey: "dual_merged_audience",
+      },
+      mergedClient,
+    );
+    expect(mergedReservation.usageCharge).toMatchObject({
+      audienceIdentityId: "audience_1",
+      entitlementAccountId: "entitlement_account_1",
+    });
+
+    const crossUserClient = new FakeServiceCreditUsageClient();
+    crossUserClient.serviceEntitlementAccounts[1]!.remainingUnits = 1000;
+    await expect(
+      reserveConversationWalletUsage(
+        {
+          externalUserId: "user_1",
+          audienceIdentityId: "audience_2",
+          representativeId: "rep_1",
+          conversationId: "conversation_1",
+          generationRunId: "generation_run_1",
+          tokenAmount: 200,
+          idempotencyKey: "dual_cross_user",
+        },
+        crossUserClient,
+      ),
+    ).rejects.toThrow(
+      "User-agent wallet does not belong to the service entitlement audience.",
+    );
+    expect(crossUserClient.userAgentWallets[0]).toMatchObject({
+      availableTokenAmount: 1000,
+      reservedTokenAmount: 0,
+    });
+    expect(crossUserClient.serviceEntitlementAccounts[1]).toMatchObject({
+      remainingUnits: 1000,
+      reservedUnits: 0,
+    });
+    expect(crossUserClient.usageCharges).toHaveLength(0);
+    expect(crossUserClient.serviceEntitlementLedgerEntries).toHaveLength(0);
+  });
+
+  it("settles used units and releases unused units on both ledgers idempotently", async () => {
+    const client = new FakeServiceCreditUsageClient();
+    const reservation = await reserveConversationWalletUsage(
+      {
+        externalUserId: "user_1",
+        audienceIdentityId: "audience_1",
+        representativeId: "rep_1",
+        conversationId: "conversation_settle",
+        generationRunId: "generation_run_settle",
+        tokenAmount: 200,
+        idempotencyKey: "dual_settle_reserve",
+      },
+      client,
+    );
+    const input = {
+      usageChargeId: reservation.usageCharge.id,
+      settledTokenAmount: 150,
+      providerCostCents: 10,
+      provider: "model-provider",
+      idempotencyKey: "dual_settle",
+    };
+
+    const first = await settleConversationWalletUsage(input, client);
+    const replay = await settleConversationWalletUsage(input, client);
+
+    expect(replay.usageCharge.id).toBe(first.usageCharge.id);
+    expect(first.usageCharge).toMatchObject({
+      status: "settled",
+      settledTokenAmount: 150,
+      releasedTokenAmount: 50,
+      availableTokenAmount: 850,
+      walletReservedTokenAmount: 0,
+    });
+    expect(client.serviceEntitlementAccounts[0]).toMatchObject({
+      remainingUnits: 850,
+      reservedUnits: 0,
+    });
+    expect(
+      client.serviceEntitlementLedgerEntries.map((entry) => [
+        entry.kind,
+        entry.units,
+      ]),
+    ).toEqual([
+      ["RESERVE", 200],
+      ["CONSUME", 150],
+      ["RELEASE", 50],
+    ]);
+    await expect(
+      verifyAgentUsageEntitlementReservation(
+        {
+          usageChargeId: reservation.usageCharge.id,
+          representativeId: "rep_1",
+          generationRunId: "generation_run_settle",
+        },
+        client,
+      ),
+    ).rejects.toThrow("requires RESERVED status");
+  });
+
+  it("releases failed reservations on both ledgers idempotently", async () => {
+    const client = new FakeServiceCreditUsageClient();
+    const reservation = await reserveConversationWalletUsage(
+      {
+        externalUserId: "user_1",
+        audienceIdentityId: "audience_1",
+        representativeId: "rep_1",
+        conversationId: "conversation_release",
+        generationRunId: "generation_run_release",
+        tokenAmount: 200,
+        idempotencyKey: "dual_release_reserve",
+      },
+      client,
+    );
+    const input = {
+      usageChargeId: reservation.usageCharge.id,
+      failed: true,
+      reason: "provider_timeout",
+      idempotencyKey: "dual_release",
+    };
+
+    const first = await releaseConversationWalletUsage(input, client);
+    const replay = await releaseConversationWalletUsage(input, client);
+
+    expect(replay.usageCharge.id).toBe(first.usageCharge.id);
+    expect(first.usageCharge).toMatchObject({
+      status: "failed",
+      availableTokenAmount: 1000,
+      walletReservedTokenAmount: 0,
+      releasedTokenAmount: 200,
+    });
+    expect(client.serviceEntitlementAccounts[0]).toMatchObject({
+      remainingUnits: 1000,
+      reservedUnits: 0,
+    });
+    expect(
+      client.serviceEntitlementLedgerEntries.map((entry) => entry.kind),
+    ).toEqual(["RESERVE", "RELEASE"]);
+  });
+
+  it("rolls back either ledger when reserve or settlement fails", async () => {
+    const emptyWalletClient = new FakeServiceCreditUsageClient();
+    emptyWalletClient.identities.push({
+      id: "audience_without_wallet",
+      status: "REGISTERED",
+      mergedIntoId: null,
+    });
+    await expect(
+      reserveConversationWalletUsage(
+        {
+          externalUserId: "user_without_wallet",
+          audienceIdentityId: "audience_without_wallet",
+          representativeId: "rep_1",
+          conversationId: "conversation_empty_wallet",
+          generationRunId: "generation_run_empty_wallet",
+          tokenAmount: 1,
+          idempotencyKey: "dual_empty_wallet",
+        },
+        emptyWalletClient,
+      ),
+    ).rejects.toBeInstanceOf(InsufficientAgentUsageCreditsError);
+    expect(emptyWalletClient.serviceEntitlementLedgerEntries).toHaveLength(0);
+
+    const missingEntitlementClient = new FakeServiceCreditUsageClient();
+    missingEntitlementClient.serviceEntitlementAccounts =
+      missingEntitlementClient.serviceEntitlementAccounts.filter(
+        (account) => account.audienceIdentityId !== "audience_1",
+      );
+    await expect(
+      reserveConversationWalletUsage(
+        {
+          externalUserId: "user_1",
+          audienceIdentityId: "audience_1",
+          representativeId: "rep_1",
+          conversationId: "conversation_missing_entitlement",
+          generationRunId: "generation_run_missing_entitlement",
+          tokenAmount: 200,
+          idempotencyKey: "dual_missing_entitlement",
+        },
+        missingEntitlementClient,
+      ),
+    ).rejects.toThrow(
+      "User-agent wallet has service credits but its entitlement account is missing.",
+    );
+    expect(missingEntitlementClient.userAgentWallets[0]).toMatchObject({
+      availableTokenAmount: 1000,
+      reservedTokenAmount: 0,
+    });
+    expect(missingEntitlementClient.usageCharges).toHaveLength(0);
+
+    const reserveFailureClient = new FakeServiceCreditUsageClient();
+    reserveFailureClient.failNextEntitlementLedger = true;
+    await expect(
+      reserveConversationWalletUsage(
+        {
+          externalUserId: "user_1",
+          audienceIdentityId: "audience_1",
+          representativeId: "rep_1",
+          conversationId: "conversation_reserve_failure",
+          generationRunId: "generation_run_reserve_failure",
+          tokenAmount: 200,
+          idempotencyKey: "dual_reserve_failure",
+        },
+        reserveFailureClient,
+      ),
+    ).rejects.toThrow("entitlement ledger write failed");
+    expect(reserveFailureClient.serviceEntitlementAccounts[0]).toMatchObject({
+      remainingUnits: 1000,
+      reservedUnits: 0,
+    });
+    expect(reserveFailureClient.userAgentWallets[0]).toMatchObject({
+      availableTokenAmount: 1000,
+      reservedTokenAmount: 0,
+    });
+    expect(reserveFailureClient.usageCharges).toHaveLength(0);
+
+    const settlementFailureClient = new FakeServiceCreditUsageClient();
+    const reservation = await reserveConversationWalletUsage(
+      {
+        externalUserId: "user_1",
+        audienceIdentityId: "audience_1",
+        representativeId: "rep_1",
+        conversationId: "conversation_settle_failure",
+        generationRunId: "generation_run_settle_failure",
+        tokenAmount: 200,
+        idempotencyKey: "dual_settle_failure_reserve",
+      },
+      settlementFailureClient,
+    );
+    settlementFailureClient.failNextAllocation = true;
+    await expect(
+      settleConversationWalletUsage(
+        {
+          usageChargeId: reservation.usageCharge.id,
+          settledTokenAmount: 100,
+          idempotencyKey: "dual_settle_failure",
+        },
+        settlementFailureClient,
+      ),
+    ).rejects.toThrow("allocation write failed");
+    expect(settlementFailureClient.serviceEntitlementAccounts[0]).toMatchObject({
+      remainingUnits: 800,
+      reservedUnits: 200,
+    });
+    expect(
+      settlementFailureClient.serviceEntitlementLedgerEntries.map(
+        (entry) => entry.kind,
+      ),
+    ).toEqual(["RESERVE"]);
+    expect(settlementFailureClient.usageCharges[0]).toMatchObject({
+      status: AgentUsageChargeStatus.RESERVED,
+      settledTokenAmount: 0,
+    });
+  });
+
+  it("fails verification closed on binding mismatch or a missing reserve fact", async () => {
+    const client = new FakeServiceCreditUsageClient();
+    const reservation = await reserveConversationWalletUsage(
+      {
+        externalUserId: "user_1",
+        audienceIdentityId: "audience_1",
+        representativeId: "rep_1",
+        conversationId: "conversation_verify",
+        generationRunId: "generation_run_verify",
+        tokenAmount: 200,
+        idempotencyKey: "dual_verify_reserve",
+      },
+      client,
+    );
+    const verify = (
+      overrides: Partial<{
+        representativeId: string;
+        generationRunId: string;
+        audienceIdentityId: string;
+        tokenAmount: number;
+      }> = {},
+    ) =>
+      verifyAgentUsageEntitlementReservation(
+        {
+          usageChargeId: reservation.usageCharge.id,
+          representativeId: "rep_1",
+          generationRunId: "generation_run_verify",
+          audienceIdentityId: "audience_1",
+          tokenAmount: 200,
+          ...overrides,
+        },
+        client,
+      );
+
+    await expect(
+      verify({ generationRunId: "another_run" }),
+    ).rejects.toThrow("Idempotency key was already used");
+    await expect(
+      verify({ audienceIdentityId: "another_audience" }),
+    ).rejects.toThrow("Idempotency key was already used");
+    await expect(verify({ tokenAmount: 201 })).rejects.toThrow(
+      "Idempotency key was already used",
+    );
+
+    client.serviceEntitlementLedgerEntries = [];
+    await expect(verify()).rejects.toThrow("missing its matching");
+    await expect(
+      settleConversationWalletUsage(
+        {
+          usageChargeId: reservation.usageCharge.id,
+          settledTokenAmount: 100,
+        },
+        client,
+      ),
+    ).rejects.toThrow("missing its matching");
+    expect(client.usageCharges[0]).toMatchObject({
+      status: AgentUsageChargeStatus.RESERVED,
+    });
+  });
+
+  it("transfers the current run owner without rewriting the reserve ledger", async () => {
+    const client = new FakeServiceCreditUsageClient();
+    const reservation = await reserveConversationWalletUsage(
+      {
+        externalUserId: "user_1",
+        audienceIdentityId: "audience_1",
+        representativeId: "rep_1",
+        conversationId: "conversation_transfer",
+        generationRunId: "generation_run_step_1",
+        tokenAmount: 200,
+        idempotencyKey: "dual_transfer_reserve",
+      },
+      client,
+    );
+    const reserveFact = structuredClone(
+      client.serviceEntitlementLedgerEntries[0],
+    );
+    const input = {
+      usageChargeId: reservation.usageCharge.id,
+      fromGenerationRunId: "generation_run_step_1",
+      toGenerationRunId: "generation_run_step_2",
+      conversationId: "conversation_transfer",
+    };
+
+    client.generationRuns.push({
+      id: "generation_run_other_conversation",
+      conversationId: "another_conversation",
+    });
+    await expect(
+      transferAgentUsageEntitlementReservation(
+        {
+          ...input,
+          toGenerationRunId: "generation_run_other_conversation",
+        },
+        client,
+      ),
+    ).rejects.toThrow("does not belong to the wallet usage conversation");
+    expect(client.usageCharges[0]?.generationRunId).toBe(
+      "generation_run_step_1",
+    );
+
+    const transferred =
+      await transferAgentUsageEntitlementReservation(input, client);
+    const replay =
+      await transferAgentUsageEntitlementReservation(input, client);
+
+    expect(transferred.generationRunId).toBe("generation_run_step_2");
+    expect(replay.generationRunId).toBe("generation_run_step_2");
+    expect(client.serviceEntitlementLedgerEntries).toEqual([reserveFact]);
+    await expect(
+      transferAgentUsageEntitlementReservation(
+        {
+          ...input,
+          fromGenerationRunId: "wrong_replay_owner",
+        },
+        client,
+      ),
+    ).rejects.toThrow("no matching transfer audit");
+    await expect(
+      transferAgentUsageEntitlementReservation(
+        {
+          ...input,
+          fromGenerationRunId: "generation_run_step_2",
+        },
+        client,
+      ),
+    ).rejects.toThrow("requires a different target owner");
+    await expect(
+      verifyAgentUsageEntitlementReservation(
+        {
+          usageChargeId: reservation.usageCharge.id,
+          representativeId: "rep_1",
+          generationRunId: "generation_run_step_2",
+          tokenAmount: 200,
+        },
+        client,
+      ),
+    ).resolves.toMatchObject({
+      generationRunId: "generation_run_step_2",
+      reserveGenerationRunId: "generation_run_step_1",
+    });
+    await expect(
+      transferAgentUsageEntitlementReservation(
+        {
+          ...input,
+          fromGenerationRunId: "wrong_owner",
+          toGenerationRunId: "generation_run_step_3",
+        },
+        client,
+      ),
+    ).rejects.toThrow("owned by a different generation run");
+    await expect(
+      transferAgentUsageEntitlementReservation(
+        { ...input, conversationId: "another_conversation" },
+        client,
+      ),
+    ).rejects.toThrow("does not belong to this conversation");
+  });
+
+  it("rejects cross-conversation run bindings and standalone terminal bypasses", async () => {
+    const crossConversationClient = new FakeServiceCreditUsageClient();
+    crossConversationClient.generationRuns.push({
+      id: "generation_run_cross_conversation",
+      conversationId: "another_conversation",
+    });
+    await expect(
+      reserveConversationWalletUsage(
+        {
+          externalUserId: "user_1",
+          audienceIdentityId: "audience_1",
+          representativeId: "rep_1",
+          conversationId: "conversation_expected",
+          generationRunId: "generation_run_cross_conversation",
+          tokenAmount: 200,
+          idempotencyKey: "dual_cross_conversation",
+        },
+        crossConversationClient,
+      ),
+    ).rejects.toThrow("does not belong to the wallet usage conversation");
+    expect(crossConversationClient.userAgentWallets[0]).toMatchObject({
+      availableTokenAmount: 1000,
+      reservedTokenAmount: 0,
+    });
+    expect(crossConversationClient.usageCharges).toHaveLength(0);
+    expect(
+      crossConversationClient.serviceEntitlementLedgerEntries,
+    ).toHaveLength(0);
+
+    const bypassClient = new FakeServiceCreditUsageClient();
+    const reservation = await reserveConversationWalletUsage(
+      {
+        externalUserId: "user_1",
+        audienceIdentityId: "audience_1",
+        representativeId: "rep_1",
+        conversationId: "conversation_1",
+        generationRunId: "generation_run_1",
+        tokenAmount: 200,
+        idempotencyKey: "dual_bypass_reserve",
+      },
+      bypassClient,
+    );
+    await expect(
+      settleAgentUsageCredits(
+        {
+          usageChargeId: reservation.usageCharge.id,
+          settledTokenAmount: 100,
+        },
+        bypassClient,
+      ),
+    ).rejects.toThrow("must use the atomic conversation wallet lifecycle");
+    await expect(
+      releaseAgentUsageCredits(
+        { usageChargeId: reservation.usageCharge.id },
+        bypassClient,
+      ),
+    ).rejects.toThrow("must use the atomic conversation wallet lifecycle");
+  });
+
+  it("fails balance reads closed on reconciliation errors but permits empty legacy state", async () => {
+    const mismatchClient = new FakeServiceCreditUsageClient();
+    mismatchClient.serviceEntitlementAccounts[1]!.remainingUnits = 499;
+    await expect(
+      getUserAgentWalletBalance(
+        {
+          externalUserId: "user_2",
+          representativeId: "rep_1",
+        },
+        mismatchClient,
+      ),
+    ).rejects.toBeInstanceOf(AgentWalletReconciliationError);
+
+    const missingAccountClient = new FakeServiceCreditUsageClient();
+    missingAccountClient.serviceEntitlementAccounts =
+      missingAccountClient.serviceEntitlementAccounts.filter(
+        (account) => account.audienceIdentityId !== "audience_2",
+      );
+    await expect(
+      getUserAgentWalletBalance(
+        {
+          externalUserId: "user_2",
+          representativeId: "rep_1",
+        },
+        missingAccountClient,
+      ),
+    ).rejects.toThrow("non-zero balance");
+
+    const emptyLegacyClient = new FakeServiceCreditUsageClient();
+    emptyLegacyClient.userAgentWallets[1]!.availableTokenAmount = 0;
+    emptyLegacyClient.userAgentWallets[1]!.totalPurchasedTokenAmount = 0;
+    emptyLegacyClient.serviceEntitlementAccounts =
+      emptyLegacyClient.serviceEntitlementAccounts.filter(
+        (account) => account.audienceIdentityId !== "audience_2",
+      );
+    await expect(
+      getUserAgentWalletBalance(
+        {
+          externalUserId: "user_2",
+          representativeId: "rep_1",
+        },
+        emptyLegacyClient,
+      ),
+    ).resolves.toMatchObject({
+      availableTokenAmount: 0,
+      reservedTokenAmount: 0,
+    });
+
+    const missingAudienceClient = new FakeServiceCreditUsageClient();
+    missingAudienceClient.users[1]!.audienceIdentityId = null as unknown as string;
+    await expect(
+      getUserAgentWalletBalance(
+        {
+          externalUserId: "user_2",
+          representativeId: "rep_1",
+        },
+        missingAudienceClient,
+      ),
+    ).rejects.toThrow("missing audienceIdentityId");
+  });
+
   it("releases the exact sale-time creator share across rounding boundaries", async () => {
     const client = new FakeServiceCreditUsageClient();
     client.agentWallets[0]!.tokenBalance = 3;
@@ -354,11 +967,52 @@ describe("user-scoped service-credit usage", () => {
 });
 
 class FakeServiceCreditUsageClient {
+  identities: Array<{
+    id: string;
+    status: "ANONYMOUS" | "REGISTERED" | "MERGED" | "DISABLED";
+    mergedIntoId: string | null;
+  }> = [
+    {
+      id: "audience_1",
+      status: "REGISTERED",
+      mergedIntoId: null,
+    },
+    {
+      id: "audience_2",
+      status: "REGISTERED",
+      mergedIntoId: null,
+    },
+  ];
   users = [
-    { id: "user_wallet_1", externalUserId: "user_1", currency: "CNY" },
-    { id: "user_wallet_2", externalUserId: "user_2", currency: "CNY" },
+    {
+      id: "user_wallet_1",
+      audienceIdentityId: "audience_1",
+      externalUserId: "user_1",
+      currency: "CNY",
+    },
+    {
+      id: "user_wallet_2",
+      audienceIdentityId: "audience_2",
+      externalUserId: "user_2",
+      currency: "CNY",
+    },
   ];
   representatives = [{ id: "rep_1", ownerId: "owner_1" }];
+  generationRuns = [
+    ["generation_run_1", "conversation_1"],
+    ["generation_run_settle", "conversation_settle"],
+    ["generation_run_release", "conversation_release"],
+    ["generation_run_empty_wallet", "conversation_empty_wallet"],
+    [
+      "generation_run_missing_entitlement",
+      "conversation_missing_entitlement",
+    ],
+    ["generation_run_reserve_failure", "conversation_reserve_failure"],
+    ["generation_run_settle_failure", "conversation_settle_failure"],
+    ["generation_run_verify", "conversation_verify"],
+    ["generation_run_step_1", "conversation_transfer"],
+    ["generation_run_step_2", "conversation_transfer"],
+  ].map(([id, conversationId]) => ({ id: id!, conversationId: conversationId! }));
   agentWallets = [
     {
       id: "agent_wallet_1",
@@ -407,7 +1061,26 @@ class FakeServiceCreditUsageClient {
   ];
   ledgerEntries: any[] = [];
   walletTransactions: any[] = [];
+  serviceEntitlementAccounts: any[] = [
+    this.entitlementAccount(
+      "entitlement_account_1",
+      "audience_1",
+      1000,
+    ),
+    this.entitlementAccount(
+      "entitlement_account_2",
+      "audience_2",
+      500,
+    ),
+  ];
+  serviceEntitlementLedgerEntries: any[] = [];
   failNextAllocation = false;
+  failNextEntitlementLedger = false;
+
+  audienceIdentity = {
+    findUnique: async (args: any) =>
+      this.identities.find((identity) => identity.id === args.where.id) ?? null,
+  };
 
   userWallet = {
     findUnique: async (args: any) =>
@@ -434,6 +1107,11 @@ class FakeServiceCreditUsageClient {
       applyDelta(wallet, "totalConsumedTokens", args.data.totalConsumedTokens);
       return wallet;
     },
+  };
+
+  generationRun = {
+    findUnique: async (args: any) =>
+      this.generationRuns.find((run) => run.id === args.where.id) ?? null,
   };
 
   userAgentWallet = {
@@ -508,6 +1186,10 @@ class FakeServiceCreditUsageClient {
         userAgentWalletId: args.data.userAgentWalletId ?? null,
         agentWalletId: args.data.agentWalletId,
         representativeId: args.data.representativeId,
+        audienceIdentityId: args.data.audienceIdentityId ?? null,
+        entitlementAccountId: args.data.entitlementAccountId ?? null,
+        conversationId: args.data.conversationId ?? null,
+        generationRunId: args.data.generationRunId ?? null,
         tokenPurchaseId: args.data.tokenPurchaseId ?? null,
         kind: args.data.kind as AgentUsageChargeKind,
         status: args.data.status as AgentUsageChargeStatus,
@@ -531,6 +1213,115 @@ class FakeServiceCreditUsageClient {
       const row = this.usageCharges.find((usage) => usage.id === args.where.id);
       if (!row) throw new Error("usage not found");
       Object.assign(row, args.data);
+      return row;
+    },
+    updateMany: async (args: any) => {
+      const row = this.usageCharges.find(
+        (usage) =>
+          usage.id === args.where.id &&
+          usage.status === args.where.status &&
+          usage.generationRunId === args.where.generationRunId &&
+          usage.conversationId === args.where.conversationId,
+      );
+      if (!row) return { count: 0 };
+      Object.assign(row, args.data);
+      return { count: 1 };
+    },
+  };
+
+  serviceEntitlementAccount = {
+    findUnique: async (args: any) => {
+      const coordinates =
+        args.where.audienceIdentityId_representativeId_productCode;
+      return this.serviceEntitlementAccounts.find((account) =>
+        typeof args.where.id === "string"
+          ? account.id === args.where.id
+          : account.audienceIdentityId === coordinates?.audienceIdentityId &&
+            account.representativeId === coordinates?.representativeId &&
+            account.productCode === coordinates?.productCode,
+      ) ?? null;
+    },
+    updateMany: async (args: any) => {
+      const account = this.serviceEntitlementAccounts.find(
+        (row) => row.id === args.where.id,
+      );
+      if (
+        !account ||
+        (args.where.status && account.status !== args.where.status) ||
+        (args.where.remainingUnits?.gte !== undefined &&
+          account.remainingUnits < args.where.remainingUnits.gte) ||
+        (args.where.reservedUnits?.gte !== undefined &&
+          account.reservedUnits < args.where.reservedUnits.gte)
+      ) {
+        return { count: 0 };
+      }
+      applyDelta(account, "remainingUnits", args.data.remainingUnits);
+      applyDelta(account, "reservedUnits", args.data.reservedUnits);
+      return { count: 1 };
+    },
+    update: async (args: any) => {
+      const account = this.serviceEntitlementAccounts.find(
+        (row) => row.id === args.where.id,
+      );
+      if (!account) throw new Error("entitlement account not found");
+      Object.assign(account, args.data);
+      return account;
+    },
+  };
+
+  serviceEntitlementLedgerEntry = {
+    findUnique: async (args: any) =>
+      this.serviceEntitlementLedgerEntries.find(
+        (entry) => entry.idempotencyKey === args.where.idempotencyKey,
+      ) ?? null,
+    findMany: async (args: any) =>
+      this.serviceEntitlementLedgerEntries.filter((entry) => {
+        const where = args.where ?? {};
+        if (
+          where.idempotencyKey?.in &&
+          !where.idempotencyKey.in.includes(entry.idempotencyKey)
+        ) {
+          return false;
+        }
+        if (
+          where.entitlementAccountId &&
+          entry.entitlementAccountId !== where.entitlementAccountId
+        ) {
+          return false;
+        }
+        if (
+          where.generationRunId &&
+          entry.generationRunId !== where.generationRunId
+        ) {
+          return false;
+        }
+        if (where.kind?.in && !where.kind.in.includes(entry.kind)) {
+          return false;
+        }
+        return true;
+      }),
+    create: async (args: any) => {
+      if (this.failNextEntitlementLedger) {
+        this.failNextEntitlementLedger = false;
+        throw new Error("entitlement ledger write failed");
+      }
+      const row = {
+        id: `service_entitlement_ledger_${
+          this.serviceEntitlementLedgerEntries.length + 1
+        }`,
+        entitlementAccountId: args.data.entitlementAccountId,
+        paymentOrderId: args.data.paymentOrderId ?? null,
+        generationRunId: args.data.generationRunId ?? null,
+        kind: args.data.kind,
+        units: args.data.units,
+        balanceAfter: args.data.balanceAfter,
+        reservedAfter: args.data.reservedAfter ?? 0,
+        idempotencyKey: args.data.idempotencyKey,
+        notes: args.data.notes ?? null,
+        metadata: args.data.metadata ?? null,
+        createdAt: new Date(),
+      };
+      this.serviceEntitlementLedgerEntries.push(row);
       return row;
     },
   };
@@ -665,6 +1456,8 @@ class FakeServiceCreditUsageClient {
       creatorEarnings: this.creatorEarnings,
       ledgerEntries: this.ledgerEntries,
       walletTransactions: this.walletTransactions,
+      serviceEntitlementAccounts: this.serviceEntitlementAccounts,
+      serviceEntitlementLedgerEntries: this.serviceEntitlementLedgerEntries,
     });
     try {
       return await fn(this);
@@ -696,6 +1489,27 @@ class FakeServiceCreditUsageClient {
       creatorPendingCents: tokenAmount / 5,
       status: AgentTokenPurchaseStatus.COMPLETED,
       createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)),
+    };
+  }
+
+  private entitlementAccount(
+    id: string,
+    audienceIdentityId: string,
+    units: number,
+  ) {
+    return {
+      id,
+      audienceIdentityId,
+      representativeId: "rep_1",
+      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      unitName: "credit",
+      status: "ACTIVE",
+      grantedUnits: units,
+      remainingUnits: units,
+      reservedUnits: 0,
+      expiresAt: null as Date | null,
+      createdAt: new Date(Date.UTC(2026, 0, 1)),
+      updatedAt: new Date(Date.UTC(2026, 0, 1)),
     };
   }
 

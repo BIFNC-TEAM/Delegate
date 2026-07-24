@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockLoadComputeRuntimeAuthority, mockPrisma } = vi.hoisted(() => ({
+const {
+  mockLoadComputeRuntimeAuthority,
+  mockPrisma,
+  mockRequireAudienceGenerationRunAuthorization,
+} = vi.hoisted(() => ({
   mockLoadComputeRuntimeAuthority: vi.fn(),
+  mockRequireAudienceGenerationRunAuthorization: vi.fn(),
   mockPrisma: {
     representative: { findUnique: vi.fn() },
     delegationTask: { findUnique: vi.fn() },
@@ -16,6 +21,11 @@ vi.mock("../src/prisma", () => ({
 
 vi.mock("../src/runtime-authority", () => ({
   loadComputeRuntimeAuthority: mockLoadComputeRuntimeAuthority,
+}));
+
+vi.mock("../src/entitlements", () => ({
+  requireAudienceGenerationRunAuthorization:
+    mockRequireAudienceGenerationRunAuthorization,
 }));
 
 vi.mock("../src/lifecycle-hooks", () => ({
@@ -91,6 +101,14 @@ describe("compute session runtime pin", () => {
       }),
     );
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
+    mockRequireAudienceGenerationRunAuthorization.mockImplementation(
+      async (input: { requestedBy: string; generationRunId?: string }) => {
+        if (input.requestedBy === "audience" && !input.generationRunId) {
+          throw new Error("audience_generation_run_required");
+        }
+        return null;
+      },
+    );
   });
 
   afterEach(() => {
@@ -131,5 +149,30 @@ describe("compute session runtime pin", () => {
       "version-active-at-creation",
     );
     expect(result.session.expiresAt).toBe("2026-07-23T10:05:00.000Z");
+  });
+
+  it("rejects an audience session before persistence when generationRunId is absent", async () => {
+    const { createComputeSession } = await import("../src/sessions");
+
+    await expect(
+      createComputeSession({
+        representativeId: "rep-1",
+        contactId: "contact-1",
+        conversationId: "conversation-1",
+        subagentId: "compute-agent",
+        requestedBy: "audience",
+        requestedCapabilities: ["exec"],
+        reason: "run without a server-owned authorization",
+      }),
+    ).rejects.toThrow("audience_generation_run_required");
+
+    expect(mockRequireAudienceGenerationRunAuthorization).toHaveBeenCalledWith({
+      representativeId: "rep-1",
+      contactId: "contact-1",
+      conversationId: "conversation-1",
+      requestedBy: "audience",
+    });
+    expect(mockLoadComputeRuntimeAuthority).not.toHaveBeenCalled();
+    expect(mockPrisma.computeSession.create).not.toHaveBeenCalled();
   });
 });

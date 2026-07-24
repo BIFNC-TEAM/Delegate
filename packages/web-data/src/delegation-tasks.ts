@@ -16,8 +16,9 @@ import {
 import type { ParsedComputeRequest } from "@delegate/runtime";
 
 import {
-  releaseAgentUsageCredits,
-  settleAgentUsageCredits,
+  releaseConversationWalletUsage,
+  settleConversationWalletUsage,
+  transferAgentUsageEntitlementReservation,
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
 import {
@@ -37,6 +38,11 @@ import {
   buildDelegationApprovalPolicyExplanation,
   buildDelegationTaskOwnerActionAvailability,
 } from "./delegation-task-product";
+import {
+  finalizeConversationEntitlementForGenerationRuns,
+  transferConversationEntitlementByGenerationRunId,
+  type ServiceEntitlementClient,
+} from "./service-entitlements";
 
 type ComputeCapability = "exec" | "read" | "write" | "process" | "browser" | "mcp";
 
@@ -865,7 +871,25 @@ export async function finalizeComputeDelegationTask(input: {
               : {}),
           },
         });
+        await transferConversationEntitlementByGenerationRunId(
+          {
+            fromGenerationRunId: generationRun.id,
+            toGenerationRunId: nextRun.id,
+          },
+          tx as unknown as ServiceEntitlementClient,
+        );
         if (billingContext) {
+          if (billingContext.mode === "service_credit") {
+            await transferAgentUsageEntitlementReservation(
+              {
+                usageChargeId: billingContext.walletReservation.usageChargeId,
+                fromGenerationRunId: billingContext.ownerRunId,
+                toGenerationRunId: nextRun.id,
+                conversationId: billingContext.conversationId,
+              },
+              tx as unknown as UsageChargeClient,
+            );
+          }
           await tx.generationRun.update({
             where: { id: billingContext.ownerRunId },
             data: {
@@ -1412,7 +1436,25 @@ export async function applyRepresentativeDelegationTaskAction(input: {
           : {}),
       },
     });
+    await transferConversationEntitlementByGenerationRunId(
+      {
+        fromGenerationRunId: sourceRun.id,
+        toGenerationRunId: run.id,
+      },
+      tx as unknown as ServiceEntitlementClient,
+    );
     if (billingContext) {
+      if (billingContext.mode === "service_credit") {
+        await transferAgentUsageEntitlementReservation(
+          {
+            usageChargeId: billingContext.walletReservation.usageChargeId,
+            fromGenerationRunId: billingContext.ownerRunId,
+            toGenerationRunId: run.id,
+            conversationId: billingContext.conversationId,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
       await tx.generationRun.update({
         where: { id: billingContext.ownerRunId },
         data: {
@@ -1657,7 +1699,25 @@ export async function applyRepresentativeDelegationExternalEffectAction(input: {
           : {}),
       },
     });
+    await transferConversationEntitlementByGenerationRunId(
+      {
+        fromGenerationRunId: sourceRun.id,
+        toGenerationRunId: run.id,
+      },
+      tx as unknown as ServiceEntitlementClient,
+    );
     if (billingContext) {
+      if (billingContext.mode === "service_credit") {
+        await transferAgentUsageEntitlementReservation(
+          {
+            usageChargeId: billingContext.walletReservation.usageChargeId,
+            fromGenerationRunId: billingContext.ownerRunId,
+            toGenerationRunId: run.id,
+            conversationId: billingContext.conversationId,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+      }
       await tx.generationRun.update({
         where: { id: billingContext.ownerRunId },
         data: {
@@ -2191,6 +2251,17 @@ async function finalizeDelegationTaskBilling(
     generationRuns: DelegationBillingRun[];
   },
 ) {
+  await finalizeConversationEntitlementForGenerationRuns(
+    {
+      generationRunIds: input.generationRuns.map((run) => run.id),
+      outcome:
+        input.status === DelegationTaskStatus.COMPLETED
+          ? "consume"
+          : "release",
+      reason: `delegation_task_${input.status.toLowerCase()}`,
+    },
+    tx as unknown as ServiceEntitlementClient,
+  );
   const context = resolveDelegationBillingContext(
     input.steps,
     input.generationRuns,
@@ -2231,7 +2302,7 @@ async function finalizeDelegationTaskBilling(
         `Delegation task usage reservation cannot settle from ${usageCharge.status}.`,
       );
     }
-    await settleAgentUsageCredits(
+    await settleConversationWalletUsage(
       {
         usageChargeId: context.walletReservation.usageChargeId,
         settledTokenAmount: context.walletReservation.tokenAmount,
@@ -2272,7 +2343,7 @@ async function finalizeDelegationTaskBilling(
       `Delegation task usage reservation cannot release from ${usageCharge.status}.`,
     );
   }
-  await releaseAgentUsageCredits(
+  await releaseConversationWalletUsage(
     {
       usageChargeId: context.walletReservation.usageChargeId,
       failed: input.status === DelegationTaskStatus.FAILED,

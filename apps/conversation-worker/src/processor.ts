@@ -17,6 +17,7 @@ import {
 import {
   buildRepresentativeRuntimeProfile,
   assertConversationChannelDeliveryAvailable,
+  authorizeGenerationRunFreeUsage,
   claimNextOperatorMessageWorkItem,
   claimNextGenerationWorkItem,
   completeOperatorMessageDelivery,
@@ -30,7 +31,6 @@ import {
   ensureConversationLeadAndHandoff,
   failGenerationRun,
   getRepresentativeRuntimeSetupSnapshot,
-  hasUnifiedConversationEntitlement,
   loadGenerationRecentTurns,
   markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval,
@@ -407,6 +407,58 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         "此前的委托任务未能继续执行，系统已停止本次任务，并且不会把它改成普通问答。请重新描述目标；文件位置将由系统自动管理。",
       );
     }
+
+    const representative = buildRepresentativeRuntimeProfile(setup);
+    let paidContinuationRequired =
+      item.usage.freeRepliesUsed >= representative.contract.freeReplyLimit;
+    if (!item.walletReservation && !paidContinuationRequired) {
+      const freeAuthorized = await authorizeGenerationRunFreeUsage({
+        runId: item.runId,
+        ...workLease,
+        freeReplyLimit: representative.contract.freeReplyLimit,
+      });
+      paidContinuationRequired = !freeAuthorized;
+    }
+    if (
+      item.audienceIdentityId
+      && paidContinuationRequired
+      && !item.walletReservation
+    ) {
+      entitlementReservation = await reserveGenerationConversationEntitlement({
+        runId: item.runId,
+        ...workLease,
+        audienceIdentityId: item.audienceIdentityId,
+        representativeId: setup.id,
+      });
+    }
+    const effectiveUsage = entitlementReservation
+      ? {
+          ...item.usage,
+          passUnlocked: true,
+          deepHelpUnlocked:
+            item.usage.deepHelpUnlocked
+            || entitlementReservation.productCode === "plan:deep_help",
+        }
+      : paidContinuationRequired && !item.walletReservation
+        ? {
+            ...item.usage,
+            passUnlocked: false,
+            deepHelpUnlocked: false,
+          }
+        : item.usage;
+
+    if (
+      parsedRequests.length
+      && paidContinuationRequired
+      && !item.walletReservation
+      && !entitlementReservation
+    ) {
+      return completeTerminalDelegationFailure(
+        item,
+        "免费额度已用完，当前没有可预占的服务权益。请先充值或购买服务额度后再执行委托任务。",
+      );
+    }
+
     if (parsedRequests.length) {
       const computeReply = await processPublicWebComputeRequest({
         item,
@@ -446,6 +498,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         completeOutbox: false,
         countUsage: computeReply.billable && !persistedRequest,
         keepConversationQueued: computeReply.hasMoreSteps,
+        ...(entitlementReservation ? { entitlementReservation } : {}),
       });
       outputMessageId = completed.message.id;
       await markGenerationDeliveryComplete({
@@ -460,41 +513,6 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       };
     }
 
-    const representative = buildRepresentativeRuntimeProfile(setup);
-    let unifiedEntitlementAuthority = false;
-    if (
-      item.audienceIdentityId
-      && item.usage.freeRepliesUsed >= representative.contract.freeReplyLimit
-      && !item.walletReservation
-    ) {
-      entitlementReservation = await reserveGenerationConversationEntitlement({
-        runId: item.runId,
-        ...workLease,
-        audienceIdentityId: item.audienceIdentityId,
-        representativeId: setup.id,
-      });
-      if (!entitlementReservation) {
-        unifiedEntitlementAuthority = await hasUnifiedConversationEntitlement({
-          audienceIdentityId: item.audienceIdentityId,
-          representativeId: setup.id,
-        });
-      }
-    }
-    const effectiveUsage = entitlementReservation
-      ? {
-          ...item.usage,
-          passUnlocked: true,
-          deepHelpUnlocked:
-            item.usage.deepHelpUnlocked
-            || entitlementReservation.productCode === "plan:deep_help",
-        }
-      : unifiedEntitlementAuthority
-        ? {
-            ...item.usage,
-            passUnlocked: false,
-            deepHelpUnlocked: false,
-          }
-        : item.usage;
     const recentTurns = await loadGenerationRecentTurns({
       conversationId: item.conversationId,
       beforeMessageId: item.inputMessageId,

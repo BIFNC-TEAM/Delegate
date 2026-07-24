@@ -7,194 +7,122 @@ vi.mock("../src/lifecycle-hooks", () => ({
 vi.mock("@delegate/web-data", () => ({
   finalizeComputeApprovalConversation: vi.fn(),
   getRepresentativeRuntimeAuthoritySnapshot: vi.fn(),
+  verifyAgentUsageEntitlementReservation: vi.fn(),
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE:
+    "agent-wallet:service-credit:v1",
 }));
 
 process.env.COMPUTE_BROKER_INTERNAL_TOKEN ??= "test-internal-token";
 
 describe("deriveConversationComputeEntitlements", () => {
-  it("does not grant pass for a fresh conversation by default", async () => {
+  it("does not grant a paid plan without an active run authorization", async () => {
     const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
+    const result = deriveConversationComputeEntitlements(null);
+
+    expect(result.hasPaidEntitlement).toBe(false);
+    expect(result.activePlanTier).toBeUndefined();
+  });
+
+  it("keeps an active server-owned free run unpaid", async () => {
+    const { deriveConversationComputeEntitlements } =
+      await import("../src/entitlements");
     const result = deriveConversationComputeEntitlements({
-      conversation: {
-        passUnlockedAt: null,
-        deepHelpUnlockedAt: null,
-      },
+      kind: "free",
+      audienceIdentityId: "audience-1",
+      generationRunId: "run-1",
+      representativeId: "rep-1",
+      productCode: null,
+      activePlanTier: undefined,
+      hasPaidEntitlement: false,
     });
 
     expect(result.hasPaidEntitlement).toBe(false);
     expect(result.activePlanTier).toBeUndefined();
   });
 
-  it("ignores a request-supplied paid-entitlement boolean", async () => {
+  it("derives the policy tier only from a verified run authorization", async () => {
     const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
     const result = deriveConversationComputeEntitlements({
-      conversation: {
-        passUnlockedAt: null,
-        deepHelpUnlockedAt: null,
-      },
-      requestedPaidEntitlement: true,
-    } as never);
-
-    expect(result.hasPaidEntitlement).toBe(false);
-    expect(result.activePlanTier).toBeUndefined();
-  });
-
-  it("derives pass from the current conversation unlock state", async () => {
-    const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
-    const now = new Date("2026-03-24T12:00:00.000Z");
-    const result = deriveConversationComputeEntitlements({
-      conversation: {
-        passUnlockedAt: now,
-        deepHelpUnlockedAt: null,
-      },
-    });
-
-    expect(result.hasPaidEntitlement).toBe(true);
-    expect(result.activePlanTier).toBe("pass");
-  });
-
-  it("prefers deep help when both unlock fields are present", async () => {
-    const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
-    const now = new Date("2026-03-24T12:00:00.000Z");
-    const result = deriveConversationComputeEntitlements({
-      conversation: {
-        passUnlockedAt: now,
-        deepHelpUnlockedAt: now,
-      },
+      kind: "plan",
+      audienceIdentityId: "audience-1",
+      generationRunId: "run-1",
+      representativeId: "rep-1",
+      productCode: "plan:deep_help",
+      activePlanTier: "deep_help",
+      hasPaidEntitlement: true,
     });
 
     expect(result.hasPaidEntitlement).toBe(true);
     expect(result.activePlanTier).toBe("deep_help");
   });
 
-  it("derives a run-scoped pass from a server-stored service-credit reservation", async () => {
-    const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
-    const result = deriveConversationComputeEntitlements({
-      conversation: {
-        passUnlockedAt: null,
-        deepHelpUnlockedAt: null,
-      },
-      generationRuntimePolicySnapshot: {
-        billingMode: "service_credit",
-        walletReservation: {
-          usageChargeId: "usage-reserved",
-          tokenAmount: 1,
-        },
-      },
-    });
-
-    expect(result.hasPaidEntitlement).toBe(true);
-    expect(result.activePlanTier).toBe("pass");
-  });
-
   it("does not derive a run-scoped pass from an incomplete wallet snapshot", async () => {
-    const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
-    const result = deriveConversationComputeEntitlements({
-      conversation: {
-        passUnlockedAt: null,
-        deepHelpUnlockedAt: null,
-      },
-      generationRuntimePolicySnapshot: {
+    const { readServerStoredServiceCreditReservation } =
+      await import("../src/entitlements");
+    expect(
+      readServerStoredServiceCreditReservation({
         billingMode: "service_credit",
         walletReservation: {
           usageChargeId: "usage-reserved",
           tokenAmount: 0,
         },
-      },
-    });
-
-    expect(result.hasPaidEntitlement).toBe(false);
-    expect(result.activePlanTier).toBeUndefined();
+      }),
+    ).toBeNull();
   });
 
-  it("verifies the run-scoped reservation against the current wallet charge", async () => {
-    const { verifyRunScopedServiceCreditReservation } = await import("../src/policy");
-    const findFirst = vi.fn().mockResolvedValue({ id: "usage-reserved" });
+  it("delegates wallet authorization with all immutable run coordinates", async () => {
+    const { verifyRunScopedServiceCreditReservation } =
+      await import("../src/entitlements");
+    const verifier = vi.fn().mockResolvedValue({
+      usageChargeId: "usage-reserved",
+      entitlementAccountId: "account-1",
+      audienceIdentityId: "audience-1",
+      representativeId: "rep-1",
+      generationRunId: "run-1",
+      reserveGenerationRunId: "run-1",
+      tokenAmount: 1,
+      productCode: "agent-wallet:service-credit:v1",
+      reserveLedgerEntryId: "reserve-1",
+    });
     const result = await verifyRunScopedServiceCreditReservation(
       {
+        audienceIdentityId: "audience-1",
         representativeId: "rep-1",
-        generationRuntimePolicySnapshot: {
-          billingMode: "service_credit",
-          walletReservation: {
-            usageChargeId: "usage-reserved",
-            tokenAmount: 1,
-          },
-        },
-      },
-      {
-        agentUsageCharge: { findFirst },
-      } as never,
-    );
-
-    expect(result).toBe(true);
-    expect(findFirst).toHaveBeenCalledWith({
-      where: {
-        id: "usage-reserved",
-        representativeId: "rep-1",
-        status: "RESERVED",
-        tokenAmount: 1,
-        reservedTokenAmount: 1,
-      },
-      select: { id: true },
-    });
-
-    findFirst.mockResolvedValueOnce(null);
-    await expect(
-      verifyRunScopedServiceCreditReservation(
-        {
-          representativeId: "rep-1",
-          generationRuntimePolicySnapshot: {
-            billingMode: "service_credit",
-            walletReservation: {
-              usageChargeId: "usage-reserved",
-              tokenAmount: 1,
-            },
-          },
-        },
-        {
-          agentUsageCharge: { findFirst },
-        } as never,
-      ),
-    ).resolves.toBe(false);
-  });
-
-  it("lets the run-scoped pass satisfy the default browser, process, and MCP plan gates", async () => {
-    const [
-      { deriveConversationComputeEntitlements },
-      { verifyRunScopedServiceCreditReservation },
-      { evaluateCapabilityPolicyStack },
-    ] =
-      await Promise.all([
-        import("../src/entitlements"),
-        import("../src/policy"),
-        import("@delegate/capability-policy"),
-      ]);
-    const generationRuntimePolicySnapshot = {
-      billingMode: "service_credit",
-      walletReservation: {
+        generationRunId: "run-1",
         usageChargeId: "usage-reserved",
         tokenAmount: 1,
       },
-    };
-    const verified = await verifyRunScopedServiceCreditReservation(
-      {
-        representativeId: "rep-1",
-        generationRuntimePolicySnapshot,
-      },
-      {
-        agentUsageCharge: {
-          findFirst: vi.fn().mockResolvedValue({ id: "usage-reserved" }),
-        },
-      } as never,
+      verifier,
     );
+
+    expect(result).toMatchObject({
+      audienceIdentityId: "audience-1",
+      generationRunId: "run-1",
+      usageChargeId: "usage-reserved",
+    });
+    expect(verifier).toHaveBeenCalledWith({
+      audienceIdentityId: "audience-1",
+      representativeId: "rep-1",
+      generationRunId: "run-1",
+      usageChargeId: "usage-reserved",
+      tokenAmount: 1,
+    });
+  });
+
+  it("lets a verified run authorization satisfy paid capability gates", async () => {
+    const [{ deriveConversationComputeEntitlements }, { evaluateCapabilityPolicyStack }] =
+      await Promise.all([
+        import("../src/entitlements"),
+        import("@delegate/capability-policy"),
+      ]);
     const entitlements = deriveConversationComputeEntitlements({
-      conversation: {
-        passUnlockedAt: null,
-        deepHelpUnlockedAt: null,
-      },
-      generationRuntimePolicySnapshot: verified
-        ? generationRuntimePolicySnapshot
-        : undefined,
+      kind: "wallet",
+      audienceIdentityId: "audience-1",
+      generationRunId: "run-1",
+      representativeId: "rep-1",
+      productCode: "agent-wallet:service-credit:v1",
+      activePlanTier: "pass",
+      hasPaidEntitlement: true,
     });
     const cases = [
       { capability: "browser", resourceScope: "browser_lane" },

@@ -25,6 +25,12 @@ import {
   type WalletWriteTransactionOptions,
 } from "./agent-wallet-write";
 import { prisma } from "./prisma";
+import {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  refundGrantedServiceEntitlement,
+  type ServiceEntitlementClient,
+} from "./service-entitlements";
+import { AgentWalletReconciliationError } from "./agent-wallet-usage-charge";
 
 type UserWalletRecord = {
   id: string;
@@ -88,6 +94,8 @@ type AgentTokenPurchaseRecord = {
   status: AgentTokenPurchaseStatus;
   idempotencyKey: string;
   refundedAt: Date | null;
+  audienceIdentityId: string | null;
+  entitlementAccountId: string | null;
   userWallet?: UserWalletRecord;
   userAgentWallet?: UserAgentWalletRecord;
   agentWallet?: AgentWalletRecord;
@@ -126,6 +134,9 @@ type RechargeRefundClient = Omit<WalletLedgerClient, "$transaction"> &
 
 type PurchaseReversalClient = Omit<WalletLedgerClient, "$transaction"> &
   WalletTransactionClient & {
+  audienceIdentity?: ServiceEntitlementClient["audienceIdentity"];
+  serviceEntitlementAccount: ServiceEntitlementClient["serviceEntitlementAccount"];
+  serviceEntitlementLedgerEntry: ServiceEntitlementClient["serviceEntitlementLedgerEntry"];
   userWallet: {
     update(args: unknown): Promise<UserWalletRecord>;
   };
@@ -182,6 +193,8 @@ export type AgentTokenPurchaseReversalSnapshot = {
   agentTokenBalance: number;
   creatorReversedCents: number;
   refundedAt: string | null;
+  audienceIdentityId: string;
+  entitlementAccountId: string;
 };
 
 export async function refundRechargeOrder(
@@ -348,7 +361,7 @@ export async function refundRechargeOrder(
 export async function reverseAgentTokenPurchase(
   purchaseId: string,
   input: ReverseAgentTokenPurchaseInput = {},
-  client: PurchaseReversalClient = prisma,
+  client: PurchaseReversalClient = prisma as unknown as PurchaseReversalClient,
 ): Promise<AgentTokenPurchaseReversalSnapshot> {
   if (!purchaseId.trim()) {
     throw new Error("Agent token purchase id is required.");
@@ -384,6 +397,11 @@ export async function reverseAgentTokenPurchase(
       purchase.remainingTokenAmount === null
     ) {
       throw new Error("Agent token purchase not found.");
+    }
+    if (!purchase.audienceIdentityId || !purchase.entitlementAccountId) {
+      throw new Error(
+        "Agent token purchase is missing its service entitlement link.",
+      );
     }
     if (existingTransaction) {
       assertWalletIdempotencyField(
@@ -425,6 +443,15 @@ export async function reverseAgentTokenPurchase(
     if (purchase.status !== AgentTokenPurchaseStatus.COMPLETED) {
       throw new Error(`Agent token purchase cannot be reversed from status ${purchase.status}.`);
     }
+    await assertReversalWalletEntitlementParity(
+      {
+        ...purchase,
+        userAgentWallet: purchase.userAgentWallet,
+        audienceIdentityId: purchase.audienceIdentityId,
+        entitlementAccountId: purchase.entitlementAccountId,
+      },
+      tx,
+    );
     const tokenAmount = input.tokenAmount ?? purchase.remainingTokenAmount;
     assertPositiveInteger(tokenAmount, "tokenAmount");
     if (tokenAmount > purchase.remainingTokenAmount) {
@@ -473,6 +500,29 @@ export async function reverseAgentTokenPurchase(
       reversedAmountCents - creatorReversedCents;
     const refundedAt = new Date();
 
+    const entitlementRefund = await refundGrantedServiceEntitlement(
+      {
+        audienceIdentityId: purchase.audienceIdentityId,
+        representativeId: purchase.representativeId,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        units: tokenAmount,
+        operationKey: `agent-token-purchase-reversal:${operationId}`,
+        notes: input.reason ?? "Agent token purchase reversal.",
+        metadata: {
+          purchaseId: purchase.id,
+          purchaseIdempotencyKey: purchase.idempotencyKey,
+          amountCents: reversedAmountCents,
+          currency: purchase.currency,
+        },
+      },
+      tx as unknown as ServiceEntitlementClient,
+    );
+    if (entitlementRefund.accountId !== purchase.entitlementAccountId) {
+      throw new Error(
+        "Agent token purchase entitlement account does not match its persisted link.",
+      );
+    }
+
     const updatedPendingEarning =
       pendingEarning && creatorReversedCents > 0
         ? await tx.creatorEarning.update({
@@ -507,6 +557,9 @@ export async function reverseAgentTokenPurchase(
           platformReversedCents,
           reason: input.reason ?? null,
           userAgentWalletId: purchase.userAgentWallet.id,
+          audienceIdentityId: entitlementRefund.audienceIdentityId,
+          entitlementAccountId: entitlementRefund.accountId,
+          entitlementRefundLedgerEntryId: entitlementRefund.ledgerEntryId,
         },
       },
       tx,
@@ -632,6 +685,16 @@ export async function reverseAgentTokenPurchase(
         },
       }),
     ]);
+    if (
+      entitlementRefund.remainingUnits
+        !== updatedUserAgentWallet.availableTokenAmount
+      || entitlementRefund.reservedUnits
+        !== updatedUserAgentWallet.reservedTokenAmount
+    ) {
+      throw new AgentWalletReconciliationError(
+        "Agent token purchase reversal left wallet and service entitlement balances inconsistent.",
+      );
+    }
 
     return serializePurchaseReversal(
       {
@@ -648,6 +711,40 @@ export async function reverseAgentTokenPurchase(
   };
 
   return runWalletWriteTransaction(client, run);
+}
+
+async function assertReversalWalletEntitlementParity(
+  purchase: AgentTokenPurchaseRecord & {
+    userAgentWallet: UserAgentWalletRecord;
+    audienceIdentityId: string;
+    entitlementAccountId: string;
+  },
+  tx: PurchaseReversalClient,
+) {
+  const entitlementAccount = await tx.serviceEntitlementAccount.findUnique({
+    where: { id: purchase.entitlementAccountId },
+  });
+  if (
+    !entitlementAccount
+    || entitlementAccount.audienceIdentityId !== purchase.audienceIdentityId
+    || entitlementAccount.representativeId !== purchase.representativeId
+    || entitlementAccount.productCode
+      !== AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+  ) {
+    throw new AgentWalletReconciliationError(
+      "Agent token purchase service entitlement link is inconsistent.",
+    );
+  }
+  if (
+    entitlementAccount.remainingUnits
+      !== purchase.userAgentWallet.availableTokenAmount
+    || entitlementAccount.reservedUnits
+      !== purchase.userAgentWallet.reservedTokenAmount
+  ) {
+    throw new AgentWalletReconciliationError(
+      "Before agent token purchase reversal: wallet and service entitlement balances do not match.",
+    );
+  }
 }
 
 function serializeRechargeRefund(
@@ -693,7 +790,21 @@ function serializePurchaseReversal(
     agentTokenBalance: purchase.agentWallet.tokenBalance,
     creatorReversedCents,
     refundedAt: purchase.refundedAt ? purchase.refundedAt.toISOString() : null,
+    audienceIdentityId:
+      purchase.audienceIdentityId ??
+      missingPurchaseEntitlement(
+        "Purchase reversal is missing its audience identity.",
+      ),
+    entitlementAccountId:
+      purchase.entitlementAccountId ??
+      missingPurchaseEntitlement(
+        "Purchase reversal is missing its service entitlement account.",
+      ),
   };
+}
+
+function missingPurchaseEntitlement(message: string): never {
+  throw new Error(message);
 }
 
 function jsonRecord(value: unknown): Record<string, unknown> {

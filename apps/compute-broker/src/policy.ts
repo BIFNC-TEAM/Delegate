@@ -9,7 +9,7 @@ import {
 
 import {
   deriveConversationComputeEntitlements,
-  readServerStoredServiceCreditReservation,
+  requireAudienceGenerationRunAuthorization,
 } from "./entitlements";
 import { loadRepresentativeMcpBinding, resolveMcpToolName } from "./mcp-bindings";
 import { normalizeContainerPath } from "./path-utils";
@@ -91,10 +91,10 @@ export async function loadSessionPolicyContext(sessionId: string) {
           },
         },
       },
-      conversation: true,
-      generationRun: {
+      conversation: {
         select: {
-          runtimePolicySnapshot: true,
+          channel: true,
+          computeBudgetRemainingCredits: true,
         },
       },
       policyProfile: {
@@ -129,6 +129,14 @@ export async function loadSessionPolicyContext(sessionId: string) {
   if (!runtimeAuthority.compute.enabled) {
     throw new SessionError(409, "compute_disabled_for_published_version");
   }
+  const audienceAuthorization =
+    await requireAudienceGenerationRunAuthorization({
+      requestedBy: session.requestedBy,
+      representativeId: session.representativeId,
+      contactId: session.contactId,
+      conversationId: session.conversationId,
+      generationRunId: session.generationRunId,
+    });
   const effectiveExpiresAt = resolveComputeSessionExpiryCeiling({
     storedExpiresAt: session.expiresAt,
     createdAt: session.createdAt,
@@ -172,6 +180,7 @@ export async function loadSessionPolicyContext(sessionId: string) {
       filesystemMode: runtimeAuthority.compute.filesystemMode,
     },
     runtimeAuthority,
+    audienceAuthorization,
     managedProfiles: [
       ...(session.representative.owner.organization?.capabilityProfiles ?? []),
       ...session.representative.owner.capabilityProfiles,
@@ -190,18 +199,9 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
       ? normalizeContainerPath(input.path)
       : input.path;
   const context = await loadSessionPolicyContext(sessionId);
-  const generationRuntimePolicySnapshot =
-    context.session.generationRun?.runtimePolicySnapshot;
-  const hasVerifiedRunScopedPass = await verifyRunScopedServiceCreditReservation({
-    representativeId: context.session.representativeId,
-    generationRuntimePolicySnapshot,
-  });
-  const entitlements = deriveConversationComputeEntitlements({
-    conversation: context.session.conversation,
-    generationRuntimePolicySnapshot: hasVerifiedRunScopedPass
-      ? generationRuntimePolicySnapshot
-      : undefined,
-  });
+  const entitlements = deriveConversationComputeEntitlements(
+    context.audienceAuthorization,
+  );
   const mcpBinding =
     input.capability === "mcp"
       ? await loadRepresentativeMcpBinding({
@@ -274,31 +274,6 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
     mcpBinding,
     sessionSubagentId,
   };
-}
-
-export async function verifyRunScopedServiceCreditReservation(
-  params: {
-    representativeId: string;
-    generationRuntimePolicySnapshot: unknown;
-  },
-  client: Pick<typeof prisma, "agentUsageCharge"> = prisma,
-): Promise<boolean> {
-  const reservation = readServerStoredServiceCreditReservation(
-    params.generationRuntimePolicySnapshot,
-  );
-  if (!reservation) return false;
-
-  const usageCharge = await client.agentUsageCharge.findFirst({
-    where: {
-      id: reservation.usageChargeId,
-      representativeId: params.representativeId,
-      status: "RESERVED",
-      tokenAmount: reservation.tokenAmount,
-      reservedTokenAmount: reservation.tokenAmount,
-    },
-    select: { id: true },
-  });
-  return usageCharge !== null;
 }
 
 export function assertComputeSessionExpiry(

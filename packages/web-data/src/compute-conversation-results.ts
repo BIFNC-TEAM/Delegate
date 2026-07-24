@@ -12,12 +12,17 @@ import {
   runConversationWriteTransaction,
 } from "./conversation-platform";
 import {
-  releaseAgentUsageCredits,
-  settleAgentUsageCredits,
+  releaseConversationWalletUsage,
+  settleConversationWalletUsage,
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
 import { prisma } from "./prisma";
 import { finalizeComputeDelegationTask } from "./delegation-tasks";
+import {
+  consumeConversationEntitlementByGenerationRunId,
+  releaseConversationEntitlementByGenerationRunId,
+  type ServiceEntitlementClient,
+} from "./service-entitlements";
 
 export type ComputeApprovalConversationOutcome =
   | "completed"
@@ -138,9 +143,25 @@ export async function finalizeComputeApprovalConversation(input: {
         errorMessage: input.failureReason?.slice(0, 1000) ?? null,
       },
     });
+    if (!delegationTaskOwnsBilling) {
+      if (input.outcome === "completed") {
+        await consumeConversationEntitlementByGenerationRunId(
+          { generationRunId: run.id },
+          tx as unknown as ServiceEntitlementClient,
+        );
+      } else {
+        await releaseConversationEntitlementByGenerationRunId(
+          {
+            generationRunId: run.id,
+            reason: `compute_${input.outcome}`,
+          },
+          tx as unknown as ServiceEntitlementClient,
+        );
+      }
+    }
     if (walletReservation && !delegationTaskOwnsBilling) {
       if (input.outcome === "completed") {
-        await settleAgentUsageCredits(
+        await settleConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
             settledTokenAmount: walletReservation.tokenAmount,
@@ -150,7 +171,7 @@ export async function finalizeComputeApprovalConversation(input: {
           tx as unknown as UsageChargeClient,
         );
       } else {
-        await releaseAgentUsageCredits(
+        await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
             failed:

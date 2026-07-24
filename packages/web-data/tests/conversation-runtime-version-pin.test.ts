@@ -1057,6 +1057,9 @@ describe("conversation runtime version pin", () => {
     expect(tx.serviceEntitlementLedgerEntry.findMany).toHaveBeenCalledWith({
       where: {
         generationRunId: "run-matrix-isolated",
+        idempotencyKey: {
+          startsWith: "conversation-entitlement:",
+        },
         kind: { in: ["RESERVE", "CONSUME", "RELEASE"] },
       },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],

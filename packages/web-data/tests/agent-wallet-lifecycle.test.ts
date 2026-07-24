@@ -16,7 +16,6 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
-  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   completeMockRechargeAndPurchaseAgentTokens,
   completeMockRechargeOrder,
   createMockRechargeOrder,
@@ -24,6 +23,7 @@ import {
 import { purchaseAgentTokens } from "../src/agent-wallet-token-purchase";
 import { applyAgentUsageCharge } from "../src/agent-wallet-usage-charge";
 import { createWithdrawRequest } from "../src/agent-wallet-withdrawals";
+import { AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE } from "../src/service-entitlements";
 
 describe("agent wallet lifecycle acceptance", () => {
   it("completes recharge and representative-scoped purchase as one operation", async () => {
@@ -31,6 +31,7 @@ describe("agent wallet lifecycle acceptance", () => {
     const recharge = await createMockRechargeOrder(
       {
         externalUserId: "user_atomic",
+        audienceIdentityId: "audience_canonical",
         representativeId: "rep_1",
         productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
         amountCents: 1000,
@@ -68,6 +69,7 @@ describe("agent wallet lifecycle acceptance", () => {
     const recharge = await createMockRechargeOrder(
       {
         externalUserId: "user_atomic",
+        audienceIdentityId: "audience_canonical",
         representativeId: "rep_1",
         productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
         amountCents: 1000,
@@ -101,6 +103,7 @@ describe("agent wallet lifecycle acceptance", () => {
     const recharge = await createMockRechargeOrder(
       {
         externalUserId: "user_1",
+        audienceIdentityId: "audience_canonical",
         amountCents: 1000,
         idempotencyKey: "lifecycle_recharge_1",
       },
@@ -279,6 +282,8 @@ type TokenPurchaseRow = {
   creatorPendingCents: number;
   status: AgentTokenPurchaseStatus;
   idempotencyKey: string;
+  audienceIdentityId: string | null;
+  entitlementAccountId: string | null;
   createdAt: Date;
   userWallet?: UserWalletRow;
   userAgentWallet?: UserAgentWalletRow;
@@ -299,6 +304,10 @@ type UsageChargeRow = {
   reservedTokenAmount: number;
   settledTokenAmount: number;
   releasedTokenAmount: number;
+  audienceIdentityId: string | null;
+  entitlementAccountId: string | null;
+  conversationId: string | null;
+  generationRunId: string | null;
   providerCostCents: number;
   platformRevenueCents: number;
   currency: string;
@@ -365,6 +374,42 @@ type LedgerRow = {
   createdAt: Date;
 };
 
+type AudienceIdentityRow = {
+  id: string;
+  status: "ANONYMOUS" | "REGISTERED" | "MERGED" | "DISABLED";
+  mergedIntoId: string | null;
+};
+
+type EntitlementAccountRow = {
+  id: string;
+  audienceIdentityId: string;
+  representativeId: string;
+  productCode: string;
+  unitName: string;
+  status: "ACTIVE" | "FROZEN" | "EXHAUSTED" | "EXPIRED";
+  grantedUnits: number;
+  remainingUnits: number;
+  reservedUnits: number;
+  expiresAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type EntitlementLedgerRow = {
+  id: string;
+  entitlementAccountId: string;
+  paymentOrderId: string | null;
+  generationRunId: string | null;
+  kind: "GRANT" | "RESERVE" | "CONSUME" | "RELEASE" | "REFUND";
+  units: number;
+  balanceAfter: number;
+  reservedAfter: number;
+  idempotencyKey: string;
+  notes: string | null;
+  metadata: unknown;
+  createdAt: Date;
+};
+
 class FakeAmnLifecycleClient {
   owners: OwnerRow[] = [
     { id: "owner_1", creatorVerificationStatus: CreatorVerificationStatus.VERIFIED },
@@ -394,6 +439,16 @@ class FakeAmnLifecycleClient {
   creatorEarnings: CreatorEarningRow[] = [];
   withdrawRequests: WithdrawRequestRow[] = [];
   ledgerEntries: LedgerRow[] = [];
+  identities: AudienceIdentityRow[] = [
+    {
+      id: "audience_canonical",
+      status: "REGISTERED",
+      mergedIntoId: null,
+    },
+  ];
+  entitlementAccounts: EntitlementAccountRow[] = [];
+  entitlementLedgerEntries: EntitlementLedgerRow[] = [];
+  private entitlementSequence = 0;
 
   owner = {
     findUnique: async (args: any) => {
@@ -404,6 +459,103 @@ class FakeAmnLifecycleClient {
   representative = {
     findUnique: async (args: any) => {
       return this.representatives.find((rep) => rep.id === args.where.id) ?? null;
+    },
+  };
+
+  audienceIdentity = {
+    findUnique: async (args: any) =>
+      this.identities.find((row) => row.id === args.where.id) ?? null,
+  };
+
+  serviceEntitlementAccount = {
+    findUnique: async (args: any) => {
+      if (typeof args.where.id === "string") {
+        return (
+          this.entitlementAccounts.find((row) => row.id === args.where.id) ??
+          null
+        );
+      }
+      const key = args.where.audienceIdentityId_representativeId_productCode;
+      return (
+        this.entitlementAccounts.find(
+          (row) =>
+            row.audienceIdentityId === key.audienceIdentityId &&
+            row.representativeId === key.representativeId &&
+            row.productCode === key.productCode,
+        ) ?? null
+      );
+    },
+    upsert: async (args: any) => {
+      const key = args.where.audienceIdentityId_representativeId_productCode;
+      const existing = this.entitlementAccounts.find(
+        (row) =>
+          row.audienceIdentityId === key.audienceIdentityId &&
+          row.representativeId === key.representativeId &&
+          row.productCode === key.productCode,
+      );
+      if (existing) {
+        applyEntitlementData(existing, args.update);
+        return existing;
+      }
+      const now = new Date();
+      const created: EntitlementAccountRow = {
+        id: this.entitlementId("entitlement_account"),
+        ...args.create,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.entitlementAccounts.push(created);
+      return created;
+    },
+    update: async (args: any) => {
+      const account = this.entitlementAccounts.find(
+        (row) => row.id === args.where.id,
+      );
+      if (!account) throw new Error("entitlement account not found");
+      applyEntitlementData(account, args.data);
+      account.updatedAt = new Date();
+      return account;
+    },
+    updateMany: async (args: any) => {
+      const rows = this.entitlementAccounts.filter((row) =>
+        matchesEntitlementWhere(row, args.where),
+      );
+      for (const row of rows) {
+        applyEntitlementData(row, args.data);
+        row.updatedAt = new Date();
+      }
+      return { count: rows.length };
+    },
+  };
+
+  serviceEntitlementLedgerEntry = {
+    findUnique: async (args: any) =>
+      this.entitlementLedgerEntries.find(
+        (row) => row.idempotencyKey === args.where.idempotencyKey,
+      ) ?? null,
+    findMany: async (args: any) =>
+      this.entitlementLedgerEntries.filter((row) =>
+        matchesEntitlementWhere(row, args.where),
+      ),
+    create: async (args: any) => {
+      if (
+        this.entitlementLedgerEntries.some(
+          (row) => row.idempotencyKey === args.data.idempotencyKey,
+        )
+      ) {
+        throw new Error("duplicate entitlement ledger operation");
+      }
+      const created: EntitlementLedgerRow = {
+        id: this.entitlementId("entitlement_ledger"),
+        paymentOrderId: null,
+        generationRunId: null,
+        notes: null,
+        metadata: null,
+        createdAt: new Date(),
+        ...args.data,
+      };
+      this.entitlementLedgerEntries.push(created);
+      return created;
     },
   };
 
@@ -657,6 +809,8 @@ class FakeAmnLifecycleClient {
         creatorPendingCents: args.data.creatorPendingCents,
         status: args.data.status,
         idempotencyKey: args.data.idempotencyKey,
+        audienceIdentityId: args.data.audienceIdentityId ?? null,
+        entitlementAccountId: args.data.entitlementAccountId ?? null,
         createdAt: new Date(Date.UTC(2026, 6, 3, 0, 0, this.tokenPurchases.length)),
       };
       this.tokenPurchases.push(purchase);
@@ -706,6 +860,10 @@ class FakeAmnLifecycleClient {
         reservedTokenAmount: args.data.reservedTokenAmount ?? 0,
         settledTokenAmount: args.data.settledTokenAmount ?? 0,
         releasedTokenAmount: args.data.releasedTokenAmount ?? 0,
+        audienceIdentityId: args.data.audienceIdentityId ?? null,
+        entitlementAccountId: args.data.entitlementAccountId ?? null,
+        conversationId: args.data.conversationId ?? null,
+        generationRunId: args.data.generationRunId ?? null,
         providerCostCents: args.data.providerCostCents,
         platformRevenueCents: args.data.platformRevenueCents,
         currency: args.data.currency,
@@ -940,7 +1098,19 @@ class FakeAmnLifecycleClient {
       creatorEarnings: this.creatorEarnings.map((row) => ({ ...row })),
       withdrawRequests: this.withdrawRequests.map((row) => ({ ...row })),
       ledgerEntries: this.ledgerEntries.map((row) => ({ ...row })),
+      entitlementAccounts: this.entitlementAccounts.map((row) => ({
+        ...row,
+      })),
+      entitlementLedgerEntries: this.entitlementLedgerEntries.map((row) => ({
+        ...row,
+      })),
+      entitlementSequence: this.entitlementSequence,
     };
+  }
+
+  private entitlementId(prefix: string) {
+    this.entitlementSequence += 1;
+    return `${prefix}_${this.entitlementSequence}`;
   }
 
   private withRepresentative(wallet: AgentWalletRow): AgentWalletRow {
@@ -1019,6 +1189,44 @@ function applyIncrementDecrement<T extends Record<K, number | null>, K extends k
   }
   if (typeof value?.decrement === "number") {
     row[key] = ((row[key] ?? 0) - value.decrement) as T[K];
+  }
+}
+
+function matchesEntitlementWhere(
+  row: Record<string, any>,
+  where: Record<string, any>,
+) {
+  return Object.entries(where).every(([key, expected]) => {
+    const actual = row[key];
+    if (
+      expected &&
+      typeof expected === "object" &&
+      !(expected instanceof Date)
+    ) {
+      if ("in" in expected) return expected.in.includes(actual);
+      if ("gte" in expected && !(actual >= expected.gte)) return false;
+      return true;
+    }
+    return actual === expected;
+  });
+}
+
+function applyEntitlementData(
+  row: Record<string, any>,
+  data: Record<string, any>,
+) {
+  for (const [key, value] of Object.entries(data)) {
+    if (
+      value &&
+      typeof value === "object" &&
+      !(value instanceof Date) &&
+      ("increment" in value || "decrement" in value)
+    ) {
+      row[key] += value.increment ?? 0;
+      row[key] -= value.decrement ?? 0;
+    } else {
+      row[key] = value;
+    }
   }
 }
 

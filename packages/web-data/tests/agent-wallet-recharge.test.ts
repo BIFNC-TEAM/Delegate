@@ -9,11 +9,11 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   assertMockRechargeMutationsEnabled,
   completeMockRechargeOrder,
   createMockRechargeOrder,
 } from "../src/agent-wallet-recharge";
+import { AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE } from "../src/service-entitlements";
 
 describe("agent wallet mock recharge", () => {
   it("disables mock recharge mutations in production", () => {

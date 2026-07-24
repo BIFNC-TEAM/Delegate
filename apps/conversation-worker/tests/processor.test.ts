@@ -34,7 +34,7 @@ const mocks = vi.hoisted(() => ({
   markDelegationTaskRunning: vi.fn(),
   waitGenerationRunForComputeApproval: vi.fn(),
   assertConversationChannelDeliveryAvailable: vi.fn(),
-  hasUnifiedConversationEntitlement: vi.fn(),
+  authorizeGenerationRunFreeUsage: vi.fn(),
   reserveGenerationConversationEntitlement: vi.fn(),
   releaseConversationEntitlement: vi.fn(),
   retryOperatorMessageDelivery: vi.fn(),
@@ -59,6 +59,7 @@ vi.mock("@delegate/runtime", () => ({
 
 vi.mock("@delegate/web-data", () => ({
   assertConversationChannelDeliveryAvailable: mocks.assertConversationChannelDeliveryAvailable,
+  authorizeGenerationRunFreeUsage: mocks.authorizeGenerationRunFreeUsage,
   buildRepresentativeRuntimeProfile: mocks.buildRepresentativeRuntimeProfile,
   claimNextOperatorMessageWorkItem: mocks.claimNextOperatorMessageWorkItem,
   claimNextGenerationWorkItem: mocks.claimNextGenerationWorkItem,
@@ -80,7 +81,6 @@ vi.mock("@delegate/web-data", () => ({
     readonly code = "generation_work_lease_lost";
   },
   getRepresentativeRuntimeSetupSnapshot: mocks.getRepresentativeRuntimeSetupSnapshot,
-  hasUnifiedConversationEntitlement: mocks.hasUnifiedConversationEntitlement,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
   markGenerationDeliveryComplete: mocks.markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval: mocks.markDelegationTaskAwaitingApproval,
@@ -113,7 +113,7 @@ describe("conversation worker knowledge recall", () => {
     mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: null, source: "model" });
     mocks.finalizeComputeDelegationTask.mockResolvedValue({ hasMoreSteps: false });
     mocks.assertConversationChannelDeliveryAvailable.mockResolvedValue(undefined);
-    mocks.hasUnifiedConversationEntitlement.mockResolvedValue(false);
+    mocks.authorizeGenerationRunFreeUsage.mockResolvedValue(true);
     mocks.reserveGenerationConversationEntitlement.mockResolvedValue(null);
     mocks.releaseConversationEntitlement.mockResolvedValue(undefined);
     mocks.renewGenerationWorkItemLease.mockResolvedValue(true);
@@ -143,7 +143,10 @@ describe("conversation worker knowledge recall", () => {
       id: "rep-1",
       compute: { enabled: false, baseImage: "debian:bookworm-slim" },
     });
-    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({ id: "rep-1" });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 4 },
+    });
     mocks.createConversationPlan.mockReturnValue({
       intent: "faq",
       nextStep: "answer",
@@ -409,6 +412,71 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.releaseConversationEntitlement).not.toHaveBeenCalled();
   });
 
+  it("falls back to a paid reservation when another channel run claims the last free slot", async () => {
+    const reservation = {
+      audienceIdentityId: "audience-1",
+      representativeId: "rep-1",
+      productCode: "plan:pass",
+      generationRunId: "run-1",
+      operationKey: "generation:run-1:attempt:1",
+      accountId: "entitlement-1",
+      attempt: 1,
+    };
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-1",
+      leaseAttempt: 1,
+      runId: "run-1",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-1",
+      contactId: "contact-1",
+      audienceIdentityId: "audience-1",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-1",
+      userText: "继续回答",
+      channel: "web",
+      usage: {
+        freeRepliesUsed: 3,
+        passUnlocked: false,
+        deepHelpUnlocked: false,
+      },
+    });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 4 },
+    });
+    mocks.authorizeGenerationRunFreeUsage.mockResolvedValue(false);
+    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(
+      reservation,
+    );
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.authorizeGenerationRunFreeUsage).toHaveBeenCalledWith({
+      runId: "run-1",
+      outboxId: "outbox-1",
+      leaseAttempt: 1,
+      freeReplyLimit: 4,
+    });
+    expect(mocks.reserveGenerationConversationEntitlement).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-1",
+        audienceIdentityId: "audience-1",
+      }),
+    );
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entitlementReservation: reservation,
+      }),
+    );
+  });
+
   it("stops before generation when fenced entitlement reservation loses its lease", async () => {
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-stale-reserve",
@@ -629,7 +697,6 @@ describe("conversation worker knowledge recall", () => {
     });
 
     expect(mocks.reserveGenerationConversationEntitlement).not.toHaveBeenCalled();
-    expect(mocks.hasUnifiedConversationEntitlement).not.toHaveBeenCalled();
     expect(mocks.createConversationPlan).toHaveBeenCalledWith(
       expect.objectContaining({
         usage: expect.objectContaining({ passUnlocked: true }),
@@ -670,7 +737,6 @@ describe("conversation worker knowledge recall", () => {
       id: "rep-1",
       contract: { freeReplyLimit: 4 },
     });
-    mocks.hasUnifiedConversationEntitlement.mockResolvedValue(true);
 
     await processNextConversationWork({ port: 4040, pollMs: 500 });
 

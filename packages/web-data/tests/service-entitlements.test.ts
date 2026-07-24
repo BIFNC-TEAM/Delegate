@@ -6,19 +6,24 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   createServicePaymentOrder,
   consumeServiceEntitlement,
   consumeConversationEntitlement,
+  consumeConversationEntitlementByGenerationRunId,
+  finalizeConversationEntitlementForGenerationRuns,
   fulfillServicePaymentOrder,
   grantServiceEntitlement,
   releaseConversationEntitlement,
   releaseConversationEntitlementByGenerationRunId,
+  refundGrantedServiceEntitlement,
   refundServiceEntitlement,
   releaseServiceEntitlement,
   reserveConversationEntitlement,
   reserveServiceEntitlement,
   serviceEntitlementOperationKey,
   servicePaymentProviderOrderKey,
+  transferConversationEntitlementByGenerationRunId,
   type ServicePaymentEvidenceInput,
 } from "../src/service-entitlements";
 
@@ -71,6 +76,226 @@ describe("service entitlements", () => {
     ).rejects.toThrow("reused with different immutable input");
     expect(client.accounts[0]?.remainingUnits).toBe(10);
     expect(client.ledgerEntries).toHaveLength(1);
+  });
+
+  it("rejects replayed grant or reservation keys with changed immutable context", async () => {
+    const client = new FakeServiceEntitlementClient();
+    await grantServiceEntitlement(
+      {
+        ...coordinates,
+        unitName: "reply",
+        units: 2,
+        operationKey: "immutable-grant",
+      },
+      client,
+    );
+    await expect(
+      grantServiceEntitlement(
+        {
+          ...coordinates,
+          unitName: "credit",
+          units: 2,
+          operationKey: "immutable-grant",
+        },
+        client,
+      ),
+    ).rejects.toThrow("reused with different immutable input");
+
+    await reserveServiceEntitlement(
+      {
+        ...coordinates,
+        units: 1,
+        operationKey: "immutable-reserve",
+        generationRunId: "run-1",
+      },
+      client,
+    );
+    await expect(
+      reserveServiceEntitlement(
+        {
+          ...coordinates,
+          units: 1,
+          operationKey: "immutable-reserve",
+          generationRunId: "run-2",
+        },
+        client,
+      ),
+    ).rejects.toThrow("reused with different immutable input");
+    expect(client.accounts[0]).toMatchObject({
+      remainingUnits: 1,
+      reservedUnits: 1,
+    });
+  });
+
+  it("canonicalizes merged identities before granting", async () => {
+    const client = new FakeServiceEntitlementClient({
+      identities: [
+        {
+          id: "audience_merged",
+          status: "MERGED",
+          mergedIntoId: coordinates.audienceIdentityId,
+        },
+        {
+          id: coordinates.audienceIdentityId,
+          status: "REGISTERED",
+          mergedIntoId: null,
+        },
+      ],
+    });
+
+    const granted = await grantServiceEntitlement(
+      {
+        ...coordinates,
+        audienceIdentityId: "audience_merged",
+        units: 2,
+        operationKey: "merged-grant",
+      },
+      client,
+    );
+
+    expect(granted.audienceIdentityId).toBe(coordinates.audienceIdentityId);
+    expect(client.accounts).toHaveLength(1);
+    expect(client.accounts[0]?.audienceIdentityId).toBe(
+      coordinates.audienceIdentityId,
+    );
+  });
+
+  it("canonicalizes merged identities for reserve, consume, and release", async () => {
+    const client = new FakeServiceEntitlementClient({
+      identities: [
+        {
+          id: "audience_merged",
+          status: "MERGED",
+          mergedIntoId: coordinates.audienceIdentityId,
+        },
+        {
+          id: coordinates.audienceIdentityId,
+          status: "REGISTERED",
+          mergedIntoId: null,
+        },
+      ],
+    });
+    await grantServiceEntitlement(
+      {
+        ...coordinates,
+        units: 3,
+        operationKey: "merged-lifecycle-grant",
+      },
+      client,
+    );
+    await reserveServiceEntitlement(
+      {
+        ...coordinates,
+        audienceIdentityId: "audience_merged",
+        units: 2,
+        operationKey: "merged-lifecycle-reserve",
+        generationRunId: "run-merged",
+      },
+      client,
+    );
+    await consumeServiceEntitlement(
+      {
+        ...coordinates,
+        audienceIdentityId: "audience_merged",
+        units: 1,
+        operationKey: "merged-lifecycle-consume",
+        generationRunId: "run-merged",
+      },
+      client,
+    );
+    const released = await releaseServiceEntitlement(
+      {
+        ...coordinates,
+        audienceIdentityId: "audience_merged",
+        units: 1,
+        operationKey: "merged-lifecycle-release",
+        generationRunId: "run-merged",
+      },
+      client,
+    );
+
+    expect(released).toMatchObject({
+      audienceIdentityId: coordinates.audienceIdentityId,
+      remainingUnits: 2,
+      reservedUnits: 0,
+    });
+    expect(client.accounts).toHaveLength(1);
+  });
+
+  it("idempotently refunds only still-available granted units", async () => {
+    const client = new FakeServiceEntitlementClient();
+    await grantServiceEntitlement(
+      { ...coordinates, units: 10, operationKey: "grant-for-refund" },
+      client,
+    );
+    const input = {
+      ...coordinates,
+      units: 4,
+      operationKey: "partial-refund-1",
+    };
+
+    const first = await refundGrantedServiceEntitlement(input, client);
+    const replay = await refundGrantedServiceEntitlement(input, client);
+
+    expect(replay).toEqual(first);
+    expect(first).toMatchObject({
+      grantedUnits: 10,
+      remainingUnits: 6,
+      reservedUnits: 0,
+      ledgerKind: "REFUND",
+    });
+    expect(client.ledgerEntries.map((entry) => entry.kind)).toEqual([
+      "GRANT",
+      "REFUND",
+    ]);
+  });
+
+  it("rejects refunding reserved or consumed entitlement units", async () => {
+    const client = new FakeServiceEntitlementClient();
+    await grantServiceEntitlement(
+      { ...coordinates, units: 5, operationKey: "grant-before-reserve" },
+      client,
+    );
+    await reserveServiceEntitlement(
+      { ...coordinates, units: 3, operationKey: "reserve-before-refund" },
+      client,
+    );
+
+    await expect(
+      refundGrantedServiceEntitlement(
+        { ...coordinates, units: 3, operationKey: "refund-too-many" },
+        client,
+      ),
+    ).rejects.toThrow("requires granted units to remain available");
+    expect(client.accounts[0]).toMatchObject({
+      remainingUnits: 2,
+      reservedUnits: 3,
+    });
+    expect(client.ledgerEntries.map((entry) => entry.kind)).toEqual([
+      "GRANT",
+      "RESERVE",
+    ]);
+  });
+
+  it("rejects a refund operation key reused with different units", async () => {
+    const client = new FakeServiceEntitlementClient();
+    await grantServiceEntitlement(
+      { ...coordinates, units: 5, operationKey: "grant-refund-replay" },
+      client,
+    );
+    await refundGrantedServiceEntitlement(
+      { ...coordinates, units: 2, operationKey: "refund-replay" },
+      client,
+    );
+
+    await expect(
+      refundGrantedServiceEntitlement(
+        { ...coordinates, units: 1, operationKey: "refund-replay" },
+        client,
+      ),
+    ).rejects.toThrow("reused with different immutable input");
+    expect(client.accounts[0]?.remainingUnits).toBe(3);
+    expect(client.ledgerEntries).toHaveLength(2);
   });
 
   it("atomically reserves, consumes, and releases units", async () => {
@@ -319,6 +544,303 @@ describe("service entitlements", () => {
       "RESERVE",
       "RELEASE",
     ]);
+  });
+
+  it("recovers and idempotently consumes a durable reservation by generation run", async () => {
+    const client = new FakeServiceEntitlementClient();
+    await grantServiceEntitlement(
+      {
+        ...coordinates,
+        productCode: "plan:pass",
+        units: 1,
+        operationKey: "grant-consume-recovery",
+      },
+      client,
+    );
+    await reserveConversationEntitlement(
+      {
+        audienceIdentityId: coordinates.audienceIdentityId,
+        representativeId: coordinates.representativeId,
+        generationRunId: "consume-recovery-run",
+      },
+      client,
+    );
+
+    const consumed = await consumeConversationEntitlementByGenerationRunId(
+      { generationRunId: "consume-recovery-run" },
+      client,
+    );
+    const replay = await consumeConversationEntitlementByGenerationRunId(
+      { generationRunId: "consume-recovery-run" },
+      client,
+    );
+
+    expect(consumed).toMatchObject({
+      ledgerKind: "CONSUME",
+      remainingUnits: 0,
+      reservedUnits: 0,
+      status: "EXHAUSTED",
+    });
+    expect(replay).toEqual(consumed);
+    expect(client.ledgerEntries.map((entry) => entry.kind)).toEqual([
+      "GRANT",
+      "RESERVE",
+      "CONSUME",
+    ]);
+  });
+
+  it("transfers one plan reservation across task runs and consumes it once", async () => {
+    const client = new FakeServiceEntitlementClient();
+    await grantServiceEntitlement(
+      {
+        ...coordinates,
+        productCode: "plan:pass",
+        units: 1,
+        operationKey: "grant-task-transfer",
+      },
+      client,
+    );
+    const source = await reserveConversationEntitlement(
+      {
+        audienceIdentityId: coordinates.audienceIdentityId,
+        representativeId: coordinates.representativeId,
+        generationRunId: "task-run-1",
+      },
+      client,
+    );
+
+    const transferred =
+      await transferConversationEntitlementByGenerationRunId(
+        {
+          fromGenerationRunId: "task-run-1",
+          toGenerationRunId: "task-run-2",
+        },
+        client,
+      );
+    const replay =
+      await transferConversationEntitlementByGenerationRunId(
+        {
+          fromGenerationRunId: "task-run-1",
+          toGenerationRunId: "task-run-2",
+        },
+        client,
+      );
+    const consumed = await finalizeConversationEntitlementForGenerationRuns(
+      {
+        generationRunIds: ["task-run-1", "task-run-2"],
+        outcome: "consume",
+      },
+      client,
+    );
+    const terminalReplay =
+      await finalizeConversationEntitlementForGenerationRuns(
+        {
+          generationRunIds: ["task-run-1", "task-run-2"],
+          outcome: "consume",
+        },
+        client,
+      );
+
+    expect(transferred).toMatchObject({
+      accountId: source?.accountId,
+      generationRunId: "task-run-2",
+      productCode: "plan:pass",
+    });
+    expect(replay).toEqual(transferred);
+    expect(consumed).toMatchObject({
+      ledgerKind: "CONSUME",
+      remainingUnits: 0,
+      reservedUnits: 0,
+      status: "EXHAUSTED",
+    });
+    expect(terminalReplay).toBeNull();
+    expect(
+      client.ledgerEntries.map((entry) => [
+        entry.kind,
+        entry.generationRunId,
+      ]),
+    ).toEqual([
+      ["GRANT", null],
+      ["RESERVE", "task-run-1"],
+      ["RELEASE", "task-run-1"],
+      ["RESERVE", "task-run-2"],
+      ["CONSUME", "task-run-2"],
+    ]);
+  });
+
+  it("fails closed when a task owns multiple active plan reservations", async () => {
+    const client = new FakeServiceEntitlementClient();
+    await grantServiceEntitlement(
+      {
+        ...coordinates,
+        productCode: "plan:pass",
+        units: 2,
+        operationKey: "grant-duplicate-task-reservations",
+      },
+      client,
+    );
+    for (const generationRunId of ["duplicate-run-1", "duplicate-run-2"]) {
+      await reserveConversationEntitlement(
+        {
+          audienceIdentityId: coordinates.audienceIdentityId,
+          representativeId: coordinates.representativeId,
+          generationRunId,
+        },
+        client,
+      );
+    }
+
+    await expect(
+      finalizeConversationEntitlementForGenerationRuns(
+        {
+          generationRunIds: ["duplicate-run-1", "duplicate-run-2"],
+          outcome: "release",
+        },
+        client,
+      ),
+    ).rejects.toThrow("multiple active conversation entitlement reservations");
+    expect(client.accounts[0]).toMatchObject({
+      remainingUnits: 0,
+      reservedUnits: 2,
+    });
+  });
+
+  it("fails closed when consuming a conversation reservation released by run", async () => {
+    const client = new FakeServiceEntitlementClient();
+    await grantServiceEntitlement(
+      {
+        ...coordinates,
+        productCode: "plan:pass",
+        units: 1,
+        operationKey: "grant-released-consume",
+      },
+      client,
+    );
+    const reservation = await reserveConversationEntitlement(
+      {
+        audienceIdentityId: coordinates.audienceIdentityId,
+        representativeId: coordinates.representativeId,
+        generationRunId: "released-consume-run",
+      },
+      client,
+    );
+    await releaseConversationEntitlement(reservation!, client);
+
+    await expect(
+      consumeConversationEntitlementByGenerationRunId(
+        { generationRunId: "released-consume-run" },
+        client,
+      ),
+    ).rejects.toThrow("already released");
+    expect(client.ledgerEntries.map((entry) => entry.kind)).toEqual([
+      "GRANT",
+      "RESERVE",
+      "RELEASE",
+    ]);
+  });
+
+  it("ignores generic wallet reservations when cleaning up a conversation run", async () => {
+    const client = new FakeServiceEntitlementClient();
+    await grantServiceEntitlement(
+      {
+        ...coordinates,
+        productCode: "plan:pass",
+        units: 1,
+        operationKey: "grant-conversation-credit",
+      },
+      client,
+    );
+    await reserveConversationEntitlement(
+      {
+        audienceIdentityId: coordinates.audienceIdentityId,
+        representativeId: coordinates.representativeId,
+        generationRunId: "shared-generation-run",
+      },
+      client,
+    );
+    await grantServiceEntitlement(
+      {
+        ...coordinates,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        units: 2,
+        operationKey: "grant-wallet-credit",
+      },
+      client,
+    );
+    await reserveServiceEntitlement(
+      {
+        ...coordinates,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        units: 1,
+        operationKey: "wallet-reserve",
+        generationRunId: "shared-generation-run",
+      },
+      client,
+    );
+
+    const released = await releaseConversationEntitlementByGenerationRunId(
+      { generationRunId: "shared-generation-run" },
+      client,
+    );
+
+    expect(released).toMatchObject({
+      productCode: "plan:pass",
+      ledgerKind: "RELEASE",
+    });
+    expect(
+      client.accounts.find(
+        (account) =>
+          account.productCode === AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      ),
+    ).toMatchObject({
+      remainingUnits: 1,
+      reservedUnits: 1,
+      status: "ACTIVE",
+    });
+    expect(
+      client.ledgerEntries.filter(
+        (entry) =>
+          entry.generationRunId === "shared-generation-run" &&
+          entry.kind === "RELEASE",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("still rejects malformed conversation-prefixed history", async () => {
+    const client = new FakeServiceEntitlementClient();
+    const granted = await grantServiceEntitlement(
+      {
+        ...coordinates,
+        productCode: "plan:pass",
+        units: 1,
+        operationKey: "grant-malformed-history",
+      },
+      client,
+    );
+    client.ledgerEntries.push({
+      id: "malformed_conversation_ledger",
+      entitlementAccountId: granted.accountId,
+      paymentOrderId: null,
+      generationRunId: "malformed-run",
+      kind: "RESERVE",
+      units: 1,
+      balanceAfter: 0,
+      reservedAfter: 1,
+      idempotencyKey:
+        "conversation-entitlement:malformed-run:not-an-attempt:reserve",
+      notes: null,
+      metadata: null,
+      createdAt: new Date(),
+    });
+
+    await expect(
+      releaseConversationEntitlementByGenerationRunId(
+        { generationRunId: "malformed-run" },
+        client,
+      ),
+    ).rejects.toThrow(
+      "unsupported legacy conversation entitlement reservation",
+    );
   });
 
   it("never releases a reservation that was already consumed", async () => {
@@ -664,16 +1186,40 @@ type PaymentEventRow = {
   receivedAt: Date;
 };
 
+type AudienceIdentityRow = {
+  id: string;
+  status: "ANONYMOUS" | "REGISTERED" | "MERGED" | "DISABLED";
+  mergedIntoId: string | null;
+};
+
 class FakeServiceEntitlementClient {
   accounts: EntitlementAccountRow[] = [];
   ledgerEntries: EntitlementLedgerRow[] = [];
   paymentOrders: PaymentOrderRow[];
   paymentEvents: PaymentEventRow[] = [];
+  identities: AudienceIdentityRow[];
   private sequence = 0;
 
-  constructor(options: { paymentOrder?: PaymentOrderRow } = {}) {
+  constructor(
+    options: {
+      paymentOrder?: PaymentOrderRow;
+      identities?: AudienceIdentityRow[];
+    } = {},
+  ) {
     this.paymentOrders = options.paymentOrder ? [options.paymentOrder] : [];
+    this.identities = options.identities ?? [
+      {
+        id: coordinates.audienceIdentityId,
+        status: "REGISTERED",
+        mergedIntoId: null,
+      },
+    ];
   }
+
+  audienceIdentity = {
+    findUnique: async (args: any) =>
+      this.identities.find((row) => row.id === args.where.id) ?? null,
+  };
 
   serviceEntitlementAccount = {
     findUnique: async (args: any) => {
@@ -946,6 +1492,13 @@ function matchesWhere(row: Record<string, any>, where: Record<string, any>) {
     ) {
       if ("in" in expected) {
         return expected.in.includes(actual);
+      }
+      if (
+        "startsWith" in expected &&
+        (typeof actual !== "string" ||
+          !actual.startsWith(expected.startsWith))
+      ) {
+        return false;
       }
       if ("gte" in expected && !(actual >= expected.gte)) {
         return false;

@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@delegate/web-data", () => ({
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE:
     "agent-wallet:service-credit:v1",
+  AgentWalletReconciliationError: class AgentWalletReconciliationError
+    extends Error {},
   completeMockRechargeAndPurchaseAgentTokens:
     mocks.completeMockRechargeAndPurchaseAgentTokens,
   createMockRechargeOrder: mocks.createMockRechargeOrder,

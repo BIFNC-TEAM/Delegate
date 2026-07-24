@@ -16,6 +16,7 @@ import {
 import { computeLifecycleHooks } from "./lifecycle-hooks";
 import { closeBrowserSessionForComputeSession } from "./browser-sessions";
 import { isDelegationTaskSessionContextValid } from "./delegation-task-context";
+import { requireAudienceGenerationRunAuthorization } from "./entitlements";
 import { loadComputeRuntimeAuthority } from "./runtime-authority";
 
 export async function createComputeSession(rawInput: unknown) {
@@ -83,6 +84,14 @@ export async function createComputeSession(rawInput: unknown) {
       throw new SessionError(409, "delegation_task_context_mismatch");
     }
   }
+
+  await requireAudienceGenerationRunAuthorization({
+    requestedBy: input.requestedBy,
+    representativeId: input.representativeId,
+    ...(input.contactId ? { contactId: input.contactId } : {}),
+    ...(input.conversationId ? { conversationId: input.conversationId } : {}),
+    ...(input.generationRunId ? { generationRunId: input.generationRunId } : {}),
+  });
 
   const runtimeAuthority = await loadComputeRuntimeAuthority({
     representativeId: representative.id,

@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
+  AgentWalletReconciliationError,
   buildWebAudienceExternalUserId,
   getUserAgentWalletBalance,
   getPublicConversationHistory,
@@ -38,6 +39,9 @@ export async function GET(
     ReturnType<typeof resolvePublicAudienceRequestPrincipal>
   >;
   let externalUserId: string;
+  let initialServiceBalance: Awaited<
+    ReturnType<typeof getUserAgentWalletBalance>
+  > = null;
   try {
     audienceRequest = await resolvePublicAudienceRequestPrincipal({
       representativeSlug: slug,
@@ -54,7 +58,25 @@ export async function GET(
           slug,
           audienceRequest.principal.audienceId,
         );
+    if (process.env.DATABASE_URL?.trim()) {
+      initialServiceBalance = await getUserAgentWalletBalance({
+        externalUserId,
+        representativeId: runtime.setup.id,
+      });
+    }
   } catch (error) {
+    if (error instanceof AgentWalletReconciliationError) {
+      return NextResponse.json(
+        {
+          error: "Wallet balance requires reconciliation.",
+          code: "wallet_reconciliation_required",
+        },
+        {
+          status: 409,
+          headers: { "Cache-Control": "private, no-store" },
+        },
+      );
+    }
     const status = publicAudiencePrincipalErrorStatus(error);
     if (!status) throw error;
     return NextResponse.json(
@@ -75,8 +97,8 @@ export async function GET(
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       let previous = "";
-      let serviceBalance: Awaited<ReturnType<typeof getUserAgentWalletBalance>> = null;
-      let nextBalanceRefreshAt = 0;
+      let serviceBalance = initialServiceBalance;
+      let nextBalanceRefreshAt = Date.now() + 2_000;
       let nextPrincipalRevalidationAt = 0;
       try {
         while (!request.signal.aborted) {

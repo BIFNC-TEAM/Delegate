@@ -22,6 +22,10 @@ The short-term web path is still backward-compatible with the existing Telegram-
 14. Payment external ids are linked through `IdentityLink(provider=PAYMENT_EXTERNAL_USER)`.
 15. Public compute session creation uses the canonical identity and the active browser's `contactId` and `conversationId`.
 16. Compute broker creates or reuses `SandboxIdentity` from `representativeId + contactId` and copies `Contact.audienceIdentityId`.
+17. Paid wallet purchase, usage, and reversal update both the scoped wallet and canonical `ServiceEntitlement` in one Serializable transaction.
+18. Wallet balance reads use one Serializable snapshot and paid authorization requires wallet/entitlement parity; drift returns reconciliation-required and never queues paid work.
+19. Audience Compute requires an active owned `GenerationRun` with a server-persisted free slot, an exact dual-ledger wallet reservation, or an active plan reservation. Legacy unlock fields and client entitlement flags are ignored.
+20. Dual-ledger reservation canonicalizes both the requested audience and the wallet owner before writing. The package root exposes only the composite reserve/settle/release lifecycle; wallet-only mutation primitives remain internal.
 
 ## Public Runtime Gate
 

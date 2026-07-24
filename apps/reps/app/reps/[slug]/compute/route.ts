@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
+  getPublicGenerationRunSnapshot,
   getPublicRepresentativeRuntime,
   resolveWebAudienceContact,
   resolveWebAudienceConversation,
@@ -56,6 +57,30 @@ export async function POST(
       principal,
       conversation.audienceIdentityId,
     );
+    const generationRun = await getPublicGenerationRunSnapshot({
+      representativeSlug: slug,
+      runId: body.generationRunId,
+      audienceIdentityId: principal.audienceIdentityId,
+      audienceId: principal.audienceId,
+    });
+    if (!generationRun) {
+      return NextResponse.json(
+        { error: "Generation run not found." },
+        {
+          status: 404,
+          headers: { "Cache-Control": "private, no-store" },
+        },
+      );
+    }
+    if (generationRun.status !== "processing") {
+      return NextResponse.json(
+        { error: "Generation run is not currently executable." },
+        {
+          status: 409,
+          headers: { "Cache-Control": "private, no-store" },
+        },
+      );
+    }
 
     const computeSession = await createWebAudienceComputeSession({
       representativeId: representative.id,

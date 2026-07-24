@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import {
+  AgentWalletReconciliationError,
   getPublicRepresentativeRuntime,
   getUserAgentWalletBalance,
   prisma,
@@ -86,6 +87,15 @@ export async function POST(
     return response;
   } catch (error) {
     console.error("Failed to reverse public demo service credits.", error);
+    if (error instanceof AgentWalletReconciliationError) {
+      return privateJson(
+        {
+          error: "钱包与服务额度账目不一致，当前操作未执行。",
+          code: "wallet_reconciliation_required",
+        },
+        409,
+      );
+    }
     const principalErrorStatus = publicAudiencePrincipalErrorStatus(error);
     if (principalErrorStatus) {
       return privateJson(

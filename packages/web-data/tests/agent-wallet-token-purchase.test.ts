@@ -8,6 +8,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { purchaseAgentTokens } from "../src/agent-wallet-token-purchase";
+import { AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE } from "../src/service-entitlements";
 
 describe("agent wallet token purchase", () => {
   it("moves user cash into agent tokens and creator pending earning", async () => {
@@ -32,6 +33,7 @@ describe("agent wallet token purchase", () => {
       agentTokenBalance: 1000,
       availableTokenAmount: 1000,
       status: "completed",
+      audienceIdentityId: "audience_canonical",
     });
     expect(client.userWallets[0]?.cashBalanceCents).toBe(200);
     expect(client.agentWallets[0]?.tokenBalance).toBe(1000);
@@ -42,6 +44,23 @@ describe("agent wallet token purchase", () => {
     });
     expect(client.ledgerEntries).toHaveLength(4);
     expect(client.walletTransactions).toHaveLength(1);
+    expect(client.entitlementAccounts).toEqual([
+      expect.objectContaining({
+        id: purchase.entitlementAccountId,
+        audienceIdentityId: "audience_canonical",
+        representativeId: "rep_1",
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        grantedUnits: 1000,
+        remainingUnits: 1000,
+      }),
+    ]);
+    expect(client.entitlementLedgerEntries).toEqual([
+      expect.objectContaining({
+        entitlementAccountId: purchase.entitlementAccountId,
+        kind: "GRANT",
+        units: 1000,
+      }),
+    ]);
     expect(
       client.ledgerEntries.every(
         (entry) => entry.transactionId === client.walletTransactions[0]?.id,
@@ -90,6 +109,7 @@ describe("agent wallet token purchase", () => {
     expect(client.tokenPurchases).toHaveLength(1);
     expect(client.creatorEarnings).toHaveLength(1);
     expect(client.ledgerEntries).toHaveLength(4);
+    expect(client.entitlementLedgerEntries).toHaveLength(1);
   });
 
   it("rejects an idempotency key reused by another owner or amount", async () => {
@@ -149,6 +169,97 @@ describe("agent wallet token purchase", () => {
     expect(client.tokenPurchases).toHaveLength(0);
     expect(client.creatorEarnings).toHaveLength(0);
     expect(client.ledgerEntries).toHaveLength(0);
+    expect(client.entitlementAccounts).toHaveLength(0);
+    expect(client.entitlementLedgerEntries).toHaveLength(0);
+  });
+
+  it("rejects a wallet without an audience identity before writing", async () => {
+    const client = new FakeTokenPurchaseClient({
+      audienceIdentityId: null,
+    });
+
+    await expect(
+      purchaseAgentTokens(
+        {
+          externalUserId: "user_1",
+          representativeId: "rep_1",
+          amountCents: 500,
+        },
+        client,
+      ),
+    ).rejects.toThrow("linked to an audience identity");
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+    expect(client.tokenPurchases).toHaveLength(0);
+    expect(client.entitlementAccounts).toHaveLength(0);
+  });
+
+  it("fails closed before purchase when wallet and entitlement balances drift", async () => {
+    const client = new FakeTokenPurchaseClient();
+    client.userAgentWallets.push({
+      id: "user_agent_wallet_1",
+      userWalletId: "user_wallet_1",
+      agentWalletId: "agent_wallet_1",
+      currency: "CNY",
+      availableTokenAmount: 5,
+      reservedTokenAmount: 0,
+      totalPurchasedTokenAmount: 5,
+      totalConsumedTokenAmount: 0,
+    });
+    const now = new Date();
+    client.entitlementAccounts.push({
+      id: "entitlement_account_drifted",
+      audienceIdentityId: "audience_canonical",
+      representativeId: "rep_1",
+      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      unitName: "unit",
+      status: "ACTIVE",
+      grantedUnits: 4,
+      remainingUnits: 4,
+      reservedUnits: 0,
+      expiresAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await expect(
+      purchaseAgentTokens(
+        {
+          externalUserId: "user_1",
+          representativeId: "rep_1",
+          amountCents: 500,
+          idempotencyKey: "purchase-after-drift",
+        },
+        client,
+      ),
+    ).rejects.toThrow(
+      "wallet and service entitlement balances do not match",
+    );
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+    expect(client.tokenPurchases).toHaveLength(0);
+    expect(client.entitlementLedgerEntries).toHaveLength(0);
+  });
+
+  it("rolls back the cash debit when the entitlement grant fails", async () => {
+    const client = new FakeTokenPurchaseClient();
+    client.identities[1]!.status = "DISABLED";
+
+    await expect(
+      purchaseAgentTokens(
+        {
+          externalUserId: "user_1",
+          representativeId: "rep_1",
+          amountCents: 500,
+          idempotencyKey: "disabled-identity-purchase",
+        },
+        client,
+      ),
+    ).rejects.toThrow("Audience identity is disabled");
+
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+    expect(client.userAgentWallets).toHaveLength(0);
+    expect(client.tokenPurchases).toHaveLength(0);
+    expect(client.entitlementAccounts).toHaveLength(0);
+    expect(client.entitlementLedgerEntries).toHaveLength(0);
   });
 
   it("allows only one concurrent debit when two purchases exceed the same cash balance", async () => {
@@ -222,6 +333,7 @@ describe("agent wallet token purchase", () => {
 type UserWalletRow = {
   id: string;
   externalUserId: string;
+  audienceIdentityId: string | null;
   currency: string;
   cashBalanceCents: number;
 };
@@ -259,6 +371,8 @@ type TokenPurchaseRow = {
   creatorPendingCents: number;
   status: AgentTokenPurchaseStatus;
   idempotencyKey: string;
+  audienceIdentityId: string | null;
+  entitlementAccountId: string | null;
   userWallet?: UserWalletRow;
   userAgentWallet?: UserAgentWalletRow;
   agentWallet?: AgentWalletRow;
@@ -304,6 +418,42 @@ type LedgerRow = {
   createdAt: Date;
 };
 
+type AudienceIdentityRow = {
+  id: string;
+  status: "ANONYMOUS" | "REGISTERED" | "MERGED" | "DISABLED";
+  mergedIntoId: string | null;
+};
+
+type EntitlementAccountRow = {
+  id: string;
+  audienceIdentityId: string;
+  representativeId: string;
+  productCode: string;
+  unitName: string;
+  status: "ACTIVE" | "FROZEN" | "EXHAUSTED" | "EXPIRED";
+  grantedUnits: number;
+  remainingUnits: number;
+  reservedUnits: number;
+  expiresAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type EntitlementLedgerRow = {
+  id: string;
+  entitlementAccountId: string;
+  paymentOrderId: string | null;
+  generationRunId: string | null;
+  kind: "GRANT" | "RESERVE" | "CONSUME" | "RELEASE" | "REFUND";
+  units: number;
+  balanceAfter: number;
+  reservedAfter: number;
+  idempotencyKey: string;
+  notes: string | null;
+  metadata: unknown;
+  createdAt: Date;
+};
+
 class FakeTokenPurchaseClient {
   userWallets: UserWalletRow[];
   representatives: RepresentativeRow[] = [
@@ -316,17 +466,37 @@ class FakeTokenPurchaseClient {
   creatorEarnings: CreatorEarningRow[] = [];
   ledgerEntries: LedgerRow[] = [];
   walletTransactions: any[] = [];
+  identities: AudienceIdentityRow[] = [
+    {
+      id: "audience_merged",
+      status: "MERGED",
+      mergedIntoId: "audience_canonical",
+    },
+    {
+      id: "audience_canonical",
+      status: "REGISTERED",
+      mergedIntoId: null,
+    },
+  ];
+  entitlementAccounts: EntitlementAccountRow[] = [];
+  entitlementLedgerEntries: EntitlementLedgerRow[] = [];
+  private entitlementSequence = 0;
 
   constructor(
     options: {
       userCashBalanceCents?: number;
       tokenUnitPriceCents?: number;
+      audienceIdentityId?: string | null;
     } = {},
   ) {
     this.userWallets = [
       {
         id: "user_wallet_1",
         externalUserId: "user_1",
+        audienceIdentityId:
+          options.audienceIdentityId === undefined
+            ? "audience_merged"
+            : options.audienceIdentityId,
         currency: "CNY",
         cashBalanceCents: options.userCashBalanceCents ?? 1200,
       },
@@ -336,6 +506,103 @@ class FakeTokenPurchaseClient {
       this.createAgentWallet("agent_wallet_2", "rep_2", 1),
     ];
   }
+
+  audienceIdentity = {
+    findUnique: async (args: any) =>
+      this.identities.find((row) => row.id === args.where.id) ?? null,
+  };
+
+  serviceEntitlementAccount = {
+    findUnique: async (args: any) => {
+      if (typeof args.where.id === "string") {
+        return (
+          this.entitlementAccounts.find((row) => row.id === args.where.id) ??
+          null
+        );
+      }
+      const key = args.where.audienceIdentityId_representativeId_productCode;
+      return (
+        this.entitlementAccounts.find(
+          (row) =>
+            row.audienceIdentityId === key.audienceIdentityId &&
+            row.representativeId === key.representativeId &&
+            row.productCode === key.productCode,
+        ) ?? null
+      );
+    },
+    upsert: async (args: any) => {
+      const key = args.where.audienceIdentityId_representativeId_productCode;
+      const existing = this.entitlementAccounts.find(
+        (row) =>
+          row.audienceIdentityId === key.audienceIdentityId &&
+          row.representativeId === key.representativeId &&
+          row.productCode === key.productCode,
+      );
+      if (existing) {
+        applyEntitlementData(existing, args.update);
+        return existing;
+      }
+      const now = new Date();
+      const created: EntitlementAccountRow = {
+        id: this.entitlementId("entitlement_account"),
+        ...args.create,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.entitlementAccounts.push(created);
+      return created;
+    },
+    update: async (args: any) => {
+      const account = this.entitlementAccounts.find(
+        (row) => row.id === args.where.id,
+      );
+      if (!account) throw new Error("entitlement account not found");
+      applyEntitlementData(account, args.data);
+      account.updatedAt = new Date();
+      return account;
+    },
+    updateMany: async (args: any) => {
+      const rows = this.entitlementAccounts.filter((row) =>
+        matchesEntitlementWhere(row, args.where),
+      );
+      for (const row of rows) {
+        applyEntitlementData(row, args.data);
+        row.updatedAt = new Date();
+      }
+      return { count: rows.length };
+    },
+  };
+
+  serviceEntitlementLedgerEntry = {
+    findUnique: async (args: any) =>
+      this.entitlementLedgerEntries.find(
+        (row) => row.idempotencyKey === args.where.idempotencyKey,
+      ) ?? null,
+    findMany: async (args: any) =>
+      this.entitlementLedgerEntries.filter((row) =>
+        matchesEntitlementWhere(row, args.where),
+      ),
+    create: async (args: any) => {
+      if (
+        this.entitlementLedgerEntries.some(
+          (row) => row.idempotencyKey === args.data.idempotencyKey,
+        )
+      ) {
+        throw new Error("duplicate entitlement ledger operation");
+      }
+      const created: EntitlementLedgerRow = {
+        id: this.entitlementId("entitlement_ledger"),
+        paymentOrderId: null,
+        generationRunId: null,
+        notes: null,
+        metadata: null,
+        createdAt: new Date(),
+        ...args.data,
+      };
+      this.entitlementLedgerEntries.push(created);
+      return created;
+    },
+  };
 
   userWallet = {
     findUnique: async (args: any) => {
@@ -459,6 +726,8 @@ class FakeTokenPurchaseClient {
         creatorPendingCents: args.data.creatorPendingCents,
         status: args.data.status,
         idempotencyKey: args.data.idempotencyKey,
+        audienceIdentityId: args.data.audienceIdentityId ?? null,
+        entitlementAccountId: args.data.entitlementAccountId ?? null,
       };
       this.tokenPurchases.push(purchase);
       return purchase;
@@ -550,6 +819,13 @@ class FakeTokenPurchaseClient {
     const creatorEarnings = this.creatorEarnings.map((row) => ({ ...row }));
     const ledgerEntries = this.ledgerEntries.map((row) => ({ ...row }));
     const walletTransactions = this.walletTransactions.map((row) => ({ ...row }));
+    const entitlementAccounts = this.entitlementAccounts.map((row) => ({
+      ...row,
+    }));
+    const entitlementLedgerEntries = this.entitlementLedgerEntries.map(
+      (row) => ({ ...row }),
+    );
+    const entitlementSequence = this.entitlementSequence;
     try {
       return await fn(this);
     } catch (error) {
@@ -560,8 +836,16 @@ class FakeTokenPurchaseClient {
       this.creatorEarnings = creatorEarnings;
       this.ledgerEntries = ledgerEntries;
       this.walletTransactions = walletTransactions;
+      this.entitlementAccounts = entitlementAccounts;
+      this.entitlementLedgerEntries = entitlementLedgerEntries;
+      this.entitlementSequence = entitlementSequence;
       throw error;
     }
+  }
+
+  private entitlementId(prefix: string) {
+    this.entitlementSequence += 1;
+    return `${prefix}_${this.entitlementSequence}`;
   }
 
   private createAgentWallet(
@@ -623,4 +907,42 @@ function applyDelta<T extends Record<K, number>, K extends keyof T>(
 
 function sumLedgerAmount(entries: LedgerRow[]): number {
   return entries.reduce((sum, entry) => sum + entry.amountCents, 0);
+}
+
+function matchesEntitlementWhere(
+  row: Record<string, any>,
+  where: Record<string, any>,
+) {
+  return Object.entries(where).every(([key, expected]) => {
+    const actual = row[key];
+    if (
+      expected &&
+      typeof expected === "object" &&
+      !(expected instanceof Date)
+    ) {
+      if ("in" in expected) return expected.in.includes(actual);
+      if ("gte" in expected && !(actual >= expected.gte)) return false;
+      return true;
+    }
+    return actual === expected;
+  });
+}
+
+function applyEntitlementData(
+  row: Record<string, any>,
+  data: Record<string, any>,
+) {
+  for (const [key, value] of Object.entries(data)) {
+    if (
+      value &&
+      typeof value === "object" &&
+      !(value instanceof Date) &&
+      ("increment" in value || "decrement" in value)
+    ) {
+      row[key] += value.increment ?? 0;
+      row[key] -= value.decrement ?? 0;
+    } else {
+      row[key] = value;
+    }
+  }
 }

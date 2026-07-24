@@ -39,8 +39,10 @@ const mocks = vi.hoisted(() => {
             : operation(tx),
       ),
     },
-    releaseAgentUsageCredits: vi.fn(),
-    settleAgentUsageCredits: vi.fn(),
+    releaseConversationWalletUsage: vi.fn(),
+    settleConversationWalletUsage: vi.fn(),
+    consumeConversationEntitlementByGenerationRunId: vi.fn(),
+    releaseConversationEntitlementByGenerationRunId: vi.fn(),
     finalizeComputeDelegationTask: vi.fn(),
   };
 });
@@ -49,9 +51,15 @@ vi.mock("../src/prisma", () => ({ prisma: mocks.prisma }));
 vi.mock("../src/agent-wallet-usage-charge", () => ({
   InsufficientAgentUsageCreditsError: class InsufficientAgentUsageCreditsError
     extends Error {},
-  reserveAgentUsageCredits: vi.fn(),
-  releaseAgentUsageCredits: mocks.releaseAgentUsageCredits,
-  settleAgentUsageCredits: mocks.settleAgentUsageCredits,
+  reserveConversationWalletUsage: vi.fn(),
+  releaseConversationWalletUsage: mocks.releaseConversationWalletUsage,
+  settleConversationWalletUsage: mocks.settleConversationWalletUsage,
+}));
+vi.mock("../src/service-entitlements", () => ({
+  consumeConversationEntitlementByGenerationRunId:
+    mocks.consumeConversationEntitlementByGenerationRunId,
+  releaseConversationEntitlementByGenerationRunId:
+    mocks.releaseConversationEntitlementByGenerationRunId,
 }));
 vi.mock("../src/delegation-tasks", () => ({
   finalizeComputeDelegationTask: mocks.finalizeComputeDelegationTask,
@@ -110,8 +118,10 @@ describe("compute approval wallet finalization", () => {
     mocks.tx.conversation.update.mockResolvedValue({ id: "conversation-1" });
     mocks.tx.conversationEpisode.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.conversationEpisode.update.mockResolvedValue({ id: "episode-1" });
-    mocks.settleAgentUsageCredits.mockResolvedValue({ status: "settled" });
-    mocks.releaseAgentUsageCredits.mockResolvedValue({ status: "released" });
+    mocks.settleConversationWalletUsage.mockResolvedValue({ status: "settled" });
+    mocks.releaseConversationWalletUsage.mockResolvedValue({ status: "released" });
+    mocks.consumeConversationEntitlementByGenerationRunId.mockResolvedValue(null);
+    mocks.releaseConversationEntitlementByGenerationRunId.mockResolvedValue(null);
     mocks.finalizeComputeDelegationTask.mockResolvedValue({
       taskId: "task-1",
       status: "READY",
@@ -127,7 +137,16 @@ describe("compute approval wallet finalization", () => {
       actualCredits: 8,
     });
 
-    expect(mocks.settleAgentUsageCredits).toHaveBeenCalledWith(
+    expect(
+      mocks.consumeConversationEntitlementByGenerationRunId,
+    ).toHaveBeenCalledWith(
+      { generationRunId: "run-1" },
+      mocks.tx,
+    );
+    expect(
+      mocks.releaseConversationEntitlementByGenerationRunId,
+    ).not.toHaveBeenCalled();
+    expect(mocks.settleConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-1",
         settledTokenAmount: 1,
@@ -136,7 +155,7 @@ describe("compute approval wallet finalization", () => {
       },
       mocks.tx,
     );
-    expect(mocks.releaseAgentUsageCredits).not.toHaveBeenCalled();
+    expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.tx.conversation.update).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
       data: {
@@ -152,7 +171,19 @@ describe("compute approval wallet finalization", () => {
       outcome: "rejected",
     });
 
-    expect(mocks.releaseAgentUsageCredits).toHaveBeenCalledWith(
+    expect(
+      mocks.releaseConversationEntitlementByGenerationRunId,
+    ).toHaveBeenCalledWith(
+      {
+        generationRunId: "run-1",
+        reason: "compute_rejected",
+      },
+      mocks.tx,
+    );
+    expect(
+      mocks.consumeConversationEntitlementByGenerationRunId,
+    ).not.toHaveBeenCalled();
+    expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-1",
         failed: false,
@@ -161,7 +192,7 @@ describe("compute approval wallet finalization", () => {
       },
       mocks.tx,
     );
-    expect(mocks.settleAgentUsageCredits).not.toHaveBeenCalled();
+    expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
   });
 
   it("does not consume the free allowance for a rejected compute run", async () => {
@@ -213,8 +244,8 @@ describe("compute approval wallet finalization", () => {
         outcome: "completed",
       }),
     );
-    expect(mocks.settleAgentUsageCredits).not.toHaveBeenCalled();
-    expect(mocks.releaseAgentUsageCredits).not.toHaveBeenCalled();
+    expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.tx.conversation.update).toHaveBeenNthCalledWith(1, {
       where: { id: "conversation-1" },
       data: {

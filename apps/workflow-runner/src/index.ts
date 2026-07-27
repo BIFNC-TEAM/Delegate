@@ -2,6 +2,13 @@ import "dotenv/config";
 
 import { createServer } from "node:http";
 
+import {
+  runWeChatPayOrderReconciliationTick,
+  runWeChatRefundReversalTick,
+  type WeChatPayReconciliationTickSummary,
+  type WeChatRefundReversalTickSummary,
+} from "@delegate/web-data";
+
 import { workflowRunnerConfig } from "./config";
 import { createTemporalBridge, type TemporalBridge } from "./temporal-bridge";
 import { runWorkflowTick, type TemporalWorkflowDispatcher, type WorkflowTickSummary } from "./runner";
@@ -9,6 +16,15 @@ import { runWorkflowTick, type TemporalWorkflowDispatcher, type WorkflowTickSumm
 let lastTickAt: string | null = null;
 let lastTickSummary: WorkflowTickSummary | null = null;
 let lastError: string | null = null;
+let paymentReconciliationActive = false;
+let lastPaymentReconciliationAt: string | null = null;
+let lastPaymentReconciliationSummary:
+  | {
+      orders: WeChatPayReconciliationTickSummary;
+      refunds: WeChatRefundReversalTickSummary;
+    }
+  | null = null;
+let lastPaymentReconciliationError: string | null = null;
 let temporalBridgeState:
   | {
       status: "starting" | "running" | "failed";
@@ -42,6 +58,21 @@ const server = createServer((request, response) => {
         lastTickAt,
         lastTickSummary,
         lastError,
+        paymentReconciliation: {
+          status:
+            lastPaymentReconciliationError === null
+              ? "ok"
+              : "degraded",
+          enabled:
+            workflowRunnerConfig.paymentReconciliation.enabled,
+          active: paymentReconciliationActive,
+          pollMs:
+            workflowRunnerConfig.paymentReconciliation.pollMs,
+          lastTickAt: lastPaymentReconciliationAt,
+          lastTickSummary:
+            lastPaymentReconciliationSummary,
+          lastError: lastPaymentReconciliationError,
+        },
       }),
     );
     return;
@@ -67,6 +98,9 @@ async function boot(): Promise<void> {
   }
 
   void tickLoop();
+  if (workflowRunnerConfig.paymentReconciliation.enabled) {
+    void paymentReconciliationLoop();
+  }
 }
 
 async function tickLoop(
@@ -127,5 +161,56 @@ async function tickLoop(
     setTimeout(() => {
       void tickLoop(nextDispatcher, nextBridge);
     }, workflowRunnerConfig.pollMs);
+  }
+}
+
+async function paymentReconciliationLoop(): Promise<void> {
+  try {
+    paymentReconciliationActive = true;
+    const config = workflowRunnerConfig.paymentReconciliation;
+    const [orderSummary, refundSummary] = await Promise.all([
+      runWeChatPayOrderReconciliationTick({
+        limit: config.batchSize,
+        leaseMs: config.leaseMs,
+        pendingBackoffMs: config.pendingBackoffMs,
+        errorBackoffMs: config.errorBackoffMs,
+        maxBackoffMs: config.maxBackoffMs,
+      }),
+      runWeChatRefundReversalTick({
+        limit: config.batchSize,
+        leaseMs: config.leaseMs,
+        maxBackoffMs: config.maxBackoffMs,
+      }),
+    ]);
+    const summary = {
+      orders: orderSummary,
+      refunds: refundSummary,
+    };
+    lastPaymentReconciliationAt = new Date().toISOString();
+    lastPaymentReconciliationSummary = summary;
+    lastPaymentReconciliationError =
+      orderSummary.failed > 0
+        ? "wechat_payment_reconciliation_item_failed"
+        : refundSummary.unresolved > 0
+          ? "wechat_refund_reconciliation_required"
+          : refundSummary.retryScheduled > 0
+            ? "wechat_refund_reversal_retry_scheduled"
+        : null;
+  } catch (error) {
+    lastPaymentReconciliationAt = new Date().toISOString();
+    lastPaymentReconciliationError =
+      error instanceof Error
+        ? error.name
+        : "wechat_payment_reconciliation_tick_failed";
+    console.error(
+      "WeChat Pay reconciliation tick failed:",
+      lastPaymentReconciliationError,
+    );
+  } finally {
+    paymentReconciliationActive = false;
+    setTimeout(
+      () => void paymentReconciliationLoop(),
+      workflowRunnerConfig.paymentReconciliation.pollMs,
+    );
   }
 }

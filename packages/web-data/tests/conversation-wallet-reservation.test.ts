@@ -237,6 +237,7 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.settleConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-paid",
         settledTokenAmount: 1,
         providerCostCents: 2,
         provider: "openai",
@@ -404,6 +405,7 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-paid",
         reason: "input_message_redacted",
         idempotencyKey:
           "message:message-in:redaction:usage-reserved:release",
@@ -841,6 +843,7 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-paid",
         reason: "generation_usage_not_counted",
         idempotencyKey: "generation:run-paid:release",
       },
@@ -877,6 +880,7 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-paid",
         reason: "generation_deferred_to_human",
         idempotencyKey: "generation:run-paid:release",
       },
@@ -1018,6 +1022,7 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-paid",
         failed: true,
         reason: "provider_failed",
         idempotencyKey: "generation:run-paid:release",
@@ -1078,6 +1083,7 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-paid",
         reason: "generation_deferred_to_human",
         idempotencyKey: "generation:run-paid:release",
       },
@@ -1125,6 +1131,7 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-paid",
         reason: "generation_deferred_to_human",
         idempotencyKey: "generation:run-paid:release",
       },

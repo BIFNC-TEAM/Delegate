@@ -155,6 +155,7 @@ export async function finalizeComputeApprovalConversation(input: {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             reason: "generation_deferred_to_human",
             idempotencyKey: `generation:${run.id}:release`,
           },
@@ -297,6 +298,7 @@ export async function finalizeComputeApprovalConversation(input: {
         await settleConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             settledTokenAmount: walletReservation.tokenAmount,
             provider: "compute",
             idempotencyKey: `generation:${run.id}:settle`,
@@ -307,6 +309,7 @@ export async function finalizeComputeApprovalConversation(input: {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             failed:
               input.outcome === "failed"
               || input.outcome === "policy_denied",

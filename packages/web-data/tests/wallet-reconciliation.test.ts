@@ -1,10 +1,18 @@
 import {
+  AgentUsageChargeStatus,
   AmnWalletAccountType,
   ServiceEntitlementLedgerKind,
+  WalletTransactionEventType,
+  WalletTransactionStatus,
   WithdrawRequestStatus,
 } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
+import { conversationWalletEntitlementOperationKey } from "../src/agent-wallet-usage-charge";
+import {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  serviceEntitlementOperationKey,
+} from "../src/service-entitlements";
 import {
   buildWorkspaceWalletReconciliationReport,
   type WorkspaceWalletReconciliationDataset,
@@ -184,6 +192,64 @@ describe("workspace wallet reconciliation", () => {
 
     expect(report.status).toBe("healthy");
     expect(report.issues).toEqual([]);
+  });
+
+  it("accepts a complete multi-hop usage entitlement transfer chain", () => {
+    const report = reconcile(multiHopReservationDataset());
+
+    expect(report.status).toBe("healthy");
+    expect(report.issues).toEqual([]);
+  });
+
+  it("blocks a broken usage entitlement transfer chain", () => {
+    const dataset = multiHopReservationDataset();
+    const secondTransfer = dataset.walletTransactions.find(
+      (transaction) => transaction.id === "transfer-run-b-run-c",
+    )!;
+    secondTransfer.metadata = {
+      ...(secondTransfer.metadata as Record<string, unknown>),
+      conversationId: "conversation-tampered",
+    };
+
+    const report = reconcile(dataset);
+
+    expect(report.status).toBe("blocked");
+    expect(report.issues).toContainEqual(expect.objectContaining({
+      code: "usage_entitlement_transfer_chain_invalid",
+      severity: "error",
+    }));
+  });
+
+  it("requires terminal entitlement evidence to belong to the current owner", () => {
+    const dataset = settledMultiHopReservationDataset();
+
+    const report = reconcile(dataset);
+
+    expect(report.status).toBe("blocked");
+    expect(report.issues).toContainEqual(expect.objectContaining({
+      code: "usage_entitlement_terminal_mismatch",
+      severity: "error",
+      expectedValue: 1,
+      actualValue: 0,
+    }));
+  });
+
+  it("blocks an orphaned balance-neutral usage transfer header", () => {
+    const dataset = emptyDataset();
+    dataset.walletTransactions.push(
+      usageTransferTransaction("missing-usage", "run-a", "run-b"),
+    );
+
+    const report = reconcile(dataset);
+
+    expect(report.status).toBe("blocked");
+    expect(report.issues).toContainEqual(expect.objectContaining({
+      code: "usage_entitlement_transfer_orphan",
+      severity: "error",
+    }));
+    expect(report.issues).not.toContainEqual(expect.objectContaining({
+      code: "wallet_transaction_without_ledger",
+    }));
   });
 
   it("detects a missing creator liability for a funded purchase", () => {
@@ -546,4 +612,140 @@ function fundedDataset(): WorkspaceWalletReconciliationDataset {
     createdAt: entryTime,
   });
   return dataset;
+}
+
+function multiHopReservationDataset(): WorkspaceWalletReconciliationDataset {
+  const dataset = fundedDataset();
+  const usageChargeId = "usage-reserved";
+  const usageIdempotencyKey = "usage-reserve-operation";
+  const reserveLedgerEntryId = "entitlement-reserve";
+
+  dataset.userAgentWallets[0]!.availableTokenAmount = 9;
+  dataset.userAgentWallets[0]!.reservedTokenAmount = 1;
+  dataset.entitlementAccounts[0]!.remainingUnits = 9;
+  dataset.entitlementAccounts[0]!.reservedUnits = 1;
+  dataset.entitlementAccounts[0]!.ledgerKinds.push(
+    ServiceEntitlementLedgerKind.RESERVE,
+  );
+  dataset.usageCharges.push({
+    id: usageChargeId,
+    userAgentWalletId: "user-agent-wallet-1",
+    agentWalletId: "agent-wallet-1",
+    representativeId: "representative-1",
+    audienceIdentityId: "audience-1",
+    entitlementAccountId: "entitlement-1",
+    conversationId: "conversation-1",
+    generationRunId: "run-c",
+    status: AgentUsageChargeStatus.RESERVED,
+    tokenAmount: 1,
+    reservedTokenAmount: 1,
+    settledTokenAmount: 0,
+    releasedTokenAmount: 0,
+    platformRevenueCents: 0,
+    currency: "CNY",
+    idempotencyKey: usageIdempotencyKey,
+    allocations: [],
+  });
+  dataset.entitlementLedgerEntries = [{
+    id: reserveLedgerEntryId,
+    entitlementAccountId: "entitlement-1",
+    kind: ServiceEntitlementLedgerKind.RESERVE,
+    units: 1,
+    idempotencyKey: serviceEntitlementOperationKey(
+      "RESERVE",
+      {
+        audienceIdentityId: "audience-1",
+        representativeId: "representative-1",
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      },
+      conversationWalletEntitlementOperationKey(
+        "reserve",
+        usageIdempotencyKey,
+      ),
+    ),
+    generationRunId: "run-a",
+  }];
+  dataset.generationRuns = ["run-a", "run-b", "run-c"].map((id) => ({
+    id,
+    conversationId: "conversation-1",
+  }));
+  dataset.walletTransactions.push(
+    usageTransferTransaction(
+      usageChargeId,
+      "run-a",
+      "run-b",
+      reserveLedgerEntryId,
+    ),
+    usageTransferTransaction(
+      usageChargeId,
+      "run-b",
+      "run-c",
+      reserveLedgerEntryId,
+    ),
+  );
+  return dataset;
+}
+
+function settledMultiHopReservationDataset(): WorkspaceWalletReconciliationDataset {
+  const dataset = multiHopReservationDataset();
+  const usage = dataset.usageCharges[0]!;
+  usage.status = AgentUsageChargeStatus.SETTLED;
+  usage.settledTokenAmount = 1;
+  usage.releasedTokenAmount = 0;
+  usage.platformRevenueCents = 1;
+  usage.allocations.push({
+    id: "usage-allocation-1",
+    tokenPurchaseId: "purchase-1",
+    creatorEarningId: null,
+    tokenAmount: 1,
+    valueCents: 1,
+    creatorReleaseCents: 0,
+    currency: "CNY",
+  });
+  dataset.userAgentWallets[0]!.reservedTokenAmount = 0;
+  dataset.userAgentWallets[0]!.totalConsumedTokenAmount = 1;
+  dataset.representatives[0]!.agentWallet!.tokenBalance = 9;
+  dataset.representatives[0]!.agentWallet!.totalConsumedTokens = 1;
+  dataset.purchases[0]!.remainingTokenAmount = 9;
+  dataset.entitlementAccounts[0]!.reservedUnits = 0;
+  dataset.ledgerEntries.find(
+    (entry) => entry.id === "ledger-1",
+  )!.tokenBalanceAfter = 9;
+  return dataset;
+}
+
+function usageTransferTransaction(
+  usageChargeId: string,
+  fromGenerationRunId: string,
+  toGenerationRunId: string,
+  reserveLedgerEntryId = "entitlement-reserve",
+): WorkspaceWalletReconciliationDataset["walletTransactions"][number] {
+  const identity = [
+    "usage_entitlement_transfer",
+    encodeURIComponent(usageChargeId),
+    encodeURIComponent(fromGenerationRunId),
+    encodeURIComponent(toGenerationRunId),
+  ].join(":");
+  return {
+    id: `transfer-${fromGenerationRunId}-${toGenerationRunId}`,
+    eventGroupId: identity,
+    idempotencyKey: identity,
+    sourceType: "AgentUsageEntitlementTransfer",
+    sourceId: usageChargeId,
+    eventType: WalletTransactionEventType.ADJUSTMENT,
+    status: WalletTransactionStatus.SUCCEEDED,
+    ownerId: "owner-1",
+    representativeId: "representative-1",
+    userWalletId: "user-wallet-1",
+    currency: "CNY",
+    metadata: {
+      usageChargeId,
+      entitlementAccountId: "entitlement-1",
+      audienceIdentityId: "audience-1",
+      conversationId: "conversation-1",
+      fromGenerationRunId,
+      toGenerationRunId,
+      reserveLedgerEntryId,
+    },
+  };
 }

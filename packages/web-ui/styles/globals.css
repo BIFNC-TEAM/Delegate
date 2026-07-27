@@ -4388,6 +4388,10 @@ button.skill-row:hover {
     grid-column: auto;
   }
 
+  .representative-shell .representative-wechat-checkout {
+    grid-template-columns: 1fr;
+  }
+
   .representative-visitor-section,
   .representative-trust-section {
     margin-top: 48px;
@@ -5365,6 +5369,30 @@ button.skill-row:hover {
   background:
     radial-gradient(circle at 78% 82%, rgba(99, 102, 241, 0.12), transparent 34%),
     linear-gradient(180deg, #ffffff 0%, var(--marketing-indigo-soft) 260%);
+}
+
+.representative-shell .representative-wechat-checkout {
+  display: grid;
+  align-items: center;
+  gap: 20px;
+  grid-template-columns: 216px minmax(0, 1fr);
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--marketing-line);
+}
+
+.representative-shell .representative-wechat-checkout svg {
+  display: block;
+  width: 216px;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--marketing-line);
+  border-radius: 8px;
+}
+
+.representative-shell .representative-wechat-checkout p {
+  max-width: 52ch;
+  color: var(--marketing-soft);
 }
 
 .representative-shell .status-error {

@@ -676,8 +676,24 @@ enum PaymentProviderEventType {
   RECHARGE_PAID
   RECHARGE_FAILED
   REFUND_SUCCEEDED
+  REFUND_CLOSED
+  REFUND_ABNORMAL
   CHARGEBACK_CREATED
   UNKNOWN
+}
+
+enum RechargeRefundProviderStatus {
+  PROCESSING
+  SUCCEEDED
+  CLOSED
+  ABNORMAL
+}
+
+enum RechargeRefundReversalStatus {
+  PENDING
+  APPLIED
+  NOT_REQUIRED
+  RECONCILIATION_REQUIRED
 }
 
 enum AgentTokenPurchaseStatus {
@@ -1184,6 +1200,7 @@ model RechargeOrder {
   productCode      String?
   provider         PaymentProvider        @default(MOCK)
   providerOrderId  String?                @unique
+  providerTransactionId String?
   amountCents      Int
   currency         String                 @default("CNY")
   status           RechargeOrderStatus    @default(CREATED)
@@ -1199,30 +1216,38 @@ model RechargeOrder {
   providerEvents   PaymentProviderEvent[]
   ledgerEntries    WalletLedgerEntry[]
   tokenPurchases   AgentTokenPurchase[]
+  refunds          RechargeRefund[]
 
   @@index([userWalletId, status, createdAt])
   @@index([representativeId, status, createdAt])
   @@index([provider, status, createdAt])
+  @@unique([provider, providerTransactionId])
 }
 
 model PaymentProviderEvent {
   id                String                   @id @default(cuid())
   provider          PaymentProvider
   providerEventId   String
+  providerTransactionId String?
   eventType         PaymentProviderEventType @default(UNKNOWN)
   rechargeOrderId   String?
   rawPayload        Json
   normalizedPayload Json?
   receivedAt        DateTime                 @default(now())
+  verifiedAt        DateTime?
   processedAt       DateTime?
   processingError   String?
   idempotencyKey    String?                  @unique
+  rechargeRefundId  String?
   rechargeOrder     RechargeOrder?           @relation(fields: [rechargeOrderId], references: [id])
+  rechargeRefund    RechargeRefund?           @relation(fields: [rechargeRefundId], references: [id], onDelete: Restrict)
   ledgerEntries     WalletLedgerEntry[]
 
   @@unique([provider, providerEventId])
+  @@unique([provider, providerTransactionId])
   @@index([provider, eventType, receivedAt])
   @@index([rechargeOrderId, receivedAt])
+  @@index([rechargeRefundId, receivedAt])
 }
 
 model AgentTokenPurchase {
@@ -1257,6 +1282,7 @@ model AgentTokenPurchase {
   usageAllocations       AgentUsageAllocation[]
   creatorEarnings        CreatorEarning[]
   ledgerEntries          WalletLedgerEntry[]
+  rechargeRefunds        RechargeRefund[]
 
   @@index([userWalletId, createdAt])
   @@index([userAgentWalletId, status, createdAt])
@@ -1264,6 +1290,50 @@ model AgentTokenPurchase {
   @@index([representativeId, status, createdAt])
   @@index([audienceIdentityId, representativeId, createdAt])
   @@index([entitlementAccountId, createdAt])
+}
+
+model RechargeRefund {
+  id                       String                         @id @default(cuid())
+  rechargeOrderId          String
+  tokenPurchaseId          String?
+  provider                 PaymentProvider
+  providerRefundOrderId    String
+  providerRefundId         String
+  paymentTransactionId     String
+  originalAmountCents      Int
+  refundAmountCents        Int
+  payerOriginalAmountCents Int
+  payerRefundAmountCents   Int
+  currency                 String                         @default("CNY")
+  providerStatus           RechargeRefundProviderStatus  @default(PROCESSING)
+  reversalStatus           RechargeRefundReversalStatus  @default(PENDING)
+  providerSucceededAt      DateTime?
+  reversalAppliedAt        DateTime?
+  processingError          String?
+  createdAt                DateTime                       @default(now())
+  updatedAt                DateTime                       @updatedAt
+  rechargeOrder            RechargeOrder                  @relation(fields: [rechargeOrderId], references: [id], onDelete: Restrict)
+  tokenPurchase            AgentTokenPurchase?            @relation(fields: [tokenPurchaseId], references: [id], onDelete: Restrict)
+  providerEvents           PaymentProviderEvent[]
+
+  @@unique([provider, providerRefundOrderId])
+  @@unique([provider, providerRefundId])
+  @@index([rechargeOrderId, providerStatus, createdAt])
+  @@index([providerStatus, updatedAt])
+  @@index([tokenPurchaseId, reversalStatus, createdAt])
+  @@index([reversalStatus, updatedAt])
+}
+
+model PaymentProviderOperationGate {
+  scopeKey       String    @id @db.VarChar(64)
+  leaseToken     String?
+  leaseExpiresAt DateTime?
+  nextAllowedAt  DateTime
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([leaseExpiresAt])
+  @@index([nextAllowedAt])
 }
 
 model AgentUsageCharge {
@@ -1274,6 +1344,11 @@ model AgentUsageCharge {
   audienceIdentityId   String?
   entitlementAccountId String?
   conversationId       String?
+  /// Database migrations enforce that wallet-entitlement binding coordinates
+  /// are either all null (legacy/unbound) or all present, and that one
+  /// GenerationRun owns at most one active bound reservation. Bound scope
+  /// relations use RESTRICT deletion so the financial authorization remains
+  /// independently verifiable.
   generationRunId      String?
   tokenPurchaseId      String?
   kind                 AgentUsageChargeKind
@@ -1293,13 +1368,13 @@ model AgentUsageCharge {
   settledAt            DateTime?
   releasedAt           DateTime?
   reversedAt           DateTime?
-  userAgentWallet      UserAgentWallet?           @relation(fields: [userAgentWalletId], references: [id], onDelete: SetNull)
+  userAgentWallet      UserAgentWallet?           @relation(fields: [userAgentWalletId], references: [id], onDelete: Restrict)
   agentWallet          AgentWallet                @relation(fields: [agentWalletId], references: [id])
   representative       Representative             @relation(fields: [representativeId], references: [id])
-  audienceIdentity     AudienceIdentity?          @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
-  entitlementAccount   ServiceEntitlementAccount? @relation(fields: [entitlementAccountId], references: [id], onDelete: SetNull)
-  conversation         Conversation?              @relation(fields: [conversationId], references: [id], onDelete: SetNull)
-  generationRun        GenerationRun?             @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
+  audienceIdentity     AudienceIdentity?          @relation(fields: [audienceIdentityId], references: [id], onDelete: Restrict)
+  entitlementAccount   ServiceEntitlementAccount? @relation(fields: [entitlementAccountId], references: [id], onDelete: Restrict)
+  conversation         Conversation?              @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+  generationRun        GenerationRun?             @relation(fields: [generationRunId], references: [id], onDelete: Restrict)
   tokenPurchase        AgentTokenPurchase?        @relation(fields: [tokenPurchaseId], references: [id])
   creatorEarnings      CreatorEarning[]
   allocations          AgentUsageAllocation[]

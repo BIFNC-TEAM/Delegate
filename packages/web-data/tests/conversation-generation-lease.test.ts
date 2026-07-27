@@ -254,6 +254,7 @@ describe("conversation generation work leases", () => {
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-stale",
         failed: true,
         reason: "generation_work_lease_exhausted",
         idempotencyKey: "generation:run-stale:release",

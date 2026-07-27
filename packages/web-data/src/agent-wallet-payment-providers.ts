@@ -28,6 +28,7 @@ export type PaymentProviderWebhookInput = {
 export type NormalizedPaymentProviderEvent = {
   provider: PaymentProvider;
   providerEventId: string;
+  providerTransactionId: string | null;
   eventType: PaymentProviderEventType;
   rechargeOrderId: string | null;
   providerOrderId: string | null;
@@ -36,6 +37,8 @@ export type NormalizedPaymentProviderEvent = {
   rawPayload: Prisma.InputJsonValue;
   normalizedPayload: Prisma.InputJsonValue;
   idempotencyKey: string;
+  verifiedAt: Date | null;
+  providerOccurredAt?: Date | null;
 };
 
 export type PaymentProviderAdapter = {
@@ -113,11 +116,26 @@ export type PaymentProviderWebhookVerification =
   | {
       verified: true;
       payload: Record<string, unknown>;
+      /**
+       * Provider-safe evidence to retain for audit. This must never contain
+       * decrypted payer details, credentials, or signing keys.
+       */
+      rawPayload?: Record<string, unknown>;
+      verifiedAt?: Date;
     }
   | {
       verified: false;
       reason?: string;
     };
+
+export class PaymentProviderWebhookVerificationError extends Error {
+  readonly code = "PAYMENT_PROVIDER_WEBHOOK_VERIFICATION_FAILED";
+
+  constructor(provider: string) {
+    super(`${provider} webhook signature verification failed.`);
+    this.name = "PaymentProviderWebhookVerificationError";
+  }
+}
 
 const SUPPORTED_PAYMENT_CURRENCIES = new Set(["CNY", "USD"]);
 
@@ -163,6 +181,7 @@ export const mockPaymentProviderAdapter: PaymentProviderAdapter = {
     return {
       provider: PaymentProvider.MOCK,
       providerEventId,
+      providerTransactionId: null,
       eventType,
       rechargeOrderId,
       providerOrderId: optionalString(payload.providerOrderId) ?? null,
@@ -180,6 +199,7 @@ export const mockPaymentProviderAdapter: PaymentProviderAdapter = {
         currency,
       },
       idempotencyKey: `mock:${providerEventId}`,
+      verifiedAt: null,
     };
   },
 };
@@ -241,10 +261,8 @@ export function createStripePaymentProviderAdapter(
       if (!config.verifyAndParseWebhook) {
         throw new Error("STRIPE webhooks require signature verification before parsing.");
       }
-      const payload = requireVerifiedWebhookPayload(
-        await config.verifyAndParseWebhook(input),
-        "STRIPE",
-      );
+      const verification = await config.verifyAndParseWebhook(input);
+      const payload = requireVerifiedWebhookPayload(verification, "STRIPE");
       const eventId = requiredString(payload.id, "id");
       const eventType = requiredString(payload.type, "type");
       const data = readObject(payload.data, "data");
@@ -260,6 +278,10 @@ export function createStripePaymentProviderAdapter(
       return {
         provider: PaymentProvider.STRIPE,
         providerEventId: eventId,
+        providerTransactionId:
+          optionalString(object.payment_intent)
+          ?? optionalString(object.id)
+          ?? null,
         eventType: normalizedType,
         rechargeOrderId,
         providerOrderId,
@@ -281,6 +303,8 @@ export function createStripePaymentProviderAdapter(
           currency,
         },
         idempotencyKey: `stripe:${eventId}`,
+        verifiedAt:
+          verification.verified ? verification.verifiedAt ?? null : null,
       };
     },
   };
@@ -399,7 +423,6 @@ function createSignedWalletPaymentProviderAdapter(
           appId: config.appId,
           merchantId: config.merchantId,
           providerOrderId: checkout.providerOrderId,
-          checkoutUrl: checkout.checkoutUrl ?? null,
           rawPayload: toJsonValue(checkout.rawPayload ?? {}),
         },
       };
@@ -408,11 +431,15 @@ function createSignedWalletPaymentProviderAdapter(
       if (!config.verifyAndParseWebhook) {
         throw new Error(`${provider} webhooks require signature verification before parsing.`);
       }
-      const parsed = requireVerifiedWebhookPayload(
-        await config.verifyAndParseWebhook(input),
+      const verification = await config.verifyAndParseWebhook(input);
+      const parsed = requireVerifiedWebhookPayload(verification, provider);
+      return normalizeSignedWalletPaymentEvent(
         provider,
+        providerName,
+        parsed,
+        verification.verified ? verification.rawPayload : undefined,
+        verification.verified ? verification.verifiedAt : undefined,
       );
-      return normalizeSignedWalletPaymentEvent(provider, providerName, parsed);
     },
   };
 }
@@ -421,11 +448,15 @@ function normalizeSignedWalletPaymentEvent(
   provider: PaymentProvider,
   providerName: "wechat_pay" | "alipay",
   payload: Record<string, unknown>,
+  rawPayload?: Record<string, unknown>,
+  verifiedAt?: Date,
 ): NormalizedPaymentProviderEvent {
   const providerEventId = requiredString(
     payload.providerEventId ?? payload.transactionId ?? payload.tradeNo,
     "providerEventId",
   );
+  const providerTransactionId =
+    optionalString(payload.transactionId ?? payload.tradeNo) ?? null;
   const rechargeOrderId = requiredString(payload.rechargeOrderId, "rechargeOrderId");
   const providerOrderId = requiredString(
     payload.providerOrderId ?? payload.outTradeNo,
@@ -447,16 +478,20 @@ function normalizeSignedWalletPaymentEvent(
         : status === "failed" || status === "closed"
           ? PaymentProviderEventType.RECHARGE_FAILED
           : PaymentProviderEventType.UNKNOWN;
+  const providerOccurredAt = parseOptionalProviderOccurredAt(
+    payload.successTime,
+  );
 
   return {
     provider,
     providerEventId,
+    providerTransactionId,
     eventType,
     rechargeOrderId,
     providerOrderId,
     amountCents,
     currency,
-    rawPayload: toJsonValue(payload),
+    rawPayload: toJsonValue(rawPayload ?? payload),
     normalizedPayload: {
       type:
         eventType === PaymentProviderEventType.RECHARGE_PAID
@@ -469,11 +504,44 @@ function normalizeSignedWalletPaymentEvent(
       provider: providerName,
       rechargeOrderId,
       providerOrderId,
+      providerTransactionId,
       amountCents,
       currency,
+      providerOccurredAt:
+        providerOccurredAt?.toISOString() ?? null,
     },
     idempotencyKey: `${providerName}:${providerEventId}`,
+    verifiedAt: verifiedAt ?? null,
+    ...(providerOccurredAt ? { providerOccurredAt } : {}),
   };
+}
+
+function parseOptionalProviderOccurredAt(
+  value: unknown,
+): Date | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (
+    typeof value !== "string"
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(
+      value,
+    )
+  ) {
+    throw new Error(
+      "Signed wallet payment successTime must be a canonical ISO timestamp.",
+    );
+  }
+  const parsed = new Date(value);
+  if (
+    !Number.isFinite(parsed.getTime())
+    || parsed.toISOString() !== value
+  ) {
+    throw new Error(
+      "Signed wallet payment successTime must be a valid timestamp.",
+    );
+  }
+  return parsed;
 }
 
 function readObject(value: unknown, label: string): Record<string, unknown> {
@@ -526,7 +594,7 @@ function requireVerifiedWebhookPayload(
   provider: string,
 ): Record<string, unknown> {
   if (verification?.verified !== true) {
-    throw new Error(`${provider} webhook signature verification failed.`);
+    throw new PaymentProviderWebhookVerificationError(provider);
   }
   if (
     typeof verification.payload !== "object" ||

@@ -27,9 +27,9 @@ import {
 import { prisma } from "./prisma";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
-  refundGrantedServiceEntitlement,
   type ServiceEntitlementClient,
 } from "./service-entitlements";
+import { refundAgentWalletServiceCreditEntitlement } from "./service-entitlements-wallet-internal";
 import { AgentWalletReconciliationError } from "./agent-wallet-usage-charge";
 
 type UserWalletRecord = {
@@ -77,6 +77,7 @@ type PaymentProviderEventRecord = {
   providerEventId: string;
   eventType: PaymentProviderEventType;
   rechargeOrderId: string | null;
+  rechargeRefundId?: string | null;
 };
 
 type AgentTokenPurchaseRecord = {
@@ -162,6 +163,8 @@ type PurchaseReversalClient = Omit<WalletLedgerClient, "$transaction"> &
 
 export type RefundRechargeOrderInput = {
   providerEventId?: string;
+  rechargeRefundId?: string;
+  refundedAt?: Date;
   reason?: string;
 };
 
@@ -224,7 +227,7 @@ export async function refundRechargeOrder(
       throw new Error("Recharge refund requires unspent user wallet cash.");
     }
 
-    const refundedAt = new Date();
+    const refundedAt = input.refundedAt ?? new Date();
     const providerEventId =
       input.providerEventId ?? `refund_${order.provider.toLowerCase()}_${order.id}`;
     const providerEvent = await tx.paymentProviderEvent.upsert({
@@ -239,15 +242,20 @@ export async function refundRechargeOrder(
         providerEventId,
         eventType: PaymentProviderEventType.REFUND_SUCCEEDED,
         rechargeOrderId: order.id,
+        ...(input.rechargeRefundId
+          ? { rechargeRefundId: input.rechargeRefundId }
+          : {}),
         rawPayload: {
           provider: order.provider,
           providerEventId,
           rechargeOrderId: order.id,
+          rechargeRefundId: input.rechargeRefundId ?? null,
           reason: input.reason ?? null,
         },
         normalizedPayload: {
           type: "RechargeRefunded",
           rechargeOrderId: order.id,
+          rechargeRefundId: input.rechargeRefundId ?? null,
           amountCents: order.amountCents,
           currency: order.currency,
         },
@@ -270,6 +278,14 @@ export async function refundRechargeOrder(
       providerEvent.eventType,
       PaymentProviderEventType.REFUND_SUCCEEDED,
     );
+    if (input.rechargeRefundId) {
+      assertWalletIdempotencyField(
+        "recharge refund event",
+        "rechargeRefundId",
+        providerEvent.rechargeRefundId ?? null,
+        input.rechargeRefundId,
+      );
+    }
 
     const walletTransaction = await recordWalletTransaction(
       {
@@ -500,11 +516,10 @@ export async function reverseAgentTokenPurchase(
       reversedAmountCents - creatorReversedCents;
     const refundedAt = new Date();
 
-    const entitlementRefund = await refundGrantedServiceEntitlement(
+    const entitlementRefund = await refundAgentWalletServiceCreditEntitlement(
       {
         audienceIdentityId: purchase.audienceIdentityId,
         representativeId: purchase.representativeId,
-        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
         units: tokenAmount,
         operationKey: `agent-token-purchase-reversal:${operationId}`,
         notes: input.reason ?? "Agent token purchase reversal.",

@@ -4,15 +4,22 @@ import {
   PaymentProvider,
   PaymentProviderEventType,
   RechargeOrderStatus,
+  RechargeRefundProviderStatus,
   type Prisma,
 } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   assertMockRechargeMutationsEnabled,
+  completeRechargeFromProviderWebhook,
   completeMockRechargeOrder,
+  createRechargeOrder,
   createMockRechargeOrder,
 } from "../src/agent-wallet-recharge";
+import type {
+  NormalizedPaymentProviderEvent,
+  PaymentProviderAdapter,
+} from "../src/agent-wallet-payment-providers";
 import { AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE } from "../src/service-entitlements";
 
 describe("agent wallet mock recharge", () => {
@@ -387,7 +394,304 @@ describe("agent wallet mock recharge", () => {
     ).rejects.toThrow("currency cannot be changed");
     expect(client.userWallets[0]?.currency).toBe("CNY");
   });
+
+  it("creates a WeChat order locally before requesting its checkout", async () => {
+    const client = new FakeRechargeClient();
+    const checkoutInputs: Array<{
+      rechargeOrderId?: string;
+      idempotencyKey: string;
+    }> = [];
+    const adapter = weChatAdapter({
+      createRechargeCheckout: async (input) => {
+        checkoutInputs.push(input);
+        return {
+          provider: PaymentProvider.WECHAT_PAY,
+          providerOrderId: input.rechargeOrderId!,
+          checkoutUrl: "weixin://wxpay/bizpayurl?pr=test",
+          providerPayload: {
+            mode: "native",
+          },
+        };
+      },
+    });
+
+    const order = await createRechargeOrder(
+      {
+        externalUserId: "user_wechat",
+        amountCents: 1200,
+        currency: "CNY",
+        idempotencyKey: "wechat_recharge_1",
+      },
+      adapter,
+      client,
+    );
+
+    expect(order).toMatchObject({
+      provider: "wechat_pay",
+      status: "requires_payment",
+      providerOrderId: order.id,
+      checkoutUrl: "weixin://wxpay/bizpayurl?pr=test",
+    });
+    expect(checkoutInputs).toEqual([
+      expect.objectContaining({
+        rechargeOrderId: order.id,
+        idempotencyKey: "wechat_recharge_1",
+      }),
+    ]);
+    expect(client.outboxEvents).toEqual([
+      expect.objectContaining({
+        aggregateType: "recharge_order",
+        aggregateId: order.id,
+        eventType: "wechat_pay.order.reconcile",
+        status: "PENDING",
+        idempotencyKey: `wechat_pay:reconcile:${order.id}`,
+      }),
+    ]);
+  });
+
+  it("credits one WeChat transaction once across differently-id'd notifications", async () => {
+    const client = new FakeRechargeClient();
+    let providerEventId = "EVT_WECHAT_1";
+    let providerTransactionId = "4200000000000000001";
+    const adapter = weChatAdapter({
+      normalizeWebhookEvent: async () =>
+        normalizedWeChatPaidEvent({
+          orderId: "recharge_1",
+          providerEventId,
+          providerTransactionId,
+        }),
+    });
+    const order = await createRechargeOrder(
+      {
+        externalUserId: "user_wechat",
+        amountCents: 1200,
+        currency: "CNY",
+        idempotencyKey: "wechat_recharge_paid_1",
+      },
+      adapter,
+      client,
+    );
+
+    const paid = await completeRechargeFromProviderWebhook(
+      adapter,
+      { rawBody: "signed-event-1" },
+      client,
+    );
+    providerEventId = "EVT_WECHAT_RETRY_DIFFERENT_ID";
+    const replayed = await completeRechargeFromProviderWebhook(
+      adapter,
+      { rawBody: "signed-event-2" },
+      client,
+    );
+
+    expect(paid.cashBalanceCents).toBe(1200);
+    expect(replayed.cashBalanceCents).toBe(1200);
+    expect(client.providerEvents).toHaveLength(1);
+    expect(client.walletTransactions).toHaveLength(1);
+    expect(client.ledgerEntries).toHaveLength(2);
+
+    providerTransactionId = "4200000000000000002";
+    await expect(
+      completeRechargeFromProviderWebhook(
+        adapter,
+        { rawBody: "different-transaction" },
+        client,
+      ),
+    ).rejects.toThrow("providerTransactionId");
+    expect(order.id).toBe(paid.id);
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+  });
+
+  it("fails closed when a successful WeChat refund was persisted before payment confirmation", async () => {
+    const client = new FakeRechargeClient();
+    const adapter = weChatAdapter({
+      normalizeWebhookEvent: async () =>
+        normalizedWeChatPaidEvent({
+          orderId: "recharge_1",
+          providerEventId: "EVT_WECHAT_REFUNDED_BEFORE_PAYMENT",
+          providerTransactionId: "4200000000000000004",
+        }),
+    });
+    const order = await createRechargeOrder(
+      {
+        externalUserId: "user_wechat_refunded_before_payment",
+        amountCents: 1200,
+        currency: "CNY",
+        idempotencyKey: "wechat_refunded_before_payment",
+      },
+      adapter,
+      client,
+    );
+    client.rechargeRefunds.push({
+      id: "refund_1",
+      rechargeOrderId: order.id,
+      provider: PaymentProvider.WECHAT_PAY,
+      providerStatus: RechargeRefundProviderStatus.SUCCEEDED,
+    });
+
+    await expect(
+      completeRechargeFromProviderWebhook(
+        adapter,
+        { rawBody: "signed-refunded-payment-event" },
+        client,
+      ),
+    ).rejects.toThrow(
+      "already has a successful provider refund",
+    );
+
+    expect(client.rechargeOrders[0]).toMatchObject({
+      status: RechargeOrderStatus.REQUIRES_PAYMENT,
+      providerTransactionId: null,
+      paidAt: null,
+    });
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(0);
+    expect(client.providerEvents).toHaveLength(0);
+    expect(client.walletTransactions).toHaveLength(0);
+    expect(client.ledgerEntries).toHaveLength(0);
+    expect(client.rechargeRefunds).toHaveLength(1);
+  });
+
+  it("keeps an already-paid WeChat transaction idempotent after a successful refund fact", async () => {
+    const client = new FakeRechargeClient();
+    let providerEventId = "EVT_WECHAT_PAID_BEFORE_REFUND";
+    const providerTransactionId = "4200000000000000005";
+    const adapter = weChatAdapter({
+      normalizeWebhookEvent: async () =>
+        normalizedWeChatPaidEvent({
+          orderId: "recharge_1",
+          providerEventId,
+          providerTransactionId,
+        }),
+    });
+    const order = await createRechargeOrder(
+      {
+        externalUserId: "user_wechat_paid_before_refund",
+        amountCents: 1200,
+        currency: "CNY",
+        idempotencyKey: "wechat_paid_before_refund",
+      },
+      adapter,
+      client,
+    );
+    const paid = await completeRechargeFromProviderWebhook(
+      adapter,
+      { rawBody: "signed-paid-event" },
+      client,
+    );
+    client.rechargeRefunds.push({
+      id: "refund_after_payment",
+      rechargeOrderId: order.id,
+      provider: PaymentProvider.WECHAT_PAY,
+      providerStatus: RechargeRefundProviderStatus.SUCCEEDED,
+    });
+    providerEventId = "EVT_WECHAT_PAYMENT_REPLAY_AFTER_REFUND";
+
+    const replayed = await completeRechargeFromProviderWebhook(
+      adapter,
+      { rawBody: "signed-replay-after-refund" },
+      client,
+    );
+
+    expect(replayed).toEqual(paid);
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+    expect(client.providerEvents).toHaveLength(1);
+    expect(client.walletTransactions).toHaveLength(1);
+    expect(client.ledgerEntries).toHaveLength(2);
+    expect(client.rechargeRefunds).toHaveLength(1);
+  });
+
+  it("uses the provider occurrence time for paidAt while retaining verification processing time", async () => {
+    const client = new FakeRechargeClient();
+    const providerOccurredAt = new Date(
+      "2026-07-27T08:00:01.000Z",
+    );
+    const verifiedAt = new Date("2026-07-27T08:00:09.000Z");
+    const adapter = weChatAdapter({
+      normalizeWebhookEvent: async () => ({
+        ...normalizedWeChatPaidEvent({
+          orderId: "recharge_1",
+          providerEventId: "EVT_WECHAT_PROVIDER_TIME",
+          providerTransactionId: "4200000000000000003",
+        }),
+        providerOccurredAt,
+        verifiedAt,
+      }),
+    });
+    const order = await createRechargeOrder(
+      {
+        externalUserId: "user_wechat_provider_time",
+        amountCents: 1200,
+        currency: "CNY",
+        idempotencyKey: "wechat_recharge_provider_time",
+      },
+      adapter,
+      client,
+    );
+
+    const paid = await completeRechargeFromProviderWebhook(
+      adapter,
+      { rawBody: "signed-provider-time-event" },
+      client,
+    );
+
+    expect(paid.id).toBe(order.id);
+    expect(paid.paidAt).toBe(providerOccurredAt.toISOString());
+    expect(client.rechargeOrders[0]?.paidAt).toEqual(
+      providerOccurredAt,
+    );
+    expect(client.providerEvents[0]?.processedAt).toEqual(verifiedAt);
+  });
 });
+
+function weChatAdapter(
+  overrides: Partial<PaymentProviderAdapter>,
+): PaymentProviderAdapter {
+  return {
+    provider: PaymentProvider.WECHAT_PAY,
+    async createRechargeCheckout(input) {
+      return {
+        provider: PaymentProvider.WECHAT_PAY,
+        providerOrderId: input.rechargeOrderId!,
+        checkoutUrl: "weixin://wxpay/bizpayurl?pr=test",
+        providerPayload: {
+          mode: "native",
+        },
+      };
+    },
+    async normalizeWebhookEvent() {
+      throw new Error("Webhook normalization was not configured.");
+    },
+    ...overrides,
+  };
+}
+
+function normalizedWeChatPaidEvent(input: {
+  orderId: string;
+  providerEventId: string;
+  providerTransactionId: string;
+}): NormalizedPaymentProviderEvent {
+  return {
+    provider: PaymentProvider.WECHAT_PAY,
+    providerEventId: input.providerEventId,
+    providerTransactionId: input.providerTransactionId,
+    eventType: PaymentProviderEventType.RECHARGE_PAID,
+    rechargeOrderId: input.orderId,
+    providerOrderId: input.orderId,
+    amountCents: 1200,
+    currency: "CNY",
+    rawPayload: {
+      id: input.providerEventId,
+      resource: {
+        ciphertext: "encrypted",
+      },
+    },
+    normalizedPayload: {
+      providerTransactionId: input.providerTransactionId,
+    },
+    idempotencyKey: `wechat_pay:${input.providerEventId}`,
+    verifiedAt: new Date("2026-07-27T00:00:00.000Z"),
+  };
+}
 
 type UserWalletRow = {
   id: string;
@@ -407,6 +711,7 @@ type RechargeOrderRow = {
   productCode: string | null;
   provider: PaymentProvider;
   providerOrderId: string | null;
+  providerTransactionId: string | null;
   amountCents: number;
   currency: string;
   status: RechargeOrderStatus;
@@ -421,9 +726,17 @@ type ProviderEventRow = {
   id: string;
   provider: PaymentProvider;
   providerEventId: string;
+  providerTransactionId: string | null;
   eventType: PaymentProviderEventType;
   rechargeOrderId: string | null;
   processedAt: Date | null;
+};
+
+type RechargeRefundRow = {
+  id: string;
+  rechargeOrderId: string;
+  provider: PaymentProvider;
+  providerStatus: RechargeRefundProviderStatus;
 };
 
 type LedgerRow = {
@@ -449,10 +762,34 @@ type IdentityLinkRow = {
 class FakeRechargeClient {
   userWallets: UserWalletRow[] = [];
   rechargeOrders: RechargeOrderRow[] = [];
+  rechargeRefunds: RechargeRefundRow[] = [];
   providerEvents: ProviderEventRow[] = [];
   ledgerEntries: LedgerRow[] = [];
   identityLinks: IdentityLinkRow[] = [];
   walletTransactions: any[] = [];
+  outboxEvents: any[] = [];
+
+  outboxEvent = {
+    upsert: async (args: any) => {
+      const existing = this.outboxEvents.find(
+        (row) =>
+          row.idempotencyKey === args.where.idempotencyKey,
+      );
+      if (existing) {
+        Object.assign(existing, args.update);
+        return existing;
+      }
+      const row = {
+        id: `outbox_${this.outboxEvents.length + 1}`,
+        ...args.create,
+        attemptCount: 0,
+        processedAt: null,
+        lastError: null,
+      };
+      this.outboxEvents.push(row);
+      return row;
+    },
+  };
 
   userWallet = {
     findFirst: async (args: any) => {
@@ -546,6 +883,8 @@ class FakeRechargeClient {
         productCode: args.data.productCode ?? null,
         provider: args.data.provider,
         providerOrderId: args.data.providerOrderId ?? null,
+        providerTransactionId:
+          args.data.providerTransactionId ?? null,
         amountCents: args.data.amountCents,
         currency: args.data.currency,
         status: args.data.status,
@@ -584,11 +923,18 @@ class FakeRechargeClient {
 
   paymentProviderEvent = {
     findUnique: async (args: any) => {
-      const key = args.where.provider_providerEventId;
+      const eventKey = args.where.provider_providerEventId;
+      const transactionKey =
+        args.where.provider_providerTransactionId;
       return (
         this.providerEvents.find(
           (event) =>
-            event.provider === key.provider && event.providerEventId === key.providerEventId,
+            eventKey
+              ? event.provider === eventKey.provider
+                && event.providerEventId === eventKey.providerEventId
+              : event.provider === transactionKey.provider
+                && event.providerTransactionId
+                  === transactionKey.providerTransactionId,
         ) ?? null
       );
     },
@@ -606,12 +952,27 @@ class FakeRechargeClient {
         id: `provider_event_${this.providerEvents.length + 1}`,
         provider: args.create.provider,
         providerEventId: args.create.providerEventId,
+        providerTransactionId:
+          args.create.providerTransactionId ?? null,
         eventType: args.create.eventType,
         rechargeOrderId: args.create.rechargeOrderId ?? null,
         processedAt: args.create.processedAt ?? null,
       };
       this.providerEvents.push(event);
       return event;
+    },
+  };
+
+  rechargeRefund = {
+    findFirst: async (args: any) => {
+      return (
+        this.rechargeRefunds.find(
+          (refund) =>
+            refund.rechargeOrderId === args.where.rechargeOrderId
+            && refund.provider === args.where.provider
+            && refund.providerStatus === args.where.providerStatus,
+        ) ?? null
+      );
     },
   };
 
@@ -674,19 +1035,23 @@ class FakeRechargeClient {
   async $transaction<T>(fn: (tx: FakeRechargeClient) => Promise<T>): Promise<T> {
     const userWallets = this.userWallets.map((row) => ({ ...row }));
     const rechargeOrders = this.rechargeOrders.map((row) => ({ ...row }));
+    const rechargeRefunds = this.rechargeRefunds.map((row) => ({ ...row }));
     const providerEvents = this.providerEvents.map((row) => ({ ...row }));
     const ledgerEntries = this.ledgerEntries.map((row) => ({ ...row }));
     const identityLinks = this.identityLinks.map((row) => ({ ...row }));
     const walletTransactions = this.walletTransactions.map((row) => ({ ...row }));
+    const outboxEvents = this.outboxEvents.map((row) => ({ ...row }));
     try {
       return await fn(this);
     } catch (error) {
       this.userWallets = userWallets;
       this.rechargeOrders = rechargeOrders;
+      this.rechargeRefunds = rechargeRefunds;
       this.providerEvents = providerEvents;
       this.ledgerEntries = ledgerEntries;
       this.identityLinks = identityLinks;
       this.walletTransactions = walletTransactions;
+      this.outboxEvents = outboxEvents;
       throw error;
     }
   }

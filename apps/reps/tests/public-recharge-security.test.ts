@@ -1,18 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  claimPaymentProviderOperation: vi.fn(),
   completeMockRechargeAndPurchaseAgentTokens: vi.fn(),
+  createPaymentProviderOperationScopeKey: vi.fn(),
+  createRechargeOrder: vi.fn(),
   createMockRechargeOrder: vi.fn(),
+  createWeChatPayApiV3PaymentProviderAdapter: vi.fn(),
+  getPublicAgentWalletState: vi.fn(),
   getPublicRepresentativeRuntime: vi.fn(),
   getUserAgentWalletBalance: vi.fn(),
+  isWeChatPayApiV3Enabled: vi.fn(),
+  loadWeChatPayApiV3ConfigFromEnv: vi.fn(),
   resolvePublicAudienceWalletExternalUserId: vi.fn(),
   agentTokenPurchaseFindFirst: vi.fn(),
   rechargeOrderFindUnique: vi.fn(),
+  releasePaymentProviderOperation: vi.fn(),
   reverseAgentTokenPurchase: vi.fn(),
   resolveWebAudienceContact: vi.fn(),
   publicAudiencePrincipalErrorStatus: vi.fn(),
   resolvePublicAudienceRequestPrincipal: vi.fn(),
   setPublicAudienceSessionCookie: vi.fn(),
+  principalRevalidate: vi.fn(),
   cookieGet: vi.fn(),
 }));
 
@@ -21,11 +30,28 @@ vi.mock("@delegate/web-data", () => ({
     "agent-wallet:service-credit:v1",
   AgentWalletReconciliationError: class AgentWalletReconciliationError
     extends Error {},
+  RechargePaymentConflictError: class RechargePaymentConflictError
+    extends Error {},
+  WeChatPayConfigurationError: class WeChatPayConfigurationError
+    extends Error {},
+  WeChatPayProtocolError: class WeChatPayProtocolError extends Error {},
+  WalletIdempotencyConflictError: class WalletIdempotencyConflictError
+    extends Error {},
+  claimPaymentProviderOperation: mocks.claimPaymentProviderOperation,
   completeMockRechargeAndPurchaseAgentTokens:
     mocks.completeMockRechargeAndPurchaseAgentTokens,
+  createPaymentProviderOperationScopeKey:
+    mocks.createPaymentProviderOperationScopeKey,
+  createRechargeOrder: mocks.createRechargeOrder,
   createMockRechargeOrder: mocks.createMockRechargeOrder,
+  createWeChatPayApiV3PaymentProviderAdapter:
+    mocks.createWeChatPayApiV3PaymentProviderAdapter,
+  getPublicAgentWalletState: mocks.getPublicAgentWalletState,
   getPublicRepresentativeRuntime: mocks.getPublicRepresentativeRuntime,
   getUserAgentWalletBalance: mocks.getUserAgentWalletBalance,
+  isWeChatPayApiV3Enabled: mocks.isWeChatPayApiV3Enabled,
+  loadWeChatPayApiV3ConfigFromEnv:
+    mocks.loadWeChatPayApiV3ConfigFromEnv,
   resolvePublicAudienceWalletExternalUserId:
     mocks.resolvePublicAudienceWalletExternalUserId,
   prisma: {
@@ -36,6 +62,7 @@ vi.mock("@delegate/web-data", () => ({
       findUnique: mocks.rechargeOrderFindUnique,
     },
   },
+  releasePaymentProviderOperation: mocks.releasePaymentProviderOperation,
   reverseAgentTokenPurchase: mocks.reverseAgentTokenPurchase,
   resolveWebAudienceContact: mocks.resolveWebAudienceContact,
 }));
@@ -53,7 +80,10 @@ vi.mock("../app/reps/[slug]/public-principal", () => ({
   setPublicAudienceSessionCookie: mocks.setPublicAudienceSessionCookie,
 }));
 
-import { POST as createRecharge } from "../app/reps/[slug]/recharge/route";
+import {
+  GET as readWalletState,
+  POST as createRecharge,
+} from "../app/reps/[slug]/recharge/route";
 import { POST as completeRecharge } from "../app/reps/[slug]/recharge/[id]/mock-success/route";
 import { POST as reverseRechargePurchase } from "../app/reps/[slug]/recharge/[id]/mock-reversal/route";
 
@@ -63,6 +93,24 @@ describe("public mock recharge security", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     restoreEnv("NODE_ENV", "development");
+    mocks.isWeChatPayApiV3Enabled.mockReturnValue(false);
+    mocks.loadWeChatPayApiV3ConfigFromEnv.mockReturnValue({
+      appId: "wx_app",
+    });
+    mocks.createWeChatPayApiV3PaymentProviderAdapter.mockReturnValue({
+      provider: "WECHAT_PAY",
+    });
+    mocks.createPaymentProviderOperationScopeKey.mockReturnValue(
+      "a".repeat(64),
+    );
+    mocks.claimPaymentProviderOperation.mockResolvedValue({
+      claimed: true,
+      scopeKey: "a".repeat(64),
+      leaseToken: "wechat-create-lease-1",
+      leaseExpiresAt: new Date("2026-07-27T12:00:15.000Z"),
+      nextAllowedAt: new Date("2026-07-27T12:00:10.000Z"),
+    });
+    mocks.releasePaymentProviderOperation.mockResolvedValue(true);
     mocks.getPublicRepresentativeRuntime.mockResolvedValue({
       status: "available",
       setup: { id: "rep-1", slug: "delegate" },
@@ -79,6 +127,7 @@ describe("public mock recharge security", () => {
         sessionToken: "session-token",
         expiresAt: "2026-07-30T00:00:00.000Z",
       },
+      revalidate: mocks.principalRevalidate,
     });
     mocks.resolvePublicAudienceWalletExternalUserId.mockResolvedValue(
       "web:delegate:aud_current_visitor",
@@ -88,9 +137,35 @@ describe("public mock recharge security", () => {
       audienceIdentityId: "identity-1",
       displayName: "Visitor",
     });
+    mocks.rechargeOrderFindUnique.mockResolvedValue(null);
     mocks.createMockRechargeOrder.mockResolvedValue({
       id: "order-1",
       status: "requires_payment",
+    });
+    mocks.createRechargeOrder.mockResolvedValue({
+      id: "wechat-order-1",
+      amountCents: 2000,
+      currency: "CNY",
+      provider: "wechat_pay",
+      status: "requires_payment",
+      checkoutUrl: "weixin://wxpay/bizpayurl?pr=redacted",
+      paidAt: null,
+      cashBalanceCents: 0,
+      externalUserId: "must-not-leak",
+      userWalletId: "must-not-leak",
+    });
+    mocks.getPublicAgentWalletState.mockResolvedValue({
+      summary: {
+        currency: "CNY",
+        cashBalanceCents: 0,
+        serviceCreditsAvailable: 8,
+        serviceCreditsReserved: 2,
+        serviceCreditsPurchased: 12,
+        serviceCreditsConsumed: 2,
+      },
+      orders: [],
+      purchases: [],
+      refunds: [],
     });
     mocks.completeMockRechargeAndPurchaseAgentTokens.mockResolvedValue({
       rechargeOrder: {
@@ -148,7 +223,94 @@ describe("public mock recharge security", () => {
     expect(mocks.completeMockRechargeAndPurchaseAgentTokens).not.toHaveBeenCalled();
   });
 
-  it("does not expose the mock recharge creation route in production", async () => {
+  it("restores only the active principal's representative and currency state", async () => {
+    restoreEnv("NODE_ENV", "production");
+
+    const request = new Request(
+      "http://localhost/reps/delegate/recharge?currency=cny",
+    );
+    const response = await readWalletState(request, {
+      params: Promise.resolve({ slug: "delegate" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("vary")).toBe("Cookie");
+    expect(mocks.principalRevalidate).toHaveBeenCalledOnce();
+    expect(mocks.getPublicAgentWalletState).toHaveBeenCalledWith({
+      audienceIdentityId: "identity-1",
+      representativeId: "rep-1",
+      currency: "CNY",
+    });
+    expect(mocks.setPublicAudienceSessionCookie).toHaveBeenCalledWith(
+      response,
+      request,
+      "delegate",
+      expect.objectContaining({
+        audienceId: "aud_current_visitor",
+      }),
+    );
+    await expect(response.json()).resolves.toEqual(
+      expect.objectContaining({
+        summary: expect.objectContaining({
+          currency: "CNY",
+          serviceCreditsAvailable: 8,
+        }),
+      }),
+    );
+  });
+
+  it("rejects an unsupported wallet currency without resolving wallet data", async () => {
+    const response = await readWalletState(
+      new Request("http://localhost/reps/delegate/recharge?currency=EUR"),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(mocks.resolvePublicAudienceRequestPrincipal).not.toHaveBeenCalled();
+    expect(mocks.getPublicAgentWalletState).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the current wallet identity requires reconciliation", async () => {
+    mocks.getPublicAgentWalletState.mockRejectedValue(
+      new Error("multiple canonical wallets"),
+    );
+    mocks.publicAudiencePrincipalErrorStatus.mockReturnValue(409);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await readWalletState(
+      new Request("http://localhost/reps/delegate/recharge?currency=CNY"),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    await expect(response.text()).resolves.not.toContain(
+      "multiple canonical wallets",
+    );
+  });
+
+  it("does not expose database details from the read-only wallet route", async () => {
+    mocks.getPublicAgentWalletState.mockRejectedValue(
+      new Error("postgres://wallet:secret@private-host/delegate"),
+    );
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await readWalletState(
+      new Request("http://localhost/reps/delegate/recharge"),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(body).toContain("钱包状态读取失败");
+    expect(body).not.toContain("secret");
+    expect(body).not.toContain("private-host");
+  });
+
+  it("fails closed without exposing mock recharge creation in production", async () => {
     restoreEnv("NODE_ENV", "production");
 
     const response = await createRecharge(
@@ -160,10 +322,240 @@ describe("public mock recharge security", () => {
       { params: Promise.resolve({ slug: "delegate" }) },
     );
 
-    expect(response.status).toBe(404);
+    expect(response.status).toBe(503);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(mocks.getPublicRepresentativeRuntime).not.toHaveBeenCalled();
     expect(mocks.createMockRechargeOrder).not.toHaveBeenCalled();
+    expect(mocks.createRechargeOrder).not.toHaveBeenCalled();
+  });
+
+  it("uses only the server-selected WeChat adapter in production", async () => {
+    restoreEnv("NODE_ENV", "production");
+    mocks.isWeChatPayApiV3Enabled.mockReturnValue(true);
+
+    const response = await createRecharge(
+      new Request("http://localhost/reps/delegate/recharge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          amountCents: 2000,
+          provider: "MOCK",
+          currency: "USD",
+          externalUserId: "attacker-selected",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+    const body = await response.json() as {
+      rechargeOrder: Record<string, unknown>;
+    };
+
+    expect(response.status).toBe(201);
+    expect(mocks.createMockRechargeOrder).not.toHaveBeenCalled();
+    expect(
+      mocks.createWeChatPayApiV3PaymentProviderAdapter,
+    ).toHaveBeenCalledOnce();
+    expect(
+      mocks.createPaymentProviderOperationScopeKey,
+    ).toHaveBeenCalledWith([
+      "wechat_pay",
+      "recharge_create",
+      "identity-1",
+    ]);
+    expect(mocks.claimPaymentProviderOperation).toHaveBeenCalledWith({
+      scopeKey: "a".repeat(64),
+    });
+    expect(mocks.createRechargeOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        externalUserId: "web:delegate:aud_current_visitor",
+        audienceIdentityId: "identity-1",
+        representativeId: "rep-1",
+        productCode: "agent-wallet:service-credit:v1",
+        amountCents: 2000,
+        currency: "CNY",
+      }),
+      { provider: "WECHAT_PAY" },
+    );
+    expect(mocks.releasePaymentProviderOperation).toHaveBeenCalledWith({
+      scopeKey: "a".repeat(64),
+      leaseToken: "wechat-create-lease-1",
+    });
+    expect(body.rechargeOrder).not.toHaveProperty("externalUserId");
+    expect(body.rechargeOrder).not.toHaveProperty("userWalletId");
+  });
+
+  it("rate-limits a new WeChat creation using only the canonical audience identity", async () => {
+    restoreEnv("NODE_ENV", "production");
+    mocks.isWeChatPayApiV3Enabled.mockReturnValue(true);
+    mocks.claimPaymentProviderOperation.mockResolvedValue({
+      claimed: false,
+      scopeKey: "a".repeat(64),
+      retryAfterSeconds: 9,
+    });
+
+    const request = new Request(
+      "http://localhost/reps/delegate/recharge",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-forwarded-for": "203.0.113.9",
+        },
+        body: JSON.stringify({
+          amountCents: 2000,
+          idempotencyKey: "rate-limited-operation",
+        }),
+      },
+    );
+    const response = await createRecharge(request, {
+      params: Promise.resolve({ slug: "delegate" }),
+    });
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("9");
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("vary")).toBe("Cookie");
+    await expect(response.json()).resolves.toEqual({
+      error: "充值请求过于频繁，请稍后使用同一操作重试。",
+      code: "payment_rate_limited",
+    });
+    expect(
+      mocks.createPaymentProviderOperationScopeKey,
+    ).toHaveBeenCalledWith([
+      "wechat_pay",
+      "recharge_create",
+      "identity-1",
+    ]);
+    expect(
+      JSON.stringify(mocks.createPaymentProviderOperationScopeKey.mock.calls),
+    ).not.toContain("203.0.113.9");
+    expect(mocks.rechargeOrderFindUnique).toHaveBeenCalledTimes(2);
+    expect(mocks.loadWeChatPayApiV3ConfigFromEnv).not.toHaveBeenCalled();
+    expect(
+      mocks.createWeChatPayApiV3PaymentProviderAdapter,
+    ).not.toHaveBeenCalled();
+    expect(mocks.createRechargeOrder).not.toHaveBeenCalled();
+    expect(mocks.releasePaymentProviderOperation).not.toHaveBeenCalled();
+    expect(mocks.setPublicAudienceSessionCookie).toHaveBeenCalledWith(
+      response,
+      request,
+      "delegate",
+      expect.objectContaining({
+        audienceId: "aud_current_visitor",
+      }),
+    );
+  });
+
+  it("reuses a durable idempotent WeChat order without occupying the creation gate", async () => {
+    restoreEnv("NODE_ENV", "production");
+    mocks.isWeChatPayApiV3Enabled.mockReturnValue(true);
+    mocks.rechargeOrderFindUnique.mockResolvedValue({
+      status: "REQUIRES_PAYMENT",
+    });
+
+    const response = await createRecharge(
+      new Request("http://localhost/reps/delegate/recharge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          amountCents: 2000,
+          idempotencyKey: "existing-operation",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(mocks.claimPaymentProviderOperation).not.toHaveBeenCalled();
+    expect(mocks.createRechargeOrder).toHaveBeenCalledOnce();
+    expect(mocks.releasePaymentProviderOperation).not.toHaveBeenCalled();
+  });
+
+  it("claims the creation gate before retrying an unfinished local WeChat order", async () => {
+    restoreEnv("NODE_ENV", "production");
+    mocks.isWeChatPayApiV3Enabled.mockReturnValue(true);
+    mocks.rechargeOrderFindUnique.mockResolvedValue({
+      status: "CREATED",
+    });
+
+    const response = await createRecharge(
+      new Request("http://localhost/reps/delegate/recharge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          amountCents: 2000,
+          idempotencyKey: "unfinished-operation",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(mocks.claimPaymentProviderOperation).toHaveBeenCalledOnce();
+    expect(mocks.createRechargeOrder).toHaveBeenCalledOnce();
+    expect(mocks.releasePaymentProviderOperation).toHaveBeenCalledOnce();
+  });
+
+  it("reuses an idempotent order that finishes while its gate claim is deferred", async () => {
+    restoreEnv("NODE_ENV", "production");
+    mocks.isWeChatPayApiV3Enabled.mockReturnValue(true);
+    mocks.rechargeOrderFindUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ status: "REQUIRES_PAYMENT" });
+    mocks.claimPaymentProviderOperation.mockResolvedValue({
+      claimed: false,
+      scopeKey: "a".repeat(64),
+      retryAfterSeconds: 9,
+    });
+
+    const response = await createRecharge(
+      new Request("http://localhost/reps/delegate/recharge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          amountCents: 2000,
+          idempotencyKey: "raced-operation",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(mocks.createRechargeOrder).toHaveBeenCalledOnce();
+    expect(mocks.releasePaymentProviderOperation).not.toHaveBeenCalled();
+  });
+
+  it("releases the fenced creation lease when provider creation fails", async () => {
+    restoreEnv("NODE_ENV", "production");
+    mocks.isWeChatPayApiV3Enabled.mockReturnValue(true);
+    mocks.createRechargeOrder.mockRejectedValue(
+      new Error("provider-internal-secret"),
+    );
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    const response = await createRecharge(
+      new Request("http://localhost/reps/delegate/recharge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          amountCents: 2000,
+          idempotencyKey: "failed-operation",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mocks.releasePaymentProviderOperation).toHaveBeenCalledWith({
+      scopeKey: "a".repeat(64),
+      leaseToken: "wechat-create-lease-1",
+    });
+    expect(await response.text()).not.toContain("provider-internal-secret");
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+      "provider-internal-secret",
+    );
   });
 
   it("does not expose the mock unused-credit reversal route in production", async () => {

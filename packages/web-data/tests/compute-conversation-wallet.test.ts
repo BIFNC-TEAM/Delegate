@@ -159,6 +159,7 @@ describe("compute approval wallet finalization", () => {
     expect(mocks.settleConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-1",
+        expectedGenerationRunId: "run-1",
         settledTokenAmount: 1,
         provider: "compute",
         idempotencyKey: "generation:run-1:settle",
@@ -203,6 +204,7 @@ describe("compute approval wallet finalization", () => {
     expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-1",
+        expectedGenerationRunId: "run-1",
         failed: false,
         reason: "compute_rejected",
         idempotencyKey: "generation:run-1:release",
@@ -317,6 +319,7 @@ describe("compute approval wallet finalization", () => {
       expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
         {
           usageChargeId: "usage-1",
+          expectedGenerationRunId: "run-1",
           reason: "generation_deferred_to_human",
           idempotencyKey: "generation:run-1:release",
         },

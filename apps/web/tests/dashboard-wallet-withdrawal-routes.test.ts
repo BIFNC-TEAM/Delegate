@@ -6,8 +6,18 @@ const mocks = vi.hoisted(() => {
       super("Idempotency key was already used for a different withdrawal request.");
     }
   }
+  class WalletReconciliationRequiredError extends Error {
+    readonly code = "wallet_reconciliation_required";
+
+    constructor() {
+      super(
+        "Wallet reconciliation is required before financial operations can continue.",
+      );
+    }
+  }
   return {
     WalletIdempotencyConflictError,
+    WalletReconciliationRequiredError,
     assertOwnerCanAccessRepresentative: vi.fn(),
     cancelWithdrawRequest: vi.fn(),
     createWithdrawRequest: vi.fn(),
@@ -18,6 +28,8 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("@delegate/web-data", () => ({
   WalletIdempotencyConflictError: mocks.WalletIdempotencyConflictError,
+  WalletReconciliationRequiredError:
+    mocks.WalletReconciliationRequiredError,
   assertOwnerCanAccessRepresentative:
     mocks.assertOwnerCanAccessRepresentative,
   cancelWithdrawRequest: mocks.cancelWithdrawRequest,
@@ -141,6 +153,22 @@ describe("dashboard wallet withdrawal routes", () => {
     expect(failureBody).toContain("Failed to update the withdrawal request.");
     expect(failureBody).not.toContain("secret");
     expect(failureBody).not.toContain("private");
+  });
+
+  it("returns a stable reconciliation-required conflict code", async () => {
+    mocks.createWithdrawRequest.mockRejectedValueOnce(
+      new mocks.WalletReconciliationRequiredError(),
+    );
+
+    const response = await createWithdrawal(withdrawalRequest());
+
+    expect(response.status).toBe(409);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    await expect(response.json()).resolves.toEqual({
+      error:
+        "Wallet reconciliation is required before financial operations can continue.",
+      code: "wallet_reconciliation_required",
+    });
   });
 
   it("lets the authenticated owner cancel their own active withdrawal", async () => {

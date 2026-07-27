@@ -20,6 +20,11 @@ import {
   markWithdrawRequestPaid,
   rejectWithdrawRequest,
 } from "../src/agent-wallet-withdrawals";
+import {
+  WalletReconciliationRequiredError,
+  type WorkspaceWalletFundsWriteScope,
+  type WorkspaceWalletReconciliationStatus,
+} from "../src/wallet-reconciliation";
 
 describe("agent wallet withdrawals", () => {
   it("allocates multiple earnings deterministically and records a balanced freeze", async () => {
@@ -115,6 +120,107 @@ describe("agent wallet withdrawals", () => {
       ),
     ).rejects.toThrow("Idempotency key was already used");
     expect(client.withdrawRequests).toHaveLength(1);
+  });
+
+  it("allows warning reconciliation scopes to create withdrawals", async () => {
+    const client = new FakeWithdrawalClient({
+      reconciliationStatus: "warning",
+    });
+
+    await expect(createDefaultRequest(client)).resolves.toMatchObject({
+      status: "pending_review",
+    });
+    expect(client.reconciliationChecks).toEqual([
+      {
+        ownerId: "owner_1",
+        representativeId: "rep_1",
+        currency: "CNY",
+      },
+    ]);
+  });
+
+  it("blocks new withdrawal writes when reconciliation has errors", async () => {
+    const client = new FakeWithdrawalClient({
+      reconciliationStatus: "blocked",
+    });
+
+    const error = await createDefaultRequest(client).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(WalletReconciliationRequiredError);
+    expect(error).toMatchObject({
+      code: "wallet_reconciliation_required",
+    });
+    expect(client.withdrawRequests).toHaveLength(0);
+    expect(client.withdrawalAllocations).toHaveLength(0);
+    expect(client.walletTransactions).toHaveLength(0);
+    expect(client.ledgerEntries).toHaveLength(0);
+    expect(client.creatorEarnings[0]).toMatchObject({
+      withdrawableCents: 500,
+      frozenCents: 0,
+    });
+  });
+
+  it("blocks withdrawal progression and cancellation but permits exact replay", async () => {
+    const client = new FakeWithdrawalClient();
+    const request = await createDefaultRequest(client);
+
+    client.reconciliationStatus = "blocked";
+    await expect(
+      approveWithdrawRequest(
+        {
+          ownerId: "owner_1",
+          withdrawRequestId: request.id,
+          idempotencyKey: "approve_while_blocked",
+        },
+        client,
+      ),
+    ).rejects.toMatchObject({
+      code: "wallet_reconciliation_required",
+    });
+    await expect(
+      cancelWithdrawRequest(
+        {
+          ownerId: "owner_1",
+          withdrawRequestId: request.id,
+          idempotencyKey: "cancel_while_blocked",
+        },
+        client,
+      ),
+    ).rejects.toMatchObject({
+      code: "wallet_reconciliation_required",
+    });
+    expect(client.withdrawRequests[0]).toMatchObject({
+      status: WithdrawRequestStatus.PENDING_REVIEW,
+    });
+    expect(client.walletTransactions).toHaveLength(1);
+    expect(client.ledgerEntries).toHaveLength(2);
+
+    client.reconciliationStatus = "healthy";
+    const approved = await approveWithdrawRequest(
+      {
+        ownerId: "owner_1",
+        withdrawRequestId: request.id,
+        reviewedBy: "reviewer_1",
+        idempotencyKey: "approve_replay_during_block",
+      },
+      client,
+    );
+    const checksBeforeReplay = client.reconciliationChecks.length;
+    client.reconciliationStatus = "blocked";
+    await expect(
+      approveWithdrawRequest(
+        {
+          ownerId: "owner_1",
+          withdrawRequestId: request.id,
+          reviewedBy: "reviewer_1",
+          idempotencyKey: "approve_replay_during_block",
+        },
+        client,
+      ),
+    ).resolves.toEqual(approved);
+    expect(client.reconciliationChecks).toHaveLength(checksBeforeReplay);
   });
 
   it("allows only one active request per representative and currency", async () => {
@@ -705,6 +811,8 @@ class FakeWithdrawalClient {
   walletTransactions: WalletTransactionRow[] = [];
   ledgerEntries: LedgerRow[] = [];
   failNextLedgerCreate = false;
+  reconciliationStatus: WorkspaceWalletReconciliationStatus = "healthy";
+  reconciliationChecks: WorkspaceWalletFundsWriteScope[] = [];
 
   constructor(
     options: {
@@ -712,8 +820,10 @@ class FakeWithdrawalClient {
       claimStatus?: RepresentativeClaimStatus;
       representativeOwnerId?: string;
       withdrawableAmounts?: number[];
+      reconciliationStatus?: WorkspaceWalletReconciliationStatus;
     } = {},
   ) {
+    this.reconciliationStatus = options.reconciliationStatus ?? "healthy";
     this.owners = [
       {
         id: "owner_1",
@@ -744,6 +854,15 @@ class FakeWithdrawalClient {
       }),
     );
   }
+
+  walletFundsWriteGate = {
+    assertAllowed: async (input: WorkspaceWalletFundsWriteScope) => {
+      this.reconciliationChecks.push({ ...input });
+      if (this.reconciliationStatus === "blocked") {
+        throw new WalletReconciliationRequiredError();
+      }
+    },
+  };
 
   owner = {
     findUnique: async (args: any) => {

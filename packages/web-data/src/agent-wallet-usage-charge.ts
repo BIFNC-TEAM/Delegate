@@ -6,6 +6,7 @@ import {
   AmnWalletAccountType,
   CreatorEarningStatus,
   WalletTransactionEventType,
+  WalletTransactionStatus,
   type Prisma,
 } from "@prisma/client";
 
@@ -18,6 +19,7 @@ import {
   findWalletTransactionByIdempotencyKey,
   recordWalletTransaction,
   type WalletTransactionClient,
+  type WalletTransactionRecord,
 } from "./agent-wallet-transactions";
 import {
   assertWalletIdempotencyField,
@@ -28,14 +30,16 @@ import {
 import { prisma } from "./prisma";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
-  consumeServiceEntitlement,
-  releaseServiceEntitlement,
   resolveServiceEntitlementAudienceIdentityId,
-  reserveServiceEntitlement,
   serviceEntitlementOperationKey,
   type ServiceEntitlementClient,
   type ServiceEntitlementSnapshot,
 } from "./service-entitlements";
+import {
+  consumeAgentWalletServiceCreditEntitlement,
+  releaseAgentWalletServiceCreditEntitlement,
+  reserveAgentWalletServiceCreditEntitlement,
+} from "./service-entitlements-wallet-internal";
 
 type UserWalletRecord = {
   id: string;
@@ -178,6 +182,11 @@ type GenerationRunRecord = {
 
 export type UsageChargeClient = Omit<WalletLedgerClient, "$transaction"> &
   WalletTransactionClient & {
+    walletTransaction?: NonNullable<
+      WalletTransactionClient["walletTransaction"]
+    > & {
+      findMany(args: unknown): Promise<WalletTransactionRecord[]>;
+    };
     userWallet: {
       findUnique(args: unknown): Promise<UserWalletRecord | null>;
     };
@@ -289,6 +298,7 @@ export type ReleaseAgentUsageCreditsInput = {
 
 type AgentUsageLifecycleInternalOptions = {
   allowBoundEntitlementLifecycle?: boolean;
+  expectedGenerationRunId?: string;
 };
 
 export class InsufficientAgentUsageCreditsError extends Error {
@@ -367,6 +377,7 @@ export type ReserveConversationWalletUsageInput = UsageWalletSelector & {
 
 export type SettleConversationWalletUsageInput = {
   usageChargeId: string;
+  expectedGenerationRunId: string;
   settledTokenAmount: number;
   providerCostCents?: number;
   provider?: string;
@@ -375,6 +386,7 @@ export type SettleConversationWalletUsageInput = {
 
 export type ReleaseConversationWalletUsageInput = {
   usageChargeId: string;
+  expectedGenerationRunId: string;
   failed?: boolean;
   reason?: string;
   idempotencyKey?: string;
@@ -419,6 +431,9 @@ export type AgentUsageEntitlementVerificationClient = {
     UsageChargeClient["serviceEntitlementLedgerEntry"]
   >;
   generationRun: NonNullable<UsageChargeClient["generationRun"]>;
+  walletTransaction: {
+    findMany(args: unknown): Promise<WalletTransactionRecord[]>;
+  };
 };
 
 type ConversationWalletUsageReadClient = {
@@ -429,6 +444,56 @@ type ConversationWalletUsageReadClient = {
   serviceEntitlementAccount?: UsageChargeClient["serviceEntitlementAccount"];
   serviceEntitlementLedgerEntry?: UsageChargeClient["serviceEntitlementLedgerEntry"];
   generationRun?: UsageChargeClient["generationRun"];
+  walletTransaction?: {
+    findMany(args: unknown): Promise<WalletTransactionRecord[]>;
+  };
+};
+
+export type AgentUsageTransferChainErrorReason =
+  | "AUDIT_LOOKUP_UNAVAILABLE"
+  | "INVALID_AUDIT_FACT"
+  | "RUN_CONVERSATION_MISMATCH"
+  | "FORKED_CHAIN"
+  | "CYCLIC_CHAIN"
+  | "BROKEN_CHAIN";
+
+export class AgentUsageTransferChainError extends Error {
+  readonly code = "AGENT_USAGE_TRANSFER_CHAIN_INVALID";
+
+  constructor(
+    readonly reason: AgentUsageTransferChainErrorReason,
+    detail: string,
+  ) {
+    super(`Agent usage transfer chain invalid [${reason}]: ${detail}`);
+    this.name = "AgentUsageTransferChainError";
+  }
+}
+
+export type VerifyAgentUsageEntitlementTransferChainInput = {
+  usageChargeId: string;
+  entitlementAccountId: string;
+  audienceIdentityId: string;
+  representativeId: string;
+  conversationId: string;
+  currentGenerationRunId: string;
+  reserveGenerationRunId: string;
+  reserveLedgerEntryId: string;
+  currency: string;
+  userWalletId: string;
+  ownerId: string | null;
+  transferTransactions: readonly WalletTransactionRecord[];
+  generationRuns: ReadonlyArray<{
+    id: string;
+    conversationId: string | null;
+  }>;
+};
+
+export type VerifiedAgentUsageEntitlementTransferChain = {
+  usageChargeId: string;
+  reserveGenerationRunId: string;
+  currentGenerationRunId: string;
+  transferCount: number;
+  transactionIds: string[];
 };
 
 export type ConversationWalletUsageSnapshot = {
@@ -931,9 +996,9 @@ export async function settleAgentUsageCredits(
             },
           },
         }),
-        tx.agentUsageCharge.update({
-          where: { id: usageCharge.id },
-          data: {
+        updateAgentUsageChargeWithOwnerFence(
+          usageCharge,
+          {
             status: AgentUsageChargeStatus.SETTLED,
             settledTokenAmount: normalized.settledTokenAmount,
             releasedTokenAmount,
@@ -942,7 +1007,9 @@ export async function settleAgentUsageCredits(
             settledAt,
             ...(releasedTokenAmount > 0 ? { releasedAt: settledAt } : {}),
           },
-        }),
+          internalOptions,
+          tx,
+        ),
       ]);
 
     return serializeAgentUsageCharge({
@@ -1080,14 +1147,16 @@ export async function releaseAgentUsageCredits(
           },
         },
       }),
-      tx.agentUsageCharge.update({
-        where: { id: usageCharge.id },
-        data: {
+      updateAgentUsageChargeWithOwnerFence(
+        usageCharge,
+        {
           status: targetStatus,
           releasedTokenAmount: usageCharge.reservedTokenAmount,
           releasedAt,
         },
-      }),
+        internalOptions,
+        tx,
+      ),
     ]);
 
     return serializeAgentUsageCharge({
@@ -1221,11 +1290,10 @@ export async function reserveConversationWalletUsage(
       conversationId,
       tx,
     );
-    const entitlement = await reserveServiceEntitlement(
+    const entitlement = await reserveAgentWalletServiceCreditEntitlement(
       {
         audienceIdentityId: canonicalAudienceIdentityId,
         representativeId,
-        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
         units: input.tokenAmount,
         operationKey: conversationWalletEntitlementOperationKey(
           "reserve",
@@ -1300,6 +1368,10 @@ export async function settleConversationWalletUsage(
     input.usageChargeId,
     "usageChargeId",
   );
+  const expectedGenerationRunId = requiredUsageContextText(
+    input.expectedGenerationRunId,
+    "expectedGenerationRunId",
+  );
   assertNonNegativeInteger(input.settledTokenAmount, "settledTokenAmount");
 
   return runWalletWriteTransaction(client, async (walletTx) => {
@@ -1308,12 +1380,17 @@ export async function settleConversationWalletUsage(
       usageChargeId,
       tx,
     );
+    await verifyAgentUsageEntitlementOwnerWithinTransaction(
+      binding,
+      expectedGenerationRunId,
+      tx,
+    );
     if (binding.status === AgentUsageChargeStatus.RESERVED) {
       await verifyAgentUsageEntitlementReservationWithinTransaction(
         {
           usageChargeId,
           representativeId: binding.representativeId,
-          generationRunId: binding.generationRunId,
+          generationRunId: expectedGenerationRunId,
           audienceIdentityId: binding.audienceIdentityId,
           tokenAmount: binding.reservedTokenAmount,
         },
@@ -1328,17 +1405,16 @@ export async function settleConversationWalletUsage(
 
     let consumed: ServiceEntitlementSnapshot | null = null;
     if (input.settledTokenAmount > 0) {
-      consumed = await consumeServiceEntitlement(
+      consumed = await consumeAgentWalletServiceCreditEntitlement(
         {
           audienceIdentityId: binding.audienceIdentityId,
           representativeId: binding.representativeId,
-          productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
           units: input.settledTokenAmount,
           operationKey: conversationWalletEntitlementOperationKey(
             "settle-consume",
             binding.id,
           ),
-          generationRunId: binding.generationRunId,
+          generationRunId: expectedGenerationRunId,
           notes: "Consumed with an agent-wallet usage settlement.",
           metadata: {
             scope: "agent_wallet_usage",
@@ -1352,17 +1428,16 @@ export async function settleConversationWalletUsage(
       binding.reservedTokenAmount - input.settledTokenAmount;
     let released: ServiceEntitlementSnapshot | null = null;
     if (unusedTokenAmount > 0) {
-      released = await releaseServiceEntitlement(
+      released = await releaseAgentWalletServiceCreditEntitlement(
         {
           audienceIdentityId: binding.audienceIdentityId,
           representativeId: binding.representativeId,
-          productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
           units: unusedTokenAmount,
           operationKey: conversationWalletEntitlementOperationKey(
             "settle-release-unused",
             binding.id,
           ),
-          generationRunId: binding.generationRunId,
+          generationRunId: expectedGenerationRunId,
           notes: "Released unused units after an agent-wallet usage settlement.",
           metadata: {
             scope: "agent_wallet_usage",
@@ -1385,7 +1460,10 @@ export async function settleConversationWalletUsage(
           ?? `conversation_wallet:${usageChargeId}:settle`,
       },
       tx,
-      { allowBoundEntitlementLifecycle: true },
+      {
+        allowBoundEntitlementLifecycle: true,
+        expectedGenerationRunId,
+      },
     );
     assertConversationWalletUsageBinding(usageCharge, binding);
     const current = released ?? consumed;
@@ -1410,10 +1488,19 @@ export async function releaseConversationWalletUsage(
     input.usageChargeId,
     "usageChargeId",
   );
+  const expectedGenerationRunId = requiredUsageContextText(
+    input.expectedGenerationRunId,
+    "expectedGenerationRunId",
+  );
   return runWalletWriteTransaction(client, async (walletTx) => {
     const tx = walletTx as UsageChargeClient & ServiceEntitlementClient;
     const binding = await requireConversationWalletUsageBinding(
       usageChargeId,
+      tx,
+    );
+    await verifyAgentUsageEntitlementOwnerWithinTransaction(
+      binding,
+      expectedGenerationRunId,
       tx,
     );
     if (binding.status === AgentUsageChargeStatus.RESERVED) {
@@ -1421,24 +1508,23 @@ export async function releaseConversationWalletUsage(
         {
           usageChargeId,
           representativeId: binding.representativeId,
-          generationRunId: binding.generationRunId,
+          generationRunId: expectedGenerationRunId,
           audienceIdentityId: binding.audienceIdentityId,
           tokenAmount: binding.reservedTokenAmount,
         },
         tx,
       );
     }
-    const entitlement = await releaseServiceEntitlement(
+    const entitlement = await releaseAgentWalletServiceCreditEntitlement(
       {
         audienceIdentityId: binding.audienceIdentityId,
         representativeId: binding.representativeId,
-        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
         units: binding.reservedTokenAmount,
         operationKey: conversationWalletEntitlementOperationKey(
           "release",
           binding.id,
         ),
-        generationRunId: binding.generationRunId,
+        generationRunId: expectedGenerationRunId,
         notes: input.reason?.trim()
           ? `Released with agent-wallet usage: ${input.reason.trim()}`
           : "Released with an agent-wallet usage charge.",
@@ -1460,7 +1546,10 @@ export async function releaseConversationWalletUsage(
           ?? `conversation_wallet:${usageChargeId}:release`,
       },
       tx,
-      { allowBoundEntitlementLifecycle: true },
+      {
+        allowBoundEntitlementLifecycle: true,
+        expectedGenerationRunId,
+      },
     );
     assertConversationWalletUsageBinding(usageCharge, binding);
     return {
@@ -1661,7 +1750,9 @@ export async function applyAgentUsageCharge(
             ? { tokenPurchaseId: input.tokenPurchaseId }
             : {}),
           ...(input.kind ? { kind: input.kind } : {}),
-          ...(input.quantity ? { quantity: input.quantity } : {}),
+          ...(input.quantity !== undefined
+            ? { quantity: input.quantity }
+            : {}),
           ...(input.currency ? { currency: input.currency } : {}),
           idempotencyKey: operationId,
         },
@@ -2031,6 +2122,59 @@ function assertStandaloneUsageLifecycleAllowed(
       "Entitlement-bound usage charges must use the atomic conversation wallet lifecycle.",
     );
   }
+  if (hasEntitlementBinding) {
+    const expectedGenerationRunId = options.expectedGenerationRunId;
+    if (!expectedGenerationRunId) {
+      throw new Error(
+        "Entitlement-bound usage lifecycle requires expectedGenerationRunId.",
+      );
+    }
+    assertWalletIdempotencyField(
+      "agent usage lifecycle owner",
+      "generationRunId",
+      usageCharge.generationRunId,
+      expectedGenerationRunId,
+    );
+  }
+}
+
+async function updateAgentUsageChargeWithOwnerFence(
+  usageCharge: AgentUsageChargeRecord,
+  data: Record<string, unknown>,
+  options: AgentUsageLifecycleInternalOptions,
+  tx: UsageChargeClient,
+): Promise<AgentUsageChargeRecord> {
+  const expectedGenerationRunId = options.expectedGenerationRunId;
+  if (!expectedGenerationRunId) {
+    return tx.agentUsageCharge.update({
+      where: { id: usageCharge.id },
+      data,
+    });
+  }
+  if (!usageCharge.conversationId || !tx.agentUsageCharge.updateMany) {
+    throw new Error(
+      "Conditional usage-charge update is required for entitlement-bound lifecycle.",
+    );
+  }
+  const updated = await tx.agentUsageCharge.updateMany({
+    where: {
+      id: usageCharge.id,
+      status: AgentUsageChargeStatus.RESERVED,
+      generationRunId: expectedGenerationRunId,
+      conversationId: usageCharge.conversationId,
+    },
+    data,
+  });
+  if (updated.count !== 1) {
+    throw new Error(
+      "Agent usage entitlement reservation owner changed concurrently.",
+    );
+  }
+  const fencedUsageCharge = await findUsageById(usageCharge.id, tx);
+  if (!fencedUsageCharge) {
+    throw new Error("Updated agent usage charge not found.");
+  }
+  return fencedUsageCharge;
 }
 
 type ConversationWalletUsageBinding = AgentUsageChargeRecord & {
@@ -2091,11 +2235,6 @@ async function requireConversationWalletUsageBinding(
     usageCharge.userAgentWallet,
     entitlementAccount,
     "Agent usage charge",
-  );
-  await assertGenerationRunConversation(
-    usageCharge.generationRunId,
-    usageCharge.conversationId,
-    tx,
   );
   return usageCharge as ConversationWalletUsageBinding;
 }
@@ -2211,35 +2350,17 @@ async function verifyAgentUsageEntitlementReservationWithinTransaction(
     );
   }
 
+  const reserveEntry =
+    await verifyAgentUsageEntitlementOwnerWithinTransaction(
+      binding,
+      input.generationRunId,
+      tx,
+    );
   const coordinates = {
     audienceIdentityId: binding.audienceIdentityId,
     representativeId: binding.representativeId,
     productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   };
-  const reserveLedgerKey = serviceEntitlementOperationKey(
-    "RESERVE",
-    coordinates,
-    conversationWalletEntitlementOperationKey(
-      "reserve",
-      binding.idempotencyKey,
-    ),
-  );
-  const reserveEntry = await tx.serviceEntitlementLedgerEntry.findUnique({
-    where: { idempotencyKey: reserveLedgerKey },
-  });
-  if (
-    !reserveEntry
-    || reserveEntry.kind !== "RESERVE"
-    || reserveEntry.entitlementAccountId !== binding.entitlementAccountId
-    || reserveEntry.units !== binding.reservedTokenAmount
-    || !reserveEntry.generationRunId
-    || reserveEntry.idempotencyKey !== reserveLedgerKey
-  ) {
-    throw new Error(
-      "Agent usage charge is missing its matching service entitlement reserve ledger entry.",
-    );
-  }
-
   const terminalLedgerKeys = [
     serviceEntitlementOperationKey(
       "CONSUME",
@@ -2280,11 +2401,71 @@ async function verifyAgentUsageEntitlementReservationWithinTransaction(
     audienceIdentityId: binding.audienceIdentityId,
     representativeId: binding.representativeId,
     generationRunId: binding.generationRunId,
-    reserveGenerationRunId: reserveEntry.generationRunId,
+    reserveGenerationRunId: reserveEntry.generationRunId!,
     tokenAmount: binding.reservedTokenAmount,
     productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
     reserveLedgerEntryId: reserveEntry.id,
   };
+}
+
+async function verifyAgentUsageEntitlementOwnerWithinTransaction(
+  binding: ConversationWalletUsageBinding,
+  expectedGenerationRunId: string,
+  tx: ConversationWalletUsageReadClient,
+): Promise<ServiceEntitlementLedgerRecord> {
+  assertWalletIdempotencyField(
+    "agent usage lifecycle owner",
+    "generationRunId",
+    binding.generationRunId,
+    expectedGenerationRunId,
+  );
+  const reserveEntry = await requireMatchingAgentUsageReserveEntry(binding, tx);
+  await loadAndVerifyAgentUsageEntitlementTransferChain(
+    binding,
+    reserveEntry,
+    tx,
+  );
+  return reserveEntry;
+}
+
+async function requireMatchingAgentUsageReserveEntry(
+  binding: ConversationWalletUsageBinding,
+  tx: ConversationWalletUsageReadClient,
+): Promise<ServiceEntitlementLedgerRecord> {
+  if (!tx.serviceEntitlementLedgerEntry) {
+    throw new Error(
+      "Service entitlement ledger lookup is required for usage authorization.",
+    );
+  }
+  const coordinates = {
+    audienceIdentityId: binding.audienceIdentityId,
+    representativeId: binding.representativeId,
+    productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  };
+  const reserveLedgerKey = serviceEntitlementOperationKey(
+    "RESERVE",
+    coordinates,
+    conversationWalletEntitlementOperationKey(
+      "reserve",
+      binding.idempotencyKey,
+    ),
+  );
+  const reserveEntry = await tx.serviceEntitlementLedgerEntry.findUnique({
+    where: { idempotencyKey: reserveLedgerKey },
+  });
+  if (
+    !reserveEntry
+    || reserveEntry.kind !== "RESERVE"
+    || reserveEntry.entitlementAccountId !== binding.entitlementAccountId
+    || reserveEntry.units !== binding.reservedTokenAmount
+    || !reserveEntry.generationRunId
+    || reserveEntry.idempotencyKey !== reserveLedgerKey
+  ) {
+    throw new Error(
+      "Agent usage charge is missing its matching service entitlement reserve ledger entry.",
+    );
+  }
+  return reserveEntry;
 }
 
 function assertConversationWalletUsageBinding(
@@ -2350,20 +2531,286 @@ function assertWalletEntitlementBalances(
   }
 }
 
+async function loadAndVerifyAgentUsageEntitlementTransferChain(
+  binding: ConversationWalletUsageBinding,
+  reserveEntry: ServiceEntitlementLedgerRecord,
+  tx: ConversationWalletUsageReadClient,
+): Promise<VerifiedAgentUsageEntitlementTransferChain> {
+  const walletTransaction = tx.walletTransaction as
+    | (NonNullable<WalletTransactionClient["walletTransaction"]> & {
+        findMany(args: unknown): Promise<WalletTransactionRecord[]>;
+      })
+    | undefined;
+  if (!walletTransaction || typeof walletTransaction.findMany !== "function") {
+    throw new AgentUsageTransferChainError(
+      "AUDIT_LOOKUP_UNAVAILABLE",
+      "wallet transaction findMany is required",
+    );
+  }
+  if (!tx.generationRun) {
+    throw new AgentUsageTransferChainError(
+      "AUDIT_LOOKUP_UNAVAILABLE",
+      "generation run lookup is required",
+    );
+  }
+  const transferTransactions = await walletTransaction.findMany({
+    where: {
+      sourceType: "AgentUsageEntitlementTransfer",
+      OR: [
+        { sourceId: binding.id },
+        {
+          metadata: {
+            path: ["usageChargeId"],
+            equals: binding.id,
+          },
+        },
+      ],
+    },
+  });
+  const generationRunIds = new Set<string>([
+    reserveEntry.generationRunId!,
+    binding.generationRunId,
+  ]);
+  for (const transaction of transferTransactions) {
+    const metadata = jsonRecord(transaction.metadata);
+    if (typeof metadata.fromGenerationRunId === "string") {
+      generationRunIds.add(metadata.fromGenerationRunId);
+    }
+    if (typeof metadata.toGenerationRunId === "string") {
+      generationRunIds.add(metadata.toGenerationRunId);
+    }
+  }
+  const generationRuns = (
+    await Promise.all(
+      [...generationRunIds].sort().map((id) =>
+        tx.generationRun!.findUnique({
+          where: { id },
+          select: { id: true, conversationId: true },
+        }),
+      ),
+    )
+  ).filter((run): run is GenerationRunRecord => Boolean(run));
+
+  return verifyAgentUsageEntitlementTransferChain({
+    usageChargeId: binding.id,
+    entitlementAccountId: binding.entitlementAccountId,
+    audienceIdentityId: binding.audienceIdentityId,
+    representativeId: binding.representativeId,
+    conversationId: binding.conversationId,
+    currentGenerationRunId: binding.generationRunId,
+    reserveGenerationRunId: reserveEntry.generationRunId!,
+    reserveLedgerEntryId: reserveEntry.id,
+    currency: binding.currency,
+    userWalletId: binding.userAgentWallet!.userWalletId,
+    ownerId: binding.agentWallet?.representative?.ownerId ?? null,
+    transferTransactions,
+    generationRuns,
+  });
+}
+
+/**
+ * Pure validation of the immutable transfer audit. Reconciliation imports this
+ * module directly so it can validate historical terminal charges without
+ * invoking any wallet writes.
+ */
+export function verifyAgentUsageEntitlementTransferChain(
+  input: VerifyAgentUsageEntitlementTransferChainInput,
+): VerifiedAgentUsageEntitlementTransferChain {
+  const generationRuns = new Map<string, string | null>();
+  for (const run of input.generationRuns) {
+    if (generationRuns.has(run.id)) {
+      throw new AgentUsageTransferChainError(
+        "INVALID_AUDIT_FACT",
+        `duplicate generation run fact ${run.id}`,
+      );
+    }
+    generationRuns.set(run.id, run.conversationId);
+  }
+
+  const assertRunConversation = (generationRunId: string) => {
+    if (generationRuns.get(generationRunId) !== input.conversationId) {
+      throw new AgentUsageTransferChainError(
+        "RUN_CONVERSATION_MISMATCH",
+        `generation run ${generationRunId} is missing or belongs to another conversation`,
+      );
+    }
+  };
+  assertRunConversation(input.reserveGenerationRunId);
+  assertRunConversation(input.currentGenerationRunId);
+
+  type TransferEdge = {
+    fromGenerationRunId: string;
+    toGenerationRunId: string;
+    transaction: WalletTransactionRecord;
+  };
+  const outgoing = new Map<string, TransferEdge>();
+  const incoming = new Map<string, TransferEdge>();
+  const edges: TransferEdge[] = [];
+  const metadataKeys = [
+    "audienceIdentityId",
+    "conversationId",
+    "entitlementAccountId",
+    "fromGenerationRunId",
+    "reserveLedgerEntryId",
+    "toGenerationRunId",
+    "usageChargeId",
+  ].sort();
+
+  for (const transaction of input.transferTransactions) {
+    const metadata = jsonRecord(transaction.metadata);
+    if (
+      transaction.sourceType !== "AgentUsageEntitlementTransfer"
+      || transaction.sourceId !== input.usageChargeId
+      || transaction.eventType !== WalletTransactionEventType.ADJUSTMENT
+      || transaction.status !== WalletTransactionStatus.SUCCEEDED
+      || transaction.currency !== input.currency
+      || transaction.ownerId !== input.ownerId
+      || transaction.representativeId !== input.representativeId
+      || transaction.userWalletId !== input.userWalletId
+      || JSON.stringify(Object.keys(metadata).sort())
+        !== JSON.stringify(metadataKeys)
+      || metadata.usageChargeId !== input.usageChargeId
+      || metadata.entitlementAccountId !== input.entitlementAccountId
+      || metadata.audienceIdentityId !== input.audienceIdentityId
+      || metadata.conversationId !== input.conversationId
+      || metadata.reserveLedgerEntryId !== input.reserveLedgerEntryId
+      || typeof metadata.fromGenerationRunId !== "string"
+      || typeof metadata.toGenerationRunId !== "string"
+    ) {
+      throw new AgentUsageTransferChainError(
+        "INVALID_AUDIT_FACT",
+        `wallet transaction ${transaction.id} does not match the reservation`,
+      );
+    }
+    const fromGenerationRunId = metadata.fromGenerationRunId;
+    const toGenerationRunId = metadata.toGenerationRunId;
+    if (
+      !fromGenerationRunId
+      || !toGenerationRunId
+      || fromGenerationRunId === toGenerationRunId
+    ) {
+      throw new AgentUsageTransferChainError(
+        "INVALID_AUDIT_FACT",
+        `wallet transaction ${transaction.id} has invalid transfer endpoints`,
+      );
+    }
+    const identity = agentUsageEntitlementTransferIdentity(
+      input.usageChargeId,
+      fromGenerationRunId,
+      toGenerationRunId,
+    );
+    if (
+      transaction.idempotencyKey !== identity
+      || transaction.eventGroupId !== identity
+    ) {
+      throw new AgentUsageTransferChainError(
+        "INVALID_AUDIT_FACT",
+        `wallet transaction ${transaction.id} has invalid audit identity`,
+      );
+    }
+    assertRunConversation(fromGenerationRunId);
+    assertRunConversation(toGenerationRunId);
+    const edge = {
+      fromGenerationRunId,
+      toGenerationRunId,
+      transaction,
+    };
+    if (
+      outgoing.has(fromGenerationRunId)
+      || incoming.has(toGenerationRunId)
+    ) {
+      throw new AgentUsageTransferChainError(
+        "FORKED_CHAIN",
+        `generation run ${fromGenerationRunId} or ${toGenerationRunId} has multiple transfer edges`,
+      );
+    }
+    outgoing.set(fromGenerationRunId, edge);
+    incoming.set(toGenerationRunId, edge);
+    edges.push(edge);
+  }
+
+  const globallyVisited = new Set<string>();
+  for (const start of outgoing.keys()) {
+    if (globallyVisited.has(start)) continue;
+    const path = new Set<string>();
+    let cursor: string | undefined = start;
+    while (cursor && outgoing.has(cursor)) {
+      if (path.has(cursor)) {
+        throw new AgentUsageTransferChainError(
+          "CYCLIC_CHAIN",
+          `generation run ${cursor} is part of a transfer cycle`,
+        );
+      }
+      path.add(cursor);
+      globallyVisited.add(cursor);
+      cursor = outgoing.get(cursor)!.toGenerationRunId;
+    }
+  }
+
+  const transactionIds: string[] = [];
+  const chainRuns = new Set<string>([input.reserveGenerationRunId]);
+  let current = input.reserveGenerationRunId;
+  while (outgoing.has(current)) {
+    const edge = outgoing.get(current)!;
+    if (chainRuns.has(edge.toGenerationRunId)) {
+      throw new AgentUsageTransferChainError(
+        "CYCLIC_CHAIN",
+        `generation run ${edge.toGenerationRunId} is revisited`,
+      );
+    }
+    transactionIds.push(edge.transaction.id);
+    chainRuns.add(edge.toGenerationRunId);
+    current = edge.toGenerationRunId;
+  }
+  if (transactionIds.length !== edges.length) {
+    throw new AgentUsageTransferChainError(
+      "BROKEN_CHAIN",
+      "transfer audit contains a disconnected edge",
+    );
+  }
+  if (current !== input.currentGenerationRunId) {
+    throw new AgentUsageTransferChainError(
+      "BROKEN_CHAIN",
+      `audited owner ${current} does not match persisted owner ${input.currentGenerationRunId}`,
+    );
+  }
+
+  return {
+    usageChargeId: input.usageChargeId,
+    reserveGenerationRunId: input.reserveGenerationRunId,
+    currentGenerationRunId: input.currentGenerationRunId,
+    transferCount: transactionIds.length,
+    transactionIds,
+  };
+}
+
+function agentUsageEntitlementTransferIdentity(
+  usageChargeId: string,
+  fromGenerationRunId: string,
+  toGenerationRunId: string,
+) {
+  return [
+    "usage_entitlement_transfer",
+    encodeURIComponent(usageChargeId),
+    encodeURIComponent(fromGenerationRunId),
+    encodeURIComponent(toGenerationRunId),
+  ].join(":");
+}
+
 function agentUsageEntitlementTransferTransactionInput(
   binding: ConversationWalletUsageBinding,
   fromGenerationRunId: string,
   toGenerationRunId: string,
   reserveLedgerEntryId: string,
 ) {
+  const identity = agentUsageEntitlementTransferIdentity(
+    binding.id,
+    fromGenerationRunId,
+    toGenerationRunId,
+  );
   return {
-    eventGroupId: `usage_entitlement_transfer:${binding.id}`,
-    idempotencyKey: [
-      "usage_entitlement_transfer",
-      encodeURIComponent(binding.id),
-      encodeURIComponent(fromGenerationRunId),
-      encodeURIComponent(toGenerationRunId),
-    ].join(":"),
+    eventGroupId: identity,
+    idempotencyKey: identity,
     sourceType: "AgentUsageEntitlementTransfer",
     sourceId: binding.id,
     eventType: WalletTransactionEventType.ADJUSTMENT,
@@ -2413,7 +2860,7 @@ async function requireAgentUsageEntitlementTransferReplay(
   }
 }
 
-function conversationWalletEntitlementOperationKey(
+export function conversationWalletEntitlementOperationKey(
   action:
     | "reserve"
     | "settle-consume"

@@ -8,6 +8,7 @@ import {
   LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   getRepresentativePublicDeliverables,
   getPublicRepresentativeRuntime,
+  isWeChatPayApiV3Enabled,
   readDelegateAuthSessionSecret,
   resolvePublicAudiencePrincipal,
   verifyDelegateAuthSession,
@@ -127,8 +128,14 @@ export default async function RepresentativePage({
   const showPublicDemoTools =
     process.env.NODE_ENV !== "production" &&
     process.env.NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS === "true";
+  const weChatPayEnabled = isWeChatPayApiV3Enabled();
+  const showPublicPayment = weChatPayEnabled || showPublicDemoTools;
+  const paymentMode = weChatPayEnabled ? "wechat" : "mock";
   const menu = [
     { href: "#chat", label: t.chatNav },
+    ...(showPublicPayment
+      ? [{ href: "#recharge", label: t.rechargeNav }]
+      : []),
     { href: "#about", label: t.aboutNav },
     ...(publicResourceCount > 0 ? [{ href: "#resources", label: t.resourcesNav }] : []),
     { href: "#trust", label: t.trustNav },
@@ -304,12 +311,30 @@ export default async function RepresentativePage({
         </section>
       ) : null}
 
-      {showPublicDemoTools ? (
+      {showPublicPayment ? (
         <section className="representative-visitor-section representative-demo-commerce" id="recharge">
           <div className="representative-visitor-section-heading">
-            <p className="eyebrow">{t.demoEyebrow}</p><h2>{t.demoTitle}</h2><p>{t.demoSummary}</p>
+            <p className="eyebrow">
+              {paymentMode === "wechat"
+                ? t.rechargeEyebrow
+                : t.demoEyebrow}
+            </p>
+            <h2>
+              {paymentMode === "wechat"
+                ? t.rechargeTitle
+                : t.demoTitle}
+            </h2>
+            <p>
+              {paymentMode === "wechat"
+                ? t.rechargeSummary(representative.name)
+                : t.demoSummary}
+            </p>
           </div>
-          <RepresentativeRechargePanel locale={locale} representativeSlug={representative.slug} />
+          <RepresentativeRechargePanel
+            locale={locale}
+            paymentMode={paymentMode}
+            representativeSlug={representative.slug}
+          />
         </section>
       ) : null}
 
@@ -419,6 +444,7 @@ function buildDeliverableSourceLabels(locale: Locale) {
 const copy = {
   zh: {
     chatNav: "开始对话",
+    rechargeNav: "充值",
     aboutNav: "能帮什么",
     resourcesNav: "公开资料",
     trustNav: "隐私与真人",
@@ -492,7 +518,7 @@ const copy = {
     agentWalletEyebrow: "Recharge scope",
     agentWalletTitle: "余额只给这个代表用，不是平台通用钱包",
     agentWalletCopy: (name: string) =>
-      `当前 ${name} 已经可以在网页里创建演示充值单、模拟支付成功，并把余额记到当前访问者身份上。真实收款上线前，还需要接入 Stripe、微信或支付宝。`,
+      `当前 ${name} 已经可以在网页里创建演示充值单、模拟支付成功，并把余额记到当前访问者身份上。下一真实收款渠道为微信支付，Stripe 已延期。`,
     agentWalletCurrentChip: "当前：演示充值",
     webFirstChip: "网页优先",
     amnPayRoadmapChip: "正式支付待接入",
@@ -600,6 +626,7 @@ const copy = {
   },
   en: {
     chatNav: "Start chatting",
+    rechargeNav: "Recharge",
     aboutNav: "What I can do",
     resourcesNav: "Public resources",
     trustNav: "Privacy & human help",
@@ -673,7 +700,7 @@ const copy = {
     agentWalletEyebrow: "Recharge scope",
     agentWalletTitle: "Balance belongs to this representative, not a generic platform pool",
     agentWalletCopy: (name: string) =>
-      `${name} can now create a demo recharge order, simulate payment success, and attach the balance to the current visitor identity. Live collection still needs Stripe, WeChat, or Alipay integration before real charging.`,
+      `${name} can now create a demo recharge order, simulate payment success, and attach the balance to the current visitor identity. WeChat Pay is the next live collection channel; Stripe is deferred.`,
     agentWalletCurrentChip: "Today: demo recharge",
     webFirstChip: "Web first",
     amnPayRoadmapChip: "Live payments pending",

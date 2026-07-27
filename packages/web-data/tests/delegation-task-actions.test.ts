@@ -876,6 +876,7 @@ describe("delegation task owner actions", () => {
     expect(settleConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-task-1",
+        expectedGenerationRunId: "run-step-2",
         settledTokenAmount: 1,
         provider: "compute",
         idempotencyKey: "delegation-task:task-1:settle",
@@ -966,6 +967,7 @@ describe("delegation task owner actions", () => {
     expect(releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-task-1",
+        expectedGenerationRunId: "run-step-2",
         failed: true,
         reason: "delegation_task_failed",
         idempotencyKey: "delegation-task:task-1:release",
@@ -1795,6 +1797,7 @@ describe("delegation task owner actions", () => {
     expect(releaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-preflight",
+        expectedGenerationRunId: "run-current",
         failed: true,
         reason: "delegation_task_failed",
         idempotencyKey: "delegation-task:task-preflight:release",

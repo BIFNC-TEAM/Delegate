@@ -1,15 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-  approveWithdrawRequest: vi.fn(),
-  markWithdrawRequestFailed: vi.fn(),
-  markWithdrawRequestPaid: vi.fn(),
-  rejectWithdrawRequest: vi.fn(),
-  requireDashboardBillingAccess: vi.fn(),
-  dashboardAuthErrorResponse: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+  class WalletReconciliationRequiredError extends Error {
+    readonly code = "wallet_reconciliation_required";
+
+    constructor() {
+      super(
+        "Wallet reconciliation is required before financial operations can continue.",
+      );
+    }
+  }
+  return {
+    WalletReconciliationRequiredError,
+    approveWithdrawRequest: vi.fn(),
+    markWithdrawRequestFailed: vi.fn(),
+    markWithdrawRequestPaid: vi.fn(),
+    rejectWithdrawRequest: vi.fn(),
+    requireDashboardBillingAccess: vi.fn(),
+    dashboardAuthErrorResponse: vi.fn(),
+  };
+});
 
 vi.mock("@delegate/web-data", () => ({
+  WalletReconciliationRequiredError:
+    mocks.WalletReconciliationRequiredError,
   approveWithdrawRequest: mocks.approveWithdrawRequest,
   markWithdrawRequestFailed: mocks.markWithdrawRequestFailed,
   markWithdrawRequestPaid: mocks.markWithdrawRequestPaid,
@@ -165,6 +179,25 @@ describe("local mock withdrawal action API", () => {
       reason: "beneficiary account closed",
       permanent: true,
       idempotencyKey: "fail-permanent",
+    });
+  });
+
+  it("returns a stable reconciliation-required conflict code", async () => {
+    mocks.approveWithdrawRequest.mockRejectedValue(
+      new mocks.WalletReconciliationRequiredError(),
+    );
+
+    const response = await postAction({
+      action: "approve",
+      idempotencyKey: "approve-blocked",
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    await expect(response.json()).resolves.toEqual({
+      error:
+        "Wallet reconciliation is required before financial operations can continue.",
+      code: "wallet_reconciliation_required",
     });
   });
 

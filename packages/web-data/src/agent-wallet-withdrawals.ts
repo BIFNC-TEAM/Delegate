@@ -22,6 +22,11 @@ import {
   type WalletWriteTransactionOptions,
 } from "./agent-wallet-write";
 import { prisma } from "./prisma";
+import {
+  assertWorkspaceWalletFundsWriteAllowed,
+  type WorkspaceWalletFundsWriteScope,
+  type WorkspaceWalletReconciliationClient,
+} from "./wallet-reconciliation";
 
 type OwnerRecord = {
   id: string;
@@ -90,6 +95,14 @@ type WalletTransactionRecord = {
 };
 
 type WithdrawalClient = Omit<WalletLedgerClient, "$transaction"> & {
+  /**
+   * Test/embedded-client seam. Production Prisma clients use the authoritative
+   * reconciliation reader below; custom clients must explicitly provide the
+   * same fail-closed contract rather than silently bypassing it.
+   */
+  walletFundsWriteGate?: {
+    assertAllowed(input: WorkspaceWalletFundsWriteScope): Promise<void>;
+  };
   owner: {
     findUnique(args: unknown): Promise<OwnerRecord | null>;
   };
@@ -255,6 +268,11 @@ export async function createWithdrawRequest(
     if (representative.claimStatus !== RepresentativeClaimStatus.CLAIMED) {
       throw new Error("Representative must be claimed before withdrawals.");
     }
+    await assertWithdrawalFundsWriteAllowed(tx, {
+      ownerId: owner.id,
+      representativeId: representative.id,
+      currency: normalized.currency,
+    });
 
     const activeRequest = await tx.withdrawRequest.findFirst({
       where: {
@@ -602,6 +620,11 @@ async function transitionWithdrawRequest(
     if (!request.representativeId) {
       throw new Error("Withdrawal request is missing a representative.");
     }
+    await assertWithdrawalFundsWriteAllowed(tx, {
+      ownerId: request.ownerId,
+      representativeId: request.representativeId,
+      currency: request.currency,
+    });
 
     const allocations = await getRequiredWithdrawalAllocations(tx, request);
     validateWithdrawalTransition(request, allocations, input);
@@ -658,6 +681,20 @@ async function transitionWithdrawRequest(
   };
 
   return runWalletWriteTransaction(client, run);
+}
+
+async function assertWithdrawalFundsWriteAllowed(
+  client: WithdrawalClient,
+  input: WorkspaceWalletFundsWriteScope,
+): Promise<void> {
+  if (client.walletFundsWriteGate) {
+    await client.walletFundsWriteGate.assertAllowed(input);
+    return;
+  }
+  await assertWorkspaceWalletFundsWriteAllowed(
+    input,
+    client as unknown as WorkspaceWalletReconciliationClient,
+  );
 }
 
 async function findOwnedWithdrawRequest(

@@ -7,6 +7,7 @@ import {
   markWithdrawRequestFailed,
   markWithdrawRequestPaid,
   rejectWithdrawRequest,
+  WalletReconciliationRequiredError,
 } from "@delegate/web-data";
 
 import { withPrivateNoStore } from "../../../../../private-response";
@@ -107,6 +108,15 @@ export async function POST(
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) return withPrivateNoStore(authResponse);
+    if (error instanceof WalletReconciliationRequiredError) {
+      return privateJson(
+        {
+          error: error.message,
+          code: error.code,
+        },
+        409,
+      );
+    }
 
     console.error("Failed to apply local mock withdrawal action.", error);
     return privateJson(

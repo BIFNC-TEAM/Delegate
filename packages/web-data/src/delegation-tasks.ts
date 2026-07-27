@@ -3551,6 +3551,7 @@ async function finalizeDelegationTaskBilling(
     await settleConversationWalletUsage(
       {
         usageChargeId: context.walletReservation.usageChargeId,
+        expectedGenerationRunId: context.ownerRunId,
         settledTokenAmount: context.walletReservation.tokenAmount,
         provider: "compute",
         idempotencyKey: `delegation-task:${input.taskId}:settle`,
@@ -3592,6 +3593,7 @@ async function finalizeDelegationTaskBilling(
   await releaseConversationWalletUsage(
     {
       usageChargeId: context.walletReservation.usageChargeId,
+      expectedGenerationRunId: context.ownerRunId,
       failed: input.status === DelegationTaskStatus.FAILED,
       reason: `delegation_task_${input.status.toLowerCase()}`,
       idempotencyKey: `delegation-task:${input.taskId}:release`,

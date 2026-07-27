@@ -63,6 +63,6 @@ DATABASE_URL="$FIXTURE_DATABASE_URL" \
   pnpm --dir "$REPO_ROOT" exec prisma migrate deploy \
   --schema "$REPO_ROOT/prisma/schema.prisma" >/dev/null
 
-printf 'phase=run_wallet_concurrency_gate\n'
+printf 'phase=run_wallet_concurrency_and_business_closure_gate\n'
 DATABASE_URL="$FIXTURE_DATABASE_URL" \
   pnpm --dir "$REPO_ROOT" --filter @delegate/web-data test:postgres:wallet

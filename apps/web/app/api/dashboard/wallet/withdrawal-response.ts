@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { WalletIdempotencyConflictError } from "@delegate/web-data";
+import {
+  WalletIdempotencyConflictError,
+  WalletReconciliationRequiredError,
+} from "@delegate/web-data";
 
 import { withPrivateNoStore } from "../../private-response";
 
@@ -12,6 +15,15 @@ export function privateWalletJson(
 }
 
 export function walletWithdrawalErrorResponse(error: unknown) {
+  if (error instanceof WalletReconciliationRequiredError) {
+    return privateWalletJson(
+      {
+        error: error.message,
+        code: error.code,
+      },
+      { status: 409 },
+    );
+  }
   if (error instanceof WalletIdempotencyConflictError) {
     return privateWalletJson({ error: error.message }, { status: 409 });
   }

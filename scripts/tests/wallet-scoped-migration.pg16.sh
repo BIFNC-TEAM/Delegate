@@ -376,6 +376,8 @@ docker exec -i "$FIXTURE_CONTAINER" \
 DO $verify$
 DECLARE
     validated_constraint_count INTEGER;
+    ownership_restrict_fk_count INTEGER;
+    ownership_index_count INTEGER;
     rejected BOOLEAN;
 BEGIN
     SELECT COUNT(*)
@@ -398,15 +400,58 @@ BEGIN
             'AgentUsageCharge_positive_dimensions',
             'AgentUsageCharge_costs_nonnegative',
             'AgentUsageCharge_status_amount_consistency',
+            'AgentUsageCharge_binding_coordinates_complete',
             'WithdrawRequest_amount_positive',
             'WithdrawRequest_status_payout_consistency'
         )
         AND contype = 'c'
         AND convalidated;
-    IF validated_constraint_count <> 17 THEN
+    IF validated_constraint_count <> 18 THEN
         RAISE EXCEPTION
-            'expected 17 validated wallet CHECK constraints, found %',
+            'expected 18 validated wallet CHECK constraints, found %',
             validated_constraint_count;
+    END IF;
+
+    SELECT COUNT(*)
+    INTO ownership_restrict_fk_count
+    FROM pg_constraint
+    WHERE
+        conname IN (
+            'AgentUsageCharge_userAgentWalletId_fkey',
+            'AgentUsageCharge_audienceIdentityId_fkey',
+            'AgentUsageCharge_entitlementAccountId_fkey',
+            'AgentUsageCharge_conversationId_fkey',
+            'AgentUsageCharge_generationRunId_fkey'
+        )
+        AND contype = 'f'
+        AND convalidated
+        AND confdeltype = 'r';
+    IF ownership_restrict_fk_count <> 5 THEN
+        RAISE EXCEPTION
+            'expected 5 RESTRICT wallet usage ownership foreign keys, found %',
+            ownership_restrict_fk_count;
+    END IF;
+
+    SELECT COUNT(*)
+    INTO ownership_index_count
+    FROM pg_class AS index_relation
+    JOIN pg_index AS index_definition
+      ON index_definition.indexrelid = index_relation.oid
+    JOIN pg_class AS table_relation
+      ON table_relation.oid = index_definition.indrelid
+    JOIN pg_namespace AS table_namespace
+      ON table_namespace.oid = table_relation.relnamespace
+    WHERE
+        table_namespace.nspname = 'public'
+        AND table_relation.relname = 'AgentUsageCharge'
+        AND index_relation.relname =
+            'AgentUsageCharge_one_active_bound_reservation_per_run'
+        AND index_definition.indisunique
+        AND index_definition.indisvalid
+        AND index_definition.indpred IS NOT NULL;
+    IF ownership_index_count <> 1 THEN
+        RAISE EXCEPTION
+            'active bound wallet usage ownership index is missing or malformed';
     END IF;
 
     rejected := FALSE;

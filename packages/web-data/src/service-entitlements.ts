@@ -327,6 +327,7 @@ export async function createServicePaymentOrder(
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ServicePaymentOrderRecord> {
   const normalized = normalizeCreatePaymentOrderInput(input);
+  assertPublicServiceEntitlementProductCode(normalized.productCode);
   return runAtomically(client, async (tx) => {
     const [existingById, existingByProviderOrder] = await Promise.all([
       tx.servicePaymentOrder.findUnique({
@@ -370,6 +371,14 @@ export async function grantServiceEntitlement(
   input: GrantServiceEntitlementInput,
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ServiceEntitlementSnapshot> {
+  assertPublicServiceEntitlementProductCode(input.productCode);
+  return grantServiceEntitlementUnchecked(input, client);
+}
+
+async function grantServiceEntitlementUnchecked(
+  input: GrantServiceEntitlementInput,
+  client: ServiceEntitlementClient,
+): Promise<ServiceEntitlementSnapshot> {
   const normalized = normalizeGrantInput(input);
   return runAtomically(client, async (tx) => {
     const canonical = {
@@ -397,6 +406,14 @@ export async function reserveServiceEntitlement(
   input: ReserveServiceEntitlementInput,
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ServiceEntitlementSnapshot> {
+  assertPublicServiceEntitlementProductCode(input.productCode);
+  return reserveServiceEntitlementUnchecked(input, client);
+}
+
+async function reserveServiceEntitlementUnchecked(
+  input: ReserveServiceEntitlementInput,
+  client: ServiceEntitlementClient,
+): Promise<ServiceEntitlementSnapshot> {
   const normalized = normalizeUnitMutationInput(input);
   return runAtomically(client, async (tx) => {
     const canonical = {
@@ -422,6 +439,14 @@ export async function consumeServiceEntitlement(
   input: ConsumeServiceEntitlementInput,
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ServiceEntitlementSnapshot> {
+  assertPublicServiceEntitlementProductCode(input.productCode);
+  return consumeServiceEntitlementUnchecked(input, client);
+}
+
+async function consumeServiceEntitlementUnchecked(
+  input: ConsumeServiceEntitlementInput,
+  client: ServiceEntitlementClient,
+): Promise<ServiceEntitlementSnapshot> {
   const normalized = normalizeUnitMutationInput(input);
   return runAtomically(client, async (tx) => {
     const canonical = {
@@ -446,6 +471,14 @@ export async function consumeServiceEntitlement(
 export async function releaseServiceEntitlement(
   input: ReleaseServiceEntitlementInput,
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
+): Promise<ServiceEntitlementSnapshot> {
+  assertPublicServiceEntitlementProductCode(input.productCode);
+  return releaseServiceEntitlementUnchecked(input, client);
+}
+
+async function releaseServiceEntitlementUnchecked(
+  input: ReleaseServiceEntitlementInput,
+  client: ServiceEntitlementClient,
 ): Promise<ServiceEntitlementSnapshot> {
   const normalized = normalizeUnitMutationInput(input);
   return runAtomically(client, async (tx) => {
@@ -477,6 +510,14 @@ export async function refundGrantedServiceEntitlement(
   input: RefundGrantedServiceEntitlementInput,
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ServiceEntitlementSnapshot> {
+  assertPublicServiceEntitlementProductCode(input.productCode);
+  return refundGrantedServiceEntitlementUnchecked(input, client);
+}
+
+async function refundGrantedServiceEntitlementUnchecked(
+  input: RefundGrantedServiceEntitlementInput,
+  client: ServiceEntitlementClient,
+): Promise<ServiceEntitlementSnapshot> {
   const normalized = normalizeUnitMutationInput(input);
   return runAtomically(client, async (tx) => {
     const canonical = {
@@ -499,6 +540,77 @@ export async function refundGrantedServiceEntitlement(
 }
 
 /**
+ * Package-internal bridge for wallet dual-ledger operations.
+ *
+ * This symbol is intentionally omitted from the package root export. Wallet
+ * services use the named wrappers in service-entitlements-wallet-internal.ts,
+ * which always pin the reserved product code and execute inside the caller's
+ * wallet transaction.
+ */
+export const serviceEntitlementWalletInternal = Object.freeze({
+  grant(
+    input: Omit<GrantServiceEntitlementInput, "productCode">,
+    client: ServiceEntitlementClient,
+  ) {
+    return grantServiceEntitlementUnchecked(
+      {
+        ...input,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      },
+      client,
+    );
+  },
+  reserve(
+    input: Omit<ReserveServiceEntitlementInput, "productCode">,
+    client: ServiceEntitlementClient,
+  ) {
+    return reserveServiceEntitlementUnchecked(
+      {
+        ...input,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      },
+      client,
+    );
+  },
+  consume(
+    input: Omit<ConsumeServiceEntitlementInput, "productCode">,
+    client: ServiceEntitlementClient,
+  ) {
+    return consumeServiceEntitlementUnchecked(
+      {
+        ...input,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      },
+      client,
+    );
+  },
+  release(
+    input: Omit<ReleaseServiceEntitlementInput, "productCode">,
+    client: ServiceEntitlementClient,
+  ) {
+    return releaseServiceEntitlementUnchecked(
+      {
+        ...input,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      },
+      client,
+    );
+  },
+  refund(
+    input: Omit<RefundGrantedServiceEntitlementInput, "productCode">,
+    client: ServiceEntitlementClient,
+  ) {
+    return refundGrantedServiceEntitlementUnchecked(
+      {
+        ...input,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      },
+      client,
+    );
+  },
+});
+
+/**
  * Reserves one cross-channel chat unit, preferring the more capable plan.
  * Missing, expired, exhausted, or frozen products are skipped; invariant and
  * persistence failures still fail closed.
@@ -519,6 +631,7 @@ export async function reserveConversationEntitlement(
     "audienceIdentityId",
   );
   const requestedProductCodes = normalizeConversationProductCodes(input.productCodes);
+  requestedProductCodes.forEach(assertPublicServiceEntitlementProductCode);
 
   return runAtomically(client, async (tx) => {
     const history = await loadConversationEntitlementHistory(generationRunId, tx);
@@ -652,6 +765,7 @@ export function consumeConversationEntitlement(
 ) {
   return runAtomically(client, async (tx) => {
     const normalized = normalizeConversationReservation(reservation);
+    assertPublicServiceEntitlementProductCode(normalized.productCode);
     return consumeConversationReservationInTransaction(normalized, tx);
   });
 }
@@ -662,6 +776,7 @@ export function releaseConversationEntitlement(
 ) {
   return runAtomically(client, async (tx) => {
     const normalized = normalizeConversationReservation(reservation);
+    assertPublicServiceEntitlementProductCode(normalized.productCode);
     return releaseConversationReservationInTransaction(normalized, tx);
   });
 }
@@ -737,6 +852,7 @@ export function transferConversationEntitlementByGenerationRunId(
         toGenerationRunId,
         tx,
       );
+      assertPublicServiceEntitlementProductCode(targetReservation.productCode);
       const latestSource =
         latestConversationEntitlementAttempt(sourceHistory);
       if (
@@ -766,6 +882,7 @@ export function transferConversationEntitlementByGenerationRunId(
       fromGenerationRunId,
       tx,
     );
+    assertPublicServiceEntitlementProductCode(sourceReservation.productCode);
     await releaseConversationReservationInTransaction(
       sourceReservation,
       tx,
@@ -836,6 +953,7 @@ export function releaseConversationEntitlementByGenerationRunId(
         attempt: activeAttempt.attempt,
       }),
     );
+    assertPublicServiceEntitlementProductCode(reservation.productCode);
     return releaseConversationReservationInTransaction(
       reservation,
       tx,
@@ -877,6 +995,7 @@ export function consumeConversationEntitlementByGenerationRunId(
         generationRunId,
         tx,
       );
+      assertPublicServiceEntitlementProductCode(reservation.productCode);
       return consumeConversationReservationInTransaction(reservation, tx);
     }
 
@@ -957,6 +1076,7 @@ export function finalizeConversationEntitlementForGenerationRuns(
       owner.generationRunId,
       tx,
     );
+    assertPublicServiceEntitlementProductCode(reservation.productCode);
     return input.outcome === "consume"
       ? consumeConversationReservationInTransaction(reservation, tx)
       : releaseConversationReservationInTransaction(
@@ -982,6 +1102,7 @@ export async function fulfillServicePaymentOrder(
   const normalized = normalizePaymentEvidence(input);
   return runAtomically(client, async (tx) => {
     const order = await loadAndValidatePaymentOrder(normalized, tx);
+    assertPublicServiceEntitlementProductCode(order.productCode);
     const existingEvent = await loadAndValidatePaymentEvent(
       normalized,
       order,
@@ -1104,6 +1225,7 @@ export async function refundServiceEntitlement(
   const normalized = normalizePaymentEvidence(input);
   return runAtomically(client, async (tx) => {
     const order = await loadAndValidatePaymentOrder(normalized, tx);
+    assertPublicServiceEntitlementProductCode(order.productCode);
     const existingEvent = await loadAndValidatePaymentEvent(
       normalized,
       order,
@@ -2482,6 +2604,18 @@ function requiredText(value: string, name: string) {
     );
   }
   return normalized;
+}
+
+function assertPublicServiceEntitlementProductCode(productCode: string) {
+  if (
+    requiredText(productCode, "productCode") ===
+    AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+  ) {
+    throw new ServiceEntitlementError(
+      "INVALID_INPUT",
+      "Agent wallet service credits must be changed through the wallet dual-ledger accounting flow.",
+    );
+  }
 }
 
 function optionalText(value: string | undefined) {

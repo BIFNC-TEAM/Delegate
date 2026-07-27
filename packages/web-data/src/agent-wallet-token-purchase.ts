@@ -18,10 +18,10 @@ import {
 } from "./agent-wallet-transactions";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
-  grantServiceEntitlement,
   resolveServiceEntitlementAudienceIdentityId,
   type ServiceEntitlementClient,
 } from "./service-entitlements";
+import { grantAgentWalletServiceCreditEntitlement } from "./service-entitlements-wallet-internal";
 import {
   assertWalletIdempotencyField,
   resolveWalletOperationId,
@@ -345,11 +345,10 @@ export async function purchaseAgentTokens(
       throw new Error("Insufficient user wallet balance.");
     }
 
-    const entitlement = await grantServiceEntitlement(
+    const entitlement = await grantAgentWalletServiceCreditEntitlement(
       {
         audienceIdentityId: entitlementAudienceIdentityId,
         representativeId: agentWallet.representativeId,
-        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
         units: tokenAmount,
         operationKey: `agent-token-purchase:${normalized.idempotencyKey}`,
         notes: "Granted from an agent token purchase.",

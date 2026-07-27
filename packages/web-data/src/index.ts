@@ -1,8 +1,10 @@
 export * from "./agent-wallet-dashboard";
 export * from "./agent-wallet-ledger";
 export * from "./agent-wallet-payment-providers";
+export * from "./agent-wallet-payment-reconciliation";
 export * from "./agent-wallet-recharge";
 export * from "./agent-wallet-refunds";
+export * from "./agent-wallet-wechat-refunds";
 export * from "./agent-wallet-revenue-policy";
 export * from "./agent-wallet-token-purchase";
 export * from "./agent-wallet-transactions";
@@ -29,6 +31,7 @@ export {
 } from "./agent-wallet-usage-charge";
 export * from "./agent-wallet-withdrawals";
 export * from "./agent-wallet-write";
+export * from "./payment-provider-operation-gate";
 export * from "./auth-identities";
 export * from "./auth-session";
 export * from "./audience-identity-binding";
@@ -58,12 +61,49 @@ export * from "./openviking";
 export * from "./owner-access";
 export * from "./owner-dashboard";
 export * from "./public-audience-principal";
+export * from "./public-agent-wallet-state";
 export * from "./prisma";
 export * from "./representative-setup";
 export * from "./representative-skill-packs";
-export * from "./service-entitlements";
+export {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  ServiceEntitlementError,
+  consumeConversationEntitlement,
+  consumeConversationEntitlementByGenerationRunId,
+  consumeServiceEntitlement,
+  createServicePaymentOrder,
+  finalizeConversationEntitlementForGenerationRuns,
+  fulfillServicePaymentOrder,
+  grantServiceEntitlement,
+  hasUnifiedConversationEntitlement,
+  refundGrantedServiceEntitlement,
+  refundServiceEntitlement,
+  refundServicePaymentOrder,
+  releaseConversationEntitlement,
+  releaseConversationEntitlementByGenerationRunId,
+  releaseServiceEntitlement,
+  reserveConversationEntitlement,
+  reserveServiceEntitlement,
+  resolveServiceEntitlementAudienceIdentityId,
+  serviceEntitlementOperationKey,
+  servicePaymentProviderOrderKey,
+  transferConversationEntitlementByGenerationRunId,
+  type ConsumeServiceEntitlementInput,
+  type ConversationEntitlementReservation,
+  type CreateServicePaymentOrderInput,
+  type GrantServiceEntitlementInput,
+  type RefundGrantedServiceEntitlementInput,
+  type ReleaseServiceEntitlementInput,
+  type ReserveServiceEntitlementInput,
+  type ServiceEntitlementClient,
+  type ServiceEntitlementCoordinates,
+  type ServiceEntitlementSnapshot,
+  type ServicePaymentEvidenceInput,
+  type ServicePaymentFulfillmentSnapshot,
+} from "./service-entitlements";
 export * from "./web-audience";
 export * from "./workspace-skills";
 export * from "./workspace-audit";
 export * from "./workspace-wallet";
 export * from "./wallet-reconciliation";
+export * from "./wechat-pay-api-v3";

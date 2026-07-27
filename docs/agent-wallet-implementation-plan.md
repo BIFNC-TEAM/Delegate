@@ -75,11 +75,42 @@ The transactional MVP described by this plan is implemented on
   cash spending, last-credit reservation, settle-versus-release, and
   withdrawal-freeze races against the real schema. Creator balance summaries
   use an uncapped database aggregate rather than a limited relation sample.
+- WeChat Pay API v3 Native collection is implemented behind an explicit,
+  default-off server flag. The server creates and signs Native orders, verifies
+  every API response and callback before parsing, decrypts successful payment
+  notifications, and recovers missed callbacks through a signed merchant-order
+  query. Callback and query confirmations share one provider-transaction
+  idempotency key and one atomic recharge-to-representative-credit transaction.
+  A PostgreSQL operation gate prevents parallel checkout creation across web
+  replicas without storing raw audience identifiers; the shared Outbox lease
+  prevents parallel query fan-out. Public responses omit wallet identities and
+  provider payloads.
+- Every pending WeChat order owns one durable
+  `wechat_pay.order.reconcile` Outbox item. The workflow runner claims it with
+  a fenced lease and bounded backoff; the principal-scoped browser status route
+  shares the same item and cannot multiply upstream queries.
+- Signed WeChat refund success, closed, and abnormal notifications are accepted
+  at `/api/payments/wechat/refund-notify`. The callback persists an immutable
+  external fact before responding. If no local order can yet be matched, it
+  returns a retryable failure after the fact is durable so provider delivery
+  can resolve the binding later; matching terminal events for the same refund
+  also bind earlier unmatched facts. A closed refund records no local value
+  change; abnormal, unmatched, and pending reversal work remains visible as a
+  persistent reconciliation alert. A successful refund freezes every linked
+  entitlement before a
+  `wechat_pay.refund.apply` Outbox item applies the local reversal. Only an
+  exact full, undiscounted refund whose credits are wholly unused and
+  unreserved, with creator proceeds still pending, is reversed automatically.
+  Partial, discounted, consumed, reserved, ambiguous, or already-released cases
+  stay frozen as `RECONCILIATION_REQUIRED` for manual review.
 
-Still intentionally excluded from this MVP: real Stripe/WeChat/Alipay
-collection, signed live webhooks, automated payout submission, chargeback
-automation, FX conversion, and a generic public Wallet API. Mock recharge and
-mock payment completion return 404 in production.
+Still intentionally excluded from this MVP: enabling a live WeChat merchant,
+a general provider-refund initiation UI, chargeback automation, real
+Stripe/Alipay collection, automated payout submission, FX conversion, and a
+generic public Wallet API. Mock recharge and mock payment completion return 404
+in production. WeChat collection must remain disabled until the database gates
+and a live merchant smoke test pass. Stripe remains deferred; no Stripe test
+account is required for this phase.
 
 ## Current Delegate Baseline
 
@@ -252,7 +283,19 @@ Recommended provider reuse:
 - WeChat Pay: official API v3 SDK/signature tooling for order creation, notification verification, certificate handling, and merchant transfer support later.
 - Alipay: official OpenAPI SDK for order creation, async notify verification, refund notifications, and transfer support later.
 
-The first implementation should ship `mock` provider support, then add Stripe, then add WeChat Pay and Alipay skeletons.
+The first implementation ships `mock` provider support. WeChat Pay API v3
+Native collection is now the first real adapter: it signs exact request bytes,
+verifies exact response/callback bytes, supports public-key rotation, renders
+the provider `code_url` locally as a QR code, and uses signed order queries as
+a callback recovery path. Stripe is intentionally deferred, and Alipay remains
+a fail-closed skeleton.
+
+One underlying provider transaction creates exactly one financial event and
+one set of ledger movements. If callback and order-query evidence both arrive,
+the first verified evidence is retained as the canonical financial fact; the
+later confirmation is treated as an idempotent replay. This minimizes retained
+provider data and deliberately does not promise offline re-verification of
+every later confirmation.
 
 ## Product Surfaces
 
@@ -301,10 +344,79 @@ All values should come from ledger projection rather than static mock data.
 13. [x] Add concurrency, idempotency, authorization, and acceptance tests.
 14. [x] Close the development business loop through paid continuation,
     unused-credit return, creator withdrawal submission/cancel, and private
-    mock review/settlement.
+    mock review/settlement. The public recharge panel now restores the current
+    representative-scoped wallet state after a reload, and withdrawal writes
+    fail closed when reconciliation reports real balance errors.
 15. [ ] Reconcile production legacy data and deploy the migration.
-16. [ ] Implement a real payment provider and signed webhook flow.
-17. [ ] Implement reviewed payout submission and reconciliation.
+16. [x] Implement default-off WeChat Pay API v3 Native order creation, response
+    and callback verification, AES-GCM notification decryption, local QR
+    rendering, principal-scoped status polling, signed active query recovery,
+    provider-transaction idempotency, and atomic service-credit purchase.
+17. [x] Add the production-shaped WeChat operations safety boundary:
+    PostgreSQL-backed distributed create/query throttling, durable
+    `wechat_pay.order.reconcile` Outbox queries, a server-side scheduled
+    worker, `/api/payments/wechat/refund-notify`, and durable
+    `wechat_pay.refund.apply` reversal processing. Success, closed, and
+    abnormal provider outcomes are retained as separate immutable events;
+    unmatched facts remain a persistent health alert. Exact full refunds of
+    wholly unused credits reverse automatically; every unsafe or ambiguous
+    successful refund freezes all linked entitlements and requires manual
+    reconciliation.
+18. [ ] Pass the live WeChat merchant smoke test and release checklist. This
+    requires a Native Pay-enabled merchant account bound to the AppID, merchant
+    API certificate serial and private key, API v3 key, WeChat Pay public key
+    ID/key, the prior platform certificate while gray migration is active,
+    public HTTPS payment and refund notification URLs, a real payer WeChat
+    account, and merchant-console/API permission to issue a refundable test
+    order. Verify payment callback and missed-callback query recovery, then
+    issue one full unused refund and confirm its Outbox reversal. Keep
+    `DELEGATE_WECHAT_PAY_ENABLED=false` until these checks and
+    `pnpm test:postgres:wallet` pass.
+19. [ ] Implement reviewed payout submission and reconciliation.
+
+The disposable PostgreSQL 16 gate (`pnpm test:postgres:wallet`) covers both
+contention safety and linear business scenarios: mock recharge,
+service-credit purchase, reserve, settle, creator-income release, withdrawal
+approval, mock payout, callback/query concurrency for one WeChat transaction,
+payment-confirmation rollback and retry, idempotent replay, and a final healthy
+reconciliation report. It also validates the provider-operation gate and the
+refund split between automatic full-unused reversal and frozen manual
+reconciliation. This database gate is required before enabling the live flag.
+
+### WeChat runtime configuration boundary
+
+`.env.example` documents the payment credentials and the reconciliation worker
+timings. Compose injects those values only into `reps`, which creates orders and
+handles `/api/payments/wechat/notify` plus
+`/api/payments/wechat/refund-notify`, and `workflow-runner`, which performs
+Outbox order queries and refund reversals. They are deliberately absent from
+the shared application environment, Dashboard, bot, compute, and conversation
+worker containers.
+
+The reconciliation worker defaults are a 5-second poll, batch size 10,
+30-second fenced lease, 10-second pending backoff, 5-second error backoff, and
+10-minute maximum backoff. `WECHAT_PAY_RECONCILIATION_LEASE_MS` must remain at
+least 30 seconds. The workflow-runner `/health` response exposes only worker
+state and summaries, never payment credentials.
+
+`WECHAT_PAY_NOTIFY_URL` is an optional public HTTPS payment-notification
+override. When it is blank, the server derives
+`/api/payments/wechat/notify` from the production
+`NEXT_PUBLIC_REPRESENTATIVE_URL`; that base URL must be a credential-free
+public HTTPS origin. Every outbound WeChat API request sends
+`Wechatpay-Serial`, preferring `WECHAT_PAY_PUBLIC_KEY_ID`, while the
+`Authorization.serial_no` field continues to use the merchant API certificate
+serial number. During WeChat's public-key gray migration, configure both the
+new `WECHAT_PAY_PUBLIC_KEY_ID`/`WECHAT_PAY_PUBLIC_KEY_BASE64` pair and the old
+`WECHAT_PAY_PLATFORM_CERTIFICATE_SERIAL_NUMBER`/
+`WECHAT_PAY_PLATFORM_CERTIFICATE_BASE64` pair. Responses and callbacks signed
+by either key are accepted, but ambiguous multi-key JSON configuration fails
+closed unless one outbound key is selected explicitly.
+
+When a refund is initiated through the merchant console or a future
+refund-submission service, its WeChat refund notification URL must be
+configured as `/api/payments/wechat/refund-notify`; it is intentionally a
+separate callback path rather than a second payment URL.
 
 ## Migration Strategy
 
@@ -319,6 +431,10 @@ The public service-credit bridge is now atomic:
   treats legacy contact unlock fields or a client boolean as paid authority.
 - production deployment must run the migration preflight against a backup and
   reconcile any rejected legacy rows before retrying.
+- the ownership migration rejects legacy transfer audits that used one
+  `usage_entitlement_transfer:<usageId>` key for every hop. This rollout has no
+  production wallet data; non-production fixtures with that format should be
+  recreated rather than carried forward.
 - the invariant migration must run with legacy wallet writers stopped. For a
   future rolling release, first deploy writer code that only emits
   constraint-compatible states to every instance, then run the migration, and
@@ -341,3 +457,8 @@ The public service-credit bridge is now atomic:
 - Tests cover idempotency, insufficient funds, cross-user and cross-Agent
   isolation, reservation rollback, concurrent writes, partial refund,
   withdrawal guards, authorization, and cursor stability.
+- Public wallet reads are principal-scoped, representative-scoped,
+  currency-scoped, `private, no-store`, and exclude provider payloads and
+  internal identifiers.
+- A blocked reconciliation report prevents new withdrawals and every payout
+  lifecycle transition; warning-only legacy evidence remains operable.

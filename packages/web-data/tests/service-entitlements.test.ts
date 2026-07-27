@@ -5,6 +5,7 @@ import {
 } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
+import * as publicWebData from "../src/index";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   createServicePaymentOrder,
@@ -26,6 +27,13 @@ import {
   transferConversationEntitlementByGenerationRunId,
   type ServicePaymentEvidenceInput,
 } from "../src/service-entitlements";
+import {
+  consumeAgentWalletServiceCreditEntitlement,
+  grantAgentWalletServiceCreditEntitlement,
+  refundAgentWalletServiceCreditEntitlement,
+  releaseAgentWalletServiceCreditEntitlement,
+  reserveAgentWalletServiceCreditEntitlement,
+} from "../src/service-entitlements-wallet-internal";
 
 const coordinates = {
   audienceIdentityId: "audience_1",
@@ -34,6 +42,120 @@ const coordinates = {
 };
 
 describe("service entitlements", () => {
+  it("fails closed when public unit mutation APIs target the wallet product", async () => {
+    const client = new FakeServiceEntitlementClient();
+    const walletCoordinates = {
+      ...coordinates,
+      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+    };
+    const mutations = [
+      () =>
+        grantServiceEntitlement(
+          { ...walletCoordinates, units: 1, operationKey: "public-grant" },
+          client,
+        ),
+      () =>
+        reserveServiceEntitlement(
+          { ...walletCoordinates, units: 1, operationKey: "public-reserve" },
+          client,
+        ),
+      () =>
+        consumeServiceEntitlement(
+          { ...walletCoordinates, units: 1, operationKey: "public-consume" },
+          client,
+        ),
+      () =>
+        releaseServiceEntitlement(
+          { ...walletCoordinates, units: 1, operationKey: "public-release" },
+          client,
+        ),
+      () =>
+        refundGrantedServiceEntitlement(
+          { ...walletCoordinates, units: 1, operationKey: "public-refund" },
+          client,
+        ),
+    ];
+
+    for (const mutate of mutations) {
+      await expect(mutate()).rejects.toThrow(
+        "wallet dual-ledger accounting flow",
+      );
+    }
+    expect(client.accounts).toHaveLength(0);
+    expect(client.ledgerEntries).toHaveLength(0);
+  });
+
+  it("keeps the wallet bridge internal and pins all mutations to its product", async () => {
+    const client = new FakeServiceEntitlementClient();
+    const input = {
+      audienceIdentityId: coordinates.audienceIdentityId,
+      representativeId: coordinates.representativeId,
+      units: 3,
+      operationKey: "wallet-internal-grant",
+    };
+
+    await grantAgentWalletServiceCreditEntitlement(input, client);
+    await reserveAgentWalletServiceCreditEntitlement(
+      { ...input, units: 1, operationKey: "wallet-internal-reserve-1" },
+      client,
+    );
+    await consumeAgentWalletServiceCreditEntitlement(
+      { ...input, units: 1, operationKey: "wallet-internal-consume" },
+      client,
+    );
+    await reserveAgentWalletServiceCreditEntitlement(
+      { ...input, units: 1, operationKey: "wallet-internal-reserve-2" },
+      client,
+    );
+    await releaseAgentWalletServiceCreditEntitlement(
+      { ...input, units: 1, operationKey: "wallet-internal-release" },
+      client,
+    );
+    await refundAgentWalletServiceCreditEntitlement(
+      { ...input, units: 1, operationKey: "wallet-internal-refund" },
+      client,
+    );
+
+    expect(client.accounts).toEqual([
+      expect.objectContaining({
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        grantedUnits: 3,
+        remainingUnits: 1,
+        reservedUnits: 0,
+      }),
+    ]);
+    expect(client.ledgerEntries.map((entry) => entry.kind)).toEqual([
+      "GRANT",
+      "RESERVE",
+      "CONSUME",
+      "RESERVE",
+      "RELEASE",
+      "REFUND",
+    ]);
+    expect(publicWebData).not.toHaveProperty("serviceEntitlementWalletInternal");
+    expect(publicWebData).not.toHaveProperty(
+      "grantAgentWalletServiceCreditEntitlement",
+    );
+  });
+
+  it("rejects the wallet product through conversation entitlement writes", async () => {
+    const client = new FakeServiceEntitlementClient();
+
+    await expect(
+      reserveConversationEntitlement(
+        {
+          audienceIdentityId: coordinates.audienceIdentityId,
+          representativeId: coordinates.representativeId,
+          generationRunId: "wallet-conversation-run",
+          productCodes: [AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE],
+        },
+        client,
+      ),
+    ).rejects.toThrow("wallet dual-ledger accounting flow");
+    expect(client.accounts).toHaveLength(0);
+    expect(client.ledgerEntries).toHaveLength(0);
+  });
+
   it("grants once with a deterministic idempotency key", async () => {
     const client = new FakeServiceEntitlementClient();
     const input = {
@@ -758,19 +880,17 @@ describe("service entitlements", () => {
       },
       client,
     );
-    await grantServiceEntitlement(
+    await grantAgentWalletServiceCreditEntitlement(
       {
         ...coordinates,
-        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
         units: 2,
         operationKey: "grant-wallet-credit",
       },
       client,
     );
-    await reserveServiceEntitlement(
+    await reserveAgentWalletServiceCreditEntitlement(
       {
         ...coordinates,
-        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
         units: 1,
         operationKey: "wallet-reserve",
         generationRunId: "shared-generation-run",
@@ -918,6 +1038,60 @@ describe("service entitlements", () => {
 });
 
 describe("service payment entitlement fulfillment", () => {
+  it("rejects creating, fulfilling, or refunding wallet product payment orders", async () => {
+    const createClient = new FakeServiceEntitlementClient();
+    await expect(
+      createServicePaymentOrder(
+        {
+          id: "wallet_payment_new",
+          payerAudienceIdentityId: coordinates.audienceIdentityId,
+          representativeId: coordinates.representativeId,
+          provider: PaymentProvider.STRIPE,
+          providerAccountId: "stripe_account_1",
+          providerOrderId: "wallet_order_new",
+          productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          amountMinor: 1200,
+          currency: "CNY",
+          entitlementUnits: 12,
+          priceSnapshot: { amountMinor: 1200, currency: "CNY" },
+        },
+        createClient,
+      ),
+    ).rejects.toThrow("wallet dual-ledger accounting flow");
+    expect(createClient.paymentOrders).toHaveLength(0);
+
+    const fulfillClient = new FakeServiceEntitlementClient({
+      paymentOrder: paymentOrder({
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      }),
+    });
+    await expect(
+      fulfillServicePaymentOrder(paymentEvidence(), fulfillClient),
+    ).rejects.toThrow("wallet dual-ledger accounting flow");
+    expect(fulfillClient.paymentOrders[0]?.status).toBe(
+      RechargeOrderStatus.REQUIRES_PAYMENT,
+    );
+    expect(fulfillClient.paymentEvents).toHaveLength(0);
+    expect(fulfillClient.ledgerEntries).toHaveLength(0);
+
+    const refundClient = new FakeServiceEntitlementClient({
+      paymentOrder: paymentOrder({
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        status: RechargeOrderStatus.PAID,
+        fulfillmentKey: "legacy-wallet-fulfillment",
+        paidAt: new Date("2026-07-23T00:00:00.000Z"),
+      }),
+    });
+    await expect(
+      refundServiceEntitlement(
+        paymentEvidence({ providerEventId: "wallet_refund_event" }),
+        refundClient,
+      ),
+    ).rejects.toThrow("wallet dual-ledger accounting flow");
+    expect(refundClient.paymentOrders[0]?.status).toBe(RechargeOrderStatus.PAID);
+    expect(refundClient.paymentEvents).toHaveLength(0);
+  });
+
   it("creates an immutable provider order fact idempotently", async () => {
     const client = new FakeServiceEntitlementClient();
     const input = {

@@ -450,6 +450,10 @@ class FakeAmnLifecycleClient {
   entitlementLedgerEntries: EntitlementLedgerRow[] = [];
   private entitlementSequence = 0;
 
+  walletFundsWriteGate = {
+    assertAllowed: async () => undefined,
+  };
+
   owner = {
     findUnique: async (args: any) => {
       return this.owners.find((owner) => owner.id === args.where.id) ?? null;
@@ -751,6 +755,10 @@ class FakeAmnLifecycleClient {
       Object.assign(order, args.data);
       return { count: 1 };
     },
+  };
+
+  rechargeRefund = {
+    findFirst: async () => null,
   };
 
   paymentProviderEvent = {

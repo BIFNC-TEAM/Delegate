@@ -3,13 +3,21 @@ import {
   AmnWalletAccountType,
   Prisma,
   ServiceEntitlementLedgerKind,
+  WalletTransactionEventType,
+  WalletTransactionStatus,
   WithdrawRequestStatus,
 } from "@prisma/client";
 
+import {
+  conversationWalletEntitlementOperationKey,
+  verifyAgentUsageEntitlementTransferChain,
+} from "./agent-wallet-usage-charge";
+import type { WalletTransactionRecord } from "./agent-wallet-transactions";
 import { prisma } from "./prisma";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   resolveServiceEntitlementAudienceIdentityId,
+  serviceEntitlementOperationKey,
   type ServiceEntitlementClient,
 } from "./service-entitlements";
 
@@ -96,6 +104,26 @@ export class WorkspaceWalletReconciliationInputError extends Error {
   }
 }
 
+export const WALLET_RECONCILIATION_REQUIRED_CODE =
+  "wallet_reconciliation_required";
+
+export class WalletReconciliationRequiredError extends Error {
+  readonly code = WALLET_RECONCILIATION_REQUIRED_CODE;
+
+  constructor() {
+    super(
+      "Wallet reconciliation is required before financial operations can continue.",
+    );
+    this.name = "WalletReconciliationRequiredError";
+  }
+}
+
+export type WorkspaceWalletFundsWriteScope = {
+  ownerId: string;
+  representativeId: string;
+  currency: string;
+};
+
 type ReconciliationRepresentative = {
   id: string;
   ownerId: string;
@@ -147,7 +175,10 @@ export type WorkspaceWalletReconciliationDataset = {
     userAgentWalletId: string | null;
     agentWalletId: string;
     representativeId: string;
+    audienceIdentityId: string | null;
     entitlementAccountId: string | null;
+    conversationId: string | null;
+    generationRunId: string | null;
     status: AgentUsageChargeStatus;
     tokenAmount: number;
     reservedTokenAmount: number;
@@ -155,6 +186,7 @@ export type WorkspaceWalletReconciliationDataset = {
     releasedTokenAmount: number;
     platformRevenueCents: number;
     currency: string;
+    idempotencyKey: string;
     allocations: Array<{
       id: string;
       tokenPurchaseId: string;
@@ -173,6 +205,14 @@ export type WorkspaceWalletReconciliationDataset = {
     remainingUnits: number;
     reservedUnits: number;
     ledgerKinds: ServiceEntitlementLedgerKind[];
+  }>;
+  entitlementLedgerEntries?: Array<{
+    id: string;
+    entitlementAccountId: string;
+    kind: ServiceEntitlementLedgerKind;
+    units: number;
+    idempotencyKey: string;
+    generationRunId: string | null;
   }>;
   creatorEarnings: Array<{
     id: string;
@@ -211,10 +251,20 @@ export type WorkspaceWalletReconciliationDataset = {
   walletTransactions: Array<{
     id: string;
     eventGroupId: string;
+    idempotencyKey?: string;
     sourceType: string;
+    sourceId?: string | null;
+    eventType?: WalletTransactionEventType;
+    status?: WalletTransactionStatus;
+    ownerId?: string | null;
     representativeId: string | null;
+    userWalletId?: string | null;
     currency: string;
     metadata: Prisma.JsonValue | null;
+  }>;
+  generationRuns?: Array<{
+    id: string;
+    conversationId: string | null;
   }>;
   ledgerEntries: Array<{
     id: string;
@@ -254,7 +304,7 @@ type ReconciliationContext = {
   issueLimit: number;
 };
 
-type ReconciliationClient = Pick<
+export type WorkspaceWalletReconciliationClient = Pick<
   typeof prisma,
   | "owner"
   | "representative"
@@ -267,9 +317,12 @@ type ReconciliationClient = Pick<
   | "walletTransaction"
   | "walletLedgerEntry"
   | "userWallet"
+  | "generationRun"
 >;
 
-type ReconciliationRootClient = ReconciliationClient
+type ReconciliationClient = WorkspaceWalletReconciliationClient;
+
+type ReconciliationRootClient = WorkspaceWalletReconciliationClient
   & Pick<typeof prisma, "$transaction">;
 
 const currencyPattern = /^[A-Z][A-Z0-9]{2,7}$/;
@@ -290,6 +343,59 @@ export async function getWorkspaceWalletReconciliationReport(
       isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
     },
   );
+}
+
+/**
+ * Authoritative funds-write gate for callers that already own a Serializable
+ * transaction. The report is loaded through that transaction client so the
+ * decision and the following mutation share one database snapshot.
+ *
+ * A warning represents incomplete legacy evidence and remains writable.
+ * Only an error-level reconciliation finding blocks funds movement.
+ */
+export async function assertWorkspaceWalletFundsWriteAllowed(
+  input: WorkspaceWalletFundsWriteScope,
+  client: WorkspaceWalletReconciliationClient = prisma,
+): Promise<Exclude<WorkspaceWalletReconciliationStatus, "blocked">> {
+  const ownerId = input.ownerId.trim();
+  const representativeId = input.representativeId.trim();
+  const currency = normalizeCurrency(input.currency);
+  if (!ownerId || !representativeId) {
+    throw new WalletReconciliationRequiredError();
+  }
+
+  const representative = await client.representative.findUnique({
+    where: { id: representativeId },
+    select: {
+      ownerId: true,
+      slug: true,
+      agentWallet: {
+        select: { currency: true },
+      },
+    },
+  });
+  if (
+    !representative
+    || representative.ownerId !== ownerId
+    || representative.agentWallet?.currency.toUpperCase() !== currency
+  ) {
+    throw new WalletReconciliationRequiredError();
+  }
+
+  const report = await loadWorkspaceWalletReconciliationReport(
+    normalizeBaseInput({
+      ownerId,
+      activeRepresentativeSlug: representative.slug,
+      representative: representative.slug,
+      currency,
+      issueLimit: 1,
+    }),
+    client,
+  );
+  if (!report || report.status === "blocked") {
+    throw new WalletReconciliationRequiredError();
+  }
+  return report.status;
 }
 
 export async function getAllWorkspaceWalletReconciliationReports(
@@ -499,7 +605,10 @@ async function loadWorkspaceWalletReconciliationReport(
         userAgentWalletId: true,
         agentWalletId: true,
         representativeId: true,
+        audienceIdentityId: true,
         entitlementAccountId: true,
+        conversationId: true,
+        generationRunId: true,
         status: true,
         tokenAmount: true,
         reservedTokenAmount: true,
@@ -507,6 +616,7 @@ async function loadWorkspaceWalletReconciliationReport(
         releasedTokenAmount: true,
         platformRevenueCents: true,
         currency: true,
+        idempotencyKey: true,
         allocations: {
           orderBy: { id: "asc" },
           select: {
@@ -535,7 +645,14 @@ async function loadWorkspaceWalletReconciliationReport(
         remainingUnits: true,
         reservedUnits: true,
         ledgerEntries: {
-          select: { kind: true },
+          select: {
+            id: true,
+            entitlementAccountId: true,
+            kind: true,
+            units: true,
+            idempotencyKey: true,
+            generationRunId: true,
+          },
         },
       },
     }),
@@ -603,8 +720,14 @@ async function loadWorkspaceWalletReconciliationReport(
       select: {
         id: true,
         eventGroupId: true,
+        idempotencyKey: true,
         sourceType: true,
+        sourceId: true,
+        eventType: true,
+        status: true,
+        ownerId: true,
         representativeId: true,
+        userWalletId: true,
         currency: true,
         metadata: true,
       },
@@ -674,10 +797,29 @@ async function loadWorkspaceWalletReconciliationReport(
     });
   }
 
+  const generationRunIds = new Set(
+    usageCharges
+      .map((usage) => usage.generationRunId)
+      .filter((id): id is string => Boolean(id)),
+  );
+  for (const account of entitlementAccounts) {
+    for (const entry of account.ledgerEntries) {
+      if (entry.generationRunId) generationRunIds.add(entry.generationRunId);
+    }
+  }
+  for (const transaction of walletTransactions) {
+    if (transaction.sourceType !== "AgentUsageEntitlementTransfer") continue;
+    const metadata = jsonObject(transaction.metadata);
+    for (const key of ["fromGenerationRunId", "toGenerationRunId"]) {
+      const id = metadata[key];
+      if (typeof id === "string" && id) generationRunIds.add(id);
+    }
+  }
+
   const userWalletIds = [...new Set(
     userAgentWallets.map((wallet) => wallet.userWalletId),
   )];
-  const [userWallets, cashLedgerEntries] = await Promise.all([
+  const [userWallets, cashLedgerEntries, generationRuns] = await Promise.all([
     client.userWallet.findMany({
       where: {
         id: { in: userWalletIds },
@@ -705,6 +847,14 @@ async function loadWorkspaceWalletReconciliationReport(
         createdAt: true,
       },
     }),
+    client.generationRun.findMany({
+      where: { id: { in: [...generationRunIds] } },
+      orderBy: { id: "asc" },
+      select: {
+        id: true,
+        conversationId: true,
+      },
+    }),
   ]);
 
   const dataset: WorkspaceWalletReconciliationDataset = {
@@ -716,9 +866,13 @@ async function loadWorkspaceWalletReconciliationReport(
       ...account,
       ledgerKinds: account.ledgerEntries.map((entry) => entry.kind),
     })),
+    entitlementLedgerEntries: entitlementAccounts.flatMap(
+      (account) => account.ledgerEntries,
+    ),
     creatorEarnings,
     withdrawRequests,
     walletTransactions,
+    generationRuns,
     ledgerEntries,
     userWallets,
     cashLedgerEntries,
@@ -1399,6 +1553,14 @@ function reconcileUsageCharges(
   >,
   addCheck: CheckFunction,
 ) {
+  const entitlementLedgerByKey = new Map(
+    (dataset.entitlementLedgerEntries ?? []).map((entry) => [
+      entry.idempotencyKey,
+      entry,
+    ]),
+  );
+  const generationRuns = dataset.generationRuns ?? [];
+
   for (const usage of dataset.usageCharges) {
     const representative = representativeById.get(usage.representativeId) ?? null;
     const wallet = usage.userAgentWalletId
@@ -1425,6 +1587,248 @@ function reconcileUsageCharges(
         references,
       }),
     );
+
+    const bindingValues = [
+      usage.audienceIdentityId,
+      usage.entitlementAccountId,
+      usage.conversationId,
+      usage.generationRunId,
+    ];
+    const populatedBindingValues = bindingValues.filter(Boolean).length;
+    const hasCompleteBinding =
+      populatedBindingValues === bindingValues.length
+      && Boolean(wallet);
+    const hasNoBinding = populatedBindingValues === 0;
+    addCheck(
+      hasNoBinding || hasCompleteBinding,
+      issueFor({
+        code: "usage_entitlement_binding_incomplete",
+        domain: "entitlement",
+        representative,
+        unit: "count",
+        expected: bindingValues.length,
+        actual: populatedBindingValues,
+        currency: context.currency,
+        references,
+      }),
+    );
+
+    if (hasCompleteBinding && wallet) {
+      const entitlementCoordinates = {
+        audienceIdentityId: usage.audienceIdentityId!,
+        representativeId: usage.representativeId,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      };
+      const reserveLedgerKey = serviceEntitlementOperationKey(
+        "RESERVE",
+        entitlementCoordinates,
+        conversationWalletEntitlementOperationKey(
+          "reserve",
+          usage.idempotencyKey,
+        ),
+      );
+      const reserveEntry = entitlementLedgerByKey.get(reserveLedgerKey);
+      const transferTransactions = dataset.walletTransactions.filter(
+        (transaction) =>
+          transaction.sourceType === "AgentUsageEntitlementTransfer"
+          && (
+            transaction.sourceId === usage.id
+            || jsonObject(transaction.metadata).usageChargeId === usage.id
+          ),
+      );
+      const transferReferences = transferTransactions.map((transaction) => ({
+        kind: "WalletTransaction",
+        id: transaction.id,
+      }));
+      const reserveMatches = Boolean(
+        reserveEntry
+        && reserveEntry.kind === ServiceEntitlementLedgerKind.RESERVE
+        && reserveEntry.entitlementAccountId === usage.entitlementAccountId
+        && reserveEntry.units === usage.reservedTokenAmount
+        && reserveEntry.generationRunId,
+      );
+      addCheck(
+        reserveMatches,
+        issueFor({
+          code: "usage_entitlement_reserve_mismatch",
+          domain: "entitlement",
+          representative,
+          unit: "tokens",
+          expected: usage.reservedTokenAmount,
+          actual: reserveEntry?.units ?? 0,
+          currency: context.currency,
+          references: [
+            ...references,
+            ...(reserveEntry
+              ? [{
+                  kind: "ServiceEntitlementLedgerEntry",
+                  id: reserveEntry.id,
+                }]
+              : []),
+            ...transferReferences,
+          ],
+        }),
+      );
+
+      let transferChainValid = reserveMatches;
+      if (reserveMatches && reserveEntry) {
+        const completeTransfers = transferTransactions.filter(
+          isCompleteWalletTransactionRecord,
+        );
+        if (completeTransfers.length !== transferTransactions.length) {
+          transferChainValid = false;
+        } else {
+          try {
+            verifyAgentUsageEntitlementTransferChain({
+              usageChargeId: usage.id,
+              entitlementAccountId: usage.entitlementAccountId!,
+              audienceIdentityId: usage.audienceIdentityId!,
+              representativeId: usage.representativeId,
+              conversationId: usage.conversationId!,
+              currentGenerationRunId: usage.generationRunId!,
+              reserveGenerationRunId: reserveEntry.generationRunId!,
+              reserveLedgerEntryId: reserveEntry.id,
+              currency: usage.currency,
+              userWalletId: wallet.userWalletId,
+              ownerId: representative?.ownerId ?? null,
+              transferTransactions: completeTransfers,
+              generationRuns,
+            });
+          } catch {
+            transferChainValid = false;
+          }
+        }
+      }
+      addCheck(
+        transferChainValid,
+        issueFor({
+          code: "usage_entitlement_transfer_chain_invalid",
+          domain: "entitlement",
+          representative,
+          unit: "count",
+          expected: 1,
+          actual: transferChainValid ? 1 : 0,
+          currency: context.currency,
+          references: [
+            ...references,
+            ...(reserveEntry
+              ? [{
+                  kind: "ServiceEntitlementLedgerEntry",
+                  id: reserveEntry.id,
+                }]
+              : []),
+            ...transferReferences,
+          ],
+        }),
+      );
+
+      const terminalEntries = {
+        consume: entitlementLedgerByKey.get(serviceEntitlementOperationKey(
+          "CONSUME",
+          entitlementCoordinates,
+          conversationWalletEntitlementOperationKey(
+            "settle-consume",
+            usage.id,
+          ),
+        )),
+        releaseUnused: entitlementLedgerByKey.get(
+          serviceEntitlementOperationKey(
+            "RELEASE",
+            entitlementCoordinates,
+            conversationWalletEntitlementOperationKey(
+              "settle-release-unused",
+              usage.id,
+            ),
+          ),
+        ),
+        release: entitlementLedgerByKey.get(serviceEntitlementOperationKey(
+          "RELEASE",
+          entitlementCoordinates,
+          conversationWalletEntitlementOperationKey(
+            "release",
+            usage.id,
+          ),
+        )),
+      };
+      const terminalEntryMatches = (
+        entry: typeof terminalEntries.consume,
+        kind: ServiceEntitlementLedgerKind,
+        units: number,
+      ) => units === 0
+        ? entry === undefined
+        : Boolean(
+            entry
+            && entry.kind === kind
+            && entry.entitlementAccountId === usage.entitlementAccountId
+            && entry.units === units
+            && entry.generationRunId === usage.generationRunId,
+          );
+      const terminalEntryCount = Object.values(terminalEntries).filter(
+        Boolean,
+      ).length;
+      let expectedTerminalEntryCount: number | null = null;
+      let terminalFactsValid = false;
+      if (usage.status === AgentUsageChargeStatus.RESERVED) {
+        expectedTerminalEntryCount = 0;
+        terminalFactsValid = terminalEntryCount === 0;
+      } else if (usage.status === AgentUsageChargeStatus.SETTLED) {
+        const unusedTokenAmount =
+          usage.reservedTokenAmount - usage.settledTokenAmount;
+        expectedTerminalEntryCount =
+          Number(usage.settledTokenAmount > 0)
+          + Number(unusedTokenAmount > 0);
+        terminalFactsValid =
+          unusedTokenAmount >= 0
+          && terminalEntryMatches(
+            terminalEntries.consume,
+            ServiceEntitlementLedgerKind.CONSUME,
+            usage.settledTokenAmount,
+          )
+          && terminalEntryMatches(
+            terminalEntries.releaseUnused,
+            ServiceEntitlementLedgerKind.RELEASE,
+            unusedTokenAmount,
+          )
+          && terminalEntries.release === undefined;
+      } else if (
+        usage.status === AgentUsageChargeStatus.RELEASED
+        || usage.status === AgentUsageChargeStatus.FAILED
+      ) {
+        expectedTerminalEntryCount = 1;
+        terminalFactsValid =
+          terminalEntries.consume === undefined
+          && terminalEntries.releaseUnused === undefined
+          && terminalEntryMatches(
+            terminalEntries.release,
+            ServiceEntitlementLedgerKind.RELEASE,
+            usage.reservedTokenAmount,
+          );
+      }
+      addCheck(
+        terminalFactsValid,
+        issueFor({
+          code: "usage_entitlement_terminal_mismatch",
+          domain: "entitlement",
+          representative,
+          unit: "count",
+          expected: expectedTerminalEntryCount,
+          actual: terminalEntryCount,
+          currency: context.currency,
+          references: [
+            ...references,
+            ...Object.values(terminalEntries)
+              .filter((entry): entry is NonNullable<typeof entry> =>
+                Boolean(entry)
+              )
+              .map((entry) => ({
+                kind: "ServiceEntitlementLedgerEntry",
+                id: entry.id,
+              })),
+          ],
+        }),
+      );
+    }
+
     if (
       usage.status === AgentUsageChargeStatus.SETTLED
       || usage.status === AgentUsageChargeStatus.APPLIED
@@ -1808,6 +2212,9 @@ function reconcileTransactionsAndLedger(
   addCheck: CheckFunction,
   addWarning: WarningFunction,
 ) {
+  const usageById = new Map(
+    dataset.usageCharges.map((usage) => [usage.id, usage]),
+  );
   const transactionByEventGroup = new Map(
     dataset.walletTransactions.map((transaction) => [
       transaction.eventGroupId,
@@ -1905,6 +2312,40 @@ function reconcileTransactionsAndLedger(
     }
   }
   for (const transaction of dataset.walletTransactions) {
+    if (transaction.sourceType === "AgentUsageEntitlementTransfer") {
+      const metadata = jsonObject(transaction.metadata);
+      const metadataUsageChargeId =
+        typeof metadata.usageChargeId === "string"
+          ? metadata.usageChargeId
+          : null;
+      const usage =
+        typeof transaction.sourceId === "string"
+          ? usageById.get(transaction.sourceId) ?? null
+          : null;
+      const representative = transaction.representativeId
+        ? representativeById.get(transaction.representativeId) ?? null
+        : null;
+      const linked =
+        usage !== null
+        && transaction.sourceId === metadataUsageChargeId
+        && usage.representativeId === transaction.representativeId
+        && usage.currency === transaction.currency;
+      addCheck(linked, issueFor({
+        code: "usage_entitlement_transfer_orphan",
+        domain: "entitlement",
+        representative,
+        unit: "count",
+        expected: 1,
+        actual: linked ? 1 : 0,
+        currency: context.currency,
+        references: [
+          { kind: "WalletTransaction", id: transaction.id },
+          ...(usage
+            ? [{ kind: "AgentUsageCharge", id: usage.id }]
+            : []),
+        ],
+      }));
+    }
     if (
       entriesByEventGroup.has(transaction.eventGroupId)
       || walletTransactionMayOmitLedger(transaction)
@@ -2063,6 +2504,29 @@ function stableIdentityHash(value: string) {
     hash = BigInt.asUintN(64, hash * prime);
   }
   return hash.toString(16).padStart(16, "0");
+}
+
+function isCompleteWalletTransactionRecord(
+  transaction: WorkspaceWalletReconciliationDataset["walletTransactions"][number],
+): transaction is (
+  WorkspaceWalletReconciliationDataset["walletTransactions"][number]
+  & WalletTransactionRecord
+) {
+  return typeof transaction.idempotencyKey === "string"
+    && (
+      typeof transaction.sourceId === "string"
+      || transaction.sourceId === null
+    )
+    && transaction.eventType !== undefined
+    && transaction.status !== undefined
+    && (
+      typeof transaction.ownerId === "string"
+      || transaction.ownerId === null
+    )
+    && (
+      typeof transaction.userWalletId === "string"
+      || transaction.userWalletId === null
+    );
 }
 
 function walletTransactionMayOmitLedger(

@@ -949,6 +949,7 @@ describe("Matrix application service ingress", () => {
     expect(mockReleaseConversationWalletUsage).toHaveBeenCalledWith(
       {
         usageChargeId: "usage-redacted",
+        expectedGenerationRunId: "run-redacted",
         reason: "input_message_redacted",
         idempotencyKey:
           "message:message-alice:redaction:usage-redacted:release",

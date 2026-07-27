@@ -1576,6 +1576,7 @@ export async function completeInlineGenerationRun(input: {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             reason: "generation_deferred_to_human",
             idempotencyKey: `generation:${run.id}:release`,
           },
@@ -1655,6 +1656,7 @@ export async function completeInlineGenerationRun(input: {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             failed: true,
             reason: failureCode,
             idempotencyKey: `generation:${run.id}:release`,
@@ -1908,6 +1910,7 @@ export async function completeInlineGenerationRun(input: {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             reason: "generation_usage_not_counted",
             idempotencyKey: `generation:${run.id}:release`,
           },
@@ -1917,6 +1920,7 @@ export async function completeInlineGenerationRun(input: {
         await settleConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             settledTokenAmount: walletReservation.tokenAmount,
             ...(input.costCents !== undefined
               ? { providerCostCents: input.costCents }
@@ -2444,6 +2448,7 @@ export async function claimNextGenerationWorkItem(
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             failed: true,
             reason: "generation_run_canceled",
             idempotencyKey: `generation:${run.id}:release`,
@@ -2629,6 +2634,7 @@ export async function claimNextGenerationWorkItem(
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             failed: true,
             reason: "representative_version_context_mismatch",
             idempotencyKey: `generation:${run.id}:release`,
@@ -2730,6 +2736,7 @@ export async function claimNextGenerationWorkItem(
             await releaseConversationWalletUsage(
               {
                 usageChargeId: walletReservation.usageChargeId,
+                expectedGenerationRunId: run.id,
                 failed: true,
                 reason: failureCode,
                 idempotencyKey: `generation:${run.id}:release`,
@@ -2858,6 +2865,7 @@ export async function claimNextGenerationWorkItem(
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             failed: true,
             reason: availability.code,
             idempotencyKey: `generation:${run.id}:release`,
@@ -3410,6 +3418,7 @@ async function terminalizeExpiredGenerationLease(
     await releaseConversationWalletUsage(
       {
         usageChargeId: walletReservation.usageChargeId,
+        expectedGenerationRunId: run.id,
         failed: true,
         reason: errorCode,
         idempotencyKey: `generation:${run.id}:release`,
@@ -3488,6 +3497,7 @@ export async function deferGenerationRunForHuman(input: {
       await releaseConversationWalletUsage(
         {
           usageChargeId: walletReservation.usageChargeId,
+          expectedGenerationRunId: current.id,
           reason: "generation_deferred_to_human",
           idempotencyKey: `generation:${current.id}:release`,
         },
@@ -4056,6 +4066,7 @@ export async function failGenerationRun(input: {
       await releaseConversationWalletUsage(
         {
           usageChargeId: walletReservation.usageChargeId,
+          expectedGenerationRunId: run.id,
           failed: true,
           reason: input.errorCode,
           idempotencyKey: `generation:${run.id}:release`,
@@ -5205,6 +5216,7 @@ export async function redactConversationMessage(input: {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             reason: "input_message_redacted",
             idempotencyKey:
               `message:${message.id}:redaction:${walletReservation.usageChargeId}:release`,
@@ -5803,6 +5815,7 @@ export async function assignConversationOperator(input: {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
+            expectedGenerationRunId: run.id,
             reason: "generation_deferred_to_human",
             idempotencyKey: `generation:${run.id}:release`,
           },

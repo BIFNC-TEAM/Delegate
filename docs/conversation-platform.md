@@ -86,7 +86,11 @@ The same availability contract is evaluated at inbound acceptance, before genera
 
 Service access is scoped to an `AudienceIdentity`, representative, and product/service. It is not a representative-wide token pool shared by unrelated audience members.
 
-Web checkout and Telegram Stars are separate payment rails:
+The domain keeps Web checkout and Telegram Stars as separate payment rails. In
+the current repository, however, Web recharge is a non-production demo/mock
+flow: its mutation endpoints are disabled in production, and live provider
+checkout, signed webhooks, and production refunds are not yet closed. Telegram
+Stars is also default-off and not production-ready.
 
 - provider amounts, currencies, settlement references, disputes, and refunds remain rail-specific;
 - a successful, verified provider event may grant or extend the same service entitlement;
@@ -96,6 +100,9 @@ Web checkout and Telegram Stars are separate payment rails:
 - if the release is Web-payment-only, Telegram paid features remain disabled and the paid interaction continues on Web.
 
 ## Native Matrix Application Service
+
+Native Matrix is an optional channel. Telegram long-polling and direct Telegram
+delivery do not require a Matrix homeserver, Application Service, or bridge.
 
 `apps/matrix-bridge` implements:
 
@@ -144,6 +151,32 @@ A Telegram-to-Matrix bridge is an optional private-chat/plain-text canary. It mu
 
 The first canary does not include group chat, media parity, reactions, typing, read receipts, history import, E2EE, full puppeting, multiple owner bots, or multiple homeservers.
 
+### Telegram long-poll configuration
+
+`TELEGRAM_BOT_TOKEN` is the only Telegram credential required to start the
+current grammY long-poll runtime. `TELEGRAM_BOT_ID` is optional: channel
+binding uses it when set and otherwise derives the numeric bot id from the token
+prefix. After `getMe` succeeds, the runtime persists the validated bot id and
+username to configured Telegram channel bindings. The Web app can therefore
+issue a connection-scoped `/bind` challenge without receiving the Bot token.
+`TELEGRAM_BOT_USERNAME` is recommended for a readable external channel identity
+but is not required for polling. `TELEGRAM_WEBHOOK_SECRET` is not read by
+long-polling and is not a long-poll requirement. It remains available to
+separate webhook/signing or fallback code, but should not be added merely to run
+polling.
+
+The current paid continuation path sends users to the Web demo/mock recharge
+surface. `TELEGRAM_WEB_RECHARGE_BASE_URL` lets the Bot use a public origin
+without changing the representative app's canonical origin, and falls back to
+`NEXT_PUBLIC_REPRESENTATIVE_URL` when unset. The resolved value must be a public
+HTTPS origin for Telegram to emit a clickable inline recharge button. Loopback,
+private-network, `.local`, credential-bearing, or non-HTTPS URLs are sent only
+as message text for local testing. The official Telegram continuation requires
+a signed-in Web audience and an exact verified Telegram identity link for the
+active Bot before recharge creation; completion and reversal remain owned by
+the canonical Web identity even if a channel link is later revoked. A clickable
+button does not make the underlying mock flow production-ready.
+
 ### Telegram runtime ownership and delivery recovery
 
 `TELEGRAM_CONVERSATION_PLATFORM_MODE` is a single-owner contract shared by the
@@ -178,10 +211,11 @@ adapter rather than relying on an implicit fallback.
 
 Outbox `availableAt` is also the processing-lease deadline. Expired
 `PROCESSING` work can be reclaimed after a crash. The default
-`CONVERSATION_OUTBOX_PROCESSING_LEASE_MS` is five hours, and that value is
-also enforced as the minimum because it exceeds the hard 240-minute
-public-compute ceiling. Supporting a shorter lease requires worker heartbeats
-first; otherwise two workers can execute the same run concurrently.
+`CONVERSATION_OUTBOX_PROCESSING_LEASE_MS` is five minutes and five minutes is
+also the enforced minimum. The conversation worker renews an active generation
+lease while work continues and fences writes by the owning lease attempt, so a
+stale worker cannot extend or complete work after another worker has reclaimed
+it.
 
 Generation completion and provider delivery are separate recoverable phases.
 Once an output `Message` exists, retries use that persisted text and never run
@@ -238,6 +272,9 @@ Rollback disables the canary adapter, restores the previous active adapter owner
 ## Verification
 
 ```bash
+pnpm test:channels
+pnpm test:channels:pg16
+
 pnpm db:validate
 pnpm --filter @delegate/runtime test
 pnpm --filter @delegate/web-data test

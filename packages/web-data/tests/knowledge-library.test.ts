@@ -24,17 +24,30 @@ import { checksumKnowledgeSource, readKnowledgeSource, storeKnowledgeSource } fr
 import { removeKnowledgeTextIndex, splitKnowledgeText } from "../src/knowledge-vector";
 
 describe("workspace knowledge library", () => {
-  const originalDatabaseUrl = process.env.DATABASE_URL;
-
   beforeEach(() => {
-    delete process.env.DATABASE_URL;
+    for (const key of [
+      "DATABASE_URL",
+      "KNOWLEDGE_OBJECT_STORE_ENDPOINT",
+      "KNOWLEDGE_OBJECT_STORE_BUCKET",
+      "KNOWLEDGE_OBJECT_STORE_REGION",
+      "KNOWLEDGE_OBJECT_STORE_ACCESS_KEY",
+      "KNOWLEDGE_OBJECT_STORE_SECRET_KEY",
+      "KNOWLEDGE_OBJECT_STORE_FORCE_PATH_STYLE",
+      "ARTIFACT_STORE_ENDPOINT",
+      "ARTIFACT_STORE_BUCKET",
+      "ARTIFACT_STORE_REGION",
+      "ARTIFACT_STORE_ACCESS_KEY",
+      "ARTIFACT_STORE_SECRET_KEY",
+      "TENCENTCLOUD_SECRET_ID",
+      "TENCENTCLOUD_SECRET_KEY",
+    ]) {
+      vi.stubEnv(key, "");
+    }
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
-    if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = originalDatabaseUrl;
   });
 
   it("imports, processes, searches, permissions, archives, and permanently deletes authored knowledge", async () => {

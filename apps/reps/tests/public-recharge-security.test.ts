@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  assertAuthenticatedPublicAudiencePrincipal: vi.fn(),
   completeMockRechargeAndPurchaseAgentTokens: vi.fn(),
   createMockRechargeOrder: vi.fn(),
   getPublicRepresentativeRuntime: vi.fn(),
   getUserAgentWalletBalance: vi.fn(),
+  isVerifiedPrivateChannelIdentityBinding: vi.fn(),
+  listActivePrivateChannelIdentityBindings: vi.fn(),
   resolvePublicAudienceWalletExternalUserId: vi.fn(),
+  resolveRepresentativeTelegramBotConnectionId: vi.fn(),
   agentTokenPurchaseFindFirst: vi.fn(),
   rechargeOrderFindUnique: vi.fn(),
   reverseAgentTokenPurchase: vi.fn(),
@@ -26,8 +30,18 @@ vi.mock("@delegate/web-data", () => ({
   createMockRechargeOrder: mocks.createMockRechargeOrder,
   getPublicRepresentativeRuntime: mocks.getPublicRepresentativeRuntime,
   getUserAgentWalletBalance: mocks.getUserAgentWalletBalance,
+  isVerifiedPrivateChannelIdentityBinding:
+    mocks.isVerifiedPrivateChannelIdentityBinding,
+  listActivePrivateChannelIdentityBindings:
+    mocks.listActivePrivateChannelIdentityBindings,
+  privateChannelIdentityProviders: {
+    telegram: "TELEGRAM",
+    matrix: "MATRIX",
+  },
   resolvePublicAudienceWalletExternalUserId:
     mocks.resolvePublicAudienceWalletExternalUserId,
+  resolveRepresentativeTelegramBotConnectionId:
+    mocks.resolveRepresentativeTelegramBotConnectionId,
   prisma: {
     agentTokenPurchase: {
       findFirst: mocks.agentTokenPurchaseFindFirst,
@@ -47,6 +61,8 @@ vi.mock("next/headers", () => ({
 }));
 
 vi.mock("../app/reps/[slug]/public-principal", () => ({
+  assertAuthenticatedPublicAudiencePrincipal:
+    mocks.assertAuthenticatedPublicAudiencePrincipal,
   publicAudiencePrincipalErrorStatus: mocks.publicAudiencePrincipalErrorStatus,
   resolvePublicAudienceRequestPrincipal:
     mocks.resolvePublicAudienceRequestPrincipal,
@@ -69,7 +85,7 @@ describe("public mock recharge security", () => {
     });
     mocks.resolvePublicAudienceRequestPrincipal.mockResolvedValue({
       principal: {
-        mode: "anonymous",
+        mode: "authenticated",
         audienceId: "aud_current_visitor",
         audienceIdentityId: "identity-1",
         businessKey: "audience:identity-1",
@@ -80,10 +96,36 @@ describe("public mock recharge security", () => {
         expiresAt: "2026-07-30T00:00:00.000Z",
       },
     });
+    mocks.assertAuthenticatedPublicAudiencePrincipal.mockImplementation(
+      (principal: { mode?: string }) => {
+        if (principal.mode !== "authenticated") {
+          const error = new Error("authentication_required");
+          Object.assign(error, { code: "authentication_required" });
+          throw error;
+        }
+      },
+    );
     mocks.resolvePublicAudienceWalletExternalUserId.mockResolvedValue(
       "web:delegate:aud_current_visitor",
     );
-    mocks.publicAudiencePrincipalErrorStatus.mockReturnValue(null);
+    mocks.publicAudiencePrincipalErrorStatus.mockImplementation(
+      (error: { code?: string }) =>
+        error?.code === "authentication_required" ? 401 : null,
+    );
+    mocks.resolveRepresentativeTelegramBotConnectionId.mockResolvedValue(
+      "8718299151",
+    );
+    mocks.listActivePrivateChannelIdentityBindings.mockResolvedValue([
+      {
+        provider: "TELEGRAM",
+        providerSubject: "123456",
+        issuer: "delegate-managed-bot",
+        connectionId: "8718299151",
+        verifiedAt: "2026-07-27T00:00:00.000Z",
+        assuranceLevel: "PLATFORM_VERIFIED",
+      },
+    ]);
+    mocks.isVerifiedPrivateChannelIdentityBinding.mockReturnValue(true);
     mocks.resolveWebAudienceContact.mockResolvedValue({
       audienceIdentityId: "identity-1",
       displayName: "Visitor",
@@ -182,6 +224,132 @@ describe("public mock recharge security", () => {
     expect(mocks.reverseAgentTokenPurchase).not.toHaveBeenCalled();
   });
 
+  it("requires a signed-in Delegate identity for all recharge writes", async () => {
+    mocks.resolvePublicAudienceRequestPrincipal.mockResolvedValue({
+      principal: {
+        mode: "anonymous",
+        audienceId: "aud_current_visitor",
+        audienceIdentityId: "identity-1",
+        businessKey: "audience:identity-1",
+      },
+      sessionState: {
+        audienceId: "aud_current_visitor",
+        sessionToken: "session-token",
+        expiresAt: "2026-07-30T00:00:00.000Z",
+      },
+    });
+
+    const [createResponse, completeResponse, reversalResponse] =
+      await Promise.all([
+        createRecharge(
+          new Request("http://localhost/reps/delegate/recharge", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ amountCents: 2000 }),
+          }),
+          { params: Promise.resolve({ slug: "delegate" }) },
+        ),
+        completeRecharge(
+          new Request(
+            "http://localhost/reps/delegate/recharge/order-1/mock-success",
+            { method: "POST" },
+          ),
+          { params: Promise.resolve({ slug: "delegate", id: "order-1" }) },
+        ),
+        reverseRechargePurchase(
+          new Request(
+            "http://localhost/reps/delegate/recharge/order-1/mock-reversal",
+            { method: "POST" },
+          ),
+          { params: Promise.resolve({ slug: "delegate", id: "order-1" }) },
+        ),
+      ]);
+
+    expect(createResponse.status).toBe(401);
+    expect(completeResponse.status).toBe(401);
+    expect(reversalResponse.status).toBe(401);
+    for (const response of [
+      createResponse,
+      completeResponse,
+      reversalResponse,
+    ]) {
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+    }
+    expect(mocks.createMockRechargeOrder).not.toHaveBeenCalled();
+    expect(mocks.rechargeOrderFindUnique).not.toHaveBeenCalled();
+    expect(mocks.agentTokenPurchaseFindFirst).not.toHaveBeenCalled();
+  });
+
+  it("requires the exact verified Telegram binding for Telegram continuation", async () => {
+    mocks.isVerifiedPrivateChannelIdentityBinding.mockReturnValue(false);
+
+    const blockedResponse = await createRecharge(
+      new Request("http://localhost/reps/delegate/recharge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          amountCents: 2000,
+          continuationChannel: "telegram",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(blockedResponse.status).toBe(409);
+    await expect(blockedResponse.json()).resolves.toEqual(
+      expect.objectContaining({ code: "telegram_binding_required" }),
+    );
+    expect(mocks.createMockRechargeOrder).not.toHaveBeenCalled();
+
+    mocks.isVerifiedPrivateChannelIdentityBinding.mockReturnValue(true);
+    const allowedResponse = await createRecharge(
+      new Request("http://localhost/reps/delegate/recharge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          amountCents: 2000,
+          continuationChannel: "telegram",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(allowedResponse.status).toBe(201);
+    expect(mocks.isVerifiedPrivateChannelIdentityBinding).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "TELEGRAM" }),
+      {
+        provider: "TELEGRAM",
+        issuer: "delegate-managed-bot",
+        connectionId: "8718299151",
+      },
+    );
+  });
+
+  it("fails closed when the Telegram continuation has no active Bot connection", async () => {
+    mocks.resolveRepresentativeTelegramBotConnectionId.mockResolvedValue(null);
+
+    const response = await createRecharge(
+      new Request("http://localhost/reps/delegate/recharge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          amountCents: 2000,
+          continuationChannel: "telegram",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual(
+      expect.objectContaining({ code: "telegram_channel_unavailable" }),
+    );
+    expect(
+      mocks.listActivePrivateChannelIdentityBindings,
+    ).not.toHaveBeenCalled();
+    expect(mocks.createMockRechargeOrder).not.toHaveBeenCalled();
+  });
+
   it("rejects an order owned by a different browser audience or representative", async () => {
     mocks.rechargeOrderFindUnique.mockResolvedValue({
       userWallet: { externalUserId: "web:other-rep:aud_other_visitor" },
@@ -203,7 +371,10 @@ describe("public mock recharge security", () => {
     mocks.rechargeOrderFindUnique.mockResolvedValue({
       representativeId: "rep-1",
       productCode: "agent-wallet:service-credit:v1",
-      userWallet: { externalUserId: "web:delegate:aud_current_visitor" },
+      userWallet: {
+        audienceIdentityId: "identity-1",
+        externalUserId: "web:delegate:aud_current_visitor",
+      },
     });
 
     const response = await completeRecharge(
@@ -235,6 +406,39 @@ describe("public mock recharge security", () => {
         }),
       }),
     );
+  });
+
+  it("keeps canonical payment completion and reversal valid after a channel unlink", async () => {
+    mocks.listActivePrivateChannelIdentityBindings.mockResolvedValue([]);
+    mocks.rechargeOrderFindUnique.mockResolvedValue({
+      representativeId: "rep-1",
+      productCode: "agent-wallet:service-credit:v1",
+      userWallet: {
+        audienceIdentityId: "identity-1",
+        externalUserId: "web:delegate:aud_current_visitor",
+      },
+    });
+
+    const completeResponse = await completeRecharge(
+      new Request(
+        "http://localhost/reps/delegate/recharge/order-1/mock-success",
+        { method: "POST" },
+      ),
+      { params: Promise.resolve({ slug: "delegate", id: "order-1" }) },
+    );
+    const reversalResponse = await reverseRechargePurchase(
+      new Request(
+        "http://localhost/reps/delegate/recharge/order-1/mock-reversal",
+        { method: "POST" },
+      ),
+      { params: Promise.resolve({ slug: "delegate", id: "order-1" }) },
+    );
+
+    expect(completeResponse.status).toBe(200);
+    expect(reversalResponse.status).toBe(200);
+    expect(
+      mocks.listActivePrivateChannelIdentityBindings,
+    ).not.toHaveBeenCalled();
   });
 
   it("does not complete a canonical wallet order through another representative", async () => {
@@ -364,10 +568,7 @@ describe("public mock recharge security", () => {
         rechargeOrderId: "order-1",
         representativeId: "rep-1",
         userWallet: {
-          OR: [
-            { audienceIdentityId: "identity-1" },
-            { externalUserId: "web:delegate:aud_current_visitor" },
-          ],
+          audienceIdentityId: "identity-1",
         },
       },
       select: {

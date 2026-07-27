@@ -27,6 +27,8 @@ import {
 } from "../../public-chat";
 import {
   buildRepresentativeAuthCallbackUrl,
+  buildRepresentativeCanonicalAuthRequestUrl,
+  buildRepresentativeAuthRedirectUrl,
   getRepresentativeAuthCookiePath,
 } from "../../public-auth";
 
@@ -37,6 +39,12 @@ export async function GET(
   const { slug } = await params;
 
   try {
+    const canonicalRequestUrl =
+      buildRepresentativeCanonicalAuthRequestUrl(request);
+    if (canonicalRequestUrl) {
+      return NextResponse.redirect(canonicalRequestUrl);
+    }
+
     const url = new URL(request.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
@@ -107,7 +115,9 @@ export async function GET(
       email: profile.email ?? null,
     });
     const authCookiePath = getRepresentativeAuthCookiePath(slug);
-    const response = NextResponse.redirect(new URL(authState.returnTo, request.url));
+    const response = NextResponse.redirect(
+      buildRepresentativeAuthRedirectUrl(request, authState.returnTo),
+    );
     response.cookies.set(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE, signDelegateAuthSession(session, secret), {
       httpOnly: true,
       sameSite: "lax",

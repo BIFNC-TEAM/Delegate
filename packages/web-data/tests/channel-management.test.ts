@@ -45,6 +45,7 @@ import {
   evaluateChannelControlPlaneHealth,
   provisionOwnerMatrixChannel,
   refreshOwnerChannelHealth,
+  resolveRepresentativeTelegramBotConnectionId,
   setOwnerChannelDesiredState,
 } from "../src/channel-management";
 import { resolveChannelAvailability } from "../src/channel-availability";
@@ -52,6 +53,72 @@ import { resolveChannelAvailability } from "../src/channel-availability";
 describe("channel management", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("uses a cold-start Bot id only for an explicitly active direct Telegram binding", async () => {
+    const findFirst = vi.fn();
+    const client = {
+      representativeChannelBinding: { findFirst },
+    };
+    const env = { TELEGRAM_BOT_ID: "8718299151" };
+
+    findFirst.mockResolvedValueOnce({
+      connectionId: null,
+      desiredState: "ACTIVE",
+      status: "CONNECTED",
+    });
+    await expect(
+      resolveRepresentativeTelegramBotConnectionId(
+        "lin",
+        env,
+        client as never,
+      ),
+    ).resolves.toBe("8718299151");
+
+    findFirst.mockResolvedValueOnce({
+      connectionId: null,
+      desiredState: "PAUSED",
+      status: "CONNECTED",
+    });
+    await expect(
+      resolveRepresentativeTelegramBotConnectionId(
+        "lin",
+        env,
+        client as never,
+      ),
+    ).resolves.toBeNull();
+
+    findFirst.mockResolvedValueOnce(null);
+    await expect(
+      resolveRepresentativeTelegramBotConnectionId(
+        "matrix-only",
+        env,
+        client as never,
+      ),
+    ).resolves.toBeNull();
+
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          kind: "TELEGRAM",
+          representative: { slug: "lin" },
+          AND: [
+            {
+              OR: [
+                { transport: null },
+                { transport: "TELEGRAM" },
+              ],
+            },
+            {
+              OR: [
+                { sourceProvider: null },
+                { sourceProvider: "TELEGRAM" },
+              ],
+            },
+          ],
+        }),
+      }),
+    );
   });
 
   it("keeps Telegram as the source when Matrix carries the transport", () => {

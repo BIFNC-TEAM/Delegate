@@ -8,6 +8,7 @@ import {
   consumeIdentityBindingChallenge,
   createIdentityBindingChallenge,
   hashBindingToken,
+  isVerifiedPrivateChannelIdentityBinding,
 } from "../src/audience-identity-binding";
 
 type FakeIdentity = {
@@ -219,6 +220,49 @@ function createFakeBindingClient(
 }
 
 describe("audience identity private-channel binding", () => {
+  it("matches only a verified private-channel link for the exact Bot connection", () => {
+    const binding = {
+      provider: IdentityLinkProvider.TELEGRAM,
+      providerSubject: "123456",
+      issuer: "delegate-managed-bot",
+      connectionId: "8718299151",
+      verifiedAt: "2026-07-27T00:00:00.000Z",
+      assuranceLevel: IdentityAssuranceLevel.PLATFORM_VERIFIED,
+    };
+    const expected = {
+      provider: IdentityLinkProvider.TELEGRAM,
+      issuer: "delegate-managed-bot",
+      connectionId: "8718299151",
+    };
+
+    expect(
+      isVerifiedPrivateChannelIdentityBinding(binding, expected),
+    ).toBe(true);
+    expect(
+      isVerifiedPrivateChannelIdentityBinding(
+        {
+          ...binding,
+          assuranceLevel: IdentityAssuranceLevel.STEP_UP_VERIFIED,
+        },
+        expected,
+      ),
+    ).toBe(true);
+    for (const candidate of [
+      { ...binding, verifiedAt: null },
+      {
+        ...binding,
+        assuranceLevel: IdentityAssuranceLevel.UNVERIFIED,
+      },
+      { ...binding, issuer: "other-bot" },
+      { ...binding, connectionId: "999" },
+      { ...binding, provider: IdentityLinkProvider.MATRIX },
+    ]) {
+      expect(
+        isVerifiedPrivateChannelIdentityBinding(candidate, expected),
+      ).toBe(false);
+    }
+  });
+
   it("stores only a token hash and binds a verified Telegram subject once", async () => {
     const fake = createFakeBindingClient([
       {

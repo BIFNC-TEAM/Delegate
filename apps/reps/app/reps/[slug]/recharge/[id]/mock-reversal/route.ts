@@ -6,11 +6,11 @@ import {
   getPublicRepresentativeRuntime,
   getUserAgentWalletBalance,
   prisma,
-  resolvePublicAudienceWalletExternalUserId,
   reverseAgentTokenPurchase,
 } from "@delegate/web-data";
 
 import {
+  assertAuthenticatedPublicAudiencePrincipal,
   publicAudiencePrincipalErrorStatus,
   resolvePublicAudienceRequestPrincipal,
   setPublicAudienceSessionCookie,
@@ -39,25 +39,13 @@ export async function POST(
       representativeSlug: slug,
       cookieStore,
     });
-    const expectedExternalUserId = await resolvePublicAudienceWalletExternalUserId({
-      audienceIdentityId: principal.audienceIdentityId,
-      representativeSlug: slug,
-      audienceId: principal.audienceId,
-      currency: "CNY",
-    });
+    assertAuthenticatedPublicAudiencePrincipal(principal);
     const purchase = await prisma.agentTokenPurchase.findFirst({
       where: {
         rechargeOrderId,
         representativeId: runtime.setup.id,
         userWallet: {
-          ...(principal.mode === "authenticated"
-            ? { audienceIdentityId: principal.audienceIdentityId }
-            : {
-                OR: [
-                  { audienceIdentityId: principal.audienceIdentityId },
-                  { externalUserId: expectedExternalUserId },
-                ],
-              }),
+          audienceIdentityId: principal.audienceIdentityId,
         },
       },
       select: {

@@ -20,10 +20,19 @@ import {
   signDelegateAuthState,
 } from "@delegate/web-data";
 
-import { sanitizeCreatorReturnTo } from "../../../auth-guard";
+import {
+  buildCreatorCanonicalAuthRequestUrl,
+  buildCreatorRedirectUrl,
+  sanitizeCreatorReturnTo,
+} from "../../../auth-guard";
 
 export async function GET(request: Request) {
   try {
+    const canonicalRequestUrl = buildCreatorCanonicalAuthRequestUrl(request);
+    if (canonicalRequestUrl) {
+      return NextResponse.redirect(canonicalRequestUrl);
+    }
+
     const url = new URL(request.url);
     const returnTo = sanitizeCreatorReturnTo(url.searchParams.get("returnTo"));
     const secret = readDelegateAuthSessionSecret();
@@ -54,7 +63,9 @@ export async function GET(request: Request) {
         ownerId,
         email: profile.email ?? null,
       });
-      const response = NextResponse.redirect(new URL(returnTo, request.url));
+      const response = NextResponse.redirect(
+        buildCreatorRedirectUrl(returnTo, request.url),
+      );
       response.cookies.set(DELEGATE_OWNER_AUTH_SESSION_COOKIE, signDelegateAuthSession(session, secret), {
         httpOnly: true,
         sameSite: "lax",

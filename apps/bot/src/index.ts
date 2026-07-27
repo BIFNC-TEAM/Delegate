@@ -43,6 +43,7 @@ import {
   buildTelegramBotCommands,
   buildWebRechargeMessage,
   formatTelegramPlans,
+  resolveTelegramInlineKeyboardUrl,
 } from "./commerce-ux";
 import {
   buildHandoffPreparation,
@@ -63,6 +64,7 @@ import {
   setActiveRepresentativeForChat,
   setStructuredCollectorState,
   submitStructuredCollector,
+  synchronizeTelegramBotChannelBindings,
   retryPendingTelegramSuccessfulPayments,
   updateStructuredCollectorState,
   validatePendingInvoice,
@@ -74,9 +76,19 @@ import {
   storeCollectorMemory,
   storePaymentMemory,
 } from "./openviking-runtime";
+import {
+  buildTelegramPollingFailureLog,
+  buildTelegramUpdateMetadata,
+  logTelegramUpdateExecution,
+  normalizeTelegramCommandEntity,
+  resolveTelegramPollingExitCode,
+  resolveTelegramRuntimeConfig,
+  sanitizeTelegramError,
+} from "./telegram-runtime";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const conversationPlatformMode = resolveTelegramConversationPlatformMode();
+const telegramRuntimeConfig = resolveTelegramRuntimeConfig();
 const telegramStarsPurchasesEnabled = isTelegramPaidFlowAvailable(
   conversationPlatformMode,
 );
@@ -86,12 +98,12 @@ if (!token) {
   process.exit(0);
 }
 
-const bot = new Bot(token);
-const me = await bot.api.getMe();
-
-await bot.api.setMyCommands(
-  buildTelegramBotCommands(telegramStarsPurchasesEnabled),
-);
+const bot = new Bot(token, {
+  client: {
+    timeoutSeconds: telegramRuntimeConfig.apiTimeoutSeconds,
+  },
+});
+const me = await initializeTelegramBot();
 
 void retryPendingTelegramSuccessfulPayments().catch((error) => {
   console.error("Telegram payment reconciliation startup pass failed:", error);
@@ -102,6 +114,16 @@ const telegramPaymentRetryTimer = setInterval(() => {
   });
 }, 5_000);
 telegramPaymentRetryTimer.unref();
+
+bot.use(async (ctx, next) => {
+  const synthesizedCommandEntity = normalizeTelegramCommandEntity(
+    ctx.message,
+  );
+  await logTelegramUpdateExecution(
+    buildTelegramUpdateMetadata(ctx.update, synthesizedCommandEntity),
+    next,
+  );
+});
 
 bot.command("start", async (ctx) => {
   if (!ctx.from) {
@@ -209,6 +231,10 @@ bot.command("paysupport", async (ctx) => {
     const rechargeUrl = buildRepresentativeWebRechargeUrl(
       representative.slug,
     );
+    const rechargeKeyboard = buildWebRechargeKeyboard(
+      "打开 Web 充值",
+      rechargeUrl,
+    );
     await ctx.reply(
       [
         "当前新充值与付费统一在 Web 完成；订单或退款问题请通过代表页面联系所有者。",
@@ -217,13 +243,8 @@ bot.command("paysupport", async (ctx) => {
       ]
         .filter(Boolean)
         .join("\n\n"),
-      rechargeUrl
-        ? {
-            reply_markup: new InlineKeyboard().url(
-              "打开 Web 充值",
-              rechargeUrl,
-            ),
-          }
+      rechargeKeyboard
+        ? { reply_markup: rechargeKeyboard }
         : {},
     );
     return;
@@ -1011,11 +1032,103 @@ bot.on("message:text", async (ctx) => {
 });
 
 bot.catch((error) => {
-  console.error("Telegram bot error:", error.error);
+  console.error(
+    JSON.stringify({
+      event: "telegram_middleware_error",
+      updateId: error.ctx.update.update_id,
+      error: sanitizeTelegramError(error.error),
+    }),
+  );
 });
 
-console.log(`Starting Delegate bot as @${me.username ?? "unknown"}...`);
-await bot.start();
+let telegramBotStopping = false;
+async function stopTelegramBot(signal: "SIGINT" | "SIGTERM") {
+  if (telegramBotStopping) {
+    return;
+  }
+  telegramBotStopping = true;
+  clearInterval(telegramPaymentRetryTimer);
+  console.info(
+    JSON.stringify({
+      event: "telegram_polling_stopping",
+      signal,
+    }),
+  );
+  try {
+    await bot.stop();
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "telegram_polling_stop_failed",
+        signal,
+        error: sanitizeTelegramError(error),
+      }),
+    );
+  }
+}
+
+process.once("SIGINT", () => {
+  void stopTelegramBot("SIGINT");
+});
+process.once("SIGTERM", () => {
+  void stopTelegramBot("SIGTERM");
+});
+
+try {
+  await bot.start({
+    timeout: telegramRuntimeConfig.pollingTimeoutSeconds,
+    onStart: () => {
+      console.info(
+        JSON.stringify({
+          event: "telegram_polling_started",
+          botUsername: me.username ?? "unknown",
+          apiTimeoutSeconds: telegramRuntimeConfig.apiTimeoutSeconds,
+          pollingTimeoutSeconds: telegramRuntimeConfig.pollingTimeoutSeconds,
+        }),
+      );
+    },
+  });
+} catch (error) {
+  console.error(JSON.stringify(buildTelegramPollingFailureLog(error)));
+  process.exitCode = resolveTelegramPollingExitCode(error);
+}
+
+async function initializeTelegramBot() {
+  try {
+    const botInfo = await bot.api.getMe();
+    bot.botInfo = botInfo;
+    process.env.TELEGRAM_BOT_ID = String(botInfo.id);
+    if (botInfo.username) {
+      process.env.TELEGRAM_BOT_USERNAME = botInfo.username;
+    }
+    const synchronizedBindings =
+      await synchronizeTelegramBotChannelBindings({
+        connectionId: String(botInfo.id),
+        ...(botInfo.username ? { username: botInfo.username } : {}),
+      });
+    await bot.api.setMyCommands(
+      buildTelegramBotCommands(
+        telegramStarsPurchasesEnabled,
+        conversationPlatformMode !== "worker",
+      ),
+    );
+    console.info(
+      JSON.stringify({
+        event: "telegram_channel_bindings_synchronized",
+        count: synchronizedBindings,
+      }),
+    );
+    return botInfo;
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "telegram_startup_failed",
+        error: sanitizeTelegramError(error),
+      }),
+    );
+    process.exit(1);
+  }
+}
 
 async function sendPlansMessage(ctx: any, representative: Awaited<ReturnType<typeof getRepresentativeRuntimeConfig>>) {
   const replyMarkup = buildPlansKeyboard(representative.slug);
@@ -1068,19 +1181,18 @@ async function sendWebRechargeEntry(
   const selectedPlan = tier
     ? representative.pricing.find((plan) => plan.tier === tier)
     : undefined;
+  const rechargeKeyboard = buildWebRechargeKeyboard(
+    "打开 Web 充值",
+    rechargeUrl,
+  );
   await ctx.reply(
     buildWebRechargeMessage({
       representativeName: representative.name,
       rechargeUrl,
       ...(selectedPlan ? { selectedPlanName: selectedPlan.name } : {}),
     }),
-    rechargeUrl
-      ? {
-          reply_markup: new InlineKeyboard().url(
-            "打开 Web 充值",
-            rechargeUrl,
-          ),
-        }
+    rechargeKeyboard
+      ? { reply_markup: rechargeKeyboard }
       : {},
   );
 }
@@ -1166,9 +1278,7 @@ function buildPlansKeyboard(
   const rechargeUrl = buildRepresentativeWebRechargeUrl(
     representativeSlug,
   );
-  return rechargeUrl
-    ? new InlineKeyboard().url("打开 Web 充值", rechargeUrl)
-    : undefined;
+  return buildWebRechargeKeyboard("打开 Web 充值", rechargeUrl);
 }
 
 function buildPlanKeyboardForConversation(
@@ -1179,9 +1289,7 @@ function buildPlanKeyboardForConversation(
     const rechargeUrl = buildRepresentativeWebRechargeUrl(
       representativeSlug,
     );
-    return rechargeUrl
-      ? new InlineKeyboard().url("在 Web 继续服务", rechargeUrl)
-      : undefined;
+    return buildWebRechargeKeyboard("在 Web 继续服务", rechargeUrl);
   }
 
   if (plan.nextStep === "offer_paid_unlock" && plan.suggestedPlan) {
@@ -1518,13 +1626,12 @@ function buildComputeReplyOptions(
     const rechargeUrl = buildRepresentativeWebRechargeUrl(
       representative.slug,
     );
-    return rechargeUrl
-      ? {
-          reply_markup: new InlineKeyboard().url(
-            "在 Web 继续服务",
-            rechargeUrl,
-          ),
-        }
+    const rechargeKeyboard = buildWebRechargeKeyboard(
+      "在 Web 继续服务",
+      rechargeUrl,
+    );
+    return rechargeKeyboard
+      ? { reply_markup: rechargeKeyboard }
       : {};
   }
 
@@ -1545,6 +1652,16 @@ function buildComputeReplyOptions(
   }
 
   return {};
+}
+
+function buildWebRechargeKeyboard(
+  label: string,
+  rechargeUrl: string | null,
+): InlineKeyboard | undefined {
+  const buttonUrl = resolveTelegramInlineKeyboardUrl(rechargeUrl);
+  return buttonUrl
+    ? new InlineKeyboard().url(label, buttonUrl)
+    : undefined;
 }
 
 function formatComputeReply(params: {

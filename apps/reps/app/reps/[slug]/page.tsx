@@ -60,10 +60,11 @@ export default async function RepresentativePage({
   searchParams,
 }: {
   params: Promise<{ slug: string }>;
-  searchParams?: Promise<{ lang?: string }>;
+  searchParams?: Promise<{ lang?: string; source?: string }>;
 }) {
   const { slug } = await params;
   const query = searchParams ? await searchParams : undefined;
+  const telegramRechargeSource = query?.source === "telegram";
   const [headerStore, cookieStore] = await Promise.all([headers(), cookies()]);
   const locale = resolveLocale({
     requestedLocale: query?.lang,
@@ -113,7 +114,11 @@ export default async function RepresentativePage({
       }
     }
   }
-  const audienceLoginHref = buildPublicAudienceLoginHref(representative.slug, locale);
+  const audienceLoginHref = buildPublicAudienceLoginHref(
+    representative.slug,
+    locale,
+    telegramRechargeSource ? "telegram-recharge" : "chat",
+  );
   const audienceLogoutHref = buildPublicAudienceLogoutHref(representative.slug, locale);
   const publicDeliverables = deliverableSnapshot?.deliverables ?? [];
   const publicResourceCount =
@@ -161,13 +166,23 @@ export default async function RepresentativePage({
             items={[
               {
                 locale: "zh",
-                href: buildLocalizedHref(`/reps/${representative.slug}`, "zh"),
+                href: buildLocalizedHref(
+                  telegramRechargeSource
+                    ? `/reps/${representative.slug}?source=telegram#recharge`
+                    : `/reps/${representative.slug}`,
+                  "zh",
+                ),
                 label: t.language.zh,
                 shortLabel: "ZH",
               },
               {
                 locale: "en",
-                href: buildLocalizedHref(`/reps/${representative.slug}`, "en"),
+                href: buildLocalizedHref(
+                  telegramRechargeSource
+                    ? `/reps/${representative.slug}?source=telegram#recharge`
+                    : `/reps/${representative.slug}`,
+                  "en",
+                ),
                 label: t.language.en,
                 shortLabel: "EN",
               },
@@ -309,7 +324,15 @@ export default async function RepresentativePage({
           <div className="representative-visitor-section-heading">
             <p className="eyebrow">{t.demoEyebrow}</p><h2>{t.demoTitle}</h2><p>{t.demoSummary}</p>
           </div>
-          <RepresentativeRechargePanel locale={locale} representativeSlug={representative.slug} />
+          <RepresentativeRechargePanel
+            audienceAuthenticated={Boolean(audienceSession)}
+            {...(telegramRechargeSource
+              ? { continuationChannel: "telegram" as const }
+              : {})}
+            locale={locale}
+            loginHref={audienceLoginHref}
+            representativeSlug={representative.slug}
+          />
         </section>
       ) : null}
 

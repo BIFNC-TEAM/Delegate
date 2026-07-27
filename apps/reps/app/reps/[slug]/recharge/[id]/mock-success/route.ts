@@ -6,11 +6,11 @@ import {
   completeMockRechargeAndPurchaseAgentTokens,
   getPublicRepresentativeRuntime,
   prisma,
-  resolvePublicAudienceWalletExternalUserId,
 } from "@delegate/web-data";
 
 import { cookies } from "next/headers";
 import {
+  assertAuthenticatedPublicAudiencePrincipal,
   publicAudiencePrincipalErrorStatus,
   resolvePublicAudienceRequestPrincipal,
   setPublicAudienceSessionCookie,
@@ -39,12 +39,7 @@ export async function POST(
       representativeSlug: slug,
       cookieStore,
     });
-    const expectedExternalUserId = await resolvePublicAudienceWalletExternalUserId({
-      audienceIdentityId: principal.audienceIdentityId,
-      representativeSlug: slug,
-      audienceId: principal.audienceId,
-      currency: "CNY",
-    });
+    assertAuthenticatedPublicAudiencePrincipal(principal);
     const rechargeOrder = await prisma.rechargeOrder.findUnique({
       where: { id },
       select: {
@@ -58,10 +53,9 @@ export async function POST(
         },
       },
     });
-    const ownedByPrincipal = rechargeOrder?.userWallet.audienceIdentityId
-      ? rechargeOrder.userWallet.audienceIdentityId === principal.audienceIdentityId
-      : principal.mode === "anonymous"
-        && rechargeOrder?.userWallet.externalUserId === expectedExternalUserId;
+    const ownedByPrincipal =
+      rechargeOrder?.userWallet.audienceIdentityId
+      === principal.audienceIdentityId;
     const matchesPurchaseIntent =
       rechargeOrder?.representativeId === runtime.setup.id
       && rechargeOrder.productCode ===

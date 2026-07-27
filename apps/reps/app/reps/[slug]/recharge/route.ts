@@ -6,11 +6,16 @@ import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   createMockRechargeOrder,
   getPublicRepresentativeRuntime,
+  isVerifiedPrivateChannelIdentityBinding,
+  listActivePrivateChannelIdentityBindings,
+  privateChannelIdentityProviders,
   resolvePublicAudienceWalletExternalUserId,
+  resolveRepresentativeTelegramBotConnectionId,
   resolveWebAudienceContact,
 } from "@delegate/web-data";
 
 import {
+  assertAuthenticatedPublicAudiencePrincipal,
   publicAudiencePrincipalErrorStatus,
   resolvePublicAudienceRequestPrincipal,
   setPublicAudienceSessionCookie,
@@ -37,11 +42,51 @@ export async function POST(
 
     const body = (await request.json()) as Record<string, unknown>;
     const amountCents = Number(body.amountCents ?? 0);
+    const continuationChannel =
+      typeof body.continuationChannel === "string"
+        ? body.continuationChannel.trim().toLowerCase()
+        : "";
+    if (continuationChannel && continuationChannel !== "telegram") {
+      return privateJson({ error: "Unsupported recharge continuation channel." }, 400);
+    }
     const cookieStore = await cookies();
     const { principal, sessionState } = await resolvePublicAudienceRequestPrincipal({
       representativeSlug: slug,
       cookieStore,
     });
+    assertAuthenticatedPublicAudiencePrincipal(principal);
+    if (continuationChannel === "telegram") {
+      const connectionId =
+        await resolveRepresentativeTelegramBotConnectionId(slug);
+      if (!connectionId) {
+        return privateJson(
+          {
+            error: "Telegram 渠道尚未连接，暂时不能从 Telegram 继续充值。",
+            code: "telegram_channel_unavailable",
+          },
+          503,
+        );
+      }
+      const bindings = await listActivePrivateChannelIdentityBindings(
+        principal.audienceIdentityId,
+      );
+      const telegramBinding = bindings.some((binding) =>
+        isVerifiedPrivateChannelIdentityBinding(binding, {
+          provider: privateChannelIdentityProviders.telegram,
+          issuer: "delegate-managed-bot",
+          connectionId,
+        }),
+      );
+      if (!telegramBinding) {
+        return privateJson(
+          {
+            error: "请先把当前 Telegram 账户绑定到这个 Delegate 账户，再创建充值单。",
+            code: "telegram_binding_required",
+          },
+          409,
+        );
+      }
+    }
     const contact = await resolveWebAudienceContact({
       representativeId: representative.id,
       representativeSlug: slug,

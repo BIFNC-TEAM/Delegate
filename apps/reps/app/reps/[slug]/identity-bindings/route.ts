@@ -3,9 +3,11 @@ import { NextResponse } from "next/server";
 
 import {
   createIdentityBindingChallenge,
+  isVerifiedPrivateChannelIdentityBinding,
   listActivePrivateChannelIdentityBindings,
   privateChannelIdentityProviders,
   resolveMatrixApplicationServiceConnectionId,
+  resolveRepresentativeTelegramBotConnectionId,
 } from "@delegate/web-data";
 
 import {
@@ -23,7 +25,21 @@ export async function GET(
     const bindings = await listActivePrivateChannelIdentityBindings(
       principal.audienceIdentityId,
     );
-    return noStoreJson({ bindings });
+    const telegramConnectionId =
+      await resolveRepresentativeTelegramBotConnectionId(slug);
+    const telegramReady = telegramConnectionId
+      ? bindings.some((binding) =>
+          isVerifiedPrivateChannelIdentityBinding(binding, {
+            provider: privateChannelIdentityProviders.telegram,
+            issuer: "delegate-managed-bot",
+            connectionId: telegramConnectionId,
+          }),
+        )
+      : false;
+    return noStoreJson({
+      bindings,
+      readiness: { telegram: telegramReady },
+    });
   } catch (error) {
     return bindingError(error);
   }
@@ -46,7 +62,7 @@ export async function POST(
     const connectionId =
       body.provider === "matrix"
         ? resolveMatrixApplicationServiceConnectionId()
-        : telegramBotConnectionId();
+        : await telegramBotConnectionId(slug);
     const grant = await createIdentityBindingChallenge({
       audienceIdentityId: principal.audienceIdentityId,
       provider,
@@ -127,11 +143,10 @@ function matrixHomeserver(matrixUserId: string) {
   return matrixUserId.slice(separator + 1).toLowerCase();
 }
 
-function telegramBotConnectionId() {
-  const configuredId = process.env.TELEGRAM_BOT_ID?.trim();
-  const tokenId = process.env.TELEGRAM_BOT_TOKEN?.trim().match(/^([1-9]\d*):/)?.[1];
-  const connectionId = configuredId || tokenId;
-  if (!connectionId || !/^[1-9]\d*$/.test(connectionId)) {
+async function telegramBotConnectionId(representativeSlug: string) {
+  const connectionId =
+    await resolveRepresentativeTelegramBotConnectionId(representativeSlug);
+  if (!connectionId) {
     throw new IdentityBindingHttpError(
       503,
       "Telegram binding requires a configured numeric bot id.",

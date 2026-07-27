@@ -37,6 +37,7 @@
     "test:postgres:seed": "bash scripts/tests/prisma-seed.pg16.sh",
     "test:postgres:channel-platform": "bash scripts/tests/channel-platform.pg16.sh",
     "test:postgres:entitlements": "bash scripts/tests/service-entitlements-concurrency.pg16.sh",
+    "test:postgres:wallet": "bash scripts/tests/wallet-concurrency.pg16.sh",
     "test:postgres:skills": "pnpm --filter @delegate/web-data test:postgres:skills",
     "test:postgres:mcp-health": "pnpm --filter @delegate/compute-broker test:postgres:mcp-health",
     "test:postgres:channel-migration": "bash scripts/tests/channel-identity-entitlements-migration.pg16.sh",

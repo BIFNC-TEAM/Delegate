@@ -370,6 +370,229 @@ END
 $verify$;
 SQL
 
+printf 'phase=verify_wallet_database_invariants\n'
+docker exec -i "$FIXTURE_CONTAINER" \
+  psql -U postgres -d delegate_wallet_ok -X --set ON_ERROR_STOP=1 <<'SQL' >/dev/null
+DO $verify$
+DECLARE
+    validated_constraint_count INTEGER;
+    rejected BOOLEAN;
+BEGIN
+    SELECT COUNT(*)
+    INTO validated_constraint_count
+    FROM pg_constraint
+    WHERE
+        conname IN (
+            'UserAgentWallet_available_nonnegative',
+            'UserAgentWallet_reserved_nonnegative',
+            'UserAgentWallet_purchased_nonnegative',
+            'UserAgentWallet_consumed_nonnegative',
+            'UserAgentWallet_balance_conservation',
+            'AgentUsageCharge_reserved_nonnegative',
+            'AgentUsageCharge_settled_nonnegative',
+            'AgentUsageCharge_released_nonnegative',
+            'AgentUsageCharge_reservation_bounds',
+            'UserWallet_cash_balance_nonnegative',
+            'CreatorEarning_buckets_nonnegative',
+            'CreatorEarning_terminal_bucket_consistency',
+            'AgentUsageCharge_positive_dimensions',
+            'AgentUsageCharge_costs_nonnegative',
+            'AgentUsageCharge_status_amount_consistency',
+            'WithdrawRequest_amount_positive',
+            'WithdrawRequest_status_payout_consistency'
+        )
+        AND contype = 'c'
+        AND convalidated;
+    IF validated_constraint_count <> 17 THEN
+        RAISE EXCEPTION
+            'expected 17 validated wallet CHECK constraints, found %',
+            validated_constraint_count;
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        UPDATE "UserWallet"
+        SET "cashBalanceCents" = -1
+        WHERE "id" = 'user_wallet_fixture';
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'negative user cash balance was accepted';
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        UPDATE "UserAgentWallet"
+        SET "availableTokenAmount" = -1
+        WHERE "userWalletId" = 'user_wallet_fixture';
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'negative scoped-wallet bucket was accepted';
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        UPDATE "UserAgentWallet"
+        SET "totalPurchasedTokenAmount" = 101
+        WHERE "userWalletId" = 'user_wallet_fixture';
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'scoped-wallet conservation mismatch was accepted';
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        UPDATE "CreatorEarning"
+        SET "pendingCents" = -1
+        WHERE "id" = 'earning_pending_wallet_fixture';
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'negative creator bucket was accepted';
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        UPDATE "CreatorEarning"
+        SET "status" = 'REVERSED'
+        WHERE "id" = 'earning_pending_wallet_fixture';
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'reversed creator earning retained live funds';
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        UPDATE "AgentUsageCharge"
+        SET
+            "status" = 'SETTLED',
+            "settledTokenAmount" = 39
+        WHERE "id" = 'usage_wallet_fixture';
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'settled usage charge with unaccounted tokens was accepted';
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        UPDATE "AgentUsageCharge"
+        SET "status" = 'CREATED'
+        WHERE "id" = 'usage_wallet_fixture';
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'created usage charge with non-zero lifecycle buckets was accepted';
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        UPDATE "AgentUsageCharge"
+        SET "status" = 'REVERSED'
+        WHERE "id" = 'usage_wallet_fixture';
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'reversed usage charge with non-zero lifecycle buckets was accepted';
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        INSERT INTO "WithdrawRequest" (
+            "id",
+            "ownerId",
+            "status",
+            "amountCents",
+            "idempotencyKey",
+            "updatedAt"
+        )
+        VALUES (
+            'withdraw_zero_wallet_fixture',
+            'owner_wallet_fixture',
+            'PENDING_REVIEW',
+            0,
+            'withdraw_zero_wallet_fixture',
+            CURRENT_TIMESTAMP
+        );
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'zero-value withdrawal request was accepted';
+    END IF;
+
+    rejected := FALSE;
+    BEGIN
+        INSERT INTO "WithdrawRequest" (
+            "id",
+            "ownerId",
+            "status",
+            "amountCents",
+            "idempotencyKey",
+            "updatedAt"
+        )
+        VALUES (
+            'withdraw_incomplete_paid_wallet_fixture',
+            'owner_wallet_fixture',
+            'PAID',
+            1,
+            'withdraw_incomplete_paid_wallet_fixture',
+            CURRENT_TIMESTAMP
+        );
+    EXCEPTION WHEN check_violation THEN
+        rejected := TRUE;
+    END;
+    IF NOT rejected THEN
+        RAISE EXCEPTION 'paid withdrawal without payout facts was accepted';
+    END IF;
+
+    -- Valid terminal states remain representable.
+    UPDATE "CreatorEarning"
+    SET
+        "status" = 'WITHDRAWN',
+        "withdrawableCents" = 0,
+        "withdrawnCents" = 8
+    WHERE "id" = 'earning_released_wallet_fixture';
+
+    INSERT INTO "WithdrawRequest" (
+        "id",
+        "ownerId",
+        "representativeId",
+        "status",
+        "amountCents",
+        "paidAt",
+        "provider",
+        "providerPayoutId",
+        "idempotencyKey",
+        "updatedAt"
+    )
+    VALUES (
+        'withdraw_paid_wallet_fixture',
+        'owner_wallet_fixture',
+        'representative_wallet_fixture',
+        'PAID',
+        8,
+        CURRENT_TIMESTAMP,
+        'MOCK',
+        'payout_wallet_fixture',
+        'withdraw_paid_wallet_fixture',
+        CURRENT_TIMESTAMP
+    );
+END
+$verify$;
+SQL
+
 printf 'phase=create_inconsistent_fixture_database\n'
 docker exec "$FIXTURE_CONTAINER" \
   psql -U postgres -d postgres -X --set ON_ERROR_STOP=1 \

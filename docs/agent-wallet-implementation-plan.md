@@ -12,7 +12,7 @@ Delegate should evolve from an early wallet-like control plane into a real Agent
 
 Payment providers such as Stripe, WeChat Pay, and Alipay should only handle money movement, signatures, provider order state, webhooks, refunds, and payouts. Delegate remains the source of truth for wallet balances, Agent tokens, creator earnings, and product ledger state.
 
-## Implementation Status (2026-07-24)
+## Implementation Status (2026-07-27)
 
 The transactional MVP described by this plan is implemented on
 `codex/dashboard-optimization`:
@@ -69,6 +69,12 @@ The transactional MVP described by this plan is implemented on
   purchase, usage, creator-income, and aggregate wallet projections reconcile
   exactly. It fails before schema changes when manual reconciliation is
   required.
+- validated PostgreSQL checks reject negative cash and earning buckets,
+  inconsistent usage terminal amounts, and incomplete paid-withdrawal facts.
+  A disposable PostgreSQL 16 gate now exercises duplicate recharge, concurrent
+  cash spending, last-credit reservation, settle-versus-release, and
+  withdrawal-freeze races against the real schema. Creator balance summaries
+  use an uncapped database aggregate rather than a limited relation sample.
 
 Still intentionally excluded from this MVP: real Stripe/WeChat/Alipay
 collection, signed live webhooks, automated payout submission, chargeback
@@ -313,6 +319,13 @@ The public service-credit bridge is now atomic:
   treats legacy contact unlock fields or a client boolean as paid authority.
 - production deployment must run the migration preflight against a backup and
   reconcile any rejected legacy rows before retrying.
+- the invariant migration must run with legacy wallet writers stopped. For a
+  future rolling release, first deploy writer code that only emits
+  constraint-compatible states to every instance, then run the migration, and
+  only then remove transitional compatibility. Never apply the migration while
+  old and new wallet writers are mixed. The migration itself holds table locks
+  from preflight through validation, but those locks do not replace the
+  application rollout order.
 
 ## Acceptance Criteria
 

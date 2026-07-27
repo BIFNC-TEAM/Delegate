@@ -61,10 +61,6 @@ const walletDashboardArgs = Prisma.validator<Prisma.RepresentativeDefaultArgs>()
       },
     },
     agentWallet: true,
-    creatorEarnings: {
-      orderBy: [{ createdAt: "desc" }],
-      take: 100,
-    },
     withdrawRequests: {
       orderBy: [{ requestedAt: "desc" }],
       take: 8,
@@ -83,14 +79,45 @@ type WalletDashboardRecord = Prisma.RepresentativeGetPayload<{
 export async function getAgentWalletDashboardSnapshot(
   representativeSlug: string,
 ): Promise<AgentWalletDashboardSnapshot | null> {
-  const representative = await prisma.representative.findUnique({
-    where: { slug: representativeSlug },
-    ...walletDashboardArgs,
+  return prisma.$transaction(async (tx) => {
+    const representative = await tx.representative.findUnique({
+      where: { slug: representativeSlug },
+      ...walletDashboardArgs,
+    });
+    if (!representative) {
+      return null;
+    }
+    if (!representative.agentWallet) {
+      return buildAgentWalletDashboardSnapshot(
+        representative,
+        normalizeCreatorEarningAggregate({
+          pendingCents: null,
+          withdrawableCents: null,
+          frozenCents: null,
+          withdrawnCents: null,
+        }),
+      );
+    }
+    const creatorEarningAggregate = await tx.creatorEarning.aggregate({
+      where: {
+        representativeId: representative.id,
+        agentWalletId: representative.agentWallet.id,
+        currency: representative.agentWallet.currency,
+      },
+      _sum: {
+        pendingCents: true,
+        withdrawableCents: true,
+        frozenCents: true,
+        withdrawnCents: true,
+      },
+    });
+    return buildAgentWalletDashboardSnapshot(
+      representative,
+      normalizeCreatorEarningAggregate(creatorEarningAggregate._sum),
+    );
+  }, {
+    isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
   });
-  if (!representative) {
-    return null;
-  }
-  return buildAgentWalletDashboardSnapshot(representative);
 }
 
 export function summarizeCreatorEarningBalances(
@@ -112,8 +139,25 @@ export function summarizeCreatorEarningBalances(
   );
 }
 
+function normalizeCreatorEarningAggregate(
+  aggregate: {
+    pendingCents: number | null;
+    withdrawableCents: number | null;
+    frozenCents: number | null;
+    withdrawnCents: number | null;
+  },
+): CreatorEarningBalances {
+  return {
+    pendingCents: aggregate.pendingCents ?? 0,
+    withdrawableCents: aggregate.withdrawableCents ?? 0,
+    frozenCents: aggregate.frozenCents ?? 0,
+    withdrawnCents: aggregate.withdrawnCents ?? 0,
+  };
+}
+
 function buildAgentWalletDashboardSnapshot(
   representative: WalletDashboardRecord,
+  creatorBalances: CreatorEarningBalances,
 ): AgentWalletDashboardSnapshot {
   const agentWallet = representative.agentWallet;
   const currency = agentWallet?.currency ?? "CNY";
@@ -134,7 +178,7 @@ function buildAgentWalletDashboardSnapshot(
       tokenUnitPriceCents: agentWallet?.tokenUnitPriceCents ?? 1,
       creatorRevenueShareBps: agentWallet?.creatorRevenueShareBps ?? 2000,
     },
-    creatorBalances: summarizeCreatorEarningBalances(representative.creatorEarnings),
+    creatorBalances,
     withdrawRequests: representative.withdrawRequests.map((request) => ({
       id: request.id,
       amountCents: request.amountCents,

@@ -1,10 +1,28 @@
 import {
+  AgentUsageChargeStatus,
+  AmnLedgerEntryKind,
+  AmnWalletAccountType,
+  AudienceIdentityStatus,
+  Channel,
+  CreatorEarningStatus,
+  CreatorVerificationStatus,
+  MessageSenderType,
   PaymentProvider,
   RechargeOrderStatus,
+  RepresentativeClaimStatus,
+  type Prisma,
 } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
 import { completeMockRechargeOrder } from "../src/agent-wallet-recharge";
+import { getAgentWalletDashboardSnapshot } from "../src/agent-wallet-dashboard";
+import { purchaseAgentTokens } from "../src/agent-wallet-token-purchase";
+import {
+  releaseConversationWalletUsage,
+  reserveConversationWalletUsage,
+  settleConversationWalletUsage,
+} from "../src/agent-wallet-usage-charge";
+import { createWithdrawRequest } from "../src/agent-wallet-withdrawals";
 import { prisma } from "../src/prisma";
 
 const describePostgres = process.env.DELEGATE_POSTGRES_E2E === "1"
@@ -36,11 +54,22 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
       },
     });
     const providerEventId = `postgres-wallet-paid-${suffix}`;
+    const concurrentClient = createReadBarrierClient<
+      NonNullable<Parameters<typeof completeMockRechargeOrder>[2]>
+    >("rechargeOrder", "findUnique");
 
     try {
       const results = await Promise.all([
-        completeMockRechargeOrder(order.id, { providerEventId }),
-        completeMockRechargeOrder(order.id, { providerEventId }),
+        completeMockRechargeOrder(
+          order.id,
+          { providerEventId },
+          concurrentClient,
+        ),
+        completeMockRechargeOrder(
+          order.id,
+          { providerEventId },
+          concurrentClient,
+        ),
       ]);
 
       expect(results[0].cashBalanceCents).toBe(1_200);
@@ -93,7 +122,717 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
       }).catch(() => undefined);
     }
   });
+
+  it("allows only one concurrent purchase to spend the same cash balance", async () => {
+    const fixture = await createWalletFixture("cash-overspend", 1_200);
+    const concurrentClient = createReadBarrierClient<
+      NonNullable<Parameters<typeof purchaseAgentTokens>[1]>
+    >("userWallet", "findUnique");
+
+    try {
+      const results = await Promise.allSettled([
+        purchaseAgentTokens({
+          externalUserId: fixture.externalUserId,
+          representativeId: fixture.representativeId,
+          amountCents: 800,
+          idempotencyKey: `${fixture.suffix}:purchase-a`,
+        }, concurrentClient),
+        purchaseAgentTokens({
+          externalUserId: fixture.externalUserId,
+          representativeId: fixture.representativeId,
+          amountCents: 800,
+          idempotencyKey: `${fixture.suffix}:purchase-b`,
+        }, concurrentClient),
+      ]);
+
+      expectNoBarrierTimeout(results);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+      const [userWallet, userAgentWallet, agentWallet, entitlementAccount] =
+        await Promise.all([
+          prisma.userWallet.findUniqueOrThrow({
+            where: { id: fixture.userWalletId },
+          }),
+          prisma.userAgentWallet.findFirstOrThrow({
+            where: {
+              userWalletId: fixture.userWalletId,
+              agentWalletId: fixture.agentWalletId,
+              currency: "CNY",
+            },
+          }),
+          prisma.agentWallet.findUniqueOrThrow({
+            where: { id: fixture.agentWalletId },
+          }),
+          prisma.serviceEntitlementAccount.findFirstOrThrow({
+            where: {
+              audienceIdentityId: fixture.audienceIdentityId,
+              representativeId: fixture.representativeId,
+            },
+          }),
+        ]);
+
+      expect(userWallet.cashBalanceCents).toBe(400);
+      expect(userAgentWallet).toMatchObject({
+        availableTokenAmount: 800,
+        reservedTokenAmount: 0,
+        totalPurchasedTokenAmount: 800,
+        totalConsumedTokenAmount: 0,
+      });
+      expect(agentWallet).toMatchObject({
+        tokenBalance: 800,
+        totalPurchasedTokens: 800,
+        totalConsumedTokens: 0,
+      });
+      expect(entitlementAccount).toMatchObject({
+        remainingUnits: 800,
+        reservedUnits: 0,
+      });
+      await expect(
+        prisma.agentTokenPurchase.count({
+          where: { representativeId: fixture.representativeId },
+        }),
+      ).resolves.toBe(1);
+      await expect(
+        prisma.creatorEarning.count({
+          where: { representativeId: fixture.representativeId },
+        }),
+      ).resolves.toBe(1);
+      await expect(
+        prisma.walletTransaction.count({
+          where: {
+            representativeId: fixture.representativeId,
+            sourceType: "AgentTokenPurchase",
+          },
+        }),
+      ).resolves.toBe(1);
+    } finally {
+      await cleanupWalletFixture(fixture);
+    }
+  }, 30_000);
+
+  it("allows only one generation run to reserve the final service credit", async () => {
+    const fixture = await createWalletFixture("last-credit", 1);
+    const concurrentClient = createReadBarrierClient<
+      NonNullable<Parameters<typeof reserveConversationWalletUsage>[1]>
+    >("userAgentWallet", "findUnique");
+
+    try {
+      await purchaseAgentTokens({
+        externalUserId: fixture.externalUserId,
+        representativeId: fixture.representativeId,
+        amountCents: 1,
+        idempotencyKey: `${fixture.suffix}:purchase`,
+      });
+      const [firstRunId, secondRunId] = await Promise.all([
+        createGenerationRun(fixture, "reserve-a"),
+        createGenerationRun(fixture, "reserve-b"),
+      ]);
+
+      const results = await Promise.allSettled([
+        reserveConversationWalletUsage({
+          externalUserId: fixture.externalUserId,
+          audienceIdentityId: fixture.audienceIdentityId,
+          representativeId: fixture.representativeId,
+          conversationId: fixture.conversationId,
+          generationRunId: firstRunId,
+          tokenAmount: 1,
+          idempotencyKey: `${fixture.suffix}:reserve-a`,
+        }, concurrentClient),
+        reserveConversationWalletUsage({
+          externalUserId: fixture.externalUserId,
+          audienceIdentityId: fixture.audienceIdentityId,
+          representativeId: fixture.representativeId,
+          conversationId: fixture.conversationId,
+          generationRunId: secondRunId,
+          tokenAmount: 1,
+          idempotencyKey: `${fixture.suffix}:reserve-b`,
+        }, concurrentClient),
+      ]);
+
+      expectNoBarrierTimeout(results);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+      const [userAgentWallet, entitlementAccount, usageCharges, reserveEntries] =
+        await Promise.all([
+          prisma.userAgentWallet.findFirstOrThrow({
+            where: {
+              userWalletId: fixture.userWalletId,
+              agentWalletId: fixture.agentWalletId,
+            },
+          }),
+          prisma.serviceEntitlementAccount.findFirstOrThrow({
+            where: {
+              audienceIdentityId: fixture.audienceIdentityId,
+              representativeId: fixture.representativeId,
+            },
+          }),
+          prisma.agentUsageCharge.findMany({
+            where: { representativeId: fixture.representativeId },
+          }),
+          prisma.serviceEntitlementLedgerEntry.findMany({
+            where: {
+              entitlementAccount: {
+                audienceIdentityId: fixture.audienceIdentityId,
+                representativeId: fixture.representativeId,
+              },
+              kind: "RESERVE",
+            },
+          }),
+        ]);
+
+      expect(userAgentWallet).toMatchObject({
+        availableTokenAmount: 0,
+        reservedTokenAmount: 1,
+      });
+      expect(entitlementAccount).toMatchObject({
+        remainingUnits: 0,
+        reservedUnits: 1,
+      });
+      expect(usageCharges).toHaveLength(1);
+      expect(usageCharges[0]).toMatchObject({
+        status: AgentUsageChargeStatus.RESERVED,
+        reservedTokenAmount: 1,
+      });
+      expect(reserveEntries).toHaveLength(1);
+    } finally {
+      await cleanupWalletFixture(fixture);
+    }
+  }, 30_000);
+
+  it("serializes settlement against release so only one terminal usage mutation wins", async () => {
+    const fixture = await createWalletFixture("settle-release", 10);
+    const concurrentClient = createReadBarrierClient<
+      NonNullable<Parameters<typeof settleConversationWalletUsage>[1]>
+    >("agentUsageCharge", "findUnique");
+
+    try {
+      await purchaseAgentTokens({
+        externalUserId: fixture.externalUserId,
+        representativeId: fixture.representativeId,
+        amountCents: 10,
+        idempotencyKey: `${fixture.suffix}:purchase`,
+      });
+      const generationRunId = await createGenerationRun(fixture, "terminal-race");
+      const reservation = await reserveConversationWalletUsage({
+        externalUserId: fixture.externalUserId,
+        audienceIdentityId: fixture.audienceIdentityId,
+        representativeId: fixture.representativeId,
+        conversationId: fixture.conversationId,
+        generationRunId,
+        tokenAmount: 10,
+        idempotencyKey: `${fixture.suffix}:reserve`,
+      });
+
+      const results = await Promise.allSettled([
+        settleConversationWalletUsage({
+          usageChargeId: reservation.usageCharge.id,
+          settledTokenAmount: 10,
+          providerCostCents: 1,
+          provider: "postgres-concurrency-test",
+          idempotencyKey: `${fixture.suffix}:settle`,
+        }, concurrentClient),
+        releaseConversationWalletUsage({
+          usageChargeId: reservation.usageCharge.id,
+          reason: "postgres_concurrency_test",
+          idempotencyKey: `${fixture.suffix}:release`,
+        }, concurrentClient),
+      ]);
+
+      expectNoBarrierTimeout(results);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+      const [usageCharge, userAgentWallet, entitlementAccount, terminalEntries] =
+        await Promise.all([
+          prisma.agentUsageCharge.findUniqueOrThrow({
+            where: { id: reservation.usageCharge.id },
+          }),
+          prisma.userAgentWallet.findFirstOrThrow({
+            where: {
+              userWalletId: fixture.userWalletId,
+              agentWalletId: fixture.agentWalletId,
+            },
+          }),
+          prisma.serviceEntitlementAccount.findFirstOrThrow({
+            where: {
+              audienceIdentityId: fixture.audienceIdentityId,
+              representativeId: fixture.representativeId,
+            },
+          }),
+          prisma.serviceEntitlementLedgerEntry.findMany({
+            where: {
+              entitlementAccount: {
+                audienceIdentityId: fixture.audienceIdentityId,
+                representativeId: fixture.representativeId,
+              },
+              kind: { in: ["CONSUME", "RELEASE"] },
+            },
+          }),
+        ]);
+
+      expect([
+        AgentUsageChargeStatus.SETTLED,
+        AgentUsageChargeStatus.RELEASED,
+      ]).toContain(usageCharge.status);
+      expect(usageCharge.settledTokenAmount + usageCharge.releasedTokenAmount).toBe(10);
+      expect(userAgentWallet.reservedTokenAmount).toBe(0);
+      expect(entitlementAccount.reservedUnits).toBe(0);
+      expect(userAgentWallet.availableTokenAmount).toBe(
+        entitlementAccount.remainingUnits,
+      );
+      expect(terminalEntries).toHaveLength(1);
+      expect(terminalEntries[0]?.units).toBe(10);
+    } finally {
+      await cleanupWalletFixture(fixture);
+    }
+  }, 30_000);
+
+  it("allows only one concurrent withdrawal to freeze the same creator earning", async () => {
+    const fixture = await createWalletFixture("withdraw-freeze", 0);
+    const concurrentClient = createReadBarrierClient<
+      NonNullable<Parameters<typeof createWithdrawRequest>[1]>
+    >("creatorEarning", "findMany");
+
+    try {
+      const earning = await prisma.creatorEarning.create({
+        data: {
+          ownerId: fixture.ownerId,
+          representativeId: fixture.representativeId,
+          agentWalletId: fixture.agentWalletId,
+          status: CreatorEarningStatus.WITHDRAWABLE,
+          pendingCents: 0,
+          withdrawableCents: 100,
+          frozenCents: 0,
+          withdrawnCents: 0,
+          currency: "CNY",
+          revenueShareBps: 2_000,
+          idempotencyKey: `${fixture.suffix}:earning`,
+        },
+      });
+      const results = await Promise.allSettled([
+        createWithdrawRequest({
+          ownerId: fixture.ownerId,
+          representativeId: fixture.representativeId,
+          amountCents: 100,
+          idempotencyKey: `${fixture.suffix}:withdraw-a`,
+        }, concurrentClient),
+        createWithdrawRequest({
+          ownerId: fixture.ownerId,
+          representativeId: fixture.representativeId,
+          amountCents: 100,
+          idempotencyKey: `${fixture.suffix}:withdraw-b`,
+        }, concurrentClient),
+      ]);
+
+      expectNoBarrierTimeout(results);
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+      const [currentEarning, requests, allocations, ledgerEntries] =
+        await Promise.all([
+          prisma.creatorEarning.findUniqueOrThrow({
+            where: { id: earning.id },
+          }),
+          prisma.withdrawRequest.findMany({
+            where: { representativeId: fixture.representativeId },
+          }),
+          prisma.withdrawalAllocation.findMany({
+            where: {
+              creatorEarningId: earning.id,
+            },
+          }),
+          prisma.walletLedgerEntry.findMany({
+            where: {
+              representativeId: fixture.representativeId,
+              withdrawRequestId: { not: null },
+            },
+          }),
+        ]);
+
+      expect(currentEarning).toMatchObject({
+        status: CreatorEarningStatus.FROZEN,
+        pendingCents: 0,
+        withdrawableCents: 0,
+        frozenCents: 100,
+        withdrawnCents: 0,
+      });
+      expect(requests).toHaveLength(1);
+      expect(allocations).toHaveLength(1);
+      expect(allocations[0]?.amountCents).toBe(100);
+      expect(ledgerEntries).toHaveLength(2);
+      expect(
+        ledgerEntries.map((entry) => ({
+          accountType: entry.accountType,
+          entryKind: entry.entryKind,
+          amountCents: entry.amountCents,
+        })),
+      ).toEqual(expect.arrayContaining([
+        {
+          accountType: AmnWalletAccountType.CREATOR_WITHDRAWABLE,
+          entryKind: AmnLedgerEntryKind.WITHDRAWAL_FREEZE,
+          amountCents: -100,
+        },
+        {
+          accountType: AmnWalletAccountType.CREATOR_FROZEN,
+          entryKind: AmnLedgerEntryKind.CREATOR_FROZEN_CREDIT,
+          amountCents: 100,
+        },
+      ]));
+      expect(ledgerEntries.reduce((sum, entry) => sum + entry.amountCents, 0)).toBe(0);
+    } finally {
+      await cleanupWalletFixture(fixture);
+    }
+  }, 30_000);
+
+  it("aggregates creator balances beyond the former 100-row dashboard limit", async () => {
+    const fixture = await createWalletFixture("dashboard-aggregate", 0);
+
+    try {
+      await prisma.creatorEarning.createMany({
+        data: Array.from({ length: 101 }, (_, index) => ({
+          ownerId: fixture.ownerId,
+          representativeId: fixture.representativeId,
+          agentWalletId: fixture.agentWalletId,
+          status: CreatorEarningStatus.WITHDRAWABLE,
+          pendingCents: 0,
+          withdrawableCents: index + 1,
+          frozenCents: 0,
+          withdrawnCents: 0,
+          currency: "CNY",
+          revenueShareBps: 2_000,
+          idempotencyKey: `${fixture.suffix}:dashboard-earning:${index}`,
+        })),
+      });
+
+      const snapshot = await getAgentWalletDashboardSnapshot(
+        fixture.suffix,
+      );
+
+      expect(snapshot?.creatorBalances).toEqual({
+        pendingCents: 0,
+        withdrawableCents: 5_151,
+        frozenCents: 0,
+        withdrawnCents: 0,
+      });
+    } finally {
+      await cleanupWalletFixture(fixture);
+    }
+  }, 30_000);
 });
+
+type WalletFixture = {
+  suffix: string;
+  ownerId: string;
+  representativeId: string;
+  audienceIdentityId: string;
+  userWalletId: string;
+  agentWalletId: string;
+  contactId: string;
+  conversationId: string;
+  externalUserId: string;
+};
+
+type WalletTransactionOptions = {
+  isolationLevel?: Prisma.TransactionIsolationLevel;
+};
+
+/**
+ * Makes both serializable transactions observe the same pre-mutation row.
+ * Without this barrier Promise.allSettled can execute effectively in series,
+ * allowing a race test to pass without exercising write-conflict retry.
+ */
+function createReadBarrierClient<TClient>(
+  delegateName: keyof Prisma.TransactionClient,
+  methodName: string,
+): TClient {
+  const waitForParticipants = createParticipantBarrier(2);
+
+  return new Proxy(prisma, {
+    get(target, property) {
+      if (property !== "$transaction") {
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+
+      return async <T>(
+        operation: (tx: Prisma.TransactionClient) => Promise<T>,
+        options?: WalletTransactionOptions,
+      ): Promise<T> =>
+        prisma.$transaction(async (tx) => {
+          let pausedInThisTransaction = false;
+          const transactionClient = new Proxy(tx, {
+            get(transactionTarget, transactionProperty) {
+              const transactionValue = Reflect.get(
+                transactionTarget,
+                transactionProperty,
+                transactionTarget,
+              );
+              if (transactionProperty !== delegateName) {
+                return typeof transactionValue === "function"
+                  ? transactionValue.bind(transactionTarget)
+                  : transactionValue;
+              }
+
+              const delegate = transactionValue as object;
+              return new Proxy(delegate, {
+                get(delegateTarget, delegateProperty) {
+                  const delegateValue = Reflect.get(
+                    delegateTarget,
+                    delegateProperty,
+                    delegateTarget,
+                  );
+                  if (typeof delegateValue !== "function") {
+                    return delegateValue;
+                  }
+                  const boundDelegate = delegateValue.bind(delegateTarget);
+                  if (delegateProperty !== methodName) {
+                    return boundDelegate;
+                  }
+
+                  return async (...args: unknown[]) => {
+                    const result = await boundDelegate(...args);
+                    if (!pausedInThisTransaction) {
+                      pausedInThisTransaction = true;
+                      await waitForParticipants();
+                    }
+                    return result;
+                  };
+                },
+              });
+            },
+          }) as Prisma.TransactionClient;
+
+          return operation(transactionClient);
+        }, options);
+    },
+  }) as unknown as TClient;
+}
+
+function createParticipantBarrier(participantCount: number): () => Promise<void> {
+  let arrived = 0;
+  let releaseParticipants: (() => void) | undefined;
+  let rejectParticipants: ((error: Error) => void) | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const allParticipantsArrived = new Promise<void>((resolve, reject) => {
+    releaseParticipants = resolve;
+    rejectParticipants = reject;
+  });
+
+  return async () => {
+    arrived += 1;
+    if (arrived === 1) {
+      timeout = setTimeout(
+        () => rejectParticipants?.(
+          new Error("Timed out waiting for concurrent wallet transaction."),
+        ),
+        5_000,
+      );
+    }
+    if (arrived >= participantCount) {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      releaseParticipants?.();
+    }
+
+    await allParticipantsArrived;
+  };
+}
+
+function expectNoBarrierTimeout(
+  results: PromiseSettledResult<unknown>[],
+): void {
+  expect(
+    results.some(
+      (result) =>
+        result.status === "rejected"
+        && result.reason instanceof Error
+        && result.reason.message ===
+          "Timed out waiting for concurrent wallet transaction.",
+    ),
+  ).toBe(false);
+}
+
+async function createWalletFixture(
+  scenario: string,
+  cashBalanceCents: number,
+): Promise<WalletFixture> {
+  const suffix = `postgres-wallet-${scenario}-${Date.now()}-${crypto.randomUUID()}`;
+  const externalUserId = `${suffix}:user`;
+  return prisma.$transaction(async (tx) => {
+    const owner = await tx.owner.create({
+      data: {
+        displayName: `Wallet concurrency owner ${scenario}`,
+        creatorVerificationStatus: CreatorVerificationStatus.VERIFIED,
+      },
+    });
+    const representative = await tx.representative.create({
+      data: {
+        ownerId: owner.id,
+        slug: suffix,
+        displayName: `Wallet concurrency representative ${scenario}`,
+        roleSummary: "PostgreSQL wallet concurrency test fixture.",
+        tone: "neutral",
+        languages: ["en"],
+        freeScope: {},
+        paywalledIntents: [],
+        handoffPrompt: "test",
+        allowedSkills: [],
+        actionGate: {},
+        claimStatus: RepresentativeClaimStatus.CLAIMED,
+      },
+    });
+    const audienceIdentity = await tx.audienceIdentity.create({
+      data: {
+        audienceKey: `${suffix}:audience`,
+        status: AudienceIdentityStatus.REGISTERED,
+      },
+    });
+    const userWallet = await tx.userWallet.create({
+      data: {
+        audienceIdentityId: audienceIdentity.id,
+        externalUserId,
+        currency: "CNY",
+        cashBalanceCents,
+      },
+    });
+    const agentWallet = await tx.agentWallet.create({
+      data: {
+        representativeId: representative.id,
+        currency: "CNY",
+        tokenUnitPriceCents: 1,
+        creatorRevenueShareBps: 2_000,
+      },
+    });
+    const contact = await tx.contact.create({
+      data: {
+        representativeId: representative.id,
+        audienceIdentityId: audienceIdentity.id,
+        externalUserId,
+        displayName: "Wallet concurrency audience",
+        sourceChannel: "web",
+      },
+    });
+    const conversation = await tx.conversation.create({
+      data: {
+        representativeId: representative.id,
+        contactId: contact.id,
+        audienceIdentityId: audienceIdentity.id,
+        channel: Channel.PRIVATE_CHAT,
+        sourceChannel: "web",
+        externalConversationId: `${suffix}:conversation`,
+      },
+    });
+
+    return {
+      suffix,
+      ownerId: owner.id,
+      representativeId: representative.id,
+      audienceIdentityId: audienceIdentity.id,
+      userWalletId: userWallet.id,
+      agentWalletId: agentWallet.id,
+      contactId: contact.id,
+      conversationId: conversation.id,
+      externalUserId,
+    };
+  });
+}
+
+async function createGenerationRun(
+  fixture: WalletFixture,
+  label: string,
+): Promise<string> {
+  const message = await prisma.message.create({
+    data: {
+      conversationId: fixture.conversationId,
+      senderType: MessageSenderType.AUDIENCE,
+      senderId: fixture.audienceIdentityId,
+      text: label,
+      clientMessageId: `${fixture.suffix}:message:${label}`,
+    },
+  });
+  const run = await prisma.generationRun.create({
+    data: {
+      conversationId: fixture.conversationId,
+      inputMessageId: message.id,
+      idempotencyKey: `${fixture.suffix}:run:${label}`,
+    },
+  });
+  return run.id;
+}
+
+async function cleanupWalletFixture(fixture: WalletFixture): Promise<void> {
+  await prisma.walletLedgerEntry.deleteMany({
+    where: { representativeId: fixture.representativeId },
+  });
+  await prisma.walletTransaction.deleteMany({
+    where: { representativeId: fixture.representativeId },
+  });
+  await prisma.withdrawalAllocation.deleteMany({
+    where: {
+      withdrawRequest: { representativeId: fixture.representativeId },
+    },
+  });
+  await prisma.agentUsageAllocation.deleteMany({
+    where: {
+      usageCharge: { representativeId: fixture.representativeId },
+    },
+  });
+  await prisma.withdrawRequest.deleteMany({
+    where: { representativeId: fixture.representativeId },
+  });
+  await prisma.creatorEarning.deleteMany({
+    where: { representativeId: fixture.representativeId },
+  });
+  await prisma.agentUsageCharge.deleteMany({
+    where: { representativeId: fixture.representativeId },
+  });
+  await prisma.serviceEntitlementLedgerEntry.deleteMany({
+    where: {
+      entitlementAccount: {
+        representativeId: fixture.representativeId,
+      },
+    },
+  });
+  await prisma.agentTokenPurchase.deleteMany({
+    where: { representativeId: fixture.representativeId },
+  });
+  await prisma.userAgentWallet.deleteMany({
+    where: { agentWalletId: fixture.agentWalletId },
+  });
+  await prisma.serviceEntitlementAccount.deleteMany({
+    where: { representativeId: fixture.representativeId },
+  });
+  await prisma.generationRun.deleteMany({
+    where: { conversationId: fixture.conversationId },
+  });
+  await prisma.message.deleteMany({
+    where: { conversationId: fixture.conversationId },
+  });
+  await prisma.conversation.delete({
+    where: { id: fixture.conversationId },
+  });
+  await prisma.contact.delete({
+    where: { id: fixture.contactId },
+  });
+  await prisma.userWallet.delete({
+    where: { id: fixture.userWalletId },
+  });
+  await prisma.agentWallet.delete({
+    where: { id: fixture.agentWalletId },
+  });
+  await prisma.representative.delete({
+    where: { id: fixture.representativeId },
+  });
+  await prisma.owner.delete({
+    where: { id: fixture.ownerId },
+  });
+  await prisma.audienceIdentity.delete({
+    where: { id: fixture.audienceIdentityId },
+  });
+}
 
 function assertSafePostgresE2eTarget() {
   const rawUrl = process.env.DATABASE_URL?.trim();

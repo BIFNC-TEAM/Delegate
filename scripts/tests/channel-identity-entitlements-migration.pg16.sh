@@ -212,9 +212,12 @@ VALUES
   );
 
 INSERT INTO "AgentWallet" (
-  "id", "representativeId", "tokenBalance", "totalPurchasedTokens", "updatedAt"
+  "id", "representativeId", "tokenBalance", "totalPurchasedTokens",
+  "totalConsumedTokens", "updatedAt"
 )
-VALUES ('agent_wallet_safe', 'rep_channel_fixture', 10, 10, CURRENT_TIMESTAMP);
+-- The APPLIED charge below consumes one token, so the legacy wallet
+-- projection must already equal 10 purchased - 1 consumed = 9.
+VALUES ('agent_wallet_safe', 'rep_channel_fixture', 9, 10, 1, CURRENT_TIMESTAMP);
 
 INSERT INTO "AgentTokenPurchase" (
   "id", "userWalletId", "agentWalletId", "representativeId",
@@ -229,7 +232,7 @@ VALUES (
   10,
   10,
   1,
-  2,
+  0,
   'fixture:purchase:safe',
   CURRENT_TIMESTAMP
 );

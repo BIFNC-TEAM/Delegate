@@ -35,6 +35,13 @@ const management = readFileSync(
   ),
   "utf8",
 );
+const representativeOperations = readFileSync(
+  new URL(
+    "../app/dashboard/dashboard-representative-operations.tsx",
+    import.meta.url,
+  ),
+  "utf8",
+);
 
 describe("dashboard channels", () => {
   it("renders real channel data instead of the framework blueprint", () => {
@@ -47,6 +54,22 @@ describe("dashboard channels", () => {
     expect(component).toContain("channel.legacyStatus");
     expect(component).toContain("channel.recentIngress");
     expect(component).toContain("channel.recentEgress");
+    expect(component).toContain("启用共享 Telegram Bot");
+    expect(component).toContain("共享 Bot 已启用");
+    expect(component).toContain("部署级共享 Telegram Bot");
+    expect(component).toContain('row.channel.kind === "TELEGRAM"');
+  });
+
+  it("links representative readiness and summary to channel operations", () => {
+    expect(representativeOperations).toContain('item.id === "channel"');
+    expect(representativeOperations).toContain(
+      "buildChannelsHref(activeSlug, locale)",
+    );
+    expect(representativeOperations).toContain("前往发布渠道");
+    expect(representativeOperations).toContain(
+      "Telegram 当前使用部署级共享 Bot",
+    );
+    expect(representativeOperations).toContain("&view=channels&lang=");
   });
 
   it("authenticates every endpoint and disables private response caching", () => {
@@ -63,12 +86,19 @@ describe("dashboard channels", () => {
     expect(healthRoute).toContain(
       "configuration_and_recent_delivery_history",
     );
+    expect(listRoute).toContain("provisionOwnerTelegramChannel");
+    expect(listRoute).toContain(
+      'body.channel === "TELEGRAM"',
+    );
   });
 
   it("owner-scopes mutations and audits actor, before/after, and correlation metadata", () => {
     expect(management).toContain("representative: { ownerId }");
     expect(management).toContain('action: "CHANNEL_DESIRED_STATE_CHANGED"');
     expect(management).toContain('action: "CHANNEL_HEALTH_CHECKED"');
+    expect(management).toContain(
+      'action: "TELEGRAM_BOT_CHANNEL_PROVISIONED"',
+    );
     expect(management).toContain("actorId");
     expect(management).toContain("requestId");
     expect(management).toContain("idempotencyKey");

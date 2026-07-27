@@ -112,8 +112,8 @@ export function RepresentativeIdentityBindingPanel({
           <strong>Telegram</strong>
           <p>
             {zh
-              ? "生成一次性命令，然后在 Delegate Bot 私聊中发送。不要把命令贴到群聊。"
-              : "Create a one-time command, then send it in a private chat with the Delegate Bot. Do not post it in a group."}
+              ? "把当前登录的 Delegate 账号与 Telegram 私聊身份关联，Web 充值余额和服务权益会保持一致。系统会生成一次性命令，请只在 Delegate Bot 私聊中发送。"
+              : "Link the signed-in Delegate account to your Telegram private-chat identity so Web balance and service entitlements stay aligned. A one-time command will be created for the Delegate Bot private chat."}
           </p>
           <button
             className="button-secondary"
@@ -121,7 +121,7 @@ export function RepresentativeIdentityBindingPanel({
             onClick={() => createBinding("telegram")}
             type="button"
           >
-            {zh ? "生成 Telegram 绑定命令" : "Create Telegram command"}
+            {zh ? "绑定我的 Telegram 账号" : "Link my Telegram account"}
           </button>
         </article>
 
@@ -157,7 +157,13 @@ export function RepresentativeIdentityBindingPanel({
       {instruction ? (
         <div className="status-banner status-success">
           <strong>
-            {zh ? "请在对应私聊中发送以下命令" : "Send this command in the matching private chat"}
+            {instruction.provider === "telegram"
+              ? zh
+                ? "复制命令并在 Delegate Bot 私聊中发送"
+                : "Copy and send this command in the Delegate Bot private chat"
+              : zh
+                ? "请在对应 Matrix 私聊中发送以下命令"
+                : "Send this command in the matching Matrix private chat"}
           </strong>
           <pre className="artifact-preview">{instruction.command}</pre>
           <p className="footer-note">

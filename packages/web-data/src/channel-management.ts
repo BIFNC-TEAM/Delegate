@@ -501,6 +501,216 @@ export async function setOwnerChannelDesiredState(input: {
   });
 }
 
+export async function provisionOwnerTelegramChannel(
+  input: {
+    ownerId: string;
+    actorId: string;
+    representativeId: string;
+    requestId: string;
+    idempotencyKey: string;
+  },
+  env: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  assertDatabaseAvailable();
+  const ownerId = requireValue(input.ownerId, "ownerId");
+  const actorId = requireValue(input.actorId, "actorId");
+  const representativeId = requireValue(
+    input.representativeId,
+    "representativeId",
+  );
+  const requestId = requireValue(input.requestId, "requestId");
+  const idempotencyKey = requireValue(input.idempotencyKey, "idempotencyKey");
+  const telegramBot = resolveConfiguredTelegramBotIdentity(env);
+
+  return prisma.$transaction(async (tx) => {
+    const representative = await tx.representative.findFirst({
+      where: {
+        id: representativeId,
+        ownerId,
+      },
+      select: {
+        id: true,
+        slug: true,
+        displayName: true,
+      },
+    });
+    if (!representative) {
+      throw new ChannelManagementError("Representative not found.", 404);
+    }
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${"telegram-bot-channel:" + representative.id})
+      )
+    `;
+
+    const candidate = await tx.representativeChannelBinding.upsert({
+      where: {
+        representativeId_kind: {
+          representativeId: representative.id,
+          kind: RepresentativeChannelKind.TELEGRAM,
+        },
+      },
+      create: {
+        representativeId: representative.id,
+        kind: RepresentativeChannelKind.TELEGRAM,
+        transport: ChannelTransport.TELEGRAM,
+        sourceProvider: ChannelSourceProvider.TELEGRAM,
+        connectionId: telegramBot.connectionId,
+        desiredState: ChannelDesiredState.ACTIVE,
+        healthStatus: ChannelHealthStatus.UNKNOWN,
+        externalUserId: telegramBot.externalUserId,
+        status: "CONFIGURED",
+        displayName: representative.displayName,
+        configuration: {
+          managed: true,
+          directMessageOnly: true,
+          botUsername: telegramBot.username,
+        },
+      },
+      update: {},
+      select: {
+        id: true,
+        representativeId: true,
+        kind: true,
+        transport: true,
+        sourceProvider: true,
+        connectionId: true,
+        desiredState: true,
+        healthStatus: true,
+        externalUserId: true,
+        status: true,
+      },
+    });
+    if (
+      (
+        candidate.transport !== null
+        && candidate.transport !== ChannelTransport.TELEGRAM
+      )
+      || (
+        candidate.sourceProvider !== null
+        && candidate.sourceProvider !== ChannelSourceProvider.TELEGRAM
+      )
+    ) {
+      throw new ChannelManagementError(
+        "Existing Telegram channel uses a different transport and cannot be replaced.",
+        409,
+      );
+    }
+    if (
+      candidate.connectionId
+      && candidate.connectionId !== telegramBot.connectionId
+    ) {
+      throw new ChannelManagementError(
+        "Existing Telegram channel is assigned to a different Bot.",
+        409,
+      );
+    }
+
+    const updated = await tx.representativeChannelBinding.updateMany({
+      where: {
+        id: candidate.id,
+        AND: [
+          {
+            OR: [
+              { transport: null },
+              { transport: ChannelTransport.TELEGRAM },
+            ],
+          },
+          {
+            OR: [
+              { sourceProvider: null },
+              { sourceProvider: ChannelSourceProvider.TELEGRAM },
+            ],
+          },
+          {
+            OR: [
+              { connectionId: null },
+              { connectionId: "" },
+              { connectionId: telegramBot.connectionId },
+            ],
+          },
+        ],
+      },
+      data: {
+        transport: ChannelTransport.TELEGRAM,
+        sourceProvider: ChannelSourceProvider.TELEGRAM,
+        connectionId: telegramBot.connectionId,
+        externalUserId: telegramBot.externalUserId,
+        displayName: representative.displayName,
+        configuration: {
+          managed: true,
+          directMessageOnly: true,
+          botUsername: telegramBot.username,
+        },
+      },
+    });
+    if (updated.count !== 1) {
+      throw new ChannelManagementError(
+        "Telegram channel changed while it was being configured. Refresh and try again.",
+        409,
+      );
+    }
+    const binding = await tx.representativeChannelBinding.findUnique({
+      where: { id: candidate.id },
+      select: {
+        id: true,
+        representativeId: true,
+        kind: true,
+        desiredState: true,
+        healthStatus: true,
+        externalUserId: true,
+        status: true,
+      },
+    });
+    if (!binding) {
+      throw new ChannelManagementError(
+        "Telegram channel no longer exists. Refresh and try again.",
+        409,
+      );
+    }
+    const repeatedAudit = await tx.eventAudit.findFirst({
+      where: {
+        representativeId: representative.id,
+        type: EventType.COMPUTE_POLICY_CHANGED,
+        AND: [
+          {
+            payload: {
+              path: ["action"],
+              equals: "TELEGRAM_BOT_CHANNEL_PROVISIONED",
+            },
+          },
+          {
+            payload: {
+              path: ["idempotencyKey"],
+              equals: idempotencyKey,
+            },
+          },
+        ],
+      },
+      select: { id: true },
+    });
+    if (!repeatedAudit) {
+      await tx.eventAudit.create({
+        data: {
+          representativeId: representative.id,
+          type: EventType.COMPUTE_POLICY_CHANGED,
+          payload: {
+            kind: "telegram_bot_channel_provisioned",
+            action: "TELEGRAM_BOT_CHANNEL_PROVISIONED",
+            actorId,
+            requestId,
+            idempotencyKey,
+            bindingId: binding.id,
+            connectionId: telegramBot.connectionId,
+            externalUserId: telegramBot.externalUserId,
+          },
+        },
+      });
+    }
+    return { binding };
+  });
+}
+
 export async function provisionOwnerMatrixChannel(input: {
   ownerId: string;
   actorId: string;
@@ -897,6 +1107,39 @@ function assertDatabaseAvailable() {
       503,
     );
   }
+}
+
+function resolveConfiguredTelegramBotIdentity(
+  env: Readonly<Record<string, string | undefined>>,
+) {
+  const configuredId = env.TELEGRAM_BOT_ID?.trim();
+  const tokenId = env.TELEGRAM_BOT_TOKEN?.trim().match(/^([1-9]\d*):/)?.[1];
+  if (configuredId && tokenId && configuredId !== tokenId) {
+    throw new ChannelManagementError(
+      "TELEGRAM_BOT_ID must match the Bot token prefix.",
+      503,
+    );
+  }
+  const connectionId = configuredId || tokenId;
+  if (!connectionId || !/^[1-9]\d*$/.test(connectionId)) {
+    throw new ChannelManagementError(
+      "TELEGRAM_BOT_ID must be configured before connecting Telegram channels.",
+      503,
+    );
+  }
+
+  const username = env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, "") || null;
+  if (username && !/^[A-Za-z0-9_]{5,32}$/.test(username)) {
+    throw new ChannelManagementError(
+      "TELEGRAM_BOT_USERNAME is invalid.",
+      503,
+    );
+  }
+  return {
+    connectionId,
+    username,
+    externalUserId: username ? `@${username}` : `telegram-bot:${connectionId}`,
+  };
 }
 
 function resolveMatrixServerName() {

@@ -92,17 +92,20 @@ export function DashboardChannels({
     action: "connect" | "pause" | "resume" | "health",
   ) {
     const bindingId = row.channel.bindingId;
-    const canProvisionMatrix =
+    const canProvisionChannel =
       action === "connect"
-      && row.channel.kind === "MATRIX"
-      && !bindingId;
+      && !bindingId
+      && (
+        row.channel.kind === "MATRIX"
+        || row.channel.kind === "TELEGRAM"
+      );
     if (
       snapshot?.dataSource !== "database"
-      || (!bindingId && !canProvisionMatrix)
+      || (!bindingId && !canProvisionChannel)
     ) return;
     const actionKey = bindingId
       ? `${bindingId}:${action}`
-      : `${row.representativeId}:MATRIX:connect`;
+      : `${row.representativeId}:${row.channel.kind}:connect`;
     const requestId = createRequestId();
     setBusyKey(actionKey);
     setError(null);
@@ -126,7 +129,7 @@ export function DashboardChannels({
             : action === "connect"
               ? {
                   body: JSON.stringify({
-                    channel: "MATRIX",
+                    channel: row.channel.kind,
                     representativeId: row.representativeId,
                   }),
                 }
@@ -140,9 +143,13 @@ export function DashboardChannels({
       if (!response.ok) throw new Error(await extractError(response));
       setNotice(
         action === "connect"
-          ? zh
-            ? `${row.representativeName} 的 Matrix 受管用户已创建；现在可从 Matrix 客户端邀请该 MXID。`
-            : `Managed Matrix user created for ${row.representativeName}; invite the MXID from a Matrix client.`
+            ? row.channel.kind === "TELEGRAM"
+              ? zh
+              ? `${row.representativeName} 已启用部署级共享 Telegram Bot；访客现在可在公开代表页绑定自己的 Telegram 账号。`
+              : `${row.representativeName} now uses the deployment-wide shared Telegram Bot; visitors can link their Telegram accounts from the public representative page.`
+            : zh
+              ? `${row.representativeName} 的 Matrix 受管用户已创建；现在可从 Matrix 客户端邀请该 MXID。`
+              : `Managed Matrix user created for ${row.representativeName}; invite the MXID from a Matrix client.`
           : action === "health"
           ? zh
             ? `${row.representativeName} 的${channelLabel(row.channel, locale)}健康状态已刷新。`
@@ -183,8 +190,8 @@ export function DashboardChannels({
           </h1>
           <span>
             {zh
-              ? "Web、Matrix 与 Telegram 始终按来源分别呈现；Telegram 即使经 Matrix 传输，也不会被伪装成 Matrix 用户或渠道。"
-              : "Web, Matrix, and Telegram remain distinct sources. Telegram is never hidden as Matrix, even when Matrix carries the transport."}
+              ? "Web、Matrix 与 Telegram 始终按来源分别呈现。Telegram 当前通过部署级共享 Bot 启用，但每个数字代表仍有独立绑定、会话和运行状态；经 Matrix 传输时会明确标注。"
+              : "Web, Matrix, and Telegram remain distinct sources. Telegram currently uses one deployment-wide shared Bot, while every representative keeps an independent binding, conversation history, and operating state; Matrix transport is labeled explicitly."}
           </span>
         </div>
         <div className="dashboard-v2-page-actions">
@@ -385,11 +392,19 @@ function ChannelTableRow({
   const healthBusy = busyKey === `${channel.bindingId}:health`;
   const unavailable = !channel.bindingId || readOnly;
   const connectBusy =
-    busyKey === `${row.representativeId}:MATRIX:connect`;
-  const canProvisionMatrix =
+    busyKey === `${row.representativeId}:${channel.kind}:connect`;
+  const canProvisionChannel =
     !readOnly
     && !channel.bindingId
-    && channel.kind === "MATRIX";
+    && (
+      channel.kind === "MATRIX"
+      || channel.kind === "TELEGRAM"
+    );
+  const usesSharedTelegramBot =
+    Boolean(channel.bindingId)
+    && channel.kind === "TELEGRAM"
+    && channel.sourceProvider === "TELEGRAM"
+    && channel.transport === "TELEGRAM";
 
   return (
     <tr className={row.isActiveRepresentative ? "is-active-representative" : undefined}>
@@ -432,7 +447,13 @@ function ChannelTableRow({
       </td>
       <td>
         <span className="channels-external-identity">
-          <strong>{channel.externalIdentity.displayName ?? (zh ? "未命名" : "Unnamed")}</strong>
+          <strong>
+            {usesSharedTelegramBot
+              ? zh
+                ? "共享 Bot 已启用"
+                : "Shared Bot enabled"
+              : channel.externalIdentity.displayName ?? (zh ? "未命名" : "Unnamed")}
+          </strong>
           <small title={channel.externalIdentity.id ?? undefined}>
             {channel.externalIdentity.id ?? (zh ? "未配置外部身份" : "No external identity")}
           </small>
@@ -454,7 +475,7 @@ function ChannelTableRow({
       </td>
       <td>
         <span className="channels-actions">
-          {canProvisionMatrix ? (
+          {canProvisionChannel ? (
             <button
               className="dashboard-v2-button-secondary"
               disabled={Boolean(busyKey)}
@@ -466,8 +487,12 @@ function ChannelTableRow({
                   ? "创建中…"
                   : "Creating…"
                 : zh
-                  ? "创建 Matrix 用户"
-                  : "Create Matrix user"}
+                  ? channel.kind === "TELEGRAM"
+                    ? "启用共享 Telegram Bot"
+                    : "创建 Matrix 用户"
+                  : channel.kind === "TELEGRAM"
+                    ? "Enable shared Telegram Bot"
+                    : "Create Matrix user"}
             </button>
           ) : null}
           <button
@@ -502,8 +527,15 @@ function ChannelTableRow({
                 ? "刷新健康"
                 : "Refresh health"}
           </button>
-          {!channel.bindingId && !canProvisionMatrix ? (
+          {!channel.bindingId && !canProvisionChannel ? (
             <small>{zh ? "尚未创建绑定" : "Binding not created"}</small>
+          ) : null}
+          {usesSharedTelegramBot ? (
+            <small>
+              {zh
+                ? "当前代表独立绑定到部署级共享 Bot"
+                : "This representative has its own binding to the deployment-wide shared Bot"}
+            </small>
           ) : null}
         </span>
       </td>

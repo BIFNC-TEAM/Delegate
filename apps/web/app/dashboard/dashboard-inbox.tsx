@@ -9,6 +9,8 @@ import type {
 } from "@delegate/web-data";
 import type { Locale } from "@delegate/web-ui";
 
+import { formatMessageTime, formatRelativeTime } from "./dashboard-time";
+
 export function DashboardInbox({
   activeSlug,
   initialDetail,
@@ -22,6 +24,7 @@ export function DashboardInbox({
 }) {
   const zh = locale === "zh";
   const [snapshot, setSnapshot] = useState(initialSnapshot);
+  const timeZone = snapshot.representative.timeZone;
   const [detail, setDetail] = useState(initialDetail);
   const [selectedId, setSelectedId] = useState(initialDetail?.id || initialSnapshot.conversations[0]?.id || "");
   const [query, setQuery] = useState("");
@@ -351,7 +354,11 @@ export function DashboardInbox({
         <div>
           <p>INBOX / 03</p>
           <h1>{zh ? "把 AI 会话和人工接手放进同一条处理队列。" : "Run AI conversations and human handoff from one queue."}</h1>
-          <span>{zh ? "先判断谁需要介入，再查看完整上下文、知识引用和当前控制权。" : "Triage who needs attention, then inspect context, citations, and current control."}</span>
+          <span>
+            {zh
+              ? `当前显示 ${snapshot.representative.displayName} 的 Web、Matrix 与 Telegram 会话；可从左上角切换数字代表。`
+              : `Showing Web, Matrix, and Telegram conversations for ${snapshot.representative.displayName}. Switch representatives from the top-left selector.`}
+          </span>
         </div>
         <div className="dashboard-v2-page-actions">
           <button className="dashboard-v2-button-secondary" onClick={() => window.location.reload()} type="button">↻ {zh ? "刷新" : "Refresh"}</button>
@@ -412,7 +419,7 @@ export function DashboardInbox({
                 <span className="inbox-conversation-copy">
                   <span>
                     <strong>{conversation.contactName}</strong>
-                    <time>{formatRelativeTime(conversation.lastMessageAt, locale)}</time>
+                    <time>{formatRelativeTime(conversation.lastMessageAt, locale, timeZone)}</time>
                   </span>
                   <small>{conversation.lastMessage}</small>
                   <span className="inbox-conversation-meta">
@@ -479,7 +486,7 @@ export function DashboardInbox({
                   <article className={`is-${message.senderType}`} key={message.id}>
                     <div className="inbox-message-author">
                       <span>{senderLabel(message.senderType, message.senderDisplayName, locale)}</span>
-                      <time>{formatMessageTime(message.createdAt, locale)}</time>
+                      <time>{formatMessageTime(message.createdAt, locale, timeZone)}</time>
                     </div>
                     <p>{message.text}</p>
                     {message.citations.length ? (
@@ -551,7 +558,7 @@ export function DashboardInbox({
                 <p>{zh ? "内部协作" : "Internal collaboration"}</p>
                 <textarea onChange={(event) => setNoteText(event.target.value)} placeholder={zh ? "仅团队可见的备注" : "Team-only note"} rows={3} value={noteText} />
                 <button className="inbox-inspector-action" disabled={!noteText.trim() || isPending} onClick={() => submitConversationContent("note")} type="button">＋ {zh ? "保存内部备注" : "Save internal note"}</button>
-                {detail.notes.map((note) => <article className="inbox-note" key={note.id}><strong>{note.authorName}</strong><p>{note.text}</p><time>{formatMessageTime(note.createdAt, locale)}</time></article>)}
+                {detail.notes.map((note) => <article className="inbox-note" key={note.id}><strong>{note.authorName}</strong><p>{note.text}</p><time>{formatMessageTime(note.createdAt, locale, timeZone)}</time></article>)}
                 <button className="inbox-inspector-action" type="button">✦ {zh ? "生成回复建议" : "Generate reply suggestion"}</button>
               </section>
             </>
@@ -575,6 +582,7 @@ export function DashboardInbox({
                 detail={taskDetail}
                 error={taskError}
                 locale={locale}
+                timeZone={timeZone}
                 onAction={(action) => void updateTask(action)}
                 onEffectAction={(effectId, action, observedOutcome) => void updateExternalEffect(effectId, action, observedOutcome)}
                 onClose={closeTask}
@@ -593,6 +601,7 @@ function DelegationTaskDrawer({
   detail,
   error,
   locale,
+  timeZone,
   onAction,
   onEffectAction,
   onClose,
@@ -601,6 +610,7 @@ function DelegationTaskDrawer({
   detail: DelegationTaskDetailSnapshot;
   error: string | null;
   locale: Locale;
+  timeZone: string;
   onAction: (action: "cancel" | "retry" | "continue") => void;
   onEffectAction: (effectId: string, action: "reconcile" | "retry" | "record_compensation", observedOutcome?: "succeeded" | "failed") => void;
   onClose: () => void;
@@ -708,7 +718,7 @@ function DelegationTaskDrawer({
         <TaskSection eyebrow={zh ? "审计时间线" : "Audit timeline"} title={zh ? "哈希链接的状态证据" : "Hash-linked state evidence"}>
           <div className="delegation-task-timeline">
             {detail.timeline.map((event) => (
-              <article key={event.id}><i /><div><strong>{event.eventType}</strong><p>{event.fromStatus || "—"} → {event.toStatus || "—"}</p><code>#{event.sequence} · {event.eventHash.slice(0, 12)}</code></div><time>{formatMessageTime(event.occurredAt, locale)}</time></article>
+              <article key={event.id}><i /><div><strong>{event.eventType}</strong><p>{event.fromStatus || "—"} → {event.toStatus || "—"}</p><code>#{event.sequence} · {event.eventHash.slice(0, 12)}</code></div><time>{formatMessageTime(event.occurredAt, locale, timeZone)}</time></article>
             ))}
           </div>
         </TaskSection>
@@ -768,14 +778,4 @@ function senderLabel(type: string, displayName: string | undefined, locale: Loca
   if (type === "representative") return locale === "zh" ? "数字代表" : "Digital representative";
   if (type === "system") return locale === "zh" ? "系统" : "System";
   return locale === "zh" ? "访客" : "Visitor";
-}
-
-function formatRelativeTime(value: string, locale: Locale) {
-  const date = new Date(value);
-  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", { hour: "2-digit", minute: "2-digit" }).format(date);
-}
-
-function formatMessageTime(value: string, locale: Locale) {
-  const date = new Date(value);
-  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
 }

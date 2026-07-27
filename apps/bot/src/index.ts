@@ -79,8 +79,10 @@ import {
 import {
   buildTelegramPollingFailureLog,
   buildTelegramUpdateMetadata,
+  handleTelegramMiddlewareError,
   logTelegramUpdateExecution,
   normalizeTelegramCommandEntity,
+  resolveTelegramRepresentativeSession,
   resolveTelegramPollingExitCode,
   resolveTelegramRuntimeConfig,
   sanitizeTelegramError,
@@ -144,8 +146,17 @@ bot.command("start", async (ctx) => {
         representativeSlug: startPayload.representativeSlug,
       });
     } catch (error) {
-      console.warn("Unable to switch representative session:", error);
-      activeRepresentativeSlug = defaultRepresentativeSlug;
+      console.warn(
+        JSON.stringify({
+          event: "telegram_representative_switch_failed",
+          updateId: ctx.update.update_id,
+          error: sanitizeTelegramError(error),
+        }),
+      );
+      await ctx.reply(
+        "当前无法切换数字代表。为避免消息进入错误代表，原会话保持不变，请稍后重试。",
+      );
+      return;
     }
   }
 
@@ -1031,15 +1042,12 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-bot.catch((error) => {
-  console.error(
-    JSON.stringify({
-      event: "telegram_middleware_error",
-      updateId: error.ctx.update.update_id,
-      error: sanitizeTelegramError(error.error),
-    }),
-  );
-});
+bot.catch((error) =>
+  handleTelegramMiddlewareError({
+    error: error.error,
+    context: error.ctx,
+  }),
+);
 
 let telegramBotStopping = false;
 async function stopTelegramBot(signal: "SIGINT" | "SIGTERM") {
@@ -1447,16 +1455,12 @@ async function resolveRepresentativeSlugForChat(
 ): Promise<string> {
   const defaultRepresentativeSlug = process.env.DEMO_REP_SLUG || demoRepresentative.slug;
 
-  if (chatType !== "private") {
-    return defaultRepresentativeSlug;
-  }
-
-  try {
-    return (await getActiveRepresentativeSlugForChat(chatId)) ?? defaultRepresentativeSlug;
-  } catch (error) {
-    console.warn("Unable to read representative session:", error);
-    return defaultRepresentativeSlug;
-  }
+  return resolveTelegramRepresentativeSession({
+    chatType,
+    defaultRepresentativeSlug,
+    readActiveRepresentativeSlug: () =>
+      getActiveRepresentativeSlugForChat(chatId),
+  });
 }
 
 function buildStartPayloadForPurchase(representativeSlug: string, tier: PlanTier): string {

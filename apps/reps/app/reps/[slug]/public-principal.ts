@@ -188,6 +188,17 @@ export function assertPublicAudienceResourceOwner(
   }
 }
 
+export function assertAuthenticatedPublicAudiencePrincipal(
+  principal: PublicAudiencePrincipal,
+): asserts principal is PublicAudiencePrincipal & { mode: "authenticated" } {
+  if (principal.mode !== "authenticated") {
+    throw new PublicAudiencePrincipalError(
+      "AUTHENTICATED_PRINCIPAL_INVALID",
+      "Sign in before using account-bound commerce.",
+    );
+  }
+}
+
 export function setPublicAudienceSessionCookie(
   response: NextResponse,
   request: Request,

@@ -7,6 +7,7 @@ import {
   buildTelegramBotCommands,
   buildWebRechargeMessage,
   formatTelegramPlans,
+  resolveTelegramInlineKeyboardUrl,
 } from "../src/commerce-ux";
 
 const plans = [
@@ -29,14 +30,18 @@ const plans = [
 ];
 
 describe("Telegram commerce UX", () => {
-  it("does not register the Stars buy command while purchases are unavailable", () => {
+  it("keeps a Web buy command while Telegram Stars purchases are unavailable", () => {
     const commands = buildTelegramBotCommands(false);
 
-    expect(commands.map((command) => command.command)).not.toContain("buy");
+    expect(commands.map((command) => command.command)).toContain("buy");
     expect(commands.map((command) => command.command)).toContain("plans");
     expect(commands.map((command) => command.description).join(" ")).not.toContain(
       "Stars",
     );
+    expect(commands.find((command) => command.command === "buy")).toEqual({
+      command: "buy",
+      description: "Continue Pass / Deep Help / Sponsor on Web",
+    });
   });
 
   it("keeps the buy command only for a gate-approved Stars environment", () => {
@@ -50,6 +55,17 @@ describe("Telegram commerce UX", () => {
     });
   });
 
+  it("describes worker-owned compute as a Web continuation", () => {
+    expect(
+      buildTelegramBotCommands(false, false).find(
+        (command) => command.command === "compute",
+      ),
+    ).toEqual({
+      command: "compute",
+      description: "Continue governed compute requests on Web",
+    });
+  });
+
   it("builds the Web recharge entry from representative URL and slug config", () => {
     expect(
       buildRepresentativeWebRechargeUrl("lin founder/测试", {
@@ -57,8 +73,17 @@ describe("Telegram commerce UX", () => {
           "https://representatives.example.test/public/",
       }),
     ).toBe(
-      "https://representatives.example.test/public/reps/lin%20founder%2F%E6%B5%8B%E8%AF%95#recharge",
+      "https://representatives.example.test/public/reps/lin%20founder%2F%E6%B5%8B%E8%AF%95?source=telegram#recharge",
     );
+  });
+
+  it("prefers a Bot-specific recharge origin without changing the Web app origin", () => {
+    expect(
+      buildRepresentativeWebRechargeUrl("lin", {
+        TELEGRAM_WEB_RECHARGE_BASE_URL: "https://tunnel.example.test",
+        NEXT_PUBLIC_REPRESENTATIVE_URL: "http://localhost:3002",
+      }),
+    ).toBe("https://tunnel.example.test/reps/lin?source=telegram#recharge");
   });
 
   it("fails closed instead of inventing a Web host", () => {
@@ -68,6 +93,64 @@ describe("Telegram commerce UX", () => {
         NEXT_PUBLIC_REPRESENTATIVE_URL: "javascript:alert(1)",
       }),
     ).toBeNull();
+    expect(
+      buildRepresentativeWebRechargeUrl("rep", {
+        NEXT_PUBLIC_REPRESENTATIVE_URL:
+          "https://user:password@representatives.example.test",
+      }),
+    ).toBeNull();
+  });
+
+  it("only creates Telegram buttons for public HTTPS recharge URLs", () => {
+    expect(
+      resolveTelegramInlineKeyboardUrl(
+        "https://representatives.example.test/reps/lin#recharge",
+      ),
+    ).toBe("https://representatives.example.test/reps/lin#recharge");
+    expect(
+      resolveTelegramInlineKeyboardUrl(
+        "http://localhost:3002/reps/lin#recharge",
+      ),
+    ).toBeNull();
+    expect(
+      resolveTelegramInlineKeyboardUrl(
+        "http://representatives.example.test/reps/lin#recharge",
+      ),
+    ).toBeNull();
+    expect(
+      resolveTelegramInlineKeyboardUrl(
+        "https://user:password@representatives.example.test/reps/lin",
+      ),
+    ).toBeNull();
+    for (const privateUrl of [
+      "https://localhost./reps/lin",
+      "https://127.1/reps/lin",
+      "https://10.0.0.1/reps/lin",
+      "https://169.254.1.2/reps/lin",
+      "https://172.16.0.1/reps/lin",
+      "https://192.168.1.1/reps/lin",
+      "https://[fc00::1]/reps/lin",
+      "https://[fe80::1]/reps/lin",
+      "https://[::192.168.1.1]/reps/lin",
+      "https://[2001::1]/reps/lin",
+      "https://[2001:2a::1]/reps/lin",
+    ]) {
+      expect(resolveTelegramInlineKeyboardUrl(privateUrl)).toBeNull();
+    }
+    expect(
+      resolveTelegramInlineKeyboardUrl("https://8.8.8.8/reps/lin"),
+    ).toBe("https://8.8.8.8/reps/lin");
+    expect(
+      resolveTelegramInlineKeyboardUrl(
+        "https://[2001:4860:4860::8888]/reps/lin",
+      ),
+    ).toBe("https://[2001:4860:4860::8888]/reps/lin");
+    for (const publicUrl of [
+      "https://[2a00::1]/reps/lin",
+      "https://[2400::1]/reps/lin",
+    ]) {
+      expect(resolveTelegramInlineKeyboardUrl(publicUrl)).toBe(publicUrl);
+    }
   });
 
   it("removes Stars pricing from plan copy when the release gate is closed", () => {
@@ -84,13 +167,14 @@ describe("Telegram commerce UX", () => {
       representativeName: "Lin Representative",
       selectedPlanName: "Pass",
       rechargeUrl:
-        "https://representatives.example.test/reps/lin#recharge",
+        "https://representatives.example.test/reps/lin?source=telegram#recharge",
     });
 
     expect(message).toContain("当前充值与付费统一在 Web 完成");
+    expect(message).toContain("先在 Web 登录并完成 Telegram 绑定");
     expect(message).toContain("Pass");
     expect(message).toContain(
-      "https://representatives.example.test/reps/lin#recharge",
+      "https://representatives.example.test/reps/lin?source=telegram#recharge",
     );
     expect(message).not.toContain("Stars");
   });
@@ -100,9 +184,8 @@ describe("Telegram commerce UX", () => {
       new URL("../src/index.ts", import.meta.url),
       "utf8",
     );
-    expect(source).toContain(
-      "buildTelegramBotCommands(telegramStarsPurchasesEnabled)",
-    );
+    expect(source).toContain("buildTelegramBotCommands(");
+    expect(source).toContain("conversationPlatformMode !== \"worker\"");
 
     const plansKeyboard = source.slice(
       source.indexOf("function buildPlansKeyboard"),
@@ -114,7 +197,7 @@ describe("Telegram commerce UX", () => {
     expect(plansKeyboard.indexOf("telegramStarsPurchasesEnabled")).toBeLessThan(
       plansKeyboard.indexOf('.text("Buy Pass"'),
     );
-    expect(plansKeyboard).toContain('.url("打开 Web 充值"');
+    expect(plansKeyboard).toContain("buildWebRechargeKeyboard(");
 
     const conversationKeyboard = source.slice(
       source.indexOf("function buildPlanKeyboardForConversation"),
@@ -126,7 +209,7 @@ describe("Telegram commerce UX", () => {
     expect(
       conversationKeyboard.indexOf("!telegramStarsPurchasesEnabled"),
     ).toBeLessThan(conversationKeyboard.indexOf("`buy:${plan.suggestedPlan}`"));
-    expect(conversationKeyboard).toContain('.url("在 Web 继续服务"');
+    expect(conversationKeyboard).toContain("buildWebRechargeKeyboard(");
 
     const computeKeyboard = source.slice(
       source.indexOf("function buildComputeReplyOptions"),

@@ -4,24 +4,22 @@ x-app-environment: &app-environment
   NODE_ENV: ${NODE_ENV:-production}
   DATABASE_URL: postgresql://postgres:postgres@postgres:5432/delegate
   NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
-  NEXT_PUBLIC_DASHBOARD_URL: ${NEXT_PUBLIC_DASHBOARD_URL:-http://localhost:3001}
-  NEXT_PUBLIC_REPRESENTATIVE_URL: ${NEXT_PUBLIC_REPRESENTATIVE_URL:-http://localhost:3002}
+  NEXT_PUBLIC_DASHBOARD_URL: ${NEXT_PUBLIC_DASHBOARD_URL:-}
+  NEXT_PUBLIC_REPRESENTATIVE_URL: ${NEXT_PUBLIC_REPRESENTATIVE_URL:-}
   DELEGATE_DASHBOARD_AUTH_MODE: ${DELEGATE_DASHBOARD_AUTH_MODE:-optional}
-  DELEGATE_AUTH_SESSION_SECRET: ${DELEGATE_AUTH_SESSION_SECRET:-delegate-local-auth-session-secret-change-me}
+  DELEGATE_AUTH_SESSION_SECRET: ${DELEGATE_AUTH_SESSION_SECRET:-}
   LOGTO_ENDPOINT: ${LOGTO_ENDPOINT:-}
   LOGTO_APP_ID: ${LOGTO_APP_ID:-}
   LOGTO_APP_SECRET: ${LOGTO_APP_SECRET:-}
-  LOGTO_REDIRECT_URI: ${LOGTO_REDIRECT_URI:-http://localhost:3001/auth/callback}
+  LOGTO_REDIRECT_URI: ${LOGTO_REDIRECT_URI:-}
   LOGTO_SCOPES: ${LOGTO_SCOPES:-openid profile email phone}
-  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
   TELEGRAM_BOT_ID: ${TELEGRAM_BOT_ID:-}
   TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
-  TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
   TELEGRAM_CONVERSATION_PLATFORM_MODE: ${TELEGRAM_CONVERSATION_PLATFORM_MODE:-worker}
   TELEGRAM_STARS_LIVE_ENABLED: ${TELEGRAM_STARS_LIVE_ENABLED:-false}
   TELEGRAM_REQUEST_TIMEOUT_MS: ${TELEGRAM_REQUEST_TIMEOUT_MS:-15000}
   CONVERSATION_OUTBOX_PROCESSING_LEASE_MS: ${CONVERSATION_OUTBOX_PROCESSING_LEASE_MS:-300000}
-  REP_PUBLIC_CHAT_SESSION_SECRET: ${REP_PUBLIC_CHAT_SESSION_SECRET:-delegate-local-public-chat-session-secret-change-me}
+  REP_PUBLIC_CHAT_SESSION_SECRET: ${REP_PUBLIC_CHAT_SESSION_SECRET:-}
   DEMO_REP_SLUG: ${DEMO_REP_SLUG:-lin-founder-rep}
   COMPUTE_BROKER_URL: ${COMPUTE_BROKER_URL:-http://compute-broker:4010}
   COMPUTE_BROKER_INTERNAL_TOKEN: ${COMPUTE_BROKER_INTERNAL_TOKEN:-delegate-local-compute-token}
@@ -35,8 +33,6 @@ x-app-environment: &app-environment
   WORKFLOW_RUNNER_POLL_MS: ${WORKFLOW_RUNNER_POLL_MS:-5000}
   WORKFLOW_RUNNER_BATCH_SIZE: ${WORKFLOW_RUNNER_BATCH_SIZE:-10}
   MATRIX_BRIDGE_PORT: ${MATRIX_BRIDGE_PORT:-4030}
-  MATRIX_AS_HS_TOKEN: ${MATRIX_AS_HS_TOKEN:-}
-  MATRIX_AS_TOKEN: ${MATRIX_AS_TOKEN:-}
   MATRIX_HOMESERVER_URL: ${MATRIX_HOMESERVER_URL:-}
   MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME:-}
   MATRIX_AS_CONNECTION_ID: ${MATRIX_AS_CONNECTION_ID:-delegate-matrix-as}
@@ -211,7 +207,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3001').then((res)=>{if(!res.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:3001/health',{redirect:'manual'}).then((res)=>{if(res.status!==200)process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 10s
       timeout: 5s
@@ -248,7 +244,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3002').then((res)=>{if(!res.ok)process.exit(1)}).catch(()=>process.exit(1))",
+          "fetch('http://127.0.0.1:3002/health',{redirect:'manual'}).then((res)=>{if(res.status!==200)process.exit(1)}).catch(()=>process.exit(1))",
         ]
       interval: 10s
       timeout: 5s
@@ -257,6 +253,12 @@ services:
 
   bot:
     <<: *app-service
+    environment:
+      <<: *app-environment
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_WEB_RECHARGE_BASE_URL: ${TELEGRAM_WEB_RECHARGE_BASE_URL:-}
+    restart: "on-failure:3"
+    stop_grace_period: 70s
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -264,7 +266,7 @@ services:
         condition: service_started
     command: >
       sh -lc "if [ -n \"$$TELEGRAM_BOT_TOKEN\" ]; then
-        pnpm --filter @delegate/bot start;
+        cd /app/apps/bot && exec node --import tsx src/index.ts;
       else
         echo 'TELEGRAM_BOT_TOKEN is empty. Bot container is idle; set the token to enable Telegram runtime.';
         tail -f /dev/null;
@@ -347,18 +349,19 @@ services:
 
   matrix-bridge:
     <<: *app-service
+    environment:
+      <<: *app-environment
+      MATRIX_AS_HS_TOKEN: ${MATRIX_AS_HS_TOKEN:-}
+      MATRIX_AS_TOKEN: ${MATRIX_AS_TOKEN:-}
+      MATRIX_BRIDGE_MAX_BODY_BYTES: ${MATRIX_BRIDGE_MAX_BODY_BYTES:-2097152}
+    profiles: ["matrix"]
     depends_on:
       postgres:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: >
-      sh -lc "if [ -n \"$$MATRIX_AS_HS_TOKEN\" ]; then
-        pnpm --filter @delegate/matrix-bridge start;
-      else
-        echo 'MATRIX_AS_HS_TOKEN is empty. Matrix bridge is idle; inject the token through environment secrets to enable it.';
-        tail -f /dev/null;
-      fi"
+      sh -lc "pnpm --filter @delegate/matrix-bridge start"
     ports:
       - "4030:4030"
     healthcheck:
@@ -376,6 +379,10 @@ services:
 
   conversation-worker:
     <<: *app-service
+    environment:
+      <<: *app-environment
+      MATRIX_AS_TOKEN: ${MATRIX_AS_TOKEN:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

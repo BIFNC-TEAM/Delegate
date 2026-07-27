@@ -101,6 +101,15 @@ export type IdentityBindingResult = {
   verifiedAt: string;
 };
 
+export type ActivePrivateChannelIdentityBinding = {
+  provider: IdentityLinkProvider;
+  providerSubject: string;
+  issuer: string;
+  connectionId: string | null;
+  verifiedAt: string | null;
+  assuranceLevel: IdentityAssuranceLevel;
+};
+
 export const privateChannelIdentityProviders = {
   telegram: IdentityLinkProvider.TELEGRAM,
   matrix: IdentityLinkProvider.MATRIX,
@@ -109,7 +118,7 @@ export const privateChannelIdentityProviders = {
 export async function listActivePrivateChannelIdentityBindings(
   audienceIdentityId: string,
   client: AudienceBindingClient = prisma,
-) {
+): Promise<ActivePrivateChannelIdentityBinding[]> {
   const id = requireNonEmpty(audienceIdentityId, "Audience identity id");
   const identity = await client.audienceIdentity.findUnique({
     where: { id },
@@ -128,6 +137,13 @@ export async function listActivePrivateChannelIdentityBindings(
         in: [IdentityLinkProvider.TELEGRAM, IdentityLinkProvider.MATRIX],
       },
       revokedAt: null,
+      verifiedAt: { not: null },
+      assuranceLevel: {
+        in: [
+          IdentityAssuranceLevel.PLATFORM_VERIFIED,
+          IdentityAssuranceLevel.STEP_UP_VERIFIED,
+        ],
+      },
     },
     select: {
       provider: true,
@@ -148,6 +164,26 @@ export async function listActivePrivateChannelIdentityBindings(
     verifiedAt: binding.verifiedAt?.toISOString() ?? null,
     assuranceLevel: binding.assuranceLevel,
   }));
+}
+
+export function isVerifiedPrivateChannelIdentityBinding(
+  binding: ActivePrivateChannelIdentityBinding,
+  expected: {
+    provider: IdentityLinkProvider;
+    issuer: string;
+    connectionId: string;
+  },
+): boolean {
+  return (
+    binding.provider === expected.provider
+    && binding.issuer === expected.issuer
+    && binding.connectionId === expected.connectionId
+    && binding.verifiedAt !== null
+    && (
+      binding.assuranceLevel === IdentityAssuranceLevel.PLATFORM_VERIFIED
+      || binding.assuranceLevel === IdentityAssuranceLevel.STEP_UP_VERIFIED
+    )
+  );
 }
 
 /**

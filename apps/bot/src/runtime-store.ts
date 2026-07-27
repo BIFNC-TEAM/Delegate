@@ -46,6 +46,7 @@ import {
 
 import { prisma } from "./prisma";
 import { assertTelegramStarsLivePaymentEnabled } from "./conversation-platform-mode";
+import { planTelegramBotChannelBindingSynchronization } from "./telegram-runtime";
 
 export type TelegramActor = {
   telegramUserId: number;
@@ -145,6 +146,86 @@ export type TelegramPaymentProcessingResult =
 const telegramPaymentProcessingLeaseMs = 30_000;
 const telegramPaymentMaximumBackoffMs = 15 * 60_000;
 
+export async function synchronizeTelegramBotChannelBindings(input: {
+  connectionId: string;
+  username?: string;
+}): Promise<number> {
+  const connectionId = input.connectionId.trim();
+  if (!/^[1-9]\d*$/.test(connectionId)) {
+    throw new Error("Telegram bot connection id must be numeric.");
+  }
+  if (!process.env.DATABASE_URL?.trim()) {
+    return 0;
+  }
+
+  const username = input.username?.trim().replace(/^@/, "");
+  const bindings = await prisma.representativeChannelBinding.findMany({
+    where: { kind: RepresentativeChannelKind.TELEGRAM },
+    select: {
+      id: true,
+      transport: true,
+      sourceProvider: true,
+      connectionId: true,
+    },
+  });
+  const synchronization = planTelegramBotChannelBindingSynchronization(
+    bindings,
+    connectionId,
+  );
+  if (synchronization.conflictingBindingIds.length > 0) {
+    throw new Error(
+      "Telegram Bot connection conflicts with an existing direct channel binding.",
+    );
+  }
+  if (synchronization.updateBindingIds.length === 0) {
+    return 0;
+  }
+
+  const result = await prisma.representativeChannelBinding.updateMany({
+    where: {
+      id: { in: synchronization.updateBindingIds },
+      kind: RepresentativeChannelKind.TELEGRAM,
+      AND: [
+        {
+          OR: [
+            { transport: null },
+            { transport: ChannelTransport.TELEGRAM },
+          ],
+        },
+        {
+          OR: [
+            { sourceProvider: null },
+            { sourceProvider: ChannelSourceProvider.TELEGRAM },
+          ],
+        },
+        {
+          OR: [
+            { connectionId: null },
+            { connectionId: "" },
+            { connectionId },
+          ],
+        },
+      ],
+    },
+    data: {
+      transport: ChannelTransport.TELEGRAM,
+      sourceProvider: ChannelSourceProvider.TELEGRAM,
+      connectionId,
+      ...(username ? { externalUserId: `@${username}` } : {}),
+      healthStatus: ChannelHealthStatus.HEALTHY,
+      status: "CONNECTED",
+      lastHealthCheckAt: new Date(),
+      lastError: null,
+    },
+  });
+  if (result.count !== synchronization.updateBindingIds.length) {
+    throw new Error(
+      "Telegram channel bindings changed while the Bot connection was being synchronized.",
+    );
+  }
+  return result.count;
+}
+
 export async function getConversationContext(
   representativeSlug: string,
   actor: TelegramActor,
@@ -235,6 +316,9 @@ export async function getConversationContext(
     },
   });
 
+  const telegramBotExternalUserId = process.env.TELEGRAM_BOT_USERNAME
+    ? `@${process.env.TELEGRAM_BOT_USERNAME.replace(/^@/, "")}`
+    : `telegram:${representative.slug}`;
   const representativeBinding = await prisma.representativeChannelBinding.upsert({
     where: {
       representativeId_kind: {
@@ -250,9 +334,7 @@ export async function getConversationContext(
       connectionId,
       desiredState: ChannelDesiredState.ACTIVE,
       healthStatus: ChannelHealthStatus.HEALTHY,
-      externalUserId: process.env.TELEGRAM_BOT_USERNAME
-        ? `@${process.env.TELEGRAM_BOT_USERNAME.replace(/^@/, "")}`
-        : `telegram:${representative.slug}`,
+      externalUserId: telegramBotExternalUserId,
       status: "CONNECTED",
       displayName: representative.displayName,
       configuration: { managed: true, source: "telegram_bot" },
@@ -262,6 +344,7 @@ export async function getConversationContext(
       transport: ChannelTransport.TELEGRAM,
       sourceProvider: ChannelSourceProvider.TELEGRAM,
       connectionId,
+      externalUserId: telegramBotExternalUserId,
       healthStatus: ChannelHealthStatus.HEALTHY,
       status: "CONNECTED",
       lastHealthCheckAt: now,

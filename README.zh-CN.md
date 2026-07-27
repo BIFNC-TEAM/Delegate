@@ -11,7 +11,7 @@
 
 把 Delegate 想成一个“AI 接待前台”。
 
-当别人通过 Telegram、WhatsApp、飞书等渠道来找你时，Delegate 会先让你的 AI 分身完成第一轮接待：
+当别人现在通过 Web，或通过可选的 Matrix、Telegram 等渠道来找你时，Delegate 会先让你的 AI 分身完成第一轮接待：
 
 - 能回答的，先回答
 - 该收费的，先收费
@@ -43,7 +43,8 @@ Delegate 现在包含这些可运行的页面和服务：
 - **营销站点** 位于 `apps/site`，使用 Dispatch Editorial 设计系统。
 - **公开 representative 应用** 位于 `apps/reps`，包含代表档案、服务档位、网页聊天、充值入口模块，以及签名 public-chat session state。
 - **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、委托任务、governed actions、compute sessions、artifacts、deliverables、packages、OpenViking traces 和 workflow state。
-- **可选 Telegram bot runtime 基础** 位于 `apps/bot`，基于 grammY 和共享 runtime policy，作为未来渠道基础设施保留，不作为第一版 Delegate 产品主入口。
+- **可选 Telegram bot runtime** 位于 `apps/bot`，基于 grammY long-poll 和共享 Conversation Platform；它保留 Telegram 特有命令与交付边界，但不是第一版 Delegate 产品主入口。
+- **可选 Matrix Application Service** 位于 `apps/matrix-bridge`，负责认证 Matrix transaction、映射渠道事件和管理虚拟用户。原生 Matrix 是独立的可选渠道，不是 Telegram 的必需中转层。
 - **AMN wallet control plane** 覆盖内部钱包 ledger、mock recharge、Agent token purchase、usage charging、Creator 20% revenue policy、refund/reversal services、withdrawal request freeze、provider adapters，以及 owner/public wallet views。
 - **Compute broker** 位于 `apps/compute-broker`，在 approval 和 policy gate 后提供受治理的 `exec`、`read`、`write`、`process` 和 `browser` 请求。
 - **Workflow runner** 位于 `apps/workflow-runner`，支持 local runner 和 Temporal-backed durable workflow dispatch。
@@ -81,7 +82,7 @@ AMN 目标层次包括：
 - **Settlement Engine:** 计算 Creator revenue、platform fees、provider costs 和 withdrawals。
 - **Transparent Ledger:** 记录 recharge、charge、settlement 和 proof events，让用户和 creator 可以验证状态。
 
-今天已经实现的是 web-first Delegate 楔子加上第一条 AMN 钱包闭环：公开 representative 页面、网页聊天、pricing tiers、公开 mock recharge、用户现金余额、Agent token purchase、Agent token usage charging、Creator pending / withdrawable earning、withdrawal request freeze、refund/reversal services、owner wallet dashboard、provider adapter boundaries 和 durable follow-up workflows。
+今天已经实现的是 web-first Delegate 楔子加上第一条 AMN 钱包闭环：公开 representative 页面、网页聊天、pricing tiers、仅开发环境可用的 mock recharge、用户现金余额、Agent token purchase、Agent token usage charging、Creator pending / withdrawable earning、withdrawal request freeze、refund/reversal services、owner wallet dashboard、provider adapter boundaries 和 durable follow-up workflows。当前 Web 充值只是非生产 demo/mock，并不代表真实支付已经接通。
 
 仍未完全产品化的是：真实 Stripe SDK wiring 和 webhook signing、真实微信支付或支付宝 credential / certificate flow、通过 Stripe Connect / 支付宝转账 / 微信商家转账自动出金、通用开放 Wallet API、chargeback 自动化、Merkle proof 发布、多币种 FX，以及完整自动 settlement。
 
@@ -102,9 +103,9 @@ Delegate
 | 模块 | 状态 | 说明 |
 | --- | --- | --- |
 | 账户类型 | 已实现 | Prisma 已建模 `USER_CASH`、`AGENT_TOKEN`、`CREATOR_PENDING`、`CREATOR_WITHDRAWABLE`、`PLATFORM_REVENUE`、`PROVIDER_COST`。Creator earning 拆成 pending 和 withdrawable，方便按服务消耗释放和提现冻结。 |
-| 数据模型 | 基本实现 | 已实现 `UserWallet`、`AgentWallet`、`WalletLedgerEntry`、`RechargeOrder`、`PaymentProviderEvent`、`AgentTokenPurchase`、`AgentUsageCharge`、`CreatorEarning`、`WithdrawRequest`。目前还没有独立通用 `User` 表，公开用户先用 `UserWallet.externalUserId` 表示。 |
+| 数据模型 | 基本实现 | 已实现 `AudienceIdentity`、`UserWallet`、`AgentWallet`、`WalletLedgerEntry`、`RechargeOrder`、`PaymentProviderEvent`、`AgentTokenPurchase`、`AgentUsageCharge`、`CreatorEarning`、`WithdrawRequest`。公开用户以 canonical `AudienceIdentity` 归属钱包；`UserWallet.externalUserId` 仅保留为兼容支付选择器。 |
 | 整数金额和 token | 已实现 | 钱全部用最小货币单位整数，例如 CNY fen、USD cents。Agent token 也是整数。 |
-| 用户充值 | mock 闭环已实现 | 已实现 `RechargeOrder` 创建、mock payment success、幂等 provider event、`UserWallet` 入账和 wallet ledger。 |
+| 用户充值 | mock 闭环已实现 | 已实现 `RechargeOrder` 创建、mock payment success、幂等 provider event、`UserWallet` 入账和 wallet ledger；所有公开充值写操作都要求已验证的 Web 账户。 |
 | 用户给 Agent 买 token | 已实现 | 服务会检查 `UserWallet`、扣用户现金、给 `AgentWallet` 增 token、生成 `AgentTokenPurchase`、按策略生成 Creator pending earning，并写 ledger。当前价格用每个 Agent 的 `tokenUnitPriceCents`，集中 price catalog 仍是后续工作。 |
 | Agent 消耗 token | service 已实现 | `AgentUsageCharge` 会扣 Agent token、记录 provider cost / platform revenue，并把 Creator pending earning 按消耗释放到 withdrawable。它还没有自动接到所有真实回复、compute、browser、MCP runtime 路径上。 |
 | Creator 提现 | MVP 已实现 | `WithdrawRequest` 会检查 verified owner、claimed representative 和 withdrawable balance，并冻结提现金额、写 ledger。Stripe Connect / 支付宝转账 / 微信商家转账自动打款还未实现。 |
@@ -112,13 +113,29 @@ Delegate
 | 复用支付能力 | adapter 边界已实现 | Mock provider 可用。Stripe Checkout 风格 adapter 已通过 injected client 边界实现。微信支付和支付宝 adapter 是 fail-closed 骨架，需要官方 SDK / OpenAPI 回调和验签后才能启用。Delegate 不处理银行卡号、支付密码或原始敏感支付信息。 |
 | 第一版不做 | 保持不做 | 不做自动跨境提现、Merkle proof、开放 Wallet API、待认领代表自动提现、链上账本、多币种汇兑。 |
 
-Telegram 是未来渠道基础设施。如果 Delegate 后续提供 bot 内数字商品和数字服务，仍应遵循 Telegram 规则，包括在需要时使用 Telegram Stars。AMN Pay 是未来 Web / 统一充值路径，不是绕过平台政策的理由。
+Telegram 现在是可选、非生产的渠道运行时。如果 Delegate 后续正式提供 bot 内数字商品和数字服务，仍应遵循 Telegram 规则，包括在需要时使用 Telegram Stars。AMN Pay 是未来 Web / 统一充值路径，不是绕过平台政策的理由。当前 demo 中 Telegram 会把用户引导到 Web mock 充值页面；该入口必须先完成 Web 登录，并且只接受当前 Bot 下已经验证的 Telegram 绑定，确保服务权益落到同一个 Delegate 账户。只有 Bot 专用的 `TELEGRAM_WEB_RECHARGE_BASE_URL`（未配置时回退到 `NEXT_PUBLIC_REPRESENTATIVE_URL`）是公网 HTTPS origin，才会显示可点击的内联充值按钮。本地或其他非公网 HTTP 地址只会作为消息文本发送。
+
+## 渠道架构方向
+
+Delegate 当前以 Web 为主，并逐步收敛到一个渠道中立的 Conversation Platform，外部渠道只保留薄适配层：
+
+- PostgreSQL 是身份、消息、生成、人工接管、服务权益和审计的业务真相。
+- Web、原生 Matrix 和 Telegram 都是外部来源；Matrix 是可选渠道，不是 Telegram 的强制中枢。
+- `sourceProvider` 记录用户从哪里发起交互，`transport` 记录事件通过什么链路传输。即使 Telegram 经可选 Matrix bridge 传输，它仍是 Telegram 来源。
+- Telegram 与 Matrix 的 provider subject 只有经过各自的所有权证明后，才能绑定到统一 `AudienceIdentity`。Matrix ghost、bridge puppet、用户名和展示名都不是 Delegate 账号凭据。
+- Web 支付与 Telegram Stars 是不同支付轨道。它们未来可以授予同一用户与代表范围内的服务权益，但余额、结算、退款和争议处理不会混用。
+- 第一阶段渠道范围只覆盖私聊和纯文本，并按 representative 灰度启用；Telegram 保留直接适配器作为回滚路径。
+
+已确认的边界、迁移顺序和回滚不变量见 [渠道 Conversation Platform ADR](./docs/adr-channel-conversation-platform.md)。
 
 ## 架构原则
 
 Delegate 围绕几条硬边界构建：
 
 - **Postgres 是业务真相。** 委托任务在 Postgres 中贯穿 workflow、billing、handoff、approval、outputs 和 dashboard state，不再把会话或某个 runtime session 当成任务本身。
+- **渠道共享业务 runtime，不强制共享 transport。** Web、Matrix 和 Telegram 最终进入同一 Conversation Platform；Matrix 保持可选，不是 Telegram 的依赖。
+- **Provider 身份必须经过 provider 证明。** 外部 subject 绑定到 `AudienceIdentity`；用户名、展示名、room membership、ghost 和 puppet 都不能单独证明账号归属。
+- **服务权益可统一，支付轨道不混用。** Web 资金和 Telegram Stars 分别保留结算与退款语义，只在验证成功后授予 audience-scoped 服务访问。
 - **Temporal 负责编排。** Temporal 负责长时 workflow timer 的 start、durable waiting、retry、wake-up 和 cancellation delivery。
 - **公共代表不是私人工作区。** Runtime 不读取 owner-private files、accounts、secrets 或 hidden notes。
 - **用户充值给某个 Agent，不是泛泛充值给平台。** 页面应该清楚说明余额属于哪个 Digital Representative。
@@ -131,7 +148,9 @@ Delegate 围绕几条硬边界构建：
 ```text
 apps/
   bot/              Optional Telegram runtime foundation
+  conversation-worker/ Durable channel generation and delivery worker
   compute-broker/   Isolated compute and browser broker
+  matrix-bridge/    Optional native Matrix Application Service
   reps/             Public representative pages and public chat
   site/             Marketing website
   web/              Owner dashboard
@@ -179,25 +198,40 @@ pnpm install
 cp .env.example .env
 ```
 
-启动完整 Docker Compose 本地栈：
+启动本地测试栈。这个显式 override 只让 Dashboard 和 representative app
+以开发模式运行，启用内建本地身份，同时确保生产认证在配置不完整时拒绝访问：
 
 ```bash
-pnpm docker:up
+pnpm docker:up:local
+```
+
+`pnpm docker:up` 用于 production-shaped 本地栈；creator 登录前必须先配置
+Logto Traditional Web application。原生 Matrix 是可选渠道，也不是 Telegram
+交付链路的必需依赖。配置 homeserver 和 Application Service secrets 后再启用
+该 profile。此命令会继续加载同一份本地 override，不会把 Dashboard 或
+representative app 重新创建为生产模式：
+
+```bash
+pnpm docker:up:matrix
 ```
 
 运行标准检查：
 
 ```bash
-pnpm typecheck
-pnpm test
+pnpm verify
 pnpm build
 ```
+
+`pnpm verify` 会先生成 Prisma client、验证已提交的 schema，然后依次运行
+workspace typecheck 和测试。
 
 默认 Docker profile 的本地地址：
 
 - Site: `http://localhost:3000`
 - Dashboard: `http://localhost:3001/dashboard?view=overview`
 - Representative: `http://localhost:3002/reps/lin-founder-rep`
+- Dashboard liveness: `http://localhost:3001/health`
+- Representative liveness: `http://localhost:3002/health`
 - Compute broker health: `http://localhost:4010/health`
 - Workflow runner health: `http://localhost:4020/health`
 - Artifact store API: `http://localhost:9000`
@@ -269,16 +303,21 @@ pnpm docker:up:temporal
 
 - `DATABASE_URL` 指向 Prisma 使用的 Postgres。
 - `LOGTO_ENDPOINT`、`LOGTO_APP_ID`、`LOGTO_APP_SECRET`、`LOGTO_REDIRECT_URI` 和 `LOGTO_SCOPES` 启用兼容 Logto OIDC 的 creator dashboard 登录。
+- `NEXT_PUBLIC_DASHBOARD_URL` 和 `NEXT_PUBLIC_REPRESENTATIVE_URL` 是 production-shaped 应用必填的 canonical public origin。本地 override 会把它们固定为 loopback origin，避免复用远端环境文件时把开发登录重定向到远端主机。
+- `TELEGRAM_WEB_RECHARGE_BASE_URL` 可只为 Bot 配置公网 Web 充值 origin，而不改变 representative app 自身的 canonical origin；未配置时回退到 `NEXT_PUBLIC_REPRESENTATIVE_URL`。只有公网 HTTPS 值会生成内联按钮，本地 HTTP 值只以文本发送。
 - `DELEGATE_AUTH_SESSION_SECRET` 用于签名 dashboard auth 和 callback-state cookie。生产环境必须使用强 secret。
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` 可以在非生产环境强制开启 dashboard 登录；生产环境始终要求登录。
+- `DELEGATE_AUTH_DEV_LOGIN` 和 `DELEGATE_AUTH_DEV_*` 身份仅在非生产环境接受；`DELEGATE_LOCAL_AUTH_BOOTSTRAP=true` 独立允许本地 fixture 绑定步骤。`pnpm docker:up:local` 会开启这两个开关，不会削弱生产登录边界。
+- `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` 会显示带明确本地演示标识的充值面板，便于测试 mock 充值、购买代表专属服务额度、用量扣减和未用额度退回闭环。创建、完成和退回充值都要求用户先登录；Telegram 来源还必须完成当前 Bot 的验证绑定。开发环境之外应保持为 `false`；mock mutation endpoints 在生产环境也会返回 `404`。真实 provider checkout、签名 payment webhook 和生产退款尚未形成 Web 支付闭环。
 - `DELEGATE_SKILL_TRUSTED_KEYS` 是 registry 发布者 key ID 到受信 Ed25519 公钥 PEM 的 JSON 映射；缺少匹配公钥时不会自动采纳签名补丁版本。
 - `DELEGATE_CLAWHUB_URL` 指定不含凭据的 HTTPS Registry origin，`DELEGATE_CLAWHUB_ALLOWED_HOSTS` 限制允许的主机名，`DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` 限制 exact-version 验证的新鲜度（默认 24 小时），且客户端拒绝重定向。采纳或回滚前会重新获取精确发布者/版本的 manifest 与 verdict，拒绝过期或发生漂移的证据，并使用当前受信公钥集合重验签后才改变 release 状态。
-- `TELEGRAM_BOT_TOKEN`、`TELEGRAM_BOT_USERNAME` 和 `TELEGRAM_WEBHOOK_SECRET` 启用可选 Telegram bot 基础设施，但第一版 Delegate 产品先做网页版。
+- 当前 Telegram long-poll runtime 只要求 `TELEGRAM_BOT_TOKEN`。`TELEGRAM_BOT_ID` 可选，未填写时会从 token 的数字前缀推导；`getMe` 成功后，Bot 会把验证过的 ID 和 username 写入已配置的 Telegram 渠道绑定，Web 因此无需拿到 token 也能生成限定当前连接的 `/bind` 挑战。建议填写 `TELEGRAM_BOT_USERNAME` 以获得可读的渠道标识，但它不影响 polling 启动。`TELEGRAM_WEBHOOK_SECRET` 不会被 long-poll 读取，也不是 long-poll 必需项；它仍可供独立 webhook、签名或 fallback 逻辑使用，但不应只为启动 polling 而配置。
 - `REP_PUBLIC_CHAT_SESSION_SECRET` 可以覆盖 public-chat cookie 签名 secret。如果没有设置，reps app 会依次回退到 `TELEGRAM_WEBHOOK_SECRET` 和本地开发 secret。
 - `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_OPENAI_MODEL` 和 `DELEGATE_ANTHROPIC_MODEL` 控制 model-backed representative replies。
 - `OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 或 `ARK_API_KEY` 启用真实 provider 调用。
 - `OPENVIKING_*` 控制 public memory sync、recall 和 commit 行为。
 - `COMPUTE_*` 控制 broker、Docker runner、browser image 和 native computer-use readiness。
+- `CONVERSATION_OUTBOX_PROCESSING_LEASE_MS` 默认是 5 分钟，最小也是 5 分钟；conversation worker 会为仍在执行的生成任务续租。
 - `WORKFLOW_*` 控制 local-runner 与 Temporal workflow execution。
 - `ARTIFACT_STORE_*` 控制 MinIO-backed artifact storage。
 - `KNOWLEDGE_OBJECT_STORE_*` 控制知识原文件对象存储，默认私有桶固定为 `delegate-1324808004`；腾讯云 COS 可使用 S3 兼容 endpoint，并将 `FORCE_PATH_STYLE` 设为 `false`。
@@ -304,12 +343,26 @@ pnpm db:deploy
 pnpm db:seed
 pnpm db:setup
 
+pnpm test:channels
+pnpm test:channels:pg16
+
 pnpm docker:ps
 pnpm docker:logs
 pnpm docker:down
+pnpm docker:up:local
+pnpm docker:up:matrix
 
 pnpm registry:search:clawhub "qualification"
 ```
+
+`pnpm docker:down` 也会停止通过 Matrix 或 Temporal profile 启动的服务，但不会
+删除本地数据库或其他 named volumes。
+
+`pnpm test:channels` 是不需要渠道凭据的离线门禁：它会清空开发机上的 provider
+credentials，再测试并 typecheck Web、Matrix、Telegram、conversation worker、
+Dashboard 和公开 representative packages。`pnpm test:channels:pg16` 在此基础上
+使用可销毁的 PostgreSQL 16 fixture，验证跨渠道身份、消息、服务权益、并发和迁移兼容性；
+它不会连接当前配置的应用数据库。
 
 ### 工作区技能迁移上线
 
@@ -443,6 +496,9 @@ Delegate 使用 [DESIGN.md](./DESIGN.md) 中定义的 **Dispatch Editorial** 方
 
 - [Architecture](./docs/architecture.md): product thesis、runtime loop、security boundary 和 OpenViking rules。
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): 更大的系统方向和 tradeoffs。
+- [Public audience identity](./docs/public-audience-identity.md): Web 匿名身份、Contact/Conversation、充值和 sandbox linkage。
+- [Conversation platform](./docs/conversation-platform.md): 渠道中立消息、episode、版本、人工接管、SSE 和 Matrix Application Service 边界。
+- [Channel Conversation Platform ADR](./docs/adr-channel-conversation-platform.md): source/transport 分离、身份校验、Web/Stars 权益、渠道 MVP、迁移和回滚决策。
 - [Delegation tasks](./docs/delegation-tasks.md): 委托任务聚合、生命周期、归属校验、审批、产物和审计关联。
 - [Delegation task product contract](./docs/delegation-task-product-contract.md): 任务创建、可见状态、Owner 操作、审批绑定、完成标准和 P0 边界。
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model、outbox、timer、cancellation 和 dashboard semantics。

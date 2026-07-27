@@ -1,0 +1,41 @@
+services:
+  dashboard:
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_DASHBOARD_URL: http://localhost:3001
+      LOGTO_REDIRECT_URI: http://localhost:3001/auth/callback
+      DELEGATE_AUTH_SESSION_SECRET: ${DELEGATE_AUTH_SESSION_SECRET:-delegate-local-auth-session-secret-change-me}
+      DELEGATE_DASHBOARD_AUTH_MODE: required
+      DELEGATE_AUTH_DEV_LOGIN: "true"
+      DELEGATE_LOCAL_AUTH_BOOTSTRAP: "true"
+    command: >
+      sh -lc "pnpm local:auth:bootstrap && pnpm --filter @delegate/dashboard exec next dev -H 0.0.0.0 -p 3001"
+    volumes:
+      - ./apps/web/app:/app/apps/web/app:ro
+      - ./apps/web/auth-guard.ts:/app/apps/web/auth-guard.ts:ro
+      - ./packages/web-data/src:/app/packages/web-data/src:ro
+      - ./scripts/local-auth-bootstrap.ts:/app/scripts/local-auth-bootstrap.ts:ro
+    healthcheck:
+      start_period: 30s
+
+  reps:
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_REPRESENTATIVE_URL: http://localhost:3002
+      DELEGATE_AUTH_SESSION_SECRET: ${DELEGATE_AUTH_SESSION_SECRET:-delegate-local-auth-session-secret-change-me}
+      REP_PUBLIC_CHAT_SESSION_SECRET: ${REP_PUBLIC_CHAT_SESSION_SECRET:-delegate-local-public-chat-session-secret-change-me}
+      DELEGATE_AUTH_DEV_LOGIN: "true"
+      NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS: "true"
+    command: >
+      sh -lc "pnpm --filter @delegate/reps exec next dev -H 0.0.0.0 -p 3002"
+    volumes:
+      - ./apps/reps/app:/app/apps/reps/app:ro
+      - ./packages/web-data/src:/app/packages/web-data/src:ro
+    healthcheck:
+      start_period: 30s
+
+  bot:
+    environment:
+      TELEGRAM_WEB_RECHARGE_BASE_URL: ${TELEGRAM_WEB_RECHARGE_BASE_URL:-http://localhost:3002}
+    volumes:
+      - ./apps/bot/src:/app/apps/bot/src:ro

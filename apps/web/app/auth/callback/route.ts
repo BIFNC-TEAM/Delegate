@@ -16,8 +16,18 @@ import {
   verifyDelegateAuthState,
 } from "@delegate/web-data";
 
+import {
+  buildCreatorCanonicalAuthRequestUrl,
+  buildCreatorRedirectUrl,
+} from "../../../auth-guard";
+
 export async function GET(request: Request) {
   try {
+    const canonicalRequestUrl = buildCreatorCanonicalAuthRequestUrl(request);
+    if (canonicalRequestUrl) {
+      return NextResponse.redirect(canonicalRequestUrl);
+    }
+
     const url = new URL(request.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
@@ -51,7 +61,9 @@ export async function GET(request: Request) {
       ownerId: owner.id,
       email: profile.email ?? null,
     });
-    const response = NextResponse.redirect(new URL(authState.returnTo, request.url));
+    const response = NextResponse.redirect(
+      buildCreatorRedirectUrl(authState.returnTo, request.url),
+    );
     response.cookies.set(DELEGATE_OWNER_AUTH_SESSION_COOKIE, signDelegateAuthSession(session, secret), {
       httpOnly: true,
       sameSite: "lax",

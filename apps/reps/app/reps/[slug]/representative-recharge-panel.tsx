@@ -62,10 +62,16 @@ type RechargeIntent = {
 };
 
 export function RepresentativeRechargePanel({
+  audienceAuthenticated,
+  continuationChannel,
+  loginHref,
   representativeSlug,
   locale,
   paymentMode,
 }: {
+  audienceAuthenticated: boolean;
+  continuationChannel?: "telegram";
+  loginHref: string;
   representativeSlug: string;
   locale: Locale;
   paymentMode: "mock" | "wechat";
@@ -84,6 +90,68 @@ export function RepresentativeRechargePanel({
   const mutationLockRef = useRef(false);
   const rechargeIntentRef = useRef<RechargeIntent | null>(null);
   const isMutating = mutation !== null;
+  const [telegramBindingStatus, setTelegramBindingStatus] = useState<
+    "checking" | "required" | "ready"
+  >(
+    continuationChannel === "telegram" && audienceAuthenticated
+      ? "checking"
+      : continuationChannel === "telegram"
+        ? "required"
+        : "ready",
+  );
+
+  const refreshTelegramBinding = useCallback(async () => {
+    if (continuationChannel !== "telegram" || !audienceAuthenticated) {
+      setTelegramBindingStatus("required");
+      return;
+    }
+    setTelegramBindingStatus("checking");
+    setError(null);
+    try {
+      const response = await fetch(
+        `/reps/${representativeSlug}/identity-bindings`,
+        { cache: "no-store" },
+      );
+      if (!response.ok) {
+        throw new Error(await extractError(response));
+      }
+      const payload = (await response.json()) as {
+        readiness?: { telegram?: boolean };
+      };
+      setTelegramBindingStatus(
+        payload.readiness?.telegram === true ? "ready" : "required",
+      );
+    } catch (nextError) {
+      setTelegramBindingStatus("required");
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : t.bindingCheckError,
+      );
+    }
+  }, [
+    audienceAuthenticated,
+    continuationChannel,
+    representativeSlug,
+    t.bindingCheckError,
+  ]);
+
+  useEffect(() => {
+    if (continuationChannel === "telegram" && audienceAuthenticated) {
+      void refreshTelegramBinding();
+    }
+  }, [
+    audienceAuthenticated,
+    continuationChannel,
+    refreshTelegramBinding,
+  ]);
+
+  const rechargeReady =
+    audienceAuthenticated
+    && (
+      continuationChannel !== "telegram"
+      || telegramBindingStatus === "ready"
+    );
 
   const applyWalletState = useCallback((
     snapshot: PublicWalletStateSnapshot,
@@ -149,6 +217,11 @@ export function RepresentativeRechargePanel({
   }, [applyWalletState, representativeSlug]);
 
   useEffect(() => {
+    if (!audienceAuthenticated) {
+      setIsRestoring(false);
+      setWalletState(null);
+      return;
+    }
     const controller = new AbortController();
     setIsRestoring(true);
     void refreshWalletState(controller.signal)
@@ -167,7 +240,7 @@ export function RepresentativeRechargePanel({
         }
       });
     return () => controller.abort();
-  }, [refreshWalletState, t.loadError]);
+  }, [audienceAuthenticated, refreshWalletState, t.loadError]);
 
   useEffect(() => {
     if (
@@ -253,7 +326,7 @@ export function RepresentativeRechargePanel({
   }
 
   function createRechargeOrder() {
-    if (!beginMutation("create")) {
+    if (!rechargeReady || !beginMutation("create")) {
       return;
     }
     setError(null);
@@ -275,6 +348,9 @@ export function RepresentativeRechargePanel({
           body: JSON.stringify({
             amountCents: intent.amountCents,
             idempotencyKey: intent.idempotencyKey,
+            ...(continuationChannel
+              ? { continuationChannel }
+              : {}),
           }),
         });
 
@@ -421,11 +497,59 @@ export function RepresentativeRechargePanel({
     <div className="setup-stack">
       <p className="footer-note">{t.identityNote}</p>
 
-      {isRestoring ? (
+      {!audienceAuthenticated ? (
+        <div className="status-banner">
+          <strong>{t.loginRequiredTitle}</strong>
+          <p>{t.loginRequiredDetail}</p>
+          <a className="button-secondary" href={loginHref}>
+            {t.loginAction}
+          </a>
+        </div>
+      ) : null}
+
+      {continuationChannel === "telegram" && audienceAuthenticated ? (
+        <div
+          className={
+            telegramBindingStatus === "ready"
+              ? "status-banner status-success"
+              : "status-banner"
+          }
+        >
+          <strong>
+            {telegramBindingStatus === "ready"
+              ? t.telegramBindingReadyTitle
+              : t.telegramBindingRequiredTitle}
+          </strong>
+          <p>
+            {telegramBindingStatus === "ready"
+              ? t.telegramBindingReadyDetail
+              : t.telegramBindingRequiredDetail}
+          </p>
+          {telegramBindingStatus !== "ready" ? (
+            <div className="button-row">
+              <a className="button-secondary" href="#identity-bindings">
+                {t.openBindingsAction}
+              </a>
+              <button
+                className="button-secondary"
+                disabled={telegramBindingStatus === "checking"}
+                onClick={() => void refreshTelegramBinding()}
+                type="button"
+              >
+                {telegramBindingStatus === "checking"
+                  ? t.checkingBinding
+                  : t.checkBindingAction}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {audienceAuthenticated && isRestoring ? (
         <div className="status-banner" role="status">
           <strong>{t.restoring}</strong>
         </div>
-      ) : walletState ? (
+      ) : audienceAuthenticated && walletState ? (
         <div className="status-banner" role="status">
           <strong>{t.walletSummaryTitle}</strong>
           <p>
@@ -458,7 +582,7 @@ export function RepresentativeRechargePanel({
         {[500, 2000, 10000].map((preset) => (
           <button
             className={amountCents === preset ? "button-primary" : "button-secondary"}
-            disabled={isMutating || isRestoring}
+            disabled={isMutating || isRestoring || !rechargeReady}
             key={preset}
             onClick={() => {
               setAmountCents(preset);
@@ -478,7 +602,7 @@ export function RepresentativeRechargePanel({
 
       <button
         className="button-primary button-block"
-        disabled={isMutating || isRestoring}
+        disabled={isMutating || isRestoring || !rechargeReady}
         onClick={createRechargeOrder}
         type="button"
       >
@@ -614,7 +738,7 @@ function formatMoney(cents: number, currency: string): string {
 
 const copy = {
   zh: {
-    identityNote: "充值会自动记到当前浏览器会话或登录身份，不需要手填用户 ID；这里只读取当前代表的 CNY 钱包状态。",
+    identityNote: "充值和服务额度会记入当前已登录的 Delegate 账户；绑定后 Web、Telegram 和 Matrix 共用同一份权益。这里只读取当前代表的 CNY 钱包状态。",
     restoring: "正在恢复当前钱包状态…",
     loadError: "钱包状态恢复失败。",
     refreshError: "操作已完成，但最新钱包状态暂时无法刷新，请重新加载页面。",
@@ -624,6 +748,17 @@ const copy = {
     creditsConsumedLabel: "已消费额度 ",
     recordSummary: (orders: number, purchases: number, refunds: number) =>
       `最近记录：${orders} 笔订单 · ${purchases} 笔购买 · ${refunds} 笔未使用额度退回`,
+    loginRequiredTitle: "请先登录 Delegate 账户",
+    loginRequiredDetail: "充值属于账户级操作，不会再记入临时浏览器身份。",
+    loginAction: "登录 / 注册",
+    telegramBindingRequiredTitle: "请先绑定当前 Telegram 账户",
+    telegramBindingRequiredDetail: "在上方“跨渠道身份”生成 /bind 命令，发送给当前 Bot 后再回来检查。",
+    telegramBindingReadyTitle: "Telegram 身份已绑定",
+    telegramBindingReadyDetail: "本次充值会进入与当前 Telegram 账户对应的同一个 Delegate 账户。",
+    openBindingsAction: "打开身份绑定",
+    checkBindingAction: "重新检查",
+    checkingBinding: "检查中...",
+    bindingCheckError: "Telegram 绑定状态检查失败。",
     createAction: "创建充值单",
     wechatCreateAction: "生成微信支付二维码",
     creating: "处理中...",
@@ -655,7 +790,7 @@ const copy = {
     wechatDisclaimer: "当前使用微信 Native 支付。Delegate 只保存订单、金额和验签后的最小资金凭据，不接触微信支付密码；支付成功后会为当前数字代表自动购买服务额度。真实退款和自动提现仍未开放。",
   },
   en: {
-    identityNote: "Recharge is attached to the current browser session or signed-in identity. This panel reads only this representative's CNY wallet state.",
+    identityNote: "Recharge and service credits are attached to the signed-in Delegate account. Linked Web, Telegram, and Matrix identities share the same entitlements. This panel reads only this representative's CNY wallet state.",
     restoring: "Restoring the current wallet state…",
     loadError: "Failed to restore wallet state.",
     refreshError: "The operation completed, but the latest wallet state could not be refreshed. Reload the page to try again.",
@@ -665,6 +800,17 @@ const copy = {
     creditsConsumedLabel: "consumed credits ",
     recordSummary: (orders: number, purchases: number, refunds: number) =>
       `Recent records: ${orders} orders · ${purchases} purchases · ${refunds} unused-credit returns`,
+    loginRequiredTitle: "Sign in to your Delegate account",
+    loginRequiredDetail: "Recharge is account-bound and is never attached to a temporary browser identity.",
+    loginAction: "Sign in / register",
+    telegramBindingRequiredTitle: "Link this Telegram account first",
+    telegramBindingRequiredDetail: "Create a /bind command in Cross-channel identity above, send it to this Bot, then check again.",
+    telegramBindingReadyTitle: "Telegram identity linked",
+    telegramBindingReadyDetail: "This recharge will reach the same Delegate account used by the current Telegram identity.",
+    openBindingsAction: "Open identity linking",
+    checkBindingAction: "Check again",
+    checkingBinding: "Checking...",
+    bindingCheckError: "Unable to check the Telegram identity link.",
     createAction: "Create recharge order",
     wechatCreateAction: "Generate WeChat Pay QR",
     creating: "Working...",

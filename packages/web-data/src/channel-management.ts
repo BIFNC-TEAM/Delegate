@@ -87,6 +87,111 @@ export class ChannelManagementError extends Error {
   }
 }
 
+export async function resolveRepresentativeChannelConnectionId(input: {
+  representativeSlug: string;
+  kind: ManagedChannelKind;
+  transport?: ManagedChannelKind;
+}): Promise<string | null> {
+  const representativeSlug = requireValue(
+    input.representativeSlug,
+    "representativeSlug",
+  );
+  if (!process.env.DATABASE_URL?.trim()) {
+    return null;
+  }
+
+  const binding = await prisma.representativeChannelBinding.findFirst({
+    where: {
+      kind: input.kind,
+      ...(input.transport ? { transport: input.transport } : {}),
+      desiredState: ChannelDesiredState.ACTIVE,
+      status: { in: [...healthyLegacyStatuses] },
+      connectionId: { not: null },
+      representative: { slug: representativeSlug },
+    },
+    select: { connectionId: true },
+  });
+  const connectionId = binding?.connectionId?.trim();
+  return connectionId || null;
+}
+
+export async function resolveRepresentativeTelegramBotConnectionId(
+  representativeSlug: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  client: {
+    representativeChannelBinding: {
+      findFirst(args: unknown): Promise<{
+        connectionId: string | null;
+        desiredState: ChannelDesiredState;
+        status: string;
+      } | null>;
+    };
+  } = prisma,
+): Promise<string | null> {
+  const normalizedRepresentativeSlug = requireValue(
+    representativeSlug,
+    "representativeSlug",
+  );
+  if (
+    client === prisma
+    && !process.env.DATABASE_URL?.trim()
+  ) {
+    return null;
+  }
+
+  const configuredId = env.TELEGRAM_BOT_ID?.trim();
+  const tokenId = env.TELEGRAM_BOT_TOKEN?.trim().match(/^([1-9]\d*):/)?.[1];
+  const binding = await client.representativeChannelBinding.findFirst({
+    where: {
+      kind: RepresentativeChannelKind.TELEGRAM,
+      representative: { slug: normalizedRepresentativeSlug },
+      AND: [
+        {
+          OR: [
+            { transport: null },
+            { transport: ChannelTransport.TELEGRAM },
+          ],
+        },
+        {
+          OR: [
+            { sourceProvider: null },
+            { sourceProvider: ChannelSourceProvider.TELEGRAM },
+          ],
+        },
+      ],
+    },
+    select: {
+      connectionId: true,
+      desiredState: true,
+      status: true,
+    },
+  });
+  if (
+    !binding
+    || binding.desiredState !== ChannelDesiredState.ACTIVE
+    || !healthyLegacyStatuses.has(binding.status)
+  ) {
+    return null;
+  }
+  const persistedId = binding.connectionId?.trim() || null;
+  if (
+    [configuredId, persistedId].some(
+      (candidate) => candidate && !/^[1-9]\d*$/.test(candidate),
+    )
+  ) {
+    return null;
+  }
+  const configuredConnectionId = configuredId || tokenId;
+  if (
+    persistedId
+    && configuredConnectionId
+    && persistedId !== configuredConnectionId
+  ) {
+    return null;
+  }
+  return persistedId || configuredConnectionId || null;
+}
+
 type RepresentativeRecord = {
   id: string;
   slug: string;

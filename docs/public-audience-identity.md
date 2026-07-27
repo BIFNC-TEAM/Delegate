@@ -12,7 +12,7 @@ The short-term web path is still backward-compatible with the existing Telegram-
 4. Server code resolves one `Contact` per representative and audience.
 5. Server code resolves one `Conversation` per representative, contact, and web audience thread.
 6. Chat writes the channel-neutral `Message` / `GenerationRun` path, returns `202 Accepted`, and completes asynchronously in the conversation worker; history and recent context come from Postgres, never from cookies.
-7. Recharge uses the same cookie-derived audience identity, writes `UserWallet.audienceIdentityId`, and persists the immutable representative/product purchase intent on the recharge order.
+7. Anonymous cookies support conversation continuity and the pre-login merge only. Recharge creation, payment completion, and reversal require a verified Web login; the server revalidates the canonical Logto principal, writes `UserWallet.audienceIdentityId`, and persists the immutable representative/product purchase intent on the recharge order.
 8. Logto login links `IdentityLink(provider=LOGTO)` to the current `AudienceIdentity`.
 9. If the Logto subject already belongs to another audience identity, the current anonymous identity is merged into the registered target.
 10. Every authenticated business request revalidates the signed session against the current verified, unrevoked Logto link and its canonical identity.

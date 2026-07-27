@@ -91,19 +91,55 @@ describe("public chat audience identity cookie", () => {
     expect(restored.sessionToken).toBe(state.sessionToken);
   });
 
-  it("keeps localhost cookies usable in production Docker", () => {
-    restoreEnv("NODE_ENV", "production");
-
+  it("derives Secure only from the trusted canonical origin", () => {
     expect(
-      shouldUseSecurePublicChatCookie(new Request("http://localhost:3002/reps/lao-jia")),
+      shouldUseSecurePublicChatCookie(
+        new Request("http://0.0.0.0:3002/reps/lao-jia", {
+          headers: {
+            host: "0.0.0.0:3002",
+            "x-forwarded-host": "delegate.example",
+          },
+        }),
+        {
+          NODE_ENV: "production",
+          NEXT_PUBLIC_REPRESENTATIVE_URL: "http://localhost:3002",
+        },
+      ),
     ).toBe(false);
     expect(
       shouldUseSecurePublicChatCookie(
-        new Request("https://delegate.example/reps/lao-jia", {
-          headers: { host: "delegate.example" },
+        new Request("http://127.0.0.1:3002/reps/lao-jia", {
+          headers: {
+            host: "delegate.example",
+            "x-forwarded-host": "localhost:3002",
+          },
         }),
+        {
+          NODE_ENV: "production",
+          NEXT_PUBLIC_REPRESENTATIVE_URL: "https://delegate.example",
+        },
       ),
     ).toBe(true);
+    expect(
+      shouldUseSecurePublicChatCookie(
+        new Request("http://localhost:3002/reps/lao-jia", {
+          headers: { "x-forwarded-host": "localhost:3002" },
+        }),
+        {
+          NODE_ENV: "production",
+          NEXT_PUBLIC_REPRESENTATIVE_URL: "http://delegate.example",
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it("fails closed when the production canonical origin is missing", () => {
+    expect(() =>
+      shouldUseSecurePublicChatCookie(
+        new Request("http://localhost:3002/reps/lao-jia"),
+        { NODE_ENV: "production" },
+      ),
+    ).toThrow("NEXT_PUBLIC_REPRESENTATIVE_URL is required in production.");
   });
 
   it("unlocks paid continuation only from representative-scoped service credits", () => {

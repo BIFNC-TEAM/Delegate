@@ -83,7 +83,7 @@ The intended AMN layers are:
 - **Settlement Engine:** calculates Creator revenue, platform fees, provider costs, and withdrawals.
 - **Transparent Ledger:** records recharge, charge, settlement, and proof events so users and creators can verify state.
 
-What is implemented today is the web-first Delegate wedge plus the first AMN wallet loop: public representative pages, web chat, pricing tiers, development-only mock recharge, user cash balance, user-and-Agent-scoped service-credit purchase, reserve/settle/release charging in public conversations, immediate balance refresh after purchase, return of unused demo credits to wallet cash, Creator pending/withdrawable earnings, creator withdrawal request/cancel UI, development-only mock review and settlement, partial refund/reversal services, the workspace wallet dashboard, provider adapter boundaries, and durable follow-up workflows.
+What is implemented today is the web-first Delegate wedge plus the first AMN wallet loop: public representative pages, web chat, pricing tiers, development-only mock recharge, user cash balance, user-and-Agent-scoped service-credit purchase, reserve/settle/release charging in public conversations, immediate balance refresh after purchase, return of unused demo credits to wallet cash, Creator pending/withdrawable earnings, creator withdrawal request/cancel UI, development-only mock review and settlement, partial refund/reversal services, the workspace wallet dashboard, provider adapter boundaries, and durable follow-up workflows. The current Web recharge path is a non-production demo/mock loop, not a live payment integration.
 
 What is still not fully productionized: live Stripe SDK wiring and webhook signing, live WeChat Pay or Alipay credentials and certificate flows, automatic payout through Stripe Connect / Alipay transfer / WeChat merchant transfer, generic open Wallet API, chargeback automation, Merkle proof publication, multi-currency FX, and full settlement automation.
 
@@ -106,7 +106,7 @@ Current status against the wallet plan:
 | Account types | Implemented | User cash, deferred service credit, Creator pending/withdrawable/frozen, platform deferred/earned revenue, provider cost, external settlement, and payout clearing are modeled in Prisma. |
 | Data models | Mostly implemented | `UserWallet`, aggregate `AgentWallet`, scoped `UserAgentWallet`, `WalletTransaction`, append-only `WalletLedgerEntry`, purchase/usage/withdrawal allocation records, recharge/provider events, Creator earnings, and withdrawal requests are implemented. Public users resolve through canonical `AudienceIdentity`; `UserWallet.externalUserId` remains a legacy payment selector while wallet ownership is checked through `audienceIdentityId`. |
 | Integer money and tokens | Implemented | Money uses integer smallest currency units such as CNY fen and USD cents. Agent tokens are integers. |
-| User recharge | Implemented for development mock flow | Recharge creation, idempotent provider events, payment completion, cash credit, and representative-scoped service-credit purchase can complete atomically. Mock endpoints are unavailable in production. |
+| User recharge | Implemented for development mock flow | Recharge creation, idempotent provider events, payment completion, cash credit, and representative-scoped service-credit purchase can complete atomically. Every public recharge write requires a verified Web account; mock endpoints are unavailable in production. |
 | User buys Agent service credits | Implemented | The service checks `UserWallet`, debits cash, credits the exact `UserAgentWallet`, grants the matching canonical `ServiceEntitlement`, creates a FIFO purchase lot and Creator pending earnings, updates the aggregate Agent projection, and writes all records in one transaction. |
 | Agent consumes service credits | Implemented for public conversation flow | Acceptance atomically chooses a conversation-locked free slot or reserves the same canonical audience units in both the wallet and entitlement ledgers before publishing work. Successful replies and approved Compute settle both; non-billable, rejected, edited, redacted, canceled, and terminal-failure paths transfer or release both, including retry-backoff runs. Multi-step Compute/MCP tasks transfer one server-verified run owner and finalize it exactly once; generation writes are fenced by renewable worker leases. Wallet/entitlement drift fails closed on a consistent snapshot, and the package root exposes only the composite dual-ledger usage lifecycle. |
 | Creator withdrawal | Operational mock loop implemented | Verified creators can submit and cancel representative-scoped requests from the workspace wallet. Requests allocate and freeze exact earnings FIFO. A non-production-only operations endpoint demonstrates approve, reject, paid, transient failure, retry, and permanent-failure release; it is unavailable in production. Automatic payout submission is not implemented yet. |
@@ -115,7 +115,7 @@ Current status against the wallet plan:
 | Database safety gate | Implemented | Validated PostgreSQL checks protect cash, scoped-credit, Creator earning, usage, and paid-withdrawal invariants. `pnpm test:postgres:wallet` runs real PostgreSQL 16 races for duplicate recharge, concurrent spending, final-credit reservation, terminal usage mutation, and withdrawal freezing. |
 | First-version exclusions | Preserved | No automatic cross-border payout, Merkle proof, open Wallet API, unclaimed-representative auto-withdrawal, chain ledger, or multi-currency FX. |
 
-Telegram remains future channel infrastructure for this product direction. If Delegate later ships bot-based digital goods and services, they should follow Telegram's rules, including Telegram Stars where required. AMN Pay is a future web/unified recharge path, not a reason to bypass platform policy.
+Telegram is now an optional, non-production channel runtime for this product direction. If Delegate later ships production bot-based digital goods and services, they should follow Telegram's rules, including Telegram Stars where required. AMN Pay is a future web/unified recharge path, not a reason to bypass platform policy. During the current demo, Telegram sends users to the Web mock-recharge surface. That continuation requires Web sign-in and an exact, verified binding to the active Bot before an order can be created, so credits land on the same canonical Delegate identity. An inline recharge button is emitted only when the Bot-specific `TELEGRAM_WEB_RECHARGE_BASE_URL` (or its `NEXT_PUBLIC_REPRESENTATIVE_URL` fallback) is a public HTTPS origin. Loopback or other non-public HTTP URLs remain plain message text for local testing.
 
 ## Channel Architecture Direction
 
@@ -150,7 +150,9 @@ Delegate is built around a few hard boundaries:
 ```text
 apps/
   bot/              Optional Telegram runtime foundation
+  conversation-worker/ Durable channel generation and delivery worker
   compute-broker/   Isolated compute and browser broker
+  matrix-bridge/    Optional native Matrix Application Service
   reps/             Public representative pages and public chat
   site/             Marketing website
   web/              Owner dashboard
@@ -202,10 +204,23 @@ pnpm install
 cp .env.example .env
 ```
 
-Start the full Docker Compose stack:
+Start the local test stack. This explicit override runs only the Dashboard and
+representative app in development mode, enables the built-in local identities,
+and keeps production authentication fail-closed:
 
 ```bash
-pnpm docker:up
+pnpm docker:up:local
+```
+
+Use `pnpm docker:up` for the production-shaped local stack; it requires a
+configured Logto Traditional Web application before creator login can succeed.
+Native Matrix is optional and is not part of Telegram delivery. Enable its
+profile only after configuring a homeserver and Application Service secrets.
+The command includes the same local override, so enabling Matrix does not
+recreate Dashboard or the representative app in production mode:
+
+```bash
+pnpm docker:up:matrix
 ```
 
 Run the standard checks:
@@ -223,6 +238,8 @@ Useful local URLs for the default Docker profile:
 - Site: `http://localhost:3000`
 - Dashboard: `http://localhost:3001/dashboard?view=overview`
 - Representative: `http://localhost:3002/reps/lin-founder-rep`
+- Dashboard liveness: `http://localhost:3001/health`
+- Representative liveness: `http://localhost:3002/health`
 - Compute broker health: `http://localhost:4010/health`
 - Workflow runner health: `http://localhost:4020/health`
 - Artifact store API: `http://localhost:9000`
@@ -294,12 +311,15 @@ The default `.env.example` is safe for local development. Important settings:
 
 - `DATABASE_URL` points Prisma to Postgres.
 - `LOGTO_ENDPOINT`, `LOGTO_APP_ID`, `LOGTO_APP_SECRET`, `LOGTO_REDIRECT_URI`, and `LOGTO_SCOPES` enable Logto-compatible OIDC login for creator dashboard sessions.
+- `NEXT_PUBLIC_DASHBOARD_URL` and `NEXT_PUBLIC_REPRESENTATIVE_URL` are required canonical public origins for the production-shaped apps. The local override fixes them to loopback origins so development login cannot be redirected to a remote host through a reused environment file.
+- `TELEGRAM_WEB_RECHARGE_BASE_URL` optionally gives only the Bot a public Web-recharge origin without changing the representative app's canonical origin. It falls back to `NEXT_PUBLIC_REPRESENTATIVE_URL`; only public HTTPS values produce an inline button, while local HTTP values are sent as text.
 - `DELEGATE_AUTH_SESSION_SECRET` signs dashboard auth and callback-state cookies. Set a strong secret in production.
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` forces dashboard auth in non-production environments; production always requires it.
-- `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` exposes the explicitly labeled local recharge panel so the mock recharge, service-credit purchase, usage, and unused-credit return loop can be exercised. Keep it `false` outside development; the mock mutation endpoints also return `404` in production.
+- `DELEGATE_AUTH_DEV_LOGIN` and the `DELEGATE_AUTH_DEV_*` identities are accepted only outside production. `DELEGATE_LOCAL_AUTH_BOOTSTRAP=true` separately permits the local fixture binding step. `pnpm docker:up:local` enables both switches without weakening the production login boundary.
+- `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` exposes the explicitly labeled local recharge panel so the mock recharge, service-credit purchase, usage, and unused-credit return loop can be exercised. Recharge creation, completion, and reversal require a signed-in audience account. Telegram continuations additionally require the current verified Bot binding. Keep it `false` outside development; the mock mutation endpoints also return `404` in production. Live provider checkout, signed payment webhooks, and production refunds are not yet a closed Web payment flow.
 - `DELEGATE_SKILL_TRUSTED_KEYS` is a JSON object mapping registry publisher key IDs to trusted Ed25519 public-key PEM strings. Signed patch auto-adoption remains disabled when the matching key is absent.
 - `DELEGATE_CLAWHUB_URL` selects a credential-free HTTPS Registry origin, `DELEGATE_CLAWHUB_ALLOWED_HOSTS` allowlists its hostname, and `DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` bounds exact-version verification freshness (24 hours by default). Redirects are rejected. Adoption and rollback re-fetch the exact publisher/version manifest and verdict, reject stale or changed evidence, and re-evaluate signatures against the current trusted-key set before changing release state.
-- `TELEGRAM_BOT_TOKEN`, numeric `TELEGRAM_BOT_ID`, `TELEGRAM_BOT_USERNAME`, and `TELEGRAM_WEBHOOK_SECRET` enable the optional Telegram bot foundation, but the first Delegate product version is web-first. Channel binding fails closed when the numeric bot ID cannot be configured or derived from the token.
+- `TELEGRAM_BOT_TOKEN` is the only Telegram credential required to start the current long-poll runtime. `TELEGRAM_BOT_ID` is optional because the numeric bot ID is derived from the token prefix when omitted; after `getMe` succeeds, the Bot persists the validated ID and username to configured Telegram channel bindings so the Web app can issue connection-scoped `/bind` challenges without receiving the token. `TELEGRAM_BOT_USERNAME` is recommended for a readable channel identity but is not required to start polling. `TELEGRAM_WEBHOOK_SECRET` is not required or read by long-polling; it remains available to separate webhook/signing or fallback code and should not be added merely to run polling.
 - `REP_PUBLIC_CHAT_SESSION_SECRET` can override the public-chat cookie signing secret. If unset, the reps app falls back to `TELEGRAM_WEBHOOK_SECRET` and then a local development secret.
 - `DELEGATE_MODEL_ENABLED`, `DELEGATE_MODEL_PROVIDER`, `DELEGATE_OPENAI_MODEL`, and `DELEGATE_ANTHROPIC_MODEL` control model-backed representative replies.
 - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `ARK_API_KEY` enable live provider calls.
@@ -339,9 +359,14 @@ pnpm test:channels:pg16
 pnpm docker:ps
 pnpm docker:logs
 pnpm docker:down
+pnpm docker:up:local
+pnpm docker:up:matrix
 
 pnpm registry:search:clawhub "qualification"
 ```
+
+`pnpm docker:down` also stops services started through the Matrix or Temporal
+profiles. It does not delete the local database or other named volumes.
 
 `pnpm test:channels` is the credential-free, offline channel gate. It clears
 developer-machine provider credentials, then tests and typechecks the Web,

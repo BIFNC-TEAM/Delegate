@@ -32,6 +32,8 @@ import {
 } from "../../public-chat";
 import {
   buildRepresentativeAuthCallbackUrl,
+  buildRepresentativeCanonicalAuthRequestUrl,
+  buildRepresentativeAuthRedirectUrl,
   getRepresentativeAuthCookiePath,
   sanitizePublicAudienceReturnTo,
 } from "../../public-auth";
@@ -43,6 +45,12 @@ export async function GET(
   const { slug } = await params;
 
   try {
+    const canonicalRequestUrl =
+      buildRepresentativeCanonicalAuthRequestUrl(request);
+    if (canonicalRequestUrl) {
+      return NextResponse.redirect(canonicalRequestUrl);
+    }
+
     const runtime = await getPublicRepresentativeRuntime(slug);
     if (runtime.status !== "available") return NextResponse.json({ error: "Representative is not publicly available." }, { status: runtime.status === "paused" ? 423 : 404 });
     const setup = runtime.setup;
@@ -102,7 +110,9 @@ export async function GET(
         audienceId: sessionState.audienceId,
         email: profile.email ?? null,
       });
-      const response = NextResponse.redirect(new URL(returnTo, request.url));
+      const response = NextResponse.redirect(
+        buildRepresentativeAuthRedirectUrl(request, returnTo),
+      );
       response.cookies.set(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE, signDelegateAuthSession(session, secret), {
         httpOnly: true,
         sameSite: "lax",

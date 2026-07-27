@@ -2,6 +2,11 @@ import type { PlanTier } from "@delegate/domain";
 import type { ModelRuntimeRecentTurn } from "@delegate/model-runtime";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
+import {
+  isLoopbackRepresentativeHostname,
+  resolveRepresentativePublicBaseUrl,
+} from "./public-auth";
+
 export type PublicChatRequest = {
   message: string;
   clientMessageId?: string;
@@ -144,15 +149,15 @@ export function getPublicChatCookieName(representativeSlug: string) {
   return `${PUBLIC_CHAT_COOKIE_PREFIX}-${representativeSlug}`;
 }
 
-export function shouldUseSecurePublicChatCookie(request: Request): boolean {
-  if (process.env.NODE_ENV !== "production") {
-    return false;
-  }
-
-  const host = normalizeHostHeader(
-    request.headers.get("x-forwarded-host") ?? request.headers.get("host") ?? readRequestHost(request),
+export function shouldUseSecurePublicChatCookie(
+  request: Request,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const canonicalBaseUrl = resolveRepresentativePublicBaseUrl(request, env);
+  return !(
+    canonicalBaseUrl.protocol === "http:"
+    && isLoopbackRepresentativeHostname(canonicalBaseUrl.hostname)
   );
-  return !isLocalHttpHost(host);
 }
 
 export function readPublicChatSessionState(params: {
@@ -288,29 +293,4 @@ function truncateRecentTurnText(value: string) {
   return normalized.length > PUBLIC_CHAT_TURN_TEXT_LIMIT
     ? normalized.slice(0, PUBLIC_CHAT_TURN_TEXT_LIMIT)
     : normalized;
-}
-
-function normalizeHostHeader(value: string): string {
-  return value.split(",")[0]?.trim() ?? value.trim();
-}
-
-function readRequestHost(request: Request): string {
-  try {
-    return new URL(request.url).host;
-  } catch {
-    return "";
-  }
-}
-
-function isLocalHttpHost(value: string): boolean {
-  const host = value.toLowerCase();
-  return (
-    host === "localhost" ||
-    host.startsWith("localhost:") ||
-    host === "127.0.0.1" ||
-    host.startsWith("127.0.0.1:") ||
-    host === "::1" ||
-    host === "[::1]" ||
-    host.startsWith("[::1]:")
-  );
 }

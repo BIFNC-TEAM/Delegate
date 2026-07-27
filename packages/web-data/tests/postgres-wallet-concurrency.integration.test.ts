@@ -24,6 +24,7 @@ import {
 } from "../src/agent-wallet-usage-charge";
 import { createWithdrawRequest } from "../src/agent-wallet-withdrawals";
 import { prisma } from "../src/prisma";
+import { getWorkspaceWalletReconciliationReport } from "../src/wallet-reconciliation";
 
 const describePostgres = process.env.DELEGATE_POSTGRES_E2E === "1"
   ? describe
@@ -486,6 +487,81 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
     }
   }, 30_000);
 
+  it("detects projection drift without mutating wallet accounting state", async () => {
+    const fixture = await createWalletFixture("reconciliation-drift", 10);
+    const reconciliationInput = {
+      ownerId: fixture.ownerId,
+      activeRepresentativeSlug: fixture.suffix,
+      representative: fixture.suffix,
+      currency: "CNY",
+    } as const;
+
+    try {
+      await purchaseAgentTokens({
+        externalUserId: fixture.externalUserId,
+        representativeId: fixture.representativeId,
+        amountCents: 10,
+        idempotencyKey: `${fixture.suffix}:purchase`,
+      });
+
+      const beforeHealthyReport = await readWalletAccountingFingerprint(fixture);
+      const healthyReport =
+        await getWorkspaceWalletReconciliationReport(reconciliationInput);
+      const afterHealthyReport = await readWalletAccountingFingerprint(fixture);
+
+      expect(healthyReport).not.toBeNull();
+      expect(healthyReport?.status).toBe("healthy");
+      expect(healthyReport?.summary.errors).toBe(0);
+      expect(healthyReport?.issues).toHaveLength(0);
+      expect(afterHealthyReport).toEqual(beforeHealthyReport);
+
+      await prisma.agentWallet.update({
+        where: { id: fixture.agentWalletId },
+        data: {
+          tokenBalance: { increment: 1 },
+          totalPurchasedTokens: { increment: 1 },
+        },
+      });
+      const beforeDriftReport = await readWalletAccountingFingerprint(fixture);
+      const driftReport =
+        await getWorkspaceWalletReconciliationReport(reconciliationInput);
+      const afterDriftReport = await readWalletAccountingFingerprint(fixture);
+
+      expect(driftReport).not.toBeNull();
+      expect(driftReport?.status).toBe("blocked");
+      expect(driftReport?.summary.errors).toBeGreaterThan(0);
+      expect(driftReport?.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: "agent_wallet_token_balance_mismatch",
+          severity: "error",
+          expectedValue: 10,
+          actualValue: 11,
+          differenceValue: 1,
+        }),
+      ]));
+      expect(afterDriftReport).toEqual(beforeDriftReport);
+
+      await prisma.agentWallet.update({
+        where: { id: fixture.agentWalletId },
+        data: {
+          tokenBalance: { decrement: 1 },
+          totalPurchasedTokens: { decrement: 1 },
+        },
+      });
+      const restoredReport =
+        await getWorkspaceWalletReconciliationReport(reconciliationInput);
+
+      expect(restoredReport?.status).toBe("healthy");
+      expect(
+        restoredReport?.issues.some(
+          (issue) => issue.code === "agent_wallet_token_balance_mismatch",
+        ),
+      ).toBe(false);
+    } finally {
+      await cleanupWalletFixture(fixture);
+    }
+  }, 30_000);
+
   it("aggregates creator balances beyond the former 100-row dashboard limit", async () => {
     const fixture = await createWalletFixture("dashboard-aggregate", 0);
 
@@ -761,6 +837,118 @@ async function createGenerationRun(
     },
   });
   return run.id;
+}
+
+async function readWalletAccountingFingerprint(fixture: WalletFixture) {
+  const [
+    walletLedgerEntryCount,
+    walletTransactionCount,
+    tokenPurchaseCount,
+    creatorEarningCount,
+    entitlementLedgerEntryCount,
+    userWallet,
+    agentWallet,
+    userAgentWallet,
+    tokenPurchase,
+    entitlementAccount,
+    creatorEarning,
+  ] = await Promise.all([
+    prisma.walletLedgerEntry.count({
+      where: { representativeId: fixture.representativeId },
+    }),
+    prisma.walletTransaction.count({
+      where: { representativeId: fixture.representativeId },
+    }),
+    prisma.agentTokenPurchase.count({
+      where: { representativeId: fixture.representativeId },
+    }),
+    prisma.creatorEarning.count({
+      where: { representativeId: fixture.representativeId },
+    }),
+    prisma.serviceEntitlementLedgerEntry.count({
+      where: {
+        entitlementAccount: {
+          representativeId: fixture.representativeId,
+        },
+      },
+    }),
+    prisma.userWallet.findUniqueOrThrow({
+      where: { id: fixture.userWalletId },
+      select: {
+        cashBalanceCents: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.agentWallet.findUniqueOrThrow({
+      where: { id: fixture.agentWalletId },
+      select: {
+        tokenBalance: true,
+        totalPurchasedTokens: true,
+        totalConsumedTokens: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.userAgentWallet.findFirstOrThrow({
+      where: {
+        userWalletId: fixture.userWalletId,
+        agentWalletId: fixture.agentWalletId,
+        currency: "CNY",
+      },
+      select: {
+        availableTokenAmount: true,
+        reservedTokenAmount: true,
+        totalPurchasedTokenAmount: true,
+        totalConsumedTokenAmount: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.agentTokenPurchase.findFirstOrThrow({
+      where: { representativeId: fixture.representativeId },
+      select: {
+        remainingTokenAmount: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.serviceEntitlementAccount.findFirstOrThrow({
+      where: {
+        audienceIdentityId: fixture.audienceIdentityId,
+        representativeId: fixture.representativeId,
+      },
+      select: {
+        remainingUnits: true,
+        reservedUnits: true,
+        updatedAt: true,
+      },
+    }),
+    prisma.creatorEarning.findFirstOrThrow({
+      where: { representativeId: fixture.representativeId },
+      select: {
+        pendingCents: true,
+        withdrawableCents: true,
+        frozenCents: true,
+        withdrawnCents: true,
+        updatedAt: true,
+      },
+    }),
+  ]);
+
+  return {
+    counts: {
+      walletLedgerEntryCount,
+      walletTransactionCount,
+      tokenPurchaseCount,
+      creatorEarningCount,
+      entitlementLedgerEntryCount,
+    },
+    rows: {
+      userWallet,
+      agentWallet,
+      userAgentWallet,
+      tokenPurchase,
+      entitlementAccount,
+      creatorEarning,
+    },
+  };
 }
 
 async function cleanupWalletFixture(fixture: WalletFixture): Promise<void> {

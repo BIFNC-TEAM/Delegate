@@ -14,6 +14,10 @@ const designSource = readFileSync(
   new URL("../../../DESIGN.md", import.meta.url),
   "utf8",
 );
+const walletCssSource = readFileSync(
+  new URL("../app/dashboard/dashboard-v2.css", import.meta.url),
+  "utf8",
+);
 
 describe("Dashboard Wallet & Billing", () => {
   it("is a functional workspace module rather than a framework-data placeholder", () => {
@@ -99,5 +103,56 @@ describe("Dashboard Wallet & Billing", () => {
     expect(walletSource).toContain('label={zh ? "审核人" : "Reviewer"}');
     expect(walletSource).toContain('label="Transaction ID"');
     expect(walletSource).toContain('label="Event group"');
+  });
+
+  it("loads a read-only reconciliation independently for representative and currency scope", () => {
+    expect(walletSource).toContain("/api/dashboard/wallet/reconciliation?");
+    expect(walletSource).toContain("setReconciliationReport");
+    expect(walletSource).toContain("setReconciliationError");
+    expect(walletSource).toContain("activeReconciliationScopeKeyRef");
+    expect(walletSource).toContain("representative,");
+    expect(walletSource).toContain("currency: resolvedCurrency");
+    expect(walletSource).toContain("refreshWalletAndReconciliation");
+    expect(walletSource).toContain("refreshReconciliationAfterMutation");
+    expect(walletSource).toContain('loadWallet("replace")');
+    expect(walletSource).toContain("loadReconciliation()");
+  });
+
+  it("places funds health after primary money metrics without adding a fifth wallet view", () => {
+    const metricsIndex = walletSource.indexOf(
+      'className="dashboard-v2-metric-grid wallet-metrics"',
+    );
+    const reconciliationIndex = walletSource.indexOf("<WalletReconciliationPanel");
+    const recentEventsIndex = walletSource.indexOf('className="wallet-overview-layout"');
+
+    expect(metricsIndex).toBeGreaterThan(-1);
+    expect(reconciliationIndex).toBeGreaterThan(metricsIndex);
+    expect(recentEventsIndex).toBeGreaterThan(reconciliationIndex);
+    expect(walletSource).toContain('healthy: ["资金正常", "Funds reconciled"]');
+    expect(walletSource).toContain('warning: ["存在需复核项", "Review needed"]');
+    expect(walletSource).toContain('blocked: ["发现资金差异", "Money differences found"]');
+    expect(walletSource).not.toContain("资金操作已阻断");
+  });
+
+  it("keeps reconciliation read-only, current, and separate from date and search filters", () => {
+    expect(walletSource).toContain("只读核对当前代表范围与币种");
+    expect(walletSource).toContain("不会修改任何财务数据");
+    expect(walletSource).toContain("不受日期、事件类型或搜索条件影响");
+    expect(walletSource).toContain("changes no financial data");
+    expect(walletSource).toContain("unaffected by date, event-type, or search filters");
+    expect(walletSource).toContain("absoluteAmountDifferenceCents");
+    expect(walletSource).toContain("absoluteTokenDifference");
+  });
+
+  it("shows textual issue severity and supports accessible expansion", () => {
+    expect(walletSource).toContain('aria-controls="wallet-reconciliation-issues"');
+    expect(walletSource).toContain("aria-expanded={expanded}");
+    expect(walletSource).toContain('role="alert"');
+    expect(walletSource).toContain('role="status"');
+    expect(walletSource).toContain("issue.references.map");
+    expect(walletCssSource).toContain(".wallet-reconciliation.is-success");
+    expect(walletCssSource).toContain(".wallet-reconciliation.is-warning");
+    expect(walletCssSource).toContain(".wallet-reconciliation.is-error");
+    expect(walletCssSource).toContain(".wallet-reconciliation-footer > button { min-height: 44px; }");
   });
 });

@@ -132,6 +132,46 @@ type WorkspaceWalletSnapshot = {
   ledgerEntries: WorkspaceWalletLedgerEntry[];
 };
 
+type WorkspaceWalletReconciliationIssue = {
+  id: string;
+  code: string;
+  severity: "warning" | "error";
+  domain: string;
+  representativeSlug: string | null;
+  representativeName: string | null;
+  unit: "minor_currency" | "tokens" | "count";
+  expectedValue: number | null;
+  actualValue: number | null;
+  differenceValue: number | null;
+  currency: string | null;
+  references: Array<{
+    kind: string;
+    id: string;
+  }>;
+};
+
+type WorkspaceWalletReconciliationReport = {
+  status: "healthy" | "warning" | "blocked";
+  checkedAt: string;
+  readOnly: true;
+  scope: {
+    representative: string;
+    currency: string;
+  };
+  summary: {
+    checks: number;
+    passed: number;
+    warnings: number;
+    errors: number;
+    findings: number;
+    absoluteAmountDifferenceCents: number;
+    absoluteTokenDifference: number;
+  };
+  issues: WorkspaceWalletReconciliationIssue[];
+  issueCount: number;
+  issuesTruncated: boolean;
+};
+
 type SelectedWalletRow =
   | { kind: "event"; id: string }
   | { kind: "settlement"; id: string }
@@ -176,7 +216,12 @@ export function DashboardWallet({
   const [mutationNotice, setMutationNotice] = useState<string | null>(null);
   const [cancelingWithdrawalId, setCancelingWithdrawalId] = useState<string | null>(null);
   const [mockWithdrawalAction, setMockWithdrawalAction] = useState<string | null>(null);
+  const [reconciliationReport, setReconciliationReport] =
+    useState<WorkspaceWalletReconciliationReport | null>(null);
+  const [reconciliationError, setReconciliationError] = useState<string | null>(null);
+  const [reconciliationLoading, setReconciliationLoading] = useState(false);
   const requestSequenceRef = useRef(0);
+  const reconciliationRequestSequenceRef = useRef(0);
   const mockActionIdempotencyKeysRef = useRef(new Map<string, string>());
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -193,6 +238,13 @@ export function DashboardWallet({
   ].join("\u0000");
   const activeFilterKeyRef = useRef(filterKey);
   activeFilterKeyRef.current = filterKey;
+  const reconciliationScopeKey = [
+    activeSlug,
+    representative,
+    resolvedCurrency,
+  ].join("\u0000");
+  const activeReconciliationScopeKeyRef = useRef(reconciliationScopeKey);
+  activeReconciliationScopeKeyRef.current = reconciliationScopeKey;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedQuery(query.trim()), 250);
@@ -296,6 +348,55 @@ export function DashboardWallet({
     to,
   ]);
 
+  const loadReconciliation = useCallback(async (signal?: AbortSignal) => {
+    if (!resolvedCurrency) return;
+    const requestId = ++reconciliationRequestSequenceRef.current;
+    const requestedScopeKey = [
+      activeSlug,
+      representative,
+      resolvedCurrency,
+    ].join("\u0000");
+    setReconciliationError(null);
+    setReconciliationLoading(true);
+
+    try {
+      const parameters = new URLSearchParams({
+        rep: activeSlug,
+        representative,
+        currency: resolvedCurrency,
+      });
+      const response = await fetch(
+        `/api/dashboard/wallet/reconciliation?${parameters.toString()}`,
+        {
+          cache: "no-store",
+          ...(signal ? { signal } : {}),
+        },
+      );
+      if (!response.ok) throw new Error(await extractError(response));
+      const report = (await response.json()) as WorkspaceWalletReconciliationReport;
+      if (
+        signal?.aborted
+        || activeReconciliationScopeKeyRef.current !== requestedScopeKey
+        || reconciliationRequestSequenceRef.current !== requestId
+      ) return;
+      setReconciliationReport(report);
+    } catch (nextError) {
+      if (
+        signal?.aborted
+        || activeReconciliationScopeKeyRef.current !== requestedScopeKey
+        || reconciliationRequestSequenceRef.current !== requestId
+      ) return;
+      throw nextError;
+    } finally {
+      if (
+        activeReconciliationScopeKeyRef.current === requestedScopeKey
+        && reconciliationRequestSequenceRef.current === requestId
+      ) {
+        setReconciliationLoading(false);
+      }
+    }
+  }, [activeSlug, representative, resolvedCurrency]);
+
   useEffect(() => {
     const controller = new AbortController();
     setSnapshot(null);
@@ -315,6 +416,32 @@ export function DashboardWallet({
     });
     return () => controller.abort();
   }, [filterKey, loadWallet, zh]);
+
+  useEffect(() => {
+    if (!resolvedCurrency) {
+      reconciliationRequestSequenceRef.current += 1;
+      setReconciliationReport(null);
+      setReconciliationError(null);
+      setReconciliationLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setReconciliationReport(null);
+    setReconciliationError(null);
+    void loadReconciliation(controller.signal).catch((nextError: unknown) => {
+      if (
+        controller.signal.aborted
+        || activeReconciliationScopeKeyRef.current !== reconciliationScopeKey
+      ) return;
+      setReconciliationError(nextError instanceof Error
+        ? nextError.message
+        : zh
+          ? "资金核对暂时无法完成。"
+          : "The funds reconciliation could not be completed.");
+    });
+    return () => controller.abort();
+  }, [loadReconciliation, reconciliationScopeKey, resolvedCurrency, zh]);
 
   useEffect(() => {
     if (!selected) return;
@@ -417,6 +544,7 @@ export function DashboardWallet({
         : "Withdrawal requested. Track its review status in Settlements.",
     );
     setSelected(null);
+    refreshReconciliationAfterMutation();
     if (activeView === "settlements") {
       await loadWallet("replace").catch((nextError: unknown) => {
         setError(nextError instanceof Error
@@ -458,6 +586,7 @@ export function DashboardWallet({
           ? "提现申请已取消，冻结收益已退回可提现余额。"
           : "Withdrawal canceled. Frozen earnings are withdrawable again.",
       );
+      refreshReconciliationAfterMutation();
       await loadWallet("replace");
     } catch (nextError) {
       setError(nextError instanceof Error
@@ -517,6 +646,7 @@ export function DashboardWallet({
           ? `本地模拟运营已完成：${mockWithdrawalActionLabel(action, locale)}。`
           : `Local mock operation completed: ${mockWithdrawalActionLabel(action, locale)}.`,
       );
+      refreshReconciliationAfterMutation();
       await loadWallet("replace");
     } catch (nextError) {
       setError(nextError instanceof Error
@@ -527,6 +657,29 @@ export function DashboardWallet({
     } finally {
       setMockWithdrawalAction(null);
     }
+  }
+
+  function refreshReconciliationAfterMutation() {
+    void loadReconciliation().catch((nextError: unknown) => {
+      setReconciliationError(nextError instanceof Error
+        ? nextError.message
+        : zh
+          ? "资金变更已完成，但资金核对刷新失败。"
+          : "The money change completed, but funds reconciliation did not refresh.");
+    });
+  }
+
+  function refreshWalletAndReconciliation() {
+    void loadWallet("replace").catch((nextError: unknown) => {
+      setError(nextError instanceof Error ? nextError.message : "Refresh failed.");
+    });
+    void loadReconciliation().catch((nextError: unknown) => {
+      setReconciliationError(nextError instanceof Error
+        ? nextError.message
+        : zh
+          ? "资金核对刷新失败。"
+          : "Failed to refresh funds reconciliation.");
+    });
   }
 
   return (
@@ -548,13 +701,16 @@ export function DashboardWallet({
         <div className="dashboard-v2-page-actions">
           <button
             className="dashboard-v2-button-secondary"
-            disabled={showInitialLoading || loading || loadingMore}
-            onClick={() => void loadWallet("replace").catch((nextError: unknown) => {
-              setError(nextError instanceof Error ? nextError.message : "Refresh failed.");
-            })}
+            disabled={
+              showInitialLoading
+              || loading
+              || loadingMore
+              || reconciliationLoading
+            }
+            onClick={refreshWalletAndReconciliation}
             type="button"
           >
-            {loading && !initialLoading
+            {(loading && !initialLoading) || reconciliationLoading
               ? zh ? "刷新中…" : "Refreshing…"
               : zh ? "刷新" : "Refresh"}
           </button>
@@ -689,6 +845,18 @@ export function DashboardWallet({
                     locale={locale}
                     metrics={snapshot?.metrics}
                     onSelect={chooseRow}
+                    onRetryReconciliation={() => {
+                      void loadReconciliation().catch((nextError: unknown) => {
+                        setReconciliationError(nextError instanceof Error
+                          ? nextError.message
+                          : zh
+                            ? "资金核对刷新失败。"
+                            : "Failed to refresh funds reconciliation.");
+                      });
+                    }}
+                    reconciliationError={reconciliationError}
+                    reconciliationLoading={reconciliationLoading}
+                    reconciliationReport={reconciliationReport}
                     settlements={settlements}
                   />
                 </div>
@@ -1236,6 +1404,10 @@ function WalletOverview({
   locale,
   metrics,
   onSelect,
+  onRetryReconciliation,
+  reconciliationError,
+  reconciliationLoading,
+  reconciliationReport,
   settlements,
 }: {
   currency: string;
@@ -1243,6 +1415,10 @@ function WalletOverview({
   locale: Locale;
   metrics: WorkspaceWalletSnapshot["metrics"] | undefined;
   onSelect: (row: SelectedWalletRow, target: HTMLElement) => void;
+  onRetryReconciliation: () => void;
+  reconciliationError: string | null;
+  reconciliationLoading: boolean;
+  reconciliationReport: WorkspaceWalletReconciliationReport | null;
   settlements: WorkspaceWalletSettlement[];
 }) {
   const zh = locale === "zh";
@@ -1290,6 +1466,14 @@ function WalletOverview({
           </article>
         ))}
       </section>
+
+      <WalletReconciliationPanel
+        error={reconciliationError}
+        loading={reconciliationLoading}
+        locale={locale}
+        onRetry={onRetryReconciliation}
+        report={reconciliationReport}
+      />
 
       <div className="wallet-overview-layout">
         <section className="dashboard-v2-panel wallet-overview-events">
@@ -1346,6 +1530,282 @@ function WalletOverview({
         </section>
       </div>
     </>
+  );
+}
+
+function WalletReconciliationPanel({
+  error,
+  loading,
+  locale,
+  onRetry,
+  report,
+}: {
+  error: string | null;
+  loading: boolean;
+  locale: Locale;
+  onRetry: () => void;
+  report: WorkspaceWalletReconciliationReport | null;
+}) {
+  const zh = locale === "zh";
+  const [expanded, setExpanded] = useState(false);
+  const previewLimit = 3;
+  const visibleIssues = report
+    ? expanded
+      ? report.issues
+      : report.issues.slice(0, previewLimit)
+    : [];
+  const canToggleIssues = Boolean(report && report.issues.length > previewLimit);
+  const tone = report
+    ? report.status === "healthy"
+      ? "success"
+      : report.status === "warning"
+        ? "warning"
+        : "error"
+    : "neutral";
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [report?.checkedAt, report?.scope.currency, report?.scope.representative]);
+
+  return (
+    <section
+      aria-busy={loading}
+      aria-labelledby="wallet-reconciliation-heading"
+      className={`dashboard-v2-panel wallet-reconciliation is-${tone}`}
+    >
+      <header className="wallet-reconciliation-header">
+        <div>
+          <p>MONEY RECONCILIATION</p>
+          <h2 id="wallet-reconciliation-heading">
+            {zh ? "资金健康" : "Funds health"}
+          </h2>
+        </div>
+        <div className="wallet-reconciliation-state">
+          <span className={`wallet-status is-${tone}`} role="status">
+            {report
+              ? reconciliationStatusLabel(report.status, locale)
+              : loading
+                ? zh ? "核对中" : "Checking"
+                : zh ? "尚未核对" : "Not checked"}
+          </span>
+          {report ? (
+            <time dateTime={report.checkedAt}>
+              {zh ? "核对于" : "Checked"}
+              {" · "}
+              {formatTimestamp(report.checkedAt, locale, true)}
+            </time>
+          ) : null}
+        </div>
+      </header>
+
+      <p className="dashboard-v2-panel-description wallet-reconciliation-description">
+        {zh
+          ? "只读核对当前代表范围与币种下的余额、额度、收益、提现和账本关系；不会修改任何财务数据，也不受日期、事件类型或搜索条件影响。"
+          : "A read-only check of balances, credits, earnings, withdrawals, and ledger relationships for the current representative scope and currency. It changes no financial data and is unaffected by date, event-type, or search filters."}
+      </p>
+
+      {error ? (
+        <div className="skills-banner is-error" role="alert">
+          <span>
+            <strong>
+              {zh ? "资金核对暂时无法完成" : "Funds reconciliation could not be completed"}
+            </strong>
+            {" · "}
+            {error}
+          </span>
+          <button
+            className="dashboard-v2-button-secondary"
+            disabled={loading}
+            onClick={onRetry}
+            type="button"
+          >
+            {loading ? zh ? "核对中…" : "Checking…" : zh ? "重试" : "Retry"}
+          </button>
+        </div>
+      ) : null}
+
+      {loading ? (
+        <p aria-live="polite" className="wallet-reconciliation-refreshing" role="status">
+          {report
+            ? zh ? "正在刷新只读核对结果…" : "Refreshing the read-only reconciliation…"
+            : zh ? "正在核对资金与账本关系…" : "Checking funds and ledger relationships…"}
+        </p>
+      ) : null}
+
+      {report ? (
+        <>
+          <div className="wallet-reconciliation-scope">
+            <span>{report.readOnly ? zh ? "只读检查" : "Read-only check" : null}</span>
+            <code>
+              {report.scope.representative === "all"
+                ? zh ? "全部代表" : "All representatives"
+                : report.scope.representative}
+              {" · "}
+              {report.scope.currency}
+            </code>
+          </div>
+
+          <dl className="wallet-reconciliation-summary">
+            <div>
+              <dt>{zh ? "通过检查" : "Checks passed"}</dt>
+              <dd>{report.summary.passed} / {report.summary.checks}</dd>
+            </div>
+            <div>
+              <dt>{zh ? "发现项" : "Findings"}</dt>
+              <dd>{report.summary.findings}</dd>
+              <small>
+                {zh
+                  ? `${report.summary.warnings} 项复核 · ${report.summary.errors} 项差异`
+                  : `${report.summary.warnings} review · ${report.summary.errors} difference`}
+              </small>
+            </div>
+            <div>
+              <dt>{zh ? "资金绝对差异" : "Absolute money difference"}</dt>
+              <dd>
+                {formatMoney(
+                  report.summary.absoluteAmountDifferenceCents,
+                  report.scope.currency,
+                  locale,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>{zh ? "额度绝对差异" : "Absolute credit difference"}</dt>
+              <dd>
+                {new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en-US")
+                  .format(report.summary.absoluteTokenDifference)}
+              </dd>
+            </div>
+          </dl>
+
+          {report.status === "healthy" && report.issueCount === 0 ? (
+            <div className="wallet-reconciliation-empty">
+              <strong>{zh ? "当前资金关系正常" : "Current funds reconcile"}</strong>
+              <span>
+                {zh
+                  ? `已完成 ${report.summary.checks} 项只读检查，未发现资金或额度差异。`
+                  : `${report.summary.checks} read-only checks completed with no money or credit differences.`}
+              </span>
+            </div>
+          ) : report.issues.length ? (
+            <>
+              <ol className="wallet-reconciliation-issues" id="wallet-reconciliation-issues">
+                {visibleIssues.map((issue) => (
+                  <li className={`is-${issue.severity}`} key={issue.id}>
+                    <header>
+                      <span className={`wallet-status is-${issue.severity === "error" ? "error" : "warning"}`}>
+                        {issue.severity === "error"
+                          ? zh ? "资金差异" : "Difference"
+                          : zh ? "需要复核" : "Review needed"}
+                      </span>
+                      <div>
+                        <strong>{reconciliationIssueLabel(issue.code, locale)}</strong>
+                        <small>
+                          {reconciliationDomainLabel(issue.domain, locale)}
+                          {" · "}
+                          {issue.representativeName
+                            ?? issue.representativeSlug
+                            ?? (zh ? "工作区" : "Workspace")}
+                        </small>
+                      </div>
+                    </header>
+                    <dl>
+                      <div>
+                        <dt>{zh ? "预期" : "Expected"}</dt>
+                        <dd>
+                          {formatReconciliationValue(
+                            issue.expectedValue,
+                            issue.unit,
+                            issue.currency ?? report.scope.currency,
+                            locale,
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{zh ? "实际" : "Actual"}</dt>
+                        <dd>
+                          {formatReconciliationValue(
+                            issue.actualValue,
+                            issue.unit,
+                            issue.currency ?? report.scope.currency,
+                            locale,
+                          )}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{zh ? "差异" : "Difference"}</dt>
+                        <dd>
+                          {formatReconciliationValue(
+                            issue.differenceValue,
+                            issue.unit,
+                            issue.currency ?? report.scope.currency,
+                            locale,
+                            true,
+                          )}
+                        </dd>
+                      </div>
+                    </dl>
+                    {issue.references.length ? (
+                      <div className="wallet-reconciliation-references">
+                        <span>{zh ? "关联记录" : "Linked records"}</span>
+                        <div>
+                          {issue.references.map((reference) => (
+                            <code
+                              key={`${reference.kind}:${reference.id}`}
+                              title={`${reference.kind} · ${reference.id}`}
+                            >
+                              {humanizeCode(reference.kind)}
+                              {" · "}
+                              {shortId(reference.id)}
+                            </code>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </li>
+                ))}
+              </ol>
+              <footer className="wallet-reconciliation-footer">
+                <span>
+                  {report.issuesTruncated
+                    ? zh
+                      ? `当前展示报告返回的 ${report.issues.length} / ${report.issueCount} 项。`
+                      : `Showing ${report.issues.length} of ${report.issueCount} findings returned by this report.`
+                    : zh
+                      ? `共 ${report.issueCount} 项发现。`
+                      : `${report.issueCount} findings.`}
+                </span>
+                {canToggleIssues ? (
+                  <button
+                    aria-controls="wallet-reconciliation-issues"
+                    aria-expanded={expanded}
+                    className="dashboard-v2-button-secondary"
+                    onClick={() => setExpanded((current) => !current)}
+                    type="button"
+                  >
+                    {expanded
+                      ? zh ? "收起问题" : "Show fewer"
+                      : zh
+                        ? `展开 ${report.issues.length} 项`
+                        : `Show all ${report.issues.length}`}
+                  </button>
+                ) : null}
+              </footer>
+            </>
+          ) : (
+            <div className="wallet-reconciliation-empty is-warning">
+              <strong>{zh ? "报告包含发现，但没有可展示明细" : "The report contains findings without displayable details"}</strong>
+              <span>{zh ? "请重试核对；若持续出现，请保留核对时间交由运营复核。" : "Retry the check. If this persists, retain the checked time for operations review."}</span>
+            </div>
+          )}
+        </>
+      ) : !loading && !error ? (
+        <div className="wallet-reconciliation-empty is-warning">
+          <strong>{zh ? "等待资金核对" : "Waiting for funds reconciliation"}</strong>
+          <span>{zh ? "选择可用币种后会自动执行只读核对。" : "A read-only check starts after an available currency is selected."}</span>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -1964,6 +2424,106 @@ function walletStatusLabel(status: string, locale: Locale) {
   return labels[key]?.[locale === "zh" ? 0 : 1] ?? humanizeCode(status);
 }
 
+function reconciliationStatusLabel(
+  status: WorkspaceWalletReconciliationReport["status"],
+  locale: Locale,
+) {
+  const labels: Record<
+    WorkspaceWalletReconciliationReport["status"],
+    [string, string]
+  > = {
+    healthy: ["资金正常", "Funds reconciled"],
+    warning: ["存在需复核项", "Review needed"],
+    blocked: ["发现资金差异", "Money differences found"],
+  };
+  return labels[status][locale === "zh" ? 0 : 1];
+}
+
+function reconciliationDomainLabel(domain: string, locale: Locale) {
+  const labels: Record<string, [string, string]> = {
+    wallet: ["钱包余额", "Wallet balances"],
+    purchase: ["额度购买", "Credit purchases"],
+    usage: ["服务用量", "Service usage"],
+    entitlement: ["服务权益", "Service entitlements"],
+    earning: ["创作者收益", "Creator earnings"],
+    ledger: ["资金账本", "Money ledger"],
+    user_cash: ["用户现金", "User cash"],
+    service_credit: ["服务额度", "Service credits"],
+    agent_wallet: ["代表钱包", "Representative wallet"],
+    creator_earning: ["创作者收益", "Creator earnings"],
+    withdrawal: ["提现", "Withdrawal"],
+    ledger_group: ["账本交易组", "Ledger group"],
+  };
+  return labels[domain.toLowerCase()]?.[locale === "zh" ? 0 : 1]
+    ?? humanizeCode(domain);
+}
+
+function reconciliationIssueLabel(code: string, locale: Locale) {
+  const labels: Record<string, [string, string]> = {
+    agent_wallet_token_balance_mismatch: ["代表可用额度汇总不一致", "Representative credit balance does not match scoped wallets"],
+    agent_wallet_purchased_total_mismatch: ["代表累计购买额度不一致", "Representative purchased-credit total does not match"],
+    agent_wallet_consumed_total_mismatch: ["代表累计消耗额度不一致", "Representative consumed-credit total does not match"],
+    scoped_wallet_conservation_mismatch: ["用户额度余额不守恒", "User credit balance does not conserve"],
+    scoped_wallet_currency_mismatch: ["用户额度钱包币种不一致", "User credit wallet currency does not match"],
+    scoped_wallet_reserved_usage_mismatch: ["预留额度与进行中用量不一致", "Reserved credits do not match active usage"],
+    scoped_wallet_consumed_usage_mismatch: ["累计消耗额度与已结算用量不一致", "Consumed credits do not match settled usage"],
+    purchase_lot_balance_mismatch: ["剩余购买额度与当前余额不一致", "Remaining purchase lots do not match the current balance"],
+    service_credit_ledger_projection_mismatch: ["服务额度余额与账本投影不一致", "Service-credit balance does not match the ledger projection"],
+    entitlement_available_balance_mismatch: ["可用额度与服务权益不一致", "Available credits do not match service entitlements"],
+    entitlement_reserved_balance_mismatch: ["预留额度与服务权益不一致", "Reserved credits do not match service entitlements"],
+    missing_entitlement_binding: ["额度余额缺少服务权益绑定", "Credit balance has no service-entitlement binding"],
+    audience_identity_resolution_incomplete: ["受众身份归并证据不完整", "Audience identity resolution is incomplete"],
+    unsupported_entitlement_ledger_semantics: ["服务权益包含需人工复核的调整", "Service entitlement contains adjustments needing review"],
+    purchase_scope_mismatch: ["额度购买归属范围不一致", "Credit purchase scope does not match"],
+    purchase_arithmetic_mismatch: ["额度购买金额计算不一致", "Credit purchase arithmetic does not match"],
+    purchase_dimensions_invalid: ["额度购买记录包含无效数值", "Credit purchase contains invalid numeric dimensions"],
+    purchase_creator_share_mismatch: ["额度购买收益分成不一致", "Purchase creator share does not match"],
+    purchase_creator_liability_mismatch: ["购买产生的创作者收益负债不守恒", "Purchase creator liability does not conserve"],
+    creator_earning_scope_mismatch: ["创作者收益归属范围不一致", "Creator earning scope does not match"],
+    purchase_remaining_out_of_range: ["剩余购买额度超出有效范围", "Remaining purchase credits are outside the valid range"],
+    usage_scope_mismatch: ["服务用量归属范围不一致", "Service usage scope does not match"],
+    usage_allocation_token_mismatch: ["已结算用量分配不一致", "Settled usage allocation does not match"],
+    usage_allocation_value_mismatch: ["已结算用量金额分配不一致", "Settled usage value allocation does not match"],
+    usage_allocation_currency_mismatch: ["用量分配币种不一致", "Usage allocation currency does not match"],
+    usage_creator_earning_mismatch: ["用量释放收益与创作者收益记录不一致", "Usage creator release does not match its earning"],
+    creator_frozen_allocation_mismatch: ["冻结收益与提现分配不一致", "Frozen earnings do not match withdrawal allocations"],
+    creator_withdrawn_allocation_mismatch: ["已提现收益与打款分配不一致", "Withdrawn earnings do not match paid allocations"],
+    creator_pending_ledger_projection_mismatch: ["待释放收益与账本投影不一致", "Pending earnings do not match the ledger projection"],
+    creator_withdrawable_ledger_projection_mismatch: ["可提现收益与账本投影不一致", "Withdrawable earnings do not match the ledger projection"],
+    creator_frozen_ledger_projection_mismatch: ["冻结收益与账本投影不一致", "Frozen earnings do not match the ledger projection"],
+    withdrawal_allocation_total_mismatch: ["提现金额与收益分配不一致", "Withdrawal amount does not match its allocations"],
+    withdrawal_scope_mismatch: ["提现分配归属范围不一致", "Withdrawal allocation scope does not match"],
+    withdrawal_allocation_state_mismatch: ["提现状态与分配状态不一致", "Withdrawal state does not match its allocations"],
+    ledger_event_group_amount_unbalanced: ["账本交易组金额不平衡", "Ledger transaction group is not balanced"],
+    ledger_event_group_currency_mismatch: ["账本交易组币种不一致", "Ledger transaction-group currency does not match"],
+    ledger_transaction_link_mismatch: ["账本明细与交易头关联不一致", "Ledger entries do not match their transaction header"],
+    wallet_transaction_without_ledger: ["资金交易缺少账本明细", "Money transaction has no ledger entries"],
+    user_cash_ledger_projection_mismatch: ["用户现金余额与账本投影不一致", "User cash balance does not match the ledger projection"],
+    legacy_purchase_lot_coverage: ["旧购买记录缺少剩余额度证据", "Legacy purchase has incomplete remaining-credit evidence"],
+    legacy_purchase_scope_coverage: ["旧购买记录缺少用户额度钱包绑定", "Legacy purchase has incomplete wallet-scope evidence"],
+    legacy_usage_scope_coverage: ["旧用量记录缺少用户额度钱包绑定", "Legacy usage has incomplete wallet-scope evidence"],
+    legacy_usage_allocation_coverage: ["旧用量记录缺少结算分配证据", "Legacy usage has incomplete settlement-allocation evidence"],
+    legacy_service_credit_ledger_coverage: ["旧服务额度缺少完整账本投影", "Legacy service credits have incomplete ledger projection"],
+    legacy_creator_pending_ledger_coverage: ["旧待释放收益缺少完整账本投影", "Legacy pending earnings have incomplete ledger projection"],
+    legacy_creator_withdrawable_ledger_coverage: ["旧可提现收益缺少完整账本投影", "Legacy withdrawable earnings have incomplete ledger projection"],
+    legacy_creator_frozen_ledger_coverage: ["旧冻结收益缺少完整账本投影", "Legacy frozen earnings have incomplete ledger projection"],
+    legacy_transaction_header_coverage: ["旧账本交易组缺少交易头", "Legacy ledger group has no transaction header"],
+    legacy_ledger_transaction_link_coverage: ["旧账本明细缺少交易头关联", "Legacy ledger entries have incomplete transaction links"],
+    legacy_user_cash_ledger_coverage: ["旧现金余额缺少完整账本投影", "Legacy cash balance has incomplete ledger projection"],
+    legacy_withdrawal_allocation_coverage: ["旧提现记录缺少完整收益分配证据", "Legacy withdrawal has incomplete allocation evidence"],
+    legacy_creator_liability_coverage: ["旧购买记录缺少完整收益负债证据", "Legacy purchase has incomplete creator-liability evidence"],
+    user_cash_balance_mismatch: ["用户现金余额与账本不一致", "User cash balance does not match its ledger"],
+    service_credit_balance_mismatch: ["服务额度双账本不一致", "Service-credit ledgers do not match"],
+    agent_wallet_balance_mismatch: ["代表额度汇总不一致", "Representative credit totals do not match"],
+    creator_earning_balance_mismatch: ["创作者收益与账本不一致", "Creator earnings do not match their ledger"],
+    withdrawal_allocation_mismatch: ["提现分配与冻结收益不一致", "Withdrawal allocations do not match frozen earnings"],
+    ledger_group_unbalanced: ["账本交易组不平衡", "Ledger transaction group is unbalanced"],
+    legacy_ledger_coverage: ["旧账本记录需要人工复核", "Legacy ledger coverage needs review"],
+  };
+  return labels[code.toLowerCase()]?.[locale === "zh" ? 0 : 1]
+    ?? humanizeCode(code);
+}
+
 function mockWithdrawalActionsForStatus(
   status: string,
 ): MockWithdrawalAction[] {
@@ -2025,6 +2585,27 @@ function formatSignedMoney(cents: number, currency: string, locale: Locale) {
 function formatSignedNumber(value: number) {
   if (!value) return "0";
   return `${value > 0 ? "+" : "−"}${new Intl.NumberFormat("en-US").format(Math.abs(value))}`;
+}
+
+function formatReconciliationValue(
+  value: number | null,
+  unit: WorkspaceWalletReconciliationIssue["unit"],
+  currency: string,
+  locale: Locale,
+  signed = false,
+) {
+  if (value === null) return "—";
+  if (unit === "minor_currency") {
+    return signed
+      ? formatSignedMoney(value, currency, locale)
+      : formatMoney(value, currency, locale);
+  }
+  const formatted = signed
+    ? formatSignedNumber(value)
+    : new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en-US").format(value);
+  return unit === "tokens"
+    ? `${formatted} ${locale === "zh" ? "额度" : "credits"}`
+    : formatted;
 }
 
 function formatTimestamp(value: string, locale: Locale, includeYear = false) {

@@ -66,3 +66,4 @@ export * from "./web-audience";
 export * from "./workspace-skills";
 export * from "./workspace-audit";
 export * from "./workspace-wallet";
+export * from "./wallet-reconciliation";

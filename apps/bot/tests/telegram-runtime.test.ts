@@ -5,12 +5,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildTelegramPollingFailureLog,
   buildTelegramUpdateMetadata,
+  handleTelegramMiddlewareError,
   logTelegramUpdateExecution,
   normalizeTelegramCommandEntity,
   planTelegramBotChannelBindingSynchronization,
   resolveTelegramPollingExitCode,
+  resolveTelegramRepresentativeSession,
   resolveTelegramRuntimeConfig,
   sanitizeTelegramError,
+  TelegramRepresentativeSessionUnavailableError,
 } from "../src/telegram-runtime";
 
 describe("Telegram bot runtime", () => {
@@ -132,6 +135,147 @@ describe("Telegram bot runtime", () => {
         TELEGRAM_REQUEST_TIMEOUT_MS: "1000",
       }),
     ).toThrow("between 3000 and 60000");
+  });
+
+  it("uses the saved private-chat representative and defaults only when no session exists", async () => {
+    await expect(
+      resolveTelegramRepresentativeSession({
+        chatType: "private",
+        defaultRepresentativeSlug: "lin-founder-rep",
+        readActiveRepresentativeSlug: async () => "sktone",
+      }),
+    ).resolves.toBe("sktone");
+
+    await expect(
+      resolveTelegramRepresentativeSession({
+        chatType: "private",
+        defaultRepresentativeSlug: "lin-founder-rep",
+        readActiveRepresentativeSlug: async () => null,
+      }),
+    ).resolves.toBe("lin-founder-rep");
+  });
+
+  it("fails closed instead of silently routing to the default representative on a session read error", async () => {
+    const readFailure = new Error("database temporarily unavailable");
+
+    await expect(
+      resolveTelegramRepresentativeSession({
+        chatType: "private",
+        defaultRepresentativeSlug: "lin-founder-rep",
+        readActiveRepresentativeSlug: async () => {
+          throw readFailure;
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "TelegramRepresentativeSessionUnavailableError",
+      cause: readFailure,
+    });
+
+    await expect(
+      resolveTelegramRepresentativeSession({
+        chatType: "private",
+        defaultRepresentativeSlug: "lin-founder-rep",
+        readActiveRepresentativeSlug: async () => {
+          throw readFailure;
+        },
+      }),
+    ).rejects.toBeInstanceOf(
+      TelegramRepresentativeSessionUnavailableError,
+    );
+  });
+
+  it("does not persist or read a representative session for group chats", async () => {
+    const readActiveRepresentativeSlug = vi.fn(async () => "sktone");
+
+    await expect(
+      resolveTelegramRepresentativeSession({
+        chatType: "group",
+        defaultRepresentativeSlug: "lin-founder-rep",
+        readActiveRepresentativeSlug,
+      }),
+    ).resolves.toBe("lin-founder-rep");
+    expect(readActiveRepresentativeSlug).not.toHaveBeenCalled();
+  });
+
+  it("replies with a fail-closed message when representative session lookup fails", async () => {
+    const reply = vi.fn(async () => undefined);
+    const logger = { error: vi.fn() };
+
+    await handleTelegramMiddlewareError({
+      error: new TelegramRepresentativeSessionUnavailableError(
+        new Error("database temporarily unavailable"),
+      ),
+      context: {
+        update: { update_id: 45 },
+        reply,
+      },
+      logger,
+    });
+
+    expect(reply).toHaveBeenCalledWith(
+      expect.stringContaining("本次消息未处理"),
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('"event":"telegram_middleware_error"'),
+    );
+  });
+
+  it("does not send the session message for unrelated middleware errors", async () => {
+    const reply = vi.fn(async () => undefined);
+
+    await handleTelegramMiddlewareError({
+      error: new Error("unrelated failure"),
+      context: {
+        update: { update_id: 46 },
+        reply,
+      },
+      logger: { error: vi.fn() },
+    });
+
+    expect(reply).not.toHaveBeenCalled();
+  });
+
+  it("contains a failure to send the fail-closed message without rejecting the error handler", async () => {
+    const logger = { error: vi.fn() };
+
+    await expect(
+      handleTelegramMiddlewareError({
+        error: new TelegramRepresentativeSessionUnavailableError(
+          new Error("database temporarily unavailable"),
+        ),
+        context: {
+          update: { update_id: 47 },
+          reply: async () => {
+            throw new Error("Telegram API unavailable");
+          },
+        },
+        logger,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringContaining('"event":"telegram_session_error_reply_failed"'),
+    );
+  });
+
+  it("keeps the current session when a /start representative switch fails", () => {
+    const source = readFileSync(
+      new URL("../src/index.ts", import.meta.url),
+      "utf8",
+    );
+    const startHandler = source.slice(
+      source.indexOf('bot.command("start"'),
+      source.indexOf('bot.command("plans"'),
+    );
+    const switchFailure = startHandler.slice(
+      startHandler.indexOf('event: "telegram_representative_switch_failed"'),
+    );
+
+    expect(switchFailure).toContain("原会话保持不变");
+    expect(switchFailure).toMatch(/await ctx\.reply\([\s\S]+?\);\s+return;/);
+    expect(switchFailure).not.toContain(
+      "activeRepresentativeSlug = defaultRepresentativeSlug",
+    );
   });
 
   it("synthesizes a missing command entity without changing existing entities", () => {

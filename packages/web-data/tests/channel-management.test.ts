@@ -8,7 +8,9 @@ const mocks = vi.hoisted(() => {
     },
     representativeChannelBinding: {
       findFirst: vi.fn(),
+      findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       upsert: vi.fn(),
     },
     matrixVirtualUserBinding: {
@@ -23,6 +25,7 @@ const mocks = vi.hoisted(() => {
       findFirst: vi.fn(),
     },
     eventAudit: {
+      findFirst: vi.fn(),
       create: vi.fn(),
     },
   };
@@ -44,6 +47,7 @@ import {
   buildOwnerChannelManagementSnapshot,
   evaluateChannelControlPlaneHealth,
   provisionOwnerMatrixChannel,
+  provisionOwnerTelegramChannel,
   refreshOwnerChannelHealth,
   resolveRepresentativeTelegramBotConnectionId,
   setOwnerChannelDesiredState,
@@ -53,6 +57,10 @@ import { resolveChannelAvailability } from "../src/channel-availability";
 describe("channel management", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.tx.eventAudit.findFirst.mockResolvedValue(null);
+    mocks.tx.representativeChannelBinding.updateMany.mockResolvedValue({
+      count: 1,
+    });
   });
 
   it("uses a cold-start Bot id only for an explicitly active direct Telegram binding", async () => {
@@ -520,5 +528,482 @@ describe("channel management", () => {
         }),
       }),
     });
+  });
+
+  it("owner-scopes and provisions the configured managed Telegram Bot for a representative", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      slug: "sktone",
+      displayName: "SKTone",
+    });
+    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      transport: "TELEGRAM",
+      sourceProvider: "TELEGRAM",
+      connectionId: "",
+      desiredState: "ACTIVE",
+      healthStatus: "UNKNOWN",
+      externalUserId: "@delegate_bot",
+      status: "CONFIGURED",
+    });
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      desiredState: "ACTIVE",
+      healthStatus: "UNKNOWN",
+      externalUserId: "@delegate_bot",
+      status: "CONFIGURED",
+    });
+    mocks.tx.eventAudit.create.mockResolvedValue({ id: "audit-telegram-1" });
+
+    try {
+      await expect(
+        provisionOwnerTelegramChannel(
+          {
+            ownerId: "owner-1",
+            actorId: "owner-1",
+            representativeId: "rep-1",
+            requestId: "request-telegram-1",
+            idempotencyKey: "idem-telegram-1",
+          },
+          {
+            TELEGRAM_BOT_ID: "8718299151",
+            TELEGRAM_BOT_USERNAME: "delegate_bot",
+          },
+        ),
+      ).resolves.toMatchObject({
+        binding: {
+          id: "binding-telegram-1",
+          externalUserId: "@delegate_bot",
+        },
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.tx.representative.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "rep-1",
+        ownerId: "owner-1",
+      },
+      select: {
+        id: true,
+        slug: true,
+        displayName: true,
+      },
+    });
+    expect(mocks.tx.representativeChannelBinding.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          representativeId_kind: {
+            representativeId: "rep-1",
+            kind: "TELEGRAM",
+          },
+        },
+        create: expect.objectContaining({
+          representativeId: "rep-1",
+          kind: "TELEGRAM",
+          transport: "TELEGRAM",
+          sourceProvider: "TELEGRAM",
+          connectionId: "8718299151",
+          externalUserId: "@delegate_bot",
+          desiredState: "ACTIVE",
+          healthStatus: "UNKNOWN",
+          status: "CONFIGURED",
+        }),
+        update: {},
+      }),
+    );
+    expect(
+      mocks.tx.representativeChannelBinding.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "binding-telegram-1",
+        }),
+        data: expect.not.objectContaining({
+          desiredState: expect.anything(),
+          healthStatus: expect.anything(),
+          status: expect.anything(),
+        }),
+      }),
+    );
+    expect(mocks.tx.eventAudit.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        representativeId: "rep-1",
+        payload: expect.objectContaining({
+          action: "TELEGRAM_BOT_CHANNEL_PROVISIONED",
+          connectionId: "8718299151",
+          externalUserId: "@delegate_bot",
+        }),
+      }),
+    });
+  });
+
+  it("fails closed when no numeric Telegram Bot id is available for provisioning", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+
+    try {
+      await expect(
+        provisionOwnerTelegramChannel(
+          {
+            ownerId: "owner-1",
+            actorId: "owner-1",
+            representativeId: "rep-1",
+            requestId: "request-telegram-2",
+            idempotencyKey: "idem-telegram-2",
+          },
+          {},
+        ),
+      ).rejects.toMatchObject({
+        name: "ChannelManagementError",
+        statusCode: 503,
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.tx.representativeChannelBinding.upsert).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the Telegram Bot id and token prefix disagree", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+
+    try {
+      await expect(
+        provisionOwnerTelegramChannel(
+          {
+            ownerId: "owner-1",
+            actorId: "owner-1",
+            representativeId: "rep-1",
+            requestId: "request-telegram-mismatch",
+            idempotencyKey: "idem-telegram-mismatch",
+          },
+          {
+            TELEGRAM_BOT_ID: "8718299151",
+            TELEGRAM_BOT_TOKEN: "9999999999:test-only-token",
+          },
+        ),
+      ).rejects.toMatchObject({
+        name: "ChannelManagementError",
+        statusCode: 503,
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it("preserves a compatible Telegram binding's paused and healthy state", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      slug: "sktone",
+      displayName: "SKTone",
+    });
+    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      transport: "TELEGRAM",
+      sourceProvider: "TELEGRAM",
+      connectionId: "8718299151",
+      desiredState: "PAUSED",
+      healthStatus: "HEALTHY",
+      externalUserId: "@delegate_bot",
+      status: "CONNECTED",
+    });
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      desiredState: "PAUSED",
+      healthStatus: "HEALTHY",
+      externalUserId: "@delegate_bot",
+      status: "CONNECTED",
+    });
+
+    try {
+      await expect(
+        provisionOwnerTelegramChannel(
+          {
+            ownerId: "owner-1",
+            actorId: "owner-1",
+            representativeId: "rep-1",
+            requestId: "request-telegram-paused",
+            idempotencyKey: "idem-telegram-paused",
+          },
+          {
+            TELEGRAM_BOT_ID: "8718299151",
+            TELEGRAM_BOT_USERNAME: "delegate_bot",
+          },
+        ),
+      ).resolves.toMatchObject({
+        binding: {
+          desiredState: "PAUSED",
+          healthStatus: "HEALTHY",
+          status: "CONNECTED",
+        },
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(
+      mocks.tx.representativeChannelBinding.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          AND: expect.arrayContaining([
+            expect.objectContaining({
+              OR: expect.arrayContaining([{ connectionId: "" }]),
+            }),
+          ]),
+        }),
+        data: expect.not.objectContaining({
+          desiredState: expect.anything(),
+          healthStatus: expect.anything(),
+          status: expect.anything(),
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    {
+      label: "a Matrix transport",
+      transport: "MATRIX",
+      sourceProvider: "TELEGRAM",
+      connectionId: "matrix-appservice",
+    },
+    {
+      label: "a different Telegram Bot",
+      transport: "TELEGRAM",
+      sourceProvider: "TELEGRAM",
+      connectionId: "9999999999",
+    },
+  ])("rejects replacing $label", async (existing) => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      slug: "sktone",
+      displayName: "SKTone",
+    });
+    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      externalUserId: "@delegate_bot",
+      status: "CONNECTED",
+      ...existing,
+    });
+
+    try {
+      await expect(
+        provisionOwnerTelegramChannel(
+          {
+            ownerId: "owner-1",
+            actorId: "owner-1",
+            representativeId: "rep-1",
+            requestId: `request-${existing.connectionId}`,
+            idempotencyKey: `idem-${existing.connectionId}`,
+          },
+          {
+            TELEGRAM_BOT_ID: "8718299151",
+            TELEGRAM_BOT_USERNAME: "delegate_bot",
+          },
+        ),
+      ).rejects.toMatchObject({
+        name: "ChannelManagementError",
+        statusCode: 409,
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(
+      mocks.tx.representativeChannelBinding.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the binding changes during the conditional update", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      slug: "sktone",
+      displayName: "SKTone",
+    });
+    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      transport: "TELEGRAM",
+      sourceProvider: "TELEGRAM",
+      connectionId: "8718299151",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      externalUserId: "@delegate_bot",
+      status: "CONNECTED",
+    });
+    mocks.tx.representativeChannelBinding.updateMany.mockResolvedValue({
+      count: 0,
+    });
+
+    try {
+      await expect(
+        provisionOwnerTelegramChannel(
+          {
+            ownerId: "owner-1",
+            actorId: "owner-1",
+            representativeId: "rep-1",
+            requestId: "request-telegram-race",
+            idempotencyKey: "idem-telegram-race",
+          },
+          {
+            TELEGRAM_BOT_ID: "8718299151",
+            TELEGRAM_BOT_USERNAME: "delegate_bot",
+          },
+        ),
+      ).rejects.toMatchObject({
+        name: "ChannelManagementError",
+        statusCode: 409,
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(
+      mocks.tx.representativeChannelBinding.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the representative is outside the owner scope", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representative.findFirst.mockResolvedValue(null);
+
+    try {
+      await expect(
+        provisionOwnerTelegramChannel(
+          {
+            ownerId: "owner-1",
+            actorId: "owner-1",
+            representativeId: "rep-other-owner",
+            requestId: "request-telegram-owner-scope",
+            idempotencyKey: "idem-telegram-owner-scope",
+          },
+          {
+            TELEGRAM_BOT_ID: "8718299151",
+            TELEGRAM_BOT_USERNAME: "delegate_bot",
+          },
+        ),
+      ).rejects.toMatchObject({
+        name: "ChannelManagementError",
+        statusCode: 404,
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.tx.representativeChannelBinding.upsert).not.toHaveBeenCalled();
+    expect(mocks.tx.$executeRaw).not.toHaveBeenCalled();
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
+  });
+
+  it("does not duplicate the audit event when an idempotency key is replayed", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      slug: "sktone",
+      displayName: "SKTone",
+    });
+    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      transport: "TELEGRAM",
+      sourceProvider: "TELEGRAM",
+      connectionId: "8718299151",
+      desiredState: "PAUSED",
+      healthStatus: "HEALTHY",
+      externalUserId: "@delegate_bot",
+      status: "CONNECTED",
+    });
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      desiredState: "PAUSED",
+      healthStatus: "HEALTHY",
+      externalUserId: "@delegate_bot",
+      status: "CONNECTED",
+    });
+    mocks.tx.eventAudit.findFirst.mockResolvedValue({
+      id: "audit-telegram-existing",
+    });
+
+    try {
+      await provisionOwnerTelegramChannel(
+        {
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          representativeId: "rep-1",
+          requestId: "request-telegram-replay",
+          idempotencyKey: "idem-telegram-replay",
+        },
+        {
+          TELEGRAM_BOT_ID: "8718299151",
+          TELEGRAM_BOT_USERNAME: "delegate_bot",
+        },
+      );
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.tx.eventAudit.findFirst).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        representativeId: "rep-1",
+        AND: expect.arrayContaining([
+          {
+            payload: {
+              path: ["action"],
+              equals: "TELEGRAM_BOT_CHANNEL_PROVISIONED",
+            },
+          },
+          {
+            payload: {
+              path: ["idempotencyKey"],
+              equals: "idem-telegram-replay",
+            },
+          },
+        ]),
+      }),
+      select: { id: true },
+    });
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
   });
 });

@@ -34,7 +34,24 @@ export type TelegramUpdateMetadata = {
   synthesizedCommandEntity?: true;
 };
 
+export class TelegramRepresentativeSessionUnavailableError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("Unable to read the active Telegram representative session.");
+    this.name = "TelegramRepresentativeSessionUnavailableError";
+    this.cause = cause;
+  }
+}
+
 type TelegramUpdateLogger = Pick<Console, "info" | "error">;
+type TelegramMiddlewareErrorLogger = Pick<Console, "error">;
+type TelegramMiddlewareErrorContext = {
+  update: {
+    update_id: number;
+  };
+  reply: (text: string) => Promise<unknown>;
+};
 
 const loggedTelegramCommands = new Set([
   "start",
@@ -111,6 +128,64 @@ export function resolveTelegramRuntimeConfig(
       Math.min(maximumPollingTimeoutSeconds, apiTimeoutSeconds - 2),
     ),
   };
+}
+
+export async function resolveTelegramRepresentativeSession(params: {
+  chatType: string;
+  defaultRepresentativeSlug: string;
+  readActiveRepresentativeSlug: () => Promise<string | null>;
+}): Promise<string> {
+  if (params.chatType !== "private") {
+    return params.defaultRepresentativeSlug;
+  }
+
+  try {
+    return (
+      (await params.readActiveRepresentativeSlug())
+      ?? params.defaultRepresentativeSlug
+    );
+  } catch (error) {
+    throw new TelegramRepresentativeSessionUnavailableError(error);
+  }
+}
+
+export function isTelegramRepresentativeSessionUnavailableError(
+  error: unknown,
+): error is TelegramRepresentativeSessionUnavailableError {
+  return error instanceof TelegramRepresentativeSessionUnavailableError;
+}
+
+export async function handleTelegramMiddlewareError(params: {
+  error: unknown;
+  context: TelegramMiddlewareErrorContext;
+  logger?: TelegramMiddlewareErrorLogger;
+}): Promise<void> {
+  const logger = params.logger ?? console;
+  logger.error(
+    JSON.stringify({
+      event: "telegram_middleware_error",
+      updateId: params.context.update.update_id,
+      error: sanitizeTelegramError(params.error),
+    }),
+  );
+
+  if (!isTelegramRepresentativeSessionUnavailableError(params.error)) {
+    return;
+  }
+
+  try {
+    await params.context.reply(
+      "当前无法确认你正在使用的数字代表。为避免消息进入错误代表，本次消息未处理，请稍后重试。",
+    );
+  } catch (replyError) {
+    logger.error(
+      JSON.stringify({
+        event: "telegram_session_error_reply_failed",
+        updateId: params.context.update.update_id,
+        error: sanitizeTelegramError(replyError),
+      }),
+    );
+  }
 }
 
 export function normalizeTelegramCommandEntity(

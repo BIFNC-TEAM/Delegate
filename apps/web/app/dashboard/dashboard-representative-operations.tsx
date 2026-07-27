@@ -274,7 +274,13 @@ export function DashboardRepresentativeOperations({
                     <article className={item.complete ? "is-complete" : undefined} key={item.id}>
                       <span>{item.complete ? "✓" : String(index + 1).padStart(2, "0")}</span>
                       <div><strong>{localizeReadiness(item.label, locale)}</strong><small>{localizeReadinessDetail(item.id, item.detail, item.complete, locale)}</small></div>
-                      <button onClick={() => navigateSection("setup", readinessSetupSection[item.id] ?? "basics")} type="button">{zh ? "查看" : "Review"} →</button>
+                      {item.id === "channel" ? (
+                        <a href={buildChannelsHref(activeSlug, locale)}>
+                          {zh ? "管理" : "Manage"} →
+                        </a>
+                      ) : (
+                        <button onClick={() => navigateSection("setup", readinessSetupSection[item.id] ?? "basics")} type="button">{zh ? "查看" : "Review"} →</button>
+                      )}
                     </article>
                   ))}
                 </div>
@@ -282,7 +288,19 @@ export function DashboardRepresentativeOperations({
 
               <aside className="representative-ops-stack">
                 <section className="dashboard-v2-panel">
-                  <header><div><p>{zh ? "渠道" : "Channels"}</p><h2>{zh ? "发布与连接状态" : "Publishing and connection"}</h2></div></header>
+                  <header>
+                    <div><p>{zh ? "渠道" : "Channels"}</p><h2>{zh ? "发布与连接状态" : "Publishing and connection"}</h2></div>
+                    <div className="dashboard-v2-panel-action">
+                      <a href={buildChannelsHref(activeSlug, locale)}>
+                        {zh ? "前往发布渠道" : "Open channels"} →
+                      </a>
+                    </div>
+                  </header>
+                  <p className="dashboard-v2-panel-description">
+                    {zh
+                      ? "这里显示当前代表的渠道摘要；连接、暂停和健康检查在发布渠道统一管理。Telegram 当前使用部署级共享 Bot。"
+                      : "This is the current representative's channel summary. Manage connections, pauses, and health checks in Channels. Telegram currently uses a deployment-wide shared Bot."}
+                  </p>
                   <div className="representative-channel-list">
                     {snapshot.channels.length ? snapshot.channels.map((channel) => (
                       <article key={channel.kind}><span className={`is-${channel.kind}`}>{channel.kind.slice(0, 1).toUpperCase()}</span><div><strong>{channel.kind}</strong><small>{channel.externalUserId || (zh ? "尚未分配身份" : "No identity assigned")}</small></div><em className={`is-${channel.status}`}>{channel.status}</em></article>
@@ -319,7 +337,6 @@ const readinessSetupSection: Record<string, RepresentativeSetupSectionId> = {
   handoff: "contract",
   pricing: "pricing",
   skills: "compute",
-  channel: "basics",
 };
 
 function parseRepresentativeSection(value: string | null): RepresentativeSection {
@@ -398,4 +415,8 @@ function localizeReadinessDetail(id: string, fallback: string, complete: boolean
 
 function formatVersionDate(value: string, locale: Locale) {
   return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function buildChannelsHref(representativeSlug: string, locale: Locale) {
+  return `/dashboard?rep=${encodeURIComponent(representativeSlug)}&view=channels&lang=${locale}`;
 }

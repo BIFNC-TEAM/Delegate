@@ -1357,8 +1357,9 @@
 .representative-readiness-list article > div { display: grid; gap: 3px; }
 .representative-readiness-list strong { color: var(--v2-copy); font-size: .72rem; }
 .representative-readiness-list small { color: var(--v2-muted); font-size: .61rem; line-height: 1.45; }
-.representative-readiness-list button, .representative-version-panel > header button {
+.representative-readiness-list button, .representative-readiness-list a, .representative-version-panel > header button {
   border: 0; color: var(--v2-teal-strong); background: transparent; font-size: .64rem; font-weight: 750; cursor: pointer;
+  text-decoration: none;
 }
 .representative-channel-list, .representative-config-links, .representative-version-list { display: grid; }
 .representative-channel-list article {

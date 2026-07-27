@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import {
   getOwnerChannelManagementSnapshot,
   provisionOwnerMatrixChannel,
+  provisionOwnerTelegramChannel,
 } from "@delegate/web-data";
 
 import { requireDashboardApiOwnerSession } from "../auth";
@@ -34,23 +35,37 @@ export async function POST(request: Request) {
       representativeId?: unknown;
     } | null;
     if (
-      body?.channel !== "MATRIX"
+      (
+        body?.channel !== "MATRIX"
+        && body?.channel !== "TELEGRAM"
+      )
       || typeof body.representativeId !== "string"
       || !body.representativeId.trim()
     ) {
       return NextResponse.json(
-        { error: "channel=MATRIX and representativeId are required." },
+        {
+          error:
+            "channel must be MATRIX or TELEGRAM and representativeId is required.",
+        },
         { status: 400 },
       );
     }
     const actorId = session?.ownerId ?? "local-owner";
     const requestMetadata = resolveChannelRequestMetadata(request);
-    const provisioned = await provisionOwnerMatrixChannel({
-      ownerId: actorId,
-      actorId,
-      representativeId: body.representativeId,
-      ...requestMetadata,
-    });
+    const provisioned =
+      body.channel === "TELEGRAM"
+        ? await provisionOwnerTelegramChannel({
+            ownerId: actorId,
+            actorId,
+            representativeId: body.representativeId,
+            ...requestMetadata,
+          })
+        : await provisionOwnerMatrixChannel({
+            ownerId: actorId,
+            actorId,
+            representativeId: body.representativeId,
+            ...requestMetadata,
+          });
     return NextResponse.json(
       { ...provisioned, requestId: requestMetadata.requestId },
       {
@@ -61,7 +76,7 @@ export async function POST(request: Request) {
   } catch (error) {
     return channelManagementErrorResponse(
       error,
-      "Failed to provision Matrix channel.",
+      "Failed to provision channel.",
     );
   }
 }

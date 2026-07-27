@@ -142,6 +142,7 @@ export type ConversationInboxSnapshot = {
     id: string;
     slug: string;
     displayName: string;
+    timeZone: string;
   };
   metrics: {
     unread: number;
@@ -503,7 +504,12 @@ export async function listConversationInboxSnapshot(
   try {
     const representative = await prisma.representative.findUnique({
       where: { slug: representativeSlug },
-      select: { id: true, slug: true, displayName: true },
+      select: {
+        id: true,
+        slug: true,
+        displayName: true,
+        owner: { select: { timezone: true } },
+      },
     });
     if (!representative) return null;
 
@@ -647,7 +653,12 @@ export async function listConversationInboxSnapshot(
     ];
 
     return {
-      representative,
+      representative: {
+        id: representative.id,
+        slug: representative.slug,
+        displayName: representative.displayName,
+        timeZone: normalizeIanaTimeZone(representative.owner.timezone),
+      },
       metrics: {
         unread: items.reduce((total, item) => total + item.unreadCount, 0),
         needsHuman: items.filter((item) => item.episodeState === "needs_human").length,
@@ -6594,6 +6605,16 @@ function normalizeChannel(value: string | null): "web" | "matrix" | "telegram" {
   return "web";
 }
 
+export function normalizeIanaTimeZone(value: string | null | undefined): string {
+  const candidate = value?.trim() || "UTC";
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: candidate }).format(0);
+    return candidate;
+  } catch {
+    return "UTC";
+  }
+}
+
 function mapChannelKind(value: AcceptInboundMessageInput["channel"]): RepresentativeChannelKind {
   if (value === "matrix") return RepresentativeChannelKind.MATRIX;
   if (value === "telegram") return RepresentativeChannelKind.TELEGRAM;
@@ -7019,6 +7040,7 @@ function buildDemoInboxSnapshot(representativeSlug: string): ConversationInboxSn
       id: "demo-representative",
       slug: representativeSlug,
       displayName: "Delegate Product Representative",
+      timeZone: "UTC",
     },
     metrics: { unread: 3, needsHuman: 1, humanActive: 1, failed: 0, pending: 1, activeLeads: 2 },
     conversations: [

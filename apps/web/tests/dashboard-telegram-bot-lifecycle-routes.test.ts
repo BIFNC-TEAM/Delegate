@@ -23,6 +23,7 @@ const routeMocks = vi.hoisted(() => {
     ChannelManagementError,
     TelegramBotConnectionError,
     dashboardAuthErrorResponse: vi.fn(),
+    disconnectOwnerMatrixChannel: vi.fn(),
     requireDashboardApiOwnerSession: vi.fn(),
     revokeOwnerTelegramBotConnection: vi.fn(),
     rotateOwnerTelegramBotConnection: vi.fn(),
@@ -35,6 +36,8 @@ const routeMocks = vi.hoisted(() => {
 vi.mock("@delegate/web-data", () => ({
   ChannelManagementError: routeMocks.ChannelManagementError,
   TelegramBotConnectionError: routeMocks.TelegramBotConnectionError,
+  disconnectOwnerMatrixChannel:
+    routeMocks.disconnectOwnerMatrixChannel,
   revokeOwnerTelegramBotConnection:
     routeMocks.revokeOwnerTelegramBotConnection,
   rotateOwnerTelegramBotConnection:
@@ -130,6 +133,15 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
       changed: true,
       replayed: false,
       token: secretSentinel,
+    });
+    routeMocks.disconnectOwnerMatrixChannel.mockResolvedValue({
+      binding: {
+        id: "matrix-binding-1",
+        representativeId: "rep-1",
+        desiredState: "DISCONNECTED",
+      },
+      changed: true,
+      replayed: false,
     });
   });
 
@@ -301,6 +313,43 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
     expect(responseText).toContain('"representativeId":"rep-1"');
     expect(responseText).toContain('"telegramBotConnectionId":null');
     expect(responseText).not.toContain(secretSentinel);
+  });
+
+  it("disconnects a Matrix binding without requiring a Telegram Bot id", async () => {
+    const response = await unassignTelegramBinding(
+      new Request(
+        "http://localhost/api/dashboard/channels/matrix-binding-1?channel=MATRIX",
+        {
+          method: "DELETE",
+          headers: {
+            "Idempotency-Key": "matrix-disconnect-idempotency",
+            "X-Request-Id": "matrix-disconnect-request",
+          },
+        },
+      ),
+      { params: Promise.resolve({ bindingId: "matrix-binding-1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(
+      routeMocks.disconnectOwnerMatrixChannel,
+    ).toHaveBeenCalledWith({
+      ownerId: "owner-1",
+      actorId: "owner-1",
+      bindingId: "matrix-binding-1",
+      requestId: "matrix-disconnect-request",
+      idempotencyKey: "matrix-disconnect-idempotency",
+    });
+    await expect(response.json()).resolves.toEqual({
+      bindingId: "matrix-binding-1",
+      representativeId: "rep-1",
+      desiredState: "DISCONNECTED",
+      changed: true,
+      requestId: "matrix-disconnect-request",
+    });
+    expect(
+      routeMocks.unassignOwnerTelegramBotConnection,
+    ).not.toHaveBeenCalled();
   });
 
   it("returns 409 when a lifecycle key is reused for a different action", async () => {

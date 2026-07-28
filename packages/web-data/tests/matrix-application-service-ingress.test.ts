@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -7,6 +8,8 @@ const {
   mockConsumeIdentityBindingChallenge,
   mockReleaseConversationEntitlement,
   mockReleaseConversationWalletUsage,
+  mockWithActiveMatrixRepresentativeChannelFence,
+  fencedTx,
 } = vi.hoisted(() => {
   const transactionClient = {
     $executeRaw: vi.fn(),
@@ -47,37 +50,61 @@ const {
       updateMany: vi.fn(),
     },
   };
+  const prismaClient = {
+    $transaction: vi.fn(),
+    channelEventInbox: {
+      upsert: vi.fn(),
+      updateMany: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
+    },
+    matrixVirtualUserBinding: {
+      findUnique: vi.fn(),
+    },
+    identityLink: {
+      findUnique: vi.fn(),
+    },
+    identityLinkConnectionProof: {
+      findUnique: vi.fn(),
+    },
+    conversationChannelBinding: {
+      findFirst: vi.fn(),
+    },
+    representativeChannelBinding: {
+      findUnique: vi.fn(),
+    },
+    message: {
+      findFirst: vi.fn(),
+      update: vi.fn(),
+    },
+  };
+  const fencedTransactionClient = {
+    ...transactionClient,
+    channelEventInbox: prismaClient.channelEventInbox,
+    identityLink: prismaClient.identityLink,
+    identityLinkConnectionProof:
+      prismaClient.identityLinkConnectionProof,
+    representativeChannelBinding:
+      prismaClient.representativeChannelBinding,
+    message: {
+      ...transactionClient.message,
+      findFirst: vi.fn((args: {
+        select?: { senderId?: boolean };
+      }) =>
+        args.select?.senderId
+          ? prismaClient.message.findFirst(args)
+          : transactionClient.message.findFirst(args)),
+    },
+  };
   return {
     tx: transactionClient,
-    mockPrisma: {
-      $transaction: vi.fn(),
-      channelEventInbox: {
-        upsert: vi.fn(),
-        updateMany: vi.fn(),
-        findUnique: vi.fn(),
-        update: vi.fn(),
-      },
-      matrixVirtualUserBinding: {
-        findUnique: vi.fn(),
-      },
-      identityLink: {
-        findUnique: vi.fn(),
-      },
-      identityLinkConnectionProof: {
-        findUnique: vi.fn(),
-      },
-      conversationChannelBinding: {
-        findFirst: vi.fn(),
-      },
-      message: {
-        findFirst: vi.fn(),
-        update: vi.fn(),
-      },
-    },
+    fencedTx: fencedTransactionClient,
+    mockPrisma: prismaClient,
     mockProvisionMatrixDirectConversation: vi.fn(),
     mockConsumeIdentityBindingChallenge: vi.fn(),
     mockReleaseConversationEntitlement: vi.fn(),
     mockReleaseConversationWalletUsage: vi.fn(),
+    mockWithActiveMatrixRepresentativeChannelFence: vi.fn(),
   };
 });
 
@@ -104,6 +131,11 @@ vi.mock("../src/agent-wallet-usage-charge", () => ({
   reserveConversationWalletUsage: vi.fn(),
   settleConversationWalletUsage: vi.fn(),
 }));
+vi.mock("../src/matrix-room-security", () => ({
+  lockMatrixRoomSecurityState: vi.fn(),
+  withActiveMatrixRepresentativeChannelFence:
+    mockWithActiveMatrixRepresentativeChannelFence,
+}));
 
 import {
   ConversationWorkInFlightControlError,
@@ -124,6 +156,7 @@ describe("Matrix application service ingress", () => {
           externalEventId: string;
           eventType: string;
           payload: MatrixApplicationServiceEvent;
+          privateCredentialHash: string | null;
         };
       }) => ({
         id: `inbox:${args.create.externalEventId}`,
@@ -131,6 +164,7 @@ describe("Matrix application service ingress", () => {
         attemptCount: 0,
         eventType: args.create.eventType,
         payload: args.create.payload,
+        privateCredentialHash: args.create.privateCredentialHash,
         lastError: null,
       }),
     );
@@ -161,7 +195,24 @@ describe("Matrix application service ingress", () => {
     });
     mockReleaseConversationEntitlement.mockResolvedValue(null);
     mockReleaseConversationWalletUsage.mockResolvedValue({ status: "released" });
+    mockWithActiveMatrixRepresentativeChannelFence.mockImplementation(
+      async (
+        _input: unknown,
+        operation: (client: typeof fencedTx) => Promise<unknown>,
+      ) => ({ executed: true, value: await operation(fencedTx) }),
+    );
     mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(buildMatrixBinding());
+    mockPrisma.representativeChannelBinding.findUnique.mockResolvedValue({
+      status: "CONNECTED",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      representative: {
+        lifecycleState: "PUBLISHED",
+        activeVersionId: "version-1",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+    });
     tx.conversationChannelBinding.findFirst.mockResolvedValue(buildMatrixBinding());
     tx.message.findFirst.mockResolvedValue({
       id: "message-alice",
@@ -445,6 +496,158 @@ describe("Matrix application service ingress", () => {
     expect(tx.generationRun.upsert).not.toHaveBeenCalled();
   });
 
+  it("applies a later encryption state before an earlier message in the same transaction", async () => {
+    let isolated = false;
+    tx.conversationChannelBinding.update.mockImplementation(
+      async (args: { data?: { metadata?: { securityState?: string } } }) => {
+        if (args.data?.metadata?.securityState === "ISOLATED") isolated = true;
+        return {};
+      },
+    );
+    mockPrisma.conversationChannelBinding.findFirst.mockImplementation(
+      async () => buildMatrixBinding({
+        metadata: isolated
+          ? { ...matrixSafetyMetadata(), securityState: "ISOLATED", encrypted: true }
+          : matrixSafetyMetadata(),
+      }),
+    );
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-message-before-encryption",
+      events: [
+        matrixTextEvent("$event-before-encryption", aliceMatrixUserId),
+        {
+          event_id: "$encryption-after-message",
+          type: "m.room.encryption",
+          room_id: "!room:example.org",
+          sender: aliceMatrixUserId,
+          content: { algorithm: "m.megolm.v1.aes-sha2" },
+        },
+      ],
+    });
+
+    expect(result).toEqual([
+      {
+        eventId: "$event-before-encryption",
+        status: "ignored",
+        reason: "matrix_room_not_private_unencrypted",
+      },
+      {
+        eventId: "$encryption-after-message",
+        status: "ignored",
+        reason: "matrix_room_encrypted",
+      },
+    ]);
+    expect(tx.conversationChannelBinding.update.mock.invocationCallOrder[0])
+      .toBeLessThan(
+        mockPrisma.conversationChannelBinding.findFirst.mock.invocationCallOrder[0]!,
+      );
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+  });
+
+  it("applies a later third-member join before an earlier message in the same transaction", async () => {
+    let isolated = false;
+    tx.conversationChannelBinding.update.mockImplementation(
+      async (args: { data?: { metadata?: { securityState?: string } } }) => {
+        if (args.data?.metadata?.securityState === "ISOLATED") isolated = true;
+        return {};
+      },
+    );
+    mockPrisma.conversationChannelBinding.findFirst.mockImplementation(
+      async () => buildMatrixBinding({
+        metadata: isolated
+          ? { ...matrixSafetyMetadata(), securityState: "ISOLATED" }
+          : matrixSafetyMetadata(),
+      }),
+    );
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-message-before-third-member",
+      events: [
+        matrixTextEvent("$event-before-third-member", aliceMatrixUserId),
+        {
+          event_id: "$mallory-join-after-message",
+          type: "m.room.member",
+          room_id: "!room:example.org",
+          sender: "@mallory:example.org",
+          state_key: "@mallory:example.org",
+          content: { membership: "join" },
+        },
+      ],
+    });
+
+    expect(result).toEqual([
+      {
+        eventId: "$event-before-third-member",
+        status: "ignored",
+        reason: "matrix_room_not_private_unencrypted",
+      },
+      {
+        eventId: "$mallory-join-after-message",
+        status: "ignored",
+        reason: "matrix_room_membership_isolated",
+      },
+    ]);
+    expect(tx.conversationChannelBinding.update.mock.invocationCallOrder[0])
+      .toBeLessThan(
+        mockPrisma.conversationChannelBinding.findFirst.mock.invocationCallOrder[0]!,
+      );
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+  });
+
+  it("applies a later third-member join before an earlier redaction in the same transaction", async () => {
+    let isolated = false;
+    tx.conversationChannelBinding.update.mockImplementation(
+      async (args: { data?: { metadata?: { securityState?: string } } }) => {
+        if (args.data?.metadata?.securityState === "ISOLATED") isolated = true;
+        return {};
+      },
+    );
+    mockPrisma.conversationChannelBinding.findFirst.mockImplementation(
+      async () => buildMatrixBinding({
+        metadata: isolated
+          ? { ...matrixSafetyMetadata(), securityState: "ISOLATED" }
+          : matrixSafetyMetadata(),
+      }),
+    );
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-redaction-before-third-member",
+      events: [
+        {
+          event_id: "$redaction-before-third-member",
+          type: "m.room.redaction",
+          room_id: "!room:example.org",
+          sender: aliceMatrixUserId,
+          redacts: "$event-alice",
+          content: {},
+        },
+        {
+          event_id: "$mallory-join-after-redaction",
+          type: "m.room.member",
+          room_id: "!room:example.org",
+          sender: "@mallory:example.org",
+          state_key: "@mallory:example.org",
+          content: { membership: "join" },
+        },
+      ],
+    });
+
+    expect(result).toEqual([
+      {
+        eventId: "$redaction-before-third-member",
+        status: "ignored",
+        reason: "matrix_room_not_private_unencrypted",
+      },
+      {
+        eventId: "$mallory-join-after-redaction",
+        status: "ignored",
+        reason: "matrix_room_membership_isolated",
+      },
+    ]);
+    expect(mockPrisma.message.findFirst).not.toHaveBeenCalled();
+  });
+
   it("keeps third-member leave evidence and does not reopen the room", async () => {
     const result = await ingestMatrixApplicationServiceTransaction({
       transactionId: "transaction-third-member-left",
@@ -567,6 +770,17 @@ describe("Matrix application service ingress", () => {
     event.content = {
       msgtype: "m.text",
       body: `!bind ${token}`,
+      format: "org.matrix.custom.html",
+      formatted_body: `<strong>!bind ${token}</strong>`,
+      "m.new_content": {
+        msgtype: "m.text",
+        body: `!bind ${token}`,
+        formatted_body: `<code>/bind ${token}</code>`,
+        nested: {
+          command: `/bind ${token}`,
+          [`secret-${token}`]: "must redact object keys too",
+        },
+      },
     };
 
     const result = await ingestMatrixApplicationServiceTransaction({
@@ -575,34 +789,513 @@ describe("Matrix application service ingress", () => {
     });
 
     expect(result).toEqual([{ eventId: "$event-bind", status: "processed" }]);
-    expect(mockConsumeIdentityBindingChallenge).toHaveBeenCalledWith({
-      token,
-      provider: "MATRIX",
-      providerSubject: aliceMatrixUserId,
-      issuer: "example.org",
-      connectionId: "delegate-matrix-as",
-      proofMetadata: {
-        matrixRoomId: "!room:example.org",
-        matrixEventId: "$event-bind",
-        directMessage: true,
+    expect(mockConsumeIdentityBindingChallenge).toHaveBeenCalledWith(
+      {
+        tokenHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        provider: "MATRIX",
+        providerSubject: aliceMatrixUserId,
+        issuer: "example.org",
+        connectionId: "delegate-matrix-as",
+        proofMetadata: {
+          matrixRoomId: "!room:example.org",
+          matrixEventId: "$event-bind",
+          directMessage: true,
+        },
       },
-    });
-    expect(mockPrisma.channelEventInbox.update).toHaveBeenCalledWith({
-      where: { id: "inbox:$event-bind" },
-      data: {
-        payload: expect.objectContaining({
-          content: expect.objectContaining({
-            body: "!bind [redacted]",
+      fencedTx,
+    );
+    expect(mockPrisma.channelEventInbox.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          privateCredentialHash:
+            expect.stringMatching(/^[a-f0-9]{64}$/),
+          payload: expect.objectContaining({
+            content: expect.objectContaining({
+              body: "!bind [redacted]",
+            }),
           }),
         }),
-      },
-    });
+      }),
+    );
+    expect(
+      JSON.stringify(mockPrisma.channelEventInbox.upsert.mock.calls),
+    ).not.toContain(token);
+    const persistedPayload =
+      mockPrisma.channelEventInbox.upsert.mock.calls[0]?.[0].create.payload;
+    expect(JSON.stringify(persistedPayload)).toContain("[redacted]");
+    expect(JSON.stringify(persistedPayload)).not.toContain(token);
     expect(tx.message.upsert).not.toHaveBeenCalled();
     expect(tx.generationRun.upsert).not.toHaveBeenCalled();
     expect(mockPrisma.identityLink.findUnique).not.toHaveBeenCalled();
     expect(
       mockPrisma.identityLinkConnectionProof.findUnique,
     ).not.toHaveBeenCalled();
+  });
+
+  it("scrubs a nested token from a partially sanitized inbox replay", async () => {
+    const token = "r".repeat(43);
+    const tokenHash = createHash("sha256")
+      .update(token, "utf8")
+      .digest("hex");
+    const event = matrixTextEvent("$event-bind-replay", aliceMatrixUserId);
+    event.content = {
+      msgtype: "m.text",
+      body: `!bind ${token}`,
+    };
+    mockPrisma.channelEventInbox.upsert.mockResolvedValue({
+      id: "inbox:$event-bind-replay",
+      status: "PENDING",
+      attemptCount: 0,
+      eventType: "m.room.message",
+      payload: {
+        ...event,
+        content: {
+          msgtype: "m.text",
+          body: "!bind [redacted]",
+          formatted_body: `<strong>!bind ${token}</strong>`,
+          "m.new_content": {
+            msgtype: "m.text",
+            body: `!bind ${token}`,
+            formatted_body: `<code>${token}</code>`,
+          },
+          "com.delegate.private_channel_binding_token_hash": tokenHash,
+        },
+      },
+      privateCredentialHash: tokenHash,
+      lastError: null,
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-bind-replay",
+      events: [event],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-bind-replay",
+      status: "processed",
+    }]);
+    expect(mockConsumeIdentityBindingChallenge).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenHash }),
+      fencedTx,
+    );
+    const payloadRewrite = mockPrisma.channelEventInbox.update.mock.calls.find(
+      ([args]) => "payload" in args.data,
+    )?.[0].data.payload;
+    expect(payloadRewrite).toBeDefined();
+    expect(JSON.stringify(payloadRewrite)).not.toContain(token);
+  });
+
+  it("does not trust a Matrix event supplied binding-token hash", async () => {
+    const forgedHash = "f".repeat(64);
+    const event = matrixTextEvent(
+      "$event-forged-binding-hash",
+      aliceMatrixUserId,
+    );
+    event.content = {
+      msgtype: "m.text",
+      body: "!bind [redacted]",
+      "com.delegate.private_channel_binding_token_hash": forgedHash,
+      nested: {
+        "com.delegate.private_channel_binding_token_hash": forgedHash,
+      },
+    };
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-forged-binding-hash",
+      events: [event],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-forged-binding-hash",
+      status: "processed",
+    }]);
+    expect(mockConsumeIdentityBindingChallenge).not.toHaveBeenCalled();
+    const created =
+      mockPrisma.channelEventInbox.upsert.mock.calls[0]?.[0].create;
+    expect(created.privateCredentialHash).toBeNull();
+    expect(JSON.stringify(created.payload)).not.toContain(
+      "private_channel_binding_token_hash",
+    );
+  });
+
+  it("parks messages until remote Matrix room validation completes without consuming retries", async () => {
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({
+        metadata: {
+          ...matrixSafetyMetadata(),
+          securityState: "PENDING_REMOTE_VALIDATION",
+        },
+      }),
+    );
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-pending-room",
+      events: [matrixTextEvent("$event-pending-room", aliceMatrixUserId)],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-pending-room",
+      status: "failed",
+      reason: "matrix_room_pending_remote_validation",
+    }]);
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenCalledWith({
+      where: { id: "inbox:$event-pending-room" },
+      data: {
+        status: "FAILED",
+        attemptCount: { decrement: 1 },
+        processedAt: null,
+        availableAt: expect.any(Date),
+        lastError: "matrix_room_pending_remote_validation",
+      },
+    });
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "representative is paused",
+      code: "representative_paused",
+      binding: { lifecycleState: "PAUSED" as const },
+    },
+    {
+      name: "channel is paused",
+      code: "channel_paused",
+      binding: { desiredState: "PAUSED" as const },
+    },
+    {
+      name: "channel is disconnected",
+      code: "channel_disconnected",
+      binding: { desiredState: "DISCONNECTED" as const },
+    },
+    {
+      name: "representative is unpublished",
+      code: "representative_unpublished",
+      binding: { lifecycleState: "DRAFT" as const },
+    },
+    {
+      name: "representative is archived",
+      code: "representative_archived",
+      binding: { lifecycleState: "ARCHIVED" as const },
+    },
+    {
+      name: "representative channel is missing",
+      code: "channel_not_connected",
+      binding: { representativeBinding: null },
+    },
+    {
+      name: "channel is unhealthy",
+      code: "channel_unhealthy",
+      binding: { healthStatus: "UNHEALTHY" as const },
+    },
+    {
+      name: "runtime policy disables Matrix",
+      code: "policy_disabled",
+      binding: {
+        runtimePolicyOverlays: [{
+          enabled: true,
+          priority: 100,
+          startsAt: new Date("2026-01-01T00:00:00.000Z"),
+          expiresAt: null,
+          payload: {
+            channels: {
+              matrix: { enabled: false },
+            },
+          },
+        }],
+      },
+    },
+  ])("terminally acknowledges Matrix binding commands when $name", async ({
+    code,
+    binding,
+  }) => {
+    const token = "p".repeat(43);
+    const event = matrixTextEvent(`$event-bind-${code}`, aliceMatrixUserId);
+    event.content = {
+      msgtype: "m.text",
+      body: `!bind ${token}`,
+    };
+    const configuredBinding = buildMatrixBinding(binding);
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      configuredBinding,
+    );
+    mockPrisma.representativeChannelBinding.findUnique.mockResolvedValue(
+      configuredBinding.representativeBinding
+        ? {
+            status: configuredBinding.representativeBinding.status,
+            desiredState:
+              configuredBinding.representativeBinding.desiredState,
+            healthStatus:
+              configuredBinding.representativeBinding.healthStatus,
+            representative: {
+              lifecycleState:
+                configuredBinding.conversation.representative.lifecycleState,
+              activeVersionId:
+                configuredBinding.conversation.representative.activeVersionId,
+              publicMode:
+                configuredBinding.conversation.representative.publicMode,
+              runtimePolicyOverlays:
+                configuredBinding.conversation.representative
+                  .runtimePolicyOverlays,
+            },
+          }
+        : null,
+    );
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: `transaction-bind-${code}`,
+      events: [event],
+    });
+
+    expect(result).toEqual([{
+      eventId: `$event-bind-${code}`,
+      status: "ignored",
+      reason: code,
+    }]);
+    expect(mockConsumeIdentityBindingChallenge).not.toHaveBeenCalled();
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenLastCalledWith({
+      where: { id: `inbox:$event-bind-${code}` },
+      data: expect.objectContaining({
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: null,
+      }),
+    });
+  });
+
+  it("terminally acknowledges normal Matrix messages after channel disconnect", async () => {
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({ desiredState: "DISCONNECTED" }),
+    );
+    tx.conversation.findFirst.mockResolvedValue({
+      id: "conversation-1",
+      state: "ACTIVE",
+      representative: {
+        id: "representative-1",
+        activeVersionId: "version-1",
+        lifecycleState: "PUBLISHED",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+      episodes: [{
+        id: "episode-1",
+        sequence: 1,
+        status: "ACTIVE",
+        representativeVersionId: "version-1",
+      }],
+      channelBindings: [{
+        id: "matrix-binding-1",
+        kind: "MATRIX",
+        externalConversationId: "!room:example.org",
+        metadata: matrixSafetyMetadata(),
+        representativeBinding: {
+          status: "DISCONNECTED",
+          desiredState: "DISCONNECTED",
+          healthStatus: "UNKNOWN",
+        },
+      }],
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-message-channel-disconnected",
+      events: [
+        matrixTextEvent(
+          "$event-message-channel-disconnected",
+          aliceMatrixUserId,
+        ),
+      ],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-message-channel-disconnected",
+      status: "ignored",
+      reason: "channel_disconnected",
+    }]);
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenLastCalledWith({
+      where: { id: "inbox:$event-message-channel-disconnected" },
+      data: expect.objectContaining({
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: null,
+      }),
+    });
+  });
+
+  it.each([
+    {
+      name: "edit",
+      event: {
+        event_id: "$event-edit-after-disconnect",
+        type: "m.room.message",
+        room_id: "!room:example.org",
+        sender: aliceMatrixUserId,
+        content: {
+          msgtype: "m.text",
+          body: "* edited after disconnect",
+          "m.relates_to": {
+            rel_type: "m.replace",
+            event_id: "$event-original",
+          },
+          "m.new_content": {
+            msgtype: "m.text",
+            body: "edited after disconnect",
+          },
+        },
+      } satisfies MatrixApplicationServiceEvent,
+    },
+    {
+      name: "redaction",
+      event: {
+        event_id: "$event-redaction-after-disconnect",
+        type: "m.room.redaction",
+        room_id: "!room:example.org",
+        sender: aliceMatrixUserId,
+        redacts: "$event-original",
+        content: {},
+      } satisfies MatrixApplicationServiceEvent,
+    },
+  ])("blocks Matrix $name side effects after channel disconnect", async ({
+    event,
+  }) => {
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({ desiredState: "DISCONNECTED" }),
+    );
+    mockPrisma.representativeChannelBinding.findUnique.mockResolvedValue({
+      status: "DISCONNECTED",
+      desiredState: "DISCONNECTED",
+      healthStatus: "UNKNOWN",
+      representative: {
+        lifecycleState: "PUBLISHED",
+        activeVersionId: "version-1",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: `transaction-${event.event_id}`,
+      events: [event],
+    });
+
+    expect(result).toEqual([{
+      eventId: event.event_id,
+      status: "ignored",
+      reason: "channel_disconnected",
+    }]);
+    expect(mockPrisma.message.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.message.update).not.toHaveBeenCalled();
+  });
+
+  it("lets a concurrent disconnect win before any Matrix content side effect", async () => {
+    mockWithActiveMatrixRepresentativeChannelFence.mockResolvedValue({
+      executed: false,
+      reason: "matrix_channel_not_active",
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-disconnect-wins",
+      events: [
+        matrixTextEvent("$event-disconnect-wins", aliceMatrixUserId),
+      ],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-disconnect-wins",
+      status: "ignored",
+      reason: "channel_disconnected",
+    }]);
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+    expect(mockConsumeIdentityBindingChallenge).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: "bind",
+      event: {
+        ...matrixTextEvent("$event-bind-after-isolation", aliceMatrixUserId),
+        content: {
+          msgtype: "m.text",
+          body: `!bind ${"r".repeat(43)}`,
+        },
+      } satisfies MatrixApplicationServiceEvent,
+    },
+    {
+      name: "normal message",
+      event: matrixTextEvent(
+        "$event-message-after-isolation",
+        aliceMatrixUserId,
+      ),
+    },
+    {
+      name: "edit",
+      event: {
+        event_id: "$event-edit-after-isolation",
+        type: "m.room.message",
+        room_id: "!room:example.org",
+        sender: aliceMatrixUserId,
+        content: {
+          msgtype: "m.text",
+          body: "* isolated edit",
+          "m.relates_to": {
+            rel_type: "m.replace",
+            event_id: "$event-original",
+          },
+          "m.new_content": {
+            msgtype: "m.text",
+            body: "isolated edit",
+          },
+        },
+      } satisfies MatrixApplicationServiceEvent,
+    },
+    {
+      name: "redaction",
+      event: {
+        event_id: "$event-redaction-after-isolation",
+        type: "m.room.redaction",
+        room_id: "!room:example.org",
+        sender: aliceMatrixUserId,
+        redacts: "$event-original",
+        content: {},
+      } satisfies MatrixApplicationServiceEvent,
+    },
+  ])("terminally blocks Matrix $name when the room is isolated after the initial read", async ({
+    event,
+  }) => {
+    tx.conversationChannelBinding.findFirst.mockResolvedValue({
+      ...buildMatrixBinding(),
+      metadata: {
+        ...matrixSafetyMetadata(),
+        securityState: "ISOLATED",
+        isolationReason: "matrix_room_encrypted",
+      },
+    });
+    mockPrisma.message.findFirst.mockResolvedValue({
+      id: "message-alice",
+      senderId: aliceMatrixUserId,
+      senderType: "AUDIENCE",
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: `transaction-${event.event_id}`,
+      events: [event],
+    });
+
+    expect(result).toEqual([{
+      eventId: event.event_id,
+      status: "ignored",
+      reason: "matrix_private_room_not_verified",
+    }]);
+    expect(mockConsumeIdentityBindingChallenge).not.toHaveBeenCalled();
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+    expect(mockPrisma.message.update).not.toHaveBeenCalled();
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenLastCalledWith({
+      where: { id: `inbox:${event.event_id}` },
+      data: expect.objectContaining({
+        status: "PROCESSED",
+        processedAt: expect.any(Date),
+        lastError: null,
+      }),
+    });
   });
 
   it("fails closed when an existing Matrix room has no proof for the exact connection", async () => {
@@ -665,6 +1358,10 @@ describe("Matrix application service ingress", () => {
     [
       "another issuer",
       { issuer: "elsewhere.example.org" },
+    ],
+    [
+      "an issuer differing only by case",
+      { issuer: "EXAMPLE.ORG" },
     ],
     [
       "a revoked identity link",
@@ -816,6 +1513,7 @@ describe("Matrix application service ingress", () => {
         attemptCount: 4,
         eventType: args.create.eventType,
         payload: args.create.payload,
+        privateCredentialHash: args.create.privateCredentialHash,
         lastError: "database temporarily unavailable",
       }),
     );
@@ -1134,7 +1832,7 @@ describe("Matrix application service ingress", () => {
         generationRunId: "run-redacted",
         reason: "input_message_redacted",
       },
-      tx,
+      fencedTx,
     );
     expect(mockReleaseConversationWalletUsage).toHaveBeenCalledWith(
       {
@@ -1144,7 +1842,7 @@ describe("Matrix application service ingress", () => {
         idempotencyKey:
           "message:message-alice:redaction:usage-redacted:release",
       },
-      tx,
+      fencedTx,
     );
     expect(tx.generationRun.updateMany).toHaveBeenCalledWith({
       where: {
@@ -1461,6 +2159,23 @@ function matrixTextEvent(
 
 function buildMatrixBinding(input: {
   contactMatrixUserId?: string | null;
+  desiredState?: "ACTIVE" | "PAUSED" | "DISCONNECTED";
+  healthStatus?: "HEALTHY" | "UNHEALTHY";
+  lifecycleState?: "PUBLISHED" | "PAUSED" | "DRAFT" | "ARCHIVED";
+  representativeBinding?: {
+    status: string;
+    desiredState: string;
+    healthStatus: string;
+    externalUserId?: string;
+  } | null;
+  metadata?: Record<string, unknown>;
+  runtimePolicyOverlays?: Array<{
+    enabled: boolean;
+    priority: number;
+    startsAt: Date;
+    expiresAt: Date | null;
+    payload: Record<string, unknown>;
+  }>;
   participants?: Array<{
     kind: string;
     participantId: string;
@@ -1474,10 +2189,32 @@ function buildMatrixBinding(input: {
     kind: "MATRIX",
     connectionId: "delegate-matrix-as",
     externalConversationId: "!room:example.org",
-    metadata: matrixSafetyMetadata(),
+    metadata: input.metadata ?? matrixSafetyMetadata(),
+    representativeBinding: input.representativeBinding === undefined
+      ? {
+          status: "CONNECTED",
+          desiredState: input.desiredState ?? "ACTIVE",
+          healthStatus: input.healthStatus ?? "HEALTHY",
+          externalUserId: "@_delegate_rep:example.org",
+        }
+      : input.representativeBinding
+        ? {
+            ...input.representativeBinding,
+            externalUserId:
+              input.representativeBinding.externalUserId
+              ?? "@_delegate_rep:example.org",
+          }
+        : null,
     conversation: {
       audienceIdentityId: "audience-identity-1",
-      representative: { slug: "representative" },
+      representative: {
+        id: "representative-1",
+        slug: "representative",
+        lifecycleState: input.lifecycleState ?? "PUBLISHED",
+        activeVersionId: "version-1",
+        publicMode: true,
+        runtimePolicyOverlays: input.runtimePolicyOverlays ?? [],
+      },
       contact: {
         id: "contact-1",
         channelUserId: input.contactMatrixUserId === undefined

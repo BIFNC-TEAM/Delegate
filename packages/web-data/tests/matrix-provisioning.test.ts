@@ -11,10 +11,10 @@ const {
       findUnique: vi.fn(),
     },
     matrixVirtualUserBinding: {
-      upsert: vi.fn(),
+      findUnique: vi.fn(),
     },
     representativeChannelBinding: {
-      upsert: vi.fn(),
+      findUnique: vi.fn(),
     },
     contact: {
       findFirst: vi.fn(),
@@ -65,6 +65,7 @@ describe("Matrix direct conversation provisioning", () => {
     mockResolveChannelAudienceIdentity.mockResolvedValue({
       id: "audience-identity-1",
     });
+    mockActiveControlPlane();
   });
 
   it.each([
@@ -90,6 +91,11 @@ describe("Matrix direct conversation provisioning", () => {
         issuer: "example.org",
         connectionId: "delegate-matrix-as",
       }),
+      tx,
+    );
+    expect(tx.$executeRaw).toHaveBeenCalledWith(
+      expect.any(Array),
+      "matrix-virtual-user:representative-1",
     );
     expect(tx.$executeRaw).toHaveBeenCalledWith(
       expect.any(Array),
@@ -131,6 +137,10 @@ describe("Matrix direct conversation provisioning", () => {
     input,
     observed,
   }) => {
+    mockActiveControlPlane(
+      input.representativeId,
+      input.representativeMatrixUserId,
+    );
     tx.conversationChannelBinding.findFirst.mockResolvedValue(
       buildExistingBinding(existing),
     );
@@ -158,7 +168,50 @@ describe("Matrix direct conversation provisioning", () => {
     });
     expect(tx.conversationChannelBinding.upsert).not.toHaveBeenCalled();
   });
+
+  it("does not let an invite re-enable a disconnected Matrix channel", async () => {
+    tx.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "representative-binding-1",
+      connectionId: "delegate-matrix-as",
+      desiredState: "DISCONNECTED",
+      externalUserId: representativeMatrixUserId,
+      status: "DISCONNECTED",
+    });
+    tx.matrixVirtualUserBinding.findUnique.mockResolvedValue({
+      representativeId: "representative-1",
+      kind: "REPRESENTATIVE",
+      enabled: false,
+    });
+
+    await expect(
+      provisionMatrixDirectConversation(provisionInput()),
+    ).rejects.toMatchObject({
+      code: "channel_disconnected",
+    });
+
+    expect(mockResolveChannelAudienceIdentity).not.toHaveBeenCalled();
+    expect(tx.conversationChannelBinding.findFirst).not.toHaveBeenCalled();
+    expect(tx.conversationChannelBinding.upsert).not.toHaveBeenCalled();
+  });
 });
+
+function mockActiveControlPlane(
+  representativeId = "representative-1",
+  matrixUserId = representativeMatrixUserId,
+) {
+  tx.representativeChannelBinding.findUnique.mockResolvedValue({
+    id: "representative-binding-1",
+    connectionId: "delegate-matrix-as",
+    desiredState: "ACTIVE",
+    externalUserId: matrixUserId,
+    status: "CONNECTED",
+  });
+  tx.matrixVirtualUserBinding.findUnique.mockResolvedValue({
+    representativeId,
+    kind: "REPRESENTATIVE",
+    enabled: true,
+  });
+}
 
 function provisionInput(overrides: {
   representativeId?: string;

@@ -62,6 +62,9 @@ export TELEGRAM_BOT_TOKEN=""
 export TELEGRAM_WEBHOOK_SECRET=""
 export WORKFLOW_ENGINE="local"
 
+printf 'phase=channel_tests_matrix_local_env\n'
+bash "${SCRIPT_DIR}/matrix-local-env.test.sh"
+
 printf 'phase=channel_tests_dashboard\n'
 pnpm --dir "$REPO_ROOT" --filter @delegate/dashboard test
 

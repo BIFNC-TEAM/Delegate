@@ -1,5 +1,9 @@
 import { demoRepresentative } from "@delegate/domain";
 
+import {
+  normalizeMatrixServerName,
+  normalizeMatrixUserId,
+} from "./matrix-identifiers";
 import { prisma } from "./prisma";
 
 const WEB_RECENT_TURN_LIMIT = 8;
@@ -48,7 +52,7 @@ export type WebAudienceIdentityLinkProvider =
   | "MATRIX"
   | "PAYMENT_EXTERNAL_USER";
 
-type WebAudienceClient = {
+export type WebAudienceClient = {
   $transaction?: <T>(
     callback: (client: WebAudienceClient) => Promise<T>,
     options?: { isolationLevel: "Serializable" },
@@ -563,7 +567,7 @@ export async function resolveChannelAudienceIdentity(
     input.provider,
     input.providerSubject,
   );
-  const issuer = input.issuer?.trim().toLowerCase() || "delegate";
+  const issuer = normalizeIdentityIssuer(input.provider, input.issuer);
   const connectionId = input.connectionId?.trim().toLowerCase();
   if (!connectionId) {
     throw new Error("Channel identity resolution requires a connection id.");
@@ -671,6 +675,9 @@ export async function linkAudienceIdentity(
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ) {
   const providerSubject = normalizeIdentityProviderSubject(input.provider, input.providerSubject);
+  const issuer = input.issuer === undefined
+    ? undefined
+    : normalizeIdentityIssuer(input.provider, input.issuer);
   const requestedIdentity = await resolveCanonicalAudienceIdentity(
     {
       audienceIdentityId: input.audienceIdentityId,
@@ -692,7 +699,7 @@ export async function linkAudienceIdentity(
       ...(existingLink.connectionId !== undefined
         ? { existingConnectionId: existingLink.connectionId }
         : {}),
-      ...(input.issuer !== undefined ? { issuer: input.issuer } : {}),
+      ...(issuer !== undefined ? { issuer } : {}),
       ...(input.connectionId !== undefined && !client.identityLinkConnectionProof
         ? { connectionId: input.connectionId }
         : {}),
@@ -714,7 +721,7 @@ export async function linkAudienceIdentity(
       await recordIdentityLinkConnectionProof({
         client,
         identityLinkId: existingLink.id,
-        issuer: input.issuer?.trim().toLowerCase() || "delegate",
+        issuer: normalizeIdentityIssuer(input.provider, issuer),
         connectionId: input.connectionId.trim().toLowerCase(),
         verifiedAt: input.verifiedAt,
         assuranceLevel:
@@ -733,7 +740,7 @@ export async function linkAudienceIdentity(
         audienceIdentityId: requestedIdentity.id,
         provider: input.provider,
         providerSubject,
-        ...(input.issuer !== undefined ? { issuer: input.issuer } : {}),
+        ...(issuer !== undefined ? { issuer } : {}),
         ...(input.connectionId !== undefined ? { connectionId: input.connectionId } : {}),
         ...(input.verifiedAt !== undefined ? { verifiedAt: input.verifiedAt } : {}),
         ...(input.assuranceLevel !== undefined
@@ -754,7 +761,7 @@ export async function linkAudienceIdentity(
       await recordIdentityLinkConnectionProof({
         client,
         identityLinkId: created.id,
-        issuer: input.issuer?.trim().toLowerCase() || "delegate",
+        issuer: normalizeIdentityIssuer(input.provider, issuer),
         connectionId: input.connectionId.trim().toLowerCase(),
         verifiedAt: input.verifiedAt,
         assuranceLevel:
@@ -786,7 +793,7 @@ export async function linkAudienceIdentity(
       ...(concurrentLink.connectionId !== undefined
         ? { existingConnectionId: concurrentLink.connectionId }
         : {}),
-      ...(input.issuer !== undefined ? { issuer: input.issuer } : {}),
+      ...(issuer !== undefined ? { issuer } : {}),
       ...(input.connectionId !== undefined && !client.identityLinkConnectionProof
         ? { connectionId: input.connectionId }
         : {}),
@@ -808,7 +815,7 @@ export async function linkAudienceIdentity(
       await recordIdentityLinkConnectionProof({
         client,
         identityLinkId: concurrentLink.id,
-        issuer: input.issuer?.trim().toLowerCase() || "delegate",
+        issuer: normalizeIdentityIssuer(input.provider, issuer),
         connectionId: input.connectionId.trim().toLowerCase(),
         verifiedAt: input.verifiedAt,
         assuranceLevel:
@@ -1588,12 +1595,19 @@ function normalizeIdentityProviderSubject(provider: WebAudienceIdentityLinkProvi
   }
   if (provider === "LOGTO") return trimmed;
   if (provider === "MATRIX") {
-    const separator = trimmed.lastIndexOf(":");
-    return separator > 0
-      ? `${trimmed.slice(0, separator)}:${trimmed.slice(separator + 1).toLowerCase()}`
-      : trimmed;
+    return normalizeMatrixUserId(trimmed);
   }
   return trimmed.toLowerCase();
+}
+
+function normalizeIdentityIssuer(
+  provider: WebAudienceIdentityLinkProvider,
+  value: string | null | undefined,
+): string {
+  const issuer = value?.trim() || "delegate";
+  return provider === "MATRIX"
+    ? normalizeMatrixServerName(issuer)
+    : issuer.toLowerCase();
 }
 
 async function findIdentityLink(

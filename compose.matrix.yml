@@ -1,0 +1,158 @@
+#
+# The normal `matrix` profile extends the application stack with Synapse.
+# The `matrix-e2e` profile is deliberately separate: its bridge and migrations
+# use delegate_matrix_e2e and never write to the normal delegate database.
+#
+x-matrix-e2e-app: &matrix-e2e-app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: delegate-app:local
+  working_dir: /app
+
+services:
+  synapse:
+    image: ${MATRIX_SYNAPSE_IMAGE:-matrixdotorg/synapse:v1.157.0}
+    profiles: ["matrix"]
+    restart: unless-stopped
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+      UID: ${MATRIX_LOCAL_UID:-991}
+      GID: ${MATRIX_LOCAL_GID:-991}
+    ports:
+      - "127.0.0.1:${MATRIX_SYNAPSE_HOST_PORT:-8008}:8008"
+    volumes:
+      - ./.local/matrix/synapse:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/_matrix/client/versions', timeout=3).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  matrix-e2e-synapse:
+    image: ${MATRIX_SYNAPSE_IMAGE:-matrixdotorg/synapse:v1.157.0}
+    profiles: ["matrix-e2e"]
+    restart: unless-stopped
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+      UID: ${MATRIX_LOCAL_UID:-991}
+      GID: ${MATRIX_LOCAL_GID:-991}
+    ports:
+      - "127.0.0.1:${MATRIX_SYNAPSE_HOST_PORT:-8009}:8008"
+    volumes:
+      - ./.local/matrix-e2e/synapse:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/_matrix/client/versions', timeout=3).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  matrix-bridge:
+    environment:
+      MATRIX_BRIDGE_PORT: 4030
+      MATRIX_HOMESERVER_URL: http://synapse:8008
+      MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME:-matrix.local}
+      MATRIX_AS_CONNECTION_ID: ${MATRIX_AS_CONNECTION_ID:-delegate-matrix-as}
+      MATRIX_AS_HS_TOKEN: ${MATRIX_AS_HS_TOKEN:-}
+      MATRIX_AS_TOKEN: ${MATRIX_AS_TOKEN:-}
+    depends_on:
+      synapse:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4030/ready').then((res)=>{if(!res.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+    ports: !override
+      - "127.0.0.1:4030:4030"
+
+  conversation-worker:
+    environment:
+      MATRIX_HOMESERVER_URL: http://synapse:8008
+      MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME:-matrix.local}
+      MATRIX_AS_CONNECTION_ID: ${MATRIX_AS_CONNECTION_ID:-delegate-matrix-as}
+      MATRIX_AS_TOKEN: ${MATRIX_AS_TOKEN:-}
+
+  matrix-e2e-db-init:
+    image: postgres:16-alpine
+    profiles: ["matrix-e2e"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: postgres
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ "$$(psql -h postgres -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'delegate_matrix_e2e'")" != "1" ]; then
+          if ! psql -h postgres -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE delegate_matrix_e2e'; then
+            [ "$$(psql -h postgres -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'delegate_matrix_e2e'")" = "1" ]
+          fi
+        fi
+    restart: "no"
+
+  matrix-e2e-migrate:
+    <<: *matrix-e2e-app
+    profiles: ["matrix-e2e"]
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/delegate_matrix_e2e
+    depends_on:
+      matrix-e2e-db-init:
+        condition: service_completed_successfully
+    command: >
+      sh -lc "pnpm db:deploy && pnpm db:seed"
+    restart: "no"
+
+  matrix-e2e-bridge:
+    <<: *matrix-e2e-app
+    profiles: ["matrix-e2e"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/delegate_matrix_e2e
+      MATRIX_BRIDGE_PORT: 4030
+      MATRIX_HOMESERVER_URL: http://matrix-e2e-synapse:8008
+      MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME:-matrix-e2e.local}
+      MATRIX_AS_CONNECTION_ID: ${MATRIX_AS_CONNECTION_ID:-delegate-matrix-e2e-as}
+      MATRIX_AS_HS_TOKEN: ${MATRIX_AS_HS_TOKEN:-}
+      MATRIX_AS_TOKEN: ${MATRIX_AS_TOKEN:-}
+      MATRIX_BRIDGE_MAX_BODY_BYTES: ${MATRIX_BRIDGE_MAX_BODY_BYTES:-2097152}
+    depends_on:
+      matrix-e2e-synapse:
+        condition: service_healthy
+      matrix-e2e-migrate:
+        condition: service_completed_successfully
+    command: >
+      sh -lc "pnpm --filter @delegate/matrix-bridge start"
+    ports:
+      - "127.0.0.1:4031:4030"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4030/ready').then((res)=>{if(!res.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s

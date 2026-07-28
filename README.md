@@ -215,7 +215,7 @@ docs/
 Prerequisites:
 
 - Node.js 20.18.1 or newer and pnpm
-- Docker, if you want the full local stack
+- Docker with Docker Compose v2.24.4 or newer, if you want the full local stack
 - Provider API keys only when you want live model or OpenViking calls
 
 Install dependencies and create local env:
@@ -235,14 +235,28 @@ pnpm docker:up:local
 
 Use `pnpm docker:up` for the production-shaped local stack; it requires a
 configured Logto Traditional Web application before creator login can succeed.
-Native Matrix is optional and is not part of Telegram delivery. Enable its
-profile only after configuring a homeserver and Application Service secrets.
-The command includes the same local override, so enabling Matrix does not
-recreate Dashboard or the representative app in production mode:
+Native Matrix is optional and is not part of Telegram delivery. The Matrix
+command bootstraps a development-only Synapse instance with random local
+Application Service tokens, then includes the same local app override. Its
+Synapse and bridge ports are published only on host loopback:
 
 ```bash
 pnpm docker:up:matrix
 ```
+
+For the smaller Matrix protocol gate, start an independently registered
+`matrix-e2e.local` Synapse, an isolated `delegate_matrix_e2e`
+database/migration job, and its own Matrix bridge, then run the real Client API
+and disconnect/reconnect lifecycle smoke:
+
+```bash
+pnpm matrix:local:up
+pnpm matrix:local:smoke
+```
+
+See [`docs/matrix-local-synapse.md`](docs/matrix-local-synapse.md) for generated
+credential locations, the one-command E2E flow, full Dashboard testing, and the
+production differences.
 
 Run the standard checks:
 
@@ -270,6 +284,10 @@ Useful local URLs for the default Docker profile:
 - Artifact store console: `http://localhost:9001`
 - OpenViking API: `http://localhost:1933`
 - OpenViking console docs: `http://localhost:8020/docs`
+- Local Synapse Client API (Matrix profile): `http://127.0.0.1:8008`
+- Matrix Application Service bridge (Matrix profile): `http://127.0.0.1:4030`
+- Isolated Matrix E2E Client API: `http://127.0.0.1:8009`
+- Isolated Matrix E2E bridge: `http://127.0.0.1:4031`
 
 If you are running the three Next.js apps manually side by side, use explicit ports:
 
@@ -402,12 +420,15 @@ pnpm docker:logs
 pnpm docker:down
 pnpm docker:up:local
 pnpm docker:up:matrix
+pnpm matrix:local:e2e
 
 pnpm registry:search:clawhub "qualification"
 ```
 
 `pnpm docker:down` also stops services started through the Matrix or Temporal
 profiles. It does not delete the local database or other named volumes.
+`pnpm matrix:local:down` is narrower: it removes only local Matrix containers
+and leaves shared PostgreSQL and the rest of the application stack running.
 
 `pnpm test:channels` is the credential-free, offline channel gate. It clears
 developer-machine provider credentials, then tests and typechecks the Web,

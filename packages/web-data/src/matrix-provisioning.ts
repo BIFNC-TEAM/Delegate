@@ -1,7 +1,6 @@
 import {
   Channel,
   ChannelDesiredState,
-  ChannelHealthStatus,
   ChannelSourceProvider,
   ChannelTransport,
   ConversationParticipantKind,
@@ -9,8 +8,17 @@ import {
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
+import { ChannelUnavailableError } from "./channel-availability";
+import {
+  matrixServerNameFromUserId,
+  normalizeMatrixRoomId,
+  normalizeMatrixUserId,
+} from "./matrix-identifiers";
 import { lockMatrixRoomSecurityState } from "./matrix-room-security";
-import { resolveChannelAudienceIdentity } from "./web-audience";
+import {
+  resolveChannelAudienceIdentity,
+  type WebAudienceClient,
+} from "./web-audience";
 
 export type ProvisionMatrixDirectConversationInput = {
   representativeId: string;
@@ -84,16 +92,65 @@ export async function provisionMatrixDirectConversation(
     input.connectionId,
   );
   const now = new Date();
-  const audienceIdentity = await resolveChannelAudienceIdentity({
-    provider: "MATRIX",
-    providerSubject: audienceMatrixUserId,
-    issuer: matrixHomeserver(audienceMatrixUserId),
-    connectionId,
-    now,
-  });
 
   return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${`matrix-virtual-user:${representativeId}`})
+      )
+    `;
     await lockMatrixRoomSecurityState(tx, roomId);
+    const representativeBinding =
+      await tx.representativeChannelBinding.findUnique({
+        where: {
+          representativeId_kind: {
+            representativeId,
+            kind: RepresentativeChannelKind.MATRIX,
+          },
+        },
+        select: {
+          id: true,
+          connectionId: true,
+          desiredState: true,
+          externalUserId: true,
+          status: true,
+        },
+      });
+    if (!representativeBinding) {
+      throw new ChannelUnavailableError("channel_not_connected");
+    }
+    const virtualUser = await tx.matrixVirtualUserBinding.findUnique({
+      where: { matrixUserId: representativeMatrixUserId },
+      select: {
+        representativeId: true,
+        kind: true,
+        enabled: true,
+      },
+    });
+    if (
+      representativeBinding.desiredState !== ChannelDesiredState.ACTIVE
+      || representativeBinding.status === "DISCONNECTED"
+      || representativeBinding.externalUserId !== representativeMatrixUserId
+      || representativeBinding.connectionId !== connectionId
+      || virtualUser?.representativeId !== representativeId
+      || virtualUser.kind !== "REPRESENTATIVE"
+      || virtualUser.enabled !== true
+    ) {
+      throw new ChannelUnavailableError("channel_disconnected");
+    }
+    const audienceIdentity = await resolveChannelAudienceIdentity(
+      {
+        provider: "MATRIX",
+        providerSubject: audienceMatrixUserId,
+        issuer: matrixServerNameFromUserId(audienceMatrixUserId),
+        connectionId,
+        now,
+      },
+      // The narrow audience client is also used by in-memory tests. Prisma's
+      // transaction delegate provides the same runtime surface, but its generic
+      // JSON method signatures are not structurally assignable to that seam.
+      tx as unknown as WebAudienceClient,
+    );
     const existingBinding = await tx.conversationChannelBinding.findFirst({
       where: {
         kind: RepresentativeChannelKind.MATRIX,
@@ -184,61 +241,8 @@ export async function provisionMatrixDirectConversation(
     });
     if (!representative) throw new Error("Representative was not found.");
     if (representative.lifecycleState !== "PUBLISHED" || !representative.activeVersionId) {
-      throw new Error("Representative must be published before Matrix provisioning.");
+      throw new ChannelUnavailableError("representative_unpublished");
     }
-
-    await tx.matrixVirtualUserBinding.upsert({
-      where: { matrixUserId: representativeMatrixUserId },
-      create: {
-        matrixUserId: representativeMatrixUserId,
-        representativeId,
-        kind: "REPRESENTATIVE",
-        displayName: representative.displayName,
-        enabled: true,
-      },
-      update: {
-        representativeId,
-        kind: "REPRESENTATIVE",
-        displayName: representative.displayName,
-        enabled: true,
-      },
-    });
-    const representativeBinding = await tx.representativeChannelBinding.upsert({
-      where: {
-        representativeId_kind: {
-          representativeId,
-          kind: RepresentativeChannelKind.MATRIX,
-        },
-      },
-      create: {
-        representativeId,
-        kind: RepresentativeChannelKind.MATRIX,
-        transport: ChannelTransport.MATRIX,
-        sourceProvider: ChannelSourceProvider.MATRIX,
-        connectionId,
-        desiredState: ChannelDesiredState.ACTIVE,
-        healthStatus: ChannelHealthStatus.HEALTHY,
-        externalUserId: representativeMatrixUserId,
-        status: "CONNECTED",
-        displayName: representative.displayName,
-        configuration: {
-          managed: true,
-          directMessageOnly: true,
-          encrypted: false,
-        },
-        lastHealthCheckAt: now,
-      },
-      update: {
-        transport: ChannelTransport.MATRIX,
-        sourceProvider: ChannelSourceProvider.MATRIX,
-        connectionId,
-        healthStatus: ChannelHealthStatus.HEALTHY,
-        externalUserId: representativeMatrixUserId,
-        status: "CONNECTED",
-        lastHealthCheckAt: now,
-        lastError: null,
-      },
-    });
 
     let contact = await tx.contact.findFirst({
       where: {
@@ -392,27 +396,6 @@ export async function provisionMatrixDirectConversation(
       roomId,
     };
   });
-}
-
-function normalizeMatrixUserId(value: string): string {
-  const userId = requireId(value, "Matrix user id");
-  if (!/^@[^\s:]+:[^\s:]+$/.test(userId)) {
-    throw new Error("Matrix user id must be a full MXID.");
-  }
-  const separator = userId.lastIndexOf(":");
-  return `${userId.slice(0, separator)}:${userId.slice(separator + 1).toLowerCase()}`;
-}
-
-function normalizeMatrixRoomId(value: string): string {
-  const roomId = requireId(value, "Matrix room id");
-  if (!/^![^\s:]+:[^\s:]+$/.test(roomId)) {
-    throw new Error("Matrix room id must be a full room id.");
-  }
-  return roomId;
-}
-
-function matrixHomeserver(matrixUserId: string): string {
-  return matrixUserId.slice(matrixUserId.lastIndexOf(":") + 1).toLowerCase();
 }
 
 function requireId(value: string, label: string): string {

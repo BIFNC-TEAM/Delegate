@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
   listActivePrivateChannelIdentityBindings: vi.fn(),
   publicAudiencePrincipalErrorStatus: vi.fn(),
   revokePrivateChannelIdentityBinding: vi.fn(),
-  resolveMatrixApplicationServiceConnectionId: vi.fn(),
+  resolveRepresentativeMatrixEndpoint: vi.fn(),
   resolveRepresentativeTelegramBotEndpoint: vi.fn(),
   resolvePublicAudienceRequestPrincipal: vi.fn(),
 }));
@@ -17,14 +17,19 @@ vi.mock("@delegate/web-data", () => ({
     mocks.isVerifiedPrivateChannelIdentityBinding,
   listActivePrivateChannelIdentityBindings:
     mocks.listActivePrivateChannelIdentityBindings,
+  matrixServerNameFromUserId: (value: string) => {
+    const normalized = normalizeTestMatrixUserId(value);
+    return normalized.slice(normalized.indexOf(":") + 1);
+  },
+  normalizeMatrixUserId: normalizeTestMatrixUserId,
   privateChannelIdentityProviders: {
     matrix: "MATRIX",
     telegram: "TELEGRAM",
   },
   revokePrivateChannelIdentityBinding:
     mocks.revokePrivateChannelIdentityBinding,
-  resolveMatrixApplicationServiceConnectionId:
-    mocks.resolveMatrixApplicationServiceConnectionId,
+  resolveRepresentativeMatrixEndpoint:
+    mocks.resolveRepresentativeMatrixEndpoint,
   resolveRepresentativeTelegramBotEndpoint:
     mocks.resolveRepresentativeTelegramBotEndpoint,
 }));
@@ -61,9 +66,10 @@ describe("public identity binding principal enforcement", () => {
     process.env.MATRIX_SERVER_NAME = "matrix.example";
     process.env.MATRIX_AS_CONNECTION_ID = "matrix-appservice";
     mocks.publicAudiencePrincipalErrorStatus.mockReturnValue(null);
-    mocks.resolveMatrixApplicationServiceConnectionId.mockReturnValue(
-      "matrix-appservice",
-    );
+    mocks.resolveRepresentativeMatrixEndpoint.mockResolvedValue({
+      matrixUserId: "@_delegate_rep_delegate:matrix.example",
+      connectionId: "matrix-appservice",
+    });
     mocks.resolveRepresentativeTelegramBotEndpoint.mockResolvedValue({
       botId: "8718299151",
       username: "delegate_test_bot",
@@ -226,6 +232,10 @@ describe("public identity binding principal enforcement", () => {
         botId: "8718299151",
         username: "delegate_test_bot",
       },
+      matrixEndpoint: {
+        matrixUserId: "@_delegate_rep_delegate:matrix.example",
+        connectionId: "matrix-appservice",
+      },
     });
     expect(mocks.isVerifiedPrivateChannelIdentityBinding).toHaveBeenCalledWith(
       oldBinding,
@@ -233,6 +243,67 @@ describe("public identity binding principal enforcement", () => {
         provider: "TELEGRAM",
         issuer: "delegate-managed-bot",
         connectionId: "8718299151",
+      },
+    );
+  });
+
+  it("hides Matrix capability when this representative has no routable Matrix endpoint", async () => {
+    mocks.resolveRepresentativeMatrixEndpoint.mockResolvedValue(null);
+
+    const response = await listIdentityBindings(
+      new Request("http://localhost/reps/delegate/identity-bindings"),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      readiness: { telegram: false, matrix: false },
+      capabilities: { telegram: true, matrix: false },
+      matrixEndpoint: null,
+    });
+  });
+
+  it("does not report Matrix ready for a binding from a different homeserver issuer", async () => {
+    const wrongHomeserverBinding = {
+      provider: "MATRIX",
+      providerSubject: "@neo:MATRIX.EXAMPLE",
+      issuer: "MATRIX.EXAMPLE",
+      connectionId: "matrix-appservice",
+      verifiedAt: "2026-07-27T00:00:00.000Z",
+      assuranceLevel: "PLATFORM_VERIFIED",
+    };
+    mocks.listActivePrivateChannelIdentityBindings.mockResolvedValue([
+      wrongHomeserverBinding,
+    ]);
+    mocks.isVerifiedPrivateChannelIdentityBinding.mockImplementation(
+      (
+        binding: typeof wrongHomeserverBinding,
+        expected: {
+          provider: string;
+          issuer: string;
+          connectionId: string;
+        },
+      ) =>
+        binding.provider === expected.provider
+        && binding.issuer === expected.issuer
+        && binding.connectionId === expected.connectionId,
+    );
+
+    const response = await listIdentityBindings(
+      new Request("http://localhost/reps/delegate/identity-bindings"),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      readiness: { matrix: false },
+    });
+    expect(mocks.isVerifiedPrivateChannelIdentityBinding).toHaveBeenCalledWith(
+      wrongHomeserverBinding,
+      {
+        provider: "MATRIX",
+        issuer: "matrix.example",
+        connectionId: "matrix-appservice",
       },
     );
   });
@@ -292,9 +363,8 @@ describe("public identity binding principal enforcement", () => {
     expect(mocks.createIdentityBindingChallenge).not.toHaveBeenCalled();
   });
 
-  it("returns 503 instead of minting a Matrix challenge when the adapter is unavailable", async () => {
-    delete process.env.MATRIX_HOMESERVER_URL;
-    delete process.env.MATRIX_SERVER_NAME;
+  it("returns 503 instead of minting a Matrix challenge when the representative endpoint is unavailable", async () => {
+    mocks.resolveRepresentativeMatrixEndpoint.mockResolvedValue(null);
 
     const response = await createIdentityBinding(
       matrixBindingRequest(),
@@ -303,6 +373,50 @@ describe("public identity binding principal enforcement", () => {
 
     expect(response.status).toBe(503);
     expect(mocks.createIdentityBindingChallenge).not.toHaveBeenCalled();
+  });
+
+  it("returns the exact Matrix destination and account-bound subject with the command", async () => {
+    const response = await createIdentityBinding(
+      new Request("http://localhost/reps/delegate/identity-bindings", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "matrix",
+          providerSubject: "@Neo:MATRIX.EXAMPLE",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(201);
+    expect(mocks.resolveRepresentativeMatrixEndpoint).toHaveBeenCalledWith(
+      "delegate",
+    );
+    expect(mocks.createIdentityBindingChallenge).toHaveBeenCalledWith({
+      audienceIdentityId: "canonical-identity",
+      provider: "MATRIX",
+      issuer: "MATRIX.EXAMPLE",
+      connectionId: "matrix-appservice",
+      expectedProviderSubject: "@Neo:MATRIX.EXAMPLE",
+      metadata: {
+        representativeSlug: "delegate",
+        requestedFrom: "representative_web",
+      },
+    });
+    await expect(response.json()).resolves.toEqual({
+      provider: "matrix",
+      expiresAt: new Date("2026-08-01T00:05:00.000Z").toISOString(),
+      command: "!bind bind-token",
+      scope: {
+        issuer: "MATRIX.EXAMPLE",
+        connectionId: "matrix-appservice",
+      },
+      expectedProviderSubject: "@Neo:MATRIX.EXAMPLE",
+      matrixEndpoint: {
+        matrixUserId: "@_delegate_rep_delegate:matrix.example",
+        connectionId: "matrix-appservice",
+      },
+    });
   });
 
   it("revokes only the authenticated identity's exact Telegram Bot proof", async () => {
@@ -350,6 +464,60 @@ describe("public identity binding principal enforcement", () => {
     expect(mocks.revokePrivateChannelIdentityBinding).not.toHaveBeenCalled();
   });
 
+  it("preserves the exact Matrix MXID issuer while normalizing only the internal connection id", async () => {
+    mocks.revokePrivateChannelIdentityBinding.mockResolvedValue({
+      binding: {
+        provider: "MATRIX",
+        providerSubject: "@neo:MATRIX.EXAMPLE",
+        issuer: "MATRIX.EXAMPLE",
+        connectionId: "matrix-appservice",
+      },
+      changed: true,
+    });
+
+    const response = await revokeIdentityBinding(
+      new Request("http://localhost/reps/delegate/identity-bindings", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "matrix",
+          providerSubject: "@neo:MATRIX.EXAMPLE",
+          issuer: "MATRIX.EXAMPLE",
+          connectionId: "Matrix-AppService",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.revokePrivateChannelIdentityBinding).toHaveBeenCalledWith({
+      audienceIdentityId: "canonical-identity",
+      provider: "MATRIX",
+      providerSubject: "@neo:MATRIX.EXAMPLE",
+      issuer: "MATRIX.EXAMPLE",
+      connectionId: "matrix-appservice",
+    });
+  });
+
+  it("rejects a Matrix issuer that differs from the MXID server only by case", async () => {
+    const response = await revokeIdentityBinding(
+      new Request("http://localhost/reps/delegate/identity-bindings", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          provider: "matrix",
+          providerSubject: "@neo:MATRIX.EXAMPLE",
+          issuer: "matrix.example",
+          connectionId: "matrix-appservice",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mocks.revokePrivateChannelIdentityBinding).not.toHaveBeenCalled();
+  });
+
   it("maps an exhausted serializable conflict to a retryable 409", async () => {
     mocks.revokePrivateChannelIdentityBinding.mockRejectedValue(
       Object.assign(new Error("serialization failure"), { code: "P2034" }),
@@ -366,6 +534,23 @@ describe("public identity binding principal enforcement", () => {
       error: "The binding changed concurrently. Please retry.",
     });
   });
+
+  it("returns 500 for an unexpected persistence failure", async () => {
+    mocks.listActivePrivateChannelIdentityBindings.mockRejectedValue(
+      new Error("database connection failed"),
+    );
+
+    const response = await listIdentityBindings(
+      new Request("http://localhost/reps/delegate/identity-bindings"),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toBe("no-store, private");
+    await expect(response.json()).resolves.toEqual({
+      error: "Unable to manage identity bindings.",
+    });
+  });
 });
 
 function matrixBindingRequest() {
@@ -377,6 +562,19 @@ function matrixBindingRequest() {
       providerSubject: "@neo:matrix.example",
     }),
   });
+}
+
+function normalizeTestMatrixUserId(value: string) {
+  const matrixUserId = value.trim();
+  const separator = matrixUserId.indexOf(":", 1);
+  if (
+    matrixUserId[0] !== "@"
+    || separator <= 1
+    || separator === matrixUserId.length - 1
+  ) {
+    throw new Error("Matrix user id must be a full MXID.");
+  }
+  return matrixUserId;
 }
 
 function telegramRevocationRequest() {

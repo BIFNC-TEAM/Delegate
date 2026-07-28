@@ -25,6 +25,9 @@ import {
   setOwnerChannelDesiredState,
 } from "../../packages/web-data/src/channel-management";
 import {
+  withActiveMatrixRepresentativeChannelFence,
+} from "../../packages/web-data/src/matrix-room-security";
+import {
   consumeIdentityBindingChallenge,
   createIdentityBindingChallenge,
 } from "../../packages/web-data/src/audience-identity-binding";
@@ -387,14 +390,14 @@ describePostgres("channel platform PostgreSQL 16 closure", () => {
           eventId: pausedMessageId,
           roomId,
           sender: audienceMatrixUserId,
-          body: "defer while paused",
+          body: "ignore while paused",
         }),
       ],
     });
     expect(pausedResult).toEqual([
       {
         eventId: pausedMessageId,
-        status: "failed",
+        status: "ignored",
         reason: expect.stringContaining("channel_paused"),
       },
     ]);
@@ -436,17 +439,21 @@ describePostgres("channel platform PostgreSQL 16 closure", () => {
             eventId: pausedMessageId,
             roomId,
             sender: audienceMatrixUserId,
-            body: "defer while paused",
+            body: "ignore while paused",
           }),
         ],
       }),
     ).resolves.toEqual([
-      { eventId: pausedMessageId, status: "processed" },
+      { eventId: pausedMessageId, status: "duplicate" },
     ]);
-    await expectSingleGeneration({
-      conversationId: matrixConversation.id,
-      clientMessageId: pausedMessageId,
-    });
+    expect(
+      await prisma.message.count({
+        where: {
+          conversationId: matrixConversation.id,
+          clientMessageId: pausedMessageId,
+        },
+      }),
+    ).toBe(0);
 
     expect(
       await prisma.serviceEntitlementAccount.count({
@@ -651,6 +658,70 @@ describePostgres("channel platform PostgreSQL 16 closure", () => {
         (payload) => payload.requestId === crossOwnerRequestId,
       ),
     ).toBe(false);
+  });
+
+  it("rechecks Matrix channel state after waiting for a lifecycle advisory lock", async () => {
+    const fixture = await createFixture();
+    const provisioned = await provisionOwnerMatrixChannel({
+      ownerId: fixture.ownerId,
+      actorId: fixture.ownerId,
+      representativeId: fixture.representativeId,
+      requestId: `${fixture.suffix}:matrix-fence-provision`,
+      idempotencyKey: `${fixture.suffix}:matrix-fence-provision`,
+    });
+
+    let signalLifecycleWriteReady!: () => void;
+    let releaseLifecycleWrite!: () => void;
+    const lifecycleWriteReady = new Promise<void>((resolve) => {
+      signalLifecycleWriteReady = resolve;
+    });
+    const lifecycleWriteReleased = new Promise<void>((resolve) => {
+      releaseLifecycleWrite = resolve;
+    });
+    const lifecycleWrite = prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtext(${`matrix-virtual-user:${fixture.representativeId}`})
+        )
+      `;
+      await tx.representativeChannelBinding.update({
+        where: { id: provisioned.binding.id },
+        data: {
+          desiredState: ChannelDesiredState.PAUSED,
+          status: "PAUSED",
+        },
+      });
+      signalLifecycleWriteReady();
+      await lifecycleWriteReleased;
+    });
+
+    await lifecycleWriteReady;
+    let operationExecuted = false;
+    const fencedOperation =
+      withActiveMatrixRepresentativeChannelFence(
+        {
+          representativeId: fixture.representativeId,
+          representativeMatrixUserId:
+            provisioned.virtualUser.matrixUserId,
+        },
+        async () => {
+          operationExecuted = true;
+          return "sent";
+        },
+      );
+
+    try {
+      await waitForAdvisoryLockWaiter();
+    } finally {
+      releaseLifecycleWrite();
+      await lifecycleWrite;
+    }
+
+    await expect(fencedOperation).resolves.toEqual({
+      executed: false,
+      reason: "matrix_channel_not_active",
+    });
+    expect(operationExecuted).toBe(false);
   });
 
   it("recovers manual channel health after failures leave the 24-hour window without resuming a paused binding", async () => {
@@ -934,6 +1005,22 @@ async function expectSingleGeneration(input: {
       },
     }),
   ).toBe(1);
+}
+
+async function waitForAdvisoryLockWaiter() {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const [row] = await prisma.$queryRaw<Array<{ waiters: number }>>`
+      SELECT count(*)::int AS waiters
+      FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND granted = false
+    `;
+    if ((row?.waiters ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    "Timed out waiting for the Matrix lifecycle advisory-lock contender.",
+  );
 }
 
 function assertSafePostgresE2eTarget() {

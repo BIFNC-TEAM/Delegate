@@ -489,18 +489,33 @@ export function DashboardChannels({
 
   async function performAction(
     row: ChannelRow,
-    action: "connect" | "pause" | "resume" | "health",
+    action: "connect" | "disconnect" | "pause" | "resume" | "health",
   ) {
     const bindingId = row.channel.bindingId;
     const canProvisionChannel =
       action === "connect"
-      && !bindingId
-      && row.channel.kind === "MATRIX";
+      && row.channel.kind === "MATRIX"
+      && (
+        !bindingId
+        || row.channel.desiredState === "DISCONNECTED"
+      );
     if (
       snapshot?.dataSource !== "database"
       || (!bindingId && !canProvisionChannel)
     ) return;
-    const actionKey = bindingId
+    if (
+      action === "disconnect"
+      && !window.confirm(
+        zh
+          ? `确认断开 ${row.representativeName} 的 Matrix 渠道？历史会话会保留，但新的 Matrix 消息将停止处理。`
+          : `Disconnect Matrix for ${row.representativeName}? Conversation history will remain, but new Matrix messages will stop.`,
+      )
+    ) {
+      return;
+    }
+    const actionKey = action === "connect"
+      ? `${row.representativeId}:${row.channel.kind}:connect`
+      : bindingId
       ? `${bindingId}:${action}`
       : `${row.representativeId}:${row.channel.kind}:connect`;
     const requestId = createRequestId();
@@ -511,17 +526,24 @@ export function DashboardChannels({
       const response = await fetch(
         action === "connect"
           ? "/api/dashboard/channels"
+          : action === "disconnect"
+          ? `/api/dashboard/channels/${encodeURIComponent(bindingId!)}?channel=MATRIX`
           : action === "health"
           ? `/api/dashboard/channels/${encodeURIComponent(bindingId!)}/health`
           : `/api/dashboard/channels/${encodeURIComponent(bindingId!)}`,
         {
-          method: action === "health" || action === "connect" ? "POST" : "PATCH",
+          method:
+            action === "disconnect"
+              ? "DELETE"
+              : action === "health" || action === "connect"
+                ? "POST"
+                : "PATCH",
           headers: {
             "Content-Type": "application/json",
             "Idempotency-Key": requestId,
             "X-Request-Id": requestId,
           },
-          ...(action === "health"
+          ...(action === "health" || action === "disconnect"
             ? {}
             : action === "connect"
               ? {
@@ -541,8 +563,12 @@ export function DashboardChannels({
       setNotice(
         action === "connect"
           ? zh
-              ? `${row.representativeName} 的 Matrix 受管用户已创建；现在可从 Matrix 客户端邀请该 MXID。`
-              : `Managed Matrix user created for ${row.representativeName}; invite the MXID from a Matrix client.`
+              ? `${row.representativeName} 的 Matrix 受管用户已启用；现在可从 Matrix 客户端邀请该 MXID。`
+              : `Managed Matrix user enabled for ${row.representativeName}; invite the MXID from a Matrix client.`
+          : action === "disconnect"
+            ? zh
+              ? `${row.representativeName} 的 Matrix 渠道已断开；历史会话已保留，可随时重新连接。`
+              : `Matrix was disconnected for ${row.representativeName}. History was preserved and the channel can be reconnected.`
           : action === "health"
           ? zh
             ? `${row.representativeName} 的${channelLabel(row.channel, locale)}健康状态已刷新。`
@@ -1251,7 +1277,9 @@ function ChannelTableRow({
 }: {
   busyKey: string | null;
   locale: Locale;
-  onAction: (action: "connect" | "pause" | "resume" | "health") => void;
+  onAction: (
+    action: "connect" | "disconnect" | "pause" | "resume" | "health"
+  ) => void;
   onConfigureTelegram: () => void;
   readOnly: boolean;
   row: ChannelRow;
@@ -1270,15 +1298,29 @@ function ChannelTableRow({
       : null;
   const telegramConfigured =
     channel.kind !== "TELEGRAM" || Boolean(assignedTelegramBot);
-  const unavailable = !channel.bindingId || !telegramConfigured || readOnly;
+  const unavailable =
+    !channel.bindingId
+    || !telegramConfigured
+    || channel.desiredState === "DISCONNECTED"
+    || readOnly;
   const connectBusy =
     busyKey === `${row.representativeId}:${channel.kind}:connect`;
   const telegramAssignBusy =
     busyKey === `${row.representativeId}:TELEGRAM:assign`;
   const canProvisionChannel =
     !readOnly
-    && !channel.bindingId
-    && channel.kind === "MATRIX";
+    && channel.kind === "MATRIX"
+    && (
+      !channel.bindingId
+      || channel.desiredState === "DISCONNECTED"
+    );
+  const disconnectBusy =
+    busyKey === `${channel.bindingId}:disconnect`;
+  const canDisconnectMatrix =
+    !readOnly
+    && channel.kind === "MATRIX"
+    && Boolean(channel.bindingId)
+    && channel.desiredState !== "DISCONNECTED";
 
   return (
     <tr className={row.isActiveRepresentative ? "is-active-representative" : undefined}>
@@ -1401,11 +1443,31 @@ function ChannelTableRow({
             >
               {connectBusy
                 ? zh
-                  ? "创建中…"
-                  : "Creating…"
+                  ? "连接中…"
+                  : "Connecting…"
+                : channel.bindingId
+                  ? zh
+                    ? "重新连接 Matrix"
+                    : "Reconnect Matrix"
                 : zh
                   ? "创建 Matrix 用户"
                   : "Create Matrix user"}
+            </button>
+          ) : null}
+          {canDisconnectMatrix ? (
+            <button
+              className="dashboard-v2-button-secondary"
+              disabled={Boolean(busyKey)}
+              onClick={() => onAction("disconnect")}
+              type="button"
+            >
+              {disconnectBusy
+                ? zh
+                  ? "断开中…"
+                  : "Disconnecting…"
+                : zh
+                  ? "断开 Matrix"
+                  : "Disconnect Matrix"}
             </button>
           ) : null}
           <button

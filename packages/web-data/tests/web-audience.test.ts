@@ -178,6 +178,55 @@ describe("web audience identity resolver", () => {
     expect(identity.id).toBe(client.identityLinks[0]?.audienceIdentityId);
   });
 
+  it("keeps Matrix identities and issuer proofs distinct by server-name case", async () => {
+    const client = new FakeWebAudienceClient();
+
+    const lower = await resolveChannelAudienceIdentity(
+      {
+        provider: "MATRIX",
+        providerSubject: "@u:matrix.org",
+        issuer: "matrix.org",
+        connectionId: "Delegate-Matrix-AS",
+      },
+      client,
+    );
+    const upper = await resolveChannelAudienceIdentity(
+      {
+        provider: "MATRIX",
+        providerSubject: "@u:MATRIX.ORG",
+        issuer: "MATRIX.ORG",
+        connectionId: "Delegate-Matrix-AS",
+      },
+      client,
+    );
+
+    expect(lower.id).not.toBe(upper.id);
+    expect(client.identityLinks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          providerSubject: "@u:matrix.org",
+          issuer: "matrix.org",
+        }),
+        expect.objectContaining({
+          providerSubject: "@u:MATRIX.ORG",
+          issuer: "MATRIX.ORG",
+        }),
+      ]),
+    );
+    expect(client.identityLinkConnectionProofs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          issuer: "matrix.org",
+          connectionId: "delegate-matrix-as",
+        }),
+        expect.objectContaining({
+          issuer: "MATRIX.ORG",
+          connectionId: "delegate-matrix-as",
+        }),
+      ]),
+    );
+  });
+
   it("does not let ordinary channel traffic create or restore a connection proof", async () => {
     const client = new FakeWebAudienceClient();
 

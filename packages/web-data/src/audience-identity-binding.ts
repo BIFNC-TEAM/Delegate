@@ -7,6 +7,10 @@ import {
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
+import {
+  normalizeMatrixServerName,
+  normalizeMatrixUserId,
+} from "./matrix-identifiers";
 import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
 import { mergeAudienceIdentity } from "./web-audience";
 
@@ -104,14 +108,20 @@ export type IdentityBindingChallengeGrant = {
   connectionId: string;
 };
 
-export type ConsumeIdentityBindingChallengeInput = {
-  token: string;
+type ConsumeIdentityBindingChallengeScope = {
   provider: IdentityLinkProvider;
   providerSubject: string;
   issuer?: string;
   connectionId: string;
   proofMetadata?: Record<string, unknown>;
 };
+
+export type ConsumeIdentityBindingChallengeInput =
+  ConsumeIdentityBindingChallengeScope
+  & (
+    | { token: string; tokenHash?: never }
+    | { token?: never; tokenHash: string }
+  );
 
 export type IdentityBindingResult = {
   audienceIdentityId: string;
@@ -267,7 +277,7 @@ export async function createIdentityBindingChallenge(
   client: AudienceBindingClient = prisma as unknown as AudienceBindingClient,
 ): Promise<IdentityBindingChallengeGrant> {
   const audienceIdentityId = requireNonEmpty(input.audienceIdentityId, "Audience identity id");
-  const issuer = normalizeIssuer(input.issuer);
+  const issuer = normalizeIssuer(input.provider, input.issuer);
   const connectionId = normalizeConnectionId(input.connectionId);
   assertBindableProvider(input.provider);
   const ttlSeconds = normalizeTtlSeconds(input.ttlSeconds);
@@ -371,8 +381,10 @@ export async function consumeIdentityBindingChallenge(
   input: ConsumeIdentityBindingChallengeInput,
   client: AudienceBindingClient = prisma as unknown as AudienceBindingClient,
 ): Promise<IdentityBindingResult> {
-  const token = requireNonEmpty(input.token, "Binding token");
-  const issuer = normalizeIssuer(input.issuer);
+  const tokenHash = input.tokenHash === undefined
+    ? hashBindingToken(requireNonEmpty(input.token, "Binding token"))
+    : normalizeBindingTokenHash(input.tokenHash);
+  const issuer = normalizeIssuer(input.provider, input.issuer);
   const connectionId = normalizeConnectionId(input.connectionId);
   const providerSubject = normalizeProviderSubject(input.provider, input.providerSubject);
   assertBindableProvider(input.provider);
@@ -380,7 +392,7 @@ export async function consumeIdentityBindingChallenge(
   const run = async (tx: AudienceBindingClient): Promise<IdentityBindingResult> => {
     const now = new Date();
     const challenge = await tx.identityBindingChallenge.findUnique({
-      where: { tokenHash: hashBindingToken(token) },
+      where: { tokenHash },
     });
     if (!challenge) throw new Error("Binding challenge is invalid.");
     if (
@@ -566,7 +578,7 @@ export async function revokePrivateChannelIdentityBinding(
     input.provider,
     input.providerSubject,
   );
-  const issuer = normalizeIssuer(input.issuer);
+  const issuer = normalizeIssuer(input.provider, input.issuer);
   const connectionId = normalizeConnectionId(input.connectionId);
   assertBindableProvider(input.provider);
   const now = new Date();
@@ -625,7 +637,7 @@ export async function revokePrivateChannelIdentityBinding(
     if (
       !link
       || link.audienceIdentityId !== audienceIdentityId
-      || normalizeIssuer(link.issuer) !== issuer
+      || normalizeIssuer(input.provider, link.issuer) !== issuer
     ) {
       return { binding, changed: false };
     }
@@ -712,6 +724,14 @@ export function hashBindingToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
+function normalizeBindingTokenHash(value: string): string {
+  const tokenHash = requireNonEmpty(value, "Binding token hash").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(tokenHash)) {
+    throw new Error("Binding token hash is invalid.");
+  }
+  return tokenHash;
+}
+
 function assertBindableProvider(provider: IdentityLinkProvider) {
   if (provider !== IdentityLinkProvider.TELEGRAM && provider !== IdentityLinkProvider.MATRIX) {
     throw new Error("Private-channel binding only supports Telegram or Matrix.");
@@ -734,17 +754,19 @@ function normalizeProviderSubject(provider: IdentityLinkProvider, value: string)
     return subject;
   }
   if (provider === IdentityLinkProvider.MATRIX) {
-    if (!/^@[^\s:]+:[^\s:]+$/.test(subject)) {
-      throw new Error("Matrix provider subject must be a full MXID.");
-    }
-    const separator = subject.lastIndexOf(":");
-    return `${subject.slice(0, separator)}:${subject.slice(separator + 1).toLowerCase()}`;
+    return normalizeMatrixUserId(subject);
   }
   return subject;
 }
 
-function normalizeIssuer(value?: string): string {
-  return (value?.trim().toLowerCase() || "delegate").slice(0, 255);
+function normalizeIssuer(
+  provider: IdentityLinkProvider,
+  value?: string,
+): string {
+  const issuer = value?.trim() || "delegate";
+  return provider === IdentityLinkProvider.MATRIX
+    ? normalizeMatrixServerName(issuer)
+    : issuer.toLowerCase().slice(0, 255);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

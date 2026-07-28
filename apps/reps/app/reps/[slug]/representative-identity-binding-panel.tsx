@@ -17,6 +17,11 @@ type TelegramBotEndpoint = {
   username: string | null;
 };
 
+type MatrixEndpoint = {
+  matrixUserId: string;
+  connectionId: string;
+};
+
 type BindingInstruction = {
   provider: "telegram" | "matrix";
   command: string;
@@ -25,7 +30,9 @@ type BindingInstruction = {
     issuer: string;
     connectionId: string;
   };
+  expectedProviderSubject?: string;
   telegramBot?: TelegramBotEndpoint;
+  matrixEndpoint?: MatrixEndpoint;
 };
 
 type BindingCapabilities = {
@@ -37,6 +44,7 @@ type BindingStatePayload = {
   bindings: BindingSnapshot[];
   capabilities: BindingCapabilities;
   telegramBot: TelegramBotEndpoint | null;
+  matrixEndpoint: MatrixEndpoint | null;
 };
 
 export function RepresentativeIdentityBindingPanel({
@@ -50,6 +58,8 @@ export function RepresentativeIdentityBindingPanel({
   const [bindings, setBindings] = useState<BindingSnapshot[]>([]);
   const [telegramBot, setTelegramBot] =
     useState<TelegramBotEndpoint | null>(null);
+  const [matrixEndpoint, setMatrixEndpoint] =
+    useState<MatrixEndpoint | null>(null);
   const [capabilities, setCapabilities] =
     useState<BindingCapabilities | null>(null);
   const [matrixUserId, setMatrixUserId] = useState("");
@@ -59,21 +69,36 @@ export function RepresentativeIdentityBindingPanel({
   const [creatingProvider, setCreatingProvider] =
     useState<"telegram" | "matrix" | null>(null);
   const [copiedCommand, setCopiedCommand] = useState<string | null>(null);
+  const [copiedMatrixTarget, setCopiedMatrixTarget] = useState<string | null>(
+    null,
+  );
   const [revokingKey, setRevokingKey] = useState<string | null>(null);
+  const [bindingLoadStatus, setBindingLoadStatus] =
+    useState<"loading" | "loaded" | "error">("loading");
+  const [bindingLoadError, setBindingLoadError] = useState<string | null>(null);
+  const [bindingLoadAttempt, setBindingLoadAttempt] = useState(0);
 
   useEffect(() => {
     let active = true;
+    setBindingLoadStatus("loading");
+    setBindingLoadError(null);
+    setCapabilities(null);
+    setTelegramBot(null);
+    setMatrixEndpoint(null);
     void fetchBindingState(representativeSlug)
       .then((payload) => {
         if (active) {
           setBindings(payload.bindings);
           setCapabilities(payload.capabilities);
           setTelegramBot(payload.telegramBot);
+          setMatrixEndpoint(payload.matrixEndpoint);
+          setBindingLoadStatus("loaded");
         }
       })
       .catch((nextError: unknown) => {
         if (active) {
-          setError(
+          setBindingLoadStatus("error");
+          setBindingLoadError(
             nextError instanceof Error
               ? nextError.message
               : zh
@@ -85,15 +110,24 @@ export function RepresentativeIdentityBindingPanel({
     return () => {
       active = false;
     };
-  }, [representativeSlug, zh]);
+  }, [bindingLoadAttempt, representativeSlug, zh]);
 
   useEffect(() => {
     if (!instruction) return;
     let active = true;
+    let timer: number | undefined;
     const expiresAt = Date.parse(instruction.expiresAt);
+    const scheduleNextPoll = () => {
+      if (!active) return;
+      timer = window.setTimeout(() => {
+        void poll();
+      }, 2_000);
+    };
     const poll = async () => {
       if (!active) return;
+      let shouldContinue = true;
       if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
+        shouldContinue = false;
         setInstruction(null);
         setCopiedCommand(null);
         setError(
@@ -109,15 +143,27 @@ export function RepresentativeIdentityBindingPanel({
         setBindings(payload.bindings);
         setCapabilities(payload.capabilities);
         setTelegramBot(payload.telegramBot);
+        setMatrixEndpoint(payload.matrixEndpoint);
         const expectedProvider =
           instruction.provider === "telegram" ? "TELEGRAM" : "MATRIX";
         const completed = payload.bindings.some(
           (binding) =>
             binding.provider === expectedProvider
             && binding.issuer === instruction.scope.issuer
-            && binding.connectionId === instruction.scope.connectionId,
+            && binding.connectionId === instruction.scope.connectionId
+            && (
+              instruction.provider !== "matrix"
+              || (
+                normalizeMatrixUserId(binding.providerSubject) !== null
+                && normalizeMatrixUserId(binding.providerSubject)
+                  === normalizeMatrixUserId(
+                    instruction.expectedProviderSubject ?? "",
+                  )
+              )
+            ),
         );
         if (completed) {
+          shouldContinue = false;
           setInstruction(null);
           setCopiedCommand(null);
           setNotice(
@@ -128,15 +174,18 @@ export function RepresentativeIdentityBindingPanel({
         }
       } catch {
         // A transient refresh failure must not discard the still-valid command.
+      } finally {
+        if (shouldContinue) {
+          scheduleNextPoll();
+        }
       }
     };
-    const timer = window.setInterval(() => {
-      void poll();
-    }, 2_000);
     void poll();
     return () => {
       active = false;
-      window.clearInterval(timer);
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     };
   }, [instruction, representativeSlug, zh]);
 
@@ -163,6 +212,9 @@ export function RepresentativeIdentityBindingPanel({
         setInstruction(nextInstruction);
         if (nextInstruction.telegramBot) {
           setTelegramBot(nextInstruction.telegramBot);
+        }
+        if (nextInstruction.matrixEndpoint) {
+          setMatrixEndpoint(nextInstruction.matrixEndpoint);
         }
       })
       .catch((nextError: unknown) => {
@@ -192,6 +244,21 @@ export function RepresentativeIdentityBindingPanel({
         zh
           ? "复制失败，请手动选择并复制命令。"
           : "Copy failed. Select and copy the command manually.",
+      );
+    }
+  }
+
+  async function copyMatrixTarget() {
+    if (!matrixEndpoint) return;
+    try {
+      await navigator.clipboard.writeText(matrixEndpoint.matrixUserId);
+      setCopiedMatrixTarget(matrixEndpoint.matrixUserId);
+      setError(null);
+    } catch {
+      setError(
+        zh
+          ? "复制失败，请手动选择并复制目标 MXID。"
+          : "Copy failed. Select and copy the destination MXID manually.",
       );
     }
   }
@@ -238,14 +305,50 @@ export function RepresentativeIdentityBindingPanel({
         if (!response.ok) throw new Error(await extractError(response));
         return response.json() as Promise<{ changed: boolean }>;
       })
-      .then(() => {
-        setBindings((current) =>
-          current.filter((candidate) => bindingKey(candidate) !== key),
+      .then(async (result) => {
+        setInstruction((current) =>
+          instructionMatchesBinding(current, binding) ? null : current,
+        );
+        setCopiedCommand(null);
+        if (result.changed) {
+          setBindings((current) =>
+            current.filter((candidate) => bindingKey(candidate) !== key),
+          );
+          setNotice(
+            zh
+              ? "已解除该渠道连接。历史消息、余额和订单均已保留；如需恢复，请重新生成并发送一次性绑定命令。"
+              : "The channel connection is unlinked. History, balance, and orders are preserved; create and send a new one-time command to restore it.",
+          );
+          return;
+        }
+
+        let payload: BindingStatePayload;
+        try {
+          payload = await fetchBindingState(representativeSlug);
+        } catch (refreshError) {
+          const reason =
+            refreshError instanceof Error ? refreshError.message : "";
+          throw new Error(
+            zh
+              ? `解除结果未发生变更，但无法读取最新绑定状态，请重试刷新。${reason ? ` ${reason}` : ""}`
+              : `The unlink result did not change, but the latest binding state could not be loaded. Retry the refresh.${reason ? ` ${reason}` : ""}`,
+          );
+        }
+        setBindings(payload.bindings);
+        setCapabilities(payload.capabilities);
+        setTelegramBot(payload.telegramBot);
+        setMatrixEndpoint(payload.matrixEndpoint);
+        const stillLinked = payload.bindings.some(
+          (candidate) => bindingKey(candidate) === key,
         );
         setNotice(
-          zh
-            ? "已解除该渠道连接。历史消息、余额和订单均已保留；如需恢复，请重新生成并发送一次性绑定命令。"
-            : "The channel connection is unlinked. History, balance, and orders are preserved; create and send a new one-time command to restore it.",
+          stillLinked
+            ? zh
+              ? "绑定状态已在其他操作中发生变化，当前连接仍然有效；页面已同步最新状态。"
+              : "The binding changed in another operation and is still active. The page now shows the latest state."
+            : zh
+              ? "该连接此前已解除，页面已同步最新状态。历史消息、余额和订单均已保留。"
+              : "This connection was already unlinked. The page now shows the latest state, and history, balance, and orders are preserved.",
         );
       })
       .catch((nextError: unknown) => {
@@ -264,7 +367,29 @@ export function RepresentativeIdentityBindingPanel({
 
   return (
     <div className="setup-stack">
-      {bindings.length ? (
+      {bindingLoadStatus === "loading" ? (
+        <p className="footer-note" role="status">
+          {zh ? "正在读取私聊账户绑定状态…" : "Loading linked private-channel accounts…"}
+        </p>
+      ) : bindingLoadStatus === "error" ? (
+        <div className="status-banner status-error" role="alert">
+          <span>
+            {bindingLoadError
+              ?? (zh
+                ? "读取绑定状态失败。"
+                : "Unable to load bindings.")}
+          </span>
+          <div className="chip-row">
+            <button
+              className="button-secondary"
+              onClick={() => setBindingLoadAttempt((current) => current + 1)}
+              type="button"
+            >
+              {zh ? "重试" : "Retry"}
+            </button>
+          </div>
+        </div>
+      ) : bindings.length ? (
         <div className="chip-row" aria-label={zh ? "已绑定账户" : "Linked accounts"}>
           {bindings.map((binding) => {
             const key = bindingKey(binding);
@@ -341,7 +466,7 @@ export function RepresentativeIdentityBindingPanel({
           </p>
           <button
             className="button-secondary"
-            disabled={creatingProvider !== null}
+            disabled={creatingProvider !== null || revokingKey !== null}
             onClick={() => createBinding("telegram")}
             type="button"
           >
@@ -361,11 +486,43 @@ export function RepresentativeIdentityBindingPanel({
           <strong>Matrix</strong>
           <p>
             {zh
-              ? "先填写完整 MXID，再把一次性命令发送到与代表的未加密私聊房间。"
-              : "Enter your full MXID, then send the one-time command in the unencrypted direct room with the representative."}
+              ? "先复制代表的目标 MXID 并创建未加密的一对一私聊，再填写你自己的完整 MXID。一次性命令只能由这个账号在该私聊中发送。"
+              : "Copy the representative's destination MXID and create an unencrypted one-to-one room first. Then enter your own full MXID; only that account can use the one-time command in this room."}
           </p>
+          {matrixEndpoint ? (
+            <div className="field-stack">
+              <span className="field-hint">
+                {zh ? "代表的目标 Matrix MXID" : "Representative destination MXID"}
+              </span>
+              <pre className="artifact-preview">{matrixEndpoint.matrixUserId}</pre>
+              <div className="chip-row">
+                <button
+                  className="button-secondary"
+                  disabled={
+                    copiedMatrixTarget === matrixEndpoint.matrixUserId
+                  }
+                  onClick={() => void copyMatrixTarget()}
+                  type="button"
+                >
+                  {copiedMatrixTarget === matrixEndpoint.matrixUserId
+                    ? zh
+                      ? "目标 MXID 已复制"
+                      : "Destination MXID copied"
+                    : zh
+                      ? "复制目标 MXID"
+                      : "Copy destination MXID"}
+                </button>
+              </div>
+              <span className="footer-note">
+                {zh ? "连接范围：" : "Connection scope: "}
+                {matrixEndpoint.connectionId}
+              </span>
+            </div>
+          ) : null}
           <label className="field-stack">
-            <span className="field-hint">{zh ? "Matrix 用户 ID" : "Matrix user ID"}</span>
+            <span className="field-hint">
+              {zh ? "你自己的 Matrix MXID" : "Your Matrix MXID"}
+            </span>
             <input
               autoComplete="username"
               className="text-input"
@@ -377,7 +534,11 @@ export function RepresentativeIdentityBindingPanel({
           </label>
           <button
             className="button-secondary"
-            disabled={creatingProvider !== null || !matrixUserId.trim()}
+            disabled={
+              creatingProvider !== null
+              || revokingKey !== null
+              || !matrixUserId.trim()
+            }
             onClick={() => createBinding("matrix")}
             type="button"
           >
@@ -386,8 +547,8 @@ export function RepresentativeIdentityBindingPanel({
                 ? "生成中…"
                 : "Creating…"
               : zh
-                ? "生成 Matrix 绑定命令"
-                : "Create Matrix command"}
+                ? "为这个 Matrix 账号生成绑定命令"
+                : "Create command for this Matrix account"}
           </button>
           </article>
         ) : null}
@@ -419,8 +580,19 @@ export function RepresentativeIdentityBindingPanel({
                       : "this representative's Telegram Bot"
                   }`
               : zh
-                ? "请在对应 Matrix 私聊中发送以下命令"
-                : "Send this command in the matching Matrix private chat"}
+                ? `请用 ${instruction.expectedProviderSubject ?? "已填写的 Matrix 账号"} 在与 ${
+                    instruction.matrixEndpoint?.matrixUserId
+                    ?? matrixEndpoint?.matrixUserId
+                    ?? "目标代表"
+                  } 的未加密私聊中发送以下命令`
+                : `Use ${
+                    instruction.expectedProviderSubject
+                    ?? "the Matrix account you entered"
+                  } to send this command in the unencrypted direct room with ${
+                    instruction.matrixEndpoint?.matrixUserId
+                    ?? matrixEndpoint?.matrixUserId
+                    ?? "the representative destination"
+                  }`}
           </strong>
           <pre className="artifact-preview">{instruction.command}</pre>
           <div className="chip-row">
@@ -480,6 +652,18 @@ function bindingKey(binding: BindingSnapshot): string {
   ].join(":");
 }
 
+function instructionMatchesBinding(
+  instruction: BindingInstruction | null,
+  binding: BindingSnapshot,
+): boolean {
+  return Boolean(
+    instruction
+    && instruction.provider.toUpperCase() === binding.provider
+    && instruction.scope.issuer === binding.issuer
+    && instruction.scope.connectionId === binding.connectionId,
+  );
+}
+
 function telegramBindingTarget(
   binding: BindingSnapshot,
   currentBot: TelegramBotEndpoint | null,
@@ -504,6 +688,87 @@ function telegramBotUrl(
   return /^[A-Za-z0-9_-]{1,64}$/.test(payload)
     ? `https://t.me/${bot.username}?start=${payload}`
     : `https://t.me/${bot.username}`;
+}
+
+function normalizeMatrixUserId(value: string): string | null {
+  const matrixUserId = value.trim();
+  const separator = matrixUserId.indexOf(":", 1);
+  const localpart =
+    separator > 1 ? matrixUserId.slice(1, separator) : "";
+  const serverName =
+    separator > 1
+      ? matrixUserId.slice(separator + 1)
+      : "";
+  if (
+    matrixUserId[0] !== "@"
+    || !localpart
+    || /\s|:/.test(localpart)
+    || !isValidMatrixServerName(serverName)
+    || new TextEncoder().encode(matrixUserId).length > 255
+  ) {
+    return null;
+  }
+  return `@${localpart}:${serverName}`;
+}
+
+function isValidMatrixServerName(value: string): boolean {
+  if (!value || value.length > 255 || /\s/.test(value)) return false;
+
+  let host = value;
+  let port: string | undefined;
+  if (value.startsWith("[")) {
+    const closingBracket = value.indexOf("]");
+    if (closingBracket <= 1) return false;
+    host = value.slice(1, closingBracket);
+    const suffix = value.slice(closingBracket + 1);
+    if (suffix) {
+      if (!suffix.startsWith(":")) return false;
+      port = suffix.slice(1);
+    }
+    if (!isValidIpv6Address(host)) return false;
+  } else {
+    const separator = value.lastIndexOf(":");
+    if (separator !== -1) {
+      if (value.indexOf(":") !== separator) return false;
+      host = value.slice(0, separator);
+      port = value.slice(separator + 1);
+    }
+    if (!host || (!isValidIpv4Address(host) && !isValidDnsName(host))) {
+      return false;
+    }
+  }
+
+  return port === undefined
+    || (/^[1-9]\d{0,4}$/.test(port) && Number(port) <= 65_535);
+}
+
+function isValidIpv6Address(value: string): boolean {
+  if (!/^[0-9a-f:.]+$/i.test(value)) return false;
+  try {
+    return new URL(`http://[${value}]/`).hostname.startsWith("[");
+  } catch {
+    return false;
+  }
+}
+
+function isValidIpv4Address(value: string): boolean {
+  const parts = value.split(".");
+  return parts.length === 4
+    && parts.every(
+      (part) =>
+        /^(?:0|[1-9]\d{0,2})$/.test(part)
+        && Number(part) <= 255,
+    );
+}
+
+function isValidDnsName(value: string): boolean {
+  if (value.length > 255 || /^\d+(?:\.\d+){3}$/.test(value)) return false;
+  return value.split(".").every(
+    (label) =>
+      label.length > 0
+      && label.length <= 63
+      && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
+  );
 }
 
 async function extractError(response: Response): Promise<string> {

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   ChannelDesiredState,
   ChannelHealthStatus,
@@ -57,7 +59,15 @@ import {
   provisionMatrixDirectConversation,
   resolveMatrixApplicationServiceConnectionId,
 } from "./matrix-provisioning";
-import { lockMatrixRoomSecurityState } from "./matrix-room-security";
+import {
+  matrixServerNameFromUserId,
+  normalizeMatrixServerName,
+  normalizeMatrixUserId,
+} from "./matrix-identifiers";
+import {
+  lockMatrixRoomSecurityState,
+  withActiveMatrixRepresentativeChannelFence,
+} from "./matrix-room-security";
 import {
   consumeConversationEntitlement,
   releaseConversationEntitlement,
@@ -395,6 +405,13 @@ export type MatrixApplicationServiceIngestResult = {
   reason?: string;
 };
 
+type MatrixConversationMessageGuard = {
+  channelBindingId: string;
+  roomId: string;
+  audienceMatrixUserId: string;
+  representativeMatrixUserId: string;
+};
+
 type PersistedMatrixApplicationServiceEvent = {
   eventId: string;
   eventType: string;
@@ -403,11 +420,14 @@ type PersistedMatrixApplicationServiceEvent = {
   inboxStatus: string;
   attemptCount: number;
   lastError: string | null;
+  privateCredentialHash: string | null;
 };
 
 const matrixEventProcessingLeaseMs = 30_000;
 const matrixEventRetryDelayMs = 2_000;
 const matrixEventMaximumAttempts = 5;
+const matrixBindingTokenHashContentKey =
+  "com.delegate.private_channel_binding_token_hash";
 // Public compute sessions are capped at 240 minutes. Keep the default claim
 // lease above that hard limit so a healthy long-running worker cannot be
 // reclaimed concurrently; deployments may override it, but never below 30s.
@@ -939,12 +959,15 @@ export async function getRepresentativeOperationsSnapshot(
   }
 }
 
-export async function acceptInboundConversationMessage(input: AcceptInboundMessageInput) {
+export async function acceptInboundConversationMessage(
+  input: AcceptInboundMessageInput,
+  existingTransaction?: Prisma.TransactionClient,
+) {
   const text = input.text.trim();
   if (!text) throw new Error("Message text is required.");
   if (!input.clientMessageId.trim()) throw new Error("clientMessageId is required.");
 
-  return runConversationWriteTransaction(async (tx) => {
+  const accept = async (tx: Prisma.TransactionClient) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
     const conversation = await tx.conversation.findFirst({
       where: { id: input.conversationId, representative: { slug: input.representativeSlug } },
@@ -1043,7 +1066,9 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
           })
         : false;
       if (!matrixBindingSafe) {
-        throw new Error("matrix_private_room_not_verified");
+        throw new ChannelUnavailableError(
+          "matrix_private_room_not_verified",
+        );
       }
     }
 
@@ -1299,7 +1324,10 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
       walletReservation: null,
       replayed: false,
     };
-  });
+  };
+  return existingTransaction
+    ? accept(existingTransaction)
+    : runConversationWriteTransaction(accept);
 }
 
 export async function assertConversationChannelDeliveryAvailable(input: {
@@ -4447,6 +4475,8 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
     const eventId = event.event_id?.trim();
     const eventType = event.type?.trim();
     if (!eventId || !eventType) continue;
+    const sanitizedEvent =
+      sanitizeMatrixApplicationServiceEvent(event);
 
     const inbox = await prisma.channelEventInbox.upsert({
       where: {
@@ -4465,7 +4495,8 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         transactionId: input.transactionId,
         externalEventId: eventId,
         eventType,
-        payload: event as Prisma.InputJsonObject,
+        payload: sanitizedEvent.event as Prisma.InputJsonObject,
+        privateCredentialHash: sanitizedEvent.privateCredentialHash,
         status: "PENDING",
         attemptCount: 0,
       },
@@ -4478,20 +4509,37 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         attemptCount: true,
         eventType: true,
         payload: true,
+        privateCredentialHash: true,
         lastError: true,
       },
     });
 
+    const persistedEvent = isJsonRecord(inbox.payload)
+      ? inbox.payload as MatrixApplicationServiceEvent
+      : sanitizedEvent.event;
+    const sanitizedPersistedEvent =
+      sanitizeMatrixApplicationServiceEvent(persistedEvent).event;
+    if (
+      JSON.stringify(sanitizedPersistedEvent)
+      !== JSON.stringify(persistedEvent)
+    ) {
+      await prisma.channelEventInbox.update({
+        where: { id: inbox.id },
+        data: {
+          payload: sanitizedPersistedEvent as Prisma.InputJsonObject,
+        },
+      });
+    }
+
     persistedEvents.push({
       eventId,
       eventType: inbox.eventType,
-      event: isJsonRecord(inbox.payload)
-        ? inbox.payload as MatrixApplicationServiceEvent
-        : event,
+      event: sanitizedPersistedEvent,
       inboxId: inbox.id,
       inboxStatus: inbox.status,
       attemptCount: inbox.attemptCount,
       lastError: inbox.lastError,
+      privateCredentialHash: inbox.privateCredentialHash ?? null,
     });
   }
 
@@ -4505,8 +4553,23 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         : [],
     ),
   );
+  const persistedEventOrder = new Map(
+    persistedEvents.map(({ eventId }, index) => [eventId, index]),
+  );
+  const securityEvents = persistedEvents.filter(
+    ({ eventType }) =>
+      eventType === "m.room.encryption" || eventType === "m.room.member",
+  );
+  const contentEvents = persistedEvents.filter(
+    ({ eventType }) =>
+      eventType !== "m.room.encryption" && eventType !== "m.room.member",
+  );
 
-  for (const persisted of persistedEvents) {
+  // Matrix state events define whether a room is still safe to use. A
+  // homeserver may place an earlier message/redaction before a later
+  // encryption or membership event in the same transaction, so apply all
+  // security state first and only then process room content.
+  for (const persisted of [...securityEvents, ...contentEvents]) {
     const {
       eventId,
       eventType,
@@ -4515,6 +4578,7 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
       inboxStatus,
       attemptCount,
       lastError,
+      privateCredentialHash,
     } = persisted;
     if (inboxStatus === "PROCESSED") {
       results.push({ eventId, status: "duplicate" });
@@ -4732,9 +4796,35 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
           externalConversationId: roomId,
         },
         include: {
+          representativeBinding: {
+            select: {
+              status: true,
+              desiredState: true,
+              healthStatus: true,
+              externalUserId: true,
+            },
+          },
           conversation: {
             include: {
-              representative: { select: { slug: true } },
+              representative: {
+                select: {
+                  id: true,
+                  slug: true,
+                  lifecycleState: true,
+                  activeVersionId: true,
+                  publicMode: true,
+                  runtimePolicyOverlays: {
+                    where: { enabled: true },
+                    select: {
+                      enabled: true,
+                      priority: true,
+                      startsAt: true,
+                      expiresAt: true,
+                      payload: true,
+                    },
+                  },
+                },
+              },
               contact: {
                 select: {
                   id: true,
@@ -4764,6 +4854,21 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
       });
 
       if (!isMatrixDirectBindingSafe(binding.metadata)) {
+        if (
+          readMatrixRoomSecurityState(binding.metadata)
+          === "PENDING_REMOTE_VALIDATION"
+        ) {
+          await deferMatrixInboxEvent(
+            inboxId,
+            "matrix_room_pending_remote_validation",
+          );
+          results.push({
+            eventId,
+            status: "failed",
+            reason: "matrix_room_pending_remote_validation",
+          });
+          continue;
+        }
         await markMatrixInboxProcessed(inboxId);
         results.push({ eventId, status: "ignored", reason: "matrix_room_not_private_unencrypted" });
         continue;
@@ -4780,26 +4885,160 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         continue;
       }
 
-      if (eventType === "m.room.redaction") {
-        const eventContent = event.content || {};
-        const redactedEventId = event.redacts?.trim()
-          || (typeof eventContent.redacts === "string" ? eventContent.redacts.trim() : "");
-        if (redactedEventId) {
-          const target = await prisma.message.findFirst({
-            where: { channelBindingId: binding.id, externalMessageId: redactedEventId },
-            select: { id: true, senderId: true, senderType: true },
+      const observedAvailability = resolveChannelAvailability({
+        channel: "matrix",
+        lifecycleState:
+          binding.conversation.representative.lifecycleState,
+        activeVersionId:
+          binding.conversation.representative.activeVersionId,
+        publicMode: binding.conversation.representative.publicMode,
+        binding: binding.representativeBinding
+          ? {
+              legacyStatus: binding.representativeBinding.status,
+              desiredState: binding.representativeBinding.desiredState,
+              healthStatus: binding.representativeBinding.healthStatus,
+            }
+          : null,
+        overlays:
+          binding.conversation.representative.runtimePolicyOverlays.map(
+            (overlay) => ({
+              ...overlay,
+              payload: isJsonRecord(overlay.payload)
+                ? overlay.payload
+                : {},
+            }),
+          ),
+      });
+      if (!binding.representativeBinding) {
+        throw new ChannelUnavailableError("channel_not_connected");
+      }
+      const representativeMatrixUserId =
+        binding.representativeBinding.externalUserId;
+      if (!representativeMatrixUserId) {
+        throw new ChannelUnavailableError("channel_disconnected");
+      }
+      const fenced = await withActiveMatrixRepresentativeChannelFence(
+        {
+          representativeId: binding.conversation.representative.id,
+          representativeMatrixUserId,
+        },
+        async (tx): Promise<MatrixApplicationServiceIngestResult> => {
+          // The representative lifecycle and channel health are read again
+          // while the same lifecycle fence used by pause/disconnect is held.
+          // That makes disconnect linearizable with bind, edit, redaction and
+          // normal message side effects instead of protecting only delivery.
+          const currentBinding =
+            await tx.representativeChannelBinding.findUnique({
+              where: {
+                representativeId_kind: {
+                  representativeId:
+                    binding.conversation.representative.id,
+                  kind: RepresentativeChannelKind.MATRIX,
+                },
+              },
+              select: {
+                status: true,
+                desiredState: true,
+                healthStatus: true,
+                representative: {
+                  select: {
+                    lifecycleState: true,
+                    activeVersionId: true,
+                    publicMode: true,
+                    runtimePolicyOverlays: {
+                      where: { enabled: true },
+                      select: {
+                        enabled: true,
+                        priority: true,
+                        startsAt: true,
+                        expiresAt: true,
+                        payload: true,
+                      },
+                    },
+                  },
+                },
+              },
+            });
+          const availability = resolveChannelAvailability({
+            channel: "matrix",
+            lifecycleState:
+              currentBinding?.representative.lifecycleState ?? "ARCHIVED",
+            activeVersionId:
+              currentBinding?.representative.activeVersionId ?? null,
+            publicMode:
+              currentBinding?.representative.publicMode ?? false,
+            binding: currentBinding
+              ? {
+                  legacyStatus: currentBinding.status,
+                  desiredState: currentBinding.desiredState,
+                  healthStatus: currentBinding.healthStatus,
+                }
+              : null,
+            overlays:
+              currentBinding?.representative.runtimePolicyOverlays.map(
+                (overlay) => ({
+                  ...overlay,
+                  payload: isJsonRecord(overlay.payload)
+                    ? overlay.payload
+                    : {},
+                }),
+              ) ?? [],
           });
-          if (target && isMatrixMessageOwnedBySender(target, sender)) {
+          if (!availability.available) {
+            throw new ChannelUnavailableError(availability.code);
+          }
+
+          if (eventType === "m.room.redaction") {
+            const eventContent = event.content || {};
+            const redactedEventId = event.redacts?.trim()
+              || (typeof eventContent.redacts === "string"
+                ? eventContent.redacts.trim()
+                : "");
+            if (!redactedEventId) {
+              await markMatrixInboxProcessed(inboxId, tx);
+              return {
+                eventId,
+                status: "ignored",
+                reason: "matrix_redaction_target_missing",
+              };
+            }
+            const target = await tx.message.findFirst({
+              where: {
+                channelBindingId: binding.id,
+                externalMessageId: redactedEventId,
+              },
+              select: { id: true, senderId: true, senderType: true },
+            });
+            if (!target || !isMatrixMessageOwnedBySender(target, sender)) {
+              await markMatrixInboxProcessed(inboxId, tx);
+              return {
+                eventId,
+                status: "ignored",
+                reason: target
+                  ? "matrix_redaction_author_mismatch"
+                  : "matrix_redaction_target_not_found",
+              };
+            }
             try {
-              await redactConversationMessage({
-                representativeSlug: binding.conversation.representative.slug,
-                conversationId: binding.conversationId,
-                messageId: target.id,
-                reason: "matrix_redaction",
-              });
+              await redactConversationMessage(
+                {
+                  representativeSlug:
+                    binding.conversation.representative.slug,
+                  conversationId: binding.conversationId,
+                  messageId: target.id,
+                  reason: "matrix_redaction",
+                  matrixGuard: {
+                    channelBindingId: binding.id,
+                    roomId,
+                    audienceMatrixUserId: sender,
+                    representativeMatrixUserId,
+                  },
+                },
+                tx,
+              );
             } catch (error) {
               if (error instanceof ConversationWorkInFlightControlError) {
-                await prisma.channelEventInbox.update({
+                await tx.channelEventInbox.update({
                   where: { id: inboxId },
                   data: {
                     status: "FAILED",
@@ -4811,171 +5050,212 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
                     lastError: "matrix_redaction_delivery_in_flight",
                   },
                 });
-                results.push({
+                return {
                   eventId,
                   status: "failed",
                   reason: "matrix_redaction_delivery_in_flight",
-                });
-                continue;
+                };
               }
-              if (!(error instanceof DelegationMessageRedactionConflictError)) {
+              if (
+                !(error instanceof DelegationMessageRedactionConflictError)
+              ) {
                 throw error;
               }
-              await markMatrixInboxProcessed(inboxId);
-              results.push({
+              await markMatrixInboxProcessed(inboxId, tx);
+              return {
                 eventId,
                 status: "ignored",
                 reason: "matrix_redaction_delegation_active",
-              });
-              continue;
+              };
             }
           } else {
-            await markMatrixInboxProcessed(inboxId);
-            results.push({
-              eventId,
-              status: "ignored",
-              reason: target ? "matrix_redaction_author_mismatch" : "matrix_redaction_target_not_found",
-            });
-            continue;
-          }
-        } else {
-          await markMatrixInboxProcessed(inboxId);
-          results.push({ eventId, status: "ignored", reason: "matrix_redaction_target_missing" });
-          continue;
-        }
-      } else {
-        const content = event.content || {};
-        const msgtype = typeof content.msgtype === "string" ? content.msgtype : "";
-        const body = typeof content.body === "string" ? content.body.trim() : "";
-        const relatesTo = isJsonRecord(content["m.relates_to"])
-          ? content["m.relates_to"]
-          : null;
-        const relationType = relatesTo && typeof relatesTo.rel_type === "string" ? relatesTo.rel_type : null;
-        const targetEventId = relatesTo && typeof relatesTo.event_id === "string"
-          ? relatesTo.event_id.trim()
-          : null;
-        const identityBindingToken =
-          msgtype === "m.text" ? parsePrivateChannelBindingCommand(body) : null;
+            const content = event.content || {};
+            const msgtype =
+              typeof content.msgtype === "string" ? content.msgtype : "";
+            const body =
+              typeof content.body === "string" ? content.body.trim() : "";
+            const relatesTo = isJsonRecord(content["m.relates_to"])
+              ? content["m.relates_to"]
+              : null;
+            const relationType =
+              relatesTo && typeof relatesTo.rel_type === "string"
+                ? relatesTo.rel_type
+                : null;
+            const targetEventId =
+              relatesTo && typeof relatesTo.event_id === "string"
+                ? relatesTo.event_id.trim()
+                : null;
+            const identityBindingTokenHash =
+              msgtype === "m.text" ? privateCredentialHash : null;
 
-        if (identityBindingToken) {
-          await prisma.channelEventInbox.update({
-            where: { id: inboxId },
-            data: {
-              payload: {
-                ...event,
-                content: {
-                  ...content,
-                  body: "!bind [redacted]",
-                },
-              } as Prisma.InputJsonObject,
-            },
-          });
-          try {
-            await consumeIdentityBindingChallenge({
-              token: identityBindingToken,
-              provider: privateChannelIdentityProviders.matrix,
-              providerSubject: sender,
-              issuer: matrixHomeserverFromUserId(sender),
-              connectionId:
-                binding.connectionId
-                || resolveMatrixApplicationServiceConnectionId(),
-              proofMetadata: {
-                matrixRoomId: roomId,
-                matrixEventId: eventId,
-                directMessage: true,
-              },
-            });
-          } catch (error) {
-            if (isRetryableMatrixIdentityBindingError(error)) throw error;
-            await markMatrixInboxProcessed(inboxId);
-            results.push({
-              eventId,
-              status: "ignored",
-              reason: "matrix_identity_binding_rejected",
-            });
-            continue;
-          }
-        } else if (!await hasActiveMatrixAudienceConnectionProof({
-          audienceIdentityId: binding.conversation.audienceIdentityId,
-          providerSubject: sender,
-          issuer: matrixHomeserverFromUserId(sender),
-          connectionId:
-            binding.connectionId
-            || resolveMatrixApplicationServiceConnectionId(),
-        })) {
-          await markMatrixInboxProcessed(inboxId);
-          results.push({
-            eventId,
-            status: "ignored",
-            reason: "matrix_identity_connection_not_verified",
-          });
-          continue;
-        } else if (relationType === "m.replace" && targetEventId) {
-          const replacement = isJsonRecord(content["m.new_content"])
-            ? content["m.new_content"]
-            : null;
-          const replacementText = replacement && typeof replacement.body === "string"
-            ? replacement.body.trim()
-            : body.replace(/^\*\s*/, "");
-          const target = await prisma.message.findFirst({
-            where: { channelBindingId: binding.id, externalMessageId: targetEventId },
-            select: { id: true, senderId: true, senderType: true },
-          });
-          if (target && replacementText && isMatrixMessageOwnedBySender(target, sender)) {
-            try {
-              await editConversationMessage({
-                representativeSlug: binding.conversation.representative.slug,
-                conversationId: binding.conversationId,
-                messageId: target.id,
-                text: replacementText,
-                editedBy: sender,
-              });
-            } catch (error) {
-              if (!(error instanceof DelegationMessageEditConflictError)) {
-                throw error;
+            if (identityBindingTokenHash) {
+              try {
+                await consumeMatrixIdentityBindingChallenge(
+                  {
+                    guard: {
+                      channelBindingId: binding.id,
+                      roomId,
+                      audienceMatrixUserId: sender,
+                      representativeMatrixUserId,
+                    },
+                    tokenHash: identityBindingTokenHash,
+                    providerSubject: sender,
+                    connectionId:
+                      binding.connectionId
+                      || resolveMatrixApplicationServiceConnectionId(),
+                    matrixEventId: eventId,
+                  },
+                  tx,
+                );
+              } catch (error) {
+                if (
+                  error instanceof ChannelUnavailableError
+                  || isRetryableMatrixIdentityBindingError(error)
+                ) {
+                  throw error;
+                }
+                await markMatrixInboxProcessed(inboxId, tx);
+                return {
+                  eventId,
+                  status: "ignored",
+                  reason: "matrix_identity_binding_rejected",
+                };
               }
-              await markMatrixInboxProcessed(inboxId);
-              results.push({
+            } else if (!await hasActiveMatrixAudienceConnectionProof(
+              {
+                audienceIdentityId:
+                  binding.conversation.audienceIdentityId,
+                providerSubject: sender,
+                issuer: matrixHomeserverFromUserId(sender),
+                connectionId:
+                  binding.connectionId
+                  || resolveMatrixApplicationServiceConnectionId(),
+              },
+              tx,
+            )) {
+              await markMatrixInboxProcessed(inboxId, tx);
+              return {
                 eventId,
                 status: "ignored",
-                reason: "matrix_edit_delegation_active",
+                reason: "matrix_identity_connection_not_verified",
+              };
+            } else if (
+              relationType === "m.replace"
+              && targetEventId
+            ) {
+              const replacement = isJsonRecord(content["m.new_content"])
+                ? content["m.new_content"]
+                : null;
+              const replacementText =
+                replacement && typeof replacement.body === "string"
+                  ? replacement.body.trim()
+                  : body.replace(/^\*\s*/, "");
+              const target = await tx.message.findFirst({
+                where: {
+                  channelBindingId: binding.id,
+                  externalMessageId: targetEventId,
+                },
+                select: { id: true, senderId: true, senderType: true },
               });
-              continue;
+              if (
+                !target
+                || !replacementText
+                || !isMatrixMessageOwnedBySender(target, sender)
+              ) {
+                await markMatrixInboxProcessed(inboxId, tx);
+                return {
+                  eventId,
+                  status: "ignored",
+                  reason: !target
+                    ? "matrix_edit_target_not_found"
+                    : !isMatrixMessageOwnedBySender(target, sender)
+                      ? "matrix_edit_author_mismatch"
+                      : "matrix_edit_body_missing",
+                };
+              }
+              try {
+                await editConversationMessage(
+                  {
+                    representativeSlug:
+                      binding.conversation.representative.slug,
+                    conversationId: binding.conversationId,
+                    messageId: target.id,
+                    text: replacementText,
+                    editedBy: sender,
+                    matrixGuard: {
+                      channelBindingId: binding.id,
+                      roomId,
+                      audienceMatrixUserId: sender,
+                      representativeMatrixUserId,
+                    },
+                  },
+                  tx,
+                );
+              } catch (error) {
+                if (!(error instanceof DelegationMessageEditConflictError)) {
+                  throw error;
+                }
+                await markMatrixInboxProcessed(inboxId, tx);
+                return {
+                  eventId,
+                  status: "ignored",
+                  reason: "matrix_edit_delegation_active",
+                };
+              }
+            } else if (msgtype === "m.text" && body) {
+              await acceptInboundConversationMessage(
+                {
+                  representativeSlug:
+                    binding.conversation.representative.slug,
+                  conversationId: binding.conversationId,
+                  text: body,
+                  senderId: sender,
+                  senderDisplayName: sender,
+                  clientMessageId: eventId,
+                  channel: "matrix",
+                  externalMessageId: eventId,
+                },
+                tx,
+              );
+            } else {
+              await markMatrixInboxProcessed(inboxId, tx);
+              return {
+                eventId,
+                status: "ignored",
+                reason: "matrix_message_type_unsupported",
+              };
             }
-          } else {
-            await markMatrixInboxProcessed(inboxId);
-            results.push({
-              eventId,
-              status: "ignored",
-              reason: !target
-                ? "matrix_edit_target_not_found"
-                : !isMatrixMessageOwnedBySender(target, sender)
-                  ? "matrix_edit_author_mismatch"
-                  : "matrix_edit_body_missing",
-            });
-            continue;
           }
-        } else if (msgtype === "m.text" && body) {
-          await acceptInboundConversationMessage({
-            representativeSlug: binding.conversation.representative.slug,
-            conversationId: binding.conversationId,
-            text: body,
-            senderId: sender,
-            senderDisplayName: sender,
-            clientMessageId: eventId,
-            channel: "matrix",
-            externalMessageId: eventId,
-          });
-        } else {
-          await markMatrixInboxProcessed(inboxId);
-          results.push({ eventId, status: "ignored", reason: "matrix_message_type_unsupported" });
-          continue;
-        }
-      }
 
-      await markMatrixInboxProcessed(inboxId);
-      results.push({ eventId, status: "processed" });
+          await markMatrixInboxProcessed(inboxId, tx);
+          return { eventId, status: "processed" };
+        },
+      );
+      if (!fenced.executed) {
+        await markMatrixInboxProcessed(inboxId);
+        results.push({
+          eventId,
+          status: "ignored",
+          reason: observedAvailability.available
+            ? "channel_disconnected"
+            : observedAvailability.code,
+        });
+        continue;
+      }
+      results.push(fenced.value);
     } catch (error) {
+      if (
+        error instanceof ChannelUnavailableError
+        && isTerminalMatrixAvailabilityCode(error.code)
+      ) {
+        await markMatrixInboxProcessed(inboxId);
+        results.push({
+          eventId,
+          status: "ignored",
+          reason: error.code,
+        });
+        continue;
+      }
       const nextAttemptCount = attemptCount + 1;
       const deadLetter = nextAttemptCount >= matrixEventMaximumAttempts;
       await prisma.channelEventInbox.update({
@@ -4999,7 +5279,13 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
     }
   }
 
-  return results;
+  // Processing order is security-first, but keep the response deterministic
+  // in the homeserver's original event order for callers and diagnostics.
+  return results.sort(
+    (left, right) =>
+      (persistedEventOrder.get(left.eventId) ?? Number.MAX_SAFE_INTEGER)
+      - (persistedEventOrder.get(right.eventId) ?? Number.MAX_SAFE_INTEGER),
+  );
 }
 
 export async function getMatrixVirtualUserBinding(matrixUserId: string) {
@@ -5022,14 +5308,29 @@ export async function editConversationMessage(input: {
   messageId: string;
   text: string;
   editedBy: string;
-}) {
+  matrixGuard?: MatrixConversationMessageGuard;
+}, existingTransaction?: Prisma.TransactionClient) {
   const text = input.text.trim();
   if (!text) throw new Error("Edited message text is required.");
 
-  return runConversationWriteTransaction(async (tx) => {
+  const edit = async (tx: Prisma.TransactionClient) => {
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
     `;
+    if (
+      input.matrixGuard
+      && !await lockAndVerifyMatrixDirectBinding(tx, {
+        id: input.matrixGuard.channelBindingId,
+        externalConversationId: input.matrixGuard.roomId,
+        audienceMatrixUserId: input.matrixGuard.audienceMatrixUserId,
+        representativeMatrixUserId:
+          input.matrixGuard.representativeMatrixUserId,
+      })
+    ) {
+      throw new ChannelUnavailableError(
+        "matrix_private_room_not_verified",
+      );
+    }
     const message = await tx.message.findFirst({
       where: {
         id: input.messageId,
@@ -5229,7 +5530,10 @@ export async function editConversationMessage(input: {
     }
 
     return { revision, action };
-  });
+  };
+  return existingTransaction
+    ? edit(existingTransaction)
+    : runConversationWriteTransaction(edit);
 }
 
 export async function redactConversationMessage(input: {
@@ -5237,12 +5541,27 @@ export async function redactConversationMessage(input: {
   conversationId: string;
   messageId: string;
   reason?: string;
-}) {
+  matrixGuard?: MatrixConversationMessageGuard;
+}, existingTransaction?: Prisma.TransactionClient) {
   const redactedAt = new Date();
-  return runConversationWriteTransaction(async (tx) => {
+  const redact = async (tx: Prisma.TransactionClient) => {
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
     `;
+    if (
+      input.matrixGuard
+      && !await lockAndVerifyMatrixDirectBinding(tx, {
+        id: input.matrixGuard.channelBindingId,
+        externalConversationId: input.matrixGuard.roomId,
+        audienceMatrixUserId: input.matrixGuard.audienceMatrixUserId,
+        representativeMatrixUserId:
+          input.matrixGuard.representativeMatrixUserId,
+      })
+    ) {
+      throw new ChannelUnavailableError(
+        "matrix_private_room_not_verified",
+      );
+    }
     const message = await tx.message.findFirst({
       where: {
         id: input.messageId,
@@ -5491,7 +5810,10 @@ export async function redactConversationMessage(input: {
       }
     }
     return redacted;
-  });
+  };
+  return existingTransaction
+    ? redact(existingTransaction)
+    : runConversationWriteTransaction(redact);
 }
 
 export async function markConversationRead(input: {
@@ -6864,8 +7186,11 @@ function isRetryableMatrixIdentityBindingError(error: unknown): boolean {
     );
 }
 
-async function markMatrixInboxProcessed(id: string) {
-  await prisma.channelEventInbox.update({
+async function markMatrixInboxProcessed(
+  id: string,
+  client: Pick<Prisma.TransactionClient, "channelEventInbox"> = prisma,
+) {
+  await client.channelEventInbox.update({
     where: { id },
     data: {
       status: "PROCESSED",
@@ -6874,6 +7199,54 @@ async function markMatrixInboxProcessed(id: string) {
       lastError: null,
     },
   });
+}
+
+async function deferMatrixInboxEvent(id: string, reason: string) {
+  await prisma.channelEventInbox.update({
+    where: { id },
+    data: {
+      status: "FAILED",
+      attemptCount: { decrement: 1 },
+      processedAt: null,
+      availableAt: new Date(Date.now() + matrixEventRetryDelayMs),
+      lastError: reason,
+    },
+  });
+}
+
+async function consumeMatrixIdentityBindingChallenge(input: {
+  guard: MatrixConversationMessageGuard;
+  tokenHash: string;
+  providerSubject: string;
+  connectionId: string;
+  matrixEventId: string;
+}, tx: Prisma.TransactionClient) {
+  if (!await lockAndVerifyMatrixDirectBinding(tx, {
+    id: input.guard.channelBindingId,
+    externalConversationId: input.guard.roomId,
+    audienceMatrixUserId: input.guard.audienceMatrixUserId,
+    representativeMatrixUserId:
+      input.guard.representativeMatrixUserId,
+  })) {
+    throw new ChannelUnavailableError(
+      "matrix_private_room_not_verified",
+    );
+  }
+  return consumeIdentityBindingChallenge(
+    {
+      tokenHash: input.tokenHash,
+      provider: privateChannelIdentityProviders.matrix,
+      providerSubject: input.providerSubject,
+      issuer: matrixHomeserverFromUserId(input.providerSubject),
+      connectionId: input.connectionId,
+      proofMetadata: {
+        matrixRoomId: input.guard.roomId,
+        matrixEventId: input.matrixEventId,
+        directMessage: true,
+      },
+    },
+    tx as never,
+  );
 }
 
 /**
@@ -6890,11 +7263,36 @@ function isMatrixDirectBindingSafe(metadata: unknown): boolean {
     && typeof metadata.representativeMatrixUserId === "string";
 }
 
+function readMatrixRoomSecurityState(metadata: unknown): string | null {
+  if (!isJsonRecord(metadata)) return null;
+  return typeof metadata.securityState === "string"
+    ? metadata.securityState
+    : null;
+}
+
+function isTerminalMatrixAvailabilityCode(
+  code: ChannelUnavailableError["code"],
+): boolean {
+  return (
+    code === "representative_paused"
+    || code === "representative_unpublished"
+    || code === "representative_archived"
+    || code === "channel_not_connected"
+    || code === "channel_paused"
+    || code === "channel_disconnected"
+    || code === "channel_unhealthy"
+    || code === "matrix_private_room_not_verified"
+    || code === "policy_disabled"
+  );
+}
+
 async function lockAndVerifyMatrixDirectBinding(
   tx: Prisma.TransactionClient,
   binding: {
     id: string;
     externalConversationId: string;
+    audienceMatrixUserId?: string;
+    representativeMatrixUserId?: string;
   },
 ) {
   await lockMatrixRoomSecurityState(tx, binding.externalConversationId);
@@ -6910,9 +7308,22 @@ async function lockAndVerifyMatrixDirectBinding(
       metadata: true,
     },
   });
-  return currentBinding?.kind === RepresentativeChannelKind.MATRIX
+  const safe = currentBinding?.kind === RepresentativeChannelKind.MATRIX
     && currentBinding.externalConversationId === binding.externalConversationId
     && isMatrixDirectBindingSafe(currentBinding.metadata);
+  if (!safe || !isJsonRecord(currentBinding.metadata)) return false;
+  return (
+    (
+      binding.audienceMatrixUserId === undefined
+      || currentBinding.metadata.audienceMatrixUserId
+        === binding.audienceMatrixUserId
+    )
+    && (
+      binding.representativeMatrixUserId === undefined
+      || currentBinding.metadata.representativeMatrixUserId
+        === binding.representativeMatrixUserId
+    )
+  );
 }
 
 function isExplicitMatrixDirectInvite(event: MatrixApplicationServiceEvent): boolean {
@@ -7099,15 +7510,70 @@ export async function activateVerifiedMatrixDirectConversation(input: {
   representativeMatrixUserId: string;
 }) {
   return prisma.$transaction(async (tx) => {
+    const candidate = await tx.conversationChannelBinding.findFirst({
+      where: {
+        kind: RepresentativeChannelKind.MATRIX,
+        externalConversationId: input.roomId,
+      },
+      select: {
+        conversation: {
+          select: { representativeId: true },
+        },
+      },
+    });
+    if (!candidate) return false;
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${`matrix-virtual-user:${candidate.conversation.representativeId}`})
+      )
+    `;
     await lockMatrixRoomSecurityState(tx, input.roomId);
     const binding = await tx.conversationChannelBinding.findFirst({
       where: {
         kind: RepresentativeChannelKind.MATRIX,
         externalConversationId: input.roomId,
       },
-      select: { id: true, metadata: true },
+      select: {
+        id: true,
+        metadata: true,
+        conversation: {
+          select: { representativeId: true },
+        },
+        representativeBinding: {
+          select: {
+            desiredState: true,
+            externalUserId: true,
+            status: true,
+          },
+        },
+      },
     });
     if (!binding || !isJsonRecord(binding.metadata)) return false;
+    const virtualUser = await tx.matrixVirtualUserBinding.findUnique({
+      where: {
+        matrixUserId: input.representativeMatrixUserId,
+      },
+      select: {
+        representativeId: true,
+        kind: true,
+        enabled: true,
+      },
+    });
+    if (
+      binding.conversation.representativeId
+        !== candidate.conversation.representativeId
+      || binding.representativeBinding?.desiredState
+        !== ChannelDesiredState.ACTIVE
+      || binding.representativeBinding.status === "DISCONNECTED"
+      || binding.representativeBinding.externalUserId
+        !== input.representativeMatrixUserId
+      || virtualUser?.representativeId
+        !== candidate.conversation.representativeId
+      || virtualUser.kind !== "REPRESENTATIVE"
+      || virtualUser.enabled !== true
+    ) {
+      return false;
+    }
     const metadata = binding.metadata;
     if (
       metadata.directMessageOnly !== true
@@ -7196,16 +7662,115 @@ function parsePrivateChannelBindingCommand(body: string): string | null {
   return match?.[1] ?? null;
 }
 
-function matrixHomeserverFromUserId(matrixUserId: string): string {
-  const separator = matrixUserId.lastIndexOf(":");
-  if (
-    !matrixUserId.startsWith("@")
-    || separator <= 1
-    || separator === matrixUserId.length - 1
-  ) {
-    throw new Error("Matrix sender must be a full MXID.");
+function sanitizeMatrixApplicationServiceEvent(
+  event: MatrixApplicationServiceEvent,
+): {
+  event: MatrixApplicationServiceEvent;
+  privateCredentialHash: string | null;
+} {
+  if (event.type !== "m.room.message" || !isJsonRecord(event.content)) {
+    return { event, privateCredentialHash: null };
   }
-  return matrixUserId.slice(separator + 1).toLowerCase();
+  const content = removeMatrixBindingCredentialMetadata(event.content);
+  if (!isJsonRecord(content)) {
+    return {
+      event: { ...event, content: {} },
+      privateCredentialHash: null,
+    };
+  }
+  const sanitizedWithoutCredential = { ...event, content };
+  const msgtype = content.msgtype;
+  if (msgtype !== "m.text") {
+    return {
+      event: sanitizedWithoutCredential,
+      privateCredentialHash: null,
+    };
+  }
+  const newContent = isJsonRecord(content["m.new_content"])
+    ? content["m.new_content"]
+    : null;
+  const candidateBodies = [
+    content.body,
+    newContent?.body,
+  ];
+  const tokens = candidateBodies.flatMap((body) => {
+    if (typeof body !== "string") return [];
+    const token = parsePrivateChannelBindingCommand(body.trim());
+    return token ? [token] : [];
+  });
+  if (tokens.length === 0) {
+    return {
+      event: sanitizedWithoutCredential,
+      privateCredentialHash: null,
+    };
+  }
+  const token = tokens[0]!;
+  const sanitizedContent = redactMatrixBindingTokens(
+    content,
+    new Set(tokens),
+  );
+  if (!isJsonRecord(sanitizedContent)) {
+    return {
+      event: sanitizedWithoutCredential,
+      privateCredentialHash: null,
+    };
+  }
+  return {
+    event: {
+      ...event,
+      content: {
+        ...sanitizedContent,
+        body: "!bind [redacted]",
+      },
+    },
+    privateCredentialHash:
+      createHash("sha256").update(token, "utf8").digest("hex"),
+  };
+}
+
+function removeMatrixBindingCredentialMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => removeMatrixBindingCredentialMetadata(item));
+  }
+  if (!isJsonRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== matrixBindingTokenHashContentKey)
+      .map(([key, nestedValue]) => [
+        key,
+        removeMatrixBindingCredentialMetadata(nestedValue),
+      ]),
+  );
+}
+
+function redactMatrixBindingTokens(
+  value: unknown,
+  tokens: ReadonlySet<string>,
+): unknown {
+  if (typeof value === "string") {
+    let redacted = value;
+    for (const token of tokens) {
+      redacted = redacted.split(token).join("[redacted]");
+    }
+    return redacted;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactMatrixBindingTokens(item, tokens));
+  }
+  if (!isJsonRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nestedValue]) => {
+      const redactedKey = redactMatrixBindingTokens(key, tokens);
+      return [
+        typeof redactedKey === "string" ? redactedKey : key,
+        redactMatrixBindingTokens(nestedValue, tokens),
+      ];
+    }),
+  );
+}
+
+function matrixHomeserverFromUserId(matrixUserId: string): string {
+  return matrixServerNameFromUserId(matrixUserId);
 }
 
 async function hasActiveMatrixAudienceConnectionProof(input: {
@@ -7213,16 +7778,19 @@ async function hasActiveMatrixAudienceConnectionProof(input: {
   providerSubject: string;
   issuer: string;
   connectionId: string;
-}): Promise<boolean> {
+}, client: Pick<
+  Prisma.TransactionClient,
+  "identityLink" | "identityLinkConnectionProof"
+> = prisma): Promise<boolean> {
   const audienceIdentityId = input.audienceIdentityId?.trim();
   const providerSubject = normalizeMatrixProviderSubject(
     input.providerSubject,
   );
-  const issuer = input.issuer.trim().toLowerCase();
+  const issuer = normalizeMatrixServerName(input.issuer);
   const connectionId = input.connectionId.trim().toLowerCase();
   if (!audienceIdentityId || !issuer || !connectionId) return false;
 
-  const identityLink = await prisma.identityLink.findUnique({
+  const identityLink = await client.identityLink.findUnique({
     where: {
       provider_providerSubject: {
         provider: privateChannelIdentityProviders.matrix,
@@ -7241,7 +7809,7 @@ async function hasActiveMatrixAudienceConnectionProof(input: {
   if (
     !identityLink
     || identityLink.audienceIdentityId !== audienceIdentityId
-    || identityLink.issuer.trim().toLowerCase() !== issuer
+    || identityLink.issuer.trim() !== issuer
     || identityLink.revokedAt
     || !identityLink.verifiedAt
     || (
@@ -7252,7 +7820,7 @@ async function hasActiveMatrixAudienceConnectionProof(input: {
     return false;
   }
 
-  const proof = await prisma.identityLinkConnectionProof.findUnique({
+  const proof = await client.identityLinkConnectionProof.findUnique({
     where: {
       identityLinkId_issuer_connectionId: {
         identityLinkId: identityLink.id,
@@ -7278,9 +7846,7 @@ async function hasActiveMatrixAudienceConnectionProof(input: {
 }
 
 function normalizeMatrixProviderSubject(matrixUserId: string): string {
-  const normalized = matrixUserId.trim();
-  const issuer = matrixHomeserverFromUserId(normalized);
-  return `${normalized.slice(0, normalized.lastIndexOf(":") + 1)}${issuer}`;
+  return normalizeMatrixUserId(matrixUserId);
 }
 
 function isJsonRecord(value: unknown): value is Record<string, unknown> {

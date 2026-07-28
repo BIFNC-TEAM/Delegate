@@ -104,6 +104,16 @@ Stars is also default-off and not production-ready.
 Native Matrix is an optional channel. Telegram long-polling and direct Telegram
 delivery do not require a Matrix homeserver, Application Service, or bridge.
 
+The offline suite uses mocks and PostgreSQL fixtures. A real Synapse instance
+is additionally necessary to close the protocol boundary (AS registration,
+virtual users, membership, plaintext-room state, and Client API delivery).
+`pnpm matrix:local:e2e` provides that disposable Docker gate with an isolated
+homeserver, Application Service transaction stream, bridge, and database. It
+also verifies disconnect blocks both directions without deleting history and
+that re-provisioning resumes delivery. Setup details and the manual Dashboard
+flow are in
+[`matrix-local-synapse.md`](matrix-local-synapse.md).
+
 `apps/matrix-bridge` implements:
 
 - authenticated transaction ingestion;
@@ -309,6 +319,7 @@ Rollback disables the canary adapter, restores the previous active adapter owner
 ```bash
 pnpm test:channels
 pnpm test:channels:pg16
+pnpm matrix:local:e2e
 
 pnpm db:validate
 pnpm --filter @delegate/runtime test

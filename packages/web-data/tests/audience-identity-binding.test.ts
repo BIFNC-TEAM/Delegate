@@ -490,6 +490,44 @@ describe("audience identity private-channel binding", () => {
     ).rejects.toThrow("already been used");
   });
 
+  it("consumes an internally persisted token hash without reconstructing the secret", async () => {
+    const fake = createFakeBindingClient([
+      {
+        id: "audience-hash",
+        status: "REGISTERED",
+        mergedIntoId: null,
+        lastSeenAt: new Date(0),
+      },
+    ]);
+    const grant = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-hash",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "example.org",
+        connectionId: "delegate-matrix-as",
+        expectedProviderSubject: "@alice:example.org",
+      },
+      fake.client as never,
+    );
+
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          tokenHash: hashBindingToken(grant.token),
+          provider: IdentityLinkProvider.MATRIX,
+          providerSubject: "@alice:example.org",
+          issuer: "example.org",
+          connectionId: "delegate-matrix-as",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({
+      audienceIdentityId: "audience-hash",
+      provider: IdentityLinkProvider.MATRIX,
+      providerSubject: "@alice:example.org",
+    });
+  });
+
   it("revokes an older live challenge when a newer command is minted for the same scope", async () => {
     const fake = createFakeBindingClient([
       {
@@ -1125,6 +1163,7 @@ describe("audience identity private-channel binding", () => {
       {
         audienceIdentityId: "audience-1",
         provider: IdentityLinkProvider.MATRIX,
+        issuer: "Example.COM",
         connectionId: "matrix-as",
       },
       fake.client as never,
@@ -1134,11 +1173,42 @@ describe("audience identity private-channel binding", () => {
         token: grant.token,
         provider: IdentityLinkProvider.MATRIX,
         providerSubject: "@Alice:Example.COM",
+        issuer: "Example.COM",
         connectionId: "matrix-as",
       },
       fake.client as never,
     );
-    expect(result.providerSubject).toBe("@Alice:example.com");
+    expect(result).toMatchObject({
+      providerSubject: "@Alice:Example.COM",
+      issuer: "Example.COM",
+    });
+
+    const caseDistinct = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "example.com",
+        connectionId: "matrix-as",
+      },
+      fake.client as never,
+    );
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: caseDistinct.token,
+          provider: IdentityLinkProvider.MATRIX,
+          providerSubject: "@Alice:example.com",
+          issuer: "example.com",
+          connectionId: "matrix-as",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({
+      providerSubject: "@Alice:example.com",
+      issuer: "example.com",
+    });
+    expect(fake.links.has("MATRIX:@Alice:Example.COM")).toBe(true);
+    expect(fake.links.has("MATRIX:@Alice:example.com")).toBe(true);
 
     const next = await createIdentityBindingChallenge(
       {

@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => {
     matrixVirtualUserBinding: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
+      updateMany: vi.fn(),
       upsert: vi.fn(),
     },
     channelEventInbox: {
@@ -49,10 +50,12 @@ vi.mock("../src/prisma", () => ({
 import {
   assignOwnerTelegramBotConnection,
   buildOwnerChannelManagementSnapshot,
+  disconnectOwnerMatrixChannel,
   evaluateChannelControlPlaneHealth,
   provisionOwnerMatrixChannel,
   provisionOwnerTelegramChannel,
   refreshOwnerChannelHealth,
+  resolveRepresentativeMatrixEndpoint,
   resolveRepresentativeTelegramBotConnectionId,
   resolveRepresentativeTelegramBotEndpoint,
   setOwnerChannelDesiredState,
@@ -63,6 +66,10 @@ describe("channel management", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.tx.eventAudit.findFirst.mockResolvedValue(null);
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue(null);
+    mocks.tx.matrixVirtualUserBinding.updateMany.mockResolvedValue({
+      count: 1,
+    });
     mocks.tx.representativeChannelBinding.updateMany.mockResolvedValue({
       count: 1,
     });
@@ -221,6 +228,176 @@ describe("channel management", () => {
         }),
       }),
     );
+  });
+
+  it("returns the exact Matrix endpoint only when the representative binding and virtual user are routable", async () => {
+    const findChannelBinding = vi.fn().mockResolvedValue({
+      representativeId: "rep-lin",
+      connectionId: "delegate-matrix-as",
+      externalUserId: "@_delegate_rep_lin:MATRIX.EXAMPLE",
+      desiredState: "ACTIVE",
+      healthStatus: "DEGRADED",
+      status: "CONFIGURED",
+    });
+    const findVirtualUser = vi.fn().mockResolvedValue({
+      matrixUserId: "@_delegate_rep_lin:MATRIX.EXAMPLE",
+      enabled: true,
+    });
+
+    await expect(
+      resolveRepresentativeMatrixEndpoint(
+        "lin",
+        {
+          MATRIX_HOMESERVER_URL: "https://matrix.example",
+          MATRIX_SERVER_NAME: "MATRIX.EXAMPLE",
+          MATRIX_AS_CONNECTION_ID: "Delegate-Matrix-AS",
+        },
+        {
+          representativeChannelBinding: { findFirst: findChannelBinding },
+          matrixVirtualUserBinding: { findFirst: findVirtualUser },
+        } as never,
+      ),
+    ).resolves.toEqual({
+      matrixUserId: "@_delegate_rep_lin:MATRIX.EXAMPLE",
+      connectionId: "delegate-matrix-as",
+    });
+    expect(findChannelBinding).toHaveBeenCalledWith({
+      where: {
+        kind: "MATRIX",
+        representative: { slug: "lin" },
+        AND: [
+          {
+            OR: [
+              { transport: null },
+              { transport: "MATRIX" },
+            ],
+          },
+          {
+            OR: [
+              { sourceProvider: null },
+              { sourceProvider: "MATRIX" },
+            ],
+          },
+        ],
+      },
+      select: {
+        representativeId: true,
+        connectionId: true,
+        externalUserId: true,
+        desiredState: true,
+        healthStatus: true,
+        status: true,
+      },
+    });
+    expect(findVirtualUser).toHaveBeenCalledWith({
+      where: {
+        matrixUserId: "@_delegate_rep_lin:MATRIX.EXAMPLE",
+        representativeId: "rep-lin",
+        kind: "REPRESENTATIVE",
+        enabled: true,
+      },
+      select: {
+        matrixUserId: true,
+        enabled: true,
+      },
+    });
+  });
+
+  it.each([
+    {
+      label: "paused",
+      binding: { desiredState: "PAUSED" },
+      virtualUser: { enabled: true },
+    },
+    {
+      label: "legacy-disabled",
+      binding: { status: "DISABLED" },
+      virtualUser: { enabled: true },
+    },
+    {
+      label: "unhealthy",
+      binding: { healthStatus: "UNHEALTHY" },
+      virtualUser: { enabled: true },
+    },
+    {
+      label: "wrong-connection",
+      binding: { connectionId: "other-as" },
+      virtualUser: { enabled: true },
+    },
+    {
+      label: "server-name-case-mismatch",
+      binding: {
+        externalUserId: "@_delegate_rep_lin:MATRIX.EXAMPLE",
+      },
+      virtualUser: {
+        matrixUserId: "@_delegate_rep_lin:MATRIX.EXAMPLE",
+        enabled: true,
+      },
+    },
+    {
+      label: "missing-virtual-user",
+      binding: {},
+      virtualUser: null,
+    },
+    {
+      label: "disabled-virtual-user",
+      binding: {},
+      virtualUser: { enabled: false },
+    },
+  ])(
+    "fails closed for a Matrix endpoint whose control-plane state is $label",
+    async ({ binding: bindingOverride, virtualUser }) => {
+      const findChannelBinding = vi.fn().mockResolvedValue({
+        representativeId: "rep-lin",
+        connectionId: "delegate-matrix-as",
+        externalUserId: "@_delegate_rep_lin:matrix.example",
+        desiredState: "ACTIVE",
+        healthStatus: "HEALTHY",
+        status: "CONFIGURED",
+        ...bindingOverride,
+      });
+      const findVirtualUser = vi.fn().mockResolvedValue(
+        virtualUser === null
+          ? null
+          : {
+              matrixUserId: "@_delegate_rep_lin:matrix.example",
+              ...virtualUser,
+            },
+      );
+
+      await expect(
+        resolveRepresentativeMatrixEndpoint(
+          "lin",
+          {
+            MATRIX_HOMESERVER_URL: "https://matrix.example",
+            MATRIX_SERVER_NAME: "matrix.example",
+            MATRIX_AS_CONNECTION_ID: "delegate-matrix-as",
+          },
+          {
+            representativeChannelBinding: { findFirst: findChannelBinding },
+            matrixVirtualUserBinding: { findFirst: findVirtualUser },
+          } as never,
+        ),
+      ).resolves.toBeNull();
+    },
+  );
+
+  it("does not expose a Matrix endpoint from database state without a configured adapter", async () => {
+    const findChannelBinding = vi.fn();
+    const findVirtualUser = vi.fn();
+
+    await expect(
+      resolveRepresentativeMatrixEndpoint(
+        "lin",
+        {},
+        {
+          representativeChannelBinding: { findFirst: findChannelBinding },
+          matrixVirtualUserBinding: { findFirst: findVirtualUser },
+        } as never,
+      ),
+    ).resolves.toBeNull();
+    expect(findChannelBinding).not.toHaveBeenCalled();
+    expect(findVirtualUser).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -485,6 +662,24 @@ describe("channel management", () => {
     },
   );
 
+  it("does not let a database-only refresh erase Matrix bridge runtime evidence", () => {
+    expect(
+      evaluateChannelControlPlaneHealth({
+        kind: "MATRIX",
+        transport: "MATRIX",
+        sourceProvider: "MATRIX",
+        externalUserId: "@_delegate_rep_lin:matrix.example.org",
+        legacyStatus: "CONFIGURED",
+        currentHealthStatus: "DEGRADED",
+        currentLastError: "matrix_join_502",
+        latestFailure: null,
+      }),
+    ).toEqual({
+      healthStatus: "DEGRADED",
+      lastError: "matrix_join_502",
+    });
+  });
+
   it("clears an expired failure during an owner health refresh", async () => {
     const previousDatabaseUrl = process.env.DATABASE_URL;
     const now = new Date("2026-07-24T12:00:00.000Z");
@@ -531,6 +726,7 @@ describe("channel management", () => {
     }
 
     const failureCutoff = new Date("2026-07-23T12:00:00.000Z");
+    expect(mocks.tx.$executeRaw).toHaveBeenCalledTimes(1);
     expect(mocks.tx.channelEventInbox.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -633,6 +829,45 @@ describe("channel management", () => {
         }),
       }),
     });
+  });
+
+  it("rejects stale pause or resume requests after a Matrix disconnect", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representativeChannelBinding.findFirst.mockResolvedValue({
+      id: "binding-matrix-disconnected",
+      representativeId: "rep-1",
+      kind: "MATRIX",
+      transport: "MATRIX",
+      sourceProvider: "MATRIX",
+      desiredState: "DISCONNECTED",
+    });
+
+    try {
+      await expect(
+        setOwnerChannelDesiredState({
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          bindingId: "binding-matrix-disconnected",
+          desiredState: "ACTIVE",
+          requestId: "request-stale-resume",
+          idempotencyKey: "idem-stale-resume",
+        }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message:
+          "Disconnected channels must be reconnected before they can be paused or resumed.",
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.tx.$executeRaw.mock.calls[0]?.[1]).toBe(
+      "matrix-virtual-user:rep-1",
+    );
+    expect(mocks.tx.representativeChannelBinding.update).not.toHaveBeenCalled();
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
   });
 
   it("replays the same channel state request once and rejects a reused key with another state", async () => {
@@ -996,6 +1231,9 @@ describe("channel management", () => {
         }),
       }),
     });
+    expect(mocks.tx.$executeRaw.mock.calls[0]?.[1]).toBe(
+      "matrix-virtual-user:rep-1",
+    );
   });
 
   it("does not duplicate a Matrix provisioning audit when a request is replayed", async () => {
@@ -1014,16 +1252,13 @@ describe("channel management", () => {
     });
     mocks.tx.matrixVirtualUserBinding.findUnique.mockResolvedValue({
       id: "matrix-user-1",
+      matrixUserId: "@_delegate_rep_lin:matrix.example.org",
       representativeId: "rep-1",
       kind: "REPRESENTATIVE",
-    });
-    mocks.tx.matrixVirtualUserBinding.upsert.mockResolvedValue({
-      id: "matrix-user-1",
-      matrixUserId: "@_delegate_rep_lin:matrix.example.org",
       displayName: "Lin",
       enabled: true,
     });
-    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue({
       id: "binding-matrix-1",
       representativeId: "rep-1",
       kind: "MATRIX",
@@ -1034,6 +1269,14 @@ describe("channel management", () => {
     });
     mocks.tx.eventAudit.findFirst.mockResolvedValue({
       id: "audit-matrix-existing",
+      payload: {
+        action: "MATRIX_VIRTUAL_USER_PROVISIONED",
+        bindingId: "binding-matrix-1",
+        matrixVirtualUserBindingId: "matrix-user-1",
+        matrixUserId: "@_delegate_rep_lin:matrix.example.org",
+        connectionId: "delegate-matrix-as",
+        idempotencyKey: "idem-matrix-replay",
+      },
     });
 
     try {
@@ -1055,30 +1298,288 @@ describe("channel management", () => {
       where: {
         representativeId: "rep-1",
         type: "CHANNEL_CONFIGURATION_CHANGED",
-        AND: [
-          {
-            payload: {
-              path: ["action"],
-              equals: "MATRIX_VIRTUAL_USER_PROVISIONED",
-            },
-          },
-          {
-            payload: {
-              path: ["bindingId"],
-              equals: "binding-matrix-1",
-            },
-          },
-          {
-            payload: {
-              path: ["idempotencyKey"],
-              equals: "idem-matrix-replay",
-            },
-          },
-        ],
+        payload: {
+          path: ["idempotencyKey"],
+          equals: "idem-matrix-replay",
+        },
       },
-      select: { id: true },
+      select: { payload: true },
     });
+    expect(mocks.tx.matrixVirtualUserBinding.upsert).not.toHaveBeenCalled();
+    expect(
+      mocks.tx.representativeChannelBinding.upsert,
+    ).not.toHaveBeenCalled();
     expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
+  });
+
+  it("does not reconnect a disconnected Matrix channel when its provisioning request is replayed", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousServerName = process.env.MATRIX_SERVER_NAME;
+    process.env.DATABASE_URL = "postgresql://test";
+    process.env.MATRIX_SERVER_NAME = "matrix.example.org";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      slug: "lin",
+      displayName: "Lin",
+    });
+    mocks.tx.matrixVirtualUserBinding.findFirst.mockResolvedValue(null);
+    mocks.tx.matrixVirtualUserBinding.findUnique.mockResolvedValue({
+      id: "matrix-user-1",
+      matrixUserId: "@_delegate_rep_lin:matrix.example.org",
+      representativeId: "rep-1",
+      kind: "REPRESENTATIVE",
+      displayName: "Lin",
+      enabled: false,
+    });
+    mocks.tx.matrixVirtualUserBinding.upsert.mockResolvedValue({
+      id: "matrix-user-1",
+      matrixUserId: "@_delegate_rep_lin:matrix.example.org",
+      displayName: "Lin",
+      enabled: true,
+    });
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "binding-matrix-1",
+      representativeId: "rep-1",
+      kind: "MATRIX",
+      desiredState: "DISCONNECTED",
+      healthStatus: "UNKNOWN",
+      externalUserId: "@_delegate_rep_lin:matrix.example.org",
+      status: "DISCONNECTED",
+    });
+    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
+      id: "binding-matrix-1",
+      representativeId: "rep-1",
+      kind: "MATRIX",
+      desiredState: "ACTIVE",
+      healthStatus: "UNKNOWN",
+      externalUserId: "@_delegate_rep_lin:matrix.example.org",
+      status: "CONFIGURED",
+    });
+    mocks.tx.eventAudit.findFirst.mockResolvedValue({
+      id: "audit-matrix-existing",
+      payload: {
+        action: "MATRIX_VIRTUAL_USER_PROVISIONED",
+        bindingId: "binding-matrix-1",
+        matrixVirtualUserBindingId: "matrix-user-1",
+        matrixUserId: "@_delegate_rep_lin:matrix.example.org",
+        connectionId: "delegate-matrix-as",
+        idempotencyKey: "idem-matrix-replay-after-disconnect",
+      },
+    });
+
+    try {
+      await expect(
+        provisionOwnerMatrixChannel({
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          representativeId: "rep-1",
+          requestId: "request-matrix-replay-after-disconnect",
+          idempotencyKey: "idem-matrix-replay-after-disconnect",
+        }),
+      ).rejects.toMatchObject({
+        name: "ChannelManagementError",
+        statusCode: 409,
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+      if (previousServerName === undefined) delete process.env.MATRIX_SERVER_NAME;
+      else process.env.MATRIX_SERVER_NAME = previousServerName;
+    }
+
+    expect(mocks.tx.matrixVirtualUserBinding.upsert).not.toHaveBeenCalled();
+    expect(
+      mocks.tx.representativeChannelBinding.upsert,
+    ).not.toHaveBeenCalled();
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
+  });
+
+  it("reactivates a disconnected Matrix channel and its existing virtual user", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousServerName = process.env.MATRIX_SERVER_NAME;
+    process.env.DATABASE_URL = "postgresql://test";
+    process.env.MATRIX_SERVER_NAME = "matrix.example.org";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      slug: "lin",
+      displayName: "Lin",
+    });
+    mocks.tx.matrixVirtualUserBinding.findFirst.mockResolvedValue(null);
+    mocks.tx.matrixVirtualUserBinding.findUnique.mockResolvedValue({
+      id: "matrix-user-1",
+      representativeId: "rep-1",
+      kind: "REPRESENTATIVE",
+    });
+    mocks.tx.matrixVirtualUserBinding.upsert.mockResolvedValue({
+      id: "matrix-user-1",
+      matrixUserId: "@_delegate_rep_lin:matrix.example.org",
+      displayName: "Lin",
+      enabled: true,
+    });
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue({
+      desiredState: "DISCONNECTED",
+    });
+    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
+      id: "binding-matrix-1",
+      representativeId: "rep-1",
+      kind: "MATRIX",
+      desiredState: "ACTIVE",
+      healthStatus: "UNKNOWN",
+      externalUserId: "@_delegate_rep_lin:matrix.example.org",
+      status: "CONFIGURED",
+    });
+
+    try {
+      await provisionOwnerMatrixChannel({
+        ownerId: "owner-1",
+        actorId: "owner-1",
+        representativeId: "rep-1",
+        requestId: "request-matrix-reconnect",
+        idempotencyKey: "idem-matrix-reconnect",
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+      if (previousServerName === undefined) delete process.env.MATRIX_SERVER_NAME;
+      else process.env.MATRIX_SERVER_NAME = previousServerName;
+    }
+
+    expect(mocks.tx.matrixVirtualUserBinding.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ enabled: true }),
+      }),
+    );
+    expect(mocks.tx.representativeChannelBinding.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          desiredState: "ACTIVE",
+          healthStatus: "UNKNOWN",
+          status: "CONFIGURED",
+          lastHealthCheckAt: null,
+          lastError: null,
+        }),
+      }),
+    );
+  });
+
+  it("requires an explicit disconnect before moving a managed Matrix identity to another homeserver", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousServerName = process.env.MATRIX_SERVER_NAME;
+    process.env.DATABASE_URL = "postgresql://test";
+    process.env.MATRIX_SERVER_NAME = "new.example.org";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      slug: "lin",
+      displayName: "Lin",
+    });
+    mocks.tx.matrixVirtualUserBinding.findFirst.mockResolvedValue({
+      id: "matrix-user-1",
+      matrixUserId: "@_delegate_rep_lin:old.example.org",
+    });
+
+    try {
+      await expect(
+        provisionOwnerMatrixChannel({
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          representativeId: "rep-1",
+          requestId: "request-matrix-migrate",
+          idempotencyKey: "idem-matrix-migrate",
+        }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+      if (previousServerName === undefined) delete process.env.MATRIX_SERVER_NAME;
+      else process.env.MATRIX_SERVER_NAME = previousServerName;
+    }
+
+    expect(mocks.tx.matrixVirtualUserBinding.upsert).not.toHaveBeenCalled();
+  });
+
+  it("disconnects only the owner's Matrix channel and disables its virtual user", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representativeChannelBinding.findFirst.mockResolvedValue({
+      id: "binding-matrix-1",
+      representativeId: "rep-1",
+      kind: "MATRIX",
+      transport: "MATRIX",
+      sourceProvider: "MATRIX",
+      connectionId: "delegate-matrix-as",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      externalUserId: "@_delegate_rep_lin:matrix.example.org",
+      status: "CONNECTED",
+    });
+    mocks.tx.representativeChannelBinding.update.mockResolvedValue({
+      id: "binding-matrix-1",
+      representativeId: "rep-1",
+      kind: "MATRIX",
+      transport: "MATRIX",
+      sourceProvider: "MATRIX",
+      connectionId: "delegate-matrix-as",
+      desiredState: "DISCONNECTED",
+      healthStatus: "UNKNOWN",
+      externalUserId: "@_delegate_rep_lin:matrix.example.org",
+      status: "DISCONNECTED",
+    });
+
+    try {
+      await expect(
+        disconnectOwnerMatrixChannel({
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          bindingId: "binding-matrix-1",
+          requestId: "request-matrix-disconnect",
+          idempotencyKey: "idem-matrix-disconnect",
+        }),
+      ).resolves.toMatchObject({
+        binding: {
+          desiredState: "DISCONNECTED",
+          status: "DISCONNECTED",
+        },
+        changed: true,
+        replayed: false,
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(
+      mocks.tx.representativeChannelBinding.findFirst,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "binding-matrix-1",
+          kind: "MATRIX",
+          representative: { ownerId: "owner-1" },
+        },
+      }),
+    );
+    expect(mocks.tx.matrixVirtualUserBinding.updateMany).toHaveBeenCalledWith({
+      where: {
+        representativeId: "rep-1",
+        kind: "REPRESENTATIVE",
+        enabled: true,
+      },
+      data: { enabled: false },
+    });
+    expect(mocks.tx.eventAudit.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        representativeId: "rep-1",
+        payload: expect.objectContaining({
+          action: "MATRIX_CHANNEL_DISCONNECTED",
+          changed: true,
+        }),
+      }),
+    });
+    expect(mocks.tx.$executeRaw.mock.calls[0]?.[1]).toBe(
+      "matrix-virtual-user:rep-1",
+    );
   });
 
   it("owner-scopes and provisions the configured managed Telegram Bot for a representative", async () => {

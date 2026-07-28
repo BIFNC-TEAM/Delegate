@@ -2551,6 +2551,7 @@ model ChannelEventInbox {
   externalEventId String
   eventType       String
   payload         Json
+  privateCredentialHash String?                 @db.Char(64)
   status          ReliableEventStatus       @default(PENDING)
   attemptCount    Int                       @default(0)
   availableAt     DateTime                  @default(now())

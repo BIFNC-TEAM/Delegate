@@ -17,3 +17,5 @@ coverage
 .DS_Store
 *.tsbuildinfo
 .gstack/
+/.local/matrix/
+/.local/matrix-e2e/

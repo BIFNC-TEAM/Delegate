@@ -5,9 +5,11 @@ import {
   createIdentityBindingChallenge,
   isVerifiedPrivateChannelIdentityBinding,
   listActivePrivateChannelIdentityBindings,
+  matrixServerNameFromUserId,
+  normalizeMatrixUserId,
   privateChannelIdentityProviders,
   revokePrivateChannelIdentityBinding,
-  resolveMatrixApplicationServiceConnectionId,
+  resolveRepresentativeMatrixEndpoint,
   resolveRepresentativeTelegramBotEndpoint,
 } from "@delegate/web-data";
 
@@ -28,6 +30,8 @@ export async function GET(
     );
     const telegramBot =
       await resolveRepresentativeTelegramBotEndpoint(slug);
+    const matrixEndpoint =
+      await resolveRepresentativeMatrixEndpoint(slug);
     const telegramReady = telegramBot
       ? bindings.some((binding) =>
           isVerifiedPrivateChannelIdentityBinding(binding, {
@@ -37,12 +41,13 @@ export async function GET(
           }),
         )
       : false;
-    const matrixConnectionId = configuredMatrixConnectionId();
-    const matrixReady = matrixConnectionId
-      ? bindings.some(
-          (binding) =>
-            binding.provider === privateChannelIdentityProviders.matrix
-            && binding.connectionId === matrixConnectionId,
+    const matrixReady = matrixEndpoint
+      ? bindings.some((binding) =>
+          isVerifiedPrivateChannelIdentityBinding(binding, {
+            provider: privateChannelIdentityProviders.matrix,
+            issuer: matrixServerNameFromUserId(matrixEndpoint.matrixUserId),
+            connectionId: matrixEndpoint.connectionId,
+          }),
         )
       : false;
     return noStoreJson({
@@ -50,9 +55,10 @@ export async function GET(
       readiness: { telegram: telegramReady, matrix: matrixReady },
       capabilities: {
         telegram: telegramBot !== null,
-        matrix: matrixConnectionId !== null,
+        matrix: matrixEndpoint !== null,
       },
       telegramBot,
+      matrixEndpoint,
     });
   } catch (error) {
     return bindingError(error);
@@ -68,17 +74,24 @@ export async function POST(
     const principal = await requireAudiencePrincipal(slug);
     const body = await readBindingRequest(request);
     const provider = privateChannelIdentityProviders[body.provider];
-    const expectedProviderSubject = body.providerSubject || undefined;
+    const expectedProviderSubject =
+      body.provider === "matrix"
+        ? normalizeMatrixUserIdForRequest(body.providerSubject)
+        : undefined;
     const issuer =
       body.provider === "matrix" && expectedProviderSubject
-        ? matrixHomeserver(expectedProviderSubject)
+        ? matrixHomeserverForRequest(expectedProviderSubject)
         : "delegate-managed-bot";
     const telegramBot =
       body.provider === "telegram"
         ? await requireTelegramBotEndpoint(slug)
         : null;
+    const matrixEndpoint =
+      body.provider === "matrix"
+        ? await requireMatrixEndpoint(slug)
+        : null;
     const connectionId = body.provider === "matrix"
-      ? requireMatrixConnectionId()
+      ? matrixEndpoint!.connectionId
       : telegramBot!.botId;
     const grant = await createIdentityBindingChallenge({
       audienceIdentityId: principal.audienceIdentityId,
@@ -104,7 +117,9 @@ export async function POST(
           issuer,
           connectionId,
         },
+        ...(expectedProviderSubject ? { expectedProviderSubject } : {}),
         ...(telegramBot ? { telegramBot } : {}),
+        ...(matrixEndpoint ? { matrixEndpoint } : {}),
       },
       201,
     );
@@ -171,7 +186,13 @@ async function readBindingRequest(request: Request) {
       "A full Matrix user id is required so the challenge is account-bound.",
     );
   }
-  return { provider, providerSubject } as const;
+  return {
+    provider,
+    providerSubject:
+      provider === "matrix"
+        ? normalizeMatrixUserIdForRequest(providerSubject)
+        : providerSubject,
+  } as const;
 }
 
 async function readRevocationRequest(request: Request) {
@@ -231,11 +252,21 @@ async function readRevocationRequest(request: Request) {
         "Telegram connectionId must be a numeric Bot id.",
       );
     }
-  } else if (matrixHomeserver(providerSubject) !== issuer.toLowerCase()) {
-    throw new IdentityBindingHttpError(
-      400,
-      "Matrix binding issuer must match the MXID homeserver.",
-    );
+  } else {
+    const normalizedProviderSubject =
+      normalizeMatrixUserIdForRequest(providerSubject);
+    if (matrixHomeserverForRequest(normalizedProviderSubject) !== issuer) {
+      throw new IdentityBindingHttpError(
+        400,
+        "Matrix binding issuer must match the MXID homeserver.",
+      );
+    }
+    return {
+      provider,
+      providerSubject: normalizedProviderSubject,
+      issuer,
+      connectionId: connectionId.toLowerCase(),
+    } as const;
   }
   return {
     provider,
@@ -245,16 +276,20 @@ async function readRevocationRequest(request: Request) {
   } as const;
 }
 
-function matrixHomeserver(matrixUserId: string) {
-  const separator = matrixUserId.lastIndexOf(":");
-  if (
-    !matrixUserId.startsWith("@")
-    || separator <= 1
-    || separator === matrixUserId.length - 1
-  ) {
+function normalizeMatrixUserIdForRequest(matrixUserId: string) {
+  try {
+    return normalizeMatrixUserId(matrixUserId);
+  } catch {
     throw new IdentityBindingHttpError(400, "Matrix user id must be a full MXID.");
   }
-  return matrixUserId.slice(separator + 1).toLowerCase();
+}
+
+function matrixHomeserverForRequest(matrixUserId: string) {
+  try {
+    return matrixServerNameFromUserId(matrixUserId);
+  } catch {
+    throw new IdentityBindingHttpError(400, "Matrix user id must be a full MXID.");
+  }
 }
 
 async function requireTelegramBotEndpoint(representativeSlug: string) {
@@ -269,29 +304,16 @@ async function requireTelegramBotEndpoint(representativeSlug: string) {
   return endpoint;
 }
 
-function requireMatrixConnectionId(): string {
-  const connectionId = configuredMatrixConnectionId();
-  if (!connectionId) {
+async function requireMatrixEndpoint(representativeSlug: string) {
+  const endpoint =
+    await resolveRepresentativeMatrixEndpoint(representativeSlug);
+  if (!endpoint) {
     throw new IdentityBindingHttpError(
       503,
-      "Matrix binding is unavailable until the homeserver and Application Service are configured.",
+      "Matrix binding requires an active representative Matrix user and Application Service connection.",
     );
   }
-  return connectionId;
-}
-
-function configuredMatrixConnectionId(): string | null {
-  const homeserverUrl = process.env.MATRIX_HOMESERVER_URL?.trim();
-  const serverName = process.env.MATRIX_SERVER_NAME?.trim();
-  const connectionId = process.env.MATRIX_AS_CONNECTION_ID?.trim();
-  if (!homeserverUrl || !serverName || !connectionId) return null;
-  try {
-    const url = new URL(homeserverUrl);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  } catch {
-    return null;
-  }
-  return resolveMatrixApplicationServiceConnectionId(connectionId);
+  return endpoint;
 }
 
 function noStoreJson(body: unknown, status = 200) {
@@ -308,7 +330,7 @@ function bindingError(error: unknown) {
   const status =
     publicAudiencePrincipalErrorStatus(error)
     ?? (isPrismaWriteConflict(error) ? 409 : null)
-    ?? (error instanceof IdentityBindingHttpError ? error.status : 400);
+    ?? (error instanceof IdentityBindingHttpError ? error.status : 500);
   return noStoreJson(
     {
       error:

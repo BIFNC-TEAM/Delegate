@@ -9,6 +9,12 @@ import {
 import { demoRepresentative } from "@delegate/domain";
 
 import { prisma } from "./prisma";
+import {
+  isValidMatrixServerName,
+  matrixServerNameFromUserId,
+  normalizeMatrixServerName,
+  normalizeMatrixUserId,
+} from "./matrix-identifiers";
 import { resolveMatrixApplicationServiceConnectionId } from "./matrix-provisioning";
 import {
   listOwnerTelegramBotConnections,
@@ -253,6 +259,116 @@ export async function resolveRepresentativeTelegramBotConnectionId(
       client,
     )
   )?.botId ?? null;
+}
+
+export type RepresentativeMatrixEndpoint = {
+  matrixUserId: string;
+  connectionId: string;
+};
+
+/**
+ * Resolves the exact managed Matrix destination exposed on a representative's
+ * public page. Deployment configuration alone is insufficient: the
+ * representative binding and its virtual user must both still be routable.
+ */
+export async function resolveRepresentativeMatrixEndpoint(
+  representativeSlug: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  client: Pick<
+    typeof prisma,
+    "representativeChannelBinding" | "matrixVirtualUserBinding"
+  > = prisma,
+): Promise<RepresentativeMatrixEndpoint | null> {
+  const normalizedRepresentativeSlug = requireValue(
+    representativeSlug,
+    "representativeSlug",
+  );
+  if (client === prisma && !env.DATABASE_URL?.trim()) {
+    return null;
+  }
+
+  const homeserverUrl = env.MATRIX_HOMESERVER_URL?.trim();
+  const serverName = env.MATRIX_SERVER_NAME?.trim();
+  const configuredConnectionId = env.MATRIX_AS_CONNECTION_ID?.trim();
+  if (
+    !homeserverUrl
+    || !serverName
+    || !isHttpUrl(homeserverUrl)
+    || !isValidMatrixServerName(serverName)
+  ) {
+    return null;
+  }
+  const connectionId = resolveMatrixApplicationServiceConnectionId(
+    configuredConnectionId,
+  );
+
+  const binding = await client.representativeChannelBinding.findFirst({
+    where: {
+      kind: RepresentativeChannelKind.MATRIX,
+      representative: { slug: normalizedRepresentativeSlug },
+      AND: [
+        {
+          OR: [
+            { transport: null },
+            { transport: ChannelTransport.MATRIX },
+          ],
+        },
+        {
+          OR: [
+            { sourceProvider: null },
+            { sourceProvider: ChannelSourceProvider.MATRIX },
+          ],
+        },
+      ],
+    },
+    select: {
+      representativeId: true,
+      connectionId: true,
+      externalUserId: true,
+      desiredState: true,
+      healthStatus: true,
+      status: true,
+    },
+  });
+  const matrixUserId = binding?.externalUserId
+    ? normalizeMatrixUserIdOrNull(binding.externalUserId)
+    : null;
+  const persistedConnectionId = binding?.connectionId?.trim();
+  if (
+    !binding
+    || binding.desiredState !== ChannelDesiredState.ACTIVE
+    || !healthyLegacyStatuses.has(binding.status)
+    || binding.healthStatus === ChannelHealthStatus.UNHEALTHY
+    || !persistedConnectionId
+    || resolveMatrixApplicationServiceConnectionId(
+      persistedConnectionId,
+    ) !== connectionId
+    || !matrixUserId
+    || matrixServerNameFromUserId(matrixUserId) !== serverName
+  ) {
+    return null;
+  }
+
+  const virtualUser = await client.matrixVirtualUserBinding.findFirst({
+    where: {
+      matrixUserId,
+      representativeId: binding.representativeId,
+      kind: "REPRESENTATIVE",
+      enabled: true,
+    },
+    select: {
+      matrixUserId: true,
+      enabled: true,
+    },
+  });
+  if (
+    !virtualUser?.enabled
+    || normalizeMatrixUserIdOrNull(virtualUser.matrixUserId) !== matrixUserId
+  ) {
+    return null;
+  }
+
+  return { matrixUserId, connectionId };
 }
 
 type RepresentativeRecord = {
@@ -531,9 +647,26 @@ export async function setOwnerChannelDesiredState(input: {
   }
 
   return prisma.$transaction(async (tx) => {
+    const candidate = await tx.representativeChannelBinding.findFirst({
+      where: {
+        id: bindingId,
+        representative: { ownerId },
+      },
+      select: {
+        representativeId: true,
+        kind: true,
+      },
+    });
+    if (!candidate) {
+      throw new ChannelManagementError("Channel binding not found.", 404);
+    }
+    const stateLockKey =
+      candidate.kind === RepresentativeChannelKind.MATRIX
+        ? `matrix-virtual-user:${candidate.representativeId}`
+        : `channel-binding-state:${bindingId}`;
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(
-        hashtext(${"channel-binding-state:" + bindingId})
+        hashtext(${stateLockKey})
       )
     `;
     const binding = await tx.representativeChannelBinding.findFirst({
@@ -552,6 +685,12 @@ export async function setOwnerChannelDesiredState(input: {
     });
     if (!binding) {
       throw new ChannelManagementError("Channel binding not found.", 404);
+    }
+    if (binding.desiredState === ChannelDesiredState.DISCONNECTED) {
+      throw new ChannelManagementError(
+        "Disconnected channels must be reconnected before they can be paused or resumed.",
+        409,
+      );
     }
     const repeatedAudit = await tx.eventAudit.findFirst({
       where: {
@@ -1188,6 +1327,90 @@ export async function provisionOwnerMatrixChannel(input: {
     if (!representative) {
       throw new ChannelManagementError("Representative not found.", 404);
     }
+    const existingChannel =
+      await tx.representativeChannelBinding.findUnique({
+        where: {
+          representativeId_kind: {
+            representativeId: representative.id,
+            kind: RepresentativeChannelKind.MATRIX,
+          },
+        },
+        select: {
+          id: true,
+          representativeId: true,
+          kind: true,
+          desiredState: true,
+          healthStatus: true,
+          externalUserId: true,
+          status: true,
+        },
+      });
+    const repeatedAudit = await tx.eventAudit.findFirst({
+      where: {
+        representativeId: representative.id,
+        type: EventType.CHANNEL_CONFIGURATION_CHANGED,
+        payload: {
+          path: ["idempotencyKey"],
+          equals: idempotencyKey,
+        },
+      },
+      select: { payload: true },
+    });
+    if (repeatedAudit) {
+      const payload = isJsonRecord(repeatedAudit.payload)
+        ? repeatedAudit.payload
+        : null;
+      const replayMatrixUserId =
+        typeof payload?.matrixUserId === "string"
+          ? payload.matrixUserId
+          : null;
+      if (
+        payload?.action !== "MATRIX_VIRTUAL_USER_PROVISIONED"
+        || !existingChannel
+        || payload.bindingId !== existingChannel.id
+        || payload.connectionId !== connectionId
+        || payload.matrixUserId !== existingChannel.externalUserId
+        || !replayMatrixUserId
+      ) {
+        throw new ChannelManagementError(
+          "Idempotency key was already used for a different Matrix channel request on this representative.",
+          409,
+        );
+      }
+      const replayVirtualUser =
+        await tx.matrixVirtualUserBinding.findUnique({
+          where: { matrixUserId: replayMatrixUserId },
+          select: {
+            id: true,
+            matrixUserId: true,
+            representativeId: true,
+            kind: true,
+            displayName: true,
+            enabled: true,
+          },
+        });
+      if (
+        existingChannel.desiredState !== ChannelDesiredState.ACTIVE
+        || !replayVirtualUser?.enabled
+        || replayVirtualUser.id !== payload.matrixVirtualUserBindingId
+        || replayVirtualUser.representativeId !== representative.id
+        || replayVirtualUser.kind !== "REPRESENTATIVE"
+      ) {
+        throw new ChannelManagementError(
+          "This Matrix provisioning request was already completed, but the channel state has since changed. Use a new idempotency key to reconnect.",
+          409,
+        );
+      }
+      return {
+        binding: existingChannel,
+        virtualUser: {
+          id: replayVirtualUser.id,
+          matrixUserId: replayVirtualUser.matrixUserId,
+          displayName: replayVirtualUser.displayName,
+          enabled: replayVirtualUser.enabled,
+        },
+      };
+    }
     const existingVirtualUser = await tx.matrixVirtualUserBinding.findFirst({
       where: {
         representativeId: representative.id,
@@ -1199,6 +1422,15 @@ export async function provisionOwnerMatrixChannel(input: {
         matrixUserId: true,
       },
     });
+    if (
+      existingVirtualUser
+      && matrixServerNameOrNull(existingVirtualUser.matrixUserId) !== serverName
+    ) {
+      throw new ChannelManagementError(
+        "The representative already has a managed Matrix user on a different homeserver. Disable and migrate that identity before changing MATRIX_SERVER_NAME.",
+        409,
+      );
+    }
     const matrixUserId =
       existingVirtualUser?.matrixUserId
       || buildRepresentativeMatrixUserId(representative.slug, serverName);
@@ -1247,6 +1479,8 @@ export async function provisionOwnerMatrixChannel(input: {
         enabled: true,
       },
     });
+    const reconnecting =
+      existingChannel?.desiredState === ChannelDesiredState.DISCONNECTED;
     const binding = await tx.representativeChannelBinding.upsert({
       where: {
         representativeId_kind: {
@@ -1278,6 +1512,15 @@ export async function provisionOwnerMatrixChannel(input: {
         connectionId,
         externalUserId: matrixUserId,
         displayName: representative.displayName,
+        ...(reconnecting
+          ? {
+              desiredState: ChannelDesiredState.ACTIVE,
+              healthStatus: ChannelHealthStatus.UNKNOWN,
+              status: "CONFIGURED",
+              lastHealthCheckAt: null,
+              lastError: null,
+            }
+          : {}),
         configuration: {
           managed: true,
           directMessageOnly: true,
@@ -1295,17 +1538,88 @@ export async function provisionOwnerMatrixChannel(input: {
         status: true,
       },
     });
-    const repeatedAudit = await tx.eventAudit.findFirst({
-      where: {
+    await tx.eventAudit.create({
+      data: {
         representativeId: representative.id,
         type: EventType.CHANNEL_CONFIGURATION_CHANGED,
+        payload: {
+          kind: "matrix_virtual_user_provisioned",
+          action: "MATRIX_VIRTUAL_USER_PROVISIONED",
+          actorId,
+          requestId,
+          idempotencyKey,
+          bindingId: binding.id,
+          matrixVirtualUserBindingId: virtualUser.id,
+          matrixUserId,
+          connectionId,
+        },
+      },
+    });
+    return { binding, virtualUser };
+  });
+}
+
+export async function disconnectOwnerMatrixChannel(input: {
+  ownerId: string;
+  actorId: string;
+  bindingId: string;
+  requestId: string;
+  idempotencyKey: string;
+}) {
+  assertDatabaseAvailable();
+  const ownerId = requireValue(input.ownerId, "ownerId");
+  const actorId = requireValue(input.actorId, "actorId");
+  const bindingId = requireValue(input.bindingId, "bindingId");
+  const requestId = requireValue(input.requestId, "requestId");
+  const idempotencyKey = requireValue(input.idempotencyKey, "idempotencyKey");
+
+  return prisma.$transaction(async (tx) => {
+    const candidate = await tx.representativeChannelBinding.findFirst({
+      where: {
+        id: bindingId,
+        kind: RepresentativeChannelKind.MATRIX,
+        representative: { ownerId },
+      },
+      select: {
+        representativeId: true,
+      },
+    });
+    if (!candidate) {
+      throw new ChannelManagementError("Matrix channel binding not found.", 404);
+    }
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${"matrix-virtual-user:" + candidate.representativeId})
+      )
+    `;
+    const binding = await tx.representativeChannelBinding.findFirst({
+      where: {
+        id: bindingId,
+        kind: RepresentativeChannelKind.MATRIX,
+        representative: { ownerId },
+      },
+      select: {
+        id: true,
+        representativeId: true,
+        kind: true,
+        transport: true,
+        sourceProvider: true,
+        connectionId: true,
+        desiredState: true,
+        healthStatus: true,
+        externalUserId: true,
+        status: true,
+      },
+    });
+    if (!binding) {
+      throw new ChannelManagementError("Matrix channel binding not found.", 404);
+    }
+
+    const repeatedAudit = await tx.eventAudit.findFirst({
+      where: {
+        representativeId: binding.representativeId,
+        type: EventType.CHANNEL_CONFIGURATION_CHANGED,
         AND: [
-          {
-            payload: {
-              path: ["action"],
-              equals: "MATRIX_VIRTUAL_USER_PROVISIONED",
-            },
-          },
           {
             payload: {
               path: ["bindingId"],
@@ -1320,28 +1634,93 @@ export async function provisionOwnerMatrixChannel(input: {
           },
         ],
       },
-      select: { id: true },
+      select: { payload: true },
     });
-    if (!repeatedAudit) {
-      await tx.eventAudit.create({
-        data: {
-          representativeId: representative.id,
-          type: EventType.CHANNEL_CONFIGURATION_CHANGED,
-          payload: {
-            kind: "matrix_virtual_user_provisioned",
-            action: "MATRIX_VIRTUAL_USER_PROVISIONED",
-            actorId,
-            requestId,
-            idempotencyKey,
-            bindingId: binding.id,
-            matrixVirtualUserBindingId: virtualUser.id,
-            matrixUserId,
-            connectionId,
-          },
-        },
-      });
+    if (repeatedAudit) {
+      const payload = isJsonRecord(repeatedAudit.payload)
+        ? repeatedAudit.payload
+        : null;
+      if (payload?.action !== "MATRIX_CHANNEL_DISCONNECTED") {
+        throw new ChannelManagementError(
+          "Idempotency key was already used for a different channel request on this binding.",
+          409,
+        );
+      }
+      return {
+        binding,
+        changed: payload.changed === true,
+        replayed: true,
+      };
     }
-    return { binding, virtualUser };
+
+    const changed =
+      binding.desiredState !== ChannelDesiredState.DISCONNECTED
+      || binding.status !== "DISCONNECTED";
+    const updated = changed
+      ? await tx.representativeChannelBinding.update({
+          where: { id: binding.id },
+          data: {
+            desiredState: ChannelDesiredState.DISCONNECTED,
+            healthStatus: ChannelHealthStatus.UNKNOWN,
+            status: "DISCONNECTED",
+            lastHealthCheckAt: null,
+            lastError: null,
+          },
+          select: {
+            id: true,
+            representativeId: true,
+            kind: true,
+            transport: true,
+            sourceProvider: true,
+            connectionId: true,
+            desiredState: true,
+            healthStatus: true,
+            externalUserId: true,
+            status: true,
+          },
+        })
+      : binding;
+
+    await tx.matrixVirtualUserBinding.updateMany({
+      where: {
+        representativeId: binding.representativeId,
+        kind: "REPRESENTATIVE",
+        enabled: true,
+      },
+      data: { enabled: false },
+    });
+    await tx.eventAudit.create({
+      data: {
+        representativeId: binding.representativeId,
+        type: EventType.CHANNEL_CONFIGURATION_CHANGED,
+        payload: {
+          kind: "matrix_channel_disconnected",
+          action: "MATRIX_CHANNEL_DISCONNECTED",
+          actorId,
+          requestId,
+          idempotencyKey,
+          bindingId: binding.id,
+          matrixUserId: binding.externalUserId,
+          connectionId: binding.connectionId,
+          before: {
+            desiredState: binding.desiredState,
+            healthStatus: binding.healthStatus,
+            status: binding.status,
+          },
+          after: {
+            desiredState: ChannelDesiredState.DISCONNECTED,
+            healthStatus: ChannelHealthStatus.UNKNOWN,
+            status: "DISCONNECTED",
+          },
+          changed,
+        },
+      },
+    });
+    return {
+      binding: updated,
+      changed,
+      replayed: false,
+    };
   });
 }
 
@@ -1363,6 +1742,28 @@ export async function refreshOwnerChannelHealth(input: {
   const failureCutoff = new Date(now.getTime() - healthFailureWindowMs);
 
   return prisma.$transaction(async (tx) => {
+    const candidate = await tx.representativeChannelBinding.findFirst({
+      where: {
+        id: bindingId,
+        representative: { ownerId },
+      },
+      select: {
+        representativeId: true,
+        kind: true,
+      },
+    });
+    if (!candidate) {
+      throw new ChannelManagementError("Channel binding not found.", 404);
+    }
+    const stateLockKey =
+      candidate.kind === RepresentativeChannelKind.MATRIX
+        ? `matrix-virtual-user:${candidate.representativeId}`
+        : `channel-binding-state:${bindingId}`;
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${stateLockKey})
+      )
+    `;
     const binding = await tx.representativeChannelBinding.findFirst({
       where: {
         id: bindingId,
@@ -1509,6 +1910,22 @@ export function evaluateChannelControlPlaneHealth(input: {
         ?? `Recent ${input.latestFailure.status.toLowerCase()} delivery event.`,
     };
   }
+  if (
+    input.kind === RepresentativeChannelKind.MATRIX
+    && (
+      input.currentHealthStatus === ChannelHealthStatus.DEGRADED
+      || input.currentHealthStatus === ChannelHealthStatus.UNHEALTHY
+    )
+    && input.currentLastError?.trim().toLowerCase().startsWith("matrix_")
+  ) {
+    // Matrix bridge runtime checks are stronger than this database-only
+    // control-plane refresh. Only a later successful bridge registration,
+    // room validation, or delivery may clear this protocol-level error.
+    return {
+      healthStatus: input.currentHealthStatus,
+      lastError: sanitizeChannelError(input.currentLastError),
+    };
+  }
 
   // Reaching this branch means the control-plane refresh completed with valid
   // binding metadata and no failed ingress or egress inside the health window.
@@ -1589,6 +2006,34 @@ function requireValue(value: string, label: string) {
   return normalized;
 }
 
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeMatrixUserIdOrNull(
+  value: string | null | undefined,
+): string | null {
+  if (!value?.trim()) return null;
+  try {
+    return normalizeMatrixUserId(value);
+  } catch {
+    return null;
+  }
+}
+
+function matrixServerNameOrNull(value: string): string | null {
+  try {
+    return matrixServerNameFromUserId(value);
+  } catch {
+    return null;
+  }
+}
+
 function assertDatabaseAvailable() {
   if (!process.env.DATABASE_URL?.trim()) {
     throw new ChannelManagementError(
@@ -1632,19 +2077,17 @@ function resolveConfiguredTelegramBotIdentity(
 }
 
 function resolveMatrixServerName() {
-  const serverName = process.env.MATRIX_SERVER_NAME?.trim().toLowerCase() || "";
+  const serverName = process.env.MATRIX_SERVER_NAME?.trim() || "";
   if (
     !serverName
-    || !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::[1-9]\d{0,4})?$/.test(
-      serverName,
-    )
+    || !isValidMatrixServerName(serverName)
   ) {
     throw new ChannelManagementError(
       "MATRIX_SERVER_NAME must be configured before provisioning Matrix users.",
       503,
     );
   }
-  return serverName;
+  return normalizeMatrixServerName(serverName);
 }
 
 function buildRepresentativeMatrixUserId(slug: string, serverName: string) {

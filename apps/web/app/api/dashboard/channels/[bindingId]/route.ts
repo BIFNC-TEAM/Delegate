@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import {
+  disconnectOwnerMatrixChannel,
   setOwnerChannelDesiredState,
   unassignOwnerTelegramBotConnection,
 } from "@delegate/web-data";
@@ -59,9 +60,31 @@ export async function DELETE(
   try {
     const session = await requireDashboardApiOwnerSession();
     const { bindingId } = await params;
-    const telegramBotConnectionId = new URL(request.url).searchParams
+    const searchParams = new URL(request.url).searchParams;
+    const channel = searchParams.get("channel")?.trim().toUpperCase();
+    const telegramBotConnectionId = searchParams
       .get("telegramBotConnectionId")
       ?.trim();
+    const actorId = session?.ownerId ?? "local-owner";
+    const requestMetadata = resolveChannelRequestMetadata(request);
+    if (channel === "MATRIX") {
+      const result = await disconnectOwnerMatrixChannel({
+        ownerId: actorId,
+        actorId,
+        bindingId,
+        ...requestMetadata,
+      });
+      return NextResponse.json(
+        {
+          bindingId: result.binding.id,
+          representativeId: result.binding.representativeId,
+          desiredState: result.binding.desiredState,
+          changed: result.changed,
+          requestId: requestMetadata.requestId,
+        },
+        { headers: { "Cache-Control": "private, no-store" } },
+      );
+    }
     if (!telegramBotConnectionId) {
       return NextResponse.json(
         {
@@ -74,8 +97,6 @@ export async function DELETE(
         },
       );
     }
-    const actorId = session?.ownerId ?? "local-owner";
-    const requestMetadata = resolveChannelRequestMetadata(request);
     const result = await unassignOwnerTelegramBotConnection({
       ownerId: actorId,
       actorId,
@@ -97,7 +118,7 @@ export async function DELETE(
   } catch (error) {
     return channelManagementErrorResponse(
       error,
-      "Failed to unbind Telegram channel.",
+      "Failed to disconnect channel.",
     );
   }
 }

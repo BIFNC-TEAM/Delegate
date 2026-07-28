@@ -86,6 +86,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         }
         externalMessageId = await sendMatrixRepresentativeMessage({
           config,
+          conversationId: operatorItem.conversationId,
           roomId: operatorItem.externalConversationId,
           senderUserId: operatorItem.matrixSenderUserId,
           deliveryId: `operator-${operatorItem.messageId}`,
@@ -1470,6 +1471,7 @@ async function deliverGenerationOutput(input: {
     }
     externalMessageId = await sendMatrixRepresentativeMessage({
       config: input.config,
+      conversationId: input.item.conversationId,
       roomId: input.item.externalConversationId,
       senderUserId: input.item.matrixSenderUserId,
       deliveryId: input.item.runId,

@@ -86,22 +86,109 @@ unusable_telegram_links AS (
       )
   )
 ),
+matrix_link_parts AS (
+  SELECT
+    link.*,
+    CASE
+      WHEN position(':' IN link."providerSubject") > 2
+        THEN substring(
+          link."providerSubject"
+          FROM position(':' IN link."providerSubject") + 1
+        )
+      ELSE ''
+    END AS matrix_server_name
+  FROM "IdentityLink" AS link
+  WHERE link."provider" = 'MATRIX'::"IdentityLinkProvider"
+),
+matrix_link_server_parts AS (
+  SELECT
+    link.*,
+    CASE
+      WHEN link.matrix_server_name ~ '^\[[^]]+\]'
+        THEN substring(
+          link.matrix_server_name
+          FROM 2 FOR position(']' IN link.matrix_server_name) - 2
+        )
+      WHEN link.matrix_server_name !~ '^\['
+        THEN regexp_replace(link.matrix_server_name, ':[0-9]+$', '')
+      ELSE NULL
+    END AS matrix_server_host,
+    CASE
+      WHEN link.matrix_server_name ~ '^\[[^]]+\]:[0-9]+$'
+        THEN substring(link.matrix_server_name FROM ':([0-9]+)$')
+      WHEN link.matrix_server_name !~ '^\['
+        AND link.matrix_server_name ~ ':[0-9]+$'
+        THEN substring(link.matrix_server_name FROM ':([0-9]+)$')
+      ELSE NULL
+    END AS matrix_server_port
+  FROM matrix_link_parts AS link
+),
+matrix_link_validation AS (
+  SELECT
+    link.*,
+    (
+      octet_length(link."providerSubject") <= 255
+      AND link."providerSubject" ~ '^@[^[:space:]:]+:'
+      AND length(link.matrix_server_name) BETWEEN 1 AND 255
+      AND (
+        (
+          link.matrix_server_name
+            ~ '^\[[0-9A-Fa-f:.]+\](:[1-9][0-9]{0,4})?$'
+          AND CASE
+            WHEN pg_input_is_valid(link.matrix_server_host, 'inet')
+              THEN family(link.matrix_server_host::inet) = 6
+            ELSE false
+          END
+        )
+        OR (
+          link.matrix_server_name !~ '^\['
+          AND link.matrix_server_name !~ ':.*:'
+          AND (
+            link.matrix_server_port IS NULL
+            OR (
+              link.matrix_server_port ~ '^[1-9][0-9]{0,4}$'
+              AND link.matrix_server_port::integer <= 65535
+            )
+          )
+          AND CASE
+            WHEN link.matrix_server_host ~ '^[0-9]+(\.[0-9]+){3}$'
+              THEN CASE
+                WHEN pg_input_is_valid(link.matrix_server_host, 'inet')
+                  THEN family(link.matrix_server_host::inet) = 4
+                    AND link.matrix_server_host !~ '(^|\.)0[0-9]'
+                ELSE false
+              END
+            ELSE link.matrix_server_host
+              ~ '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+          END
+        )
+      )
+    ) AS matrix_identifier_valid
+  FROM matrix_link_server_parts AS link
+),
+unusable_matrix_links AS (
+  SELECT
+    'REVOKED_MATRIX_LINK_REQUIRES_RELINK'::text AS issue_code,
+    'identity_link'::text AS entity_type,
+    link."id" AS entity_key,
+    jsonb_build_object(
+      'providerSubject', link."providerSubject",
+      'issuer', link."issuer",
+      'audienceIdentityId', link."audienceIdentityId",
+      'revokedAt', link."revokedAt",
+      'remediation', link."proofMetadata"->>'matrixCaseRemediation'
+    ) AS details
+  FROM matrix_link_validation AS link
+  WHERE link."revokedAt" IS NOT NULL
+),
 matrix_issuer_issues AS (
   SELECT
     CASE
-      WHEN link."providerSubject" !~ '^@[^[:space:]:]+:[^[:space:]:]+$'
+      WHEN NOT link.matrix_identifier_valid
         THEN 'MATRIX_LINK_INVALID_FULL_MXID'
       WHEN link."issuer" = 'delegate'
         THEN 'MATRIX_LINK_DEFAULT_ISSUER'
-      WHEN link."issuer" <> lower(split_part(link."providerSubject", ':', 2))
-        THEN 'MATRIX_LINK_ISSUER_MISMATCH'
-      WHEN link."providerSubject" <>
-        left(
-          link."providerSubject",
-          length(link."providerSubject") - length(split_part(link."providerSubject", ':', 2))
-        ) || lower(split_part(link."providerSubject", ':', 2))
-        THEN 'MATRIX_LINK_SUBJECT_NOT_NORMALIZED'
-      ELSE 'MATRIX_LINK_NORMALIZATION_COLLISION'
+      ELSE 'MATRIX_LINK_ISSUER_MISMATCH'
     END::text AS issue_code,
     'identity_link'::text AS entity_type,
     link."id" AS entity_key,
@@ -110,56 +197,17 @@ matrix_issuer_issues AS (
       'issuer', link."issuer",
       'expectedIssuer',
         CASE
-          WHEN link."providerSubject" ~ '^@[^[:space:]:]+:[^[:space:]:]+$'
-            THEN lower(split_part(link."providerSubject", ':', 2))
+          WHEN link.matrix_identifier_valid
+            THEN link.matrix_server_name
           ELSE NULL
-        END,
-      'normalizedMxidCollisionCount', (
-        SELECT count(*)
-        FROM "IdentityLink" AS collision
-        WHERE collision."provider" = 'MATRIX'::"IdentityLinkProvider"
-          AND collision."providerSubject" ~ '^@[^[:space:]:]+:[^[:space:]:]+$'
-          AND (
-            left(
-              collision."providerSubject",
-              length(collision."providerSubject") - length(split_part(collision."providerSubject", ':', 2))
-            ) || lower(split_part(collision."providerSubject", ':', 2))
-          ) = (
-            left(
-              link."providerSubject",
-              length(link."providerSubject") - length(split_part(link."providerSubject", ':', 2))
-            ) || lower(split_part(link."providerSubject", ':', 2))
-          )
-      )
+        END
     ) AS details
-  FROM "IdentityLink" AS link
-  WHERE link."provider" = 'MATRIX'::"IdentityLinkProvider"
+  FROM matrix_link_validation AS link
+  WHERE link."revokedAt" IS NULL
     AND (
-      link."providerSubject" !~ '^@[^[:space:]:]+:[^[:space:]:]+$'
+      NOT link.matrix_identifier_valid
       OR link."issuer" = 'delegate'
-      OR link."issuer" <> lower(split_part(link."providerSubject", ':', 2))
-      OR link."providerSubject" <>
-        left(
-          link."providerSubject",
-          length(link."providerSubject") - length(split_part(link."providerSubject", ':', 2))
-        ) || lower(split_part(link."providerSubject", ':', 2))
-      OR (
-        SELECT count(*)
-        FROM "IdentityLink" AS collision
-        WHERE collision."provider" = 'MATRIX'::"IdentityLinkProvider"
-          AND collision."providerSubject" ~ '^@[^[:space:]:]+:[^[:space:]:]+$'
-          AND (
-            left(
-              collision."providerSubject",
-              length(collision."providerSubject") - length(split_part(collision."providerSubject", ':', 2))
-            ) || lower(split_part(collision."providerSubject", ':', 2))
-          ) = (
-            left(
-              link."providerSubject",
-              length(link."providerSubject") - length(split_part(link."providerSubject", ':', 2))
-            ) || lower(split_part(link."providerSubject", ':', 2))
-          )
-      ) > 1
+      OR link."issuer" <> link.matrix_server_name
     )
 ),
 telegram_issuer_issues AS (
@@ -604,6 +652,7 @@ SELECT issue.issue_code, issue.entity_type, issue.entity_key, issue.details
 FROM (
   SELECT * FROM identity_conflicts
   UNION ALL SELECT * FROM unusable_telegram_links
+  UNION ALL SELECT * FROM unusable_matrix_links
   UNION ALL SELECT * FROM matrix_issuer_issues
   UNION ALL SELECT * FROM telegram_issuer_issues
   UNION ALL SELECT * FROM wallet_without_provider_proof

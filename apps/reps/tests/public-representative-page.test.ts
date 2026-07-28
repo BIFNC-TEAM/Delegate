@@ -107,6 +107,15 @@ describe("public representative visitor-first page", () => {
     expect(identityBindingSource).toContain("capabilities?.telegram");
     expect(identityBindingSource).toContain("capabilities?.matrix");
     expect(identityBindingSource).toContain("绑定成功。这个私聊账号现在会使用当前 Delegate 账号的余额和服务权益");
+    expect(identityBindingSource).toContain('bindingLoadStatus === "loading"');
+    expect(identityBindingSource).toContain('bindingLoadStatus === "error"');
+    expect(identityBindingSource).toContain("setBindingLoadAttempt");
+    expect(identityBindingSource).toContain("if (result.changed)");
+    expect(identityBindingSource).toContain(
+      "const payload = await fetchBindingState(representativeSlug)",
+    );
+    expect(identityBindingSource).toContain("window.setTimeout");
+    expect(identityBindingSource).not.toContain("window.setInterval");
     expect(identityBindingSource).not.toContain("生成 Telegram 绑定命令");
   });
 });

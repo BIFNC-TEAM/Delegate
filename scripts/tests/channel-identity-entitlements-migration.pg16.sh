@@ -128,7 +128,9 @@ VALUES
   ('identity_conflict_wallet', 'fixture:conflict:wallet', 'ANONYMOUS', CURRENT_TIMESTAMP),
   ('identity_matrix_safe', 'fixture:matrix:safe', 'ANONYMOUS', CURRENT_TIMESTAMP),
   ('identity_matrix_collision_upper', 'fixture:matrix:collision:upper', 'ANONYMOUS', CURRENT_TIMESTAMP),
-  ('identity_matrix_collision_lower', 'fixture:matrix:collision:lower', 'ANONYMOUS', CURRENT_TIMESTAMP);
+  ('identity_matrix_collision_lower', 'fixture:matrix:collision:lower', 'ANONYMOUS', CURRENT_TIMESTAMP),
+  ('identity_matrix_invalid_port', 'fixture:matrix:invalid-port', 'ANONYMOUS', CURRENT_TIMESTAMP),
+  ('identity_matrix_invalid_host', 'fixture:matrix:invalid-host', 'ANONYMOUS', CURRENT_TIMESTAMP);
 
 INSERT INTO "Contact" (
   "id", "representativeId", "audienceIdentityId", "telegramUserId",
@@ -430,9 +432,43 @@ VALUES
 SQL
 
 printf 'phase=deploy_safe_backfill\n'
-DATABASE_URL="$FIXTURE_DATABASE_URL" \
+if ! DATABASE_URL="$FIXTURE_DATABASE_URL" \
   pnpm --dir "$REPO_ROOT" exec prisma migrate deploy \
-  --schema "$FIXTURE_ROOT/full/prisma/schema.prisma" >/dev/null
+  --schema "$FIXTURE_ROOT/full/prisma/schema.prisma"; then
+  printf 'phase=report_failed_migration\n' >&2
+  docker exec -i "$FIXTURE_CONTAINER" \
+    psql -U postgres -d delegate_fixture -X --set ON_ERROR_STOP=1 \
+    --command \
+      'SELECT migration_name, logs FROM "_prisma_migrations" WHERE finished_at IS NULL ORDER BY started_at DESC LIMIT 1;' \
+    >&2
+  exit 1
+fi
+
+printf 'phase=insert_invalid_matrix_links_for_reconciliation\n'
+docker exec -i "$FIXTURE_CONTAINER" \
+  psql -U postgres -d delegate_fixture -X --set ON_ERROR_STOP=1 <<'SQL' >/dev/null
+INSERT INTO "IdentityLink" (
+  "id", "audienceIdentityId", "provider", "providerSubject",
+  "issuer", "updatedAt"
+)
+VALUES
+  (
+    'matrix_link_invalid_port',
+    'identity_matrix_invalid_port',
+    'MATRIX',
+    '@Invalid:matrix.example.org:70000',
+    'matrix.example.org:70000',
+    CURRENT_TIMESTAMP
+  ),
+  (
+    'matrix_link_invalid_host',
+    'identity_matrix_invalid_host',
+    'MATRIX',
+    '@Invalid:foo/bar',
+    'foo/bar',
+    CURRENT_TIMESTAMP
+  );
+SQL
 
 printf 'phase=assert_safe_backfill_and_quarantine\n'
 docker exec -i "$FIXTURE_CONTAINER" \
@@ -481,11 +517,19 @@ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM "AgentTokenPurchase"
     WHERE "id" = 'purchase_safe' AND "audienceIdentityId" = safe_identity_id
-  ) OR NOT EXISTS (
-    SELECT 1 FROM "AgentUsageCharge"
-    WHERE "id" = 'charge_safe' AND "audienceIdentityId" = safe_identity_id
   ) THEN
-    RAISE EXCEPTION 'proven legacy financial ownership was not propagated';
+    RAISE EXCEPTION 'proven legacy purchase ownership was not propagated';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM "AgentUsageCharge"
+    WHERE "id" = 'charge_safe'
+      AND "audienceIdentityId" IS NULL
+      AND "entitlementAccountId" IS NULL
+      AND "conversationId" IS NULL
+      AND "generationRunId" IS NULL
+  ) THEN
+    RAISE EXCEPTION 'unbound legacy usage charge acquired a partial authorization scope';
   END IF;
 
   IF NOT EXISTS (
@@ -541,27 +585,71 @@ BEGIN
     WHERE "id" = 'matrix_link_safe'
       AND "providerSubject" = '@Alice:example.org'
       AND "issuer" = 'example.org'
+      AND "revokedAt" IS NOT NULL
+      AND "proofMetadata"->>'matrixCaseRemediation' = 'rebind_required'
   ) THEN
-    RAISE EXCEPTION 'valid Matrix MXID did not backfill its normalized homeserver issuer';
+    RAISE EXCEPTION 'case-normalized Matrix link was not revoked for explicit rebind';
   END IF;
 
-  IF EXISTS (
+  IF NOT EXISTS (
     SELECT 1 FROM "IdentityLink"
-    WHERE "id" IN ('matrix_link_collision_upper', 'matrix_link_collision_lower')
-      AND "issuer" <> 'delegate'
+    WHERE "id" = 'matrix_link_collision_upper'
+      AND "providerSubject" = '@Bob:EXAMPLE.ORG'
+      AND "issuer" = 'delegate'
+      AND "revokedAt" IS NULL
+  ) OR NOT EXISTS (
+    SELECT 1 FROM "IdentityLink"
+    WHERE "id" = 'matrix_link_collision_lower'
+      AND "providerSubject" = '@Bob:example.org'
+      AND "issuer" = 'delegate'
+      AND "revokedAt" IS NULL
   ) THEN
-    RAISE EXCEPTION 'Matrix normalization collision selected an arbitrary identity link';
+    RAISE EXCEPTION 'ambiguous legacy Matrix links selected an arbitrary winner';
   END IF;
 END
 $fixture$;
 SQL
 
-printf 'phase=replay_safe_backfill_sql\n'
+printf 'phase=replay_forward_remediation_sql\n'
+# Prisma never reapplies an already-recorded migration. Replaying the immutable
+# legacy backfill after later database invariants exist would manufacture an
+# impossible migration order, so only prove that the new forward remediation is
+# independently idempotent.
+FORWARD_REMEDIATION_STATE_BEFORE="$(
+  docker exec -i "$FIXTURE_CONTAINER" \
+    psql -U postgres -d delegate_fixture \
+    -X --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
+    --command \
+      "SELECT jsonb_build_object(
+        'revokedAt', \"revokedAt\",
+        'proofMetadata', \"proofMetadata\",
+        'updatedAt', \"updatedAt\"
+      )::text
+      FROM \"IdentityLink\"
+      WHERE \"id\" = 'matrix_link_safe';"
+)"
 docker exec -i "$FIXTURE_CONTAINER" \
   psql -U postgres -d delegate_fixture \
   -X --set ON_ERROR_STOP=1 --file - \
-  < "$REPO_ROOT/prisma/migrations/20260723231000_channel_identity_safe_backfill/migration.sql" \
+  < "$REPO_ROOT/prisma/migrations/20260723231500_channel_identity_safe_forward_remediation/migration.sql" \
   >/dev/null
+FORWARD_REMEDIATION_STATE_AFTER="$(
+  docker exec -i "$FIXTURE_CONTAINER" \
+    psql -U postgres -d delegate_fixture \
+    -X --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
+    --command \
+      "SELECT jsonb_build_object(
+        'revokedAt', \"revokedAt\",
+        'proofMetadata', \"proofMetadata\",
+        'updatedAt', \"updatedAt\"
+      )::text
+      FROM \"IdentityLink\"
+      WHERE \"id\" = 'matrix_link_safe';"
+)"
+if [[ "$FORWARD_REMEDIATION_STATE_AFTER" != "$FORWARD_REMEDIATION_STATE_BEFORE" ]]; then
+  printf 'Forward remediation replay mutated an already-remediated Matrix link.\n' >&2
+  exit 1
+fi
 
 printf 'phase=assert_post_deploy_report\n'
 POST_DEPLOY_REPORT="$(
@@ -575,11 +663,11 @@ printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'TELEGRAM_IDENTITY_CONFLICT' >/dev
 printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'DUPLICATE_CHANNEL_COORDINATE' >/dev/null
 printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'SERIALIZED_CHANNEL_KEY_COLLISION' >/dev/null
 printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'LEGACY_INVOICE_ENTITLEMENT_DECISION_REQUIRED' >/dev/null
+printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'REVOKED_MATRIX_LINK_REQUIRES_RELINK' >/dev/null
 printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'MATRIX_LINK_DEFAULT_ISSUER' >/dev/null
-if printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'matrix_link_safe' >/dev/null; then
-  printf 'Safely normalized Matrix link must not remain in the reconciliation report.\n' >&2
-  exit 6
-fi
+printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'MATRIX_LINK_INVALID_FULL_MXID' >/dev/null
+printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'matrix_link_invalid_port' >/dev/null
+printf '%s\n' "$POST_DEPLOY_REPORT" | grep -F 'matrix_link_invalid_host' >/dev/null
 
 printf 'phase=assert_reconciliation_sql_executes\n'
 docker exec -i "$FIXTURE_CONTAINER" \

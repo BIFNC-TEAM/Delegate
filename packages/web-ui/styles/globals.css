@@ -5485,6 +5485,37 @@ button.skill-row:hover {
   color: var(--marketing-green-strong);
 }
 
+.representative-shell .identity-binding-item {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.representative-shell .identity-binding-unlink {
+  min-height: 36px;
+  border: 1px solid var(--marketing-line);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #ffffff;
+  color: var(--marketing-soft);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 750;
+  cursor: pointer;
+  transition: transform 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.representative-shell .identity-binding-unlink:not(:disabled):hover {
+  transform: translateY(-1px);
+  border-color: rgba(13, 148, 136, 0.28);
+  color: var(--marketing-green-strong);
+}
+
+.representative-shell .identity-binding-unlink:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
 .representative-shell .button-primary,
 .representative-shell .button-secondary {
   min-height: 36px;

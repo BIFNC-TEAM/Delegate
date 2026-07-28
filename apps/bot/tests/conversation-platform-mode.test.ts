@@ -13,7 +13,7 @@ import {
 describe("Telegram conversation platform mode", () => {
   it("checks channel availability before branching into legacy, shadow, or worker mode", () => {
     const source = readFileSync(
-      new URL("../src/index.ts", import.meta.url),
+      new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
     );
     const handlerStart = source.indexOf('bot.on("message:text"');
@@ -31,7 +31,7 @@ describe("Telegram conversation platform mode", () => {
 
   it("does not fall through to legacy group generation in worker mode", () => {
     const source = readFileSync(
-      new URL("../src/index.ts", import.meta.url),
+      new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
     );
     const handlerSource = source.slice(source.indexOf('bot.on("message:text"'));
@@ -46,7 +46,7 @@ describe("Telegram conversation platform mode", () => {
 
   it("blocks the legacy direct-compute path when worker owns Telegram", () => {
     const source = readFileSync(
-      new URL("../src/index.ts", import.meta.url),
+      new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
     );
     const commandSource = source.slice(
@@ -62,7 +62,7 @@ describe("Telegram conversation platform mode", () => {
 
   it("checks channel availability before starting paid invoices or compute work", () => {
     const source = readFileSync(
-      new URL("../src/index.ts", import.meta.url),
+      new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
     );
     const invoiceSource = source.slice(

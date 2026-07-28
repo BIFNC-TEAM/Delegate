@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 
-import { setOwnerChannelDesiredState } from "@delegate/web-data";
+import {
+  setOwnerChannelDesiredState,
+  unassignOwnerTelegramBotConnection,
+} from "@delegate/web-data";
 
 import { requireDashboardApiOwnerSession } from "../../auth";
 import { channelManagementErrorResponse } from "../errors";
@@ -22,7 +25,10 @@ export async function PATCH(
     ) {
       return NextResponse.json(
         { error: "desiredState must be ACTIVE or PAUSED." },
-        { status: 400 },
+        {
+          status: 400,
+          headers: { "Cache-Control": "private, no-store" },
+        },
       );
     }
     const actorId = session?.ownerId ?? "local-owner";
@@ -42,6 +48,56 @@ export async function PATCH(
     return channelManagementErrorResponse(
       error,
       "Failed to update channel state.",
+    );
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  { params }: { params: Promise<{ bindingId: string }> },
+) {
+  try {
+    const session = await requireDashboardApiOwnerSession();
+    const { bindingId } = await params;
+    const telegramBotConnectionId = new URL(request.url).searchParams
+      .get("telegramBotConnectionId")
+      ?.trim();
+    if (!telegramBotConnectionId) {
+      return NextResponse.json(
+        {
+          error:
+            "telegramBotConnectionId is required to unbind a Telegram channel.",
+        },
+        {
+          status: 400,
+          headers: { "Cache-Control": "private, no-store" },
+        },
+      );
+    }
+    const actorId = session?.ownerId ?? "local-owner";
+    const requestMetadata = resolveChannelRequestMetadata(request);
+    const result = await unassignOwnerTelegramBotConnection({
+      ownerId: actorId,
+      actorId,
+      bindingId,
+      telegramBotConnectionId,
+      ...requestMetadata,
+    });
+    return NextResponse.json(
+      {
+        bindingId: result.binding.id,
+        representativeId: result.binding.representativeId,
+        telegramBotConnectionId:
+          result.binding.telegramBotConnectionId,
+        changed: result.changed,
+        requestId: requestMetadata.requestId,
+      },
+      { headers: { "Cache-Control": "private, no-store" } },
+    );
+  } catch (error) {
+    return channelManagementErrorResponse(
+      error,
+      "Failed to unbind Telegram channel.",
     );
   }
 }

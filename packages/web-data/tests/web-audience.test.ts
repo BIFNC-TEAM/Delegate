@@ -173,9 +173,56 @@ describe("web audience identity resolver", () => {
         },
         client,
       ),
-    ).rejects.toThrow(/different provider connection/i);
+    ).rejects.toThrow(/not actively verified/i);
     expect(client.audienceIdentities).toHaveLength(1);
     expect(identity.id).toBe(client.identityLinks[0]?.audienceIdentityId);
+  });
+
+  it("does not let ordinary channel traffic create or restore a connection proof", async () => {
+    const client = new FakeWebAudienceClient();
+
+    await resolveChannelAudienceIdentity(
+      {
+        provider: "TELEGRAM",
+        providerSubject: "123456",
+        issuer: "delegate-managed-bot",
+        connectionId: "bot-a",
+      },
+      client,
+    );
+    const botAProof = client.identityLinkConnectionProofs.find(
+      (proof) => proof.connectionId === "bot-a",
+    );
+    expect(botAProof).toBeDefined();
+    botAProof!.revokedAt = new Date("2026-07-28T00:00:00.000Z");
+
+    await expect(
+      resolveChannelAudienceIdentity(
+        {
+          provider: "TELEGRAM",
+          providerSubject: "123456",
+          issuer: "delegate-managed-bot",
+          connectionId: "bot-a",
+        },
+        client,
+      ),
+    ).rejects.toThrow(/not actively verified/i);
+    await expect(
+      resolveChannelAudienceIdentity(
+        {
+          provider: "TELEGRAM",
+          providerSubject: "123456",
+          issuer: "delegate-managed-bot",
+          connectionId: "bot-b",
+        },
+        client,
+      ),
+    ).rejects.toThrow(/not actively verified/i);
+
+    expect(client.identityLinkConnectionProofs).toHaveLength(1);
+    expect(botAProof?.revokedAt).toEqual(
+      new Date("2026-07-28T00:00:00.000Z"),
+    );
   });
 
   it("merges anonymous identity references into a target identity", async () => {
@@ -876,9 +923,20 @@ type IdentityLinkRow = {
   metadata: unknown;
 };
 
+type IdentityLinkConnectionProofRow = {
+  identityLinkId: string;
+  issuer: string;
+  connectionId: string;
+  verifiedAt: Date | null;
+  assuranceLevel: "UNVERIFIED" | "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+  revokedAt: Date | null;
+  proofMetadata: unknown;
+};
+
 class FakeWebAudienceClient {
   audienceIdentities: AudienceIdentityRow[] = [];
   identityLinks: IdentityLinkRow[] = [];
+  identityLinkConnectionProofs: IdentityLinkConnectionProofRow[] = [];
   contacts: ContactRow[] = [];
   conversations: ConversationRow[] = [];
   turns: TurnRow[] = [];
@@ -954,6 +1012,7 @@ class FakeWebAudienceClient {
       );
       return link
         ? {
+            id: link.id,
             audienceIdentityId: link.audienceIdentityId,
             ...(link.issuer ? { issuer: link.issuer } : {}),
             connectionId: link.connectionId,
@@ -1024,6 +1083,42 @@ class FakeWebAudienceClient {
         }
       }
       return { count };
+    },
+  };
+
+  identityLinkConnectionProof = {
+    findUnique: async (args: any) => {
+      const key = args.where.identityLinkId_issuer_connectionId;
+      return this.identityLinkConnectionProofs.find(
+        (proof) =>
+          proof.identityLinkId === key.identityLinkId
+          && proof.issuer === key.issuer
+          && proof.connectionId === key.connectionId,
+      ) ?? null;
+    },
+    upsert: async (args: any) => {
+      const key = args.where.identityLinkId_issuer_connectionId;
+      const existing = this.identityLinkConnectionProofs.find(
+        (proof) =>
+          proof.identityLinkId === key.identityLinkId
+          && proof.issuer === key.issuer
+          && proof.connectionId === key.connectionId,
+      );
+      if (existing) {
+        Object.assign(existing, args.update);
+        return existing;
+      }
+      const proof: IdentityLinkConnectionProofRow = {
+        identityLinkId: args.create.identityLinkId,
+        issuer: args.create.issuer,
+        connectionId: args.create.connectionId,
+        verifiedAt: args.create.verifiedAt,
+        assuranceLevel: args.create.assuranceLevel,
+        revokedAt: args.create.revokedAt,
+        proofMetadata: args.create.proofMetadata ?? null,
+      };
+      this.identityLinkConnectionProofs.push(proof);
+      return proof;
     },
   };
 

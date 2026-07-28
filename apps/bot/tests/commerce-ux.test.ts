@@ -181,7 +181,7 @@ describe("Telegram commerce UX", () => {
 
   it("wires command registration and all generated buy buttons through the gate", () => {
     const source = readFileSync(
-      new URL("../src/index.ts", import.meta.url),
+      new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
     );
     expect(source).toContain("buildTelegramBotCommands(");

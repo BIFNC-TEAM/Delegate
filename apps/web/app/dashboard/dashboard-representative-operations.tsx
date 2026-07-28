@@ -298,8 +298,8 @@ export function DashboardRepresentativeOperations({
                   </header>
                   <p className="dashboard-v2-panel-description">
                     {zh
-                      ? "这里显示当前代表的渠道摘要；连接、暂停和健康检查在发布渠道统一管理。Telegram 当前使用部署级共享 Bot。"
-                      : "This is the current representative's channel summary. Manage connections, pauses, and health checks in Channels. Telegram currently uses a deployment-wide shared Bot."}
+                      ? "这里显示当前代表的渠道摘要；连接、暂停和健康检查在发布渠道统一管理。每个数字代表可选择独立 Telegram Bot，也可复用工作区内同一个 Bot。"
+                      : "This is the current representative's channel summary. Manage connections, pauses, and health checks in Channels. Each representative can use its own Telegram Bot or reuse one Bot in the workspace."}
                   </p>
                   <div className="representative-channel-list">
                     {snapshot.channels.length ? snapshot.channels.map((channel) => (

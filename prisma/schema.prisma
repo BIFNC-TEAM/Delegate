@@ -157,6 +157,7 @@ enum EventType {
   SKILL_UPDATE_POLICY_CHANGED
   MCP_BINDING_CHANGED
   COMPUTE_POLICY_CHANGED
+  CHANNEL_CONFIGURATION_CHANGED
 }
 
 enum CapabilityKind {
@@ -807,6 +808,24 @@ enum ChannelHealthStatus {
   UNHEALTHY
 }
 
+enum TelegramBotConnectionScope {
+  OWNER_MANAGED
+  PLATFORM_MANAGED
+}
+
+enum TelegramBotConnectionStatus {
+  PENDING_CREDENTIAL
+  ACTIVE
+  DISABLED
+  REVOKED
+}
+
+enum TelegramBotCredentialStatus {
+  ACTIVE
+  RETIRED
+  REVOKED
+}
+
 enum ChannelInteractionMode {
   PRIVATE_CHAT
   GROUP_MENTION
@@ -924,6 +943,7 @@ model Owner {
   knowledgeAssets           KnowledgeAsset[]
   matrixVirtualUsers        MatrixVirtualUserBinding[]
   workspaceSkillInstalls    WorkspaceSkillInstall[]
+  telegramBotConnections    TelegramBotConnection[]
 }
 
 model OwnerIdentityLink {
@@ -997,11 +1017,29 @@ model IdentityLink {
   createdAt          DateTime               @default(now())
   updatedAt          DateTime               @updatedAt
   audienceIdentity   AudienceIdentity       @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
+  connectionProofs   IdentityLinkConnectionProof[]
 
   @@unique([provider, providerSubject])
   @@index([audienceIdentityId, provider])
   @@index([provider, issuer, providerSubject])
   @@index([revokedAt])
+}
+
+model IdentityLinkConnectionProof {
+  id             String                 @id @default(cuid())
+  identityLinkId String
+  issuer         String
+  connectionId   String
+  verifiedAt     DateTime?
+  assuranceLevel IdentityAssuranceLevel @default(UNVERIFIED)
+  revokedAt      DateTime?
+  proofMetadata  Json?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  identityLink   IdentityLink           @relation(fields: [identityLinkId], references: [id], onDelete: Cascade)
+
+  @@unique([identityLinkId, issuer, connectionId])
+  @@index([issuer, connectionId, revokedAt])
 }
 
 model IdentityBindingChallenge {
@@ -1775,30 +1813,105 @@ model RuntimePolicyOverlay {
   @@index([expiresAt])
 }
 
+model TelegramBotConnection {
+  id                     String                       @id @default(cuid())
+  ownerId                String?
+  scope                  TelegramBotConnectionScope   @default(OWNER_MANAGED)
+  botId                  String                       @unique
+  username               String?
+  displayName            String?
+  label                  String?
+  status                 TelegramBotConnectionStatus @default(PENDING_CREDENTIAL)
+  healthStatus           ChannelHealthStatus          @default(UNKNOWN)
+  activeCredentialId     String?                      @unique
+  credentialRevision     Int                          @default(0)
+  lastVerifiedAt         DateTime?
+  lastHealthCheckAt      DateTime?
+  lastError              String?
+  revokedAt              DateTime?
+  createdAt              DateTime                     @default(now())
+  updatedAt              DateTime                     @updatedAt
+  owner                  Owner?                       @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  activeCredential       TelegramBotCredential?       @relation("ActiveTelegramBotCredential", fields: [activeCredentialId], references: [id], onDelete: SetNull)
+  credentials            TelegramBotCredential[]      @relation("TelegramBotCredentialVersions")
+  representativeBindings RepresentativeChannelBinding[]
+  chatSessions           ChatSession[]
+  runtimeLease           TelegramBotRuntimeLease?
+
+  @@index([ownerId, status, updatedAt])
+  @@index([status, healthStatus, updatedAt])
+}
+
+model TelegramBotRuntimeLease {
+  telegramBotConnectionId String                @id
+  holderId                 String
+  leaseToken               String                @unique
+  expiresAt                DateTime
+  acquiredAt               DateTime
+  renewedAt                DateTime
+  createdAt                DateTime              @default(now())
+  updatedAt                DateTime              @updatedAt
+  telegramBotConnection    TelegramBotConnection @relation(fields: [telegramBotConnectionId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([holderId, expiresAt])
+}
+
+model TelegramBotCredential {
+  id                      String                      @id @default(cuid())
+  telegramBotConnectionId String
+  version                 Int
+  ciphertext              Bytes?
+  iv                      Bytes?
+  authTag                 Bytes?
+  keyVersion              String
+  algorithm               String                      @default("aes-256-gcm")
+  fingerprint             String
+  status                  TelegramBotCredentialStatus @default(ACTIVE)
+  createdBy               String
+  requestId               String
+  idempotencyKey          String
+  activatedAt             DateTime?
+  retiredAt               DateTime?
+  revokedAt               DateTime?
+  createdAt               DateTime                    @default(now())
+  updatedAt               DateTime                    @updatedAt
+  telegramBotConnection   TelegramBotConnection       @relation("TelegramBotCredentialVersions", fields: [telegramBotConnectionId], references: [id], onDelete: Cascade)
+  activeForConnection     TelegramBotConnection?      @relation("ActiveTelegramBotCredential")
+
+  @@unique([telegramBotConnectionId, version])
+  @@unique([telegramBotConnectionId, idempotencyKey])
+  @@index([telegramBotConnectionId, fingerprint])
+  @@index([telegramBotConnectionId, status, createdAt])
+}
+
 model RepresentativeChannelBinding {
-  id                String                       @id @default(cuid())
-  representativeId  String
-  kind              RepresentativeChannelKind
-  transport         ChannelTransport?
-  sourceProvider    ChannelSourceProvider?
-  connectionId      String?
-  desiredState      ChannelDesiredState          @default(ACTIVE)
-  healthStatus      ChannelHealthStatus          @default(UNKNOWN)
-  externalUserId    String?
-  status            String                       @default("CONNECTED")
-  displayName       String?
-  configuration     Json?
-  lastHealthCheckAt DateTime?
-  lastError         String?
-  createdAt         DateTime                     @default(now())
-  updatedAt         DateTime                     @updatedAt
-  representative    Representative               @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  conversations     ConversationChannelBinding[]
+  id                      String                       @id @default(cuid())
+  representativeId        String
+  kind                    RepresentativeChannelKind
+  transport               ChannelTransport?
+  sourceProvider          ChannelSourceProvider?
+  connectionId            String?
+  telegramBotConnectionId String?
+  desiredState            ChannelDesiredState          @default(ACTIVE)
+  healthStatus            ChannelHealthStatus          @default(UNKNOWN)
+  externalUserId          String?
+  status                  String                       @default("CONNECTED")
+  displayName             String?
+  configuration           Json?
+  lastHealthCheckAt       DateTime?
+  lastError               String?
+  createdAt               DateTime                     @default(now())
+  updatedAt               DateTime                     @updatedAt
+  representative          Representative               @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  telegramBotConnection   TelegramBotConnection?       @relation(fields: [telegramBotConnectionId], references: [id], onDelete: Restrict)
+  conversations           ConversationChannelBinding[]
 
   @@unique([representativeId, kind])
   @@index([kind, status, updatedAt])
   @@index([desiredState, healthStatus, updatedAt])
   @@index([sourceProvider, transport, updatedAt])
+  @@index([telegramBotConnectionId, desiredState, updatedAt])
 }
 
 model KnowledgePack {
@@ -2077,13 +2190,19 @@ model Conversation {
 }
 
 model ChatSession {
-  id               String         @id @default(cuid())
-  telegramChatId   String         @unique
-  telegramUserId   String
-  representativeId String
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
-  representative   Representative @relation(fields: [representativeId], references: [id])
+  id                      String                 @id @default(cuid())
+  telegramChatId          String
+  telegramUserId          String
+  representativeId        String
+  telegramBotConnectionId String?
+  createdAt               DateTime               @default(now())
+  updatedAt               DateTime               @updatedAt
+  representative          Representative         @relation(fields: [representativeId], references: [id])
+  telegramBotConnection   TelegramBotConnection? @relation(fields: [telegramBotConnectionId], references: [id], onDelete: Restrict)
+
+  @@unique([telegramBotConnectionId, telegramChatId])
+  @@index([telegramChatId])
+  @@index([representativeId, telegramBotConnectionId])
 }
 
 model ConversationTurn {
@@ -2388,7 +2507,7 @@ model ChannelEventInbox {
   updatedAt       DateTime                  @updatedAt
   conversation    Conversation?             @relation(fields: [conversationId], references: [id], onDelete: SetNull)
 
-  @@unique([kind, externalEventId])
+  @@unique([kind, connectionId, externalEventId])
   @@index([status, availableAt, createdAt])
   @@index([transactionId])
   @@index([sourceProvider, transport, createdAt])
@@ -2416,6 +2535,7 @@ model OutboxEvent {
 
   @@index([status, availableAt, createdAt])
   @@index([aggregateType, aggregateId, createdAt])
+  @@index([transport, connectionId, status, availableAt])
 }
 
 model MatrixVirtualUserBinding {

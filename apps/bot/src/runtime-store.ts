@@ -47,6 +47,10 @@ import {
 import { prisma } from "./prisma";
 import { assertTelegramStarsLivePaymentEnabled } from "./conversation-platform-mode";
 import { planTelegramBotChannelBindingSynchronization } from "./telegram-runtime";
+import {
+  getTelegramRuntimeContext,
+  requireTelegramRuntimeContext,
+} from "./telegram-runtime-context";
 
 export type TelegramActor = {
   telegramUserId: number;
@@ -147,11 +151,17 @@ const telegramPaymentProcessingLeaseMs = 30_000;
 const telegramPaymentMaximumBackoffMs = 15 * 60_000;
 
 export async function synchronizeTelegramBotChannelBindings(input: {
-  connectionId: string;
+  internalConnectionId: string;
+  botId: string;
   username?: string;
+  legacy?: boolean;
 }): Promise<number> {
-  const connectionId = input.connectionId.trim();
-  if (!/^[1-9]\d*$/.test(connectionId)) {
+  const internalConnectionId = input.internalConnectionId.trim();
+  const botId = input.botId.trim();
+  if (!internalConnectionId) {
+    throw new Error("Telegram internal connection id is required.");
+  }
+  if (!/^[1-9]\d*$/.test(botId)) {
     throw new Error("Telegram bot connection id must be numeric.");
   }
   if (!process.env.DATABASE_URL?.trim()) {
@@ -166,11 +176,16 @@ export async function synchronizeTelegramBotChannelBindings(input: {
       transport: true,
       sourceProvider: true,
       connectionId: true,
+      telegramBotConnectionId: true,
     },
   });
   const synchronization = planTelegramBotChannelBindingSynchronization(
     bindings,
-    connectionId,
+    {
+      internalConnectionId,
+      botId,
+      ...(input.legacy !== undefined ? { legacy: input.legacy } : {}),
+    },
   );
   if (synchronization.conflictingBindingIds.length > 0) {
     throw new Error(
@@ -200,17 +215,23 @@ export async function synchronizeTelegramBotChannelBindings(input: {
         },
         {
           OR: [
-            { connectionId: null },
-            { connectionId: "" },
-            { connectionId },
+            { connectionId: botId },
           ],
         },
+        input.legacy
+          ? {
+              OR: [
+                { telegramBotConnectionId: null },
+                { telegramBotConnectionId: internalConnectionId },
+              ],
+            }
+          : { telegramBotConnectionId: internalConnectionId },
       ],
     },
     data: {
       transport: ChannelTransport.TELEGRAM,
       sourceProvider: ChannelSourceProvider.TELEGRAM,
-      connectionId,
+      connectionId: botId,
       ...(username ? { externalUserId: `@${username}` } : {}),
       healthStatus: ChannelHealthStatus.HEALTHY,
       status: "CONNECTED",
@@ -230,6 +251,7 @@ export async function getConversationContext(
   representativeSlug: string,
   actor: TelegramActor,
 ): Promise<ConversationContextRecord> {
+  const telegramRuntime = requireTelegramRuntimeContext();
   const representative = await prisma.representative.findUnique({
     where: { slug: representativeSlug },
     include: {
@@ -244,7 +266,9 @@ export async function getConversationContext(
   const now = new Date();
   const telegramUserId = String(actor.telegramUserId);
   const channelUserId = `telegram:${telegramUserId}`;
-  const connectionId = telegramBotConnectionId();
+  const connectionId = telegramRuntime.botId;
+  const scopedTelegramChatId =
+    `${connectionId}:${String(actor.chatId)}`;
   const audienceIdentity = await resolveChannelAudienceIdentity({
     provider: "TELEGRAM",
     providerSubject: telegramUserId,
@@ -291,7 +315,7 @@ export async function getConversationContext(
     where: {
       representativeId_telegramChatId_contactId: {
         representativeId: representative.id,
-        telegramChatId: String(actor.chatId),
+        telegramChatId: scopedTelegramChatId,
         contactId: contact.id,
       },
     },
@@ -299,7 +323,7 @@ export async function getConversationContext(
       representativeId: representative.id,
       contactId: contact.id,
       audienceIdentityId: audienceIdentity.id,
-      telegramChatId: String(actor.chatId),
+      telegramChatId: scopedTelegramChatId,
       channel: actor.channel,
       sourceChannel: "telegram",
       externalConversationId: String(actor.chatId),
@@ -316,42 +340,41 @@ export async function getConversationContext(
     },
   });
 
-  const telegramBotExternalUserId = process.env.TELEGRAM_BOT_USERNAME
-    ? `@${process.env.TELEGRAM_BOT_USERNAME.replace(/^@/, "")}`
-    : `telegram:${representative.slug}`;
-  const representativeBinding = await prisma.representativeChannelBinding.upsert({
-    where: {
-      representativeId_kind: {
+  const representativeBinding =
+    await prisma.representativeChannelBinding.findFirst({
+      where: {
         representativeId: representative.id,
-        kind: "TELEGRAM",
+        kind: RepresentativeChannelKind.TELEGRAM,
+        transport: ChannelTransport.TELEGRAM,
+        sourceProvider: ChannelSourceProvider.TELEGRAM,
+        connectionId,
+        ...(telegramRuntime.internalConnectionId.startsWith("legacy:")
+          ? {
+              OR: [
+                { telegramBotConnectionId: null },
+                {
+                  telegramBotConnectionId:
+                    telegramRuntime.internalConnectionId,
+                },
+              ],
+            }
+          : {
+              telegramBotConnectionId:
+                telegramRuntime.internalConnectionId,
+            }),
       },
-    },
-    create: {
-      representativeId: representative.id,
-      kind: "TELEGRAM",
-      transport: ChannelTransport.TELEGRAM,
-      sourceProvider: ChannelSourceProvider.TELEGRAM,
-      connectionId,
-      desiredState: ChannelDesiredState.ACTIVE,
-      healthStatus: ChannelHealthStatus.HEALTHY,
-      externalUserId: telegramBotExternalUserId,
-      status: "CONNECTED",
-      displayName: representative.displayName,
-      configuration: { managed: true, source: "telegram_bot" },
-      lastHealthCheckAt: now,
-    },
-    update: {
-      transport: ChannelTransport.TELEGRAM,
-      sourceProvider: ChannelSourceProvider.TELEGRAM,
-      connectionId,
-      externalUserId: telegramBotExternalUserId,
-      healthStatus: ChannelHealthStatus.HEALTHY,
-      status: "CONNECTED",
-      lastHealthCheckAt: now,
-      lastError: null,
-    },
-  });
-  const bindingKey = `TELEGRAM:${representative.id}:${String(actor.chatId)}:`;
+      select: {
+        id: true,
+        connectionId: true,
+      },
+    });
+  if (!representativeBinding) {
+    throw new Error(
+      "This Telegram Bot is not assigned to the selected representative.",
+    );
+  }
+  const bindingKey =
+    `TELEGRAM:${representative.id}:${connectionId}:${String(actor.chatId)}:`;
   await prisma.conversationChannelBinding.upsert({
     where: { bindingKey },
     create: {
@@ -360,12 +383,14 @@ export async function getConversationContext(
       kind: "TELEGRAM",
       transport: ChannelTransport.TELEGRAM,
       sourceProvider: ChannelSourceProvider.TELEGRAM,
-      connectionId: representativeBinding.connectionId,
+      connectionId,
       bindingKey,
       externalConversationId: String(actor.chatId),
       metadata: {
         source: "telegram_bot",
         telegramUserId,
+        telegramBotConnectionId: telegramRuntime.internalConnectionId,
+        botId: connectionId,
       },
     },
     update: {
@@ -373,7 +398,7 @@ export async function getConversationContext(
       representativeBindingId: representativeBinding.id,
       transport: ChannelTransport.TELEGRAM,
       sourceProvider: ChannelSourceProvider.TELEGRAM,
-      connectionId: representativeBinding.connectionId,
+      connectionId,
     },
   });
 
@@ -440,9 +465,14 @@ export async function getConversationContext(
 export async function getActiveRepresentativeSlugForChat(
   telegramChatId: number | string,
 ): Promise<string | null> {
-  const session = await prisma.chatSession.findUnique({
+  const telegramRuntime = requireTelegramRuntimeContext();
+  const session = await prisma.chatSession.findFirst({
     where: {
       telegramChatId: String(telegramChatId),
+      telegramBotConnectionId:
+        telegramRuntime.internalConnectionId.startsWith("legacy:")
+          ? null
+          : telegramRuntime.internalConnectionId,
     },
     include: {
       representative: {
@@ -456,33 +486,113 @@ export async function getActiveRepresentativeSlugForChat(
   return session?.representative.slug ?? null;
 }
 
+export async function getDefaultRepresentativeSlugForTelegramBot():
+Promise<string | null> {
+  const telegramRuntime = requireTelegramRuntimeContext();
+  const bindings = await prisma.representativeChannelBinding.findMany({
+    where: {
+      kind: RepresentativeChannelKind.TELEGRAM,
+      connectionId: telegramRuntime.botId,
+      desiredState: ChannelDesiredState.ACTIVE,
+      ...(telegramRuntime.internalConnectionId.startsWith("legacy:")
+        ? {
+            OR: [
+              { telegramBotConnectionId: null },
+              {
+                telegramBotConnectionId:
+                  telegramRuntime.internalConnectionId,
+              },
+            ],
+          }
+        : {
+            telegramBotConnectionId:
+              telegramRuntime.internalConnectionId,
+          }),
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    take: 2,
+    select: {
+      representative: {
+        select: { slug: true },
+      },
+    },
+  });
+  return bindings.length === 1
+    ? bindings[0]?.representative.slug ?? null
+    : null;
+}
+
 export async function setActiveRepresentativeForChat(params: {
   telegramChatId: number | string;
   telegramUserId: number;
   representativeSlug: string;
 }): Promise<string> {
+  const telegramRuntime = requireTelegramRuntimeContext();
   const representative = await prisma.representative.findUnique({
     where: { slug: params.representativeSlug },
-    select: { id: true, slug: true },
+    select: {
+      id: true,
+      slug: true,
+      channelBindings: {
+        where: {
+          kind: RepresentativeChannelKind.TELEGRAM,
+          connectionId: telegramRuntime.botId,
+          desiredState: ChannelDesiredState.ACTIVE,
+          ...(telegramRuntime.internalConnectionId.startsWith("legacy:")
+            ? {
+                OR: [
+                  { telegramBotConnectionId: null },
+                  {
+                    telegramBotConnectionId:
+                      telegramRuntime.internalConnectionId,
+                  },
+                ],
+              }
+            : {
+                telegramBotConnectionId:
+                  telegramRuntime.internalConnectionId,
+              }),
+        },
+        select: { id: true },
+        take: 1,
+      },
+    },
   });
 
-  if (!representative) {
+  if (!representative || representative.channelBindings.length === 0) {
     throw new Error(`Representative "${params.representativeSlug}" not found.`);
   }
 
-  await prisma.chatSession.upsert({
-    where: {
-      telegramChatId: String(params.telegramChatId),
-    },
-    create: {
-      telegramChatId: String(params.telegramChatId),
-      telegramUserId: String(params.telegramUserId),
-      representativeId: representative.id,
-    },
-    update: {
-      telegramUserId: String(params.telegramUserId),
-      representativeId: representative.id,
-    },
+  const telegramBotConnectionId =
+    telegramRuntime.internalConnectionId.startsWith("legacy:")
+      ? null
+      : telegramRuntime.internalConnectionId;
+  await prisma.$transaction(async (tx) => {
+    const existing = await tx.chatSession.findFirst({
+      where: {
+        telegramChatId: String(params.telegramChatId),
+        telegramBotConnectionId,
+      },
+      select: { id: true },
+    });
+    if (existing) {
+      await tx.chatSession.update({
+        where: { id: existing.id },
+        data: {
+          telegramUserId: String(params.telegramUserId),
+          representativeId: representative.id,
+        },
+      });
+      return;
+    }
+    await tx.chatSession.create({
+      data: {
+        telegramChatId: String(params.telegramChatId),
+        telegramUserId: String(params.telegramUserId),
+        representativeId: representative.id,
+        ...(telegramBotConnectionId ? { telegramBotConnectionId } : {}),
+      },
+    });
   });
 
   return representative.slug;
@@ -1511,6 +1621,20 @@ export async function validatePendingInvoice(
   if (!invoice.conversationId) {
     throw new Error("Telegram invoice is not attached to a conversation.");
   }
+  if (invoice.planType !== PricingPlanType.SPONSOR) {
+    const servicePaymentOrder = await prisma.servicePaymentOrder.findUnique({
+      where: { id: `service-payment:${invoice.id}` },
+      select: { providerAccountId: true },
+    });
+    if (
+      !servicePaymentOrder
+      || servicePaymentOrder.providerAccountId !== telegramBotConnectionId()
+    ) {
+      throw new Error(
+        "Telegram invoice belongs to a different Bot connection.",
+      );
+    }
+  }
   await assertConversationChannelDeliveryAvailable({
     conversationId: invoice.conversationId,
     channel: "telegram",
@@ -1525,8 +1649,9 @@ export async function persistAndProcessTelegramSuccessfulPayment(
   const externalEventId = `${connectionId}:${normalized.telegramPaymentChargeId}`;
   const inbox = await prisma.channelEventInbox.upsert({
     where: {
-      kind_externalEventId: {
+      kind_connectionId_externalEventId: {
         kind: RepresentativeChannelKind.TELEGRAM,
+        connectionId,
         externalEventId,
       },
     },
@@ -1535,7 +1660,8 @@ export async function persistAndProcessTelegramSuccessfulPayment(
       transport: ChannelTransport.TELEGRAM,
       sourceProvider: ChannelSourceProvider.TELEGRAM,
       connectionId,
-      originKey: `telegram:successful-payment:${externalEventId}`,
+      originKey:
+        `telegram:${connectionId}:successful-payment:${normalized.telegramPaymentChargeId}`,
       transactionId: normalized.invoicePayload,
       externalEventId,
       eventType: "telegram.successful_payment",
@@ -1774,6 +1900,29 @@ export async function confirmInvoicePayment(
       throw new Error("Telegram payment charge id is required.");
     }
 
+    const servicePaymentOrder =
+      invoice.planType === PricingPlanType.SPONSOR
+        ? null
+        : await tx.servicePaymentOrder.findUnique({
+            where: { id: `service-payment:${invoice.id}` },
+            select: { providerAccountId: true },
+          });
+    if (
+      invoice.planType !== PricingPlanType.SPONSOR
+      && !servicePaymentOrder
+    ) {
+      throw new Error("Telegram service payment order is missing.");
+    }
+    if (
+      servicePaymentOrder
+      && servicePaymentOrder.providerAccountId
+        !== telegramBotConnectionId()
+    ) {
+      throw new Error(
+        "Telegram payment belongs to a different Bot connection.",
+      );
+    }
+
     if (invoice.status === InvoiceStatus.PAID || invoice.status === InvoiceStatus.FULFILLED) {
       if (invoice.telegramPaymentChargeId !== params.telegramPaymentChargeId) {
         throw new Error("Invoice was already paid by a different Telegram charge.");
@@ -1798,20 +1947,6 @@ export async function confirmInvoicePayment(
     });
     if (duplicateCharge && duplicateCharge.id !== invoice.id) {
       throw new Error("Telegram payment charge was already used for another invoice.");
-    }
-
-    const servicePaymentOrder =
-      invoice.planType === PricingPlanType.SPONSOR
-        ? null
-        : await tx.servicePaymentOrder.findUnique({
-            where: { id: `service-payment:${invoice.id}` },
-            select: { providerAccountId: true },
-          });
-    if (
-      invoice.planType !== PricingPlanType.SPONSOR &&
-      !servicePaymentOrder
-    ) {
-      throw new Error("Telegram service payment order is missing.");
     }
 
     const paidAt = new Date();
@@ -2057,6 +2192,10 @@ function assertMatchingSuccessfulPayment(
 }
 
 function telegramBotConnectionId(): string {
+  const runtimeContext = getTelegramRuntimeContext();
+  if (runtimeContext) {
+    return runtimeContext.botId;
+  }
   const configuredId = process.env.TELEGRAM_BOT_ID?.trim();
   const tokenId = process.env.TELEGRAM_BOT_TOKEN?.trim().match(/^([1-9]\d*):/)?.[1];
   const connectionId = configuredId || tokenId;

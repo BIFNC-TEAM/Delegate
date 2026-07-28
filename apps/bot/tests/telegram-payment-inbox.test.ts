@@ -59,8 +59,9 @@ describe("Telegram payment inbox", () => {
 
     expect(mockPrisma.channelEventInbox.upsert).toHaveBeenCalledWith({
       where: {
-        kind_externalEventId: {
+        kind_connectionId_externalEventId: {
           kind: "TELEGRAM",
+          connectionId: "777000",
           externalEventId: "777000:charge-1",
         },
       },
@@ -69,7 +70,7 @@ describe("Telegram payment inbox", () => {
         transport: "TELEGRAM",
         sourceProvider: "TELEGRAM",
         connectionId: "777000",
-        originKey: "telegram:successful-payment:777000:charge-1",
+        originKey: "telegram:777000:successful-payment:charge-1",
         externalEventId: "777000:charge-1",
         eventType: "telegram.successful_payment",
         payload: payment,

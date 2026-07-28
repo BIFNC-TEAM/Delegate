@@ -104,12 +104,14 @@ type WebAudienceClient = {
         };
       };
       select: {
+        id: true;
         audienceIdentityId: true;
         issuer: true;
         connectionId: true;
         revokedAt: true;
       };
     }): Promise<{
+      id?: string;
       audienceIdentityId: string;
       issuer?: string;
       connectionId?: string | null;
@@ -172,6 +174,50 @@ type WebAudienceClient = {
         metadata?: unknown;
       };
     }): Promise<{ count: number }>;
+  };
+  identityLinkConnectionProof?: {
+    findUnique(args: {
+      where: {
+        identityLinkId_issuer_connectionId: {
+          identityLinkId: string;
+          issuer: string;
+          connectionId: string;
+        };
+      };
+      select: {
+        verifiedAt: true;
+        assuranceLevel: true;
+        revokedAt: true;
+      };
+    }): Promise<{
+      verifiedAt: Date | null;
+      assuranceLevel: "UNVERIFIED" | "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+      revokedAt: Date | null;
+    } | null>;
+    upsert(args: {
+      where: {
+        identityLinkId_issuer_connectionId: {
+          identityLinkId: string;
+          issuer: string;
+          connectionId: string;
+        };
+      };
+      create: {
+        identityLinkId: string;
+        issuer: string;
+        connectionId: string;
+        verifiedAt: Date;
+        assuranceLevel: "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+        revokedAt: null;
+        proofMetadata?: unknown;
+      };
+      update: {
+        verifiedAt: Date;
+        assuranceLevel: "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+        revokedAt: null;
+        proofMetadata?: unknown;
+      };
+    }): Promise<unknown>;
   };
   contact: {
     upsert(args: {
@@ -531,13 +577,44 @@ export async function resolveChannelAudienceIdentity(
     if (existingLink.issuer && existingLink.issuer !== issuer) {
       throw new Error("Channel identity belongs to a different issuer realm.");
     }
-    if (!existingLink.connectionId) {
-      throw new Error(
-        "Channel identity is missing verified connection scope and requires reconciliation.",
-      );
-    }
-    if (existingLink.connectionId.toLowerCase() !== connectionId) {
-      throw new Error("Channel identity belongs to a different provider connection.");
+    if (client.identityLinkConnectionProof && existingLink.id) {
+      const existingProof =
+        await client.identityLinkConnectionProof.findUnique({
+          where: {
+            identityLinkId_issuer_connectionId: {
+              identityLinkId: existingLink.id,
+              issuer,
+              connectionId,
+            },
+          },
+          select: {
+            verifiedAt: true,
+            assuranceLevel: true,
+            revokedAt: true,
+          },
+        });
+      if (
+        !existingProof
+        || existingProof.revokedAt
+        || !existingProof.verifiedAt
+        || (
+          existingProof.assuranceLevel !== "PLATFORM_VERIFIED"
+          && existingProof.assuranceLevel !== "STEP_UP_VERIFIED"
+        )
+      ) {
+        throw new Error(
+          "Channel identity connection is not actively verified; bind it from Web first.",
+        );
+      }
+    } else {
+      if (!existingLink.connectionId) {
+        throw new Error(
+          "Channel identity is missing verified connection scope and requires reconciliation.",
+        );
+      }
+      if (existingLink.connectionId.toLowerCase() !== connectionId) {
+        throw new Error("Channel identity belongs to a different provider connection.");
+      }
     }
     const identity = await resolveCanonicalAudienceIdentity(
       { audienceIdentityId: existingLink.audienceIdentityId },
@@ -603,7 +680,7 @@ export async function linkAudienceIdentity(
   const existingLink = await findIdentityLink(client, input.provider, providerSubject);
 
   if (existingLink) {
-    return updateOwnedIdentityLink({
+    const updated = await updateOwnedIdentityLink({
       client,
       existingAudienceIdentityId: existingLink.audienceIdentityId,
       requestedAudienceIdentityId: requestedIdentity.id,
@@ -616,7 +693,7 @@ export async function linkAudienceIdentity(
         ? { existingConnectionId: existingLink.connectionId }
         : {}),
       ...(input.issuer !== undefined ? { issuer: input.issuer } : {}),
-      ...(input.connectionId !== undefined
+      ...(input.connectionId !== undefined && !client.identityLinkConnectionProof
         ? { connectionId: input.connectionId }
         : {}),
       ...(input.verifiedAt !== undefined ? { verifiedAt: input.verifiedAt } : {}),
@@ -628,10 +705,30 @@ export async function linkAudienceIdentity(
         : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     });
+    if (
+      client.identityLinkConnectionProof
+      && existingLink.id
+      && input.connectionId
+      && input.verifiedAt
+    ) {
+      await recordIdentityLinkConnectionProof({
+        client,
+        identityLinkId: existingLink.id,
+        issuer: input.issuer?.trim().toLowerCase() || "delegate",
+        connectionId: input.connectionId.trim().toLowerCase(),
+        verifiedAt: input.verifiedAt,
+        assuranceLevel:
+          input.assuranceLevel === "STEP_UP_VERIFIED"
+            ? "STEP_UP_VERIFIED"
+            : "PLATFORM_VERIFIED",
+        proofMetadata: input.proofMetadata,
+      });
+    }
+    return updated;
   }
 
   try {
-    return await client.identityLink.create({
+    const created = await client.identityLink.create({
       data: {
         audienceIdentityId: requestedIdentity.id,
         provider: input.provider,
@@ -647,7 +744,27 @@ export async function linkAudienceIdentity(
           : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
       },
-    });
+    }) as { id?: string };
+    if (
+      client.identityLinkConnectionProof
+      && created.id
+      && input.connectionId
+      && input.verifiedAt
+    ) {
+      await recordIdentityLinkConnectionProof({
+        client,
+        identityLinkId: created.id,
+        issuer: input.issuer?.trim().toLowerCase() || "delegate",
+        connectionId: input.connectionId.trim().toLowerCase(),
+        verifiedAt: input.verifiedAt,
+        assuranceLevel:
+          input.assuranceLevel === "STEP_UP_VERIFIED"
+            ? "STEP_UP_VERIFIED"
+            : "PLATFORM_VERIFIED",
+        proofMetadata: input.proofMetadata,
+      });
+    }
+    return created;
   } catch (error) {
     if (!isUniqueConstraintError(error)) {
       throw error;
@@ -657,7 +774,7 @@ export async function linkAudienceIdentity(
     if (!concurrentLink) {
       throw error;
     }
-    return updateOwnedIdentityLink({
+    const updated = await updateOwnedIdentityLink({
       client,
       existingAudienceIdentityId: concurrentLink.audienceIdentityId,
       requestedAudienceIdentityId: requestedIdentity.id,
@@ -670,7 +787,7 @@ export async function linkAudienceIdentity(
         ? { existingConnectionId: concurrentLink.connectionId }
         : {}),
       ...(input.issuer !== undefined ? { issuer: input.issuer } : {}),
-      ...(input.connectionId !== undefined
+      ...(input.connectionId !== undefined && !client.identityLinkConnectionProof
         ? { connectionId: input.connectionId }
         : {}),
       ...(input.verifiedAt !== undefined ? { verifiedAt: input.verifiedAt } : {}),
@@ -682,6 +799,26 @@ export async function linkAudienceIdentity(
         : {}),
       ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     });
+    if (
+      client.identityLinkConnectionProof
+      && concurrentLink.id
+      && input.connectionId
+      && input.verifiedAt
+    ) {
+      await recordIdentityLinkConnectionProof({
+        client,
+        identityLinkId: concurrentLink.id,
+        issuer: input.issuer?.trim().toLowerCase() || "delegate",
+        connectionId: input.connectionId.trim().toLowerCase(),
+        verifiedAt: input.verifiedAt,
+        assuranceLevel:
+          input.assuranceLevel === "STEP_UP_VERIFIED"
+            ? "STEP_UP_VERIFIED"
+            : "PLATFORM_VERIFIED",
+        proofMetadata: input.proofMetadata,
+      });
+    }
+    return updated;
   }
 }
 
@@ -1472,10 +1609,53 @@ async function findIdentityLink(
       },
     },
     select: {
+      id: true,
       audienceIdentityId: true,
       issuer: true,
       connectionId: true,
       revokedAt: true,
+    },
+  });
+}
+
+async function recordIdentityLinkConnectionProof(input: {
+  client: WebAudienceClient;
+  identityLinkId: string;
+  issuer: string;
+  connectionId: string;
+  verifiedAt: Date;
+  assuranceLevel?: "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
+  proofMetadata?: unknown;
+}) {
+  const store = input.client.identityLinkConnectionProof;
+  if (!store) return;
+  const assuranceLevel = input.assuranceLevel ?? "PLATFORM_VERIFIED";
+  await store.upsert({
+    where: {
+      identityLinkId_issuer_connectionId: {
+        identityLinkId: input.identityLinkId,
+        issuer: input.issuer,
+        connectionId: input.connectionId,
+      },
+    },
+    create: {
+      identityLinkId: input.identityLinkId,
+      issuer: input.issuer,
+      connectionId: input.connectionId,
+      verifiedAt: input.verifiedAt,
+      assuranceLevel,
+      revokedAt: null,
+      ...(input.proofMetadata !== undefined
+        ? { proofMetadata: input.proofMetadata }
+        : {}),
+    },
+    update: {
+      verifiedAt: input.verifiedAt,
+      assuranceLevel,
+      revokedAt: null,
+      ...(input.proofMetadata !== undefined
+        ? { proofMetadata: input.proofMetadata }
+        : {}),
     },
   });
 }

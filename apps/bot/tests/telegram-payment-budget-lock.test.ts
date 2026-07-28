@@ -33,6 +33,12 @@ const { mockPrisma, tx, mockFulfillServicePaymentOrder } = vi.hoisted(() => {
       $transaction: vi.fn(
         async (callback: (client: typeof tx) => unknown) => callback(tx),
       ),
+      invoice: {
+        findUnique: vi.fn(),
+      },
+      servicePaymentOrder: {
+        findUnique: vi.fn(),
+      },
     },
   };
 });
@@ -48,6 +54,8 @@ vi.mock("@delegate/web-data", () => ({
   resolveChannelAudienceIdentity: vi.fn(),
 }));
 
+import { runWithTelegramRuntimeContext } from "../src/telegram-runtime-context";
+
 describe("Telegram payment conversation budget locking", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -55,7 +63,7 @@ describe("Telegram payment conversation budget locking", () => {
       .mockResolvedValueOnce(buildInvoice())
       .mockResolvedValueOnce(null);
     tx.servicePaymentOrder.findUnique.mockResolvedValue({
-      providerAccountId: "telegram-stars",
+      providerAccountId: "777000",
     });
     tx.invoice.updateMany.mockResolvedValue({ count: 1 });
     tx.wallet.update.mockResolvedValue({ id: "wallet-1" });
@@ -72,14 +80,21 @@ describe("Telegram payment conversation budget locking", () => {
   it("locks and re-reads the budget after the wallet write", async () => {
     const { confirmInvoicePayment } = await import("../src/runtime-store");
 
-    await confirmInvoicePayment({
-      invoicePayload: "invoice-payload-1",
-      currency: "XTR",
-      totalAmount: 25,
-      telegramUserId: 12345,
-      telegramPaymentChargeId: "telegram-charge-1",
-      providerPaymentChargeId: "provider-charge-1",
-    });
+    await runWithTelegramRuntimeContext(
+      {
+        internalConnectionId: "connection-1",
+        botId: "777000",
+      },
+      () =>
+        confirmInvoicePayment({
+          invoicePayload: "invoice-payload-1",
+          currency: "XTR",
+          totalAmount: 25,
+          telegramUserId: 12345,
+          telegramPaymentChargeId: "telegram-charge-1",
+          providerPaymentChargeId: "provider-charge-1",
+        }),
+    );
 
     expect(tx.conversation.update).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
@@ -97,6 +112,31 @@ describe("Telegram payment conversation budget locking", () => {
     expect(tx.conversation.findUnique.mock.invocationCallOrder[0]).toBeLessThan(
       tx.conversation.update.mock.invocationCallOrder[0]!,
     );
+  });
+
+  it("rejects a payment delivered by a different Bot connection", async () => {
+    const { confirmInvoicePayment } = await import("../src/runtime-store");
+    tx.servicePaymentOrder.findUnique.mockResolvedValue({
+      providerAccountId: "888000",
+    });
+
+    await expect(
+      runWithTelegramRuntimeContext(
+        {
+          internalConnectionId: "connection-1",
+          botId: "777000",
+        },
+        () =>
+          confirmInvoicePayment({
+            invoicePayload: "invoice-payload-1",
+            currency: "XTR",
+            totalAmount: 25,
+            telegramUserId: 12345,
+            telegramPaymentChargeId: "telegram-charge-1",
+          }),
+      ),
+    ).rejects.toThrow("different Bot connection");
+    expect(tx.invoice.updateMany).not.toHaveBeenCalled();
   });
 });
 

@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   PUBLIC_WALLET_UPDATED_EVENT,
+  getCheckoutSecondsRemaining,
+  getPublicRechargeStatusPresentation,
+  getWeChatPaymentPollDelayMs,
   publishPublicWalletUpdate,
   selectCurrentPublicWalletActivity,
   type PublicWalletStateSnapshot,
@@ -53,6 +56,7 @@ describe("public wallet client updates", () => {
       provider: "mock",
       status: "requires_payment",
       checkoutUrl: "/mock/checkout",
+      checkoutExpiresAt: null,
       paidAt: null,
       refundedAt: null,
       createdAt: "2026-07-27T05:00:00.000Z",
@@ -63,6 +67,54 @@ describe("public wallet client updates", () => {
       purchase: null,
       refund: null,
     });
+  });
+
+  it("maps every recharge state to localized text and a semantic tone", () => {
+    expect(
+      getPublicRechargeStatusPresentation("requires_payment", "zh"),
+    ).toEqual({ label: "待支付", tone: "warning" });
+    expect(
+      getPublicRechargeStatusPresentation("paid", "en"),
+    ).toEqual({ label: "Payment confirmed", tone: "success" });
+    expect(
+      getPublicRechargeStatusPresentation("failed", "zh"),
+    ).toEqual({ label: "支付失败", tone: "error" });
+    expect(
+      getPublicRechargeStatusPresentation("refunded", "en"),
+    ).toEqual({ label: "Refunded", tone: "neutral" });
+    expect(
+      getPublicRechargeStatusPresentation(
+        "requires_payment",
+        "zh",
+        { checkoutExpired: true },
+      ),
+    ).toEqual({ label: "二维码已过期", tone: "warning" });
+  });
+
+  it("derives a canonical checkout countdown without accepting malformed dates", () => {
+    expect(
+      getCheckoutSecondsRemaining(
+        "2026-07-27T10:00:10.000Z",
+        Date.parse("2026-07-27T10:00:00.250Z"),
+      ),
+    ).toBe(10);
+    expect(
+      getCheckoutSecondsRemaining(
+        "2026-07-27T10:00:00.000Z",
+        Date.parse("2026-07-27T10:00:01.000Z"),
+      ),
+    ).toBe(0);
+    expect(getCheckoutSecondsRemaining("2026-07-27", 0)).toBeNull();
+  });
+
+  it("uses bounded exponential delays for serialized payment polling", () => {
+    expect([
+      getWeChatPaymentPollDelayMs(0),
+      getWeChatPaymentPollDelayMs(1),
+      getWeChatPaymentPollDelayMs(2),
+      getWeChatPaymentPollDelayMs(3),
+      getWeChatPaymentPollDelayMs(20),
+    ]).toEqual([2_000, 4_000, 8_000, 15_000, 15_000]);
   });
 });
 
@@ -83,6 +135,7 @@ function walletStateFixture(): PublicWalletStateSnapshot {
       provider: "mock",
       status: "paid",
       checkoutUrl: null,
+      checkoutExpiresAt: null,
       paidAt: "2026-07-27T02:00:00.000Z",
       refundedAt: null,
       createdAt: "2026-07-27T01:00:00.000Z",

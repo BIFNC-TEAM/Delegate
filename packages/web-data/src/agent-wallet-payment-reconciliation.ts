@@ -3,11 +3,18 @@ import {
   RechargeOrderStatus,
 } from "@prisma/client";
 
-import type { NormalizedPaymentProviderEvent } from "./agent-wallet-payment-providers";
+import type {
+  NormalizedPaymentProviderEvent,
+  RechargeCheckoutSession,
+} from "./agent-wallet-payment-providers";
 import { prisma } from "./prisma";
 import {
-  isWeChatPayApiV3Enabled,
-  loadWeChatPayApiV3ConfigFromEnv,
+  isWeChatPayProcessingEnabled,
+  loadWeChatPayProcessingConfigFromEnv,
+} from "./wechat-pay-release-flags";
+import {
+  closeWeChatPayOrderByOutTradeNo,
+  createWeChatPayApiV3PaymentProviderAdapter,
   queryWeChatPayOrderByOutTradeNo,
   type WeChatPayEnvironment,
   type WeChatPayOrderQueryResult,
@@ -19,11 +26,13 @@ const WECHAT_RECONCILIATION_EVENT_TYPE =
 const WECHAT_RECONCILIATION_KEY_PREFIX =
   "wechat_pay:reconcile:";
 
-const MINIMUM_LEASE_MS = 30_000;
+const MINIMUM_LEASE_MS = 75_000;
 const DEFAULT_INITIAL_DELAY_MS = 10_000;
 const DEFAULT_PENDING_BACKOFF_MS = 10_000;
 const DEFAULT_ERROR_BACKOFF_MS = 5_000;
 const DEFAULT_MAX_BACKOFF_MS = 10 * 60_000;
+const DEFAULT_CREATED_ORDER_CLOSE_DELAY_MS = 5 * 60_000;
+export const WECHAT_CREATED_ORDER_RECOVERY_DELAY_MS = 75_000;
 
 type ReconciliationOutboxRecord = {
   id: string;
@@ -36,7 +45,16 @@ type RechargeOrderState = {
   id: string;
   provider: PaymentProvider;
   status: RechargeOrderStatus;
-  providerPayload?: unknown;
+  providerOrderId: string | null;
+  amountCents: number;
+  currency: string;
+  idempotencyKey: string;
+  checkoutUrl: string | null;
+  providerPayload: unknown;
+  createdAt: Date;
+  userWallet: {
+    externalUserId: string;
+  };
 };
 
 type ReconciliationTransactionClient = {
@@ -101,6 +119,8 @@ type ReconciliationTimingOptions = {
   pendingBackoffMs?: number;
   errorBackoffMs?: number;
   maxBackoffMs?: number;
+  createdOrderCloseDelayMs?: number;
+  createdRecoverySafetyDelayMs?: number;
   now?: () => Date;
 };
 
@@ -111,6 +131,12 @@ type ReconciliationDependencies = {
   completePaidEvent?: (
     event: NormalizedPaymentProviderEvent,
   ) => Promise<unknown>;
+  createCheckout?: (
+    order: RechargeOrderState,
+  ) => Promise<RechargeCheckoutSession>;
+  closeOrder?: (
+    rechargeOrderId: string,
+  ) => Promise<void>;
 };
 
 export type ReconcileWeChatPayOrderOptions =
@@ -146,7 +172,7 @@ export class WeChatPayReconciliationConflictError extends Error {
 /**
  * The local order transition and this durable work item are written by the
  * same database transaction. The globally unique key also heals an old or
- * replayed REQUIRES_PAYMENT order without creating parallel query jobs.
+ * replayed CREATED/REQUIRES_PAYMENT order without creating parallel jobs.
  */
 export async function enqueueWeChatPayOrderReconciliation(
   rechargeOrderIdInput: string,
@@ -281,6 +307,18 @@ export async function reconcileClaimedWeChatPayOrder(
       id: true,
       provider: true,
       status: true,
+      providerOrderId: true,
+      amountCents: true,
+      currency: true,
+      idempotencyKey: true,
+      checkoutUrl: true,
+      providerPayload: true,
+      createdAt: true,
+      userWallet: {
+        select: {
+          externalUserId: true,
+        },
+      },
     },
   });
   if (!order || order.provider !== PaymentProvider.WECHAT_PAY) {
@@ -299,7 +337,10 @@ export async function reconcileClaimedWeChatPayOrder(
     await completeClaimAsTerminal(claim, client);
     return { status: localStatus, queried: false };
   }
-  if (order.status !== RechargeOrderStatus.REQUIRES_PAYMENT) {
+  if (
+    order.status !== RechargeOrderStatus.CREATED
+    && order.status !== RechargeOrderStatus.REQUIRES_PAYMENT
+  ) {
     await deadLetterClaim(
       claim,
       "wechat_recharge_order_not_queryable",
@@ -307,6 +348,18 @@ export async function reconcileClaimedWeChatPayOrder(
     );
     throw new WeChatPayReconciliationConflictError(
       `WeChat Pay recharge order cannot be queried from ${order.status}.`,
+    );
+  }
+
+  if (
+    order.status === RechargeOrderStatus.CREATED
+    && !isCreatedRecoveryQueryDue(order, options)
+  ) {
+    return rescheduleCreatedRecoverySafetyWindow(
+      claim,
+      order,
+      client,
+      options,
     );
   }
 
@@ -351,8 +404,43 @@ export async function reconcileClaimedWeChatPayOrder(
     return { status: "paid", queried: true };
   }
 
+  if (queryResult.status === "not_found") {
+    if (order.status !== RechargeOrderStatus.CREATED) {
+      await deadLetterClaim(
+        claim,
+        "wechat_existing_checkout_missing_at_provider",
+        client,
+      );
+      throw new WeChatPayReconciliationConflictError(
+        "A persisted WeChat Pay checkout is missing at the provider.",
+      );
+    }
+    return recoverProviderMissingCreatedOrder(
+      claim,
+      order,
+      dependencies,
+      client,
+      options,
+    );
+  }
+
   if (queryResult.status === "pending") {
-    return reschedulePendingClaim(claim, client, options);
+    if (
+      queryResult.tradeState === "NOTPAY"
+      && isUnpaidOrderCloseDue(order, options)
+    ) {
+      return closeUnpayableOrder(
+        claim,
+        dependencies,
+        client,
+        options,
+      );
+    }
+    return reschedulePendingClaim(
+      claim,
+      client,
+      options,
+    );
   }
 
   return applyProviderTerminalResult(
@@ -443,7 +531,7 @@ export async function runWeChatPayOrderReconciliationTick(
 ): Promise<WeChatPayReconciliationTickSummary> {
   const env = options.env ?? process.env;
   const summary: WeChatPayReconciliationTickSummary = {
-    enabled: isWeChatPayApiV3Enabled(env),
+    enabled: isWeChatPayProcessingEnabled(env),
     claimed: 0,
     paid: 0,
     terminal: 0,
@@ -494,6 +582,382 @@ export async function runWeChatPayOrderReconciliationTick(
   return summary;
 }
 
+async function recoverProviderMissingCreatedOrder(
+  claim: WeChatPayOrderReconciliationClaim,
+  order: RechargeOrderState,
+  dependencies: Required<ReconciliationDependencies>,
+  client: ReconciliationClient,
+  options: ReconciliationTimingOptions,
+): Promise<WeChatPayOrderReconciliationResult> {
+  if (isPreparedCreatedCheckoutExpired(order, options)) {
+    // The signed query proved that WeChat has no order for this out_trade_no.
+    // Replaying the exact frozen request after time_expire can never succeed
+    // and would otherwise leave the outbox retrying forever. Close only local
+    // state so the user can deliberately create a fresh out_trade_no.
+    return applyProviderTerminalResult(
+      claim,
+      "closed",
+      client,
+      options,
+    );
+  }
+  await renewClaimForProviderEffect(
+    claim,
+    client,
+    options,
+  );
+  let checkout: RechargeCheckoutSession;
+  try {
+    // This is the only recovery path allowed to resubmit a Native order. The
+    // signed query immediately above proved that this out_trade_no does not
+    // exist, and the adapter reuses the request facts frozen before attempt 1.
+    checkout = await dependencies.createCheckout(order);
+  } catch (error) {
+    await retryClaimAfterError(
+      claim,
+      error,
+      client,
+      options,
+    );
+    throw error;
+  }
+
+  try {
+    return await persistRecoveredCreatedCheckout(
+      claim,
+      checkout,
+      client,
+      options,
+    );
+  } catch (error) {
+    if (
+      error instanceof WeChatPayReconciliationLeaseLostError
+    ) {
+      throw error;
+    }
+    if (isReconciliationConflict(error)) {
+      await deadLetterClaim(
+        claim,
+        safeErrorCode(error),
+        client,
+      );
+    } else {
+      await retryClaimAfterError(
+        claim,
+        error,
+        client,
+        options,
+      );
+    }
+    throw error;
+  }
+}
+
+async function persistRecoveredCreatedCheckout(
+  claim: WeChatPayOrderReconciliationClaim,
+  checkout: RechargeCheckoutSession,
+  client: ReconciliationClient,
+  options: ReconciliationTimingOptions,
+): Promise<WeChatPayOrderReconciliationResult> {
+  assertRecoveredCheckout(checkout, claim.rechargeOrderId);
+  return client.$transaction(async (tx) => {
+    await assertClaimOwned(claim, tx);
+    const transitioned = await tx.rechargeOrder.updateMany({
+      where: {
+        id: claim.rechargeOrderId,
+        provider: PaymentProvider.WECHAT_PAY,
+        status: RechargeOrderStatus.CREATED,
+      },
+      data: {
+        providerOrderId: checkout.providerOrderId,
+        checkoutUrl: checkout.checkoutUrl,
+        providerPayload: checkout.providerPayload,
+        status: RechargeOrderStatus.REQUIRES_PAYMENT,
+      },
+    });
+    if (transitioned.count === 0) {
+      const current = await tx.rechargeOrder.findUnique({
+        where: { id: claim.rechargeOrderId },
+        select: {
+          id: true,
+          provider: true,
+          status: true,
+          providerOrderId: true,
+        },
+      });
+      const currentStatus = current
+        ? publicStatusForLocalOrder(current.status)
+        : null;
+      if (
+        !current
+        || current.provider !== PaymentProvider.WECHAT_PAY
+        || !currentStatus
+      ) {
+        await markClaimDeadLettered(
+          claim,
+          "wechat_created_checkout_transition_conflict",
+          tx,
+        );
+        throw new WeChatPayReconciliationConflictError(
+          "WeChat Pay recharge order changed during checkout recovery.",
+        );
+      }
+      if (
+        current.status === RechargeOrderStatus.REQUIRES_PAYMENT
+        && current.providerOrderId !== checkout.providerOrderId
+      ) {
+        await markClaimDeadLettered(
+          claim,
+          "wechat_created_checkout_provider_order_conflict",
+          tx,
+        );
+        throw new WeChatPayReconciliationConflictError(
+          "Recovered WeChat Pay checkout identity conflicts with local state.",
+        );
+      }
+      if (currentStatus !== "pending") {
+        await markClaimProcessed(claim, tx);
+        return { status: currentStatus, queried: true };
+      }
+    }
+    await rescheduleOwnedClaim(claim, tx, options);
+    return { status: "pending", queried: true };
+  });
+}
+
+async function closeUnpayableOrder(
+  claim: WeChatPayOrderReconciliationClaim,
+  dependencies: Required<ReconciliationDependencies>,
+  client: ReconciliationClient,
+  options: ReconciliationTimingOptions,
+): Promise<WeChatPayOrderReconciliationResult> {
+  await renewClaimForProviderEffect(
+    claim,
+    client,
+    options,
+  );
+  try {
+    // A signed NOTPAY query proves the provider order exists. A CREATED order
+    // has lost its one-time code_url; a REQUIRES_PAYMENT order has passed its
+    // provider-authored expiry and safety margin. Only a verified close lets
+    // the user create a fresh out_trade_no without two payable orders.
+    await dependencies.closeOrder(claim.rechargeOrderId);
+  } catch (error) {
+    await retryClaimAfterError(
+      claim,
+      error,
+      client,
+      options,
+    );
+    throw error;
+  }
+
+  return client.$transaction(async (tx) => {
+    await assertClaimOwned(claim, tx);
+    const transitioned = await tx.rechargeOrder.updateMany({
+      where: {
+        id: claim.rechargeOrderId,
+        provider: PaymentProvider.WECHAT_PAY,
+        status: {
+          in: [
+            RechargeOrderStatus.CREATED,
+            RechargeOrderStatus.REQUIRES_PAYMENT,
+          ],
+        },
+      },
+      data: {
+        status: RechargeOrderStatus.CANCELED,
+        checkoutUrl: null,
+      },
+    });
+    if (transitioned.count === 0) {
+      const current = await tx.rechargeOrder.findUnique({
+        where: { id: claim.rechargeOrderId },
+        select: { id: true, provider: true, status: true },
+      });
+      const currentStatus = current
+        ? publicStatusForLocalOrder(current.status)
+        : null;
+      if (
+        !current
+        || current.provider !== PaymentProvider.WECHAT_PAY
+        || !currentStatus
+      ) {
+        await markClaimDeadLettered(
+          claim,
+          "wechat_close_transition_conflict",
+          tx,
+        );
+        throw new WeChatPayReconciliationConflictError(
+          "WeChat Pay recharge order changed during confirmed close.",
+        );
+      }
+      await markClaimProcessed(claim, tx);
+      return { status: currentStatus, queried: true };
+    }
+    await markClaimProcessed(claim, tx);
+    return { status: "closed", queried: true };
+  });
+}
+
+async function renewClaimForProviderEffect(
+  claim: WeChatPayOrderReconciliationClaim,
+  client: ReconciliationClient,
+  options: ReconciliationTimingOptions,
+): Promise<void> {
+  const leaseMs = normalizeLeaseMs(options.leaseMs);
+  const now = options.now?.() ?? new Date();
+  await client.$transaction(async (tx) => {
+    const renewed = await tx.outboxEvent.updateMany({
+      where: ownedClaimWhere(claim),
+      data: {
+        status: "PROCESSING",
+        availableAt: new Date(now.getTime() + leaseMs),
+      },
+    });
+    if (renewed.count !== 1) {
+      throw new WeChatPayReconciliationLeaseLostError();
+    }
+  });
+}
+
+function isUnpaidOrderCloseDue(
+  order: RechargeOrderState,
+  options: ReconciliationTimingOptions,
+): boolean {
+  const closeDelayMs = normalizeCreatedOrderCloseDelayMs(
+    options.createdOrderCloseDelayMs,
+  );
+  const now = options.now?.() ?? new Date();
+  if (order.status === RechargeOrderStatus.CREATED) {
+    const createdAt = order.createdAt;
+    return createdAt instanceof Date
+      && Number.isFinite(createdAt.getTime())
+      && now.getTime() - createdAt.getTime() >= closeDelayMs;
+  }
+  const checkoutExpiresAt =
+    readNativeCheckoutExpiresAt(order.providerPayload);
+  return order.status === RechargeOrderStatus.REQUIRES_PAYMENT
+    && checkoutExpiresAt !== null
+    && now.getTime() - checkoutExpiresAt.getTime() >= closeDelayMs;
+}
+
+function isCreatedRecoveryQueryDue(
+  order: RechargeOrderState,
+  options: ReconciliationTimingOptions,
+): boolean {
+  if (
+    !(order.createdAt instanceof Date)
+    || !Number.isFinite(order.createdAt.getTime())
+  ) {
+    return false;
+  }
+  const delayMs = normalizeCreatedRecoverySafetyDelayMs(
+    options.createdRecoverySafetyDelayMs,
+  );
+  const now = options.now?.() ?? new Date();
+  return now.getTime() - order.createdAt.getTime() >= delayMs;
+}
+
+function isPreparedCreatedCheckoutExpired(
+  order: RechargeOrderState,
+  options: ReconciliationTimingOptions,
+): boolean {
+  const outer = readUnknownObject(order.providerPayload);
+  const prepared = outer
+    ? readUnknownObject(outer.rawPayload)
+    : null;
+  if (
+    !prepared
+    || prepared.version !== 1
+    || prepared.mode !== "native"
+    || prepared.outTradeNo !== order.id
+  ) {
+    return false;
+  }
+  const expiresAt =
+    readNativeCheckoutExpiresAt(order.providerPayload);
+  if (!expiresAt) {
+    return false;
+  }
+  const now = options.now?.() ?? new Date();
+  return expiresAt.getTime() <= now.getTime();
+}
+
+function readNativeCheckoutExpiresAt(
+  providerPayload: unknown,
+): Date | null {
+  const outer = readUnknownObject(providerPayload);
+  if (!outer) {
+    return null;
+  }
+  const nativePayload = Object.prototype.hasOwnProperty.call(
+    outer,
+    "rawPayload",
+  )
+    ? readUnknownObject(outer.rawPayload)
+    : outer;
+  if (
+    !nativePayload
+    || nativePayload.mode !== "native"
+    || typeof nativePayload.expiresAt !== "string"
+  ) {
+    return null;
+  }
+  const expiresAt = new Date(nativePayload.expiresAt);
+  return Number.isFinite(expiresAt.getTime())
+    && expiresAt.toISOString() === nativePayload.expiresAt
+    ? expiresAt
+    : null;
+}
+
+async function rescheduleCreatedRecoverySafetyWindow(
+  claim: WeChatPayOrderReconciliationClaim,
+  order: RechargeOrderState,
+  client: ReconciliationClient,
+  options: ReconciliationTimingOptions,
+): Promise<WeChatPayOrderReconciliationResult> {
+  return client.$transaction(async (tx) => {
+    await assertClaimOwned(claim, tx);
+    const safetyDelayMs = normalizeCreatedRecoverySafetyDelayMs(
+      options.createdRecoverySafetyDelayMs,
+    );
+    const availableAt = new Date(
+      order.createdAt.getTime() + safetyDelayMs,
+    );
+    await updateOwnedClaim(
+      claim,
+      {
+        status: "PENDING",
+        availableAt,
+        processedAt: null,
+        lastError: null,
+      },
+      tx,
+    );
+    return { status: "pending", queried: false };
+  });
+}
+
+function assertRecoveredCheckout(
+  checkout: RechargeCheckoutSession,
+  expectedOrderId: string,
+): void {
+  if (
+    checkout.provider !== PaymentProvider.WECHAT_PAY
+    || checkout.providerOrderId !== expectedOrderId
+    || typeof checkout.checkoutUrl !== "string"
+    || !checkout.checkoutUrl.startsWith("weixin://wxpay/")
+    || checkout.providerPayload === null
+    || typeof checkout.providerPayload !== "object"
+    || Array.isArray(checkout.providerPayload)
+  ) {
+    throw new WeChatPayReconciliationConflictError(
+      "Recovered WeChat Pay checkout did not match the frozen local order.",
+    );
+  }
+}
+
 async function reschedulePendingClaim(
   claim: WeChatPayOrderReconciliationClaim,
   client: ReconciliationClient,
@@ -507,7 +971,6 @@ async function reschedulePendingClaim(
         id: true,
         provider: true,
         status: true,
-        providerPayload: true,
       },
     });
     const currentStatus = order
@@ -530,7 +993,10 @@ async function reschedulePendingClaim(
       await markClaimProcessed(claim, tx);
       return { status: currentStatus, queried: true };
     }
-    if (order.status !== RechargeOrderStatus.REQUIRES_PAYMENT) {
+    if (
+      order.status !== RechargeOrderStatus.CREATED
+      && order.status !== RechargeOrderStatus.REQUIRES_PAYMENT
+    ) {
       await markClaimDeadLettered(
         claim,
         "wechat_recharge_order_not_queryable",
@@ -541,81 +1007,41 @@ async function reschedulePendingClaim(
       );
     }
 
-    const now = options.now?.() ?? new Date();
-    const checkoutExpiresAt =
-      readNativeCheckoutExpiresAt(order.providerPayload);
-    if (
-      checkoutExpiresAt
-      && checkoutExpiresAt.getTime() <= now.getTime()
-    ) {
-      const canceled = await tx.rechargeOrder.updateMany({
-        where: {
-          id: claim.rechargeOrderId,
-          provider: PaymentProvider.WECHAT_PAY,
-          status: RechargeOrderStatus.REQUIRES_PAYMENT,
-        },
-        data: {
-          status: RechargeOrderStatus.CANCELED,
-          checkoutUrl: null,
-        },
-      });
-      if (canceled.count === 1) {
-        await markClaimProcessed(claim, tx);
-        return { status: "closed", queried: true };
-      }
-
-      // A verified callback may have committed while the signed pending
-      // query was in flight. Never overwrite that newer local truth.
-      const raced = await tx.rechargeOrder.findUnique({
-        where: { id: claim.rechargeOrderId },
-        select: { id: true, provider: true, status: true },
-      });
-      const racedStatus = raced
-        ? publicStatusForLocalOrder(raced.status)
-        : null;
-      if (
-        !raced
-        || raced.provider !== PaymentProvider.WECHAT_PAY
-        || !racedStatus
-      ) {
-        await markClaimDeadLettered(
-          claim,
-          "wechat_expired_checkout_transition_conflict",
-          tx,
-        );
-        throw new WeChatPayReconciliationConflictError(
-          "WeChat Pay checkout changed during expiration handling.",
-        );
-      }
-      if (racedStatus !== "pending") {
-        await markClaimProcessed(claim, tx);
-        return { status: racedStatus, queried: true };
-      }
-      // A failed CAS with an otherwise intact pending row is not sufficient
-      // evidence to cancel. Preserve the job and retry fail-safe.
-    }
-
-    const retryAt = new Date(
-      now.getTime()
-      + calculateBackoff(
-        claim.attempt,
-        options.pendingBackoffMs,
-        DEFAULT_PENDING_BACKOFF_MS,
-        options.maxBackoffMs,
-      ),
-    );
-    await updateOwnedClaim(
-      claim,
-      {
-        status: "PENDING",
-        availableAt: retryAt,
-        processedAt: null,
-        lastError: null,
-      },
-      tx,
-    );
+    // A local QR expiration is only a presentation boundary. It is not
+    // provider-authoritative proof that WeChat closed the order, and using it
+    // here creates a paid-but-not-credited race when clocks differ or payment
+    // completes between the signed query and the local transition. Keep
+    // polling until a signed provider terminal state is observed.
+    await rescheduleOwnedClaim(claim, tx, options);
     return { status: "pending", queried: true };
   });
+}
+
+async function rescheduleOwnedClaim(
+  claim: WeChatPayOrderReconciliationClaim,
+  tx: ReconciliationTransactionClient,
+  options: ReconciliationTimingOptions,
+): Promise<void> {
+  const now = options.now?.() ?? new Date();
+  const retryAt = new Date(
+    now.getTime()
+    + calculateBackoff(
+      claim.attempt,
+      options.pendingBackoffMs,
+      DEFAULT_PENDING_BACKOFF_MS,
+      options.maxBackoffMs,
+    ),
+  );
+  await updateOwnedClaim(
+    claim,
+    {
+      status: "PENDING",
+      availableAt: retryAt,
+      processedAt: null,
+      lastError: null,
+    },
+    tx,
+  );
 }
 
 async function applyProviderTerminalResult(
@@ -636,7 +1062,12 @@ async function applyProviderTerminalResult(
       where: {
         id: claim.rechargeOrderId,
         provider: PaymentProvider.WECHAT_PAY,
-        status: RechargeOrderStatus.REQUIRES_PAYMENT,
+        status: {
+          in: [
+            RechargeOrderStatus.CREATED,
+            RechargeOrderStatus.REQUIRES_PAYMENT,
+          ],
+        },
       },
       data: {
         status: terminalStatus,
@@ -813,17 +1244,27 @@ function ownedClaimWhere(
   };
 }
 
+function readUnknownObject(
+  value: unknown,
+): Record<string, unknown> | null {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 function resolveDependencies(
   options: ReconciliationDependencies,
 ): Required<ReconciliationDependencies> {
   let config:
-    | ReturnType<typeof loadWeChatPayApiV3ConfigFromEnv>
+    | ReturnType<typeof loadWeChatPayProcessingConfigFromEnv>
     | undefined;
   return {
     queryOrder:
       options.queryOrder
       ?? ((rechargeOrderId) => {
-        config ??= loadWeChatPayApiV3ConfigFromEnv();
+        config ??= loadWeChatPayProcessingConfigFromEnv();
         return queryWeChatPayOrderByOutTradeNo(
           rechargeOrderId,
           config,
@@ -839,6 +1280,30 @@ function resolveDependencies(
           event,
         );
       }),
+    createCheckout:
+      options.createCheckout
+      ?? (async (order) => {
+        config ??= loadWeChatPayProcessingConfigFromEnv();
+        return createWeChatPayApiV3PaymentProviderAdapter(
+          config,
+        ).createRechargeCheckout({
+          rechargeOrderId: order.id,
+          externalUserId: order.userWallet.externalUserId,
+          amountCents: order.amountCents,
+          currency: order.currency,
+          idempotencyKey: order.idempotencyKey,
+          preparedProviderPayload: order.providerPayload,
+        });
+      }),
+    closeOrder:
+      options.closeOrder
+      ?? (async (rechargeOrderId) => {
+        config ??= loadWeChatPayProcessingConfigFromEnv();
+        await closeWeChatPayOrderByOutTradeNo(
+          rechargeOrderId,
+          config,
+        );
+      }),
   };
 }
 
@@ -846,6 +1311,7 @@ function publicStatusForLocalOrder(
   status: RechargeOrderStatus,
 ): WeChatPayReconciliationPublicStatus | null {
   switch (status) {
+    case RechargeOrderStatus.CREATED:
     case RechargeOrderStatus.REQUIRES_PAYMENT:
       return "pending";
     case RechargeOrderStatus.PAID:
@@ -859,54 +1325,6 @@ function publicStatusForLocalOrder(
     default:
       return null;
   }
-}
-
-/**
- * Native checkout creation persists a server-authored canonical ISO timestamp
- * under providerPayload.rawPayload. A direct shape is accepted for legacy
- * rows, but only when it also explicitly declares Native mode. Any missing,
- * malformed, non-canonical, or differently shaped value is treated as unknown
- * and therefore cannot trigger cancellation.
- */
-function readNativeCheckoutExpiresAt(
-  providerPayload: unknown,
-): Date | null {
-  const outer = readJsonObject(providerPayload);
-  if (!outer) return null;
-
-  const hasRawPayload = Object.prototype.hasOwnProperty.call(
-    outer,
-    "rawPayload",
-  );
-  const nativePayload = hasRawPayload
-    ? readJsonObject(outer.rawPayload)
-    : outer;
-  if (
-    !nativePayload
-    || nativePayload.mode !== "native"
-    || typeof nativePayload.expiresAt !== "string"
-  ) {
-    return null;
-  }
-
-  const parsed = new Date(nativePayload.expiresAt);
-  if (
-    !Number.isFinite(parsed.getTime())
-    || parsed.toISOString() !== nativePayload.expiresAt
-  ) {
-    return null;
-  }
-  return parsed;
-}
-
-function readJsonObject(
-  value: unknown,
-): Record<string, unknown> | null {
-  return value !== null
-    && typeof value === "object"
-    && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
 }
 
 function calculateBackoff(
@@ -976,6 +1394,40 @@ function normalizePositiveDuration(
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(
       "WeChat Pay reconciliation duration must be a positive integer.",
+    );
+  }
+  return value;
+}
+
+function normalizeCreatedOrderCloseDelayMs(
+  value: number | undefined,
+): number {
+  if (value === undefined) {
+    return DEFAULT_CREATED_ORDER_CLOSE_DELAY_MS;
+  }
+  if (
+    !Number.isSafeInteger(value)
+    || value < DEFAULT_CREATED_ORDER_CLOSE_DELAY_MS
+  ) {
+    throw new Error(
+      `WeChat Pay createdOrderCloseDelayMs must be at least ${DEFAULT_CREATED_ORDER_CLOSE_DELAY_MS}.`,
+    );
+  }
+  return value;
+}
+
+function normalizeCreatedRecoverySafetyDelayMs(
+  value: number | undefined,
+): number {
+  if (value === undefined) {
+    return WECHAT_CREATED_ORDER_RECOVERY_DELAY_MS;
+  }
+  if (
+    !Number.isSafeInteger(value)
+    || value <= 60_000
+  ) {
+    throw new Error(
+      "WeChat Pay createdRecoverySafetyDelayMs must be greater than the maximum provider request timeout of 60000.",
     );
   }
   return value;

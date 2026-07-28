@@ -10,31 +10,48 @@ describe("workflow-runner payment reconciliation config", () => {
       enabled: false,
       pollMs: 5_000,
       batchSize: 10,
-      leaseMs: 30_000,
+      leaseMs: 75_000,
       pendingBackoffMs: 10_000,
       errorBackoffMs: 5_000,
       maxBackoffMs: 600_000,
     });
+    expect(config.readinessStaleMs).toBe(180_000);
   });
 
-  it("enables reconciliation only for the exact release flag", () => {
+  it("supports the legacy flag while preferring processing over collection", () => {
     expect(
       resolveWorkflowRunnerConfig({
         DELEGATE_WECHAT_PAY_ENABLED: "true",
       }).paymentReconciliation.enabled,
     ).toBe(true);
-    expect(
+    expect(() =>
       resolveWorkflowRunnerConfig({
         DELEGATE_WECHAT_PAY_ENABLED: "TRUE",
+      }),
+    ).toThrow('must be exactly "true" or "false"');
+    expect(
+      resolveWorkflowRunnerConfig({
+        DELEGATE_WECHAT_PAY_ENABLED: "true",
+        DELEGATE_WECHAT_PAY_COLLECTION_ENABLED: "false",
+        DELEGATE_WECHAT_PAY_PROCESSING_ENABLED: "true",
       }).paymentReconciliation.enabled,
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  it("rejects collection when durable processing is disabled", () => {
+    expect(() =>
+      resolveWorkflowRunnerConfig({
+        DELEGATE_WECHAT_PAY_COLLECTION_ENABLED: "true",
+        DELEGATE_WECHAT_PAY_PROCESSING_ENABLED: "false",
+      }),
+    ).toThrow("requires DELEGATE_WECHAT_PAY_PROCESSING_ENABLED=true");
   });
 
   it("rejects a lease shorter than the provider request boundary", () => {
     expect(() =>
       resolveWorkflowRunnerConfig({
-        WECHAT_PAY_RECONCILIATION_LEASE_MS: "29999",
+        WECHAT_PAY_RECONCILIATION_LEASE_MS: "74999",
       }),
-    ).toThrow("must be an integer between 30000");
+    ).toThrow("must be an integer between 75000");
   });
 });

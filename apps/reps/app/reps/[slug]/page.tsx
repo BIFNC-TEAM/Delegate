@@ -8,8 +8,8 @@ import {
   LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   getRepresentativePublicDeliverables,
   getPublicRepresentativeRuntime,
-  isWeChatPayApiV3Enabled,
   readDelegateAuthSessionSecret,
+  resolveWeChatPayReleaseFlags,
   resolvePublicAudiencePrincipal,
   verifyDelegateAuthSession,
 } from "@delegate/web-data";
@@ -133,9 +133,26 @@ export default async function RepresentativePage({
   const showPublicDemoTools =
     process.env.NODE_ENV !== "production" &&
     process.env.NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS === "true";
-  const weChatPayEnabled = isWeChatPayApiV3Enabled();
-  const showPublicPayment = weChatPayEnabled || showPublicDemoTools;
-  const paymentMode = weChatPayEnabled ? "wechat" : "mock";
+  let weChatPayReleaseFlags:
+    | ReturnType<typeof resolveWeChatPayReleaseFlags>
+    | null = null;
+  try {
+    weChatPayReleaseFlags = resolveWeChatPayReleaseFlags();
+  } catch {
+    // Runtime readiness exposes the operator-facing configuration failure.
+    // The public page fails closed instead of falling back to demo payments.
+  }
+  const weChatPayProcessingEnabled =
+    weChatPayReleaseFlags?.processingEnabled === true;
+  const showPublicPayment =
+    weChatPayProcessingEnabled
+    || (weChatPayReleaseFlags !== null && showPublicDemoTools);
+  const paymentMode: "mock" | "wechat" =
+    weChatPayProcessingEnabled ? "wechat" : "mock";
+  const collectionEnabled =
+    paymentMode === "mock"
+      ? true
+      : weChatPayReleaseFlags?.collectionEnabled === true;
   const menu = [
     { href: "#chat", label: t.chatNav },
     ...(showPublicPayment
@@ -347,6 +364,7 @@ export default async function RepresentativePage({
           </div>
           <RepresentativeRechargePanel
             audienceAuthenticated={Boolean(audienceSession)}
+            collectionEnabled={collectionEnabled}
             {...(telegramRechargeSource
               ? { continuationChannel: "telegram" as const }
               : {})}

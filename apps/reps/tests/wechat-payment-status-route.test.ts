@@ -33,8 +33,9 @@ const mocks = vi.hoisted(() => {
     WeChatPayProtocolError,
     WeChatPayReconciliationConflictError,
     getPublicRepresentativeRuntime: vi.fn(),
-    isWeChatPayApiV3Enabled: vi.fn(),
+    isWeChatPayProcessingEnabled: vi.fn(),
     reconcileWeChatPayOrderIfDue: vi.fn(),
+    readWeChatPayCheckoutExpiresAt: vi.fn(),
     rechargeOrderFindUnique: vi.fn(),
     resolvePublicAudienceWalletExternalUserId: vi.fn(),
     publicAudiencePrincipalErrorStatus: vi.fn(),
@@ -57,9 +58,12 @@ vi.mock("@delegate/web-data", () => ({
   WeChatPayReconciliationConflictError:
     mocks.WeChatPayReconciliationConflictError,
   getPublicRepresentativeRuntime: mocks.getPublicRepresentativeRuntime,
-  isWeChatPayApiV3Enabled: mocks.isWeChatPayApiV3Enabled,
+  isWeChatPayProcessingEnabled:
+    mocks.isWeChatPayProcessingEnabled,
   reconcileWeChatPayOrderIfDue:
     mocks.reconcileWeChatPayOrderIfDue,
+  readWeChatPayCheckoutExpiresAt:
+    mocks.readWeChatPayCheckoutExpiresAt,
   prisma: {
     rechargeOrder: {
       findUnique: mocks.rechargeOrderFindUnique,
@@ -89,7 +93,7 @@ import { POST as readWeChatPaymentStatus } from "../app/reps/[slug]/recharge/[id
 describe("public WeChat Pay status reconciliation route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.isWeChatPayApiV3Enabled.mockReturnValue(true);
+    mocks.isWeChatPayProcessingEnabled.mockReturnValue(true);
     mocks.getPublicRepresentativeRuntime.mockResolvedValue({
       status: "available",
       setup: { id: "rep-1", slug: "delegate" },
@@ -113,6 +117,7 @@ describe("public WeChat Pay status reconciliation route", () => {
     );
     mocks.publicAudiencePrincipalErrorStatus.mockReturnValue(null);
     mocks.rechargeOrderFindUnique.mockResolvedValue(ownedWeChatOrder());
+    mocks.readWeChatPayCheckoutExpiresAt.mockReturnValue(null);
     mocks.reconcileWeChatPayOrderIfDue.mockResolvedValue({
       status: "pending",
       queried: true,
@@ -120,7 +125,7 @@ describe("public WeChat Pay status reconciliation route", () => {
   });
 
   it("returns 503 before loading credentials or identity when WeChat Pay is disabled", async () => {
-    mocks.isWeChatPayApiV3Enabled.mockReturnValue(false);
+    mocks.isWeChatPayProcessingEnabled.mockReturnValue(false);
 
     const response = await reconcile();
 
@@ -204,7 +209,7 @@ describe("public WeChat Pay status reconciliation route", () => {
     expect(mocks.reconcileWeChatPayOrderIfDue).not.toHaveBeenCalled();
   });
 
-  it("returns a minimal pending state without completing or exposing checkout data", async () => {
+  it("returns only principal-owned checkout data for a pending order", async () => {
     const response = await reconcile();
     const body = await response.json() as Record<string, unknown>;
 
@@ -215,11 +220,132 @@ describe("public WeChat Pay status reconciliation route", () => {
     expect(mocks.reconcileWeChatPayOrderIfDue).toHaveBeenCalledWith(
       "order-1",
     );
-    expect(body).toEqual(expect.objectContaining({ status: "pending" }));
-    expect(JSON.stringify(body)).not.toContain("checkoutUrl");
+    expect(body).toEqual(expect.objectContaining({
+      status: "pending",
+      orderStatus: "requires_payment",
+      checkoutUrl: "weixin://wxpay/bizpayurl?pr=safe-order-1",
+    }));
     expect(JSON.stringify(body)).not.toContain("providerPayload");
     expect(JSON.stringify(body)).not.toContain("externalUserId");
     expect(JSON.stringify(body)).not.toContain("audienceIdentityId");
+  });
+
+  it("returns only the safe checkout expiry with a pending status", async () => {
+    mocks.readWeChatPayCheckoutExpiresAt.mockReturnValue(
+      "2026-07-30T00:10:00.000Z",
+    );
+
+    const response = await reconcile();
+    const body = await response.json();
+
+    expect(body).toEqual({
+      status: "pending",
+      orderStatus: "requires_payment",
+      providerChecked: true,
+      checkoutUrl: "weixin://wxpay/bizpayurl?pr=safe-order-1",
+      checkoutExpiresAt: "2026-07-30T00:10:00.000Z",
+    });
+    expect(JSON.stringify(body)).not.toContain("providerPayload");
+    expect(JSON.stringify(body)).not.toContain("must-not-leak");
+  });
+
+  it("does not claim provider confirmation when another worker owns the query lease", async () => {
+    mocks.reconcileWeChatPayOrderIfDue.mockResolvedValue({
+      status: "pending",
+      queried: false,
+    });
+
+    const response = await reconcile();
+
+    await expect(response.json()).resolves.toEqual({
+      status: "pending",
+      orderStatus: "requires_payment",
+      providerChecked: false,
+      checkoutUrl: "weixin://wxpay/bizpayurl?pr=safe-order-1",
+      checkoutExpiresAt: null,
+    });
+  });
+
+  it("keeps CREATED queryable and returns the recovered QR from fresh local state", async () => {
+    mocks.rechargeOrderFindUnique
+      .mockResolvedValueOnce(
+        ownedWeChatOrder({
+          status: "CREATED",
+          checkoutUrl: null,
+        }),
+      )
+      .mockResolvedValueOnce(
+        ownedWeChatOrder({
+          status: "REQUIRES_PAYMENT",
+          checkoutUrl:
+            "weixin://wxpay/bizpayurl?pr=recovered-order-1",
+          providerPayload: {
+            rawPayload: {
+              mode: "native",
+              expiresAt: "2026-07-30T00:10:00.000Z",
+            },
+          },
+        }),
+      );
+    mocks.readWeChatPayCheckoutExpiresAt.mockReturnValue(
+      "2026-07-30T00:10:00.000Z",
+    );
+
+    const response = await reconcile();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      status: "pending",
+      orderStatus: "requires_payment",
+      providerChecked: true,
+      checkoutUrl:
+        "weixin://wxpay/bizpayurl?pr=recovered-order-1",
+      checkoutExpiresAt: "2026-07-30T00:10:00.000Z",
+    });
+    expect(mocks.rechargeOrderFindUnique).toHaveBeenCalledTimes(2);
+    expect(mocks.reconcileWeChatPayOrderIfDue)
+      .toHaveBeenCalledWith("order-1");
+  });
+
+  it("returns CREATED as a safe recovering state until a QR is persisted", async () => {
+    mocks.rechargeOrderFindUnique.mockResolvedValue(
+      ownedWeChatOrder({
+        status: "CREATED",
+        checkoutUrl: null,
+      }),
+    );
+    mocks.reconcileWeChatPayOrderIfDue.mockResolvedValue({
+      status: "pending",
+      queried: false,
+    });
+
+    const response = await reconcile();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      status: "pending",
+      orderStatus: "created",
+      providerChecked: false,
+      checkoutUrl: null,
+      checkoutExpiresAt: null,
+    });
+  });
+
+  it("still performs a final signed query when the browser checkout has just expired", async () => {
+    mocks.readWeChatPayCheckoutExpiresAt.mockReturnValue(
+      "2026-07-27T09:59:59.000Z",
+    );
+    mocks.reconcileWeChatPayOrderIfDue.mockResolvedValue({
+      status: "paid",
+      queried: true,
+    });
+
+    const response = await reconcile();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ status: "paid" });
+    expect(mocks.reconcileWeChatPayOrderIfDue)
+      .toHaveBeenCalledWith("order-1");
   });
 
   it.each(["closed", "refunded", "failed"] as const)(
@@ -342,7 +468,7 @@ function ownedWeChatOrder(
     productCode: "agent-wallet:service-credit:v1",
     amountCents: 2_000,
     currency: "CNY",
-    checkoutUrl: "weixin://wxpay/bizpayurl?pr=must-not-leak",
+    checkoutUrl: "weixin://wxpay/bizpayurl?pr=safe-order-1",
     providerPayload: { secret: "must-not-leak" },
     userWallet: {
       audienceIdentityId: "identity-1",

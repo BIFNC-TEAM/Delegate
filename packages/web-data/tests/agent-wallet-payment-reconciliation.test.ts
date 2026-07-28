@@ -17,7 +17,7 @@ import type { NormalizedPaymentProviderEvent } from "../src/agent-wallet-payment
 const databaseNow = new Date("2026-07-27T10:00:00.000Z");
 
 describe("WeChat Pay order reconciliation", () => {
-  it("enqueues one durable job and claims it with SKIP LOCKED and a 30-second lease", async () => {
+  it("enqueues one durable job and claims it with SKIP LOCKED and a provider-safe 75-second lease", async () => {
     const client = new FakeReconciliationClient();
     client.addPendingOrder("order-1");
 
@@ -50,13 +50,22 @@ describe("WeChat Pay order reconciliation", () => {
       outboxId: "outbox-1",
       rechargeOrderId: "order-1",
       attempt: 1,
-      leaseUntil: new Date("2026-07-27T10:00:30.000Z"),
+      leaseUntil: new Date("2026-07-27T10:01:15.000Z"),
     });
     expect(duplicateClaim).toBeNull();
     expect(client.outboxRows[0]).toMatchObject({
       status: "PROCESSING",
       attemptCount: 1,
     });
+  });
+
+  it("rejects a reconciliation lease that cannot cover the maximum provider timeout plus persistence", async () => {
+    await expect(
+      claimNextWeChatPayOrderReconciliation({
+        client: new FakeReconciliationClient(),
+        leaseMs: 60_000,
+      }),
+    ).rejects.toThrow("at least 75000");
   });
 
   it("queries outside the claim transaction and backs off an unexpired pending order", async () => {
@@ -106,8 +115,470 @@ describe("WeChat Pay order reconciliation", () => {
     expect(client.orderUpdateTransactionDepths).toHaveLength(0);
   });
 
+  it("does not query a CREATED order until the original provider request timeout and propagation window have passed", async () => {
+    const client = new FakeReconciliationClient();
+    client.addCreatedOrder("order-1", {
+      createdAt: new Date("2026-07-27T09:59:30.000Z"),
+    });
+    await enqueueWeChatPayOrderReconciliation(
+      "order-1",
+      client,
+      { initialDelayMs: 0, now: () => databaseNow },
+    );
+    const queryOrder = vi.fn();
+
+    const result = await reconcileWeChatPayOrderIfDue(
+      "order-1",
+      {
+        client,
+        queryOrder,
+        completePaidEvent: vi.fn(),
+        createCheckout: vi.fn(),
+        closeOrder: vi.fn(),
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      },
+    );
+
+    expect(result).toEqual({
+      status: "pending",
+      queried: false,
+    });
+    expect(queryOrder).not.toHaveBeenCalled();
+    expect(client.outboxRows[0]).toMatchObject({
+      status: "PENDING",
+      availableAt:
+        new Date("2026-07-27T10:00:45.000Z"),
+      lastError: null,
+    });
+  });
+
+  it("retries a CREATED Native order only after a signed not_found query and persists the recovered QR", async () => {
+    const client = await clientWithCreatedOrder(
+      new Date("2026-07-27T09:58:00.000Z"),
+    );
+    const callOrder: string[] = [];
+    let createdRecoveryInput:
+      | Record<string, unknown>
+      | undefined;
+    const createCheckout = vi.fn(async (order) => {
+      expect(client.transactionDepth).toBe(0);
+      callOrder.push("create");
+      createdRecoveryInput = {
+        id: order.id,
+        status: order.status,
+        amountCents: order.amountCents,
+        currency: order.currency,
+        idempotencyKey: order.idempotencyKey,
+      };
+      return {
+        provider: PaymentProvider.WECHAT_PAY,
+        providerOrderId: "order-1",
+        checkoutUrl: "weixin://wxpay/recovered",
+        providerPayload: nativeCheckoutPayload(
+          "2026-07-27T12:00:00.000Z",
+        ),
+      };
+    });
+
+    const result = await reconcileWeChatPayOrderIfDue(
+      "order-1",
+      {
+        client,
+        queryOrder: vi.fn(async () => {
+          expect(client.transactionDepth).toBe(0);
+          callOrder.push("query");
+          return missingQueryResult();
+        }),
+        completePaidEvent: vi.fn(),
+        createCheckout,
+        closeOrder: vi.fn(),
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      },
+    );
+
+    expect(callOrder).toEqual(["query", "create"]);
+    expect(createdRecoveryInput).toEqual({
+      id: "order-1",
+      status: RechargeOrderStatus.CREATED,
+      amountCents: 2_000,
+      currency: "CNY",
+      idempotencyKey: "idempotency-order-1",
+    });
+    expect(result).toEqual({
+      status: "pending",
+      queried: true,
+    });
+    expect(client.orders[0]).toMatchObject({
+      status: RechargeOrderStatus.REQUIRES_PAYMENT,
+      providerOrderId: "order-1",
+      checkoutUrl: "weixin://wxpay/recovered",
+    });
+    expect(client.outboxRows[0]).toMatchObject({
+      status: "PENDING",
+      lastError: null,
+    });
+  });
+
+  it("cancels a missing CREATED order instead of replaying a frozen request after time_expire", async () => {
+    const client = new FakeReconciliationClient();
+    client.addCreatedOrder("order-1", {
+      createdAt: new Date("2026-07-27T07:00:00.000Z"),
+      providerPayload: nativePreparedCheckoutPayload(
+        "order-1",
+        "2026-07-27T09:00:00.000Z",
+      ),
+    });
+    await enqueueWeChatPayOrderReconciliation(
+      "order-1",
+      client,
+      { initialDelayMs: 0, now: () => databaseNow },
+    );
+    const createCheckout = vi.fn();
+    const closeOrder = vi.fn();
+
+    const result = await reconcileWeChatPayOrderIfDue(
+      "order-1",
+      {
+        client,
+        queryOrder: vi.fn(async () => missingQueryResult()),
+        completePaidEvent: vi.fn(),
+        createCheckout,
+        closeOrder,
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      },
+    );
+
+    expect(result).toEqual({ status: "closed", queried: true });
+    expect(createCheckout).not.toHaveBeenCalled();
+    expect(closeOrder).not.toHaveBeenCalled();
+    expect(client.orders[0]).toMatchObject({
+      status: RechargeOrderStatus.CANCELED,
+      checkoutUrl: null,
+    });
+    expect(client.outboxRows[0]).toMatchObject({
+      status: "PROCESSED",
+      lastError: null,
+    });
+  });
+
+  it("credits a signed SUCCESS query directly from CREATED through the shared paid-event path", async () => {
+    const client = await clientWithCreatedOrder(
+      new Date("2026-07-27T09:58:00.000Z"),
+    );
+    const event = paidEvent("order-1");
+    const completePaidEvent = vi.fn(async () => {
+      client.orders[0]!.status = RechargeOrderStatus.PAID;
+      client.orders[0]!.providerOrderId = "order-1";
+    });
+
+    const result = await reconcileWeChatPayOrderIfDue(
+      "order-1",
+      {
+        client,
+        queryOrder: vi.fn(async () => ({
+          status: "paid" as const,
+          tradeState: "SUCCESS" as const,
+          event,
+        })),
+        completePaidEvent,
+        createCheckout: vi.fn(),
+        closeOrder: vi.fn(),
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      },
+    );
+
+    expect(result).toEqual({ status: "paid", queried: true });
+    expect(completePaidEvent).toHaveBeenCalledWith(event);
+    expect(client.outboxRows[0]!.status).toBe("PROCESSED");
+  });
+
+  it("waits at least five minutes before closing a CREATED provider order whose code_url was lost", async () => {
+    const client = await clientWithCreatedOrder(
+      new Date("2026-07-27T09:58:00.000Z"),
+    );
+    const closeOrder = vi.fn();
+
+    const result = await reconcileWeChatPayOrderIfDue(
+      "order-1",
+      {
+        client,
+        queryOrder: vi.fn(async () => pendingQueryResult()),
+        completePaidEvent: vi.fn(),
+        createCheckout: vi.fn(),
+        closeOrder,
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      },
+    );
+
+    expect(result).toEqual({
+      status: "pending",
+      queried: true,
+    });
+    expect(closeOrder).not.toHaveBeenCalled();
+    expect(client.orders[0]!.status).toBe(
+      RechargeOrderStatus.CREATED,
+    );
+    expect(client.outboxRows[0]!.status).toBe("PENDING");
+  });
+
+  it("cancels a CREATED order only after NOTPAY and a verified successful close", async () => {
+    const client = await clientWithCreatedOrder(
+      new Date("2026-07-27T09:54:00.000Z"),
+    );
+    const closeOrder = vi.fn(async () => {
+      expect(client.transactionDepth).toBe(0);
+    });
+
+    const result = await reconcileWeChatPayOrderIfDue(
+      "order-1",
+      {
+        client,
+        queryOrder: vi.fn(async () => pendingQueryResult()),
+        completePaidEvent: vi.fn(),
+        createCheckout: vi.fn(),
+        closeOrder,
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      },
+    );
+
+    expect(closeOrder).toHaveBeenCalledWith("order-1");
+    expect(result).toEqual({
+      status: "closed",
+      queried: true,
+    });
+    expect(client.orders[0]).toMatchObject({
+      status: RechargeOrderStatus.CANCELED,
+      checkoutUrl: null,
+    });
+    expect(client.outboxRows[0]!.status).toBe("PROCESSED");
+  });
+
+  it("keeps an expired REQUIRES_PAYMENT order pending through the five-minute close margin", async () => {
+    const client = await clientWithClaimableOrder(
+      nativeCheckoutPayload("2026-07-27T09:56:00.000Z"),
+    );
+    const closeOrder = vi.fn();
+
+    const result = await reconcileWeChatPayOrderIfDue(
+      "order-1",
+      {
+        client,
+        queryOrder: vi.fn(async () => pendingQueryResult()),
+        completePaidEvent: vi.fn(),
+        createCheckout: vi.fn(),
+        closeOrder,
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      },
+    );
+
+    expect(result).toEqual({ status: "pending", queried: true });
+    expect(closeOrder).not.toHaveBeenCalled();
+    expect(client.orders[0]!.status).toBe(
+      RechargeOrderStatus.REQUIRES_PAYMENT,
+    );
+    expect(client.outboxRows[0]!.status).toBe("PENDING");
+  });
+
+  it("closes an expired REQUIRES_PAYMENT order only after signed NOTPAY and the safety margin", async () => {
+    const client = await clientWithClaimableOrder(
+      nativeCheckoutPayload("2026-07-27T09:54:00.000Z"),
+    );
+    const closeOrder = vi.fn();
+
+    const result = await reconcileWeChatPayOrderIfDue(
+      "order-1",
+      {
+        client,
+        queryOrder: vi.fn(async () => pendingQueryResult()),
+        completePaidEvent: vi.fn(),
+        createCheckout: vi.fn(),
+        closeOrder,
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      },
+    );
+
+    expect(closeOrder).toHaveBeenCalledWith("order-1");
+    expect(result).toEqual({ status: "closed", queried: true });
+    expect(client.orders[0]!.status).toBe(
+      RechargeOrderStatus.CANCELED,
+    );
+    expect(client.outboxRows[0]!.status).toBe("PROCESSED");
+  });
+
+  it("keeps a failed close retryable so the next attempt queries first again", async () => {
+    const client = await clientWithCreatedOrder(
+      new Date("2026-07-27T09:54:00.000Z"),
+    );
+    const providerError = Object.assign(
+      new Error("upstream private message"),
+      { code: "WECHAT_PAY_PROTOCOL_ERROR" },
+    );
+
+    await expect(
+      reconcileWeChatPayOrderIfDue("order-1", {
+        client,
+        queryOrder: vi.fn(async () => pendingQueryResult()),
+        completePaidEvent: vi.fn(),
+        createCheckout: vi.fn(),
+        closeOrder: vi.fn(async () => {
+          throw providerError;
+        }),
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      }),
+    ).rejects.toBe(providerError);
+
+    expect(client.orders[0]!.status).toBe(
+      RechargeOrderStatus.CREATED,
+    );
+    expect(client.outboxRows[0]).toMatchObject({
+      status: "FAILED",
+      lastError: "WECHAT_PAY_PROTOCOL_ERROR",
+    });
+    expect(JSON.stringify(client.outboxRows)).not.toContain(
+      "upstream private message",
+    );
+  });
+
+  it("prevents an expired owner from closing after a newer worker reclaims the lease", async () => {
+    const client = await clientWithCreatedOrder(
+      new Date("2026-07-27T09:54:00.000Z"),
+    );
+    const stale =
+      await claimNextWeChatPayOrderReconciliation({ client });
+    if (!stale) throw new Error("expected stale claim");
+    let current:
+      | Awaited<ReturnType<
+          typeof claimNextWeChatPayOrderReconciliation
+        >>
+      | undefined;
+    const closeOrder = vi.fn();
+
+    await expect(
+      reconcileClaimedWeChatPayOrder(stale, {
+        client,
+        queryOrder: vi.fn(async () => {
+          client.outboxRows[0]!.availableAt =
+            new Date(databaseNow.getTime() - 1);
+          current =
+            await claimNextWeChatPayOrderReconciliation({
+              client,
+            });
+          return pendingQueryResult();
+        }),
+        completePaidEvent: vi.fn(),
+        createCheckout: vi.fn(),
+        closeOrder,
+        now: () => databaseNow,
+      }),
+    ).rejects.toBeInstanceOf(
+      WeChatPayReconciliationLeaseLostError,
+    );
+
+    expect(current?.attempt).toBe(2);
+    expect(closeOrder).not.toHaveBeenCalled();
+    expect(client.orders[0]!.status).toBe(
+      RechargeOrderStatus.CREATED,
+    );
+  });
+
+  it("allows only the current lease owner to resubmit after not_found", async () => {
+    const client = await clientWithCreatedOrder(
+      new Date("2026-07-27T09:54:00.000Z"),
+    );
+    const stale =
+      await claimNextWeChatPayOrderReconciliation({ client });
+    if (!stale) throw new Error("expected stale claim");
+    let current:
+      | Awaited<ReturnType<
+          typeof claimNextWeChatPayOrderReconciliation
+        >>
+      | undefined;
+    const createCheckout = vi.fn(async () => ({
+      provider: PaymentProvider.WECHAT_PAY,
+      providerOrderId: "order-1",
+      checkoutUrl: "weixin://wxpay/current-owner",
+      providerPayload: nativeCheckoutPayload(
+        "2026-07-27T12:00:00.000Z",
+      ),
+    }));
+
+    await expect(
+      reconcileClaimedWeChatPayOrder(stale, {
+        client,
+        queryOrder: vi.fn(async () => {
+          client.outboxRows[0]!.availableAt =
+            new Date(databaseNow.getTime() - 1);
+          current =
+            await claimNextWeChatPayOrderReconciliation({
+              client,
+            });
+          return missingQueryResult();
+        }),
+        completePaidEvent: vi.fn(),
+        createCheckout,
+        closeOrder: vi.fn(),
+        now: () => databaseNow,
+      }),
+    ).rejects.toBeInstanceOf(
+      WeChatPayReconciliationLeaseLostError,
+    );
+    expect(createCheckout).not.toHaveBeenCalled();
+    if (!current) throw new Error("expected current claim");
+
+    await reconcileClaimedWeChatPayOrder(current, {
+      client,
+      queryOrder: vi.fn(async () => missingQueryResult()),
+      completePaidEvent: vi.fn(),
+      createCheckout,
+      closeOrder: vi.fn(),
+      now: () => databaseNow,
+    });
+
+    expect(createCheckout).toHaveBeenCalledOnce();
+    expect(client.orders[0]).toMatchObject({
+      status: RechargeOrderStatus.REQUIRES_PAYMENT,
+      checkoutUrl: "weixin://wxpay/current-owner",
+    });
+  });
+
+  it("dead-letters a not_found query for an already persisted REQUIRES_PAYMENT checkout", async () => {
+    const client = await clientWithClaimableOrder();
+    const createCheckout = vi.fn();
+
+    await expect(
+      reconcileWeChatPayOrderIfDue("order-1", {
+        client,
+        queryOrder: vi.fn(async () => missingQueryResult()),
+        completePaidEvent: vi.fn(),
+        createCheckout,
+        closeOrder: vi.fn(),
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      }),
+    ).rejects.toThrow("missing at the provider");
+
+    expect(createCheckout).not.toHaveBeenCalled();
+    expect(client.orders[0]!.status).toBe(
+      RechargeOrderStatus.REQUIRES_PAYMENT,
+    );
+    expect(client.outboxRows[0]).toMatchObject({
+      status: "DEAD_LETTER",
+      lastError:
+        "wechat_existing_checkout_missing_at_provider",
+    });
+  });
+
   it.each(["NOTPAY", "USERPAYING"] as const)(
-    "queries once, then closes an expired Native checkout reported as %s",
+    "keeps an expired local QR pending until WeChat reports a terminal state (%s)",
     async (tradeState) => {
       const client = await clientWithClaimableOrder(
         nativeCheckoutPayload("2026-07-27T09:59:59.000Z"),
@@ -131,19 +602,20 @@ describe("WeChat Pay order reconciliation", () => {
 
       expect(queryOrder).toHaveBeenCalledOnce();
       expect(result).toEqual({
-        status: "closed",
+        status: "pending",
         queried: true,
       });
       expect(client.orders[0]).toMatchObject({
-        status: RechargeOrderStatus.CANCELED,
-        checkoutUrl: null,
+        status: RechargeOrderStatus.REQUIRES_PAYMENT,
+        checkoutUrl: "weixin://wxpay/test",
       });
       expect(client.outboxRows[0]).toMatchObject({
-        status: "PROCESSED",
+        status: "PENDING",
         attemptCount: 1,
+        availableAt: new Date("2026-07-27T10:00:10.000Z"),
         lastError: null,
       });
-      expect(client.orderUpdateTransactionDepths).toEqual([1]);
+      expect(client.orderUpdateTransactionDepths).toHaveLength(0);
     },
   );
 
@@ -225,16 +697,16 @@ describe("WeChat Pay order reconciliation", () => {
     const client = await clientWithClaimableOrder(
       nativeCheckoutPayload("2026-07-27T09:59:59.000Z"),
     );
-    client.beforeRechargeOrderUpdate = () => {
+    const queryOrder = vi.fn(async () => {
       client.orders[0]!.status = RechargeOrderStatus.PAID;
-      client.beforeRechargeOrderUpdate = null;
-    };
+      return pendingQueryResult();
+    });
 
     const result = await reconcileWeChatPayOrderIfDue(
       "order-1",
       {
         client,
-        queryOrder: vi.fn(async () => pendingQueryResult()),
+        queryOrder,
         completePaidEvent: vi.fn(),
         initialDelayMs: 0,
         now: () => databaseNow,
@@ -246,7 +718,7 @@ describe("WeChat Pay order reconciliation", () => {
       RechargeOrderStatus.PAID,
     );
     expect(client.outboxRows[0]!.status).toBe("PROCESSED");
-    expect(client.orderUpdateTransactionDepths).toEqual([1]);
+    expect(client.orderUpdateTransactionDepths).toHaveLength(0);
   });
 
   it.each([
@@ -421,6 +893,36 @@ describe("WeChat Pay order reconciliation", () => {
     expect(completePaidEvent).not.toHaveBeenCalled();
     expect(client.outboxRows[0]!.status).toBe("PENDING");
   });
+
+  it("continues processing existing orders while collection is paused", async () => {
+    const client = await clientWithClaimableOrder();
+    const queryOrder = vi.fn(async () => pendingQueryResult());
+
+    const summary =
+      await runWeChatPayOrderReconciliationTick({
+        client,
+        env: {
+          DELEGATE_WECHAT_PAY_COLLECTION_ENABLED: "false",
+          DELEGATE_WECHAT_PAY_PROCESSING_ENABLED: "true",
+        },
+        queryOrder,
+        completePaidEvent: vi.fn(),
+        limit: 1,
+        now: () => databaseNow,
+      });
+
+    expect(summary).toMatchObject({
+      enabled: true,
+      claimed: 1,
+      pending: 1,
+      failed: 0,
+    });
+    expect(queryOrder).toHaveBeenCalledOnce();
+    expect(client.outboxRows[0]).toMatchObject({
+      status: "PENDING",
+      attemptCount: 1,
+    });
+  });
 });
 
 async function clientWithClaimableOrder(
@@ -440,10 +942,29 @@ async function clientWithClaimableOrder(
   return client;
 }
 
+async function clientWithCreatedOrder(createdAt: Date) {
+  const client = new FakeReconciliationClient();
+  client.addCreatedOrder("order-1", { createdAt });
+  await enqueueWeChatPayOrderReconciliation(
+    "order-1",
+    client,
+    { initialDelayMs: 0, now: () => databaseNow },
+  );
+  return client;
+}
+
 function pendingQueryResult() {
   return {
     status: "pending" as const,
     tradeState: "NOTPAY" as const,
+    event: null,
+  };
+}
+
+function missingQueryResult() {
+  return {
+    status: "not_found" as const,
+    tradeState: null,
     event: null,
   };
 }
@@ -455,6 +976,30 @@ function nativeCheckoutPayload(expiresAt: string) {
       mode: "native",
       outTradeNo: "order-1",
       expiresAt,
+    },
+  };
+}
+
+function nativePreparedCheckoutPayload(
+  orderId: string,
+  expiresAt = "2026-07-27T12:00:00.000Z",
+) {
+  return {
+    provider: "wechat_pay",
+    appId: "wx-test",
+    merchantId: "1900000109",
+    rawPayload: {
+      version: 1,
+      mode: "native",
+      appId: "wx-test",
+      merchantId: "1900000109",
+      description: "Delegate recharge",
+      outTradeNo: orderId,
+      expiresAt,
+      notifyUrl:
+        "https://delegate.example/api/payments/wechat/notify",
+      amountCents: 2_000,
+      currency: "CNY",
     },
   };
 }
@@ -504,9 +1049,17 @@ type FakeOrder = {
   id: string;
   provider: PaymentProvider;
   status: RechargeOrderStatus;
+  providerOrderId: string | null;
+  amountCents: number;
+  currency: string;
+  idempotencyKey: string;
   checkoutUrl: string | null;
   providerPayload: unknown;
   refundedAt: Date | null;
+  createdAt: Date;
+  userWallet: {
+    externalUserId: string;
+  };
 };
 
 class FakeReconciliationClient {
@@ -527,9 +1080,46 @@ class FakeReconciliationClient {
       id,
       provider: PaymentProvider.WECHAT_PAY,
       status: RechargeOrderStatus.REQUIRES_PAYMENT,
+      providerOrderId: id,
+      amountCents: 2_000,
+      currency: "CNY",
+      idempotencyKey: `idempotency-${id}`,
       checkoutUrl: "weixin://wxpay/test",
       providerPayload,
       refundedAt: null,
+      createdAt: new Date("2026-07-27T09:00:00.000Z"),
+      userWallet: {
+        externalUserId: `external-${id}`,
+      },
+    });
+  }
+
+  addCreatedOrder(
+    id: string,
+    input: {
+      createdAt?: Date;
+      providerPayload?: unknown;
+    } = {},
+  ) {
+    this.orders.push({
+      id,
+      provider: PaymentProvider.WECHAT_PAY,
+      status: RechargeOrderStatus.CREATED,
+      providerOrderId: null,
+      amountCents: 2_000,
+      currency: "CNY",
+      idempotencyKey: `idempotency-${id}`,
+      checkoutUrl: null,
+      providerPayload:
+        input.providerPayload
+        ?? nativePreparedCheckoutPayload(id),
+      refundedAt: null,
+      createdAt:
+        input.createdAt
+        ?? new Date("2026-07-27T09:59:00.000Z"),
+      userWallet: {
+        externalUserId: `external-${id}`,
+      },
     });
   }
 
@@ -593,7 +1183,11 @@ class FakeReconciliationClient {
         (candidate) =>
           candidate.id === args.where.id
           && candidate.provider === args.where.provider
-          && candidate.status === args.where.status,
+          && (
+            typeof args.where.status === "object"
+              ? args.where.status.in.includes(candidate.status)
+              : candidate.status === args.where.status
+          ),
       );
       if (!row) return { count: 0 };
       Object.assign(row, args.data);

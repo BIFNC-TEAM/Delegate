@@ -2056,6 +2056,202 @@
   font-size: .56rem;
 }
 .wallet-reconciliation-footer > button { min-height: 36px; }
+.wallet-exception-queue {
+  gap: 14px;
+  border-color: rgba(217,119,6,.2);
+  background: linear-gradient(150deg,#fff 0%,var(--v2-warning-soft) 190%);
+}
+.wallet-exception-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+.wallet-exception-header > div {
+  display: grid;
+  gap: 5px;
+}
+.wallet-exception-header h2 { margin: 0; font-size: 1rem; }
+.wallet-exception-count {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: #92400e;
+  background: #fef3c7;
+  font: 800 .58rem var(--font-mono),monospace;
+}
+.wallet-exception-description {
+  max-width: 88ch;
+  margin: 0;
+  color: var(--v2-muted);
+  font-size: .62rem;
+  line-height: 1.65;
+}
+.wallet-exception-state {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  min-height: 74px;
+  padding: 13px;
+  border: 1px dashed #d1d5db;
+  border-radius: 9px;
+  color: var(--v2-copy);
+  background: #fff;
+}
+.wallet-exception-state > div,
+.wallet-exception-state:not(.is-error) {
+  display: grid;
+  justify-content: initial;
+  gap: 4px;
+}
+.wallet-exception-state strong { font-size: .66rem; }
+.wallet-exception-state span {
+  color: var(--v2-muted);
+  font-size: .58rem;
+  line-height: 1.5;
+}
+.wallet-exception-state.is-error {
+  border-style: solid;
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+.wallet-exception-state.is-empty {
+  border-color: #99f6e4;
+  background: var(--v2-teal-soft);
+}
+.wallet-exception-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.wallet-exception-list > li {
+  display: grid;
+  grid-template-columns: minmax(250px,1.1fr) minmax(300px,.9fr) auto;
+  gap: 13px;
+  align-items: center;
+  padding: 13px;
+  border: 1px solid var(--v2-line);
+  border-left: 3px solid var(--v2-warning);
+  border-radius: 9px;
+  background: #fff;
+}
+.wallet-exception-list > li.is-error { border-left-color: #dc2626; }
+.wallet-exception-list > li.is-critical {
+  border-color: #fecaca;
+  border-left-color: #991b1b;
+  background: #fffafa;
+}
+.wallet-exception-list > li > header {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.wallet-exception-list > li > header > div:last-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.wallet-exception-list > li > header strong {
+  overflow: hidden;
+  color: var(--v2-ink);
+  font-size: .67rem;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+}
+.wallet-exception-list > li > header small {
+  color: var(--v2-muted);
+  font-size: .56rem;
+}
+.wallet-exception-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.wallet-exception-severity {
+  display: inline-flex;
+  min-height: 24px;
+  padding: 4px 7px;
+  align-items: center;
+  border-radius: 999px;
+  color: #92400e;
+  background: #fef3c7;
+  font-size: .54rem;
+  font-weight: 800;
+}
+.wallet-exception-severity.is-error {
+  color: #b91c1c;
+  background: #fee2e2;
+}
+.wallet-exception-severity.is-critical {
+  color: #fff;
+  background: #991b1b;
+}
+.wallet-exception-facts {
+  display: grid;
+  grid-template-columns: repeat(3,minmax(0,1fr));
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--v2-line);
+  border-radius: 8px;
+}
+.wallet-exception-facts > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border-left: 1px solid var(--v2-line);
+}
+.wallet-exception-facts > div:first-child { border-left: 0; }
+.wallet-exception-facts dt {
+  color: var(--v2-muted);
+  font-size: .52rem;
+}
+.wallet-exception-facts dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--v2-ink);
+  font: 700 .57rem var(--font-mono),monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wallet-exception-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  max-width: 310px;
+}
+.wallet-exception-actions button { min-height: 38px; }
+.wallet-exception-actions > span {
+  flex-basis: 100%;
+  color: var(--v2-muted);
+  font-size: .54rem;
+  line-height: 1.45;
+  text-align: right;
+}
+.wallet-exception-feedback {
+  grid-column: 1/-1;
+  padding: 8px 9px;
+  border: 1px solid #fde68a;
+  border-radius: 7px;
+  color: #92400e;
+  background: var(--v2-warning-soft);
+  font-size: .57rem;
+  line-height: 1.5;
+}
+.wallet-exception-feedback.is-success {
+  border-color: #99f6e4;
+  color: #0f766e;
+  background: var(--v2-teal-soft);
+}
+.wallet-exception-feedback.is-error {
+  border-color: #fecaca;
+  color: #b91c1c;
+  background: #fef2f2;
+}
 .wallet-overview-layout {
   display: grid;
   grid-template-columns: minmax(0,1.7fr) minmax(280px,.75fr);
@@ -2197,6 +2393,55 @@
 }
 .wallet-detail-facts dd.is-mono { font-family: var(--font-mono),monospace; font-size: .57rem; }
 .wallet-detail-panel .skills-trust-note { margin-top: 0; }
+.wallet-refund-operation {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid #fde68a;
+  border-radius: 10px;
+  background: #fffbeb;
+}
+.wallet-refund-operation > header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+.wallet-refund-operation > header strong {
+  color: var(--v2-ink);
+  font-size: .68rem;
+}
+.wallet-refund-operation > p {
+  margin: 0;
+  color: var(--v2-copy);
+  font-size: .6rem;
+  line-height: 1.6;
+}
+.wallet-refund-feedback {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  color: #4338ca;
+  background: var(--v2-indigo-soft);
+}
+.wallet-refund-feedback.is-queued {
+  border-color: #99f6e4;
+  color: #0f766e;
+  background: var(--v2-teal-soft);
+}
+.wallet-refund-feedback.is-error {
+  border-color: #fecaca;
+  color: #b91c1c;
+  background: #fef2f2;
+}
+.wallet-refund-feedback strong { font-size: .6rem; }
+.wallet-refund-feedback span { font-size: .57rem; line-height: 1.5; }
+.wallet-refund-button {
+  min-height: 44px;
+  justify-self: start;
+}
 .wallet-settlement-actions {
   display: grid;
   gap: 7px;
@@ -2483,6 +2728,22 @@
     border-top: 1px solid var(--v2-line);
   }
   .wallet-reconciliation-footer > button { min-height: 44px; }
+  .wallet-exception-header,
+  .wallet-exception-state.is-error {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .wallet-exception-list > li { grid-template-columns: 1fr; }
+  .wallet-exception-actions {
+    justify-content: stretch;
+    max-width: none;
+  }
+  .wallet-exception-actions button {
+    flex: 1 1 180px;
+    min-height: 44px;
+  }
+  .wallet-exception-actions > span { text-align: left; }
+  .wallet-exception-state button { min-height: 44px; }
   .wallet-table-detail-layout { display: block; }
   .wallet-detail-panel {
     position: fixed;
@@ -2507,6 +2768,8 @@
     background: rgba(17,24,39,.38);
   }
   .wallet-detail-close { width: 44px; height: 44px; }
+  .wallet-refund-operation > header { align-items: flex-start; flex-direction: column; }
+  .wallet-refund-button { width: 100%; justify-content: center; }
   .wallet-withdrawal-backdrop { padding: 0; place-items: stretch; }
   .wallet-withdrawal-dialog {
     width: 100%;
@@ -2531,14 +2794,17 @@
   .wallet-metrics { grid-template-columns: 1fr; }
   .wallet-metrics article:last-child { grid-column: auto; }
   .wallet-reconciliation-summary,
-  .wallet-reconciliation-issues > li > dl { grid-template-columns: 1fr; }
+  .wallet-reconciliation-issues > li > dl,
+  .wallet-exception-facts { grid-template-columns: 1fr; }
   .wallet-reconciliation-summary > div,
   .wallet-reconciliation-summary > div:nth-child(4),
-  .wallet-reconciliation-issues > li > dl > div {
+  .wallet-reconciliation-issues > li > dl > div,
+  .wallet-exception-facts > div {
     border-top: 1px solid var(--v2-line);
     border-left: 0;
   }
   .wallet-reconciliation-summary > div:first-child,
-  .wallet-reconciliation-issues > li > dl > div:first-child { border-top: 0; }
+  .wallet-reconciliation-issues > li > dl > div:first-child,
+  .wallet-exception-facts > div:first-child { border-top: 0; }
   .wallet-reconciliation-issues > li > header { align-items: stretch; flex-direction: column; }
 }

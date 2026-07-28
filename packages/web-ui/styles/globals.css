@@ -570,6 +570,16 @@ select {
   background: rgba(195, 91, 45, 0.1);
 }
 
+.status-warning {
+  border-color: rgba(217, 119, 6, 0.24);
+  background: rgba(217, 119, 6, 0.08);
+}
+
+.status-neutral {
+  border-color: rgba(107, 114, 128, 0.22);
+  background: rgba(249, 250, 251, 0.92);
+}
+
 .search-form {
   display: flex;
   gap: 12px;
@@ -5393,6 +5403,38 @@ button.skill-row:hover {
 .representative-shell .representative-wechat-checkout p {
   max-width: 52ch;
   color: var(--marketing-soft);
+}
+
+.representative-shell .representative-wechat-countdown,
+.representative-shell .representative-payment-status {
+  font-family: var(--font-mono), "SFMono-Regular", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+}
+
+.representative-shell .representative-wechat-countdown {
+  color: #b45309;
+}
+
+.representative-shell .representative-payment-action-note {
+  margin: 8px 0 0;
+}
+
+.representative-shell .representative-payment-expired {
+  color: #92400e;
+  font-weight: 650;
+}
+
+.representative-shell .status-warning {
+  border-color: rgba(217, 119, 6, 0.22);
+  background: linear-gradient(180deg, #ffffff 0%, #fffbeb 230%);
+  color: #92400e;
+}
+
+.representative-shell .status-neutral {
+  border-color: rgba(107, 114, 128, 0.18);
+  background: linear-gradient(180deg, #ffffff 0%, #f9fafb 230%);
+  color: #374151;
 }
 
 .representative-shell .status-error {

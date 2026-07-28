@@ -5,8 +5,8 @@ import {
   WeChatPayConfigurationError,
   WeChatPayProtocolError,
   WalletIdempotencyConflictError,
-  isWeChatPayApiV3Enabled,
-  loadWeChatPayApiV3ConfigFromEnv,
+  isWeChatPayProcessingEnabled,
+  loadWeChatPayProcessingConfigFromEnv,
   persistVerifiedWeChatPayRefund,
   verifyWeChatPayApiV3RefundNotification,
 } from "@delegate/web-data";
@@ -17,7 +17,7 @@ import {
 } from "../notification-request";
 
 export async function POST(request: Request) {
-  if (!isWeChatPayApiV3Enabled()) {
+  if (!isWeChatPayProcessingEnabled()) {
     return noStoreJson(
       {
         code: "SERVICE_UNAVAILABLE",
@@ -44,7 +44,7 @@ export async function POST(request: Request) {
         rawBody,
         headers: readWeChatPaySignatureHeaders(request.headers),
       },
-      loadWeChatPayApiV3ConfigFromEnv(),
+      loadWeChatPayProcessingConfigFromEnv(),
     );
     // Persist every verified terminal status before responding. Successful
     // refunds freeze linked entitlements and enqueue the durable reversal;

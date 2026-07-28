@@ -18,7 +18,10 @@ import {
   type PaymentProviderWebhookInput,
   type NormalizedPaymentProviderEvent,
 } from "./agent-wallet-payment-providers";
-import { enqueueWeChatPayOrderReconciliation } from "./agent-wallet-payment-reconciliation";
+import {
+  WECHAT_CREATED_ORDER_RECOVERY_DELAY_MS,
+  enqueueWeChatPayOrderReconciliation,
+} from "./agent-wallet-payment-reconciliation";
 import {
   recordWalletTransaction,
   type WalletTransactionClient,
@@ -60,6 +63,7 @@ type RechargeOrderRecord = {
   status: RechargeOrderStatus;
   idempotencyKey: string;
   checkoutUrl: string | null;
+  providerPayload?: unknown;
   paidAt: Date | null;
   refundedAt: Date | null;
   userWallet?: UserWalletRecord;
@@ -122,6 +126,7 @@ export type RechargeOrderSnapshot = {
   providerOrderId: string | null;
   status: "created" | "requires_payment" | "paid" | "failed" | "canceled" | "refunded";
   checkoutUrl: string | null;
+  checkoutExpiresAt: string | null;
   paidAt: string | null;
   cashBalanceCents: number;
 };
@@ -136,6 +141,16 @@ export type CreateRechargeOrderInput = {
   displayName?: string;
   telegramUserId?: string;
   idempotencyKey?: string;
+  /**
+   * Server-only fencing hooks for payment providers whose remote create call
+   * must be serialized across replicas. The first hook runs inside the same
+   * transaction that creates CREATED; the second runs immediately before the
+   * provider request.
+   */
+  creationFence?: {
+    lockBeforeLocalCreate(client: unknown): Promise<void>;
+    renewBeforeProviderCreate(): Promise<void>;
+  };
 };
 
 export type CreateMockRechargeOrderInput = CreateRechargeOrderInput;
@@ -197,7 +212,9 @@ export async function createMockRechargeOrder(
  * Creates the local order before calling a payment network. The provider call
  * deliberately runs outside the serializable database transaction so network
  * latency cannot hold wallet locks. Retrying the same idempotency key reuses
- * both the local order id and the provider out-trade number.
+ * both the local order id and the provider out-trade number. An ambiguous
+ * WeChat result is never blindly submitted again here; its durable worker
+ * queries the provider before deciding whether an exact retry is safe.
  */
 export async function createRechargeOrder(
   input: CreateRechargeOrderInput,
@@ -237,13 +254,26 @@ export async function createRechargeOrder(
         normalized,
         adapter.provider,
       );
-      return serializeRechargeOrder(existing);
+      const snapshot = serializeRechargeOrder(existing);
+      await enqueueRecoverableWeChatOrderIfRequired(
+        adapter.provider,
+        snapshot.status,
+        snapshot.id,
+        tx,
+      );
+      return {
+        snapshot,
+        createdNow: false,
+        preparedProviderPayload:
+          existing.providerPayload,
+      };
     }
 
+    await input.creationFence?.lockBeforeLocalCreate(tx);
     const userWallet = await resolveRechargeUserWallet(normalized, tx);
     await linkPaymentExternalUserId(normalized, tx);
 
-    const order = await tx.rechargeOrder.create({
+    let order = await tx.rechargeOrder.create({
       data: {
         userWalletId: userWallet.id,
         ...(normalized.representativeId
@@ -259,27 +289,65 @@ export async function createRechargeOrder(
         idempotencyKey: normalized.idempotencyKey,
       },
     });
-
-    return serializeRechargeOrder({ ...order, userWallet });
+    const checkoutInput = {
+      rechargeOrderId: order.id,
+      externalUserId: userWallet.externalUserId,
+      amountCents: order.amountCents,
+      currency: order.currency,
+      idempotencyKey: normalized.idempotencyKey,
+    };
+    const preparedProviderPayload =
+      adapter.prepareRechargeCheckout
+        ? await adapter.prepareRechargeCheckout(checkoutInput)
+        : undefined;
+    if (preparedProviderPayload !== undefined) {
+      order = await tx.rechargeOrder.update({
+        where: { id: order.id },
+        data: {
+          providerPayload: preparedProviderPayload,
+        },
+      });
+    }
+    await enqueueRecoverableWeChatOrderIfRequired(
+      adapter.provider,
+      "created",
+      order.id,
+      tx,
+    );
+    return {
+      snapshot: serializeRechargeOrder({
+        ...order,
+        userWallet,
+      }),
+      createdNow: true,
+      preparedProviderPayload,
+    };
   };
 
   const prepared = await runWalletWriteTransaction(client, prepare);
-  if (prepared.status !== "created") {
-    await enqueuePendingWeChatOrderIfRequired(
-      adapter.provider,
-      prepared.status,
-      prepared.id,
-      client,
-    );
-    return prepared;
+  if (
+    prepared.snapshot.status !== "created"
+    || (
+      !prepared.createdNow
+      && adapter.provider === PaymentProvider.WECHAT_PAY
+    )
+  ) {
+    return prepared.snapshot;
   }
 
+  await input.creationFence?.renewBeforeProviderCreate();
   const checkout = await adapter.createRechargeCheckout({
-    rechargeOrderId: prepared.id,
-    externalUserId: prepared.externalUserId,
-    amountCents: prepared.amountCents,
-    currency: prepared.currency,
+    rechargeOrderId: prepared.snapshot.id,
+    externalUserId: prepared.snapshot.externalUserId,
+    amountCents: prepared.snapshot.amountCents,
+    currency: prepared.snapshot.currency,
     idempotencyKey: normalized.idempotencyKey,
+    ...(prepared.preparedProviderPayload !== undefined
+      ? {
+          preparedProviderPayload:
+            prepared.preparedProviderPayload,
+        }
+      : {}),
   });
   if (checkout.provider !== adapter.provider) {
     throw new Error("Payment provider checkout returned a different provider.");
@@ -291,7 +359,7 @@ export async function createRechargeOrder(
 
   return runWalletWriteTransaction(client, async (tx) => {
     const current = await tx.rechargeOrder.findUnique({
-      where: { id: prepared.id },
+      where: { id: prepared.snapshot.id },
       include: { userWallet: true },
     });
     if (!current?.userWallet) {
@@ -309,7 +377,7 @@ export async function createRechargeOrder(
         current.providerOrderId,
         providerOrderId,
       );
-      await enqueuePendingWeChatOrderIfRequired(
+      await enqueueRecoverableWeChatOrderIfRequired(
         adapter.provider,
         serializeRechargeOrder(current).status,
         current.id,
@@ -345,7 +413,7 @@ export async function createRechargeOrder(
         raced.providerOrderId,
         providerOrderId,
       );
-      await enqueuePendingWeChatOrderIfRequired(
+      await enqueueRecoverableWeChatOrderIfRequired(
         adapter.provider,
         serializeRechargeOrder(raced).status,
         raced.id,
@@ -354,7 +422,7 @@ export async function createRechargeOrder(
       return serializeRechargeOrder(raced);
     }
 
-    await enqueuePendingWeChatOrderIfRequired(
+    await enqueueRecoverableWeChatOrderIfRequired(
       adapter.provider,
       "requires_payment",
       current.id,
@@ -364,12 +432,13 @@ export async function createRechargeOrder(
       ...current,
       providerOrderId,
       checkoutUrl: checkout.checkoutUrl,
+      providerPayload: checkout.providerPayload,
       status: RechargeOrderStatus.REQUIRES_PAYMENT,
     });
   });
 }
 
-async function enqueuePendingWeChatOrderIfRequired(
+async function enqueueRecoverableWeChatOrderIfRequired(
   provider: PaymentProvider,
   status: RechargeOrderSnapshot["status"],
   rechargeOrderId: string,
@@ -377,7 +446,10 @@ async function enqueuePendingWeChatOrderIfRequired(
 ): Promise<void> {
   if (
     provider !== PaymentProvider.WECHAT_PAY
-    || status !== "requires_payment"
+    || (
+      status !== "created"
+      && status !== "requires_payment"
+    )
   ) {
     return;
   }
@@ -386,6 +458,12 @@ async function enqueuePendingWeChatOrderIfRequired(
     client as unknown as Parameters<
       typeof enqueueWeChatPayOrderReconciliation
     >[1],
+    status === "created"
+      ? {
+          initialDelayMs:
+            WECHAT_CREATED_ORDER_RECOVERY_DELAY_MS,
+        }
+      : {},
   );
 }
 
@@ -520,7 +598,16 @@ async function applyVerifiedPaidRechargeEvent(
     );
     return serializeRechargeOrder(order);
   }
-  if (order.status !== RechargeOrderStatus.REQUIRES_PAYMENT) {
+  const acceptsVerifiedLateWeChatPayment =
+    normalizedEvent.provider === PaymentProvider.WECHAT_PAY
+    && (
+      order.status === RechargeOrderStatus.CANCELED
+      || order.status === RechargeOrderStatus.CREATED
+    );
+  if (
+    order.status !== RechargeOrderStatus.REQUIRES_PAYMENT
+    && !acceptsVerifiedLateWeChatPayment
+  ) {
     throw new RechargePaymentConflictError(
       `Recharge order cannot be paid from status ${order.status}.`,
     );
@@ -550,11 +637,12 @@ async function applyVerifiedPaidRechargeEvent(
       provider: order.provider,
       amountCents: order.amountCents,
       currency: order.currency,
-      status: RechargeOrderStatus.REQUIRES_PAYMENT,
+      status: order.status,
     },
     data: {
       status: RechargeOrderStatus.PAID,
       paidAt,
+      providerOrderId: normalizedEvent.providerOrderId,
       providerTransactionId: normalizedEvent.providerTransactionId,
     },
   });
@@ -688,6 +776,7 @@ async function applyVerifiedPaidRechargeEvent(
 
   return serializeRechargeOrder({
     ...order,
+    providerOrderId: normalizedEvent.providerOrderId,
     providerTransactionId:
       normalizedEvent.providerTransactionId,
     status: RechargeOrderStatus.PAID,
@@ -1070,10 +1159,18 @@ function assertPaymentEventMatchesRechargeOrder(
   event: NormalizedPaymentProviderEvent,
   order: RechargeOrderRecord,
 ): void {
+  const expectedProviderOrderId =
+    order.provider === PaymentProvider.WECHAT_PAY
+    && order.status === RechargeOrderStatus.CREATED
+    && order.providerOrderId === null
+      ? order.id
+      : order.providerOrderId;
   const mismatches = [
     event.provider !== order.provider ? "provider" : null,
     event.rechargeOrderId !== order.id ? "order" : null,
-    event.providerOrderId !== order.providerOrderId ? "provider order" : null,
+    event.providerOrderId !== expectedProviderOrderId
+      ? "provider order"
+      : null,
     event.amountCents !== order.amountCents ? "amount" : null,
     event.currency?.toUpperCase() !== order.currency.toUpperCase() ? "currency" : null,
   ].filter((value): value is string => value !== null);
@@ -1127,9 +1224,57 @@ function serializeRechargeOrder(order: RechargeOrderRecord): RechargeOrderSnapsh
     providerOrderId: order.providerOrderId,
     status: order.status.toLowerCase() as RechargeOrderSnapshot["status"],
     checkoutUrl: order.checkoutUrl,
+    checkoutExpiresAt:
+      order.provider === PaymentProvider.WECHAT_PAY
+      && order.status === RechargeOrderStatus.REQUIRES_PAYMENT
+        ? readWeChatPayCheckoutExpiresAt(order.providerPayload)
+        : null,
     paidAt: order.paidAt ? order.paidAt.toISOString() : null,
     cashBalanceCents: order.userWallet.cashBalanceCents,
   };
+}
+
+/**
+ * Returns only the server-authored Native checkout expiry that is safe for a
+ * browser. Provider payloads can contain merchant and reconciliation details,
+ * so callers must never serialize the source object itself.
+ */
+export function readWeChatPayCheckoutExpiresAt(
+  providerPayload: unknown,
+): string | null {
+  const outer = readJsonObject(providerPayload);
+  if (!outer) {
+    return null;
+  }
+  const nativePayload = Object.prototype.hasOwnProperty.call(
+    outer,
+    "rawPayload",
+  )
+    ? readJsonObject(outer.rawPayload)
+    : outer;
+  if (
+    !nativePayload
+    || nativePayload.mode !== "native"
+    || typeof nativePayload.expiresAt !== "string"
+  ) {
+    return null;
+  }
+  const parsed = new Date(nativePayload.expiresAt);
+  if (
+    !Number.isFinite(parsed.getTime())
+    || parsed.toISOString() !== nativePayload.expiresAt
+  ) {
+    return null;
+  }
+  return nativePayload.expiresAt;
+}
+
+function readJsonObject(value: unknown): Record<string, unknown> | null {
+  return value !== null
+    && typeof value === "object"
+    && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function assertPositiveInteger(value: number, label: string): void {

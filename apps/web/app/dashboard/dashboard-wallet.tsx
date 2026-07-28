@@ -172,10 +172,38 @@ type WorkspaceWalletReconciliationReport = {
   issuesTruncated: boolean;
 };
 
+type WalletExceptionCase = {
+  id: string;
+  kind: string;
+  reasonCode: string;
+  severity: "warning" | "error" | "critical";
+  status: "open" | "claimed" | "acknowledged" | "resolved";
+  version: number;
+  representativeSlug: string;
+  representativeName: string;
+  currency: string;
+  createdAt: string;
+  updatedAt: string;
+  retryable: boolean;
+  claimedByCurrentOwner: boolean;
+};
+
+type WalletExceptionAction = "claim" | "retry" | "acknowledge";
+
+type WalletExceptionFeedback = {
+  tone: "success" | "warning" | "error";
+  message: string;
+};
+
 type SelectedWalletRow =
   | { kind: "event"; id: string }
   | { kind: "settlement"; id: string }
   | { kind: "ledger"; id: string };
+
+type WalletRefundFeedback = {
+  tone: "pending" | "queued" | "error";
+  message: string;
+};
 
 const walletPageSize = 50;
 const walletViews: WalletView[] = [
@@ -216,6 +244,10 @@ export function DashboardWallet({
   const [mutationNotice, setMutationNotice] = useState<string | null>(null);
   const [cancelingWithdrawalId, setCancelingWithdrawalId] = useState<string | null>(null);
   const [mockWithdrawalAction, setMockWithdrawalAction] = useState<string | null>(null);
+  const [refundingTokenPurchaseId, setRefundingTokenPurchaseId] =
+    useState<string | null>(null);
+  const [refundFeedback, setRefundFeedback] =
+    useState<Record<string, WalletRefundFeedback>>({});
   const [reconciliationReport, setReconciliationReport] =
     useState<WorkspaceWalletReconciliationReport | null>(null);
   const [reconciliationError, setReconciliationError] = useState<string | null>(null);
@@ -223,6 +255,7 @@ export function DashboardWallet({
   const requestSequenceRef = useRef(0);
   const reconciliationRequestSequenceRef = useRef(0);
   const mockActionIdempotencyKeysRef = useRef(new Map<string, string>());
+  const refundIdempotencyKeysRef = useRef(new Map<string, string>());
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const resolvedCurrency = currency || snapshot?.filters.currency || "";
@@ -659,6 +692,152 @@ export function DashboardWallet({
     }
   }
 
+  async function requestFullWeChatRefund(event: WorkspaceWalletEvent) {
+    const tokenPurchaseId =
+      event.sourceType === "AgentTokenPurchase"
+        ? event.sourceId?.trim()
+        : null;
+    if (!tokenPurchaseId) return;
+
+    const confirmed = window.confirm(
+      zh
+        ? "确认发起这笔微信支付的全额退款？仅当购买额度完全未使用、未预留时才能进入退款队列。退款由后台异步处理，不会在本页面直接改余额。"
+        : "Queue a full WeChat Pay refund? Only completely unused and unreserved credits are eligible. Processing is asynchronous and this page never changes balances directly.",
+    );
+    if (!confirmed) return;
+    const reasonInput = window.prompt(
+      zh
+        ? "可选：填写退款原因（最多 80 个 UTF-8 字节）；取消则不提交。"
+        : "Optional refund reason (up to 80 UTF-8 bytes). Choose Cancel to stop.",
+      "",
+    );
+    if (reasonInput === null) return;
+    const reason = reasonInput.trim();
+    if (new TextEncoder().encode(reason).byteLength > 80) {
+      setRefundFeedback((current) => ({
+        ...current,
+        [tokenPurchaseId]: {
+          tone: "error",
+          message: zh
+            ? "退款原因超过 80 个 UTF-8 字节，请缩短后重试。"
+            : "The refund reason exceeds 80 UTF-8 bytes. Shorten it and retry.",
+        },
+      }));
+      return;
+    }
+
+    const idempotencyKey =
+      refundIdempotencyKeysRef.current.get(tokenPurchaseId)
+      ?? `refund:${crypto.randomUUID()}`;
+    refundIdempotencyKeysRef.current.set(
+      tokenPurchaseId,
+      idempotencyKey,
+    );
+    setRefundingTokenPurchaseId(tokenPurchaseId);
+    setMutationNotice(null);
+    setRefundFeedback((current) => ({
+      ...current,
+      [tokenPurchaseId]: {
+        tone: "pending",
+        message: zh
+          ? "正在校验可退条件并写入退款队列…"
+          : "Checking eligibility and writing the refund intent…",
+      },
+    }));
+
+    try {
+      const response = await fetch(
+        `/api/dashboard/wallet/refunds?rep=${encodeURIComponent(activeSlug)}`,
+        {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tokenPurchaseId,
+            idempotencyKey,
+            ...(reason ? { reason } : {}),
+          }),
+        },
+      );
+      if (!response.ok) {
+        const failure = await readWalletRefundFailure(response, locale);
+        if (failure.code === "refund_already_queued") {
+          refundIdempotencyKeysRef.current.delete(tokenPurchaseId);
+          setRefundFeedback((current) => ({
+            ...current,
+            [tokenPurchaseId]: {
+              tone: "queued",
+              message: failure.message,
+            },
+          }));
+          setMutationNotice(failure.message);
+          await refreshAfterRefundQueued();
+          return;
+        }
+        if (failure.code === "refund_idempotency_conflict") {
+          refundIdempotencyKeysRef.current.delete(tokenPurchaseId);
+        }
+        setRefundFeedback((current) => ({
+          ...current,
+          [tokenPurchaseId]: {
+            tone: "error",
+            message: failure.message,
+          },
+        }));
+        return;
+      }
+
+      refundIdempotencyKeysRef.current.delete(tokenPurchaseId);
+      const queuedMessage = zh
+        ? "全额退款已排队。后台将向微信提交并持续查询最终结果，余额会在验真成功后自动冲正。"
+        : "Full refund queued. The worker will submit it to WeChat Pay and reconcile the final result before balances are reversed.";
+      setRefundFeedback((current) => ({
+        ...current,
+        [tokenPurchaseId]: {
+          tone: "queued",
+          message: queuedMessage,
+        },
+      }));
+      setMutationNotice(queuedMessage);
+      await refreshAfterRefundQueued();
+    } catch {
+      setRefundFeedback((current) => ({
+        ...current,
+        [tokenPurchaseId]: {
+          tone: "error",
+          message: zh
+            ? "退款请求未确认写入，请使用同一页面重试；系统会复用幂等键，避免重复退款。"
+            : "The refund request was not confirmed. Retry here; the same idempotency key is reused to prevent duplicate refunds.",
+        },
+      }));
+    } finally {
+      setRefundingTokenPurchaseId((current) =>
+        current === tokenPurchaseId ? null : current);
+    }
+
+    async function refreshAfterRefundQueued() {
+      const [walletResult, reconciliationResult] =
+        await Promise.allSettled([
+          loadWallet("replace"),
+          loadReconciliation(),
+        ]);
+      if (walletResult.status === "rejected") {
+        setError(
+          zh
+            ? "退款已排队，但钱包明细刷新失败，请手动刷新。"
+            : "The refund is queued, but wallet details did not refresh. Refresh manually.",
+        );
+      }
+      if (reconciliationResult.status === "rejected") {
+        setReconciliationError(
+          zh
+            ? "退款已排队，但资金核对刷新失败，请稍后重试。"
+            : "The refund is queued, but funds reconciliation did not refresh. Retry shortly.",
+        );
+      }
+    }
+  }
+
   function refreshReconciliationAfterMutation() {
     void loadReconciliation().catch((nextError: unknown) => {
       setReconciliationError(nextError instanceof Error
@@ -840,6 +1019,7 @@ export function DashboardWallet({
               >
                 <div>
                   <WalletOverview
+                    activeSlug={activeSlug}
                     currency={resolvedCurrency || "CNY"}
                     events={events}
                     locale={locale}
@@ -858,6 +1038,19 @@ export function DashboardWallet({
                     reconciliationLoading={reconciliationLoading}
                     reconciliationReport={reconciliationReport}
                     settlements={settlements}
+                    onRefreshReconciliation={async () => {
+                      try {
+                        await loadReconciliation();
+                      } catch (nextError) {
+                        const message = nextError instanceof Error
+                          ? nextError.message
+                          : zh
+                            ? "资金核对刷新失败。"
+                            : "Failed to refresh funds reconciliation.";
+                        setReconciliationError(message);
+                        throw nextError;
+                      }
+                    }}
                   />
                 </div>
                 {selectedDetail ? (
@@ -874,6 +1067,19 @@ export function DashboardWallet({
                     onClose={() => setSelected(null)}
                     onMockWithdrawalAction={(settlement, action) =>
                       void applyMockWithdrawalAction(settlement, action)}
+                    onRequestWeChatRefund={(event) =>
+                      void requestFullWeChatRefund(event)}
+                    refundFeedback={
+                      selectedDetail.kind === "event"
+                      && selectedDetail.row.sourceId
+                        ? refundFeedback[selectedDetail.row.sourceId] ?? null
+                        : null
+                    }
+                    refundSubmitting={
+                      selectedDetail.kind === "event"
+                      && selectedDetail.row.sourceId
+                        === refundingTokenPurchaseId
+                    }
                   />
                 ) : null}
               </div>
@@ -943,6 +1149,19 @@ export function DashboardWallet({
                   onClose={() => setSelected(null)}
                   onMockWithdrawalAction={(settlement, action) =>
                     void applyMockWithdrawalAction(settlement, action)}
+                  onRequestWeChatRefund={(event) =>
+                    void requestFullWeChatRefund(event)}
+                  refundFeedback={
+                    selectedDetail?.kind === "event"
+                    && selectedDetail.row.sourceId
+                      ? refundFeedback[selectedDetail.row.sourceId] ?? null
+                      : null
+                  }
+                  refundSubmitting={
+                    selectedDetail?.kind === "event"
+                    && selectedDetail.row.sourceId
+                      === refundingTokenPurchaseId
+                  }
                 />
               </div>
             )}
@@ -1399,10 +1618,12 @@ function WalletFilters({
 }
 
 function WalletOverview({
+  activeSlug,
   currency,
   events,
   locale,
   metrics,
+  onRefreshReconciliation,
   onSelect,
   onRetryReconciliation,
   reconciliationError,
@@ -1410,10 +1631,12 @@ function WalletOverview({
   reconciliationReport,
   settlements,
 }: {
+  activeSlug: string;
   currency: string;
   events: WorkspaceWalletEvent[];
   locale: Locale;
   metrics: WorkspaceWalletSnapshot["metrics"] | undefined;
+  onRefreshReconciliation: () => Promise<void>;
   onSelect: (row: SelectedWalletRow, target: HTMLElement) => void;
   onRetryReconciliation: () => void;
   reconciliationError: string | null;
@@ -1475,6 +1698,12 @@ function WalletOverview({
         report={reconciliationReport}
       />
 
+      <WalletExceptionQueue
+        activeSlug={activeSlug}
+        locale={locale}
+        onRefreshReconciliation={onRefreshReconciliation}
+      />
+
       <div className="wallet-overview-layout">
         <section className="dashboard-v2-panel wallet-overview-events">
           <header>
@@ -1530,6 +1759,362 @@ function WalletOverview({
         </section>
       </div>
     </>
+  );
+}
+
+function WalletExceptionQueue({
+  activeSlug,
+  locale,
+  onRefreshReconciliation,
+}: {
+  activeSlug: string;
+  locale: Locale;
+  onRefreshReconciliation: () => Promise<void>;
+}) {
+  const zh = locale === "zh";
+  const [cases, setCases] = useState<WalletExceptionCase[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [feedback, setFeedback] =
+    useState<Record<string, WalletExceptionFeedback>>({});
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState<string | null>(null);
+  const requestSequenceRef = useRef(0);
+  const actionIdempotencyKeysRef = useRef(new Map<string, string>());
+
+  const loadCases = useCallback(async (signal?: AbortSignal) => {
+    const requestId = ++requestSequenceRef.current;
+    setError(null);
+    setLoading(true);
+
+    try {
+      const response = await fetch(
+        `/api/dashboard/wallet/exceptions?rep=${encodeURIComponent(activeSlug)}`,
+        {
+          cache: "no-store",
+          ...(signal ? { signal } : {}),
+        },
+      );
+      if (!response.ok) throw new Error(`wallet_exception_load_${response.status}`);
+      const payload = (await response.json()) as { cases?: WalletExceptionCase[] };
+      if (signal?.aborted || requestSequenceRef.current !== requestId) return;
+      setCases(Array.isArray(payload.cases) ? payload.cases : []);
+    } catch (nextError) {
+      if (signal?.aborted || requestSequenceRef.current !== requestId) return;
+      setError(
+        zh
+          ? "异常队列暂时无法加载。资金状态未被修改，请重试。"
+          : "The exception queue could not load. No funds were changed; retry.",
+      );
+    } finally {
+      if (requestSequenceRef.current === requestId) setLoading(false);
+    }
+  }, [activeSlug, zh]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setCases([]);
+    setFeedback({});
+    setSubmitting(null);
+    actionIdempotencyKeysRef.current.clear();
+    void loadCases(controller.signal);
+    return () => controller.abort();
+  }, [loadCases]);
+
+  async function applyAction(
+    exceptionCase: WalletExceptionCase,
+    action: WalletExceptionAction,
+  ) {
+    let note: string | undefined;
+    if (action === "acknowledge") {
+      const input = window.prompt(
+        zh
+          ? "请输入不包含账号、订单号、退款号或个人信息的处理说明（必填）。确认只记录说明，不会修改资金。"
+          : "Enter a required handling note without account, order, refund, or personal information. Acknowledging records context only and never changes funds.",
+        "",
+      );
+      if (input === null) return;
+      note = input.trim();
+      if (!note) {
+        setFeedback((current) => ({
+          ...current,
+          [exceptionCase.id]: {
+            tone: "error",
+            message: zh
+              ? "确认异常前必须填写非敏感处理说明。"
+              : "A non-sensitive handling note is required before acknowledging.",
+          },
+        }));
+        return;
+      }
+    }
+
+    const actionKey =
+      `${exceptionCase.id}:${action}:${exceptionCase.version}`;
+    const idempotencyKey =
+      actionIdempotencyKeysRef.current.get(actionKey)
+      ?? `wallet-exception:${action}:${crypto.randomUUID()}`;
+    actionIdempotencyKeysRef.current.set(actionKey, idempotencyKey);
+    setSubmitting(actionKey);
+    setFeedback((current) => ({
+      ...current,
+      [exceptionCase.id]: {
+        tone: "warning",
+        message: walletExceptionActionPendingLabel(action, locale),
+      },
+    }));
+
+    try {
+      const response = await fetch(
+        `/api/dashboard/wallet/exceptions/${encodeURIComponent(exceptionCase.id)}/actions?rep=${encodeURIComponent(activeSlug)}`,
+        {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action,
+            expectedVersion: exceptionCase.version,
+            idempotencyKey,
+            ...(note ? { note } : {}),
+          }),
+        },
+      );
+
+      if (response.status === 409) {
+        actionIdempotencyKeysRef.current.delete(actionKey);
+        setFeedback((current) => ({
+          ...current,
+          [exceptionCase.id]: {
+            tone: "warning",
+            message: zh
+              ? "异常状态已由其他操作更新，正在刷新最新版本。"
+              : "Another action updated this exception. Refreshing the latest version.",
+          },
+        }));
+        await loadCases();
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(`wallet_exception_action_${response.status}`);
+      }
+
+      actionIdempotencyKeysRef.current.delete(actionKey);
+      setFeedback((current) => ({
+        ...current,
+        [exceptionCase.id]: {
+          tone: "success",
+          message: walletExceptionActionSuccessLabel(action, locale),
+        },
+      }));
+      const [casesResult, reconciliationResult] = await Promise.allSettled([
+        loadCases(),
+        onRefreshReconciliation(),
+      ]);
+      if (casesResult.status === "rejected") {
+        setError(
+          zh
+            ? "动作已记录，但异常队列刷新失败，请重试加载。"
+            : "The action was recorded, but the queue did not refresh. Retry loading it.",
+        );
+      }
+      if (reconciliationResult.status === "rejected") {
+        setFeedback((current) => ({
+          ...current,
+          [exceptionCase.id]: {
+            tone: "warning",
+            message: zh
+              ? "动作已记录，但资金核对刷新失败；请稍后重新核对。"
+              : "The action was recorded, but reconciliation did not refresh. Check again shortly.",
+          },
+        }));
+      }
+    } catch {
+      setFeedback((current) => ({
+        ...current,
+        [exceptionCase.id]: {
+          tone: "error",
+          message: zh
+            ? "动作结果尚未确认。请在当前页面重试，系统会复用同一幂等键。"
+            : "The action result is unconfirmed. Retry here; the same idempotency key will be reused.",
+        },
+      }));
+    } finally {
+      setSubmitting((current) => current === actionKey ? null : current);
+    }
+  }
+
+  return (
+    <section
+      aria-busy={loading}
+      aria-labelledby="wallet-exception-queue-heading"
+      className="dashboard-v2-panel wallet-exception-queue"
+    >
+      <header className="wallet-exception-header">
+        <div>
+          <p>OPERATIONS EXCEPTIONS</p>
+          <h2 id="wallet-exception-queue-heading">
+            {zh ? "待处理资金异常" : "Funds exceptions"}
+          </h2>
+        </div>
+        <span className="wallet-exception-count">
+          {cases.length}
+          {" "}
+          {zh ? "项" : cases.length === 1 ? "case" : "cases"}
+        </span>
+      </header>
+      <p className="dashboard-v2-panel-description wallet-exception-description">
+        {zh
+          ? "这里只展示已确认归属当前 Owner 的异常。认领和确认用于记录处置过程，不会直接修改余额；重试只恢复该异常对应的精确后台任务。"
+          : "Only exceptions proven to belong to the current Owner appear here. Claiming and acknowledging record handling without changing balances; retry restores only the exact background job for this case."}
+      </p>
+
+      {error ? (
+        <div className="wallet-exception-state is-error" role="alert">
+          <div>
+            <strong>{zh ? "异常队列加载失败" : "Exception queue unavailable"}</strong>
+            <span>{error}</span>
+          </div>
+          <button
+            className="dashboard-v2-button-secondary"
+            disabled={loading}
+            onClick={() => void loadCases()}
+            type="button"
+          >
+            {loading ? zh ? "重试中…" : "Retrying…" : zh ? "重试" : "Retry"}
+          </button>
+        </div>
+      ) : loading && !cases.length ? (
+        <div
+          aria-live="polite"
+          className="wallet-exception-state"
+          role="status"
+        >
+          <strong>{zh ? "正在加载异常队列…" : "Loading the exception queue…"}</strong>
+          <span>
+            {zh
+              ? "正在读取当前 Owner 可处理的资金异常。"
+              : "Reading funds exceptions available to the current Owner."}
+          </span>
+        </div>
+      ) : !cases.length ? (
+        <div className="wallet-exception-state is-empty" role="status">
+          <strong>{zh ? "当前没有待处理资金异常" : "No funds exceptions need attention"}</strong>
+          <span>
+            {zh
+              ? "支付、退款和资金冲正任务目前没有需要 Owner 介入的事项。"
+              : "Payment, refund, and reversal jobs currently need no Owner intervention."}
+          </span>
+        </div>
+      ) : (
+        <ol className="wallet-exception-list">
+          {cases.map((exceptionCase) => {
+            const rowBusy = submitting?.startsWith(`${exceptionCase.id}:`) ?? false;
+            const itemFeedback = feedback[exceptionCase.id];
+            const canOperate =
+              exceptionCase.status === "claimed"
+              && exceptionCase.claimedByCurrentOwner;
+            return (
+              <li
+                aria-busy={rowBusy}
+                className={`is-${exceptionCase.severity}`}
+                key={exceptionCase.id}
+              >
+                <header>
+                  <div className="wallet-exception-labels">
+                    <span className={`wallet-exception-severity is-${exceptionCase.severity}`}>
+                      {walletExceptionSeverityLabel(exceptionCase.severity, locale)}
+                    </span>
+                    <span className={`wallet-status is-${walletExceptionStatusTone(exceptionCase.status)}`}>
+                      {walletExceptionStatusLabel(
+                        exceptionCase.status,
+                        exceptionCase.claimedByCurrentOwner,
+                        locale,
+                      )}
+                    </span>
+                  </div>
+                  <div>
+                    <strong>
+                      {walletExceptionReasonLabel(exceptionCase.reasonCode, locale)}
+                    </strong>
+                    <small>{walletExceptionKindLabel(exceptionCase.kind, locale)}</small>
+                  </div>
+                </header>
+                <dl className="wallet-exception-facts">
+                  <div>
+                    <dt>{zh ? "数字代表" : "Representative"}</dt>
+                    <dd>
+                      {exceptionCase.representativeName
+                        || (zh ? "当前数字代表" : "Current representative")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{zh ? "币种" : "Currency"}</dt>
+                    <dd>{exceptionCase.currency}</dd>
+                  </div>
+                  <div>
+                    <dt>{zh ? "最近更新" : "Last updated"}</dt>
+                    <dd>{formatTimestamp(exceptionCase.updatedAt, locale, true)}</dd>
+                  </div>
+                </dl>
+                {itemFeedback ? (
+                  <div
+                    aria-live="polite"
+                    className={`wallet-exception-feedback is-${itemFeedback.tone}`}
+                    role={itemFeedback.tone === "error" ? "alert" : "status"}
+                  >
+                    {itemFeedback.message}
+                  </div>
+                ) : null}
+                {exceptionCase.status === "open" ? (
+                  <div className="wallet-exception-actions">
+                    <button
+                      aria-label={`${zh ? "认领资金异常" : "Claim funds exception"}：${walletExceptionReasonLabel(exceptionCase.reasonCode, locale)}`}
+                      className="dashboard-v2-button-primary"
+                      disabled={rowBusy}
+                      onClick={() => void applyAction(exceptionCase, "claim")}
+                      type="button"
+                    >
+                      {rowBusy ? zh ? "认领中…" : "Claiming…" : zh ? "认领处理" : "Claim case"}
+                    </button>
+                  </div>
+                ) : canOperate ? (
+                  <div className="wallet-exception-actions">
+                    {exceptionCase.retryable ? (
+                      <button
+                        aria-label={`${zh ? "重试精确后台任务" : "Retry exact background job"}：${walletExceptionReasonLabel(exceptionCase.reasonCode, locale)}`}
+                        className="dashboard-v2-button-primary"
+                        disabled={rowBusy}
+                        onClick={() => void applyAction(exceptionCase, "retry")}
+                        type="button"
+                      >
+                        {submitting === `${exceptionCase.id}:retry:${exceptionCase.version}`
+                          ? zh ? "重试中…" : "Retrying…"
+                          : zh ? "重试精确任务" : "Retry exact job"}
+                      </button>
+                    ) : null}
+                    <button
+                      aria-label={`${zh ? "确认并记录处理说明" : "Acknowledge with a handling note"}：${walletExceptionReasonLabel(exceptionCase.reasonCode, locale)}`}
+                      className="dashboard-v2-button-secondary"
+                      disabled={rowBusy}
+                      onClick={() => void applyAction(exceptionCase, "acknowledge")}
+                      type="button"
+                    >
+                      {submitting === `${exceptionCase.id}:acknowledge:${exceptionCase.version}`
+                        ? zh ? "确认中…" : "Acknowledging…"
+                        : zh ? "确认并记录说明" : "Acknowledge with note"}
+                    </button>
+                    <span>
+                      {zh
+                        ? "确认只记录说明，不会修改资金。"
+                        : "Acknowledging records context only; it does not change funds."}
+                    </span>
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
   );
 }
 
@@ -2049,6 +2634,9 @@ function WalletDetailPanel({
   onCancelWithdrawal,
   onClose,
   onMockWithdrawalAction,
+  onRequestWeChatRefund,
+  refundFeedback,
+  refundSubmitting,
 }: {
   cancelingWithdrawalId: string | null;
   closeButtonRef: RefObject<HTMLButtonElement | null>;
@@ -2066,6 +2654,9 @@ function WalletDetailPanel({
     settlement: WorkspaceWalletSettlement,
     action: MockWithdrawalAction,
   ) => void;
+  onRequestWeChatRefund: (event: WorkspaceWalletEvent) => void;
+  refundFeedback: WalletRefundFeedback | null;
+  refundSubmitting: boolean;
 }) {
   const zh = locale === "zh";
   const [isMobileSheet, setIsMobileSheet] = useState(false);
@@ -2120,7 +2711,13 @@ function WalletDetailPanel({
               : "Choose a business event, withdrawal, or ledger entry to inspect its linked identifiers and money state."}
           </p>
         ) : detail.kind === "event" ? (
-          <EventDetail event={detail.row} locale={locale} />
+          <EventDetail
+            event={detail.row}
+            feedback={refundFeedback}
+            locale={locale}
+            onRequestWeChatRefund={onRequestWeChatRefund}
+            submitting={refundSubmitting}
+          />
         ) : detail.kind === "settlement" ? (
           <SettlementDetail
             canceling={cancelingWithdrawalId === detail.row.id}
@@ -2147,19 +2744,78 @@ function WalletDetailPanel({
   );
 }
 
-function EventDetail({ event, locale }: { event: WorkspaceWalletEvent; locale: Locale }) {
+function EventDetail({
+  event,
+  feedback,
+  locale,
+  onRequestWeChatRefund,
+  submitting,
+}: {
+  event: WorkspaceWalletEvent;
+  feedback: WalletRefundFeedback | null;
+  locale: Locale;
+  onRequestWeChatRefund: (event: WorkspaceWalletEvent) => void;
+  submitting: boolean;
+}) {
   const zh = locale === "zh";
+  const canRequestWeChatRefund =
+    event.sourceType === "AgentTokenPurchase"
+    && Boolean(event.sourceId);
   return (
-    <dl className="skills-detail-facts wallet-detail-facts">
-      <Fact label={zh ? "状态" : "Status"} value={walletStatusLabel(event.status, locale)} />
-      <Fact label={zh ? "发生时间" : "Occurred"} value={formatTimestamp(event.occurredAt, locale, true)} />
-      <Fact label={zh ? "数字代表" : "Representative"} value={event.representativeName ?? "—"} />
-      <Fact label={zh ? "金额" : "Amount"} value={event.amountCents ? formatSignedMoney(event.amountCents, event.currency, locale) : "—"} />
-      <Fact label={zh ? "服务额度" : "Service credits"} value={event.tokenAmount ? formatSignedNumber(event.tokenAmount) : "—"} />
-      <Fact label="Source" value={`${event.sourceType}${event.sourceId ? ` · ${event.sourceId}` : ""}`} />
-      <Fact label="Transaction ID" value={event.transactionId ?? "—"} mono />
-      <Fact label="Event group" value={event.eventGroupId} mono />
-    </dl>
+    <>
+      <dl className="skills-detail-facts wallet-detail-facts">
+        <Fact label={zh ? "状态" : "Status"} value={walletStatusLabel(event.status, locale)} />
+        <Fact label={zh ? "发生时间" : "Occurred"} value={formatTimestamp(event.occurredAt, locale, true)} />
+        <Fact label={zh ? "数字代表" : "Representative"} value={event.representativeName ?? "—"} />
+        <Fact label={zh ? "金额" : "Amount"} value={event.amountCents ? formatSignedMoney(event.amountCents, event.currency, locale) : "—"} />
+        <Fact label={zh ? "服务额度" : "Service credits"} value={event.tokenAmount ? formatSignedNumber(event.tokenAmount) : "—"} />
+        <Fact label="Source" value={`${event.sourceType}${event.sourceId ? ` · ${event.sourceId}` : ""}`} />
+        <Fact label="Transaction ID" value={event.transactionId ?? "—"} mono />
+        <Fact label="Event group" value={event.eventGroupId} mono />
+      </dl>
+      {canRequestWeChatRefund ? (
+        <section className="wallet-refund-operation">
+          <header>
+            <strong>{zh ? "微信全额退款" : "Full WeChat Pay refund"}</strong>
+            <span className="wallet-status is-warning">
+              {zh ? "后台异步处理" : "Async processing"}
+            </span>
+          </header>
+          <p>
+            {zh
+              ? "仅购买额度完全未使用、未预留时可退。提交后先冻结额度，再由后台向微信提交并验真；此操作不会直接修改余额。"
+              : "Only completely unused and unreserved credits are eligible. Submission freezes the credits, then a worker submits and verifies the refund; this action never changes balances directly."}
+          </p>
+          {feedback ? (
+            <div
+              className={`wallet-refund-feedback is-${feedback.tone}`}
+              role={feedback.tone === "error" ? "alert" : "status"}
+            >
+              <strong>
+                {feedback.tone === "queued"
+                  ? zh ? "已排队" : "Queued"
+                  : feedback.tone === "pending"
+                    ? zh ? "提交中" : "Submitting"
+                    : zh ? "提交失败" : "Failed"}
+              </strong>
+              <span>{feedback.message}</span>
+            </div>
+          ) : null}
+          <button
+            className="dashboard-v2-button-secondary wallet-refund-button"
+            disabled={submitting || feedback?.tone === "queued"}
+            onClick={() => onRequestWeChatRefund(event)}
+            type="button"
+          >
+            {submitting
+              ? zh ? "正在提交…" : "Submitting…"
+              : feedback?.tone === "queued"
+                ? zh ? "退款已排队" : "Refund queued"
+                : zh ? "发起全额退款" : "Request full refund"}
+          </button>
+        </section>
+      ) : null}
+    </>
   );
 }
 
@@ -2623,6 +3279,118 @@ function formatTimestamp(value: string, locale: Locale, includeYear = false) {
   }).format(new Date(value));
 }
 
+function walletExceptionSeverityLabel(
+  severity: WalletExceptionCase["severity"],
+  locale: Locale,
+) {
+  const labels: Record<WalletExceptionCase["severity"], [string, string]> = {
+    warning: ["需要复核", "Review needed"],
+    error: ["处理失败", "Processing failed"],
+    critical: ["严重异常", "Critical exception"],
+  };
+  return labels[severity][locale === "zh" ? 0 : 1];
+}
+
+function walletExceptionStatusTone(status: WalletExceptionCase["status"]) {
+  if (status === "resolved") return "success";
+  if (status === "open") return "error";
+  if (status === "claimed") return "warning";
+  return "neutral";
+}
+
+function walletExceptionStatusLabel(
+  status: WalletExceptionCase["status"],
+  claimedByCurrentOwner: boolean,
+  locale: Locale,
+) {
+  const zh = locale === "zh";
+  if (status === "open") return zh ? "待认领" : "Open";
+  if (status === "claimed") {
+    return claimedByCurrentOwner
+      ? zh ? "已由你认领" : "Claimed by you"
+      : zh ? "已认领" : "Claimed";
+  }
+  if (status === "acknowledged") return zh ? "已确认" : "Acknowledged";
+  return zh ? "已恢复" : "Resolved";
+}
+
+function walletExceptionKindLabel(kind: string, locale: Locale) {
+  const labels: Record<string, [string, string]> = {
+    order_reconciliation: ["支付订单核对", "Payment order reconciliation"],
+    payment_order_reconciliation: ["支付订单核对", "Payment order reconciliation"],
+    refund_lifecycle: ["微信退款状态跟踪", "WeChat Pay refund tracking"],
+    refund_submission: ["微信退款提交", "WeChat Pay refund submission"],
+    refund_reversal: ["退款资金冲正", "Refund funds reversal"],
+    refund_reconciliation: ["退款资金核对", "Refund funds reconciliation"],
+    refund_abnormal: ["微信退款异常", "WeChat Pay refund exception"],
+  };
+  return labels[kind]?.[locale === "zh" ? 0 : 1]
+    ?? (locale === "zh" ? "资金处理异常" : "Funds processing exception");
+}
+
+function walletExceptionReasonLabel(reasonCode: string, locale: Locale) {
+  const labels: Record<string, [string, string]> = {
+    wechat_order_reconciliation_dead_letter: [
+      "支付订单自动核对多次失败",
+      "Automatic payment order reconciliation failed repeatedly",
+    ],
+    wechat_refund_lifecycle_dead_letter: [
+      "退款状态自动跟踪多次失败",
+      "Automatic refund tracking failed repeatedly",
+    ],
+    wechat_refund_submission_dead_letter: [
+      "退款提交结果需要人工复核",
+      "Refund submission outcome needs manual review",
+    ],
+    wechat_refund_reversal_dead_letter: [
+      "退款后的资金冲正需要人工复核",
+      "Post-refund funds reversal needs manual review",
+    ],
+    wechat_refund_reconciliation_required: [
+      "退款与本地资金状态需要复核",
+      "Refund and local funds state need reconciliation",
+    ],
+    wechat_refund_provider_abnormal: [
+      "微信退款返回异常状态",
+      "WeChat Pay reported an abnormal refund state",
+    ],
+  };
+  return labels[reasonCode]?.[locale === "zh" ? 0 : 1]
+    ?? (locale === "zh"
+      ? "资金处理需要运营复核"
+      : "Funds processing needs operations review");
+}
+
+function walletExceptionActionPendingLabel(
+  action: WalletExceptionAction,
+  locale: Locale,
+) {
+  const labels: Record<WalletExceptionAction, [string, string]> = {
+    claim: ["正在认领异常…", "Claiming the exception…"],
+    retry: ["正在恢复对应的精确后台任务…", "Restoring the exact background job…"],
+    acknowledge: ["正在记录非敏感处理说明…", "Recording the non-sensitive handling note…"],
+  };
+  return labels[action][locale === "zh" ? 0 : 1];
+}
+
+function walletExceptionActionSuccessLabel(
+  action: WalletExceptionAction,
+  locale: Locale,
+) {
+  const labels: Record<WalletExceptionAction, [string, string]> = {
+    claim: ["异常已由你认领。", "The exception is now claimed by you."],
+    retry: [
+      "精确后台任务已恢复；资金仍由后台验真流程更新。",
+      "The exact background job was restored; funds still change only through verified processing.",
+    ],
+    acknowledge: [
+      "处理说明已记录；此次确认没有修改任何资金。",
+      "The handling note was recorded; acknowledging changed no funds.",
+    ],
+  };
+  return labels[action][locale === "zh" ? 0 : 1];
+}
+
 function humanizeCode(value: string) {
   return value
     .toLowerCase()
@@ -2639,4 +3407,70 @@ function shortId(value: string) {
 async function extractError(response: Response) {
   const payload = (await response.json().catch(() => null)) as { error?: string } | null;
   return payload?.error || `Request failed (${response.status}).`;
+}
+
+async function readWalletRefundFailure(
+  response: Response,
+  locale: Locale,
+): Promise<{ code: string; message: string }> {
+  const payload = (await response.json().catch(() => null)) as {
+    code?: string;
+    error?: string;
+  } | null;
+  const code = payload?.code ?? "refund_request_failed";
+  const messages: Record<string, [string, string]> = {
+    refund_already_queued: [
+      "这笔购买已有退款正在处理或已经完成。",
+      "This purchase already has a refund in progress or completed.",
+    ],
+    refund_credits_not_unused: [
+      "仅完全未使用、未预留的购买额度可以退款。",
+      "Only completely unused and unreserved credits can be refunded.",
+    ],
+    refund_idempotency_conflict: [
+      "退款重试标识与原请求不一致，请刷新后重试。",
+      "The refund retry key conflicts with the original request. Refresh and retry.",
+    ],
+    refund_order_not_eligible: [
+      "只有已支付的微信购买订单可在这里退款。",
+      "Only paid WeChat Pay purchases can be refunded here.",
+    ],
+    refund_purchase_ambiguous: [
+      "这笔支付无法自动退款，需要运营复核。",
+      "This payment cannot be refunded automatically and needs operations review.",
+    ],
+    refund_purchase_not_found: [
+      "未找到当前 Owner 可退款的购买记录。",
+      "No refundable purchase was found for the current Owner.",
+    ],
+    refund_queue_failed: [
+      "退款未能写入队列，请使用当前页面重试。",
+      "The refund could not be queued. Retry from this page.",
+    ],
+    refund_request_conflict: [
+      "当前状态不允许自动退款，请刷新状态或联系运营。",
+      "The current state does not allow an automatic refund. Refresh or contact operations.",
+    ],
+    refund_request_invalid: [
+      "退款请求格式无效，请检查原因长度后重试。",
+      "The refund request is invalid. Check the reason length and retry.",
+    ],
+    wechat_pay_configuration_invalid: [
+      "微信退款配置尚未就绪，请联系运营。",
+      "WeChat Pay refund configuration is not ready. Contact operations.",
+    ],
+    wechat_pay_processing_unavailable: [
+      "微信退款处理当前暂停，请稍后重试。",
+      "WeChat Pay refund processing is paused. Retry later.",
+    ],
+  };
+  return {
+    code,
+    message:
+      messages[code]?.[locale === "zh" ? 0 : 1]
+      ?? payload?.error
+      ?? (locale === "zh"
+        ? `退款请求失败（${response.status}）。`
+        : `Refund request failed (${response.status}).`),
+  };
 }

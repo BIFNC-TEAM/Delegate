@@ -7,8 +7,8 @@ import {
   WalletIdempotencyConflictError,
   completeRechargeAndPurchaseAgentTokensFromProviderWebhook,
   createWeChatPayApiV3PaymentProviderAdapter,
-  isWeChatPayApiV3Enabled,
-  loadWeChatPayApiV3ConfigFromEnv,
+  isWeChatPayProcessingEnabled,
+  loadWeChatPayProcessingConfigFromEnv,
 } from "@delegate/web-data";
 
 import {
@@ -17,7 +17,7 @@ import {
 } from "../notification-request";
 
 export async function POST(request: Request) {
-  if (!isWeChatPayApiV3Enabled()) {
+  if (!isWeChatPayProcessingEnabled()) {
     return noStoreJson(
       {
         code: "SERVICE_UNAVAILABLE",
@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     }
 
     const adapter = createWeChatPayApiV3PaymentProviderAdapter(
-      loadWeChatPayApiV3ConfigFromEnv(),
+      loadWeChatPayProcessingConfigFromEnv(),
     );
     await completeRechargeAndPurchaseAgentTokensFromProviderWebhook(
       adapter,

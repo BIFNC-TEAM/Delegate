@@ -15,6 +15,7 @@ import {
   completeMockRechargeOrder,
   createRechargeOrder,
   createMockRechargeOrder,
+  readWeChatPayCheckoutExpiresAt,
 } from "../src/agent-wallet-recharge";
 import type {
   NormalizedPaymentProviderEvent,
@@ -23,6 +24,35 @@ import type {
 import { AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE } from "../src/service-entitlements";
 
 describe("agent wallet mock recharge", () => {
+  it("derives only canonical Native checkout expiry values", () => {
+    expect(
+      readWeChatPayCheckoutExpiresAt({
+        provider: "wechat_pay",
+        privateMerchantField: "must-not-leak",
+        rawPayload: {
+          mode: "native",
+          expiresAt: "2026-07-27T10:10:00.000Z",
+        },
+      }),
+    ).toBe("2026-07-27T10:10:00.000Z");
+    expect(
+      readWeChatPayCheckoutExpiresAt({
+        rawPayload: {
+          mode: "native",
+          expiresAt: "2026-07-27T10:10:00Z",
+        },
+      }),
+    ).toBeNull();
+    expect(
+      readWeChatPayCheckoutExpiresAt({
+        rawPayload: {
+          mode: "jsapi",
+          expiresAt: "2026-07-27T10:10:00.000Z",
+        },
+      }),
+    ).toBeNull();
+  });
+
   it("disables mock recharge mutations in production", () => {
     expect(() =>
       assertMockRechargeMutationsEnabled({ NODE_ENV: "production" }),
@@ -410,6 +440,8 @@ describe("agent wallet mock recharge", () => {
           checkoutUrl: "weixin://wxpay/bizpayurl?pr=test",
           providerPayload: {
             mode: "native",
+            expiresAt: "2026-07-27T10:10:00.000Z",
+            merchantSecret: "must-not-leak",
           },
         };
       },
@@ -431,7 +463,10 @@ describe("agent wallet mock recharge", () => {
       status: "requires_payment",
       providerOrderId: order.id,
       checkoutUrl: "weixin://wxpay/bizpayurl?pr=test",
+      checkoutExpiresAt: "2026-07-27T10:10:00.000Z",
     });
+    expect(JSON.stringify(order)).not.toContain("must-not-leak");
+    expect(JSON.stringify(order)).not.toContain("providerPayload");
     expect(checkoutInputs).toEqual([
       expect.objectContaining({
         rechargeOrderId: order.id,
@@ -447,6 +482,214 @@ describe("agent wallet mock recharge", () => {
         idempotencyKey: `wechat_pay:reconcile:${order.id}`,
       }),
     ]);
+  });
+
+  it("durably records a frozen CREATED recovery job before the first WeChat provider request and never blindly re-posts its replay", async () => {
+    const client = new FakeRechargeClient();
+    const createRechargeCheckout = vi.fn(async (input) => {
+      expect(client.rechargeOrders[0]).toMatchObject({
+        status: RechargeOrderStatus.CREATED,
+        providerPayload: {
+          provider: "wechat_pay",
+          rawPayload: {
+            version: 1,
+            outTradeNo: "recharge_1",
+          },
+        },
+      });
+      expect(client.outboxEvents[0]).toMatchObject({
+        aggregateId: "recharge_1",
+        status: "PENDING",
+      });
+      expect(input.preparedProviderPayload).toEqual(
+        client.rechargeOrders[0]!.providerPayload,
+      );
+      throw Object.assign(
+        new Error("ambiguous provider timeout"),
+        { code: "WECHAT_PAY_PROTOCOL_ERROR" },
+      );
+    });
+    const adapter = weChatAdapter({
+      prepareRechargeCheckout: async (input) => ({
+        provider: "wechat_pay",
+        rawPayload: {
+          version: 1,
+          mode: "native",
+          outTradeNo: input.rechargeOrderId!,
+          expiresAt: "2026-07-27T12:00:00.000Z",
+        },
+      }),
+      createRechargeCheckout,
+    });
+    const input = {
+      externalUserId: "user_wechat_timeout",
+      amountCents: 1_200,
+      currency: "CNY",
+      idempotencyKey: "wechat_recharge_timeout",
+    };
+
+    await expect(
+      createRechargeOrder(input, adapter, client),
+    ).rejects.toThrow("ambiguous provider timeout");
+    const replay = await createRechargeOrder(
+      input,
+      adapter,
+      client,
+    );
+
+    expect(replay).toMatchObject({
+      id: "recharge_1",
+      status: "created",
+      checkoutUrl: null,
+    });
+    expect(createRechargeCheckout).toHaveBeenCalledOnce();
+    expect(client.rechargeOrders).toHaveLength(1);
+    expect(client.outboxEvents).toHaveLength(1);
+    expect(
+      client.outboxEvents[0]!.availableAt.getTime()
+      - Date.now(),
+    ).toBeGreaterThan(60_000);
+  });
+
+  it("rolls back the CREATED order when its durable WeChat recovery fact cannot be written", async () => {
+    const client = new FakeRechargeClient();
+    client.outboxEvent.upsert = vi.fn(async () => {
+      throw new Error("outbox unavailable");
+    });
+    const createRechargeCheckout = vi.fn();
+
+    await expect(
+      createRechargeOrder(
+        {
+          externalUserId: "user_wechat_atomic",
+          amountCents: 1_200,
+          currency: "CNY",
+          idempotencyKey: "wechat_recharge_atomic",
+        },
+        weChatAdapter({ createRechargeCheckout }),
+        client,
+      ),
+    ).rejects.toThrow("outbox unavailable");
+
+    expect(client.rechargeOrders).toHaveLength(0);
+    expect(client.userWallets).toHaveLength(0);
+    expect(createRechargeCheckout).not.toHaveBeenCalled();
+  });
+
+  it("rolls back local creation when the database-held provider gate is no longer owned", async () => {
+    const client = new FakeRechargeClient();
+    const createRechargeCheckout = vi.fn();
+    const renewBeforeProviderCreate = vi.fn();
+
+    await expect(
+      createRechargeOrder(
+        {
+          externalUserId: "user_wechat_stale_local_owner",
+          amountCents: 1_200,
+          currency: "CNY",
+          idempotencyKey: "wechat_stale_local_owner",
+          creationFence: {
+            lockBeforeLocalCreate: async () => {
+              throw new Error("provider creation lease lost");
+            },
+            renewBeforeProviderCreate,
+          },
+        },
+        weChatAdapter({ createRechargeCheckout }),
+        client,
+      ),
+    ).rejects.toThrow("provider creation lease lost");
+
+    expect(client.userWallets).toHaveLength(0);
+    expect(client.rechargeOrders).toHaveLength(0);
+    expect(client.outboxEvents).toHaveLength(0);
+    expect(renewBeforeProviderCreate).not.toHaveBeenCalled();
+    expect(createRechargeCheckout).not.toHaveBeenCalled();
+  });
+
+  it("never POSTs after the creation lease is lost following the durable local intent", async () => {
+    const client = new FakeRechargeClient();
+    const createRechargeCheckout = vi.fn();
+    const lockBeforeLocalCreate = vi.fn();
+
+    await expect(
+      createRechargeOrder(
+        {
+          externalUserId: "user_wechat_stale_remote_owner",
+          amountCents: 1_200,
+          currency: "CNY",
+          idempotencyKey: "wechat_stale_remote_owner",
+          creationFence: {
+            lockBeforeLocalCreate,
+            renewBeforeProviderCreate: async () => {
+              throw new Error("provider creation lease lost");
+            },
+          },
+        },
+        weChatAdapter({ createRechargeCheckout }),
+        client,
+      ),
+    ).rejects.toThrow("provider creation lease lost");
+
+    expect(lockBeforeLocalCreate).toHaveBeenCalledOnce();
+    expect(client.rechargeOrders).toEqual([
+      expect.objectContaining({
+        status: RechargeOrderStatus.CREATED,
+        idempotencyKey: "wechat_stale_remote_owner",
+      }),
+    ]);
+    expect(client.outboxEvents).toHaveLength(1);
+    expect(createRechargeCheckout).not.toHaveBeenCalled();
+  });
+
+  it("credits a verified WeChat SUCCESS directly from an ambiguous CREATED order", async () => {
+    const client = new FakeRechargeClient();
+    const adapter = weChatAdapter({
+      createRechargeCheckout: async () => {
+        throw new Error("provider response lost");
+      },
+      normalizeWebhookEvent: async () =>
+        normalizedWeChatPaidEvent({
+          orderId: "recharge_1",
+          providerEventId: "EVT_WECHAT_CREATED_SUCCESS",
+          providerTransactionId:
+            "4200000000000000099",
+        }),
+    });
+
+    await expect(
+      createRechargeOrder(
+        {
+          externalUserId: "user_wechat_created_success",
+          amountCents: 1_200,
+          currency: "CNY",
+          idempotencyKey: "wechat_created_success",
+        },
+        adapter,
+        client,
+      ),
+    ).rejects.toThrow("provider response lost");
+
+    const paid = await completeRechargeFromProviderWebhook(
+      adapter,
+      { rawBody: "verified-success" },
+      client,
+    );
+
+    expect(paid).toMatchObject({
+      id: "recharge_1",
+      providerOrderId: "recharge_1",
+      status: "paid",
+      cashBalanceCents: 1_200,
+    });
+    expect(client.rechargeOrders[0]).toMatchObject({
+      status: RechargeOrderStatus.PAID,
+      providerOrderId: "recharge_1",
+      providerTransactionId:
+        "4200000000000000099",
+    });
+    expect(client.providerEvents).toHaveLength(1);
+    expect(client.ledgerEntries).toHaveLength(2);
   });
 
   it("credits one WeChat transaction once across differently-id'd notifications", async () => {
@@ -500,6 +743,59 @@ describe("agent wallet mock recharge", () => {
     ).rejects.toThrow("providerTransactionId");
     expect(order.id).toBe(paid.id);
     expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+  });
+
+  it("credits a verified late WeChat payment after a local cancellation exactly once", async () => {
+    const client = new FakeRechargeClient();
+    let providerEventId = "EVT_WECHAT_LATE_PAYMENT";
+    const providerTransactionId = "4200000000000000006";
+    const adapter = weChatAdapter({
+      normalizeWebhookEvent: async () =>
+        normalizedWeChatPaidEvent({
+          orderId: "recharge_1",
+          providerEventId,
+          providerTransactionId,
+        }),
+    });
+    const order = await createRechargeOrder(
+      {
+        externalUserId: "user_wechat_late_payment",
+        amountCents: 1200,
+        currency: "CNY",
+        idempotencyKey: "wechat_late_payment",
+      },
+      adapter,
+      client,
+    );
+    client.rechargeOrders[0]!.status = RechargeOrderStatus.CANCELED;
+    client.rechargeOrders[0]!.checkoutUrl = null;
+
+    const paid = await completeRechargeFromProviderWebhook(
+      adapter,
+      { rawBody: "signed-late-payment" },
+      client,
+    );
+    providerEventId = "EVT_WECHAT_LATE_PAYMENT_REPLAY";
+    const replayed = await completeRechargeFromProviderWebhook(
+      adapter,
+      { rawBody: "signed-late-payment-replay" },
+      client,
+    );
+
+    expect(paid).toMatchObject({
+      id: order.id,
+      status: "paid",
+      cashBalanceCents: 1200,
+    });
+    expect(replayed).toEqual(paid);
+    expect(client.rechargeOrders[0]).toMatchObject({
+      status: RechargeOrderStatus.PAID,
+      providerTransactionId,
+    });
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+    expect(client.providerEvents).toHaveLength(1);
+    expect(client.walletTransactions).toHaveLength(1);
+    expect(client.ledgerEntries).toHaveLength(2);
   });
 
   it("fails closed when a successful WeChat refund was persisted before payment confirmation", async () => {
@@ -717,6 +1013,7 @@ type RechargeOrderRow = {
   status: RechargeOrderStatus;
   idempotencyKey: string;
   checkoutUrl: string | null;
+  providerPayload?: unknown;
   paidAt: Date | null;
   refundedAt: Date | null;
   userWallet?: UserWalletRow;
@@ -890,6 +1187,7 @@ class FakeRechargeClient {
         status: args.data.status,
         idempotencyKey: args.data.idempotencyKey,
         checkoutUrl: args.data.checkoutUrl ?? null,
+        providerPayload: args.data.providerPayload ?? null,
         paidAt: null,
         refundedAt: null,
       };

@@ -10,8 +10,9 @@ import {
   WeChatPayReconciliationConflictError,
   WalletIdempotencyConflictError,
   getPublicRepresentativeRuntime,
-  isWeChatPayApiV3Enabled,
+  isWeChatPayProcessingEnabled,
   prisma,
+  readWeChatPayCheckoutExpiresAt,
   reconcileWeChatPayOrderIfDue,
   resolvePublicAudienceWalletExternalUserId,
 } from "@delegate/web-data";
@@ -26,7 +27,7 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ slug: string; id: string }> },
 ) {
-  if (!isWeChatPayApiV3Enabled()) {
+  if (!isWeChatPayProcessingEnabled()) {
     return privateJson(
       {
         error: "微信支付暂未配置，请稍后再试。",
@@ -66,6 +67,7 @@ export async function POST(
         id: true,
         provider: true,
         status: true,
+        providerPayload: true,
         representativeId: true,
         productCode: true,
         userWallet: {
@@ -98,13 +100,13 @@ export async function POST(
     const knownStatus = readKnownLocalStatus(rechargeOrder.status);
     if (knownStatus) {
       return principalJson(
-        { status: knownStatus },
+        paymentStatusBody(knownStatus, rechargeOrder.providerPayload),
         request,
         slug,
         sessionState,
       );
     }
-    if (rechargeOrder.status !== "REQUIRES_PAYMENT") {
+    if (!readPendingLocalStatus(rechargeOrder.status)) {
       return privateJson(
         {
           error: "充值单暂不可查询，请重新发起支付。",
@@ -122,8 +124,68 @@ export async function POST(
     const reconciliation =
       await reconcileWeChatPayOrderIfDue(rechargeOrder.id);
 
+    if (reconciliation.status !== "pending") {
+      return principalJson(
+        paymentStatusBody(
+          reconciliation.status,
+          rechargeOrder.providerPayload,
+          reconciliation.queried,
+        ),
+        request,
+        slug,
+        sessionState,
+      );
+    }
+
+    // Reconciliation can recover a lost Native create response and persist a
+    // fresh code_url. Reload local truth so the authenticated browser receives
+    // that QR without creating a second out_trade_no.
+    const currentOrder = await prisma.rechargeOrder.findUnique({
+      where: { id: rechargeOrder.id },
+      select: {
+        id: true,
+        status: true,
+        checkoutUrl: true,
+        providerPayload: true,
+      },
+    });
+    if (!currentOrder) {
+      throw new WeChatPayReconciliationConflictError(
+        "WeChat Pay recharge order disappeared after reconciliation.",
+      );
+    }
+    const currentKnownStatus =
+      readKnownLocalStatus(currentOrder.status);
+    if (currentKnownStatus) {
+      return principalJson(
+        paymentStatusBody(
+          currentKnownStatus,
+          currentOrder.providerPayload,
+          reconciliation.queried,
+        ),
+        request,
+        slug,
+        sessionState,
+      );
+    }
+    const currentPendingStatus =
+      readPendingLocalStatus(currentOrder.status);
+    if (!currentPendingStatus) {
+      throw new WeChatPayReconciliationConflictError(
+        "WeChat Pay recharge order changed to an unsupported state.",
+      );
+    }
+
     return principalJson(
-      { status: reconciliation.status },
+      paymentStatusBody(
+        "pending",
+        currentOrder.providerPayload,
+        reconciliation.queried,
+        {
+          orderStatus: currentPendingStatus,
+          checkoutUrl: currentOrder.checkoutUrl,
+        },
+      ),
       request,
       slug,
       sessionState,
@@ -180,6 +242,47 @@ export async function POST(
       },
       500,
     );
+  }
+}
+
+function paymentStatusBody(
+  status: "pending" | "paid" | "closed" | "refunded" | "failed",
+  providerPayload: unknown,
+  providerChecked = false,
+  pendingOrder?: {
+    orderStatus: "created" | "requires_payment";
+    checkoutUrl: string | null;
+  },
+) {
+  return status === "pending"
+    ? {
+        status,
+        orderStatus: pendingOrder?.orderStatus ?? "requires_payment",
+        providerChecked,
+        checkoutUrl:
+          pendingOrder?.orderStatus === "requires_payment"
+          && typeof pendingOrder.checkoutUrl === "string"
+          && pendingOrder.checkoutUrl.startsWith("weixin://wxpay/")
+            ? pendingOrder.checkoutUrl
+            : null,
+        checkoutExpiresAt:
+          pendingOrder?.orderStatus === "created"
+            ? null
+            : readWeChatPayCheckoutExpiresAt(providerPayload),
+      }
+    : { status };
+}
+
+function readPendingLocalStatus(
+  status: string,
+): "created" | "requires_payment" | null {
+  switch (status) {
+    case "CREATED":
+      return "created";
+    case "REQUIRES_PAYMENT":
+      return "requires_payment";
+    default:
+      return null;
   }
 }
 

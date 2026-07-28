@@ -28,7 +28,7 @@ describe("conversation platform schema", () => {
     expect(schema).toContain("model ChannelEventInbox");
     expect(schema).toContain("@@unique([kind, externalEventId])");
     expect(schema).toContain("model OutboxEvent");
-    expect(schema).toContain("idempotencyKey String");
+    expect(schema).toMatch(/idempotencyKey\s+String/);
   });
 
   it("separates contacts, leads, read state, and internal collaboration", () => {

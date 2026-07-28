@@ -1,8 +1,11 @@
 import { getWorkflowEngineConfig } from "@delegate/workflows";
+import { resolveWeChatPayReleaseFlags } from "@delegate/web-data";
 
 export function resolveWorkflowRunnerConfig(
   env: Record<string, string | undefined> = process.env,
 ) {
+  const weChatPayRelease =
+    resolveWeChatPayReleaseFlags(env);
   return {
     port: parseInt(env.WORKFLOW_RUNNER_PORT?.trim() || "4020", 10),
     pollMs: parseInt(
@@ -17,8 +20,15 @@ export function resolveWorkflowRunnerConfig(
       env.WORKFLOW_RUNNER_BATCH_SIZE?.trim() || "10",
       10,
     ),
+    readinessStaleMs: readBoundedInteger(
+      env,
+      "WORKFLOW_RUNNER_READINESS_STALE_MS",
+      180_000,
+      30_000,
+      60 * 60_000,
+    ),
     paymentReconciliation: {
-      enabled: env.DELEGATE_WECHAT_PAY_ENABLED === "true",
+      enabled: weChatPayRelease.processingEnabled,
       pollMs: readBoundedInteger(
         env,
         "WECHAT_PAY_RECONCILIATION_POLL_MS",
@@ -36,8 +46,8 @@ export function resolveWorkflowRunnerConfig(
       leaseMs: readBoundedInteger(
         env,
         "WECHAT_PAY_RECONCILIATION_LEASE_MS",
-        30_000,
-        30_000,
+        75_000,
+        75_000,
         10 * 60_000,
       ),
       pendingBackoffMs: readBoundedInteger(

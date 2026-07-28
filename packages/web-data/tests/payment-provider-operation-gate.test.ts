@@ -4,7 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   claimPaymentProviderOperation,
   createPaymentProviderOperationScopeKey,
+  lockPaymentProviderOperationLease,
   releasePaymentProviderOperation,
+  renewPaymentProviderOperationLease,
   type PaymentProviderOperationGateClient,
 } from "../src/payment-provider-operation-gate";
 
@@ -99,8 +101,79 @@ describe("payment provider operation gate", () => {
     expect(sqlText(client.queries[1]!)).toContain("- NOW()");
   });
 
-  it("releases only the matching fencing token", async () => {
+  it("locks only the exact unexpired fencing token inside the caller transaction", async () => {
     const scopeKey = "c".repeat(64);
+    const activeClient = new FakeGateClient([
+      [{ scopeKey }],
+    ]);
+    const staleClient = new FakeGateClient([[]]);
+
+    await expect(
+      lockPaymentProviderOperationLease(
+        { scopeKey, leaseToken: "active-token" },
+        activeClient,
+      ),
+    ).resolves.toBe(true);
+    await expect(
+      lockPaymentProviderOperationLease(
+        { scopeKey, leaseToken: "stale-token" },
+        staleClient,
+      ),
+    ).resolves.toBe(false);
+
+    const lockQuery = activeClient.queries[0]!;
+    expect(sqlText(lockQuery)).toContain(
+      'AND "leaseToken" = ? AND "leaseExpiresAt" > NOW() FOR UPDATE',
+    );
+    expect(lockQuery.values).toEqual([scopeKey, "active-token"]);
+  });
+
+  it("renews only the exact still-unexpired owner using database time", async () => {
+    const scopeKey = "d".repeat(64);
+    const leaseExpiresAt =
+      new Date("2026-07-27T12:01:15.000Z");
+    const activeClient = new FakeGateClient([
+      [{ leaseExpiresAt }],
+    ]);
+    const staleClient = new FakeGateClient([[]]);
+
+    await expect(
+      renewPaymentProviderOperationLease(
+        {
+          scopeKey,
+          leaseToken: "active-token",
+          leaseDurationMs: 75_000,
+        },
+        activeClient,
+      ),
+    ).resolves.toEqual(leaseExpiresAt);
+    await expect(
+      renewPaymentProviderOperationLease(
+        {
+          scopeKey,
+          leaseToken: "stale-token",
+          leaseDurationMs: 75_000,
+        },
+        staleClient,
+      ),
+    ).resolves.toBeNull();
+
+    const renewQuery = activeClient.queries[0]!;
+    expect(sqlText(renewQuery)).toContain(
+      'UPDATE "PaymentProviderOperationGate" SET "leaseExpiresAt" = NOW() + (? * INTERVAL',
+    );
+    expect(sqlText(renewQuery)).toContain(
+      'AND "leaseToken" = ? AND "leaseExpiresAt" > NOW()',
+    );
+    expect(renewQuery.values).toEqual([
+      75_000,
+      scopeKey,
+      "active-token",
+    ]);
+  });
+
+  it("releases only the matching fencing token", async () => {
+    const scopeKey = "e".repeat(64);
     const activeClient = new FakeGateClient([], [1]);
     const staleClient = new FakeGateClient([], [0]);
 

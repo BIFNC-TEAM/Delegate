@@ -6,6 +6,14 @@ coverage
 .turbo
 .env
 .env.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
 .DS_Store
 *.tsbuildinfo
 .gstack/

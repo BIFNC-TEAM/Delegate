@@ -15,7 +15,11 @@ import {
 } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
-import { completeMockRechargeOrder } from "../src/agent-wallet-recharge";
+import {
+  completeMockRechargeOrder,
+  createRechargeOrder,
+} from "../src/agent-wallet-recharge";
+import type { PaymentProviderAdapter } from "../src/agent-wallet-payment-providers";
 import { getAgentWalletDashboardSnapshot } from "../src/agent-wallet-dashboard";
 import {
   WeChatPayReconciliationLeaseLostError,
@@ -55,6 +59,152 @@ if (process.env.DELEGATE_POSTGRES_E2E === "1") {
 }
 
 describePostgres("agent wallet PostgreSQL concurrency", () => {
+  it("atomically preserves and query-first recovers a real CREATED WeChat order after an ambiguous create result", async () => {
+    const suffix = `${Date.now()}-${crypto.randomUUID()}`;
+    const idempotencyKey =
+      `postgres-wechat-created-${suffix}`;
+    const adapter: PaymentProviderAdapter = {
+      provider: PaymentProvider.WECHAT_PAY,
+      async prepareRechargeCheckout(input) {
+        return {
+          provider: "wechat_pay",
+          appId: "wx-postgres-test",
+          merchantId: "1900000109",
+          rawPayload: {
+            version: 1,
+            mode: "native",
+            appId: "wx-postgres-test",
+            merchantId: "1900000109",
+            description: "Postgres recovery test",
+            outTradeNo: input.rechargeOrderId!,
+            expiresAt: "2026-07-28T12:00:00.000Z",
+            notifyUrl:
+              "https://delegate.example/api/payments/wechat/notify",
+            amountCents: input.amountCents,
+            currency: input.currency,
+          },
+        };
+      },
+      async createRechargeCheckout() {
+        throw Object.assign(
+          new Error("simulated ambiguous create result"),
+          { code: "WECHAT_PAY_PROTOCOL_ERROR" },
+        );
+      },
+      async normalizeWebhookEvent() {
+        throw new Error("not used");
+      },
+    };
+    let orderId: string | undefined;
+    let walletId: string | undefined;
+
+    try {
+      await expect(
+        createRechargeOrder({
+          externalUserId:
+            `postgres-wechat-created-${suffix}`,
+          amountCents: 1_000,
+          currency: "CNY",
+          idempotencyKey,
+        }, adapter),
+      ).rejects.toThrow("ambiguous create result");
+      const created =
+        await prisma.rechargeOrder.findUniqueOrThrow({
+          where: { idempotencyKey },
+        });
+      orderId = created.id;
+      walletId = created.userWalletId;
+      expect(created).toMatchObject({
+        status: RechargeOrderStatus.CREATED,
+        provider: PaymentProvider.WECHAT_PAY,
+        providerOrderId: null,
+        checkoutUrl: null,
+      });
+      await expect(
+        prisma.outboxEvent.findUniqueOrThrow({
+          where: {
+            idempotencyKey:
+              `wechat_pay:reconcile:${created.id}`,
+          },
+        }),
+      ).resolves.toMatchObject({
+        aggregateId: created.id,
+        eventType: "wechat_pay.order.reconcile",
+        status: "PENDING",
+      });
+
+      await prisma.outboxEvent.update({
+        where: {
+          idempotencyKey:
+            `wechat_pay:reconcile:${created.id}`,
+        },
+        data: { availableAt: new Date(Date.now() - 1_000) },
+      });
+      const result = await reconcileClaimedWeChatPayOrder(
+        (await claimNextWeChatPayOrderReconciliation({
+          rechargeOrderId: created.id,
+        }))!,
+        {
+          now: () =>
+            new Date(created.createdAt.getTime() + 76_000),
+          queryOrder: async () => ({
+            status: "not_found",
+            tradeState: null,
+            event: null,
+          }),
+          createCheckout: async () => ({
+            provider: PaymentProvider.WECHAT_PAY,
+            providerOrderId: created.id,
+            checkoutUrl:
+              "weixin://wxpay/postgres-created-recovered",
+            providerPayload: {
+              provider: "wechat_pay",
+              rawPayload: {
+                mode: "native",
+                outTradeNo: created.id,
+                expiresAt:
+                  "2026-07-28T12:00:00.000Z",
+              },
+            },
+          }),
+          closeOrder: async () => undefined,
+        },
+      );
+
+      expect(result).toEqual({
+        status: "pending",
+        queried: true,
+      });
+      await expect(
+        prisma.rechargeOrder.findUniqueOrThrow({
+          where: { id: created.id },
+        }),
+      ).resolves.toMatchObject({
+        status: RechargeOrderStatus.REQUIRES_PAYMENT,
+        providerOrderId: created.id,
+        checkoutUrl:
+          "weixin://wxpay/postgres-created-recovered",
+      });
+    } finally {
+      if (orderId) {
+        await prisma.outboxEvent.deleteMany({
+          where: {
+            aggregateType: "recharge_order",
+            aggregateId: orderId,
+          },
+        });
+        await prisma.rechargeOrder.delete({
+          where: { id: orderId },
+        }).catch(() => undefined);
+      }
+      if (walletId) {
+        await prisma.userWallet.delete({
+          where: { id: walletId },
+        }).catch(() => undefined);
+      }
+    }
+  }, 30_000);
+
   it("serializes provider-call claims and fences stale release tokens in PostgreSQL", async () => {
     const scopeKey = createPaymentProviderOperationScopeKey([
       "wechat_pay",

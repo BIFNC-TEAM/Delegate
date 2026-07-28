@@ -10,6 +10,12 @@ export type RechargeCheckoutInput = {
   amountCents: number;
   currency: string;
   idempotencyKey: string;
+  /**
+   * Provider-safe, immutable request facts prepared before the first network
+   * call. Recovery workers reuse this value so an ambiguous provider outcome
+   * can be queried first and, only when absent, retried with the same request.
+   */
+  preparedProviderPayload?: unknown;
 };
 
 export type RechargeCheckoutSession = {
@@ -43,6 +49,13 @@ export type NormalizedPaymentProviderEvent = {
 
 export type PaymentProviderAdapter = {
   provider: PaymentProvider;
+  /**
+   * This hook must be local and side-effect free. Its result is persisted in
+   * the same transaction as the CREATED recharge order and durable outbox.
+   */
+  prepareRechargeCheckout?(
+    input: RechargeCheckoutInput,
+  ): Promise<Prisma.InputJsonValue>;
   createRechargeCheckout(input: RechargeCheckoutInput): Promise<RechargeCheckoutSession>;
   normalizeWebhookEvent(
     input: PaymentProviderWebhookInput,
@@ -104,6 +117,9 @@ export type SignedWalletCheckoutRecord = {
 export type SignedWalletProviderConfig = {
   appId: string;
   merchantId: string;
+  prepareRechargeCheckout?: (
+    input: RechargeCheckoutInput,
+  ) => Promise<Record<string, unknown>>;
   createRechargeCheckout?: (
     input: RechargeCheckoutInput,
   ) => Promise<SignedWalletCheckoutRecord>;
@@ -405,15 +421,38 @@ function createSignedWalletPaymentProviderAdapter(
 ): PaymentProviderAdapter {
   return {
     provider,
+    ...(config.prepareRechargeCheckout
+      ? {
+          async prepareRechargeCheckout(input: RechargeCheckoutInput) {
+            validateRechargeCheckoutInput(input);
+            const rawPayload =
+              await config.prepareRechargeCheckout!(input);
+            return {
+              provider: providerName,
+              appId: config.appId,
+              merchantId: config.merchantId,
+              rawPayload: toJsonValue(rawPayload),
+            };
+          },
+        }
+      : {}),
     async createRechargeCheckout(input) {
       if (!config.createRechargeCheckout) {
         throw new Error(`${provider} checkout creation requires an official provider SDK adapter.`);
       }
-      assertPositiveInteger(input.amountCents, "amountCents");
-      assertSupportedCurrency(input.currency);
-      requiredString(input.externalUserId, "externalUserId");
-      requiredString(input.idempotencyKey, "idempotencyKey");
-      const checkout = await config.createRechargeCheckout(input);
+      validateRechargeCheckoutInput(input);
+      const preparedProviderPayload =
+        readPreparedSignedWalletPayload(
+          input.preparedProviderPayload,
+          providerName,
+          config,
+        );
+      const checkout = await config.createRechargeCheckout({
+        ...input,
+        ...(preparedProviderPayload
+          ? { preparedProviderPayload }
+          : {}),
+      });
       return {
         provider,
         providerOrderId: checkout.providerOrderId,
@@ -442,6 +481,56 @@ function createSignedWalletPaymentProviderAdapter(
       );
     },
   };
+}
+
+function validateRechargeCheckoutInput(
+  input: RechargeCheckoutInput,
+): void {
+  assertPositiveInteger(input.amountCents, "amountCents");
+  assertSupportedCurrency(input.currency);
+  requiredString(input.externalUserId, "externalUserId");
+  requiredString(input.idempotencyKey, "idempotencyKey");
+}
+
+function readPreparedSignedWalletPayload(
+  value: unknown,
+  providerName: "wechat_pay" | "alipay",
+  config: SignedWalletProviderConfig,
+): Record<string, unknown> | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const outer = readGenericObject(
+    value,
+    "prepared payment provider payload",
+  );
+  if (
+    outer.provider !== providerName
+    || outer.appId !== config.appId
+    || outer.merchantId !== config.merchantId
+  ) {
+    throw new Error(
+      "Prepared payment provider payload does not match the configured provider identity.",
+    );
+  }
+  return readGenericObject(
+    outer.rawPayload,
+    "prepared payment provider raw payload",
+  );
+}
+
+function readGenericObject(
+  value: unknown,
+  label: string,
+): Record<string, unknown> {
+  if (
+    value === null
+    || typeof value !== "object"
+    || Array.isArray(value)
+  ) {
+    throw new Error(`${label} must be an object.`);
+  }
+  return value as Record<string, unknown>;
 }
 
 function normalizeSignedWalletPaymentEvent(

@@ -22,8 +22,8 @@ const mocks = vi.hoisted(() => {
     WalletIdempotencyConflictError,
     WeChatPayConfigurationError,
     WeChatPayProtocolError,
-    isWeChatPayApiV3Enabled: vi.fn(),
-    loadWeChatPayApiV3ConfigFromEnv: vi.fn(),
+    isWeChatPayProcessingEnabled: vi.fn(),
+    loadWeChatPayProcessingConfigFromEnv: vi.fn(),
     persistVerifiedWeChatPayRefund: vi.fn(),
     verifyWeChatPayApiV3RefundNotification: vi.fn(),
   };
@@ -35,9 +35,10 @@ vi.mock("@delegate/web-data", () => ({
     mocks.WalletIdempotencyConflictError,
   WeChatPayConfigurationError: mocks.WeChatPayConfigurationError,
   WeChatPayProtocolError: mocks.WeChatPayProtocolError,
-  isWeChatPayApiV3Enabled: mocks.isWeChatPayApiV3Enabled,
-  loadWeChatPayApiV3ConfigFromEnv:
-    mocks.loadWeChatPayApiV3ConfigFromEnv,
+  isWeChatPayProcessingEnabled:
+    mocks.isWeChatPayProcessingEnabled,
+  loadWeChatPayProcessingConfigFromEnv:
+    mocks.loadWeChatPayProcessingConfigFromEnv,
   persistVerifiedWeChatPayRefund:
     mocks.persistVerifiedWeChatPayRefund,
   verifyWeChatPayApiV3RefundNotification:
@@ -55,8 +56,8 @@ const normalizedRefund = {
 describe("WeChat Pay refund notification route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.isWeChatPayApiV3Enabled.mockReturnValue(true);
-    mocks.loadWeChatPayApiV3ConfigFromEnv.mockReturnValue(config);
+    mocks.isWeChatPayProcessingEnabled.mockReturnValue(true);
+    mocks.loadWeChatPayProcessingConfigFromEnv.mockReturnValue(config);
     mocks.verifyWeChatPayApiV3RefundNotification
       .mockResolvedValue(normalizedRefund);
     mocks.persistVerifiedWeChatPayRefund.mockResolvedValue({
@@ -66,13 +67,15 @@ describe("WeChat Pay refund notification route", () => {
   });
 
   it("does not load credentials when WeChat Pay is disabled", async () => {
-    mocks.isWeChatPayApiV3Enabled.mockReturnValue(false);
+    mocks.isWeChatPayProcessingEnabled.mockReturnValue(false);
 
     const response = await notifyWeChatRefund(notificationRequest("{}"));
 
     expect(response.status).toBe(503);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(mocks.loadWeChatPayApiV3ConfigFromEnv).not.toHaveBeenCalled();
+    expect(
+      mocks.loadWeChatPayProcessingConfigFromEnv,
+    ).not.toHaveBeenCalled();
     expect(
       mocks.verifyWeChatPayApiV3RefundNotification,
     ).not.toHaveBeenCalled();
@@ -191,7 +194,9 @@ describe("WeChat Pay refund notification route", () => {
 
     expect(response.status).toBe(413);
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(mocks.loadWeChatPayApiV3ConfigFromEnv).not.toHaveBeenCalled();
+    expect(
+      mocks.loadWeChatPayProcessingConfigFromEnv,
+    ).not.toHaveBeenCalled();
     expect(
       mocks.verifyWeChatPayApiV3RefundNotification,
     ).not.toHaveBeenCalled();

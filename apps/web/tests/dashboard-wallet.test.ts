@@ -94,6 +94,32 @@ describe("Dashboard Wallet & Billing", () => {
     expect(walletSource).not.toContain("申请提现 · 流程接入中");
   });
 
+  it("queues owner-scoped full WeChat refunds from purchase details", () => {
+    expect(walletSource).toContain(
+      'event.sourceType === "AgentTokenPurchase"',
+    );
+    expect(walletSource).toContain(
+      "/api/dashboard/wallet/refunds?rep=",
+    );
+    expect(walletSource).toContain("window.confirm(");
+    expect(walletSource).toContain("window.prompt(");
+    expect(walletSource).toContain(
+      "new TextEncoder().encode(reason).byteLength > 80",
+    );
+    expect(walletSource).toContain("refundIdempotencyKeysRef");
+    expect(walletSource).toContain("refund:${crypto.randomUUID()}");
+    expect(walletSource).toContain("Only completely unused and unreserved credits");
+    expect(walletSource).toContain("后台异步处理");
+    expect(walletSource).toContain("不会直接修改余额");
+    expect(walletSource).toContain("Promise.allSettled([");
+    expect(walletSource).toContain('loadWallet("replace")');
+    expect(walletSource).toContain("loadReconciliation()");
+    expect(walletCssSource).toContain(".wallet-refund-operation");
+    expect(walletCssSource).toContain(
+      ".wallet-refund-button {\n  min-height: 44px;",
+    );
+  });
+
   it("keeps mock operations visibly non-production and improves withdrawal trace detail", () => {
     expect(walletSource).toContain("mockWithdrawalOperations");
     expect(walletSource).toContain("本地模拟运营");
@@ -132,6 +158,55 @@ describe("Dashboard Wallet & Billing", () => {
     expect(walletSource).toContain('warning: ["存在需复核项", "Review needed"]');
     expect(walletSource).toContain('blocked: ["发现资金差异", "Money differences found"]');
     expect(walletSource).not.toContain("资金操作已阻断");
+  });
+
+  it("places an independent owner-scoped exception queue after funds health", () => {
+    const reconciliationIndex = walletSource.indexOf("<WalletReconciliationPanel");
+    const exceptionQueueIndex = walletSource.indexOf("<WalletExceptionQueue");
+    const recentEventsIndex = walletSource.indexOf('className="wallet-overview-layout"');
+
+    expect(exceptionQueueIndex).toBeGreaterThan(reconciliationIndex);
+    expect(recentEventsIndex).toBeGreaterThan(exceptionQueueIndex);
+    expect(walletSource).toContain(
+      "/api/dashboard/wallet/exceptions?rep=",
+    );
+    expect(walletSource).toContain("异常队列暂时无法加载");
+    expect(walletSource).toContain("当前没有待处理资金异常");
+    expect(walletSource).toContain('aria-labelledby="wallet-exception-queue-heading"');
+    expect(walletSource).toContain('aria-busy={loading}');
+    expect(walletCssSource).toContain(".wallet-exception-queue");
+  });
+
+  it("uses versioned idempotent exception actions without directly mutating funds", () => {
+    expect(walletSource).toContain(
+      "/api/dashboard/wallet/exceptions/${encodeURIComponent(exceptionCase.id)}/actions?rep=",
+    );
+    expect(walletSource).toContain("expectedVersion: exceptionCase.version");
+    expect(walletSource).toContain("wallet-exception:${action}:${crypto.randomUUID()}");
+    expect(walletSource).toContain("actionIdempotencyKeysRef");
+    expect(walletSource).toContain("response.status === 409");
+    expect(walletSource).toContain("Promise.allSettled([");
+    expect(walletSource).toContain("onRefreshReconciliation()");
+    expect(walletSource).toContain('applyAction(exceptionCase, "claim")');
+    expect(walletSource).toContain('applyAction(exceptionCase, "retry")');
+    expect(walletSource).toContain('applyAction(exceptionCase, "acknowledge")');
+    expect(walletSource).toContain("确认只记录说明，不会修改资金");
+    expect(walletSource).toContain("retry restores only the exact background job");
+  });
+
+  it("keeps exception text safe and requires a non-sensitive acknowledgement note", () => {
+    expect(walletSource).toContain("walletExceptionReasonLabel(exceptionCase.reasonCode");
+    expect(walletSource).toContain(
+      '?? (locale === "zh"\n      ? "资金处理需要运营复核"',
+    );
+    expect(walletSource).not.toContain("humanizeCode(exceptionCase.reasonCode)");
+    expect(walletSource).not.toContain("exceptionCase.representativeSlug}");
+    expect(walletSource).toContain("不包含账号、订单号、退款号或个人信息");
+    expect(walletSource).toContain("A non-sensitive handling note is required");
+    expect(walletSource).toContain("claimedByCurrentOwner");
+    expect(walletCssSource).toContain(
+      ".wallet-exception-actions button {\n    flex: 1 1 180px;\n    min-height: 44px;",
+    );
   });
 
   it("keeps reconciliation read-only, current, and separate from date and search filters", () => {

@@ -9,6 +9,7 @@ import {
 
 import { prisma } from "./prisma";
 import { PublicAudiencePrincipalError } from "./public-audience-principal";
+import { readWeChatPayCheckoutExpiresAt } from "./agent-wallet-recharge";
 import { AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE } from "./service-entitlements";
 
 const PUBLIC_WALLET_RECORD_LIMIT = 20;
@@ -33,6 +34,7 @@ type PublicRechargeOrderRecord = {
   provider: PaymentProvider;
   status: RechargeOrderStatus;
   checkoutUrl: string | null;
+  providerPayload: unknown;
   paidAt: Date | null;
   refundedAt: Date | null;
   createdAt: Date;
@@ -109,6 +111,7 @@ export type PublicAgentWalletOrder = {
     | "canceled"
     | "refunded";
   checkoutUrl: string | null;
+  checkoutExpiresAt: string | null;
   paidAt: string | null;
   refundedAt: string | null;
   createdAt: string;
@@ -254,6 +257,7 @@ async function readPublicAgentWalletState(
         provider: true,
         status: true,
         checkoutUrl: true,
+        providerPayload: true,
         paidAt: true,
         refundedAt: true,
         createdAt: true,
@@ -349,6 +353,11 @@ function serializePublicRechargeOrder(
     checkoutUrl:
       order.status === RechargeOrderStatus.REQUIRES_PAYMENT
         ? order.checkoutUrl
+        : null,
+    checkoutExpiresAt:
+      order.provider === PaymentProvider.WECHAT_PAY
+      && order.status === RechargeOrderStatus.REQUIRES_PAYMENT
+        ? readWeChatPayCheckoutExpiresAt(order.providerPayload)
         : null,
     paidAt: isoDate(order.paidAt),
     refundedAt: isoDate(order.refundedAt),

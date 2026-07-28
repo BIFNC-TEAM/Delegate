@@ -47,6 +47,11 @@ describe("public agent wallet state", () => {
         currency: "CNY",
         provider: PaymentProvider.MOCK,
         status: RechargeOrderStatus.PAID,
+        checkoutUrl: null,
+        providerPayload: {
+          provider: "mock",
+          private: "must-not-leak",
+        },
         paidAt: new Date("2026-07-27T02:00:00.000Z"),
         refundedAt: null,
         createdAt: new Date("2026-07-27T01:00:00.000Z"),
@@ -168,6 +173,7 @@ describe("public agent wallet state", () => {
         provider: "mock",
         status: "paid",
         checkoutUrl: null,
+        checkoutExpiresAt: null,
         paidAt: "2026-07-27T02:00:00.000Z",
         refundedAt: null,
         createdAt: "2026-07-27T01:00:00.000Z",
@@ -199,6 +205,59 @@ describe("public agent wallet state", () => {
     expect(serialized).not.toContain("identity-1");
     expect(serialized).not.toContain("private-operation-reason");
     expect(serialized).not.toContain("private-entitlement-id");
+    expect(serialized).not.toContain("must-not-leak");
+  });
+
+  it("exposes only a canonical Native expiry from a pending WeChat payload", async () => {
+    mocks.rechargeOrderFindMany.mockResolvedValue([
+      {
+        id: "order-wechat-1",
+        amountCents: 2000,
+        currency: "CNY",
+        provider: PaymentProvider.WECHAT_PAY,
+        status: RechargeOrderStatus.REQUIRES_PAYMENT,
+        checkoutUrl: "weixin://wxpay/bizpayurl?pr=safe-checkout",
+        providerPayload: {
+          provider: "wechat_pay",
+          merchantId: "private-merchant-id",
+          rawPayload: {
+            mode: "native",
+            outTradeNo: "private-out-trade-no",
+            expiresAt: "2026-07-27T02:10:00.000Z",
+          },
+        },
+        paidAt: null,
+        refundedAt: null,
+        createdAt: new Date("2026-07-27T02:00:00.000Z"),
+      },
+    ]);
+    mocks.agentTokenPurchaseFindMany.mockResolvedValue([]);
+    mocks.walletTransactionFindMany.mockResolvedValue([]);
+
+    const state = await getPublicAgentWalletState(
+      {
+        audienceIdentityId: "identity-1",
+        representativeId: "rep-1",
+      },
+      client,
+    );
+
+    expect(state.orders[0]).toEqual({
+      id: "order-wechat-1",
+      amountCents: 2000,
+      currency: "CNY",
+      provider: "wechat_pay",
+      status: "requires_payment",
+      checkoutUrl: "weixin://wxpay/bizpayurl?pr=safe-checkout",
+      checkoutExpiresAt: "2026-07-27T02:10:00.000Z",
+      paidAt: null,
+      refundedAt: null,
+      createdAt: "2026-07-27T02:00:00.000Z",
+    });
+    const serialized = JSON.stringify(state);
+    expect(serialized).not.toContain("private-merchant-id");
+    expect(serialized).not.toContain("private-out-trade-no");
+    expect(serialized).not.toContain("providerPayload");
   });
 
   it("returns an empty, currency-specific state before a wallet exists", async () => {

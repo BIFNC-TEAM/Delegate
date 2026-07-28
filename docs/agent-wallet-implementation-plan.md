@@ -12,7 +12,7 @@ Delegate should evolve from an early wallet-like control plane into a real Agent
 
 Payment providers such as Stripe, WeChat Pay, and Alipay should only handle money movement, signatures, provider order state, webhooks, refunds, and payouts. Delegate remains the source of truth for wallet balances, Agent tokens, creator earnings, and product ledger state.
 
-## Implementation Status (2026-07-27)
+## Implementation Status (2026-07-28)
 
 The transactional MVP described by this plan is implemented on
 `codex/dashboard-optimization`:
@@ -75,41 +75,79 @@ The transactional MVP described by this plan is implemented on
   cash spending, last-credit reservation, settle-versus-release, and
   withdrawal-freeze races against the real schema. Creator balance summaries
   use an uncapped database aggregate rather than a limited relation sample.
-- WeChat Pay API v3 Native collection is implemented behind an explicit,
-  default-off server flag. The server creates and signs Native orders, verifies
-  every API response and callback before parsing, decrypts successful payment
-  notifications, and recovers missed callbacks through a signed merchant-order
-  query. Callback and query confirmations share one provider-transaction
-  idempotency key and one atomic recharge-to-representative-credit transaction.
-  A PostgreSQL operation gate prevents parallel checkout creation across web
-  replicas without storing raw audience identifiers; the shared Outbox lease
-  prevents parallel query fan-out. Public responses omit wallet identities and
-  provider payloads.
-- Every pending WeChat order owns one durable
+- WeChat Pay API v3 Native collection is implemented behind two explicit,
+  default-off server flags. `DELEGATE_WECHAT_PAY_COLLECTION_ENABLED` controls
+  only new Native orders, while
+  `DELEGATE_WECHAT_PAY_PROCESSING_ENABLED` keeps callbacks, queries, refund
+  recovery, and ledger reversal running for existing money. Collection without
+  processing is rejected at startup. Before its first provider POST, the server
+  atomically persists a `CREATED` order, exact replayable Native request facts,
+  and durable reconciliation Outbox work. Recovery queries the same
+  `out_trade_no` first and replays the exact request only after a signed
+  not-found response. A locally expired QR remains reconcilable; a pending
+  provider order with a lost QR is canceled only after a minimum delay and a
+  successful signed provider close. The server verifies every API response and
+  callback before parsing, decrypts successful payment notifications, and
+  recovers missed callbacks through a signed merchant-order query. Callback
+  and query confirmations share one provider-transaction idempotency key and
+  one atomic
+  recharge-to-representative-credit transaction. A PostgreSQL operation gate
+  prevents parallel checkout creation across web replicas without storing raw
+  audience identifiers; the shared Outbox lease prevents parallel query
+  fan-out. Public responses omit wallet identities and provider payloads.
+- Every `CREATED` or pending WeChat order owns one durable
   `wechat_pay.order.reconcile` Outbox item. The workflow runner claims it with
   a fenced lease and bounded backoff; the principal-scoped browser status route
   shares the same item and cannot multiply upstream queries.
-- Signed WeChat refund success, closed, and abnormal notifications are accepted
-  at `/api/payments/wechat/refund-notify`. The callback persists an immutable
+- The authenticated owner billing dashboard can submit one exact full refund
+  for a paid WeChat purchase whose credits are wholly unused and unreserved and
+  whose creator proceeds remain pending. Delegate persists an idempotent refund
+  intent, freezes the entitlement, and enqueues lifecycle work before the first
+  provider request. The first claimant durably changes `QUEUED` to `UNKNOWN`
+  before sending the POST. Every crash, timeout, transport failure, non-success
+  response, or unverifiable response therefore resumes by querying the
+  original `out_refund_no`. After a verified `RESOURCE_NOT_EXISTS`, Delegate
+  either replays the exact request or terminalizes only a retained, allowlisted
+  deterministic rejection; unknown codes remain frozen. `PROCESSING` queries
+  follow a bounded one-minute then 5/10/20/30-minute schedule.
+- Signed refund submission/query responses persist `PROCESSING`, `SUCCESS`,
+  `CLOSED`, and `ABNORMAL` provider facts. Terminal `SUCCESS`, `CLOSED`, and
+  `ABNORMAL` callbacks are accepted at
+  `/api/payments/wechat/refund-notify`; the callback persists an immutable
   external fact before responding. If no local order can yet be matched, it
   returns a retryable failure after the fact is durable so provider delivery
-  can resolve the binding later; matching terminal events for the same refund
-  also bind earlier unmatched facts. A closed refund records no local value
-  change; abnormal, unmatched, and pending reversal work remains visible as a
-  persistent reconciliation alert. A successful refund freezes every linked
-  entitlement before a
-  `wechat_pay.refund.apply` Outbox item applies the local reversal. Only an
-  exact full, undiscounted refund whose credits are wholly unused and
-  unreserved, with creator proceeds still pending, is reversed automatically.
-  Partial, discounted, consumed, reserved, ambiguous, or already-released cases
-  stay frozen as `RECONCILIATION_REQUIRED` for manual review.
+  can resolve the binding later; matching facts for the same refund also bind
+  earlier unmatched events. A closed refund restores eligibility only when the
+  signed provider lifecycle makes that safe; abnormal, unmatched, overdue, and
+  unsafe work remains frozen as a persistent reconciliation exception. A
+  successful refund enqueues `wechat_pay.refund.apply`; its local reversal is
+  append-only and idempotent.
+- The workflow runner executes order reconciliation, refund lifecycle, and
+  refund reversal as three independently tracked lanes with durable heartbeat,
+  success, stable failure-code, and redacted scalar-summary checkpoints.
+  `Promise.allSettled` isolation lets healthy lanes continue when another lane
+  fails. `/health` remains liveness, `/ready` covers startup/runtime
+  dependencies, and `/operations/wechat-pay/health` always returns a redacted
+  operational `healthy`, `degraded`, or `critical` snapshot. Idle backoff ticks
+  do not clear failures; readiness rehydrates persistent checkpoint and
+  per-lane `FAILED` backlog state so restarts, replicas, and unrelated
+  successful items cannot hide unresolved work.
+- The owner Dashboard exposes one private Owner-scoped exception queue across
+  every representative owned by that Owner. The `rep` query selects a
+  billing-authorized workspace anchor; it does not filter the queue to that
+  representative. Only cases whose recharge/refund chain proves Owner
+  ownership are included. Claim, exact bound-Outbox retry, and acknowledge are
+  version-checked, idempotent, and audit-recorded; these actions never edit
+  wallet balances. Claim is allowed only from `OPEN`; retry and acknowledge
+  require the case to be `CLAIMED` by the current Owner, and acknowledge
+  requires a note. Unmatched provider facts remain platform-only alerts.
 
-Still intentionally excluded from this MVP: enabling a live WeChat merchant,
-a general provider-refund initiation UI, chargeback automation, real
+Still intentionally excluded from this MVP: enabling a live WeChat merchant
+before its canary passes, partial provider refunds, chargeback automation, real
 Stripe/Alipay collection, automated payout submission, FX conversion, and a
 generic public Wallet API. Mock recharge and mock payment completion return 404
 in production. WeChat collection must remain disabled until the database gates
-and a live merchant smoke test pass. Stripe remains deferred; no Stripe test
+and the live merchant smoke test pass. Stripe remains deferred; no Stripe test
 account is required for this phase.
 
 ## Current Delegate Baseline
@@ -287,8 +325,10 @@ The first implementation ships `mock` provider support. WeChat Pay API v3
 Native collection is now the first real adapter: it signs exact request bytes,
 verifies exact response/callback bytes, supports public-key rotation, renders
 the provider `code_url` locally as a QR code, and uses signed order queries as
-a callback recovery path. Stripe is intentionally deferred, and Alipay remains
-a fail-closed skeleton.
+a callback recovery path. The same signed boundary submits eligible full
+refunds and queries unknown or processing refund outcomes by their original
+merchant refund number. Stripe is intentionally deferred, and Alipay remains a
+fail-closed skeleton.
 
 One underlying provider transaction creates exactly one financial event and
 one set of ledger movements. If callback and order-query evidence both arrive,
@@ -354,14 +394,18 @@ All values should come from ledger projection rather than static mock data.
     provider-transaction idempotency, and atomic service-credit purchase.
 17. [x] Add the production-shaped WeChat operations safety boundary:
     PostgreSQL-backed distributed create/query throttling, durable
-    `wechat_pay.order.reconcile` Outbox queries, a server-side scheduled
-    worker, `/api/payments/wechat/refund-notify`, and durable
-    `wechat_pay.refund.apply` reversal processing. Success, closed, and
-    abnormal provider outcomes are retained as separate immutable events;
-    unmatched facts remain a persistent health alert. Exact full refunds of
-    wholly unused credits reverse automatically; every unsafe or ambiguous
-    successful refund freezes all linked entitlements and requires manual
-    reconciliation.
+    `wechat_pay.order.reconcile` queries, persisted full-refund intent and
+    entitlement freeze, `wechat_pay.refund.reconcile` submission/query
+    recovery, `/api/payments/wechat/refund-notify`, and durable
+    `wechat_pay.refund.apply` reversal processing. Every uncertain refund POST
+    becomes `UNKNOWN` and queries the original `out_refund_no` before an exact
+    request replay. Success, closed, processing, and abnormal provider outcomes
+    are retained as immutable facts; unmatched facts remain a platform
+    operations alert. Exact full refunds of wholly unused credits reverse
+    automatically; every unsafe or ambiguous successful refund stays frozen
+    for reconciliation. Run order reconciliation, refund lifecycle, and refund
+    reversal as three `Promise.allSettled` lanes with durable checkpoints,
+    redacted operations health, and an owner-scoped, audited exception queue.
 18. [ ] Pass the live WeChat merchant smoke test and release checklist. This
     requires a Native Pay-enabled merchant account bound to the AppID, merchant
     API certificate serial and private key, API v3 key, WeChat Pay public key
@@ -369,9 +413,10 @@ All values should come from ledger projection rather than static mock data.
     public HTTPS payment and refund notification URLs, a real payer WeChat
     account, and merchant-console/API permission to issue a refundable test
     order. Verify payment callback and missed-callback query recovery, then
-    issue one full unused refund and confirm its Outbox reversal. Keep
-    `DELEGATE_WECHAT_PAY_ENABLED=false` until these checks and
-    `pnpm test:postgres:wallet` pass.
+    issue one full unused refund and confirm its Outbox reversal. First enable
+    processing with collection off and verify readiness/recovery, then enable
+    collection only for the ¥5 canary. Do not open general traffic until these
+    checks and `pnpm test:postgres:wallet` pass.
 19. [ ] Implement reviewed payout submission and reconciliation.
 
 The disposable PostgreSQL 16 gate (`pnpm test:postgres:wallet`) covers both
@@ -381,23 +426,57 @@ approval, mock payout, callback/query concurrency for one WeChat transaction,
 payment-confirmation rollback and retry, idempotent replay, and a final healthy
 reconciliation report. It also validates the provider-operation gate and the
 refund split between automatic full-unused reversal and frozen manual
-reconciliation. This database gate is required before enabling the live flag.
+reconciliation, same-key concurrent refund creation, callback-before-submit
+convergence, `UNKNOWN` query-first recovery, abnormal-state transitions, and
+terminal replay quarantine. This database gate is required before enabling
+collection.
 
 ### WeChat runtime configuration boundary
 
-`.env.example` documents the payment credentials and the reconciliation worker
-timings. Compose injects those values only into `reps`, which creates orders and
-handles `/api/payments/wechat/notify` plus
-`/api/payments/wechat/refund-notify`, and `workflow-runner`, which performs
-Outbox order queries and refund reversals. They are deliberately absent from
-the shared application environment, Dashboard, bot, compute, and conversation
-worker containers.
+`.env.example` documents the split release controls, payment credentials,
+separate payment/refund callbacks, and reconciliation worker timings. Compose
+injects WeChat server configuration according to least privilege:
+
+- `reps`, which creates Native orders, handles
+  `/api/payments/wechat/notify` and
+  `/api/payments/wechat/refund-notify`, and serves principal-scoped order
+  status;
+- `dashboard`, which receives only the two release flags and
+  credential-free callback URL/origin values needed to authorize and freeze
+  owner-initiated eligible full refunds; and
+- `workflow-runner`, which performs durable order query, refund lifecycle, and
+  refund reversal work.
+
+The merchant private key, API v3 key, response-verification keys, and legacy
+platform certificate are restricted to `reps` and `workflow-runner`; they are
+absent from `dashboard`, bot, compute broker, conversation worker, and browser.
+Both split flags must be configured together with exact lowercase `true` or
+`false`. `DELEGATE_WECHAT_PAY_ENABLED` is a compatibility fallback only when
+both split flags are absent. Processing may be enabled while collection is off,
+but collection without processing fails closed.
 
 The reconciliation worker defaults are a 5-second poll, batch size 10,
-30-second fenced lease, 10-second pending backoff, 5-second error backoff, and
+75-second fenced lease, 10-second pending backoff, 5-second error backoff, and
 10-minute maximum backoff. `WECHAT_PAY_RECONCILIATION_LEASE_MS` must remain at
-least 30 seconds. The workflow-runner `/health` response exposes only worker
-state and summaries, never payment credentials.
+least 75 seconds so one lease always exceeds the maximum 60-second provider
+request timeout plus a database-write margin. The workflow-runner `/health` endpoint is liveness only;
+`/ready` checks database access, redacted local WeChat preflight, and loop
+freshness. `/operations/wechat-pay/health` always returns HTTP 200 and carries
+the operational result in a redacted `healthy`, `degraded`, or `critical`
+body. It aggregates safe codes/counts and the three lane checkpoints; none of
+these endpoints returns credentials, order/user identifiers, raw provider
+payloads, provider descriptions, or exception messages.
+
+The private owner queue is read through
+`/api/dashboard/wallet/exceptions?rep=...`; claim, retry, and acknowledge write
+through `/api/dashboard/wallet/exceptions/[caseId]/actions?rep=...`. The `rep`
+value is a billing-authorization anchor, while reads and actions cover all
+cases owned by that Owner. Every mutation uses an expected case version and an
+owner-scoped idempotency key. Retry can only reset the case's exact bound
+`FAILED`/`DEAD_LETTER` payment Outbox item after the current Owner has claimed
+the case. Acknowledge has the same claim precondition, requires a non-sensitive
+note, and does not resolve the underlying financial state. Cases resolve only
+after the source operation or verified refund lifecycle recovers.
 
 `WECHAT_PAY_NOTIFY_URL` is an optional public HTTPS payment-notification
 override. When it is blank, the server derives
@@ -413,10 +492,13 @@ new `WECHAT_PAY_PUBLIC_KEY_ID`/`WECHAT_PAY_PUBLIC_KEY_BASE64` pair and the old
 by either key are accepted, but ambiguous multi-key JSON configuration fails
 closed unless one outbound key is selected explicitly.
 
-When a refund is initiated through the merchant console or a future
-refund-submission service, its WeChat refund notification URL must be
-configured as `/api/payments/wechat/refund-notify`; it is intentionally a
-separate callback path rather than a second payment URL.
+`WECHAT_PAY_REFUND_NOTIFY_URL` is independently configurable and must target
+`/api/payments/wechat/refund-notify`; when omitted, it is derived from the
+payment callback origin or the canonical representative origin. It is
+intentionally a separate callback path rather than a second payment URL. The
+owner refund API stores that exact callback URL with the frozen refund request,
+so a query-first retry can replay the original request without changing any
+provider parameter.
 
 ## Migration Strategy
 
@@ -462,3 +544,7 @@ The public service-credit bridge is now atomic:
   internal identifiers.
 - A blocked reconciliation report prevents new withdrawals and every payout
   lifecycle transition; warning-only legacy evidence remains operable.
+- Owner exception reads and actions require billing authorization through the
+  active representative, return the Owner's cross-representative queue, never
+  infer ownership for unmatched provider facts, and cannot write wallet
+  balances directly.

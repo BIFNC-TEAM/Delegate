@@ -6,6 +6,7 @@ import {
   PaymentProvider,
   PaymentProviderEventType,
   RechargeRefundReversalStatus,
+  RechargeRefundSubmissionStatus,
   RechargeOrderStatus,
   RepresentativeClaimStatus,
   ServiceEntitlementStatus,
@@ -25,10 +26,16 @@ import {
   RechargePaymentConflictError,
 } from "../src/agent-wallet-recharge";
 import {
+  persistVerifiedWeChatPayRefundApiResult,
   persistVerifiedWeChatPayRefund,
   runWeChatRefundReversalTick,
   WECHAT_REFUND_REVERSAL_OUTBOX_EVENT_TYPE,
 } from "../src/agent-wallet-wechat-refunds";
+import {
+  createWeChatRefundIntent,
+  runWeChatRefundLifecycleTick,
+  WECHAT_REFUND_LIFECYCLE_OUTBOX_EVENT_TYPE,
+} from "../src/agent-wallet-wechat-refund-submission";
 import {
   reserveConversationWalletUsage,
   settleConversationWalletUsage,
@@ -43,6 +50,11 @@ import { AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE } from "../src/service-entitle
 import { getWorkspaceWalletReconciliationReport } from "../src/wallet-reconciliation";
 import type {
   NormalizedWeChatPayRefundResult,
+  SubmitWeChatPayRefundInput,
+  WeChatPayRefundApiResult,
+} from "../src/wechat-pay-api-v3";
+import {
+  WeChatPayRefundApiError,
 } from "../src/wechat-pay-api-v3";
 
 const describePostgres = process.env.DELEGATE_POSTGRES_E2E === "1"
@@ -573,7 +585,7 @@ describePostgres("agent wallet PostgreSQL business closure", () => {
           },
         }),
       ).resolves.toMatchObject({
-        status: ServiceEntitlementStatus.ACTIVE,
+        status: ServiceEntitlementStatus.FROZEN,
         remainingUnits: 100,
       });
       // Reproduce a provider fact that committed before its local binding was
@@ -674,6 +686,13 @@ describePostgres("agent wallet PostgreSQL business closure", () => {
           },
         }),
       ).resolves.toBe(1);
+      const lateAbnormalReplay =
+        await persistVerifiedWeChatPayRefund(abnormalResult);
+      expect(lateAbnormalReplay).toMatchObject({
+        providerStatus: "succeeded",
+        reversalStatus: "pending",
+        processingError: null,
+      });
 
       await prisma.outboxEvent.updateMany({
         where: {
@@ -958,7 +977,7 @@ describePostgres("agent wallet PostgreSQL business closure", () => {
     }
   }, 30_000);
 
-  it("records a closed WeChat refund without freezing or reversing local value", async () => {
+  it("freezes an abnormal WeChat refund and restores unused value only after CLOSED", async () => {
     const fixture = await createBusinessClosureFixture();
     const adapter = createLocalWeChatPaymentProviderAdapter();
     const providerTransactionId =
@@ -987,15 +1006,46 @@ describePostgres("agent wallet PostgreSQL business closure", () => {
         }),
       );
 
-      const persisted = await persistVerifiedWeChatPayRefund(
-        createVerifiedWeChatRefundResult({
+      const abnormal = createVerifiedWeChatRefundResult({
+        fixture,
+        orderId: order.id,
+        providerTransactionId,
+        label: "closed-abnormal",
+        refundStatus: "ABNORMAL",
+      });
+      await expect(
+        persistVerifiedWeChatPayRefund(abnormal),
+      ).resolves.toMatchObject({
+        providerStatus: "abnormal",
+        reversalStatus: "not_required",
+      });
+      await expect(
+        prisma.serviceEntitlementAccount.findFirstOrThrow({
+          where: {
+            representativeId: fixture.representativeId,
+            audienceIdentityId: fixture.audienceIdentityId,
+            productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: ServiceEntitlementStatus.FROZEN,
+      });
+
+      const closed = createVerifiedWeChatRefundResult({
           fixture,
           orderId: order.id,
           providerTransactionId,
           label: "closed",
           refundStatus: "CLOSED",
-        }),
-      );
+      });
+      closed.refundId = abnormal.refundId;
+      closed.outRefundNo = abnormal.outRefundNo;
+      closed.normalizedPayload.providerRefundId =
+        abnormal.refundId;
+      closed.normalizedPayload.providerRefundOrderId =
+        abnormal.outRefundNo;
+      const persisted =
+        await persistVerifiedWeChatPayRefund(closed);
       const refundId = persisted.refundId;
       if (!refundId) {
         throw new Error("Expected a persisted closed recharge refund.");
@@ -1022,7 +1072,10 @@ describePostgres("agent wallet PostgreSQL business closure", () => {
             },
           }),
           prisma.paymentProviderEvent.findFirstOrThrow({
-            where: { rechargeRefundId: refundId },
+            where: {
+              rechargeRefundId: refundId,
+              eventType: PaymentProviderEventType.REFUND_CLOSED,
+            },
           }),
           prisma.outboxEvent.count({
             where: {
@@ -1055,6 +1108,661 @@ describePostgres("agent wallet PostgreSQL business closure", () => {
       ).resolves.toMatchObject({
         claimed: 0,
         unresolved: 0,
+      });
+    } finally {
+      await cleanupBusinessClosureFixture(fixture);
+    }
+  }, 30_000);
+
+  it("persists one refund intent and queries UNKNOWN before replaying the exact frozen POST", async () => {
+    const fixture = await createBusinessClosureFixture();
+    try {
+      const paid = await createPaidWeChatRecharge(
+        fixture,
+        "refund-lifecycle",
+      );
+      const intentInput = {
+        rechargeOrderId: paid.orderId,
+        requestedByOwnerId: fixture.ownerId,
+        requestIdempotencyKey:
+          `${fixture.suffix}:refund-lifecycle`,
+        reason: "用户申请退款",
+        refundNotifyUrl:
+          "https://reps.delegate.example/api/payments/wechat/refund-notify",
+      };
+      const [intent, concurrentReplay] = await Promise.all([
+        createWeChatRefundIntent(intentInput, {
+          now: () => new Date(0),
+        }),
+        createWeChatRefundIntent(intentInput, {
+          now: () => new Date(0),
+        }),
+      ]);
+      expect(concurrentReplay).toEqual(intent);
+      const outRefundNo = intent.providerRefundOrderId;
+      await expect(
+        prisma.rechargeRefund.count({
+          where: { rechargeOrderId: paid.orderId },
+        }),
+      ).resolves.toBe(1);
+      await expect(
+        prisma.outboxEvent.count({
+          where: {
+            aggregateId: intent.id,
+            eventType: WECHAT_REFUND_LIFECYCLE_OUTBOX_EVENT_TYPE,
+          },
+        }),
+      ).resolves.toBe(1);
+
+      const frozenRequest: SubmitWeChatPayRefundInput[] = [];
+      const firstTick = await runWeChatRefundLifecycleTick({
+        limit: 1,
+        submitRefund: async (request) => {
+          frozenRequest.push(request);
+          throw new WeChatPayRefundApiError(
+            "signed provider non-allowlisted rejection",
+            "rejected",
+            "POLICY_CHANGED",
+            400,
+          );
+        },
+        queryRefund: async () => {
+          throw new Error("query must not run before first POST");
+        },
+      });
+      expect(firstTick).toMatchObject({
+        claimed: 1,
+        submitted: 1,
+        queried: 0,
+        pending: 1,
+        rejected: 0,
+        failed: 0,
+      });
+      expect(frozenRequest).toHaveLength(1);
+      expect(frozenRequest[0]).toMatchObject({
+        transactionId: paid.providerTransactionId,
+        outTradeNo: paid.orderId,
+        outRefundNo,
+        originalAmountCents: 1_000,
+        refundAmountCents: 1_000,
+        currency: "CNY",
+        reason: "用户申请退款",
+      });
+      await expect(
+        prisma.rechargeRefund.findUniqueOrThrow({
+          where: { id: intent.id },
+        }),
+      ).resolves.toMatchObject({
+        submissionStatus: RechargeRefundSubmissionStatus.UNKNOWN,
+        providerStatus: null,
+        reversalStatus: RechargeRefundReversalStatus.PENDING,
+      });
+      await expect(
+        prisma.serviceEntitlementAccount.findFirstOrThrow({
+          where: {
+            representativeId: fixture.representativeId,
+            audienceIdentityId: fixture.audienceIdentityId,
+            productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: ServiceEntitlementStatus.FROZEN,
+      });
+
+      await makeRefundLifecycleDue(intent.id);
+      const callOrder: string[] = [];
+      const processingResult = createWeChatRefundApiResult({
+        orderId: paid.orderId,
+        providerTransactionId: paid.providerTransactionId,
+        outRefundNo,
+        refundId:
+          `500${crypto.randomUUID().replaceAll("-", "").slice(0, 29)}`,
+        status: "PROCESSING",
+        source: "submission_response",
+      });
+      const secondTick = await runWeChatRefundLifecycleTick({
+        limit: 1,
+        queryRefund: async (queriedOutRefundNo) => {
+          callOrder.push(`query:${queriedOutRefundNo}`);
+          throw new WeChatPayRefundApiError(
+            "signed not found",
+            "not_found",
+            "RESOURCE_NOT_EXISTS",
+            404,
+          );
+        },
+        submitRefund: async (request) => {
+          callOrder.push(`submit:${request.outRefundNo}`);
+          expect(request).toEqual(frozenRequest[0]);
+          return processingResult;
+        },
+      });
+      expect(callOrder).toEqual([
+        `query:${outRefundNo}`,
+        `submit:${outRefundNo}`,
+      ]);
+      expect(secondTick).toMatchObject({
+        claimed: 1,
+        queried: 1,
+        submitted: 1,
+        pending: 1,
+        failed: 0,
+      });
+      await expect(
+        prisma.rechargeRefund.findUniqueOrThrow({
+          where: { id: intent.id },
+        }),
+      ).resolves.toMatchObject({
+        submissionStatus: RechargeRefundSubmissionStatus.ACCEPTED,
+        providerStatus: "PROCESSING",
+        providerRefundId: processingResult.refundId,
+      });
+
+      await makeRefundLifecycleDue(intent.id);
+      const successResult = createWeChatRefundApiResult({
+        orderId: paid.orderId,
+        providerTransactionId: paid.providerTransactionId,
+        outRefundNo,
+        refundId: processingResult.refundId,
+        status: "SUCCESS",
+        source: "refund_query",
+      });
+      await expect(
+        runWeChatRefundLifecycleTick({
+          limit: 1,
+          queryRefund: async () => successResult,
+          submitRefund: async () => {
+            throw new Error("accepted refunds must only be queried");
+          },
+        }),
+      ).resolves.toMatchObject({
+        claimed: 1,
+        queried: 1,
+        submitted: 0,
+        terminal: 1,
+        failed: 0,
+      });
+      await expect(
+        prisma.outboxEvent.count({
+          where: {
+            aggregateId: intent.id,
+            eventType: WECHAT_REFUND_LIFECYCLE_OUTBOX_EVENT_TYPE,
+          },
+        }),
+      ).resolves.toBe(1);
+      await expect(
+        prisma.outboxEvent.count({
+          where: {
+            aggregateId: intent.id,
+            eventType: WECHAT_REFUND_REVERSAL_OUTBOX_EVENT_TYPE,
+          },
+        }),
+      ).resolves.toBe(1);
+    } finally {
+      await cleanupBusinessClosureFixture(fixture);
+    }
+  }, 30_000);
+
+  it("does not replay a refund after another worker takes over the queried claim", async () => {
+    const fixture = await createBusinessClosureFixture();
+    try {
+      const paid = await createPaidWeChatRecharge(
+        fixture,
+        "refund-replay-fence",
+      );
+      const intent = await createWeChatRefundIntent({
+        rechargeOrderId: paid.orderId,
+        requestedByOwnerId: fixture.ownerId,
+        requestIdempotencyKey:
+          `${fixture.suffix}:refund-replay-fence`,
+        refundNotifyUrl:
+          "https://reps.delegate.example/api/payments/wechat/refund-notify",
+      });
+
+      await expect(
+        runWeChatRefundLifecycleTick({
+          limit: 1,
+          submitRefund: async () => {
+            throw new WeChatPayRefundApiError(
+              "ambiguous first submission",
+              "retryable",
+              "SYSTEM_ERROR",
+              500,
+            );
+          },
+          queryRefund: async () => {
+            throw new Error("first attempt must submit");
+          },
+        }),
+      ).resolves.toMatchObject({
+        claimed: 1,
+        submitted: 1,
+        pending: 1,
+        failed: 0,
+      });
+      await makeRefundLifecycleDue(intent.id);
+
+      let replayCalls = 0;
+      const takeoverTick = await runWeChatRefundLifecycleTick({
+        limit: 1,
+        queryRefund: async () => {
+          const outbox =
+            await prisma.outboxEvent.findFirstOrThrow({
+              where: {
+                aggregateId: intent.id,
+                eventType:
+                  WECHAT_REFUND_LIFECYCLE_OUTBOX_EVENT_TYPE,
+              },
+            });
+          await prisma.outboxEvent.update({
+            where: { id: outbox.id },
+            data: {
+              // Simulate a new worker claiming the expired lease while the
+              // old worker is waiting on the signed query response.
+              attemptCount: { increment: 1 },
+              status: "PROCESSING",
+              availableAt: new Date(Date.now() + 75_000),
+            },
+          });
+          throw new WeChatPayRefundApiError(
+            "signed not found",
+            "not_found",
+            "RESOURCE_NOT_EXISTS",
+            404,
+          );
+        },
+        submitRefund: async () => {
+          replayCalls += 1;
+          throw new Error(
+            "a superseded worker must not replay the refund",
+          );
+        },
+      });
+
+      expect(takeoverTick).toMatchObject({
+        claimed: 1,
+        submitted: 0,
+        failed: 1,
+      });
+      expect(replayCalls).toBe(0);
+      await expect(
+        prisma.outboxEvent.findFirstOrThrow({
+          where: {
+            aggregateId: intent.id,
+            eventType:
+              WECHAT_REFUND_LIFECYCLE_OUTBOX_EVENT_TYPE,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: "PROCESSING",
+      });
+      await expect(
+        prisma.rechargeRefund.findUniqueOrThrow({
+          where: { id: intent.id },
+        }),
+      ).resolves.toMatchObject({
+        submissionStatus:
+          RechargeRefundSubmissionStatus.UNKNOWN,
+        providerStatus: null,
+        reversalStatus:
+          RechargeRefundReversalStatus.PENDING,
+      });
+    } finally {
+      await cleanupBusinessClosureFixture(fixture);
+    }
+  }, 30_000);
+
+  it("terminalizes a documented refund rejection and restores the frozen entitlement", async () => {
+    const fixture = await createBusinessClosureFixture();
+    try {
+      const paid = await createPaidWeChatRecharge(
+        fixture,
+        "refund-definitive-rejection",
+      );
+      const intent = await createWeChatRefundIntent({
+        rechargeOrderId: paid.orderId,
+        requestedByOwnerId: fixture.ownerId,
+        requestIdempotencyKey:
+          `${fixture.suffix}:refund-definitive-rejection`,
+        refundNotifyUrl:
+          "https://reps.delegate.example/api/payments/wechat/refund-notify",
+      });
+      let submissions = 0;
+      const firstTick = await runWeChatRefundLifecycleTick({
+        limit: 1,
+        submitRefund: async () => {
+          submissions += 1;
+          throw new WeChatPayRefundApiError(
+            "signed provider rejection",
+            "rejected",
+            "INVALID_REQUEST",
+            400,
+          );
+        },
+        queryRefund: async () => {
+          throw new Error(
+            "a definitively rejected refund must not be queried",
+          );
+        },
+      });
+
+      expect(firstTick).toMatchObject({
+        claimed: 1,
+        submitted: 1,
+        queried: 0,
+        terminal: 0,
+        pending: 1,
+        rejected: 0,
+        failed: 0,
+      });
+      expect(submissions).toBe(1);
+      await expect(
+        prisma.rechargeRefund.findUniqueOrThrow({
+          where: { id: intent.id },
+        }),
+      ).resolves.toMatchObject({
+        submissionStatus:
+          RechargeRefundSubmissionStatus.UNKNOWN,
+        providerStatus: null,
+        reversalStatus:
+          RechargeRefundReversalStatus.PENDING,
+        processingError: "wechat_refund_invalid_request",
+      });
+      await expect(
+        prisma.serviceEntitlementAccount.findFirstOrThrow({
+          where: {
+            representativeId: fixture.representativeId,
+            audienceIdentityId: fixture.audienceIdentityId,
+            productCode:
+              AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: ServiceEntitlementStatus.FROZEN,
+        remainingUnits: 100,
+        reservedUnits: 0,
+      });
+      await makeRefundLifecycleDue(intent.id);
+      const secondTick = await runWeChatRefundLifecycleTick({
+        limit: 1,
+        submitRefund: async () => {
+          submissions += 1;
+          throw new Error(
+            "a definitively rejected refund must not be resubmitted",
+          );
+        },
+        queryRefund: async () => {
+          throw new WeChatPayRefundApiError(
+            "signed not found",
+            "not_found",
+            "RESOURCE_NOT_EXISTS",
+            404,
+          );
+        },
+      });
+      expect(secondTick).toMatchObject({
+        claimed: 1,
+        submitted: 0,
+        queried: 1,
+        terminal: 1,
+        pending: 0,
+        rejected: 1,
+        failed: 0,
+      });
+      expect(submissions).toBe(1);
+      await expect(
+        prisma.rechargeRefund.findUniqueOrThrow({
+          where: { id: intent.id },
+        }),
+      ).resolves.toMatchObject({
+        submissionStatus:
+          RechargeRefundSubmissionStatus.REJECTED,
+        providerStatus: null,
+        reversalStatus:
+          RechargeRefundReversalStatus.NOT_REQUIRED,
+        processingError: "wechat_refund_invalid_request",
+      });
+      await expect(
+        prisma.serviceEntitlementAccount.findFirstOrThrow({
+          where: {
+            representativeId: fixture.representativeId,
+            audienceIdentityId: fixture.audienceIdentityId,
+            productCode:
+              AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: ServiceEntitlementStatus.ACTIVE,
+        remainingUnits: 100,
+        reservedUnits: 0,
+      });
+      await expect(
+        prisma.outboxEvent.findFirstOrThrow({
+          where: {
+            aggregateId: intent.id,
+            eventType:
+              WECHAT_REFUND_LIFECYCLE_OUTBOX_EVENT_TYPE,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: "PROCESSED",
+        lastError: null,
+      });
+      await expect(
+        runWeChatRefundLifecycleTick({
+          limit: 1,
+          submitRefund: async () => {
+            submissions += 1;
+            throw new Error("must not replay rejected refunds");
+          },
+          queryRefund: async () => {
+            throw new Error("must not query rejected refunds");
+          },
+        }),
+      ).resolves.toMatchObject({
+        claimed: 0,
+      });
+      expect(submissions).toBe(1);
+    } finally {
+      await cleanupBusinessClosureFixture(fixture);
+    }
+  }, 30_000);
+
+  it("keeps an unresolved refund frozen and dead-letters it for reconciliation only after eight days", async () => {
+    const fixture = await createBusinessClosureFixture();
+    try {
+      const paid = await createPaidWeChatRecharge(
+        fixture,
+        "refund-eight-day-recovery",
+      );
+      const now = new Date("2026-07-28T00:00:00.000Z");
+      const intent = await createWeChatRefundIntent(
+        {
+          rechargeOrderId: paid.orderId,
+          requestedByOwnerId: fixture.ownerId,
+          requestIdempotencyKey:
+            `${fixture.suffix}:refund-eight-day-recovery`,
+          refundNotifyUrl:
+            "https://reps.delegate.example/api/payments/wechat/refund-notify",
+        },
+        {
+          providerRefundOrderId:
+            `refund_${crypto.randomUUID().replaceAll("-", "")}`,
+          now: () => new Date(0),
+        },
+      );
+      await prisma.rechargeRefund.update({
+        where: { id: intent.id },
+        data: {
+          submissionStatus: RechargeRefundSubmissionStatus.UNKNOWN,
+          processingError:
+            "wechat_refund_provider_outcome_unknown",
+          createdAt: new Date(
+            now.getTime() - 8 * 24 * 60 * 60_000,
+          ),
+        },
+      });
+      await makeRefundLifecycleDue(intent.id);
+      await expect(
+        runWeChatRefundLifecycleTick({
+          limit: 1,
+          now: () => now,
+          submitRefund: async () => {
+            throw new Error("provider must not be called after cutoff");
+          },
+          queryRefund: async () => {
+            throw new Error("provider must not be called after cutoff");
+          },
+        }),
+      ).resolves.toMatchObject({
+        claimed: 1,
+        reconciliationRequired: 1,
+        failed: 0,
+      });
+      await expect(
+        prisma.rechargeRefund.findUniqueOrThrow({
+          where: { id: intent.id },
+        }),
+      ).resolves.toMatchObject({
+        submissionStatus: RechargeRefundSubmissionStatus.UNKNOWN,
+        providerStatus: null,
+        reversalStatus:
+          RechargeRefundReversalStatus.RECONCILIATION_REQUIRED,
+        processingError:
+          "wechat_refund_recovery_window_exhausted",
+      });
+      await expect(
+        prisma.outboxEvent.findFirstOrThrow({
+          where: {
+            aggregateId: intent.id,
+            eventType: WECHAT_REFUND_LIFECYCLE_OUTBOX_EVENT_TYPE,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: "DEAD_LETTER",
+        lastError:
+          "wechat_refund_recovery_window_exhausted",
+      });
+      await expect(
+        prisma.serviceEntitlementAccount.findFirstOrThrow({
+          where: {
+            representativeId: fixture.representativeId,
+            audienceIdentityId: fixture.audienceIdentityId,
+            productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: ServiceEntitlementStatus.FROZEN,
+      });
+    } finally {
+      await cleanupBusinessClosureFixture(fixture);
+    }
+  }, 30_000);
+
+  it("keeps callback-before-response terminal state and reconciliation quarantine monotonic", async () => {
+    const fixture = await createBusinessClosureFixture();
+    try {
+      const paid = await createPaidWeChatRecharge(
+        fixture,
+        "refund-monotonic",
+      );
+      const outRefundNo =
+        `refund_${crypto.randomUUID().replaceAll("-", "")}`;
+      const providerRefundId =
+        `500${crypto.randomUUID().replaceAll("-", "").slice(0, 29)}`;
+      const intent = await createWeChatRefundIntent(
+        {
+          rechargeOrderId: paid.orderId,
+          requestedByOwnerId: fixture.ownerId,
+          requestIdempotencyKey:
+            `${fixture.suffix}:refund-monotonic`,
+          refundNotifyUrl:
+            "https://reps.delegate.example/api/payments/wechat/refund-notify",
+        },
+        {
+          providerRefundOrderId: outRefundNo,
+          now: () => new Date(0),
+        },
+      );
+      const callbackSuccess = createVerifiedWeChatRefundResult({
+        fixture,
+        orderId: paid.orderId,
+        providerTransactionId: paid.providerTransactionId,
+        label: "callback-before-response",
+      });
+      callbackSuccess.refundId = providerRefundId;
+      callbackSuccess.outRefundNo = outRefundNo;
+      callbackSuccess.normalizedPayload.providerRefundId =
+        providerRefundId;
+      callbackSuccess.normalizedPayload.providerRefundOrderId =
+        outRefundNo;
+      await expect(
+        persistVerifiedWeChatPayRefund(callbackSuccess),
+      ).resolves.toMatchObject({
+        refundId: intent.id,
+        providerStatus: "succeeded",
+        reversalStatus: "pending",
+      });
+      const lateProcessing = createWeChatRefundApiResult({
+        orderId: paid.orderId,
+        providerTransactionId: paid.providerTransactionId,
+        outRefundNo,
+        refundId: providerRefundId,
+        status: "PROCESSING",
+        source: "submission_response",
+      });
+      await expect(
+        persistVerifiedWeChatPayRefundApiResult(lateProcessing),
+      ).resolves.toMatchObject({
+        refundId: intent.id,
+        providerStatus: "succeeded",
+        reversalStatus: "pending",
+      });
+
+      await prisma.rechargeRefund.update({
+        where: { id: intent.id },
+        data: {
+          reversalStatus:
+            RechargeRefundReversalStatus.RECONCILIATION_REQUIRED,
+          processingError: "wechat_refund_manual_quarantine",
+        },
+      });
+      const successQuery = createWeChatRefundApiResult({
+        orderId: paid.orderId,
+        providerTransactionId: paid.providerTransactionId,
+        outRefundNo,
+        refundId: providerRefundId,
+        status: "SUCCESS",
+        source: "refund_query",
+      });
+      for (const replay of [successQuery, successQuery, lateProcessing]) {
+        await expect(
+          persistVerifiedWeChatPayRefundApiResult(replay),
+        ).resolves.toMatchObject({
+          refundId: intent.id,
+          providerStatus: "succeeded",
+          reversalStatus: "reconciliation_required",
+          processingError: "wechat_refund_manual_quarantine",
+        });
+      }
+      await expect(
+        persistVerifiedWeChatPayRefund(callbackSuccess),
+      ).resolves.toMatchObject({
+        refundId: intent.id,
+        providerStatus: "succeeded",
+        reversalStatus: "reconciliation_required",
+        processingError: "wechat_refund_manual_quarantine",
+      });
+      await expect(
+        prisma.serviceEntitlementAccount.findFirstOrThrow({
+          where: {
+            representativeId: fixture.representativeId,
+            audienceIdentityId: fixture.audienceIdentityId,
+            productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          },
+        }),
+      ).resolves.toMatchObject({
+        status: ServiceEntitlementStatus.FROZEN,
       });
     } finally {
       await cleanupBusinessClosureFixture(fixture);
@@ -1361,6 +2069,141 @@ function createLocalWeChatPaymentProviderAdapter(): PaymentProviderAdapter {
     },
     async normalizeWebhookEvent() {
       throw new Error("This test supplies an already-verified provider event.");
+    },
+  };
+}
+
+async function createPaidWeChatRecharge(
+  fixture: BusinessClosureFixture,
+  label: string,
+): Promise<{
+  orderId: string;
+  providerTransactionId: string;
+}> {
+  const providerTransactionId =
+    `420${Date.now()}${crypto.randomUUID().replaceAll("-", "").slice(0, 13)}`;
+  const order = await createRechargeOrder(
+    {
+      externalUserId: fixture.externalUserId,
+      audienceIdentityId: fixture.audienceIdentityId,
+      representativeId: fixture.representativeId,
+      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      amountCents: 1_000,
+      currency: "CNY",
+      idempotencyKey: `${fixture.suffix}:${label}:recharge`,
+    },
+    createLocalWeChatPaymentProviderAdapter(),
+  );
+  await completeRechargeAndPurchaseAgentTokensFromVerifiedProviderEvent(
+    createVerifiedWeChatPaidEvent({
+      orderId: order.id,
+      providerEventId:
+        `${fixture.suffix}:${label}:payment-callback`,
+      providerTransactionId,
+    }),
+  );
+  return {
+    orderId: order.id,
+    providerTransactionId,
+  };
+}
+
+async function makeRefundLifecycleDue(
+  rechargeRefundId: string,
+): Promise<void> {
+  await prisma.outboxEvent.updateMany({
+    where: {
+      aggregateId: rechargeRefundId,
+      eventType: WECHAT_REFUND_LIFECYCLE_OUTBOX_EVENT_TYPE,
+    },
+    data: {
+      status: "PENDING",
+      availableAt: new Date(0),
+    },
+  });
+}
+
+function createWeChatRefundApiResult(input: {
+  orderId: string;
+  providerTransactionId: string;
+  outRefundNo: string;
+  refundId: string;
+  status: WeChatPayRefundApiResult["refundStatus"];
+  source: WeChatPayRefundApiResult["source"];
+}): WeChatPayRefundApiResult {
+  const providerCreatedAt =
+    new Date("2026-07-27T12:05:00.000Z");
+  const providerOccurredAt =
+    input.status === "SUCCESS"
+      ? new Date("2026-07-27T12:06:00.000Z")
+      : providerCreatedAt;
+  const providerEventId =
+    `${input.source}:${input.refundId}:${input.status}:`
+    + (
+      input.status === "SUCCESS"
+        ? providerOccurredAt.toISOString()
+        : providerCreatedAt.toISOString()
+    );
+  const type =
+    input.status === "PROCESSING"
+      ? "RechargeRefundProcessing"
+      : input.status === "SUCCESS"
+        ? "RechargeRefunded"
+        : input.status === "CLOSED"
+          ? "RechargeRefundClosed"
+          : "RechargeRefundAbnormal";
+  return {
+    source: input.source,
+    providerEventId,
+    refundId: input.refundId,
+    outRefundNo: input.outRefundNo,
+    outTradeNo: input.orderId,
+    transactionId: input.providerTransactionId,
+    refundStatus: input.status,
+    originalAmountCents: 1_000,
+    refundAmountCents: 1_000,
+    payerAmountCents: 1_000,
+    payerRefundAmountCents: 1_000,
+    verifiedAt: new Date("2026-07-27T12:07:00.000Z"),
+    providerCreatedAt,
+    providerOccurredAt,
+    rawPayload: {
+      source: input.source,
+      refundId: input.refundId,
+      outRefundNo: input.outRefundNo,
+      outTradeNo: input.orderId,
+      transactionId: input.providerTransactionId,
+      refundStatus: input.status,
+      createTime: providerCreatedAt.toISOString(),
+      successTime:
+        input.status === "SUCCESS"
+          ? providerOccurredAt.toISOString()
+          : null,
+      amount: {
+        total: 1_000,
+        refund: 1_000,
+        payerTotal: 1_000,
+        payerRefund: 1_000,
+        currency: "CNY",
+      },
+    },
+    normalizedPayload: {
+      type,
+      source: input.source,
+      provider: "wechat_pay",
+      providerEventId,
+      providerRefundId: input.refundId,
+      providerRefundOrderId: input.outRefundNo,
+      providerPaymentTransactionId:
+        input.providerTransactionId,
+      rechargeOrderId: input.orderId,
+      refundStatus: input.status,
+      originalAmountCents: 1_000,
+      refundAmountCents: 1_000,
+      payerAmountCents: 1_000,
+      payerRefundAmountCents: 1_000,
+      providerCreatedAt: providerCreatedAt.toISOString(),
+      providerOccurredAt: providerOccurredAt.toISOString(),
     },
   };
 }

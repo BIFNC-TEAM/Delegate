@@ -45,7 +45,7 @@ Delegate currently includes these working surfaces and services:
 - **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, and workflow state.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and retained as the Telegram-specific edge while business behavior moves toward the shared Conversation Platform.
 - **Matrix Application Service foundation** in `apps/matrix-bridge`, providing authenticated Matrix transaction ingestion and channel event mapping. Native Matrix is an optional channel; it is not required for Telegram availability.
-- **AMN wallet control plane** covering internal wallet ledger entries, mock recharge, Agent token purchase, usage charging, Creator 20% revenue policy, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
+- **AMN wallet control plane** covering internal wallet ledger entries, local mock recharge, default-off WeChat Pay API v3 Native collection and recovery, Agent token purchase, usage charging, Creator 20% revenue policy, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
 - **Prisma/Postgres data model** for representatives, contacts, conversations, delegation tasks, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
@@ -83,9 +83,29 @@ The intended AMN layers are:
 - **Settlement Engine:** calculates Creator revenue, platform fees, provider costs, and withdrawals.
 - **Transparent Ledger:** records recharge, charge, settlement, and proof events so users and creators can verify state.
 
-What is implemented today is the web-first Delegate wedge plus the first AMN wallet loop: public representative pages, web chat, pricing tiers, development-only mock recharge, user cash balance, user-and-Agent-scoped service-credit purchase, reserve/settle/release charging in public conversations, immediate balance refresh after purchase, return of unused demo credits to wallet cash, Creator pending/withdrawable earnings, creator withdrawal request/cancel UI, development-only mock review and settlement, partial refund/reversal services, the workspace wallet dashboard, provider adapter boundaries, and durable follow-up workflows. The current Web recharge path is a non-production demo/mock loop, not a live payment integration.
+What is implemented today is the web-first Delegate wedge plus the first AMN
+wallet loop: public representative pages, web chat, pricing tiers,
+development-only mock recharge, default-off WeChat Pay API v3 Native checkout,
+signed payment and refund callbacks, signed query recovery, user cash balance,
+user-and-Agent-scoped service-credit purchase, reserve/settle/release charging
+in public conversations, immediate balance refresh after purchase, return of
+unused demo credits to wallet cash, Creator pending/withdrawable earnings,
+creator withdrawal request/cancel UI, development-only mock review and
+settlement, eligible full-unused WeChat refund submission and reversal, the
+workspace wallet dashboard with an owner-scoped exception queue, provider
+adapter boundaries, and durable follow-up workflows.
 
-What is still not fully productionized: live Stripe SDK wiring and webhook signing, live WeChat Pay or Alipay credentials and certificate flows, automatic payout through Stripe Connect / Alipay transfer / WeChat merchant transfer, generic open Wallet API, chargeback automation, Merkle proof publication, multi-currency FX, and full settlement automation.
+The WeChat implementation is production-shaped but is not yet production
+validated: the real merchant ¥5 payment-and-refund canary and release checklist
+remain open. Code, migration, and test completion do not prove that the
+merchant/AppID binding, production callbacks, API permissions, or payer flow
+work in the deployed environment.
+
+What is still not fully productionized: live Stripe SDK wiring and webhook
+signing, live Alipay collection, WeChat merchant activation and live canary,
+automatic payout through Stripe Connect / Alipay transfer / WeChat merchant
+transfer, generic open Wallet API, chargeback automation, Merkle proof
+publication, multi-currency FX, and full settlement automation.
 
 ## AMN Wallet Implementation Status
 
@@ -106,13 +126,14 @@ Current status against the wallet plan:
 | Account types | Implemented | User cash, deferred service credit, Creator pending/withdrawable/frozen, platform deferred/earned revenue, provider cost, external settlement, and payout clearing are modeled in Prisma. |
 | Data models | Mostly implemented | `UserWallet`, aggregate `AgentWallet`, scoped `UserAgentWallet`, `WalletTransaction`, append-only `WalletLedgerEntry`, purchase/usage/withdrawal allocation records, recharge/provider events, Creator earnings, and withdrawal requests are implemented. Public users resolve through canonical `AudienceIdentity`; `UserWallet.externalUserId` remains a legacy payment selector while wallet ownership is checked through `audienceIdentityId`. |
 | Integer money and tokens | Implemented | Money uses integer smallest currency units such as CNY fen and USD cents. Agent tokens are integers. |
-| User recharge | Implemented for development mock flow | Recharge creation, idempotent provider events, payment completion, cash credit, and representative-scoped service-credit purchase can complete atomically. Every public recharge write requires a verified Web account; mock endpoints are unavailable in production. |
+| User recharge | Mock and default-off WeChat Native flows implemented | Recharge creation, idempotent provider facts, payment completion, cash credit, and representative-scoped service-credit purchase complete atomically. Before its first Native POST, Delegate persists a `CREATED` order, exact replay facts, and durable recovery work; uncertain creation queries the same order before exact replay. Local QR expiry never cancels money, and a lost QR permits replacement only after a delayed signed provider close. Verified late success still credits exactly once. Every public recharge write requires a verified Web account; mock endpoints are unavailable in production. Live merchant activation remains gated by the runbook canary. |
 | User buys Agent service credits | Implemented | The service checks `UserWallet`, debits cash, credits the exact `UserAgentWallet`, grants the matching canonical `ServiceEntitlement`, creates a FIFO purchase lot and Creator pending earnings, updates the aggregate Agent projection, and writes all records in one transaction. |
 | Agent consumes service credits | Implemented for public conversation flow | Acceptance atomically chooses a conversation-locked free slot or reserves the same canonical audience units in both the wallet and entitlement ledgers before publishing work. Successful replies and approved Compute settle both; non-billable, rejected, edited, redacted, canceled, and terminal-failure paths transfer or release both, including retry-backoff runs. Multi-step Compute/MCP tasks transfer one server-verified run owner and finalize it exactly once; generation writes are fenced by renewable worker leases. Wallet/entitlement drift fails closed on a consistent snapshot, and the package root exposes only the composite dual-ledger usage lifecycle. |
 | Creator withdrawal | Operational mock loop implemented | Verified creators can submit and cancel representative-scoped requests from the workspace wallet. Requests allocate and freeze exact earnings FIFO. A non-production-only operations endpoint demonstrates approve, reject, paid, transient failure, retry, and permanent-failure release; it is unavailable in production. Automatic payout submission is not implemented yet. |
-| Refund and reversal | Partially implemented | Paid recharge refunds and partial reversal of unconsumed purchase lots retract wallet credits and the matching unspent `ServiceEntitlement` atomically. The public development flow can return its own unused credits to wallet cash after audience and representative ownership checks. Full provider refund submission, chargeback automation, and dispute freezing remain future work. |
-| Payment reuse | Adapter boundary implemented | Mock provider is live. Stripe Checkout-style adapter is implemented through an injected client boundary. WeChat Pay and Alipay adapters are fail-closed skeletons requiring official SDK / OpenAPI callbacks and signature verification before use. Delegate does not handle card numbers, bank cards, payment passwords, or raw sensitive payment data. |
-| Database safety gate | Implemented | Validated PostgreSQL checks protect cash, scoped-credit, Creator earning, usage, and paid-withdrawal invariants. `pnpm test:postgres:wallet` runs real PostgreSQL 16 races for duplicate recharge, concurrent spending, final-credit reservation, terminal usage mutation, and withdrawal freezing. |
+| Refund and reversal | Eligible WeChat full-refund loop implemented | The authenticated billing dashboard can queue one idempotent full refund for a wholly unused and unreserved WeChat purchase. Delegate persists the refund intent, freezes entitlement, and durably marks the first submission `UNKNOWN` before the provider call. Every uncertain outcome queries the original `out_refund_no`; exact replay or deterministic rejection is allowed only after signed not-found evidence. Unknown codes and unsafe, ambiguous, abnormal, or unresolved cases remain frozen for reconciliation. Verified callback/query facts drive idempotent reversal. Local demo partial reversal is retained; automatic chargeback/dispute resolution remains future work. |
+| Payment adapters | Mock and WeChat Native implemented | Mock remains development-only. WeChat Pay API v3 Native signs exact request bytes, verifies response/callback signatures, supports public-key rotation with legacy platform-certificate compatibility, and never exposes provider payloads to the browser. Stripe has an injected Checkout-style boundary but no live SDK/webhook wiring; Alipay remains fail closed. Delegate does not handle card numbers, bank cards, payment passwords, or raw sensitive payment data. |
+| WeChat operations | Implemented | The workflow runner executes order reconciliation, refund lifecycle, and refund reversal as independently tracked lanes so one failure does not suppress the others. Liveness, readiness, and redacted operations health have separate semantics; persistent checkpoints and per-lane `FAILED` backlog keep unresolved work visible across idle backoff, restarts, replicas, and unrelated successes. Proven exceptions across all representatives owned by the signed-in Owner appear in one private Dashboard queue with versioned, idempotent claim, exact-Outbox retry, and acknowledge actions; unmatched platform events are never assigned to an owner. |
+| Database safety gate | Implemented | Validated PostgreSQL checks protect cash, scoped-credit, Creator earning, usage, paid-withdrawal, and refund lifecycle invariants. `pnpm test:postgres:wallet` runs real PostgreSQL 16 races and recovery scenarios for duplicate recharge, concurrent spending, payment callback/query convergence, refund idempotency, unknown-outcome query-first recovery, terminal-fact replay, and withdrawal freezing. |
 | First-version exclusions | Preserved | No automatic cross-border payout, Merkle proof, open Wallet API, unclaimed-representative auto-withdrawal, chain ledger, or multi-currency FX. |
 
 Telegram is now an optional, non-production channel runtime for this product direction. If Delegate later ships production bot-based digital goods and services, they should follow Telegram's rules, including Telegram Stars where required. AMN Pay is a future web/unified recharge path, not a reason to bypass platform policy. During the current demo, Telegram sends users to the Web mock-recharge surface. That continuation requires Web sign-in and an exact, verified binding to the active Bot before an order can be created, so credits land on the same canonical Delegate identity. An inline recharge button is emitted only when the Bot-specific `TELEGRAM_WEB_RECHARGE_BASE_URL` (or its `NEXT_PUBLIC_REPRESENTATIVE_URL` fallback) is a public HTTPS origin. Loopback or other non-public HTTP URLs remain plain message text for local testing.
@@ -240,8 +261,11 @@ Useful local URLs for the default Docker profile:
 - Representative: `http://localhost:3002/reps/lin-founder-rep`
 - Dashboard liveness: `http://localhost:3001/health`
 - Representative liveness: `http://localhost:3002/health`
+- Representative readiness: `http://localhost:3002/ready`
 - Compute broker health: `http://localhost:4010/health`
 - Workflow runner health: `http://localhost:4020/health`
+- Workflow runner readiness: `http://localhost:4020/ready`
+- Workflow runner WeChat operations health: `http://localhost:4020/operations/wechat-pay/health`
 - Artifact store API: `http://localhost:9000`
 - Artifact store console: `http://localhost:9001`
 - OpenViking API: `http://localhost:1933`
@@ -316,7 +340,23 @@ The default `.env.example` is safe for local development. Important settings:
 - `DELEGATE_AUTH_SESSION_SECRET` signs dashboard auth and callback-state cookies. Set a strong secret in production.
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` forces dashboard auth in non-production environments; production always requires it.
 - `DELEGATE_AUTH_DEV_LOGIN` and the `DELEGATE_AUTH_DEV_*` identities are accepted only outside production. `DELEGATE_LOCAL_AUTH_BOOTSTRAP=true` separately permits the local fixture binding step. `pnpm docker:up:local` enables both switches without weakening the production login boundary.
-- `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` exposes the explicitly labeled local recharge panel so the mock recharge, service-credit purchase, usage, and unused-credit return loop can be exercised. Recharge creation, completion, and reversal require a signed-in audience account. Telegram continuations additionally require the current verified Bot binding. Keep it `false` outside development; the mock mutation endpoints also return `404` in production. Live provider checkout, signed payment webhooks, and production refunds are not yet a closed Web payment flow.
+- `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` exposes the explicitly labeled local recharge panel so the mock recharge, service-credit purchase, usage, and unused-credit return loop can be exercised. Recharge creation, completion, and reversal require a signed-in audience account. Telegram continuations additionally require the current verified Bot binding. Keep it `false` outside development; the mock mutation endpoints also return `404` in production. This switch does not enable WeChat Pay.
+- `DELEGATE_WECHAT_PAY_COLLECTION_ENABLED` controls creation of new WeChat
+  Native orders. `DELEGATE_WECHAT_PAY_PROCESSING_ENABLED` independently keeps
+  callbacks, signed order/refund queries, refund submission recovery, and
+  ledger reversal running for existing money. Collection is invalid without
+  processing. Configure both split flags together using exact lowercase
+  `true`/`false`; partial or misspelled values fail readiness. The older
+  `DELEGATE_WECHAT_PAY_ENABLED` is only a compatibility fallback when both
+  split flags are absent.
+- `WECHAT_PAY_NOTIFY_URL` and `WECHAT_PAY_REFUND_NOTIFY_URL` are separate
+  credential-free public HTTPS callback URLs. When blank, both can be derived
+  from a public origin-only `NEXT_PUBLIC_REPRESENTATIVE_URL`. During WeChat's
+  public-key gray migration, configure both the current
+  `WECHAT_PAY_PUBLIC_KEY_ID`/`WECHAT_PAY_PUBLIC_KEY_BASE64` pair and the prior
+  platform certificate pair until the merchant console reaches 100% and a
+  post-migration canary succeeds. See the
+  [production runbook](./docs/wechat-pay-production-runbook.md).
 - `DELEGATE_SKILL_TRUSTED_KEYS` is a JSON object mapping registry publisher key IDs to trusted Ed25519 public-key PEM strings. Signed patch auto-adoption remains disabled when the matching key is absent.
 - `DELEGATE_CLAWHUB_URL` selects a credential-free HTTPS Registry origin, `DELEGATE_CLAWHUB_ALLOWED_HOSTS` allowlists its hostname, and `DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` bounds exact-version verification freshness (24 hours by default). Redirects are rejected. Adoption and rollback re-fetch the exact publisher/version manifest and verdict, reject stale or changed evidence, and re-evaluate signatures against the current trusted-key set before changing release state.
 - `TELEGRAM_BOT_TOKEN` is the only Telegram credential required to start the current long-poll runtime. `TELEGRAM_BOT_ID` is optional because the numeric bot ID is derived from the token prefix when omitted; after `getMe` succeeds, the Bot persists the validated ID and username to configured Telegram channel bindings so the Web app can issue connection-scoped `/bind` challenges without receiving the token. `TELEGRAM_BOT_USERNAME` is recommended for a readable channel identity but is not required to start polling. `TELEGRAM_WEBHOOK_SECRET` is not required or read by long-polling; it remains available to separate webhook/signing or fallback code and should not be added merely to run polling.
@@ -549,6 +589,7 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model, outbox, timer, cancellation, and dashboard semantics.
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute and browser isolation model.
 - [OpenViking integration](./docs/openviking-integration.md): public memory and recall integration.
+- [WeChat Pay production runbook](./docs/wechat-pay-production-runbook.md): split release controls, callback and refund recovery, readiness, incidents, and the live merchant canary.
 - [Roadmap](./docs/roadmap.md): staged product and platform direction.
 - [Gap analysis](./docs/gap-analysis.md): remaining product and architecture gaps.
 - [Design system](./DESIGN.md): visual direction and implementation notes.
@@ -562,6 +603,8 @@ Delegate can:
 - offer paid continuation
 - show web-first recharge/service-depth UI and invoice records
 - show early Agent Wallet / recharge-entry state for a specific Digital Representative
+- run a default-off, signed WeChat Pay Native collection and eligible
+  full-unused refund recovery path after its explicit production gates are met
 - create owner handoff requests
 - run governed compute and browser tasks through the broker
 - persist artifacts, deliverables, package downloads, audit events, and ledgers

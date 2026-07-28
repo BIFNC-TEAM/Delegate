@@ -15,6 +15,15 @@ export type PaymentProviderOperationGateClient = {
   $executeRaw(query: Prisma.Sql): Promise<number>;
 };
 
+export class PaymentProviderOperationLeaseLostError extends Error {
+  readonly code = "PAYMENT_PROVIDER_OPERATION_LEASE_LOST";
+
+  constructor() {
+    super("Payment provider operation lease is no longer owned by this caller.");
+    this.name = "PaymentProviderOperationLeaseLostError";
+  }
+}
+
 export type ClaimPaymentProviderOperationInput = {
   scopeKey: string;
   leaseDurationMs?: number;
@@ -180,6 +189,68 @@ export async function claimPaymentProviderOperation(
 }
 
 /**
+ * Verifies the exact unexpired fencing token and locks its gate row for the
+ * caller's surrounding database transaction. Call this with a transaction
+ * client immediately before creating the local provider intent. A contender
+ * cannot reclaim the lease until that transaction commits or rolls back.
+ */
+export async function lockPaymentProviderOperationLease(
+  input: {
+    scopeKey: string;
+    leaseToken: string;
+  },
+  client: PaymentProviderOperationGateClient = prisma,
+): Promise<boolean> {
+  const scopeKey = requiredScopeKey(input.scopeKey);
+  const leaseToken = requiredLeaseToken(input.leaseToken);
+  const rows = await client.$queryRaw<Array<{ scopeKey: string }>>(Prisma.sql`
+    SELECT "scopeKey"
+    FROM "PaymentProviderOperationGate"
+    WHERE "scopeKey" = ${scopeKey}
+      AND "leaseToken" = ${leaseToken}
+      AND "leaseExpiresAt" > NOW()
+    FOR UPDATE
+  `);
+  return rows.length === 1;
+}
+
+/**
+ * Extends only the exact currently-owned, still-unexpired lease using database
+ * time. Returning null is a fencing failure: an old caller must not perform
+ * the remote provider effect after another request can own the gate.
+ */
+export async function renewPaymentProviderOperationLease(
+  input: {
+    scopeKey: string;
+    leaseToken: string;
+    leaseDurationMs?: number;
+  },
+  client: PaymentProviderOperationGateClient = prisma,
+): Promise<Date | null> {
+  const scopeKey = requiredScopeKey(input.scopeKey);
+  const leaseToken = requiredLeaseToken(input.leaseToken);
+  const leaseDurationMs = normalizedDuration(
+    input.leaseDurationMs,
+    DEFAULT_PAYMENT_PROVIDER_OPERATION_LEASE_MS,
+    "leaseDurationMs",
+  );
+  const rows = await client.$queryRaw<Array<{
+    leaseExpiresAt: Date;
+  }>>(Prisma.sql`
+    UPDATE "PaymentProviderOperationGate"
+    SET
+      "leaseExpiresAt" =
+        NOW() + (${leaseDurationMs} * INTERVAL '1 millisecond'),
+      "updatedAt" = NOW()
+    WHERE "scopeKey" = ${scopeKey}
+      AND "leaseToken" = ${leaseToken}
+      AND "leaseExpiresAt" > NOW()
+    RETURNING "leaseExpiresAt"
+  `);
+  return rows[0]?.leaseExpiresAt ?? null;
+}
+
+/**
  * Releases only the lease owned by this caller. A stale caller cannot clear a
  * lease acquired later with a different fencing token.
  */
@@ -191,10 +262,7 @@ export async function releasePaymentProviderOperation(
   client: PaymentProviderOperationGateClient = prisma,
 ): Promise<boolean> {
   const scopeKey = requiredScopeKey(input.scopeKey);
-  const leaseToken = input.leaseToken.trim();
-  if (!leaseToken) {
-    throw new Error("Payment provider operation leaseToken is required.");
-  }
+  const leaseToken = requiredLeaseToken(input.leaseToken);
   const released = await client.$executeRaw(Prisma.sql`
     UPDATE "PaymentProviderOperationGate"
     SET
@@ -205,6 +273,14 @@ export async function releasePaymentProviderOperation(
       AND "leaseToken" = ${leaseToken}
   `);
   return released === 1;
+}
+
+function requiredLeaseToken(leaseTokenInput: string): string {
+  const leaseToken = leaseTokenInput.trim();
+  if (!leaseToken) {
+    throw new Error("Payment provider operation leaseToken is required.");
+  }
+  return leaseToken;
 }
 
 function requiredScopeKey(scopeKeyInput: string): string {

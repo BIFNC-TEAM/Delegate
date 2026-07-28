@@ -27,8 +27,12 @@ import {
 const NATIVE_ORDER_PATH = "/v3/pay/transactions/native";
 const ORDER_QUERY_PATH_PREFIX =
   "/v3/pay/transactions/out-trade-no/";
+const ORDER_CLOSE_PATH_SUFFIX = "/close";
+const DOMESTIC_REFUND_PATH = "/v3/refund/domestic/refunds";
 const PAYMENT_NOTIFICATION_PATH =
   "/api/payments/wechat/notify";
+const REFUND_NOTIFICATION_PATH =
+  "/api/payments/wechat/refund-notify";
 const DEFAULT_API_BASE_URL = "https://api.mch.weixin.qq.com";
 const DEFAULT_SIGNATURE_AGE_SECONDS = 5 * 60;
 const DEFAULT_CHECKOUT_LIFETIME_SECONDS = 2 * 60 * 60;
@@ -55,6 +59,7 @@ export type WeChatPayApiV3Config = {
    */
   wechatPaySerial: string;
   notifyUrl: string;
+  refundNotifyUrl?: string;
   description?: string;
   apiBaseUrl?: string;
   fetch?: typeof globalThis.fetch;
@@ -78,6 +83,7 @@ type ResolvedConfig = {
   wechatPayVerificationKeys: Readonly<Record<string, string>>;
   wechatPaySerial: string;
   notifyUrl: string;
+  refundNotifyUrl: string;
   description: string;
   apiBaseUrl: string;
   fetch: typeof globalThis.fetch;
@@ -122,6 +128,11 @@ export type WeChatPayOrderQueryResult =
         | "REVOKED"
         | "USERPAYING"
         | "PAYERROR";
+      event: null;
+    }
+  | {
+      status: "not_found";
+      tradeState: null;
       event: null;
     };
 
@@ -179,6 +190,78 @@ export type NormalizedWeChatPayRefundResult = {
   };
 };
 
+export type WeChatPayRefundApiStatus =
+  | "PROCESSING"
+  | "SUCCESS"
+  | "CLOSED"
+  | "ABNORMAL";
+
+export type WeChatPayRefundApiResult = {
+  source: "submission_response" | "refund_query";
+  providerEventId: string;
+  refundId: string;
+  outRefundNo: string;
+  outTradeNo: string;
+  transactionId: string;
+  refundStatus: WeChatPayRefundApiStatus;
+  originalAmountCents: number;
+  refundAmountCents: number;
+  payerAmountCents: number;
+  payerRefundAmountCents: number;
+  verifiedAt: Date;
+  providerCreatedAt: Date;
+  providerOccurredAt: Date;
+  rawPayload: {
+    source: "submission_response" | "refund_query";
+    refundId: string;
+    outRefundNo: string;
+    outTradeNo: string;
+    transactionId: string;
+    refundStatus: WeChatPayRefundApiStatus;
+    createTime: string;
+    successTime: string | null;
+    amount: {
+      total: number;
+      refund: number;
+      payerTotal: number;
+      payerRefund: number;
+      currency: "CNY";
+    };
+  };
+  normalizedPayload: {
+    type:
+      | "RechargeRefundProcessing"
+      | "RechargeRefunded"
+      | "RechargeRefundClosed"
+      | "RechargeRefundAbnormal";
+    source: "submission_response" | "refund_query";
+    provider: "wechat_pay";
+    providerEventId: string;
+    providerRefundId: string;
+    providerRefundOrderId: string;
+    providerPaymentTransactionId: string;
+    rechargeOrderId: string;
+    refundStatus: WeChatPayRefundApiStatus;
+    originalAmountCents: number;
+    refundAmountCents: number;
+    payerAmountCents: number;
+    payerRefundAmountCents: number;
+    providerCreatedAt: string;
+    providerOccurredAt: string;
+  };
+};
+
+export type SubmitWeChatPayRefundInput = {
+  transactionId: string;
+  outTradeNo: string;
+  outRefundNo: string;
+  originalAmountCents: number;
+  refundAmountCents: number;
+  currency: "CNY";
+  reason?: string;
+  notifyUrl?: string;
+};
+
 export class WeChatPayConfigurationError extends Error {
   readonly code = "WECHAT_PAY_CONFIGURATION_ERROR";
 
@@ -194,6 +277,22 @@ export class WeChatPayProtocolError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "WeChatPayProtocolError";
+  }
+}
+
+export class WeChatPayRefundApiError extends WeChatPayProtocolError {
+  constructor(
+    message: string,
+    readonly failureKind:
+      | "unknown"
+      | "retryable"
+      | "rejected"
+      | "not_found",
+    readonly providerCode: string,
+    readonly httpStatus: number,
+  ) {
+    super(message);
+    this.name = "WeChatPayRefundApiError";
   }
 }
 
@@ -295,6 +394,8 @@ export function loadWeChatPayApiV3ConfigFromEnv(
     wechatPayVerificationKeys: verificationKeys,
     wechatPaySerial,
     notifyUrl: resolveWeChatPayNotifyUrlEnvironment(env),
+    refundNotifyUrl:
+      resolveWeChatPayRefundNotifyUrlEnvironment(env),
     ...(description ? { description } : {}),
   };
 }
@@ -314,6 +415,10 @@ export function createWeChatPayApiV3SignedWalletProviderConfig(
   return {
     appId: resolved.appId,
     merchantId: resolved.merchantId,
+    prepareRechargeCheckout: (input) =>
+      Promise.resolve(
+        prepareWeChatPayNativeCheckout(input, resolved),
+      ),
     createRechargeCheckout: (input) =>
       createWeChatPayNativeCheckout(input, resolved),
     verifyAndParseWebhook: (input) =>
@@ -335,20 +440,25 @@ export async function createWeChatPayNativeCheckout(
   const outTradeNo = requiredText(input.rechargeOrderId, "rechargeOrderId");
   assertValidOutTradeNo(outTradeNo);
 
-  const requestTime = resolved.now();
-  const expiresAt = new Date(
-    requestTime.getTime() + resolved.checkoutLifetimeSeconds * 1000,
-  );
+  const prepared = input.preparedProviderPayload === undefined
+    ? prepareWeChatPayNativeCheckout(input, resolved)
+    : parsePreparedWeChatPayNativeCheckout(
+        input.preparedProviderPayload,
+        input,
+        resolved,
+      );
   const body = JSON.stringify({
-    appid: resolved.appId,
-    mchid: resolved.merchantId,
-    description: resolved.description,
-    out_trade_no: outTradeNo,
-    time_expire: toRfc3339Seconds(expiresAt),
-    notify_url: resolved.notifyUrl,
+    appid: prepared.appId,
+    mchid: prepared.merchantId,
+    description: prepared.description,
+    out_trade_no: prepared.outTradeNo,
+    time_expire: toRfc3339Seconds(
+      new Date(prepared.expiresAt),
+    ),
+    notify_url: prepared.notifyUrl,
     amount: {
-      total: input.amountCents,
-      currency: input.currency,
+      total: prepared.amountCents,
+      currency: prepared.currency,
     },
   });
   const { response, responseBody } = await requestWeChatPayApiV3({
@@ -376,8 +486,139 @@ export async function createWeChatPayNativeCheckout(
     rawPayload: {
       mode: "native",
       outTradeNo,
-      expiresAt: expiresAt.toISOString(),
+      expiresAt: prepared.expiresAt,
     },
+  };
+}
+
+function prepareWeChatPayNativeCheckout(
+  input: RechargeCheckoutInput,
+  config: ResolvedConfig,
+): PreparedWeChatPayNativeCheckout {
+  if (input.currency !== "CNY") {
+    throw new WeChatPayProtocolError(
+      "WeChat Pay Native recharge currently supports CNY only.",
+    );
+  }
+  assertPositiveInteger(input.amountCents, "amountCents");
+  const outTradeNo = requiredText(
+    input.rechargeOrderId,
+    "rechargeOrderId",
+  );
+  assertValidOutTradeNo(outTradeNo);
+  const expiresAt = new Date(
+    config.now().getTime()
+      + config.checkoutLifetimeSeconds * 1000,
+  );
+  return {
+    version: 1,
+    mode: "native",
+    appId: config.appId,
+    merchantId: config.merchantId,
+    description: config.description,
+    outTradeNo,
+    expiresAt: expiresAt.toISOString(),
+    notifyUrl: config.notifyUrl,
+    amountCents: input.amountCents,
+    currency: input.currency,
+  };
+}
+
+type PreparedWeChatPayNativeCheckout = {
+  version: 1;
+  mode: "native";
+  appId: string;
+  merchantId: string;
+  description: string;
+  outTradeNo: string;
+  expiresAt: string;
+  notifyUrl: string;
+  amountCents: number;
+  currency: "CNY";
+};
+
+function parsePreparedWeChatPayNativeCheckout(
+  value: unknown,
+  input: RechargeCheckoutInput,
+  config: ResolvedConfig,
+): PreparedWeChatPayNativeCheckout {
+  const prepared = readObject(
+    value,
+    "prepared_native_checkout",
+  );
+  if (
+    prepared.version !== 1
+    || prepared.mode !== "native"
+  ) {
+    throw new WeChatPayProtocolError(
+      "Prepared WeChat Pay Native checkout has an unsupported format.",
+    );
+  }
+  const appId = requiredText(
+    prepared.appId,
+    "prepared_native_checkout.appId",
+  );
+  const merchantId = requiredText(
+    prepared.merchantId,
+    "prepared_native_checkout.merchantId",
+  );
+  const description = requiredText(
+    prepared.description,
+    "prepared_native_checkout.description",
+  );
+  const outTradeNo = requiredText(
+    prepared.outTradeNo ?? prepared.out_trade_no,
+    "prepared_native_checkout.outTradeNo",
+  );
+  const expiresAt = requiredCanonicalIsoTimestamp(
+    prepared.expiresAt,
+    "prepared_native_checkout.expiresAt",
+  );
+  const notifyUrl = parsePublicHttpsCallbackUrl(
+    requiredText(
+      prepared.notifyUrl,
+      "prepared_native_checkout.notifyUrl",
+    ),
+    "prepared_native_checkout.notifyUrl",
+    { requirePath: true },
+  );
+  const amountCents = Number(prepared.amountCents);
+  assertPositiveInteger(
+    amountCents,
+    "prepared_native_checkout.amountCents",
+  );
+  const currency = requiredText(
+    prepared.currency,
+    "prepared_native_checkout.currency",
+  ).toUpperCase();
+  const inputOutTradeNo = requiredText(
+    input.rechargeOrderId,
+    "rechargeOrderId",
+  );
+  if (
+    appId !== config.appId
+    || merchantId !== config.merchantId
+    || outTradeNo !== inputOutTradeNo
+    || amountCents !== input.amountCents
+    || currency !== input.currency
+    || currency !== "CNY"
+  ) {
+    throw new WeChatPayProtocolError(
+      "Prepared WeChat Pay Native checkout does not match the local order.",
+    );
+  }
+  assertValidOutTradeNo(outTradeNo);
+  return {
+    version: 1,
+    mode: "native",
+    appId,
+    merchantId,
+    description,
+    outTradeNo,
+    expiresAt,
+    notifyUrl,
+    amountCents,
+    currency: "CNY",
   };
 }
 
@@ -399,6 +640,19 @@ export async function queryWeChatPayOrderByOutTradeNo(
     });
   if (!response.ok) {
     const providerCode = optionalText(responseBody.code) ?? "HTTP_ERROR";
+    if (
+      response.status === 404
+      && (
+        providerCode === "ORDER_NOT_EXIST"
+        || providerCode === "NOT_FOUND"
+      )
+    ) {
+      return {
+        status: "not_found",
+        tradeState: null,
+        event: null,
+      };
+    }
     throw new WeChatPayProtocolError(
       `WeChat Pay order query failed (${response.status}, ${providerCode}).`,
     );
@@ -508,6 +762,411 @@ export async function queryWeChatPayOrderByOutTradeNo(
     tradeState,
     event,
   };
+}
+
+export async function closeWeChatPayOrderByOutTradeNo(
+  outTradeNoInput: string,
+  config: WeChatPayApiV3Config | ResolvedConfig,
+): Promise<void> {
+  const resolved = isResolvedConfig(config)
+    ? config
+    : resolveConfig(config);
+  const outTradeNo = requiredText(
+    outTradeNoInput,
+    "outTradeNo",
+  );
+  assertValidOutTradeNo(outTradeNo);
+  const canonicalPath =
+    `${ORDER_QUERY_PATH_PREFIX}${encodeURIComponent(outTradeNo)}`
+    + ORDER_CLOSE_PATH_SUFFIX;
+  const body = JSON.stringify({ mchid: resolved.merchantId });
+  const { response, responseBody } =
+    await requestWeChatPayApiV3({
+      method: "POST",
+      canonicalPath,
+      body,
+      config: resolved,
+    });
+  if (response.status !== 204) {
+    const providerCode =
+      optionalText(responseBody.code) ?? "HTTP_ERROR";
+    throw new WeChatPayProtocolError(
+      `WeChat Pay order close failed (${response.status}, ${providerCode}).`,
+    );
+  }
+}
+
+export async function submitWeChatPayRefund(
+  input: SubmitWeChatPayRefundInput,
+  config: WeChatPayApiV3Config | ResolvedConfig,
+): Promise<WeChatPayRefundApiResult> {
+  const resolved = isResolvedConfig(config) ? config : resolveConfig(config);
+  const transactionId = requiredBoundedText(
+    input.transactionId,
+    "refund.transactionId",
+    32,
+  );
+  const outTradeNo = requiredBoundedText(
+    input.outTradeNo,
+    "refund.outTradeNo",
+    32,
+  );
+  assertValidOutTradeNo(outTradeNo);
+  const outRefundNo = requiredBoundedText(
+    input.outRefundNo,
+    "refund.outRefundNo",
+    64,
+  );
+  assertValidOutRefundNo(outRefundNo);
+  assertPositiveInteger(
+    input.originalAmountCents,
+    "refund.originalAmountCents",
+  );
+  assertPositiveInteger(
+    input.refundAmountCents,
+    "refund.refundAmountCents",
+  );
+  if (input.refundAmountCents > input.originalAmountCents) {
+    throw new WeChatPayProtocolError(
+      "WeChat Pay refund amount cannot exceed the original amount.",
+    );
+  }
+  if (input.currency !== "CNY") {
+    throw new WeChatPayProtocolError(
+      "WeChat Pay domestic refunds currently support CNY only.",
+    );
+  }
+  const reason = optionalText(input.reason);
+  if (reason) {
+    assertTextByteLength(reason, "refund.reason", 80);
+  }
+  const notifyUrl = parsePublicHttpsCallbackUrl(
+    input.notifyUrl ?? resolved.refundNotifyUrl,
+    "refund.notifyUrl",
+    { requirePath: true },
+  );
+  const body = JSON.stringify({
+    transaction_id: transactionId,
+    out_refund_no: outRefundNo,
+    ...(reason ? { reason } : {}),
+    notify_url: notifyUrl,
+    amount: {
+      refund: input.refundAmountCents,
+      total: input.originalAmountCents,
+      currency: input.currency,
+    },
+  });
+  const { response, responseBody, verifiedAt } =
+    await requestWeChatPayApiV3({
+      method: "POST",
+      canonicalPath: DOMESTIC_REFUND_PATH,
+      body,
+      config: resolved,
+    });
+  if (!response.ok) {
+    throw refundApiResponseError(
+      "submission",
+      response.status,
+      responseBody,
+    );
+  }
+  const result = parseWeChatPayRefundApiResponse(
+    responseBody,
+    "submission_response",
+    verifiedAt,
+  );
+  assertWeChatPayRefundApiIdentity(result, {
+    transactionId,
+    outTradeNo,
+    outRefundNo,
+    originalAmountCents: input.originalAmountCents,
+    refundAmountCents: input.refundAmountCents,
+    currency: input.currency,
+  });
+  return result;
+}
+
+export async function queryWeChatPayRefundByOutRefundNo(
+  outRefundNoInput: string,
+  config: WeChatPayApiV3Config | ResolvedConfig,
+): Promise<WeChatPayRefundApiResult> {
+  const resolved = isResolvedConfig(config) ? config : resolveConfig(config);
+  const outRefundNo = requiredBoundedText(
+    outRefundNoInput,
+    "refund.outRefundNo",
+    64,
+  );
+  assertValidOutRefundNo(outRefundNo);
+  const canonicalPath =
+    `${DOMESTIC_REFUND_PATH}/${encodeURIComponent(outRefundNo)}`;
+  const { response, responseBody, verifiedAt } =
+    await requestWeChatPayApiV3({
+      method: "GET",
+      canonicalPath,
+      config: resolved,
+    });
+  if (!response.ok) {
+    throw refundApiResponseError(
+      "query",
+      response.status,
+      responseBody,
+    );
+  }
+  const result = parseWeChatPayRefundApiResponse(
+    responseBody,
+    "refund_query",
+    verifiedAt,
+  );
+  if (result.outRefundNo !== outRefundNo) {
+    throw new WeChatPayProtocolError(
+      "WeChat Pay refund query identity does not match the request.",
+    );
+  }
+  return result;
+}
+
+function parseWeChatPayRefundApiResponse(
+  response: Record<string, unknown>,
+  source: WeChatPayRefundApiResult["source"],
+  verifiedAt: Date,
+): WeChatPayRefundApiResult {
+  const refundId = requiredBoundedText(
+    response.refund_id,
+    "refund_response.refund_id",
+    32,
+  );
+  const outRefundNo = requiredBoundedText(
+    response.out_refund_no,
+    "refund_response.out_refund_no",
+    64,
+  );
+  assertValidOutRefundNo(outRefundNo);
+  const transactionId = requiredBoundedText(
+    response.transaction_id,
+    "refund_response.transaction_id",
+    32,
+  );
+  const outTradeNo = requiredBoundedText(
+    response.out_trade_no,
+    "refund_response.out_trade_no",
+    32,
+  );
+  assertValidOutTradeNo(outTradeNo);
+  const refundStatus = requiredBoundedText(
+    response.status,
+    "refund_response.status",
+    32,
+  );
+  if (!isWeChatPayRefundApiStatus(refundStatus)) {
+    throw new WeChatPayProtocolError(
+      "WeChat Pay refund response returned an unsupported status.",
+    );
+  }
+  const createTimeText = requiredBoundedText(
+    response.create_time,
+    "refund_response.create_time",
+    64,
+  );
+  const providerCreatedAt = parseWeChatPaySuccessTime(
+    createTimeText,
+    "refund_response.create_time",
+  );
+  const successTimeText = optionalText(response.success_time);
+  if (successTimeText) {
+    assertTextByteLength(
+      successTimeText,
+      "refund_response.success_time",
+      64,
+    );
+  }
+  const providerOccurredAt =
+    refundStatus === "SUCCESS"
+      ? parseWeChatPaySuccessTime(
+          requiredBoundedText(
+            response.success_time,
+            "refund_response.success_time",
+            64,
+          ),
+          "refund_response.success_time",
+        )
+      : successTimeText
+        ? parseWeChatPaySuccessTime(
+            successTimeText,
+            "refund_response.success_time",
+          )
+        : providerCreatedAt;
+
+  // Validate this provider-required field, but never expose or persist it.
+  requiredBoundedText(
+    response.user_received_account,
+    "refund_response.user_received_account",
+    64,
+  );
+  const amount = readObject(
+    response.amount,
+    "refund_response.amount",
+  );
+  const originalAmountCents = readPositiveSafeInteger(
+    amount.total,
+    "refund_response.amount.total",
+  );
+  const refundAmountCents = readPositiveSafeInteger(
+    amount.refund,
+    "refund_response.amount.refund",
+  );
+  const payerAmountCents = readNonNegativeSafeInteger(
+    amount.payer_total,
+    "refund_response.amount.payer_total",
+  );
+  const payerRefundAmountCents = readNonNegativeSafeInteger(
+    amount.payer_refund,
+    "refund_response.amount.payer_refund",
+  );
+  const currency = requiredBoundedText(
+    amount.currency,
+    "refund_response.amount.currency",
+    3,
+  ).toUpperCase();
+  if (
+    currency !== "CNY"
+    || refundAmountCents > originalAmountCents
+    || payerAmountCents > originalAmountCents
+    || payerRefundAmountCents > payerAmountCents
+    || payerRefundAmountCents > refundAmountCents
+  ) {
+    throw new WeChatPayProtocolError(
+      "WeChat Pay refund response amounts are inconsistent.",
+    );
+  }
+  const providerEventId =
+    `${source}:${refundId}:${refundStatus}:`
+    + (
+      refundStatus === "SUCCESS"
+        ? providerOccurredAt.toISOString()
+        : providerCreatedAt.toISOString()
+    );
+  const normalizedType:
+    WeChatPayRefundApiResult["normalizedPayload"]["type"] =
+      refundStatus === "PROCESSING"
+        ? "RechargeRefundProcessing"
+        : refundStatus === "SUCCESS"
+          ? "RechargeRefunded"
+          : refundStatus === "CLOSED"
+            ? "RechargeRefundClosed"
+            : "RechargeRefundAbnormal";
+  const rawPayload: WeChatPayRefundApiResult["rawPayload"] = {
+    source,
+    refundId,
+    outRefundNo,
+    outTradeNo,
+    transactionId,
+    refundStatus,
+    createTime: providerCreatedAt.toISOString(),
+    successTime:
+      refundStatus === "SUCCESS"
+        ? providerOccurredAt.toISOString()
+        : null,
+    amount: {
+      total: originalAmountCents,
+      refund: refundAmountCents,
+      payerTotal: payerAmountCents,
+      payerRefund: payerRefundAmountCents,
+      currency: "CNY",
+    },
+  };
+  return {
+    source,
+    providerEventId,
+    refundId,
+    outRefundNo,
+    outTradeNo,
+    transactionId,
+    refundStatus,
+    originalAmountCents,
+    refundAmountCents,
+    payerAmountCents,
+    payerRefundAmountCents,
+    verifiedAt,
+    providerCreatedAt,
+    providerOccurredAt,
+    rawPayload,
+    normalizedPayload: {
+      type: normalizedType,
+      source,
+      provider: "wechat_pay",
+      providerEventId,
+      providerRefundId: refundId,
+      providerRefundOrderId: outRefundNo,
+      providerPaymentTransactionId: transactionId,
+      rechargeOrderId: outTradeNo,
+      refundStatus,
+      originalAmountCents,
+      refundAmountCents,
+      payerAmountCents,
+      payerRefundAmountCents,
+      providerCreatedAt: providerCreatedAt.toISOString(),
+      providerOccurredAt: providerOccurredAt.toISOString(),
+    },
+  };
+}
+
+function assertWeChatPayRefundApiIdentity(
+  result: WeChatPayRefundApiResult,
+  expected: {
+    transactionId: string;
+    outTradeNo: string;
+    outRefundNo: string;
+    originalAmountCents: number;
+    refundAmountCents: number;
+    currency: "CNY";
+  },
+): void {
+  if (
+    result.transactionId !== expected.transactionId
+    || result.outTradeNo !== expected.outTradeNo
+    || result.outRefundNo !== expected.outRefundNo
+    || result.originalAmountCents !== expected.originalAmountCents
+    || result.refundAmountCents !== expected.refundAmountCents
+    || result.rawPayload.amount.currency !== expected.currency
+  ) {
+    throw new WeChatPayProtocolError(
+      "WeChat Pay refund response identity does not match the request.",
+    );
+  }
+}
+
+function refundApiResponseError(
+  operation: "submission" | "query",
+  httpStatus: number,
+  response: Record<string, unknown>,
+): WeChatPayRefundApiError {
+  const providerCode = optionalText(response.code) ?? "HTTP_ERROR";
+  const failureKind =
+    operation === "query" && providerCode === "RESOURCE_NOT_EXISTS"
+      ? "not_found"
+      : providerCode === "SYSTEM_ERROR"
+        || providerCode === "FREQUENCY_LIMITED"
+        || httpStatus === 429
+        || httpStatus >= 500
+        ? "retryable"
+        : "rejected";
+  return new WeChatPayRefundApiError(
+    `WeChat Pay refund ${operation} failed (${httpStatus}, ${providerCode}).`,
+    failureKind,
+    providerCode,
+    httpStatus,
+  );
+}
+
+function isWeChatPayRefundApiStatus(
+  value: string,
+): value is WeChatPayRefundApiStatus {
+  return [
+    "PROCESSING",
+    "SUCCESS",
+    "CLOSED",
+    "ABNORMAL",
+  ].includes(value);
 }
 
 export async function verifyWeChatPayApiV3Notification(
@@ -1033,13 +1692,21 @@ function resolveConfig(config: WeChatPayApiV3Config): ResolvedConfig {
       "WeChat Pay API v3 key must be exactly 32 UTF-8 bytes.",
     );
   }
+  let merchantPrivateKeyObject: ReturnType<
+    typeof createPrivateKey
+  >;
   try {
-    createPrivateKey(merchantPrivateKey);
+    merchantPrivateKeyObject =
+      createPrivateKey(merchantPrivateKey);
   } catch {
     throw new WeChatPayConfigurationError(
       "WeChat Pay merchant private key is not a valid PEM private key.",
     );
   }
+  assertRsa2048Key(
+    merchantPrivateKeyObject,
+    "WeChat Pay merchant private key",
+  );
 
   const verificationKeys: Record<string, string> = {};
   for (const [serial, pem] of Object.entries(
@@ -1056,13 +1723,20 @@ function resolveConfig(config: WeChatPayApiV3Config): ResolvedConfig {
       pem,
       `wechatPayVerificationKeys.${normalizedSerial}`,
     );
+    let verificationKeyObject: ReturnType<
+      typeof createPublicKey
+    >;
     try {
-      createPublicKey(normalizedPem);
+      verificationKeyObject = createPublicKey(normalizedPem);
     } catch {
       throw new WeChatPayConfigurationError(
         `WeChat Pay verification key ${normalizedSerial} is not a valid PEM public key or certificate.`,
       );
     }
+    assertRsa2048Key(
+      verificationKeyObject,
+      `WeChat Pay verification key ${normalizedSerial}`,
+    );
     const existingPem = verificationKeys[normalizedSerial];
     if (existingPem && existingPem !== normalizedPem) {
       throw new WeChatPayConfigurationError(
@@ -1092,6 +1766,15 @@ function resolveConfig(config: WeChatPayApiV3Config): ResolvedConfig {
   const notifyUrl = parsePublicHttpsCallbackUrl(
     config.notifyUrl,
     "notifyUrl",
+    { requirePath: true },
+  );
+  const refundNotifyUrl = parsePublicHttpsCallbackUrl(
+    config.refundNotifyUrl
+      ?? new URL(
+        REFUND_NOTIFICATION_PATH,
+        new URL(notifyUrl).origin,
+      ).toString(),
+    "refundNotifyUrl",
     { requirePath: true },
   );
   const apiBaseUrl = parseHttpsUrl(
@@ -1147,6 +1830,7 @@ function resolveConfig(config: WeChatPayApiV3Config): ResolvedConfig {
     wechatPayVerificationKeys: verificationKeys,
     wechatPaySerial,
     notifyUrl,
+    refundNotifyUrl,
     description,
     apiBaseUrl,
     fetch: fetchImplementation,
@@ -1162,6 +1846,25 @@ function isResolvedConfig(
   config: WeChatPayApiV3Config | ResolvedConfig,
 ): config is ResolvedConfig {
   return (config as Partial<ResolvedConfig>).resolved === true;
+}
+
+function assertRsa2048Key(
+  key: ReturnType<typeof createPrivateKey>
+    | ReturnType<typeof createPublicKey>,
+  label: string,
+): void {
+  const keyType = key.asymmetricKeyType;
+  const modulusLength =
+    key.asymmetricKeyDetails?.modulusLength;
+  if (
+    keyType !== "rsa"
+    || typeof modulusLength !== "number"
+    || modulusLength < 2048
+  ) {
+    throw new WeChatPayConfigurationError(
+      `${label} must be an RSA key with a modulus length of at least 2048 bits.`,
+    );
+  }
 }
 
 function signMessage(message: string, privateKey: string): string {
@@ -1267,9 +1970,29 @@ async function requestWeChatPayApiV3(input: {
   });
   return {
     response,
-    responseBody: parseJsonObject(rawResponse, "WeChat Pay API response"),
+    responseBody:
+      response.status === 204 && rawResponse.length === 0
+        ? {}
+        : parseJsonObject(rawResponse, "WeChat Pay API response"),
     verifiedAt,
   };
+}
+
+function requiredCanonicalIsoTimestamp(
+  value: unknown,
+  label: string,
+): string {
+  const text = requiredText(value, label);
+  const parsed = new Date(text);
+  if (
+    !Number.isFinite(parsed.getTime())
+    || parsed.toISOString() !== text
+  ) {
+    throw new WeChatPayProtocolError(
+      `WeChat Pay ${label} must be a canonical ISO timestamp.`,
+    );
+  }
+  return text;
 }
 
 function parseWeChatPaySuccessTime(
@@ -1372,7 +2095,7 @@ function isUnpaidTradeState(
   value: string,
 ): value is Exclude<
   WeChatPayOrderQueryResult["tradeState"],
-  "SUCCESS"
+  "SUCCESS" | null
 > {
   return [
     "REFUND",
@@ -1387,7 +2110,7 @@ function isUnpaidTradeState(
 function mapUnpaidTradeState(
   tradeState: Exclude<
     WeChatPayOrderQueryResult["tradeState"],
-    "SUCCESS"
+    "SUCCESS" | null
   >,
 ): "pending" | "closed" | "refunded" | "failed" {
   if (tradeState === "NOTPAY" || tradeState === "USERPAYING") {
@@ -1852,6 +2575,66 @@ function resolveWeChatPayNotifyUrlEnvironment(
   return new URL(PAYMENT_NOTIFICATION_PATH, parsed.origin).toString();
 }
 
+function resolveWeChatPayRefundNotifyUrlEnvironment(
+  env: WeChatPayEnvironment,
+): string {
+  const explicitNotifyUrl = optionalText(
+    env.WECHAT_PAY_REFUND_NOTIFY_URL,
+  );
+  if (explicitNotifyUrl) {
+    return parsePublicHttpsCallbackUrl(
+      explicitNotifyUrl,
+      "WECHAT_PAY_REFUND_NOTIFY_URL",
+      { requirePath: true },
+    );
+  }
+
+  const paymentNotifyUrl = optionalText(env.WECHAT_PAY_NOTIFY_URL);
+  if (paymentNotifyUrl) {
+    const normalizedPaymentNotifyUrl =
+      parsePublicHttpsCallbackUrl(
+        paymentNotifyUrl,
+        "WECHAT_PAY_NOTIFY_URL",
+        { requirePath: true },
+      );
+    return new URL(
+      REFUND_NOTIFICATION_PATH,
+      new URL(normalizedPaymentNotifyUrl).origin,
+    ).toString();
+  }
+
+  const representativeUrl = optionalText(
+    env.NEXT_PUBLIC_REPRESENTATIVE_URL,
+  );
+  if (!representativeUrl) {
+    throw new WeChatPayConfigurationError(
+      "WECHAT_PAY_REFUND_NOTIFY_URL or NEXT_PUBLIC_REPRESENTATIVE_URL is required.",
+    );
+  }
+  const normalizedRepresentativeUrl = parsePublicHttpsCallbackUrl(
+    representativeUrl,
+    "NEXT_PUBLIC_REPRESENTATIVE_URL",
+  );
+  const parsed = new URL(normalizedRepresentativeUrl);
+  if (parsed.pathname !== "/") {
+    throw new WeChatPayConfigurationError(
+      "NEXT_PUBLIC_REPRESENTATIVE_URL must be an origin without a path when deriving the WeChat Pay refund notify URL.",
+    );
+  }
+  return new URL(REFUND_NOTIFICATION_PATH, parsed.origin).toString();
+}
+
+/**
+ * Resolves only the public refund callback URL. Dashboard refund intent
+ * creation uses this narrow loader so the web process never needs merchant
+ * signing keys, the API v3 key, or WeChat verification material.
+ */
+export function loadWeChatPayRefundNotifyUrlFromEnv(
+  env: WeChatPayEnvironment = process.env,
+): string {
+  return resolveWeChatPayRefundNotifyUrlEnvironment(env);
+}
+
 function parsePublicHttpsCallbackUrl(
   value: string,
   label: string,
@@ -1878,10 +2661,10 @@ function parsePublicHttpsCallbackUrl(
     || hostname.endsWith(".internal")
     || isIP(unbracketedHostname) !== 0
     || (options.requirePath && url.pathname === "/")
-    || Buffer.byteLength(normalized, "utf8") > 255
+    || Buffer.byteLength(normalized, "utf8") > 256
   ) {
     throw new WeChatPayConfigurationError(
-      `WeChat Pay ${label} must be a public HTTPS URL with a callback path, no credentials/query/fragment, and at most 255 UTF-8 bytes.`,
+      `WeChat Pay ${label} must be a public HTTPS URL with a callback path, no credentials/query/fragment, and at most 256 UTF-8 bytes.`,
     );
   }
   return normalized;

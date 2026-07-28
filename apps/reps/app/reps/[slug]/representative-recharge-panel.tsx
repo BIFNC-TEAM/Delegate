@@ -11,8 +11,13 @@ import { QRCodeSVG } from "qrcode.react";
 import { pickCopy, type Locale } from "@delegate/web-ui";
 
 import {
+  getCheckoutSecondsRemaining,
+  getPublicRechargeStatusPresentation,
+  getWeChatPaymentPollDelayMs,
   publishPublicWalletUpdate,
   selectCurrentPublicWalletActivity,
+  type PublicRechargeOrderStatus,
+  type PublicRechargeStatusTone,
   type PublicWalletStateSnapshot,
 } from "./public-wallet-client";
 
@@ -21,8 +26,9 @@ type RechargeOrderSnapshot = {
   amountCents: number;
   currency: string;
   provider: string;
-  status: string;
+  status: PublicRechargeOrderStatus;
   checkoutUrl: string | null;
+  checkoutExpiresAt: string | null;
   cashBalanceCents: number;
 };
 
@@ -52,7 +58,24 @@ type UserAgentWalletBalance = {
 
 type WeChatPaymentStatus = {
   status: "pending" | "paid" | "closed" | "refunded" | "failed";
+  orderStatus?: "created" | "requires_payment";
+  providerChecked?: boolean;
+  checkoutUrl?: string | null;
+  checkoutExpiresAt?: string | null;
 };
+
+type PaymentNotice =
+  | { kind: "checking"; message: string; tone: "warning" }
+  | { kind: "transient"; message: string; tone: "warning" }
+  | { kind: "offline"; message: string; tone: "warning" }
+  | { kind: "auth"; message: string; tone: "error" }
+  | { kind: "manual-review"; message: string; tone: "error" }
+  | { kind: "expired-confirming"; message: string; tone: "warning" }
+  | { kind: "expired-unconfirmed"; message: string; tone: "warning" }
+  | { kind: "expired"; message: string; tone: "warning" }
+  | { kind: "paid-refreshing"; message: string; tone: "success" }
+  | { kind: "paid-refresh-failed"; message: string; tone: "warning" }
+  | { kind: "paid"; message: string; tone: "success" };
 
 type RechargeMutation = "create" | "mock-pay" | "return" | null;
 
@@ -63,6 +86,7 @@ type RechargeIntent = {
 
 export function RepresentativeRechargePanel({
   audienceAuthenticated,
+  collectionEnabled,
   continuationChannel,
   loginHref,
   representativeSlug,
@@ -70,6 +94,7 @@ export function RepresentativeRechargePanel({
   paymentMode,
 }: {
   audienceAuthenticated: boolean;
+  collectionEnabled: boolean;
   continuationChannel?: "telegram";
   loginHref: string;
   representativeSlug: string;
@@ -86,6 +111,11 @@ export function RepresentativeRechargePanel({
   const [error, setError] = useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
   const [isCheckoutUrlCopied, setIsCheckoutUrlCopied] = useState(false);
+  const [checkoutClockMs, setCheckoutClockMs] = useState(() => Date.now());
+  const [paymentNotice, setPaymentNotice] =
+    useState<PaymentNotice | null>(null);
+  const [paymentStatusRetryNonce, setPaymentStatusRetryNonce] =
+    useState(0);
   const [mutation, setMutation] = useState<RechargeMutation>(null);
   const mutationLockRef = useRef(false);
   const rechargeIntentRef = useRef<RechargeIntent | null>(null);
@@ -152,6 +182,45 @@ export function RepresentativeRechargePanel({
       continuationChannel !== "telegram"
       || telegramBindingStatus === "ready"
     );
+  const checkoutRemainingSeconds =
+    paymentMode === "wechat"
+    && order?.status === "requires_payment"
+      ? getCheckoutSecondsRemaining(
+          order.checkoutExpiresAt,
+          checkoutClockMs,
+        )
+      : null;
+  const checkoutExpired = checkoutRemainingSeconds === 0;
+  const paymentResultConfirmed =
+    paymentNotice?.kind === "paid-refreshing"
+    || paymentNotice?.kind === "paid-refresh-failed"
+    || paymentNotice?.kind === "paid";
+  const checkoutRequiresManualAction =
+    paymentNotice?.kind === "auth"
+    || paymentNotice?.kind === "manual-review"
+    || paymentNotice?.kind === "expired-confirming"
+    || paymentNotice?.kind === "expired-unconfirmed"
+    || (
+      checkoutExpired
+      && paymentNotice?.kind !== "expired"
+    );
+  const hasActivePendingCheckout =
+    paymentMode === "wechat"
+    && order?.status === "requires_payment"
+    && Boolean(order.checkoutUrl)
+    && !checkoutExpired;
+  const hasPendingWeChatOrder =
+    paymentMode === "wechat"
+    && order?.status === "requires_payment";
+  const hasRecoveringWeChatOrder =
+    paymentMode === "wechat"
+    && order?.status === "created";
+  const hasActiveWeChatOrder =
+    hasRecoveringWeChatOrder || hasPendingWeChatOrder;
+  const showWeChatCheckout =
+    hasActivePendingCheckout
+    && !paymentResultConfirmed
+    && !checkoutRequiresManualAction;
 
   const applyWalletState = useCallback((
     snapshot: PublicWalletStateSnapshot,
@@ -166,9 +235,20 @@ export function RepresentativeRechargePanel({
           provider: activity.order.provider,
           status: activity.order.status,
           checkoutUrl: activity.order.checkoutUrl,
+          checkoutExpiresAt: activity.order.checkoutExpiresAt,
           cashBalanceCents: snapshot.summary.cashBalanceCents,
         }
       : null);
+    if (
+      (
+        activity.order?.status === "created"
+        || activity.order?.status === "requires_payment"
+      )
+      && activity.order.provider === "wechat_pay"
+    ) {
+      setAmountCents(activity.order.amountCents);
+      setCheckoutClockMs(Date.now());
+    }
     setPurchase(activity.purchase
       ? {
           id: activity.purchase.id,
@@ -246,18 +326,84 @@ export function RepresentativeRechargePanel({
     if (
       paymentMode !== "wechat"
       || !order?.id
-      || order?.status !== "requires_payment"
+      || (
+        order.status !== "created"
+        && order.status !== "requires_payment"
+      )
     ) {
       return;
     }
     const orderId = order.id;
-    const controller = new AbortController();
-    let requestInFlight = false;
-    const reconcile = async () => {
-      if (requestInFlight || controller.signal.aborted) {
+    const checkoutExpiresAt = order.checkoutExpiresAt;
+    let stopped = false;
+    let attempt = 0;
+    let timer: number | null = null;
+    let requestController: AbortController | null = null;
+    let walletRefreshController: AbortController | null = null;
+
+    const clearTimer = () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+    const isPageReady = () =>
+      document.visibilityState !== "hidden"
+      && (typeof navigator === "undefined" || navigator.onLine !== false);
+    const hasExpired = () =>
+      getCheckoutSecondsRemaining(checkoutExpiresAt, Date.now()) === 0;
+    const markExpiryConfirmed = () => {
+      setCheckoutClockMs(Date.now());
+      setPaymentNotice({
+        kind: "expired-confirming",
+        message: t.wechatExpiredConfirmed,
+        tone: "warning",
+      });
+      schedule();
+    };
+    const markExpiryUnconfirmed = () => {
+      setCheckoutClockMs(Date.now());
+      setPaymentNotice({
+        kind: "expired-unconfirmed",
+        message: t.wechatExpiredUnconfirmed,
+        tone: "warning",
+      });
+      schedule();
+    };
+    const schedule = () => {
+      clearTimer();
+      if (stopped || !isPageReady()) {
         return;
       }
-      requestInFlight = true;
+      const delay = getWeChatPaymentPollDelayMs(attempt);
+      attempt += 1;
+      const remainingMs = checkoutExpiresAt
+        ? Math.max(0, Date.parse(checkoutExpiresAt) - Date.now())
+        : null;
+      timer = window.setTimeout(
+        () => void reconcile(),
+        remainingMs === null
+          ? delay
+          : remainingMs === 0
+            ? delay
+            : Math.max(250, Math.min(delay, remainingMs)),
+      );
+    };
+    const reconcile = async () => {
+      if (stopped || requestController || !isPageReady()) {
+        return;
+      }
+      const isFinalExpiryCheck = hasExpired();
+      if (isFinalExpiryCheck) {
+        setCheckoutClockMs(Date.now());
+        setPaymentNotice({
+          kind: "expired-confirming",
+          message: t.wechatExpiredConfirming,
+          tone: "warning",
+        });
+      }
+      const controller = new AbortController();
+      requestController = controller;
       try {
         const response = await fetch(
           `/reps/${representativeSlug}/recharge/${orderId}/wechat-status`,
@@ -269,52 +415,271 @@ export function RepresentativeRechargePanel({
           },
         );
         if (!response.ok) {
+          const message = await extractError(response);
+          if (response.status === 401) {
+            stopped = true;
+            setPaymentNotice({
+              kind: "auth",
+              message: t.wechatAuthExpired,
+              tone: "error",
+            });
+            return;
+          }
+          if (response.status === 409) {
+            stopped = true;
+            setPaymentNotice({
+              kind: "manual-review",
+              message: t.wechatManualReview,
+              tone: "error",
+            });
+            return;
+          }
+          if (response.status === 502 || response.status === 503) {
+            if (isFinalExpiryCheck) {
+              markExpiryUnconfirmed();
+              return;
+            }
+            setPaymentNotice({
+              kind: "transient",
+              message: `${t.wechatProviderRetry} ${message}`,
+              tone: "warning",
+            });
+            schedule();
+            return;
+          }
+          if (isFinalExpiryCheck) {
+            markExpiryUnconfirmed();
+            return;
+          }
+          setPaymentNotice({
+            kind: "transient",
+            message: message || t.wechatStatusRetry,
+            tone: "warning",
+          });
+          schedule();
           return;
         }
         const result = (await response.json()) as WeChatPaymentStatus;
         if (result.status === "paid") {
-          await refreshWalletState(controller.signal);
+          stopped = true;
+          clearTimer();
+          setPaymentNotice({
+            kind: "paid-refreshing",
+            message: t.wechatPaidRefreshing,
+            tone: "success",
+          });
+          walletRefreshController = new AbortController();
+          try {
+            await refreshWalletState(walletRefreshController.signal);
+            setPaymentNotice({
+              kind: "paid",
+              message: t.wechatPaid,
+              tone: "success",
+            });
+          } catch (nextError) {
+            if (!isAbortError(nextError)) {
+              setPaymentNotice({
+                kind: "paid-refresh-failed",
+                message: t.wechatPaidRefreshFailed,
+                tone: "warning",
+              });
+            }
+          } finally {
+            walletRefreshController = null;
+          }
           return;
         }
-        if (result.status !== "pending") {
-          setOrder((current) => current?.id === orderId
-            ? {
-                ...current,
-                status:
-                  result.status === "closed"
-                    ? "canceled"
-                    : result.status,
-                checkoutUrl: null,
-              }
-            : current);
+        if (result.status === "pending") {
+          if (result.orderStatus === "created") {
+            setPaymentNotice({
+              kind: "checking",
+              message: t.wechatRecovering,
+              tone: "warning",
+            });
+            schedule();
+            return;
+          }
+          if (
+            result.orderStatus === "requires_payment"
+            && typeof result.checkoutUrl === "string"
+            && result.checkoutUrl.startsWith("weixin://wxpay/")
+          ) {
+            const nextCheckoutExpiresAt =
+              typeof result.checkoutExpiresAt === "string"
+                ? result.checkoutExpiresAt
+                : null;
+            const checkoutRecovered =
+              order.status !== "requires_payment"
+              || order.checkoutUrl !== result.checkoutUrl
+              || order.checkoutExpiresAt !== nextCheckoutExpiresAt;
+            setOrder((current) => current?.id === orderId
+              ? {
+                  ...current,
+                  status: "requires_payment",
+                  checkoutUrl: result.checkoutUrl ?? null,
+                  checkoutExpiresAt: nextCheckoutExpiresAt,
+                }
+              : current);
+            setCheckoutClockMs(Date.now());
+            if (checkoutRecovered) {
+              setPaymentNotice({
+                kind: "checking",
+                message: t.wechatAwaitingPayment,
+                tone: "warning",
+              });
+              return;
+            }
+          }
+          if (isFinalExpiryCheck || hasExpired()) {
+            if (result.providerChecked === true) {
+              markExpiryConfirmed();
+            } else {
+              markExpiryUnconfirmed();
+            }
+            return;
+          }
+          setPaymentNotice({
+            kind: "checking",
+            message: t.wechatAwaitingPayment,
+            tone: "warning",
+          });
+          schedule();
+          return;
         }
+        stopped = true;
+        const terminalStatus: PublicRechargeOrderStatus =
+          result.status === "closed"
+            ? "canceled"
+            : result.status === "refunded"
+              ? "refunded"
+              : "failed";
+        setPaymentNotice(null);
+        setOrder((current) => current?.id === orderId
+          ? {
+              ...current,
+              status: terminalStatus,
+              checkoutUrl: null,
+              checkoutExpiresAt: null,
+            }
+          : current);
       } catch (nextError) {
-        if (
-          !(nextError instanceof DOMException)
-          || nextError.name !== "AbortError"
-        ) {
-          // A transient provider query failure should not discard the QR code
-          // or create a false payment failure. The next interval retries.
+        if (!isAbortError(nextError)) {
+          if (isFinalExpiryCheck) {
+            markExpiryUnconfirmed();
+            return;
+          }
+          setPaymentNotice({
+            kind:
+              typeof navigator !== "undefined" && navigator.onLine === false
+                ? "offline"
+                : "transient",
+            message:
+              typeof navigator !== "undefined" && navigator.onLine === false
+                ? t.wechatOffline
+                : t.wechatStatusRetry,
+            tone: "warning",
+          });
+          schedule();
         }
       } finally {
-        requestInFlight = false;
+        if (requestController === controller) {
+          requestController = null;
+        }
       }
     };
 
+    const pauseOrResume = () => {
+      clearTimer();
+      requestController?.abort();
+      requestController = null;
+      if (stopped) {
+        return;
+      }
+      if (!isPageReady()) {
+        if (
+          typeof navigator !== "undefined"
+          && navigator.onLine === false
+        ) {
+          setPaymentNotice({
+            kind: "offline",
+            message: t.wechatOffline,
+            tone: "warning",
+          });
+        }
+        return;
+      }
+      attempt = 0;
+      timer = window.setTimeout(() => void reconcile(), 0);
+    };
+
     void reconcile();
-    const poll = window.setInterval(() => {
-      void reconcile();
-    }, 5_000);
+    document.addEventListener("visibilitychange", pauseOrResume);
+    window.addEventListener("online", pauseOrResume);
+    window.addEventListener("offline", pauseOrResume);
     return () => {
-      controller.abort();
-      window.clearInterval(poll);
+      stopped = true;
+      clearTimer();
+      requestController?.abort();
+      walletRefreshController?.abort();
+      document.removeEventListener("visibilitychange", pauseOrResume);
+      window.removeEventListener("online", pauseOrResume);
+      window.removeEventListener("offline", pauseOrResume);
     };
   }, [
+    order?.checkoutExpiresAt,
+    order?.checkoutUrl,
     order?.id,
     order?.status,
+    paymentStatusRetryNonce,
     paymentMode,
     refreshWalletState,
     representativeSlug,
+    t.wechatAuthExpired,
+    t.wechatAwaitingPayment,
+    t.wechatExpiredDetail,
+    t.wechatExpiredConfirmed,
+    t.wechatExpiredConfirming,
+    t.wechatExpiredUnconfirmed,
+    t.wechatManualReview,
+    t.wechatOffline,
+    t.wechatPaid,
+    t.wechatPaidRefreshFailed,
+    t.wechatPaidRefreshing,
+    t.wechatProviderRetry,
+    t.wechatRecovering,
+    t.wechatStatusRetry,
+  ]);
+
+  useEffect(() => {
+    if (
+      paymentMode !== "wechat"
+      || order?.status !== "requires_payment"
+      || !order.checkoutExpiresAt
+    ) {
+      return;
+    }
+    let timer: number | null = null;
+    const tick = () => {
+      const now = Date.now();
+      setCheckoutClockMs(now);
+      const seconds = getCheckoutSecondsRemaining(
+        order.checkoutExpiresAt,
+        now,
+      );
+      if (seconds !== null && seconds > 0) {
+        timer = window.setTimeout(tick, 1_000);
+      }
+    };
+    tick();
+    return () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [
+    order?.checkoutExpiresAt,
+    order?.status,
+    paymentMode,
   ]);
 
   async function restoreAfterMutation() {
@@ -326,10 +691,18 @@ export function RepresentativeRechargePanel({
   }
 
   function createRechargeOrder() {
-    if (!rechargeReady || !beginMutation("create")) {
+    if (
+      !collectionEnabled
+      || !rechargeReady
+      || hasActiveWeChatOrder
+      || paymentResultConfirmed
+      || checkoutRequiresManualAction
+      || !beginMutation("create")
+    ) {
       return;
     }
     setError(null);
+    setPaymentNotice(null);
     const existingIntent = rechargeIntentRef.current;
     const intent =
       existingIntent?.amountCents === amountCents
@@ -354,12 +727,38 @@ export function RepresentativeRechargePanel({
           }),
         });
 
+        const payload = (await response.json().catch(() => null)) as {
+          rechargeOrder?: RechargeOrderSnapshot;
+          code?: string;
+          error?: string;
+        } | null;
         if (!response.ok) {
-          throw new Error(await extractError(response));
+          if (
+            response.status === 409
+            && payload?.code === "payment_checkout_active"
+            && payload.rechargeOrder
+          ) {
+            setOrder(payload.rechargeOrder);
+            setAmountCents(payload.rechargeOrder.amountCents);
+            setCheckoutClockMs(Date.now());
+            setPaymentNotice({
+              kind: "checking",
+              message:
+                payload.rechargeOrder.status === "created"
+                  ? t.wechatRecovering
+                  : t.wechatExistingCheckoutRestored,
+              tone: "warning",
+            });
+          }
+          throw new Error(
+            payload?.error ?? response.statusText,
+          );
         }
-
-        const payload = (await response.json()) as { rechargeOrder: RechargeOrderSnapshot };
+        if (!payload?.rechargeOrder) {
+          throw new Error(t.createError);
+        }
         setOrder(payload.rechargeOrder);
+        setCheckoutClockMs(Date.now());
         setIsCheckoutUrlCopied(false);
         setPurchase(null);
         setReversal(null);
@@ -370,6 +769,38 @@ export function RepresentativeRechargePanel({
         setError(nextError instanceof Error ? nextError.message : t.createError);
       })
       .finally(endMutation);
+  }
+
+  function retryPaidWalletRefresh() {
+    setPaymentNotice({
+      kind: "paid-refreshing",
+      message: t.wechatPaidRefreshing,
+      tone: "success",
+    });
+    void refreshWalletState()
+      .then(() => {
+        setPaymentNotice({
+          kind: "paid",
+          message: t.wechatPaid,
+          tone: "success",
+        });
+      })
+      .catch(() => {
+        setPaymentNotice({
+          kind: "paid-refresh-failed",
+          message: t.wechatPaidRefreshFailed,
+          tone: "warning",
+        });
+      });
+  }
+
+  function retryExpiredPaymentStatus() {
+    setPaymentNotice({
+      kind: "expired-confirming",
+      message: t.wechatExpiredConfirming,
+      tone: "warning",
+    });
+    setPaymentStatusRetryNonce((current) => current + 1);
   }
 
   function copyCheckoutUrl() {
@@ -493,9 +924,30 @@ export function RepresentativeRechargePanel({
     setMutation(null);
   }
 
+  const orderPresentation = order
+    ? getPublicRechargeStatusPresentation(
+        order.status,
+        locale,
+        { checkoutExpired },
+      )
+    : null;
+  const orderTone =
+    paymentResultConfirmed
+      ? "success"
+      : checkoutRequiresManualAction
+        ? "error"
+        : orderPresentation?.tone ?? "neutral";
+
   return (
     <div className="setup-stack">
       <p className="footer-note">{t.identityNote}</p>
+
+      {paymentMode === "wechat" && !collectionEnabled ? (
+        <div className="status-banner status-warning" role="status">
+          <strong>{t.wechatCollectionPausedTitle}</strong>
+          <p>{t.wechatCollectionPausedDetail}</p>
+        </div>
+      ) : null}
 
       {!audienceAuthenticated ? (
         <div className="status-banner">
@@ -582,7 +1034,15 @@ export function RepresentativeRechargePanel({
         {[500, 2000, 10000].map((preset) => (
           <button
             className={amountCents === preset ? "button-primary" : "button-secondary"}
-            disabled={isMutating || isRestoring || !rechargeReady}
+            disabled={
+              !collectionEnabled
+              || isMutating
+              || isRestoring
+              || !rechargeReady
+              || hasActivePendingCheckout
+              || paymentResultConfirmed
+              || checkoutRequiresManualAction
+            }
             key={preset}
             onClick={() => {
               setAmountCents(preset);
@@ -602,22 +1062,59 @@ export function RepresentativeRechargePanel({
 
       <button
         className="button-primary button-block"
-        disabled={isMutating || isRestoring || !rechargeReady}
+        disabled={
+          !collectionEnabled
+          || isMutating
+          || isRestoring
+          || !rechargeReady
+          || hasActiveWeChatOrder
+          || paymentResultConfirmed
+          || checkoutRequiresManualAction
+        }
         onClick={createRechargeOrder}
         type="button"
       >
         {mutation === "create"
           ? t.creating
-          : paymentMode === "wechat"
-            ? t.wechatCreateAction
-            : t.createAction}
+          : paymentMode === "wechat" && !collectionEnabled
+            ? t.wechatCollectionPausedAction
+            : checkoutExpired
+              ? checkoutRequiresManualAction
+                ? t.wechatExpiryConfirmationAction
+                : t.regenerateWechatAction
+              : hasRecoveringWeChatOrder
+                ? t.wechatRecoveringAction
+              : hasActivePendingCheckout
+                ? t.wechatPendingAction
+                : paymentMode === "wechat"
+                  ? t.wechatCreateAction
+                  : t.createAction}
       </button>
+      {hasActiveWeChatOrder ? (
+        <p className="footer-note representative-payment-action-note">
+          {hasRecoveringWeChatOrder
+            ? t.wechatRecoveringPreventsDuplicate
+            : checkoutExpired
+              ? t.wechatExpiredPreventsDuplicate
+              : t.wechatPendingPreventsDuplicate}
+        </p>
+      ) : null}
 
       {order ? (
-        <div className="status-banner status-success">
+        <div
+          className={`status-banner ${statusToneClassName(orderTone)}`}
+        >
           <strong>{t.latestOrder}</strong>
           <p>
-            {formatMoney(order.amountCents, order.currency)} · {order.status} · {t.balanceLabel}
+            {formatMoney(order.amountCents, order.currency)}
+            {" · "}
+            <span className="representative-payment-status">
+              {paymentResultConfirmed
+                ? t.paymentConfirmedStatus
+                : orderPresentation?.label}
+            </span>
+            {" · "}
+            {t.balanceLabel}
             {formatMoney(order.cashBalanceCents, order.currency)}
           </p>
           {order.status === "requires_payment" && paymentMode === "mock" ? (
@@ -632,6 +1129,7 @@ export function RepresentativeRechargePanel({
           ) : null}
           {order.status === "requires_payment"
             && paymentMode === "wechat"
+            && showWeChatCheckout
             && order.checkoutUrl ? (
               <div className="representative-wechat-checkout">
                 <QRCodeSVG
@@ -646,6 +1144,16 @@ export function RepresentativeRechargePanel({
                 <div>
                   <strong>{t.wechatQrTitle}</strong>
                   <p>{t.wechatQrDetail}</p>
+                  {checkoutRemainingSeconds !== null ? (
+                    <p
+                      className="representative-wechat-countdown"
+                      role="timer"
+                    >
+                      {t.wechatCountdown(
+                        formatCountdown(checkoutRemainingSeconds),
+                      )}
+                    </p>
+                  ) : null}
                   <div className="button-row">
                     <a
                       className="button-primary"
@@ -666,6 +1174,13 @@ export function RepresentativeRechargePanel({
                 </div>
               </div>
             ) : null}
+          {checkoutExpired ? (
+            <p className="representative-payment-expired">
+              {paymentNotice?.kind !== "expired"
+                ? t.wechatExpiredConfirming
+                : t.wechatExpiredDetail}
+            </p>
+          ) : null}
           {purchase ? (
             <>
               <p>
@@ -711,6 +1226,42 @@ export function RepresentativeRechargePanel({
         </div>
       ) : null}
 
+      {paymentNotice ? (
+        <div
+          className={`status-banner ${statusToneClassName(paymentNotice.tone)}`}
+          role={paymentNotice.tone === "error" ? "alert" : "status"}
+        >
+          <strong>{paymentNotice.message}</strong>
+          {paymentNotice.kind === "auth" ? (
+            <a className="button-secondary" href={loginHref}>
+              {t.loginAction}
+            </a>
+          ) : null}
+          {paymentNotice.kind === "manual-review" ? (
+            <p>{t.wechatManualReviewAction}</p>
+          ) : null}
+          {paymentNotice.kind === "paid-refresh-failed" ? (
+            <button
+              className="button-secondary"
+              disabled={mutation !== null}
+              onClick={retryPaidWalletRefresh}
+              type="button"
+            >
+              {t.refreshWalletAction}
+            </button>
+          ) : null}
+          {paymentNotice.kind === "expired-unconfirmed" ? (
+            <button
+              className="button-secondary"
+              onClick={retryExpiredPaymentStatus}
+              type="button"
+            >
+              {t.retryPaymentStatusAction}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {error ? <div className="status-banner status-error">{error}</div> : null}
       <p className="footer-note">
         {paymentMode === "wechat"
@@ -734,6 +1285,30 @@ function randomId(): string {
 
 function formatMoney(cents: number, currency: string): string {
   return `${currency} ${(cents / 100).toFixed(2)}`;
+}
+
+function formatCountdown(seconds: number): string {
+  const normalized = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(normalized / 60);
+  const remainingSeconds = normalized % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
+function statusToneClassName(tone: PublicRechargeStatusTone): string {
+  switch (tone) {
+    case "success":
+      return "status-success";
+    case "warning":
+      return "status-warning";
+    case "error":
+      return "status-error";
+    case "neutral":
+      return "status-neutral";
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 const copy = {
@@ -761,6 +1336,16 @@ const copy = {
     bindingCheckError: "Telegram 绑定状态检查失败。",
     createAction: "创建充值单",
     wechatCreateAction: "生成微信支付二维码",
+    wechatCollectionPausedTitle: "微信支付已暂停新收款",
+    wechatCollectionPausedDetail: "当前不能生成新的支付二维码；已创建订单仍会继续查询和入账，请按现有二维码完成支付或等待结果确认。",
+    wechatCollectionPausedAction: "新收款已暂停",
+    regenerateWechatAction: "重新生成微信支付二维码",
+    wechatExpiryConfirmationAction: "正在确认到期订单",
+    wechatRecoveringAction: "正在安全恢复微信支付订单",
+    wechatPendingAction: "请完成当前待支付订单",
+    wechatRecoveringPreventsDuplicate: "正在确认上一次微信下单结果。二维码生成后会自动显示；为避免生成两笔可支付订单，请勿重复创建。",
+    wechatPendingPreventsDuplicate: "当前二维码仍在有效期内。为避免重复扣款，请先完成或等待该订单关闭。",
+    wechatExpiredPreventsDuplicate: "当前二维码已过期，但旧订单尚未由微信确认关闭。系统会继续查询并安全关单；关闭前请勿创建第二笔订单。",
     creating: "处理中...",
     createError: "创建充值单失败。",
     payError: "模拟支付失败。",
@@ -769,6 +1354,26 @@ const copy = {
     mockPayAction: "模拟支付成功",
     wechatQrTitle: "微信扫码支付",
     wechatQrDetail: "请使用微信扫描二维码。支付完成后，本页会自动刷新余额和当前代表服务额度。",
+    wechatCountdown: (time: string) => `二维码剩余有效时间 ${time}`,
+    wechatAwaitingPayment: "正在等待微信支付确认。",
+    wechatRecovering: "微信支付订单正在安全确认，二维码生成后会自动显示。",
+    wechatExpiredDetail: "当前二维码已过期，不会再展示。请重新生成后再扫码支付。",
+    wechatExpiredConfirming: "二维码已到期，正在做最后一次支付结果确认。确认完成前请勿重复支付。",
+    wechatExpiredConfirmed: "二维码已到期，暂未发现成功支付；系统正在等待微信安全关闭旧订单，关闭前请勿创建新订单。",
+    wechatExpiredUnconfirmed: "二维码已到期，但支付结果暂时无法确认。请勿重复支付；系统会继续查询。",
+    retryPaymentStatusAction: "重新查询支付结果",
+    wechatAuthExpired: "登录状态已失效，支付查询已停止。请重新登录后核对订单。",
+    wechatManualReview: "支付结果与钱包账目需要人工核对，自动查询已停止。",
+    wechatManualReviewAction: "请勿重复支付。联系数字代表主人并提供当前订单时间和金额进行核对。",
+    wechatProviderRetry: "微信支付状态暂时不可用，本页会降低频率后自动重试。",
+    wechatStatusRetry: "网络暂时不可用，本页会自动重试支付状态。",
+    wechatOffline: "当前设备已离线；支付查询已暂停，恢复联网后会自动继续。",
+    wechatPaidRefreshing: "微信支付已确认，正在刷新钱包和服务额度…",
+    wechatPaid: "微信支付已确认，钱包和服务额度已更新。",
+    wechatPaidRefreshFailed: "微信支付已确认，但钱包状态暂时无法刷新。请勿重复支付，可重新读取钱包。",
+    wechatExistingCheckoutRestored: "已恢复仍在有效期内的待支付二维码。",
+    paymentConfirmedStatus: "支付已确认",
+    refreshWalletAction: "重新读取钱包",
     openWechatAction: "在微信中打开",
     copyCheckoutUrl: "复制支付链接",
     checkoutUrlCopied: "已复制",
@@ -813,6 +1418,16 @@ const copy = {
     bindingCheckError: "Unable to check the Telegram identity link.",
     createAction: "Create recharge order",
     wechatCreateAction: "Generate WeChat Pay QR",
+    wechatCollectionPausedTitle: "New WeChat Pay collection is paused",
+    wechatCollectionPausedDetail: "New QR codes cannot be created right now. Existing orders will still be checked and credited; complete the current checkout or wait for its result.",
+    wechatCollectionPausedAction: "New collection paused",
+    regenerateWechatAction: "Generate a new WeChat Pay QR",
+    wechatExpiryConfirmationAction: "Confirming expired order",
+    wechatRecoveringAction: "Recovering WeChat Pay order",
+    wechatPendingAction: "Complete the pending payment first",
+    wechatRecoveringPreventsDuplicate: "The previous WeChat Pay creation is being verified. Its QR will appear automatically; do not create another payable order.",
+    wechatPendingPreventsDuplicate: "This QR code is still valid. Complete it or wait for the order to close before creating another, avoiding a duplicate charge.",
+    wechatExpiredPreventsDuplicate: "This QR code expired, but WeChat has not confirmed the old order closed. Checks and safe closure will continue; do not create a second order yet.",
     creating: "Working...",
     createError: "Failed to create recharge order.",
     payError: "Failed to simulate payment.",
@@ -821,6 +1436,26 @@ const copy = {
     mockPayAction: "Simulate payment success",
     wechatQrTitle: "Scan with WeChat Pay",
     wechatQrDetail: "Scan this QR code in WeChat. This page will refresh the wallet and representative-scoped service credits after payment.",
+    wechatCountdown: (time: string) => `QR code expires in ${time}`,
+    wechatAwaitingPayment: "Waiting for WeChat Pay confirmation.",
+    wechatRecovering: "The WeChat Pay order is being verified. Its QR code will appear automatically when ready.",
+    wechatExpiredDetail: "This QR code has expired and is no longer shown. Generate a new one before paying.",
+    wechatExpiredConfirming: "The QR code expired. A final payment-result check is in progress; do not pay again yet.",
+    wechatExpiredConfirmed: "The QR code expired and no successful payment is confirmed yet. The old order is being closed safely; do not create a new one yet.",
+    wechatExpiredUnconfirmed: "The QR code expired, but its payment result is temporarily unavailable. Do not pay again; checks will continue.",
+    retryPaymentStatusAction: "Retry payment status",
+    wechatAuthExpired: "Your session expired, so payment checks stopped. Sign in again to verify this order.",
+    wechatManualReview: "The payment result and wallet records need manual review. Automatic checks have stopped.",
+    wechatManualReviewAction: "Do not pay again. Contact the representative owner with the order time and amount for verification.",
+    wechatProviderRetry: "WeChat Pay status is temporarily unavailable. This page will retry at a lower frequency.",
+    wechatStatusRetry: "The network is temporarily unavailable. This page will retry the payment status.",
+    wechatOffline: "This device is offline. Payment checks are paused and will resume when the connection returns.",
+    wechatPaidRefreshing: "WeChat Pay is confirmed. Refreshing wallet cash and service credits…",
+    wechatPaid: "WeChat Pay is confirmed. Wallet cash and service credits are up to date.",
+    wechatPaidRefreshFailed: "WeChat Pay is confirmed, but the wallet could not refresh yet. Do not pay again; retry the wallet read.",
+    wechatExistingCheckoutRestored: "The still-valid pending checkout has been restored.",
+    paymentConfirmedStatus: "Payment confirmed",
+    refreshWalletAction: "Refresh wallet",
     openWechatAction: "Open in WeChat",
     copyCheckoutUrl: "Copy payment link",
     checkoutUrlCopied: "Copied",

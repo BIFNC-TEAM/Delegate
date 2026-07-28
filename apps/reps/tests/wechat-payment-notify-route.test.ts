@@ -44,8 +44,8 @@ const mocks = vi.hoisted(() => {
     WeChatPayConfigurationError,
     completeRechargeAndPurchaseAgentTokensFromProviderWebhook: vi.fn(),
     createWeChatPayApiV3PaymentProviderAdapter: vi.fn(),
-    isWeChatPayApiV3Enabled: vi.fn(),
-    loadWeChatPayApiV3ConfigFromEnv: vi.fn(),
+    isWeChatPayProcessingEnabled: vi.fn(),
+    loadWeChatPayProcessingConfigFromEnv: vi.fn(),
   };
 });
 
@@ -60,9 +60,10 @@ vi.mock("@delegate/web-data", () => ({
     mocks.completeRechargeAndPurchaseAgentTokensFromProviderWebhook,
   createWeChatPayApiV3PaymentProviderAdapter:
     mocks.createWeChatPayApiV3PaymentProviderAdapter,
-  isWeChatPayApiV3Enabled: mocks.isWeChatPayApiV3Enabled,
-  loadWeChatPayApiV3ConfigFromEnv:
-    mocks.loadWeChatPayApiV3ConfigFromEnv,
+  isWeChatPayProcessingEnabled:
+    mocks.isWeChatPayProcessingEnabled,
+  loadWeChatPayProcessingConfigFromEnv:
+    mocks.loadWeChatPayProcessingConfigFromEnv,
 }));
 
 import { POST as notifyWeChatPayment } from "../app/api/payments/wechat/notify/route";
@@ -73,8 +74,8 @@ const adapter = { provider: "WECHAT_PAY" };
 describe("WeChat Pay notification route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.isWeChatPayApiV3Enabled.mockReturnValue(true);
-    mocks.loadWeChatPayApiV3ConfigFromEnv.mockReturnValue(config);
+    mocks.isWeChatPayProcessingEnabled.mockReturnValue(true);
+    mocks.loadWeChatPayProcessingConfigFromEnv.mockReturnValue(config);
     mocks.createWeChatPayApiV3PaymentProviderAdapter.mockReturnValue(adapter);
     mocks.completeRechargeAndPurchaseAgentTokensFromProviderWebhook
       .mockResolvedValue({
@@ -83,7 +84,7 @@ describe("WeChat Pay notification route", () => {
   });
 
   it("returns 503 without loading credentials when WeChat Pay is disabled", async () => {
-    mocks.isWeChatPayApiV3Enabled.mockReturnValue(false);
+    mocks.isWeChatPayProcessingEnabled.mockReturnValue(false);
 
     const response = await notifyWeChatPayment(notificationRequest("{}"));
 
@@ -94,7 +95,9 @@ describe("WeChat Pay notification route", () => {
       code: "SERVICE_UNAVAILABLE",
       message: "Payment notification service is unavailable.",
     });
-    expect(mocks.loadWeChatPayApiV3ConfigFromEnv).not.toHaveBeenCalled();
+    expect(
+      mocks.loadWeChatPayProcessingConfigFromEnv,
+    ).not.toHaveBeenCalled();
     expect(
       mocks.createWeChatPayApiV3PaymentProviderAdapter,
     ).not.toHaveBeenCalled();
@@ -172,7 +175,7 @@ describe("WeChat Pay notification route", () => {
   });
 
   it("returns a safe 503 when server-side WeChat Pay configuration is invalid", async () => {
-    mocks.loadWeChatPayApiV3ConfigFromEnv.mockImplementation(() => {
+    mocks.loadWeChatPayProcessingConfigFromEnv.mockImplementation(() => {
       throw new mocks.WeChatPayConfigurationError(
         "WECHAT_PAY_API_V3_KEY secret-value is invalid.",
       );
@@ -232,7 +235,9 @@ describe("WeChat Pay notification route", () => {
       code: "INVALID_REQUEST",
       message: "Payment notification is invalid.",
     });
-    expect(mocks.loadWeChatPayApiV3ConfigFromEnv).not.toHaveBeenCalled();
+    expect(
+      mocks.loadWeChatPayProcessingConfigFromEnv,
+    ).not.toHaveBeenCalled();
     expect(
       mocks.createWeChatPayApiV3PaymentProviderAdapter,
     ).not.toHaveBeenCalled();

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  PaymentProviderOperationLeaseLostError,
   WeChatPayConfigurationError,
   WeChatPayProtocolError,
   WalletIdempotencyConflictError,
@@ -15,15 +16,19 @@ import {
   getPublicAgentWalletState,
   getPublicRepresentativeRuntime,
   isVerifiedPrivateChannelIdentityBinding,
-  isWeChatPayApiV3Enabled,
   listActivePrivateChannelIdentityBindings,
-  loadWeChatPayApiV3ConfigFromEnv,
+  loadWeChatPayProcessingConfigFromEnv,
+  lockPaymentProviderOperationLease,
   privateChannelIdentityProviders,
   prisma,
+  readWeChatPayCheckoutExpiresAt,
   releasePaymentProviderOperation,
+  renewPaymentProviderOperationLease,
   resolvePublicAudienceWalletExternalUserId,
   resolveRepresentativeTelegramBotConnectionId,
+  resolveWeChatPayReleaseFlags,
   resolveWebAudienceContact,
+  type PaymentProviderOperationGateClient,
 } from "@delegate/web-data";
 
 import {
@@ -35,6 +40,7 @@ import {
 
 const PUBLIC_WALLET_CURRENCIES = new Set(["CNY", "USD"]);
 const PUBLIC_RECHARGE_AMOUNTS_CENTS = new Set([500, 2_000, 10_000]);
+const WECHAT_RECHARGE_CREATE_LEASE_MS = 75_000;
 
 export async function GET(
   request: Request,
@@ -99,10 +105,26 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
-  const useWeChatPay = isWeChatPayApiV3Enabled();
+  let releaseFlags: ReturnType<typeof resolveWeChatPayReleaseFlags>;
+  try {
+    releaseFlags = resolveWeChatPayReleaseFlags();
+  } catch {
+    return privateJson(
+      {
+        error: "微信支付发布配置无效，请稍后再试。",
+        code: "payment_provider_unavailable",
+      },
+      503,
+    );
+  }
+  const useWeChatPay = releaseFlags.processingEnabled;
+  const collectionEnabled = releaseFlags.collectionEnabled;
   const mockEnabled =
-    process.env.NODE_ENV === "development"
-    || process.env.NODE_ENV === "test";
+    !useWeChatPay
+    && (
+      process.env.NODE_ENV === "development"
+      || process.env.NODE_ENV === "test"
+    );
   if (!useWeChatPay && !mockEnabled) {
     return privateJson(
       {
@@ -195,6 +217,42 @@ export async function POST(
       audienceId: principal.audienceId,
       currency: "CNY",
     });
+    if (useWeChatPay) {
+      const activeCheckout =
+        await findActiveWeChatRechargeOrder({
+          audienceIdentityId: principal.audienceIdentityId,
+          representativeId: representative.id,
+        });
+      if (activeCheckout) {
+        const response = activeWeChatCheckoutResponse(
+          activeCheckout,
+          amountCents,
+        );
+        setPublicAudienceSessionCookie(
+          response,
+          request,
+          slug,
+          sessionState,
+        );
+        return response;
+      }
+    }
+    if (useWeChatPay && !collectionEnabled) {
+      const response = privateJson(
+        {
+          error: "微信支付已暂停新收款；已有订单仍会继续查询和入账。",
+          code: "payment_collection_paused",
+        },
+        503,
+      );
+      setPublicAudienceSessionCookie(
+        response,
+        request,
+        slug,
+        sessionState,
+      );
+      return response;
+    }
     const requestedIdempotencyKey =
       request.headers.get("idempotency-key")?.trim()
       || (typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "");
@@ -223,7 +281,10 @@ export async function POST(
           "recharge_create",
           principal.audienceIdentityId,
         ]);
-        const claim = await claimPaymentProviderOperation({ scopeKey });
+        const claim = await claimPaymentProviderOperation({
+          scopeKey,
+          leaseDurationMs: WECHAT_RECHARGE_CREATE_LEASE_MS,
+        });
         if (claim.claimed) {
           createGateLease = {
             scopeKey: claim.scopeKey,
@@ -261,41 +322,83 @@ export async function POST(
       }
     }
 
-    const orderInput = {
-      externalUserId,
-      audienceIdentityId: principal.audienceIdentityId,
-      representativeId: representative.id,
-      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
-      displayName: typeof body.displayName === "string" ? body.displayName : contact.displayName ?? externalUserId,
-      amountCents,
-      currency: "CNY",
-      idempotencyKey,
-    };
-    let rechargeOrder;
     try {
-      rechargeOrder = useWeChatPay
+      if (useWeChatPay && createGateLease) {
+        // The first lookup may predate a previous owner's commit. Recheck only
+        // after this request owns the gate, before creating another local
+        // out_trade_no.
+        const activeCheckout =
+          await findActiveWeChatRechargeOrder({
+            audienceIdentityId: principal.audienceIdentityId,
+            representativeId: representative.id,
+          });
+        if (activeCheckout) {
+          const response = activeWeChatCheckoutResponse(
+            activeCheckout,
+            amountCents,
+          );
+          setPublicAudienceSessionCookie(
+            response,
+            request,
+            slug,
+            sessionState,
+          );
+          return response;
+        }
+      }
+
+      const orderInput = {
+        externalUserId,
+        audienceIdentityId: principal.audienceIdentityId,
+        representativeId: representative.id,
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        displayName: typeof body.displayName === "string"
+          ? body.displayName
+          : contact.displayName ?? externalUserId,
+        amountCents,
+        currency: "CNY",
+        idempotencyKey,
+        ...(createGateLease
+          ? {
+              creationFence: createWeChatRechargeCreationFence(
+                createGateLease,
+              ),
+            }
+          : {}),
+      };
+      const rechargeOrder = useWeChatPay
         ? await createRechargeOrder(
             orderInput,
             createWeChatPayApiV3PaymentProviderAdapter(
-              loadWeChatPayApiV3ConfigFromEnv(),
+              loadWeChatPayProcessingConfigFromEnv(),
             ),
           )
         : await createMockRechargeOrder(orderInput);
+
+      const response = privateJson(
+        { rechargeOrder: serializePublicCheckoutOrder(rechargeOrder) },
+        201,
+      );
+      setPublicAudienceSessionCookie(response, request, slug, sessionState);
+      return response;
     } finally {
       if (createGateLease) {
         await releasePaymentProviderOperationSafely(createGateLease);
       }
     }
-
-    const response = privateJson(
-      { rechargeOrder: serializePublicCheckoutOrder(rechargeOrder) },
-      201,
-    );
-    setPublicAudienceSessionCookie(response, request, slug, sessionState);
-
-    return response;
   } catch (error) {
     logPublicRechargeError(error);
+    if (error instanceof PaymentProviderOperationLeaseLostError) {
+      const response = privateJson(
+        {
+          error: "微信支付订单正在由另一请求安全创建，请稍后重试。",
+          code: "payment_rate_limited",
+        },
+        429,
+      );
+      response.headers.set("Retry-After", "1");
+      return response;
+    }
     if (error instanceof WeChatPayConfigurationError) {
       return privateJson(
         {
@@ -353,8 +456,124 @@ function serializePublicCheckoutOrder(
     provider: order.provider,
     status: order.status,
     checkoutUrl: order.checkoutUrl,
+    checkoutExpiresAt: order.checkoutExpiresAt,
     paidAt: order.paidAt,
     cashBalanceCents: order.cashBalanceCents,
+  };
+}
+
+async function findActiveWeChatRechargeOrder(input: {
+  audienceIdentityId: string;
+  representativeId: string;
+}) {
+  const order = await prisma.rechargeOrder.findFirst({
+    where: {
+      representativeId: input.representativeId,
+      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      provider: "WECHAT_PAY",
+      status: {
+        in: ["CREATED", "REQUIRES_PAYMENT"],
+      },
+      currency: "CNY",
+      userWallet: {
+        audienceIdentityId: input.audienceIdentityId,
+      },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: {
+      id: true,
+      amountCents: true,
+      currency: true,
+      provider: true,
+      status: true,
+      checkoutUrl: true,
+      providerPayload: true,
+      paidAt: true,
+      userWallet: {
+        select: {
+          cashBalanceCents: true,
+        },
+      },
+    },
+  });
+  if (!order) {
+    return null;
+  }
+  if (order.status === "CREATED") {
+    return { ...order, checkoutExpiresAt: null };
+  }
+  const checkoutExpiresAt =
+    readWeChatPayCheckoutExpiresAt(order.providerPayload);
+  return { ...order, checkoutExpiresAt };
+}
+
+function serializePersistedPublicCheckoutOrder(
+  order: NonNullable<
+    Awaited<ReturnType<typeof findActiveWeChatRechargeOrder>>
+  >,
+) {
+  return {
+    id: order.id,
+    amountCents: order.amountCents,
+    currency: order.currency,
+    provider: order.provider.toLowerCase(),
+    status: order.status.toLowerCase(),
+    checkoutUrl: order.checkoutUrl,
+    checkoutExpiresAt: order.checkoutExpiresAt,
+    paidAt: order.paidAt?.toISOString() ?? null,
+    cashBalanceCents: order.userWallet.cashBalanceCents,
+  };
+}
+
+function activeWeChatCheckoutResponse(
+  activeCheckout: NonNullable<
+    Awaited<ReturnType<typeof findActiveWeChatRechargeOrder>>
+  >,
+  requestedAmountCents: number,
+) {
+  const sameAmount =
+    activeCheckout.amountCents === requestedAmountCents;
+  return privateJson(
+    sameAmount
+      ? {
+          rechargeOrder:
+            serializePersistedPublicCheckoutOrder(activeCheckout),
+          reused: true,
+        }
+      : {
+          error: "已有另一金额的微信支付订单正在创建或待支付，请先完成或等待该订单关闭。",
+          code: "payment_checkout_active",
+          rechargeOrder:
+            serializePersistedPublicCheckoutOrder(activeCheckout),
+        },
+    sameAmount ? 200 : 409,
+  );
+}
+
+function createWeChatRechargeCreationFence(input: {
+  scopeKey: string;
+  leaseToken: string;
+}) {
+  return {
+    async lockBeforeLocalCreate(client: unknown) {
+      const owned = await lockPaymentProviderOperationLease(
+        input,
+        client as PaymentProviderOperationGateClient,
+      );
+      if (!owned) {
+        throw new PaymentProviderOperationLeaseLostError();
+      }
+    },
+    async renewBeforeProviderCreate() {
+      const renewedUntil =
+        await renewPaymentProviderOperationLease({
+          ...input,
+          leaseDurationMs: WECHAT_RECHARGE_CREATE_LEASE_MS,
+        });
+      if (!renewedUntil) {
+        throw new PaymentProviderOperationLeaseLostError();
+      }
+    },
   };
 }
 

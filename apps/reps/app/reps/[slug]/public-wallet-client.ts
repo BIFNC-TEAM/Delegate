@@ -6,6 +6,38 @@ export type PublicWalletUpdatedDetail = {
   serviceCreditsReserved: number;
 };
 
+export type PublicRechargeOrderStatus =
+  | "created"
+  | "requires_payment"
+  | "paid"
+  | "failed"
+  | "canceled"
+  | "refunded";
+
+export type PublicRechargeStatusTone =
+  | "success"
+  | "warning"
+  | "error"
+  | "neutral";
+
+export type PublicRechargeStatusPresentation = {
+  label: string;
+  tone: PublicRechargeStatusTone;
+};
+
+export type PublicWalletOrder = {
+  id: string;
+  amountCents: number;
+  currency: string;
+  provider: string;
+  status: PublicRechargeOrderStatus;
+  checkoutUrl: string | null;
+  checkoutExpiresAt: string | null;
+  paidAt: string | null;
+  refundedAt: string | null;
+  createdAt: string;
+};
+
 export type PublicWalletStateSnapshot = {
   summary: {
     currency: string;
@@ -15,17 +47,7 @@ export type PublicWalletStateSnapshot = {
     serviceCreditsPurchased: number;
     serviceCreditsConsumed: number;
   };
-  orders: Array<{
-    id: string;
-    amountCents: number;
-    currency: string;
-    provider: string;
-    status: string;
-    checkoutUrl: string | null;
-    paidAt: string | null;
-    refundedAt: string | null;
-    createdAt: string;
-  }>;
+  orders: PublicWalletOrder[];
   purchases: Array<{
     id: string;
     rechargeOrderId: string | null;
@@ -53,6 +75,87 @@ export type CurrentPublicWalletActivity = {
   purchase: PublicWalletStateSnapshot["purchases"][number] | null;
   refund: PublicWalletStateSnapshot["refunds"][number] | null;
 };
+
+const rechargeStatusCopy = {
+  zh: {
+    created: "正在创建",
+    requires_payment: "待支付",
+    paid: "支付已确认",
+    failed: "支付失败",
+    canceled: "已关闭",
+    refunded: "已退款",
+    expired: "二维码已过期",
+  },
+  en: {
+    created: "Creating",
+    requires_payment: "Awaiting payment",
+    paid: "Payment confirmed",
+    failed: "Payment failed",
+    canceled: "Closed",
+    refunded: "Refunded",
+    expired: "QR code expired",
+  },
+} as const;
+
+export function getPublicRechargeStatusPresentation(
+  status: PublicRechargeOrderStatus,
+  locale: "zh" | "en",
+  options: { checkoutExpired?: boolean } = {},
+): PublicRechargeStatusPresentation {
+  if (status === "requires_payment" && options.checkoutExpired) {
+    return {
+      label: rechargeStatusCopy[locale].expired,
+      tone: "warning",
+    };
+  }
+  switch (status) {
+    case "paid":
+      return {
+        label: rechargeStatusCopy[locale].paid,
+        tone: "success",
+      };
+    case "created":
+    case "requires_payment":
+      return {
+        label: rechargeStatusCopy[locale][status],
+        tone: "warning",
+      };
+    case "failed":
+      return {
+        label: rechargeStatusCopy[locale].failed,
+        tone: "error",
+      };
+    case "canceled":
+    case "refunded":
+      return {
+        label: rechargeStatusCopy[locale][status],
+        tone: "neutral",
+      };
+  }
+}
+
+export function getCheckoutSecondsRemaining(
+  checkoutExpiresAt: string | null,
+  nowMs = Date.now(),
+): number | null {
+  if (!checkoutExpiresAt) {
+    return null;
+  }
+  const parsed = new Date(checkoutExpiresAt);
+  if (
+    !Number.isFinite(parsed.getTime())
+    || parsed.toISOString() !== checkoutExpiresAt
+  ) {
+    return null;
+  }
+  return Math.max(0, Math.ceil((parsed.getTime() - nowMs) / 1_000));
+}
+
+export function getWeChatPaymentPollDelayMs(attempt: number): number {
+  const normalizedAttempt =
+    Number.isSafeInteger(attempt) && attempt > 0 ? attempt : 0;
+  return Math.min(15_000, 2_000 * (2 ** normalizedAttempt));
+}
 
 export function publishPublicWalletUpdate(
   detail: PublicWalletUpdatedDetail,

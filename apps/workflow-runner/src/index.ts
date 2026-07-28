@@ -1,17 +1,26 @@
 import "dotenv/config";
 
-import { createServer } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 
 import {
-  runWeChatPayOrderReconciliationTick,
-  runWeChatRefundReversalTick,
-  type WeChatPayReconciliationTickSummary,
-  type WeChatRefundReversalTickSummary,
+  getWeChatPayOperationsHealthSnapshot,
+  preflightWeChatPayRuntime,
+  prisma,
 } from "@delegate/web-data";
 
 import { workflowRunnerConfig } from "./config";
+import { buildWorkflowRunnerReadiness } from "./health";
 import { createTemporalBridge, type TemporalBridge } from "./temporal-bridge";
 import { runWorkflowTick, type TemporalWorkflowDispatcher, type WorkflowTickSummary } from "./runner";
+import {
+  runWeChatPayOperationsTick,
+  type WeChatPayOperationsTickResult,
+  updateWeChatPayOperationsFailureCodes,
+} from "./wechat-pay-operations";
 
 let lastTickAt: string | null = null;
 let lastTickSummary: WorkflowTickSummary | null = null;
@@ -19,12 +28,9 @@ let lastError: string | null = null;
 let paymentReconciliationActive = false;
 let lastPaymentReconciliationAt: string | null = null;
 let lastPaymentReconciliationSummary:
-  | {
-      orders: WeChatPayReconciliationTickSummary;
-      refunds: WeChatRefundReversalTickSummary;
-    }
-  | null = null;
+  WeChatPayOperationsTickResult | null = null;
 let lastPaymentReconciliationError: string | null = null;
+let paymentReconciliationFailureCodes: string[] = [];
 let temporalBridgeState:
   | {
       status: "starting" | "running" | "failed";
@@ -33,60 +39,154 @@ let temporalBridgeState:
   | null = null;
 
 const server = createServer((request, response) => {
-  if ((request.method === "GET" || request.method === "HEAD") && request.url === "/health") {
-    response.statusCode = 200;
-    response.setHeader("content-type", "application/json; charset=utf-8");
-    if (request.method === "HEAD") {
-      response.end();
-      return;
-    }
+  void handleHttpRequest(request, response);
+});
 
-    response.end(
-      JSON.stringify({
-        status: "ok",
-        service: "workflow-runner",
-        engine: workflowRunnerConfig.engine.effectiveEngine,
-        configuredEngine: workflowRunnerConfig.engine.configuredEngine,
-        queueName:
-          workflowRunnerConfig.engine.effectiveEngine === "temporal"
-            ? workflowRunnerConfig.engine.temporalTaskQueue
-            : workflowRunnerConfig.engine.localQueueName,
-        temporalReady: workflowRunnerConfig.engine.temporalReady,
-        fallbackReason: workflowRunnerConfig.engine.fallbackReason ?? null,
-        temporalBridgeState,
-        pollMs: workflowRunnerConfig.pollMs,
-        lastTickAt,
-        lastTickSummary,
-        lastError,
-        paymentReconciliation: {
-          status:
-            lastPaymentReconciliationError === null
-              ? "ok"
-              : "degraded",
-          enabled:
-            workflowRunnerConfig.paymentReconciliation.enabled,
-          active: paymentReconciliationActive,
-          pollMs:
-            workflowRunnerConfig.paymentReconciliation.pollMs,
-          lastTickAt: lastPaymentReconciliationAt,
-          lastTickSummary:
-            lastPaymentReconciliationSummary,
-          lastError: lastPaymentReconciliationError,
-        },
-      }),
+void start();
+
+async function start(): Promise<void> {
+  const preflight = preflightWeChatPayRuntime();
+  if (!preflight.ready) {
+    console.error(
+      "workflow-runner startup preflight failed:",
+      preflight.errorCode,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  server.listen(workflowRunnerConfig.port, "0.0.0.0", () => {
+    console.log(
+      `workflow-runner listening on http://0.0.0.0:${workflowRunnerConfig.port}`,
+    );
+  });
+  await boot();
+}
+
+async function handleHttpRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  const isProbeMethod =
+    request.method === "GET" || request.method === "HEAD";
+  if (isProbeMethod && request.url === "/health") {
+    sendJson(
+      request.method,
+      response,
+      200,
+      { status: "ok", service: "workflow-runner" },
     );
     return;
   }
+  if (isProbeMethod && request.url === "/ready") {
+    const reconciliationEnabled =
+      workflowRunnerConfig.paymentReconciliation.enabled;
+    const [
+      databaseReady,
+      weChatPay,
+      persistentPaymentWorkerFailure,
+    ] = await Promise.all([
+      checkDatabaseReadiness(),
+      Promise.resolve(preflightWeChatPayRuntime()),
+      reconciliationEnabled
+        ? getWeChatPayOperationsHealthSnapshot({
+            staleAfterMs:
+              workflowRunnerConfig.readinessStaleMs,
+            processingEnabled: true,
+          })
+          .then((snapshot) =>
+            snapshot.workers.some(
+              (worker) => worker.status === "failing",
+            ),
+          )
+          .catch(() => true)
+        : Promise.resolve(false),
+    ]);
+    const readiness = buildWorkflowRunnerReadiness({
+      now: new Date(),
+      staleAfterMs: workflowRunnerConfig.readinessStaleMs,
+      databaseReady,
+      weChatPay,
+      workflow: {
+        lastTickAt,
+        lastTickFailed: lastError !== null,
+      },
+      paymentReconciliation: {
+        enabled: reconciliationEnabled,
+        lastTickAt: lastPaymentReconciliationAt,
+        lastTickFailed:
+          lastPaymentReconciliationError !== null,
+        persistentWorkerFailure:
+          persistentPaymentWorkerFailure,
+      },
+    });
+    sendJson(
+      request.method,
+      response,
+      readiness.status === "ready" ? 200 : 503,
+      readiness,
+    );
+    return;
+  }
+  if (
+    isProbeMethod
+    && request.url === "/operations/wechat-pay/health"
+  ) {
+    try {
+      const snapshot =
+        await getWeChatPayOperationsHealthSnapshot({
+          staleAfterMs:
+            workflowRunnerConfig.readinessStaleMs,
+          processingEnabled:
+            workflowRunnerConfig.paymentReconciliation.enabled,
+        });
+      sendJson(request.method, response, 200, snapshot);
+    } catch {
+      sendJson(request.method, response, 200, {
+        status: "critical",
+        workers: [],
+        alerts: [
+          {
+            code: "wechat_operations_health_query_failed",
+            severity: "critical",
+            count: 1,
+          },
+        ],
+      });
+    }
+    return;
+  }
 
-  response.statusCode = 404;
-  response.end(JSON.stringify({ error: "not_found" }));
-});
+  sendJson(
+    request.method,
+    response,
+    404,
+    { error: "not_found" },
+  );
+}
 
-server.listen(workflowRunnerConfig.port, "0.0.0.0", () => {
-  console.log(`workflow-runner listening on http://0.0.0.0:${workflowRunnerConfig.port}`);
-});
+async function checkDatabaseReadiness(): Promise<boolean> {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-void boot();
+function sendJson(
+  method: string | undefined,
+  response: ServerResponse,
+  status: number,
+  body: unknown,
+): void {
+  response.statusCode = status;
+  response.setHeader(
+    "content-type",
+    "application/json; charset=utf-8",
+  );
+  response.setHeader("cache-control", "no-store");
+  response.end(method === "HEAD" ? undefined : JSON.stringify(body));
+}
 
 async function boot(): Promise<void> {
   if (workflowRunnerConfig.engine.effectiveEngine === "temporal") {
@@ -168,40 +268,40 @@ async function paymentReconciliationLoop(): Promise<void> {
   try {
     paymentReconciliationActive = true;
     const config = workflowRunnerConfig.paymentReconciliation;
-    const [orderSummary, refundSummary] = await Promise.all([
-      runWeChatPayOrderReconciliationTick({
-        limit: config.batchSize,
-        leaseMs: config.leaseMs,
-        pendingBackoffMs: config.pendingBackoffMs,
-        errorBackoffMs: config.errorBackoffMs,
-        maxBackoffMs: config.maxBackoffMs,
-      }),
-      runWeChatRefundReversalTick({
-        limit: config.batchSize,
-        leaseMs: config.leaseMs,
-        maxBackoffMs: config.maxBackoffMs,
-      }),
-    ]);
-    const summary = {
-      orders: orderSummary,
-      refunds: refundSummary,
-    };
+    const summary = await runWeChatPayOperationsTick(config);
     lastPaymentReconciliationAt = new Date().toISOString();
     lastPaymentReconciliationSummary = summary;
+    // Durable business anomalies are reported by the operations endpoint and
+    // do not affect readiness. A lane/checkpoint/synchronization execution
+    // failure does: the loop ran, but did not complete its required work.
+    paymentReconciliationFailureCodes =
+      updateWeChatPayOperationsFailureCodes(
+        paymentReconciliationFailureCodes,
+        summary,
+      );
     lastPaymentReconciliationError =
-      orderSummary.failed > 0
-        ? "wechat_payment_reconciliation_item_failed"
-        : refundSummary.unresolved > 0
-          ? "wechat_refund_reconciliation_required"
-          : refundSummary.retryScheduled > 0
-            ? "wechat_refund_reversal_retry_scheduled"
-        : null;
+      paymentReconciliationFailureCodes[0] ?? null;
+    if (summary.failedWorkerCodes.length > 0) {
+      console.error(
+        "WeChat Pay operations lanes failed:",
+        summary.failedWorkerCodes.join(","),
+      );
+    }
+    if (summary.exceptionSyncFailed) {
+      console.error(
+        "WeChat Pay exception queue sync failed:",
+        "wechat_exception_queue_sync_failed",
+      );
+    }
   } catch (error) {
     lastPaymentReconciliationAt = new Date().toISOString();
     lastPaymentReconciliationError =
       error instanceof Error
         ? error.name
         : "wechat_payment_reconciliation_tick_failed";
+    paymentReconciliationFailureCodes = [
+      lastPaymentReconciliationError,
+    ];
     console.error(
       "WeChat Pay reconciliation tick failed:",
       lastPaymentReconciliationError,

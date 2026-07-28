@@ -675,11 +675,20 @@ enum RechargeOrderStatus {
 enum PaymentProviderEventType {
   RECHARGE_PAID
   RECHARGE_FAILED
+  REFUND_PROCESSING
   REFUND_SUCCEEDED
   REFUND_CLOSED
   REFUND_ABNORMAL
   CHARGEBACK_CREATED
   UNKNOWN
+}
+
+enum RechargeRefundSubmissionStatus {
+  EXTERNAL
+  QUEUED
+  ACCEPTED
+  UNKNOWN
+  REJECTED
 }
 
 enum RechargeRefundProviderStatus {
@@ -694,6 +703,33 @@ enum RechargeRefundReversalStatus {
   APPLIED
   NOT_REQUIRED
   RECONCILIATION_REQUIRED
+}
+
+enum WalletExceptionCaseStatus {
+  OPEN
+  CLAIMED
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum WalletExceptionSeverity {
+  WARNING
+  ERROR
+  CRITICAL
+}
+
+enum WalletExceptionSourceType {
+  ORDER_RECONCILIATION_OUTBOX
+  REFUND_LIFECYCLE_OUTBOX
+  REFUND_REVERSAL_OUTBOX
+  REFUND_RECONCILIATION
+  REFUND_ABNORMAL
+}
+
+enum WalletExceptionActionType {
+  CLAIM
+  RETRY
+  ACKNOWLEDGE
 }
 
 enum AgentTokenPurchaseStatus {
@@ -902,28 +938,33 @@ enum ReliableEventStatus {
 }
 
 model Owner {
-  id                        String                     @id @default(cuid())
-  organizationId            String?
-  telegramUserId            String?                    @unique
-  displayName               String
-  handle                    String?
-  timezone                  String                     @default("UTC")
-  creatorVerificationStatus CreatorVerificationStatus  @default(UNVERIFIED)
-  createdAt                 DateTime                   @default(now())
-  updatedAt                 DateTime                   @updatedAt
-  wallet                    Wallet?
-  organization              Organization?              @relation(fields: [organizationId], references: [id])
-  organizationMember        OrganizationMember?
-  capabilityProfiles        CapabilityPolicyProfile[]
-  representatives           Representative[]
-  creatorEarnings           CreatorEarning[]
-  withdrawRequests          WithdrawRequest[]
-  walletTransactions        WalletTransaction[]
-  walletLedgerEntries       WalletLedgerEntry[]
-  identityLinks             OwnerIdentityLink[]
-  knowledgeAssets           KnowledgeAsset[]
-  matrixVirtualUsers        MatrixVirtualUserBinding[]
-  workspaceSkillInstalls    WorkspaceSkillInstall[]
+  id                           String                     @id @default(cuid())
+  organizationId               String?
+  telegramUserId               String?                    @unique
+  displayName                  String
+  handle                       String?
+  timezone                     String                     @default("UTC")
+  creatorVerificationStatus    CreatorVerificationStatus  @default(UNVERIFIED)
+  createdAt                    DateTime                   @default(now())
+  updatedAt                    DateTime                   @updatedAt
+  wallet                       Wallet?
+  organization                 Organization?              @relation(fields: [organizationId], references: [id])
+  organizationMember           OrganizationMember?
+  capabilityProfiles           CapabilityPolicyProfile[]
+  representatives              Representative[]
+  creatorEarnings              CreatorEarning[]
+  withdrawRequests             WithdrawRequest[]
+  walletTransactions           WalletTransaction[]
+  walletLedgerEntries          WalletLedgerEntry[]
+  identityLinks                OwnerIdentityLink[]
+  knowledgeAssets              KnowledgeAsset[]
+  matrixVirtualUsers           MatrixVirtualUserBinding[]
+  workspaceSkillInstalls       WorkspaceSkillInstall[]
+  rechargeRefundRequests       RechargeRefund[]
+  walletExceptionCases         WalletExceptionCase[]      @relation("WalletExceptionOwner")
+  claimedWalletExceptions      WalletExceptionCase[]      @relation("WalletExceptionClaimedBy")
+  acknowledgedWalletExceptions WalletExceptionCase[]      @relation("WalletExceptionAcknowledgedBy")
+  walletExceptionActions       WalletExceptionAction[]
 }
 
 model OwnerIdentityLink {
@@ -1194,54 +1235,54 @@ model WalletLedgerEntry {
 }
 
 model RechargeOrder {
-  id               String                 @id @default(cuid())
-  userWalletId     String
-  representativeId String?
-  productCode      String?
-  provider         PaymentProvider        @default(MOCK)
-  providerOrderId  String?                @unique
+  id                    String                 @id @default(cuid())
+  userWalletId          String
+  representativeId      String?
+  productCode           String?
+  provider              PaymentProvider        @default(MOCK)
+  providerOrderId       String?                @unique
   providerTransactionId String?
-  amountCents      Int
-  currency         String                 @default("CNY")
-  status           RechargeOrderStatus    @default(CREATED)
-  idempotencyKey   String                 @unique
-  checkoutUrl      String?
-  providerPayload  Json?
-  paidAt           DateTime?
-  refundedAt       DateTime?
-  createdAt        DateTime               @default(now())
-  updatedAt        DateTime               @updatedAt
-  userWallet       UserWallet             @relation(fields: [userWalletId], references: [id])
-  representative   Representative?        @relation(fields: [representativeId], references: [id], onDelete: SetNull)
-  providerEvents   PaymentProviderEvent[]
-  ledgerEntries    WalletLedgerEntry[]
-  tokenPurchases   AgentTokenPurchase[]
-  refunds          RechargeRefund[]
+  amountCents           Int
+  currency              String                 @default("CNY")
+  status                RechargeOrderStatus    @default(CREATED)
+  idempotencyKey        String                 @unique
+  checkoutUrl           String?
+  providerPayload       Json?
+  paidAt                DateTime?
+  refundedAt            DateTime?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  userWallet            UserWallet             @relation(fields: [userWalletId], references: [id])
+  representative        Representative?        @relation(fields: [representativeId], references: [id], onDelete: SetNull)
+  providerEvents        PaymentProviderEvent[]
+  ledgerEntries         WalletLedgerEntry[]
+  tokenPurchases        AgentTokenPurchase[]
+  refunds               RechargeRefund[]
 
+  @@unique([provider, providerTransactionId])
   @@index([userWalletId, status, createdAt])
   @@index([representativeId, status, createdAt])
   @@index([provider, status, createdAt])
-  @@unique([provider, providerTransactionId])
 }
 
 model PaymentProviderEvent {
-  id                String                   @id @default(cuid())
-  provider          PaymentProvider
-  providerEventId   String
+  id                    String                   @id @default(cuid())
+  provider              PaymentProvider
+  providerEventId       String
   providerTransactionId String?
-  eventType         PaymentProviderEventType @default(UNKNOWN)
-  rechargeOrderId   String?
-  rawPayload        Json
-  normalizedPayload Json?
-  receivedAt        DateTime                 @default(now())
-  verifiedAt        DateTime?
-  processedAt       DateTime?
-  processingError   String?
-  idempotencyKey    String?                  @unique
-  rechargeRefundId  String?
-  rechargeOrder     RechargeOrder?           @relation(fields: [rechargeOrderId], references: [id])
-  rechargeRefund    RechargeRefund?           @relation(fields: [rechargeRefundId], references: [id], onDelete: Restrict)
-  ledgerEntries     WalletLedgerEntry[]
+  eventType             PaymentProviderEventType @default(UNKNOWN)
+  rechargeOrderId       String?
+  rawPayload            Json
+  normalizedPayload     Json?
+  receivedAt            DateTime                 @default(now())
+  verifiedAt            DateTime?
+  processedAt           DateTime?
+  processingError       String?
+  idempotencyKey        String?                  @unique
+  rechargeRefundId      String?
+  rechargeOrder         RechargeOrder?           @relation(fields: [rechargeOrderId], references: [id])
+  rechargeRefund        RechargeRefund?          @relation(fields: [rechargeRefundId], references: [id], onDelete: Restrict)
+  ledgerEntries         WalletLedgerEntry[]
 
   @@unique([provider, providerEventId])
   @@unique([provider, providerTransactionId])
@@ -1296,17 +1337,24 @@ model RechargeRefund {
   id                       String                         @id @default(cuid())
   rechargeOrderId          String
   tokenPurchaseId          String?
+  requestedByOwnerId       String?
   provider                 PaymentProvider
   providerRefundOrderId    String
-  providerRefundId         String
+  providerRefundId         String?
   paymentTransactionId     String
   originalAmountCents      Int
   refundAmountCents        Int
-  payerOriginalAmountCents Int
-  payerRefundAmountCents   Int
+  payerOriginalAmountCents Int?
+  payerRefundAmountCents   Int?
   currency                 String                         @default("CNY")
-  providerStatus           RechargeRefundProviderStatus  @default(PROCESSING)
-  reversalStatus           RechargeRefundReversalStatus  @default(PENDING)
+  submissionStatus         RechargeRefundSubmissionStatus @default(EXTERNAL)
+  providerStatus           RechargeRefundProviderStatus?
+  reversalStatus           RechargeRefundReversalStatus   @default(PENDING)
+  requestIdempotencyKey    String?                        @unique
+  requestReason            String?
+  refundNotifyUrl          String?
+  providerCreatedAt        DateTime?
+  lastProviderQueryAt      DateTime?
   providerSucceededAt      DateTime?
   reversalAppliedAt        DateTime?
   processingError          String?
@@ -1314,10 +1362,14 @@ model RechargeRefund {
   updatedAt                DateTime                       @updatedAt
   rechargeOrder            RechargeOrder                  @relation(fields: [rechargeOrderId], references: [id], onDelete: Restrict)
   tokenPurchase            AgentTokenPurchase?            @relation(fields: [tokenPurchaseId], references: [id], onDelete: Restrict)
+  requestedByOwner         Owner?                         @relation(fields: [requestedByOwnerId], references: [id], onDelete: Restrict)
   providerEvents           PaymentProviderEvent[]
+  walletExceptionCases     WalletExceptionCase[]
 
   @@unique([provider, providerRefundOrderId])
   @@unique([provider, providerRefundId])
+  @@index([requestedByOwnerId, createdAt])
+  @@index([submissionStatus, updatedAt])
   @@index([rechargeOrderId, providerStatus, createdAt])
   @@index([providerStatus, updatedAt])
   @@index([tokenPurchaseId, reversalStatus, createdAt])
@@ -1730,6 +1782,7 @@ model Representative {
   trainingVersions                 CreatorTrainingVersion[]
   entitlementAccounts              ServiceEntitlementAccount[]
   servicePaymentOrders             ServicePaymentOrder[]
+  walletExceptionCases             WalletExceptionCase[]
 
   @@index([ownerId, lifecycleState, updatedAt])
   @@index([activeVersionId])
@@ -2395,27 +2448,96 @@ model ChannelEventInbox {
 }
 
 model OutboxEvent {
-  id             String                 @id @default(cuid())
-  conversationId String?
-  aggregateType  String
-  aggregateId    String
-  eventType      String
-  transport      ChannelTransport?
-  sourceProvider ChannelSourceProvider?
-  connectionId   String?
-  payload        Json
-  status         ReliableEventStatus    @default(PENDING)
-  idempotencyKey String                 @unique
-  attemptCount   Int                    @default(0)
-  availableAt    DateTime               @default(now())
-  processedAt    DateTime?
-  lastError      String?
-  createdAt      DateTime               @default(now())
-  updatedAt      DateTime               @updatedAt
-  conversation   Conversation?          @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  id                  String                 @id @default(cuid())
+  conversationId      String?
+  aggregateType       String
+  aggregateId         String
+  eventType           String
+  transport           ChannelTransport?
+  sourceProvider      ChannelSourceProvider?
+  connectionId        String?
+  payload             Json
+  status              ReliableEventStatus    @default(PENDING)
+  idempotencyKey      String                 @unique
+  attemptCount        Int                    @default(0)
+  availableAt         DateTime               @default(now())
+  processedAt         DateTime?
+  lastError           String?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  conversation        Conversation?          @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  walletExceptionCase WalletExceptionCase?
 
   @@index([status, availableAt, createdAt])
   @@index([aggregateType, aggregateId, createdAt])
+}
+
+model OperationalWorkerCheckpoint {
+  workerKey           String    @id @db.VarChar(96)
+  lastStartedAt       DateTime
+  lastHeartbeatAt     DateTime
+  lastSuccessAt       DateTime?
+  consecutiveFailures Int       @default(0)
+  lastErrorCode       String?   @db.VarChar(96)
+  lastSummary         Json?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@index([lastHeartbeatAt])
+}
+
+model WalletExceptionCase {
+  id                    String                    @id @default(cuid())
+  ownerId               String
+  representativeId      String
+  currency              String                    @default("CNY") @db.VarChar(12)
+  kind                  String                    @db.VarChar(96)
+  reasonCode            String                    @db.VarChar(128)
+  sourceType            WalletExceptionSourceType
+  sourceId              String
+  outboxEventId         String?                   @unique
+  rechargeRefundId      String?
+  status                WalletExceptionCaseStatus @default(OPEN)
+  severity              WalletExceptionSeverity
+  claimedByOwnerId      String?
+  claimedAt             DateTime?
+  acknowledgedByOwnerId String?
+  acknowledgedAt        DateTime?
+  note                  String?
+  version               Int                       @default(0)
+  firstDetectedAt       DateTime                  @default(now())
+  lastDetectedAt        DateTime                  @default(now())
+  resolvedAt            DateTime?
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  owner                 Owner                     @relation("WalletExceptionOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  representative        Representative            @relation(fields: [representativeId], references: [id], onDelete: Restrict)
+  claimedByOwner        Owner?                    @relation("WalletExceptionClaimedBy", fields: [claimedByOwnerId], references: [id], onDelete: Restrict)
+  acknowledgedByOwner   Owner?                    @relation("WalletExceptionAcknowledgedBy", fields: [acknowledgedByOwnerId], references: [id], onDelete: Restrict)
+  outboxEvent           OutboxEvent?              @relation(fields: [outboxEventId], references: [id], onDelete: Restrict)
+  rechargeRefund        RechargeRefund?           @relation(fields: [rechargeRefundId], references: [id], onDelete: Restrict)
+  actions               WalletExceptionAction[]
+
+  @@unique([sourceType, sourceId])
+  @@index([ownerId, representativeId, status, severity, lastDetectedAt])
+  @@index([rechargeRefundId, status])
+}
+
+model WalletExceptionAction {
+  id               String                    @id @default(cuid())
+  caseId           String
+  actorOwnerId     String
+  action           WalletExceptionActionType
+  idempotencyKey   String                    @db.VarChar(128)
+  expectedVersion  Int
+  resultingVersion Int
+  note             String?
+  createdAt        DateTime                  @default(now())
+  case             WalletExceptionCase       @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  actorOwner       Owner                     @relation(fields: [actorOwnerId], references: [id], onDelete: Restrict)
+
+  @@unique([actorOwnerId, idempotencyKey])
+  @@index([caseId, createdAt])
 }
 
 model MatrixVirtualUserBinding {

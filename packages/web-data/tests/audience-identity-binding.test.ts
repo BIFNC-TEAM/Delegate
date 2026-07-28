@@ -9,6 +9,8 @@ import {
   createIdentityBindingChallenge,
   hashBindingToken,
   isVerifiedPrivateChannelIdentityBinding,
+  listActivePrivateChannelIdentityBindings,
+  revokePrivateChannelIdentityBinding,
 } from "../src/audience-identity-binding";
 
 type FakeIdentity = {
@@ -44,12 +46,24 @@ type FakeLink = {
   proofMetadata: unknown;
 };
 
+type FakeConnectionProof = {
+  identityLinkId: string;
+  issuer: string;
+  connectionId: string;
+  verifiedAt: Date;
+  assuranceLevel: IdentityAssuranceLevel;
+  revokedAt: Date | null;
+  proofMetadata: unknown;
+};
+
 function createFakeBindingClient(
   identities: FakeIdentity[],
   seedLinks: FakeLink[] = [],
+  options: { withConnectionProofs?: boolean } = {},
 ) {
   const identityMap = new Map(identities.map((identity) => [identity.id, identity]));
   const challenges = new Map<string, FakeChallenge>();
+  const connectionProofs = new Map<string, FakeConnectionProof>();
   const links = new Map(
     [
       ...identities
@@ -119,26 +133,51 @@ function createFakeBindingClient(
       updateMany: async (input: unknown) => {
         const args = input as {
           where: {
-            id: string;
-            consumedAt: null;
-            revokedAt: null;
-            expiresAt: { gt: Date };
+            id?: string;
+            audienceIdentityId?: string;
+            provider?: IdentityLinkProvider;
+            issuer?: string;
+            connectionId?: string;
+            consumedAt?: null;
+            revokedAt?: null;
+            expiresAt?: { gt: Date };
           };
-          data: { consumedAt: Date };
+          data: { consumedAt?: Date; revokedAt?: Date };
         };
-        const challenge = [...challenges.values()].find(
-          (candidate) => candidate.id === args.where.id,
-        );
-        if (
-          !challenge ||
-          challenge.consumedAt ||
-          challenge.revokedAt ||
-          challenge.expiresAt <= args.where.expiresAt.gt
-        ) {
-          return { count: 0 };
+        let count = 0;
+        for (const challenge of challenges.values()) {
+          if (
+            (args.where.id !== undefined && challenge.id !== args.where.id)
+            || (
+              args.where.audienceIdentityId !== undefined
+              && challenge.audienceIdentityId !== args.where.audienceIdentityId
+            )
+            || (
+              args.where.provider !== undefined
+              && challenge.provider !== args.where.provider
+            )
+            || (
+              args.where.issuer !== undefined
+              && challenge.issuer !== args.where.issuer
+            )
+            || (
+              args.where.connectionId !== undefined
+              && challenge.connectionId !== args.where.connectionId
+            )
+            || (args.where.consumedAt === null && challenge.consumedAt !== null)
+            || (args.where.revokedAt === null && challenge.revokedAt !== null)
+            || (
+              args.where.expiresAt !== undefined
+              && challenge.expiresAt <= args.where.expiresAt.gt
+            )
+          ) {
+            continue;
+          }
+          if (args.data.consumedAt) challenge.consumedAt = args.data.consumedAt;
+          if (args.data.revokedAt) challenge.revokedAt = args.data.revokedAt;
+          count += 1;
         }
-        challenge.consumedAt = args.data.consumedAt;
-        return { count: 1 };
+        return { count };
       },
     },
     identityLink: {
@@ -213,10 +252,138 @@ function createFakeBindingClient(
         Object.assign(link, args.data);
         return link;
       },
+      findMany: async () =>
+        [...links.values()]
+          .filter(
+            (link) =>
+              link.revokedAt === null
+              && link.verifiedAt !== null
+              && link.assuranceLevel !== IdentityAssuranceLevel.UNVERIFIED
+              && (
+                link.provider === IdentityLinkProvider.TELEGRAM
+                || link.provider === IdentityLinkProvider.MATRIX
+              ),
+          )
+          .map((link) => ({
+            ...link,
+            connectionProofs: options.withConnectionProofs
+              ? [...connectionProofs.values()].filter(
+                  (proof) => proof.identityLinkId === link.id,
+                )
+              : undefined,
+          })),
     },
+    ...(options.withConnectionProofs
+      ? {
+          identityLinkConnectionProof: {
+            findUnique: async (input: unknown) => {
+              const args = input as {
+                where: {
+                  identityLinkId_issuer_connectionId: {
+                    identityLinkId: string;
+                    issuer: string;
+                    connectionId: string;
+                  };
+                };
+              };
+              const compound = args.where.identityLinkId_issuer_connectionId;
+              return connectionProofs.get(
+                [
+                  compound.identityLinkId,
+                  compound.issuer,
+                  compound.connectionId,
+                ].join(":"),
+              ) ?? null;
+            },
+            updateMany: async (input: unknown) => {
+              const args = input as {
+                where: {
+                  identityLinkId: string;
+                  issuer: string;
+                  connectionId: string;
+                  revokedAt: null;
+                };
+                data: { revokedAt: Date };
+              };
+              let count = 0;
+              for (const proof of connectionProofs.values()) {
+                if (
+                  proof.identityLinkId === args.where.identityLinkId
+                  && proof.issuer === args.where.issuer
+                  && proof.connectionId === args.where.connectionId
+                  && proof.revokedAt === null
+                ) {
+                  proof.revokedAt = args.data.revokedAt;
+                  count += 1;
+                }
+              }
+              return { count };
+            },
+            count: async (input: unknown) => {
+              const args = input as {
+                where: {
+                  identityLinkId: string;
+                  revokedAt: null;
+                  verifiedAt?: { not: null };
+                  assuranceLevel?: { in: IdentityAssuranceLevel[] };
+                };
+              };
+              return [...connectionProofs.values()].filter(
+                (proof) =>
+                  proof.identityLinkId === args.where.identityLinkId
+                  && proof.revokedAt === null
+                  && (
+                    args.where.verifiedAt === undefined
+                    || proof.verifiedAt !== null
+                  )
+                  && (
+                    args.where.assuranceLevel === undefined
+                    || args.where.assuranceLevel.in.includes(proof.assuranceLevel)
+                  ),
+              ).length;
+            },
+            upsert: async (input: unknown) => {
+              const args = input as {
+                where: {
+                  identityLinkId_issuer_connectionId: {
+                    identityLinkId: string;
+                    issuer: string;
+                    connectionId: string;
+                  };
+                };
+                create: FakeConnectionProof;
+                update: Pick<
+                  FakeConnectionProof,
+                  "verifiedAt" | "assuranceLevel" | "revokedAt" | "proofMetadata"
+                >;
+              };
+              const compound = args.where.identityLinkId_issuer_connectionId;
+              const key = [
+                compound.identityLinkId,
+                compound.issuer,
+                compound.connectionId,
+              ].join(":");
+              const existing = connectionProofs.get(key);
+              if (existing) {
+                Object.assign(existing, args.update);
+                return existing;
+              }
+              const proof = { ...args.create };
+              connectionProofs.set(key, proof);
+              return proof;
+            },
+          },
+        }
+      : {}),
   };
 
-  return { client, identities: identityMap, challenges, links };
+  return {
+    client,
+    identities: identityMap,
+    challenges,
+    links,
+    connectionProofs,
+  };
 }
 
 describe("audience identity private-channel binding", () => {
@@ -321,6 +488,62 @@ describe("audience identity private-channel binding", () => {
         fake.client as never,
       ),
     ).rejects.toThrow("already been used");
+  });
+
+  it("revokes an older live challenge when a newer command is minted for the same scope", async () => {
+    const fake = createFakeBindingClient([
+      {
+        id: "audience-1",
+        status: "REGISTERED",
+        mergedIntoId: null,
+        lastSeenAt: new Date(),
+      },
+    ]);
+    const first = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.TELEGRAM,
+        connectionId: "bot-1",
+      },
+      fake.client as never,
+    );
+    const second = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.TELEGRAM,
+        connectionId: "bot-1",
+      },
+      fake.client as never,
+    );
+
+    expect(
+      fake.challenges.get(hashBindingToken(first.token))?.revokedAt,
+    ).toBeInstanceOf(Date);
+    expect(
+      fake.challenges.get(hashBindingToken(second.token))?.revokedAt,
+    ).toBeNull();
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: first.token,
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          connectionId: "bot-1",
+        },
+        fake.client as never,
+      ),
+    ).rejects.toThrow("revoked");
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: second.token,
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          connectionId: "bot-1",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({ audienceIdentityId: "audience-1" });
   });
 
   it("does not move an existing provider link to another identity", async () => {
@@ -455,6 +678,355 @@ describe("audience identity private-channel binding", () => {
       ),
     ).rejects.toThrow("different provider connection");
     expect(fake.links.get("TELEGRAM:123")?.connectionId).toBe("bot-old");
+  });
+
+  it("allows one Telegram subject on multiple Bots for the same Web identity and upserts proofs idempotently", async () => {
+    const fake = createFakeBindingClient(
+      [
+        {
+          id: "audience-1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          lastSeenAt: new Date(),
+        },
+      ],
+      [],
+      { withConnectionProofs: true },
+    );
+
+    for (const connectionId of ["bot-a", "bot-b", "bot-b"]) {
+      const grant = await createIdentityBindingChallenge(
+        {
+          audienceIdentityId: "audience-1",
+          provider: IdentityLinkProvider.TELEGRAM,
+          connectionId,
+          expectedProviderSubject: "123456",
+        },
+        fake.client as never,
+      );
+      await expect(
+        consumeIdentityBindingChallenge(
+          {
+            token: grant.token,
+            provider: IdentityLinkProvider.TELEGRAM,
+            providerSubject: "123456",
+            connectionId,
+          },
+          fake.client as never,
+        ),
+      ).resolves.toMatchObject({
+        audienceIdentityId: "audience-1",
+        providerSubject: "123456",
+      });
+    }
+
+    const identityLink = fake.links.get("TELEGRAM:123456");
+    expect(identityLink).toMatchObject({
+      audienceIdentityId: "audience-1",
+      connectionId: "bot-a",
+    });
+    expect(
+      [...fake.connectionProofs.values()].map((proof) => ({
+        identityLinkId: proof.identityLinkId,
+        issuer: proof.issuer,
+        connectionId: proof.connectionId,
+        assuranceLevel: proof.assuranceLevel,
+        revokedAt: proof.revokedAt,
+      })),
+    ).toEqual([
+      {
+        identityLinkId: identityLink?.id,
+        issuer: "delegate",
+        connectionId: "bot-a",
+        assuranceLevel: IdentityAssuranceLevel.PLATFORM_VERIFIED,
+        revokedAt: null,
+      },
+      {
+        identityLinkId: identityLink?.id,
+        issuer: "delegate",
+        connectionId: "bot-b",
+        assuranceLevel: IdentityAssuranceLevel.PLATFORM_VERIFIED,
+        revokedAt: null,
+      },
+    ]);
+  });
+
+  it("does not let a second Bot reassign a Telegram subject to another Web identity", async () => {
+    const fake = createFakeBindingClient(
+      [
+        {
+          id: "audience-1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          lastSeenAt: new Date(),
+        },
+        {
+          id: "audience-2",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          lastSeenAt: new Date(),
+        },
+      ],
+      [],
+      { withConnectionProofs: true },
+    );
+    const firstGrant = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.TELEGRAM,
+        connectionId: "bot-a",
+      },
+      fake.client as never,
+    );
+    await consumeIdentityBindingChallenge(
+      {
+        token: firstGrant.token,
+        provider: IdentityLinkProvider.TELEGRAM,
+        providerSubject: "123456",
+        connectionId: "bot-a",
+      },
+      fake.client as never,
+    );
+
+    const takeoverGrant = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-2",
+        provider: IdentityLinkProvider.TELEGRAM,
+        connectionId: "bot-b",
+      },
+      fake.client as never,
+    );
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: takeoverGrant.token,
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          connectionId: "bot-b",
+        },
+        fake.client as never,
+      ),
+    ).rejects.toThrow("already bound to another");
+
+    expect(fake.links.get("TELEGRAM:123456")?.audienceIdentityId).toBe(
+      "audience-1",
+    );
+    expect(
+      [...fake.connectionProofs.values()].map((proof) => proof.connectionId),
+    ).toEqual(["bot-a"]);
+  });
+
+  it("revokes only one Bot proof, invalidates every pending retry, and permits explicit rebind", async () => {
+    const fake = createFakeBindingClient(
+      [
+        {
+          id: "audience-1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          lastSeenAt: new Date(),
+        },
+      ],
+      [],
+      { withConnectionProofs: true },
+    );
+
+    for (const connectionId of ["bot-a", "bot-b"]) {
+      const grant = await createIdentityBindingChallenge(
+        {
+          audienceIdentityId: "audience-1",
+          provider: IdentityLinkProvider.TELEGRAM,
+          connectionId,
+          expectedProviderSubject: "123456",
+        },
+        fake.client as never,
+      );
+      await consumeIdentityBindingChallenge(
+        {
+          token: grant.token,
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          connectionId,
+        },
+        fake.client as never,
+      );
+    }
+
+    const staleGrant = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.TELEGRAM,
+        connectionId: "bot-a",
+      },
+      fake.client as never,
+    );
+    await expect(
+      revokePrivateChannelIdentityBinding(
+        {
+          audienceIdentityId: "audience-1",
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          issuer: "delegate",
+          connectionId: "bot-a",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({ changed: true });
+
+    const link = fake.links.get("TELEGRAM:123456");
+    expect(link?.revokedAt).toBeNull();
+    expect(
+      [...fake.connectionProofs.values()].map((proof) => ({
+        connectionId: proof.connectionId,
+        revoked: proof.revokedAt !== null,
+      })),
+    ).toEqual([
+      { connectionId: "bot-a", revoked: true },
+      { connectionId: "bot-b", revoked: false },
+    ]);
+    expect(
+      await listActivePrivateChannelIdentityBindings(
+        "audience-1",
+        fake.client as never,
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        providerSubject: "123456",
+        connectionId: "bot-b",
+      }),
+    ]);
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: staleGrant.token,
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          connectionId: "bot-a",
+        },
+        fake.client as never,
+      ),
+    ).rejects.toThrow("revoked");
+
+    const retryGrant = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.TELEGRAM,
+        connectionId: "bot-a",
+      },
+      fake.client as never,
+    );
+    await expect(
+      revokePrivateChannelIdentityBinding(
+        {
+          audienceIdentityId: "audience-1",
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          issuer: "delegate",
+          connectionId: "bot-a",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({ changed: false });
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: retryGrant.token,
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          connectionId: "bot-a",
+        },
+        fake.client as never,
+      ),
+    ).rejects.toThrow("revoked");
+
+    const rebindGrant = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.TELEGRAM,
+        connectionId: "bot-a",
+      },
+      fake.client as never,
+    );
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: rebindGrant.token,
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          connectionId: "bot-a",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({ audienceIdentityId: "audience-1" });
+    expect(
+      [...fake.connectionProofs.values()].find(
+        (proof) => proof.connectionId === "bot-a",
+      )?.revokedAt,
+    ).toBeNull();
+  });
+
+  it("revokes the parent link when the last verified proof is removed", async () => {
+    const fake = createFakeBindingClient(
+      [
+        {
+          id: "audience-1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          lastSeenAt: new Date(),
+        },
+      ],
+      [],
+      { withConnectionProofs: true },
+    );
+    const grant = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        connectionId: "matrix-as",
+        expectedProviderSubject: "@alice:example.org",
+      },
+      fake.client as never,
+    );
+    await consumeIdentityBindingChallenge(
+      {
+        token: grant.token,
+        provider: IdentityLinkProvider.MATRIX,
+        providerSubject: "@alice:example.org",
+        connectionId: "matrix-as",
+      },
+      fake.client as never,
+    );
+
+    await expect(
+      revokePrivateChannelIdentityBinding(
+        {
+          audienceIdentityId: "audience-1",
+          provider: IdentityLinkProvider.MATRIX,
+          providerSubject: "@alice:example.org",
+          issuer: "delegate",
+          connectionId: "matrix-as",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({ changed: true });
+    expect(fake.links.get("MATRIX:@alice:example.org")?.revokedAt).toBeInstanceOf(
+      Date,
+    );
+    await expect(
+      listActivePrivateChannelIdentityBindings(
+        "audience-1",
+        fake.client as never,
+      ),
+    ).resolves.toEqual([]);
+
+    // Even if a legacy repair leaves the parent row active, the presence of a
+    // revoked proof must prevent the listing code from falling back to it.
+    fake.links.get("MATRIX:@alice:example.org")!.revokedAt = null;
+    await expect(
+      listActivePrivateChannelIdentityBindings(
+        "audience-1",
+        fake.client as never,
+      ),
+    ).resolves.toEqual([]);
   });
 
   it("requires a verified registered Web identity to mint a challenge", async () => {

@@ -47,6 +47,7 @@ import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
 import {
   ChannelUnavailableError,
   resolveChannelAvailability,
+  resolveTelegramDeliveryEndpointAvailability,
 } from "./channel-availability";
 import {
   consumeIdentityBindingChallenge,
@@ -974,6 +975,14 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
                 status: true,
                 desiredState: true,
                 healthStatus: true,
+                connectionId: true,
+                telegramBotConnectionId: true,
+                telegramBotConnection: {
+                  select: {
+                    id: true,
+                    botId: true,
+                  },
+                },
               },
             },
           },
@@ -1005,6 +1014,19 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
               }
             : null
         : null,
+      ...(normalizedChannel === "telegram" && binding
+        ? {
+            telegramEndpoint: {
+              conversationConnectionId: binding.connectionId,
+              representativeConnectionId:
+                binding.representativeBinding?.connectionId,
+              representativeTelegramBotConnectionId:
+                binding.representativeBinding?.telegramBotConnectionId,
+              representativeTelegramBot:
+                binding.representativeBinding?.telegramBotConnection,
+            },
+          }
+        : {}),
       overlays: (conversation.representative.runtimePolicyOverlays ?? []).map((overlay) => ({
         ...overlay,
         payload: isJsonRecord(overlay.payload) ? overlay.payload : {},
@@ -1221,6 +1243,13 @@ export async function acceptInboundConversationMessage(input: AcceptInboundMessa
           aggregateType: "generation_run",
           aggregateId: run.id,
           eventType: "generation.requested",
+          ...(binding?.transport ? { transport: binding.transport } : {}),
+          ...(binding?.sourceProvider
+            ? { sourceProvider: binding.sourceProvider }
+            : {}),
+          ...(binding?.connectionId
+            ? { connectionId: binding.connectionId }
+            : {}),
           payload: { runId: run.id, conversationId: conversation.id, messageId: message.id },
           idempotencyKey: `generation.requested:${run.id}`,
         },
@@ -1306,11 +1335,20 @@ export async function assertConversationChannelDeliveryAvailable(input: {
         take: 1,
         select: {
           metadata: true,
+          connectionId: true,
           representativeBinding: {
             select: {
               status: true,
               desiredState: true,
               healthStatus: true,
+              connectionId: true,
+              telegramBotConnectionId: true,
+              telegramBotConnection: {
+                select: {
+                  id: true,
+                  botId: true,
+                },
+              },
             },
           },
         },
@@ -1350,6 +1388,17 @@ export async function assertConversationChannelDeliveryAvailable(input: {
           healthStatus: binding.healthStatus,
         }
       : null,
+    ...(input.channel === "telegram" && channelBinding
+      ? {
+          telegramEndpoint: {
+            conversationConnectionId: channelBinding.connectionId,
+            representativeConnectionId: binding?.connectionId,
+            representativeTelegramBotConnectionId:
+              binding?.telegramBotConnectionId,
+            representativeTelegramBot: binding?.telegramBotConnection,
+          },
+        }
+      : {}),
     overlays: conversation.representative.runtimePolicyOverlays.map((overlay) => ({
       ...overlay,
       payload: isJsonRecord(overlay.payload) ? overlay.payload : {},
@@ -2102,6 +2151,7 @@ export type ClaimedGenerationWorkItem = {
   userText: string;
   channel: "web" | "matrix" | "telegram";
   externalConversationId?: string;
+  telegramConnectionId?: string;
   matrixSenderUserId?: string;
   deliveryOnly?: boolean;
   outputMessageId?: string;
@@ -2358,6 +2408,14 @@ export async function claimNextGenerationWorkItem(
                     status: true,
                     desiredState: true,
                     healthStatus: true,
+                    connectionId: true,
+                    telegramBotConnectionId: true,
+                    telegramBotConnection: {
+                      select: {
+                        id: true,
+                        botId: true,
+                      },
+                    },
                   },
                 },
               },
@@ -2426,6 +2484,14 @@ export async function claimNextGenerationWorkItem(
                     status: true,
                     desiredState: true,
                     healthStatus: true,
+                    connectionId: true,
+                    telegramBotConnectionId: true,
+                    telegramBotConnection: {
+                      select: {
+                        id: true,
+                        botId: true,
+                      },
+                    },
                   },
                 },
               },
@@ -2835,6 +2901,22 @@ export async function claimNextGenerationWorkItem(
               }
             : null
         : null,
+      ...(channel === "telegram" && activeBinding
+        ? {
+            telegramEndpoint: {
+              conversationConnectionId: activeBinding.connectionId,
+              representativeConnectionId:
+                activeBinding.representativeBinding?.connectionId,
+              ...(outbox.connectionId?.trim()
+                ? { expectedConnectionId: outbox.connectionId }
+                : {}),
+              representativeTelegramBotConnectionId:
+                activeBinding.representativeBinding?.telegramBotConnectionId,
+              representativeTelegramBot:
+                activeBinding.representativeBinding?.telegramBotConnection,
+            },
+          }
+        : {}),
       overlays: (run.conversation.representative.runtimePolicyOverlays ?? []).map((overlay) => ({
         ...overlay,
         payload: isJsonRecord(overlay.payload) ? overlay.payload : {},
@@ -2842,6 +2924,27 @@ export async function claimNextGenerationWorkItem(
     });
     if (!availability.available) {
       if (run.status === GenerationRunStatus.COMPLETED) {
+        if (availability.code === "telegram_connection_reassigned") {
+          if (run.outputMessage) {
+            await tx.message.update({
+              where: { id: run.outputMessage.id },
+              data: {
+                deliveryStatus: MessageDeliveryStatus.CANCELED,
+                failureCode: availability.code,
+                failureReason:
+                  "Telegram delivery was canceled because this conversation belongs to a previously assigned Bot.",
+              },
+            });
+          }
+          await tx.outboxEvent.update({
+            where: { id: outbox.id },
+            data: {
+              status: "DEAD_LETTER",
+              lastError: availability.code,
+            },
+          });
+          return null;
+        }
         await tx.outboxEvent.update({
           where: { id: outbox.id },
           data: {
@@ -2854,10 +2957,14 @@ export async function claimNextGenerationWorkItem(
         return null;
       }
       const canceledAt = new Date();
+      const failureReason =
+        availability.code === "telegram_connection_reassigned"
+          ? "Generation canceled because this Telegram conversation belongs to a previously assigned Bot."
+          : `Generation canceled because ${availability.code}.`;
       await abortDelegatedTaskForGenerationClaimFailure(
         tx,
         run,
-        `Generation canceled because ${availability.code}.`,
+        failureReason,
       );
       await releaseConversationEntitlementByGenerationRunId(
         {
@@ -2889,7 +2996,7 @@ export async function claimNextGenerationWorkItem(
         data: {
           status: GenerationRunStatus.CANCELED,
           errorCode: availability.code,
-          errorMessage: `Generation canceled because ${availability.code}.`,
+          errorMessage: failureReason,
           canceledAt,
         },
       });
@@ -2898,7 +3005,10 @@ export async function claimNextGenerationWorkItem(
         data: {
           deliveryStatus: MessageDeliveryStatus.CANCELED,
           failureCode: availability.code,
-          failureReason: "The channel is not currently available.",
+          failureReason:
+            availability.code === "telegram_connection_reassigned"
+              ? "This Telegram conversation belongs to a previously assigned Bot."
+              : "The channel is not currently available.",
         },
       });
       await tx.outboxEvent.update({
@@ -2920,6 +3030,10 @@ export async function claimNextGenerationWorkItem(
     const walletReservation = readGenerationWalletReservation(
       run.runtimePolicySnapshot,
     );
+    const telegramConnectionId =
+      channel === "telegram"
+        ? activeBinding?.representativeBinding?.connectionId || null
+        : null;
 
     if (run.status !== GenerationRunStatus.COMPLETED) {
       await tx.generationRun.update({
@@ -2958,6 +3072,9 @@ export async function claimNextGenerationWorkItem(
       channel,
       ...(activeBinding
         ? { externalConversationId: activeBinding.externalConversationId }
+        : {}),
+      ...(telegramConnectionId
+        ? { telegramConnectionId }
         : {}),
       ...(matrixVirtualUser ? { matrixSenderUserId: matrixVirtualUser.matrixUserId } : {}),
       ...(run.status === GenerationRunStatus.COMPLETED && run.outputMessage
@@ -3742,6 +3859,7 @@ export type ClaimedOperatorMessageWorkItem = {
   operatorName: string;
   channel: "matrix" | "telegram";
   externalConversationId: string;
+  telegramConnectionId?: string;
   matrixSenderUserId?: string;
 };
 
@@ -3806,7 +3924,22 @@ export async function claimNextOperatorMessageWorkItem(
     const message = await tx.message.findUnique({
       where: { id: outbox.aggregateId },
       include: {
-        channelBinding: true,
+        channelBinding: {
+          include: {
+            representativeBinding: {
+              select: {
+                connectionId: true,
+                telegramBotConnectionId: true,
+                telegramBotConnection: {
+                  select: {
+                    id: true,
+                    botId: true,
+                  },
+                },
+              },
+            },
+          },
+        },
         conversation: {
           include: {
             representative: {
@@ -3857,6 +3990,42 @@ export async function claimNextOperatorMessageWorkItem(
       });
       return null;
     }
+    if (channel === "telegram") {
+      const endpointAvailability =
+        resolveTelegramDeliveryEndpointAvailability({
+          conversationConnectionId: message.channelBinding.connectionId,
+          representativeConnectionId:
+            message.channelBinding.representativeBinding?.connectionId,
+          ...(outbox.connectionId?.trim()
+            ? { expectedConnectionId: outbox.connectionId }
+            : {}),
+          representativeTelegramBotConnectionId:
+            message.channelBinding.representativeBinding
+              ?.telegramBotConnectionId,
+          representativeTelegramBot:
+            message.channelBinding.representativeBinding
+              ?.telegramBotConnection,
+        });
+      if (!endpointAvailability.available) {
+        await tx.message.update({
+          where: { id: message.id },
+          data: {
+            deliveryStatus: MessageDeliveryStatus.CANCELED,
+            failureCode: endpointAvailability.code,
+            failureReason:
+              "Telegram delivery was canceled because this conversation belongs to a previously assigned Bot.",
+          },
+        });
+        await tx.outboxEvent.update({
+          where: { id: outbox.id },
+          data: {
+            status: "DEAD_LETTER",
+            lastError: endpointAvailability.code,
+          },
+        });
+        return null;
+      }
+    }
     if (channel === "telegram" && options.telegramWorkerEnabled === false) {
       await tx.outboxEvent.update({
         where: { id: outbox.id },
@@ -3883,6 +4052,10 @@ export async function claimNextOperatorMessageWorkItem(
           select: { matrixUserId: true },
         })
       : null;
+    const telegramConnectionId =
+      channel === "telegram"
+        ? message.channelBinding.representativeBinding?.connectionId || null
+        : null;
     return {
       outboxId: outbox.id,
       messageId: message.id,
@@ -3891,6 +4064,9 @@ export async function claimNextOperatorMessageWorkItem(
       operatorName: message.senderDisplayName || "Operator",
       channel,
       externalConversationId: message.channelBinding.externalConversationId,
+      ...(telegramConnectionId
+        ? { telegramConnectionId }
+        : {}),
       ...(matrixTransportUser
         ? { matrixSenderUserId: matrixTransportUser.matrixUserId }
         : {}),
@@ -4263,6 +4439,7 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
 }) {
   const results: MatrixApplicationServiceIngestResult[] = [];
   const persistedEvents: PersistedMatrixApplicationServiceEvent[] = [];
+  const matrixConnectionId = resolveMatrixApplicationServiceConnectionId();
 
   // Persist the whole transaction before applying any business side effects. Matrix
   // homeservers retry transactions, so the event id is the durable idempotency key.
@@ -4273,8 +4450,9 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
 
     const inbox = await prisma.channelEventInbox.upsert({
       where: {
-        kind_externalEventId: {
+        kind_connectionId_externalEventId: {
           kind: RepresentativeChannelKind.MATRIX,
+          connectionId: matrixConnectionId,
           externalEventId: eventId,
         },
       },
@@ -4282,7 +4460,8 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         kind: RepresentativeChannelKind.MATRIX,
         transport: ChannelTransport.MATRIX,
         sourceProvider: ChannelSourceProvider.MATRIX,
-        originKey: `matrix:${eventId}`,
+        connectionId: matrixConnectionId,
+        originKey: `matrix:${matrixConnectionId}:${eventId}`,
         transactionId: input.transactionId,
         externalEventId: eventId,
         eventType,
@@ -4716,6 +4895,21 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
             });
             continue;
           }
+        } else if (!await hasActiveMatrixAudienceConnectionProof({
+          audienceIdentityId: binding.conversation.audienceIdentityId,
+          providerSubject: sender,
+          issuer: matrixHomeserverFromUserId(sender),
+          connectionId:
+            binding.connectionId
+            || resolveMatrixApplicationServiceConnectionId(),
+        })) {
+          await markMatrixInboxProcessed(inboxId);
+          results.push({
+            eventId,
+            status: "ignored",
+            reason: "matrix_identity_connection_not_verified",
+          });
+          continue;
         } else if (relationType === "m.replace" && targetEventId) {
           const replacement = isJsonRecord(content["m.new_content"])
             ? content["m.new_content"]
@@ -5426,6 +5620,15 @@ export async function sendOperatorConversationMessage(input: {
           aggregateType: "operator_message",
           aggregateId: message.id,
           eventType: "operator.message.requested",
+          ...(channelBinding.transport
+            ? { transport: channelBinding.transport }
+            : {}),
+          ...(channelBinding.sourceProvider
+            ? { sourceProvider: channelBinding.sourceProvider }
+            : {}),
+          ...(channelBinding.connectionId
+            ? { connectionId: channelBinding.connectionId }
+            : {}),
           payload: {
             messageId: message.id,
             conversationId: conversation.id,
@@ -7003,6 +7206,81 @@ function matrixHomeserverFromUserId(matrixUserId: string): string {
     throw new Error("Matrix sender must be a full MXID.");
   }
   return matrixUserId.slice(separator + 1).toLowerCase();
+}
+
+async function hasActiveMatrixAudienceConnectionProof(input: {
+  audienceIdentityId: string | null;
+  providerSubject: string;
+  issuer: string;
+  connectionId: string;
+}): Promise<boolean> {
+  const audienceIdentityId = input.audienceIdentityId?.trim();
+  const providerSubject = normalizeMatrixProviderSubject(
+    input.providerSubject,
+  );
+  const issuer = input.issuer.trim().toLowerCase();
+  const connectionId = input.connectionId.trim().toLowerCase();
+  if (!audienceIdentityId || !issuer || !connectionId) return false;
+
+  const identityLink = await prisma.identityLink.findUnique({
+    where: {
+      provider_providerSubject: {
+        provider: privateChannelIdentityProviders.matrix,
+        providerSubject,
+      },
+    },
+    select: {
+      id: true,
+      audienceIdentityId: true,
+      issuer: true,
+      verifiedAt: true,
+      assuranceLevel: true,
+      revokedAt: true,
+    },
+  });
+  if (
+    !identityLink
+    || identityLink.audienceIdentityId !== audienceIdentityId
+    || identityLink.issuer.trim().toLowerCase() !== issuer
+    || identityLink.revokedAt
+    || !identityLink.verifiedAt
+    || (
+      identityLink.assuranceLevel !== "PLATFORM_VERIFIED"
+      && identityLink.assuranceLevel !== "STEP_UP_VERIFIED"
+    )
+  ) {
+    return false;
+  }
+
+  const proof = await prisma.identityLinkConnectionProof.findUnique({
+    where: {
+      identityLinkId_issuer_connectionId: {
+        identityLinkId: identityLink.id,
+        issuer,
+        connectionId,
+      },
+    },
+    select: {
+      verifiedAt: true,
+      assuranceLevel: true,
+      revokedAt: true,
+    },
+  });
+  return Boolean(
+    proof
+    && !proof.revokedAt
+    && proof.verifiedAt
+    && (
+      proof.assuranceLevel === "PLATFORM_VERIFIED"
+      || proof.assuranceLevel === "STEP_UP_VERIFIED"
+    ),
+  );
+}
+
+function normalizeMatrixProviderSubject(matrixUserId: string): string {
+  const normalized = matrixUserId.trim();
+  const issuer = matrixHomeserverFromUserId(normalized);
+  return `${normalized.slice(0, normalized.lastIndexOf(":") + 1)}${issuer}`;
 }
 
 function isJsonRecord(value: unknown): value is Record<string, unknown> {

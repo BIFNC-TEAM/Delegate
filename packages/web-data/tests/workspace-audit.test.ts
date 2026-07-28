@@ -38,6 +38,7 @@ describe("workspace audit normalization", () => {
     expect(classifyWorkspaceAuditEvent("approval_resolved")).toBe("approvals");
     expect(classifyWorkspaceAuditEvent("workflow_failed")).toBe("workflow");
     expect(classifyWorkspaceAuditEvent("representative_version_published")).toBe("publishing");
+    expect(classifyWorkspaceAuditEvent("channel_configuration_changed")).toBe("publishing");
     expect(classifyWorkspaceAuditEvent("tool_execution_failed")).toBe("tools");
   });
 

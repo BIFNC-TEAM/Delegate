@@ -200,6 +200,8 @@ services:
       DELEGATE_WECHAT_PAY_PROCESSING_ENABLED: ${DELEGATE_WECHAT_PAY_PROCESSING_ENABLED:-}
       WECHAT_PAY_NOTIFY_URL: ${WECHAT_PAY_NOTIFY_URL:-}
       WECHAT_PAY_REFUND_NOTIFY_URL: ${WECHAT_PAY_REFUND_NOTIFY_URL:-}
+      CHANNEL_CREDENTIAL_MASTER_KEY: ${CHANNEL_CREDENTIAL_MASTER_KEY:-}
+      CHANNEL_CREDENTIAL_MASTER_KEY_VERSION: ${CHANNEL_CREDENTIAL_MASTER_KEY_VERSION:-v1}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -266,8 +268,14 @@ services:
     <<: *app-service
     environment:
       <<: *app-environment
+      CHANNEL_CREDENTIAL_MASTER_KEY: ${CHANNEL_CREDENTIAL_MASTER_KEY:-}
+      CHANNEL_CREDENTIAL_MASTER_KEY_VERSION: ${CHANNEL_CREDENTIAL_MASTER_KEY_VERSION:-v1}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_WEB_RECHARGE_BASE_URL: ${TELEGRAM_WEB_RECHARGE_BASE_URL:-}
+      TELEGRAM_RUNTIME_RECONCILE_MS: ${TELEGRAM_RUNTIME_RECONCILE_MS:-5000}
+      TELEGRAM_RUNTIME_LEASE_MS: ${TELEGRAM_RUNTIME_LEASE_MS:-120000}
+      TELEGRAM_RUNTIME_LEASE_RENEW_MS: ${TELEGRAM_RUNTIME_LEASE_RENEW_MS:-20000}
+      TELEGRAM_RUNTIME_LEASE_DB_TIMEOUT_MS: ${TELEGRAM_RUNTIME_LEASE_DB_TIMEOUT_MS:-10000}
     restart: "on-failure:3"
     stop_grace_period: 70s
     depends_on:
@@ -276,12 +284,7 @@ services:
       openviking:
         condition: service_started
     command: >
-      sh -lc "if [ -n \"$$TELEGRAM_BOT_TOKEN\" ]; then
-        cd /app/apps/bot && exec node --import tsx src/index.ts;
-      else
-        echo 'TELEGRAM_BOT_TOKEN is empty. Bot container is idle; set the token to enable Telegram runtime.';
-        tail -f /dev/null;
-      fi"
+      sh -lc "cd /app/apps/bot && exec node --import tsx src/index.ts"
 
   compute-broker:
     <<: *app-service
@@ -395,6 +398,8 @@ services:
     <<: *app-service
     environment:
       <<: *app-environment
+      CHANNEL_CREDENTIAL_MASTER_KEY: ${CHANNEL_CREDENTIAL_MASTER_KEY:-}
+      CHANNEL_CREDENTIAL_MASTER_KEY_VERSION: ${CHANNEL_CREDENTIAL_MASTER_KEY_VERSION:-v1}
       MATRIX_AS_TOKEN: ${MATRIX_AS_TOKEN:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
     depends_on:

@@ -76,6 +76,9 @@ vi.hoisted(() => {
         async (callback: (client: typeof transactionClient) => unknown) =>
           callback(transactionClient),
       ),
+      conversation: {
+        findUnique: vi.fn(),
+      },
     },
     mockAbortDelegationTaskForGenerationFailure: vi.fn(),
   };
@@ -89,6 +92,7 @@ vi.mock("../src/delegation-tasks", () => ({
 
 import {
   acceptInboundConversationMessage,
+  assertConversationChannelDeliveryAvailable,
   claimNextGenerationWorkItem,
   claimNextOperatorMessageWorkItem,
   completeInlineGenerationRun,
@@ -1345,7 +1349,7 @@ describe("conversation runtime version pin", () => {
     expect(tx.message.update).not.toHaveBeenCalled();
   });
 
-  it("reclaims an expired processing lease and returns only persisted delivery for a completed run", async () => {
+  it("claims a completed Telegram delivery with a legacy null outbox connection when the live bindings still match", async () => {
     tx.$queryRaw.mockResolvedValue([{
       id: "outbox-delivery",
       aggregateId: "run-delivery",
@@ -1355,6 +1359,7 @@ describe("conversation runtime version pin", () => {
     tx.outboxEvent.update.mockResolvedValue({
       id: "outbox-delivery",
       aggregateId: "run-delivery",
+      connectionId: null,
     });
     tx.generationRun.findUnique.mockResolvedValue({
       id: "run-delivery",
@@ -1376,11 +1381,18 @@ describe("conversation runtime version pin", () => {
         channelBinding: {
           id: "telegram-binding-1",
           kind: "TELEGRAM",
+          connectionId: "111111111",
           externalConversationId: "123456",
           representativeBinding: {
             status: "CONNECTED",
             desiredState: "ACTIVE",
             healthStatus: "HEALTHY",
+            connectionId: "111111111",
+            telegramBotConnectionId: "telegram-connection-a",
+            telegramBotConnection: {
+              id: "telegram-connection-a",
+              botId: "111111111",
+            },
           },
         },
       },
@@ -1427,6 +1439,7 @@ describe("conversation runtime version pin", () => {
       runId: "run-delivery",
       channel: "telegram",
       externalConversationId: "123456",
+      telegramConnectionId: "111111111",
       deliveryOnly: true,
       outputMessageId: "message-output",
       outputText: "persisted reply",
@@ -1777,6 +1790,302 @@ describe("conversation runtime version pin", () => {
     });
   });
 
+  it("cancels queued Telegram generation after the representative switches Bots", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-telegram-reassigned-queued",
+      aggregateId: "run-telegram-reassigned-queued",
+      status: "PENDING",
+      attemptCount: 0,
+    }]);
+    tx.outboxEvent.update.mockResolvedValue({
+      id: "outbox-telegram-reassigned-queued",
+      aggregateId: "run-telegram-reassigned-queued",
+      connectionId: "111111111",
+      attemptCount: 1,
+    });
+    const telegramBinding = {
+      id: "telegram-binding-reassigned-queued",
+      kind: "TELEGRAM",
+      connectionId: "111111111",
+      externalConversationId: "123456",
+      representativeBinding: {
+        status: "CONFIGURED",
+        desiredState: "ACTIVE",
+        healthStatus: "HEALTHY",
+        connectionId: "222222222",
+        telegramBotConnectionId: "telegram-connection-b",
+        telegramBotConnection: {
+          id: "telegram-connection-b",
+          botId: "222222222",
+        },
+      },
+    };
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-telegram-reassigned-queued",
+      status: "QUEUED",
+      delegationTaskId: null,
+      delegationTaskStepId: null,
+      delegationTaskStep: null,
+      contextSnapshot: null,
+      runtimePolicySnapshot: null,
+      representativeVersionId: "representative-version-1",
+      episodeId: "episode-1",
+      episode: {
+        representativeVersionId: "representative-version-1",
+      },
+      inputMessageId: "message-telegram-inbound-queued",
+      inputMessage: {
+        id: "message-telegram-inbound-queued",
+        text: "hello from Bot A",
+        channelBinding: telegramBinding,
+      },
+      outputMessage: null,
+      conversation: {
+        id: "conversation-telegram-reassigned-queued",
+        representativeId: "representative-1",
+        contactId: "contact-1",
+        audienceIdentityId: "audience-1",
+        state: "AI_QUEUED",
+        freeRepliesUsed: 1,
+        passUnlockedAt: null,
+        deepHelpUnlockedAt: null,
+        representative: {
+          slug: "representative",
+          displayName: "Representative",
+          lifecycleState: "PUBLISHED",
+          activeVersionId: "representative-version-1",
+          publicMode: true,
+          runtimePolicyOverlays: [],
+        },
+        channelBindings: [telegramBinding],
+      },
+    });
+
+    await expect(claimNextGenerationWorkItem({
+      telegramWorkerEnabled: true,
+    })).resolves.toBeNull();
+
+    expect(tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-telegram-reassigned-queued" },
+      data: {
+        status: "CANCELED",
+        errorCode: "telegram_connection_reassigned",
+        errorMessage:
+          "Generation canceled because this Telegram conversation belongs to a previously assigned Bot.",
+        canceledAt: expect.any(Date),
+      },
+    });
+    expect(tx.message.update).toHaveBeenCalledWith({
+      where: { id: "message-telegram-inbound-queued" },
+      data: {
+        deliveryStatus: "CANCELED",
+        failureCode: "telegram_connection_reassigned",
+        failureReason:
+          "This Telegram conversation belongs to a previously assigned Bot.",
+      },
+    });
+    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
+      where: { id: "outbox-telegram-reassigned-queued" },
+      data: {
+        status: "DEAD_LETTER",
+        lastError: "telegram_connection_reassigned",
+      },
+    });
+  });
+
+  it("dead-letters completed Telegram delivery after the representative switches Bots", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-telegram-reassigned",
+      aggregateId: "run-telegram-reassigned",
+      status: "PENDING",
+      attemptCount: 0,
+    }]);
+    tx.outboxEvent.update.mockResolvedValue({
+      id: "outbox-telegram-reassigned",
+      aggregateId: "run-telegram-reassigned",
+      connectionId: "111111111",
+      attemptCount: 1,
+    });
+    const telegramBinding = {
+      id: "telegram-binding-reassigned",
+      kind: "TELEGRAM",
+      connectionId: "111111111",
+      externalConversationId: "123456",
+      representativeBinding: {
+        status: "CONFIGURED",
+        desiredState: "ACTIVE",
+        healthStatus: "HEALTHY",
+        connectionId: "222222222",
+        telegramBotConnectionId: "telegram-connection-b",
+        telegramBotConnection: {
+          id: "telegram-connection-b",
+          botId: "222222222",
+        },
+      },
+    };
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-telegram-reassigned",
+      status: "COMPLETED",
+      delegationTaskId: null,
+      delegationTaskStepId: null,
+      delegationTaskStep: null,
+      contextSnapshot: null,
+      representativeVersionId: "representative-version-1",
+      episodeId: "episode-1",
+      episode: {
+        representativeVersionId: "representative-version-1",
+      },
+      inputMessageId: "message-telegram-inbound",
+      inputMessage: {
+        id: "message-telegram-inbound",
+        text: "hello from Bot A",
+        channelBinding: telegramBinding,
+      },
+      outputMessage: {
+        id: "message-telegram-output",
+        text: "must not be sent",
+        externalMessageId: null,
+      },
+      conversation: {
+        id: "conversation-telegram-reassigned",
+        representativeId: "representative-1",
+        contactId: "contact-1",
+        audienceIdentityId: "audience-1",
+        state: "WAITING_USER",
+        freeRepliesUsed: 1,
+        passUnlockedAt: null,
+        deepHelpUnlockedAt: null,
+        representative: {
+          slug: "representative",
+          displayName: "Representative",
+          lifecycleState: "PUBLISHED",
+          activeVersionId: "representative-version-1",
+          publicMode: true,
+          runtimePolicyOverlays: [],
+        },
+        channelBindings: [telegramBinding],
+      },
+    });
+
+    await expect(claimNextGenerationWorkItem({
+      telegramWorkerEnabled: true,
+    })).resolves.toBeNull();
+
+    expect(tx.message.update).toHaveBeenCalledWith({
+      where: { id: "message-telegram-output" },
+      data: {
+        deliveryStatus: "CANCELED",
+        failureCode: "telegram_connection_reassigned",
+        failureReason:
+          "Telegram delivery was canceled because this conversation belongs to a previously assigned Bot.",
+      },
+    });
+    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
+      where: { id: "outbox-telegram-reassigned" },
+      data: {
+        status: "DEAD_LETTER",
+        lastError: "telegram_connection_reassigned",
+      },
+    });
+  });
+
+  it("rejects delivery availability for a historical Telegram conversation after Bot reassignment", async () => {
+    mockPrisma.conversation.findUnique.mockResolvedValue({
+      state: "WAITING_USER",
+      representative: {
+        lifecycleState: "PUBLISHED",
+        activeVersionId: "representative-version-1",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+      channelBindings: [{
+        metadata: null,
+        connectionId: "111111111",
+        representativeBinding: {
+          status: "CONFIGURED",
+          desiredState: "ACTIVE",
+          healthStatus: "HEALTHY",
+          connectionId: "222222222",
+          telegramBotConnectionId: "telegram-connection-b",
+          telegramBotConnection: {
+            id: "telegram-connection-b",
+            botId: "222222222",
+          },
+        },
+      }],
+    });
+
+    await expect(
+      assertConversationChannelDeliveryAvailable({
+        conversationId: "conversation-telegram-reassigned",
+        channel: "telegram",
+        senderMode: "ai",
+      }),
+    ).rejects.toMatchObject({
+      name: "ChannelUnavailableError",
+      code: "telegram_connection_reassigned",
+    });
+  });
+
+  it("dead-letters an Operator reply queued for a previously assigned Telegram Bot", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-operator-reassigned",
+      attemptCount: 0,
+    }]);
+    tx.outboxEvent.update.mockResolvedValue({
+      id: "outbox-operator-reassigned",
+      aggregateId: "message-operator-reassigned",
+      connectionId: "111111111",
+    });
+    tx.message.findUnique.mockResolvedValue({
+      id: "message-operator-reassigned",
+      conversationId: "conversation-telegram-reassigned",
+      text: "operator reply",
+      senderDisplayName: "Owner",
+      externalMessageId: null,
+      channelBinding: {
+        kind: "TELEGRAM",
+        connectionId: "111111111",
+        externalConversationId: "123456",
+        representativeBinding: {
+          connectionId: "222222222",
+          telegramBotConnectionId: "telegram-connection-b",
+          telegramBotConnection: {
+            id: "telegram-connection-b",
+            botId: "222222222",
+          },
+        },
+      },
+      conversation: {
+        representative: {
+          id: "representative-1",
+          ownerId: "owner-1",
+        },
+      },
+    });
+
+    await expect(claimNextOperatorMessageWorkItem({
+      telegramWorkerEnabled: true,
+    })).resolves.toBeNull();
+
+    expect(tx.message.update).toHaveBeenCalledWith({
+      where: { id: "message-operator-reassigned" },
+      data: {
+        deliveryStatus: "CANCELED",
+        failureCode: "telegram_connection_reassigned",
+        failureReason:
+          "Telegram delivery was canceled because this conversation belongs to a previously assigned Bot.",
+      },
+    });
+    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
+      where: { id: "outbox-operator-reassigned" },
+      data: {
+        status: "DEAD_LETTER",
+        lastError: "telegram_connection_reassigned",
+      },
+    });
+  });
+
   it("keeps Telegram operator outbox pending when worker does not own delivery", async () => {
     tx.$queryRaw.mockResolvedValue([{
       id: "outbox-operator",
@@ -1786,6 +2095,7 @@ describe("conversation runtime version pin", () => {
       .mockResolvedValueOnce({
         id: "outbox-operator",
         aggregateId: "message-operator",
+        connectionId: "111111111",
       })
       .mockResolvedValueOnce({ id: "outbox-operator" });
     tx.message.findUnique.mockResolvedValue({
@@ -1795,7 +2105,16 @@ describe("conversation runtime version pin", () => {
       senderDisplayName: "Owner",
       channelBinding: {
         kind: "TELEGRAM",
+        connectionId: "111111111",
         externalConversationId: "123456",
+        representativeBinding: {
+          connectionId: "111111111",
+          telegramBotConnectionId: "telegram-connection-a",
+          telegramBotConnection: {
+            id: "telegram-connection-a",
+            botId: "111111111",
+          },
+        },
       },
       conversation: {
         representative: {

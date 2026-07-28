@@ -7,6 +7,7 @@ import {
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
+import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
 import { mergeAudienceIdentity } from "./web-audience";
 
 const DEFAULT_CHALLENGE_TTL_SECONDS = 10 * 60;
@@ -24,6 +25,7 @@ type BindingChallengeRecord = {
   expiresAt: Date;
   consumedAt: Date | null;
   revokedAt: Date | null;
+  metadata?: unknown;
 };
 
 type IdentityLinkRecord = {
@@ -32,6 +34,16 @@ type IdentityLinkRecord = {
   issuer: string;
   connectionId: string | null;
   revokedAt: Date | null;
+};
+
+type IdentityLinkConnectionProofRecord = {
+  identityLinkId: string;
+  issuer: string;
+  connectionId: string;
+  verifiedAt: Date | null;
+  assuranceLevel: IdentityAssuranceLevel;
+  revokedAt: Date | null;
+  proofMetadata?: unknown;
 };
 
 type AudienceBindingClient = {
@@ -55,14 +67,22 @@ type AudienceBindingClient = {
     update(args: unknown): Promise<IdentityLinkRecord>;
     findMany?(args: unknown): Promise<
       Array<{
+        id?: string;
         provider: IdentityLinkProvider;
         providerSubject: string;
         issuer: string;
         connectionId: string | null;
         verifiedAt: Date | null;
         assuranceLevel: IdentityAssuranceLevel;
+        connectionProofs?: IdentityLinkConnectionProofRecord[];
       }>
     >;
+  };
+  identityLinkConnectionProof?: {
+    findUnique(args: unknown): Promise<IdentityLinkConnectionProofRecord | null>;
+    updateMany(args: unknown): Promise<{ count: number }>;
+    count(args: unknown): Promise<number>;
+    upsert(args: unknown): Promise<IdentityLinkConnectionProofRecord>;
   };
 };
 
@@ -99,6 +119,25 @@ export type IdentityBindingResult = {
   providerSubject: string;
   issuer: string;
   verifiedAt: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type RevokePrivateChannelIdentityBindingInput = {
+  audienceIdentityId: string;
+  provider: IdentityLinkProvider;
+  providerSubject: string;
+  issuer: string;
+  connectionId: string;
+};
+
+export type RevokePrivateChannelIdentityBindingResult = {
+  binding: {
+    provider: IdentityLinkProvider;
+    providerSubject: string;
+    issuer: string;
+    connectionId: string;
+  };
+  changed: boolean;
 };
 
 export type ActivePrivateChannelIdentityBinding = {
@@ -117,7 +156,7 @@ export const privateChannelIdentityProviders = {
 
 export async function listActivePrivateChannelIdentityBindings(
   audienceIdentityId: string,
-  client: AudienceBindingClient = prisma,
+  client: AudienceBindingClient = prisma as unknown as AudienceBindingClient,
 ): Promise<ActivePrivateChannelIdentityBinding[]> {
   const id = requireNonEmpty(audienceIdentityId, "Audience identity id");
   const identity = await client.audienceIdentity.findUnique({
@@ -152,18 +191,51 @@ export async function listActivePrivateChannelIdentityBindings(
       connectionId: true,
       verifiedAt: true,
       assuranceLevel: true,
+      connectionProofs: {
+        select: {
+          identityLinkId: true,
+          issuer: true,
+          connectionId: true,
+          verifiedAt: true,
+          assuranceLevel: true,
+          revokedAt: true,
+          proofMetadata: true,
+        },
+        orderBy: [{ createdAt: "asc" }],
+      },
     },
     orderBy: [{ provider: "asc" }, { createdAt: "asc" }],
   });
 
-  return bindings.map((binding) => ({
-    provider: binding.provider,
-    providerSubject: binding.providerSubject,
-    issuer: binding.issuer,
-    connectionId: binding.connectionId,
-    verifiedAt: binding.verifiedAt?.toISOString() ?? null,
-    assuranceLevel: binding.assuranceLevel,
-  }));
+  return bindings.flatMap((binding) => {
+    if (binding.connectionProofs?.length) {
+      return binding.connectionProofs.flatMap((proof) =>
+        proof.revokedAt === null
+        && proof.verifiedAt !== null
+        && (
+          proof.assuranceLevel === IdentityAssuranceLevel.PLATFORM_VERIFIED
+          || proof.assuranceLevel === IdentityAssuranceLevel.STEP_UP_VERIFIED
+        )
+          ? [{
+              provider: binding.provider,
+              providerSubject: binding.providerSubject,
+              issuer: proof.issuer,
+              connectionId: proof.connectionId,
+              verifiedAt: proof.verifiedAt.toISOString(),
+              assuranceLevel: proof.assuranceLevel,
+            }]
+          : [],
+      );
+    }
+    return [{
+      provider: binding.provider,
+      providerSubject: binding.providerSubject,
+      issuer: binding.issuer,
+      connectionId: binding.connectionId,
+      verifiedAt: binding.verifiedAt?.toISOString() ?? null,
+      assuranceLevel: binding.assuranceLevel,
+    }];
+  });
 }
 
 export function isVerifiedPrivateChannelIdentityBinding(
@@ -192,7 +264,7 @@ export function isVerifiedPrivateChannelIdentityBinding(
  */
 export async function createIdentityBindingChallenge(
   input: CreateIdentityBindingChallengeInput,
-  client: AudienceBindingClient = prisma,
+  client: AudienceBindingClient = prisma as unknown as AudienceBindingClient,
 ): Promise<IdentityBindingChallengeGrant> {
   const audienceIdentityId = requireNonEmpty(input.audienceIdentityId, "Audience identity id");
   const issuer = normalizeIssuer(input.issuer);
@@ -202,58 +274,85 @@ export async function createIdentityBindingChallenge(
   const expectedProviderSubject = input.expectedProviderSubject
     ? normalizeProviderSubject(input.provider, input.expectedProviderSubject)
     : undefined;
-
-  const identity = await client.audienceIdentity.findUnique({
-    where: { id: audienceIdentityId },
-    select: { id: true, status: true },
-  });
-  if (!identity) throw new Error("Audience identity was not found.");
-  if (identity.status !== "REGISTERED") {
-    throw new Error(
-      "Private-channel binding must target a registered Web identity.",
-    );
-  }
-  const verifiedWebLink = await client.identityLink.findFirst({
-    where: {
-      audienceIdentityId,
-      provider: IdentityLinkProvider.LOGTO,
-      revokedAt: null,
-      verifiedAt: { not: null },
-      assuranceLevel: {
-        in: [
-          IdentityAssuranceLevel.PLATFORM_VERIFIED,
-          IdentityAssuranceLevel.STEP_UP_VERIFIED,
-        ],
-      },
-    },
-    select: {
-      id: true,
-      audienceIdentityId: true,
-      issuer: true,
-      connectionId: true,
-      revokedAt: true,
-    },
-  });
-  if (!verifiedWebLink) {
-    throw new Error(
-      "Private-channel binding requires a verified Web login.",
-    );
-  }
-
   const token = randomBytes(32).toString("base64url");
-  const expiresAt = new Date(Date.now() + ttlSeconds * 1_000);
-  await client.identityBindingChallenge.create({
-    data: {
-      audienceIdentityId,
-      provider: input.provider,
-      issuer,
-      connectionId,
-      ...(expectedProviderSubject ? { expectedProviderSubject } : {}),
-      tokenHash: hashBindingToken(token),
-      expiresAt,
-      metadata: input.metadata ?? {},
-    },
-  });
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + ttlSeconds * 1_000);
+  const run = async (tx: AudienceBindingClient) => {
+    const identity = await tx.audienceIdentity.findUnique({
+      where: { id: audienceIdentityId },
+      select: { id: true, status: true },
+    });
+    if (!identity) throw new Error("Audience identity was not found.");
+    if (identity.status !== "REGISTERED") {
+      throw new Error(
+        "Private-channel binding must target a registered Web identity.",
+      );
+    }
+    const verifiedWebLink = await tx.identityLink.findFirst({
+      where: {
+        audienceIdentityId,
+        provider: IdentityLinkProvider.LOGTO,
+        revokedAt: null,
+        verifiedAt: { not: null },
+        assuranceLevel: {
+          in: [
+            IdentityAssuranceLevel.PLATFORM_VERIFIED,
+            IdentityAssuranceLevel.STEP_UP_VERIFIED,
+          ],
+        },
+      },
+      select: {
+        id: true,
+        audienceIdentityId: true,
+        issuer: true,
+        connectionId: true,
+        revokedAt: true,
+      },
+    });
+    if (!verifiedWebLink) {
+      throw new Error(
+        "Private-channel binding requires a verified Web login.",
+      );
+    }
+
+    // A Web identity can have only one live challenge for an exact adapter
+    // scope. This keeps the most recently displayed command authoritative and
+    // prevents an older copied command from restoring a revoked proof later.
+    await tx.identityBindingChallenge.updateMany({
+      where: {
+        audienceIdentityId,
+        provider: input.provider,
+        issuer,
+        connectionId,
+        consumedAt: null,
+        revokedAt: null,
+        expiresAt: { gt: now },
+      },
+      data: { revokedAt: now },
+    });
+    await tx.identityBindingChallenge.create({
+      data: {
+        audienceIdentityId,
+        provider: input.provider,
+        issuer,
+        connectionId,
+        ...(expectedProviderSubject ? { expectedProviderSubject } : {}),
+        tokenHash: hashBindingToken(token),
+        expiresAt,
+        metadata: input.metadata ?? {},
+      },
+    });
+  };
+
+  if (client.$transaction) {
+    await runWithPrismaWriteConflictRetry(() =>
+      client.$transaction!(run, {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      }),
+    );
+  } else {
+    await run(client);
+  }
 
   return {
     token,
@@ -270,16 +369,16 @@ export async function createIdentityBindingChallenge(
  */
 export async function consumeIdentityBindingChallenge(
   input: ConsumeIdentityBindingChallengeInput,
-  client: AudienceBindingClient = prisma,
+  client: AudienceBindingClient = prisma as unknown as AudienceBindingClient,
 ): Promise<IdentityBindingResult> {
   const token = requireNonEmpty(input.token, "Binding token");
   const issuer = normalizeIssuer(input.issuer);
   const connectionId = normalizeConnectionId(input.connectionId);
   const providerSubject = normalizeProviderSubject(input.provider, input.providerSubject);
   assertBindableProvider(input.provider);
-  const now = new Date();
 
   const run = async (tx: AudienceBindingClient): Promise<IdentityBindingResult> => {
+    const now = new Date();
     const challenge = await tx.identityBindingChallenge.findUnique({
       where: { tokenHash: hashBindingToken(token) },
     });
@@ -329,7 +428,8 @@ export async function consumeIdentityBindingChallenge(
       throw new Error("Provider account belongs to a different issuer realm.");
     }
     if (
-      existing?.connectionId
+      !tx.identityLinkConnectionProof
+      && existing?.connectionId
       && existing.connectionId.toLowerCase() !== connectionId
     ) {
       throw new Error("Provider account belongs to a different provider connection.");
@@ -377,20 +477,19 @@ export async function consumeIdentityBindingChallenge(
       issuer,
       connectionId,
     };
-    if (existing) {
-      await tx.identityLink.update({
+    const identityLink = existing
+      ? await tx.identityLink.update({
         where: { id: existing.id },
         data: {
           issuer,
-          connectionId,
+          ...(!tx.identityLinkConnectionProof ? { connectionId } : {}),
           verifiedAt: now,
           assuranceLevel: IdentityAssuranceLevel.PLATFORM_VERIFIED,
           revokedAt: null,
           proofMetadata,
         },
-      });
-    } else {
-      await tx.identityLink.create({
+      })
+      : await tx.identityLink.create({
         data: {
           audienceIdentityId: identity.id,
           provider: input.provider,
@@ -402,6 +501,31 @@ export async function consumeIdentityBindingChallenge(
           proofMetadata,
         },
       });
+    if (tx.identityLinkConnectionProof) {
+      await tx.identityLinkConnectionProof.upsert({
+        where: {
+          identityLinkId_issuer_connectionId: {
+            identityLinkId: identityLink.id,
+            issuer,
+            connectionId,
+          },
+        },
+        create: {
+          identityLinkId: identityLink.id,
+          issuer,
+          connectionId,
+          verifiedAt: now,
+          assuranceLevel: IdentityAssuranceLevel.PLATFORM_VERIFIED,
+          revokedAt: null,
+          proofMetadata,
+        },
+        update: {
+          verifiedAt: now,
+          assuranceLevel: IdentityAssuranceLevel.PLATFORM_VERIFIED,
+          revokedAt: null,
+          proofMetadata,
+        },
+      });
     }
 
     return {
@@ -410,13 +534,177 @@ export async function consumeIdentityBindingChallenge(
       providerSubject,
       issuer,
       verifiedAt: now.toISOString(),
+      ...(isRecord(challenge.metadata)
+        ? { metadata: challenge.metadata }
+        : {}),
     };
   };
 
   return client.$transaction
-    ? client.$transaction(run, {
-        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      })
+    ? runWithPrismaWriteConflictRetry(() =>
+        client.$transaction!(run, {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        }),
+      )
+    : run(client);
+}
+
+/**
+ * Revokes one provider connection without disturbing verified proofs for other
+ * Bots or Matrix adapters. A revoked proof is a tombstone: normal channel
+ * traffic cannot silently reactivate it, while a new Web-issued challenge can.
+ */
+export async function revokePrivateChannelIdentityBinding(
+  input: RevokePrivateChannelIdentityBindingInput,
+  client: AudienceBindingClient = prisma as unknown as AudienceBindingClient,
+): Promise<RevokePrivateChannelIdentityBindingResult> {
+  const audienceIdentityId = requireNonEmpty(
+    input.audienceIdentityId,
+    "Audience identity id",
+  );
+  const providerSubject = normalizeProviderSubject(
+    input.provider,
+    input.providerSubject,
+  );
+  const issuer = normalizeIssuer(input.issuer);
+  const connectionId = normalizeConnectionId(input.connectionId);
+  assertBindableProvider(input.provider);
+  const now = new Date();
+  const binding = {
+    provider: input.provider,
+    providerSubject,
+    issuer,
+    connectionId,
+  };
+
+  const run = async (
+    tx: AudienceBindingClient,
+  ): Promise<RevokePrivateChannelIdentityBindingResult> => {
+    const identity = await tx.audienceIdentity.findUnique({
+      where: { id: audienceIdentityId },
+      select: { id: true, status: true },
+    });
+    if (!identity) throw new Error("Audience identity was not found.");
+    assertActiveIdentity(identity);
+    if (identity.status !== "REGISTERED") {
+      throw new Error(
+        "Private-channel unlink must target a registered Web identity.",
+      );
+    }
+
+    // A retrying DELETE must also invalidate a challenge created after an
+    // earlier unlink. Challenge revocation is therefore independent from
+    // whether the connection proof itself changes in this transaction.
+    await tx.identityBindingChallenge.updateMany({
+      where: {
+        audienceIdentityId,
+        provider: input.provider,
+        issuer,
+        connectionId,
+        consumedAt: null,
+        revokedAt: null,
+      },
+      data: { revokedAt: now },
+    });
+
+    const link = await tx.identityLink.findUnique({
+      where: {
+        provider_providerSubject: {
+          provider: input.provider,
+          providerSubject,
+        },
+      },
+      select: {
+        id: true,
+        audienceIdentityId: true,
+        issuer: true,
+        connectionId: true,
+        revokedAt: true,
+      },
+    });
+    if (
+      !link
+      || link.audienceIdentityId !== audienceIdentityId
+      || normalizeIssuer(link.issuer) !== issuer
+    ) {
+      return { binding, changed: false };
+    }
+
+    let changed = false;
+    if (tx.identityLinkConnectionProof) {
+      const proof = await tx.identityLinkConnectionProof.findUnique({
+        where: {
+          identityLinkId_issuer_connectionId: {
+            identityLinkId: link.id,
+            issuer,
+            connectionId,
+          },
+        },
+      });
+      const isLegacyConnection =
+        !proof
+        && link.connectionId?.trim().toLowerCase() === connectionId;
+      if (!proof && !isLegacyConnection) {
+        return { binding, changed: false };
+      }
+
+      if (proof) {
+        const revoked = await tx.identityLinkConnectionProof.updateMany({
+          where: {
+            identityLinkId: link.id,
+            issuer,
+            connectionId,
+            revokedAt: null,
+          },
+          data: { revokedAt: now },
+        });
+        changed = revoked.count === 1;
+      }
+
+      const activeProofCount = await tx.identityLinkConnectionProof.count({
+        where: {
+          identityLinkId: link.id,
+          revokedAt: null,
+          verifiedAt: { not: null },
+          assuranceLevel: {
+            in: [
+              IdentityAssuranceLevel.PLATFORM_VERIFIED,
+              IdentityAssuranceLevel.STEP_UP_VERIFIED,
+            ],
+          },
+        },
+      });
+      if (activeProofCount === 0 && link.revokedAt === null) {
+        await tx.identityLink.update({
+          where: { id: link.id },
+          data: { revokedAt: now },
+        });
+        changed = true;
+      }
+    } else {
+      const matchesLegacyConnection =
+        link.connectionId?.trim().toLowerCase() === connectionId;
+      if (!matchesLegacyConnection) {
+        return { binding, changed: false };
+      }
+      if (link.revokedAt === null) {
+        await tx.identityLink.update({
+          where: { id: link.id },
+          data: { revokedAt: now },
+        });
+        changed = true;
+      }
+    }
+
+    return { binding, changed };
+  };
+
+  return client.$transaction
+    ? runWithPrismaWriteConflictRetry(() =>
+        client.$transaction!(run, {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+        }),
+      )
     : run(client);
 }
 
@@ -457,6 +745,10 @@ function normalizeProviderSubject(provider: IdentityLinkProvider, value: string)
 
 function normalizeIssuer(value?: string): string {
   return (value?.trim().toLowerCase() || "delegate").slice(0, 255);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function normalizeConnectionId(value: string): string {

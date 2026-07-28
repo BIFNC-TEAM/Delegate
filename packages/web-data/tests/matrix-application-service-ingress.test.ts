@@ -60,6 +60,12 @@ const {
       matrixVirtualUserBinding: {
         findUnique: vi.fn(),
       },
+      identityLink: {
+        findUnique: vi.fn(),
+      },
+      identityLinkConnectionProof: {
+        findUnique: vi.fn(),
+      },
       conversationChannelBinding: {
         findFirst: vi.fn(),
       },
@@ -132,6 +138,19 @@ describe("Matrix application service ingress", () => {
     mockPrisma.channelEventInbox.update.mockResolvedValue({});
     mockPrisma.channelEventInbox.findUnique.mockResolvedValue(null);
     mockPrisma.matrixVirtualUserBinding.findUnique.mockResolvedValue(null);
+    mockPrisma.identityLink.findUnique.mockResolvedValue({
+      id: "matrix-identity-link-1",
+      audienceIdentityId: "audience-identity-1",
+      issuer: "example.org",
+      verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+      assuranceLevel: "PLATFORM_VERIFIED",
+      revokedAt: null,
+    });
+    mockPrisma.identityLinkConnectionProof.findUnique.mockResolvedValue({
+      verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+      assuranceLevel: "PLATFORM_VERIFIED",
+      revokedAt: null,
+    });
     mockProvisionMatrixDirectConversation.mockResolvedValue({
       status: "ready",
       securityState: "PENDING_REMOTE_VALIDATION",
@@ -580,6 +599,177 @@ describe("Matrix application service ingress", () => {
     });
     expect(tx.message.upsert).not.toHaveBeenCalled();
     expect(tx.generationRun.upsert).not.toHaveBeenCalled();
+    expect(mockPrisma.identityLink.findUnique).not.toHaveBeenCalled();
+    expect(
+      mockPrisma.identityLinkConnectionProof.findUnique,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an existing Matrix room has no proof for the exact connection", async () => {
+    mockPrisma.identityLinkConnectionProof.findUnique.mockResolvedValue(null);
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-missing-connection-proof",
+      events: [matrixTextEvent(
+        "$event-missing-connection-proof",
+        aliceMatrixUserId,
+      )],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-missing-connection-proof",
+      status: "ignored",
+      reason: "matrix_identity_connection_not_verified",
+    }]);
+    expect(mockPrisma.identityLink.findUnique).toHaveBeenCalledWith({
+      where: {
+        provider_providerSubject: {
+          provider: "MATRIX",
+          providerSubject: aliceMatrixUserId,
+        },
+      },
+      select: {
+        id: true,
+        audienceIdentityId: true,
+        issuer: true,
+        verifiedAt: true,
+        assuranceLevel: true,
+        revokedAt: true,
+      },
+    });
+    expect(
+      mockPrisma.identityLinkConnectionProof.findUnique,
+    ).toHaveBeenCalledWith({
+      where: {
+        identityLinkId_issuer_connectionId: {
+          identityLinkId: "matrix-identity-link-1",
+          issuer: "example.org",
+          connectionId: "delegate-matrix-as",
+        },
+      },
+      select: {
+        verifiedAt: true,
+        assuranceLevel: true,
+        revokedAt: true,
+      },
+    });
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+    expect(tx.generationRun.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "another audience identity",
+      { audienceIdentityId: "audience-identity-other" },
+    ],
+    [
+      "another issuer",
+      { issuer: "elsewhere.example.org" },
+    ],
+    [
+      "a revoked identity link",
+      { revokedAt: new Date("2026-07-28T01:00:00.000Z") },
+    ],
+  ])("fails closed when the Matrix proof belongs to %s", async (
+    _case,
+    identityLinkOverride,
+  ) => {
+    mockPrisma.identityLink.findUnique.mockResolvedValue({
+      id: "matrix-identity-link-1",
+      audienceIdentityId: "audience-identity-1",
+      issuer: "example.org",
+      verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+      assuranceLevel: "PLATFORM_VERIFIED",
+      revokedAt: null,
+      ...identityLinkOverride,
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: `transaction-invalid-link-${_case}`,
+      events: [matrixTextEvent(
+        `$event-invalid-link-${_case}`,
+        aliceMatrixUserId,
+      )],
+    });
+
+    expect(result).toEqual([{
+      eventId: `$event-invalid-link-${_case}`,
+      status: "ignored",
+      reason: "matrix_identity_connection_not_verified",
+    }]);
+    expect(
+      mockPrisma.identityLinkConnectionProof.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the exact Matrix connection proof is revoked", async () => {
+    mockPrisma.identityLinkConnectionProof.findUnique.mockResolvedValue({
+      verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+      assuranceLevel: "PLATFORM_VERIFIED",
+      revokedAt: new Date("2026-07-28T01:00:00.000Z"),
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-revoked-connection-proof",
+      events: [matrixTextEvent(
+        "$event-revoked-connection-proof",
+        aliceMatrixUserId,
+      )],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-revoked-connection-proof",
+      status: "ignored",
+      reason: "matrix_identity_connection_not_verified",
+    }]);
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+    expect(tx.generationRun.upsert).not.toHaveBeenCalled();
+  });
+
+  it("consumes !bind before proof validation and accepts the next Matrix message", async () => {
+    let rebound = false;
+    mockPrisma.identityLinkConnectionProof.findUnique.mockImplementation(
+      async () => rebound
+        ? {
+            verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+            assuranceLevel: "PLATFORM_VERIFIED",
+            revokedAt: null,
+          }
+        : null,
+    );
+    mockConsumeIdentityBindingChallenge.mockImplementation(async () => {
+      rebound = true;
+      return { audienceIdentityId: "audience-identity-1" };
+    });
+    const token = "d".repeat(43);
+    const bindEvent = matrixTextEvent("$event-rebind", aliceMatrixUserId);
+    bindEvent.content = {
+      msgtype: "m.text",
+      body: `!bind ${token}`,
+    };
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-rebind-before-proof-check",
+      events: [
+        bindEvent,
+        matrixTextEvent("$event-after-rebind", aliceMatrixUserId),
+      ],
+    });
+
+    expect(result).toEqual([
+      { eventId: "$event-rebind", status: "processed" },
+      { eventId: "$event-after-rebind", status: "processed" },
+    ]);
+    expect(mockConsumeIdentityBindingChallenge).toHaveBeenCalledTimes(1);
+    expect(
+      mockPrisma.identityLinkConnectionProof.findUnique,
+    ).toHaveBeenCalledTimes(1);
+    expect(tx.message.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        externalMessageId: "$event-after-rebind",
+      }),
+    }));
   });
 
   it("terminally acknowledges a rejected Matrix binding command", async () => {
@@ -1282,9 +1472,11 @@ function buildMatrixBinding(input: {
     id: "matrix-binding-1",
     conversationId: "conversation-1",
     kind: "MATRIX",
+    connectionId: "delegate-matrix-as",
     externalConversationId: "!room:example.org",
     metadata: matrixSafetyMetadata(),
     conversation: {
+      audienceIdentityId: "audience-identity-1",
       representative: { slug: "representative" },
       contact: {
         id: "contact-1",

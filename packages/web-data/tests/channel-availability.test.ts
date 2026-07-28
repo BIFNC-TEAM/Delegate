@@ -80,4 +80,45 @@ describe("canonical channel availability", () => {
       }),
     ).toEqual({ available: false, code: "channel_unhealthy" });
   });
+
+  it("fails closed when a Telegram delivery points at a reassigned Bot", () => {
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        channel: "telegram",
+        telegramEndpoint: {
+          conversationConnectionId: "111111111",
+          representativeConnectionId: "222222222",
+          expectedConnectionId: "111111111",
+          representativeTelegramBotConnectionId: "connection-b",
+          representativeTelegramBot: {
+            id: "connection-b",
+            botId: "222222222",
+          },
+        },
+      }),
+    ).toEqual({
+      available: false,
+      code: "telegram_connection_reassigned",
+    });
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        channel: "telegram",
+        telegramEndpoint: {
+          conversationConnectionId: "222222222",
+          representativeConnectionId: "222222222",
+          expectedConnectionId: "111111111",
+          representativeTelegramBotConnectionId: "connection-b",
+          representativeTelegramBot: {
+            id: "connection-b",
+            botId: "222222222",
+          },
+        },
+      }),
+    ).toEqual({
+      available: false,
+      code: "telegram_connection_reassigned",
+    });
+  });
 });

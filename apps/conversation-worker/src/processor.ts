@@ -31,6 +31,7 @@ import {
   ensureConversationLeadAndHandoff,
   failGenerationRun,
   getRepresentativeRuntimeSetupSnapshot,
+  hasPersistedTelegramBotConnections,
   loadGenerationRecentTurns,
   markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval,
@@ -47,6 +48,7 @@ import {
   renewGenerationWorkItemLease,
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
+  resolveTelegramBotRuntimeCredential,
   waitGenerationRunForComputeApproval,
   type AuthorizedDelegationKnowledge,
   type ConversationEntitlementReservation,
@@ -94,6 +96,9 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         externalMessageId = await sendTelegramOperatorMessage({
           config,
           chatId: operatorItem.externalConversationId,
+          ...(operatorItem.telegramConnectionId
+            ? { connectionId: operatorItem.telegramConnectionId }
+            : {}),
           operatorName: operatorItem.operatorName,
           text: operatorItem.text,
         });
@@ -1355,6 +1360,7 @@ function renderCapabilityLabel(capability: ParsedComputeRequest["capability"]) {
 async function sendTelegramOperatorMessage(input: {
   config: ConversationWorkerConfig;
   chatId: string;
+  connectionId?: string;
   operatorName: string;
   text: string;
 }) {
@@ -1364,6 +1370,9 @@ async function sendTelegramOperatorMessage(input: {
   return sendTelegramMessage({
     config: input.config,
     chatId: input.chatId,
+    ...(input.connectionId
+      ? { connectionId: input.connectionId }
+      : {}),
     text: `${input.operatorName}: ${input.text}`,
   });
 }
@@ -1371,6 +1380,7 @@ async function sendTelegramOperatorMessage(input: {
 async function sendTelegramRepresentativeMessage(input: {
   config: ConversationWorkerConfig;
   chatId: string;
+  connectionId?: string;
   text: string;
 }) {
   return sendTelegramMessage(input);
@@ -1379,18 +1389,49 @@ async function sendTelegramRepresentativeMessage(input: {
 async function sendTelegramMessage(input: {
   config: ConversationWorkerConfig;
   chatId: string;
+  connectionId?: string;
   text: string;
 }) {
-  if (!input.config.telegramBotToken) throw new Error("TELEGRAM_BOT_TOKEN is not configured.");
-  const response = await fetch(`https://api.telegram.org/bot${input.config.telegramBotToken}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: input.chatId,
-      text: input.text,
-    }),
-    signal: AbortSignal.timeout(input.config.telegramRequestTimeoutMs ?? 15_000),
-  });
+  const configuredConnectionId = input.connectionId?.trim();
+  const credential = configuredConnectionId
+    ? await resolveTelegramBotRuntimeCredential({
+        connectionId: configuredConnectionId,
+      })
+    : null;
+  const hasPersistedConnections = credential
+    ? true
+    : await hasPersistedTelegramBotConnections();
+  const token =
+    credential?.token
+    || (!hasPersistedConnections
+      ? input.config.telegramBotToken
+      : undefined);
+  if (!token) {
+    throw new Error(
+      configuredConnectionId
+        ? "Telegram Bot credential is unavailable for this conversation."
+        : "Telegram Bot credential is not configured.",
+    );
+  }
+  const tokenBotId = token.match(/^([1-9]\d*):/)?.[1];
+  const expectedBotId = credential?.botId || configuredConnectionId;
+  if (!tokenBotId || (expectedBotId && tokenBotId !== expectedBotId)) {
+    throw new Error("Telegram Bot credential does not match the conversation connection.");
+  }
+  let response: Response;
+  try {
+    response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: input.chatId,
+        text: input.text,
+      }),
+      signal: AbortSignal.timeout(input.config.telegramRequestTimeoutMs ?? 15_000),
+    });
+  } catch {
+    throw new Error("Telegram delivery could not reach the provider.");
+  }
   const payload = (await response.json().catch(() => ({}))) as {
     ok?: boolean;
     result?: { message_id?: number };
@@ -1446,6 +1487,9 @@ async function deliverGenerationOutput(input: {
     externalMessageId = await sendTelegramRepresentativeMessage({
       config: input.config,
       chatId: input.item.externalConversationId,
+      ...(input.item.telegramConnectionId
+        ? { connectionId: input.item.telegramConnectionId }
+        : {}),
       text: input.text,
     });
   }

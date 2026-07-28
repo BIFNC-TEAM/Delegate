@@ -91,8 +91,22 @@ describe("public representative visitor-first page", () => {
       "Web 充值余额和服务权益会保持一致",
     );
     expect(identityBindingSource).toContain(
-      "复制命令并在 Delegate Bot 私聊中发送",
+      "复制命令并发送给",
     );
+    expect(identityBindingSource).toContain("binding.connectionId");
+    expect(identityBindingSource).toContain(
+      "https://t.me/${bot.username}?start=${payload}",
+    );
+    expect(identityBindingSource).toContain("`rep_${representativeSlug}`");
+    expect(identityBindingSource).toContain("navigator.clipboard.writeText");
+    expect(identityBindingSource).toContain("creatingProvider");
+    expect(identityBindingSource).toContain("Legacy binding; rebind required");
+    expect(identityBindingSource).toContain('method: "DELETE"');
+    expect(identityBindingSource).toContain("解除绑定");
+    expect(identityBindingSource).toContain("历史消息、余额和订单不会删除");
+    expect(identityBindingSource).toContain("capabilities?.telegram");
+    expect(identityBindingSource).toContain("capabilities?.matrix");
+    expect(identityBindingSource).toContain("绑定成功。这个私聊账号现在会使用当前 Delegate 账号的余额和服务权益");
     expect(identityBindingSource).not.toContain("生成 Telegram 绑定命令");
   });
 });

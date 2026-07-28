@@ -5,6 +5,15 @@ import { describe, expect, it } from "vitest";
 
 const schemaPath = fileURLToPath(new URL("../../../prisma/schema.prisma", import.meta.url));
 const schema = readFileSync(schemaPath, "utf8");
+const telegramBotMigration = readFileSync(
+  fileURLToPath(
+    new URL(
+      "../../../prisma/migrations/20260727123000_telegram_bot_connections/migration.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 describe("conversation platform schema", () => {
   it("keeps legacy turns while adding the channel-neutral message model", () => {
@@ -26,9 +35,26 @@ describe("conversation platform schema", () => {
 
   it("adds durable inbox and outbox idempotency boundaries", () => {
     expect(schema).toContain("model ChannelEventInbox");
-    expect(schema).toContain("@@unique([kind, externalEventId])");
+    expect(schema).toContain(
+      "@@unique([kind, connectionId, externalEventId])",
+    );
     expect(schema).toContain("model OutboxEvent");
     expect(schema).toMatch(/idempotencyKey\s+String/);
+    expect(schema).toContain(
+      "@@index([transport, connectionId, status, availableAt])",
+    );
+    expect(telegramBotMigration).toContain(
+      '"ChatSession_legacy_telegramChatId_key"',
+    );
+    expect(telegramBotMigration).toContain(
+      'WHERE "telegramBotConnectionId" IS NULL',
+    );
+    expect(telegramBotMigration).toContain(
+      '"ChannelEventInbox_legacy_kind_externalEventId_key"',
+    );
+    expect(telegramBotMigration).toContain(
+      'WHERE "connectionId" IS NULL',
+    );
   });
 
   it("separates contacts, leads, read state, and internal collaboration", () => {

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   generateRepresentativeReply: vi.fn(),
+  hasPersistedTelegramBotConnections: vi.fn(),
   planNaturalLanguageComputeRequest: vi.fn(),
   renderGroundedKnowledgeFallback: vi.fn(),
   claimNextOperatorMessageWorkItem: vi.fn(),
@@ -39,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   reserveGenerationConversationEntitlement: vi.fn(),
   releaseConversationEntitlement: vi.fn(),
   retryOperatorMessageDelivery: vi.fn(),
+  resolveTelegramBotRuntimeCredential: vi.fn(),
 }));
 
 vi.mock("@delegate/model-runtime", () => ({
@@ -82,6 +84,8 @@ vi.mock("@delegate/web-data", () => ({
     readonly code = "generation_work_lease_lost";
   },
   getRepresentativeRuntimeSetupSnapshot: mocks.getRepresentativeRuntimeSetupSnapshot,
+  hasPersistedTelegramBotConnections:
+    mocks.hasPersistedTelegramBotConnections,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
   markGenerationDeliveryComplete: mocks.markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval: mocks.markDelegationTaskAwaitingApproval,
@@ -94,6 +98,8 @@ vi.mock("@delegate/web-data", () => ({
   renewGenerationWorkItemLease: mocks.renewGenerationWorkItemLease,
   retryGenerationDelivery: mocks.retryGenerationDelivery,
   retryOperatorMessageDelivery: mocks.retryOperatorMessageDelivery,
+  resolveTelegramBotRuntimeCredential:
+    mocks.resolveTelegramBotRuntimeCredential,
   isGenerationWorkLeaseLostError: (error: unknown) =>
     error instanceof Error
     && "code" in error
@@ -127,6 +133,8 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.retryGenerationDelivery.mockResolvedValue(undefined);
     mocks.retryOperatorMessageDelivery.mockResolvedValue(undefined);
+    mocks.resolveTelegramBotRuntimeCredential.mockResolvedValue(null);
+    mocks.hasPersistedTelegramBotConnections.mockResolvedValue(false);
     mocks.createComputeDelegationTask.mockResolvedValue({
       task: { id: "task-1" },
       step: { id: "task-step-1" },
@@ -239,6 +247,14 @@ describe("conversation worker knowledge recall", () => {
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
+    mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+      connectionId: "connection-a",
+      botId: "111111111",
+      username: "bot_a",
+      displayName: "Bot A",
+      token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+      credentialRevision: 1,
+    });
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-delivery-retry",
       leaseAttempt: 2,
@@ -253,6 +269,7 @@ describe("conversation worker knowledge recall", () => {
       userText: "original inbound",
       channel: "telegram",
       externalConversationId: "123456",
+      telegramConnectionId: "111111111",
       deliveryOnly: true,
       outputMessageId: "message-output",
       outputText: "persisted reply",
@@ -266,7 +283,7 @@ describe("conversation worker knowledge recall", () => {
     await expect(processNextConversationWork({
       port: 4040,
       pollMs: 500,
-      telegramBotToken: "telegram-token-long-enough",
+      telegramBotToken: "222222222:BBBBBBBBBBBBBBBBBBBBBBBB",
       telegramConversationPlatformMode: "worker",
       telegramRequestTimeoutMs: 8_000,
     })).resolves.toMatchObject({
@@ -279,8 +296,13 @@ describe("conversation worker knowledge recall", () => {
     });
     expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
     expect(mocks.completeInlineGenerationRun).not.toHaveBeenCalled();
+    expect(
+      mocks.resolveTelegramBotRuntimeCredential,
+    ).toHaveBeenCalledWith({ connectionId: "111111111" });
     expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining("/sendMessage"),
+      expect.stringContaining(
+        "/bot111111111:AAAAAAAAAAAAAAAAAAAAAAAA/sendMessage",
+      ),
       expect.objectContaining({
         signal: expect.any(AbortSignal),
         body: JSON.stringify({
@@ -304,6 +326,65 @@ describe("conversation worker knowledge recall", () => {
       leaseAttempt: 2,
       outputMessageId: "message-output",
       externalMessageId: "90210",
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("never falls back to the legacy token when a managed Bot credential is unavailable", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.hasPersistedTelegramBotConnections.mockResolvedValueOnce(true);
+    mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce(null);
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-managed-credential-unavailable",
+      leaseAttempt: 1,
+      runId: "run-managed-credential-unavailable",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-managed-credential-unavailable",
+      contactId: "contact-managed-credential-unavailable",
+      controlState: "WAITING_USER",
+      inputMessageId: "message-inbound",
+      userText: "original inbound",
+      channel: "telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "111111111",
+      deliveryOnly: true,
+      outputMessageId: "message-output",
+      outputText: "persisted reply",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramBotToken: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+      telegramConversationPlatformMode: "worker",
+      telegramRequestTimeoutMs: 8_000,
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-managed-credential-unavailable",
+      status: "failed",
+      error:
+        "Telegram Bot credential is unavailable for this conversation.",
+    });
+
+    expect(
+      mocks.resolveTelegramBotRuntimeCredential,
+    ).toHaveBeenCalledWith({ connectionId: "111111111" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mocks.retryGenerationDelivery).toHaveBeenCalledWith({
+      runId: "run-managed-credential-unavailable",
+      outboxId: "outbox-managed-credential-unavailable",
+      leaseAttempt: 1,
+      outputMessageId: "message-output",
+      errorMessage:
+        "Telegram Bot credential is unavailable for this conversation.",
     });
     vi.unstubAllGlobals();
   });
@@ -359,7 +440,7 @@ describe("conversation worker knowledge recall", () => {
       await expect(processNextConversationWork({
         port: 4040,
         pollMs: 500,
-        telegramBotToken: "telegram-token-long-enough",
+        telegramBotToken: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
         telegramConversationPlatformMode: "worker",
         telegramRequestTimeoutMs: 8_000,
       })).resolves.toMatchObject({
@@ -534,7 +615,7 @@ describe("conversation worker knowledge recall", () => {
       port: 4040,
       pollMs: 500,
       telegramConversationPlatformMode: "worker",
-      telegramBotToken: "telegram-token-long-enough",
+      telegramBotToken: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
     })).resolves.toMatchObject({
       processed: true,
       runId: "operator-message-paused",
@@ -548,6 +629,75 @@ describe("conversation worker knowledge recall", () => {
     });
     expect(mocks.retryOperatorMessageDelivery).not.toHaveBeenCalled();
     expect(mocks.claimNextGenerationWorkItem).not.toHaveBeenCalled();
+  });
+
+  it("delivers an operator reply with the conversation's Telegram Bot credential", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        result: { message_id: 90212 },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+      connectionId: "connection-a",
+      botId: "111111111",
+      username: "bot_a",
+      displayName: "Bot A",
+      token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+      credentialRevision: 1,
+    });
+    mocks.claimNextOperatorMessageWorkItem.mockResolvedValue({
+      outboxId: "operator-outbox-telegram-a",
+      messageId: "operator-message-telegram-a",
+      conversationId: "conversation-telegram-a",
+      text: "operator reply",
+      operatorName: "Owner",
+      channel: "telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "connection-a",
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+      telegramBotToken: "222222222:BBBBBBBBBBBBBBBBBBBBBBBB",
+      telegramRequestTimeoutMs: 8_000,
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "operator-message-telegram-a",
+      status: "completed",
+    });
+
+    expect(
+      mocks.resolveTelegramBotRuntimeCredential,
+    ).toHaveBeenCalledWith({ connectionId: "connection-a" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/bot111111111:AAAAAAAAAAAAAAAAAAAAAAAA/sendMessage",
+      ),
+      expect.objectContaining({
+        body: JSON.stringify({
+          chat_id: "123456",
+          text: "Owner: operator reply",
+        }),
+      }),
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/bot222222222:BBBBBBBBBBBBBBBBBBBBBBBB/sendMessage",
+      ),
+      expect.anything(),
+    );
+    expect(mocks.completeOperatorMessageDelivery).toHaveBeenCalledWith({
+      outboxId: "operator-outbox-telegram-a",
+      messageId: "operator-message-telegram-a",
+      externalMessageId: "90212",
+    });
+    expect(mocks.claimNextGenerationWorkItem).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 
   it("reserves and atomically consumes a shared entitlement after free replies are exhausted", async () => {

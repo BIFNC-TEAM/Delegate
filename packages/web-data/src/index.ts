@@ -102,6 +102,9 @@ export {
   type ServicePaymentEvidenceInput,
   type ServicePaymentFulfillmentSnapshot,
 } from "./service-entitlements";
+export * from "./telegram-bot-connections";
+export * from "./telegram-bot-runtime-leases";
+export * from "./telegram-bot-credentials";
 export * from "./web-audience";
 export * from "./workspace-skills";
 export * from "./workspace-audit";

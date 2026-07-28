@@ -25,6 +25,7 @@ export type TelegramChannelBindingSnapshot = {
   transport: "TELEGRAM" | "MATRIX" | "WEB" | null;
   sourceProvider: "TELEGRAM" | "MATRIX" | "WEB" | null;
   connectionId: string | null;
+  telegramBotConnectionId: string | null;
 };
 
 export type TelegramUpdateMetadata = {
@@ -41,6 +42,13 @@ export class TelegramRepresentativeSessionUnavailableError extends Error {
     super("Unable to read the active Telegram representative session.");
     this.name = "TelegramRepresentativeSessionUnavailableError";
     this.cause = cause;
+  }
+}
+
+export class TelegramRepresentativeSelectionRequiredError extends Error {
+  constructor() {
+    super("A representative must be selected for this Telegram Bot.");
+    this.name = "TelegramRepresentativeSelectionRequiredError";
   }
 }
 
@@ -68,12 +76,23 @@ const maximumPollingTimeoutSeconds = 10;
 
 export function planTelegramBotChannelBindingSynchronization(
   bindings: TelegramChannelBindingSnapshot[],
-  connectionId: string,
+  connection: {
+    internalConnectionId: string;
+    botId: string;
+    legacy?: boolean;
+  },
 ): {
   updateBindingIds: string[];
   conflictingBindingIds: string[];
 } {
-  const normalizedConnectionId = connectionId.trim();
+  const internalConnectionId = connection.internalConnectionId.trim();
+  const botId = connection.botId.trim();
+  if (!internalConnectionId) {
+    throw new Error("Telegram internal connection id is required.");
+  }
+  if (!/^[1-9]\d*$/.test(botId)) {
+    throw new Error("Telegram bot id must be numeric.");
+  }
   const updateBindingIds: string[] = [];
   const conflictingBindingIds: string[] = [];
 
@@ -89,9 +108,21 @@ export function planTelegramBotChannelBindingSynchronization(
     }
 
     const existingConnectionId = binding.connectionId?.trim() || null;
+    const bindingInternalConnectionId =
+      binding.telegramBotConnectionId?.trim() || null;
+    const belongsToRuntime =
+      bindingInternalConnectionId === internalConnectionId
+      || (
+        connection.legacy === true
+        && bindingInternalConnectionId === null
+        && existingConnectionId === botId
+      );
+    if (!belongsToRuntime) {
+      continue;
+    }
     if (
-      existingConnectionId
-      && existingConnectionId !== normalizedConnectionId
+      !existingConnectionId
+      || existingConnectionId !== botId
     ) {
       conflictingBindingIds.push(binding.id);
       continue;
@@ -132,21 +163,29 @@ export function resolveTelegramRuntimeConfig(
 
 export async function resolveTelegramRepresentativeSession(params: {
   chatType: string;
-  defaultRepresentativeSlug: string;
+  defaultRepresentativeSlug: string | null;
   readActiveRepresentativeSlug: () => Promise<string | null>;
 }): Promise<string> {
   if (params.chatType !== "private") {
-    return params.defaultRepresentativeSlug;
+    if (params.defaultRepresentativeSlug) {
+      return params.defaultRepresentativeSlug;
+    }
+    throw new TelegramRepresentativeSelectionRequiredError();
   }
 
   try {
-    return (
-      (await params.readActiveRepresentativeSlug())
-      ?? params.defaultRepresentativeSlug
-    );
+    const activeRepresentativeSlug =
+      await params.readActiveRepresentativeSlug();
+    if (activeRepresentativeSlug) {
+      return activeRepresentativeSlug;
+    }
   } catch (error) {
     throw new TelegramRepresentativeSessionUnavailableError(error);
   }
+  if (params.defaultRepresentativeSlug) {
+    return params.defaultRepresentativeSlug;
+  }
+  throw new TelegramRepresentativeSelectionRequiredError();
 }
 
 export function isTelegramRepresentativeSessionUnavailableError(
@@ -170,6 +209,21 @@ export async function handleTelegramMiddlewareError(params: {
   );
 
   if (!isTelegramRepresentativeSessionUnavailableError(params.error)) {
+    if (params.error instanceof TelegramRepresentativeSelectionRequiredError) {
+      try {
+        await params.context.reply(
+          "请先从目标数字代表的公开页面打开这个 Bot，再继续发送消息。",
+        );
+      } catch (replyError) {
+        logger.error(
+          JSON.stringify({
+            event: "telegram_selection_error_reply_failed",
+            updateId: params.context.update.update_id,
+            error: sanitizeTelegramError(replyError),
+          }),
+        );
+      }
+    }
     return;
   }
 
@@ -308,6 +362,10 @@ export function sanitizeTelegramError(error: unknown): string {
         : "unknown_error";
   return message
     .replace(/bot\d+:[a-z0-9_-]+/gi, "bot[REDACTED]")
+    .replace(
+      /\b[1-9]\d{5,19}:[A-Za-z0-9_-]{20,200}\b/g,
+      "[REDACTED]",
+    )
     .slice(0, 500);
 }
 

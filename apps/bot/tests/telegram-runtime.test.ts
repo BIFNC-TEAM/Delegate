@@ -13,6 +13,7 @@ import {
   resolveTelegramRepresentativeSession,
   resolveTelegramRuntimeConfig,
   sanitizeTelegramError,
+  TelegramRepresentativeSelectionRequiredError,
   TelegramRepresentativeSessionUnavailableError,
 } from "../src/telegram-runtime";
 
@@ -26,37 +27,83 @@ describe("Telegram bot runtime", () => {
             transport: "TELEGRAM",
             sourceProvider: "TELEGRAM",
             connectionId: null,
+            telegramBotConnectionId: "connection-current",
           },
           {
             id: "legacy-empty",
             transport: null,
             sourceProvider: null,
             connectionId: "",
+            telegramBotConnectionId: "connection-current",
           },
           {
             id: "direct-same",
             transport: "TELEGRAM",
             sourceProvider: "TELEGRAM",
             connectionId: "8718299151",
+            telegramBotConnectionId: "connection-current",
           },
           {
             id: "matrix-canary",
             transport: "MATRIX",
             sourceProvider: "TELEGRAM",
             connectionId: "matrix-appservice",
+            telegramBotConnectionId: null,
           },
           {
             id: "direct-conflict",
             transport: "TELEGRAM",
             sourceProvider: "TELEGRAM",
             connectionId: "999",
+            telegramBotConnectionId: "connection-other",
           },
         ],
-        "8718299151",
+        {
+          internalConnectionId: "connection-current",
+          botId: "8718299151",
+        },
       ),
     ).toEqual({
-      updateBindingIds: ["direct-empty", "legacy-empty", "direct-same"],
-      conflictingBindingIds: ["direct-conflict"],
+      updateBindingIds: ["direct-same"],
+      conflictingBindingIds: ["direct-empty", "legacy-empty"],
+    });
+  });
+
+  it("lets a legacy runtime refresh only an explicitly matching bot id", () => {
+    expect(
+      planTelegramBotChannelBindingSynchronization(
+        [
+          {
+            id: "legacy-explicit",
+            transport: "TELEGRAM",
+            sourceProvider: "TELEGRAM",
+            connectionId: "8718299151",
+            telegramBotConnectionId: null,
+          },
+          {
+            id: "legacy-unassigned",
+            transport: "TELEGRAM",
+            sourceProvider: "TELEGRAM",
+            connectionId: null,
+            telegramBotConnectionId: null,
+          },
+          {
+            id: "other-bot",
+            transport: "TELEGRAM",
+            sourceProvider: "TELEGRAM",
+            connectionId: "999",
+            telegramBotConnectionId: null,
+          },
+        ],
+        {
+          internalConnectionId: "legacy:8718299151",
+          botId: "8718299151",
+          legacy: true,
+        },
+      ),
+    ).toEqual({
+      updateBindingIds: ["legacy-explicit"],
+      conflictingBindingIds: [],
     });
   });
 
@@ -72,6 +119,10 @@ describe("Telegram bot runtime", () => {
     expect(botService).toContain(
       "cd /app/apps/bot && exec node --import tsx src/index.ts",
     );
+    expect(botService).not.toContain(
+      'if [ -n "$$TELEGRAM_BOT_TOKEN" ]',
+    );
+    expect(botService).not.toContain("tail -f /dev/null");
     expect(botService).toContain('restart: "on-failure:3"');
     expect(botService).toContain("stop_grace_period: 70s");
   });
@@ -89,32 +140,46 @@ describe("Telegram bot runtime", () => {
       compose.indexOf("  bot:"),
       compose.indexOf("  compute-broker:"),
     );
+    const dashboardService = compose.slice(
+      compose.indexOf("  dashboard:"),
+      compose.indexOf("  reps:"),
+    );
+    const repsService = compose.slice(
+      compose.indexOf("  reps:"),
+      compose.indexOf("  bot:"),
+    );
     const workerService = compose.slice(
       compose.indexOf("  conversation-worker:"),
       compose.indexOf("  temporal-db-init:"),
     );
     expect(sharedEnvironment).not.toContain("TELEGRAM_BOT_TOKEN");
+    expect(sharedEnvironment).not.toContain(
+      "CHANNEL_CREDENTIAL_MASTER_KEY",
+    );
     expect(botService).toContain("TELEGRAM_BOT_TOKEN");
+    expect(botService).toContain("CHANNEL_CREDENTIAL_MASTER_KEY");
+    expect(dashboardService).toContain("CHANNEL_CREDENTIAL_MASTER_KEY");
+    expect(repsService).not.toContain("CHANNEL_CREDENTIAL_MASTER_KEY");
     expect(workerService).toContain("TELEGRAM_BOT_TOKEN");
+    expect(workerService).toContain("CHANNEL_CREDENTIAL_MASTER_KEY");
   });
 
-  it("refreshes a seeded channel binding with the configured Bot identity", () => {
+  it("requires an explicitly assigned channel binding instead of claiming an empty binding", () => {
     const runtimeStore = readFileSync(
       new URL("../src/runtime-store.ts", import.meta.url),
       "utf8",
     );
-    const bindingUpsert = runtimeStore.slice(
+    const bindingLookup = runtimeStore.slice(
       runtimeStore.indexOf(
-        "const telegramBotExternalUserId = process.env.TELEGRAM_BOT_USERNAME",
+        "const representativeBinding =",
       ),
-      runtimeStore.indexOf("const bindingKey ="),
+      runtimeStore.indexOf("if (!representativeBinding)"),
     );
-    expect(bindingUpsert).toContain(
-      "externalUserId: telegramBotExternalUserId",
+    expect(bindingLookup).toContain(
+      "telegramBotConnectionId:",
     );
-    expect(
-      bindingUpsert.match(/externalUserId: telegramBotExternalUserId/g),
-    ).toHaveLength(2);
+    expect(bindingLookup).toContain("connectionId,");
+    expect(bindingLookup).not.toContain("upsert");
   });
 
   it("uses a bounded API timeout that leaves headroom around long polling", () => {
@@ -197,6 +262,18 @@ describe("Telegram bot runtime", () => {
     expect(readActiveRepresentativeSlug).not.toHaveBeenCalled();
   });
 
+  it("requires an explicit representative selection when a Bot is shared", async () => {
+    await expect(
+      resolveTelegramRepresentativeSession({
+        chatType: "private",
+        defaultRepresentativeSlug: null,
+        readActiveRepresentativeSlug: async () => null,
+      }),
+    ).rejects.toBeInstanceOf(
+      TelegramRepresentativeSelectionRequiredError,
+    );
+  });
+
   it("replies with a fail-closed message when representative session lookup fails", async () => {
     const reply = vi.fn(async () => undefined);
     const logger = { error: vi.fn() };
@@ -217,6 +294,23 @@ describe("Telegram bot runtime", () => {
     );
     expect(logger.error).toHaveBeenCalledWith(
       expect.stringContaining('"event":"telegram_middleware_error"'),
+    );
+  });
+
+  it("asks for an explicit representative when a shared Bot has no session", async () => {
+    const reply = vi.fn(async () => undefined);
+
+    await handleTelegramMiddlewareError({
+      error: new TelegramRepresentativeSelectionRequiredError(),
+      context: {
+        update: { update_id: 48 },
+        reply,
+      },
+      logger: { error: vi.fn() },
+    });
+
+    expect(reply).toHaveBeenCalledWith(
+      expect.stringContaining("目标数字代表"),
     );
   });
 
@@ -260,7 +354,7 @@ describe("Telegram bot runtime", () => {
 
   it("keeps the current session when a /start representative switch fails", () => {
     const source = readFileSync(
-      new URL("../src/index.ts", import.meta.url),
+      new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
     );
     const startHandler = source.slice(
@@ -380,5 +474,10 @@ describe("Telegram bot runtime", () => {
         "bot8718299151:AASecretTokenValue is unavailable",
       ),
     ).toBe("bot[REDACTED] is unavailable");
+    expect(
+      sanitizeTelegramError(
+        "8718299151:AASecretTokenValueLongEnough failed",
+      ),
+    ).toBe("[REDACTED] failed");
   });
 });

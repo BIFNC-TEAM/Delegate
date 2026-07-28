@@ -153,17 +153,52 @@ The first canary does not include group chat, media parity, reactions, typing, r
 
 ### Telegram long-poll configuration
 
-`TELEGRAM_BOT_TOKEN` is the only Telegram credential required to start the
-current grammY long-poll runtime. `TELEGRAM_BOT_ID` is optional: channel
-binding uses it when set and otherwise derives the numeric bot id from the token
-prefix. After `getMe` succeeds, the runtime persists the validated bot id and
-username to configured Telegram channel bindings. The Web app can therefore
-issue a connection-scoped `/bind` challenge without receiving the Bot token.
-`TELEGRAM_BOT_USERNAME` is recommended for a readable external channel identity
-but is not required for polling. `TELEGRAM_WEBHOOK_SECRET` is not read by
-long-polling and is not a long-poll requirement. It remains available to
-separate webhook/signing or fallback code, but should not be added merely to run
-polling.
+The Dashboard stores one encrypted Telegram Bot connection per verified Bot
+identity. Each digital representative selects one connection, and several
+representatives under the same owner may intentionally select the same
+connection. The supervisor starts one grammY long-poll runtime per active
+connection and dynamically reconciles additions, pauses, and credential
+rotations.
+
+`CHANNEL_CREDENTIAL_MASTER_KEY` must be an independently generated,
+base64-encoded 32-byte key; `CHANNEL_CREDENTIAL_MASTER_KEY_VERSION` identifies
+the current key version. The current runtime loads one key version, so changing
+either value requires re-entering every stored Bot token. Tokens are accepted
+only by the authenticated
+Dashboard API, verified with Telegram `getMe`, encrypted at rest, and never
+returned by list or snapshot APIs. `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_ID`, and
+`TELEGRAM_BOT_USERNAME` remain as a legacy single-Bot bootstrap path. During an
+upgrade, a matching pending migrated connection is activated without changing
+its owner or platform-managed scope. `TELEGRAM_WEBHOOK_SECRET` is not read by
+long-polling.
+
+Every Delegate Bot replica reconciles credential-free connection descriptors,
+but it must atomically acquire that connection's PostgreSQL runtime lease
+before resolving its encrypted credential. A non-holder never selects or
+decrypts the token, and an unchanged holder does not decrypt it again on each
+reconcile. The defaults are a five-second descriptor reconcile, a 120-second
+lease, a 20-second heartbeat, and a ten-second database-operation timeout:
+
+- `TELEGRAM_RUNTIME_RECONCILE_MS=5000`
+- `TELEGRAM_RUNTIME_LEASE_MS=120000`
+- `TELEGRAM_RUNTIME_LEASE_RENEW_MS=20000`
+- `TELEGRAM_RUNTIME_LEASE_DB_TIMEOUT_MS=10000`
+
+Lease acquisition, renewal, expiry, and takeover use the PostgreSQL clock.
+Renewal and release require the exact connection, holder, and lease token, so a
+stale process cannot delete its successor's lease. A failed or timed-out
+heartbeat immediately stops local polling; graceful shutdown attempts a fenced
+release, while a crash is recovered after expiry. Configuration validation
+requires the renewal interval plus database timeout and the maximum supported
+60-second Telegram request timeout to fit inside the lease duration.
+
+The database lease coordinates only Delegate replicas. It cannot fence a
+manually launched script, another deployment, or any other external
+`getUpdates` consumer that does not use this database. Such a consumer remains
+detectable through Telegram's `409 Conflict` response
+(`another_get_updates_consumer`) and must be stopped or migrated separately.
+Running the legacy environment-token fallback without PostgreSQL is therefore
+supported only as a single-instance development mode.
 
 The current paid continuation path sends users to the Web demo/mock recharge
 surface. `TELEGRAM_WEB_RECHARGE_BASE_URL` lets the Bot use a public origin

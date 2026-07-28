@@ -10,6 +10,10 @@ import { demoRepresentative } from "@delegate/domain";
 
 import { prisma } from "./prisma";
 import { resolveMatrixApplicationServiceConnectionId } from "./matrix-provisioning";
+import {
+  listOwnerTelegramBotConnections,
+  type OwnerTelegramBotConnectionSummary,
+} from "./telegram-bot-connections";
 
 const channelKinds = [
   RepresentativeChannelKind.WEB,
@@ -49,6 +53,12 @@ export type ManagedChannelBinding = {
     id: string | null;
     displayName: string | null;
   };
+  telegramBotConnectionId: string | null;
+  telegramBot: {
+    botId: string;
+    username: string | null;
+    displayName: string | null;
+  } | null;
   lastHealthCheckAt: string | null;
   lastError: string | null;
   recentIngress: ChannelActivitySummary | null;
@@ -74,6 +84,7 @@ export type OwnerChannelManagementSnapshot = {
     pausedBindings: number;
     attentionBindings: number;
   };
+  telegramBots: OwnerTelegramBotConnectionSummary[];
   representatives: ManagedRepresentativeChannels[];
 };
 
@@ -115,19 +126,16 @@ export async function resolveRepresentativeChannelConnectionId(input: {
   return connectionId || null;
 }
 
-export async function resolveRepresentativeTelegramBotConnectionId(
+export type RepresentativeTelegramBotEndpoint = {
+  botId: string;
+  username: string | null;
+};
+
+export async function resolveRepresentativeTelegramBotEndpoint(
   representativeSlug: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
-  client: {
-    representativeChannelBinding: {
-      findFirst(args: unknown): Promise<{
-        connectionId: string | null;
-        desiredState: ChannelDesiredState;
-        status: string;
-      } | null>;
-    };
-  } = prisma,
-): Promise<string | null> {
+  client: Pick<typeof prisma, "representativeChannelBinding"> = prisma,
+): Promise<RepresentativeTelegramBotEndpoint | null> {
   const normalizedRepresentativeSlug = requireValue(
     representativeSlug,
     "representativeSlug",
@@ -141,6 +149,8 @@ export async function resolveRepresentativeTelegramBotConnectionId(
 
   const configuredId = env.TELEGRAM_BOT_ID?.trim();
   const tokenId = env.TELEGRAM_BOT_TOKEN?.trim().match(/^([1-9]\d*):/)?.[1];
+  const configuredUsername =
+    env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, "") || null;
   const binding = await client.representativeChannelBinding.findFirst({
     where: {
       kind: RepresentativeChannelKind.TELEGRAM,
@@ -162,17 +172,51 @@ export async function resolveRepresentativeTelegramBotConnectionId(
     },
     select: {
       connectionId: true,
+      telegramBotConnectionId: true,
       desiredState: true,
+      healthStatus: true,
       status: true,
+      telegramBotConnection: {
+        select: {
+          botId: true,
+          username: true,
+          status: true,
+          revokedAt: true,
+          activeCredentialId: true,
+        },
+      },
     },
   });
   if (
     !binding
     || binding.desiredState !== ChannelDesiredState.ACTIVE
     || !healthyLegacyStatuses.has(binding.status)
+    || binding.healthStatus === ChannelHealthStatus.UNHEALTHY
   ) {
     return null;
   }
+
+  // Once a binding has been migrated to a managed connection, that relation
+  // is the only routing authority. An unavailable, revoked, or credential-less
+  // managed Bot must fail closed instead of silently using deployment env.
+  if (binding.telegramBotConnectionId !== null) {
+    const connection = binding.telegramBotConnection;
+    const botId = connection?.botId.trim() ?? "";
+    if (
+      !connection
+      || connection.status !== "ACTIVE"
+      || connection.revokedAt !== null
+      || !connection.activeCredentialId?.trim()
+      || !/^[1-9]\d*$/.test(botId)
+    ) {
+      return null;
+    }
+    return {
+      botId,
+      username: connection.username?.trim().replace(/^@/, "") || null,
+    };
+  }
+
   const persistedId = binding.connectionId?.trim() || null;
   if (
     [configuredId, persistedId].some(
@@ -181,15 +225,34 @@ export async function resolveRepresentativeTelegramBotConnectionId(
   ) {
     return null;
   }
-  const configuredConnectionId = configuredId || tokenId;
-  if (
-    persistedId
-    && configuredConnectionId
-    && persistedId !== configuredConnectionId
-  ) {
-    return null;
+  // Deployment-level values remain only as a cold-start fallback for truly
+  // legacy bindings that have not yet been attached to a managed connection.
+  if (persistedId) {
+    return {
+      botId: persistedId,
+      username:
+        !configuredId || configuredId === persistedId
+          ? configuredUsername
+          : null,
+    };
   }
-  return persistedId || configuredConnectionId || null;
+  if (configuredId && tokenId && configuredId !== tokenId) return null;
+  const botId = configuredId || tokenId || null;
+  return botId ? { botId, username: configuredUsername } : null;
+}
+
+export async function resolveRepresentativeTelegramBotConnectionId(
+  representativeSlug: string,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  client: Pick<typeof prisma, "representativeChannelBinding"> = prisma,
+): Promise<string | null> {
+  return (
+    await resolveRepresentativeTelegramBotEndpoint(
+      representativeSlug,
+      env,
+      client,
+    )
+  )?.botId ?? null;
 }
 
 type RepresentativeRecord = {
@@ -214,6 +277,12 @@ type BindingRecord = {
   displayName: string | null;
   lastHealthCheckAt: Date | null;
   lastError: string | null;
+  telegramBotConnectionId?: string | null;
+  telegramBotConnection?: {
+    botId: string;
+    username: string | null;
+    displayName: string | null;
+  } | null;
 };
 
 type EventRecord = {
@@ -249,12 +318,13 @@ export async function getOwnerChannelManagementSnapshot(input: {
       ],
       ingressEvents: [],
       egressEvents: [],
+      telegramBots: [],
       generatedAt: now,
       dataSource: "demo-empty",
     });
   }
 
-  const [representatives, ingressEvents, egressEvents] = await Promise.all([
+  const [representatives, ingressEvents, egressEvents, telegramBots] = await Promise.all([
     prisma.representative.findMany({
       where: { ownerId },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -279,6 +349,14 @@ export async function getOwnerChannelManagementSnapshot(input: {
             displayName: true,
             lastHealthCheckAt: true,
             lastError: true,
+            telegramBotConnectionId: true,
+            telegramBotConnection: {
+              select: {
+                botId: true,
+                username: true,
+                displayName: true,
+              },
+            },
           },
         },
       },
@@ -326,6 +404,7 @@ export async function getOwnerChannelManagementSnapshot(input: {
         },
       },
     }),
+    listOwnerTelegramBotConnections({ ownerId }),
   ]);
 
   return buildOwnerChannelManagementSnapshot({
@@ -335,6 +414,7 @@ export async function getOwnerChannelManagementSnapshot(input: {
       ...event,
       kind: (event.sourceProvider ?? event.transport ?? "WEB") as ManagedChannelKind,
     })) as EventRecord[],
+    telegramBots,
     generatedAt: now,
     dataSource: "database",
   });
@@ -344,6 +424,7 @@ export function buildOwnerChannelManagementSnapshot(input: {
   representatives: RepresentativeRecord[];
   ingressEvents: EventRecord[];
   egressEvents: EventRecord[];
+  telegramBots?: OwnerTelegramBotConnectionSummary[];
   generatedAt: Date;
   dataSource: OwnerChannelManagementSnapshot["dataSource"];
 }): OwnerChannelManagementSnapshot {
@@ -376,6 +457,15 @@ export function buildOwnerChannelManagementSnapshot(input: {
           id: binding?.externalUserId ?? null,
           displayName: binding?.displayName ?? null,
         },
+        telegramBotConnectionId:
+          binding?.telegramBotConnectionId ?? null,
+        telegramBot: binding?.telegramBotConnection
+          ? {
+              botId: binding.telegramBotConnection.botId,
+              username: binding.telegramBotConnection.username,
+              displayName: binding.telegramBotConnection.displayName,
+            }
+          : null,
         lastHealthCheckAt: binding?.lastHealthCheckAt?.toISOString() ?? null,
         lastError: sanitizeChannelError(binding?.lastError),
         recentIngress: ingressByRepresentativeAndSource.get(activityKey) ?? null,
@@ -414,6 +504,7 @@ export function buildOwnerChannelManagementSnapshot(input: {
           || Boolean(binding.lastError),
       ).length,
     },
+    telegramBots: input.telegramBots ?? [],
     representatives,
   };
 }
@@ -440,6 +531,11 @@ export async function setOwnerChannelDesiredState(input: {
   }
 
   return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${"channel-binding-state:" + bindingId})
+      )
+    `;
     const binding = await tx.representativeChannelBinding.findFirst({
       where: {
         id: bindingId,
@@ -456,6 +552,42 @@ export async function setOwnerChannelDesiredState(input: {
     });
     if (!binding) {
       throw new ChannelManagementError("Channel binding not found.", 404);
+    }
+    const repeatedAudit = await tx.eventAudit.findFirst({
+      where: {
+        representativeId: binding.representativeId,
+        type: EventType.CHANNEL_CONFIGURATION_CHANGED,
+        AND: [
+          {
+            payload: {
+              path: ["bindingId"],
+              equals: binding.id,
+            },
+          },
+          {
+            payload: {
+              path: ["idempotencyKey"],
+              equals: idempotencyKey,
+            },
+          },
+        ],
+      },
+      select: { payload: true },
+    });
+    if (repeatedAudit) {
+      const payload = isJsonRecord(repeatedAudit.payload)
+        ? repeatedAudit.payload
+        : null;
+      if (
+        payload?.action !== "CHANNEL_DESIRED_STATE_CHANGED"
+        || payload.desiredState !== input.desiredState
+      ) {
+        throw new ChannelManagementError(
+          "Idempotency key was already used for a different channel request on this binding.",
+          409,
+        );
+      }
+      return binding;
     }
     const updated = binding.desiredState === input.desiredState
       ? binding
@@ -474,7 +606,7 @@ export async function setOwnerChannelDesiredState(input: {
     await tx.eventAudit.create({
       data: {
         representativeId: binding.representativeId,
-        type: EventType.COMPUTE_POLICY_CHANGED,
+        type: EventType.CHANNEL_CONFIGURATION_CHANGED,
         payload: {
           kind: "channel_desired_state_changed",
           action: "CHANNEL_DESIRED_STATE_CHANGED",
@@ -671,7 +803,7 @@ export async function provisionOwnerTelegramChannel(
     const repeatedAudit = await tx.eventAudit.findFirst({
       where: {
         representativeId: representative.id,
-        type: EventType.COMPUTE_POLICY_CHANGED,
+        type: EventType.CHANNEL_CONFIGURATION_CHANGED,
         AND: [
           {
             payload: {
@@ -693,7 +825,7 @@ export async function provisionOwnerTelegramChannel(
       await tx.eventAudit.create({
         data: {
           representativeId: representative.id,
-          type: EventType.COMPUTE_POLICY_CHANGED,
+          type: EventType.CHANNEL_CONFIGURATION_CHANGED,
           payload: {
             kind: "telegram_bot_channel_provisioned",
             action: "TELEGRAM_BOT_CHANNEL_PROVISIONED",
@@ -708,6 +840,312 @@ export async function provisionOwnerTelegramChannel(
       });
     }
     return { binding };
+  });
+}
+
+/**
+ * Assigns one owner-managed Telegram Bot connection to a representative.
+ * A connection may be reused by multiple representatives owned by the same
+ * workspace; switching this representative never mutates the other bindings.
+ */
+export async function assignOwnerTelegramBotConnection(input: {
+  ownerId: string;
+  actorId: string;
+  representativeId: string;
+  telegramBotConnectionId: string;
+  requestId: string;
+  idempotencyKey: string;
+}) {
+  assertDatabaseAvailable();
+  const ownerId = requireValue(input.ownerId, "ownerId");
+  const actorId = requireValue(input.actorId, "actorId");
+  const representativeId = requireValue(
+    input.representativeId,
+    "representativeId",
+  );
+  const telegramBotConnectionId = requireValue(
+    input.telegramBotConnectionId,
+    "telegramBotConnectionId",
+  );
+  const requestId = requireValue(input.requestId, "requestId");
+  const idempotencyKey = requireValue(input.idempotencyKey, "idempotencyKey");
+
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${"telegram-bot-channel:" + representativeId})
+      )
+    `;
+    const telegramBotLockTarget =
+      await tx.telegramBotConnection.findFirst({
+        where: {
+          id: telegramBotConnectionId,
+          ownerId,
+        },
+        select: { botId: true },
+      });
+    if (!telegramBotLockTarget) {
+      throw new ChannelManagementError(
+        "Telegram Bot connection not found.",
+        404,
+      );
+    }
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${"telegram-bot-connection:" + telegramBotLockTarget.botId})
+      )
+    `;
+    const [representative, telegramBot] = await Promise.all([
+      tx.representative.findFirst({
+        where: { id: representativeId, ownerId },
+        select: {
+          id: true,
+          displayName: true,
+        },
+      }),
+      tx.telegramBotConnection.findFirst({
+        where: {
+          id: telegramBotConnectionId,
+          ownerId,
+          revokedAt: null,
+          status: "ACTIVE",
+        },
+        select: {
+          id: true,
+          botId: true,
+          username: true,
+          displayName: true,
+          status: true,
+          healthStatus: true,
+        },
+      }),
+    ]);
+    if (!representative) {
+      throw new ChannelManagementError("Representative not found.", 404);
+    }
+    if (!telegramBot) {
+      throw new ChannelManagementError("Telegram Bot connection not found.", 404);
+    }
+
+    const existing = await tx.representativeChannelBinding.findUnique({
+      where: {
+        representativeId_kind: {
+          representativeId,
+          kind: RepresentativeChannelKind.TELEGRAM,
+        },
+      },
+      select: {
+        id: true,
+        representativeId: true,
+        kind: true,
+        transport: true,
+        sourceProvider: true,
+        connectionId: true,
+        telegramBotConnectionId: true,
+        desiredState: true,
+        healthStatus: true,
+        externalUserId: true,
+        status: true,
+      },
+    });
+    if (existing) {
+      const repeatedAssignment = await tx.eventAudit.findFirst({
+        where: {
+          representativeId,
+          type: EventType.CHANNEL_CONFIGURATION_CHANGED,
+          AND: [
+            {
+              payload: {
+                path: ["bindingId"],
+                equals: existing.id,
+              },
+            },
+            {
+              payload: {
+                path: ["idempotencyKey"],
+                equals: idempotencyKey,
+              },
+            },
+          ],
+        },
+        select: { payload: true },
+      });
+      if (repeatedAssignment) {
+        assertTelegramAssignmentIdempotencyReplay(
+          repeatedAssignment.payload,
+          telegramBot.id,
+        );
+        return {
+          binding: existing,
+          telegramBot: {
+            id: telegramBot.id,
+            botId: telegramBot.botId,
+            username: telegramBot.username,
+            displayName: telegramBot.displayName,
+            status: telegramBot.status,
+            healthStatus: telegramBot.healthStatus,
+          },
+        };
+      }
+    }
+    if (
+      existing
+      && (
+        (
+          existing.transport !== null
+          && existing.transport !== ChannelTransport.TELEGRAM
+        )
+        || (
+          existing.sourceProvider !== null
+          && existing.sourceProvider !== ChannelSourceProvider.TELEGRAM
+        )
+      )
+    ) {
+      throw new ChannelManagementError(
+        "Existing Telegram channel uses a different transport and cannot be replaced.",
+        409,
+      );
+    }
+
+    const changed =
+      existing?.telegramBotConnectionId !== telegramBot.id
+      || existing.connectionId !== telegramBot.botId;
+    const nextDesiredState = changed
+      ? ChannelDesiredState.ACTIVE
+      : existing?.desiredState ?? ChannelDesiredState.ACTIVE;
+    const externalUserId = telegramBot.username
+      ? `@${telegramBot.username}`
+      : `telegram-bot:${telegramBot.botId}`;
+    const binding = await tx.representativeChannelBinding.upsert({
+      where: {
+        representativeId_kind: {
+          representativeId,
+          kind: RepresentativeChannelKind.TELEGRAM,
+        },
+      },
+      create: {
+        representativeId,
+        kind: RepresentativeChannelKind.TELEGRAM,
+        transport: ChannelTransport.TELEGRAM,
+        sourceProvider: ChannelSourceProvider.TELEGRAM,
+        connectionId: telegramBot.botId,
+        telegramBotConnectionId: telegramBot.id,
+        desiredState: nextDesiredState,
+        healthStatus: telegramBot.healthStatus,
+        externalUserId,
+        status: "CONFIGURED",
+        displayName: representative.displayName,
+        configuration: {
+          managed: true,
+          directMessageOnly: true,
+          botUsername: telegramBot.username,
+        },
+        lastError: null,
+      },
+      update: changed
+        ? {
+            transport: ChannelTransport.TELEGRAM,
+            sourceProvider: ChannelSourceProvider.TELEGRAM,
+            connectionId: telegramBot.botId,
+            telegramBotConnectionId: telegramBot.id,
+            desiredState: nextDesiredState,
+              healthStatus: telegramBot.healthStatus,
+              lastHealthCheckAt: null,
+            externalUserId,
+            status: "CONFIGURED",
+            displayName: representative.displayName,
+            configuration: {
+              managed: true,
+              directMessageOnly: true,
+              botUsername: telegramBot.username,
+            },
+            lastError: null,
+          }
+        : {},
+      select: {
+        id: true,
+        representativeId: true,
+        kind: true,
+        transport: true,
+        sourceProvider: true,
+        connectionId: true,
+        telegramBotConnectionId: true,
+        desiredState: true,
+        healthStatus: true,
+        externalUserId: true,
+        status: true,
+      },
+    });
+
+    const repeatedAudit = await tx.eventAudit.findFirst({
+      where: {
+        representativeId,
+        type: EventType.CHANNEL_CONFIGURATION_CHANGED,
+        AND: [
+          {
+            payload: {
+              path: ["bindingId"],
+              equals: binding.id,
+            },
+          },
+          {
+            payload: {
+              path: ["idempotencyKey"],
+              equals: idempotencyKey,
+            },
+          },
+        ],
+      },
+      select: { payload: true },
+    });
+    if (repeatedAudit) {
+      assertTelegramAssignmentIdempotencyReplay(
+        repeatedAudit.payload,
+        telegramBot.id,
+      );
+    } else {
+      await tx.eventAudit.create({
+        data: {
+          representativeId,
+          type: EventType.CHANNEL_CONFIGURATION_CHANGED,
+          payload: {
+            kind: "representative_telegram_bot_assigned",
+            action: "REPRESENTATIVE_TELEGRAM_BOT_ASSIGNED",
+            actorId,
+            requestId,
+            idempotencyKey,
+            bindingId: binding.id,
+            telegramBotConnectionId: telegramBot.id,
+            botId: telegramBot.botId,
+            botUsername: telegramBot.username,
+            before: {
+              telegramBotConnectionId:
+                existing?.telegramBotConnectionId ?? null,
+              connectionId: existing?.connectionId ?? null,
+              desiredState:
+                existing?.desiredState ?? ChannelDesiredState.DISCONNECTED,
+            },
+            after: {
+              telegramBotConnectionId: telegramBot.id,
+              connectionId: telegramBot.botId,
+              desiredState: nextDesiredState,
+            },
+            changed,
+          },
+        },
+      });
+    }
+    return {
+      binding,
+      telegramBot: {
+        id: telegramBot.id,
+        botId: telegramBot.botId,
+        username: telegramBot.username,
+        displayName: telegramBot.displayName,
+        status: telegramBot.status,
+        healthStatus: telegramBot.healthStatus,
+      },
+    };
   });
 }
 
@@ -857,23 +1295,52 @@ export async function provisionOwnerMatrixChannel(input: {
         status: true,
       },
     });
-    await tx.eventAudit.create({
-      data: {
+    const repeatedAudit = await tx.eventAudit.findFirst({
+      where: {
         representativeId: representative.id,
-        type: EventType.COMPUTE_POLICY_CHANGED,
-        payload: {
-          kind: "matrix_virtual_user_provisioned",
-          action: "MATRIX_VIRTUAL_USER_PROVISIONED",
-          actorId,
-          requestId,
-          idempotencyKey,
-          bindingId: binding.id,
-          matrixVirtualUserBindingId: virtualUser.id,
-          matrixUserId,
-          connectionId,
-        },
+        type: EventType.CHANNEL_CONFIGURATION_CHANGED,
+        AND: [
+          {
+            payload: {
+              path: ["action"],
+              equals: "MATRIX_VIRTUAL_USER_PROVISIONED",
+            },
+          },
+          {
+            payload: {
+              path: ["bindingId"],
+              equals: binding.id,
+            },
+          },
+          {
+            payload: {
+              path: ["idempotencyKey"],
+              equals: idempotencyKey,
+            },
+          },
+        ],
       },
+      select: { id: true },
     });
+    if (!repeatedAudit) {
+      await tx.eventAudit.create({
+        data: {
+          representativeId: representative.id,
+          type: EventType.CHANNEL_CONFIGURATION_CHANGED,
+          payload: {
+            kind: "matrix_virtual_user_provisioned",
+            action: "MATRIX_VIRTUAL_USER_PROVISIONED",
+            actorId,
+            requestId,
+            idempotencyKey,
+            bindingId: binding.id,
+            matrixVirtualUserBindingId: virtualUser.id,
+            matrixUserId,
+            connectionId,
+          },
+        },
+      });
+    }
     return { binding, virtualUser };
   });
 }
@@ -970,7 +1437,7 @@ export async function refreshOwnerChannelHealth(input: {
     await tx.eventAudit.create({
       data: {
         representativeId: binding.representativeId,
-        type: EventType.COMPUTE_POLICY_CHANGED,
+        type: EventType.CHANNEL_CONFIGURATION_CHANGED,
         payload: {
           kind: "channel_health_checked",
           action: "CHANNEL_HEALTH_CHECKED",
@@ -1090,6 +1557,28 @@ function sanitizeChannelError(value: string | null | undefined): string | null {
       "$1=[redacted]",
     )
     .slice(0, 240);
+}
+
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object"
+    && value !== null
+    && !Array.isArray(value);
+}
+
+function assertTelegramAssignmentIdempotencyReplay(
+  payloadValue: unknown,
+  telegramBotConnectionId: string,
+) {
+  const payload = isJsonRecord(payloadValue) ? payloadValue : null;
+  if (
+    payload?.action !== "REPRESENTATIVE_TELEGRAM_BOT_ASSIGNED"
+    || payload.telegramBotConnectionId !== telegramBotConnectionId
+  ) {
+    throw new ChannelManagementError(
+      "Idempotency key was already used for a different Telegram Bot assignment on this representative.",
+      409,
+    );
+  }
 }
 
 function requireValue(value: string, label: string) {

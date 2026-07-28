@@ -275,8 +275,8 @@ export default async function RepresentativePage({
             <h2>{locale === "zh" ? "绑定你的私聊账户" : "Link your private-channel accounts"}</h2>
             <p>
               {locale === "zh"
-                ? "绑定后，Web、Telegram 和 Matrix 会对应到同一个 Delegate 用户与服务权益；各渠道的原始会话记录仍然分开。"
-                : "Once linked, Web, Telegram, and Matrix resolve to the same Delegate user and service entitlements while each channel keeps its own conversation timeline."}
+                ? "绑定后，当前已开放的私聊渠道会对应到同一个 Delegate 用户与服务权益；各渠道的原始会话记录仍然分开。"
+                : "Once linked, the available private-chat channels resolve to the same Delegate user and service entitlements while each channel keeps its own conversation timeline."}
             </p>
           </div>
           <RepresentativeIdentityBindingPanel

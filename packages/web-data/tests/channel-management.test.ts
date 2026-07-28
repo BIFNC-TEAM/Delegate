@@ -6,6 +6,9 @@ const mocks = vi.hoisted(() => {
     representative: {
       findFirst: vi.fn(),
     },
+    telegramBotConnection: {
+      findFirst: vi.fn(),
+    },
     representativeChannelBinding: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
@@ -44,12 +47,14 @@ vi.mock("../src/prisma", () => ({
 }));
 
 import {
+  assignOwnerTelegramBotConnection,
   buildOwnerChannelManagementSnapshot,
   evaluateChannelControlPlaneHealth,
   provisionOwnerMatrixChannel,
   provisionOwnerTelegramChannel,
   refreshOwnerChannelHealth,
   resolveRepresentativeTelegramBotConnectionId,
+  resolveRepresentativeTelegramBotEndpoint,
   setOwnerChannelDesiredState,
 } from "../src/channel-management";
 import { resolveChannelAvailability } from "../src/channel-availability";
@@ -63,7 +68,7 @@ describe("channel management", () => {
     });
   });
 
-  it("uses a cold-start Bot id only for an explicitly active direct Telegram binding", async () => {
+  it("uses a cold-start Bot id only for an explicitly active and available legacy Telegram binding", async () => {
     const findFirst = vi.fn();
     const client = {
       representativeChannelBinding: { findFirst },
@@ -72,8 +77,11 @@ describe("channel management", () => {
 
     findFirst.mockResolvedValueOnce({
       connectionId: null,
+      telegramBotConnectionId: null,
       desiredState: "ACTIVE",
+      healthStatus: "UNKNOWN",
       status: "CONNECTED",
+      telegramBotConnection: null,
     });
     await expect(
       resolveRepresentativeTelegramBotConnectionId(
@@ -85,8 +93,11 @@ describe("channel management", () => {
 
     findFirst.mockResolvedValueOnce({
       connectionId: null,
+      telegramBotConnectionId: null,
       desiredState: "PAUSED",
+      healthStatus: "UNKNOWN",
       status: "CONNECTED",
+      telegramBotConnection: null,
     });
     await expect(
       resolveRepresentativeTelegramBotConnectionId(
@@ -127,6 +138,187 @@ describe("channel management", () => {
         }),
       }),
     );
+  });
+
+  it("returns the Bot id for an active managed Telegram connection", async () => {
+    const findFirst = vi.fn().mockResolvedValue({
+      connectionId: "stale-public-id",
+      telegramBotConnectionId: "telegram-connection-1",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      status: "CONFIGURED",
+      telegramBotConnection: {
+        botId: "8718299151",
+        status: "ACTIVE",
+        revokedAt: null,
+        activeCredentialId: "credential-1",
+      },
+    });
+
+    await expect(
+      resolveRepresentativeTelegramBotConnectionId(
+        "lin",
+        {
+          TELEGRAM_BOT_ID: "9999999999",
+          TELEGRAM_BOT_TOKEN: "9999999999:legacy-token",
+        },
+        { representativeChannelBinding: { findFirst } } as never,
+      ),
+    ).resolves.toBe("8718299151");
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          telegramBotConnectionId: true,
+          telegramBotConnection: {
+            select: {
+              botId: true,
+              username: true,
+              status: true,
+              revokedAt: true,
+              activeCredentialId: true,
+            },
+          },
+        }),
+      }),
+    );
+  });
+
+  it("returns the safe Bot endpoint needed by the public binding page", async () => {
+    const findFirst = vi.fn().mockResolvedValue({
+      connectionId: "stale-public-id",
+      telegramBotConnectionId: "telegram-connection-1",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      status: "CONFIGURED",
+      telegramBotConnection: {
+        botId: "8718299151",
+        username: "delegate_test_bot",
+        status: "ACTIVE",
+        revokedAt: null,
+        activeCredentialId: "credential-1",
+      },
+    });
+
+    await expect(
+      resolveRepresentativeTelegramBotEndpoint(
+        "lin",
+        {},
+        { representativeChannelBinding: { findFirst } } as never,
+      ),
+    ).resolves.toEqual({
+      botId: "8718299151",
+      username: "delegate_test_bot",
+    });
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          telegramBotConnection: {
+            select: expect.objectContaining({
+              botId: true,
+              username: true,
+            }),
+          },
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    {
+      label: "disabled",
+      status: "DISABLED",
+      revokedAt: null,
+      activeCredentialId: "credential-1",
+    },
+    {
+      label: "revoked",
+      status: "ACTIVE",
+      revokedAt: new Date("2026-07-27T00:00:00.000Z"),
+      activeCredentialId: "credential-1",
+    },
+    {
+      label: "without an active credential",
+      status: "ACTIVE",
+      revokedAt: null,
+      activeCredentialId: null,
+    },
+  ])(
+    "fails closed for a managed Telegram connection that is $label",
+    async ({ status, revokedAt, activeCredentialId }) => {
+      const findFirst = vi.fn().mockResolvedValue({
+        connectionId: "8718299151",
+        telegramBotConnectionId: "telegram-connection-1",
+        desiredState: "ACTIVE",
+        healthStatus: "HEALTHY",
+        status: "CONFIGURED",
+        telegramBotConnection: {
+          botId: "8718299151",
+          status,
+          revokedAt,
+          activeCredentialId,
+        },
+      });
+
+      await expect(
+        resolveRepresentativeTelegramBotConnectionId(
+          "lin",
+          {
+            TELEGRAM_BOT_ID: "9999999999",
+            TELEGRAM_BOT_TOKEN: "9999999999:legacy-token",
+          },
+          { representativeChannelBinding: { findFirst } } as never,
+        ),
+      ).resolves.toBeNull();
+    },
+  );
+
+  it("does not fall back to env when a managed Telegram binding is unavailable", async () => {
+    const findFirst = vi.fn().mockResolvedValue({
+      connectionId: "8718299151",
+      telegramBotConnectionId: "telegram-connection-1",
+      desiredState: "ACTIVE",
+      healthStatus: "UNHEALTHY",
+      status: "CONFIGURED",
+      telegramBotConnection: {
+        botId: "8718299151",
+        status: "ACTIVE",
+        revokedAt: null,
+        activeCredentialId: "credential-1",
+      },
+    });
+
+    await expect(
+      resolveRepresentativeTelegramBotConnectionId(
+        "lin",
+        {
+          TELEGRAM_BOT_ID: "9999999999",
+          TELEGRAM_BOT_TOKEN: "9999999999:legacy-token",
+        },
+        { representativeChannelBinding: { findFirst } } as never,
+      ),
+    ).resolves.toBeNull();
+  });
+
+  it("keeps a legacy binding's persisted Bot id ahead of env fallback", async () => {
+    const findFirst = vi.fn().mockResolvedValue({
+      connectionId: "8718299151",
+      telegramBotConnectionId: null,
+      desiredState: "ACTIVE",
+      healthStatus: "DEGRADED",
+      status: "CONNECTED",
+      telegramBotConnection: null,
+    });
+
+    await expect(
+      resolveRepresentativeTelegramBotConnectionId(
+        "lin",
+        {
+          TELEGRAM_BOT_ID: "9999999999",
+          TELEGRAM_BOT_TOKEN: "9999999999:legacy-token",
+        },
+        { representativeChannelBinding: { findFirst } } as never,
+      ),
+    ).resolves.toBe("8718299151");
   });
 
   it("keeps Telegram as the source when Matrix carries the transport", () => {
@@ -443,6 +635,282 @@ describe("channel management", () => {
     });
   });
 
+  it("replays the same channel state request once and rejects a reused key with another state", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    const binding = {
+      id: "binding-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      transport: "TELEGRAM",
+      sourceProvider: "TELEGRAM",
+      desiredState: "PAUSED",
+    };
+    mocks.tx.representativeChannelBinding.findFirst.mockResolvedValue(binding);
+    mocks.tx.eventAudit.findFirst.mockResolvedValue({
+      payload: {
+        action: "CHANNEL_DESIRED_STATE_CHANGED",
+        bindingId: "binding-1",
+        idempotencyKey: "idem-state",
+        desiredState: "PAUSED",
+      },
+    });
+
+    try {
+      await expect(
+        setOwnerChannelDesiredState({
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          bindingId: "binding-1",
+          desiredState: "PAUSED",
+          requestId: "request-replay",
+          idempotencyKey: "idem-state",
+        }),
+      ).resolves.toEqual(binding);
+      await expect(
+        setOwnerChannelDesiredState({
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          bindingId: "binding-1",
+          desiredState: "ACTIVE",
+          requestId: "request-conflict",
+          idempotencyKey: "idem-state",
+        }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message:
+          "Idempotency key was already used for a different channel request on this binding.",
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.tx.representativeChannelBinding.update).not.toHaveBeenCalled();
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
+    expect(mocks.tx.$executeRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not overwrite a paused binding on an idempotent Telegram Bot assignment replay", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      displayName: "Lin",
+    });
+    mocks.tx.telegramBotConnection.findFirst
+      .mockResolvedValueOnce({ botId: "8718299151" })
+      .mockResolvedValueOnce({
+        id: "telegram-connection-1",
+        botId: "8718299151",
+        username: "delegate_test_bot",
+        displayName: "Delegate",
+        status: "ACTIVE",
+        healthStatus: "HEALTHY",
+      });
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      transport: "TELEGRAM",
+      sourceProvider: "TELEGRAM",
+      connectionId: "8718299151",
+      telegramBotConnectionId: "telegram-connection-1",
+      desiredState: "PAUSED",
+      healthStatus: "DEGRADED",
+      externalUserId: "@delegate_test_bot",
+      status: "CONFIGURED",
+    });
+    mocks.tx.eventAudit.findFirst.mockResolvedValue({
+      payload: {
+        action: "REPRESENTATIVE_TELEGRAM_BOT_ASSIGNED",
+        bindingId: "binding-telegram-1",
+        telegramBotConnectionId: "telegram-connection-1",
+        idempotencyKey: "assignment-replay",
+      },
+    });
+
+    try {
+      await expect(
+        assignOwnerTelegramBotConnection({
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          representativeId: "rep-1",
+          telegramBotConnectionId: "telegram-connection-1",
+          requestId: "request-assignment-replay",
+          idempotencyKey: "assignment-replay",
+        }),
+      ).resolves.toMatchObject({
+        binding: {
+          id: "binding-telegram-1",
+          desiredState: "PAUSED",
+          healthStatus: "DEGRADED",
+        },
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.tx.representativeChannelBinding.upsert).not.toHaveBeenCalled();
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
+    expect(mocks.tx.$executeRaw).toHaveBeenCalledTimes(2);
+    expect(mocks.tx.eventAudit.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          representativeId: "rep-1",
+          type: "CHANNEL_CONFIGURATION_CHANGED",
+        }),
+      }),
+    );
+  });
+
+  it("rejects a Telegram assignment key reused for another Bot", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      displayName: "Lin",
+    });
+    mocks.tx.telegramBotConnection.findFirst
+      .mockResolvedValueOnce({ botId: "2222222222" })
+      .mockResolvedValueOnce({
+        id: "telegram-connection-2",
+        botId: "2222222222",
+        username: "delegate_second_bot",
+        displayName: "Delegate Two",
+        status: "ACTIVE",
+        healthStatus: "HEALTHY",
+      });
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      transport: "TELEGRAM",
+      sourceProvider: "TELEGRAM",
+      connectionId: "8718299151",
+      telegramBotConnectionId: "telegram-connection-1",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      externalUserId: "@delegate_test_bot",
+      status: "CONFIGURED",
+    });
+    mocks.tx.eventAudit.findFirst.mockResolvedValue({
+      payload: {
+        action: "REPRESENTATIVE_TELEGRAM_BOT_ASSIGNED",
+        bindingId: "binding-telegram-1",
+        telegramBotConnectionId: "telegram-connection-1",
+        idempotencyKey: "assignment-reused",
+      },
+    });
+
+    try {
+      await expect(
+        assignOwnerTelegramBotConnection({
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          representativeId: "rep-1",
+          telegramBotConnectionId: "telegram-connection-2",
+          requestId: "request-assignment-reused",
+          idempotencyKey: "assignment-reused",
+        }),
+      ).rejects.toMatchObject({
+        statusCode: 409,
+        message:
+          "Idempotency key was already used for a different Telegram Bot assignment on this representative.",
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.tx.representativeChannelBinding.upsert).not.toHaveBeenCalled();
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps a paused binding paused when the same Bot is assigned with a new request", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgresql://test";
+    const existingBinding = {
+      id: "binding-telegram-1",
+      representativeId: "rep-1",
+      kind: "TELEGRAM",
+      transport: "TELEGRAM",
+      sourceProvider: "TELEGRAM",
+      connectionId: "8718299151",
+      telegramBotConnectionId: "telegram-connection-1",
+      desiredState: "PAUSED",
+      healthStatus: "DEGRADED",
+      externalUserId: "@delegate_test_bot",
+      status: "CONFIGURED",
+    };
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      displayName: "Lin",
+    });
+    mocks.tx.telegramBotConnection.findFirst
+      .mockResolvedValueOnce({ botId: "8718299151" })
+      .mockResolvedValueOnce({
+        id: "telegram-connection-1",
+        botId: "8718299151",
+        username: "delegate_test_bot",
+        displayName: "Delegate",
+        status: "ACTIVE",
+        healthStatus: "HEALTHY",
+      });
+    mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue(
+      existingBinding,
+    );
+    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue(
+      existingBinding,
+    );
+    mocks.tx.eventAudit.create.mockResolvedValue({
+      id: "audit-assignment-noop",
+    });
+
+    try {
+      await expect(
+        assignOwnerTelegramBotConnection({
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          representativeId: "rep-1",
+          telegramBotConnectionId: "telegram-connection-1",
+          requestId: "request-assignment-noop",
+          idempotencyKey: "assignment-noop",
+        }),
+      ).resolves.toMatchObject({
+        binding: {
+          desiredState: "PAUSED",
+          healthStatus: "DEGRADED",
+        },
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+
+    expect(mocks.tx.representativeChannelBinding.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: {},
+      }),
+    );
+    expect(mocks.tx.eventAudit.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: "CHANNEL_CONFIGURATION_CHANGED",
+        payload: expect.objectContaining({
+          action: "REPRESENTATIVE_TELEGRAM_BOT_ASSIGNED",
+          changed: false,
+          before: expect.objectContaining({
+            desiredState: "PAUSED",
+          }),
+          after: expect.objectContaining({
+            desiredState: "PAUSED",
+          }),
+        }),
+      }),
+    });
+  });
+
   it("owner-scopes and bootstraps a deterministic Matrix representative user", async () => {
     const previousDatabaseUrl = process.env.DATABASE_URL;
     const previousServerName = process.env.MATRIX_SERVER_NAME;
@@ -528,6 +996,89 @@ describe("channel management", () => {
         }),
       }),
     });
+  });
+
+  it("does not duplicate a Matrix provisioning audit when a request is replayed", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    const previousServerName = process.env.MATRIX_SERVER_NAME;
+    process.env.DATABASE_URL = "postgresql://test";
+    process.env.MATRIX_SERVER_NAME = "matrix.example.org";
+    mocks.tx.representative.findFirst.mockResolvedValue({
+      id: "rep-1",
+      slug: "lin",
+      displayName: "Lin",
+    });
+    mocks.tx.matrixVirtualUserBinding.findFirst.mockResolvedValue({
+      id: "matrix-user-1",
+      matrixUserId: "@_delegate_rep_lin:matrix.example.org",
+    });
+    mocks.tx.matrixVirtualUserBinding.findUnique.mockResolvedValue({
+      id: "matrix-user-1",
+      representativeId: "rep-1",
+      kind: "REPRESENTATIVE",
+    });
+    mocks.tx.matrixVirtualUserBinding.upsert.mockResolvedValue({
+      id: "matrix-user-1",
+      matrixUserId: "@_delegate_rep_lin:matrix.example.org",
+      displayName: "Lin",
+      enabled: true,
+    });
+    mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
+      id: "binding-matrix-1",
+      representativeId: "rep-1",
+      kind: "MATRIX",
+      desiredState: "ACTIVE",
+      healthStatus: "UNKNOWN",
+      externalUserId: "@_delegate_rep_lin:matrix.example.org",
+      status: "CONFIGURED",
+    });
+    mocks.tx.eventAudit.findFirst.mockResolvedValue({
+      id: "audit-matrix-existing",
+    });
+
+    try {
+      await provisionOwnerMatrixChannel({
+        ownerId: "owner-1",
+        actorId: "owner-1",
+        representativeId: "rep-1",
+        requestId: "request-matrix-replay",
+        idempotencyKey: "idem-matrix-replay",
+      });
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+      if (previousServerName === undefined) delete process.env.MATRIX_SERVER_NAME;
+      else process.env.MATRIX_SERVER_NAME = previousServerName;
+    }
+
+    expect(mocks.tx.eventAudit.findFirst).toHaveBeenCalledWith({
+      where: {
+        representativeId: "rep-1",
+        type: "CHANNEL_CONFIGURATION_CHANGED",
+        AND: [
+          {
+            payload: {
+              path: ["action"],
+              equals: "MATRIX_VIRTUAL_USER_PROVISIONED",
+            },
+          },
+          {
+            payload: {
+              path: ["bindingId"],
+              equals: "binding-matrix-1",
+            },
+          },
+          {
+            payload: {
+              path: ["idempotencyKey"],
+              equals: "idem-matrix-replay",
+            },
+          },
+        ],
+      },
+      select: { id: true },
+    });
+    expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
   });
 
   it("owner-scopes and provisions the configured managed Telegram Bot for a representative", async () => {

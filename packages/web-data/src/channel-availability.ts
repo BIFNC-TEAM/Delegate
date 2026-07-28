@@ -13,6 +13,7 @@ export type ChannelAvailabilityCode =
   | "channel_disconnected"
   | "channel_unhealthy"
   | "matrix_private_room_not_verified"
+  | "telegram_connection_reassigned"
   | "policy_disabled";
 
 export type ChannelAvailabilityResult =
@@ -36,7 +37,19 @@ export type ChannelAvailabilityInput = {
     expiresAt?: Date | null;
     payload: Record<string, unknown>;
   }>;
+  telegramEndpoint?: TelegramDeliveryEndpointInput;
   now?: Date;
+};
+
+export type TelegramDeliveryEndpointInput = {
+  conversationConnectionId?: string | null | undefined;
+  representativeConnectionId?: string | null | undefined;
+  expectedConnectionId?: string | null | undefined;
+  representativeTelegramBotConnectionId?: string | null | undefined;
+  representativeTelegramBot?: {
+    id: string;
+    botId: string;
+  } | null | undefined;
 };
 
 /**
@@ -107,6 +120,70 @@ export function resolveChannelAvailability(
     return { available: false, code: "channel_unhealthy" };
   }
 
+  if (input.channel === "telegram" && input.telegramEndpoint) {
+    const telegramEndpoint =
+      resolveTelegramDeliveryEndpointAvailability(input.telegramEndpoint);
+    if (!telegramEndpoint.available) return telegramEndpoint;
+  }
+
+  return { available: true, code: "available" };
+}
+
+/**
+ * A Telegram conversation is permanently scoped to the Bot that received it.
+ * Reassigning a representative must never silently retarget historical chats
+ * or queued deliveries to either the old or the new Bot.
+ */
+export function resolveTelegramDeliveryEndpointAvailability(
+  input: TelegramDeliveryEndpointInput,
+): ChannelAvailabilityResult {
+  const conversationConnectionId = normalizeConnectionId(
+    input.conversationConnectionId,
+  );
+  const representativeConnectionId = normalizeConnectionId(
+    input.representativeConnectionId,
+  );
+  if (
+    !conversationConnectionId
+    || !representativeConnectionId
+    || conversationConnectionId !== representativeConnectionId
+  ) {
+    return {
+      available: false,
+      code: "telegram_connection_reassigned",
+    };
+  }
+
+  if (
+    "expectedConnectionId" in input
+    && normalizeConnectionId(input.expectedConnectionId)
+      !== representativeConnectionId
+  ) {
+    return {
+      available: false,
+      code: "telegram_connection_reassigned",
+    };
+  }
+
+  const managedConnectionId = normalizeConnectionId(
+    input.representativeTelegramBotConnectionId,
+  );
+  const managedBot = input.representativeTelegramBot;
+  if (
+    (managedConnectionId || managedBot)
+    && (
+      !managedConnectionId
+      || !managedBot
+      || managedBot.id !== managedConnectionId
+      || normalizeConnectionId(managedBot.botId) !== representativeConnectionId
+    )
+  ) {
+    return {
+      available: false,
+      code: "telegram_connection_reassigned",
+    };
+  }
+
   return { available: true, code: "available" };
 }
 
@@ -145,4 +222,10 @@ function readChannelPolicy(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeConnectionId(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized || null;
 }

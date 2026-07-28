@@ -1,5 +1,9 @@
 import {
   Channel,
+  ChannelDesiredState,
+  ChannelHealthStatus,
+  ChannelSourceProvider,
+  ChannelTransport,
   IdentityAssuranceLevel,
   IdentityLinkProvider,
   PaymentProvider,
@@ -8,6 +12,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { getConversationContext } from "../../apps/bot/src/runtime-store";
+import { runWithTelegramRuntimeContext } from "../../apps/bot/src/telegram-runtime-context";
 import {
   acceptInboundConversationMessage,
   activateVerifiedMatrixDirectConversation,
@@ -16,6 +21,7 @@ import {
 } from "../../packages/web-data/src/conversation-platform";
 import {
   provisionOwnerMatrixChannel,
+  refreshOwnerChannelHealth,
   setOwnerChannelDesiredState,
 } from "../../packages/web-data/src/channel-management";
 import {
@@ -63,20 +69,29 @@ describePostgres("channel platform PostgreSQL 16 closure", () => {
   it("unifies Web identity and entitlement while preserving native Matrix and Telegram routing", async () => {
     const fixture = await createFixture();
 
-    const telegramBeforeBinding = await getConversationContext(
-      fixture.representativeSlug,
-      {
-        telegramUserId: fixture.telegramUserId,
-        username: "channel_fixture",
-        displayName: "Channel Fixture",
-        chatId: fixture.telegramChatId,
-        channel: Channel.PRIVATE_CHAT,
-      },
+    const telegramBeforeBinding = await withLegacyTelegramRuntime(
+      () => getConversationContext(
+        fixture.representativeSlug,
+        {
+          telegramUserId: fixture.telegramUserId,
+          username: "channel_fixture",
+          displayName: "Channel Fixture",
+          chatId: fixture.telegramChatId,
+          channel: Channel.PRIVATE_CHAT,
+        },
+      ),
     );
     expect(telegramBeforeBinding.audienceIdentityId).not.toBe(
       fixture.webAudienceIdentityId,
     );
 
+    const staleTelegramGrant = await createIdentityBindingChallenge({
+      audienceIdentityId: fixture.webAudienceIdentityId,
+      provider: IdentityLinkProvider.TELEGRAM,
+      issuer: "delegate-managed-bot",
+      connectionId: process.env.TELEGRAM_BOT_ID!,
+      expectedProviderSubject: String(fixture.telegramUserId),
+    });
     const telegramGrant = await createIdentityBindingChallenge({
       audienceIdentityId: fixture.webAudienceIdentityId,
       provider: IdentityLinkProvider.TELEGRAM,
@@ -84,6 +99,15 @@ describePostgres("channel platform PostgreSQL 16 closure", () => {
       connectionId: process.env.TELEGRAM_BOT_ID!,
       expectedProviderSubject: String(fixture.telegramUserId),
     });
+    await expect(
+      consumeIdentityBindingChallenge({
+        token: staleTelegramGrant.token,
+        provider: IdentityLinkProvider.TELEGRAM,
+        providerSubject: String(fixture.telegramUserId),
+        issuer: "delegate-managed-bot",
+        connectionId: process.env.TELEGRAM_BOT_ID!,
+      }),
+    ).rejects.toThrow("revoked");
     await expect(
       consumeIdentityBindingChallenge({
         token: telegramGrant.token,
@@ -97,13 +121,15 @@ describePostgres("channel platform PostgreSQL 16 closure", () => {
       provider: IdentityLinkProvider.TELEGRAM,
     });
 
-    const telegram = await getConversationContext(
-      fixture.representativeSlug,
-      {
-        telegramUserId: fixture.telegramUserId,
-        chatId: fixture.telegramChatId,
-        channel: Channel.PRIVATE_CHAT,
-      },
+    const telegram = await withLegacyTelegramRuntime(
+      () => getConversationContext(
+        fixture.representativeSlug,
+        {
+          telegramUserId: fixture.telegramUserId,
+          chatId: fixture.telegramChatId,
+          channel: Channel.PRIVATE_CHAT,
+        },
+      ),
     );
     expect(telegram.audienceIdentityId).toBe(fixture.webAudienceIdentityId);
 
@@ -432,6 +458,319 @@ describePostgres("channel platform PostgreSQL 16 closure", () => {
       }),
     ).toBe(1);
   });
+
+  it("owner-scopes Matrix control operations and records auditable state transitions", async () => {
+    const ownerA = await createFixture();
+    const ownerB = await createFixture();
+    const provisionRequestId = `${ownerA.suffix}:matrix-provision-idempotent`;
+    const provisionIdempotencyKey =
+      `${ownerA.suffix}:matrix-provision-idempotent`;
+
+    const firstProvision = await provisionOwnerMatrixChannel({
+      ownerId: ownerA.ownerId,
+      actorId: ownerA.ownerId,
+      representativeId: ownerA.representativeId,
+      requestId: provisionRequestId,
+      idempotencyKey: provisionIdempotencyKey,
+    });
+    const repeatedProvision = await provisionOwnerMatrixChannel({
+      ownerId: ownerA.ownerId,
+      actorId: ownerA.ownerId,
+      representativeId: ownerA.representativeId,
+      requestId: provisionRequestId,
+      idempotencyKey: provisionIdempotencyKey,
+    });
+
+    expect(repeatedProvision.binding.id).toBe(firstProvision.binding.id);
+    expect(repeatedProvision.virtualUser.id).toBe(
+      firstProvision.virtualUser.id,
+    );
+    expect(repeatedProvision.virtualUser.matrixUserId).toBe(
+      firstProvision.virtualUser.matrixUserId,
+    );
+    await expect(
+      prisma.representativeChannelBinding.count({
+        where: {
+          representativeId: ownerA.representativeId,
+          kind: RepresentativeChannelKind.MATRIX,
+        },
+      }),
+    ).resolves.toBe(1);
+    await expect(
+      prisma.matrixVirtualUserBinding.count({
+        where: {
+          representativeId: ownerA.representativeId,
+          kind: "REPRESENTATIVE",
+          enabled: true,
+        },
+      }),
+    ).resolves.toBe(1);
+
+    const ownerBMatrix = await provisionOwnerMatrixChannel({
+      ownerId: ownerB.ownerId,
+      actorId: ownerB.ownerId,
+      representativeId: ownerB.representativeId,
+      requestId: `${ownerB.suffix}:matrix-provision`,
+      idempotencyKey: `${ownerB.suffix}:matrix-provision`,
+    });
+    const crossOwnerRequestId = `${ownerA.suffix}:cross-owner-pause`;
+    await expect(
+      setOwnerChannelDesiredState({
+        ownerId: ownerA.ownerId,
+        actorId: ownerA.ownerId,
+        bindingId: ownerBMatrix.binding.id,
+        desiredState: "PAUSED",
+        requestId: crossOwnerRequestId,
+        idempotencyKey: crossOwnerRequestId,
+      }),
+    ).rejects.toMatchObject({
+      name: "ChannelManagementError",
+      statusCode: 404,
+    });
+    await expect(
+      prisma.representativeChannelBinding.findUniqueOrThrow({
+        where: { id: ownerBMatrix.binding.id },
+        select: { desiredState: true },
+      }),
+    ).resolves.toEqual({ desiredState: ChannelDesiredState.ACTIVE });
+
+    const actorId = `operator_${ownerA.suffix}`;
+    const pauseRequestId = `${ownerA.suffix}:owner-matrix-pause`;
+    const resumeRequestId = `${ownerA.suffix}:owner-matrix-resume`;
+    await expect(
+      setOwnerChannelDesiredState({
+        ownerId: ownerA.ownerId,
+        actorId,
+        bindingId: firstProvision.binding.id,
+        desiredState: "PAUSED",
+        requestId: pauseRequestId,
+        idempotencyKey: `${pauseRequestId}:idem`,
+      }),
+    ).resolves.toMatchObject({
+      id: firstProvision.binding.id,
+      desiredState: ChannelDesiredState.PAUSED,
+    });
+    await expect(
+      setOwnerChannelDesiredState({
+        ownerId: ownerA.ownerId,
+        actorId,
+        bindingId: firstProvision.binding.id,
+        desiredState: "PAUSED",
+        requestId: `${pauseRequestId}:replay`,
+        idempotencyKey: `${pauseRequestId}:idem`,
+      }),
+    ).resolves.toMatchObject({
+      id: firstProvision.binding.id,
+      desiredState: ChannelDesiredState.PAUSED,
+    });
+    await expect(
+      setOwnerChannelDesiredState({
+        ownerId: ownerA.ownerId,
+        actorId,
+        bindingId: firstProvision.binding.id,
+        desiredState: "ACTIVE",
+        requestId: `${pauseRequestId}:conflict`,
+        idempotencyKey: `${pauseRequestId}:idem`,
+      }),
+    ).rejects.toMatchObject({
+      name: "ChannelManagementError",
+      statusCode: 409,
+    });
+    await expect(
+      setOwnerChannelDesiredState({
+        ownerId: ownerA.ownerId,
+        actorId,
+        bindingId: firstProvision.binding.id,
+        desiredState: "ACTIVE",
+        requestId: resumeRequestId,
+        idempotencyKey: `${resumeRequestId}:idem`,
+      }),
+    ).resolves.toMatchObject({
+      id: firstProvision.binding.id,
+      desiredState: ChannelDesiredState.ACTIVE,
+    });
+
+    const auditRows = await prisma.eventAudit.findMany({
+      where: { representativeId: ownerA.representativeId },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { payload: true },
+    });
+    const auditPayloads = auditRows.map(
+      (row) => row.payload as Record<string, unknown>,
+    );
+    expect(
+      auditPayloads.filter(
+        (payload) =>
+          payload.action === "MATRIX_VIRTUAL_USER_PROVISIONED"
+          && payload.idempotencyKey === provisionIdempotencyKey,
+      ),
+    ).toHaveLength(1);
+    expect(
+      auditPayloads.find(
+        (payload) => payload.requestId === provisionRequestId,
+      ),
+    ).toMatchObject({
+      action: "MATRIX_VIRTUAL_USER_PROVISIONED",
+      actorId: ownerA.ownerId,
+      requestId: provisionRequestId,
+      idempotencyKey: provisionIdempotencyKey,
+      bindingId: firstProvision.binding.id,
+      matrixVirtualUserBindingId: firstProvision.virtualUser.id,
+    });
+    expect(
+      auditPayloads.find((payload) => payload.requestId === pauseRequestId),
+    ).toMatchObject({
+      action: "CHANNEL_DESIRED_STATE_CHANGED",
+      actorId,
+      requestId: pauseRequestId,
+      bindingId: firstProvision.binding.id,
+      before: { desiredState: ChannelDesiredState.ACTIVE },
+      after: { desiredState: ChannelDesiredState.PAUSED },
+      changed: true,
+    });
+    expect(
+      auditPayloads.filter(
+        (payload) =>
+          payload.action === "CHANNEL_DESIRED_STATE_CHANGED"
+          && payload.idempotencyKey === `${pauseRequestId}:idem`,
+      ),
+    ).toHaveLength(1);
+    expect(
+      auditPayloads.find((payload) => payload.requestId === resumeRequestId),
+    ).toMatchObject({
+      action: "CHANNEL_DESIRED_STATE_CHANGED",
+      actorId,
+      requestId: resumeRequestId,
+      bindingId: firstProvision.binding.id,
+      before: { desiredState: ChannelDesiredState.PAUSED },
+      after: { desiredState: ChannelDesiredState.ACTIVE },
+      changed: true,
+    });
+    expect(
+      auditPayloads.some(
+        (payload) => payload.requestId === crossOwnerRequestId,
+      ),
+    ).toBe(false);
+  });
+
+  it("recovers manual channel health after failures leave the 24-hour window without resuming a paused binding", async () => {
+    const fixture = await createFixture();
+    const now = new Date("2026-07-28T00:00:00.000Z");
+    const matrixControlPlane = await provisionOwnerMatrixChannel({
+      ownerId: fixture.ownerId,
+      actorId: fixture.ownerId,
+      representativeId: fixture.representativeId,
+      requestId: `${fixture.suffix}:matrix-health-provision`,
+      idempotencyKey: `${fixture.suffix}:matrix-health-provision`,
+    });
+    await prisma.representativeChannelBinding.update({
+      where: { id: matrixControlPlane.binding.id },
+      data: {
+        desiredState: ChannelDesiredState.PAUSED,
+        healthStatus: ChannelHealthStatus.HEALTHY,
+        lastError: null,
+      },
+    });
+    const contact = await prisma.contact.create({
+      data: {
+        representativeId: fixture.representativeId,
+        audienceIdentityId: fixture.webAudienceIdentityId,
+        channelUserId: `@health_${fixture.suffix}:matrix.local.test`,
+        externalUserId: `@health_${fixture.suffix}:matrix.local.test`,
+        source: "matrix",
+        sourceChannel: "matrix",
+      },
+    });
+    const conversation = await prisma.conversation.create({
+      data: {
+        representativeId: fixture.representativeId,
+        contactId: contact.id,
+        audienceIdentityId: fixture.webAudienceIdentityId,
+        channel: Channel.PRIVATE_CHAT,
+        sourceChannel: "matrix",
+        externalConversationId:
+          `!health_${fixture.suffix}:matrix.local.test`,
+      },
+    });
+    const failedOutbox = await prisma.outboxEvent.create({
+      data: {
+        conversationId: conversation.id,
+        aggregateType: "Conversation",
+        aggregateId: conversation.id,
+        eventType: "matrix.message",
+        transport: ChannelTransport.MATRIX,
+        sourceProvider: ChannelSourceProvider.MATRIX,
+        connectionId: process.env.MATRIX_AS_CONNECTION_ID!,
+        payload: { fixture: true },
+        status: "FAILED",
+        idempotencyKey: `${fixture.suffix}:matrix-health-failure`,
+        lastError: "Matrix delivery failed.",
+        createdAt: new Date(now.getTime() - 60 * 60 * 1_000),
+      },
+    });
+
+    const degradedRequestId = `${fixture.suffix}:matrix-health-degraded`;
+    await expect(
+      refreshOwnerChannelHealth({
+        ownerId: fixture.ownerId,
+        actorId: fixture.ownerId,
+        bindingId: matrixControlPlane.binding.id,
+        requestId: degradedRequestId,
+        idempotencyKey: degradedRequestId,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      healthStatus: ChannelHealthStatus.DEGRADED,
+      lastError: "Matrix delivery failed.",
+    });
+    await expect(
+      prisma.representativeChannelBinding.findUniqueOrThrow({
+        where: { id: matrixControlPlane.binding.id },
+        select: {
+          desiredState: true,
+          healthStatus: true,
+        },
+      }),
+    ).resolves.toEqual({
+      desiredState: ChannelDesiredState.PAUSED,
+      healthStatus: ChannelHealthStatus.DEGRADED,
+    });
+
+    await prisma.outboxEvent.update({
+      where: { id: failedOutbox.id },
+      data: {
+        createdAt: new Date(now.getTime() - 24 * 60 * 60 * 1_000 - 1),
+      },
+    });
+    const recoveredRequestId = `${fixture.suffix}:matrix-health-recovered`;
+    await expect(
+      refreshOwnerChannelHealth({
+        ownerId: fixture.ownerId,
+        actorId: fixture.ownerId,
+        bindingId: matrixControlPlane.binding.id,
+        requestId: recoveredRequestId,
+        idempotencyKey: recoveredRequestId,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      healthStatus: ChannelHealthStatus.HEALTHY,
+      lastError: null,
+    });
+    await expect(
+      prisma.representativeChannelBinding.findUniqueOrThrow({
+        where: { id: matrixControlPlane.binding.id },
+        select: {
+          desiredState: true,
+          healthStatus: true,
+          lastError: true,
+        },
+      }),
+    ).resolves.toEqual({
+      desiredState: ChannelDesiredState.PAUSED,
+      healthStatus: ChannelHealthStatus.HEALTHY,
+      lastError: null,
+    });
+  });
 });
 
 async function createFixture() {
@@ -484,6 +823,26 @@ async function createFixture() {
       activeVersionId: version.id,
     },
   });
+  await prisma.representativeChannelBinding.create({
+    data: {
+      representativeId,
+      kind: RepresentativeChannelKind.TELEGRAM,
+      transport: ChannelTransport.TELEGRAM,
+      sourceProvider: ChannelSourceProvider.TELEGRAM,
+      connectionId: process.env.TELEGRAM_BOT_ID!,
+      telegramBotConnectionId: null,
+      desiredState: ChannelDesiredState.ACTIVE,
+      healthStatus: ChannelHealthStatus.HEALTHY,
+      externalUserId: `@${process.env.TELEGRAM_BOT_USERNAME!}`,
+      status: "CONNECTED",
+      displayName: "Channel fixture representative",
+      configuration: {
+        managed: true,
+        directMessageOnly: true,
+        legacyEnvironmentCredential: true,
+      },
+    },
+  });
   await prisma.audienceIdentity.create({
     data: {
       id: webAudienceIdentityId,
@@ -513,6 +872,18 @@ async function createFixture() {
     telegramUserId: 8_000_000 + Math.floor(Math.random() * 900_000),
     telegramChatId: 9_000_000 + Math.floor(Math.random() * 900_000),
   };
+}
+
+function withLegacyTelegramRuntime<T>(callback: () => T): T {
+  const botId = process.env.TELEGRAM_BOT_ID!;
+  return runWithTelegramRuntimeContext(
+    {
+      internalConnectionId: `legacy:${botId}`,
+      botId,
+      username: process.env.TELEGRAM_BOT_USERNAME!,
+    },
+    callback,
+  );
 }
 
 function matrixTextEvent(input: {

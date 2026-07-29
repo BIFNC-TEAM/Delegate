@@ -23,6 +23,7 @@ jobs:
     timeout-minutes: 30
     env:
       DATABASE_URL: postgresql://delegate:delegate@127.0.0.1:5432/delegate_ci
+      COMPUTE_BROKER_INTERNAL_TOKEN: delegate-ci-compute-broker-token
 
     steps:
       - name: Check out repository

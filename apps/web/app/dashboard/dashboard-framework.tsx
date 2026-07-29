@@ -8,6 +8,10 @@ import type {
   RepresentativeDirectoryItem,
   RepresentativeOperationsSnapshot,
 } from "@delegate/web-data";
+import type {
+  OwnerOperationalAlertSummary,
+  OwnerSettingsSnapshot,
+} from "@delegate/web-data/owner-settings";
 
 import {
   dashboardNavigation,
@@ -24,6 +28,8 @@ import { DashboardSkills } from "./dashboard-skills";
 import { DashboardAuditLogs } from "./dashboard-audit-logs";
 import { DashboardChannels } from "./dashboard-channels";
 import { DashboardWallet } from "./dashboard-wallet";
+import { DashboardSettings } from "./dashboard-settings";
+import type { SettingsSection } from "./settings-section-navigation";
 
 const channelControlPlaneViews = ["channels", "audit"] as const;
 const functionalDashboardViews = new Set<DashboardView>([
@@ -31,7 +37,7 @@ const functionalDashboardViews = new Set<DashboardView>([
   "representatives",
   "inbox",
   "approvals",
-  "skills", "wallet", "audit",
+  "skills", "wallet", "audit", "settings",
   ...channelControlPlaneViews,
 ]);
 
@@ -47,6 +53,10 @@ type DashboardFrameworkProps = {
   representativeBaseUrl: string;
   representatives: RepresentativeDirectoryItem[];
   representativeOperations: RepresentativeOperationsSnapshot | null;
+  operationalAlerts: OwnerOperationalAlertSummary;
+  ownerSettings: OwnerSettingsSnapshot;
+  settingsSection: SettingsSection;
+  settingsTimeZones: string[];
   websiteBaseUrl: string;
 };
 
@@ -77,6 +87,8 @@ const frameworkCopy = {
     more: "更多",
     viewAll: "查看全部",
     notConnected: "功能待接入",
+    accountSettings: "Owner 账户设置",
+    accountSettingsMeta: "不受当前代表影响",
   },
   en: {
     brandKicker: "Digital Representative OS",
@@ -104,6 +116,8 @@ const frameworkCopy = {
     more: "More",
     viewAll: "View all",
     notConnected: "Coming next",
+    accountSettings: "Owner account settings",
+    accountSettingsMeta: "Independent of the active representative",
   },
 } as const;
 
@@ -130,6 +144,18 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
             </div>
           </div>
 
+          {props.activeView === "settings" ? (
+            <div className="dashboard-v2-settings-scope">
+              <span className="dashboard-v2-avatar">
+                {props.accountLabel.slice(0, 1).toUpperCase()}
+              </span>
+              <span>
+                <small>{t.workspaceLabel}</small>
+                <strong>{t.accountSettings}</strong>
+                <em>{t.accountSettingsMeta}</em>
+              </span>
+            </div>
+          ) : (
           <details className="dashboard-v2-workspace-switcher">
             <summary>
               <span className="dashboard-v2-avatar">DS</span>
@@ -157,6 +183,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               ))}
             </div>
           </details>
+          )}
 
           <details className="dashboard-v2-mobile-menu">
             <summary>
@@ -164,16 +191,35 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               <b>☰</b>
             </summary>
             <nav aria-label={t.navAria}>
-              {dashboardNavigation.flatMap((group) => group.items).map((item) => (
-                <Link
-                  className={item.id === props.activeView ? "is-active" : undefined}
-                  href={buildDashboardHref(item.id, props.activeSlug, props.locale)}
-                  key={item.id}
-                >
-                  <span>{item.index}</span>
-                  <strong>{localize(props.locale, item.label)}</strong>
-                </Link>
-              ))}
+              {dashboardNavigation.flatMap((group) => group.items).map((item) => {
+                const count = dashboardNavigationCount(item.id, props.operationalAlerts);
+                return (
+                  <Link
+                    aria-current={
+                      item.id === props.activeView ? "page" : undefined
+                    }
+                    className={item.id === props.activeView ? "is-active" : undefined}
+                    href={buildDashboardHref(
+                      item.id,
+                      props.activeSlug,
+                      props.locale,
+                      item.id === "settings" ? props.settingsSection : undefined,
+                    )}
+                    key={item.id}
+                  >
+                    <span>{item.index}</span>
+                    <strong>{localize(props.locale, item.label)}</strong>
+                    {count ? (
+                      <b
+                        aria-label={props.locale === "zh" ? `${count} 项待处理` : `${count} items need attention`}
+                        className="dashboard-v2-nav-count"
+                      >
+                        {formatNavigationCount(count)}
+                      </b>
+                    ) : null}
+                  </Link>
+                );
+              })}
             </nav>
           </details>
 
@@ -183,16 +229,29 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                 <p>{localize(props.locale, group.label)}</p>
                 {group.items.map((item) => {
                   const isActive = item.id === props.activeView;
+                  const count = dashboardNavigationCount(item.id, props.operationalAlerts);
                   return (
                     <Link
                       aria-current={isActive ? "page" : undefined}
                       className={isActive ? "dashboard-v2-nav-item is-active" : "dashboard-v2-nav-item"}
-                      href={buildDashboardHref(item.id, props.activeSlug, props.locale)}
+                      href={buildDashboardHref(
+                        item.id,
+                        props.activeSlug,
+                        props.locale,
+                        item.id === "settings" ? props.settingsSection : undefined,
+                      )}
                       key={item.id}
                     >
                       <span className="dashboard-v2-nav-index">{item.index}</span>
                       <span>{localize(props.locale, item.label)}</span>
-                      {item.id === "inbox" ? <strong className="dashboard-v2-nav-dot" aria-label="unread" /> : null}
+                      {count ? (
+                        <strong
+                          aria-label={props.locale === "zh" ? `${count} 项待处理` : `${count} items need attention`}
+                          className="dashboard-v2-nav-count"
+                        >
+                          {formatNavigationCount(count)}
+                        </strong>
+                      ) : null}
                     </Link>
                   );
                 })}
@@ -215,9 +274,13 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                 <small>Owner</small>
               </div>
               {props.logoutHref ? (
-                <a href={props.logoutHref} title={t.signOut}>↗</a>
+                <a aria-label={t.signOut} href={props.logoutHref} title={t.signOut}>
+                  <span aria-hidden="true">↗</span>
+                </a>
               ) : props.loginHref ? (
-                <a href={props.loginHref} title={t.signIn}>↗</a>
+                <a aria-label={t.signIn} href={props.loginHref} title={t.signIn}>
+                  <span aria-hidden="true">↗</span>
+                </a>
               ) : null}
             </div>
           </div>
@@ -241,13 +304,23 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                 items={[
                   {
                     locale: "zh",
-                    href: buildDashboardHref(props.activeView, props.activeSlug, "zh"),
+                    href: buildDashboardHref(
+                      props.activeView,
+                      props.activeSlug,
+                      "zh",
+                      props.activeView === "settings" ? props.settingsSection : undefined,
+                    ),
                     label: "中文",
                     shortLabel: "中",
                   },
                   {
                     locale: "en",
-                    href: buildDashboardHref(props.activeView, props.activeSlug, "en"),
+                    href: buildDashboardHref(
+                      props.activeView,
+                      props.activeSlug,
+                      "en",
+                      props.activeView === "settings" ? props.settingsSection : undefined,
+                    ),
                     label: "English",
                     shortLabel: "EN",
                   },
@@ -256,13 +329,13 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               <a className="dashboard-v2-text-link" href={buildLocalizedHref(`${props.websiteBaseUrl}/`, props.locale)}>
                 {t.website}
               </a>
-              <a
+              {props.activeView !== "settings" ? <a
                 className="dashboard-v2-top-button"
                 href={buildLocalizedHref(`${props.representativeBaseUrl}/reps/${props.activeSlug}`, props.locale)}
               >
                 {t.publicPage}
                 <span>↗</span>
-              </a>
+              </a> : null}
             </div>
           </header>
 
@@ -316,6 +389,15 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               />
             ) : props.activeView === "audit" ? (
               <DashboardAuditLogs activeSlug={props.activeSlug} locale={props.locale} />
+            ) : props.activeView === "settings" ? (
+              <DashboardSettings
+                alertSummary={props.operationalAlerts}
+                initialSection={props.settingsSection}
+                initialSnapshot={props.ownerSettings}
+                locale={props.locale}
+                logoutHref={props.logoutHref}
+                timeZones={props.settingsTimeZones}
+              />
             ) : (
               <DashboardSectionFramework
                 blueprint={dashboardSectionBlueprints[props.activeView]}
@@ -606,6 +688,43 @@ function Panel({ eyebrow, title, action, children, tone = "default" }: { eyebrow
   );
 }
 
-function buildDashboardHref(view: DashboardView, representativeSlug: string, locale: Locale): string {
-  return `/dashboard?rep=${encodeURIComponent(representativeSlug)}&view=${view}&lang=${locale}`;
+function buildDashboardHref(
+  view: DashboardView,
+  representativeSlug: string,
+  locale: Locale,
+  settingsSection?: SettingsSection,
+): string {
+  const parameters = new URLSearchParams({
+    rep: representativeSlug,
+    view,
+    lang: locale,
+  });
+  if (view === "settings" && settingsSection) {
+    parameters.set("settingsSection", settingsSection);
+  }
+  return `/dashboard?${parameters.toString()}`;
+}
+
+function dashboardNavigationCount(
+  view: DashboardView,
+  alerts: OwnerOperationalAlertSummary,
+) {
+  if (alerts.dataSource !== "database") return 0;
+  if (view === "inbox") {
+    return alerts.topics.handoffs.enabled ? alerts.topics.handoffs.count : 0;
+  }
+  if (view === "approvals") {
+    return alerts.topics.approvals.enabled ? alerts.topics.approvals.count : 0;
+  }
+  if (view === "wallet") {
+    return alerts.topics.walletIssues.count;
+  }
+  if (view === "channels") {
+    return alerts.topics.channelIssues.enabled ? alerts.topics.channelIssues.count : 0;
+  }
+  return 0;
+}
+
+function formatNavigationCount(count: number) {
+  return count > 99 ? "99+" : String(count);
 }

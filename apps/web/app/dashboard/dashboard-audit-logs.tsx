@@ -198,7 +198,7 @@ export function DashboardAuditLogs({ activeSlug, locale }: { activeSlug: string;
                     <td><time dateTime={event.createdAt}>{formatAuditTime(event.createdAt, locale)}</time></td>
                     <td><strong>{auditEventLabel(event.type, locale)}</strong><small>{categoryLabel(event.category, locale)}</small></td>
                     <td><strong>{event.resource?.kind ?? "—"}</strong><small>{event.resource?.id ?? "—"}</small></td>
-                    <td>{event.representativeName}</td>
+                    <td>{event.representativeName ?? (zh ? "工作区" : "Workspace")}</td>
                     <td>{event.actor ?? (zh ? "系统" : "system")}</td>
                   </tr>
                 ))}
@@ -226,7 +226,7 @@ export function DashboardAuditLogs({ activeSlug, locale }: { activeSlug: string;
           {selected ? <dl className="skills-detail-facts">
             <div><dt>Event ID</dt><dd title={selected.id}>{selected.id.slice(0, 16)}…</dd></div>
             <div><dt>{zh ? "时间" : "Time"}</dt><dd>{new Date(selected.createdAt).toLocaleString(zh ? "zh-CN" : "en-US")}</dd></div>
-            <div><dt>{zh ? "代表" : "Representative"}</dt><dd>{selected.representativeName}</dd></div>
+            <div><dt>{zh ? "范围" : "Scope"}</dt><dd>{selected.representativeName ?? (zh ? "工作区" : "Workspace")}</dd></div>
             <div><dt>{zh ? "分类" : "Category"}</dt><dd>{categoryLabel(selected.category, locale)}</dd></div>
             <div><dt>{zh ? "资源" : "Resource"}</dt><dd>{selected.resource ? `${selected.resource.kind} · ${selected.resource.id}` : "—"}</dd></div>
             <div><dt>Trace ID</dt><dd>{selected.traceId ?? "—"}</dd></div>
@@ -245,7 +245,7 @@ export function DashboardAuditLogs({ activeSlug, locale }: { activeSlug: string;
 
 function categoryLabel(category: string, locale: Locale) {
   const labels: Record<string, [string, string]> = {
-    skills: ["技能", "Skills"], publishing: ["发布", "Publishing"], approvals: ["审批", "Approvals"], wallet: ["钱包", "Wallet"], tools: ["工具", "Tools"], workflow: ["工作流", "Workflow"], conversation: ["会话", "Conversation"], security: ["安全", "Security"], other: ["其他", "Other"],
+    skills: ["技能", "Skills"], publishing: ["发布", "Publishing"], approvals: ["审批", "Approvals"], wallet: ["钱包", "Wallet"], tools: ["工具", "Tools"], workflow: ["工作流", "Workflow"], conversation: ["会话", "Conversation"], settings: ["设置", "Settings"], security: ["安全", "Security"], other: ["其他", "Other"],
   };
   return labels[category]?.[locale === "zh" ? 0 : 1] ?? category;
 }

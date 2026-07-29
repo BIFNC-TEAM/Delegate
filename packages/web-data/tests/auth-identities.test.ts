@@ -40,8 +40,111 @@ describe("auth identity mapping", () => {
         provider: "LOGTO",
         providerSubject: "logto-user-1",
         email: "ada@example.com",
+        emailVerifiedAt: null,
+        phoneVerifiedAt: null,
+        verifiedAt: null,
       }),
     ]);
+  });
+
+  it("writes independent email and phone verification timestamps when creating an owner", async () => {
+    const client = new FakeAuthIdentityClient();
+
+    const result = await resolveOwnerForAuth(
+      {
+        provider: "logto",
+        subject: "logto-verified-email",
+        email: "verified@example.com",
+        phone: "+8613800000000",
+        emailVerified: true,
+        phoneVerified: false,
+      },
+      client,
+    );
+
+    expect(result.created).toBe(true);
+    expect(result.identityLink.emailVerifiedAt).toEqual(expect.any(Date));
+    expect(result.identityLink.phoneVerifiedAt).toBeNull();
+    expect(result.identityLink.verifiedAt).toEqual(
+      result.identityLink.emailVerifiedAt,
+    );
+  });
+
+  it("refreshes identity claims without overwriting the owner's display name", async () => {
+    const client = new FakeAuthIdentityClient();
+    const first = await resolveOwnerForAuth(
+      {
+        provider: "logto",
+        subject: "logto-refresh",
+        email: "old@example.com",
+        name: "Owner-chosen source name",
+        emailVerified: true,
+        metadata: { revision: 1 },
+      },
+      client,
+    );
+    expect(first.identityLink.emailVerifiedAt).toEqual(expect.any(Date));
+
+    const refreshed = await resolveOwnerForAuth(
+      {
+        provider: "logto",
+        subject: "logto-refresh",
+        email: "new@example.com",
+        phone: "+8613900000000",
+        name: "Identity provider renamed this user",
+        emailVerified: false,
+        phoneVerified: true,
+        metadata: { revision: 2 },
+      },
+      client,
+    );
+
+    expect(refreshed.created).toBe(false);
+    expect(refreshed.owner.displayName).toBe("Owner-chosen source name");
+    expect(client.owners[0]?.displayName).toBe("Owner-chosen source name");
+    expect(refreshed.identityLink).toMatchObject({
+      email: "new@example.com",
+      phone: "+8613900000000",
+      emailVerifiedAt: null,
+      phoneVerifiedAt: expect.any(Date),
+      metadata: { revision: 2 },
+    });
+    expect(refreshed.identityLink.verifiedAt).toEqual(
+      refreshed.identityLink.phoneVerifiedAt,
+    );
+  });
+
+  it("clears stale verification timestamps when Logto reports false", async () => {
+    const client = new FakeAuthIdentityClient();
+    await resolveOwnerForAuth(
+      {
+        provider: "logto",
+        subject: "logto-revoked-verification",
+        email: "owner@example.com",
+        phone: "+8613700000000",
+        emailVerified: true,
+        phoneVerified: true,
+      },
+      client,
+    );
+
+    const refreshed = await resolveOwnerForAuth(
+      {
+        provider: "logto",
+        subject: "logto-revoked-verification",
+        email: "owner@example.com",
+        phone: "+8613700000000",
+        emailVerified: false,
+        phoneVerified: false,
+      },
+      client,
+    );
+
+    expect(refreshed.identityLink).toMatchObject({
+      emailVerifiedAt: null,
+      phoneVerifiedAt: null,
+      verifiedAt: null,
+    });
   });
 
   it("links a registered login to an existing audience identity", async () => {
@@ -100,6 +203,8 @@ type OwnerIdentityLinkRow = {
   email: string | null;
   phone: string | null;
   verifiedAt: Date | null;
+  emailVerifiedAt: Date | null;
+  phoneVerifiedAt: Date | null;
   metadata: unknown;
 };
 
@@ -143,6 +248,16 @@ class FakeAuthIdentityClient {
         owner,
       };
     },
+    update: async (args: any) => {
+      const link = this.ownerIdentityLinks.find(
+        (item) => item.id === args.where.id,
+      );
+      if (!link) {
+        throw new Error("owner identity link not found");
+      }
+      Object.assign(link, args.data);
+      return link;
+    },
   };
 
   owner = {
@@ -160,6 +275,8 @@ class FakeAuthIdentityClient {
         email: args.data.identityLinks.create.email,
         phone: args.data.identityLinks.create.phone,
         verifiedAt: args.data.identityLinks.create.verifiedAt,
+        emailVerifiedAt: args.data.identityLinks.create.emailVerifiedAt,
+        phoneVerifiedAt: args.data.identityLinks.create.phoneVerifiedAt,
         metadata: args.data.identityLinks.create.metadata,
       };
       this.owners.push(owner);

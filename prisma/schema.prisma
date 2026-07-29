@@ -158,6 +158,8 @@ enum EventType {
   MCP_BINDING_CHANGED
   COMPUTE_POLICY_CHANGED
   CHANNEL_CONFIGURATION_CHANGED
+  OWNER_PROFILE_UPDATED
+  OWNER_NOTIFICATION_PREFERENCES_UPDATED
 }
 
 enum CapabilityKind {
@@ -961,12 +963,16 @@ model Owner {
   organizationId               String?
   telegramUserId               String?                    @unique
   displayName                  String
+  accountDisplayName           String?                    @db.VarChar(80)
   handle                       String?
   timezone                     String                     @default("UTC")
+  preferredLocale              String?                    @db.VarChar(16)
+  settingsVersion              Int                        @default(0)
   creatorVerificationStatus    CreatorVerificationStatus  @default(UNVERIFIED)
   createdAt                    DateTime                   @default(now())
   updatedAt                    DateTime                   @updatedAt
   wallet                       Wallet?
+  notificationSettings         OwnerNotificationSettings?
   organization                 Organization?              @relation(fields: [organizationId], references: [id])
   organizationMember           OrganizationMember?
   capabilityProfiles           CapabilityPolicyProfile[]
@@ -985,23 +991,35 @@ model Owner {
   acknowledgedWalletExceptions WalletExceptionCase[]      @relation("WalletExceptionAcknowledgedBy")
   walletExceptionActions       WalletExceptionAction[]
   telegramBotConnections       TelegramBotConnection[]
+  auditEvents                  EventAudit[]                @relation("OwnerAuditEvents")
 }
 
 model OwnerIdentityLink {
-  id              String                    @id @default(cuid())
-  ownerId         String
-  provider        OwnerIdentityLinkProvider
-  providerSubject String
-  email           String?
-  phone           String?
-  verifiedAt      DateTime?
-  metadata        Json?
-  createdAt       DateTime                  @default(now())
-  updatedAt       DateTime                  @updatedAt
-  owner           Owner                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  id                String                    @id @default(cuid())
+  ownerId           String
+  provider          OwnerIdentityLinkProvider
+  providerSubject   String
+  email             String?
+  phone             String?
+  verifiedAt        DateTime?
+  emailVerifiedAt   DateTime?
+  phoneVerifiedAt   DateTime?
+  metadata          Json?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+  owner             Owner                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerSubject])
   @@index([ownerId, provider])
+}
+
+model OwnerNotificationSettings {
+  ownerId   String   @id
+  rules     Json     @default("{}")
+  version   Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  owner     Owner    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 }
 
 model Wallet {
@@ -2958,20 +2976,26 @@ model Invoice {
 
 model EventAudit {
   id               String          @id @default(cuid())
-  representativeId String
+  ownerId          String?
+  representativeId String?
+  idempotencyKey   String?         @db.VarChar(191)
+  requestHash      String?         @db.VarChar(64)
   contactId        String?
   conversationId   String?
   delegationTaskId String?
   type             EventType
   payload          Json
   createdAt        DateTime        @default(now())
-  representative   Representative  @relation(fields: [representativeId], references: [id])
+  owner            Owner?          @relation("OwnerAuditEvents", fields: [ownerId], references: [id], onDelete: Restrict)
+  representative   Representative? @relation(fields: [representativeId], references: [id], onDelete: Restrict)
   contact          Contact?        @relation(fields: [contactId], references: [id])
   conversation     Conversation?   @relation(fields: [conversationId], references: [id])
   delegationTask   DelegationTask? @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
 
   @@index([delegationTaskId, createdAt])
+  @@index([ownerId, createdAt])
   @@index([representativeId, createdAt])
+  @@unique([ownerId, idempotencyKey])
 }
 
 model CapabilityPolicyProfile {

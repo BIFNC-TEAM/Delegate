@@ -74,6 +74,7 @@ export async function bootstrapLocalOwnerAuth(
       email:
         env.DELEGATE_AUTH_DEV_OWNER_EMAIL?.trim() || DEFAULT_DEV_OWNER_EMAIL,
       verifiedAt,
+      emailVerifiedAt: verifiedAt,
       metadata: {
         mode: "development",
         actor: "owner",
@@ -84,6 +85,7 @@ export async function bootstrapLocalOwnerAuth(
       email:
         env.DELEGATE_AUTH_DEV_OWNER_EMAIL?.trim() || DEFAULT_DEV_OWNER_EMAIL,
       verifiedAt,
+      emailVerifiedAt: verifiedAt,
       metadata: {
         mode: "development",
         actor: "owner",

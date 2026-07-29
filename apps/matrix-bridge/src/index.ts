@@ -107,14 +107,43 @@ const server = createServer(async (request, response) => {
           error: "Virtual user is not registered.",
         });
       }
+      if (
+        binding.representativeId
+        && (
+          binding.endpointAssignmentRevision === null
+          || binding.endpointAssignmentRevision <= 0
+        )
+      ) {
+        return json(response, 404, {
+          errcode: "M_NOT_FOUND",
+          error: "Virtual user is not the representative's current assignment.",
+        });
+      }
       const registrationError = await ensureMatrixVirtualUserRegistered(
         binding.matrixUserId,
       );
       await recordManagedMatrixRuntimeHealth(
         binding.matrixUserId,
         registrationError
-          ? { status: "DEGRADED", errorCode: registrationError }
-          : { status: "HEALTHY" },
+          ? {
+              status: "DEGRADED",
+              errorCode: registrationError,
+              ...(binding.endpointAssignmentRevision === null
+                ? {}
+                : {
+                    expectedAssignmentRevision:
+                      binding.endpointAssignmentRevision,
+                  }),
+            }
+          : {
+              status: "HEALTHY",
+              ...(binding.endpointAssignmentRevision === null
+                ? {}
+                : {
+                    expectedAssignmentRevision:
+                      binding.endpointAssignmentRevision,
+                  }),
+            },
       );
       return registrationError
         ? json(response, 503, {
@@ -332,9 +361,27 @@ export async function validateActiveMatrixRoomsBeforeIngest(
   for (const roomId of roomIds) {
     const roomSecurity = await getMatrixRoomSecuritySnapshot(roomId);
     if (!roomSecurity || roomSecurity.securityState !== "ACTIVE") continue;
+    if (
+      roomSecurity.currentRepresentativeAssignmentRevision === null
+      || roomSecurity.currentRepresentativeAssignmentRevision <= 0
+      || roomSecurity.representativeAssignmentRevision
+        !== roomSecurity.currentRepresentativeAssignmentRevision
+    ) {
+      await isolateMatrixConversationRoom({
+        roomId,
+        reason: "matrix_remote_room_validation_failed",
+      });
+      continue;
+    }
     const audienceMatrixUserId = roomSecurity.audienceMatrixUserId;
     const representativeMatrixUserId =
       roomSecurity.representativeMatrixUserId;
+    const expectedAssignmentRevision =
+      roomSecurity.representativeAssignmentRevision ?? undefined;
+    const assignmentHealthScope =
+      expectedAssignmentRevision === undefined
+        ? {}
+        : { expectedAssignmentRevision };
     if (!audienceMatrixUserId || !representativeMatrixUserId) {
       await isolateMatrixConversationRoom({
         roomId,
@@ -346,6 +393,7 @@ export async function validateActiveMatrixRoomsBeforeIngest(
           {
             status: "DEGRADED",
             errorCode: "matrix_room_identity_missing",
+            ...assignmentHealthScope,
           },
         );
       }
@@ -379,6 +427,7 @@ export async function validateActiveMatrixRoomsBeforeIngest(
           {
             status: "DEGRADED",
             errorCode: roomCheck.reason,
+            ...assignmentHealthScope,
           },
         );
       }
@@ -408,6 +457,7 @@ export async function validateActiveMatrixRoomsBeforeIngest(
       {
         status: "DEGRADED",
         errorCode: roomCheck.reason,
+        ...assignmentHealthScope,
       },
     );
   }
@@ -441,6 +491,8 @@ export async function joinManagedMatrixInvites(
       !binding
       || binding.matrixUserId !== event.state_key
       || !binding.representativeId
+      || binding.endpointAssignmentRevision === null
+      || binding.endpointAssignmentRevision <= 0
     ) {
       continue;
     }
@@ -449,16 +501,37 @@ export async function joinManagedMatrixInvites(
       await recordManagedMatrixRuntimeHealth(binding.matrixUserId, {
         status: "DEGRADED",
         errorCode: "matrix_room_security_state_missing",
+        expectedAssignmentRevision:
+          binding.endpointAssignmentRevision,
       });
       failures.push(
         `${roomId}:${binding.matrixUserId}:room_security_state_missing`,
       );
       continue;
     }
+    const expectedAssignmentRevision =
+      roomSecurity.representativeAssignmentRevision ?? undefined;
+    const assignmentHealthScope =
+      expectedAssignmentRevision === undefined
+        ? {}
+        : { expectedAssignmentRevision };
+    if (
+      roomSecurity.currentRepresentativeAssignmentRevision === null
+      || roomSecurity.currentRepresentativeAssignmentRevision <= 0
+      || roomSecurity.representativeAssignmentRevision
+        !== roomSecurity.currentRepresentativeAssignmentRevision
+    ) {
+      await isolateMatrixConversationRoom({
+        roomId,
+        reason: "matrix_remote_room_validation_failed",
+      });
+      continue;
+    }
     if (roomSecurity.securityState === "ISOLATED") continue;
     if (roomSecurity.securityState === "ACTIVE") {
       await recordManagedMatrixRuntimeHealth(binding.matrixUserId, {
         status: "HEALTHY",
+        ...assignmentHealthScope,
       });
       continue;
     }
@@ -473,6 +546,7 @@ export async function joinManagedMatrixInvites(
       await recordManagedMatrixRuntimeHealth(binding.matrixUserId, {
         status: "DEGRADED",
         errorCode: "matrix_room_identity_mismatch",
+        ...assignmentHealthScope,
       });
       continue;
     }
@@ -484,6 +558,7 @@ export async function joinManagedMatrixInvites(
       await recordManagedMatrixRuntimeHealth(binding.matrixUserId, {
         status: "DEGRADED",
         errorCode: "matrix_room_security_state_invalid",
+        ...assignmentHealthScope,
       });
       continue;
     }
@@ -492,6 +567,12 @@ export async function joinManagedMatrixInvites(
       {
         representativeId: binding.representativeId,
         representativeMatrixUserId: binding.matrixUserId,
+        room: {
+          roomId,
+          conversationId: roomSecurity.conversationId,
+          audienceMatrixUserId: event.sender,
+          expectedSecurityState: "PENDING_REMOTE_VALIDATION",
+        },
       },
       async () => {
         const registrationError = await ensureMatrixVirtualUserRegistered(
@@ -559,6 +640,7 @@ export async function joinManagedMatrixInvites(
         await recordManagedMatrixRuntimeHealth(binding.matrixUserId, {
           status: "DEGRADED",
           errorCode: remoteJoin.value.errorCode,
+          ...assignmentHealthScope,
         });
       }
       if (disposition.status === "retry_scheduled") {
@@ -602,6 +684,7 @@ export async function joinManagedMatrixInvites(
         await recordManagedMatrixRuntimeHealth(binding.matrixUserId, {
           status: "DEGRADED",
           errorCode: roomCheck.reason,
+          ...assignmentHealthScope,
         });
       }
       if (disposition.status === "retry_scheduled") {
@@ -626,6 +709,7 @@ export async function joinManagedMatrixInvites(
       ) {
         await recordManagedMatrixRuntimeHealth(binding.matrixUserId, {
           status: "HEALTHY",
+          ...assignmentHealthScope,
         });
         if (roomSecurity.remoteValidationAttemptCount > 0) {
           await clearMatrixRoomRemoteValidationFailures(roomId);
@@ -654,10 +738,12 @@ export async function joinManagedMatrixInvites(
       await recordManagedMatrixRuntimeHealth(binding.matrixUserId, {
         status: "DEGRADED",
         errorCode: "matrix_room_activation_failed",
+        ...assignmentHealthScope,
       });
     } else {
       await recordManagedMatrixRuntimeHealth(binding.matrixUserId, {
         status: "HEALTHY",
+        ...assignmentHealthScope,
       });
       if (roomSecurity.remoteValidationAttemptCount > 0) {
         await clearMatrixRoomRemoteValidationFailures(roomId);
@@ -670,8 +756,16 @@ export async function joinManagedMatrixInvites(
 async function recordManagedMatrixRuntimeHealth(
   matrixUserId: string,
   input:
-    | { status: "HEALTHY"; errorCode?: never }
-    | { status: "DEGRADED" | "UNHEALTHY"; errorCode: string },
+    | {
+        status: "HEALTHY";
+        errorCode?: never;
+        expectedAssignmentRevision?: number;
+      }
+    | {
+        status: "DEGRADED" | "UNHEALTHY";
+        errorCode: string;
+        expectedAssignmentRevision?: number;
+      },
 ) {
   try {
     const errorCode =
@@ -684,6 +778,12 @@ async function recordManagedMatrixRuntimeHealth(
       matrixUserId,
       status: input.status,
       ...(errorCode ? { errorCode } : {}),
+      ...(input.expectedAssignmentRevision === undefined
+        ? {}
+        : {
+            expectedAssignmentRevision:
+              input.expectedAssignmentRevision,
+          }),
     });
   } catch (error) {
     console.error(

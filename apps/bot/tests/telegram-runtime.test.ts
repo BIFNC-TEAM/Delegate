@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildTelegramAssignmentEpochScope,
   buildTelegramPollingFailureLog,
   buildTelegramUpdateMetadata,
   handleTelegramMiddlewareError,
@@ -18,6 +19,31 @@ import {
 } from "../src/telegram-runtime";
 
 describe("Telegram bot runtime", () => {
+  it("creates immutable conversation coordinates for every assignment epoch", () => {
+    const first = buildTelegramAssignmentEpochScope({
+      representativeId: "rep-1",
+      botId: "8718299151",
+      chatId: 42,
+      assignmentRevision: 1,
+    });
+    const reassignedBack = buildTelegramAssignmentEpochScope({
+      representativeId: "rep-1",
+      botId: "8718299151",
+      chatId: 42,
+      assignmentRevision: 3,
+    });
+
+    expect(first).toEqual({
+      scopedTelegramChatId: "8718299151:42:r1",
+      bindingKey: "TELEGRAM:rep-1:8718299151:42:r1",
+    });
+    expect(reassignedBack).toEqual({
+      scopedTelegramChatId: "8718299151:42:r3",
+      bindingKey: "TELEGRAM:rep-1:8718299151:42:r3",
+    });
+    expect(reassignedBack).not.toEqual(first);
+  });
+
   it("only synchronizes the same direct Bot and never rewrites Matrix transport", () => {
     expect(
       planTelegramBotChannelBindingSynchronization(

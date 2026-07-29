@@ -109,6 +109,26 @@ describe("Matrix runtime health", () => {
     }));
   });
 
+  it("does not let an old room update a newer Matrix assignment health", async () => {
+    mockPrisma.representativeChannelBinding.updateMany.mockResolvedValueOnce({
+      count: 0,
+    });
+
+    await expect(recordMatrixRuntimeHealth({
+      matrixUserId: "@_delegate_rep:example.org",
+      status: "HEALTHY",
+      expectedAssignmentRevision: 1,
+    })).resolves.toBe(false);
+
+    expect(
+      mockPrisma.representativeChannelBinding.updateMany,
+    ).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({
+        endpointAssignmentRevision: 1,
+      }),
+    }));
+  });
+
   it("does not update an unknown or disabled virtual user", async () => {
     mockPrisma.matrixVirtualUserBinding.findFirst.mockResolvedValue(null);
 

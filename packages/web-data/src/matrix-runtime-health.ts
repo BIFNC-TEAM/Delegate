@@ -33,6 +33,7 @@ export async function recordMatrixRuntimeHealth(input: {
   status: MatrixRuntimeHealthStatus;
   errorCode?: string | null;
   checkedAt?: Date;
+  expectedAssignmentRevision?: number;
 }): Promise<boolean> {
   const matrixUserId = normalizeMatrixUserId(input.matrixUserId);
   const checkedAt = input.checkedAt ?? new Date();
@@ -41,6 +42,17 @@ export async function recordMatrixRuntimeHealth(input: {
     input.status === "HEALTHY"
       ? null
       : normalizeMatrixRuntimeError(input.errorCode);
+  const expectedAssignmentRevision =
+    input.expectedAssignmentRevision;
+  if (
+    expectedAssignmentRevision !== undefined
+    && (
+      !Number.isSafeInteger(expectedAssignmentRevision)
+      || expectedAssignmentRevision <= 0
+    )
+  ) {
+    return false;
+  }
   const virtualUser = await prisma.matrixVirtualUserBinding.findFirst({
     where: {
       matrixUserId,
@@ -77,6 +89,12 @@ export async function recordMatrixRuntimeHealth(input: {
         externalUserId: matrixUserId,
         desiredState: { not: ChannelDesiredState.DISCONNECTED },
         status: { not: "DISCONNECTED" },
+        ...(expectedAssignmentRevision === undefined
+          ? {}
+          : {
+              endpointAssignmentRevision:
+                expectedAssignmentRevision,
+            }),
       },
       data: {
         healthStatus,

@@ -34,6 +34,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       action?: unknown;
       token?: unknown;
       label?: unknown;
+      expectedCredentialRevision?: unknown;
     } | null;
     if (
       body?.action !== "rotate"
@@ -42,6 +43,15 @@ export async function PATCH(request: Request, { params }: RouteContext) {
     ) {
       return privateJson(
         { error: "action must be rotate, disable, or resume." },
+        400,
+      );
+    }
+    const expectedCredentialRevision = normalizePositiveInteger(
+      body.expectedCredentialRevision,
+    );
+    if (expectedCredentialRevision === null) {
+      return privateJson(
+        { error: "expectedCredentialRevision must be a positive integer." },
         400,
       );
     }
@@ -67,6 +77,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
         ownerId: actorId,
         actorId,
         telegramBotConnectionId: connectionId,
+        expectedCredentialRevision,
         token,
         ...(label === undefined ? {} : { label }),
         ...requestMetadata,
@@ -83,6 +94,7 @@ export async function PATCH(request: Request, { params }: RouteContext) {
       ownerId: actorId,
       actorId,
       telegramBotConnectionId: connectionId,
+      expectedCredentialRevision,
       status: body.action === "disable" ? "DISABLED" : "ACTIVE",
       ...requestMetadata,
     });
@@ -110,12 +122,25 @@ export async function DELETE(request: Request, { params }: RouteContext) {
         400,
       );
     }
+    const body = (await request.json().catch(() => null)) as {
+      expectedCredentialRevision?: unknown;
+    } | null;
+    const expectedCredentialRevision = normalizePositiveInteger(
+      body?.expectedCredentialRevision,
+    );
+    if (expectedCredentialRevision === null) {
+      return privateJson(
+        { error: "expectedCredentialRevision must be a positive integer." },
+        400,
+      );
+    }
     const actorId = session?.ownerId ?? "local-owner";
     const requestMetadata = resolveChannelRequestMetadata(request);
     const result = await revokeOwnerTelegramBotConnection({
       ownerId: actorId,
       actorId,
       telegramBotConnectionId: connectionId,
+      expectedCredentialRevision,
       ...requestMetadata,
     });
     return privateJson({
@@ -153,6 +178,14 @@ function normalizeLabel(value: unknown): string | null | undefined {
     return undefined;
   }
   return normalized || null;
+}
+
+function normalizePositiveInteger(value: unknown): number | null {
+  return typeof value === "number"
+      && Number.isSafeInteger(value)
+      && value > 0
+    ? value
+    : null;
 }
 
 function serializeOwnerTelegramBotConnection(

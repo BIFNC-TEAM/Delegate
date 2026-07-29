@@ -22,6 +22,10 @@ type TelegramBotDialogState = {
   row: ChannelRow;
 };
 
+type MatrixDialogState = {
+  row: ChannelRow;
+};
+
 type TelegramBotLifecycleIntent =
   | "rotate"
   | "disable"
@@ -56,9 +60,17 @@ export function DashboardChannels({
   const [telegramRevokeConfirmation, setTelegramRevokeConfirmation] =
     useState("");
   const [telegramDialogError, setTelegramDialogError] = useState<string | null>(null);
+  const [matrixDialog, setMatrixDialog] =
+    useState<MatrixDialogState | null>(null);
+  const [matrixUserId, setMatrixUserId] = useState("");
+  const [matrixDialogError, setMatrixDialogError] =
+    useState<string | null>(null);
+  const [copiedMatrixUserId, setCopiedMatrixUserId] =
+    useState<string | null>(null);
   const requestSequenceRef = useRef(0);
   const busyKeyRef = useRef<string | null>(null);
   const telegramDialogRef = useRef<HTMLElement>(null);
+  const matrixDialogRef = useRef<HTMLElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   busyKeyRef.current = busyKey;
 
@@ -111,6 +123,16 @@ export function DashboardChannels({
     window.setTimeout(() => previousFocus?.focus(), 0);
   }, []);
 
+  const closeMatrixDialog = useCallback(() => {
+    setMatrixDialog(null);
+    setMatrixUserId("");
+    setMatrixDialogError(null);
+    setCopiedMatrixUserId(null);
+    const previousFocus = previousFocusRef.current;
+    previousFocusRef.current = null;
+    window.setTimeout(() => previousFocus?.focus(), 0);
+  }, []);
+
   useEffect(() => {
     if (!telegramDialog) return;
     const dialog = telegramDialogRef.current;
@@ -151,6 +173,47 @@ export function DashboardChannels({
       document.body.style.overflow = previousOverflow;
     };
   }, [closeTelegramDialog, telegramDialog]);
+
+  useEffect(() => {
+    if (!matrixDialog) return;
+    const dialog = matrixDialogRef.current;
+    const focusable = dialog?.querySelector<HTMLElement>(
+      "button:not([disabled]), input:not([disabled])",
+    );
+    focusable?.focus();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        if (busyKeyRef.current) return;
+        event.preventDefault();
+        closeMatrixDialog();
+        return;
+      }
+      if (event.key === "Tab" && dialog) {
+        const controls = [
+          ...dialog.querySelectorAll<HTMLElement>(
+            "button:not([disabled]), input:not([disabled])",
+          ),
+        ];
+        const first = controls[0];
+        const last = controls[controls.length - 1];
+        if (!first || !last) return;
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [closeMatrixDialog, matrixDialog]);
 
   const rows = useMemo(() => {
     const flattened = (snapshot?.representatives ?? []).flatMap((representative) =>
@@ -215,9 +278,128 @@ export function DashboardChannels({
     setTelegramDialog({ row });
   }
 
+  function openMatrixDialog(row: ChannelRow) {
+    previousFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setMatrixUserId(row.channel.externalIdentity.id ?? "");
+    setMatrixDialogError(null);
+    setCopiedMatrixUserId(null);
+    setMatrixDialog({ row });
+  }
+
+  async function saveMatrixConfiguration() {
+    if (!matrixDialog || snapshot?.dataSource !== "database") return;
+    const currentMatrixUserId =
+      matrixDialog.row.channel.externalIdentity.id?.trim() || null;
+    const requestedMatrixUserId = matrixUserId.trim() || null;
+    if (currentMatrixUserId && !requestedMatrixUserId) {
+      setMatrixDialogError(
+        zh
+          ? "已有受管 Matrix 身份时不能留空；请输入新的完整 MXID，或保留当前 MXID 重新连接。"
+          : "A configured managed Matrix identity cannot be blank. Enter a new full MXID, or keep the current MXID to reconnect it.",
+      );
+      return;
+    }
+    const replacing = Boolean(
+      currentMatrixUserId
+      && requestedMatrixUserId
+      && currentMatrixUserId !== requestedMatrixUserId,
+    );
+    if (
+      replacing
+      && !window.confirm(
+        zh
+          ? `确认把 ${matrixDialog.row.representativeName} 的受管 Matrix 身份从 ${currentMatrixUserId} 替换为 ${requestedMatrixUserId}？旧房间和历史会保留，但旧 MXID 将停止新的收发，用户需要与新 MXID 创建新的未加密一对一私聊。`
+          : `Replace ${matrixDialog.row.representativeName}'s managed Matrix identity from ${currentMatrixUserId} to ${requestedMatrixUserId}? Existing rooms and history remain, but the old MXID stops new traffic and users must create a new unencrypted one-to-one room with the new MXID.`,
+      )
+    ) {
+      return;
+    }
+
+    const requestId = createRequestId();
+    const actionKey = `${matrixDialog.row.representativeId}:MATRIX:configure`;
+    setBusyKey(actionKey);
+    setMatrixDialogError(null);
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await fetch("/api/dashboard/channels", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": requestId,
+          "X-Request-Id": requestId,
+        },
+        body: JSON.stringify({
+          channel: "MATRIX",
+          representativeId: matrixDialog.row.representativeId,
+          ...(requestedMatrixUserId
+            ? { matrixUserId: requestedMatrixUserId }
+            : {}),
+          expectedCurrentMatrixUserId: currentMatrixUserId,
+          expectedCurrentEndpointAssignmentRevision:
+            matrixDialog.row.channel.endpointAssignmentRevision,
+          ...(replacing ? { replaceExisting: true } : {}),
+        }),
+      });
+      if (!response.ok) throw new Error(await extractError(response));
+      const result = (await response.json()) as {
+        virtualUser?: { matrixUserId?: unknown };
+      };
+      const savedMatrixUserId =
+        typeof result.virtualUser?.matrixUserId === "string"
+          ? result.virtualUser.matrixUserId
+          : requestedMatrixUserId;
+      setNotice(
+        replacing
+          ? zh
+            ? `${matrixDialog.row.representativeName} 已替换为 ${savedMatrixUserId ?? "新的受管 Matrix 身份"}。旧会话历史已保留，旧房间不会改用新身份发送。`
+            : `${matrixDialog.row.representativeName} now uses ${savedMatrixUserId ?? "the new managed Matrix identity"}. Existing history is preserved, and old rooms will not send through the new identity.`
+          : currentMatrixUserId
+            ? zh
+              ? `${matrixDialog.row.representativeName} 的受管 Matrix 身份 ${savedMatrixUserId ?? currentMatrixUserId} 已重新连接。`
+              : `${matrixDialog.row.representativeName}'s managed Matrix identity ${savedMatrixUserId ?? currentMatrixUserId} was reconnected.`
+            : zh
+              ? `${matrixDialog.row.representativeName} 已添加受管 Matrix 身份 ${savedMatrixUserId ?? ""}；完成注册和健康检查后即可使用。`
+              : `Managed Matrix identity ${savedMatrixUserId ?? ""} was added for ${matrixDialog.row.representativeName}. It is usable after registration and health checks complete.`,
+      );
+      await loadChannels();
+      closeMatrixDialog();
+    } catch (nextError) {
+      setMatrixDialogError(
+        nextError instanceof Error
+          ? nextError.message
+          : zh
+            ? "Matrix 渠道配置失败。"
+            : "Failed to configure the Matrix channel.",
+      );
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  async function copyMatrixIdentity() {
+    const value = matrixDialog?.row.channel.externalIdentity.id;
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedMatrixUserId(value);
+      setMatrixDialogError(null);
+    } catch {
+      setMatrixDialogError(
+        zh
+          ? "复制失败，请手动选择并复制 MXID。"
+          : "Copy failed. Select and copy the MXID manually.",
+      );
+    }
+  }
+
   async function saveTelegramBotAssignment() {
     if (!telegramDialog || snapshot?.dataSource !== "database") return;
     let telegramBotConnectionId = selectedTelegramBotId;
+    let createdTelegramBotConnectionId: string | null = null;
     if (telegramDialogMode === "add" && !telegramBotToken.trim()) {
       setTelegramDialogError(
         zh
@@ -281,6 +463,7 @@ export function DashboardChannels({
           );
         }
         telegramBotConnectionId = created.connection.id;
+        createdTelegramBotConnectionId = telegramBotConnectionId;
       }
 
       const assignRequestIdValue = createRequestId();
@@ -295,6 +478,10 @@ export function DashboardChannels({
           channel: "TELEGRAM",
           representativeId: telegramDialog.row.representativeId,
           telegramBotConnectionId,
+          expectedCurrentTelegramBotConnectionId:
+            telegramDialog.row.channel.telegramBotConnectionId,
+          expectedCurrentEndpointAssignmentRevision:
+            telegramDialog.row.channel.endpointAssignmentRevision,
         }),
       });
       if (!assignResponse.ok) {
@@ -314,12 +501,25 @@ export function DashboardChannels({
       await loadChannels();
       closeTelegramDialog();
     } catch (nextError) {
+      if (createdTelegramBotConnectionId) {
+        await loadChannels().catch(() => undefined);
+        setSelectedTelegramBotId(createdTelegramBotConnectionId);
+        setTelegramDialogMode("existing");
+      }
       setTelegramDialogError(
-        nextError instanceof Error
-          ? nextError.message
-          : zh
-            ? "Telegram Bot 配置失败。"
-            : "Failed to configure the Telegram Bot.",
+        createdTelegramBotConnectionId
+          ? zh
+            ? `Bot 已安全添加，但未能分配给当前数字代表。它已保留在工作区 Bot 列表中，请直接重试分配。${
+                nextError instanceof Error ? ` ${nextError.message}` : ""
+              }`
+            : `The Bot was added securely but could not be assigned to this representative. It remains in the workspace Bot list; retry the assignment.${
+                nextError instanceof Error ? ` ${nextError.message}` : ""
+              }`
+          : nextError instanceof Error
+            ? nextError.message
+            : zh
+              ? "Telegram Bot 配置失败。"
+              : "Failed to configure the Telegram Bot.",
       );
     } finally {
       setBusyKey(null);
@@ -390,10 +590,12 @@ export function DashboardChannels({
             "Idempotency-Key": requestId,
             "X-Request-Id": requestId,
           },
-          ...(action === "revoke"
-            ? {}
-            : {
-                body: JSON.stringify({
+          body: JSON.stringify({
+            expectedCredentialRevision:
+              selectedTelegramBot.credentialRevision,
+            ...(action === "revoke"
+              ? {}
+              : {
                   action,
                   ...(action === "rotate"
                     ? {
@@ -402,7 +604,7 @@ export function DashboardChannels({
                       }
                     : {}),
                 }),
-              }),
+          }),
         },
       );
       if (!response.ok) throw new Error(await extractError(response));
@@ -448,6 +650,7 @@ export function DashboardChannels({
       !telegramDialog
       || !bindingId
       || !selectedTelegramBotIsCurrent
+      || !telegramDialog.row.channel.endpointAssignmentRevision
       || snapshot?.dataSource !== "database"
     ) return;
     const requestId = createRequestId();
@@ -457,7 +660,7 @@ export function DashboardChannels({
     setNotice(null);
     try {
       const response = await fetch(
-        `/api/dashboard/channels/${encodeURIComponent(bindingId)}?telegramBotConnectionId=${encodeURIComponent(selectedTelegramBot!.id)}`,
+        `/api/dashboard/channels/${encodeURIComponent(bindingId)}?telegramBotConnectionId=${encodeURIComponent(selectedTelegramBot!.id)}&expectedEndpointAssignmentRevision=${telegramDialog.row.channel.endpointAssignmentRevision}`,
         {
           method: "DELETE",
           headers: {
@@ -504,6 +707,18 @@ export function DashboardChannels({
       || (!bindingId && !canProvisionChannel)
     ) return;
     if (
+      bindingId
+      && action !== "health"
+      && !row.channel.endpointAssignmentRevision
+    ) {
+      setError(
+        zh
+          ? "渠道分配版本缺失，请刷新页面后重试。"
+          : "The channel assignment revision is missing. Refresh and try again.",
+      );
+      return;
+    }
+    if (
       action === "disconnect"
       && !window.confirm(
         zh
@@ -527,7 +742,7 @@ export function DashboardChannels({
         action === "connect"
           ? "/api/dashboard/channels"
           : action === "disconnect"
-          ? `/api/dashboard/channels/${encodeURIComponent(bindingId!)}?channel=MATRIX`
+          ? `/api/dashboard/channels/${encodeURIComponent(bindingId!)}?channel=MATRIX&expectedEndpointAssignmentRevision=${row.channel.endpointAssignmentRevision}`
           : action === "health"
           ? `/api/dashboard/channels/${encodeURIComponent(bindingId!)}/health`
           : `/api/dashboard/channels/${encodeURIComponent(bindingId!)}`,
@@ -550,11 +765,15 @@ export function DashboardChannels({
                   body: JSON.stringify({
                     channel: row.channel.kind,
                     representativeId: row.representativeId,
+                    expectedCurrentEndpointAssignmentRevision:
+                      row.channel.endpointAssignmentRevision,
                   }),
                 }
             : {
                 body: JSON.stringify({
                   desiredState: action === "pause" ? "PAUSED" : "ACTIVE",
+                  expectedCurrentEndpointAssignmentRevision:
+                    row.channel.endpointAssignmentRevision,
                 }),
               }),
         },
@@ -755,6 +974,7 @@ export function DashboardChannels({
                         key={`${row.representativeId}:${row.channel.kind}`}
                         locale={locale}
                         onAction={(action) => void performAction(row, action)}
+                        onConfigureMatrix={() => openMatrixDialog(row)}
                         onConfigureTelegram={() => openTelegramDialog(row)}
                         readOnly={snapshot?.dataSource !== "database"}
                         row={row}
@@ -832,8 +1052,8 @@ export function DashboardChannels({
               id="telegram-bot-dialog-description"
             >
               {zh
-                ? "选择工作区已有 Bot，或使用 BotFather Token 添加并验证一个新 Bot。切换只影响当前数字代表；同一个 Bot 可以被多个代表复用。"
-                : "Choose an existing workspace Bot, or add and verify one with a BotFather token. Switching affects only this representative, and one Bot can be reused by multiple representatives."}
+                ? "选择工作区已有 Bot，或使用 BotFather Token 添加并验证一个新 Bot。替换只影响当前数字代表；同一个 Bot 可以被多个代表复用。替换后，旧 Bot 中已有会话会保留历史但停止新的自动回复。"
+                : "Choose an existing workspace Bot, or add and verify one with a BotFather token. Replacement affects only this representative, and one Bot can be reused by multiple representatives. Existing conversations on the old Bot keep their history but stop new automated replies."}
             </p>
 
             <div
@@ -1254,8 +1474,208 @@ export function DashboardChannels({
                           ? "保持当前 Bot"
                           : "Keep current Bot"
                         : zh
-                          ? "切换到所选 Bot"
-                          : "Switch to selected Bot"}
+                        ? "替换为所选 Bot"
+                          : "Replace with selected Bot"}
+                </button>
+              </div>
+            </footer>
+          </section>
+        </div>
+      ) : null}
+
+      {matrixDialog ? (
+        <div
+          className="channels-dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !busyKey) {
+              closeMatrixDialog();
+            }
+          }}
+          role="presentation"
+        >
+          <section
+            aria-describedby="matrix-channel-dialog-description"
+            aria-labelledby="matrix-channel-dialog-title"
+            aria-modal="true"
+            className="channels-bot-dialog"
+            ref={matrixDialogRef}
+            role="dialog"
+          >
+            <header>
+              <div>
+                <p>MATRIX IDENTITY</p>
+                <h2 id="matrix-channel-dialog-title">
+                  {zh
+                    ? `为 ${matrixDialog.row.representativeName} 配置 Matrix`
+                    : `Configure Matrix for ${matrixDialog.row.representativeName}`}
+                </h2>
+              </div>
+              <button
+                aria-label={zh ? "关闭 Matrix 配置" : "Close Matrix configuration"}
+                className="channels-dialog-close"
+                disabled={Boolean(busyKey)}
+                onClick={closeMatrixDialog}
+                type="button"
+              >
+                ×
+              </button>
+            </header>
+
+            <p
+              className="dashboard-v2-panel-description"
+              id="matrix-channel-dialog-description"
+            >
+              {zh
+                ? "这里配置的是数字代表的系统受管 Matrix 身份，不是访客的私人 MXID。凭据由部署级 Application Service 管理，页面不会收集 Matrix 密码或 Access Token。"
+                : "This configures the representative's system-managed Matrix identity, not a visitor's personal MXID. Credentials remain with the deployment Application Service; this page never collects Matrix passwords or access tokens."}
+            </p>
+
+            <section className="channels-bot-management">
+              <header>
+                <span>
+                  <small>{zh ? "当前受管 MXID" : "Current managed MXID"}</small>
+                  <strong>
+                    {matrixDialog.row.channel.externalIdentity.id
+                      ?? (zh ? "尚未添加" : "Not added")}
+                  </strong>
+                </span>
+                <span>
+                  <small>{zh ? "Application Service 连接" : "Application Service connection"}</small>
+                  <strong>
+                    {matrixDialog.row.channel.connectionId
+                      ?? snapshot?.matrixConfiguration.connectionId
+                      ?? "—"}
+                  </strong>
+                </span>
+              </header>
+              {matrixDialog.row.channel.externalIdentity.id ? (
+                <div className="channels-bot-management-actions">
+                  <button
+                    className="dashboard-v2-button-secondary"
+                    disabled={
+                      Boolean(busyKey)
+                      || copiedMatrixUserId
+                        === matrixDialog.row.channel.externalIdentity.id
+                    }
+                    onClick={() => void copyMatrixIdentity()}
+                    type="button"
+                  >
+                    {copiedMatrixUserId
+                        === matrixDialog.row.channel.externalIdentity.id
+                      ? zh
+                        ? "MXID 已复制"
+                        : "MXID copied"
+                      : zh
+                        ? "复制当前 MXID"
+                        : "Copy current MXID"}
+                  </button>
+                </div>
+              ) : null}
+            </section>
+
+            <div className="channels-bot-form">
+              <label>
+                <span>
+                  {matrixDialog.row.channel.externalIdentity.id
+                    ? zh
+                      ? "受管 Matrix MXID（修改后将替换）"
+                      : "Managed Matrix MXID (editing replaces it)"
+                    : zh
+                      ? "受管 Matrix MXID（留空则自动生成）"
+                      : "Managed Matrix MXID (leave blank to generate)"}
+                </span>
+                <input
+                  autoComplete="off"
+                  disabled={Boolean(busyKey)}
+                  maxLength={255}
+                  onChange={(event) => setMatrixUserId(event.target.value)}
+                  placeholder={
+                    snapshot?.matrixConfiguration.serverName
+                      ? `@${snapshot.matrixConfiguration.managedUserPrefix}support:${snapshot.matrixConfiguration.serverName}`
+                      : "@_delegate_rep_support:matrix.example"
+                  }
+                  spellCheck={false}
+                  value={matrixUserId}
+                />
+              </label>
+              <div className="channels-token-boundary" role="note">
+                <strong>{zh ? "受管范围" : "Managed boundary"}</strong>
+                <span>
+                  {snapshot?.matrixConfiguration.available
+                    ? zh
+                      ? `只接受 ${snapshot.matrixConfiguration.serverName} 上以 ${snapshot.matrixConfiguration.managedUserPrefix} 开头的 MXID。替换会保留历史并使旧房间停止新路由。`
+                      : `Only MXIDs on ${snapshot.matrixConfiguration.serverName} with the ${snapshot.matrixConfiguration.managedUserPrefix} prefix are accepted. Replacement preserves history and stops new routing in old rooms.`
+                    : zh
+                      ? "Matrix Application Service 尚未配置，暂时无法添加或替换受管身份。"
+                      : "The Matrix Application Service is not configured, so managed identities cannot be added or replaced yet."}
+                </span>
+              </div>
+            </div>
+
+            {matrixDialogError ? (
+              <div className="skills-banner is-error" role="alert">
+                {matrixDialogError}
+              </div>
+            ) : null}
+
+            <footer>
+              <span>
+                {zh
+                  ? "新身份先创建并验证数据约束，再原子切换；失败时当前身份保持不变。Matrix MVP 仍只支持未加密的一对一私聊。"
+                  : "The new identity is validated before an atomic switch; failures leave the current identity unchanged. Matrix MVP remains limited to unencrypted one-to-one rooms."}
+              </span>
+              <div>
+                <button
+                  className="dashboard-v2-button-secondary"
+                  disabled={Boolean(busyKey)}
+                  onClick={closeMatrixDialog}
+                  type="button"
+                >
+                  {zh ? "取消" : "Cancel"}
+                </button>
+                <button
+                  className="dashboard-v2-button-primary"
+                  disabled={
+                    Boolean(busyKey)
+                    || !snapshot?.matrixConfiguration.available
+                    || (
+                      Boolean(matrixDialog.row.channel.externalIdentity.id)
+                      && !matrixUserId.trim()
+                    )
+                    || (
+                      matrixDialog.row.channel.desiredState !== "DISCONNECTED"
+                      && Boolean(matrixDialog.row.channel.externalIdentity.id)
+                      && matrixUserId.trim()
+                        === matrixDialog.row.channel.externalIdentity.id
+                    )
+                  }
+                  onClick={() => void saveMatrixConfiguration()}
+                  type="button"
+                >
+                  {busyKey
+                    ? zh
+                      ? "处理中…"
+                      : "Working…"
+                    : matrixDialog.row.channel.externalIdentity.id
+                      ? !matrixUserId.trim()
+                        ? zh
+                          ? "请输入完整 Matrix MXID"
+                          : "Enter a full Matrix MXID"
+                        : matrixUserId.trim()
+                          !== matrixDialog.row.channel.externalIdentity.id
+                        ? zh
+                          ? "验证并替换 Matrix 身份"
+                          : "Validate and replace identity"
+                        : matrixDialog.row.channel.desiredState === "DISCONNECTED"
+                          ? zh
+                            ? "重新连接当前身份"
+                            : "Reconnect current identity"
+                          : zh
+                            ? "当前身份已连接"
+                            : "Current identity connected"
+                      : zh
+                        ? "添加 Matrix 身份"
+                        : "Add Matrix identity"}
                 </button>
               </div>
             </footer>
@@ -1270,6 +1690,7 @@ function ChannelTableRow({
   busyKey,
   locale,
   onAction,
+  onConfigureMatrix,
   onConfigureTelegram,
   readOnly,
   row,
@@ -1280,6 +1701,7 @@ function ChannelTableRow({
   onAction: (
     action: "connect" | "disconnect" | "pause" | "resume" | "health"
   ) => void;
+  onConfigureMatrix: () => void;
   onConfigureTelegram: () => void;
   readOnly: boolean;
   row: ChannelRow;
@@ -1303,17 +1725,8 @@ function ChannelTableRow({
     || !telegramConfigured
     || channel.desiredState === "DISCONNECTED"
     || readOnly;
-  const connectBusy =
-    busyKey === `${row.representativeId}:${channel.kind}:connect`;
   const telegramAssignBusy =
     busyKey === `${row.representativeId}:TELEGRAM:assign`;
-  const canProvisionChannel =
-    !readOnly
-    && channel.kind === "MATRIX"
-    && (
-      !channel.bindingId
-      || channel.desiredState === "DISCONNECTED"
-    );
   const disconnectBusy =
     busyKey === `${channel.bindingId}:disconnect`;
   const canDisconnectMatrix =
@@ -1427,31 +1840,31 @@ function ChannelTableRow({
                   : "Saving…"
                 : assignedTelegramBot
                   ? zh
-                    ? "切换 Bot"
-                    : "Switch Bot"
+                    ? "替换 Bot"
+                    : "Replace Bot"
                   : zh
                     ? "配置 Bot"
                     : "Configure Bot"}
             </button>
           ) : null}
-          {canProvisionChannel ? (
+          {channel.kind === "MATRIX" && !readOnly ? (
             <button
               className="dashboard-v2-button-secondary"
               disabled={Boolean(busyKey)}
-              onClick={() => onAction("connect")}
+              onClick={onConfigureMatrix}
               type="button"
             >
-              {connectBusy
+              {busyKey === `${row.representativeId}:MATRIX:configure`
                 ? zh
-                  ? "连接中…"
-                  : "Connecting…"
-                : channel.bindingId
+                  ? "保存中…"
+                  : "Saving…"
+                : channel.externalIdentity.id
                   ? zh
-                    ? "重新连接 Matrix"
-                    : "Reconnect Matrix"
+                    ? "替换 Matrix"
+                    : "Replace Matrix"
                 : zh
-                  ? "创建 Matrix 用户"
-                  : "Create Matrix user"}
+                  ? "添加 Matrix"
+                  : "Add Matrix"}
             </button>
           ) : null}
           {canDisconnectMatrix ? (
@@ -1503,7 +1916,10 @@ function ChannelTableRow({
                 : "Refresh health"}
           </button>
           {(
-            (!channel.bindingId && !canProvisionChannel)
+            (
+              !channel.bindingId
+              && (channel.kind === "WEB" || readOnly)
+            )
             || (channel.kind === "TELEGRAM" && !assignedTelegramBot)
           ) ? (
             <small>

@@ -19,6 +19,7 @@ export async function PATCH(
     const session = await requireDashboardApiOwnerSession();
     const body = (await request.json().catch(() => null)) as {
       desiredState?: unknown;
+      expectedCurrentEndpointAssignmentRevision?: unknown;
     } | null;
     if (
       body?.desiredState !== "ACTIVE"
@@ -32,6 +33,24 @@ export async function PATCH(
         },
       );
     }
+    if (
+      typeof body.expectedCurrentEndpointAssignmentRevision !== "number"
+      || !Number.isSafeInteger(
+        body.expectedCurrentEndpointAssignmentRevision,
+      )
+      || body.expectedCurrentEndpointAssignmentRevision <= 0
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "expectedCurrentEndpointAssignmentRevision must be a positive integer.",
+        },
+        {
+          status: 400,
+          headers: { "Cache-Control": "private, no-store" },
+        },
+      );
+    }
     const actorId = session?.ownerId ?? "local-owner";
     const requestMetadata = resolveChannelRequestMetadata(request);
     const binding = await setOwnerChannelDesiredState({
@@ -39,6 +58,8 @@ export async function PATCH(
       actorId,
       bindingId,
       desiredState: body.desiredState,
+      expectedCurrentEndpointAssignmentRevision:
+        body.expectedCurrentEndpointAssignmentRevision,
       ...requestMetadata,
     });
     return NextResponse.json(
@@ -65,6 +86,22 @@ export async function DELETE(
     const telegramBotConnectionId = searchParams
       .get("telegramBotConnectionId")
       ?.trim();
+    const expectedCurrentEndpointAssignmentRevision =
+      parsePositiveInteger(
+        searchParams.get("expectedEndpointAssignmentRevision"),
+      );
+    if (expectedCurrentEndpointAssignmentRevision === null) {
+      return NextResponse.json(
+        {
+          error:
+            "expectedEndpointAssignmentRevision must be a positive integer.",
+        },
+        {
+          status: 400,
+          headers: { "Cache-Control": "private, no-store" },
+        },
+      );
+    }
     const actorId = session?.ownerId ?? "local-owner";
     const requestMetadata = resolveChannelRequestMetadata(request);
     if (channel === "MATRIX") {
@@ -72,6 +109,7 @@ export async function DELETE(
         ownerId: actorId,
         actorId,
         bindingId,
+        expectedCurrentEndpointAssignmentRevision,
         ...requestMetadata,
       });
       return NextResponse.json(
@@ -102,6 +140,7 @@ export async function DELETE(
       actorId,
       bindingId,
       telegramBotConnectionId,
+      expectedCurrentEndpointAssignmentRevision,
       ...requestMetadata,
     });
     return NextResponse.json(
@@ -121,4 +160,10 @@ export async function DELETE(
       "Failed to disconnect channel.",
     );
   }
+}
+
+function parsePositiveInteger(value: string | null): number | null {
+  if (!value || !/^[1-9]\d*$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
 }

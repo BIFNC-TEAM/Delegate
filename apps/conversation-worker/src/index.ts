@@ -2,10 +2,14 @@ import "dotenv/config";
 
 import { createServer } from "node:http";
 
-import { resolveConversationWorkerConfig } from "./config";
+import {
+  resolveConversationWorkerConfig,
+  resolveConversationWorkerModelReadiness,
+} from "./config";
 import { processNextConversationWork } from "./processor";
 
 const config = resolveConversationWorkerConfig();
+const modelRuntime = resolveConversationWorkerModelReadiness();
 let lastProcessedAt: string | null = null;
 let lastError: string | null = null;
 let active = false;
@@ -14,7 +18,14 @@ const server = createServer((request, response) => {
   if ((request.method === "GET" || request.method === "HEAD") && request.url === "/health") {
     response.statusCode = 200;
     response.setHeader("content-type", "application/json; charset=utf-8");
-    response.end(request.method === "HEAD" ? undefined : JSON.stringify({ status: "ok", service: "conversation-worker", active, lastProcessedAt, lastError }));
+    response.end(request.method === "HEAD" ? undefined : JSON.stringify({
+      status: modelRuntime.state === "ready" ? "ok" : "degraded",
+      service: "conversation-worker",
+      active,
+      lastProcessedAt,
+      lastError,
+      modelRuntime,
+    }));
     return;
   }
   response.statusCode = 404;
@@ -23,6 +34,9 @@ const server = createServer((request, response) => {
 
 server.listen(config.port, "0.0.0.0", () => {
   console.log(`conversation-worker listening on http://0.0.0.0:${config.port}`);
+  if (modelRuntime.state !== "ready") {
+    console.warn(`conversation-worker model runtime degraded: ${modelRuntime.state}`);
+  }
 });
 
 void runLoop();

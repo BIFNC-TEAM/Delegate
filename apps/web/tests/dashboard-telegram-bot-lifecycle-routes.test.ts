@@ -65,6 +65,8 @@ import {
 
 const connectionId = "telegram-connection-1";
 const bindingId = "telegram-binding-1";
+const credentialRevision = 2;
+const endpointAssignmentRevision = 3;
 const secretToken =
   "8718299151:AASecretTokenValueThatMustNeverLeaveTheServer";
 const secretSentinel = "SECRET_CREDENTIAL_SENTINEL";
@@ -198,6 +200,7 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
       ownerId: "owner-1",
       actorId: "owner-1",
       telegramBotConnectionId: connectionId,
+      expectedCredentialRevision: credentialRevision,
       token: secretToken,
       label: "Rotated support",
       requestId: "telegram-lifecycle-request",
@@ -244,6 +247,7 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
         ownerId: "owner-1",
         actorId: "owner-1",
         telegramBotConnectionId: connectionId,
+        expectedCredentialRevision: credentialRevision,
         status,
         requestId: "telegram-lifecycle-request",
         idempotencyKey: "telegram-lifecycle-idempotency",
@@ -269,6 +273,7 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
       ownerId: "owner-1",
       actorId: "owner-1",
       telegramBotConnectionId: connectionId,
+      expectedCredentialRevision: credentialRevision,
       requestId: "telegram-lifecycle-request",
       idempotencyKey: "telegram-lifecycle-idempotency",
     });
@@ -286,7 +291,7 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
   it("unassigns one representative binding without exposing service internals", async () => {
     const response = await unassignTelegramBinding(
       new Request(
-        `http://localhost/api/dashboard/channels/${bindingId}?telegramBotConnectionId=${connectionId}`,
+        `http://localhost/api/dashboard/channels/${bindingId}?telegramBotConnectionId=${connectionId}&expectedEndpointAssignmentRevision=${endpointAssignmentRevision}`,
         {
           method: "DELETE",
           headers: {
@@ -305,6 +310,8 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
       actorId: "owner-1",
       bindingId,
       telegramBotConnectionId: connectionId,
+      expectedCurrentEndpointAssignmentRevision:
+        endpointAssignmentRevision,
       requestId: "telegram-lifecycle-request",
       idempotencyKey: "telegram-lifecycle-idempotency",
     });
@@ -318,7 +325,7 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
   it("disconnects a Matrix binding without requiring a Telegram Bot id", async () => {
     const response = await unassignTelegramBinding(
       new Request(
-        "http://localhost/api/dashboard/channels/matrix-binding-1?channel=MATRIX",
+        `http://localhost/api/dashboard/channels/matrix-binding-1?channel=MATRIX&expectedEndpointAssignmentRevision=${endpointAssignmentRevision}`,
         {
           method: "DELETE",
           headers: {
@@ -337,6 +344,8 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
       ownerId: "owner-1",
       actorId: "owner-1",
       bindingId: "matrix-binding-1",
+      expectedCurrentEndpointAssignmentRevision:
+        endpointAssignmentRevision,
       requestId: "matrix-disconnect-request",
       idempotencyKey: "matrix-disconnect-idempotency",
     });
@@ -403,7 +412,7 @@ describe("dashboard Telegram Bot lifecycle routes", () => {
   it("rejects an unassign request without the expected Bot connection", async () => {
     const response = await unassignTelegramBinding(
       new Request(
-        `http://localhost/api/dashboard/channels/${bindingId}`,
+        `http://localhost/api/dashboard/channels/${bindingId}?expectedEndpointAssignmentRevision=${endpointAssignmentRevision}`,
         { method: "DELETE" },
       ),
       { params: Promise.resolve({ bindingId }) },
@@ -557,20 +566,34 @@ function lifecycleRequest(
   method: "PATCH" | "DELETE",
   body?: Record<string, unknown> | null,
 ) {
+  const revisionedBody =
+    method === "DELETE" && body === undefined
+      ? { expectedCredentialRevision: credentialRevision }
+      : body && typeof body === "object"
+        ? {
+            expectedCredentialRevision: credentialRevision,
+            ...body,
+          }
+        : body;
   return new Request(
     `http://localhost/api/dashboard/channels/telegram-bots/${connectionId}`,
     {
       method,
       headers: {
-        ...(body === undefined
+        ...(revisionedBody === undefined
           ? {}
           : { "Content-Type": "application/json" }),
         "Idempotency-Key": "telegram-lifecycle-idempotency",
         "X-Request-Id": "telegram-lifecycle-request",
       },
-      ...(body === undefined
+      ...(revisionedBody === undefined
         ? {}
-        : { body: body === null ? "null" : JSON.stringify(body) }),
+        : {
+            body:
+              revisionedBody === null
+                ? "null"
+                : JSON.stringify(revisionedBody),
+          }),
     },
   );
 }
@@ -581,7 +604,7 @@ function connectionContext() {
 
 function unassignRequest(telegramBotConnectionId: string) {
   return new Request(
-    `http://localhost/api/dashboard/channels/${bindingId}?telegramBotConnectionId=${telegramBotConnectionId}`,
+    `http://localhost/api/dashboard/channels/${bindingId}?telegramBotConnectionId=${telegramBotConnectionId}&expectedEndpointAssignmentRevision=${endpointAssignmentRevision}`,
     {
       method: "DELETE",
       headers: {

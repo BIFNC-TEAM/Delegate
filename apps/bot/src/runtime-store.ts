@@ -42,11 +42,15 @@ import {
   Prisma,
   PricingPlanType,
   RepresentativeChannelKind,
+  TelegramBotConnectionStatus,
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
 import { assertTelegramStarsLivePaymentEnabled } from "./conversation-platform-mode";
-import { planTelegramBotChannelBindingSynchronization } from "./telegram-runtime";
+import {
+  buildTelegramAssignmentEpochScope,
+  planTelegramBotChannelBindingSynchronization,
+} from "./telegram-runtime";
 import {
   getTelegramRuntimeContext,
   requireTelegramRuntimeContext,
@@ -252,102 +256,37 @@ export async function getConversationContext(
   actor: TelegramActor,
 ): Promise<ConversationContextRecord> {
   const telegramRuntime = requireTelegramRuntimeContext();
-  const representative = await prisma.representative.findUnique({
-    where: { slug: representativeSlug },
-    include: {
-      pricingPlans: true,
-    },
-  });
-
-  if (!representative) {
-    throw new Error(`Representative "${representativeSlug}" not found. Run db:seed first.`);
-  }
-
   const now = new Date();
   const telegramUserId = String(actor.telegramUserId);
   const channelUserId = `telegram:${telegramUserId}`;
   const connectionId = telegramRuntime.botId;
-  const scopedTelegramChatId =
-    `${connectionId}:${String(actor.chatId)}`;
-  const audienceIdentity = await resolveChannelAudienceIdentity({
-    provider: "TELEGRAM",
-    providerSubject: telegramUserId,
-    issuer: "delegate-managed-bot",
-    connectionId,
-    now,
-  });
-
-  const contact = await prisma.contact.upsert({
-    where: {
-      representativeId_telegramUserId: {
-        representativeId: representative.id,
-        telegramUserId,
+  const context = await prisma.$transaction(async (tx) => {
+    const representative = await tx.representative.findUnique({
+      where: { slug: representativeSlug },
+      include: {
+        pricingPlans: true,
       },
-    },
-    create: {
-      representativeId: representative.id,
-      audienceIdentityId: audienceIdentity.id,
-      telegramUserId,
-      channelUserId,
-      externalUserId: channelUserId,
-      username: actor.username ?? null,
-      displayName: actor.displayName ?? actor.username ?? String(actor.telegramUserId),
-      role: AudienceRole.OTHER,
-      stage: ContactStage.NEW,
-      isPaid: false,
-      source: actor.channel.toLowerCase(),
-      sourceChannel: "telegram",
-      lastSeenAt: now,
-    },
-    update: {
-      audienceIdentityId: audienceIdentity.id,
-      channelUserId,
-      externalUserId: channelUserId,
-      username: actor.username ?? null,
-      displayName: actor.displayName ?? actor.username ?? String(actor.telegramUserId),
-      source: actor.channel.toLowerCase(),
-      sourceChannel: "telegram",
-      lastSeenAt: now,
-    },
-  });
-
-  const conversation = await prisma.conversation.upsert({
-    where: {
-      representativeId_telegramChatId_contactId: {
-        representativeId: representative.id,
-        telegramChatId: scopedTelegramChatId,
-        contactId: contact.id,
-      },
-    },
-    create: {
-      representativeId: representative.id,
-      contactId: contact.id,
-      audienceIdentityId: audienceIdentity.id,
-      telegramChatId: scopedTelegramChatId,
-      channel: actor.channel,
-      sourceChannel: "telegram",
-      externalConversationId: String(actor.chatId),
-      state: "ACTIVE",
-      freeRepliesUsed: 0,
-      lastMessageAt: now,
-    },
-    update: {
-      audienceIdentityId: audienceIdentity.id,
-      channel: actor.channel,
-      sourceChannel: "telegram",
-      externalConversationId: String(actor.chatId),
-      lastMessageAt: now,
-    },
-  });
-
-  const representativeBinding =
-    await prisma.representativeChannelBinding.findFirst({
+    });
+    if (!representative) {
+      throw new Error(
+        `Representative "${representativeSlug}" not found. Run db:seed first.`,
+      );
+    }
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${`telegram-bot-channel:${representative.id}`})
+      )
+    `;
+    const representativeBinding =
+      await tx.representativeChannelBinding.findFirst({
       where: {
         representativeId: representative.id,
         kind: RepresentativeChannelKind.TELEGRAM,
         transport: ChannelTransport.TELEGRAM,
         sourceProvider: ChannelSourceProvider.TELEGRAM,
         connectionId,
+        endpointAssignmentRevision: { gt: 0 },
+        desiredState: ChannelDesiredState.ACTIVE,
         ...(telegramRuntime.internalConnectionId.startsWith("legacy:")
           ? {
               OR: [
@@ -361,46 +300,151 @@ export async function getConversationContext(
           : {
               telegramBotConnectionId:
                 telegramRuntime.internalConnectionId,
+              telegramBotConnection: {
+                status: TelegramBotConnectionStatus.ACTIVE,
+              },
             }),
       },
       select: {
         id: true,
         connectionId: true,
+        endpointAssignmentRevision: true,
       },
     });
-  if (!representativeBinding) {
-    throw new Error(
-      "This Telegram Bot is not assigned to the selected representative.",
-    );
-  }
-  const bindingKey =
-    `TELEGRAM:${representative.id}:${connectionId}:${String(actor.chatId)}:`;
-  await prisma.conversationChannelBinding.upsert({
-    where: { bindingKey },
-    create: {
-      conversationId: conversation.id,
-      representativeBindingId: representativeBinding.id,
-      kind: "TELEGRAM",
-      transport: ChannelTransport.TELEGRAM,
-      sourceProvider: ChannelSourceProvider.TELEGRAM,
-      connectionId,
-      bindingKey,
-      externalConversationId: String(actor.chatId),
-      metadata: {
-        source: "telegram_bot",
-        telegramUserId,
-        telegramBotConnectionId: telegramRuntime.internalConnectionId,
-        botId: connectionId,
+    if (!representativeBinding) {
+      throw new Error(
+        "This Telegram Bot is not assigned to the selected representative.",
+      );
+    }
+    const assignmentRevision =
+      representativeBinding.endpointAssignmentRevision;
+    const assignmentScope = buildTelegramAssignmentEpochScope({
+      representativeId: representative.id,
+      botId: connectionId,
+      chatId: actor.chatId,
+      assignmentRevision,
+    });
+    const audienceIdentity = await resolveChannelAudienceIdentity(
+      {
+        provider: "TELEGRAM",
+        providerSubject: telegramUserId,
+        issuer: "delegate-managed-bot",
+        connectionId,
+        now,
       },
-    },
-    update: {
-      conversationId: conversation.id,
-      representativeBindingId: representativeBinding.id,
-      transport: ChannelTransport.TELEGRAM,
-      sourceProvider: ChannelSourceProvider.TELEGRAM,
-      connectionId,
-    },
+      tx as never,
+    );
+    const contact = await tx.contact.upsert({
+      where: {
+        representativeId_telegramUserId: {
+          representativeId: representative.id,
+          telegramUserId,
+        },
+      },
+      create: {
+        representativeId: representative.id,
+        audienceIdentityId: audienceIdentity.id,
+        telegramUserId,
+        channelUserId,
+        externalUserId: channelUserId,
+        username: actor.username ?? null,
+        displayName:
+          actor.displayName
+          ?? actor.username
+          ?? String(actor.telegramUserId),
+        role: AudienceRole.OTHER,
+        stage: ContactStage.NEW,
+        isPaid: false,
+        source: actor.channel.toLowerCase(),
+        sourceChannel: "telegram",
+        lastSeenAt: now,
+      },
+      update: {
+        audienceIdentityId: audienceIdentity.id,
+        channelUserId,
+        externalUserId: channelUserId,
+        username: actor.username ?? null,
+        displayName:
+          actor.displayName
+          ?? actor.username
+          ?? String(actor.telegramUserId),
+        source: actor.channel.toLowerCase(),
+        sourceChannel: "telegram",
+        lastSeenAt: now,
+      },
+    });
+    const conversation = await tx.conversation.upsert({
+      where: {
+        representativeId_telegramChatId_contactId: {
+          representativeId: representative.id,
+          telegramChatId: assignmentScope.scopedTelegramChatId,
+          contactId: contact.id,
+        },
+      },
+      create: {
+        representativeId: representative.id,
+        contactId: contact.id,
+        audienceIdentityId: audienceIdentity.id,
+        telegramChatId: assignmentScope.scopedTelegramChatId,
+        channel: actor.channel,
+        sourceChannel: "telegram",
+        externalConversationId: String(actor.chatId),
+        state: "ACTIVE",
+        freeRepliesUsed: 0,
+        lastMessageAt: now,
+      },
+      update: {
+        audienceIdentityId: audienceIdentity.id,
+        channel: actor.channel,
+        sourceChannel: "telegram",
+        externalConversationId: String(actor.chatId),
+        lastMessageAt: now,
+      },
+    });
+    const bindingKey = assignmentScope.bindingKey;
+    await tx.conversationChannelBinding.upsert({
+      where: { bindingKey },
+      create: {
+        conversationId: conversation.id,
+        representativeBindingId: representativeBinding.id,
+        representativeAssignmentRevision: assignmentRevision,
+        kind: "TELEGRAM",
+        transport: ChannelTransport.TELEGRAM,
+        sourceProvider: ChannelSourceProvider.TELEGRAM,
+        connectionId,
+        bindingKey,
+        externalConversationId: String(actor.chatId),
+        metadata: {
+          source: "telegram_bot",
+          telegramUserId,
+          telegramBotConnectionId:
+            telegramRuntime.internalConnectionId,
+          botId: connectionId,
+          representativeAssignmentRevision: assignmentRevision,
+        },
+      },
+      update: {
+        conversationId: conversation.id,
+        representativeBindingId: representativeBinding.id,
+        representativeAssignmentRevision: assignmentRevision,
+        transport: ChannelTransport.TELEGRAM,
+        sourceProvider: ChannelSourceProvider.TELEGRAM,
+        connectionId,
+      },
+    });
+    return {
+      representative,
+      audienceIdentity,
+      contact,
+      conversation,
+    };
   });
+  const {
+    representative,
+    audienceIdentity,
+    contact,
+    conversation,
+  } = context;
 
   return {
     representativeId: representative.id,

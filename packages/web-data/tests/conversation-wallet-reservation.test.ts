@@ -259,6 +259,56 @@ describe("generation wallet reservation lifecycle", () => {
     });
   });
 
+  it("merges a sanitized fallback outcome into the existing context snapshot", async () => {
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      ...reservedRun,
+      contextSnapshot: {
+        source: "public_web_conversation",
+        request: {
+          safeField: "preserved",
+        },
+      },
+    });
+
+    await completeInlineGenerationRun({
+      conversationId: reservedRun.conversationId,
+      runId: reservedRun.id,
+      outboxId: "outbox-paid",
+      leaseAttempt: 1,
+      replyText: "Deterministic fallback answer",
+      senderDisplayName: "Representative",
+      countUsage: false,
+      runtimeOutcome: {
+        mode: "fallback",
+        fallbackStrategy: "deterministic_preview",
+        modelRuntimeState: "missing_credentials",
+        fallbackReason: "model_unavailable",
+      },
+    });
+
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: reservedRun.id },
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        errorCode: null,
+        errorMessage: null,
+        contextSnapshot: {
+          source: "public_web_conversation",
+          request: {
+            safeField: "preserved",
+          },
+          runtimeOutcome: {
+            version: 1,
+            mode: "fallback",
+            fallbackStrategy: "deterministic_preview",
+            modelRuntimeState: "missing_credentials",
+            fallbackReason: "model_unavailable",
+          },
+        },
+      }),
+    });
+  });
+
   it("claims a free slot under the generation lease and refuses an over-limit concurrent run", async () => {
     mocks.tx.generationRun.findUnique.mockResolvedValue({
       id: "run-free",

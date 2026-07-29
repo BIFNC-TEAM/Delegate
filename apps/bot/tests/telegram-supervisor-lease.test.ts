@@ -64,12 +64,14 @@ describe("Telegram supervisor polling leases", () => {
     const resolveRuntimeCredential = vi.fn()
       .mockResolvedValue(credential);
     const releaseLease = vi.fn().mockResolvedValue(true);
+    const markRuntimeHealth = vi.fn().mockResolvedValue({});
     const supervisor = await startTelegramBotSupervisor(
       buildDependencies({
         acquireLease: vi.fn().mockResolvedValue(lease),
         resolveRuntimeCredential,
         createRuntime: vi.fn().mockResolvedValue(runtime.value),
         releaseLease,
+        markRuntimeHealth,
       }),
     );
     await vi.waitFor(() => {
@@ -78,6 +80,15 @@ describe("Telegram supervisor polling leases", () => {
 
     expect(supervisor.connectionCount).toBe(1);
     expect(resolveRuntimeCredential).toHaveBeenCalledOnce();
+    expect(markRuntimeHealth).toHaveBeenCalledWith(
+      expect.objectContaining({
+        telegramBotConnectionId: "connection-a",
+        expectedCredentialRevision: 1,
+        leaseHolderId: "supervisor-a",
+        leaseToken: "lease-token-a",
+        healthStatus: "HEALTHY",
+      }),
+    );
 
     await vi.advanceTimersByTimeAsync(5_000);
     expect(resolveRuntimeCredential).toHaveBeenCalledOnce();

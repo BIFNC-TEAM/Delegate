@@ -534,7 +534,7 @@ async function runConnection(
       if (managed.stopRequested) break;
       failedAttempts = 0;
       await updateRuntimeHealth(
-        managed.config,
+        managed,
         "HEALTHY",
         null,
         state.dependencies,
@@ -558,7 +558,7 @@ async function runConnection(
         }),
       );
       await updateRuntimeHealth(
-        managed.config,
+        managed,
         failure.reason === "another_get_updates_consumer"
           ? "DEGRADED"
           : "UNHEALTHY",
@@ -678,15 +678,21 @@ function hasRuntimeCredential(
 }
 
 async function updateRuntimeHealth(
-  config: TelegramBotRuntimeConfig,
+  managed: ManagedConnection,
   healthStatus: "HEALTHY" | "DEGRADED" | "UNHEALTHY",
   lastError: string | null,
   dependencies: ResolvedSupervisorDependencies,
 ) {
+  const config = managed.config;
   if (config.legacy) return;
+  const lease = managed.lease;
+  if (!lease || managed.leaseLost || managed.stopRequested) return;
   try {
     await dependencies.markRuntimeHealth({
       telegramBotConnectionId: config.internalConnectionId,
+      expectedCredentialRevision: config.credentialRevision,
+      leaseHolderId: lease.holderId,
+      leaseToken: lease.leaseToken,
       healthStatus,
       lastError,
       checkedAt: new Date(),

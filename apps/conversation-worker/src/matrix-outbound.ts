@@ -49,6 +49,7 @@ export async function sendMatrixRepresentativeMessage(input: {
           conversationId: input.conversationId,
           audienceMatrixUserId:
             snapshot.audienceMatrixUserId,
+          requireActiveAudienceProof: true,
         },
       },
       () => fetch(url, {
@@ -70,9 +71,14 @@ export async function sendMatrixRepresentativeMessage(input: {
       }),
     );
   if (!fencedDelivery.executed) {
-    throw new Error(fencedDelivery.reason === "matrix_room_not_active"
-      ? "Matrix room was isolated before outbound delivery."
-      : "Matrix channel became unavailable before outbound delivery.");
+    throw new Error(
+      fencedDelivery.reason === "matrix_room_not_active"
+        ? "Matrix room was isolated before outbound delivery."
+        : fencedDelivery.reason
+            === "matrix_audience_connection_not_verified"
+          ? "Matrix audience connection is no longer verified for outbound delivery."
+          : "Matrix channel became unavailable before outbound delivery.",
+    );
   }
   const response = fencedDelivery.value;
   const payload = (await response.json().catch(() => ({}))) as { event_id?: string; error?: string };

@@ -106,6 +106,36 @@ describe("Matrix direct conversation provisioning", () => {
     expect(tx.conversation.update).not.toHaveBeenCalled();
   });
 
+  it("permanently isolates an old room after an A to B to A identity cycle", async () => {
+    mockActiveControlPlane(
+      "representative-1",
+      representativeMatrixUserId,
+      3,
+    );
+    tx.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildExistingBinding({ securityState: "ACTIVE" }),
+    );
+
+    await expect(
+      provisionMatrixDirectConversation(provisionInput()),
+    ).resolves.toEqual(expect.objectContaining({
+      status: "isolated_conflict",
+      securityState: "ISOLATED",
+      reason: "matrix_room_binding_assignment_reassigned",
+    }));
+    expect(tx.conversationChannelBinding.update).toHaveBeenCalledWith({
+      where: { id: "matrix-binding-1" },
+      data: {
+        metadata: expect.objectContaining({
+          securityState: "ISOLATED",
+          isolationReason:
+            "matrix_room_binding_assignment_reassigned",
+          observedRepresentativeAssignmentRevision: 3,
+        }),
+      },
+    });
+  });
+
   it.each([
     {
       label: "audience",
@@ -198,10 +228,12 @@ describe("Matrix direct conversation provisioning", () => {
 function mockActiveControlPlane(
   representativeId = "representative-1",
   matrixUserId = representativeMatrixUserId,
+  endpointAssignmentRevision = 1,
 ) {
   tx.representativeChannelBinding.findUnique.mockResolvedValue({
     id: "representative-binding-1",
     connectionId: "delegate-matrix-as",
+    endpointAssignmentRevision,
     desiredState: "ACTIVE",
     externalUserId: matrixUserId,
     status: "CONNECTED",
@@ -234,6 +266,8 @@ function buildExistingBinding(input: {
   return {
     id: "matrix-binding-1",
     conversationId: "conversation-1",
+    connectionId: "delegate-matrix-as",
+    representativeAssignmentRevision: 1,
     metadata: {
       directMessageOnly: true,
       encrypted: false,
@@ -241,6 +275,7 @@ function buildExistingBinding(input: {
       audienceMatrixUserId:
         input.audienceMatrixUserId ?? audienceMatrixUserId,
       representativeMatrixUserId,
+      representativeAssignmentRevision: 1,
     },
     conversation: {
       representativeId: "representative-1",

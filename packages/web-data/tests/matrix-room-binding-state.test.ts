@@ -3,8 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 type MatrixBindingState = {
   id: string;
   conversationId: string;
+  representativeAssignmentRevision: number;
   conversation: {
     representativeId: string;
+    audienceIdentityId: string | null;
     participants: Array<{
       kind: "AUDIENCE" | "REPRESENTATIVE" | "SYSTEM";
       participantId: string;
@@ -15,8 +17,10 @@ type MatrixBindingState = {
   representativeBinding: {
     desiredState: "ACTIVE" | "PAUSED" | "DISCONNECTED";
     externalUserId: string;
+    connectionId: string | null;
     healthStatus: "UNKNOWN" | "HEALTHY" | "DEGRADED" | "UNHEALTHY";
     representativeId: string;
+    endpointAssignmentRevision: number;
     status: string;
   } | null;
 };
@@ -26,10 +30,12 @@ const {
   tx,
   getBindingState,
   setBindingState,
+  setActiveAudienceProof,
   setDelayIsolationUntilCompetingLock,
   resetAdvisoryLock,
 } = vi.hoisted(() => {
   let bindingState: MatrixBindingState;
+  let activeAudienceProof = true;
   let advisoryLockTails = new Map<string, Promise<void>>();
   let delayIsolationUntilCompetingLock = false;
   let roomLockAttemptCount = 0;
@@ -68,6 +74,25 @@ const {
     },
     conversationParticipant: {
       upsert: vi.fn(),
+    },
+    identityLink: {
+      findUnique: vi.fn(async () => ({
+        id: "matrix-identity-link-1",
+        audienceIdentityId: "audience-identity-1",
+        issuer: "example.org",
+        verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+        assuranceLevel: "PLATFORM_VERIFIED",
+        revokedAt: null,
+      })),
+    },
+    identityLinkConnectionProof: {
+      findUnique: vi.fn(async () => ({
+        verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+        assuranceLevel: "PLATFORM_VERIFIED",
+        revokedAt: activeAudienceProof
+          ? null
+          : new Date("2026-07-29T00:00:00.000Z"),
+      })),
     },
     matrixVirtualUserBinding: {
       findUnique: vi.fn(async () => ({
@@ -167,6 +192,9 @@ const {
       };
       delayIsolationUntilCompetingLock = false;
     },
+    setActiveAudienceProof: (value: boolean) => {
+      activeAudienceProof = value;
+    },
     setDelayIsolationUntilCompetingLock: (value: boolean) => {
       delayIsolationUntilCompetingLock = value;
     },
@@ -205,8 +233,10 @@ describe("Matrix room binding security state", () => {
     setBindingState({
       id: "matrix-binding-1",
       conversationId: "conversation-1",
+      representativeAssignmentRevision: 1,
       conversation: {
         representativeId: "representative-1",
+        audienceIdentityId: "audience-identity-1",
         participants: [
           {
             kind: "AUDIENCE",
@@ -226,15 +256,19 @@ describe("Matrix room binding security state", () => {
         securityState: "PENDING_REMOTE_VALIDATION",
         audienceMatrixUserId,
         representativeMatrixUserId,
+        representativeAssignmentRevision: 1,
       },
       representativeBinding: {
         desiredState: "ACTIVE",
         externalUserId: representativeMatrixUserId,
+        connectionId: "delegate-matrix-as",
         healthStatus: "HEALTHY",
         representativeId: "representative-1",
+        endpointAssignmentRevision: 1,
         status: "CONNECTED",
       },
     });
+    setActiveAudienceProof(true);
     tx.$executeRaw.mockResolvedValue(0);
     tx.conversation.update.mockResolvedValue({ id: "conversation-1" });
   });
@@ -278,6 +312,8 @@ describe("Matrix room binding security state", () => {
       remoteValidationAttemptCount: 0,
       audienceMatrixUserId,
       representativeMatrixUserId,
+      representativeAssignmentRevision: 1,
+      currentRepresentativeAssignmentRevision: 1,
       representativeChannelDesiredState: "ACTIVE",
     });
   });
@@ -578,6 +614,99 @@ describe("Matrix room binding security state", () => {
       "matrix-virtual-user:representative-1",
       "matrix-room-security:!room:example.org",
     ]);
+  });
+
+  it("checks the active audience proof under the final rep, room, then audience lock", async () => {
+    setBindingState({
+      ...getBindingState(),
+      metadata: {
+        ...getBindingState().metadata,
+        securityState: "ACTIVE",
+      },
+    });
+    const operation = vi.fn(async () => "sent");
+
+    await expect(withActiveMatrixRepresentativeChannelFence(
+      {
+        representativeId: "representative-1",
+        representativeMatrixUserId,
+        room: {
+          roomId,
+          conversationId: "conversation-1",
+          audienceMatrixUserId,
+          requireActiveAudienceProof: true,
+        },
+      },
+      operation,
+    )).resolves.toEqual({
+      executed: true,
+      value: "sent",
+    });
+
+    expect(operation).toHaveBeenCalledOnce();
+    expect(tx.$executeRaw.mock.calls.map((call) => call[1])).toEqual([
+      "matrix-virtual-user:representative-1",
+      "matrix-room-security:!room:example.org",
+      "matrix-audience-connection:audience-identity-1:delegate-matrix-as",
+    ]);
+  });
+
+  it("does not execute an outbound operation after the audience proof is revoked", async () => {
+    setBindingState({
+      ...getBindingState(),
+      metadata: {
+        ...getBindingState().metadata,
+        securityState: "ACTIVE",
+      },
+    });
+    setActiveAudienceProof(false);
+    const operation = vi.fn(async () => "sent");
+
+    await expect(withActiveMatrixRepresentativeChannelFence(
+      {
+        representativeId: "representative-1",
+        representativeMatrixUserId,
+        room: {
+          roomId,
+          conversationId: "conversation-1",
+          audienceMatrixUserId,
+          requireActiveAudienceProof: true,
+        },
+      },
+      operation,
+    )).resolves.toEqual({
+      executed: false,
+      reason: "matrix_audience_connection_not_verified",
+    });
+
+    expect(operation).not.toHaveBeenCalled();
+  });
+
+  it("does not require an audience proof while validating a pending invite", async () => {
+    setActiveAudienceProof(false);
+    const operation = vi.fn(async () => "joined");
+
+    await expect(withActiveMatrixRepresentativeChannelFence(
+      {
+        representativeId: "representative-1",
+        representativeMatrixUserId,
+        room: {
+          roomId,
+          conversationId: "conversation-1",
+          audienceMatrixUserId,
+          expectedSecurityState: "PENDING_REMOTE_VALIDATION",
+        },
+      },
+      operation,
+    )).resolves.toEqual({
+      executed: true,
+      value: "joined",
+    });
+
+    expect(operation).toHaveBeenCalledOnce();
+    expect(
+      tx.identityLinkConnectionProof.findUnique,
+    ).not.toHaveBeenCalled();
   });
 
   it("does not execute a room-scoped operation after an expected participant leaves", async () => {

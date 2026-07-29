@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+import {
+  resolveModelRuntimeEnv,
+  resolveProviderAttemptOrder,
+  type ModelProvider,
+  type ModelRuntimeState,
+} from "@delegate/model-runtime";
+
 const defaultOutboxProcessingLeaseMs = 5 * 60_000;
 const minimumOutboxProcessingLeaseMs = defaultOutboxProcessingLeaseMs;
 
@@ -18,6 +25,34 @@ const configSchema = z.object({
 });
 
 export type ConversationWorkerConfig = z.infer<typeof configSchema>;
+
+export type ConversationWorkerModelReadiness = {
+  state: ModelRuntimeState;
+  configuredProvider: ModelProvider | "unsupported";
+  fallbackProvider?: ModelProvider | "unsupported";
+  readyProviders: ModelProvider[];
+};
+
+function sanitizeModelProvider(provider: string): ModelProvider | "unsupported" {
+  return provider === "openai" || provider === "bailian" || provider === "anthropic"
+    ? provider
+    : "unsupported";
+}
+
+export function resolveConversationWorkerModelReadiness(
+  env: Record<string, string | undefined> = process.env,
+): ConversationWorkerModelReadiness {
+  const runtime = resolveModelRuntimeEnv(env);
+
+  return {
+    state: runtime.state,
+    configuredProvider: sanitizeModelProvider(runtime.provider),
+    ...(runtime.fallbackProvider
+      ? { fallbackProvider: sanitizeModelProvider(runtime.fallbackProvider) }
+      : {}),
+    readyProviders: resolveProviderAttemptOrder(runtime),
+  };
+}
 
 export function resolveConversationWorkerConfig(
   env: Record<string, string | undefined> = process.env,

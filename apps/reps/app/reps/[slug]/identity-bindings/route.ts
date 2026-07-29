@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import {
   createIdentityBindingChallenge,
+  getIdentityBindingChallengeStatus,
   isVerifiedPrivateChannelIdentityBinding,
   listActivePrivateChannelIdentityBindings,
   matrixServerNameFromUserId,
@@ -19,12 +20,34 @@ import {
 } from "../public-principal";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   try {
     const { slug } = await params;
     const principal = await requireAudiencePrincipal(slug);
+    const challengeId = readChallengeId(request);
+    if (challengeId) {
+      const challenge = await getIdentityBindingChallengeStatus({
+        audienceIdentityId: principal.audienceIdentityId,
+        challengeId,
+      });
+      if (!challenge) {
+        throw new IdentityBindingHttpError(
+          404,
+          "Identity binding challenge was not found.",
+        );
+      }
+      return noStoreJson({
+        challengeId: challenge.challengeId,
+        status: challenge.status,
+        expiresAt: challenge.expiresAt,
+        ...(challenge.providerSubject
+          ? { providerSubject: challenge.providerSubject }
+          : {}),
+      });
+    }
+
     const bindings = await listActivePrivateChannelIdentityBindings(
       principal.audienceIdentityId,
     );
@@ -32,27 +55,30 @@ export async function GET(
       await resolveRepresentativeTelegramBotEndpoint(slug);
     const matrixEndpoint =
       await resolveRepresentativeMatrixEndpoint(slug);
-    const telegramReady = telegramBot
-      ? bindings.some((binding) =>
+    const currentTelegramBindings = telegramBot
+      ? bindings.filter((binding) =>
           isVerifiedPrivateChannelIdentityBinding(binding, {
             provider: privateChannelIdentityProviders.telegram,
             issuer: "delegate-managed-bot",
             connectionId: telegramBot.botId,
           }),
         )
-      : false;
-    const matrixReady = matrixEndpoint
-      ? bindings.some((binding) =>
-          isVerifiedPrivateChannelIdentityBinding(binding, {
-            provider: privateChannelIdentityProviders.matrix,
-            issuer: matrixServerNameFromUserId(matrixEndpoint.matrixUserId),
-            connectionId: matrixEndpoint.connectionId,
-          }),
+      : [];
+    const currentMatrixBindings = matrixEndpoint
+      ? bindings.filter((binding) =>
+          isCurrentMatrixBinding(binding, matrixEndpoint.connectionId),
         )
-      : false;
+      : [];
     return noStoreJson({
       bindings,
-      readiness: { telegram: telegramReady, matrix: matrixReady },
+      currentBindings: {
+        telegram: currentTelegramBindings,
+        matrix: currentMatrixBindings,
+      },
+      readiness: {
+        telegram: currentTelegramBindings.length > 0,
+        matrix: currentMatrixBindings.length > 0,
+      },
       capabilities: {
         telegram: telegramBot !== null,
         matrix: matrixEndpoint !== null,
@@ -107,6 +133,7 @@ export async function POST(
 
     return noStoreJson(
       {
+        challengeId: grant.challengeId,
         provider: body.provider,
         expiresAt: grant.expiresAt,
         command:
@@ -158,6 +185,37 @@ async function requireAudiencePrincipal(representativeSlug: string) {
     throw new IdentityBindingHttpError(401, "Sign in before binding a channel.");
   }
   return principal;
+}
+
+function readChallengeId(request: Request): string | null {
+  const url = new URL(request.url);
+  if (!url.searchParams.has("challengeId")) return null;
+  const challengeId = url.searchParams.get("challengeId")?.trim() ?? "";
+  if (!challengeId || challengeId.length > 255) {
+    throw new IdentityBindingHttpError(
+      400,
+      "A valid identity binding challenge id is required.",
+    );
+  }
+  return challengeId;
+}
+
+function isCurrentMatrixBinding(
+  binding: Awaited<
+    ReturnType<typeof listActivePrivateChannelIdentityBindings>
+  >[number],
+  connectionId: string,
+) {
+  try {
+    const issuer = matrixServerNameFromUserId(binding.providerSubject);
+    return isVerifiedPrivateChannelIdentityBinding(binding, {
+      provider: privateChannelIdentityProviders.matrix,
+      issuer,
+      connectionId,
+    });
+  } catch {
+    return false;
+  }
 }
 
 async function readBindingRequest(request: Request) {

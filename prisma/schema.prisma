@@ -1964,6 +1964,7 @@ model RepresentativeChannelBinding {
   sourceProvider          ChannelSourceProvider?
   connectionId            String?
   telegramBotConnectionId String?
+  endpointAssignmentRevision Int                          @default(1)
   desiredState            ChannelDesiredState          @default(ACTIVE)
   healthStatus            ChannelHealthStatus          @default(UNKNOWN)
   externalUserId          String?
@@ -2336,6 +2337,7 @@ model ConversationChannelBinding {
   id                      String                        @id @default(cuid())
   conversationId          String
   representativeBindingId String?
+  representativeAssignmentRevision Int?
   kind                    RepresentativeChannelKind
   transport               ChannelTransport?
   sourceProvider          ChannelSourceProvider?

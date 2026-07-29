@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   consumeIdentityBindingChallenge,
   createIdentityBindingChallenge,
+  getIdentityBindingChallengeStatus,
   hashBindingToken,
   isVerifiedPrivateChannelIdentityBinding,
   listActivePrivateChannelIdentityBindings,
@@ -31,6 +32,7 @@ type FakeChallenge = {
   expiresAt: Date;
   consumedAt: Date | null;
   revokedAt: Date | null;
+  metadata: unknown;
 };
 
 type FakeLink = {
@@ -64,6 +66,7 @@ function createFakeBindingClient(
   const identityMap = new Map(identities.map((identity) => [identity.id, identity]));
   const challenges = new Map<string, FakeChallenge>();
   const connectionProofs = new Map<string, FakeConnectionProof>();
+  const advisoryLocks: string[] = [];
   const links = new Map(
     [
       ...identities
@@ -87,6 +90,10 @@ function createFakeBindingClient(
 
   const client: any = {
     $transaction: async <T>(fn: (tx: any) => Promise<T>) => fn(client),
+    $executeRaw: async (...args: unknown[]) => {
+      advisoryLocks.push(String(args[1] ?? ""));
+      return 0;
+    },
     audienceIdentity: {
       findUnique: async (input: unknown) => {
         const args = input as { where: { id: string } };
@@ -127,8 +134,17 @@ function createFakeBindingClient(
         return challenge;
       },
       findUnique: async (input: unknown) => {
-        const args = input as { where: { tokenHash: string } };
-        return challenges.get(args.where.tokenHash) ?? null;
+        const args = input as {
+          where: { id?: string; tokenHash?: string };
+        };
+        if (args.where.id) {
+          return [...challenges.values()].find(
+            (challenge) => challenge.id === args.where.id,
+          ) ?? null;
+        }
+        return args.where.tokenHash
+          ? challenges.get(args.where.tokenHash) ?? null
+          : null;
       },
       updateMany: async (input: unknown) => {
         const args = input as {
@@ -142,7 +158,11 @@ function createFakeBindingClient(
             revokedAt?: null;
             expiresAt?: { gt: Date };
           };
-          data: { consumedAt?: Date; revokedAt?: Date };
+          data: {
+            consumedAt?: Date;
+            revokedAt?: Date;
+            metadata?: unknown;
+          };
         };
         let count = 0;
         for (const challenge of challenges.values()) {
@@ -175,6 +195,9 @@ function createFakeBindingClient(
           }
           if (args.data.consumedAt) challenge.consumedAt = args.data.consumedAt;
           if (args.data.revokedAt) challenge.revokedAt = args.data.revokedAt;
+          if (args.data.metadata !== undefined) {
+            challenge.metadata = args.data.metadata;
+          }
           count += 1;
         }
         return { count };
@@ -383,6 +406,7 @@ function createFakeBindingClient(
     challenges,
     links,
     connectionProofs,
+    advisoryLocks,
   };
 }
 
@@ -430,33 +454,42 @@ describe("audience identity private-channel binding", () => {
     }
   });
 
-  it("stores only a token hash and binds a verified Telegram subject once", async () => {
-    const fake = createFakeBindingClient([
-      {
-        id: "audience-1",
-        status: "REGISTERED",
-        mergedIntoId: null,
-        lastSeenAt: new Date(0),
-      },
-    ]);
+  it("idempotently replays a consumed Telegram challenge only for its verified subject and Bot", async () => {
+    const fake = createFakeBindingClient(
+      [
+        {
+          id: "audience-1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          lastSeenAt: new Date(0),
+        },
+      ],
+      [],
+      { withConnectionProofs: true },
+    );
     const grant = await createIdentityBindingChallenge(
       {
         audienceIdentityId: "audience-1",
         provider: IdentityLinkProvider.TELEGRAM,
+        issuer: "delegate-managed-bot",
         connectionId: "bot-1",
-        expectedProviderSubject: "123456",
+        metadata: { representativeSlug: "sktone" },
       },
       fake.client as never,
     );
 
     expect(fake.challenges.has(hashBindingToken(grant.token))).toBe(true);
     expect([...fake.challenges.keys()]).not.toContain(grant.token);
+    expect(grant.challengeId).toBe(
+      fake.challenges.get(hashBindingToken(grant.token))?.id,
+    );
 
     const result = await consumeIdentityBindingChallenge(
       {
         token: grant.token,
         provider: IdentityLinkProvider.TELEGRAM,
         providerSubject: "123456",
+        issuer: "delegate-managed-bot",
         connectionId: "bot-1",
         proofMetadata: {
           method: "attacker_override",
@@ -474,8 +507,20 @@ describe("audience identity private-channel binding", () => {
     expect(fake.links.get("TELEGRAM:123456")?.proofMetadata).toMatchObject({
       method: "private_channel_challenge",
       challengeId: [...fake.challenges.values()][0]?.id,
-      issuer: "delegate",
+      issuer: "delegate-managed-bot",
       connectionId: "bot-1",
+    });
+    await expect(
+      getIdentityBindingChallengeStatus(
+        {
+          audienceIdentityId: "audience-1",
+          challengeId: grant.challengeId,
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({
+      status: "CONSUMED",
+      providerSubject: "123456",
     });
     await expect(
       consumeIdentityBindingChallenge(
@@ -483,11 +528,166 @@ describe("audience identity private-channel binding", () => {
           token: grant.token,
           provider: IdentityLinkProvider.TELEGRAM,
           providerSubject: "123456",
+          issuer: "delegate-managed-bot",
+          connectionId: "bot-1",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({
+      audienceIdentityId: "audience-1",
+      provider: IdentityLinkProvider.TELEGRAM,
+      providerSubject: "123456",
+      issuer: "delegate-managed-bot",
+      metadata: { representativeSlug: "sktone" },
+    });
+    for (const replay of [
+      {
+        provider: IdentityLinkProvider.TELEGRAM,
+        providerSubject: "999999",
+        issuer: "delegate-managed-bot",
+        connectionId: "bot-1",
+      },
+      {
+        provider: IdentityLinkProvider.TELEGRAM,
+        providerSubject: "123456",
+        issuer: "other-issuer",
+        connectionId: "bot-1",
+      },
+      {
+        provider: IdentityLinkProvider.TELEGRAM,
+        providerSubject: "123456",
+        issuer: "delegate-managed-bot",
+        connectionId: "other-bot",
+      },
+    ]) {
+      await expect(
+        consumeIdentityBindingChallenge(
+          {
+            token: grant.token,
+            ...replay,
+          },
+          fake.client as never,
+        ),
+      ).rejects.toThrow();
+    }
+
+    await revokePrivateChannelIdentityBinding(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.TELEGRAM,
+        providerSubject: "123456",
+        issuer: "delegate-managed-bot",
+        connectionId: "bot-1",
+      },
+      fake.client as never,
+    );
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: grant.token,
+          provider: IdentityLinkProvider.TELEGRAM,
+          providerSubject: "123456",
+          issuer: "delegate-managed-bot",
           connectionId: "bot-1",
         },
         fake.client as never,
       ),
     ).rejects.toThrow("already been used");
+  });
+
+  it("reports challenge state only to its owning audience identity", async () => {
+    const fake = createFakeBindingClient([
+      {
+        id: "audience-1",
+        status: "REGISTERED",
+        mergedIntoId: null,
+        lastSeenAt: new Date(0),
+      },
+      {
+        id: "audience-2",
+        status: "REGISTERED",
+        mergedIntoId: null,
+        lastSeenAt: new Date(0),
+      },
+    ]);
+    const grant = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.TELEGRAM,
+        connectionId: "bot-1",
+      },
+      fake.client as never,
+    );
+
+    await expect(
+      getIdentityBindingChallengeStatus(
+        {
+          audienceIdentityId: "audience-1",
+          challengeId: grant.challengeId,
+          now: new Date("2026-01-01T00:00:00.000Z"),
+        },
+        fake.client as never,
+      ),
+    ).resolves.toEqual({
+      challengeId: grant.challengeId,
+      status: "PENDING",
+      expiresAt: grant.expiresAt,
+    });
+    await expect(
+      getIdentityBindingChallengeStatus(
+        {
+          audienceIdentityId: "audience-2",
+          challengeId: grant.challengeId,
+        },
+        fake.client as never,
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      getIdentityBindingChallengeStatus(
+        {
+          audienceIdentityId: "audience-1",
+          challengeId: "missing-challenge",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toBeNull();
+
+    const challenge = fake.challenges.get(hashBindingToken(grant.token))!;
+    challenge.expiresAt = new Date("2025-12-31T23:59:59.000Z");
+    await expect(
+      getIdentityBindingChallengeStatus(
+        {
+          audienceIdentityId: "audience-1",
+          challengeId: grant.challengeId,
+          now: new Date("2026-01-01T00:00:00.000Z"),
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({ status: "EXPIRED" });
+
+    challenge.revokedAt = new Date("2025-12-31T23:58:00.000Z");
+    await expect(
+      getIdentityBindingChallengeStatus(
+        {
+          audienceIdentityId: "audience-1",
+          challengeId: grant.challengeId,
+          now: new Date("2026-01-01T00:00:00.000Z"),
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({ status: "REVOKED" });
+
+    challenge.consumedAt = new Date("2025-12-31T23:57:00.000Z");
+    await expect(
+      getIdentityBindingChallengeStatus(
+        {
+          audienceIdentityId: "audience-1",
+          challengeId: grant.challengeId,
+          now: new Date("2026-01-01T00:00:00.000Z"),
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({ status: "CONSUMED" });
   });
 
   it("consumes an internally persisted token hash without reconstructing the secret", async () => {
@@ -582,6 +782,59 @@ describe("audience identity private-channel binding", () => {
         fake.client as never,
       ),
     ).resolves.toMatchObject({ audienceIdentityId: "audience-1" });
+  });
+
+  it("replaces a pending Matrix command for the same connection across homeservers", async () => {
+    const fake = createFakeBindingClient([
+      {
+        id: "audience-1",
+        status: "REGISTERED",
+        mergedIntoId: null,
+        lastSeenAt: new Date(),
+      },
+    ]);
+    const first = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "old.example",
+        connectionId: "matrix-as",
+        expectedProviderSubject: "@alice:old.example",
+      },
+      fake.client as never,
+    );
+    const second = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "new.example",
+        connectionId: "matrix-as",
+        expectedProviderSubject: "@alice:new.example",
+      },
+      fake.client as never,
+    );
+
+    expect(
+      fake.challenges.get(hashBindingToken(first.token))?.revokedAt,
+    ).toBeInstanceOf(Date);
+    expect(
+      fake.challenges.get(hashBindingToken(second.token))?.revokedAt,
+    ).toBeNull();
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: first.token,
+          provider: IdentityLinkProvider.MATRIX,
+          issuer: "old.example",
+          connectionId: "matrix-as",
+          providerSubject: "@alice:old.example",
+        },
+        fake.client as never,
+      ),
+    ).rejects.toThrow("revoked");
+    expect(fake.advisoryLocks).toEqual([
+      "matrix-audience-connection:audience-1:matrix-as",
+    ]);
   });
 
   it("does not move an existing provider link to another identity", async () => {
@@ -998,6 +1251,269 @@ describe("audience identity private-channel binding", () => {
     expect(
       [...fake.connectionProofs.values()].find(
         (proof) => proof.connectionId === "bot-a",
+      )?.revokedAt,
+    ).toBeNull();
+  });
+
+  it("revokes a pending Matrix replacement across homeservers when unlinking the current connection", async () => {
+    const fake = createFakeBindingClient(
+      [
+        {
+          id: "audience-1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          lastSeenAt: new Date(),
+        },
+      ],
+      [],
+      { withConnectionProofs: true },
+    );
+    const original = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "old.example",
+        connectionId: "matrix-as",
+        expectedProviderSubject: "@alice:old.example",
+      },
+      fake.client as never,
+    );
+    await consumeIdentityBindingChallenge(
+      {
+        token: original.token,
+        provider: IdentityLinkProvider.MATRIX,
+        providerSubject: "@alice:old.example",
+        issuer: "old.example",
+        connectionId: "matrix-as",
+      },
+      fake.client as never,
+    );
+
+    const replacement = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "new.example",
+        connectionId: "matrix-as",
+        expectedProviderSubject: "@bob:new.example",
+      },
+      fake.client as never,
+    );
+    const otherConnection = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "other.example",
+        connectionId: "matrix-other",
+        expectedProviderSubject: "@carol:other.example",
+      },
+      fake.client as never,
+    );
+
+    await expect(
+      revokePrivateChannelIdentityBinding(
+        {
+          audienceIdentityId: "audience-1",
+          provider: IdentityLinkProvider.MATRIX,
+          providerSubject: "@alice:old.example",
+          issuer: "old.example",
+          connectionId: "matrix-as",
+        },
+        fake.client as never,
+      ),
+    ).resolves.toMatchObject({ changed: true });
+
+    expect(
+      fake.challenges.get(hashBindingToken(replacement.token))?.revokedAt,
+    ).toBeInstanceOf(Date);
+    expect(
+      fake.challenges.get(hashBindingToken(otherConnection.token))?.revokedAt,
+    ).toBeNull();
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: replacement.token,
+          provider: IdentityLinkProvider.MATRIX,
+          providerSubject: "@bob:new.example",
+          issuer: "new.example",
+          connectionId: "matrix-as",
+        },
+        fake.client as never,
+      ),
+    ).rejects.toThrow("revoked");
+    expect(fake.advisoryLocks).toEqual([
+      "matrix-audience-connection:audience-1:matrix-as",
+      "matrix-audience-connection:audience-1:matrix-as",
+      "matrix-audience-connection:audience-1:matrix-as",
+    ]);
+  });
+
+  it("replaces only the previous Matrix subject on the same representative connection", async () => {
+    const fake = createFakeBindingClient(
+      [
+        {
+          id: "audience-1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          lastSeenAt: new Date(),
+        },
+      ],
+      [],
+      { withConnectionProofs: true },
+    );
+
+    for (const connectionId of ["matrix-as", "matrix-other"]) {
+      const grant = await createIdentityBindingChallenge(
+        {
+          audienceIdentityId: "audience-1",
+          provider: IdentityLinkProvider.MATRIX,
+          issuer: "old.example",
+          connectionId,
+          expectedProviderSubject: "@alice:old.example",
+        },
+        fake.client as never,
+      );
+      await consumeIdentityBindingChallenge(
+        {
+          token: grant.token,
+          provider: IdentityLinkProvider.MATRIX,
+          providerSubject: "@alice:old.example",
+          issuer: "old.example",
+          connectionId,
+        },
+        fake.client as never,
+      );
+    }
+
+    const replacement = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "new.example",
+        connectionId: "matrix-as",
+        expectedProviderSubject: "@bob:new.example",
+      },
+      fake.client as never,
+    );
+    await consumeIdentityBindingChallenge(
+      {
+        token: replacement.token,
+        provider: IdentityLinkProvider.MATRIX,
+        providerSubject: "@bob:new.example",
+        issuer: "new.example",
+        connectionId: "matrix-as",
+      },
+      fake.client as never,
+    );
+
+    const aliceLink = fake.links.get("MATRIX:@alice:old.example");
+    const bobLink = fake.links.get("MATRIX:@bob:new.example");
+    expect(aliceLink?.revokedAt).toBeNull();
+    expect(bobLink?.revokedAt).toBeNull();
+    expect(
+      [...fake.connectionProofs.values()]
+        .filter((proof) => proof.identityLinkId === aliceLink?.id)
+        .map((proof) => ({
+          connectionId: proof.connectionId,
+          revoked: proof.revokedAt !== null,
+        })),
+    ).toEqual([
+      { connectionId: "matrix-as", revoked: true },
+      { connectionId: "matrix-other", revoked: false },
+    ]);
+    expect(
+      [...fake.connectionProofs.values()].find(
+        (proof) =>
+          proof.identityLinkId === bobLink?.id
+          && proof.connectionId === "matrix-as",
+      )?.revokedAt,
+    ).toBeNull();
+    await expect(
+      listActivePrivateChannelIdentityBindings(
+        "audience-1",
+        fake.client as never,
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        providerSubject: "@alice:old.example",
+        connectionId: "matrix-other",
+      }),
+      expect.objectContaining({
+        providerSubject: "@bob:new.example",
+        connectionId: "matrix-as",
+      }),
+    ]);
+    expect(fake.advisoryLocks).toEqual([
+      "matrix-audience-connection:audience-1:matrix-as",
+      "matrix-audience-connection:audience-1:matrix-other",
+      "matrix-audience-connection:audience-1:matrix-as",
+    ]);
+  });
+
+  it("keeps the previous Matrix proof active when the replacement cannot be verified", async () => {
+    const fake = createFakeBindingClient(
+      [
+        {
+          id: "audience-1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          lastSeenAt: new Date(),
+        },
+      ],
+      [],
+      { withConnectionProofs: true },
+    );
+    const original = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "old.example",
+        connectionId: "matrix-as",
+        expectedProviderSubject: "@alice:old.example",
+      },
+      fake.client as never,
+    );
+    await consumeIdentityBindingChallenge(
+      {
+        token: original.token,
+        provider: IdentityLinkProvider.MATRIX,
+        providerSubject: "@alice:old.example",
+        issuer: "old.example",
+        connectionId: "matrix-as",
+      },
+      fake.client as never,
+    );
+
+    const replacement = await createIdentityBindingChallenge(
+      {
+        audienceIdentityId: "audience-1",
+        provider: IdentityLinkProvider.MATRIX,
+        issuer: "new.example",
+        connectionId: "matrix-as",
+        expectedProviderSubject: "@bob:new.example",
+      },
+      fake.client as never,
+    );
+    await expect(
+      consumeIdentityBindingChallenge(
+        {
+          token: replacement.token,
+          provider: IdentityLinkProvider.MATRIX,
+          providerSubject: "@mallory:new.example",
+          issuer: "new.example",
+          connectionId: "matrix-as",
+        },
+        fake.client as never,
+      ),
+    ).rejects.toThrow("different provider account");
+
+    const aliceLink = fake.links.get("MATRIX:@alice:old.example");
+    expect(aliceLink?.revokedAt).toBeNull();
+    expect(
+      [...fake.connectionProofs.values()].find(
+        (proof) =>
+          proof.identityLinkId === aliceLink?.id
+          && proof.connectionId === "matrix-as",
       )?.revokedAt,
     ).toBeNull();
   });

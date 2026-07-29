@@ -113,13 +113,17 @@ vi.mock("../src/matrix-provisioning", () => ({
   provisionMatrixDirectConversation: mockProvisionMatrixDirectConversation,
   resolveMatrixApplicationServiceConnectionId: () => "delegate-matrix-as",
 }));
-vi.mock("../src/audience-identity-binding", () => ({
-  consumeIdentityBindingChallenge: mockConsumeIdentityBindingChallenge,
-  privateChannelIdentityProviders: {
-    telegram: "TELEGRAM",
-    matrix: "MATRIX",
-  },
-}));
+vi.mock("../src/audience-identity-binding", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("../src/audience-identity-binding")
+    >();
+  return {
+    ...actual,
+    consumeIdentityBindingChallenge:
+      mockConsumeIdentityBindingChallenge,
+  };
+});
 vi.mock("../src/service-entitlements", () => ({
   consumeConversationEntitlement: vi.fn(),
   releaseConversationEntitlementByGenerationRunId: mockReleaseConversationEntitlement,
@@ -1350,6 +1354,90 @@ describe("Matrix application service ingress", () => {
     expect(tx.generationRun.upsert).not.toHaveBeenCalled();
   });
 
+  it("ignores an old Matrix room after the representative identity is reassigned", async () => {
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({
+        representativeBinding: {
+          status: "CONNECTED",
+          desiredState: "ACTIVE",
+          healthStatus: "HEALTHY",
+          externalUserId: "@_delegate_rep_new:example.org",
+        },
+      }),
+    );
+    mockPrisma.representativeChannelBinding.findUnique.mockResolvedValue({
+      status: "CONNECTED",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      externalUserId: "@_delegate_rep_new:example.org",
+      representative: {
+        lifecycleState: "PUBLISHED",
+        activeVersionId: "version-1",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-representative-matrix-reassigned",
+      events: [matrixTextEvent(
+        "$event-representative-matrix-reassigned",
+        aliceMatrixUserId,
+      )],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-representative-matrix-reassigned",
+      status: "ignored",
+      reason: "matrix_identity_reassigned",
+    }]);
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+    expect(tx.generationRun.upsert).not.toHaveBeenCalled();
+  });
+
+  it("ignores an A to B to A room whose Matrix assignment revision is stale", async () => {
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({
+        representativeBinding: {
+          status: "CONNECTED",
+          desiredState: "ACTIVE",
+          healthStatus: "HEALTHY",
+          externalUserId: "@_delegate_rep:example.org",
+          endpointAssignmentRevision: 3,
+        },
+      }),
+    );
+    mockPrisma.representativeChannelBinding.findUnique.mockResolvedValue({
+      status: "CONNECTED",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      externalUserId: "@_delegate_rep:example.org",
+      endpointAssignmentRevision: 3,
+      representative: {
+        lifecycleState: "PUBLISHED",
+        activeVersionId: "version-1",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-matrix-assignment-revision-stale",
+      events: [matrixTextEvent(
+        "$event-matrix-assignment-revision-stale",
+        aliceMatrixUserId,
+      )],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-matrix-assignment-revision-stale",
+      status: "ignored",
+      reason: "matrix_identity_reassigned",
+    }]);
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+    expect(tx.generationRun.upsert).not.toHaveBeenCalled();
+  });
+
   it.each([
     [
       "another audience identity",
@@ -2167,6 +2255,7 @@ function buildMatrixBinding(input: {
     desiredState: string;
     healthStatus: string;
     externalUserId?: string;
+    endpointAssignmentRevision?: number;
   } | null;
   metadata?: Record<string, unknown>;
   runtimePolicyOverlays?: Array<{
@@ -2188,6 +2277,7 @@ function buildMatrixBinding(input: {
     conversationId: "conversation-1",
     kind: "MATRIX",
     connectionId: "delegate-matrix-as",
+    representativeAssignmentRevision: 1,
     externalConversationId: "!room:example.org",
     metadata: input.metadata ?? matrixSafetyMetadata(),
     representativeBinding: input.representativeBinding === undefined
@@ -2196,6 +2286,7 @@ function buildMatrixBinding(input: {
           desiredState: input.desiredState ?? "ACTIVE",
           healthStatus: input.healthStatus ?? "HEALTHY",
           externalUserId: "@_delegate_rep:example.org",
+          endpointAssignmentRevision: 1,
         }
       : input.representativeBinding
         ? {
@@ -2203,6 +2294,9 @@ function buildMatrixBinding(input: {
             externalUserId:
               input.representativeBinding.externalUserId
               ?? "@_delegate_rep:example.org",
+            endpointAssignmentRevision:
+              input.representativeBinding
+                .endpointAssignmentRevision ?? 1,
           }
         : null,
     conversation: {
@@ -2239,6 +2333,7 @@ function matrixSafetyMetadata() {
     securityState: "ACTIVE",
     audienceMatrixUserId: aliceMatrixUserId,
     representativeMatrixUserId: "@_delegate_rep:example.org",
+    representativeAssignmentRevision: 1,
   };
 }
 

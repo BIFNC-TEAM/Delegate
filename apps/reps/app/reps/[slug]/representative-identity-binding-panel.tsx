@@ -1,8 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { Locale } from "@delegate/web-ui";
+
+import {
+  bindingPollRetryDelayMs,
+  isInstructionBindingCurrent,
+} from "./identity-binding-polling";
 
 type BindingSnapshot = {
   provider: "TELEGRAM" | "MATRIX";
@@ -23,6 +28,8 @@ type MatrixEndpoint = {
 };
 
 type BindingInstruction = {
+  challengeId: string;
+  replacing: boolean;
   provider: "telegram" | "matrix";
   command: string;
   expiresAt: string;
@@ -35,6 +42,8 @@ type BindingInstruction = {
   matrixEndpoint?: MatrixEndpoint;
 };
 
+type BindingInstructionResponse = Omit<BindingInstruction, "replacing">;
+
 type BindingCapabilities = {
   telegram: boolean;
   matrix: boolean;
@@ -42,9 +51,21 @@ type BindingCapabilities = {
 
 type BindingStatePayload = {
   bindings: BindingSnapshot[];
+  currentBindings: {
+    telegram: BindingSnapshot[];
+    matrix: BindingSnapshot[];
+  };
+  readiness: BindingCapabilities;
   capabilities: BindingCapabilities;
   telegramBot: TelegramBotEndpoint | null;
   matrixEndpoint: MatrixEndpoint | null;
+};
+
+type BindingChallengeState = {
+  challengeId: string;
+  status: "PENDING" | "CONSUMED" | "EXPIRED" | "REVOKED";
+  expiresAt: string;
+  providerSubject?: string;
 };
 
 export function RepresentativeIdentityBindingPanel({
@@ -56,6 +77,12 @@ export function RepresentativeIdentityBindingPanel({
 }) {
   const zh = locale === "zh";
   const [bindings, setBindings] = useState<BindingSnapshot[]>([]);
+  const [currentBindings, setCurrentBindings] = useState<{
+    telegram: BindingSnapshot[];
+    matrix: BindingSnapshot[];
+  }>({ telegram: [], matrix: [] });
+  const [readiness, setReadiness] =
+    useState<BindingCapabilities>({ telegram: false, matrix: false });
   const [telegramBot, setTelegramBot] =
     useState<TelegramBotEndpoint | null>(null);
   const [matrixEndpoint, setMatrixEndpoint] =
@@ -77,21 +104,45 @@ export function RepresentativeIdentityBindingPanel({
     useState<"loading" | "loaded" | "error">("loading");
   const [bindingLoadError, setBindingLoadError] = useState<string | null>(null);
   const [bindingLoadAttempt, setBindingLoadAttempt] = useState(0);
+  const [bindingPollAttempt, setBindingPollAttempt] = useState(0);
+  const [bindingPollPaused, setBindingPollPaused] = useState(false);
+  const operationGenerationRef = useRef(0);
+
+  useEffect(() => {
+    operationGenerationRef.current += 1;
+    setInstruction(null);
+    setNotice(null);
+    setError(null);
+    setCopiedCommand(null);
+    setRevokingKey(null);
+    setCreatingProvider(null);
+    setBindingPollAttempt(0);
+    setBindingPollPaused(false);
+  }, [representativeSlug]);
 
   useEffect(() => {
     let active = true;
     setBindingLoadStatus("loading");
     setBindingLoadError(null);
     setCapabilities(null);
+    setCurrentBindings({ telegram: [], matrix: [] });
+    setReadiness({ telegram: false, matrix: false });
     setTelegramBot(null);
     setMatrixEndpoint(null);
     void fetchBindingState(representativeSlug)
       .then((payload) => {
         if (active) {
           setBindings(payload.bindings);
+          setCurrentBindings(payload.currentBindings);
+          setReadiness(payload.readiness);
           setCapabilities(payload.capabilities);
           setTelegramBot(payload.telegramBot);
           setMatrixEndpoint(payload.matrixEndpoint);
+          setMatrixUserId(
+            payload.currentBindings.matrix.length === 1
+              ? payload.currentBindings.matrix[0]!.providerSubject
+              : "",
+          );
           setBindingLoadStatus("loaded");
         }
       })
@@ -114,69 +165,140 @@ export function RepresentativeIdentityBindingPanel({
 
   useEffect(() => {
     if (!instruction) return;
+    setBindingPollPaused(false);
     let active = true;
     let timer: number | undefined;
-    const expiresAt = Date.parse(instruction.expiresAt);
-    const scheduleNextPoll = () => {
+    let consecutiveFailures = 0;
+    const scheduleNextPoll = (delayMs = 2_000) => {
       if (!active) return;
       timer = window.setTimeout(() => {
         void poll();
-      }, 2_000);
+      }, delayMs);
     };
     const poll = async () => {
       if (!active) return;
       let shouldContinue = true;
-      if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
-        shouldContinue = false;
-        setInstruction(null);
-        setCopiedCommand(null);
-        setError(
-          zh
-            ? "一次性绑定命令已过期，请重新生成。"
-            : "The one-time binding command expired. Create a new one.",
-        );
-        return;
-      }
+      let nextPollDelayMs = 2_000;
+      let confirmedConsumed = false;
       try {
+        const challenge = await fetchBindingChallengeState(
+          representativeSlug,
+          instruction.challengeId,
+        );
+        if (!active) return;
+        if (challenge.status === "PENDING") {
+          consecutiveFailures = 0;
+          setError(null);
+          return;
+        }
+        if (challenge.status !== "CONSUMED") {
+          shouldContinue = false;
+          setBindingPollPaused(false);
+          setInstruction(null);
+          setCopiedCommand(null);
+          setError(
+            challenge.status === "EXPIRED"
+              ? zh
+                ? "一次性绑定命令已过期，请重新生成。"
+                : "The one-time binding command expired. Create a new one."
+              : zh
+                ? "这条一次性绑定命令已失效，请重新生成。"
+                : "This one-time binding command is no longer valid. Create a new one.",
+          );
+          return;
+        }
+        confirmedConsumed = true;
         const payload = await fetchBindingState(representativeSlug);
         if (!active) return;
         setBindings(payload.bindings);
+        setCurrentBindings(payload.currentBindings);
+        setReadiness(payload.readiness);
         setCapabilities(payload.capabilities);
         setTelegramBot(payload.telegramBot);
         setMatrixEndpoint(payload.matrixEndpoint);
-        const expectedProvider =
-          instruction.provider === "telegram" ? "TELEGRAM" : "MATRIX";
-        const completed = payload.bindings.some(
-          (binding) =>
-            binding.provider === expectedProvider
-            && binding.issuer === instruction.scope.issuer
-            && binding.connectionId === instruction.scope.connectionId
-            && (
-              instruction.provider !== "matrix"
-              || (
-                normalizeMatrixUserId(binding.providerSubject) !== null
-                && normalizeMatrixUserId(binding.providerSubject)
-                  === normalizeMatrixUserId(
-                    instruction.expectedProviderSubject ?? "",
-                  )
-              )
-            ),
+        setMatrixUserId(
+          payload.currentBindings.matrix.length === 1
+            ? payload.currentBindings.matrix[0]!.providerSubject
+            : "",
         );
-        if (completed) {
+        shouldContinue = false;
+        setBindingPollPaused(false);
+        setInstruction(null);
+        setCopiedCommand(null);
+        setError(null);
+        if (
+          !isInstructionBindingCurrent(
+            payload.currentBindings,
+            {
+              ...instruction,
+              ...(challenge.providerSubject
+                ? {
+                    consumedProviderSubject:
+                      challenge.providerSubject,
+                  }
+                : {}),
+            },
+          )
+        ) {
+          setNotice(null);
+          setError(
+            zh
+              ? "一次性命令已经消费，但该账号已不在当前代表的渠道连接上，可能已在其他页面解除绑定或渠道已被替换。页面已显示实际状态，请重新生成命令。"
+              : "The one-time command was consumed, but that account is no longer on this representative's current channel connection. It may have been unlinked elsewhere or the endpoint may have changed. The page now shows the actual state; create a new command.",
+          );
+          return;
+        }
+        setNotice(
+          instruction.provider === "matrix"
+            ? instruction.replacing
+              ? zh
+                ? "Matrix 账号已验证并替换完成。当前未加密私聊可以继续使用；旧 MXID 仅在当前 Matrix 连接下失效，其他连接和历史记录不受影响。"
+                : "The Matrix account was verified and replaced. The current unencrypted room can continue; the old MXID is revoked only for this Matrix connection, while other connections and history remain unchanged."
+              : zh
+                ? "Matrix 账号绑定成功。当前未加密私聊已与登录的 Delegate 账号对应，Web 余额和服务权益会保持一致。"
+                : "Matrix linked. This unencrypted room now maps to the signed-in Delegate account and shares its Web balance and service entitlements."
+            : zh
+              ? "Telegram 绑定成功。这个私聊账号现在会使用当前 Delegate 账号的余额和服务权益。"
+              : "Telegram linked. This private-chat account now uses the current Delegate balance and service entitlements.",
+        );
+      } catch (nextError) {
+        if (!active) return;
+        if (
+          nextError instanceof BindingRequestError
+          && [400, 401, 403, 404].includes(nextError.status)
+        ) {
           shouldContinue = false;
+          setBindingPollPaused(false);
           setInstruction(null);
           setCopiedCommand(null);
-          setNotice(
-            zh
-              ? "绑定成功。这个私聊账号现在会使用当前 Delegate 账号的余额和服务权益。"
-              : "Linked. This private-chat account now uses the current Delegate balance and service entitlements.",
-          );
+          setError(nextError.message);
+          return;
         }
-      } catch {
-        // A transient refresh failure must not discard the still-valid command.
+        consecutiveFailures += 1;
+        const retryDelay =
+          bindingPollRetryDelayMs(consecutiveFailures);
+        if (retryDelay === null) {
+          shouldContinue = false;
+          setBindingPollPaused(true);
+        } else {
+          nextPollDelayMs = retryDelay;
+        }
+        setError(
+          retryDelay === null
+            ? zh
+              ? "连续多次无法读取绑定状态，自动检查已暂停。请检查网络后点击“重新检查绑定状态”。"
+              : "Binding status could not be loaded repeatedly, so automatic checks are paused. Check your connection, then choose “Check binding status again”."
+            : confirmedConsumed
+            ? zh
+              ? "账号验证已经完成，但页面暂时无法同步最新绑定状态；系统将稍后重试，你也可以刷新页面确认。"
+              : "Account verification completed, but the latest binding state could not be synchronized. Retrying with backoff; you can also refresh the page to confirm."
+            : zh
+              ? "暂时无法查询一次性命令状态，系统将稍后重试。"
+              : "The one-time command status is temporarily unavailable. Retrying with backoff.",
+        );
       } finally {
         if (shouldContinue) {
-          scheduleNextPoll();
+          scheduleNextPoll(nextPollDelayMs);
         }
       }
     };
@@ -187,13 +309,16 @@ export function RepresentativeIdentityBindingPanel({
         window.clearTimeout(timer);
       }
     };
-  }, [instruction, representativeSlug, zh]);
+  }, [bindingPollAttempt, instruction, representativeSlug, zh]);
 
   function createBinding(provider: "telegram" | "matrix") {
     if (creatingProvider) return;
+    const operationGeneration = operationGenerationRef.current;
+    const requestedMatrixUserId = matrixUserId.trim();
     setError(null);
     setNotice(null);
     setInstruction(null);
+    setBindingPollPaused(false);
     setCopiedCommand(null);
     setCreatingProvider(provider);
     void fetch(`/reps/${representativeSlug}/identity-bindings`, {
@@ -206,10 +331,19 @@ export function RepresentativeIdentityBindingPanel({
     })
       .then(async (response) => {
         if (!response.ok) throw new Error(await extractError(response));
-        return response.json() as Promise<BindingInstruction>;
+        return response.json() as Promise<BindingInstructionResponse>;
       })
       .then((nextInstruction) => {
-        setInstruction(nextInstruction);
+        if (operationGenerationRef.current !== operationGeneration) return;
+        setInstruction({
+          ...nextInstruction,
+          replacing:
+            provider === "matrix"
+            && currentBindings.matrix.some(
+              (binding) =>
+                binding.providerSubject !== requestedMatrixUserId,
+            ),
+        });
         if (nextInstruction.telegramBot) {
           setTelegramBot(nextInstruction.telegramBot);
         }
@@ -218,6 +352,7 @@ export function RepresentativeIdentityBindingPanel({
         }
       })
       .catch((nextError: unknown) => {
+        if (operationGenerationRef.current !== operationGeneration) return;
         setError(
           nextError instanceof Error
             ? nextError.message
@@ -227,6 +362,7 @@ export function RepresentativeIdentityBindingPanel({
         );
       })
       .finally(() => {
+        if (operationGenerationRef.current !== operationGeneration) return;
         setCreatingProvider((current) =>
           current === provider ? null : current,
         );
@@ -288,6 +424,7 @@ export function RepresentativeIdentityBindingPanel({
     );
     if (!confirmed) return;
 
+    const operationGeneration = operationGenerationRef.current;
     setError(null);
     setNotice(null);
     setRevokingKey(key);
@@ -306,52 +443,63 @@ export function RepresentativeIdentityBindingPanel({
         return response.json() as Promise<{ changed: boolean }>;
       })
       .then(async (result) => {
-        setInstruction((current) =>
-          instructionMatchesBinding(current, binding) ? null : current,
-        );
-        setCopiedCommand(null);
-        if (result.changed) {
-          setBindings((current) =>
-            current.filter((candidate) => bindingKey(candidate) !== key),
-          );
-          setNotice(
-            zh
-              ? "已解除该渠道连接。历史消息、余额和订单均已保留；如需恢复，请重新生成并发送一次性绑定命令。"
-              : "The channel connection is unlinked. History, balance, and orders are preserved; create and send a new one-time command to restore it.",
-          );
-          return;
-        }
-
+        if (operationGenerationRef.current !== operationGeneration) return;
         let payload: BindingStatePayload;
         try {
           payload = await fetchBindingState(representativeSlug);
         } catch (refreshError) {
           const reason =
             refreshError instanceof Error ? refreshError.message : "";
+          if (result.changed) {
+            setNotice(
+              zh
+                ? "解除绑定已经完成，但页面暂时无法同步最新状态，正在重新读取；历史消息、余额和订单均已保留。"
+                : "The binding was unlinked, but the page could not synchronize the latest state and is reloading it. History, balance, and orders are preserved.",
+            );
+            setBindingLoadAttempt((current) => current + 1);
+            return;
+          }
           throw new Error(
             zh
               ? `解除结果未发生变更，但无法读取最新绑定状态，请重试刷新。${reason ? ` ${reason}` : ""}`
               : `The unlink result did not change, but the latest binding state could not be loaded. Retry the refresh.${reason ? ` ${reason}` : ""}`,
           );
         }
+        if (operationGenerationRef.current !== operationGeneration) return;
         setBindings(payload.bindings);
+        setCurrentBindings(payload.currentBindings);
+        setReadiness(payload.readiness);
         setCapabilities(payload.capabilities);
         setTelegramBot(payload.telegramBot);
         setMatrixEndpoint(payload.matrixEndpoint);
+        setMatrixUserId(
+          payload.currentBindings.matrix.length === 1
+            ? payload.currentBindings.matrix[0]!.providerSubject
+            : "",
+        );
         const stillLinked = payload.bindings.some(
           (candidate) => bindingKey(candidate) === key,
         );
         setNotice(
-          stillLinked
+          result.changed && stillLinked
             ? zh
-              ? "绑定状态已在其他操作中发生变化，当前连接仍然有效；页面已同步最新状态。"
-              : "The binding changed in another operation and is still active. The page now shows the latest state."
-            : zh
-              ? "该连接此前已解除，页面已同步最新状态。历史消息、余额和订单均已保留。"
-              : "This connection was already unlinked. The page now shows the latest state, and history, balance, and orders are preserved.",
+              ? "解除已完成，但另一项并发操作又验证了同一连接；页面已按服务端实际状态同步。"
+              : "The unlink completed, but another concurrent operation verified the same connection again. The page now reflects the authoritative server state."
+            : result.changed
+              ? zh
+                ? "已解除该渠道连接。历史消息、余额和订单均已保留；如需恢复，请重新生成并发送一次性绑定命令。"
+                : "The channel connection is unlinked. History, balance, and orders are preserved; create and send a new one-time command to restore it."
+              : stillLinked
+                ? zh
+                  ? "绑定状态已在其他操作中发生变化，当前连接仍然有效；页面已同步最新状态。"
+                  : "The binding changed in another operation and is still active. The page now shows the latest state."
+                : zh
+                  ? "该连接此前已解除，页面已同步最新状态。历史消息、余额和订单均已保留。"
+                  : "This connection was already unlinked. The page now shows the latest state, and history, balance, and orders are preserved.",
         );
       })
       .catch((nextError: unknown) => {
+        if (operationGenerationRef.current !== operationGeneration) return;
         setError(
           nextError instanceof Error
             ? nextError.message
@@ -361,6 +509,7 @@ export function RepresentativeIdentityBindingPanel({
         );
       })
       .finally(() => {
+        if (operationGenerationRef.current !== operationGeneration) return;
         setRevokingKey((current) => (current === key ? null : current));
       });
   }
@@ -464,6 +613,25 @@ export function RepresentativeIdentityBindingPanel({
               ? "把当前登录的 Delegate 账号与 Telegram 私聊身份关联，Web 充值余额和服务权益会保持一致。系统会明确显示当前代表使用的目标 Bot，请只在该 Bot 私聊中发送一次性命令。"
               : "Link the signed-in Delegate account to your Telegram private-chat identity so Web balance and service entitlements stay aligned. The exact Bot for this representative will be shown with the one-time command."}
           </p>
+          <div className="field-stack">
+            <span className="field-hint">
+              {zh ? "当前代表下已绑定的 Telegram 账号" : "Telegram account linked for this representative"}
+            </span>
+            <strong>
+              {currentBindings.telegram.length
+                ? currentBindings.telegram
+                    .map((binding) => binding.providerSubject)
+                    .join(zh ? "、" : ", ")
+                : zh
+                  ? "尚未绑定"
+                  : "Not linked"}
+            </strong>
+            {readiness.telegram ? (
+              <span className="footer-note">
+                {zh ? "已验证，可共享 Web 余额与权益。" : "Verified and sharing Web balance and entitlements."}
+              </span>
+            ) : null}
+          </div>
           <button
             className="button-secondary"
             disabled={creatingProvider !== null || revokingKey !== null}
@@ -475,8 +643,12 @@ export function RepresentativeIdentityBindingPanel({
                 ? "生成中…"
                 : "Creating…"
               : zh
-                ? "绑定我的 Telegram 账号"
-                : "Link my Telegram account"}
+                ? currentBindings.telegram.length
+                  ? "绑定另一个或重新验证 Telegram 账号"
+                  : "绑定我的 Telegram 账号"
+                : currentBindings.telegram.length
+                  ? "Link another or reverify a Telegram account"
+                  : "Link my Telegram account"}
           </button>
           </article>
         ) : null}
@@ -519,9 +691,29 @@ export function RepresentativeIdentityBindingPanel({
               </span>
             </div>
           ) : null}
+          {currentBindings.matrix.length ? (
+            <div className="field-stack">
+              <span className="field-hint">
+                {zh
+                  ? "当前代表连接下已绑定的 Matrix 账号"
+                  : "Matrix accounts linked on this representative connection"}
+              </span>
+              <strong>
+                {currentBindings.matrix
+                  .map((binding) => binding.providerSubject)
+                  .join(zh ? "、" : ", ")}
+              </strong>
+            </div>
+          ) : null}
           <label className="field-stack">
             <span className="field-hint">
-              {zh ? "你自己的 Matrix MXID" : "Your Matrix MXID"}
+              {zh
+                ? currentBindings.matrix.length
+                  ? "当前绑定的 Matrix MXID（可输入新账号替换）"
+                  : "你自己的 Matrix MXID"
+                : currentBindings.matrix.length
+                  ? "Current Matrix MXID (enter a new account to replace it)"
+                  : "Your Matrix MXID"}
             </span>
             <input
               autoComplete="username"
@@ -531,6 +723,17 @@ export function RepresentativeIdentityBindingPanel({
               spellCheck={false}
               value={matrixUserId}
             />
+            {currentBindings.matrix.length > 1 ? (
+              <span className="footer-note">
+                {zh
+                  ? `检测到 ${currentBindings.matrix.length} 个旧版有效账号；新 MXID 验证成功后，它们只会在当前 Matrix 连接下失效。`
+                  : `${currentBindings.matrix.length} legacy active accounts were found. After the new MXID is verified, they are revoked only for this Matrix connection.`}
+              </span>
+            ) : readiness.matrix ? (
+              <span className="footer-note">
+                {zh ? "已验证，可共享 Web 余额与权益。" : "Verified and sharing Web balance and entitlements."}
+              </span>
+            ) : null}
           </label>
           <button
             className="button-secondary"
@@ -547,8 +750,12 @@ export function RepresentativeIdentityBindingPanel({
                 ? "生成中…"
                 : "Creating…"
               : zh
-                ? "为这个 Matrix 账号生成绑定命令"
-                : "Create command for this Matrix account"}
+                ? currentBindings.matrix.length
+                  ? "生成 Matrix 替换命令"
+                  : "为这个 Matrix 账号生成绑定命令"
+                : currentBindings.matrix.length
+                  ? "Create Matrix replacement command"
+                  : "Create command for this Matrix account"}
           </button>
           </article>
         ) : null}
@@ -626,6 +833,21 @@ export function RepresentativeIdentityBindingPanel({
                   : `Open ${telegramBotLabel(instruction.telegramBot)}`}
               </a>
             ) : null}
+            {bindingPollPaused ? (
+              <button
+                className="button-secondary"
+                onClick={() => {
+                  setError(null);
+                  setBindingPollPaused(false);
+                  setBindingPollAttempt((current) => current + 1);
+                }}
+                type="button"
+              >
+                {zh
+                  ? "重新检查绑定状态"
+                  : "Check binding status again"}
+              </button>
+            ) : null}
           </div>
           <p className="footer-note">
             {zh ? "一次性命令将在 " : "This one-time command expires at "}
@@ -650,18 +872,6 @@ function bindingKey(binding: BindingSnapshot): string {
     binding.issuer,
     binding.connectionId,
   ].join(":");
-}
-
-function instructionMatchesBinding(
-  instruction: BindingInstruction | null,
-  binding: BindingSnapshot,
-): boolean {
-  return Boolean(
-    instruction
-    && instruction.provider.toUpperCase() === binding.provider
-    && instruction.scope.issuer === binding.issuer
-    && instruction.scope.connectionId === binding.connectionId,
-  );
 }
 
 function telegramBindingTarget(
@@ -690,87 +900,6 @@ function telegramBotUrl(
     : `https://t.me/${bot.username}`;
 }
 
-function normalizeMatrixUserId(value: string): string | null {
-  const matrixUserId = value.trim();
-  const separator = matrixUserId.indexOf(":", 1);
-  const localpart =
-    separator > 1 ? matrixUserId.slice(1, separator) : "";
-  const serverName =
-    separator > 1
-      ? matrixUserId.slice(separator + 1)
-      : "";
-  if (
-    matrixUserId[0] !== "@"
-    || !localpart
-    || /\s|:/.test(localpart)
-    || !isValidMatrixServerName(serverName)
-    || new TextEncoder().encode(matrixUserId).length > 255
-  ) {
-    return null;
-  }
-  return `@${localpart}:${serverName}`;
-}
-
-function isValidMatrixServerName(value: string): boolean {
-  if (!value || value.length > 255 || /\s/.test(value)) return false;
-
-  let host = value;
-  let port: string | undefined;
-  if (value.startsWith("[")) {
-    const closingBracket = value.indexOf("]");
-    if (closingBracket <= 1) return false;
-    host = value.slice(1, closingBracket);
-    const suffix = value.slice(closingBracket + 1);
-    if (suffix) {
-      if (!suffix.startsWith(":")) return false;
-      port = suffix.slice(1);
-    }
-    if (!isValidIpv6Address(host)) return false;
-  } else {
-    const separator = value.lastIndexOf(":");
-    if (separator !== -1) {
-      if (value.indexOf(":") !== separator) return false;
-      host = value.slice(0, separator);
-      port = value.slice(separator + 1);
-    }
-    if (!host || (!isValidIpv4Address(host) && !isValidDnsName(host))) {
-      return false;
-    }
-  }
-
-  return port === undefined
-    || (/^[1-9]\d{0,4}$/.test(port) && Number(port) <= 65_535);
-}
-
-function isValidIpv6Address(value: string): boolean {
-  if (!/^[0-9a-f:.]+$/i.test(value)) return false;
-  try {
-    return new URL(`http://[${value}]/`).hostname.startsWith("[");
-  } catch {
-    return false;
-  }
-}
-
-function isValidIpv4Address(value: string): boolean {
-  const parts = value.split(".");
-  return parts.length === 4
-    && parts.every(
-      (part) =>
-        /^(?:0|[1-9]\d{0,2})$/.test(part)
-        && Number(part) <= 255,
-    );
-}
-
-function isValidDnsName(value: string): boolean {
-  if (value.length > 255 || /^\d+(?:\.\d+){3}$/.test(value)) return false;
-  return value.split(".").every(
-    (label) =>
-      label.length > 0
-      && label.length <= 63
-      && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label),
-  );
-}
-
 async function extractError(response: Response): Promise<string> {
   const payload = (await response.json().catch(() => null)) as {
     error?: string;
@@ -785,6 +914,39 @@ async function fetchBindingState(
     `/reps/${representativeSlug}/identity-bindings`,
     { cache: "no-store" },
   );
-  if (!response.ok) throw new Error(await extractError(response));
+  if (!response.ok) {
+    throw new BindingRequestError(
+      response.status,
+      await extractError(response),
+    );
+  }
   return response.json() as Promise<BindingStatePayload>;
+}
+
+async function fetchBindingChallengeState(
+  representativeSlug: string,
+  challengeId: string,
+): Promise<BindingChallengeState> {
+  const search = new URLSearchParams({ challengeId });
+  const response = await fetch(
+    `/reps/${representativeSlug}/identity-bindings?${search.toString()}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    throw new BindingRequestError(
+      response.status,
+      await extractError(response),
+    );
+  }
+  return response.json() as Promise<BindingChallengeState>;
+}
+
+class BindingRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "BindingRequestError";
+  }
 }

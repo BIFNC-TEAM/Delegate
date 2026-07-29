@@ -5,7 +5,12 @@ import {
   RepresentativeChannelKind,
 } from "@prisma/client";
 
+import {
+  hasActiveMatrixAudienceConnectionProof,
+  lockMatrixAudienceConnectionScope,
+} from "./audience-identity-binding";
 import { resolveChannelAvailability } from "./channel-availability";
+import { matrixServerNameFromUserId } from "./matrix-identifiers";
 import { prisma } from "./prisma";
 
 export type MatrixRoomSecurityState =
@@ -22,6 +27,8 @@ export type MatrixRoomSecuritySnapshot = {
   remoteValidationAttemptCount: number;
   audienceMatrixUserId: string | null;
   representativeMatrixUserId: string | null;
+  representativeAssignmentRevision: number | null;
+  currentRepresentativeAssignmentRevision: number | null;
   representativeChannelDesiredState: ChannelDesiredState | null;
 };
 
@@ -63,10 +70,12 @@ export async function getMatrixRoomSecuritySnapshot(
     select: {
       id: true,
       conversationId: true,
+      representativeAssignmentRevision: true,
       metadata: true,
       representativeBinding: {
         select: {
           representativeId: true,
+          endpointAssignmentRevision: true,
           desiredState: true,
         },
       },
@@ -93,6 +102,10 @@ export async function getMatrixRoomSecuritySnapshot(
       typeof metadata.representativeMatrixUserId === "string"
         ? metadata.representativeMatrixUserId
         : null,
+    representativeAssignmentRevision:
+      binding.representativeAssignmentRevision,
+    currentRepresentativeAssignmentRevision:
+      binding.representativeBinding?.endpointAssignmentRevision ?? null,
     representativeChannelDesiredState:
       binding.representativeBinding?.desiredState ?? null,
   };
@@ -262,6 +275,10 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
       roomId: string;
       conversationId: string;
       audienceMatrixUserId: string;
+      expectedSecurityState?:
+        | "ACTIVE"
+        | "PENDING_REMOTE_VALIDATION";
+      requireActiveAudienceProof?: boolean;
     };
   },
   operation: (tx: Prisma.TransactionClient) => Promise<T>,
@@ -271,7 +288,8 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
       executed: false;
       reason:
         | "matrix_channel_not_active"
-        | "matrix_room_not_active";
+        | "matrix_room_not_active"
+        | "matrix_audience_connection_not_verified";
     }
 > {
   return prisma.$transaction(async (tx) => {
@@ -291,6 +309,8 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
         select: {
           desiredState: true,
           externalUserId: true,
+          connectionId: true,
+          endpointAssignmentRevision: true,
           healthStatus: true,
           id: true,
           status: true,
@@ -370,10 +390,12 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
             representativeBindingId: binding.id,
           },
           select: {
+            representativeAssignmentRevision: true,
             metadata: true,
             conversation: {
               select: {
                 representativeId: true,
+                audienceIdentityId: true,
                 participants: {
                   where: {
                     kind: {
@@ -400,12 +422,53 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
           representativeMatrixUserId:
             input.representativeMatrixUserId,
           audienceMatrixUserId: input.room.audienceMatrixUserId,
+          representativeAssignmentRevision:
+            binding.endpointAssignmentRevision,
+          securityState:
+            input.room.expectedSecurityState ?? "ACTIVE",
         })
       ) {
         return {
           executed: false,
           reason: "matrix_room_not_active",
         } as const;
+      }
+      if (input.room.requireActiveAudienceProof) {
+        const audienceIdentityId =
+          roomBinding?.conversation.audienceIdentityId?.trim();
+        const connectionId = binding.connectionId?.trim();
+        if (!audienceIdentityId || !connectionId) {
+          return {
+            executed: false,
+            reason: "matrix_audience_connection_not_verified",
+          } as const;
+        }
+        await lockMatrixAudienceConnectionScope(tx, {
+          audienceIdentityId,
+          connectionId,
+        });
+        let proofActive = false;
+        try {
+          proofActive = await hasActiveMatrixAudienceConnectionProof(
+            {
+              audienceIdentityId,
+              providerSubject: input.room.audienceMatrixUserId,
+              issuer: matrixServerNameFromUserId(
+                input.room.audienceMatrixUserId,
+              ),
+              connectionId,
+            },
+            tx,
+          );
+        } catch {
+          // Invalid or incomplete identity state must fail closed.
+        }
+        if (!proofActive) {
+          return {
+            executed: false,
+            reason: "matrix_audience_connection_not_verified",
+          } as const;
+        }
       }
     }
     return {
@@ -427,9 +490,11 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
 
 function isActiveMatrixOutboundRoomBinding(
   binding: {
+    representativeAssignmentRevision: number | null;
     metadata: unknown;
     conversation: {
       representativeId: string;
+      audienceIdentityId: string | null;
       participants: Array<{
         kind: ConversationParticipantKind;
         participantId: string;
@@ -441,6 +506,8 @@ function isActiveMatrixOutboundRoomBinding(
     representativeId: string;
     representativeMatrixUserId: string;
     audienceMatrixUserId: string;
+    representativeAssignmentRevision: number;
+    securityState: "ACTIVE" | "PENDING_REMOTE_VALIDATION";
   },
 ) {
   if (
@@ -450,11 +517,16 @@ function isActiveMatrixOutboundRoomBinding(
     || !isJsonRecord(binding.metadata)
     || binding.metadata.directMessageOnly !== true
     || binding.metadata.encrypted !== false
-    || binding.metadata.securityState !== "ACTIVE"
+    || binding.metadata.securityState !== expected.securityState
     || binding.metadata.audienceMatrixUserId
       !== expected.audienceMatrixUserId
     || binding.metadata.representativeMatrixUserId
       !== expected.representativeMatrixUserId
+    || expected.representativeAssignmentRevision <= 0
+    || binding.representativeAssignmentRevision
+      !== expected.representativeAssignmentRevision
+    || binding.metadata.representativeAssignmentRevision
+      !== expected.representativeAssignmentRevision
   ) {
     return false;
   }

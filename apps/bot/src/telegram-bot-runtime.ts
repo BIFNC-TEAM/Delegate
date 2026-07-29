@@ -321,8 +321,11 @@ bot.command("bind", async (ctx) => {
     return;
   }
 
+  let binding:
+    | Awaited<ReturnType<typeof consumeIdentityBindingChallenge>>
+    | undefined;
   try {
-    const binding = await consumeIdentityBindingChallenge({
+    binding = await consumeIdentityBindingChallenge({
       token: bindingToken,
       provider: privateChannelIdentityProviders.telegram,
       providerSubject: String(ctx.from.id),
@@ -333,9 +336,19 @@ bot.command("bind", async (ctx) => {
         telegramChatId: String(ctx.chat.id),
       },
     });
-    const representativeSlug =
-      readRepresentativeSlugFromIdentityBinding(binding);
-    if (representativeSlug) {
+  } catch (error) {
+    await ctx.reply(
+      error instanceof Error
+        ? `绑定失败：${error.message}`
+        : "绑定失败，请回到 Web 重新生成一次性代码。",
+    );
+    return;
+  }
+
+  const representativeSlug =
+    readRepresentativeSlugFromIdentityBinding(binding);
+  if (representativeSlug) {
+    try {
       const activeRepresentativeSlug =
         await setActiveRepresentativeForChat({
           telegramChatId: ctx.chat.id,
@@ -349,17 +362,16 @@ bot.command("bind", async (ctx) => {
         `绑定成功。你的 Telegram 会话现在已对应到同一个 Delegate 用户与服务权益，当前正在与 ${representative.name} 对话。`,
       );
       return;
+    } catch {
+      await ctx.reply(
+        "账号绑定已经完成，但这个数字代表的 Bot 配置刚刚发生了变化，未切换当前会话。请回到代表公开页刷新后重新选择。",
+      );
+      return;
     }
-    await ctx.reply(
-      "绑定成功。你的 Telegram 会话现在已对应到同一个 Delegate 用户与服务权益；请从代表公开页重新打开 Bot 以选择当前代表。",
-    );
-  } catch (error) {
-    await ctx.reply(
-      error instanceof Error
-        ? `绑定失败：${error.message}`
-        : "绑定失败，请回到 Web 重新生成一次性代码。",
-    );
   }
+  await ctx.reply(
+    "绑定成功。你的 Telegram 会话现在已对应到同一个 Delegate 用户与服务权益；请从代表公开页重新打开 Bot 以选择当前代表。",
+  );
 });
 
 bot.command("compute", async (ctx) => {

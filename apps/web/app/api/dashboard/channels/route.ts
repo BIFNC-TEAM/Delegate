@@ -34,6 +34,11 @@ export async function POST(request: Request) {
       channel?: unknown;
       representativeId?: unknown;
       telegramBotConnectionId?: unknown;
+      expectedCurrentTelegramBotConnectionId?: unknown;
+      expectedCurrentEndpointAssignmentRevision?: unknown;
+      matrixUserId?: unknown;
+      replaceExisting?: unknown;
+      expectedCurrentMatrixUserId?: unknown;
     } | null;
     if (
       (
@@ -72,6 +77,48 @@ export async function POST(request: Request) {
         },
       );
     }
+    if (
+      body.channel === "TELEGRAM"
+      && !isOptionalNonEmptyStringOrNull(
+        body.expectedCurrentTelegramBotConnectionId,
+      )
+    ) {
+      return badRequest(
+        "expectedCurrentTelegramBotConnectionId must be a non-empty string or null.",
+      );
+    }
+    if (
+      !isPositiveIntegerOrNull(
+        body.expectedCurrentEndpointAssignmentRevision,
+      )
+    ) {
+      return badRequest(
+        "expectedCurrentEndpointAssignmentRevision must be a positive integer or null.",
+      );
+    }
+    if (
+      body.channel === "MATRIX"
+      && (
+        (
+          body.matrixUserId !== undefined
+          && (
+            typeof body.matrixUserId !== "string"
+            || !body.matrixUserId.trim()
+          )
+        )
+        || (
+          body.replaceExisting !== undefined
+          && typeof body.replaceExisting !== "boolean"
+        )
+        || !isOptionalNonEmptyStringOrNull(
+          body.expectedCurrentMatrixUserId,
+        )
+      )
+    ) {
+      return badRequest(
+        "matrixUserId must be a non-empty string, replaceExisting must be boolean, and expectedCurrentMatrixUserId must be a non-empty string or null.",
+      );
+    }
     const actorId = session?.ownerId ?? "local-owner";
     const requestMetadata = resolveChannelRequestMetadata(request);
     const provisioned =
@@ -81,12 +128,37 @@ export async function POST(request: Request) {
             actorId,
             representativeId: body.representativeId,
             telegramBotConnectionId: body.telegramBotConnectionId as string,
+            ...(body.expectedCurrentTelegramBotConnectionId !== undefined
+              ? {
+                  expectedCurrentTelegramBotConnectionId:
+                    body.expectedCurrentTelegramBotConnectionId as
+                      string | null,
+                }
+              : {}),
+            expectedCurrentEndpointAssignmentRevision:
+              body.expectedCurrentEndpointAssignmentRevision as
+                number | null,
             ...requestMetadata,
           })
         : await provisionOwnerMatrixChannel({
             ownerId: actorId,
             actorId,
             representativeId: body.representativeId,
+            ...(body.matrixUserId !== undefined
+              ? { matrixUserId: (body.matrixUserId as string).trim() }
+              : {}),
+            ...(body.replaceExisting !== undefined
+              ? { replaceExisting: body.replaceExisting as boolean }
+              : {}),
+            ...(body.expectedCurrentMatrixUserId !== undefined
+              ? {
+                  expectedCurrentMatrixUserId:
+                    body.expectedCurrentMatrixUserId as string | null,
+                }
+              : {}),
+            expectedCurrentEndpointAssignmentRevision:
+              body.expectedCurrentEndpointAssignmentRevision as
+                number | null,
             ...requestMetadata,
           });
     return NextResponse.json(
@@ -102,4 +174,29 @@ export async function POST(request: Request) {
       "Failed to provision channel.",
     );
   }
+}
+
+function isOptionalNonEmptyStringOrNull(value: unknown): boolean {
+  return value === undefined
+    || value === null
+    || (typeof value === "string" && Boolean(value.trim()));
+}
+
+function isPositiveIntegerOrNull(value: unknown): boolean {
+  return value === null
+    || (
+      typeof value === "number"
+      && Number.isSafeInteger(value)
+      && value > 0
+    );
+}
+
+function badRequest(error: string) {
+  return NextResponse.json(
+    { error },
+    {
+      status: 400,
+      headers: { "Cache-Control": "private, no-store" },
+    },
+  );
 }

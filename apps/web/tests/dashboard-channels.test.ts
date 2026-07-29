@@ -24,6 +24,9 @@ const routeMocks = vi.hoisted(() => {
     TelegramBotConnectionError,
     assignOwnerTelegramBotConnection: vi.fn(),
     createOrRotateOwnerTelegramBotConnection: vi.fn(),
+    revokeOwnerTelegramBotConnection: vi.fn(),
+    rotateOwnerTelegramBotConnection: vi.fn(),
+    setOwnerTelegramBotConnectionStatus: vi.fn(),
     dashboardAuthErrorResponse: vi.fn(),
     getOwnerChannelManagementSnapshot: vi.fn(),
     provisionOwnerMatrixChannel: vi.fn(),
@@ -38,6 +41,12 @@ vi.mock("@delegate/web-data", () => ({
     routeMocks.assignOwnerTelegramBotConnection,
   createOrRotateOwnerTelegramBotConnection:
     routeMocks.createOrRotateOwnerTelegramBotConnection,
+  revokeOwnerTelegramBotConnection:
+    routeMocks.revokeOwnerTelegramBotConnection,
+  rotateOwnerTelegramBotConnection:
+    routeMocks.rotateOwnerTelegramBotConnection,
+  setOwnerTelegramBotConnectionStatus:
+    routeMocks.setOwnerTelegramBotConnectionStatus,
   getOwnerChannelManagementSnapshot:
     routeMocks.getOwnerChannelManagementSnapshot,
   provisionOwnerMatrixChannel: routeMocks.provisionOwnerMatrixChannel,
@@ -51,6 +60,10 @@ vi.mock("../app/api/dashboard/auth", () => ({
 
 import { POST as assignChannel } from "../app/api/dashboard/channels/route";
 import { POST as createTelegramBot } from "../app/api/dashboard/channels/telegram-bots/route";
+import {
+  DELETE as revokeTelegramBot,
+  PATCH as updateTelegramBot,
+} from "../app/api/dashboard/channels/telegram-bots/[connectionId]/route";
 
 const component = readFileSync(
   new URL("../app/dashboard/dashboard-channels.tsx", import.meta.url),
@@ -134,6 +147,45 @@ describe("dashboard channels", () => {
     routeMocks.assignOwnerTelegramBotConnection.mockResolvedValue({
       binding: { id: "binding-telegram-1" },
     });
+    const lifecycleConnection = {
+      id: "telegram-connection-1",
+      botId: "8718299151",
+      username: "delegate_bot",
+      displayName: "Delegate Bot",
+      label: "Support",
+      status: "ACTIVE",
+      healthStatus: "UNKNOWN",
+      verificationStatus: "VERIFIED",
+      lastVerifiedAt: "2026-07-27T10:00:00.000Z",
+      lastHealthCheckAt: null,
+      lastError: null,
+      credentialRevision: 3,
+      referenceCount: 1,
+      activeReferenceCount: 1,
+    };
+    routeMocks.rotateOwnerTelegramBotConnection.mockResolvedValue({
+      connection: lifecycleConnection,
+      changed: true,
+    });
+    routeMocks.setOwnerTelegramBotConnectionStatus.mockResolvedValue({
+      connection: lifecycleConnection,
+      changed: true,
+    });
+    routeMocks.revokeOwnerTelegramBotConnection.mockResolvedValue({
+      connection: {
+        ...lifecycleConnection,
+        status: "REVOKED",
+        referenceCount: 0,
+        activeReferenceCount: 0,
+      },
+      changed: true,
+    });
+    routeMocks.provisionOwnerMatrixChannel.mockResolvedValue({
+      binding: { id: "binding-matrix-1" },
+      virtualUser: {
+        matrixUserId: "@_delegate_rep_lin:matrix.example.org",
+      },
+    });
   });
 
   it("renders real channel data instead of the framework blueprint", () => {
@@ -147,13 +199,22 @@ describe("dashboard channels", () => {
     expect(component).toContain("channel.recentIngress");
     expect(component).toContain("channel.recentEgress");
     expect(component).toContain("配置 Bot");
-    expect(component).toContain("切换 Bot");
+    expect(component).toContain("替换 Bot");
     expect(component).toContain("同一个 Bot 可以被多个代表复用");
     expect(component).toContain("referenceCount");
     expect(component).toContain("Bot ID");
     expect(component).toContain("bot.healthStatus");
     expect(component).toContain('bot.status === "ACTIVE"');
     expect(component).toContain('channel.kind === "TELEGRAM"');
+    expect(component).toContain(
+      "expectedCurrentEndpointAssignmentRevision",
+    );
+    expect(component).toContain(
+      "expectedEndpointAssignmentRevision",
+    );
+    expect(component).toContain(
+      "expectedCredentialRevision",
+    );
   });
 
   it("adds verified Telegram Bots without exposing credentials in snapshots", () => {
@@ -188,6 +249,21 @@ describe("dashboard channels", () => {
     expect(component).toContain("selectedTelegramBotId");
     expect(component).toContain("telegramBotConnectionId");
     expect(component).toContain("其他数字代表的 Bot 配置不受影响");
+  });
+
+  it("presents managed Matrix add and replace controls without collecting credentials", () => {
+    expect(component).toContain("添加 Matrix");
+    expect(component).toContain("替换 Matrix");
+    expect(component).toContain("系统受管 Matrix 身份");
+    expect(component).toContain(
+      "页面不会收集 Matrix 密码或 Access Token",
+    );
+    expect(component).toContain("matrixConfiguration");
+    expect(component).toContain(
+      "expectedCurrentMatrixUserId: currentMatrixUserId",
+    );
+    expect(component).toContain("replaceExisting: true");
+    expect(component).toContain("已有受管 Matrix 身份时不能留空");
   });
 
   it("links representative readiness and summary to channel operations", () => {
@@ -278,6 +354,8 @@ describe("dashboard channels", () => {
       channel: "TELEGRAM",
       representativeId: "rep-1",
       telegramBotConnectionId: "telegram-connection-1",
+      expectedCurrentTelegramBotConnectionId: null,
+      expectedCurrentEndpointAssignmentRevision: null,
     }));
     expect(response.status).toBe(201);
     expect(routeMocks.assignOwnerTelegramBotConnection).toHaveBeenCalledWith({
@@ -285,9 +363,170 @@ describe("dashboard channels", () => {
       actorId: "owner-1",
       representativeId: "rep-1",
       telegramBotConnectionId: "telegram-connection-1",
+      expectedCurrentTelegramBotConnectionId: null,
+      expectedCurrentEndpointAssignmentRevision: null,
       requestId: "channel-request-1",
       idempotencyKey: "channel-assign-1",
     });
+  });
+
+  it("forwards managed Matrix replacement and CAS fields", async () => {
+    const response = await assignChannel(channelAssignmentRequest({
+      channel: "MATRIX",
+      representativeId: "rep-1",
+      matrixUserId: "  @_delegate_rep_support:matrix.example.org  ",
+      replaceExisting: true,
+      expectedCurrentMatrixUserId:
+        "@_delegate_rep_lin:matrix.example.org",
+      expectedCurrentEndpointAssignmentRevision: 3,
+    }));
+
+    expect(response.status).toBe(201);
+    expect(routeMocks.provisionOwnerMatrixChannel).toHaveBeenCalledWith({
+      ownerId: "owner-1",
+      actorId: "owner-1",
+      representativeId: "rep-1",
+      matrixUserId: "@_delegate_rep_support:matrix.example.org",
+      replaceExisting: true,
+      expectedCurrentMatrixUserId:
+        "@_delegate_rep_lin:matrix.example.org",
+      expectedCurrentEndpointAssignmentRevision: 3,
+      requestId: "channel-request-1",
+      idempotencyKey: "channel-assign-1",
+    });
+  });
+
+  it("forwards an explicit null Matrix CAS when adding the first identity", async () => {
+    const response = await assignChannel(channelAssignmentRequest({
+      channel: "MATRIX",
+      representativeId: "rep-1",
+      expectedCurrentMatrixUserId: null,
+      expectedCurrentEndpointAssignmentRevision: null,
+    }));
+
+    expect(response.status).toBe(201);
+    expect(routeMocks.provisionOwnerMatrixChannel).toHaveBeenCalledWith({
+      ownerId: "owner-1",
+      actorId: "owner-1",
+      representativeId: "rep-1",
+      expectedCurrentMatrixUserId: null,
+      expectedCurrentEndpointAssignmentRevision: null,
+      requestId: "channel-request-1",
+      idempotencyKey: "channel-assign-1",
+    });
+  });
+
+  it("rejects malformed channel CAS and Matrix replacement fields", async () => {
+    const invalidTelegram = await assignChannel(channelAssignmentRequest({
+      channel: "TELEGRAM",
+      representativeId: "rep-1",
+      telegramBotConnectionId: "telegram-connection-1",
+      expectedCurrentTelegramBotConnectionId: 42,
+      expectedCurrentEndpointAssignmentRevision: null,
+    }));
+    const invalidMatrix = await assignChannel(channelAssignmentRequest({
+      channel: "MATRIX",
+      representativeId: "rep-1",
+      matrixUserId: " ",
+      replaceExisting: "yes",
+      expectedCurrentMatrixUserId: 42,
+      expectedCurrentEndpointAssignmentRevision: null,
+    }));
+
+    expect(invalidTelegram.status).toBe(400);
+    expect(invalidMatrix.status).toBe(400);
+    expect(routeMocks.assignOwnerTelegramBotConnection).not.toHaveBeenCalled();
+    expect(routeMocks.provisionOwnerMatrixChannel).not.toHaveBeenCalled();
+  });
+
+  it("requires and forwards Telegram credential revisions for lifecycle changes", async () => {
+    const context = {
+      params: Promise.resolve({
+        connectionId: "telegram-connection-1",
+      }),
+    };
+    const updated = await updateTelegramBot(
+      new Request(
+        "http://localhost/api/dashboard/channels/telegram-bots/telegram-connection-1",
+        {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": "telegram-disable-1",
+            "X-Request-Id": "telegram-disable-request-1",
+          },
+          body: JSON.stringify({
+            action: "disable",
+            expectedCredentialRevision: 2,
+          }),
+        },
+      ),
+      context,
+    );
+
+    expect(updated.status).toBe(200);
+    expect(
+      routeMocks.setOwnerTelegramBotConnectionStatus,
+    ).toHaveBeenCalledWith({
+      ownerId: "owner-1",
+      actorId: "owner-1",
+      telegramBotConnectionId: "telegram-connection-1",
+      expectedCredentialRevision: 2,
+      status: "DISABLED",
+      requestId: "telegram-disable-request-1",
+      idempotencyKey: "telegram-disable-1",
+    });
+
+    const revoked = await revokeTelegramBot(
+      new Request(
+        "http://localhost/api/dashboard/channels/telegram-bots/telegram-connection-1",
+        {
+          method: "DELETE",
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": "telegram-revoke-1",
+            "X-Request-Id": "telegram-revoke-request-1",
+          },
+          body: JSON.stringify({
+            expectedCredentialRevision: 3,
+          }),
+        },
+      ),
+      context,
+    );
+
+    expect(revoked.status).toBe(200);
+    expect(routeMocks.revokeOwnerTelegramBotConnection).toHaveBeenCalledWith({
+      ownerId: "owner-1",
+      actorId: "owner-1",
+      telegramBotConnectionId: "telegram-connection-1",
+      expectedCredentialRevision: 3,
+      requestId: "telegram-revoke-request-1",
+      idempotencyKey: "telegram-revoke-1",
+    });
+  });
+
+  it("rejects Telegram lifecycle requests without a credential revision", async () => {
+    const response = await updateTelegramBot(
+      new Request(
+        "http://localhost/api/dashboard/channels/telegram-bots/telegram-connection-1",
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "disable" }),
+        },
+      ),
+      {
+        params: Promise.resolve({
+          connectionId: "telegram-connection-1",
+        }),
+      },
+    );
+
+    expect(response.status).toBe(400);
+    expect(
+      routeMocks.setOwnerTelegramBotConnectionStatus,
+    ).not.toHaveBeenCalled();
   });
 
   it("keeps unexpected credential failures private", async () => {

@@ -106,7 +106,22 @@ describe("public representative visitor-first page", () => {
     expect(identityBindingSource).toContain("历史消息、余额和订单不会删除");
     expect(identityBindingSource).toContain("capabilities?.telegram");
     expect(identityBindingSource).toContain("capabilities?.matrix");
-    expect(identityBindingSource).toContain("绑定成功。这个私聊账号现在会使用当前 Delegate 账号的余额和服务权益");
+    expect(identityBindingSource).toContain(
+      "当前代表下已绑定的 Telegram 账号",
+    );
+    expect(identityBindingSource).toContain(
+      "当前绑定的 Matrix MXID（可输入新账号替换）",
+    );
+    expect(identityBindingSource).toContain(
+      "Matrix 账号已验证并替换完成",
+    );
+    expect(identityBindingSource).toContain("currentBindings");
+    expect(identityBindingSource).toContain(
+      "fetchBindingChallengeState",
+    );
+    expect(identityBindingSource).toContain(
+      'challenge.status === "PENDING"',
+    );
     expect(identityBindingSource).toContain('bindingLoadStatus === "loading"');
     expect(identityBindingSource).toContain('bindingLoadStatus === "error"');
     expect(identityBindingSource).toContain("setBindingLoadAttempt");

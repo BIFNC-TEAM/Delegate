@@ -78,6 +78,7 @@ export type OwnerTelegramBotUnassignmentResult = {
     representativeId: string;
     telegramBotConnectionId: string | null;
     connectionId: string | null;
+    endpointAssignmentRevision: number;
     desiredState: "ACTIVE" | "PAUSED" | "DISCONNECTED";
     status: string;
   };
@@ -151,6 +152,7 @@ const ownerTelegramBindingSelect = {
   representativeId: true,
   connectionId: true,
   telegramBotConnectionId: true,
+  endpointAssignmentRevision: true,
   desiredState: true,
   status: true,
 } as const;
@@ -480,6 +482,7 @@ export async function rotateOwnerTelegramBotConnection(
     ownerId: string;
     actorId: string;
     telegramBotConnectionId: string;
+    expectedCredentialRevision: number;
     token: string;
     label?: string | null;
     requestId: string;
@@ -492,6 +495,10 @@ export async function rotateOwnerTelegramBotConnection(
   const telegramBotConnectionId = requireText(
     input.telegramBotConnectionId,
     "telegramBotConnectionId",
+  );
+  const expectedCredentialRevision = requirePositiveRevision(
+    input.expectedCredentialRevision,
+    "expectedCredentialRevision",
   );
   const requestId = normalizeOperationToken(input.requestId, "requestId");
   const idempotencyKey = normalizeOperationToken(
@@ -523,6 +530,28 @@ export async function rotateOwnerTelegramBotConnection(
 
   try {
     return await client.$transaction(async (tx) => {
+      const initiallyAffectedBindings =
+        await tx.representativeChannelBinding.findMany({
+          where: {
+            telegramBotConnectionId,
+            representative: { ownerId },
+          },
+          select: { representativeId: true },
+        });
+      const affectedRepresentativeIds = [
+        ...new Set(
+          initiallyAffectedBindings.map(
+            (binding) => binding.representativeId,
+          ),
+        ),
+      ].sort();
+      for (const representativeId of affectedRepresentativeIds) {
+        await tx.$executeRaw`
+          SELECT pg_advisory_xact_lock(
+            hashtext(${"telegram-bot-channel:" + representativeId})
+          )
+        `;
+      }
       await lockOwnerTelegramBotConnection(
         tx,
         ownerId,
@@ -576,6 +605,7 @@ export async function rotateOwnerTelegramBotConnection(
           action,
           payload: {
             tokenFingerprint: fingerprint,
+            expectedCredentialRevision,
             label: input.label === undefined
               ? { provided: false }
               : { provided: true, value: label },
@@ -600,6 +630,10 @@ export async function rotateOwnerTelegramBotConnection(
             409,
           );
         }
+        assertOwnerTelegramBotReplayState(
+          repeatedAudit,
+          buildOwnerTelegramBotAuditSnapshot(existing),
+        );
         return {
           connection: serializeOwnerConnection(existing),
           changed: false,
@@ -610,6 +644,12 @@ export async function rotateOwnerTelegramBotConnection(
       if (repeatedCredential) {
         throw new TelegramBotConnectionError(
           "Telegram Bot credential operation requires reconciliation.",
+          409,
+        );
+      }
+      if (existing.credentialRevision !== expectedCredentialRevision) {
+        throw new TelegramBotConnectionError(
+          "Telegram Bot credential changed since it was loaded.",
           409,
         );
       }
@@ -765,6 +805,7 @@ export async function setOwnerTelegramBotConnectionStatus(
     ownerId: string;
     actorId: string;
     telegramBotConnectionId: string;
+    expectedCredentialRevision: number;
     status: "ACTIVE" | "DISABLED";
     requestId: string;
     idempotencyKey: string;
@@ -779,6 +820,10 @@ export async function setOwnerTelegramBotConnectionStatus(
   const telegramBotConnectionId = requireText(
     input.telegramBotConnectionId,
     "telegramBotConnectionId",
+  );
+  const expectedCredentialRevision = requirePositiveRevision(
+    input.expectedCredentialRevision,
+    "expectedCredentialRevision",
   );
   const requestId = normalizeOperationToken(input.requestId, "requestId");
   const idempotencyKey = normalizeOperationToken(
@@ -796,10 +841,33 @@ export async function setOwnerTelegramBotConnectionStatus(
   }
   const targetStatus = input.status;
   const client = dependencies.client ?? prisma;
+  const now = dependencies.now ?? new Date();
   requireLifecycleDatabase(client);
 
   try {
     return await client.$transaction(async (tx) => {
+      const initiallyAffectedBindings =
+        await tx.representativeChannelBinding.findMany({
+          where: {
+            telegramBotConnectionId,
+            representative: { ownerId },
+          },
+          select: { representativeId: true },
+        });
+      const affectedRepresentativeIds = [
+        ...new Set(
+          initiallyAffectedBindings.map(
+            (binding) => binding.representativeId,
+          ),
+        ),
+      ].sort();
+      for (const representativeId of affectedRepresentativeIds) {
+        await tx.$executeRaw`
+          SELECT pg_advisory_xact_lock(
+            hashtext(${"telegram-bot-channel:" + representativeId})
+          )
+        `;
+      }
       await lockOwnerTelegramBotConnection(
         tx,
         ownerId,
@@ -817,7 +885,10 @@ export async function setOwnerTelegramBotConnectionStatus(
       const idempotencyRequestHash =
         buildOwnerTelegramBotIdempotencyRequestHash({
           action,
-          payload: { status: targetStatus },
+          payload: {
+            status: targetStatus,
+            expectedCredentialRevision,
+          },
         });
       const repeatedAudit = await findOwnerTelegramBotLifecycleAudit(
         tx,
@@ -832,11 +903,21 @@ export async function setOwnerTelegramBotConnectionStatus(
           action,
           idempotencyRequestHash,
         });
+        assertOwnerTelegramBotReplayState(
+          repeatedAudit,
+          buildOwnerTelegramBotAuditSnapshot(existing),
+        );
         return {
           connection: serializeOwnerConnection(existing),
           changed: false,
           replayed: true,
         };
+      }
+      if (existing.credentialRevision !== expectedCredentialRevision) {
+        throw new TelegramBotConnectionError(
+          "Telegram Bot credential changed since it was loaded.",
+          409,
+        );
       }
       if (
         existing.status === TelegramBotConnectionStatus.REVOKED
@@ -909,6 +990,25 @@ export async function setOwnerTelegramBotConnectionStatus(
           telegramBotConnectionId,
         );
       }
+      await tx.representativeChannelBinding.updateMany({
+        where: {
+          kind: RepresentativeChannelKind.TELEGRAM,
+          telegramBotConnectionId,
+          connectionId: existing.botId,
+          desiredState: ChannelDesiredState.ACTIVE,
+        },
+        data: targetStatus === TelegramBotConnectionStatus.ACTIVE
+          ? {
+              healthStatus: ChannelHealthStatus.UNKNOWN,
+              lastHealthCheckAt: null,
+              lastError: null,
+            }
+          : {
+              healthStatus: ChannelHealthStatus.UNHEALTHY,
+              lastHealthCheckAt: now,
+              lastError: "Telegram Bot connection is disabled.",
+            },
+      });
       await createOwnerTelegramBotLifecycleAudit(tx, {
         ...auditContext,
         actorId,
@@ -942,6 +1042,7 @@ export async function revokeOwnerTelegramBotConnection(
     ownerId: string;
     actorId: string;
     telegramBotConnectionId: string;
+    expectedCredentialRevision: number;
     requestId: string;
     idempotencyKey: string;
   },
@@ -956,6 +1057,10 @@ export async function revokeOwnerTelegramBotConnection(
     input.telegramBotConnectionId,
     "telegramBotConnectionId",
   );
+  const expectedCredentialRevision = requirePositiveRevision(
+    input.expectedCredentialRevision,
+    "expectedCredentialRevision",
+  );
   const requestId = normalizeOperationToken(input.requestId, "requestId");
   const idempotencyKey = normalizeOperationToken(
     input.idempotencyKey,
@@ -967,6 +1072,28 @@ export async function revokeOwnerTelegramBotConnection(
 
   try {
     return await client.$transaction(async (tx) => {
+      const initiallyAffectedBindings =
+        await tx.representativeChannelBinding.findMany({
+          where: {
+            telegramBotConnectionId,
+            representative: { ownerId },
+          },
+          select: { representativeId: true },
+        });
+      const affectedRepresentativeIds = [
+        ...new Set(
+          initiallyAffectedBindings.map(
+            (binding) => binding.representativeId,
+          ),
+        ),
+      ].sort();
+      for (const representativeId of affectedRepresentativeIds) {
+        await tx.$executeRaw`
+          SELECT pg_advisory_xact_lock(
+            hashtext(${"telegram-bot-channel:" + representativeId})
+          )
+        `;
+      }
       await lockOwnerTelegramBotConnection(
         tx,
         ownerId,
@@ -981,7 +1108,7 @@ export async function revokeOwnerTelegramBotConnection(
       const idempotencyRequestHash =
         buildOwnerTelegramBotIdempotencyRequestHash({
           action,
-          payload: {},
+          payload: { expectedCredentialRevision },
         });
       const repeatedAudit = await findOwnerTelegramBotLifecycleAudit(
         tx,
@@ -996,11 +1123,21 @@ export async function revokeOwnerTelegramBotConnection(
           action,
           idempotencyRequestHash,
         });
+        assertOwnerTelegramBotReplayState(
+          repeatedAudit,
+          buildOwnerTelegramBotAuditSnapshot(existing),
+        );
         return {
           connection: serializeOwnerConnection(existing),
           changed: false,
           replayed: true,
         };
+      }
+      if (existing.credentialRevision !== expectedCredentialRevision) {
+        throw new TelegramBotConnectionError(
+          "Telegram Bot credential changed since it was loaded.",
+          409,
+        );
       }
       if (
         existing.status === TelegramBotConnectionStatus.REVOKED
@@ -1095,6 +1232,7 @@ export async function unassignOwnerTelegramBotConnection(
     actorId: string;
     bindingId: string;
     telegramBotConnectionId: string;
+    expectedCurrentEndpointAssignmentRevision?: number;
     requestId: string;
     idempotencyKey: string;
   },
@@ -1110,6 +1248,13 @@ export async function unassignOwnerTelegramBotConnection(
     input.telegramBotConnectionId,
     "telegramBotConnectionId",
   );
+  const expectedCurrentEndpointAssignmentRevision =
+    input.expectedCurrentEndpointAssignmentRevision === undefined
+      ? null
+      : requirePositiveAssignmentRevision(
+          input.expectedCurrentEndpointAssignmentRevision,
+          "expectedCurrentEndpointAssignmentRevision",
+        );
   const requestId = normalizeOperationToken(input.requestId, "requestId");
   const idempotencyKey = normalizeOperationToken(
     input.idempotencyKey,
@@ -1177,6 +1322,7 @@ export async function unassignOwnerTelegramBotConnection(
           payload: {
             telegramBotConnectionId:
               expectedTelegramBotConnectionId,
+            expectedCurrentEndpointAssignmentRevision,
           },
         });
       const repeatedAudit = await tx.eventAudit.findFirst({
@@ -1211,6 +1357,28 @@ export async function unassignOwnerTelegramBotConnection(
           action,
           idempotencyRequestHash,
         });
+        const payload = isJsonObject(repeatedAudit.payload)
+          ? repeatedAudit.payload
+          : null;
+        const after = payload && isJsonObject(payload.after)
+          ? payload.after
+          : null;
+        const currentBinding = serializeOwnerTelegramBinding(existing);
+        if (
+          !after
+          || after.telegramBotConnectionId
+            !== currentBinding.telegramBotConnectionId
+          || after.connectionId !== currentBinding.connectionId
+          || after.endpointAssignmentRevision
+            !== currentBinding.endpointAssignmentRevision
+          || after.desiredState !== currentBinding.desiredState
+          || after.status !== currentBinding.status
+        ) {
+          throw new TelegramBotConnectionError(
+            "Telegram channel changed after the idempotent unassignment completed.",
+            409,
+          );
+        }
         return {
           binding: serializeOwnerTelegramBinding(existing),
           changed: false,
@@ -1220,6 +1388,11 @@ export async function unassignOwnerTelegramBotConnection(
       if (
         existing.telegramBotConnectionId
         !== expectedTelegramBotConnectionId
+        || (
+          expectedCurrentEndpointAssignmentRevision !== null
+          && existing.endpointAssignmentRevision
+            !== expectedCurrentEndpointAssignmentRevision
+        )
       ) {
         throw new TelegramBotConnectionError(
           "Telegram channel binding changed since it was loaded.",
@@ -1242,6 +1415,8 @@ export async function unassignOwnerTelegramBotConnection(
               telegramBotConnectionId:
                 expectedTelegramBotConnectionId,
               connectionId: existing.connectionId,
+              endpointAssignmentRevision:
+                existing.endpointAssignmentRevision,
               desiredState: existing.desiredState,
             },
             data: buildUnassignedTelegramBindingUpdate(),
@@ -1279,6 +1454,7 @@ export async function unassignOwnerTelegramBotConnection(
             idempotencyRequestHash,
             bindingId,
             connectionId: existing.telegramBotConnectionId,
+            expectedCurrentEndpointAssignmentRevision,
             affectedRepresentativeIds: [existing.representativeId],
             referenceCount:
               existing.telegramBotConnectionId === null ? 0 : 1,
@@ -1527,14 +1703,8 @@ export async function listActiveTelegramBotRuntimeConfigs(
     } catch {
       // One corrupt or stale credential must fail closed for that Bot without
       // preventing the supervisor from reconciling every other connection.
-      await markTelegramBotRuntimeHealth(
-        {
-          telegramBotConnectionId: connection.id,
-          healthStatus: ChannelHealthStatus.UNHEALTHY,
-          lastError: "Telegram Bot credential is unavailable.",
-        },
-        { client },
-      ).catch(() => undefined);
+      // Health is only writable by the holder of the current polling lease,
+      // so discovery deliberately has no health side effect.
     }
   }
   return configs;
@@ -1597,16 +1767,34 @@ export async function hasPersistedTelegramBotConnections(
 export async function markTelegramBotRuntimeHealth(
   input: {
     telegramBotConnectionId: string;
+    expectedCredentialRevision: number;
+    leaseHolderId: string;
+    leaseToken: string;
     healthStatus: "HEALTHY" | "DEGRADED" | "UNHEALTHY";
     lastError?: string | null;
     checkedAt?: Date;
   },
-  dependencies: Pick<TelegramBotConnectionDependencies, "client"> = {},
+  dependencies: Pick<
+    TelegramBotConnectionDependencies,
+    "client" | "now"
+  > = {},
 ) {
   const telegramBotConnectionId = requireText(
     input.telegramBotConnectionId,
     "telegramBotConnectionId",
   );
+  const expectedCredentialRevision = input.expectedCredentialRevision;
+  if (
+    !Number.isSafeInteger(expectedCredentialRevision)
+    || expectedCredentialRevision <= 0
+  ) {
+    throw new TelegramBotConnectionError(
+      "Telegram Bot credential revision is invalid.",
+      400,
+    );
+  }
+  const leaseHolderId = requireText(input.leaseHolderId, "leaseHolderId");
+  const leaseToken = requireText(input.leaseToken, "leaseToken");
   if (
     input.healthStatus !== ChannelHealthStatus.HEALTHY
     && input.healthStatus !== ChannelHealthStatus.DEGRADED
@@ -1618,6 +1806,7 @@ export async function markTelegramBotRuntimeHealth(
     );
   }
   const checkedAt = input.checkedAt ?? new Date();
+  const observedAt = dependencies.now ?? new Date();
   const lastError = sanitizeRuntimeError(input.lastError);
   const client = dependencies.client ?? prisma;
   if (client === prisma && !process.env.DATABASE_URL?.trim()) {
@@ -1627,10 +1816,87 @@ export async function markTelegramBotRuntimeHealth(
     );
   }
   return client.$transaction(async (tx) => {
+    const lockTarget = await tx.telegramBotConnection.findFirst({
+      where: { id: telegramBotConnectionId },
+      select: { botId: true },
+    });
+    if (!lockTarget) {
+      throw new TelegramBotConnectionError(
+        "Telegram Bot connection not found.",
+        404,
+      );
+    }
+    await lockTelegramBotConnection(tx, lockTarget.botId);
+    const current = await tx.telegramBotConnection.findFirst({
+      where: { id: telegramBotConnectionId },
+      select: {
+        botId: true,
+        status: true,
+        revokedAt: true,
+        activeCredentialId: true,
+        credentialRevision: true,
+        lastHealthCheckAt: true,
+        activeCredential: {
+          select: {
+            id: true,
+            version: true,
+            status: true,
+          },
+        },
+        runtimeLease: {
+          select: {
+            holderId: true,
+            leaseToken: true,
+            expiresAt: true,
+          },
+        },
+      },
+    });
+    if (!current) {
+      throw new TelegramBotConnectionError(
+        "Telegram Bot connection not found.",
+        404,
+      );
+    }
+    if (
+      current.status !== TelegramBotConnectionStatus.ACTIVE
+      || current.revokedAt !== null
+      || !current.activeCredentialId
+      || !current.activeCredential
+      || current.activeCredential.id !== current.activeCredentialId
+      || current.activeCredential.status
+        !== TelegramBotCredentialStatus.ACTIVE
+      || current.credentialRevision !== expectedCredentialRevision
+      || current.activeCredential.version !== expectedCredentialRevision
+      || !current.runtimeLease
+      || current.runtimeLease.holderId !== leaseHolderId
+      || current.runtimeLease.leaseToken !== leaseToken
+      || current.runtimeLease.expiresAt.getTime() <= observedAt.getTime()
+      || (
+        current.lastHealthCheckAt
+        && current.lastHealthCheckAt.getTime() > checkedAt.getTime()
+      )
+    ) {
+      throw new TelegramBotConnectionError(
+        "Telegram Bot runtime health report is stale.",
+        409,
+      );
+    }
     const updated = await tx.telegramBotConnection.updateMany({
       where: {
         id: telegramBotConnectionId,
+        status: TelegramBotConnectionStatus.ACTIVE,
         revokedAt: null,
+        activeCredentialId: current.activeCredentialId,
+        credentialRevision: expectedCredentialRevision,
+        lastHealthCheckAt: current.lastHealthCheckAt,
+        runtimeLease: {
+          is: {
+            holderId: leaseHolderId,
+            leaseToken,
+            expiresAt: { gt: observedAt },
+          },
+        },
       },
       data: {
         healthStatus: input.healthStatus,
@@ -1640,12 +1906,21 @@ export async function markTelegramBotRuntimeHealth(
     });
     if (updated.count !== 1) {
       throw new TelegramBotConnectionError(
-        "Telegram Bot connection not found.",
-        404,
+        "Telegram Bot runtime health report is stale.",
+        409,
       );
     }
     await tx.representativeChannelBinding.updateMany({
-      where: { telegramBotConnectionId },
+      where: {
+        kind: RepresentativeChannelKind.TELEGRAM,
+        telegramBotConnectionId,
+        connectionId: current.botId,
+        desiredState: ChannelDesiredState.ACTIVE,
+        OR: [
+          { lastHealthCheckAt: null },
+          { lastHealthCheckAt: { lte: checkedAt } },
+        ],
+      },
       data: {
         healthStatus: input.healthStatus,
         lastHealthCheckAt: checkedAt,
@@ -2074,10 +2349,47 @@ function assertOwnerTelegramBotIdempotencyReplay(
   }
 }
 
+function assertOwnerTelegramBotReplayState(
+  audit: { payload: unknown },
+  current: OwnerTelegramBotAuditSnapshot,
+) {
+  const payload = isJsonObject(audit.payload) ? audit.payload : null;
+  const after = payload && isJsonObject(payload.after)
+    ? payload.after
+    : null;
+  if (
+    !after
+    || after.status !== current.status
+    || after.label !== current.label
+    || after.credentialRevision !== current.credentialRevision
+    || after.hasActiveCredential !== current.hasActiveCredential
+    || after.referenceCount !== current.referenceCount
+    || after.activeReferenceCount !== current.activeReferenceCount
+  ) {
+    throw new TelegramBotConnectionError(
+      "Telegram Bot connection changed after the idempotent operation completed.",
+      409,
+    );
+  }
+}
+
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object"
     && value !== null
     && !Array.isArray(value);
+}
+
+function requirePositiveRevision(
+  value: number,
+  label: string,
+): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TelegramBotConnectionError(
+      `${label} must be a positive integer.`,
+      400,
+    );
+  }
+  return value;
 }
 
 function buildOwnerTelegramBotAuditSnapshot(
@@ -2107,6 +2419,7 @@ function buildUnassignedTelegramBindingUpdate() {
   return {
     telegramBotConnectionId: null,
     connectionId: null,
+    endpointAssignmentRevision: { increment: 1 },
     desiredState: ChannelDesiredState.DISCONNECTED,
     healthStatus: ChannelHealthStatus.UNKNOWN,
     externalUserId: null,
@@ -2122,6 +2435,7 @@ function serializeOwnerTelegramBinding(binding: {
   representativeId: string;
   telegramBotConnectionId: string | null;
   connectionId: string | null;
+  endpointAssignmentRevision: number;
   desiredState: ChannelDesiredState;
   status: string;
 }): OwnerTelegramBotUnassignmentResult["binding"] {
@@ -2130,6 +2444,8 @@ function serializeOwnerTelegramBinding(binding: {
     representativeId: binding.representativeId,
     telegramBotConnectionId: binding.telegramBotConnectionId,
     connectionId: binding.connectionId,
+    endpointAssignmentRevision:
+      binding.endpointAssignmentRevision,
     desiredState: binding.desiredState,
     status: binding.status,
   };
@@ -2174,6 +2490,19 @@ function requireText(value: string, label: string) {
     throw new TelegramBotConnectionError(`${label} is required.`, 400);
   }
   return normalized;
+}
+
+function requirePositiveAssignmentRevision(
+  value: number,
+  label: string,
+) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TelegramBotConnectionError(
+      `${label} must be a positive integer.`,
+      400,
+    );
+  }
+  return value;
 }
 
 function normalizeOptionalLabel(value: string | null | undefined) {

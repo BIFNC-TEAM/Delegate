@@ -37,6 +37,8 @@ type IdentityLinkRecord = {
   audienceIdentityId: string;
   issuer: string;
   connectionId: string | null;
+  verifiedAt: Date | null;
+  assuranceLevel: IdentityAssuranceLevel;
   revokedAt: Date | null;
 };
 
@@ -71,13 +73,15 @@ type AudienceBindingClient = {
     update(args: unknown): Promise<IdentityLinkRecord>;
     findMany?(args: unknown): Promise<
       Array<{
-        id?: string;
+        id: string;
+        audienceIdentityId: string;
         provider: IdentityLinkProvider;
         providerSubject: string;
         issuer: string;
         connectionId: string | null;
         verifiedAt: Date | null;
         assuranceLevel: IdentityAssuranceLevel;
+        revokedAt: Date | null;
         connectionProofs?: IdentityLinkConnectionProofRecord[];
       }>
     >;
@@ -101,11 +105,31 @@ export type CreateIdentityBindingChallengeInput = {
 };
 
 export type IdentityBindingChallengeGrant = {
+  challengeId: string;
   token: string;
   expiresAt: string;
   provider: IdentityLinkProvider;
   issuer: string;
   connectionId: string;
+};
+
+export type IdentityBindingChallengeStatus =
+  | "PENDING"
+  | "CONSUMED"
+  | "EXPIRED"
+  | "REVOKED";
+
+export type IdentityBindingChallengeSnapshot = {
+  challengeId: string;
+  status: IdentityBindingChallengeStatus;
+  expiresAt: string;
+  providerSubject?: string;
+};
+
+export type GetIdentityBindingChallengeStatusInput = {
+  audienceIdentityId: string;
+  challengeId: string;
+  now?: Date;
 };
 
 type ConsumeIdentityBindingChallengeScope = {
@@ -163,6 +187,107 @@ export const privateChannelIdentityProviders = {
   telegram: IdentityLinkProvider.TELEGRAM,
   matrix: IdentityLinkProvider.MATRIX,
 } as const;
+
+/**
+ * Serializes every Matrix proof mutation and final outbound proof check for one
+ * Delegate audience identity on one Application Service connection.
+ *
+ * Callers that also hold representative/room locks must acquire this lock
+ * last: representative -> room -> audience connection.
+ */
+export async function lockMatrixAudienceConnectionScope(
+  client: Pick<Prisma.TransactionClient, "$executeRaw">,
+  input: {
+    audienceIdentityId: string;
+    connectionId: string;
+  },
+) {
+  const audienceIdentityId = requireNonEmpty(
+    input.audienceIdentityId,
+    "Audience identity id",
+  );
+  const connectionId = normalizeConnectionId(input.connectionId);
+  await client.$executeRaw`
+    SELECT pg_advisory_xact_lock(
+      hashtext(${`matrix-audience-connection:${audienceIdentityId}:${connectionId}`})
+    )
+  `;
+}
+
+export async function hasActiveMatrixAudienceConnectionProof(
+  input: {
+    audienceIdentityId: string | null;
+    providerSubject: string;
+    issuer: string;
+    connectionId: string;
+  },
+  client: Pick<
+    Prisma.TransactionClient,
+    "identityLink" | "identityLinkConnectionProof"
+  > = prisma,
+): Promise<boolean> {
+  const audienceIdentityId = input.audienceIdentityId?.trim();
+  const providerSubject = normalizeMatrixUserId(input.providerSubject);
+  const issuer = normalizeMatrixServerName(input.issuer);
+  const connectionId = normalizeConnectionId(input.connectionId);
+  if (!audienceIdentityId || !issuer || !connectionId) return false;
+
+  const identityLink = await client.identityLink.findUnique({
+    where: {
+      provider_providerSubject: {
+        provider: IdentityLinkProvider.MATRIX,
+        providerSubject,
+      },
+    },
+    select: {
+      id: true,
+      audienceIdentityId: true,
+      issuer: true,
+      verifiedAt: true,
+      assuranceLevel: true,
+      revokedAt: true,
+    },
+  });
+  if (
+    !identityLink
+    || identityLink.audienceIdentityId !== audienceIdentityId
+    || identityLink.issuer.trim() !== issuer
+    || identityLink.revokedAt
+    || !identityLink.verifiedAt
+    || (
+      identityLink.assuranceLevel
+        !== IdentityAssuranceLevel.PLATFORM_VERIFIED
+      && identityLink.assuranceLevel
+        !== IdentityAssuranceLevel.STEP_UP_VERIFIED
+    )
+  ) {
+    return false;
+  }
+
+  const proof = await client.identityLinkConnectionProof.findUnique({
+    where: {
+      identityLinkId_issuer_connectionId: {
+        identityLinkId: identityLink.id,
+        issuer,
+        connectionId,
+      },
+    },
+    select: {
+      verifiedAt: true,
+      assuranceLevel: true,
+      revokedAt: true,
+    },
+  });
+  return Boolean(
+    proof
+    && !proof.revokedAt
+    && proof.verifiedAt
+    && (
+      proof.assuranceLevel === IdentityAssuranceLevel.PLATFORM_VERIFIED
+      || proof.assuranceLevel === IdentityAssuranceLevel.STEP_UP_VERIFIED
+    ),
+  );
+}
 
 export async function listActivePrivateChannelIdentityBindings(
   audienceIdentityId: string,
@@ -261,11 +386,67 @@ export function isVerifiedPrivateChannelIdentityBinding(
     && binding.issuer === expected.issuer
     && binding.connectionId === expected.connectionId
     && binding.verifiedAt !== null
-    && (
-      binding.assuranceLevel === IdentityAssuranceLevel.PLATFORM_VERIFIED
-      || binding.assuranceLevel === IdentityAssuranceLevel.STEP_UP_VERIFIED
-    )
+    && isVerifiedAssuranceLevel(binding.assuranceLevel)
   );
+}
+
+function isVerifiedAssuranceLevel(
+  assuranceLevel: IdentityAssuranceLevel,
+): boolean {
+  return assuranceLevel === IdentityAssuranceLevel.PLATFORM_VERIFIED
+    || assuranceLevel === IdentityAssuranceLevel.STEP_UP_VERIFIED;
+}
+
+/**
+ * Reads the lifecycle of one challenge without exposing the challenge secret
+ * or allowing another authenticated audience identity to probe its state.
+ */
+export async function getIdentityBindingChallengeStatus(
+  input: GetIdentityBindingChallengeStatusInput,
+  client: AudienceBindingClient = prisma as unknown as AudienceBindingClient,
+): Promise<IdentityBindingChallengeSnapshot | null> {
+  const audienceIdentityId = requireNonEmpty(
+    input.audienceIdentityId,
+    "Audience identity id",
+  );
+  const challengeId = requireNonEmpty(input.challengeId, "Binding challenge id");
+  const challenge = await client.identityBindingChallenge.findUnique({
+    where: { id: challengeId },
+    select: {
+      id: true,
+      audienceIdentityId: true,
+      expiresAt: true,
+      consumedAt: true,
+      revokedAt: true,
+      expectedProviderSubject: true,
+      metadata: true,
+    },
+  });
+  if (!challenge || challenge.audienceIdentityId !== audienceIdentityId) {
+    return null;
+  }
+
+  const now = input.now ?? new Date();
+  const status: IdentityBindingChallengeStatus = challenge.consumedAt
+    ? "CONSUMED"
+    : challenge.revokedAt
+      ? "REVOKED"
+      : challenge.expiresAt.getTime() <= now.getTime()
+        ? "EXPIRED"
+        : "PENDING";
+  const consumedProviderSubject =
+    status === "CONSUMED"
+      ? readConsumedProviderSubject(challenge.metadata)
+        ?? challenge.expectedProviderSubject
+      : null;
+  return {
+    challengeId: challenge.id,
+    status,
+    expiresAt: challenge.expiresAt.toISOString(),
+    ...(consumedProviderSubject
+      ? { providerSubject: consumedProviderSubject }
+      : {}),
+  };
 }
 
 /**
@@ -332,7 +513,10 @@ export async function createIdentityBindingChallenge(
       where: {
         audienceIdentityId,
         provider: input.provider,
-        issuer,
+        // A Matrix connection can accept federated MXIDs from many issuers.
+        // The newest command for that representative connection replaces any
+        // older command, including one minted for another homeserver.
+        ...(input.provider === IdentityLinkProvider.MATRIX ? {} : { issuer }),
         connectionId,
         consumedAt: null,
         revokedAt: null,
@@ -340,7 +524,7 @@ export async function createIdentityBindingChallenge(
       },
       data: { revokedAt: now },
     });
-    await tx.identityBindingChallenge.create({
+    return tx.identityBindingChallenge.create({
       data: {
         audienceIdentityId,
         provider: input.provider,
@@ -354,17 +538,16 @@ export async function createIdentityBindingChallenge(
     });
   };
 
-  if (client.$transaction) {
-    await runWithPrismaWriteConflictRetry(() =>
+  const challenge = client.$transaction
+    ? await runWithPrismaWriteConflictRetry(() =>
       client.$transaction!(run, {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       }),
-    );
-  } else {
-    await run(client);
-  }
+    )
+    : await run(client);
 
   return {
+    challengeId: challenge.id,
     token,
     expiresAt: expiresAt.toISOString(),
     provider: input.provider,
@@ -375,7 +558,9 @@ export async function createIdentityBindingChallenge(
 
 /**
  * Consumes a challenge exactly once and binds the verified provider subject to
- * the canonical Delegate identity. Existing links are never silently moved.
+ * the canonical Delegate identity. An exact replay may recover the committed
+ * result while its connection proof remains active, so channel post-actions can
+ * be retried without allowing another account or adapter scope to reuse it.
  */
 export async function consumeIdentityBindingChallenge(
   input: ConsumeIdentityBindingChallengeInput,
@@ -402,7 +587,21 @@ export async function consumeIdentityBindingChallenge(
     ) {
       throw new Error("Binding challenge does not match this provider.");
     }
-    if (challenge.consumedAt) throw new Error("Binding challenge has already been used.");
+    if (input.provider === IdentityLinkProvider.MATRIX) {
+      await lockMatrixAudienceConnectionScopeIfAvailable(tx, {
+        audienceIdentityId: challenge.audienceIdentityId,
+        connectionId,
+      });
+    }
+    if (challenge.consumedAt) {
+      return replayConsumedIdentityBindingChallenge({
+        tx,
+        challenge,
+        providerSubject,
+        issuer,
+        connectionId,
+      });
+    }
     if (challenge.revokedAt) throw new Error("Binding challenge has been revoked.");
     if (challenge.expiresAt.getTime() <= now.getTime()) {
       throw new Error("Binding challenge has expired.");
@@ -476,7 +675,13 @@ export async function consumeIdentityBindingChallenge(
         revokedAt: null,
         expiresAt: { gt: now },
       },
-      data: { consumedAt: now },
+      data: {
+        consumedAt: now,
+        metadata: {
+          ...(isRecord(challenge.metadata) ? challenge.metadata : {}),
+          consumedProviderSubject: providerSubject,
+        },
+      },
     });
     if (consumed.count !== 1) {
       throw new Error("Binding challenge was consumed concurrently.");
@@ -538,6 +743,15 @@ export async function consumeIdentityBindingChallenge(
           proofMetadata,
         },
       });
+      if (input.provider === IdentityLinkProvider.MATRIX) {
+        await replaceMatrixBindingWithinConnection({
+          tx,
+          audienceIdentityId: identity.id,
+          activeIdentityLinkId: identityLink.id,
+          connectionId,
+          now,
+        });
+      }
     }
 
     return {
@@ -559,6 +773,202 @@ export async function consumeIdentityBindingChallenge(
         }),
       )
     : run(client);
+}
+
+async function replayConsumedIdentityBindingChallenge(input: {
+  tx: AudienceBindingClient;
+  challenge: BindingChallengeRecord;
+  providerSubject: string;
+  issuer: string;
+  connectionId: string;
+}): Promise<IdentityBindingResult> {
+  const alreadyUsed = () =>
+    new Error("Binding challenge has already been used.");
+  if (
+    readConsumedProviderSubject(input.challenge.metadata)
+      !== input.providerSubject
+  ) {
+    throw alreadyUsed();
+  }
+
+  const [identity, link] = await Promise.all([
+    input.tx.audienceIdentity.findUnique({
+      where: { id: input.challenge.audienceIdentityId },
+      select: { id: true, status: true },
+    }),
+    input.tx.identityLink.findUnique({
+      where: {
+        provider_providerSubject: {
+          provider: input.challenge.provider,
+          providerSubject: input.providerSubject,
+        },
+      },
+      select: {
+        id: true,
+        audienceIdentityId: true,
+        issuer: true,
+        connectionId: true,
+        verifiedAt: true,
+        assuranceLevel: true,
+        revokedAt: true,
+      },
+    }),
+  ]);
+  if (
+    !identity
+    || identity.status !== "REGISTERED"
+    || !link
+    || link.audienceIdentityId !== identity.id
+    || link.issuer !== input.issuer
+    || link.revokedAt !== null
+    || link.verifiedAt === null
+    || !isVerifiedAssuranceLevel(link.assuranceLevel)
+  ) {
+    throw alreadyUsed();
+  }
+
+  let verifiedAt = link.verifiedAt;
+  if (input.tx.identityLinkConnectionProof) {
+    const proof = await input.tx.identityLinkConnectionProof.findUnique({
+      where: {
+        identityLinkId_issuer_connectionId: {
+          identityLinkId: link.id,
+          issuer: input.issuer,
+          connectionId: input.connectionId,
+        },
+      },
+    });
+    if (
+      !proof
+      || proof.revokedAt !== null
+      || proof.verifiedAt === null
+      || !isVerifiedAssuranceLevel(proof.assuranceLevel)
+    ) {
+      throw alreadyUsed();
+    }
+    verifiedAt = proof.verifiedAt;
+  } else if (
+    link.connectionId?.trim().toLowerCase() !== input.connectionId
+  ) {
+    throw alreadyUsed();
+  }
+
+  return {
+    audienceIdentityId: identity.id,
+    provider: input.challenge.provider,
+    providerSubject: input.providerSubject,
+    issuer: input.issuer,
+    verifiedAt: verifiedAt.toISOString(),
+    ...(isRecord(input.challenge.metadata)
+      ? { metadata: input.challenge.metadata }
+      : {}),
+  };
+}
+
+async function replaceMatrixBindingWithinConnection(input: {
+  tx: AudienceBindingClient;
+  audienceIdentityId: string;
+  activeIdentityLinkId: string;
+  connectionId: string;
+  now: Date;
+}) {
+  const { tx } = input;
+  if (!tx.identityLink.findMany || !tx.identityLinkConnectionProof) {
+    throw new Error(
+      "Matrix connection replacement is unavailable for this persistence client.",
+    );
+  }
+
+  const links = await tx.identityLink.findMany({
+    where: {
+      audienceIdentityId: input.audienceIdentityId,
+      provider: IdentityLinkProvider.MATRIX,
+      revokedAt: null,
+    },
+    select: {
+      id: true,
+      audienceIdentityId: true,
+      provider: true,
+      providerSubject: true,
+      issuer: true,
+      connectionId: true,
+      verifiedAt: true,
+      assuranceLevel: true,
+      revokedAt: true,
+      connectionProofs: {
+        select: {
+          identityLinkId: true,
+          issuer: true,
+          connectionId: true,
+          verifiedAt: true,
+          assuranceLevel: true,
+          revokedAt: true,
+          proofMetadata: true,
+        },
+      },
+    },
+  });
+
+  for (const link of links) {
+    if (
+      link.id === input.activeIdentityLinkId
+      || link.audienceIdentityId !== input.audienceIdentityId
+      || link.provider !== IdentityLinkProvider.MATRIX
+      || link.revokedAt !== null
+    ) {
+      continue;
+    }
+
+    const proofs = link.connectionProofs ?? [];
+    const matchingProofs = proofs.filter(
+      (proof) =>
+        proof.connectionId === input.connectionId
+        && proof.revokedAt === null
+        && proof.verifiedAt !== null
+        && (
+          proof.assuranceLevel === IdentityAssuranceLevel.PLATFORM_VERIFIED
+          || proof.assuranceLevel === IdentityAssuranceLevel.STEP_UP_VERIFIED
+        ),
+    );
+    for (const proof of matchingProofs) {
+      await tx.identityLinkConnectionProof.updateMany({
+        where: {
+          identityLinkId: link.id,
+          issuer: proof.issuer,
+          connectionId: proof.connectionId,
+          revokedAt: null,
+        },
+        data: { revokedAt: input.now },
+      });
+    }
+
+    const isLegacyConnection =
+      proofs.length === 0
+      && link.connectionId?.trim().toLowerCase() === input.connectionId;
+    if (matchingProofs.length === 0 && !isLegacyConnection) {
+      continue;
+    }
+
+    const activeProofCount = await tx.identityLinkConnectionProof.count({
+      where: {
+        identityLinkId: link.id,
+        revokedAt: null,
+        verifiedAt: { not: null },
+        assuranceLevel: {
+          in: [
+            IdentityAssuranceLevel.PLATFORM_VERIFIED,
+            IdentityAssuranceLevel.STEP_UP_VERIFIED,
+          ],
+        },
+      },
+    });
+    if (activeProofCount === 0) {
+      await tx.identityLink.update({
+        where: { id: link.id },
+        data: { revokedAt: input.now },
+      });
+    }
+  }
 }
 
 /**
@@ -603,6 +1013,12 @@ export async function revokePrivateChannelIdentityBinding(
         "Private-channel unlink must target a registered Web identity.",
       );
     }
+    if (input.provider === IdentityLinkProvider.MATRIX) {
+      await lockMatrixAudienceConnectionScopeIfAvailable(tx, {
+        audienceIdentityId,
+        connectionId,
+      });
+    }
 
     // A retrying DELETE must also invalidate a challenge created after an
     // earlier unlink. Challenge revocation is therefore independent from
@@ -611,7 +1027,10 @@ export async function revokePrivateChannelIdentityBinding(
       where: {
         audienceIdentityId,
         provider: input.provider,
-        issuer,
+        // Matrix adapters accept federated MXIDs, so unlinking one proof must
+        // invalidate every pending command for this representative connection,
+        // including a replacement minted for another homeserver.
+        ...(input.provider === IdentityLinkProvider.MATRIX ? {} : { issuer }),
         connectionId,
         consumedAt: null,
         revokedAt: null,
@@ -724,6 +1143,23 @@ export function hashBindingToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
+async function lockMatrixAudienceConnectionScopeIfAvailable(
+  client: AudienceBindingClient,
+  input: {
+    audienceIdentityId: string;
+    connectionId: string;
+  },
+) {
+  const lockClient = client as AudienceBindingClient
+    & Partial<Pick<Prisma.TransactionClient, "$executeRaw">>;
+  if (typeof lockClient.$executeRaw !== "function") return;
+  await lockMatrixAudienceConnectionScope(
+    lockClient as AudienceBindingClient
+      & Pick<Prisma.TransactionClient, "$executeRaw">,
+    input,
+  );
+}
+
 function normalizeBindingTokenHash(value: string): string {
   const tokenHash = requireNonEmpty(value, "Binding token hash").toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(tokenHash)) {
@@ -767,6 +1203,12 @@ function normalizeIssuer(
   return provider === IdentityLinkProvider.MATRIX
     ? normalizeMatrixServerName(issuer)
     : issuer.toLowerCase().slice(0, 255);
+}
+
+function readConsumedProviderSubject(metadata: unknown): string | null {
+  if (!isRecord(metadata)) return null;
+  const value = metadata.consumedProviderSubject;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

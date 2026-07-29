@@ -89,11 +89,14 @@ describe("canonical channel availability", () => {
         telegramEndpoint: {
           conversationConnectionId: "111111111",
           representativeConnectionId: "222222222",
+          conversationRepresentativeAssignmentRevision: 1,
+          representativeAssignmentRevision: 2,
           expectedConnectionId: "111111111",
           representativeTelegramBotConnectionId: "connection-b",
           representativeTelegramBot: {
             id: "connection-b",
             botId: "222222222",
+            status: "ACTIVE",
           },
         },
       }),
@@ -108,17 +111,171 @@ describe("canonical channel availability", () => {
         telegramEndpoint: {
           conversationConnectionId: "222222222",
           representativeConnectionId: "222222222",
+          conversationRepresentativeAssignmentRevision: 1,
+          representativeAssignmentRevision: 1,
           expectedConnectionId: "111111111",
           representativeTelegramBotConnectionId: "connection-b",
           representativeTelegramBot: {
             id: "connection-b",
             botId: "222222222",
+            status: "ACTIVE",
           },
         },
       }),
     ).toEqual({
       available: false,
       code: "telegram_connection_reassigned",
+    });
+  });
+
+  it("requires an active Bot and an exact positive Telegram assignment epoch", () => {
+    const telegramEndpoint = {
+      conversationConnectionId: "111111111",
+      representativeConnectionId: "111111111",
+      expectedConnectionId: "111111111",
+      representativeTelegramBotConnectionId: "connection-a",
+      representativeTelegramBot: {
+        id: "connection-a",
+        botId: "111111111",
+        status: "ACTIVE",
+      },
+    };
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        channel: "telegram",
+        telegramEndpoint: {
+          ...telegramEndpoint,
+          conversationRepresentativeAssignmentRevision: 1,
+          representativeAssignmentRevision: 1,
+        },
+      }),
+    ).toEqual({ available: true, code: "available" });
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        channel: "telegram",
+        telegramEndpoint: {
+          ...telegramEndpoint,
+          conversationRepresentativeAssignmentRevision: null,
+          representativeAssignmentRevision: 1,
+        },
+      }),
+    ).toEqual({
+      available: false,
+      code: "telegram_connection_reassigned",
+    });
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        channel: "telegram",
+        telegramEndpoint: {
+          ...telegramEndpoint,
+          // The Bot id cycled A -> B -> A, but the old conversation epoch
+          // remains permanently fenced.
+          conversationRepresentativeAssignmentRevision: 1,
+          representativeAssignmentRevision: 3,
+        },
+      }),
+    ).toEqual({
+      available: false,
+      code: "telegram_connection_reassigned",
+    });
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        channel: "telegram",
+        telegramEndpoint: {
+          ...telegramEndpoint,
+          conversationRepresentativeAssignmentRevision: 3,
+          representativeAssignmentRevision: 3,
+          representativeTelegramBot: {
+            ...telegramEndpoint.representativeTelegramBot,
+            status: "DISABLED",
+          },
+        },
+      }),
+    ).toEqual({
+      available: false,
+      code: "telegram_connection_reassigned",
+    });
+  });
+
+  it("fails closed when a Matrix room belongs to a reassigned representative identity", () => {
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        matrixEndpoint: {
+          conversationRepresentativeMatrixUserId:
+            "@_delegate_rep_old:example.org",
+          representativeMatrixUserId: "@_delegate_rep_new:example.org",
+        },
+      }),
+    ).toEqual({
+      available: false,
+      code: "matrix_identity_reassigned",
+    });
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        matrixEndpoint: {
+          conversationRepresentativeMatrixUserId:
+            "@_delegate_rep:example.org",
+          representativeMatrixUserId:
+            "@_delegate_rep:example.org",
+          conversationRepresentativeAssignmentRevision: 0,
+          representativeAssignmentRevision: 0,
+        },
+      }),
+    ).toEqual({
+      available: false,
+      code: "matrix_identity_reassigned",
+    });
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        matrixEndpoint: {
+          conversationRepresentativeMatrixUserId:
+            "@_delegate_rep:example.org",
+          representativeMatrixUserId: "@_delegate_rep:example.org",
+          conversationRepresentativeAssignmentRevision: 1,
+          representativeAssignmentRevision: 1,
+        },
+      }),
+    ).toEqual({
+      available: true,
+      code: "available",
+    });
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        matrixEndpoint: {
+          // A -> B -> A returns to the same MXID, but the old room remains
+          // fenced by the immutable assignment revision.
+          conversationRepresentativeMatrixUserId:
+            "@_delegate_rep:example.org",
+          representativeMatrixUserId:
+            "@_delegate_rep:example.org",
+          conversationRepresentativeAssignmentRevision: 1,
+          representativeAssignmentRevision: 3,
+        },
+      }),
+    ).toEqual({
+      available: false,
+      code: "matrix_identity_reassigned",
+    });
+    expect(
+      resolveChannelAvailability({
+        ...available,
+        matrixEndpoint: {
+          conversationRepresentativeMatrixUserId:
+            "@_delegate_rep:example.org",
+          representativeMatrixUserId: null,
+        },
+      }),
+    ).toEqual({
+      available: true,
+      code: "available",
     });
   });
 });

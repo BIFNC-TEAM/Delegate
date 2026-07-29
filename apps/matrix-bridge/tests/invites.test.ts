@@ -76,6 +76,7 @@ describe("managed Matrix invite joining", () => {
     mockGetMatrixVirtualUserBinding.mockResolvedValue({
       matrixUserId: representativeMatrixUserId,
       representativeId: "representative-1",
+      endpointAssignmentRevision: 1,
     });
     mockIsolateMatrixConversationRoom.mockResolvedValue(true);
     mockClearMatrixRoomRemoteValidationFailures.mockResolvedValue(false);
@@ -111,6 +112,24 @@ describe("managed Matrix invite joining", () => {
 
     expect(fetch).not.toHaveBeenCalled();
     expect(mockActivateVerifiedMatrixDirectConversation).not.toHaveBeenCalled();
+  });
+
+  it("does not validate or join an orphaned room assignment", async () => {
+    mockGetMatrixRoomSecuritySnapshot.mockResolvedValue({
+      ...securitySnapshot("PENDING_REMOTE_VALIDATION"),
+      currentRepresentativeAssignmentRevision: null,
+    });
+
+    await expect(
+      joinManagedMatrixInvites([directInviteEvent()]),
+    ).resolves.toEqual([]);
+
+    expect(mockIsolateMatrixConversationRoom).toHaveBeenCalledWith({
+      roomId,
+      reason: "matrix_remote_room_validation_failed",
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(mockRecordMatrixRuntimeHealth).not.toHaveBeenCalled();
   });
 
   it("does not register or join a non-representative virtual user", async () => {
@@ -169,6 +188,7 @@ describe("managed Matrix invite joining", () => {
       matrixUserId: representativeMatrixUserId,
       status: "DEGRADED",
       errorCode: "matrix_join_502",
+      expectedAssignmentRevision: 1,
     });
 
     vi.mocked(fetch).mockReset();
@@ -193,7 +213,20 @@ describe("managed Matrix invite joining", () => {
     expect(mockRecordMatrixRuntimeHealth).toHaveBeenCalledWith({
       matrixUserId: representativeMatrixUserId,
       status: "HEALTHY",
+      expectedAssignmentRevision: 1,
     });
+    expect(
+      mockWithActiveMatrixRepresentativeChannelFence,
+    ).toHaveBeenLastCalledWith({
+      representativeId: "representative-1",
+      representativeMatrixUserId,
+      room: {
+        roomId,
+        conversationId: "conversation-1",
+        audienceMatrixUserId,
+        expectedSecurityState: "PENDING_REMOTE_VALIDATION",
+      },
+    }, expect.any(Function));
   });
 
   it.each([400, 401, 403, 404, 409, 422])(
@@ -417,6 +450,7 @@ describe("managed Matrix invite joining", () => {
       matrixUserId: representativeMatrixUserId,
       status: "DEGRADED",
       errorCode: "matrix_runtime_register_502",
+      expectedAssignmentRevision: 1,
     });
   });
 
@@ -424,6 +458,7 @@ describe("managed Matrix invite joining", () => {
     mockGetMatrixVirtualUserBinding.mockResolvedValue({
       matrixUserId: "@_delegate_rep:EXAMPLE.ORG",
       representativeId: "representative-1",
+      endpointAssignmentRevision: 1,
     });
     mockGetMatrixRoomSecuritySnapshot.mockResolvedValue({
       ...securitySnapshot("PENDING_REMOTE_VALIDATION"),
@@ -708,6 +743,7 @@ describe("active Matrix room revalidation", () => {
       matrixUserId: representativeMatrixUserId,
       status: "DEGRADED",
       errorCode: "matrix_runtime_joined_members_not_exactly_direct",
+      expectedAssignmentRevision: 1,
     });
   });
 
@@ -876,6 +912,8 @@ function securitySnapshot(
     remoteValidationAttemptCount: 0,
     audienceMatrixUserId,
     representativeMatrixUserId,
+    representativeAssignmentRevision: 1,
+    currentRepresentativeAssignmentRevision: 1,
     representativeChannelDesiredState: "ACTIVE",
   };
 }

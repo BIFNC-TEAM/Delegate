@@ -133,6 +133,35 @@ export function planTelegramBotChannelBindingSynchronization(
   return { updateBindingIds, conflictingBindingIds };
 }
 
+export function buildTelegramAssignmentEpochScope(input: {
+  representativeId: string;
+  botId: string;
+  chatId: string | number;
+  assignmentRevision: number;
+}) {
+  const representativeId = input.representativeId.trim();
+  const botId = input.botId.trim();
+  const chatId = String(input.chatId).trim();
+  if (
+    !representativeId
+    || !/^[1-9]\d*$/.test(botId)
+    || !chatId
+    || !Number.isSafeInteger(input.assignmentRevision)
+    || input.assignmentRevision <= 0
+  ) {
+    throw new Error(
+      "Telegram assignment epoch scope requires valid representative, Bot, chat, and revision coordinates.",
+    );
+  }
+  return {
+    scopedTelegramChatId:
+      `${botId}:${chatId}:r${input.assignmentRevision}`,
+    bindingKey:
+      `TELEGRAM:${representativeId}:${botId}:${chatId}:`
+      + `r${input.assignmentRevision}`,
+  };
+}
+
 export function resolveTelegramRuntimeConfig(
   env: Record<string, string | undefined> = process.env,
 ): TelegramRuntimeConfig {

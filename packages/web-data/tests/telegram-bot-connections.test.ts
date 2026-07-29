@@ -91,6 +91,7 @@ type FakeBinding = {
   sourceProvider: ChannelSourceProvider | null;
   connectionId: string | null;
   telegramBotConnectionId: string | null;
+  endpointAssignmentRevision: number;
   desiredState: ChannelDesiredState;
   healthStatus: ChannelHealthStatus;
   externalUserId: string | null;
@@ -106,6 +107,13 @@ type FakeAudit = {
   id: string;
   representativeId: string;
   payload: Record<string, unknown>;
+};
+
+type FakeRuntimeLease = {
+  telegramBotConnectionId: string;
+  holderId: string;
+  leaseToken: string;
+  expiresAt: Date;
 };
 
 function createFakeClient() {
@@ -131,6 +139,8 @@ function createFakeClient() {
   ];
   const bindings: FakeBinding[] = [];
   const audits: FakeAudit[] = [];
+  const runtimeLeases = new Map<string, FakeRuntimeLease>();
+  const advisoryLocks: string[] = [];
 
   const enrich = (connection: FakeConnection) => ({
     ...connection,
@@ -145,6 +155,7 @@ function createFakeClient() {
     representativeBindings: bindings.filter(
       (binding) => binding.telegramBotConnectionId === connection.id,
     ),
+    runtimeLease: runtimeLeases.get(connection.id) ?? null,
   });
   const selectConnection = (
     connection: FakeConnection,
@@ -223,6 +234,45 @@ function createFakeClient() {
       && connection.credentialRevision !== where.credentialRevision
     ) return false;
     if (
+      "lastHealthCheckAt" in where
+      && (
+        where.lastHealthCheckAt === null
+          ? connection.lastHealthCheckAt !== null
+          : where.lastHealthCheckAt instanceof Date
+            && connection.lastHealthCheckAt?.getTime()
+              !== where.lastHealthCheckAt.getTime()
+      )
+    ) return false;
+    if (
+      where.runtimeLease
+      && typeof where.runtimeLease === "object"
+      && "is" in where.runtimeLease
+      && where.runtimeLease.is
+      && typeof where.runtimeLease.is === "object"
+    ) {
+      const lease = runtimeLeases.get(connection.id);
+      const leaseWhere = where.runtimeLease.is as Record<string, unknown>;
+      if (
+        !lease
+        || (
+          typeof leaseWhere.holderId === "string"
+          && lease.holderId !== leaseWhere.holderId
+        )
+        || (
+          typeof leaseWhere.leaseToken === "string"
+          && lease.leaseToken !== leaseWhere.leaseToken
+        )
+        || (
+          leaseWhere.expiresAt
+          && typeof leaseWhere.expiresAt === "object"
+          && "gt" in leaseWhere.expiresAt
+          && leaseWhere.expiresAt.gt instanceof Date
+          && lease.expiresAt.getTime()
+            <= leaseWhere.expiresAt.gt.getTime()
+        )
+      ) return false;
+    }
+    if (
       Array.isArray(where.OR)
       && !where.OR.some((selector) =>
         matchesConnectionWhere(
@@ -256,6 +306,11 @@ function createFakeClient() {
     if (
       "connectionId" in where
       && binding.connectionId !== where.connectionId
+    ) return false;
+    if (
+      typeof where.endpointAssignmentRevision === "number"
+      && binding.endpointAssignmentRevision
+        !== where.endpointAssignmentRevision
     ) return false;
     if (
       typeof where.desiredState === "string"
@@ -292,7 +347,15 @@ function createFakeClient() {
   };
 
   const client = {
-    $executeRaw: async () => 1,
+    $executeRaw: async (
+      _query: TemplateStringsArray,
+      ...values: unknown[]
+    ) => {
+      if (typeof values[0] === "string") {
+        advisoryLocks.push(values[0]);
+      }
+      return 1;
+    },
     $transaction: async <T>(callback: (tx: unknown) => Promise<T>) =>
       callback(client),
     owner: {
@@ -508,12 +571,30 @@ function createFakeClient() {
       },
       updateMany: async (args: {
         where: Record<string, unknown>;
-        data: Partial<FakeBinding>;
+        data: Omit<
+          Partial<FakeBinding>,
+          "endpointAssignmentRevision"
+        > & {
+          endpointAssignmentRevision?:
+            | number
+            | { increment: number };
+        };
       }) => {
         let count = 0;
         for (const binding of bindings) {
           if (!matchesBindingWhere(binding, args.where)) continue;
-          Object.assign(binding, args.data, {
+          const revisionUpdate =
+            args.data.endpointAssignmentRevision;
+          const nextRevision =
+            typeof revisionUpdate === "object"
+              ? binding.endpointAssignmentRevision
+                + revisionUpdate.increment
+              : revisionUpdate;
+          Object.assign(binding, {
+            ...args.data,
+            ...(nextRevision === undefined
+              ? {}
+              : { endpointAssignmentRevision: nextRevision }),
             updatedAt: new Date(),
           });
           count += 1;
@@ -596,6 +677,8 @@ function createFakeClient() {
     bindings,
     representatives,
     audits,
+    runtimeLeases,
+    advisoryLocks,
   };
 }
 
@@ -617,6 +700,7 @@ function addTelegramBinding(
     sourceProvider: ChannelSourceProvider.TELEGRAM,
     connectionId: input.botId ?? "1234567890",
     telegramBotConnectionId: input.telegramBotConnectionId,
+    endpointAssignmentRevision: 1,
     desiredState: ChannelDesiredState.ACTIVE,
     healthStatus: ChannelHealthStatus.HEALTHY,
     externalUserId: "@delegate_test_bot",
@@ -746,6 +830,7 @@ describe("Telegram Bot connections", () => {
         ownerId: "owner-1",
         actorId: "owner-1",
         telegramBotConnectionId: created.connection.id,
+        expectedCredentialRevision: 1,
         token: tokenTwo,
         requestId: "request-rotate",
         idempotencyKey: "rotate-bot",
@@ -773,6 +858,26 @@ describe("Telegram Bot connections", () => {
         { client: fake.client as never, env: keyEnv },
       ),
     ).toMatchObject({ token: tokenTwo, credentialRevision: 2 });
+    await expect(
+      setOwnerTelegramBotConnectionStatus(
+        {
+          ownerId: "owner-1",
+          actorId: "owner-1",
+          telegramBotConnectionId: created.connection.id,
+          expectedCredentialRevision: 1,
+          status: "DISABLED",
+          requestId: "request-stale-after-rotate",
+          idempotencyKey: "stale-after-rotate",
+        },
+        { client: fake.client as never },
+      ),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      message: "Telegram Bot credential changed since it was loaded.",
+    });
+    expect(fake.connections[0]!.status).toBe(
+      TelegramBotConnectionStatus.ACTIVE,
+    );
   });
 
   it("disables and resumes an owner Bot with durable idempotent auditing", async () => {
@@ -806,6 +911,7 @@ describe("Telegram Bot connections", () => {
       ownerId: "owner-1",
       actorId: "owner-1",
       telegramBotConnectionId: created.connection.id,
+      expectedCredentialRevision: 1,
       status: "DISABLED" as const,
       requestId: "request-disable",
       idempotencyKey: "disable-once",
@@ -829,6 +935,15 @@ describe("Telegram Bot connections", () => {
       status: TelegramBotCredentialStatus.ACTIVE,
     });
     expect(fake.credentials[0]!.ciphertext).not.toBeNull();
+    expect(fake.bindings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          healthStatus: ChannelHealthStatus.UNHEALTHY,
+          lastError: "Telegram Bot connection is disabled.",
+          lastHealthCheckAt: new Date("2026-07-27T06:00:00.000Z"),
+        }),
+      ]),
+    );
     expect(fake.audits).toHaveLength(1);
     expect(fake.audits[0]).toMatchObject({
       representativeId: "rep-1",
@@ -903,6 +1018,15 @@ describe("Telegram Bot connections", () => {
         status: TelegramBotConnectionStatus.ACTIVE,
       },
     });
+    expect(fake.bindings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          healthStatus: ChannelHealthStatus.UNKNOWN,
+          lastError: null,
+          lastHealthCheckAt: null,
+        }),
+      ]),
+    );
     expect(fake.audits.at(-1)?.payload).toMatchObject({
       action: "TELEGRAM_BOT_CONNECTION_RESUMED",
       before: { status: TelegramBotConnectionStatus.DISABLED },
@@ -938,6 +1062,7 @@ describe("Telegram Bot connections", () => {
         ownerId: "owner-1",
         actorId: "owner-1",
         telegramBotConnectionId: created.connection.id,
+        expectedCredentialRevision: 1,
         status: "DISABLED",
         requestId: "request-rotate-disable",
         idempotencyKey: "rotate-disable",
@@ -968,6 +1093,7 @@ describe("Telegram Bot connections", () => {
       ownerId: "owner-1",
       actorId: "owner-1",
       telegramBotConnectionId: created.connection.id,
+      expectedCredentialRevision: 1,
       token: tokenTwo,
       label: "Renamed",
       requestId: "request-explicit-rotate",
@@ -1105,6 +1231,7 @@ describe("Telegram Bot connections", () => {
         ownerId: "owner-1",
         actorId: "owner-1",
         telegramBotConnectionId: created.connection.id,
+        expectedCredentialRevision: 1,
         token: tokenTwo,
         requestId: "request-pre-revoke-rotate",
         idempotencyKey: "pre-revoke-rotate",
@@ -1125,9 +1252,11 @@ describe("Telegram Bot connections", () => {
       ownerId: "owner-1",
       actorId: "owner-1",
       telegramBotConnectionId: created.connection.id,
+      expectedCredentialRevision: 2,
       requestId: "request-revoke",
       idempotencyKey: "revoke-once",
     };
+    const lockCountBeforeRevoke = fake.advisoryLocks.length;
 
     const revoked = await revokeOwnerTelegramBotConnection(
       revokeInput,
@@ -1136,6 +1265,13 @@ describe("Telegram Bot connections", () => {
         now: new Date("2026-07-27T06:20:00.000Z"),
       },
     );
+    expect(
+      fake.advisoryLocks.slice(lockCountBeforeRevoke),
+    ).toEqual([
+      "telegram-bot-channel:rep-1",
+      "telegram-bot-channel:rep-2",
+      "telegram-bot-connection:1234567890",
+    ]);
     expect(revoked).toMatchObject({
       changed: true,
       replayed: false,
@@ -1162,6 +1298,7 @@ describe("Telegram Bot connections", () => {
       expect(binding).toMatchObject({
         telegramBotConnectionId: null,
         connectionId: null,
+        endpointAssignmentRevision: 2,
         desiredState: ChannelDesiredState.DISCONNECTED,
         healthStatus: ChannelHealthStatus.UNKNOWN,
         externalUserId: null,
@@ -1204,6 +1341,7 @@ describe("Telegram Bot connections", () => {
           ownerId: "owner-1",
           actorId: "owner-1",
           telegramBotConnectionId: created.connection.id,
+          expectedCredentialRevision: 2,
           status: "ACTIVE",
           requestId: "request-resume-revoked",
           idempotencyKey: "resume-revoked",
@@ -1259,6 +1397,7 @@ describe("Telegram Bot connections", () => {
         id: selected.id,
         telegramBotConnectionId: null,
         connectionId: null,
+        endpointAssignmentRevision: 2,
         desiredState: ChannelDesiredState.DISCONNECTED,
         status: "DISCONNECTED",
       },
@@ -1267,6 +1406,7 @@ describe("Telegram Bot connections", () => {
     expect(shared).toMatchObject({
       telegramBotConnectionId: created.connection.id,
       connectionId: created.connection.botId,
+      endpointAssignmentRevision: 1,
       desiredState: ChannelDesiredState.ACTIVE,
       status: "CONFIGURED",
     });
@@ -1390,6 +1530,7 @@ describe("Telegram Bot connections", () => {
           ownerId: "owner-1",
           actorId: "owner-1",
           telegramBotConnectionId: created.connection.id,
+          expectedCredentialRevision: 1,
           status: "DISABLED",
           requestId: "request-no-anchor-disable",
           idempotencyKey: "no-anchor-disable",
@@ -1718,8 +1859,10 @@ describe("Telegram Bot connections", () => {
         (connection) => connection.id === first.connection.id,
       ),
     ).toMatchObject({
-      healthStatus: ChannelHealthStatus.UNHEALTHY,
-      lastError: "Telegram Bot credential is unavailable.",
+      // Runtime discovery is read-only. The lease holder reports the
+      // credential failure through the revision-fenced health writer.
+      healthStatus: ChannelHealthStatus.UNKNOWN,
+      lastError: null,
     });
   });
 
@@ -1747,6 +1890,7 @@ describe("Telegram Bot connections", () => {
       sourceProvider: ChannelSourceProvider.TELEGRAM,
       connectionId: created.connection.botId,
       telegramBotConnectionId: created.connection.id,
+      endpointAssignmentRevision: 1,
       desiredState: ChannelDesiredState.ACTIVE,
       healthStatus: ChannelHealthStatus.UNKNOWN,
       externalUserId: "@delegate_test_bot",
@@ -1757,15 +1901,27 @@ describe("Telegram Bot connections", () => {
       createdAt: new Date("2026-07-27T05:30:00.000Z"),
       updatedAt: new Date("2026-07-27T05:30:00.000Z"),
     });
+    fake.runtimeLeases.set(created.connection.id, {
+      telegramBotConnectionId: created.connection.id,
+      holderId: "supervisor-a",
+      leaseToken: "lease-token-a",
+      expiresAt: new Date("2026-07-27T06:05:00.000Z"),
+    });
 
     const health = await markTelegramBotRuntimeHealth(
       {
         telegramBotConnectionId: created.connection.id,
+        expectedCredentialRevision: 1,
+        leaseHolderId: "supervisor-a",
+        leaseToken: "lease-token-a",
         healthStatus: "UNHEALTHY",
         lastError: `token=${tokenOne} https://api.telegram.org/private`,
         checkedAt: new Date("2026-07-27T06:00:00.000Z"),
       },
-      { client: fake.client as never },
+      {
+        client: fake.client as never,
+        now: new Date("2026-07-27T06:00:00.000Z"),
+      },
     );
     expect(health.lastError).toBe(
       "token=[redacted] [redacted-url]",
@@ -1774,5 +1930,43 @@ describe("Telegram Bot connections", () => {
       healthStatus: ChannelHealthStatus.UNHEALTHY,
       lastError: "token=[redacted] [redacted-url]",
     });
+
+    await expect(
+      markTelegramBotRuntimeHealth(
+        {
+          telegramBotConnectionId: created.connection.id,
+          expectedCredentialRevision: 1,
+          leaseHolderId: "stale-supervisor",
+          leaseToken: "stale-lease",
+          healthStatus: "HEALTHY",
+          checkedAt: new Date("2026-07-27T06:01:00.000Z"),
+        },
+        {
+          client: fake.client as never,
+          now: new Date("2026-07-27T06:01:00.000Z"),
+        },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(fake.connections[0]).toMatchObject({
+      healthStatus: ChannelHealthStatus.UNHEALTHY,
+      lastError: "token=[redacted] [redacted-url]",
+    });
+
+    await expect(
+      markTelegramBotRuntimeHealth(
+        {
+          telegramBotConnectionId: created.connection.id,
+          expectedCredentialRevision: 1,
+          leaseHolderId: "supervisor-a",
+          leaseToken: "lease-token-a",
+          healthStatus: "HEALTHY",
+          checkedAt: new Date("2026-07-27T05:59:00.000Z"),
+        },
+        {
+          client: fake.client as never,
+          now: new Date("2026-07-27T06:01:00.000Z"),
+        },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409 });
   });
 });

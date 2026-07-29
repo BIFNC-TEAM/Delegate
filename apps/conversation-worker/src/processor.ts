@@ -2,6 +2,7 @@ import {
   generateRepresentativeReply,
   planNaturalLanguageComputeRequest,
   renderGroundedKnowledgeFallback,
+  type ModelRuntimeState,
 } from "@delegate/model-runtime";
 import {
   buildComputeRequestsFromDelegationPlan,
@@ -49,9 +50,11 @@ import {
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
   resolveTelegramBotRuntimeCredential,
+  withActiveTelegramRepresentativeChannelFence,
   waitGenerationRunForComputeApproval,
   type AuthorizedDelegationKnowledge,
   type ConversationEntitlementReservation,
+  type GenerationRuntimeOutcome,
 } from "@delegate/web-data";
 
 import type { ConversationWorkerConfig } from "./config";
@@ -60,6 +63,22 @@ import {
   isComputeGenerationExecutionInProgressError,
 } from "./compute-client";
 import { sendMatrixRepresentativeMessage } from "./matrix-outbound";
+
+function resolveFallbackReason(
+  state: ModelRuntimeState,
+): Extract<GenerationRuntimeOutcome, { mode: "fallback" }>["fallbackReason"] {
+  if (
+    state === "disabled"
+    || state === "missing_credentials"
+    || state === "unsupported_provider"
+  ) {
+    return "model_unavailable";
+  }
+  if (state === "invalid_subagent_route") {
+    return "policy_fallback";
+  }
+  return "provider_failed";
+}
 
 export async function processNextConversationWork(config: ConversationWorkerConfig) {
   const telegramWorkerEnabled =
@@ -96,6 +115,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       } else {
         externalMessageId = await sendTelegramOperatorMessage({
           config,
+          conversationId: operatorItem.conversationId,
           chatId: operatorItem.externalConversationId,
           ...(operatorItem.telegramConnectionId
             ? { connectionId: operatorItem.telegramConnectionId }
@@ -637,6 +657,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
 
     let replyText = renderReplyPreview(representative, plan);
     let runtime: { provider?: "openai" | "bailian" | "anthropic"; model?: string; inputTokens?: number; outputTokens?: number; costCents?: number } = {};
+    let runtimeOutcome: GenerationRuntimeOutcome | undefined;
     let citations: typeof recalled.citations = recalled.citations;
     if (plan.nextStep === "answer") {
       const generated = await generateRepresentativeReply({
@@ -651,6 +672,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       leaseGuard.assertOwned();
       if (generated.ok) {
         replyText = generated.replyText;
+        runtimeOutcome = { mode: "model" };
         runtime = {
           provider: generated.provider,
           model: generated.model,
@@ -659,10 +681,21 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           ...(generated.usage?.costCents !== undefined ? { costCents: generated.usage.costCents } : {}),
         };
       } else {
-        replyText = renderGroundedKnowledgeFallback({
+        const groundedFallback = renderGroundedKnowledgeFallback({
           userText: item.userText,
           recalled: recalled.items,
-        }) ?? replyText;
+        });
+        if (groundedFallback) {
+          replyText = groundedFallback;
+        }
+        runtimeOutcome = {
+          mode: "fallback",
+          fallbackStrategy: groundedFallback
+            ? "grounded_knowledge"
+            : "deterministic_preview",
+          modelRuntimeState: generated.state,
+          fallbackReason: resolveFallbackReason(generated.state),
+        };
       }
     }
 
@@ -690,6 +723,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         : {}),
       ...(entitlementReservation ? { entitlementReservation } : {}),
       ...(citations.length ? { citations } : {}),
+      ...(runtimeOutcome ? { runtimeOutcome } : {}),
       ...runtime,
     });
     outputMessageId = completed.message.id;
@@ -1360,6 +1394,7 @@ function renderCapabilityLabel(capability: ParsedComputeRequest["capability"]) {
 
 async function sendTelegramOperatorMessage(input: {
   config: ConversationWorkerConfig;
+  conversationId: string;
   chatId: string;
   connectionId?: string;
   operatorName: string;
@@ -1370,6 +1405,7 @@ async function sendTelegramOperatorMessage(input: {
   }
   return sendTelegramMessage({
     config: input.config,
+    conversationId: input.conversationId,
     chatId: input.chatId,
     ...(input.connectionId
       ? { connectionId: input.connectionId }
@@ -1380,6 +1416,7 @@ async function sendTelegramOperatorMessage(input: {
 
 async function sendTelegramRepresentativeMessage(input: {
   config: ConversationWorkerConfig;
+  conversationId: string;
   chatId: string;
   connectionId?: string;
   text: string;
@@ -1389,59 +1426,97 @@ async function sendTelegramRepresentativeMessage(input: {
 
 async function sendTelegramMessage(input: {
   config: ConversationWorkerConfig;
+  conversationId: string;
   chatId: string;
   connectionId?: string;
   text: string;
 }) {
   const configuredConnectionId = input.connectionId?.trim();
-  const credential = configuredConnectionId
-    ? await resolveTelegramBotRuntimeCredential({
-        connectionId: configuredConnectionId,
-      })
-    : null;
-  const hasPersistedConnections = credential
-    ? true
-    : await hasPersistedTelegramBotConnections();
-  const token =
-    credential?.token
-    || (!hasPersistedConnections
-      ? input.config.telegramBotToken
-      : undefined);
-  if (!token) {
+  if (!configuredConnectionId) {
     throw new Error(
-      configuredConnectionId
-        ? "Telegram Bot credential is unavailable for this conversation."
-        : "Telegram Bot credential is not configured.",
+      "Telegram Bot connection is missing for this conversation.",
     );
   }
-  const tokenBotId = token.match(/^([1-9]\d*):/)?.[1];
-  const expectedBotId = credential?.botId || configuredConnectionId;
-  if (!tokenBotId || (expectedBotId && tokenBotId !== expectedBotId)) {
-    throw new Error("Telegram Bot credential does not match the conversation connection.");
+  const fencedDelivery =
+    await withActiveTelegramRepresentativeChannelFence(
+      {
+        conversationId: input.conversationId,
+        expectedConnectionId: configuredConnectionId,
+      },
+      async () => {
+        const credential = await resolveTelegramBotRuntimeCredential({
+          connectionId: configuredConnectionId,
+        });
+        const hasPersistedConnections = credential
+          ? true
+          : await hasPersistedTelegramBotConnections();
+        const token =
+          credential?.token
+          || (!hasPersistedConnections
+            ? input.config.telegramBotToken
+            : undefined);
+        if (!token) {
+          throw new Error(
+            "Telegram Bot credential is unavailable for this conversation.",
+          );
+        }
+        const tokenBotId = token.match(/^([1-9]\d*):/)?.[1];
+        const expectedBotId =
+          credential?.botId || configuredConnectionId;
+        if (
+          !tokenBotId
+          || (expectedBotId && tokenBotId !== expectedBotId)
+        ) {
+          throw new Error(
+            "Telegram Bot credential does not match the conversation connection.",
+          );
+        }
+        let response: Response;
+        try {
+          response = await fetch(
+            `https://api.telegram.org/bot${token}/sendMessage`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: input.chatId,
+                text: input.text,
+              }),
+              signal: AbortSignal.timeout(
+                input.config.telegramRequestTimeoutMs ?? 15_000,
+              ),
+            },
+          );
+        } catch {
+          throw new Error(
+            "Telegram delivery could not reach the provider.",
+          );
+        }
+        const payload =
+          (await response.json().catch(() => ({}))) as {
+            ok?: boolean;
+            result?: { message_id?: number };
+            description?: string;
+          };
+        if (
+          !response.ok
+          || !payload.ok
+          || !payload.result?.message_id
+        ) {
+          throw new Error(
+            payload.description
+            || `Telegram operator delivery failed (${response.status}).`,
+          );
+        }
+        return String(payload.result.message_id);
+      },
+    );
+  if (!fencedDelivery.executed) {
+    throw new Error(
+      "Telegram channel assignment changed before outbound delivery.",
+    );
   }
-  let response: Response;
-  try {
-    response = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: input.chatId,
-        text: input.text,
-      }),
-      signal: AbortSignal.timeout(input.config.telegramRequestTimeoutMs ?? 15_000),
-    });
-  } catch {
-    throw new Error("Telegram delivery could not reach the provider.");
-  }
-  const payload = (await response.json().catch(() => ({}))) as {
-    ok?: boolean;
-    result?: { message_id?: number };
-    description?: string;
-  };
-  if (!response.ok || !payload.ok || !payload.result?.message_id) {
-    throw new Error(payload.description || `Telegram operator delivery failed (${response.status}).`);
-  }
-  return String(payload.result.message_id);
+  return fencedDelivery.value;
 }
 
 async function deliverGenerationOutput(input: {
@@ -1488,6 +1563,7 @@ async function deliverGenerationOutput(input: {
     }
     externalMessageId = await sendTelegramRepresentativeMessage({
       config: input.config,
+      conversationId: input.item.conversationId,
       chatId: input.item.externalConversationId,
       ...(input.item.telegramConnectionId
         ? { connectionId: input.item.telegramConnectionId }

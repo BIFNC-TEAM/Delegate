@@ -46,7 +46,7 @@
     "test:wallet-reconcile-cli": "vitest run scripts/tests/wallet-reconcile-cli.test.ts",
     "local:auth:bootstrap": "tsx scripts/local-auth-bootstrap.ts",
     "test:channels": "bash scripts/tests/channels-offline.sh",
-    "test:channels:pg16": "pnpm test:channels && pnpm test:postgres:seed && pnpm test:postgres:channel-platform && pnpm test:postgres:entitlements && pnpm test:postgres:channel-migration",
+    "test:channels:pg16": "pnpm test:channels && pnpm test:postgres:seed && pnpm test:postgres:channel-platform && pnpm test:postgres:entitlements && pnpm test:postgres:channel-migration && pnpm test:postgres:matrix-assignment-revision",
     "test:postgres:seed": "bash scripts/tests/prisma-seed.pg16.sh",
     "test:postgres:channel-platform": "bash scripts/tests/channel-platform.pg16.sh",
     "test:postgres:entitlements": "bash scripts/tests/service-entitlements-concurrency.pg16.sh",
@@ -56,6 +56,7 @@
     "test:postgres:skills": "pnpm --filter @delegate/web-data test:postgres:skills",
     "test:postgres:mcp-health": "pnpm --filter @delegate/compute-broker test:postgres:mcp-health",
     "test:postgres:channel-migration": "bash scripts/tests/channel-identity-entitlements-migration.pg16.sh",
+    "test:postgres:matrix-assignment-revision": "bash scripts/tests/matrix-assignment-revision-migration.pg16.sh",
     "test:migration-gate": "vitest run scripts/tests/workspace-skill-release-gate.test.ts",
     "test:migration-fixture:pg16": "bash scripts/tests/workspace-skill-legacy-migration.pg16.sh",
     "test:wallet-migration-fixture:pg16": "bash scripts/tests/wallet-scoped-migration.pg16.sh"

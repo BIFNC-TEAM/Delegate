@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   createIdentityBindingChallenge: vi.fn(),
+  getIdentityBindingChallengeStatus: vi.fn(),
   isVerifiedPrivateChannelIdentityBinding: vi.fn(),
   listActivePrivateChannelIdentityBindings: vi.fn(),
   publicAudiencePrincipalErrorStatus: vi.fn(),
@@ -13,6 +14,8 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@delegate/web-data", () => ({
   createIdentityBindingChallenge: mocks.createIdentityBindingChallenge,
+  getIdentityBindingChallengeStatus:
+    mocks.getIdentityBindingChallengeStatus,
   isVerifiedPrivateChannelIdentityBinding:
     mocks.isVerifiedPrivateChannelIdentityBinding,
   listActivePrivateChannelIdentityBindings:
@@ -95,8 +98,14 @@ describe("public identity binding principal enforcement", () => {
       { id: "binding-1", provider: "MATRIX" },
     ]);
     mocks.createIdentityBindingChallenge.mockResolvedValue({
+      challengeId: "challenge-1",
       token: "bind-token",
       expiresAt: new Date("2026-08-01T00:05:00.000Z"),
+    });
+    mocks.getIdentityBindingChallengeStatus.mockResolvedValue({
+      challengeId: "challenge-1",
+      status: "PENDING",
+      expiresAt: "2026-08-01T00:05:00.000Z",
     });
     mocks.revokePrivateChannelIdentityBinding.mockResolvedValue({
       binding: {
@@ -133,6 +142,83 @@ describe("public identity binding principal enforcement", () => {
     await expect(response.json()).resolves.toEqual({
       error: "Sign in before binding a channel.",
     });
+  });
+
+  it("returns a private challenge lifecycle only for the authenticated audience identity", async () => {
+    const response = await listIdentityBindings(
+      new Request(
+        "http://localhost/reps/delegate/identity-bindings?challengeId=challenge-1",
+      ),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store, private");
+    expect(mocks.getIdentityBindingChallengeStatus).toHaveBeenCalledWith({
+      audienceIdentityId: "canonical-identity",
+      challengeId: "challenge-1",
+    });
+    expect(
+      mocks.listActivePrivateChannelIdentityBindings,
+    ).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({
+      challengeId: "challenge-1",
+      status: "PENDING",
+      expiresAt: "2026-08-01T00:05:00.000Z",
+    });
+  });
+
+  it("returns the exact consumed provider subject to the challenge owner", async () => {
+    mocks.getIdentityBindingChallengeStatus.mockResolvedValueOnce({
+      challengeId: "challenge-1",
+      status: "CONSUMED",
+      expiresAt: "2026-08-01T00:05:00.000Z",
+      providerSubject: "123456",
+    });
+
+    const response = await listIdentityBindings(
+      new Request(
+        "http://localhost/reps/delegate/identity-bindings?challengeId=challenge-1",
+      ),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      challengeId: "challenge-1",
+      status: "CONSUMED",
+      expiresAt: "2026-08-01T00:05:00.000Z",
+      providerSubject: "123456",
+    });
+  });
+
+  it("does not reveal whether another audience identity owns a challenge id", async () => {
+    mocks.getIdentityBindingChallengeStatus.mockResolvedValue(null);
+
+    const response = await listIdentityBindings(
+      new Request(
+        "http://localhost/reps/delegate/identity-bindings?challengeId=other-challenge",
+      ),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("cache-control")).toBe("no-store, private");
+    await expect(response.json()).resolves.toEqual({
+      error: "Identity binding challenge was not found.",
+    });
+  });
+
+  it("rejects an empty challenge id before touching persistence", async () => {
+    const response = await listIdentityBindings(
+      new Request(
+        "http://localhost/reps/delegate/identity-bindings?challengeId=",
+      ),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mocks.getIdentityBindingChallengeStatus).not.toHaveBeenCalled();
   });
 
   it("returns 401 from POST before creating when the current subject is invalid", async () => {
@@ -226,6 +312,7 @@ describe("public identity binding principal enforcement", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
       bindings: [oldBinding],
+      currentBindings: { telegram: [], matrix: [] },
       readiness: { telegram: false, matrix: false },
       capabilities: { telegram: true, matrix: true },
       telegramBot: {
@@ -263,8 +350,8 @@ describe("public identity binding principal enforcement", () => {
     });
   });
 
-  it("does not report Matrix ready for a binding from a different homeserver issuer", async () => {
-    const wrongHomeserverBinding = {
+  it("reports a federated Matrix MXID ready for the representative Application Service connection", async () => {
+    const federatedBinding = {
       provider: "MATRIX",
       providerSubject: "@neo:MATRIX.EXAMPLE",
       issuer: "MATRIX.EXAMPLE",
@@ -273,11 +360,11 @@ describe("public identity binding principal enforcement", () => {
       assuranceLevel: "PLATFORM_VERIFIED",
     };
     mocks.listActivePrivateChannelIdentityBindings.mockResolvedValue([
-      wrongHomeserverBinding,
+      federatedBinding,
     ]);
     mocks.isVerifiedPrivateChannelIdentityBinding.mockImplementation(
       (
-        binding: typeof wrongHomeserverBinding,
+        binding: typeof federatedBinding,
         expected: {
           provider: string;
           issuer: string;
@@ -296,13 +383,60 @@ describe("public identity binding principal enforcement", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
+      currentBindings: { matrix: [federatedBinding] },
+      readiness: { matrix: true },
+    });
+    expect(mocks.isVerifiedPrivateChannelIdentityBinding).toHaveBeenCalledWith(
+      federatedBinding,
+      {
+        provider: "MATRIX",
+        issuer: "MATRIX.EXAMPLE",
+        connectionId: "matrix-appservice",
+      },
+    );
+  });
+
+  it("rejects a Matrix binding whose issuer does not match its MXID homeserver", async () => {
+    const malformedBinding = {
+      provider: "MATRIX",
+      providerSubject: "@neo:federated.example",
+      issuer: "attacker.example",
+      connectionId: "matrix-appservice",
+      verifiedAt: "2026-07-27T00:00:00.000Z",
+      assuranceLevel: "PLATFORM_VERIFIED",
+    };
+    mocks.listActivePrivateChannelIdentityBindings.mockResolvedValue([
+      malformedBinding,
+    ]);
+    mocks.isVerifiedPrivateChannelIdentityBinding.mockImplementation(
+      (
+        binding: typeof malformedBinding,
+        expected: {
+          provider: string;
+          issuer: string;
+          connectionId: string;
+        },
+      ) =>
+        binding.provider === expected.provider
+        && binding.issuer === expected.issuer
+        && binding.connectionId === expected.connectionId,
+    );
+
+    const response = await listIdentityBindings(
+      new Request("http://localhost/reps/delegate/identity-bindings"),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      currentBindings: { matrix: [] },
       readiness: { matrix: false },
     });
     expect(mocks.isVerifiedPrivateChannelIdentityBinding).toHaveBeenCalledWith(
-      wrongHomeserverBinding,
+      malformedBinding,
       {
         provider: "MATRIX",
-        issuer: "matrix.example",
+        issuer: "federated.example",
         connectionId: "matrix-appservice",
       },
     );
@@ -333,6 +467,7 @@ describe("public identity binding principal enforcement", () => {
       },
     });
     await expect(response.json()).resolves.toEqual({
+      challengeId: "challenge-1",
       provider: "telegram",
       expiresAt: new Date("2026-08-01T00:05:00.000Z").toISOString(),
       command: "/bind bind-token",
@@ -404,6 +539,7 @@ describe("public identity binding principal enforcement", () => {
       },
     });
     await expect(response.json()).resolves.toEqual({
+      challengeId: "challenge-1",
       provider: "matrix",
       expiresAt: new Date("2026-08-01T00:05:00.000Z").toISOString(),
       command: "!bind bind-token",

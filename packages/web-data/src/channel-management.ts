@@ -48,6 +48,7 @@ export type ChannelActivitySummary = {
 
 export type ManagedChannelBinding = {
   bindingId: string | null;
+  connectionId: string | null;
   kind: ManagedChannelKind;
   sourceProvider: ManagedChannelKind;
   transport: ManagedChannelKind;
@@ -60,6 +61,7 @@ export type ManagedChannelBinding = {
     displayName: string | null;
   };
   telegramBotConnectionId: string | null;
+  endpointAssignmentRevision: number | null;
   telegramBot: {
     botId: string;
     username: string | null;
@@ -84,6 +86,12 @@ export type ManagedRepresentativeChannels = {
 export type OwnerChannelManagementSnapshot = {
   generatedAt: string;
   dataSource: "database" | "demo-empty";
+  matrixConfiguration: {
+    available: boolean;
+    serverName: string | null;
+    connectionId: string | null;
+    managedUserPrefix: "_delegate_rep_";
+  };
   metrics: {
     representatives: number;
     connectedBindings: number;
@@ -383,6 +391,7 @@ type RepresentativeRecord = {
 
 type BindingRecord = {
   id: string;
+  connectionId?: string | null;
   kind: ManagedChannelKind;
   transport: ManagedChannelKind | null;
   sourceProvider: ManagedChannelKind | null;
@@ -394,6 +403,7 @@ type BindingRecord = {
   lastHealthCheckAt: Date | null;
   lastError: string | null;
   telegramBotConnectionId?: string | null;
+  endpointAssignmentRevision?: number;
   telegramBotConnection?: {
     botId: string;
     username: string | null;
@@ -455,6 +465,7 @@ export async function getOwnerChannelManagementSnapshot(input: {
           orderBy: { kind: "asc" },
           select: {
             id: true,
+            connectionId: true,
             kind: true,
             transport: true,
             sourceProvider: true,
@@ -466,6 +477,7 @@ export async function getOwnerChannelManagementSnapshot(input: {
             lastHealthCheckAt: true,
             lastError: true,
             telegramBotConnectionId: true,
+            endpointAssignmentRevision: true,
             telegramBotConnection: {
               select: {
                 botId: true,
@@ -560,6 +572,7 @@ export function buildOwnerChannelManagementSnapshot(input: {
       const activityKey = channelActivityKey(representative.id, sourceProvider);
       return {
         bindingId: binding?.id ?? null,
+        connectionId: binding?.connectionId ?? null,
         kind,
         sourceProvider,
         transport,
@@ -575,6 +588,8 @@ export function buildOwnerChannelManagementSnapshot(input: {
         },
         telegramBotConnectionId:
           binding?.telegramBotConnectionId ?? null,
+        endpointAssignmentRevision:
+          binding?.endpointAssignmentRevision ?? null,
         telegramBot: binding?.telegramBotConnection
           ? {
               botId: binding.telegramBotConnection.botId,
@@ -605,6 +620,7 @@ export function buildOwnerChannelManagementSnapshot(input: {
   return {
     generatedAt: input.generatedAt.toISOString(),
     dataSource: input.dataSource,
+    matrixConfiguration: resolveMatrixManagementConfiguration(),
     metrics: {
       representatives: representatives.length,
       connectedBindings: bindings.filter(
@@ -630,6 +646,7 @@ export async function setOwnerChannelDesiredState(input: {
   actorId: string;
   bindingId: string;
   desiredState: "ACTIVE" | "PAUSED";
+  expectedCurrentEndpointAssignmentRevision: number;
   requestId: string;
   idempotencyKey: string;
 }) {
@@ -637,6 +654,11 @@ export async function setOwnerChannelDesiredState(input: {
   const ownerId = requireValue(input.ownerId, "ownerId");
   const actorId = requireValue(input.actorId, "actorId");
   const bindingId = requireValue(input.bindingId, "bindingId");
+  const expectedCurrentEndpointAssignmentRevision =
+    requirePositiveAssignmentRevision(
+      input.expectedCurrentEndpointAssignmentRevision,
+      "expectedCurrentEndpointAssignmentRevision",
+    );
   const requestId = requireValue(input.requestId, "requestId");
   const idempotencyKey = requireValue(input.idempotencyKey, "idempotencyKey");
   if (
@@ -663,7 +685,9 @@ export async function setOwnerChannelDesiredState(input: {
     const stateLockKey =
       candidate.kind === RepresentativeChannelKind.MATRIX
         ? `matrix-virtual-user:${candidate.representativeId}`
-        : `channel-binding-state:${bindingId}`;
+        : candidate.kind === RepresentativeChannelKind.TELEGRAM
+          ? `telegram-bot-channel:${candidate.representativeId}`
+          : `channel-binding-state:${bindingId}`;
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(
         hashtext(${stateLockKey})
@@ -680,11 +704,24 @@ export async function setOwnerChannelDesiredState(input: {
         kind: true,
         transport: true,
         sourceProvider: true,
+        connectionId: true,
+        telegramBotConnectionId: true,
+        endpointAssignmentRevision: true,
         desiredState: true,
+        status: true,
       },
     });
     if (!binding) {
       throw new ChannelManagementError("Channel binding not found.", 404);
+    }
+    if (
+      binding.endpointAssignmentRevision
+        !== expectedCurrentEndpointAssignmentRevision
+    ) {
+      throw new ChannelManagementError(
+        "Channel binding changed since it was loaded.",
+        409,
+      );
     }
     if (binding.desiredState === ChannelDesiredState.DISCONNECTED) {
       throw new ChannelManagementError(
@@ -720,6 +757,11 @@ export async function setOwnerChannelDesiredState(input: {
       if (
         payload?.action !== "CHANNEL_DESIRED_STATE_CHANGED"
         || payload.desiredState !== input.desiredState
+        || payload.expectedCurrentEndpointAssignmentRevision
+          !== expectedCurrentEndpointAssignmentRevision
+        || payload.endpointAssignmentRevision
+          !== binding.endpointAssignmentRevision
+        || payload.desiredState !== binding.desiredState
       ) {
         throw new ChannelManagementError(
           "Idempotency key was already used for a different channel request on this binding.",
@@ -728,20 +770,48 @@ export async function setOwnerChannelDesiredState(input: {
       }
       return binding;
     }
-    const updated = binding.desiredState === input.desiredState
-      ? binding
-      : await tx.representativeChannelBinding.update({
-          where: { id: binding.id },
-          data: { desiredState: input.desiredState },
-          select: {
-            id: true,
-            representativeId: true,
-            kind: true,
-            transport: true,
-            sourceProvider: true,
-            desiredState: true,
-          },
-        });
+    const stateUpdate =
+      await tx.representativeChannelBinding.updateMany({
+        where: {
+          id: binding.id,
+          desiredState: binding.desiredState,
+          connectionId: binding.connectionId,
+          telegramBotConnectionId:
+            binding.telegramBotConnectionId,
+          endpointAssignmentRevision:
+            binding.endpointAssignmentRevision,
+          status: binding.status,
+        },
+        data: { desiredState: input.desiredState },
+      });
+    if (stateUpdate.count !== 1) {
+      throw new ChannelManagementError(
+        "Channel binding changed while its state was being updated.",
+        409,
+      );
+    }
+    const updated =
+      await tx.representativeChannelBinding.findFirst({
+        where: {
+          id: binding.id,
+          representative: { ownerId },
+        },
+        select: {
+          id: true,
+          representativeId: true,
+          kind: true,
+          transport: true,
+          sourceProvider: true,
+          endpointAssignmentRevision: true,
+          desiredState: true,
+        },
+      });
+    if (!updated) {
+      throw new ChannelManagementError(
+        "Channel binding changed while its state was being updated.",
+        409,
+      );
+    }
     await tx.eventAudit.create({
       data: {
         representativeId: binding.representativeId,
@@ -756,6 +826,9 @@ export async function setOwnerChannelDesiredState(input: {
           channelKind: binding.kind,
           sourceProvider: binding.sourceProvider ?? binding.kind,
           transport: binding.transport ?? binding.kind,
+          expectedCurrentEndpointAssignmentRevision,
+          endpointAssignmentRevision:
+            binding.endpointAssignmentRevision,
           previousDesiredState: binding.desiredState,
           desiredState: input.desiredState,
           before: {
@@ -763,6 +836,8 @@ export async function setOwnerChannelDesiredState(input: {
           },
           after: {
             desiredState: input.desiredState,
+            endpointAssignmentRevision:
+              binding.endpointAssignmentRevision,
           },
           changed: binding.desiredState !== input.desiredState,
         },
@@ -992,6 +1067,8 @@ export async function assignOwnerTelegramBotConnection(input: {
   actorId: string;
   representativeId: string;
   telegramBotConnectionId: string;
+  expectedCurrentTelegramBotConnectionId?: string | null;
+  expectedCurrentEndpointAssignmentRevision?: number | null;
   requestId: string;
   idempotencyKey: string;
 }) {
@@ -1006,6 +1083,28 @@ export async function assignOwnerTelegramBotConnection(input: {
     input.telegramBotConnectionId,
     "telegramBotConnectionId",
   );
+  const expectedTelegramBotConnectionIdWasProvided =
+    input.expectedCurrentTelegramBotConnectionId !== undefined;
+  const expectedCurrentTelegramBotConnectionId =
+    input.expectedCurrentTelegramBotConnectionId === null
+      ? null
+      : input.expectedCurrentTelegramBotConnectionId === undefined
+        ? null
+        : requireValue(
+            input.expectedCurrentTelegramBotConnectionId,
+            "expectedCurrentTelegramBotConnectionId",
+          );
+  const expectedEndpointAssignmentRevisionWasProvided =
+    input.expectedCurrentEndpointAssignmentRevision !== undefined;
+  const expectedCurrentEndpointAssignmentRevision =
+    input.expectedCurrentEndpointAssignmentRevision === null
+      ? null
+      : input.expectedCurrentEndpointAssignmentRevision === undefined
+        ? null
+        : requirePositiveAssignmentRevision(
+            input.expectedCurrentEndpointAssignmentRevision,
+            "expectedCurrentEndpointAssignmentRevision",
+          );
   const requestId = requireValue(input.requestId, "requestId");
   const idempotencyKey = requireValue(input.idempotencyKey, "idempotencyKey");
 
@@ -1081,6 +1180,7 @@ export async function assignOwnerTelegramBotConnection(input: {
         sourceProvider: true,
         connectionId: true,
         telegramBotConnectionId: true,
+        endpointAssignmentRevision: true,
         desiredState: true,
         healthStatus: true,
         externalUserId: true,
@@ -1113,7 +1213,24 @@ export async function assignOwnerTelegramBotConnection(input: {
         assertTelegramAssignmentIdempotencyReplay(
           repeatedAssignment.payload,
           telegramBot.id,
+          expectedTelegramBotConnectionIdWasProvided,
+          expectedCurrentTelegramBotConnectionId,
+          expectedEndpointAssignmentRevisionWasProvided,
+          expectedCurrentEndpointAssignmentRevision,
         );
+        if (
+          existing.telegramBotConnectionId !== telegramBot.id
+          || existing.connectionId !== telegramBot.botId
+          || !isTelegramAssignmentReplayCurrent(
+            repeatedAssignment.payload,
+            existing,
+          )
+        ) {
+          throw new ChannelManagementError(
+            "Telegram channel binding changed after the idempotent assignment completed.",
+            409,
+          );
+        }
         return {
           binding: existing,
           telegramBot: {
@@ -1126,6 +1243,23 @@ export async function assignOwnerTelegramBotConnection(input: {
           },
         };
       }
+    }
+    if (
+      (
+        expectedTelegramBotConnectionIdWasProvided
+        && (existing?.telegramBotConnectionId ?? null)
+          !== expectedCurrentTelegramBotConnectionId
+      )
+      || (
+        expectedEndpointAssignmentRevisionWasProvided
+        && (existing?.endpointAssignmentRevision ?? null)
+          !== expectedCurrentEndpointAssignmentRevision
+      )
+    ) {
+      throw new ChannelManagementError(
+        "Telegram channel binding changed since it was loaded.",
+        409,
+      );
     }
     if (
       existing
@@ -1149,9 +1283,12 @@ export async function assignOwnerTelegramBotConnection(input: {
     const changed =
       existing?.telegramBotConnectionId !== telegramBot.id
       || existing.connectionId !== telegramBot.botId;
-    const nextDesiredState = changed
-      ? ChannelDesiredState.ACTIVE
-      : existing?.desiredState ?? ChannelDesiredState.ACTIVE;
+    const reconnecting =
+      existing?.desiredState === ChannelDesiredState.DISCONNECTED;
+    const nextDesiredState =
+      existing?.desiredState === ChannelDesiredState.PAUSED
+        ? ChannelDesiredState.PAUSED
+        : ChannelDesiredState.ACTIVE;
     const externalUserId = telegramBot.username
       ? `@${telegramBot.username}`
       : `telegram-bot:${telegramBot.botId}`;
@@ -1181,15 +1318,16 @@ export async function assignOwnerTelegramBotConnection(input: {
         },
         lastError: null,
       },
-      update: changed
+      update: changed || reconnecting
         ? {
             transport: ChannelTransport.TELEGRAM,
             sourceProvider: ChannelSourceProvider.TELEGRAM,
             connectionId: telegramBot.botId,
             telegramBotConnectionId: telegramBot.id,
+            endpointAssignmentRevision: { increment: 1 },
             desiredState: nextDesiredState,
-              healthStatus: telegramBot.healthStatus,
-              lastHealthCheckAt: null,
+            healthStatus: telegramBot.healthStatus,
+            lastHealthCheckAt: null,
             externalUserId,
             status: "CONFIGURED",
             displayName: representative.displayName,
@@ -1209,6 +1347,7 @@ export async function assignOwnerTelegramBotConnection(input: {
         sourceProvider: true,
         connectionId: true,
         telegramBotConnectionId: true,
+        endpointAssignmentRevision: true,
         desiredState: true,
         healthStatus: true,
         externalUserId: true,
@@ -1241,6 +1380,10 @@ export async function assignOwnerTelegramBotConnection(input: {
       assertTelegramAssignmentIdempotencyReplay(
         repeatedAudit.payload,
         telegramBot.id,
+        expectedTelegramBotConnectionIdWasProvided,
+        expectedCurrentTelegramBotConnectionId,
+        expectedEndpointAssignmentRevisionWasProvided,
+        expectedCurrentEndpointAssignmentRevision,
       );
     } else {
       await tx.eventAudit.create({
@@ -1257,19 +1400,31 @@ export async function assignOwnerTelegramBotConnection(input: {
             telegramBotConnectionId: telegramBot.id,
             botId: telegramBot.botId,
             botUsername: telegramBot.username,
+            expectedCurrentTelegramBotConnectionIdWasProvided:
+              expectedTelegramBotConnectionIdWasProvided,
+            expectedCurrentTelegramBotConnectionId:
+              expectedCurrentTelegramBotConnectionId,
+            expectedEndpointAssignmentRevisionWasProvided,
+            expectedCurrentEndpointAssignmentRevision:
+              expectedCurrentEndpointAssignmentRevision,
             before: {
               telegramBotConnectionId:
                 existing?.telegramBotConnectionId ?? null,
               connectionId: existing?.connectionId ?? null,
               desiredState:
                 existing?.desiredState ?? ChannelDesiredState.DISCONNECTED,
+              endpointAssignmentRevision:
+                existing?.endpointAssignmentRevision ?? 0,
             },
             after: {
               telegramBotConnectionId: telegramBot.id,
               connectionId: telegramBot.botId,
               desiredState: nextDesiredState,
+              endpointAssignmentRevision:
+                binding.endpointAssignmentRevision,
             },
             changed,
+            reconnected: reconnecting,
           },
         },
       });
@@ -1292,6 +1447,10 @@ export async function provisionOwnerMatrixChannel(input: {
   ownerId: string;
   actorId: string;
   representativeId: string;
+  matrixUserId?: string;
+  replaceExisting?: boolean;
+  expectedCurrentMatrixUserId?: string | null;
+  expectedCurrentEndpointAssignmentRevision?: number | null;
   requestId: string;
   idempotencyKey: string;
 }) {
@@ -1304,8 +1463,49 @@ export async function provisionOwnerMatrixChannel(input: {
   );
   const requestId = requireValue(input.requestId, "requestId");
   const idempotencyKey = requireValue(input.idempotencyKey, "idempotencyKey");
-  const serverName = resolveMatrixServerName();
-  const connectionId = resolveMatrixApplicationServiceConnectionId();
+  const matrixConfiguration = resolveMatrixManagementConfiguration();
+  if (
+    !matrixConfiguration.available
+    || !matrixConfiguration.serverName
+    || !matrixConfiguration.connectionId
+  ) {
+    throw new ChannelManagementError(
+      "Matrix Application Service must be fully configured before managing representative identities.",
+      503,
+    );
+  }
+  const serverName = matrixConfiguration.serverName;
+  const connectionId = matrixConfiguration.connectionId;
+  const requestedMatrixUserIdWasProvided = input.matrixUserId !== undefined;
+  const requestedMatrixUserId = requestedMatrixUserIdWasProvided
+    ? normalizeManagedMatrixUserId(
+        requireValue(input.matrixUserId as string, "matrixUserId"),
+        serverName,
+      )
+    : null;
+  const expectedCurrentMatrixUserIdWasProvided =
+    input.expectedCurrentMatrixUserId !== undefined;
+  const expectedCurrentMatrixUserId =
+    input.expectedCurrentMatrixUserId === null
+      ? null
+      : input.expectedCurrentMatrixUserId === undefined
+        ? null
+        : normalizeMatrixUserIdForRequest(
+            input.expectedCurrentMatrixUserId,
+            "expectedCurrentMatrixUserId",
+          );
+  const expectedEndpointAssignmentRevisionWasProvided =
+    input.expectedCurrentEndpointAssignmentRevision !== undefined;
+  const expectedCurrentEndpointAssignmentRevision =
+    input.expectedCurrentEndpointAssignmentRevision === null
+      ? null
+      : input.expectedCurrentEndpointAssignmentRevision === undefined
+        ? null
+        : requirePositiveAssignmentRevision(
+            input.expectedCurrentEndpointAssignmentRevision,
+            "expectedCurrentEndpointAssignmentRevision",
+          );
+  const replaceExisting = input.replaceExisting === true;
 
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`
@@ -1339,6 +1539,8 @@ export async function provisionOwnerMatrixChannel(input: {
           id: true,
           representativeId: true,
           kind: true,
+          connectionId: true,
+          endpointAssignmentRevision: true,
           desiredState: true,
           healthStatus: true,
           externalUserId: true,
@@ -1364,13 +1566,64 @@ export async function provisionOwnerMatrixChannel(input: {
         typeof payload?.matrixUserId === "string"
           ? payload.matrixUserId
           : null;
+      const replayBefore = isJsonRecord(payload?.before)
+        ? payload.before
+        : null;
+      const replayAfter = isJsonRecord(payload?.after)
+        ? payload.after
+        : null;
       if (
-        payload?.action !== "MATRIX_VIRTUAL_USER_PROVISIONED"
+        (
+          payload?.action !== "MATRIX_VIRTUAL_USER_PROVISIONED"
+          && payload?.action !== "MATRIX_VIRTUAL_USER_REPLACED"
+        )
         || !existingChannel
         || payload.bindingId !== existingChannel.id
         || payload.connectionId !== connectionId
         || payload.matrixUserId !== existingChannel.externalUserId
+        || payload.endpointAssignmentRevision
+          !== existingChannel.endpointAssignmentRevision
+        || replayAfter?.matrixUserId !== existingChannel.externalUserId
+        || replayAfter?.connectionId !== existingChannel.connectionId
+        || replayAfter?.endpointAssignmentRevision
+          !== existingChannel.endpointAssignmentRevision
+        || replayAfter?.desiredState !== existingChannel.desiredState
         || !replayMatrixUserId
+        || !isManagedMatrixUserIdForServer(replayMatrixUserId, serverName)
+        || (
+          (payload.requestedMatrixUserIdWasProvided === true)
+          !== requestedMatrixUserIdWasProvided
+        )
+        || (
+          requestedMatrixUserIdWasProvided
+          && (
+            payload.requestedMatrixUserIdWasProvided !== true
+            || payload.requestedMatrixUserId !== requestedMatrixUserId
+          )
+        )
+        || (payload.replaceExisting === true) !== replaceExisting
+        || (
+          (payload.expectedCurrentMatrixUserIdWasProvided === true)
+          !== expectedCurrentMatrixUserIdWasProvided
+        )
+        || (
+          expectedCurrentMatrixUserIdWasProvided
+          && (
+            payload.expectedCurrentMatrixUserIdWasProvided !== true
+            || replayBefore?.matrixUserId !== expectedCurrentMatrixUserId
+          )
+        )
+        || (
+          (
+            payload.expectedEndpointAssignmentRevisionWasProvided
+              === true
+          ) !== expectedEndpointAssignmentRevisionWasProvided
+        )
+        || (
+          expectedEndpointAssignmentRevisionWasProvided
+          && replayBefore?.endpointAssignmentRevision
+            !== expectedCurrentEndpointAssignmentRevision
+        )
       ) {
         throw new ChannelManagementError(
           "Idempotency key was already used for a different Matrix channel request on this representative.",
@@ -1384,16 +1637,21 @@ export async function provisionOwnerMatrixChannel(input: {
             id: true,
             matrixUserId: true,
             representativeId: true,
+            ownerId: true,
             kind: true,
             displayName: true,
             enabled: true,
           },
         });
       if (
-        existingChannel.desiredState !== ChannelDesiredState.ACTIVE
+        existingChannel.desiredState === ChannelDesiredState.DISCONNECTED
         || !replayVirtualUser?.enabled
         || replayVirtualUser.id !== payload.matrixVirtualUserBindingId
         || replayVirtualUser.representativeId !== representative.id
+        || (
+          replayVirtualUser.ownerId != null
+          && replayVirtualUser.ownerId !== ownerId
+        )
         || replayVirtualUser.kind !== "REPRESENTATIVE"
       ) {
         throw new ChannelManagementError(
@@ -1411,34 +1669,82 @@ export async function provisionOwnerMatrixChannel(input: {
         },
       };
     }
-    const existingVirtualUser = await tx.matrixVirtualUserBinding.findFirst({
-      where: {
-        representativeId: representative.id,
-        kind: "REPRESENTATIVE",
-        enabled: true,
-      },
-      select: {
-        id: true,
-        matrixUserId: true,
-      },
-    });
+
+    const existingEnabledVirtualUser =
+      await tx.matrixVirtualUserBinding.findFirst({
+        where: {
+          representativeId: representative.id,
+          kind: "REPRESENTATIVE",
+          enabled: true,
+        },
+        select: {
+          matrixUserId: true,
+          ownerId: true,
+        },
+      });
     if (
-      existingVirtualUser
-      && matrixServerNameOrNull(existingVirtualUser.matrixUserId) !== serverName
+      existingEnabledVirtualUser?.ownerId != null
+      && existingEnabledVirtualUser.ownerId !== ownerId
     ) {
       throw new ChannelManagementError(
-        "The representative already has a managed Matrix user on a different homeserver. Disable and migrate that identity before changing MATRIX_SERVER_NAME.",
+        "Managed Matrix user belongs to another workspace.",
         409,
       );
     }
+    const currentMatrixUserId = normalizeMatrixUserIdOrNull(
+      existingChannel?.externalUserId
+      ?? existingEnabledVirtualUser?.matrixUserId,
+    );
+    if (
+      (
+        expectedCurrentMatrixUserIdWasProvided
+        && currentMatrixUserId !== expectedCurrentMatrixUserId
+      )
+      || (
+        expectedEndpointAssignmentRevisionWasProvided
+        && (existingChannel?.endpointAssignmentRevision ?? null)
+          !== expectedCurrentEndpointAssignmentRevision
+      )
+    ) {
+      throw new ChannelManagementError(
+        "Matrix channel binding changed since it was loaded.",
+        409,
+      );
+    }
+
     const matrixUserId =
-      existingVirtualUser?.matrixUserId
-      || buildRepresentativeMatrixUserId(representative.slug, serverName);
+      requestedMatrixUserId
+      || (
+        currentMatrixUserId
+        && isManagedMatrixUserIdForServer(currentMatrixUserId, serverName)
+          ? currentMatrixUserId
+          : buildRepresentativeMatrixUserId(representative.slug, serverName)
+      );
+    const previousExternalUserId =
+      existingChannel?.externalUserId?.trim()
+      || existingEnabledVirtualUser?.matrixUserId?.trim()
+      || null;
+    const replacing =
+      previousExternalUserId !== null
+      && previousExternalUserId !== matrixUserId;
+    if (replacing && !replaceExisting) {
+      throw new ChannelManagementError(
+        "A different managed Matrix user is already connected. Confirm replacement before changing it.",
+        409,
+      );
+    }
+
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${"matrix-virtual-user-id:" + matrixUserId})
+      )
+    `;
     const collision = await tx.matrixVirtualUserBinding.findUnique({
       where: { matrixUserId },
       select: {
         id: true,
         representativeId: true,
+        ownerId: true,
         kind: true,
       },
     });
@@ -1446,6 +1752,7 @@ export async function provisionOwnerMatrixChannel(input: {
       collision
       && (
         collision.representativeId !== representative.id
+        || (collision.ownerId != null && collision.ownerId !== ownerId)
         || collision.kind !== "REPRESENTATIVE"
       )
     ) {
@@ -1455,6 +1762,25 @@ export async function provisionOwnerMatrixChannel(input: {
       );
     }
 
+    // The database enforces one enabled representative virtual user per
+    // representative/kind. Disable the previous row first inside this same
+    // transaction; any failure while enabling the new row rolls the disable
+    // back, so the currently routed identity is never lost.
+    if (replacing && previousExternalUserId) {
+      await tx.matrixVirtualUserBinding.updateMany({
+        where: {
+          matrixUserId: previousExternalUserId,
+          representativeId: representative.id,
+          kind: "REPRESENTATIVE",
+          enabled: true,
+          OR: [
+            { ownerId },
+            { ownerId: null },
+          ],
+        },
+        data: { enabled: false },
+      });
+    }
     const virtualUser = await tx.matrixVirtualUserBinding.upsert({
       where: { matrixUserId },
       create: {
@@ -1481,6 +1807,22 @@ export async function provisionOwnerMatrixChannel(input: {
     });
     const reconnecting =
       existingChannel?.desiredState === ChannelDesiredState.DISCONNECTED;
+    const identityChanged =
+      previousExternalUserId !== matrixUserId;
+    const connectionChanged =
+      existingChannel?.connectionId !== connectionId;
+    const assignmentRevisionMissing =
+      existingChannel !== null
+      && existingChannel.endpointAssignmentRevision <= 0;
+    const nextDesiredState =
+      !existingChannel || reconnecting
+        ? ChannelDesiredState.ACTIVE
+        : existingChannel.desiredState;
+    const resetRuntimeState =
+      reconnecting
+      || identityChanged
+      || connectionChanged
+      || assignmentRevisionMissing;
     const binding = await tx.representativeChannelBinding.upsert({
       where: {
         representativeId_kind: {
@@ -1494,7 +1836,8 @@ export async function provisionOwnerMatrixChannel(input: {
         transport: ChannelTransport.MATRIX,
         sourceProvider: ChannelSourceProvider.MATRIX,
         connectionId,
-        desiredState: ChannelDesiredState.ACTIVE,
+        endpointAssignmentRevision: 1,
+        desiredState: nextDesiredState,
         healthStatus: ChannelHealthStatus.UNKNOWN,
         externalUserId: matrixUserId,
         status: "CONFIGURED",
@@ -1511,10 +1854,15 @@ export async function provisionOwnerMatrixChannel(input: {
         sourceProvider: ChannelSourceProvider.MATRIX,
         connectionId,
         externalUserId: matrixUserId,
+        desiredState: nextDesiredState,
         displayName: representative.displayName,
-        ...(reconnecting
+        ...(resetRuntimeState
           ? {
-              desiredState: ChannelDesiredState.ACTIVE,
+              endpointAssignmentRevision: { increment: 1 },
+            }
+          : {}),
+        ...(resetRuntimeState
+          ? {
               healthStatus: ChannelHealthStatus.UNKNOWN,
               status: "CONFIGURED",
               lastHealthCheckAt: null,
@@ -1532,6 +1880,8 @@ export async function provisionOwnerMatrixChannel(input: {
         id: true,
         representativeId: true,
         kind: true,
+        connectionId: true,
+        endpointAssignmentRevision: true,
         desiredState: true,
         healthStatus: true,
         externalUserId: true,
@@ -1543,8 +1893,12 @@ export async function provisionOwnerMatrixChannel(input: {
         representativeId: representative.id,
         type: EventType.CHANNEL_CONFIGURATION_CHANGED,
         payload: {
-          kind: "matrix_virtual_user_provisioned",
-          action: "MATRIX_VIRTUAL_USER_PROVISIONED",
+          kind: replacing
+            ? "matrix_virtual_user_replaced"
+            : "matrix_virtual_user_provisioned",
+          action: replacing
+            ? "MATRIX_VIRTUAL_USER_REPLACED"
+            : "MATRIX_VIRTUAL_USER_PROVISIONED",
           actorId,
           requestId,
           idempotencyKey,
@@ -1552,6 +1906,35 @@ export async function provisionOwnerMatrixChannel(input: {
           matrixVirtualUserBindingId: virtualUser.id,
           matrixUserId,
           connectionId,
+          endpointAssignmentRevision:
+            binding.endpointAssignmentRevision,
+          requestedMatrixUserIdWasProvided,
+          requestedMatrixUserId,
+          replaceExisting,
+          expectedCurrentMatrixUserIdWasProvided,
+          expectedCurrentMatrixUserId,
+          expectedEndpointAssignmentRevisionWasProvided,
+          expectedCurrentEndpointAssignmentRevision,
+          before: {
+            matrixUserId: currentMatrixUserId,
+            connectionId: existingChannel?.connectionId ?? null,
+            endpointAssignmentRevision:
+              existingChannel?.endpointAssignmentRevision ?? 0,
+            desiredState:
+              existingChannel?.desiredState
+              ?? ChannelDesiredState.DISCONNECTED,
+            healthStatus:
+              existingChannel?.healthStatus
+              ?? ChannelHealthStatus.UNKNOWN,
+          },
+          after: {
+            matrixUserId,
+            connectionId,
+            endpointAssignmentRevision:
+              binding.endpointAssignmentRevision,
+            desiredState: nextDesiredState,
+            healthStatus: binding.healthStatus,
+          },
         },
       },
     });
@@ -1563,6 +1946,7 @@ export async function disconnectOwnerMatrixChannel(input: {
   ownerId: string;
   actorId: string;
   bindingId: string;
+  expectedCurrentEndpointAssignmentRevision?: number;
   requestId: string;
   idempotencyKey: string;
 }) {
@@ -1570,6 +1954,13 @@ export async function disconnectOwnerMatrixChannel(input: {
   const ownerId = requireValue(input.ownerId, "ownerId");
   const actorId = requireValue(input.actorId, "actorId");
   const bindingId = requireValue(input.bindingId, "bindingId");
+  const expectedCurrentEndpointAssignmentRevision =
+    input.expectedCurrentEndpointAssignmentRevision === undefined
+      ? null
+      : requirePositiveAssignmentRevision(
+          input.expectedCurrentEndpointAssignmentRevision,
+          "expectedCurrentEndpointAssignmentRevision",
+        );
   const requestId = requireValue(input.requestId, "requestId");
   const idempotencyKey = requireValue(input.idempotencyKey, "idempotencyKey");
 
@@ -1605,6 +1996,7 @@ export async function disconnectOwnerMatrixChannel(input: {
         transport: true,
         sourceProvider: true,
         connectionId: true,
+        endpointAssignmentRevision: true,
         desiredState: true,
         healthStatus: true,
         externalUserId: true,
@@ -1646,11 +2038,48 @@ export async function disconnectOwnerMatrixChannel(input: {
           409,
         );
       }
+      const replayBefore = isJsonRecord(payload.before)
+        ? payload.before
+        : null;
+      const replayAfter = isJsonRecord(payload.after)
+        ? payload.after
+        : null;
+      if (
+        replayBefore?.endpointAssignmentRevision
+          !== expectedCurrentEndpointAssignmentRevision
+      ) {
+        throw new ChannelManagementError(
+          "Idempotency key was already used for a different Matrix disconnect request on this binding.",
+          409,
+        );
+      }
+      if (
+        replayAfter?.endpointAssignmentRevision
+          !== binding.endpointAssignmentRevision
+        || replayAfter.desiredState !== binding.desiredState
+        || replayAfter.status !== binding.status
+        || binding.desiredState !== ChannelDesiredState.DISCONNECTED
+      ) {
+        throw new ChannelManagementError(
+          "Matrix channel changed after the idempotent disconnect completed.",
+          409,
+        );
+      }
       return {
         binding,
         changed: payload.changed === true,
         replayed: true,
       };
+    }
+    if (
+      expectedCurrentEndpointAssignmentRevision !== null
+      && binding.endpointAssignmentRevision
+        !== expectedCurrentEndpointAssignmentRevision
+    ) {
+      throw new ChannelManagementError(
+        "Matrix channel binding changed since it was loaded.",
+        409,
+      );
     }
 
     const changed =
@@ -1673,6 +2102,7 @@ export async function disconnectOwnerMatrixChannel(input: {
             transport: true,
             sourceProvider: true,
             connectionId: true,
+            endpointAssignmentRevision: true,
             desiredState: true,
             healthStatus: true,
             externalUserId: true,
@@ -1706,11 +2136,15 @@ export async function disconnectOwnerMatrixChannel(input: {
             desiredState: binding.desiredState,
             healthStatus: binding.healthStatus,
             status: binding.status,
+            endpointAssignmentRevision:
+              binding.endpointAssignmentRevision,
           },
           after: {
             desiredState: ChannelDesiredState.DISCONNECTED,
             healthStatus: ChannelHealthStatus.UNKNOWN,
             status: "DISCONNECTED",
+            endpointAssignmentRevision:
+              updated.endpointAssignmentRevision,
           },
           changed,
         },
@@ -1758,7 +2192,9 @@ export async function refreshOwnerChannelHealth(input: {
     const stateLockKey =
       candidate.kind === RepresentativeChannelKind.MATRIX
         ? `matrix-virtual-user:${candidate.representativeId}`
-        : `channel-binding-state:${bindingId}`;
+        : candidate.kind === RepresentativeChannelKind.TELEGRAM
+          ? `telegram-bot-channel:${candidate.representativeId}`
+          : `channel-binding-state:${bindingId}`;
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(
         hashtext(${stateLockKey})
@@ -1775,24 +2211,59 @@ export async function refreshOwnerChannelHealth(input: {
         kind: true,
         transport: true,
         sourceProvider: true,
+        connectionId: true,
+        telegramBotConnectionId: true,
+        endpointAssignmentRevision: true,
         desiredState: true,
         healthStatus: true,
         externalUserId: true,
         status: true,
         lastError: true,
+        telegramBotConnection: {
+          select: {
+            id: true,
+            status: true,
+            revokedAt: true,
+            activeCredentialId: true,
+            credentialRevision: true,
+            activeCredential: {
+              select: {
+                id: true,
+                version: true,
+                status: true,
+              },
+            },
+          },
+        },
       },
     });
     if (!binding) {
       throw new ChannelManagementError("Channel binding not found.", 404);
     }
     const sourceProvider = binding.sourceProvider ?? binding.kind;
+    const conversationFailureScope =
+      binding.kind === RepresentativeChannelKind.MATRIX
+      || binding.kind === RepresentativeChannelKind.TELEGRAM
+        ? {
+            representativeId: binding.representativeId,
+            channelBindings: {
+              some: {
+                kind: binding.kind,
+                representativeBindingId: binding.id,
+                representativeAssignmentRevision:
+                  binding.endpointAssignmentRevision,
+              },
+            },
+          }
+        : { representativeId: binding.representativeId };
     const [failedIngress, failedEgress] = await Promise.all([
       tx.channelEventInbox.findFirst({
         where: {
           sourceProvider,
+          connectionId: binding.connectionId,
           createdAt: { gte: failureCutoff },
           status: { in: ["FAILED", "DEAD_LETTER"] },
-          conversation: { representativeId: binding.representativeId },
+          conversation: conversationFailureScope,
         },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         select: { status: true, lastError: true, createdAt: true },
@@ -1800,9 +2271,10 @@ export async function refreshOwnerChannelHealth(input: {
       tx.outboxEvent.findFirst({
         where: {
           sourceProvider,
+          connectionId: binding.connectionId,
           createdAt: { gte: failureCutoff },
           status: { in: ["FAILED", "DEAD_LETTER"] },
-          conversation: { representativeId: binding.representativeId },
+          conversation: conversationFailureScope,
         },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         select: { status: true, lastError: true, createdAt: true },
@@ -1811,30 +2283,61 @@ export async function refreshOwnerChannelHealth(input: {
     const latestFailure = [failedIngress, failedEgress]
       .filter((event): event is NonNullable<typeof event> => Boolean(event))
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0] ?? null;
-    const health = evaluateChannelControlPlaneHealth({
-      kind: binding.kind,
-      transport: binding.transport,
-      sourceProvider: binding.sourceProvider,
-      externalUserId: binding.externalUserId,
-      legacyStatus: binding.status,
-      currentHealthStatus: binding.healthStatus,
-      currentLastError: binding.lastError,
-      latestFailure,
-    });
-    const updated = await tx.representativeChannelBinding.update({
-      where: { id: binding.id },
-      data: {
-        healthStatus: health.healthStatus,
-        lastHealthCheckAt: now,
-        lastError: health.lastError,
-      },
-      select: {
-        id: true,
-        healthStatus: true,
-        lastHealthCheckAt: true,
-        lastError: true,
-      },
-    });
+    const managedTelegramBotError =
+      binding.kind === RepresentativeChannelKind.TELEGRAM
+      && binding.telegramBotConnectionId
+        ? resolveManagedTelegramBotHealthError(
+            binding.telegramBotConnectionId,
+            binding.telegramBotConnection,
+          )
+        : null;
+    const health = managedTelegramBotError
+      ? {
+          healthStatus: ChannelHealthStatus.UNHEALTHY,
+          lastError: managedTelegramBotError,
+        }
+      : evaluateChannelControlPlaneHealth({
+          kind: binding.kind,
+          transport: binding.transport,
+          sourceProvider: binding.sourceProvider,
+          externalUserId: binding.externalUserId,
+          legacyStatus: binding.status,
+          currentHealthStatus: binding.healthStatus,
+          currentLastError: binding.lastError,
+          latestFailure,
+        });
+    const healthUpdate =
+      await tx.representativeChannelBinding.updateMany({
+        where: {
+          id: binding.id,
+          connectionId: binding.connectionId,
+          telegramBotConnectionId:
+            binding.telegramBotConnectionId,
+          endpointAssignmentRevision:
+            binding.endpointAssignmentRevision,
+          desiredState: binding.desiredState,
+          healthStatus: binding.healthStatus,
+          status: binding.status,
+          lastError: binding.lastError,
+        },
+        data: {
+          healthStatus: health.healthStatus,
+          lastHealthCheckAt: now,
+          lastError: health.lastError,
+        },
+      });
+    if (healthUpdate.count !== 1) {
+      throw new ChannelManagementError(
+        "Channel binding changed while its health was being refreshed.",
+        409,
+      );
+    }
+    const updated = {
+      id: binding.id,
+      healthStatus: health.healthStatus,
+      lastHealthCheckAt: now,
+      lastError: health.lastError,
+    };
     await tx.eventAudit.create({
       data: {
         representativeId: binding.representativeId,
@@ -1862,6 +2365,42 @@ export async function refreshOwnerChannelHealth(input: {
     });
     return updated;
   });
+}
+
+function resolveManagedTelegramBotHealthError(
+  expectedConnectionId: string,
+  connection: {
+    id: string;
+    status: string;
+    revokedAt: Date | null;
+    activeCredentialId: string | null;
+    credentialRevision: number;
+    activeCredential: {
+      id: string;
+      version: number;
+      status: string;
+    } | null;
+  } | null,
+): string | null {
+  if (!connection || connection.id !== expectedConnectionId) {
+    return "Managed Telegram Bot connection is unavailable.";
+  }
+  if (connection.revokedAt) {
+    return "Managed Telegram Bot connection is revoked.";
+  }
+  if (connection.status !== "ACTIVE") {
+    return `Managed Telegram Bot connection is ${connection.status.toLowerCase()}.`;
+  }
+  if (
+    !connection.activeCredentialId
+    || !connection.activeCredential
+    || connection.activeCredential.id !== connection.activeCredentialId
+    || connection.activeCredential.status !== "ACTIVE"
+    || connection.activeCredential.version !== connection.credentialRevision
+  ) {
+    return "Managed Telegram Bot credential requires reconciliation.";
+  }
+  return null;
 }
 
 export function evaluateChannelControlPlaneHealth(input: {
@@ -1985,17 +2524,75 @@ function isJsonRecord(value: unknown): value is Record<string, unknown> {
 function assertTelegramAssignmentIdempotencyReplay(
   payloadValue: unknown,
   telegramBotConnectionId: string,
+  expectedCurrentTelegramBotConnectionIdWasProvided: boolean,
+  expectedCurrentTelegramBotConnectionId: string | null,
+  expectedEndpointAssignmentRevisionWasProvided: boolean,
+  expectedCurrentEndpointAssignmentRevision: number | null,
 ) {
   const payload = isJsonRecord(payloadValue) ? payloadValue : null;
+  const before = isJsonRecord(payload?.before) ? payload.before : null;
   if (
     payload?.action !== "REPRESENTATIVE_TELEGRAM_BOT_ASSIGNED"
     || payload.telegramBotConnectionId !== telegramBotConnectionId
+    || (
+      (payload.expectedCurrentTelegramBotConnectionIdWasProvided === true)
+      !== expectedCurrentTelegramBotConnectionIdWasProvided
+    )
+    || (
+      expectedCurrentTelegramBotConnectionIdWasProvided
+      && before?.telegramBotConnectionId
+        !== expectedCurrentTelegramBotConnectionId
+    )
+    || (
+      (
+        payload.expectedEndpointAssignmentRevisionWasProvided === true
+      ) !== expectedEndpointAssignmentRevisionWasProvided
+    )
+    || (
+      expectedEndpointAssignmentRevisionWasProvided
+      && before?.endpointAssignmentRevision
+        !== expectedCurrentEndpointAssignmentRevision
+    )
   ) {
     throw new ChannelManagementError(
       "Idempotency key was already used for a different Telegram Bot assignment on this representative.",
       409,
     );
   }
+}
+
+function requirePositiveAssignmentRevision(
+  value: number,
+  label: string,
+) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new ChannelManagementError(
+      `${label} must be a positive integer.`,
+      400,
+    );
+  }
+  return value;
+}
+
+function isTelegramAssignmentReplayCurrent(
+  payloadValue: unknown,
+  current: {
+    telegramBotConnectionId: string | null;
+    connectionId: string | null;
+    endpointAssignmentRevision: number;
+    desiredState: ChannelDesiredState;
+  },
+) {
+  const payload = isJsonRecord(payloadValue) ? payloadValue : null;
+  const after = isJsonRecord(payload?.after) ? payload.after : null;
+  return Number.isSafeInteger(current.endpointAssignmentRevision)
+    && current.endpointAssignmentRevision > 0
+    && after?.telegramBotConnectionId
+      === current.telegramBotConnectionId
+    && after?.connectionId === current.connectionId
+    && after?.endpointAssignmentRevision
+      === current.endpointAssignmentRevision
+    && after?.desiredState === current.desiredState;
 }
 
 function requireValue(value: string, label: string) {
@@ -2026,12 +2623,77 @@ function normalizeMatrixUserIdOrNull(
   }
 }
 
-function matrixServerNameOrNull(value: string): string | null {
+function normalizeMatrixUserIdForRequest(
+  value: string,
+  label: string,
+): string {
   try {
-    return matrixServerNameFromUserId(value);
+    return normalizeMatrixUserId(requireValue(value, label));
   } catch {
-    return null;
+    throw new ChannelManagementError(`${label} must be a valid full MXID.`, 400);
   }
+}
+
+function normalizeManagedMatrixUserId(
+  value: string,
+  serverName: string,
+): string {
+  const matrixUserId = normalizeMatrixUserIdForRequest(value, "matrixUserId");
+  if (!isManagedMatrixUserIdForServer(matrixUserId, serverName)) {
+    throw new ChannelManagementError(
+      `matrixUserId must use the @_delegate_rep_ namespace on ${serverName}.`,
+      400,
+    );
+  }
+  return matrixUserId;
+}
+
+function isManagedMatrixUserIdForServer(
+  matrixUserId: string,
+  serverName: string,
+): boolean {
+  try {
+    const normalized = normalizeMatrixUserId(matrixUserId);
+    const separator = normalized.indexOf(":", 1);
+    const localpart = separator > 1
+      ? normalized.slice(1, separator)
+      : "";
+    return (
+      localpart.startsWith("_delegate_rep_")
+      && localpart.length > "_delegate_rep_".length
+      && matrixServerNameFromUserId(normalized) === serverName
+    );
+  } catch {
+    return false;
+  }
+}
+
+function resolveMatrixManagementConfiguration(): OwnerChannelManagementSnapshot[
+  "matrixConfiguration"
+] {
+  let serverName: string | null = null;
+  try {
+    serverName = resolveMatrixServerName();
+  } catch {
+    // Reading the channel snapshot remains safe when Matrix is not configured.
+  }
+  const homeserverUrl = process.env.MATRIX_HOMESERVER_URL?.trim() || "";
+  const resolvedConnectionId =
+    resolveMatrixApplicationServiceConnectionId();
+  const connectionId =
+    resolvedConnectionId.length <= 255
+    && !/\s/.test(resolvedConnectionId)
+      ? resolvedConnectionId
+      : null;
+  return {
+    available:
+      serverName !== null
+      && isHttpUrl(homeserverUrl)
+      && connectionId !== null,
+    serverName,
+    connectionId,
+    managedUserPrefix: "_delegate_rep_",
+  };
 }
 
 function assertDatabaseAvailable() {

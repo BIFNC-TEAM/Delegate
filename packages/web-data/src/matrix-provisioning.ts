@@ -51,7 +51,8 @@ export type MatrixProvisioningConflict = {
   securityState: "ISOLATED";
   reason:
     | "matrix_room_binding_participant_conflict"
-    | "matrix_room_binding_invalid_security_state";
+    | "matrix_room_binding_invalid_security_state"
+    | "matrix_room_binding_assignment_reassigned";
   representativeId: string;
   conversationId: string;
   channelBindingId: string;
@@ -111,6 +112,7 @@ export async function provisionMatrixDirectConversation(
         select: {
           id: true,
           connectionId: true,
+          endpointAssignmentRevision: true,
           desiredState: true,
           externalUserId: true,
           status: true,
@@ -130,6 +132,7 @@ export async function provisionMatrixDirectConversation(
     if (
       representativeBinding.desiredState !== ChannelDesiredState.ACTIVE
       || representativeBinding.status === "DISCONNECTED"
+      || representativeBinding.endpointAssignmentRevision <= 0
       || representativeBinding.externalUserId !== representativeMatrixUserId
       || representativeBinding.connectionId !== connectionId
       || virtualUser?.representativeId !== representativeId
@@ -159,6 +162,8 @@ export async function provisionMatrixDirectConversation(
       select: {
         id: true,
         conversationId: true,
+        connectionId: true,
+        representativeAssignmentRevision: true,
         metadata: true,
         conversation: {
           select: {
@@ -182,10 +187,18 @@ export async function provisionMatrixDirectConversation(
         existingBinding.conversation.representativeId === representativeId
         && metadata.audienceMatrixUserId === audienceMatrixUserId
         && metadata.representativeMatrixUserId === representativeMatrixUserId;
-      if (!sameParticipants || !knownSecurityState) {
-        const isolationReason = sameParticipants
-          ? "matrix_room_binding_invalid_security_state"
-          : "matrix_room_binding_participant_conflict";
+      const sameAssignment =
+        existingBinding.connectionId === connectionId
+        && existingBinding.representativeAssignmentRevision
+          === representativeBinding.endpointAssignmentRevision
+        && metadata.representativeAssignmentRevision
+          === representativeBinding.endpointAssignmentRevision;
+      if (!sameParticipants || !sameAssignment || !knownSecurityState) {
+        const isolationReason = !sameParticipants
+          ? "matrix_room_binding_participant_conflict"
+          : !sameAssignment
+            ? "matrix_room_binding_assignment_reassigned"
+            : "matrix_room_binding_invalid_security_state";
         await tx.conversation.update({
           where: { id: existingBinding.conversationId },
           data: { state: "FAILED" },
@@ -202,6 +215,8 @@ export async function provisionMatrixDirectConversation(
               observedAudienceMatrixUserId: audienceMatrixUserId,
               observedRepresentativeMatrixUserId: representativeMatrixUserId,
               observedRepresentativeId: representativeId,
+              observedRepresentativeAssignmentRevision:
+                representativeBinding.endpointAssignmentRevision,
             },
           },
         });
@@ -303,6 +318,8 @@ export async function provisionMatrixDirectConversation(
       create: {
         conversationId: conversation.id,
         representativeBindingId: representativeBinding.id,
+        representativeAssignmentRevision:
+          representativeBinding.endpointAssignmentRevision,
         kind: RepresentativeChannelKind.MATRIX,
         transport: ChannelTransport.MATRIX,
         sourceProvider: ChannelSourceProvider.MATRIX,
@@ -314,6 +331,8 @@ export async function provisionMatrixDirectConversation(
           encrypted: false,
           audienceMatrixUserId,
           representativeMatrixUserId,
+          representativeAssignmentRevision:
+            representativeBinding.endpointAssignmentRevision,
           // A direct invite is only a candidate. The Application Service must
           // join and verify the room's authoritative state before ingress can
           // queue AI work.
@@ -323,12 +342,16 @@ export async function provisionMatrixDirectConversation(
       update: {
         conversationId: conversation.id,
         representativeBindingId: representativeBinding.id,
+        representativeAssignmentRevision:
+          representativeBinding.endpointAssignmentRevision,
         connectionId,
         metadata: {
           directMessageOnly: true,
           encrypted: false,
           audienceMatrixUserId,
           representativeMatrixUserId,
+          representativeAssignmentRevision:
+            representativeBinding.endpointAssignmentRevision,
           securityState: "PENDING_REMOTE_VALIDATION",
         },
       },

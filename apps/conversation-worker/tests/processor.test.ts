@@ -41,6 +41,7 @@ const mocks = vi.hoisted(() => ({
   releaseConversationEntitlement: vi.fn(),
   retryOperatorMessageDelivery: vi.fn(),
   resolveTelegramBotRuntimeCredential: vi.fn(),
+  withActiveTelegramRepresentativeChannelFence: vi.fn(),
 }));
 
 vi.mock("@delegate/model-runtime", () => ({
@@ -100,6 +101,8 @@ vi.mock("@delegate/web-data", () => ({
   retryOperatorMessageDelivery: mocks.retryOperatorMessageDelivery,
   resolveTelegramBotRuntimeCredential:
     mocks.resolveTelegramBotRuntimeCredential,
+  withActiveTelegramRepresentativeChannelFence:
+    mocks.withActiveTelegramRepresentativeChannelFence,
   isGenerationWorkLeaseLostError: (error: unknown) =>
     error instanceof Error
     && "code" in error
@@ -134,6 +137,12 @@ describe("conversation worker knowledge recall", () => {
     mocks.retryGenerationDelivery.mockResolvedValue(undefined);
     mocks.retryOperatorMessageDelivery.mockResolvedValue(undefined);
     mocks.resolveTelegramBotRuntimeCredential.mockResolvedValue(null);
+    mocks.withActiveTelegramRepresentativeChannelFence.mockImplementation(
+      async (_input, operation) => ({
+        executed: true,
+        value: await operation({}),
+      }),
+    );
     mocks.hasPersistedTelegramBotConnections.mockResolvedValue(false);
     mocks.createComputeDelegationTask.mockResolvedValue({
       task: { id: "task-1" },
@@ -213,13 +222,16 @@ describe("conversation worker knowledge recall", () => {
     }));
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       citations: [expect.objectContaining({ title: "佩奇当老师" })],
+      runtimeOutcome: {
+        mode: "model",
+      },
     }));
   });
 
   it("uses recalled knowledge and keeps citations when model generation fails", async () => {
     mocks.generateRepresentativeReply.mockResolvedValue({
       ok: false,
-      reason: "provider timed out",
+      reason: "provider timed out with secret upstream details",
       state: "ready",
     });
 
@@ -235,7 +247,45 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       replyText: expect.stringContaining("佩奇临时代课"),
       citations: [expect.objectContaining({ title: "佩奇当老师" })],
+      runtimeOutcome: {
+        mode: "fallback",
+        fallbackStrategy: "grounded_knowledge",
+        modelRuntimeState: "ready",
+        fallbackReason: "provider_failed",
+      },
     }));
+    expect(
+      JSON.stringify(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]),
+    ).not.toContain("secret upstream details");
+  });
+
+  it("records a sanitized deterministic fallback when the model is unavailable", async () => {
+    mocks.generateRepresentativeReply.mockResolvedValue({
+      ok: false,
+      reason: "missing key sk-do-not-persist",
+      state: "missing_credentials",
+    });
+    mocks.renderGroundedKnowledgeFallback.mockReturnValue(null);
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyText: "fallback",
+        runtimeOutcome: {
+          mode: "fallback",
+          fallbackStrategy: "deterministic_preview",
+          modelRuntimeState: "missing_credentials",
+          fallbackReason: "model_unavailable",
+        },
+      }),
+    );
+    expect(
+      JSON.stringify(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]),
+    ).not.toContain("sk-do-not-persist");
   });
 
   it("retries only persisted delivery for a completed Telegram generation", async () => {
@@ -299,6 +349,15 @@ describe("conversation worker knowledge recall", () => {
     expect(
       mocks.resolveTelegramBotRuntimeCredential,
     ).toHaveBeenCalledWith({ connectionId: "111111111" });
+    expect(
+      mocks.withActiveTelegramRepresentativeChannelFence,
+    ).toHaveBeenCalledWith(
+      {
+        conversationId: "conversation-telegram",
+        expectedConnectionId: "111111111",
+      },
+      expect.any(Function),
+    );
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(
         "/bot111111111:AAAAAAAAAAAAAAAAAAAAAAAA/sendMessage",
@@ -327,6 +386,67 @@ describe("conversation worker knowledge recall", () => {
       outputMessageId: "message-output",
       externalMessageId: "90210",
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("does not call Telegram after the final assignment-epoch fence closes", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.withActiveTelegramRepresentativeChannelFence
+      .mockResolvedValueOnce({
+        executed: false,
+        reason: "telegram_channel_not_active",
+      });
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-old-telegram-epoch",
+      leaseAttempt: 2,
+      runId: "run-old-telegram-epoch",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-old-telegram-epoch",
+      contactId: "contact-telegram",
+      controlState: "WAITING_USER",
+      inputMessageId: "message-inbound",
+      userText: "original inbound",
+      channel: "telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "111111111",
+      deliveryOnly: true,
+      outputMessageId: "message-output",
+      outputText: "stale reply",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+      telegramRequestTimeoutMs: 8_000,
+    })).resolves.toMatchObject({
+      processed: true,
+      status: "failed",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(
+      mocks.resolveTelegramBotRuntimeCredential,
+    ).not.toHaveBeenCalled();
+    expect(mocks.retryGenerationDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-old-telegram-epoch",
+        outputMessageId: "message-output",
+        errorMessage:
+          "Telegram channel assignment changed before outbound delivery.",
+      }),
+    );
+    expect(
+      mocks.markGenerationDeliveryComplete,
+    ).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 
@@ -421,6 +541,7 @@ describe("conversation worker knowledge recall", () => {
       userText: "生成一份报告",
       channel: "telegram",
       externalConversationId: "654321",
+      telegramConnectionId: "111111111",
       delegationTerminalRecovery: {
         taskStatus: "COMPLETED",
         stepStatus: "COMPLETED",

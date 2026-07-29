@@ -13,6 +13,7 @@ export type ChannelAvailabilityCode =
   | "channel_disconnected"
   | "channel_unhealthy"
   | "matrix_private_room_not_verified"
+  | "matrix_identity_reassigned"
   | "telegram_connection_reassigned"
   | "policy_disabled";
 
@@ -37,18 +38,35 @@ export type ChannelAvailabilityInput = {
     expiresAt?: Date | null;
     payload: Record<string, unknown>;
   }>;
+  matrixEndpoint?: MatrixDeliveryEndpointInput;
   telegramEndpoint?: TelegramDeliveryEndpointInput;
   now?: Date;
+};
+
+export type MatrixDeliveryEndpointInput = {
+  conversationRepresentativeMatrixUserId?: string | null | undefined;
+  representativeMatrixUserId?: string | null | undefined;
+  conversationRepresentativeAssignmentRevision?:
+    | number
+    | null
+    | undefined;
+  representativeAssignmentRevision?: number | null | undefined;
 };
 
 export type TelegramDeliveryEndpointInput = {
   conversationConnectionId?: string | null | undefined;
   representativeConnectionId?: string | null | undefined;
+  conversationRepresentativeAssignmentRevision?:
+    | number
+    | null
+    | undefined;
+  representativeAssignmentRevision?: number | null | undefined;
   expectedConnectionId?: string | null | undefined;
   representativeTelegramBotConnectionId?: string | null | undefined;
   representativeTelegramBot?: {
     id: string;
     botId: string;
+    status: string;
   } | null | undefined;
 };
 
@@ -120,10 +138,67 @@ export function resolveChannelAvailability(
     return { available: false, code: "channel_unhealthy" };
   }
 
+  if (input.channel === "matrix" && input.matrixEndpoint) {
+    const matrixEndpoint =
+      resolveMatrixDeliveryEndpointAvailability(input.matrixEndpoint);
+    if (!matrixEndpoint.available) return matrixEndpoint;
+  }
+
   if (input.channel === "telegram" && input.telegramEndpoint) {
     const telegramEndpoint =
       resolveTelegramDeliveryEndpointAvailability(input.telegramEndpoint);
     if (!telegramEndpoint.available) return telegramEndpoint;
+  }
+
+  return { available: true, code: "available" };
+}
+
+/**
+ * A Matrix room is permanently scoped to the representative MXID that joined
+ * it. Reassigning the representative identity must never silently reuse the
+ * old room with the new MXID. Missing identifiers are left to the existing
+ * connection and room-security gates; this helper classifies only a proven
+ * reassignment.
+ */
+export function resolveMatrixDeliveryEndpointAvailability(
+  input: MatrixDeliveryEndpointInput,
+): ChannelAvailabilityResult {
+  const conversationRepresentativeMatrixUserId = normalizeConnectionId(
+    input.conversationRepresentativeMatrixUserId,
+  );
+  const representativeMatrixUserId = normalizeConnectionId(
+    input.representativeMatrixUserId,
+  );
+  const conversationAssignmentRevision =
+    normalizeAssignmentRevision(
+      input.conversationRepresentativeAssignmentRevision,
+    );
+  const representativeAssignmentRevision =
+    normalizeAssignmentRevision(
+      input.representativeAssignmentRevision,
+    );
+  const representativeAssignmentRevisionWasProvided =
+    input.representativeAssignmentRevision !== undefined
+    && input.representativeAssignmentRevision !== null;
+  if (
+    (
+      conversationRepresentativeMatrixUserId
+      && representativeMatrixUserId
+      && conversationRepresentativeMatrixUserId !== representativeMatrixUserId
+    )
+    || (
+      representativeAssignmentRevisionWasProvided
+      && (
+        representativeAssignmentRevision === null
+        || conversationAssignmentRevision
+          !== representativeAssignmentRevision
+      )
+    )
+  ) {
+    return {
+      available: false,
+      code: "matrix_identity_reassigned",
+    };
   }
 
   return { available: true, code: "available" };
@@ -143,10 +218,21 @@ export function resolveTelegramDeliveryEndpointAvailability(
   const representativeConnectionId = normalizeConnectionId(
     input.representativeConnectionId,
   );
+  const conversationAssignmentRevision =
+    normalizeAssignmentRevision(
+      input.conversationRepresentativeAssignmentRevision,
+    );
+  const representativeAssignmentRevision =
+    normalizeAssignmentRevision(
+      input.representativeAssignmentRevision,
+    );
   if (
     !conversationConnectionId
     || !representativeConnectionId
     || conversationConnectionId !== representativeConnectionId
+    || representativeAssignmentRevision === null
+    || conversationAssignmentRevision
+      !== representativeAssignmentRevision
   ) {
     return {
       available: false,
@@ -176,6 +262,7 @@ export function resolveTelegramDeliveryEndpointAvailability(
       || !managedBot
       || managedBot.id !== managedConnectionId
       || normalizeConnectionId(managedBot.botId) !== representativeConnectionId
+      || managedBot.status.trim().toUpperCase() !== "ACTIVE"
     )
   ) {
     return {
@@ -228,4 +315,14 @@ function normalizeConnectionId(value: string | null | undefined): string | null 
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return normalized || null;
+}
+
+function normalizeAssignmentRevision(
+  value: number | null | undefined,
+): number | null {
+  return typeof value === "number"
+    && Number.isSafeInteger(value)
+    && value > 0
+    ? value
+    : null;
 }

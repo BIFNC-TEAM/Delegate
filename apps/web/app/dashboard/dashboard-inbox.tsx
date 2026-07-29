@@ -9,6 +9,7 @@ import type {
 } from "@delegate/web-data";
 import type { Locale } from "@delegate/web-ui";
 
+import { formatGenerationRunPresentation } from "./dashboard-inbox-run-status";
 import { formatMessageTime, formatRelativeTime } from "./dashboard-time";
 
 export function DashboardInbox({
@@ -549,9 +550,18 @@ export function DashboardInbox({
               <section>
                 <p>{zh ? "最近运行" : "Recent runs"}</p>
                 <div className="inbox-run-list">
-                  {detail.runs.length ? detail.runs.map((run) => (
-                    <article key={run.id}><span className={`is-${run.status}`} /><div><strong>{run.status}</strong><small>{run.model || "Model pending"}</small></div></article>
-                  )) : <small>{zh ? "暂无生成运行记录" : "No generation runs yet"}</small>}
+                  {detail.runs.length ? detail.runs.map((run) => {
+                    const presentation = formatGenerationRunPresentation(run, locale);
+                    return (
+                      <article key={run.id}>
+                        <span className={presentation.markerClass} />
+                        <div>
+                          <strong>{presentation.label}</strong>
+                          <small>{presentation.detail}</small>
+                        </div>
+                      </article>
+                    );
+                  }) : <small>{zh ? "暂无生成运行记录" : "No generation runs yet"}</small>}
                 </div>
               </section>
               <section>

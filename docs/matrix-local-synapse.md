@@ -77,6 +77,16 @@ local Synapse state.
 Generated values are strict shell-safe scalars. The helpers validate and parse
 `matrix.env` through a key whitelist; they never execute it with `source`.
 
+The normal Matrix Compose wrapper layers configuration explicitly: it gives
+Docker Compose the repository `.env` first, then the generated
+`.local/matrix/matrix.env`. This makes model-provider settings and credentials
+from the repository `.env` available to the application services while the
+generated local Matrix identity, endpoints, and bearer tokens take precedence
+over any `MATRIX_*` values in `.env`. The repository `.env` is passed to Docker
+Compose for parsing and is never sourced or executed by the wrapper. Generated
+Matrix credentials are not printed; inspect only non-secret readiness state
+when diagnosing the local stack.
+
 ## Start and test
 
 Start only the isolated E2E Synapse, E2E database/migrations, and E2E Matrix

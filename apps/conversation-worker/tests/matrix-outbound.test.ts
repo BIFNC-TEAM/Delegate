@@ -64,6 +64,7 @@ describe("Matrix outbound authorship", () => {
           roomId,
           conversationId,
           audienceMatrixUserId: audienceUserId,
+          requireActiveAudienceProof: true,
         },
       },
       expect.any(Function),
@@ -248,6 +249,32 @@ describe("Matrix outbound authorship", () => {
       text: "must not leave",
     })).rejects.toThrow("room was isolated before outbound delivery");
 
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not send a queued reply after the audience Matrix proof is revoked", async () => {
+    mockActiveRoom();
+    mocks.withActiveMatrixRepresentativeChannelFence.mockResolvedValueOnce({
+      executed: false,
+      reason: "matrix_audience_connection_not_verified",
+    });
+    const fetchMock = validatedRoomFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(sendMatrixRepresentativeMessage({
+      config,
+      conversationId,
+      roomId,
+      senderUserId,
+      deliveryId: "revoked-audience-proof",
+      senderMode: "ai",
+      text: "must not leave",
+    })).rejects.toThrow(
+      "Matrix audience connection is no longer verified",
+    );
+
+    // Only the joined-member and encryption checks ran. The fenced send
+    // callback was never executed.
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 

@@ -42,7 +42,7 @@ Delegate 现在包含这些可运行的页面和服务：
 
 - **营销站点** 位于 `apps/site`，使用 Dispatch Editorial 设计系统。
 - **公开 representative 应用** 位于 `apps/reps`，包含代表档案、服务档位、网页聊天、充值入口模块，以及签名 public-chat session state。
-- **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、委托任务、governed actions、compute sessions、artifacts、deliverables、packages、OpenViking traces 和 workflow state。
+- **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、委托任务、governed actions、compute sessions、artifacts、deliverables、packages、OpenViking traces、workflow state，以及 Owner 资料、身份安全和 Dashboard 通知设置。
 - **可选 Telegram bot runtime** 位于 `apps/bot`，基于 grammY long-poll 和共享 Conversation Platform；它保留 Telegram 特有命令与交付边界，但不是第一版 Delegate 产品主入口。
 - **可选 Matrix Application Service** 位于 `apps/matrix-bridge`，负责认证 Matrix transaction、映射渠道事件和管理虚拟用户。原生 Matrix 是独立的可选渠道，不是 Telegram 的必需中转层。
 - **AMN wallet control plane** 覆盖内部钱包 ledger、mock recharge、Agent token purchase、usage charging、Creator 20% revenue policy、refund/reversal services、withdrawal request freeze、provider adapters，以及 owner/public wallet views。
@@ -303,6 +303,8 @@ pnpm docker:up:temporal
 
 - `DATABASE_URL` 指向 Prisma 使用的 Postgres。
 - `LOGTO_ENDPOINT`、`LOGTO_APP_ID`、`LOGTO_APP_SECRET`、`LOGTO_REDIRECT_URI` 和 `LOGTO_SCOPES` 启用兼容 Logto OIDC 的 creator dashboard 登录。
+- `LOGTO_ACCOUNT_CENTER_URL` 可在 Owner Settings 中显示经过校验的 Logto 自助账户管理入口。生产值必须使用 HTTPS；本地开发可以使用 loopback HTTP。
+- Owner Settings 的通知偏好目前只控制 Dashboard 导航提醒，不会启用 Email、SMS、Slack、Webhook 或免打扰时段。
 - `NEXT_PUBLIC_DASHBOARD_URL` 和 `NEXT_PUBLIC_REPRESENTATIVE_URL` 是 production-shaped 应用必填的 canonical public origin。本地 override 会把它们固定为 loopback origin，避免复用远端环境文件时把开发登录重定向到远端主机。
 - `TELEGRAM_WEB_RECHARGE_BASE_URL` 可只为 Bot 配置公网 Web 充值 origin，而不改变 representative app 自身的 canonical origin；未配置时回退到 `NEXT_PUBLIC_REPRESENTATIVE_URL`。只有公网 HTTPS 值会生成内联按钮，本地 HTTP 值只以文本发送。
 - `DELEGATE_AUTH_SESSION_SECRET` 用于签名 dashboard auth 和 callback-state cookie。生产环境必须使用强 secret。
@@ -345,6 +347,7 @@ pnpm db:setup
 
 pnpm test:channels
 pnpm test:channels:pg16
+pnpm test:postgres:owner-settings
 
 pnpm docker:ps
 pnpm docker:logs
@@ -363,6 +366,12 @@ credentials，再测试并 typecheck Web、Matrix、Telegram、conversation work
 Dashboard 和公开 representative packages。`pnpm test:channels:pg16` 在此基础上
 使用可销毁的 PostgreSQL 16 fixture，验证跨渠道身份、消息、服务权益、并发和迁移兼容性；
 它不会连接当前配置的应用数据库。
+`pnpm test:postgres:owner-settings` 同样会创建并销毁独立的 PostgreSQL 16 容器，
+从空库应用全部迁移，并验证 Owner Settings 的 CAS、幂等、并发、审计、通知与公开身份边界。
+
+发布 Owner Settings 时，应先应用三项增量设置迁移，再部署应用。两个仅含单条
+`CREATE INDEX CONCURRENTLY` 的迁移不能被人工包进大事务。若应用发布失败，
+应先回滚应用并保留这些向前兼容的 schema 增量，不执行破坏性的数据库降级。
 
 ### 工作区技能迁移上线
 

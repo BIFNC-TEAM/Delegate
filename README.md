@@ -42,7 +42,7 @@ Delegate currently includes these working surfaces and services:
 
 - **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
 - **Public representative app** in `apps/reps`, including representative profiles, service tiers, web chat, recharge-entry modules, and signed public-chat session state.
-- **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, and workflow state.
+- **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, workflow state, and Owner profile, identity-security, and Dashboard notification settings.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and retained as the Telegram-specific edge while business behavior moves toward the shared Conversation Platform.
 - **Matrix Application Service foundation** in `apps/matrix-bridge`, providing authenticated Matrix transaction ingestion and channel event mapping. Native Matrix is an optional channel; it is not required for Telegram availability.
 - **AMN wallet control plane** covering internal wallet ledger entries, local mock recharge, default-off WeChat Pay API v3 Native collection and recovery, Agent token purchase, usage charging, Creator 20% revenue policy, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
@@ -353,6 +353,8 @@ The default `.env.example` is safe for local development. Important settings:
 
 - `DATABASE_URL` points Prisma to Postgres.
 - `LOGTO_ENDPOINT`, `LOGTO_APP_ID`, `LOGTO_APP_SECRET`, `LOGTO_REDIRECT_URI`, and `LOGTO_SCOPES` enable Logto-compatible OIDC login for creator dashboard sessions.
+- `LOGTO_ACCOUNT_CENTER_URL` optionally exposes a validated Logto self-service account-management link in Owner Settings. Production values must use HTTPS; local development may use loopback HTTP.
+- Owner Settings notification preferences control Dashboard navigation reminders only. They do not enable email, SMS, Slack, webhook, or quiet-hours delivery.
 - `NEXT_PUBLIC_DASHBOARD_URL` and `NEXT_PUBLIC_REPRESENTATIVE_URL` are required canonical public origins for the production-shaped apps. The local override fixes them to loopback origins so development login cannot be redirected to a remote host through a reused environment file.
 - `TELEGRAM_WEB_RECHARGE_BASE_URL` optionally gives only the Bot a public Web-recharge origin without changing the representative app's canonical origin. It falls back to `NEXT_PUBLIC_REPRESENTATIVE_URL`; only public HTTPS values produce an inline button, while local HTTP values are sent as text.
 - `DELEGATE_AUTH_SESSION_SECRET` signs dashboard auth and callback-state cookies. Set a strong secret in production.
@@ -414,6 +416,7 @@ pnpm db:setup
 
 pnpm test:channels
 pnpm test:channels:pg16
+pnpm test:postgres:owner-settings
 
 pnpm docker:ps
 pnpm docker:logs
@@ -437,6 +440,17 @@ Matrix, Telegram, worker, dashboard, and public representative packages.
 cross-channel identity/message/entitlement loop, entitlement concurrency, and
 migration compatibility. These fixtures do not use the configured application
 database.
+`pnpm test:postgres:owner-settings` likewise creates and removes an isolated
+PostgreSQL 16 container, applies every migration from a fresh database, and
+verifies Owner Settings CAS, idempotency, concurrency, audit, notification, and
+public-identity boundaries.
+
+For an Owner Settings release, apply the three additive settings migrations
+before deploying the application. Keep the two single-statement
+`CREATE INDEX CONCURRENTLY` migrations outside any manually added transaction.
+If the application rollout fails, roll back the application first and leave
+these forward-compatible schema additions in place; do not run a destructive
+database downgrade.
 
 ### Workspace skill migration rollout
 

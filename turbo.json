@@ -11,6 +11,7 @@
     },
     "test": {
       "dependsOn": ["^typecheck"],
+      "env": ["COMPUTE_BROKER_INTERNAL_TOKEN"],
       "outputs": []
     }
   }

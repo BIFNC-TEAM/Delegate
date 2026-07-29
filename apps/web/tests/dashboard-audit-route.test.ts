@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getWorkspaceAuditExport: vi.fn(),
   getWorkspaceAuditSnapshot: vi.fn(),
+  requireDashboardApiOwnerSession: vi.fn(),
   requireDashboardRepresentativeAccess: vi.fn(),
 }));
 
@@ -14,6 +15,7 @@ vi.mock("@delegate/web-data", () => ({
 
 vi.mock("../app/api/dashboard/auth", () => ({
   dashboardAuthErrorResponse: () => null,
+  requireDashboardApiOwnerSession: mocks.requireDashboardApiOwnerSession,
   requireDashboardRepresentativeAccess: mocks.requireDashboardRepresentativeAccess,
 }));
 
@@ -22,6 +24,7 @@ import { GET } from "../app/api/dashboard/audit/route";
 describe("dashboard workspace audit route", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.requireDashboardApiOwnerSession.mockResolvedValue({ ownerId: "owner-1" });
     mocks.requireDashboardRepresentativeAccess.mockResolvedValue({ ownerId: "owner-1" });
   });
 
@@ -40,7 +43,8 @@ describe("dashboard workspace audit route", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
-    expect(mocks.requireDashboardRepresentativeAccess).toHaveBeenCalledWith("delegate");
+    expect(mocks.requireDashboardApiOwnerSession).toHaveBeenCalledOnce();
+    expect(mocks.requireDashboardRepresentativeAccess).not.toHaveBeenCalled();
     expect(mocks.getWorkspaceAuditSnapshot).toHaveBeenCalledWith({
       ownerId: "owner-1",
       activeRepresentativeSlug: "delegate",
@@ -48,6 +52,28 @@ describe("dashboard workspace audit route", () => {
       query: "install",
       limit: 25,
       cursor: "opaque",
+    });
+  });
+
+  it("loads owner-only settings audit events without requiring a representative", async () => {
+    mocks.getWorkspaceAuditSnapshot.mockResolvedValue({
+      workspace: { ownerId: "owner-1", representativeCount: 0 },
+      metrics: { total: 1, last24Hours: 1, decisions: 0, anomalies: 0 },
+      categories: [{ id: "settings", count: 1 }],
+      page: { filteredTotal: 1, limit: 50, hasMore: false, nextCursor: null },
+      events: [],
+    });
+
+    const response = await GET(new Request(
+      "http://localhost/api/dashboard/audit?category=settings",
+    ));
+
+    expect(response.status).toBe(200);
+    expect(mocks.requireDashboardRepresentativeAccess).not.toHaveBeenCalled();
+    expect(mocks.getWorkspaceAuditSnapshot).toHaveBeenCalledWith({
+      ownerId: "owner-1",
+      activeRepresentativeSlug: "",
+      category: "settings",
     });
   });
 

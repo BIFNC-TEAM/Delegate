@@ -106,6 +106,14 @@ The creator dashboard uses Logto-compatible OIDC:
 - `/auth/logout` clears auth cookies.
 - production requires `DELEGATE_AUTH_SESSION_SECRET`; local development falls back to a dev-only secret.
 
+Each successful callback refreshes the matching `OwnerIdentityLink` with the
+current email, phone, and independent channel-verification state from the
+validated identity-provider profile. A channel reported as unverified clears
+its previous verification timestamp, so Owner Settings cannot display stale
+security evidence. This refresh never overwrites either the public
+`Owner.displayName` attribution or the private Owner Settings account display
+name.
+
 Representative directory and creation APIs now scope to the logged-in `Owner`. The setup API checks that the current owner owns the requested representative before reading or writing setup state.
 
 ## Sandbox Semantics

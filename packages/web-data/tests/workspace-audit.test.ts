@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildWorkspaceAuditSafeMetadata,
+  buildWorkspaceOwnerScopeWhere,
   classifyWorkspaceAuditEvent,
   countWorkspaceAuditEventsWithinLast24Hours,
   decodeWorkspaceAuditCursor,
@@ -40,6 +41,22 @@ describe("workspace audit normalization", () => {
     expect(classifyWorkspaceAuditEvent("representative_version_published")).toBe("publishing");
     expect(classifyWorkspaceAuditEvent("channel_configuration_changed")).toBe("publishing");
     expect(classifyWorkspaceAuditEvent("tool_execution_failed")).toBe("tools");
+    expect(classifyWorkspaceAuditEvent("owner_profile_updated")).toBe("settings");
+    expect(classifyWorkspaceAuditEvent("owner_notification_preferences_updated")).toBe("settings");
+  });
+
+  it("treats an explicit owner scope as authoritative over representative fallback", () => {
+    expect(buildWorkspaceOwnerScopeWhere("owner-a")).toEqual({
+      OR: [
+        { ownerId: "owner-a" },
+        {
+          AND: [
+            { ownerId: null },
+            { representative: { ownerId: "owner-a" } },
+          ],
+        },
+      ],
+    });
   });
 
   it("derives workspace-wide totals from grouped counts without a row-window cap", () => {
@@ -59,6 +76,7 @@ describe("workspace audit normalization", () => {
         { id: "tools", count: 0 },
         { id: "workflow", count: 97 },
         { id: "conversation", count: 500 },
+        { id: "settings", count: 0 },
         { id: "security", count: 0 },
         { id: "other", count: 0 },
       ],
@@ -88,6 +106,9 @@ describe("workspace audit normalization", () => {
       version: "1.2.3",
       requestedCommand: "cat /private/secret",
       token: "secret",
+      email: "private@example.com",
+      phone: "+8613800138000",
+      displayName: "Private Owner",
       nested: { credential: "secret" },
     })).toEqual({ status: "FAILED", version: "1.2.3" });
   });

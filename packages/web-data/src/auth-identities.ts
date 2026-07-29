@@ -25,6 +25,8 @@ type OwnerIdentityLinkRecord = {
   email: string | null;
   phone: string | null;
   verifiedAt: Date | null;
+  emailVerifiedAt: Date | null;
+  phoneVerifiedAt: Date | null;
   metadata: unknown;
 };
 
@@ -51,6 +53,17 @@ type AuthIdentityClient = {
       };
       include: { owner: true };
     }): Promise<(OwnerIdentityLinkRecord & { owner: OwnerRecord }) | null>;
+    update(args: {
+      where: { id: string };
+      data: {
+        email: string | null;
+        phone: string | null;
+        verifiedAt: Date | null;
+        emailVerifiedAt: Date | null;
+        phoneVerifiedAt: Date | null;
+        metadata: unknown;
+      };
+    }): Promise<OwnerIdentityLinkRecord>;
   };
   owner: {
     create(args: {
@@ -63,6 +76,8 @@ type AuthIdentityClient = {
             email: string | null;
             phone: string | null;
             verifiedAt: Date | null;
+            emailVerifiedAt: Date | null;
+            phoneVerifiedAt: Date | null;
             metadata: unknown;
           };
         };
@@ -125,9 +140,20 @@ export async function resolveOwnerForAuth(
   });
 
   if (existingLink) {
+    const refreshedLink = await client.ownerIdentityLink.update({
+      where: { id: existingLink.id },
+      data: {
+        email: normalized.email,
+        phone: normalized.phone,
+        verifiedAt: normalized.verifiedAt,
+        emailVerifiedAt: normalized.emailVerifiedAt,
+        phoneVerifiedAt: normalized.phoneVerifiedAt,
+        metadata: normalized.metadata,
+      },
+    });
     return {
       owner: existingLink.owner,
-      identityLink: existingLink,
+      identityLink: refreshedLink,
       created: false,
     };
   }
@@ -142,6 +168,8 @@ export async function resolveOwnerForAuth(
           email: normalized.email,
           phone: normalized.phone,
           verifiedAt: normalized.verifiedAt,
+          emailVerifiedAt: normalized.emailVerifiedAt,
+          phoneVerifiedAt: normalized.phoneVerifiedAt,
           metadata: normalized.metadata,
         },
       },
@@ -200,6 +228,10 @@ function normalizeExternalAuthProfile(profile: ExternalAuthProfile, verifiedAtNo
   const email = normalizeOptionalEmail(profile.email);
   const phone = normalizeOptionalText(profile.phone);
   const name = normalizeOptionalText(profile.name);
+  const emailVerifiedAt =
+    email && profile.emailVerified === true ? verifiedAtNow : null;
+  const phoneVerifiedAt =
+    phone && profile.phoneVerified === true ? verifiedAtNow : null;
 
   return {
     ownerProvider: mapOwnerProvider(profile.provider),
@@ -208,7 +240,9 @@ function normalizeExternalAuthProfile(profile: ExternalAuthProfile, verifiedAtNo
     email,
     phone,
     name,
-    verifiedAt: profile.emailVerified || profile.phoneVerified ? verifiedAtNow : null,
+    verifiedAt: emailVerifiedAt ?? phoneVerifiedAt,
+    emailVerifiedAt,
+    phoneVerifiedAt,
     metadata: profile.metadata ?? null,
   };
 }

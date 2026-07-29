@@ -520,8 +520,8 @@ export async function getWorkspaceSkillSnapshot(input: {
       return {
         id: event.id,
         type: event.type.toLowerCase(),
-        representativeSlug: event.representative.slug,
-        representativeName: event.representative.displayName,
+        representativeSlug: event.representative?.slug ?? active.slug,
+        representativeName: event.representative?.displayName ?? active.displayName,
         skillSlug: readString(payload?.slug),
         version: readString(payload?.version) ?? readString(payload?.installedVersion),
         actor: readString(payload?.changedBy) ?? readString(payload?.reviewedBy) ?? readString(payload?.installedBy),

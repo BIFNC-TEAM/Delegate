@@ -12,11 +12,12 @@ import {
 } from "../../../dashboard/dashboard-audit-csv";
 import {
   dashboardAuthErrorResponse,
+  requireDashboardApiOwnerSession,
   requireDashboardRepresentativeAccess,
 } from "../auth";
 
 const categories = new Set<WorkspaceAuditCategory>([
-  "skills", "publishing", "approvals", "wallet", "tools", "workflow", "conversation", "security", "other",
+  "skills", "publishing", "approvals", "wallet", "tools", "workflow", "conversation", "settings", "security", "other",
 ]);
 
 export async function GET(request: Request) {
@@ -32,15 +33,28 @@ export async function GET(request: Request) {
   const limit = rawLimit ? Number(rawLimit) : undefined;
   const format = url.searchParams.get("format")?.trim() || "json";
   if (
-    !representativeSlug
-    || !category
+    !category
     || (format !== "json" && format !== "csv")
     || (rawLimit && !Number.isFinite(limit))
   ) {
-    return NextResponse.json({ error: "rep and a valid category are required." }, { status: 400 });
+    return NextResponse.json({ error: "A valid category is required." }, { status: 400 });
   }
   try {
-    const session = await requireDashboardRepresentativeAccess(representativeSlug);
+    const ownerSession = await requireDashboardApiOwnerSession();
+    const session = ownerSession?.ownerId
+      ? ownerSession
+      : representativeSlug
+        ? await requireDashboardRepresentativeAccess(representativeSlug)
+        : ownerSession;
+    if (!session?.ownerId && !representativeSlug) {
+      return NextResponse.json(
+        { error: "Authentication or rep is required." },
+        {
+          status: 401,
+          headers: { "Cache-Control": "private, no-store" },
+        },
+      );
+    }
     if (format === "csv") {
       const auditExport = await getWorkspaceAuditExport({
         ...(session?.ownerId ? { ownerId: session.ownerId } : {}),
@@ -55,7 +69,7 @@ export async function GET(request: Request) {
         auditExport.events,
         request.signal,
       );
-      const safeSlug = representativeSlug
+      const safeSlug = (representativeSlug || "workspace")
         .replace(/[^a-z0-9._-]+/gi, "-")
         .slice(0, 80) || "workspace";
       return new Response(stream, {

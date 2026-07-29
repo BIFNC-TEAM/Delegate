@@ -84,7 +84,10 @@ export const dashboardNavigation: Array<{
   },
 ];
 
-export const dashboardSectionBlueprints: Record<Exclude<DashboardView, "overview">, DashboardSectionBlueprint> = {
+export const dashboardSectionBlueprints: Record<
+  Exclude<DashboardView, "overview" | "settings">,
+  DashboardSectionBlueprint
+> = {
   knowledge: {
     eyebrow: text("Knowledge Library", "Knowledge Library"),
     title: text("把所有知识资产收进一套可复用、可授权的资料库。", "Keep every knowledge asset reusable, traceable, and permissioned."),
@@ -353,33 +356,6 @@ export const dashboardSectionBlueprints: Record<Exclude<DashboardView, "overview
     modules: [
       { title: text("事件详情", "Event detail"), description: text("保留 payload、前后状态、相关资源和 Trace ID。", "Retain payload, before/after state, related resources, and trace ID."), items: [text("Payload", "Payload"), text("前后状态", "Before / after"), text("相关资源", "Related resources"), text("Trace ID", "Trace ID")] },
       { title: text("事件筛选", "Event filters"), description: text("从业务动作进入审计，而不是在原始日志里搜索。", "Enter audit from business actions rather than searching raw logs."), items: [text("发布事件", "Publishing"), text("审批事件", "Approvals"), text("钱包事件", "Wallet"), text("工具调用", "Tool calls"), text("登录 / 设置", "Login / settings")], status: text("保留 180 天", "180-day retention") },
-    ],
-  },
-  settings: {
-    eyebrow: text("Settings", "Settings"),
-    title: text("管理账户、工作区、支付、安全和开发者连接。", "Manage account, workspace, payment, security, and developer connections."),
-    description: text("系统设置只放真正的工作区级配置，代表自己的配置留在数字代表模块。", "System settings contain workspace-level configuration; representative configuration stays with representatives."),
-    primaryAction: text("保存工作区设置", "Save workspace settings"),
-    tabs: [text("Account", "Account"), text("Workspace", "Workspace"), text("Billing", "Billing"), text("Security", "Security"), text("Notifications", "Notifications"), text("Developer", "Developer")],
-    metrics: [
-      { label: text("工作区成员", "Members"), value: "04", detail: text("Owner 与协作者", "Owners and collaborators"), tone: "teal" },
-      { label: text("集成连接", "Integrations"), value: "06", detail: text("支付、消息与开发工具", "Payment, messaging, developer") },
-      { label: text("通知规则", "Notification rules"), value: "08", detail: text("Handoff / 审批 / 付款", "Handoff / approval / payment") },
-      { label: text("安全状态", "Security"), value: "Healthy", detail: text("未发现高风险配置", "No high-risk configuration"), tone: "indigo" },
-    ],
-    table: {
-      title: text("Workspace / Organization", "Workspace / Organization"),
-      description: text("管理成员、角色和邀请状态。", "Manage members, roles, and invitations."),
-      columns: [text("成员", "Member"), text("邮箱", "Email"), text("角色", "Role"), text("状态", "Status"), text("最后活动", "Last active")],
-      rows: [
-        [text("Lin", "Lin"), text("owner@delegate.ai", "owner@delegate.ai"), text("Owner", "Owner"), text("已启用", "Active"), text("刚刚", "Just now")],
-        [text("Operations", "Operations"), text("ops@delegate.ai", "ops@delegate.ai"), text("Operator", "Operator"), text("已启用", "Active"), text("2 小时前", "2 hours ago")],
-        [text("Finance", "Finance"), text("finance@delegate.ai", "finance@delegate.ai"), text("Billing", "Billing"), text("待邀请", "Invited"), text("—", "—")],
-      ],
-    },
-    modules: [
-      { title: text("Security", "Security"), description: text("登录方式、API Keys、Webhook secrets 和数据访问策略集中治理。", "Govern sign-in, API keys, webhook secrets, and data access policies."), items: [text("登录方式", "Sign-in methods"), text("API Keys", "API keys"), text("Webhook secrets", "Webhook secrets"), text("数据访问策略", "Data access policy")], status: text("状态正常", "Healthy") },
-      { title: text("Developer", "Developer"), description: text("把开发者入口和生产集成状态放在同一处。", "Keep developer entry points and production integration state together."), items: [text("API 文档", "API docs"), text("Webhooks", "Webhooks"), text("Environment", "Environment"), text("Integration status", "Integration status")] },
     ],
   },
 };

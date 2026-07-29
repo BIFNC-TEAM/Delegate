@@ -180,6 +180,7 @@ export async function seedDatabase(
         providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
         email: "creator@delegate.local",
         verifiedAt: now,
+        emailVerifiedAt: now,
         metadata: {
           mode: "development",
           actor: "owner",
@@ -189,6 +190,7 @@ export async function seedDatabase(
       update: {
         email: "creator@delegate.local",
         verifiedAt: now,
+        emailVerifiedAt: now,
         metadata: {
           mode: "development",
           actor: "owner",

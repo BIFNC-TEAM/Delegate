@@ -5,6 +5,7 @@ import { cookies, headers } from "next/headers";
 import "@delegate/web-ui/styles.css";
 import "./dashboard/dashboard-v2.css";
 import { extractCountryHint, formatHtmlLang, getCookieLocale, localeCookieName, resolveLocale } from "@delegate/web-ui";
+import { DashboardHistoryTracker } from "./dashboard/dashboard-history-tracker";
 
 export const metadata: Metadata = {
   title: "Delegate",
@@ -27,7 +28,10 @@ export default async function RootLayout({
 
   return (
     <html data-scroll-behavior="smooth" lang={formatHtmlLang(locale)}>
-      <body>{children}</body>
+      <body>
+        <DashboardHistoryTracker />
+        {children}
+      </body>
     </html>
   );
 }

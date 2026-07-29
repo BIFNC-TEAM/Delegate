@@ -97,6 +97,12 @@ Owns identity, tone, public boundaries, pricing, public knowledge, allowed skill
 
 An Owner owns zero or more Representatives. Each representative has an editable working configuration and zero or more immutable `RepresentativeVersion` records. Dashboard setup reads the working configuration; public pages and conversation runtimes read the active or conversation-pinned published version. This prevents unpublished edits from changing live conversations.
 
+### Owner control-plane settings
+
+Owner account settings are independent of every Representative and its publish lifecycle. `accountDisplayName` is private control-plane identity; the existing Owner `displayName` remains the public attribution source. Time zone and preferred locale affect Dashboard presentation only.
+
+Login identifiers and their channel-specific verification state are derived from the connected identity provider rather than edited locally. Notification preferences currently control Dashboard navigation indicators only; they do not imply email, SMS, webhook, or quiet-hours delivery. Profile and notification writes use version checks, idempotency keys, and Owner-scoped audit events.
+
 ### Public Knowledge Pack
 
 Structured public content split into:

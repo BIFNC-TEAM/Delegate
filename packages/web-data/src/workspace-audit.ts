@@ -11,6 +11,7 @@ export type WorkspaceAuditCategory =
   | "tools"
   | "workflow"
   | "conversation"
+  | "settings"
   | "security"
   | "other";
 
@@ -18,8 +19,8 @@ export type WorkspaceAuditEvent = {
   id: string;
   type: string;
   category: WorkspaceAuditCategory;
-  representativeSlug: string;
-  representativeName: string;
+  representativeSlug: string | null;
+  representativeName: string | null;
   actor: string | null;
   summary: string;
   resource: { kind: string; id: string } | null;
@@ -66,7 +67,7 @@ type WorkspaceAuditRecord = {
   type: string;
   payload: Prisma.JsonValue;
   createdAt: Date;
-  representative: { slug: string; displayName: string };
+  representative: { slug: string; displayName: string } | null;
 };
 
 type WorkspaceAuditCursor = {
@@ -87,6 +88,7 @@ export const workspaceAuditCategories: readonly WorkspaceAuditCategory[] = [
   "tools",
   "workflow",
   "conversation",
+  "settings",
   "security",
   "other",
 ];
@@ -157,9 +159,7 @@ export async function getWorkspaceAuditSnapshot(input: WorkspaceAuditQueryInput 
   const context = await resolveWorkspaceAuditContext(input);
   if (!context) return null;
 
-  const baseWhere: Prisma.EventAuditWhereInput = {
-    representative: { ownerId: context.ownerId },
-  };
+  const baseWhere = buildWorkspaceOwnerScopeWhere(context.ownerId);
   const now = new Date();
   const cutoff = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
@@ -381,6 +381,7 @@ export function decodeWorkspaceAuditCursor(
 
 export function classifyWorkspaceAuditEvent(type: string): WorkspaceAuditCategory {
   const normalized = type.toLowerCase();
+  if (normalized.startsWith("owner_profile_") || normalized.startsWith("owner_notification_")) return "settings";
   if (normalized.startsWith("skill_")) return "skills";
   if (normalized.includes("approval")) return "approvals";
   if (normalized.includes("wallet") || normalized.includes("payment") || normalized.includes("invoice") || normalized.includes("recharge")) return "wallet";
@@ -454,17 +455,18 @@ async function resolveWorkspaceAuditContext(input: {
   ownerId?: string | null;
   activeRepresentativeSlug: string;
 }) {
+  const ownerId = input.ownerId?.trim();
+  if (ownerId) {
+    return { ownerId };
+  }
   const representative = await prisma.representative.findFirst({
     where: {
       slug: input.activeRepresentativeSlug,
-      ...(input.ownerId ? { ownerId: input.ownerId } : {}),
     },
     select: { ownerId: true },
   });
   if (!representative) return null;
-  return {
-    ownerId: input.ownerId?.trim() || representative.ownerId,
-  };
+  return { ownerId: representative.ownerId };
 }
 
 function buildWorkspaceAuditWhere(input: {
@@ -474,7 +476,7 @@ function buildWorkspaceAuditWhere(input: {
   anchor?: WorkspaceAuditCursor | null;
 }): Prisma.EventAuditWhereInput {
   const conditions: Prisma.EventAuditWhereInput[] = [
-    { representative: { ownerId: input.ownerId } },
+    buildWorkspaceOwnerScopeWhere(input.ownerId),
   ];
   if (input.category !== "all") {
     conditions.push({ type: { in: eventTypesByCategory[input.category] } });
@@ -534,7 +536,7 @@ async function countFilteredWorkspaceAuditEvents(input: {
   const rows = await prisma.$queryRaw<Array<{ count: bigint }>>(Prisma.sql`
     SELECT COUNT(*)::bigint AS "count"
     FROM "EventAudit" AS e
-    INNER JOIN "Representative" AS r ON r."id" = e."representativeId"
+    LEFT JOIN "Representative" AS r ON r."id" = e."representativeId"
     WHERE ${buildWorkspaceAuditRawWhere(input)}
   `);
   return Number(rows[0]?.count ?? 0);
@@ -561,8 +563,8 @@ async function findFilteredWorkspaceAuditEvents(input: {
     type: string;
     payload: Prisma.JsonValue;
     createdAt: Date;
-    representativeSlug: string;
-    representativeName: string;
+    representativeSlug: string | null;
+    representativeName: string | null;
   }>>(Prisma.sql`
     SELECT
       e."id",
@@ -572,7 +574,7 @@ async function findFilteredWorkspaceAuditEvents(input: {
       r."slug" AS "representativeSlug",
       r."displayName" AS "representativeName"
     FROM "EventAudit" AS e
-    INNER JOIN "Representative" AS r ON r."id" = e."representativeId"
+    LEFT JOIN "Representative" AS r ON r."id" = e."representativeId"
     WHERE ${buildWorkspaceAuditRawWhere(input)}
     ORDER BY e."createdAt" DESC, e."id" DESC
     LIMIT ${input.take}
@@ -582,10 +584,12 @@ async function findFilteredWorkspaceAuditEvents(input: {
     type: row.type,
     payload: row.payload,
     createdAt: row.createdAt,
-    representative: {
-      slug: row.representativeSlug,
-      displayName: row.representativeName,
-    },
+    representative: row.representativeSlug && row.representativeName
+      ? {
+          slug: row.representativeSlug,
+          displayName: row.representativeName,
+        }
+      : null,
   }));
 }
 
@@ -597,7 +601,10 @@ function buildWorkspaceAuditRawWhere(input: {
   anchor?: WorkspaceAuditCursor | null;
 }) {
   const clauses: Prisma.Sql[] = [
-    Prisma.sql`r."ownerId" = ${input.ownerId}`,
+    Prisma.sql`(
+      e."ownerId" = ${input.ownerId}
+      OR (e."ownerId" IS NULL AND r."ownerId" = ${input.ownerId})
+    )`,
   ];
   if (input.category !== "all") {
     const categoryEventTypes = eventTypesByCategory[input.category];
@@ -615,7 +622,7 @@ function buildWorkspaceAuditRawWhere(input: {
     clauses.push(Prisma.sql`
       (
         STRPOS(LOWER(e."id"), ${needle}) > 0
-        OR STRPOS(LOWER(r."displayName"), ${needle}) > 0
+        OR STRPOS(LOWER(COALESCE(r."displayName", '')), ${needle}) > 0
         OR STRPOS(LOWER(e."type"::text), ${needle}) > 0
         OR STRPOS(LOWER(REPLACE(e."type"::text, '_', ' ')), ${needle}) > 0
         OR ${Prisma.join(whitelistedPayloadSearch, " OR ")}
@@ -651,8 +658,11 @@ async function countWorkspaceAuditAnomalies(ownerId: string) {
   const rows = await prisma.$queryRaw<Array<{ count: bigint }>>(Prisma.sql`
     SELECT COUNT(*)::bigint AS "count"
     FROM "EventAudit" AS e
-    INNER JOIN "Representative" AS r ON r."id" = e."representativeId"
-    WHERE r."ownerId" = ${ownerId}
+    LEFT JOIN "Representative" AS r ON r."id" = e."representativeId"
+    WHERE (
+      e."ownerId" = ${ownerId}
+      OR (e."ownerId" IS NULL AND r."ownerId" = ${ownerId})
+    )
       AND (
         e."type"::text IN (${Prisma.join(anomalyEventTypes)})
         OR LOWER(COALESCE(e."payload" ->> ${"status"}, ''))
@@ -673,8 +683,8 @@ function serializeWorkspaceAuditEvent(record: WorkspaceAuditRecord): WorkspaceAu
     id: record.id,
     type,
     category,
-    representativeSlug: record.representative.slug,
-    representativeName: record.representative.displayName,
+    representativeSlug: record.representative?.slug ?? null,
+    representativeName: record.representative?.displayName ?? null,
     actor: firstString(payload, ["resolvedBy", "reviewedBy", "changedBy", "publishedBy", "installedBy", "activatedBy", "actorId"]),
     summary: buildAuditSummary(type, payload),
     resource,
@@ -790,3 +800,19 @@ const workspaceAuditRecordSelect = {
     },
   },
 } satisfies Prisma.EventAuditSelect;
+
+export function buildWorkspaceOwnerScopeWhere(
+  ownerId: string,
+): Prisma.EventAuditWhereInput {
+  return {
+    OR: [
+      { ownerId },
+      {
+        AND: [
+          { ownerId: null },
+          { representative: { ownerId } },
+        ],
+      },
+    ],
+  };
+}

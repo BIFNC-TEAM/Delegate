@@ -129,6 +129,11 @@ const searchablePayloadKeys = [
   "toolExecutionId",
   "workflowRunId",
   "conversationId",
+  "productId",
+  "priceVersionId",
+  "profileId",
+  "destinationId",
+  "withdrawRequestId",
   "resourceId",
   "id",
   "traceId",
@@ -384,7 +389,15 @@ export function classifyWorkspaceAuditEvent(type: string): WorkspaceAuditCategor
   if (normalized.startsWith("owner_profile_") || normalized.startsWith("owner_notification_")) return "settings";
   if (normalized.startsWith("skill_")) return "skills";
   if (normalized.includes("approval")) return "approvals";
-  if (normalized.includes("wallet") || normalized.includes("payment") || normalized.includes("invoice") || normalized.includes("recharge")) return "wallet";
+  if (
+    normalized.includes("wallet")
+    || normalized.includes("payment")
+    || normalized.includes("invoice")
+    || normalized.includes("recharge")
+    || normalized.includes("billing")
+    || normalized.includes("payout")
+    || normalized.includes("withdraw")
+  ) return "wallet";
   if (normalized.includes("tool") || normalized.includes("compute") || normalized.includes("browser") || normalized.includes("mcp")) return "tools";
   if (normalized.includes("workflow") || normalized.includes("delegation_task")) return "workflow";
   if (normalized.includes("published") || normalized.includes("version_activated") || normalized.includes("channel")) return "publishing";
@@ -761,6 +774,11 @@ function resolveAuditResource(
     ["tool_execution", firstString(payload, ["toolExecutionId"]) ?? ""],
     ["workflow_run", firstString(payload, ["workflowRunId"]) ?? ""],
     ["conversation", firstString(payload, ["conversationId"]) ?? ""],
+    ["billing_product", firstString(payload, ["productId"]) ?? ""],
+    ["billing_price_version", firstString(payload, ["priceVersionId"]) ?? ""],
+    ["payout_profile", firstString(payload, ["profileId"]) ?? ""],
+    ["payout_destination", firstString(payload, ["destinationId"]) ?? ""],
+    ["withdraw_request", firstString(payload, ["withdrawRequestId"]) ?? ""],
   ];
   const resolved = candidates.find(([, id]) => Boolean(id));
   if (resolved) return { kind: resolved[0], id: resolved[1] };

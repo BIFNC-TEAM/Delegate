@@ -37,6 +37,12 @@ describe("workspace wallet read model", () => {
         },
       }),
     );
+    const payoutDestinationLookup = vi.fn().mockImplementation(
+      (args: { where: { currency: string } }) =>
+        Promise.resolve(
+          args.where.currency === "CNY" ? { id: "payout-cny" } : null,
+        ),
+    );
     const client = {
       owner: {
         findUnique: vi.fn().mockResolvedValue({
@@ -61,6 +67,9 @@ describe("workspace wallet read model", () => {
         ]),
       },
       agentWallet: {},
+      payoutDestination: {
+        findFirst: payoutDestinationLookup,
+      },
       agentTokenPurchase: {
         aggregate: vi.fn(),
       },
@@ -206,6 +215,22 @@ describe("workspace wallet read model", () => {
     expect(JSON.stringify(releasedWhere)).toContain("CREATOR_EARNING_RELEASE");
     expect(JSON.stringify(releasedWhere)).toContain('"usageChargeId":{"not":null}');
     expect(JSON.stringify(releasedWhere)).toContain('"withdrawRequestId":null');
+
+    const usdSnapshot = await getWorkspaceWalletSnapshot({
+      ownerId: "owner-1",
+      activeRepresentativeSlug: "delegate",
+      currency: "USD",
+      asOf: "2026-07-23T16:00:00.000Z",
+    }, client as never);
+    expect(usdSnapshot?.primaryAction).toEqual({
+      kind: "payout_profile",
+      reason: "verified_payout_destination_required",
+    });
+    expect(
+      payoutDestinationLookup.mock.calls.map(
+        (call) => call[0].where.currency,
+      ),
+    ).toEqual(["CNY", "USD"]);
   });
 
   it("keeps the selected currency explicit and rejects cross-currency fallback", () => {
@@ -397,6 +422,15 @@ describe("workspace wallet read model", () => {
     expect(resolveWorkspaceWalletPrimaryAction({
       creatorVerificationStatus: CreatorVerificationStatus.VERIFIED,
       withdrawableCents: 500,
+      hasVerifiedPayoutDestination: false,
+    })).toEqual({
+      kind: "payout_profile",
+      reason: "verified_payout_destination_required",
+    });
+    expect(resolveWorkspaceWalletPrimaryAction({
+      creatorVerificationStatus: CreatorVerificationStatus.VERIFIED,
+      withdrawableCents: 500,
+      hasVerifiedPayoutDestination: true,
     })).toEqual({ kind: "withdraw", reason: null });
     expect(resolveWorkspaceWalletPrimaryAction({
       creatorVerificationStatus: CreatorVerificationStatus.VERIFIED,

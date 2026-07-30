@@ -10,6 +10,7 @@ import {
   type Locale,
 } from "@delegate/web-ui";
 
+import { DashboardRepresentativeBillingProducts } from "./dashboard-representative-billing-products";
 import { saveRepresentativeSetupRequests } from "./representative-setup-save";
 
 type InquiryIntent =
@@ -832,6 +833,7 @@ export function DashboardRepresentativeSetup({
       </div>
 
       <div className="representative-config-layout">
+      <div className="representative-config-main">
       <form className="setup-stack representative-config-form" onSubmit={handleSubmit}>
         {activeSection === "basics" || activeSection === "contract" ? (
           <DashboardSurfaceGrid columns={1}>
@@ -1951,6 +1953,14 @@ export function DashboardRepresentativeSetup({
           </div>
         </div>
       </form>
+
+        {activeSection === "pricing" ? (
+          <DashboardRepresentativeBillingProducts
+            locale={locale}
+            representativeSlug={representativeSlug}
+          />
+        ) : null}
+      </div>
 
         <aside className="representative-config-aside">
           <header>

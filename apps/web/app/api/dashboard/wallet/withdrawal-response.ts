@@ -37,6 +37,10 @@ export function walletWithdrawalErrorResponse(error: unknown) {
   const statusByMessage = new Map<string, number>([
     ["Owner must be verified before requesting withdrawals.", 422],
     ["Representative must be claimed before withdrawals.", 422],
+    [
+      "A verified payout destination is required before requesting withdrawals.",
+      422,
+    ],
     ["Insufficient withdrawable creator balance.", 409],
     [
       "An active withdrawal request already exists for this representative and currency.",

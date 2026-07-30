@@ -55,6 +55,16 @@ type RechargeOrderRecord = {
   userWalletId: string;
   representativeId: string | null;
   productCode: string | null;
+  billingProductId?: string | null;
+  billingPriceVersionId?: string | null;
+  productNameSnapshot?: string | null;
+  unitNameSnapshot?: string | null;
+  entitlementUnitsSnapshot?: number | null;
+  creatorRevenueShareBpsSnapshot?: number | null;
+  platformRevenueShareBpsSnapshot?: number | null;
+  refundPolicySnapshot?: string | null;
+  expiryPolicySnapshot?: string | null;
+  entitlementValidityDaysSnapshot?: number | null;
   provider: PaymentProvider;
   providerOrderId: string | null;
   providerTransactionId?: string | null;
@@ -129,6 +139,11 @@ export type RechargeOrderSnapshot = {
   checkoutExpiresAt: string | null;
   paidAt: string | null;
   cashBalanceCents: number;
+  billingProductId: string | null;
+  billingPriceVersionId: string | null;
+  productNameSnapshot: string | null;
+  unitNameSnapshot: string | null;
+  entitlementUnitsSnapshot: number | null;
 };
 
 export type CreateRechargeOrderInput = {
@@ -136,6 +151,16 @@ export type CreateRechargeOrderInput = {
   audienceIdentityId?: string;
   representativeId?: string;
   productCode?: string;
+  billingProductId?: string;
+  billingPriceVersionId?: string;
+  productNameSnapshot?: string;
+  unitNameSnapshot?: "credit";
+  entitlementUnitsSnapshot?: number;
+  creatorRevenueShareBpsSnapshot?: number;
+  platformRevenueShareBpsSnapshot?: number;
+  refundPolicySnapshot?: "FULL_WHEN_UNUSED";
+  expiryPolicySnapshot?: "NEVER_EXPIRES";
+  entitlementValidityDaysSnapshot?: null;
   amountCents: number;
   currency?: string;
   displayName?: string;
@@ -281,6 +306,48 @@ export async function createRechargeOrder(
           : {}),
         ...(normalized.productCode
           ? { productCode: normalized.productCode }
+          : {}),
+        ...(normalized.billingProductId
+          ? { billingProductId: normalized.billingProductId }
+          : {}),
+        ...(normalized.billingPriceVersionId
+          ? { billingPriceVersionId: normalized.billingPriceVersionId }
+          : {}),
+        ...(normalized.productNameSnapshot
+          ? { productNameSnapshot: normalized.productNameSnapshot }
+          : {}),
+        ...(normalized.unitNameSnapshot
+          ? { unitNameSnapshot: normalized.unitNameSnapshot }
+          : {}),
+        ...(normalized.entitlementUnitsSnapshot !== undefined
+          ? {
+              entitlementUnitsSnapshot:
+                normalized.entitlementUnitsSnapshot,
+            }
+          : {}),
+        ...(normalized.creatorRevenueShareBpsSnapshot !== undefined
+          ? {
+              creatorRevenueShareBpsSnapshot:
+                normalized.creatorRevenueShareBpsSnapshot,
+            }
+          : {}),
+        ...(normalized.platformRevenueShareBpsSnapshot !== undefined
+          ? {
+              platformRevenueShareBpsSnapshot:
+                normalized.platformRevenueShareBpsSnapshot,
+            }
+          : {}),
+        ...(normalized.refundPolicySnapshot
+          ? { refundPolicySnapshot: normalized.refundPolicySnapshot }
+          : {}),
+        ...(normalized.expiryPolicySnapshot
+          ? { expiryPolicySnapshot: normalized.expiryPolicySnapshot }
+          : {}),
+        ...(normalized.billingPriceVersionId
+          ? {
+              entitlementValidityDaysSnapshot:
+                normalized.entitlementValidityDaysSnapshot,
+            }
           : {}),
         provider: adapter.provider,
         amountCents: normalized.amountCents,
@@ -802,6 +869,7 @@ export async function completeMockRechargeAndPurchaseAgentTokens(
       select: {
         representativeId: true,
         productCode: true,
+        billingPriceVersionId: true,
       },
     });
     if (
@@ -1006,6 +1074,16 @@ function normalizeCreateRechargeOrderInput(
     | "audienceIdentityId"
     | "representativeId"
     | "productCode"
+    | "billingProductId"
+    | "billingPriceVersionId"
+    | "productNameSnapshot"
+    | "unitNameSnapshot"
+    | "entitlementUnitsSnapshot"
+    | "creatorRevenueShareBpsSnapshot"
+    | "platformRevenueShareBpsSnapshot"
+    | "refundPolicySnapshot"
+    | "expiryPolicySnapshot"
+    | "entitlementValidityDaysSnapshot"
     | "displayName"
     | "telegramUserId"
   > {
@@ -1025,6 +1103,8 @@ function normalizeCreateRechargeOrderInput(
       "representativeId and productCode must be provided together.",
     );
   }
+  const commercialSnapshot =
+    normalizeCommercialSnapshot(input);
   return {
     externalUserId,
     amountCents: input.amountCents,
@@ -1036,6 +1116,7 @@ function normalizeCreateRechargeOrderInput(
     ...(input.audienceIdentityId?.trim() ? { audienceIdentityId: input.audienceIdentityId.trim() } : {}),
     ...(representativeId ? { representativeId } : {}),
     ...(productCode ? { productCode } : {}),
+    ...commercialSnapshot,
     ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
     ...(input.telegramUserId?.trim() ? { telegramUserId: input.telegramUserId.trim() } : {}),
   };
@@ -1145,6 +1226,46 @@ function assertExistingRechargeOrderMatches(
       ? "representative"
       : null,
     order.productCode !== (normalized.productCode ?? null) ? "product" : null,
+    (order.billingProductId ?? null)
+      !== (normalized.billingProductId ?? null)
+      ? "billing product"
+      : null,
+    (order.billingPriceVersionId ?? null)
+      !== (normalized.billingPriceVersionId ?? null)
+      ? "billing price version"
+      : null,
+    (order.productNameSnapshot ?? null)
+      !== (normalized.productNameSnapshot ?? null)
+      ? "product name snapshot"
+      : null,
+    (order.unitNameSnapshot ?? null)
+      !== (normalized.unitNameSnapshot ?? null)
+      ? "unit name snapshot"
+      : null,
+    (order.entitlementUnitsSnapshot ?? null)
+      !== (normalized.entitlementUnitsSnapshot ?? null)
+      ? "entitlement units snapshot"
+      : null,
+    (order.creatorRevenueShareBpsSnapshot ?? null)
+      !== (normalized.creatorRevenueShareBpsSnapshot ?? null)
+      ? "creator revenue share snapshot"
+      : null,
+    (order.platformRevenueShareBpsSnapshot ?? null)
+      !== (normalized.platformRevenueShareBpsSnapshot ?? null)
+      ? "platform revenue share snapshot"
+      : null,
+    (order.refundPolicySnapshot ?? null)
+      !== (normalized.refundPolicySnapshot ?? null)
+      ? "refund policy snapshot"
+      : null,
+    (order.expiryPolicySnapshot ?? null)
+      !== (normalized.expiryPolicySnapshot ?? null)
+      ? "expiry policy snapshot"
+      : null,
+    (order.entitlementValidityDaysSnapshot ?? null)
+      !== (normalized.entitlementValidityDaysSnapshot ?? null)
+      ? "entitlement validity snapshot"
+      : null,
     order.amountCents !== normalized.amountCents ? "amount" : null,
     order.currency !== normalized.currency ? "currency" : null,
   ].filter((value): value is string => value !== null);
@@ -1231,7 +1352,124 @@ function serializeRechargeOrder(order: RechargeOrderRecord): RechargeOrderSnapsh
         : null,
     paidAt: order.paidAt ? order.paidAt.toISOString() : null,
     cashBalanceCents: order.userWallet.cashBalanceCents,
+    billingProductId: order.billingProductId ?? null,
+    billingPriceVersionId: order.billingPriceVersionId ?? null,
+    productNameSnapshot: order.productNameSnapshot ?? null,
+    unitNameSnapshot: order.unitNameSnapshot ?? null,
+    entitlementUnitsSnapshot: order.entitlementUnitsSnapshot ?? null,
   };
+}
+
+function normalizeCommercialSnapshot(
+  input: CreateRechargeOrderInput,
+): Pick<
+  CreateRechargeOrderInput,
+  | "billingProductId"
+  | "billingPriceVersionId"
+  | "productNameSnapshot"
+  | "unitNameSnapshot"
+  | "entitlementUnitsSnapshot"
+  | "creatorRevenueShareBpsSnapshot"
+  | "platformRevenueShareBpsSnapshot"
+  | "refundPolicySnapshot"
+  | "expiryPolicySnapshot"
+  | "entitlementValidityDaysSnapshot"
+> {
+  const hasSnapshotField = [
+    input.billingProductId,
+    input.billingPriceVersionId,
+    input.productNameSnapshot,
+    input.unitNameSnapshot,
+    input.entitlementUnitsSnapshot,
+    input.creatorRevenueShareBpsSnapshot,
+    input.platformRevenueShareBpsSnapshot,
+    input.refundPolicySnapshot,
+    input.expiryPolicySnapshot,
+  ].some((value) => value !== undefined);
+  if (!hasSnapshotField) {
+    return {};
+  }
+
+  const billingProductId = input.billingProductId?.trim();
+  const billingPriceVersionId = input.billingPriceVersionId?.trim();
+  const productNameSnapshot = input.productNameSnapshot?.trim();
+  const unitNameSnapshot = input.unitNameSnapshot?.trim();
+  if (
+    !billingProductId
+    || !billingPriceVersionId
+    || !productNameSnapshot
+    || !unitNameSnapshot
+  ) {
+    throw new Error("A billing order requires a complete commercial snapshot.");
+  }
+  if (unitNameSnapshot !== "credit") {
+    throw new Error("V1 billing orders must use the credit unit.");
+  }
+  assertPositiveInteger(
+    input.entitlementUnitsSnapshot ?? 0,
+    "entitlementUnitsSnapshot",
+  );
+  assertBasisPoints(
+    input.creatorRevenueShareBpsSnapshot,
+    "creatorRevenueShareBpsSnapshot",
+  );
+  assertBasisPoints(
+    input.platformRevenueShareBpsSnapshot,
+    "platformRevenueShareBpsSnapshot",
+  );
+  if (
+    input.creatorRevenueShareBpsSnapshot!
+      + input.platformRevenueShareBpsSnapshot!
+    !== 10_000
+  ) {
+    throw new Error("Revenue share snapshots must total 10000 bps.");
+  }
+  if (input.refundPolicySnapshot !== "FULL_WHEN_UNUSED") {
+    throw new Error("Unsupported recharge refund policy.");
+  }
+  if (
+    input.expiryPolicySnapshot !== "NEVER_EXPIRES"
+    || input.entitlementValidityDaysSnapshot !== null
+  ) {
+    throw new Error("Expiring service packages are not supported in V1.");
+  }
+  if (input.amountCents % input.entitlementUnitsSnapshot! !== 0) {
+    throw new Error(
+      "Recharge amount must divide evenly into entitlement units.",
+    );
+  }
+  const entitlementUnitsSnapshot = input.entitlementUnitsSnapshot!;
+  const creatorRevenueShareBpsSnapshot =
+    input.creatorRevenueShareBpsSnapshot!;
+  const platformRevenueShareBpsSnapshot =
+    input.platformRevenueShareBpsSnapshot!;
+
+  return {
+    billingProductId,
+    billingPriceVersionId,
+    productNameSnapshot,
+    unitNameSnapshot,
+    entitlementUnitsSnapshot,
+    creatorRevenueShareBpsSnapshot,
+    platformRevenueShareBpsSnapshot,
+    refundPolicySnapshot: input.refundPolicySnapshot,
+    expiryPolicySnapshot: input.expiryPolicySnapshot,
+    entitlementValidityDaysSnapshot: null,
+  };
+}
+
+function assertBasisPoints(
+  value: number | undefined,
+  label: string,
+): void {
+  if (
+    !Number.isSafeInteger(value)
+    || value === undefined
+    || value < 0
+    || value > 10_000
+  ) {
+    throw new Error(`${label} must be an integer between 0 and 10000.`);
+  }
 }
 
 /**

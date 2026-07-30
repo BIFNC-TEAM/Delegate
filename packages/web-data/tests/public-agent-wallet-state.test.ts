@@ -43,6 +43,11 @@ describe("public agent wallet state", () => {
     mocks.rechargeOrderFindMany.mockResolvedValue([
       {
         id: "order-public-1",
+        billingProductId: null,
+        billingPriceVersionId: null,
+        productName: null,
+        entitlementUnits: null,
+        unitName: null,
         amountCents: 2000,
         currency: "CNY",
         provider: PaymentProvider.MOCK,
@@ -107,7 +112,6 @@ describe("public agent wallet state", () => {
       take: 2,
       select: {
         id: true,
-        cashBalanceCents: true,
       },
     });
     expect(mocks.userAgentWalletFindFirst).toHaveBeenCalledWith(
@@ -160,7 +164,6 @@ describe("public agent wallet state", () => {
     expect(state).toEqual({
       summary: {
         currency: "CNY",
-        cashBalanceCents: 1250,
         serviceCreditsAvailable: 8,
         serviceCreditsReserved: 2,
         serviceCreditsPurchased: 14,
@@ -168,6 +171,11 @@ describe("public agent wallet state", () => {
       },
       orders: [{
         id: "order-public-1",
+        billingProductId: null,
+        billingPriceVersionId: null,
+        productName: null,
+        entitlementUnits: null,
+        unitName: null,
         amountCents: 2000,
         currency: "CNY",
         provider: "mock",
@@ -244,6 +252,11 @@ describe("public agent wallet state", () => {
 
     expect(state.orders[0]).toEqual({
       id: "order-wechat-1",
+      billingProductId: null,
+      billingPriceVersionId: null,
+      productName: null,
+      entitlementUnits: null,
+      unitName: null,
       amountCents: 2000,
       currency: "CNY",
       provider: "wechat_pay",
@@ -275,7 +288,6 @@ describe("public agent wallet state", () => {
     expect(state).toEqual({
       summary: {
         currency: "USD",
-        cashBalanceCents: 0,
         serviceCreditsAvailable: 0,
         serviceCreditsReserved: 0,
         serviceCreditsPurchased: 0,

@@ -429,7 +429,7 @@ function DashboardOverviewFramework({
     { label: zh ? "知识库文件" : "Knowledge files", value: "24", detail: zh ? "19 个已完成处理" : "19 fully processed" },
     { label: zh ? "今日会话" : "Conversations today", value: "18", detail: zh ? "较昨日 +12%" : "+12% from yesterday", tone: "indigo" },
     { label: zh ? "待审批 Action" : "Pending actions", value: "05", detail: zh ? "2 个高风险" : "2 high risk", tone: "warning" },
-    { label: zh ? "本月收入" : "Revenue this month", value: "¥2.86k", detail: zh ? "可提现 ¥1,240" : "¥1,240 withdrawable" },
+    { label: zh ? "本月收入" : "Revenue this month", value: "—", detail: zh ? "进入钱包查看实时数据" : "Open Wallet for live data" },
   ] as const;
   const resources = [
     [zh ? "知识库文件" : "Knowledge files", "24", "19 / 5"],
@@ -449,7 +449,6 @@ function DashboardOverviewFramework({
   ];
   const activities = [
     { time: "10:42", title: zh ? "审批 Action 已通过" : "Action approved", detail: zh ? "Lin AI · 发送报价文件" : "Lin AI · Proposal delivery", kind: "AP" },
-    { time: "10:24", title: zh ? "用户购买服务额度" : "Service credits purchased", detail: zh ? "¥199 · Delegate 产品顾问" : "¥199 · Delegate product advisor", kind: "¥" },
     { time: "09:52", title: zh ? "数字代表已发布" : "Representative published", detail: zh ? "招聘接待代表 · v0.8" : "Recruiting front desk · v0.8", kind: "DR" },
     { time: "09:18", title: zh ? "知识文件处理完成" : "Knowledge processing complete", detail: "Founder profile.pdf · 18 chunks", kind: "KB" },
   ];
@@ -516,18 +515,24 @@ function DashboardOverviewFramework({
         >
           <div className="dashboard-v2-wallet-summary">
             <div className="dashboard-v2-wallet-balance">
-              <small>{zh ? "可用余额" : "Available balance"}</small>
-              <strong>¥8,420.00</strong>
-              <span>{zh ? "本月收入 +18.4%" : "Revenue +18.4% this month"}</span>
+              <small>{zh ? "实时资金数据" : "Live money data"}</small>
+              <strong>—</strong>
+              <span>{zh ? "概览暂不加载资金数据" : "Financial data is not loaded in Overview"}</span>
             </div>
             <div className="dashboard-v2-wallet-split">
-              <div><span>{zh ? "可提现" : "Withdrawable"}</span><strong>¥1,240</strong></div>
-              <div><span>{zh ? "待释放" : "Pending"}</span><strong>¥572</strong></div>
+              <div><span>{zh ? "可提现" : "Withdrawable"}</span><strong>—</strong></div>
+              <div><span>{zh ? "待释放" : "Pending"}</span><strong>—</strong></div>
             </div>
           </div>
           <div className="dashboard-v2-mini-transactions">
-            <div><span>↘</span><p><strong>Agent token purchase</strong><small>{zh ? "今天 10:24" : "Today 10:24"}</small></p><b>-¥199.00</b></div>
-            <div><span>↗</span><p><strong>Creator earning</strong><small>{zh ? "今天 09:51" : "Today 09:51"}</small></p><b className="is-positive">+¥39.80</b></div>
+            <div>
+              <span>→</span>
+              <p>
+                <strong>{zh ? "资金数据仅在钱包模块读取" : "Financial data loads only in Wallet"}</strong>
+                <small>{zh ? "避免示例金额冒充真实余额" : "Sample amounts are never presented as live balances"}</small>
+              </p>
+              <b>—</b>
+            </div>
           </div>
         </Panel>
 

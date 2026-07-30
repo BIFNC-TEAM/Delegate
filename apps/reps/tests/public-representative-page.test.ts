@@ -78,6 +78,29 @@ describe("public representative visitor-first page", () => {
     );
   });
 
+  it("presents representative-scoped service packages without exposing wallet cash", () => {
+    expect(pageSource).toContain('rechargeNav: "服务包"');
+    expect(pageSource).toContain("购买当前数字代表的服务额度");
+    expect(rechargePanelSource).toContain("snapshot.servicePackages");
+    expect(rechargePanelSource).toContain(
+      "billingPriceVersionId: intent.priceVersionId",
+    );
+    expect(rechargePanelSource).not.toContain(
+      "amountCents: intent.amountCents",
+    );
+    expect(rechargePanelSource).not.toContain("cashBalanceCents");
+    expect(rechargePanelSource).not.toContain("[500, 2000, 10000]");
+    expect(rechargePanelSource).toContain(
+      "选择当前数字代表的服务包",
+    );
+    expect(rechargePanelSource).toContain(
+      "无需再用余额二次购买",
+    );
+    expect(rechargePanelSource).toContain(
+      "仅适用于当前数字代表",
+    );
+  });
+
   it("keeps pricing contextual and long citations collapsed", () => {
     expect(chatSource).toContain("showPlans");
     expect(chatSource).toContain("usage.freeRepliesRemaining > 0");
@@ -88,7 +111,7 @@ describe("public representative visitor-first page", () => {
   it("describes Telegram as visitor identity linking rather than Bot setup", () => {
     expect(identityBindingSource).toContain("绑定我的 Telegram 账号");
     expect(identityBindingSource).toContain(
-      "Web 充值余额和服务权益会保持一致",
+      "代表专属服务额度会保持一致",
     );
     expect(identityBindingSource).toContain(
       "复制命令并发送给",
@@ -103,7 +126,7 @@ describe("public representative visitor-first page", () => {
     expect(identityBindingSource).toContain("Legacy binding; rebind required");
     expect(identityBindingSource).toContain('method: "DELETE"');
     expect(identityBindingSource).toContain("解除绑定");
-    expect(identityBindingSource).toContain("历史消息、余额和订单不会删除");
+    expect(identityBindingSource).toContain("历史消息、服务额度和订单不会删除");
     expect(identityBindingSource).toContain("capabilities?.telegram");
     expect(identityBindingSource).toContain("capabilities?.matrix");
     expect(identityBindingSource).toContain(

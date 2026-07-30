@@ -2,17 +2,28 @@
 
 ## Goal
 
-Delegate should evolve from an early wallet-like control plane into a real Agent Wallet system:
+Delegate should evolve from an early wallet-like control plane into a real
+Wallet & Billing system:
 
-1. Users recharge their own cash wallet.
-2. Users spend that cash balance to buy tokens for a specific Agent.
-3. The Agent spends tokens while serving the user.
-4. The Agent creator earns 20% of token value, first as pending earnings.
-5. Creator earnings become withdrawable only after token usage or a release policy allows it.
+1. A user buys a one-time service package for one specific Digital
+   Representative.
+2. Payment directly grants representative-scoped service credits; there is no
+   second customer cash-wallet purchase.
+3. The representative consumes those credits while serving the user.
+4. The Creator earns the price-version revenue-share snapshot, first as pending
+   earnings. The current provisional default is Creator 20% / platform gross
+   80%.
+5. Creator earnings become withdrawable only after credit usage releases them.
+
+The authoritative V1 product rules are in
+`docs/wallet-billing-product-contract.md`; the funds-flow decision is in
+`docs/adr-wallet-billing-funds-flow.md`. References below to recharge or
+`USER_CASH` describe legacy model names and same-transaction internal clearing,
+not a customer-facing cash wallet.
 
 Payment providers such as Stripe, WeChat Pay, and Alipay should only handle money movement, signatures, provider order state, webhooks, refunds, and payouts. Delegate remains the source of truth for wallet balances, Agent tokens, creator earnings, and product ledger state.
 
-## Implementation Status (2026-07-28)
+## Implementation Status (2026-07-29)
 
 The transactional MVP described by this plan is implemented on
 `codex/dashboard-optimization`:
@@ -21,7 +32,7 @@ The transactional MVP described by this plan is implemented on
   `UserAgentWallet`; one visitor can never spend another visitor's purchase.
 - every business operation has a `WalletTransaction` header and balanced,
   traceable `WalletLedgerEntry` movements.
-- recharge, purchase, reservation, settlement, release, partial refund, and
+- payment, purchase, reservation, settlement, release, full-unused refund, and
   withdrawal state transitions run at Serializable isolation with conflict
   retry and parameter-checked idempotency.
 - service-credit lots are consumed FIFO through `AgentUsageAllocation`, and
@@ -52,15 +63,34 @@ The transactional MVP described by this plan is implemented on
   every completion and failure write is fenced by the current lease attempt,
   stale work can be reclaimed atomically, and exhausting the retry budget
   dead-letters the run and releases any wallet reservation.
-- newly created representatives receive an Agent wallet atomically; paid
-  representatives cannot publish with an invalid billing wallet.
-- the development public flow refreshes chat balances immediately after
-  purchase and lets the same audience return unreserved, unconsumed credits to
-  wallet cash.
+- newly created representatives receive an Agent wallet plus three active CNY
+  service packages atomically; paid representatives cannot publish without a
+  valid billing wallet and at least one active CNY product/price version.
+- `BillingProduct` is the stable product identity and
+  `BillingPriceVersion` freezes immutable price, included units, Creator/platform
+  share, refund, and expiry terms. Public checkout submits only a price-version
+  ID. `RechargeOrder` snapshots those terms before contacting the provider, and
+  fulfillment does not reload mutable `AgentWallet` price/share fields.
+- the development public flow refreshes representative-scoped credits
+  immediately after purchase and lets the same audience reverse a wholly
+  unused package. Internal cash clearing is omitted from public responses.
 - the owner Dashboard has workspace Overview, Transactions, Settlements, and
   Ledger views with owner/billing authorization, single-currency metrics,
   filter-bound cursor pagination, trace details, creator withdrawal submission,
   and cancellation.
+- each representative has an Owner-facing service-package manager under
+  Pricing/Billing. Owners create stable products, edit display metadata,
+  publish immutable CNY price versions with revision-safe compare-and-swap,
+  and archive products without rewriting historical orders.
+- verified Owners/Organizations have a payout profile and tokenized WeChat Pay
+  destination model. Provider recipient tokens are encrypted with a dedicated
+  key and never returned; withdrawal creation requires an active CNY
+  destination and freezes a complete masked destination snapshot before
+  earnings move to frozen.
+- local development exposes payout-profile review and destination activation
+  only to close the test loop. Production exposes neither creator self-review
+  nor payout execution; a separate Operator RBAC and maker/checker workflow is
+  still required.
 - non-production environments expose a private mock operations action for
   withdrawal review and settlement so the full ledger lifecycle can be
   exercised without pretending that a real payout occurred. It returns 404 in
@@ -298,12 +328,24 @@ The system must never delete historical ledger rows.
 Creator requests withdrawal
 System verifies creator identity and Agent claim state
 WithdrawRequest enters PENDING_REVIEW
-Approved withdrawal freezes or debits withdrawable earnings
-External payout provider is called later
-PAID/FAILED state is recorded with provider reference
+Approval freezes withdrawable earnings
+
+Current local-only mock:
+PENDING_REVIEW → PAID | FAILED
+
+Required production execution:
+APPROVED → persist idempotent ATTEMPT_CREATED
+         → submit provider request
+         → PROCESSING
+         → PAID | FAILED | RECONCILIATION_REQUIRED
 ```
 
-The first version should not automatically pay out. It should create auditable manual-review withdrawal requests only.
+The current version does not automatically pay out. It creates auditable
+manual-review requests and permits settlement only through a non-production
+mock. Production must persist the attempt before provider I/O. Creator
+cancellation is allowed only before the first provider submission; after
+submission or an uncertain response it stays closed, and reconciliation must
+resolve the existing attempt before any retry.
 
 ## Payment Provider Boundary
 
@@ -372,20 +414,22 @@ All values should come from ledger projection rather than static mock data.
 1. [x] Add this implementation plan and keep it aligned with the schema work.
 2. [x] Add wallet transaction, scoped balance, allocation, and migration models.
 3. [x] Implement the append-only wallet ledger engine and projections.
-4. [x] Add mock recharge and atomic recharge-to-purchase flow.
+4. [x] Add mock payment and atomic service-package fulfillment.
 5. [x] Keep payment providers behind adapter boundaries.
-6. [x] Add user cash to representative-scoped service-credit purchase.
+6. [x] Keep cash as same-transaction internal clearing while granting
+   representative-scoped service credits directly.
 7. [x] Add reserve, settle, release, and FIFO usage allocation.
 8. [x] Apply the configurable creator revenue policy (20% default).
-9. [x] Add unconsumed-credit partial refund and reversal handling.
+9. [x] Add V1 full-unused refund and reversal handling; keep legacy partial
+   reversal outside the public V1 contract.
 10. [x] Add creator withdrawal allocation and lifecycle state machine.
 11. [x] Add workspace owner Dashboard wallet and billing views.
 12. [x] Add public representative demo purchase and paid continuation.
 13. [x] Add concurrency, idempotency, authorization, and acceptance tests.
 14. [x] Close the development business loop through paid continuation,
     unused-credit return, creator withdrawal submission/cancel, and private
-    mock review/settlement. The public recharge panel now restores the current
-    representative-scoped wallet state after a reload, and withdrawal writes
+    mock review/settlement. The public service-package panel now restores the
+    current representative-scoped credit state after a reload, and withdrawal writes
     fail closed when reconciliation reports real balance errors.
 15. [ ] Reconcile production legacy data and deploy the migration.
 16. [x] Implement default-off WeChat Pay API v3 Native order creation, response
@@ -417,7 +461,25 @@ All values should come from ledger projection rather than static mock data.
     processing with collection off and verify readiness/recovery, then enable
     collection only for the ¥5 canary. Do not open general traffic until these
     checks and `pnpm test:postgres:wallet` pass.
-19. [ ] Implement reviewed payout submission and reconciliation.
+19. [x] Add Owner service-package management with immutable version publication,
+    optimistic revision checks, idempotency, audit records, and archival.
+20. [x] Add Owner/Organization payout profiles, encrypted tokenized WeChat Pay
+    destinations, local-only review/activation, withdrawal gating, and
+    immutable destination snapshots.
+21. [ ] Add production Operator RBAC, maker/checker payout approval, real
+    provider submission, proof, and payout reconciliation. Creator accounts
+    must never be allowed to approve their own payout. Acceptance for this item
+    also requires:
+    - an idempotent provider-attempt record created before provider I/O;
+    - `PROCESSING` and `RECONCILIATION_REQUIRED` handling that prohibits
+      Creator cancellation and duplicate submission after provider contact;
+    - a versioned credential keyring, background re-encryption, verification,
+      and an old-key retirement gate;
+    - a server-enforced cooling-off deadline for every newly verified
+      destination, including the first;
+    - distinct maker/checker Operators within the target organization;
+    - immutable proof plus append-only organization audit containing actor,
+      before/after state, attempt ID, and provider reference.
 
 The disposable PostgreSQL 16 gate (`pnpm test:postgres:wallet`) covers both
 contention safety and linear business scenarios: mock recharge,
@@ -535,6 +597,16 @@ The public service-credit bridge is now atomic:
 - Token usage releases earnings into withdrawable state.
 - Refunds create reversal entries and do not delete old ledger rows.
 - Withdrawals require claimed/verified creator state.
+- Before production payout, provider submission is represented by a durable
+  idempotent attempt; timeout/unknown outcomes enter
+  `RECONCILIATION_REQUIRED`, prohibit Creator cancellation, and cannot create a
+  second provider payout.
+- Before production payout, every new destination observes a server-owned
+  cooling-off deadline even if a client requests `ACTIVE`.
+- Before production payout, credential key rotation and re-encryption preserve
+  decryptability until the old key passes its retirement gate.
+- Before production payout, organization-scoped maker/checker authorization,
+  immutable proof, and append-only audit are covered by integration tests.
 - Provider adapters never mutate wallet balances directly.
 - Tests cover idempotency, insufficient funds, cross-user and cross-Agent
   isolation, reservation rollback, concurrent writes, partial refund,

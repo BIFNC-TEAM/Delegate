@@ -2,8 +2,11 @@ import {
   AmnLedgerEntryKind,
   AmnWalletAccountType,
   CreatorEarningStatus,
+  CreatorPayoutProfileStatus,
   CreatorVerificationStatus,
   PaymentProvider,
+  PayoutDestinationStatus,
+  PayoutSubjectType,
   RepresentativeClaimStatus,
   WalletTransactionEventType,
   WalletTransactionStatus,
@@ -27,6 +30,55 @@ import {
 } from "../src/wallet-reconciliation";
 
 describe("agent wallet withdrawals", () => {
+  it("fails closed before freezing funds when no verified active payout destination exists", async () => {
+    const client = new FakeWithdrawalClient({
+      hasVerifiedPayoutDestination: false,
+    });
+
+    await expect(createDefaultRequest(client)).rejects.toThrow(
+      "A verified payout destination is required before requesting withdrawals.",
+    );
+
+    expect(client.withdrawRequests).toHaveLength(0);
+    expect(client.withdrawalAllocations).toHaveLength(0);
+    expect(client.walletTransactions).toHaveLength(0);
+    expect(client.ledgerEntries).toHaveLength(0);
+    expect(client.creatorEarnings[0]).toMatchObject({
+      withdrawableCents: 500,
+      frozenCents: 0,
+    });
+  });
+
+  it("copies the complete masked payout destination snapshot onto a withdrawal", async () => {
+    const client = new FakeWithdrawalClient();
+
+    const request = await createDefaultRequest(client);
+
+    expect(request).toMatchObject({
+      payoutProfileId: "payout_profile_owner_1",
+      payoutDestinationId: "payout_destination_owner_1_v3",
+      payoutSubjectType: "owner",
+      payoutSubjectId: "owner_1",
+      destinationMaskedLabel: "WeChat Pay ···· 2048",
+      destinationVersion: 3,
+    });
+    expect(client.withdrawRequests[0]).toMatchObject({
+      payoutProfileId: "payout_profile_owner_1",
+      payoutDestinationId: "payout_destination_owner_1_v3",
+      payoutSubjectTypeSnapshot: PayoutSubjectType.OWNER,
+      payoutSubjectIdSnapshot: "owner_1",
+      destinationMaskedLabelSnapshot: "WeChat Pay ···· 2048",
+      destinationVersionSnapshot: 3,
+    });
+
+    client.payoutDestinations[0]!.maskedLabel = "WeChat Pay ···· 9999";
+    client.payoutDestinations[0]!.credentialVersion = 4;
+    expect(client.withdrawRequests[0]).toMatchObject({
+      destinationMaskedLabelSnapshot: "WeChat Pay ···· 2048",
+      destinationVersionSnapshot: 3,
+    });
+  });
+
   it("allocates multiple earnings deterministically and records a balanced freeze", async () => {
     const client = new FakeWithdrawalClient({
       withdrawableAmounts: [200, 400],
@@ -761,6 +813,29 @@ type WithdrawRequestRow = {
   providerPayoutId: string | null;
   failureReason: string | null;
   idempotencyKey: string;
+  payoutProfileId: string | null;
+  payoutDestinationId: string | null;
+  payoutSubjectTypeSnapshot: PayoutSubjectType | null;
+  payoutSubjectIdSnapshot: string | null;
+  destinationMaskedLabelSnapshot: string | null;
+  destinationVersionSnapshot: number | null;
+};
+
+type PayoutDestinationRow = {
+  id: string;
+  profileId: string;
+  currency: string;
+  status: PayoutDestinationStatus;
+  maskedLabel: string;
+  credentialVersion: number;
+  coolingOffUntil: Date | null;
+  profile: {
+    id: string;
+    ownerId: string | null;
+    organizationId: string | null;
+    subjectType: PayoutSubjectType;
+    status: CreatorPayoutProfileStatus;
+  };
 };
 
 type WithdrawalAllocationRow = {
@@ -810,6 +885,7 @@ class FakeWithdrawalClient {
   withdrawalAllocations: WithdrawalAllocationRow[] = [];
   walletTransactions: WalletTransactionRow[] = [];
   ledgerEntries: LedgerRow[] = [];
+  payoutDestinations: PayoutDestinationRow[];
   failNextLedgerCreate = false;
   reconciliationStatus: WorkspaceWalletReconciliationStatus = "healthy";
   reconciliationChecks: WorkspaceWalletFundsWriteScope[] = [];
@@ -821,6 +897,7 @@ class FakeWithdrawalClient {
       representativeOwnerId?: string;
       withdrawableAmounts?: number[];
       reconciliationStatus?: WorkspaceWalletReconciliationStatus;
+      hasVerifiedPayoutDestination?: boolean;
     } = {},
   ) {
     this.reconciliationStatus = options.reconciliationStatus ?? "healthy";
@@ -853,6 +930,24 @@ class FakeWithdrawalClient {
         createdAt: new Date(Date.UTC(2026, 6, 3, 0, 0, index)),
       }),
     );
+    this.payoutDestinations = options.hasVerifiedPayoutDestination === false
+      ? []
+      : [{
+          id: "payout_destination_owner_1_v3",
+          profileId: "payout_profile_owner_1",
+          currency: "CNY",
+          status: PayoutDestinationStatus.ACTIVE,
+          maskedLabel: "WeChat Pay ···· 2048",
+          credentialVersion: 3,
+          coolingOffUntil: null,
+          profile: {
+            id: "payout_profile_owner_1",
+            ownerId: "owner_1",
+            organizationId: null,
+            subjectType: PayoutSubjectType.OWNER,
+            status: CreatorPayoutProfileStatus.VERIFIED,
+          },
+        }];
   }
 
   walletFundsWriteGate = {
@@ -874,6 +969,10 @@ class FakeWithdrawalClient {
     findUnique: async (args: any) => {
       return this.representatives.find((rep) => rep.id === args.where.id) ?? null;
     },
+  };
+
+  payoutDestination = {
+    findFirst: async () => this.payoutDestinations[0] ?? null,
   };
 
   creatorEarning = {
@@ -986,6 +1085,15 @@ class FakeWithdrawalClient {
         providerPayoutId: null,
         failureReason: null,
         idempotencyKey: args.data.idempotencyKey,
+        payoutProfileId: args.data.payoutProfileId ?? null,
+        payoutDestinationId: args.data.payoutDestinationId ?? null,
+        payoutSubjectTypeSnapshot:
+          args.data.payoutSubjectTypeSnapshot ?? null,
+        payoutSubjectIdSnapshot: args.data.payoutSubjectIdSnapshot ?? null,
+        destinationMaskedLabelSnapshot:
+          args.data.destinationMaskedLabelSnapshot ?? null,
+        destinationVersionSnapshot:
+          args.data.destinationVersionSnapshot ?? null,
       };
       this.withdrawRequests.push(request);
       return request;
@@ -1142,6 +1250,10 @@ class FakeWithdrawalClient {
             : row.metadata,
       })),
       ledgerEntries: this.ledgerEntries.map((row) => ({ ...row })),
+      payoutDestinations: this.payoutDestinations.map((row) => ({
+        ...row,
+        profile: { ...row.profile },
+      })),
       failNextLedgerCreate: this.failNextLedgerCreate,
     };
   }

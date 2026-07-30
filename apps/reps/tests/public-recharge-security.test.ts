@@ -5,6 +5,14 @@ const mocks = vi.hoisted(() => ({
     class PaymentProviderOperationLeaseLostError extends Error {
       readonly code = "PAYMENT_PROVIDER_OPERATION_LEASE_LOST";
     },
+  PublicServicePackageError: class PublicServicePackageError extends Error {
+    readonly code: string;
+
+    constructor(code: string) {
+      super(code);
+      this.code = code;
+    }
+  },
   assertAuthenticatedPublicAudiencePrincipal: vi.fn(),
   claimPaymentProviderOperation: vi.fn(),
   completeMockRechargeAndPurchaseAgentTokens: vi.fn(),
@@ -16,11 +24,13 @@ const mocks = vi.hoisted(() => ({
   getPublicRepresentativeRuntime: vi.fn(),
   getUserAgentWalletBalance: vi.fn(),
   loadWeChatPayProcessingConfigFromEnv: vi.fn(),
+  listPublicServicePackages: vi.fn(),
   lockPaymentProviderOperationLease: vi.fn(),
   resolveWeChatPayReleaseFlags: vi.fn(),
   isVerifiedPrivateChannelIdentityBinding: vi.fn(),
   listActivePrivateChannelIdentityBindings: vi.fn(),
   resolvePublicAudienceWalletExternalUserId: vi.fn(),
+  resolvePublicServicePackage: vi.fn(),
   resolveRepresentativeTelegramBotConnectionId: vi.fn(),
   agentTokenPurchaseFindFirst: vi.fn(),
   rechargeOrderFindFirst: vi.fn(),
@@ -44,6 +54,7 @@ vi.mock("@delegate/web-data", () => ({
     extends Error {},
   PaymentProviderOperationLeaseLostError:
     mocks.PaymentProviderOperationLeaseLostError,
+  PublicServicePackageError: mocks.PublicServicePackageError,
   RechargePaymentConflictError: class RechargePaymentConflictError
     extends Error {},
   WeChatPayConfigurationError: class WeChatPayConfigurationError
@@ -65,6 +76,7 @@ vi.mock("@delegate/web-data", () => ({
   getUserAgentWalletBalance: mocks.getUserAgentWalletBalance,
   loadWeChatPayProcessingConfigFromEnv:
     mocks.loadWeChatPayProcessingConfigFromEnv,
+  listPublicServicePackages: mocks.listPublicServicePackages,
   lockPaymentProviderOperationLease:
     mocks.lockPaymentProviderOperationLease,
   isVerifiedPrivateChannelIdentityBinding:
@@ -77,6 +89,7 @@ vi.mock("@delegate/web-data", () => ({
   },
   resolvePublicAudienceWalletExternalUserId:
     mocks.resolvePublicAudienceWalletExternalUserId,
+  resolvePublicServicePackage: mocks.resolvePublicServicePackage,
   resolveRepresentativeTelegramBotConnectionId:
     mocks.resolveRepresentativeTelegramBotConnectionId,
   resolveWeChatPayReleaseFlags:
@@ -179,6 +192,35 @@ describe("public mock recharge security", () => {
     mocks.resolvePublicAudienceWalletExternalUserId.mockResolvedValue(
       "web:delegate:aud_current_visitor",
     );
+    mocks.listPublicServicePackages.mockResolvedValue([
+      {
+        productId: "product-1",
+        priceVersionId: "price-1",
+        name: "20 次服务包",
+        description: null,
+        amountCents: 2000,
+        currency: "CNY",
+        entitlementUnits: 2000,
+        unitName: "credit",
+        refundPolicy: "FULL_WHEN_UNUSED",
+        expiryPolicy: "NEVER_EXPIRES",
+      },
+    ]);
+    mocks.resolvePublicServicePackage.mockResolvedValue({
+      productId: "product-1",
+      priceVersionId: "price-1",
+      name: "20 次服务包",
+      description: null,
+      amountCents: 2000,
+      currency: "CNY",
+      entitlementUnits: 2000,
+      unitName: "credit",
+      creatorRevenueShareBps: 2000,
+      platformRevenueShareBps: 8000,
+      refundPolicy: "FULL_WHEN_UNUSED",
+      expiryPolicy: "NEVER_EXPIRES",
+      entitlementValidityDays: null,
+    });
     mocks.publicAudiencePrincipalErrorStatus.mockImplementation(
       (error: { code?: string }) =>
         error?.code === "authentication_required" ? 401 : null,
@@ -331,14 +373,26 @@ describe("public mock recharge security", () => {
         audienceId: "aud_current_visitor",
       }),
     );
-    await expect(response.json()).resolves.toEqual(
-      expect.objectContaining({
+    const body = await response.json() as Record<string, unknown>;
+    expect(body).toEqual(expect.objectContaining({
         summary: expect.objectContaining({
           currency: "CNY",
           serviceCreditsAvailable: 8,
         }),
-      }),
-    );
+        servicePackages: [
+          expect.objectContaining({
+            priceVersionId: "price-1",
+            amountCents: 2000,
+          }),
+        ],
+      }));
+    expect(
+      body.summary as Record<string, unknown>,
+    ).not.toHaveProperty("cashBalanceCents");
+    expect(mocks.listPublicServicePackages).toHaveBeenCalledWith({
+      representativeId: "rep-1",
+      currency: "CNY",
+    });
   });
 
   it("rejects an unsupported wallet currency without resolving wallet data", async () => {
@@ -398,7 +452,10 @@ describe("public mock recharge security", () => {
       new Request("http://localhost/reps/delegate/recharge", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amountCents: 2000 }),
+        body: JSON.stringify({
+          billingPriceVersionId: "price-1",
+          amountCents: 1,
+        }),
       }),
       { params: Promise.resolve({ slug: "delegate" }) },
     );
@@ -410,7 +467,7 @@ describe("public mock recharge security", () => {
     expect(mocks.createRechargeOrder).not.toHaveBeenCalled();
   });
 
-  it("uses only the server-selected WeChat adapter in production", async () => {
+  it("ignores client price tampering and uses only server-authored package terms", async () => {
     restoreEnv("NODE_ENV", "production");
     enableWeChatPay();
 
@@ -419,7 +476,8 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          amountCents: 2000,
+          billingPriceVersionId: "price-1",
+          amountCents: 1,
           provider: "MOCK",
           currency: "USD",
           externalUserId: "attacker-selected",
@@ -455,6 +513,16 @@ describe("public mock recharge security", () => {
         productCode: "agent-wallet:service-credit:v1",
         amountCents: 2000,
         currency: "CNY",
+        billingProductId: "product-1",
+        billingPriceVersionId: "price-1",
+        productNameSnapshot: "20 次服务包",
+        unitNameSnapshot: "credit",
+        entitlementUnitsSnapshot: 2000,
+        creatorRevenueShareBpsSnapshot: 2000,
+        platformRevenueShareBpsSnapshot: 8000,
+        refundPolicySnapshot: "FULL_WHEN_UNUSED",
+        expiryPolicySnapshot: "NEVER_EXPIRES",
+        entitlementValidityDaysSnapshot: null,
       }),
       { provider: "WECHAT_PAY" },
     );
@@ -466,7 +534,34 @@ describe("public mock recharge security", () => {
     expect(body.rechargeOrder).not.toHaveProperty("userWalletId");
   });
 
-  it("reuses the same-amount active WeChat checkout without creating another order", async () => {
+  it("rejects a cross-representative or inactive price version before checkout", async () => {
+    enableWeChatPay();
+    mocks.resolvePublicServicePackage.mockRejectedValueOnce(
+      new mocks.PublicServicePackageError("SERVICE_PACKAGE_UNAVAILABLE"),
+    );
+
+    const response = await createRecharge(
+      new Request("http://localhost/reps/delegate/recharge", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          billingPriceVersionId: "price-from-another-representative",
+        }),
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual(
+      expect.objectContaining({
+        code: "service_package_unavailable",
+      }),
+    );
+    expect(mocks.createRechargeOrder).not.toHaveBeenCalled();
+    expect(mocks.createMockRechargeOrder).not.toHaveBeenCalled();
+  });
+
+  it("reuses the same price-version active WeChat checkout without creating another order", async () => {
     restoreEnv("NODE_ENV", "production");
     enableWeChatPay();
     mocks.rechargeOrderFindFirst.mockResolvedValue(
@@ -477,7 +572,7 @@ describe("public mock recharge security", () => {
       new Request("http://localhost/reps/delegate/recharge", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amountCents: 2000 }),
+        body: JSON.stringify({ billingPriceVersionId: "price-1" }),
       }),
       { params: Promise.resolve({ slug: "delegate" }) },
     );
@@ -498,6 +593,7 @@ describe("public mock recharge security", () => {
     );
     expect(JSON.stringify(body)).not.toContain("private-merchant");
     expect(JSON.stringify(body)).not.toContain("providerPayload");
+    expect(mocks.resolvePublicServicePackage).not.toHaveBeenCalled();
     expect(mocks.claimPaymentProviderOperation).not.toHaveBeenCalled();
     expect(mocks.createRechargeOrder).not.toHaveBeenCalled();
   });
@@ -514,6 +610,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "new-owner-after-expiry",
         }),
@@ -555,6 +652,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "new-browser-operation",
         }),
@@ -578,9 +676,24 @@ describe("public mock recharge security", () => {
     expect(mocks.createRechargeOrder).not.toHaveBeenCalled();
   });
 
-  it("blocks a different amount while a CREATED order is recovering", async () => {
+  it("blocks a different service package while a CREATED order is recovering", async () => {
     restoreEnv("NODE_ENV", "production");
     enableWeChatPay();
+    mocks.resolvePublicServicePackage.mockResolvedValueOnce({
+      productId: "product-1",
+      priceVersionId: "price-2",
+      name: "5 次服务包",
+      description: null,
+      amountCents: 500,
+      currency: "CNY",
+      entitlementUnits: 500,
+      unitName: "credit",
+      creatorRevenueShareBps: 2000,
+      platformRevenueShareBps: 8000,
+      refundPolicy: "FULL_WHEN_UNUSED",
+      expiryPolicy: "NEVER_EXPIRES",
+      entitlementValidityDays: null,
+    });
     mocks.rechargeOrderFindFirst.mockResolvedValue(
       recoveringWeChatOrder(),
     );
@@ -590,7 +703,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          amountCents: 500,
+          billingPriceVersionId: "price-2",
           idempotencyKey: "different-browser-operation",
         }),
       }),
@@ -628,6 +741,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "expired-browser-operation",
         }),
@@ -661,6 +775,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "same-active-checkout",
         }),
@@ -692,7 +807,7 @@ describe("public mock recharge security", () => {
       new Request("http://localhost/reps/delegate/recharge", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amountCents: 2000 }),
+        body: JSON.stringify({ billingPriceVersionId: "price-1" }),
       }),
       { params: Promise.resolve({ slug: "delegate" }) },
     );
@@ -716,7 +831,7 @@ describe("public mock recharge security", () => {
       new Request("http://localhost/reps/delegate/recharge", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amountCents: 2000 }),
+        body: JSON.stringify({ billingPriceVersionId: "price-1" }),
       }),
       { params: Promise.resolve({ slug: "delegate" }) },
     );
@@ -731,9 +846,24 @@ describe("public mock recharge security", () => {
     expect(mocks.createRechargeOrder).not.toHaveBeenCalled();
   });
 
-  it("returns a stable conflict instead of silently reusing an active checkout for another amount", async () => {
+  it("returns a stable conflict instead of reusing an active checkout for another price version", async () => {
     restoreEnv("NODE_ENV", "production");
     enableWeChatPay();
+    mocks.resolvePublicServicePackage.mockResolvedValueOnce({
+      productId: "product-1",
+      priceVersionId: "price-2",
+      name: "另一个服务包",
+      description: null,
+      amountCents: 2000,
+      currency: "CNY",
+      entitlementUnits: 1000,
+      unitName: "credit",
+      creatorRevenueShareBps: 2000,
+      platformRevenueShareBps: 8000,
+      refundPolicy: "FULL_WHEN_UNUSED",
+      expiryPolicy: "NEVER_EXPIRES",
+      entitlementValidityDays: null,
+    });
     mocks.rechargeOrderFindFirst.mockResolvedValue(
       activeWeChatCheckout(),
     );
@@ -742,7 +872,7 @@ describe("public mock recharge security", () => {
       new Request("http://localhost/reps/delegate/recharge", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amountCents: 500 }),
+        body: JSON.stringify({ billingPriceVersionId: "price-2" }),
       }),
       { params: Promise.resolve({ slug: "delegate" }) },
     );
@@ -782,6 +912,7 @@ describe("public mock recharge security", () => {
           "x-forwarded-for": "203.0.113.9",
         },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "rate-limited-operation",
         }),
@@ -796,7 +927,7 @@ describe("public mock recharge security", () => {
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("vary")).toBe("Cookie");
     await expect(response.json()).resolves.toEqual({
-      error: "充值请求过于频繁，请稍后使用同一操作重试。",
+      error: "服务包下单请求过于频繁，请稍后使用同一操作重试。",
       code: "payment_rate_limited",
     });
     expect(
@@ -840,6 +971,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "existing-operation",
         }),
@@ -865,6 +997,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "unfinished-operation",
         }),
@@ -901,6 +1034,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "expired-old-owner",
         }),
@@ -957,6 +1091,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "expired-before-provider-post",
         }),
@@ -995,6 +1130,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "raced-operation",
         }),
@@ -1022,6 +1158,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           idempotencyKey: "failed-operation",
         }),
@@ -1077,7 +1214,7 @@ describe("public mock recharge security", () => {
           new Request("http://localhost/reps/delegate/recharge", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ amountCents: 2000 }),
+            body: JSON.stringify({ billingPriceVersionId: "price-1" }),
           }),
           { params: Promise.resolve({ slug: "delegate" }) },
         ),
@@ -1120,6 +1257,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           continuationChannel: "telegram",
         }),
@@ -1139,6 +1277,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           continuationChannel: "telegram",
         }),
@@ -1165,6 +1304,7 @@ describe("public mock recharge security", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          billingPriceVersionId: "price-1",
           amountCents: 2000,
           continuationChannel: "telegram",
         }),
@@ -1213,7 +1353,7 @@ describe("public mock recharge security", () => {
       new Request("http://localhost/reps/delegate/recharge/order-1/mock-success", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amountCents: 2000 }),
+        body: JSON.stringify({ billingPriceVersionId: "price-1" }),
       }),
       { params: Promise.resolve({ slug: "delegate", id: "order-1" }) },
     );
@@ -1224,7 +1364,6 @@ describe("public mock recharge security", () => {
       rechargeOrderId: "order-1",
       externalUserId: "web:delegate:aud_current_visitor",
       representativeId: "rep-1",
-      amountCents: 2000,
       purchaseIdempotencyKey: "public_token_purchase:order-1",
     });
     await expect(response.json()).resolves.toEqual(
@@ -1475,7 +1614,7 @@ describe("public mock recharge security", () => {
           "content-type": "application/json",
           "idempotency-key": "checkout-click-1",
         },
-        body: JSON.stringify({ amountCents: 2000 }),
+        body: JSON.stringify({ billingPriceVersionId: "price-1" }),
       }),
       { params: Promise.resolve({ slug: "delegate" }) },
     );
@@ -1499,7 +1638,7 @@ describe("public mock recharge security", () => {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ amountCents: 2000 }),
+        body: JSON.stringify({ billingPriceVersionId: "price-1" }),
       },
     );
 
@@ -1529,7 +1668,7 @@ describe("public mock recharge security", () => {
           "content-type": "application/json",
           "idempotency-key": "x".repeat(161),
         },
-        body: JSON.stringify({ amountCents: 2000 }),
+        body: JSON.stringify({ billingPriceVersionId: "price-1" }),
       }),
       { params: Promise.resolve({ slug: "delegate" }) },
     );
@@ -1561,6 +1700,11 @@ function enableWeChatPay(
 function activeWeChatCheckout() {
   return {
     id: "active-wechat-order",
+    billingProductId: "product-1",
+    billingPriceVersionId: "price-1",
+    productNameSnapshot: "20 次服务包",
+    entitlementUnitsSnapshot: 2000,
+    unitNameSnapshot: "credit",
     amountCents: 2000,
     currency: "CNY",
     provider: "WECHAT_PAY",

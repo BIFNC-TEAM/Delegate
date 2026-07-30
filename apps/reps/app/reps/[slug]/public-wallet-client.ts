@@ -27,6 +27,11 @@ export type PublicRechargeStatusPresentation = {
 
 export type PublicWalletOrder = {
   id: string;
+  billingProductId: string | null;
+  billingPriceVersionId: string | null;
+  productName: string | null;
+  entitlementUnits: number | null;
+  unitName: string | null;
   amountCents: number;
   currency: string;
   provider: string;
@@ -41,12 +46,23 @@ export type PublicWalletOrder = {
 export type PublicWalletStateSnapshot = {
   summary: {
     currency: string;
-    cashBalanceCents: number;
     serviceCreditsAvailable: number;
     serviceCreditsReserved: number;
     serviceCreditsPurchased: number;
     serviceCreditsConsumed: number;
   };
+  servicePackages: Array<{
+    productId: string;
+    priceVersionId: string;
+    name: string;
+    description: string | null;
+    amountCents: number;
+    currency: string;
+    entitlementUnits: number;
+    unitName: string;
+    refundPolicy: string;
+    expiryPolicy: string;
+  }>;
   orders: PublicWalletOrder[];
   purchases: Array<{
     id: string;

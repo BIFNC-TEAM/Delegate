@@ -17,7 +17,6 @@ const SUPPORTED_PUBLIC_WALLET_CURRENCIES = new Set(["CNY", "USD"]);
 
 type PublicUserWalletRecord = {
   id: string;
-  cashBalanceCents: number;
 };
 
 type PublicUserAgentWalletRecord = {
@@ -29,6 +28,11 @@ type PublicUserAgentWalletRecord = {
 
 type PublicRechargeOrderRecord = {
   id: string;
+  billingProductId: string | null;
+  billingPriceVersionId: string | null;
+  productNameSnapshot: string | null;
+  entitlementUnitsSnapshot: number | null;
+  unitNameSnapshot: string | null;
   amountCents: number;
   currency: string;
   provider: PaymentProvider;
@@ -86,7 +90,6 @@ export type PublicAgentWalletStateClient = {
 
 export type PublicAgentWalletSummary = {
   currency: string;
-  cashBalanceCents: number;
   serviceCreditsAvailable: number;
   serviceCreditsReserved: number;
   serviceCreditsPurchased: number;
@@ -95,6 +98,11 @@ export type PublicAgentWalletSummary = {
 
 export type PublicAgentWalletOrder = {
   id: string;
+  billingProductId: string | null;
+  billingPriceVersionId: string | null;
+  productName: string | null;
+  entitlementUnits: number | null;
+  unitName: string | null;
   amountCents: number;
   currency: string;
   provider:
@@ -204,7 +212,6 @@ async function readPublicAgentWalletState(
     take: 2,
     select: {
       id: true,
-      cashBalanceCents: true,
     },
   } satisfies Prisma.UserWalletFindManyArgs);
   if (userWallets.length > 1) {
@@ -252,6 +259,11 @@ async function readPublicAgentWalletState(
       take: PUBLIC_WALLET_RECORD_LIMIT,
       select: {
         id: true,
+        billingProductId: true,
+        billingPriceVersionId: true,
+        productNameSnapshot: true,
+        entitlementUnitsSnapshot: true,
+        unitNameSnapshot: true,
         amountCents: true,
         currency: true,
         provider: true,
@@ -310,7 +322,6 @@ async function readPublicAgentWalletState(
   return {
     summary: {
       currency,
-      cashBalanceCents: userWallet.cashBalanceCents,
       serviceCreditsAvailable: scopedWallet?.availableTokenAmount ?? 0,
       serviceCreditsReserved: scopedWallet?.reservedTokenAmount ?? 0,
       serviceCreditsPurchased:
@@ -329,7 +340,6 @@ function emptyPublicAgentWalletState(
   return {
     summary: {
       currency,
-      cashBalanceCents: 0,
       serviceCreditsAvailable: 0,
       serviceCreditsReserved: 0,
       serviceCreditsPurchased: 0,
@@ -346,6 +356,11 @@ function serializePublicRechargeOrder(
 ): PublicAgentWalletOrder {
   return {
     id: order.id,
+    billingProductId: order.billingProductId ?? null,
+    billingPriceVersionId: order.billingPriceVersionId ?? null,
+    productName: order.productNameSnapshot ?? null,
+    entitlementUnits: order.entitlementUnitsSnapshot ?? null,
+    unitName: order.unitNameSnapshot ?? null,
     amountCents: order.amountCents,
     currency: order.currency,
     provider: order.provider.toLowerCase() as PublicAgentWalletOrder["provider"],

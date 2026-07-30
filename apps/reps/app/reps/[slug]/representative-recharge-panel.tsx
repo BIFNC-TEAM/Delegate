@@ -23,14 +23,21 @@ import {
 
 type RechargeOrderSnapshot = {
   id: string;
+  billingProductId: string | null;
+  billingPriceVersionId: string | null;
+  productName: string | null;
+  entitlementUnits: number | null;
+  unitName: string | null;
   amountCents: number;
   currency: string;
   provider: string;
   status: PublicRechargeOrderStatus;
   checkoutUrl: string | null;
   checkoutExpiresAt: string | null;
-  cashBalanceCents: number;
 };
+
+type ServicePackageSnapshot =
+  PublicWalletStateSnapshot["servicePackages"][number];
 
 type TokenPurchaseSnapshot = {
   id: string;
@@ -46,7 +53,6 @@ type PurchaseReversalSnapshot = {
   tokenAmount: number;
   remainingTokenAmount: number;
   reversedAmountCents: number;
-  cashBalanceCents: number;
   currency: string;
   status: string;
 };
@@ -80,7 +86,7 @@ type PaymentNotice =
 type RechargeMutation = "create" | "mock-pay" | "return" | null;
 
 type RechargeIntent = {
-  amountCents: number;
+  priceVersionId: string;
   idempotencyKey: string;
 };
 
@@ -102,7 +108,11 @@ export function RepresentativeRechargePanel({
   paymentMode: "mock" | "wechat";
 }) {
   const t = pickCopy(locale, copy);
-  const [amountCents, setAmountCents] = useState(2000);
+  const [servicePackages, setServicePackages] = useState<
+    ServicePackageSnapshot[]
+  >([]);
+  const [selectedPriceVersionId, setSelectedPriceVersionId] =
+    useState<string | null>(null);
   const [order, setOrder] = useState<RechargeOrderSnapshot | null>(null);
   const [purchase, setPurchase] = useState<TokenPurchaseSnapshot | null>(null);
   const [reversal, setReversal] = useState<PurchaseReversalSnapshot | null>(null);
@@ -230,15 +240,41 @@ export function RepresentativeRechargePanel({
     setOrder(activity.order
       ? {
           id: activity.order.id,
+          billingProductId: activity.order.billingProductId,
+          billingPriceVersionId: activity.order.billingPriceVersionId,
+          productName: activity.order.productName,
+          entitlementUnits: activity.order.entitlementUnits,
+          unitName: activity.order.unitName,
           amountCents: activity.order.amountCents,
           currency: activity.order.currency,
           provider: activity.order.provider,
           status: activity.order.status,
           checkoutUrl: activity.order.checkoutUrl,
           checkoutExpiresAt: activity.order.checkoutExpiresAt,
-          cashBalanceCents: snapshot.summary.cashBalanceCents,
         }
       : null);
+    setServicePackages(snapshot.servicePackages);
+    setSelectedPriceVersionId((current) => {
+      if (
+        current
+        && snapshot.servicePackages.some(
+          (servicePackage) => servicePackage.priceVersionId === current,
+        )
+      ) {
+        return current;
+      }
+      if (
+        activity.order
+        && snapshot.servicePackages.some(
+          (servicePackage) =>
+            servicePackage.priceVersionId
+            === activity.order?.billingPriceVersionId,
+        )
+      ) {
+        return activity.order.billingPriceVersionId;
+      }
+      return snapshot.servicePackages[0]?.priceVersionId ?? null;
+    });
     if (
       (
         activity.order?.status === "created"
@@ -246,7 +282,6 @@ export function RepresentativeRechargePanel({
       )
       && activity.order.provider === "wechat_pay"
     ) {
-      setAmountCents(activity.order.amountCents);
       setCheckoutClockMs(Date.now());
     }
     setPurchase(activity.purchase
@@ -266,7 +301,6 @@ export function RepresentativeRechargePanel({
           remainingTokenAmount:
             activity.purchase?.remainingTokenAmount ?? 0,
           reversedAmountCents: activity.refund.amountCents,
-          cashBalanceCents: snapshot.summary.cashBalanceCents,
           currency: activity.refund.currency,
           status: activity.refund.status,
         }
@@ -697,6 +731,7 @@ export function RepresentativeRechargePanel({
       || hasActiveWeChatOrder
       || paymentResultConfirmed
       || checkoutRequiresManualAction
+      || !selectedPriceVersionId
       || !beginMutation("create")
     ) {
       return;
@@ -705,10 +740,10 @@ export function RepresentativeRechargePanel({
     setPaymentNotice(null);
     const existingIntent = rechargeIntentRef.current;
     const intent =
-      existingIntent?.amountCents === amountCents
+      existingIntent?.priceVersionId === selectedPriceVersionId
         ? existingIntent
         : {
-            amountCents,
+            priceVersionId: selectedPriceVersionId,
             idempotencyKey: randomId(),
           };
     rechargeIntentRef.current = intent;
@@ -719,7 +754,7 @@ export function RepresentativeRechargePanel({
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            amountCents: intent.amountCents,
+            billingPriceVersionId: intent.priceVersionId,
             idempotencyKey: intent.idempotencyKey,
             ...(continuationChannel
               ? { continuationChannel }
@@ -739,7 +774,9 @@ export function RepresentativeRechargePanel({
             && payload.rechargeOrder
           ) {
             setOrder(payload.rechargeOrder);
-            setAmountCents(payload.rechargeOrder.amountCents);
+            setSelectedPriceVersionId(
+              payload.rechargeOrder.billingPriceVersionId,
+            );
             setCheckoutClockMs(Date.now());
             setPaymentNotice({
               kind: "checking",
@@ -758,6 +795,9 @@ export function RepresentativeRechargePanel({
           throw new Error(t.createError);
         }
         setOrder(payload.rechargeOrder);
+        setSelectedPriceVersionId(
+          payload.rechargeOrder.billingPriceVersionId,
+        );
         setCheckoutClockMs(Date.now());
         setIsCheckoutUrlCopied(false);
         setPurchase(null);
@@ -886,9 +926,6 @@ export function RepresentativeRechargePanel({
         const reservedTokenAmount =
           payload.walletBalance?.reservedTokenAmount ?? 0;
         setReversal(payload.reversal);
-        setOrder((current) => current
-          ? { ...current, cashBalanceCents: payload.reversal.cashBalanceCents }
-          : current);
         setPurchase((current) => current
           ? {
               ...current,
@@ -937,6 +974,11 @@ export function RepresentativeRechargePanel({
       : checkoutRequiresManualAction
         ? "error"
         : orderPresentation?.tone ?? "neutral";
+  const selectedServicePackage =
+    servicePackages.find(
+      (servicePackage) =>
+        servicePackage.priceVersionId === selectedPriceVersionId,
+    ) ?? null;
 
   return (
     <div className="setup-stack">
@@ -1005,12 +1047,6 @@ export function RepresentativeRechargePanel({
         <div className="status-banner" role="status">
           <strong>{t.walletSummaryTitle}</strong>
           <p>
-            {t.balanceLabel}
-            {formatMoney(
-              walletState.summary.cashBalanceCents,
-              walletState.summary.currency,
-            )}
-            {" · "}
             {t.creditsAvailableLabel}
             {walletState.summary.serviceCreditsAvailable}
             {" · "}
@@ -1030,66 +1066,111 @@ export function RepresentativeRechargePanel({
         </div>
       ) : null}
 
-      <div className="button-row button-row-stretch">
-        {[500, 2000, 10000].map((preset) => (
+      {audienceAuthenticated && !isRestoring ? (
+        servicePackages.length > 0 ? (
+          <>
+            <strong>{t.servicePackagesTitle}</strong>
+            <div className="button-row button-row-stretch">
+              {servicePackages.map((servicePackage) => (
+                <button
+                  aria-pressed={
+                    selectedPriceVersionId === servicePackage.priceVersionId
+                  }
+                  className={
+                    selectedPriceVersionId === servicePackage.priceVersionId
+                      ? "button-primary"
+                      : "button-secondary"
+                  }
+                  disabled={
+                    isMutating
+                    || !rechargeReady
+                    || hasActiveWeChatOrder
+                    || paymentResultConfirmed
+                    || checkoutRequiresManualAction
+                  }
+                  key={servicePackage.priceVersionId}
+                  onClick={() => {
+                    setSelectedPriceVersionId(servicePackage.priceVersionId);
+                    if (
+                      rechargeIntentRef.current
+                      && rechargeIntentRef.current.priceVersionId
+                        !== servicePackage.priceVersionId
+                    ) {
+                      rechargeIntentRef.current = null;
+                    }
+                  }}
+                  type="button"
+                >
+                  <strong>{servicePackage.name}</strong>
+                  {" · "}
+                  {formatMoney(
+                    servicePackage.amountCents,
+                    servicePackage.currency,
+                  )}
+                  {" · "}
+                  {t.packageUnits(
+                    servicePackage.entitlementUnits,
+                    servicePackage.unitName,
+                  )}
+                </button>
+              ))}
+            </div>
+            {selectedServicePackage ? (
+              <p className="footer-note">
+                {selectedServicePackage.description
+                  ? `${selectedServicePackage.description} · `
+                  : ""}
+                {t.packagePolicy(
+                  selectedServicePackage.refundPolicy,
+                  selectedServicePackage.expiryPolicy,
+                )}
+                {" · "}
+                {t.creditsScope}
+              </p>
+            ) : null}
+          </>
+        ) : (
+          <div className="status-banner" role="status">
+            <strong>{t.noServicePackagesTitle}</strong>
+            <p>{t.noServicePackagesDetail}</p>
+          </div>
+        )
+      ) : null}
+
+      {audienceAuthenticated
+        && (servicePackages.length > 0 || hasActiveWeChatOrder) ? (
           <button
-            className={amountCents === preset ? "button-primary" : "button-secondary"}
+            className="button-primary button-block"
             disabled={
               !collectionEnabled
               || isMutating
               || isRestoring
               || !rechargeReady
-              || hasActivePendingCheckout
+              || !selectedPriceVersionId
+              || hasActiveWeChatOrder
               || paymentResultConfirmed
               || checkoutRequiresManualAction
             }
-            key={preset}
-            onClick={() => {
-              setAmountCents(preset);
-              if (
-                rechargeIntentRef.current
-                && rechargeIntentRef.current.amountCents !== preset
-              ) {
-                rechargeIntentRef.current = null;
-              }
-            }}
+            onClick={createRechargeOrder}
             type="button"
           >
-            {formatMoney(preset, "CNY")}
+            {mutation === "create"
+              ? t.creating
+              : paymentMode === "wechat" && !collectionEnabled
+                ? t.wechatCollectionPausedAction
+                : checkoutExpired
+                  ? checkoutRequiresManualAction
+                    ? t.wechatExpiryConfirmationAction
+                    : t.regenerateWechatAction
+                  : hasRecoveringWeChatOrder
+                    ? t.wechatRecoveringAction
+                  : hasActivePendingCheckout
+                    ? t.wechatPendingAction
+                    : paymentMode === "wechat"
+                      ? t.wechatCreateAction
+                      : t.createAction}
           </button>
-        ))}
-      </div>
-
-      <button
-        className="button-primary button-block"
-        disabled={
-          !collectionEnabled
-          || isMutating
-          || isRestoring
-          || !rechargeReady
-          || hasActiveWeChatOrder
-          || paymentResultConfirmed
-          || checkoutRequiresManualAction
-        }
-        onClick={createRechargeOrder}
-        type="button"
-      >
-        {mutation === "create"
-          ? t.creating
-          : paymentMode === "wechat" && !collectionEnabled
-            ? t.wechatCollectionPausedAction
-            : checkoutExpired
-              ? checkoutRequiresManualAction
-                ? t.wechatExpiryConfirmationAction
-                : t.regenerateWechatAction
-              : hasRecoveringWeChatOrder
-                ? t.wechatRecoveringAction
-              : hasActivePendingCheckout
-                ? t.wechatPendingAction
-                : paymentMode === "wechat"
-                  ? t.wechatCreateAction
-                  : t.createAction}
-      </button>
+        ) : null}
       {hasActiveWeChatOrder ? (
         <p className="footer-note representative-payment-action-note">
           {hasRecoveringWeChatOrder
@@ -1106,6 +1187,8 @@ export function RepresentativeRechargePanel({
         >
           <strong>{t.latestOrder}</strong>
           <p>
+            {order.productName ?? t.legacyServicePackage}
+            {" · "}
             {formatMoney(order.amountCents, order.currency)}
             {" · "}
             <span className="representative-payment-status">
@@ -1114,8 +1197,9 @@ export function RepresentativeRechargePanel({
                 : orderPresentation?.label}
             </span>
             {" · "}
-            {t.balanceLabel}
-            {formatMoney(order.cashBalanceCents, order.currency)}
+            {order.entitlementUnits && order.unitName
+              ? t.packageUnits(order.entitlementUnits, order.unitName)
+              : t.legacyOrderTerms}
           </p>
           {order.status === "requires_payment" && paymentMode === "mock" ? (
             <button
@@ -1219,7 +1303,6 @@ export function RepresentativeRechargePanel({
                 reversal.tokenAmount,
                 reversal.reversedAmountCents,
                 reversal.currency,
-                reversal.cashBalanceCents,
               )}
             </p>
           ) : null}
@@ -1313,29 +1396,36 @@ function isAbortError(error: unknown): boolean {
 
 const copy = {
   zh: {
-    identityNote: "充值和服务额度会记入当前已登录的 Delegate 账户；绑定后 Web、Telegram 和 Matrix 共用同一份权益。这里只读取当前代表的 CNY 钱包状态。",
-    restoring: "正在恢复当前钱包状态…",
-    loadError: "钱包状态恢复失败。",
-    refreshError: "操作已完成，但最新钱包状态暂时无法刷新，请重新加载页面。",
-    walletSummaryTitle: "当前钱包状态",
+    identityNote: "购买后，服务额度会直接发放到当前已登录的 Delegate 账户，并且仅适用于当前数字代表；无需再用余额二次购买。绑定后 Web、Telegram 和 Matrix 可使用同一份当前代表权益。",
+    restoring: "正在读取当前代表的服务额度与服务包…",
+    loadError: "服务额度与服务包读取失败。",
+    refreshError: "操作已完成，但最新服务额度暂时无法刷新，请重新加载页面。",
+    walletSummaryTitle: "当前代表的服务额度",
     creditsAvailableLabel: "可用额度 ",
     creditsReservedLabel: "预留额度 ",
     creditsConsumedLabel: "已消费额度 ",
     recordSummary: (orders: number, purchases: number, refunds: number) =>
-      `最近记录：${orders} 笔订单 · ${purchases} 笔购买 · ${refunds} 笔未使用额度退回`,
+      `最近记录：${orders} 笔服务包订单 · ${purchases} 次额度发放 · ${refunds} 笔退款`,
     loginRequiredTitle: "请先登录 Delegate 账户",
-    loginRequiredDetail: "充值属于账户级操作，不会再记入临时浏览器身份。",
+    loginRequiredDetail: "服务包购买和服务额度会记入已登录账户，不会记入临时浏览器身份。",
     loginAction: "登录 / 注册",
     telegramBindingRequiredTitle: "请先绑定当前 Telegram 账户",
     telegramBindingRequiredDetail: "在上方“跨渠道身份”生成 /bind 命令，发送给当前 Bot 后再回来检查。",
     telegramBindingReadyTitle: "Telegram 身份已绑定",
-    telegramBindingReadyDetail: "本次充值会进入与当前 Telegram 账户对应的同一个 Delegate 账户。",
+    telegramBindingReadyDetail: "购买后，当前代表的服务额度可由已绑定的 Telegram 账户使用。",
     openBindingsAction: "打开身份绑定",
     checkBindingAction: "重新检查",
     checkingBinding: "检查中...",
     bindingCheckError: "Telegram 绑定状态检查失败。",
-    createAction: "创建充值单",
-    wechatCreateAction: "生成微信支付二维码",
+    servicePackagesTitle: "选择当前数字代表的服务包",
+    noServicePackagesTitle: "当前没有可购买的服务包",
+    noServicePackagesDetail: "数字代表主人尚未上架服务包，请稍后再来。",
+    packageUnits: (units: number, unitName: string) =>
+      `${units} ${unitName === "credit" ? "服务额度" : unitName || "服务额度"}`,
+    packagePolicy: (refundPolicy: string, expiryPolicy: string) =>
+      `${refundPolicy === "FULL_WHEN_UNUSED" ? "完全未使用时可申请全额退款" : "按商品退款规则处理"} · ${expiryPolicy === "NEVER_EXPIRES" ? "长期有效" : "按商品有效期使用"}`,
+    createAction: "购买所选服务包",
+    wechatCreateAction: "使用微信购买所选服务包",
     wechatCollectionPausedTitle: "微信支付已暂停新收款",
     wechatCollectionPausedDetail: "当前不能生成新的支付二维码；已创建订单仍会继续查询和入账，请按现有二维码完成支付或等待结果确认。",
     wechatCollectionPausedAction: "新收款已暂停",
@@ -1347,13 +1437,14 @@ const copy = {
     wechatPendingPreventsDuplicate: "当前二维码仍在有效期内。为避免重复扣款，请先完成或等待该订单关闭。",
     wechatExpiredPreventsDuplicate: "当前二维码已过期，但旧订单尚未由微信确认关闭。系统会继续查询并安全关单；关闭前请勿创建第二笔订单。",
     creating: "处理中...",
-    createError: "创建充值单失败。",
+    createError: "创建服务包订单失败。",
     payError: "模拟支付失败。",
-    latestOrder: "最近一笔充值单",
-    balanceLabel: "当前余额 ",
+    latestOrder: "最近一笔服务包订单",
+    legacyServicePackage: "历史服务订单",
+    legacyOrderTerms: "历史订单未保存服务包快照",
     mockPayAction: "模拟支付成功",
     wechatQrTitle: "微信扫码支付",
-    wechatQrDetail: "请使用微信扫描二维码。支付完成后，本页会自动刷新余额和当前代表服务额度。",
+    wechatQrDetail: "请使用微信扫描二维码。支付成功后，所选服务额度会直接发放给当前数字代表，无需二次购买。",
     wechatCountdown: (time: string) => `二维码剩余有效时间 ${time}`,
     wechatAwaitingPayment: "正在等待微信支付确认。",
     wechatRecovering: "微信支付订单正在安全确认，二维码生成后会自动显示。",
@@ -1363,17 +1454,17 @@ const copy = {
     wechatExpiredUnconfirmed: "二维码已到期，但支付结果暂时无法确认。请勿重复支付；系统会继续查询。",
     retryPaymentStatusAction: "重新查询支付结果",
     wechatAuthExpired: "登录状态已失效，支付查询已停止。请重新登录后核对订单。",
-    wechatManualReview: "支付结果与钱包账目需要人工核对，自动查询已停止。",
+    wechatManualReview: "支付结果与服务包订单需要人工核对，自动查询已停止。",
     wechatManualReviewAction: "请勿重复支付。联系数字代表主人并提供当前订单时间和金额进行核对。",
     wechatProviderRetry: "微信支付状态暂时不可用，本页会降低频率后自动重试。",
     wechatStatusRetry: "网络暂时不可用，本页会自动重试支付状态。",
     wechatOffline: "当前设备已离线；支付查询已暂停，恢复联网后会自动继续。",
-    wechatPaidRefreshing: "微信支付已确认，正在刷新钱包和服务额度…",
-    wechatPaid: "微信支付已确认，钱包和服务额度已更新。",
-    wechatPaidRefreshFailed: "微信支付已确认，但钱包状态暂时无法刷新。请勿重复支付，可重新读取钱包。",
+    wechatPaidRefreshing: "微信支付已确认，正在刷新当前代表的服务额度…",
+    wechatPaid: "微信支付已确认，当前代表的服务额度已发放。",
+    wechatPaidRefreshFailed: "微信支付已确认，但服务额度暂时无法刷新。请勿重复支付，可重新读取服务额度。",
     wechatExistingCheckoutRestored: "已恢复仍在有效期内的待支付二维码。",
     paymentConfirmedStatus: "支付已确认",
-    refreshWalletAction: "重新读取钱包",
+    refreshWalletAction: "重新读取服务额度",
     openWechatAction: "在微信中打开",
     copyCheckoutUrl: "复制支付链接",
     checkoutUrlCopied: "已复制",
@@ -1384,40 +1475,52 @@ const copy = {
     returning: "退回中...",
     returnError: "未使用额度退回失败。",
     reservedReturnHint: "有额度正在服务请求中，结算或释放后才能退回。",
-    returnedTitle: "未使用额度已退回站内余额",
+    returnedTitle: "未使用的演示额度已撤销",
     returnedDetail: (
       tokens: number,
       amountCents: number,
       currency: string,
-      cashBalanceCents: number,
-    ) => `${tokens} 额度 · ${formatMoney(amountCents, currency)} · 站内余额 ${formatMoney(cashBalanceCents, currency)}`,
-    disclaimer: "当前是仅限开发环境的演示支付入口：可以验证创建充值单、模拟支付、自动购买当前代表服务额度、付费继续和未使用额度退回站内余额，但不会真实扣款或原路退款。下一真实收款渠道为微信支付；Stripe 已延期。Delegate 不处理银行卡号或支付密码。",
-    wechatDisclaimer: "当前使用微信 Native 支付。Delegate 只保存订单、金额和验签后的最小资金凭据，不接触微信支付密码；支付成功后会为当前数字代表自动购买服务额度。真实退款和自动提现仍未开放。",
+    ) => `${tokens} 额度 · ${formatMoney(amountCents, currency)}`,
+    disclaimer: "当前是仅限开发环境的演示支付入口：可以验证服务包下单、模拟支付、直接发放当前代表服务额度、付费继续和完全未使用额度的本地撤销；不会真实扣款，也不模拟渠道原路退款。Delegate 不处理银行卡号或支付密码。",
+    wechatDisclaimer: "当前使用微信 Native 支付。Delegate 只保存服务包订单和验签后的最小支付凭据，不接触微信支付密码；支付成功后会直接发放当前数字代表专属服务额度。退款按所购服务包规则处理。",
   },
   en: {
-    identityNote: "Recharge and service credits are attached to the signed-in Delegate account. Linked Web, Telegram, and Matrix identities share the same entitlements. This panel reads only this representative's CNY wallet state.",
-    restoring: "Restoring the current wallet state…",
-    loadError: "Failed to restore wallet state.",
-    refreshError: "The operation completed, but the latest wallet state could not be refreshed. Reload the page to try again.",
-    walletSummaryTitle: "Current wallet state",
+    identityNote: "After purchase, service credits are issued directly to the signed-in Delegate account for this Digital Representative only. There is no second wallet purchase. Linked Web, Telegram, and Matrix identities can use the same representative-scoped entitlement.",
+    restoring: "Loading service credits and packages for this representative…",
+    loadError: "Service credits and packages could not be loaded.",
+    refreshError: "The operation completed, but the latest service credits could not be refreshed. Reload the page to try again.",
+    walletSummaryTitle: "Credits for this representative",
     creditsAvailableLabel: "available credits ",
     creditsReservedLabel: "reserved credits ",
     creditsConsumedLabel: "consumed credits ",
     recordSummary: (orders: number, purchases: number, refunds: number) =>
-      `Recent records: ${orders} orders · ${purchases} purchases · ${refunds} unused-credit returns`,
+      `Recent records: ${orders} service-package orders · ${purchases} credit grants · ${refunds} refunds`,
     loginRequiredTitle: "Sign in to your Delegate account",
-    loginRequiredDetail: "Recharge is account-bound and is never attached to a temporary browser identity.",
+    loginRequiredDetail: "Service-package purchases and credits are attached to a signed-in account, never a temporary browser identity.",
     loginAction: "Sign in / register",
     telegramBindingRequiredTitle: "Link this Telegram account first",
     telegramBindingRequiredDetail: "Create a /bind command in Cross-channel identity above, send it to this Bot, then check again.",
     telegramBindingReadyTitle: "Telegram identity linked",
-    telegramBindingReadyDetail: "This recharge will reach the same Delegate account used by the current Telegram identity.",
+    telegramBindingReadyDetail: "Credits purchased here can be used for this representative by the linked Telegram account.",
     openBindingsAction: "Open identity linking",
     checkBindingAction: "Check again",
     checkingBinding: "Checking...",
     bindingCheckError: "Unable to check the Telegram identity link.",
-    createAction: "Create recharge order",
-    wechatCreateAction: "Generate WeChat Pay QR",
+    servicePackagesTitle: "Choose a service package for this representative",
+    noServicePackagesTitle: "No service package is available",
+    noServicePackagesDetail: "The representative owner has not published a service package yet.",
+    packageUnits: (units: number, unitName: string) =>
+      `${units} ${
+        unitName === "credit"
+          ? units === 1
+            ? "service credit"
+            : "service credits"
+          : unitName || "service credits"
+      }`,
+    packagePolicy: (refundPolicy: string, expiryPolicy: string) =>
+      `${refundPolicy === "FULL_WHEN_UNUSED" ? "Full refund available while completely unused" : "Product refund policy applies"} · ${expiryPolicy === "NEVER_EXPIRES" ? "Does not expire" : "Product expiry policy applies"}`,
+    createAction: "Buy selected service package",
+    wechatCreateAction: "Buy selected package with WeChat Pay",
     wechatCollectionPausedTitle: "New WeChat Pay collection is paused",
     wechatCollectionPausedDetail: "New QR codes cannot be created right now. Existing orders will still be checked and credited; complete the current checkout or wait for its result.",
     wechatCollectionPausedAction: "New collection paused",
@@ -1429,13 +1532,14 @@ const copy = {
     wechatPendingPreventsDuplicate: "This QR code is still valid. Complete it or wait for the order to close before creating another, avoiding a duplicate charge.",
     wechatExpiredPreventsDuplicate: "This QR code expired, but WeChat has not confirmed the old order closed. Checks and safe closure will continue; do not create a second order yet.",
     creating: "Working...",
-    createError: "Failed to create recharge order.",
+    createError: "Failed to create the service-package order.",
     payError: "Failed to simulate payment.",
-    latestOrder: "Latest recharge order",
-    balanceLabel: "Current balance ",
+    latestOrder: "Latest service-package order",
+    legacyServicePackage: "Legacy service order",
+    legacyOrderTerms: "Package snapshot unavailable for this legacy order",
     mockPayAction: "Simulate payment success",
     wechatQrTitle: "Scan with WeChat Pay",
-    wechatQrDetail: "Scan this QR code in WeChat. This page will refresh the wallet and representative-scoped service credits after payment.",
+    wechatQrDetail: "Scan this QR code in WeChat. After payment, the selected service credits are issued directly for this Digital Representative with no second purchase.",
     wechatCountdown: (time: string) => `QR code expires in ${time}`,
     wechatAwaitingPayment: "Waiting for WeChat Pay confirmation.",
     wechatRecovering: "The WeChat Pay order is being verified. Its QR code will appear automatically when ready.",
@@ -1445,17 +1549,17 @@ const copy = {
     wechatExpiredUnconfirmed: "The QR code expired, but its payment result is temporarily unavailable. Do not pay again; checks will continue.",
     retryPaymentStatusAction: "Retry payment status",
     wechatAuthExpired: "Your session expired, so payment checks stopped. Sign in again to verify this order.",
-    wechatManualReview: "The payment result and wallet records need manual review. Automatic checks have stopped.",
+    wechatManualReview: "The payment result and service-package order need manual review. Automatic checks have stopped.",
     wechatManualReviewAction: "Do not pay again. Contact the representative owner with the order time and amount for verification.",
     wechatProviderRetry: "WeChat Pay status is temporarily unavailable. This page will retry at a lower frequency.",
     wechatStatusRetry: "The network is temporarily unavailable. This page will retry the payment status.",
     wechatOffline: "This device is offline. Payment checks are paused and will resume when the connection returns.",
-    wechatPaidRefreshing: "WeChat Pay is confirmed. Refreshing wallet cash and service credits…",
-    wechatPaid: "WeChat Pay is confirmed. Wallet cash and service credits are up to date.",
-    wechatPaidRefreshFailed: "WeChat Pay is confirmed, but the wallet could not refresh yet. Do not pay again; retry the wallet read.",
+    wechatPaidRefreshing: "WeChat Pay is confirmed. Refreshing this representative's service credits…",
+    wechatPaid: "WeChat Pay is confirmed. Service credits were issued for this representative.",
+    wechatPaidRefreshFailed: "WeChat Pay is confirmed, but service credits could not refresh yet. Do not pay again; retry the credit read.",
     wechatExistingCheckoutRestored: "The still-valid pending checkout has been restored.",
     paymentConfirmedStatus: "Payment confirmed",
-    refreshWalletAction: "Refresh wallet",
+    refreshWalletAction: "Refresh service credits",
     openWechatAction: "Open in WeChat",
     copyCheckoutUrl: "Copy payment link",
     checkoutUrlCopied: "Copied",
@@ -1466,14 +1570,13 @@ const copy = {
     returning: "Returning...",
     returnError: "Failed to return unused credits.",
     reservedReturnHint: "Credits reserved by an active service request can be returned after settlement or release.",
-    returnedTitle: "Unused credits returned to wallet cash",
+    returnedTitle: "Unused demo credits reversed",
     returnedDetail: (
       tokens: number,
       amountCents: number,
       currency: string,
-      cashBalanceCents: number,
-    ) => `${tokens} credits · ${formatMoney(amountCents, currency)} · wallet cash ${formatMoney(cashBalanceCents, currency)}`,
-    disclaimer: "This development-only demo validates order creation, simulated payment, representative-scoped credit purchase, paid continuation, and returning unused credits to wallet cash without a real charge or provider refund. WeChat Pay is the next live collection channel; Stripe is deferred. Delegate does not handle card numbers or payment passwords.",
-    wechatDisclaimer: "This checkout uses WeChat Pay Native. Delegate stores only the order, amount, and minimal verified payment evidence; it never handles a WeChat payment password. Successful payment automatically purchases service credits for this Digital Representative. Live refunds and automated payouts remain unavailable.",
+    ) => `${tokens} credits · ${formatMoney(amountCents, currency)}`,
+    disclaimer: "This development-only checkout validates service-package ordering, simulated payment, direct representative-scoped credit grants, paid continuation, and local reversal of completely unused demo credits. It creates no real charge and does not simulate a provider refund. Delegate does not handle card numbers or payment passwords.",
+    wechatDisclaimer: "This checkout uses WeChat Pay Native. Delegate stores only the service-package order and minimal verified payment evidence; it never handles a WeChat payment password. Successful payment directly grants credits for this Digital Representative. Refunds follow the purchased package policy.",
   },
 } as const;

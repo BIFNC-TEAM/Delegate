@@ -226,28 +226,24 @@ export const dashboardSectionBlueprints: Record<
   wallet: {
     eyebrow: text("Wallet & Billing", "Wallet & Billing"),
     title: text("看清楚钱从哪里来、花到哪里、何时可以提现。", "See where money comes from, where it goes, and when it becomes withdrawable."),
-    description: text("把充值、服务额度、使用扣费、创作者收益、退款和内部账本放在一条可解释的资金链上。", "Connect recharge, service credits, usage, creator earnings, refunds, and ledger entries into one explainable money flow."),
+    description: text("把服务包购买、权益发放、使用扣费、创作者收益、退款和内部账本放在一条可解释的资金链上。", "Connect service-package purchases, entitlement grants, usage, creator earnings, refunds, and ledger entries into one explainable money flow."),
     primaryAction: text("查看账本明细", "View ledger"),
-    tabs: [text("钱包概览", "Overview"), text("充值 / 购买", "Recharge & purchase"), text("使用扣费", "Usage"), text("提现", "Withdrawals"), text("退款 / 冲正", "Refunds"), text("账本明细", "Ledger")],
+    tabs: [text("钱包概览", "Overview"), text("服务包购买", "Service packages"), text("使用扣费", "Usage"), text("提现", "Withdrawals"), text("退款 / 冲正", "Refunds"), text("账本明细", "Ledger")],
     metrics: [
-      { label: text("可用余额", "Available balance"), value: "¥8,420", detail: text("用户资金与服务额度", "Cash and service credits"), tone: "teal" },
-      { label: text("本月收入", "Revenue this month"), value: "¥2,860", detail: text("全部代表累计", "Across all representatives") },
-      { label: text("待释放收益", "Pending earnings"), value: "¥572", detail: text("随服务消耗释放", "Released as service is consumed") },
-      { label: text("可提现", "Withdrawable"), value: "¥1,240", detail: text("已完成结算", "Settled and available"), tone: "indigo" },
+      { label: text("代表服务额度", "Representative credits"), value: "—", detail: text("从实时账本读取", "Loaded from the live ledger"), tone: "teal" },
+      { label: text("本月收入", "Revenue this month"), value: "—", detail: text("从实时账本读取", "Loaded from the live ledger") },
+      { label: text("待释放收益", "Pending earnings"), value: "—", detail: text("随服务消耗释放", "Released as service is consumed") },
+      { label: text("可提现", "Withdrawable"), value: "—", detail: text("完成结算后可用", "Available after settlement"), tone: "indigo" },
     ],
     table: {
       title: text("最近交易", "Recent transactions"),
-      description: text("按事件组追踪充值、购买、扣费、收入和冲正。", "Trace recharge, purchase, usage, revenue, and reversal by event group."),
+      description: text("按事件组追踪购买、权益发放、扣费、收入和冲正。", "Trace purchase, entitlement, usage, revenue, and reversal by event group."),
       columns: [text("事件", "Event"), text("账户类型", "Account"), text("金额 / 数量", "Amount"), text("状态", "Status"), text("时间", "Time")],
-      rows: [
-        [text("Agent token purchase", "Agent token purchase"), text("USER_CASH", "USER_CASH"), text("-¥199.00", "-¥199.00"), text("已完成", "Completed"), text("今天 10:24", "Today 10:24")],
-        [text("Creator earning release", "Creator earning release"), text("CREATOR_WITHDRAWABLE", "CREATOR_WITHDRAWABLE"), text("+¥39.80", "+¥39.80"), text("已入账", "Posted"), text("今天 09:51", "Today 09:51")],
-        [text("Browser usage", "Browser usage"), text("PROVIDER_COST", "PROVIDER_COST"), text("-18 credits", "-18 credits"), text("已计费", "Charged"), text("昨天", "Yesterday")],
-      ],
+      rows: [],
     },
     modules: [
-      { title: text("资金流", "Money flow"), description: text("外部支付负责收钱；Delegate 内部账本负责余额、收益、成本和审计。", "Payment providers collect funds; Delegate tracks balances, earnings, cost, and audit state."), items: [text("User recharge", "User recharge"), text("Agent token purchase", "Agent token purchase"), text("Usage charge", "Usage charge"), text("Creator settlement", "Creator settlement")] },
-      { title: text("提现与退款", "Withdrawals & refunds"), description: text("提现先冻结，退款与冲正必须保留原事件关联。", "Withdrawals freeze funds first; refunds and reversals retain original event links."), items: [text("发起提现", "Request withdrawal"), text("提现审核", "Withdrawal review"), text("Refund / reversal", "Refund / reversal"), text("Chargeback", "Chargeback")], status: text("¥1,240 可提现", "¥1,240 available") },
+      { title: text("资金流", "Money flow"), description: text("外部支付负责收钱；Delegate 内部账本负责服务权益、收益、成本和审计。", "Payment providers collect funds; Delegate tracks service entitlements, earnings, cost, and audit state."), items: [text("购买服务包", "Service-package purchase"), text("发放代表专属权益", "Representative entitlement grant"), text("Usage charge", "Usage charge"), text("Creator settlement", "Creator settlement")] },
+      { title: text("提现与退款", "Withdrawals & refunds"), description: text("提现先冻结，退款与冲正必须保留原事件关联。", "Withdrawals freeze funds first; refunds and reversals retain original event links."), items: [text("发起提现", "Request withdrawal"), text("提现审核", "Withdrawal review"), text("Refund / reversal", "Refund / reversal"), text("Chargeback", "Chargeback")] },
     ],
   },
   memory: {

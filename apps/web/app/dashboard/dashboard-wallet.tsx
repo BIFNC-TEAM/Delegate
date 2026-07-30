@@ -13,6 +13,8 @@ import {
 
 import type { Locale } from "@delegate/web-ui";
 
+import { DashboardPayoutProfile } from "./dashboard-payout-profile";
+
 type WalletView = "overview" | "transactions" | "settlements" | "ledger";
 type MockWithdrawalAction =
   | "approve"
@@ -117,7 +119,7 @@ type WorkspaceWalletSnapshot = {
     payoutInProgressCents: number;
   };
   primaryAction: {
-    kind: "withdraw" | "verify" | "none";
+    kind: "withdraw" | "verify" | "payout_profile" | "none";
     reason: string | null;
   };
   eventTypes: Array<{ id: string; count: number }>;
@@ -897,6 +899,21 @@ export function DashboardWallet({
             <span className="wallet-primary-guidance" role="status">
               {zh ? "完成创作者验证后可提现" : "Complete creator verification to withdraw"}
             </span>
+          ) : snapshot?.primaryAction.kind === "payout_profile" ? (
+            <button
+              className="dashboard-v2-button-primary"
+              onClick={() => {
+                setActiveView("settlements");
+                window.setTimeout(() => {
+                  document
+                    .getElementById("wallet-payout-profile")
+                    ?.scrollIntoView({ behavior: "smooth", block: "start" });
+                }, 0);
+              }}
+              type="button"
+            >
+              {zh ? "设置收款账户" : "Set up payout account"}
+            </button>
           ) : snapshot?.primaryAction.kind === "withdraw" ? (
             <button
               className="dashboard-v2-button-primary"
@@ -1024,6 +1041,7 @@ export function DashboardWallet({
                     events={events}
                     locale={locale}
                     metrics={snapshot?.metrics}
+                    onWalletChanged={refreshWalletAndReconciliation}
                     onSelect={chooseRow}
                     onRetryReconciliation={() => {
                       void loadReconciliation().catch((nextError: unknown) => {
@@ -1085,7 +1103,17 @@ export function DashboardWallet({
               </div>
             ) : (
               <div className="wallet-table-detail-layout">
-                <section className="dashboard-v2-panel wallet-table-panel">
+                <div className={activeView === "settlements"
+                  ? "wallet-settlements-stack"
+                  : "wallet-table-stack"}
+                >
+                  {activeView === "settlements" ? (
+                    <DashboardPayoutProfile
+                      locale={locale}
+                      onChanged={refreshWalletAndReconciliation}
+                    />
+                  ) : null}
+                  <section className="dashboard-v2-panel wallet-table-panel">
                   <header>
                     <div>
                       <p>{walletViewEyebrow(activeView)}</p>
@@ -1135,7 +1163,8 @@ export function DashboardWallet({
                     })}
                     total={snapshot?.page.filteredTotal ?? 0}
                   />
-                </section>
+                  </section>
+                </div>
                 <WalletDetailPanel
                   cancelingWithdrawalId={cancelingWithdrawalId}
                   closeButtonRef={closeButtonRef}
@@ -1623,6 +1652,7 @@ function WalletOverview({
   events,
   locale,
   metrics,
+  onWalletChanged,
   onRefreshReconciliation,
   onSelect,
   onRetryReconciliation,
@@ -1636,6 +1666,7 @@ function WalletOverview({
   events: WorkspaceWalletEvent[];
   locale: Locale;
   metrics: WorkspaceWalletSnapshot["metrics"] | undefined;
+  onWalletChanged: () => void;
   onRefreshReconciliation: () => Promise<void>;
   onSelect: (row: SelectedWalletRow, target: HTMLElement) => void;
   onRetryReconciliation: () => void;
@@ -1689,6 +1720,11 @@ function WalletOverview({
           </article>
         ))}
       </section>
+
+      <DashboardPayoutProfile
+        locale={locale}
+        onChanged={onWalletChanged}
+      />
 
       <WalletReconciliationPanel
         error={reconciliationError}
@@ -3044,7 +3080,7 @@ function walletViewEyebrow(view: WalletView) {
 
 function walletEventTypeLabel(type: string, locale: Locale) {
   const labels: Record<string, [string, string]> = {
-    user_recharge: ["用户充值", "User recharge"],
+    user_recharge: ["服务包收款（兼容事件）", "Service-package payment (legacy event)"],
     agent_token_purchase: ["购买服务额度", "Service credits purchased"],
     usage_reservation: ["预留服务额度", "Service credits reserved"],
     usage_settlement: ["结算服务使用", "Usage settled"],

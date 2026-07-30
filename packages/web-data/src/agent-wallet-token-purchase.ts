@@ -134,8 +134,19 @@ type TokenPurchaseClient = Omit<WalletLedgerClient, "$transaction"> &
     findUnique(args: unknown): Promise<{
       id: string;
       userWalletId: string;
+      representativeId: string | null;
+      productCode: string | null;
       currency: string;
+      amountCents: number;
       status: RechargeOrderStatus;
+      billingPriceVersionId?: string | null;
+      unitNameSnapshot?: string | null;
+      entitlementUnitsSnapshot?: number | null;
+      creatorRevenueShareBpsSnapshot?: number | null;
+      platformRevenueShareBpsSnapshot?: number | null;
+      refundPolicySnapshot?: string | null;
+      expiryPolicySnapshot?: string | null;
+      entitlementValidityDaysSnapshot?: number | null;
     } | null>;
   };
   $transaction?<T>(
@@ -247,6 +258,7 @@ export async function purchaseAgentTokens(
       throw new Error("Insufficient user wallet balance.");
     }
     const initialUserCashBalanceCents = userWallet.cashBalanceCents;
+    let rechargeOrderTerms: RechargeOrderPurchaseTerms | null = null;
     if (normalized.rechargeOrderId && tx.rechargeOrder) {
       const rechargeOrder = await tx.rechargeOrder.findUnique({
         where: { id: normalized.rechargeOrderId },
@@ -254,13 +266,17 @@ export async function purchaseAgentTokens(
       if (
         !rechargeOrder ||
         rechargeOrder.userWalletId !== userWallet.id ||
+        rechargeOrder.representativeId !== normalized.representativeId ||
         rechargeOrder.currency !== normalized.currency ||
+        rechargeOrder.amountCents !== normalized.amountCents ||
         rechargeOrder.status !== RechargeOrderStatus.PAID
       ) {
         throw new Error(
-          "Recharge order is not a paid order for this user wallet and currency.",
+          "Recharge order is not a paid order for this wallet, representative, amount, and currency.",
         );
       }
+      rechargeOrderTerms =
+        resolveRechargeOrderPurchaseTerms(rechargeOrder);
     }
 
     const agentWallet = await tx.agentWallet.findUnique({
@@ -273,12 +289,15 @@ export async function purchaseAgentTokens(
     if (agentWallet.currency !== normalized.currency) {
       throw new Error("Agent wallet currency does not match purchase currency.");
     }
-    assertPositiveInteger(agentWallet.tokenUnitPriceCents, "tokenUnitPriceCents");
-    if (normalized.amountCents % agentWallet.tokenUnitPriceCents !== 0) {
-      throw new Error("Purchase amount must divide evenly into agent tokens.");
-    }
-
-    const tokenAmount = normalized.amountCents / agentWallet.tokenUnitPriceCents;
+    const tokenAmount =
+      rechargeOrderTerms?.entitlementUnits
+      ?? resolveLegacyTokenAmount(
+        normalized.amountCents,
+        agentWallet.tokenUnitPriceCents,
+      );
+    const tokenUnitPriceCents =
+      rechargeOrderTerms?.tokenUnitPriceCents
+      ?? agentWallet.tokenUnitPriceCents;
     const entitlementAudienceIdentityId =
       await resolveServiceEntitlementAudienceIdentityId(
         userWallet.audienceIdentityId,
@@ -286,7 +305,9 @@ export async function purchaseAgentTokens(
       );
     const revenueSplit = calculateAgentWalletRevenueSplit({
       grossAmountCents: normalized.amountCents,
-      creatorRevenueShareBps: agentWallet.creatorRevenueShareBps,
+      creatorRevenueShareBps:
+        rechargeOrderTerms?.creatorRevenueShareBps
+        ?? agentWallet.creatorRevenueShareBps,
     });
     const userAgentWallet = await tx.userAgentWallet.upsert({
       where: {
@@ -350,6 +371,9 @@ export async function purchaseAgentTokens(
         audienceIdentityId: entitlementAudienceIdentityId,
         representativeId: agentWallet.representativeId,
         units: tokenAmount,
+        ...(rechargeOrderTerms
+          ? { unitName: rechargeOrderTerms.unitName }
+          : {}),
         operationKey: `agent-token-purchase:${normalized.idempotencyKey}`,
         notes: "Granted from an agent token purchase.",
         metadata: {
@@ -357,6 +381,15 @@ export async function purchaseAgentTokens(
           userWalletId: userWallet.id,
           amountCents: normalized.amountCents,
           currency: normalized.currency,
+          ...(normalized.rechargeOrderId
+            ? { rechargeOrderId: normalized.rechargeOrderId }
+            : {}),
+          ...(rechargeOrderTerms
+            ? {
+                billingPriceVersionId:
+                  rechargeOrderTerms.billingPriceVersionId,
+              }
+            : {}),
         },
       },
       tx as unknown as ServiceEntitlementClient,
@@ -373,7 +406,7 @@ export async function purchaseAgentTokens(
         currency: normalized.currency,
         tokenAmount,
         remainingTokenAmount: tokenAmount,
-        tokenUnitPriceCents: agentWallet.tokenUnitPriceCents,
+        tokenUnitPriceCents,
         creatorRevenueShareBps: revenueSplit.creatorRevenueShareBps,
         creatorPendingCents: revenueSplit.creatorShareCents,
         status: AgentTokenPurchaseStatus.COMPLETED,
@@ -413,7 +446,7 @@ export async function purchaseAgentTokens(
           userAgentWalletId: userAgentWallet.id,
           audienceIdentityId: entitlement.audienceIdentityId,
           entitlementAccountId: entitlement.accountId,
-          tokenUnitPriceCents: agentWallet.tokenUnitPriceCents,
+          tokenUnitPriceCents,
           creatorRevenueShareBps: revenueSplit.creatorRevenueShareBps,
         },
       },
@@ -538,6 +571,81 @@ export async function purchaseAgentTokens(
   };
 
   return runWalletWriteTransaction(client, run);
+}
+
+type RechargeOrderPurchaseTerms = {
+  billingPriceVersionId: string;
+  unitName: string;
+  entitlementUnits: number;
+  tokenUnitPriceCents: number;
+  creatorRevenueShareBps: number;
+};
+
+function resolveRechargeOrderPurchaseTerms(
+  order: {
+    productCode: string | null;
+    amountCents: number;
+    billingPriceVersionId?: string | null;
+    unitNameSnapshot?: string | null;
+    entitlementUnitsSnapshot?: number | null;
+    creatorRevenueShareBpsSnapshot?: number | null;
+    platformRevenueShareBpsSnapshot?: number | null;
+    refundPolicySnapshot?: string | null;
+    expiryPolicySnapshot?: string | null;
+    entitlementValidityDaysSnapshot?: number | null;
+  },
+): RechargeOrderPurchaseTerms | null {
+  if (!order.billingPriceVersionId) {
+    return null;
+  }
+  const unitName = order.unitNameSnapshot?.trim();
+  const entitlementUnits = order.entitlementUnitsSnapshot;
+  const creatorRevenueShareBps =
+    order.creatorRevenueShareBpsSnapshot;
+  const platformRevenueShareBps =
+    order.platformRevenueShareBpsSnapshot;
+  if (
+    order.productCode !== AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+    || unitName !== "credit"
+    || typeof entitlementUnits !== "number"
+    || !Number.isSafeInteger(entitlementUnits)
+    || entitlementUnits <= 0
+    || typeof creatorRevenueShareBps !== "number"
+    || !Number.isSafeInteger(creatorRevenueShareBps)
+    || creatorRevenueShareBps < 0
+    || creatorRevenueShareBps > 10_000
+    || typeof platformRevenueShareBps !== "number"
+    || !Number.isSafeInteger(platformRevenueShareBps)
+    || platformRevenueShareBps < 0
+    || platformRevenueShareBps > 10_000
+    || creatorRevenueShareBps + platformRevenueShareBps !== 10_000
+    || order.refundPolicySnapshot !== "FULL_WHEN_UNUSED"
+    || order.expiryPolicySnapshot !== "NEVER_EXPIRES"
+    || order.entitlementValidityDaysSnapshot !== null
+    || order.amountCents % entitlementUnits !== 0
+  ) {
+    throw new Error(
+      "Recharge order has an incomplete or unsupported commercial snapshot.",
+    );
+  }
+  return {
+    billingPriceVersionId: order.billingPriceVersionId,
+    unitName,
+    entitlementUnits,
+    tokenUnitPriceCents: order.amountCents / entitlementUnits,
+    creatorRevenueShareBps,
+  };
+}
+
+function resolveLegacyTokenAmount(
+  amountCents: number,
+  tokenUnitPriceCents: number,
+): number {
+  assertPositiveInteger(tokenUnitPriceCents, "tokenUnitPriceCents");
+  if (amountCents % tokenUnitPriceCents !== 0) {
+    throw new Error("Purchase amount must divide evenly into agent tokens.");
+  }
+  return amountCents / tokenUnitPriceCents;
 }
 
 async function assertPurchaseWalletEntitlementParity(

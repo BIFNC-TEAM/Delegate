@@ -2,8 +2,11 @@ import {
   AmnLedgerEntryKind,
   AmnWalletAccountType,
   CreatorEarningStatus,
+  CreatorPayoutProfileStatus,
   CreatorVerificationStatus,
   PaymentProvider,
+  PayoutDestinationStatus,
+  PayoutSubjectType,
   RepresentativeClaimStatus,
   WalletTransactionEventType,
   WalletTransactionStatus,
@@ -67,6 +70,29 @@ type WithdrawRequestRecord = {
   providerPayoutId?: string | null;
   failureReason?: string | null;
   idempotencyKey: string;
+  payoutProfileId?: string | null;
+  payoutDestinationId?: string | null;
+  payoutSubjectTypeSnapshot?: PayoutSubjectType | null;
+  payoutSubjectIdSnapshot?: string | null;
+  destinationMaskedLabelSnapshot?: string | null;
+  destinationVersionSnapshot?: number | null;
+};
+
+type PayoutDestinationRecord = {
+  id: string;
+  profileId: string;
+  currency: string;
+  status: PayoutDestinationStatus;
+  maskedLabel: string;
+  credentialVersion: number;
+  coolingOffUntil: Date | null;
+  profile: {
+    id: string;
+    ownerId: string | null;
+    organizationId: string | null;
+    subjectType: PayoutSubjectType;
+    status: CreatorPayoutProfileStatus;
+  };
 };
 
 type WithdrawalAllocationRecord = {
@@ -124,6 +150,9 @@ type WithdrawalClient = Omit<WalletLedgerClient, "$transaction"> & {
     findMany(args: unknown): Promise<WithdrawalAllocationRecord[]>;
     create(args: unknown): Promise<WithdrawalAllocationRecord>;
     update(args: unknown): Promise<WithdrawalAllocationRecord>;
+  };
+  payoutDestination?: {
+    findFirst(args: any): Promise<any>;
   };
   walletTransaction?: {
     findUnique(args: unknown): Promise<WalletTransactionRecord | null>;
@@ -202,6 +231,12 @@ export type WithdrawRequestSnapshot = {
   provider: PaymentProvider | null;
   providerPayoutId: string | null;
   failureReason: string | null;
+  payoutProfileId: string | null;
+  payoutDestinationId: string | null;
+  payoutSubjectType: "owner" | "organization" | null;
+  payoutSubjectId: string | null;
+  destinationMaskedLabel: string | null;
+  destinationVersion: number | null;
 };
 
 const SUPPORTED_WITHDRAWAL_CURRENCIES = new Set(["CNY", "USD"]);
@@ -268,6 +303,11 @@ export async function createWithdrawRequest(
     if (representative.claimStatus !== RepresentativeClaimStatus.CLAIMED) {
       throw new Error("Representative must be claimed before withdrawals.");
     }
+    const payoutDestination = await resolveVerifiedPayoutDestination(
+      tx,
+      owner.id,
+      normalized.currency,
+    );
     await assertWithdrawalFundsWriteAllowed(tx, {
       ownerId: owner.id,
       representativeId: representative.id,
@@ -333,6 +373,18 @@ export async function createWithdrawRequest(
         currency: normalized.currency,
         status: WithdrawRequestStatus.PENDING_REVIEW,
         idempotencyKey: normalized.idempotencyKey,
+        payoutProfileId: payoutDestination.profileId,
+        payoutDestinationId: payoutDestination.id,
+        payoutSubjectTypeSnapshot:
+          payoutDestination.profile.subjectType,
+        payoutSubjectIdSnapshot:
+          payoutDestination.profile.subjectType === PayoutSubjectType.OWNER
+            ? payoutDestination.profile.ownerId
+            : payoutDestination.profile.organizationId,
+        destinationMaskedLabelSnapshot:
+          payoutDestination.maskedLabel,
+        destinationVersionSnapshot:
+          payoutDestination.credentialVersion,
       },
     });
 
@@ -1228,7 +1280,98 @@ function serializeWithdrawRequest(
     provider: request.provider ?? null,
     providerPayoutId: request.providerPayoutId ?? null,
     failureReason: request.failureReason ?? null,
+    payoutProfileId: request.payoutProfileId ?? null,
+    payoutDestinationId: request.payoutDestinationId ?? null,
+    payoutSubjectType: request.payoutSubjectTypeSnapshot
+      ? request.payoutSubjectTypeSnapshot.toLowerCase() as
+        | "owner"
+        | "organization"
+      : null,
+    payoutSubjectId: request.payoutSubjectIdSnapshot ?? null,
+    destinationMaskedLabel:
+      request.destinationMaskedLabelSnapshot ?? null,
+    destinationVersion: request.destinationVersionSnapshot ?? null,
   };
+}
+
+async function resolveVerifiedPayoutDestination(
+  client: WithdrawalClient,
+  ownerId: string,
+  currency: string,
+): Promise<PayoutDestinationRecord> {
+  if (!client.payoutDestination) {
+    throw new Error(
+      "A verified payout destination is required before requesting withdrawals.",
+    );
+  }
+
+  const destination = await client.payoutDestination.findFirst({
+    where: {
+      currency,
+      status: PayoutDestinationStatus.ACTIVE,
+      OR: [
+        { coolingOffUntil: null },
+        { coolingOffUntil: { lte: new Date() } },
+      ],
+      profile: {
+        status: CreatorPayoutProfileStatus.VERIFIED,
+        OR: [
+          {
+            ownerId,
+            subjectType: PayoutSubjectType.OWNER,
+          },
+          {
+            subjectType: PayoutSubjectType.ORGANIZATION,
+            organization: {
+              members: {
+                some: {
+                  ownerId,
+                  canManageBilling: true,
+                },
+              },
+            },
+          },
+        ],
+      },
+    },
+    include: {
+      profile: {
+        select: {
+          id: true,
+          ownerId: true,
+          organizationId: true,
+          subjectType: true,
+          status: true,
+        },
+      },
+    },
+    orderBy: [
+      { activatedAt: "desc" },
+      { createdAt: "desc" },
+      { id: "desc" },
+    ],
+  }) as PayoutDestinationRecord | null;
+  if (!destination) {
+    throw new Error(
+      "A verified payout destination is required before requesting withdrawals.",
+    );
+  }
+  const subjectId =
+    destination.profile.subjectType === PayoutSubjectType.OWNER
+      ? destination.profile.ownerId
+      : destination.profile.organizationId;
+  if (
+    !subjectId
+    || (
+      destination.profile.subjectType === PayoutSubjectType.OWNER
+      && destination.profile.ownerId !== ownerId
+    )
+  ) {
+    throw new Error(
+      "A verified payout destination is required before requesting withdrawals.",
+    );
+  }
+  return destination;
 }
 
 function normalizeOptionalText(value: string | undefined): string | null {

@@ -21,6 +21,51 @@ enum PricingPlanType {
   SPONSOR
 }
 
+enum BillingProductStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+enum BillingPriceVersionStatus {
+  DRAFT
+  ACTIVE
+  RETIRED
+}
+
+enum BillingRefundPolicy {
+  FULL_WHEN_UNUSED
+}
+
+enum BillingEntitlementExpiryPolicy {
+  NEVER_EXPIRES
+}
+
+enum PayoutSubjectType {
+  OWNER
+  ORGANIZATION
+}
+
+enum CreatorPayoutProfileStatus {
+  PENDING_VERIFICATION
+  VERIFIED
+  REJECTED
+  SUSPENDED
+}
+
+enum PayoutDestinationKind {
+  WECHAT_PAY
+}
+
+enum PayoutDestinationStatus {
+  PENDING_VERIFICATION
+  VERIFIED
+  ACTIVE
+  REJECTED
+  DISABLED
+  REPLACED
+}
+
 enum AudienceRole {
   LEAD
   PARTNER
@@ -160,6 +205,13 @@ enum EventType {
   CHANNEL_CONFIGURATION_CHANGED
   OWNER_PROFILE_UPDATED
   OWNER_NOTIFICATION_PREFERENCES_UPDATED
+  BILLING_PRODUCT_CREATED
+  BILLING_PRODUCT_UPDATED
+  BILLING_PRICE_VERSION_PUBLISHED
+  BILLING_PRODUCT_ARCHIVED
+  WALLET_PAYOUT_PROFILE_SUBMITTED
+  WALLET_PAYOUT_DESTINATION_CHANGED
+  WALLET_PAYOUT_DESTINATION_VERIFIED
 }
 
 enum CapabilityKind {
@@ -991,23 +1043,26 @@ model Owner {
   acknowledgedWalletExceptions WalletExceptionCase[]      @relation("WalletExceptionAcknowledgedBy")
   walletExceptionActions       WalletExceptionAction[]
   telegramBotConnections       TelegramBotConnection[]
-  auditEvents                  EventAudit[]                @relation("OwnerAuditEvents")
+  auditEvents                  EventAudit[]               @relation("OwnerAuditEvents")
+  payoutProfile                CreatorPayoutProfile?      @relation("PayoutProfileOwner")
+  createdPayoutProfiles        CreatorPayoutProfile[]     @relation("PayoutProfileCreator")
+  createdPayoutDestinations    PayoutDestination[]        @relation("PayoutDestinationCreator")
 }
 
 model OwnerIdentityLink {
-  id                String                    @id @default(cuid())
-  ownerId           String
-  provider          OwnerIdentityLinkProvider
-  providerSubject   String
-  email             String?
-  phone             String?
-  verifiedAt        DateTime?
-  emailVerifiedAt   DateTime?
-  phoneVerifiedAt   DateTime?
-  metadata          Json?
-  createdAt         DateTime                  @default(now())
-  updatedAt         DateTime                  @updatedAt
-  owner             Owner                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  id              String                    @id @default(cuid())
+  ownerId         String
+  provider        OwnerIdentityLinkProvider
+  providerSubject String
+  email           String?
+  phone           String?
+  verifiedAt      DateTime?
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+  metadata        Json?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  owner           Owner                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerSubject])
   @@index([ownerId, provider])
@@ -1062,20 +1117,20 @@ model AudienceIdentity {
 }
 
 model IdentityLink {
-  id                 String                 @id @default(cuid())
+  id                 String                        @id @default(cuid())
   audienceIdentityId String
   provider           IdentityLinkProvider
   providerSubject    String
-  issuer             String                 @default("delegate")
+  issuer             String                        @default("delegate")
   connectionId       String?
   verifiedAt         DateTime?
-  assuranceLevel     IdentityAssuranceLevel @default(UNVERIFIED)
+  assuranceLevel     IdentityAssuranceLevel        @default(UNVERIFIED)
   revokedAt          DateTime?
   proofMetadata      Json?
   metadata           Json?
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
-  audienceIdentity   AudienceIdentity       @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
+  createdAt          DateTime                      @default(now())
+  updatedAt          DateTime                      @updatedAt
+  audienceIdentity   AudienceIdentity              @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
   connectionProofs   IdentityLinkConnectionProof[]
 
   @@unique([provider, providerSubject])
@@ -1291,33 +1346,47 @@ model WalletLedgerEntry {
 }
 
 model RechargeOrder {
-  id                    String                 @id @default(cuid())
-  userWalletId          String
-  representativeId      String?
-  productCode           String?
-  provider              PaymentProvider        @default(MOCK)
-  providerOrderId       String?                @unique
-  providerTransactionId String?
-  amountCents           Int
-  currency              String                 @default("CNY")
-  status                RechargeOrderStatus    @default(CREATED)
-  idempotencyKey        String                 @unique
-  checkoutUrl           String?
-  providerPayload       Json?
-  paidAt                DateTime?
-  refundedAt            DateTime?
-  createdAt             DateTime               @default(now())
-  updatedAt             DateTime               @updatedAt
-  userWallet            UserWallet             @relation(fields: [userWalletId], references: [id])
-  representative        Representative?        @relation(fields: [representativeId], references: [id], onDelete: SetNull)
-  providerEvents        PaymentProviderEvent[]
-  ledgerEntries         WalletLedgerEntry[]
-  tokenPurchases        AgentTokenPurchase[]
-  refunds               RechargeRefund[]
+  id                              String                          @id @default(cuid())
+  userWalletId                    String
+  representativeId                String?
+  productCode                     String?
+  billingProductId                String?
+  billingPriceVersionId           String?
+  productNameSnapshot             String?
+  unitNameSnapshot                String?
+  entitlementUnitsSnapshot        Int?
+  creatorRevenueShareBpsSnapshot  Int?
+  platformRevenueShareBpsSnapshot Int?
+  refundPolicySnapshot            BillingRefundPolicy?
+  expiryPolicySnapshot            BillingEntitlementExpiryPolicy?
+  entitlementValidityDaysSnapshot Int?
+  provider                        PaymentProvider                 @default(MOCK)
+  providerOrderId                 String?                         @unique
+  providerTransactionId           String?
+  amountCents                     Int
+  currency                        String                          @default("CNY")
+  status                          RechargeOrderStatus             @default(CREATED)
+  idempotencyKey                  String                          @unique
+  checkoutUrl                     String?
+  providerPayload                 Json?
+  paidAt                          DateTime?
+  refundedAt                      DateTime?
+  createdAt                       DateTime                        @default(now())
+  updatedAt                       DateTime                        @updatedAt
+  userWallet                      UserWallet                      @relation(fields: [userWalletId], references: [id])
+  representative                  Representative?                 @relation(fields: [representativeId], references: [id], onDelete: SetNull)
+  billingProduct                  BillingProduct?                 @relation(fields: [billingProductId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  billingPriceVersion             BillingPriceVersion?            @relation(fields: [billingPriceVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  providerEvents                  PaymentProviderEvent[]
+  ledgerEntries                   WalletLedgerEntry[]
+  tokenPurchases                  AgentTokenPurchase[]
+  refunds                         RechargeRefund[]
 
   @@unique([provider, providerTransactionId])
   @@index([userWalletId, status, createdAt])
   @@index([representativeId, status, createdAt])
+  @@index([billingProductId, status, createdAt])
+  @@index([billingPriceVersionId, status, createdAt])
   @@index([provider, status, createdAt])
 }
 
@@ -1647,29 +1716,38 @@ model CreatorEarning {
 }
 
 model WithdrawRequest {
-  id               String                 @id @default(cuid())
-  ownerId          String
-  representativeId String?
-  status           WithdrawRequestStatus  @default(PENDING_REVIEW)
-  amountCents      Int
-  currency         String                 @default("CNY")
-  requestedAt      DateTime               @default(now())
-  reviewedAt       DateTime?
-  reviewedBy       String?
-  paidAt           DateTime?
-  provider         PaymentProvider?
-  providerPayoutId String?                @unique
-  failureReason    String?
-  idempotencyKey   String                 @unique
-  createdAt        DateTime               @default(now())
-  updatedAt        DateTime               @updatedAt
-  owner            Owner                  @relation(fields: [ownerId], references: [id])
-  representative   Representative?        @relation(fields: [representativeId], references: [id])
-  allocations      WithdrawalAllocation[]
-  ledgerEntries    WalletLedgerEntry[]
+  id                             String                 @id @default(cuid())
+  ownerId                        String
+  representativeId               String?
+  payoutProfileId                String?
+  payoutDestinationId            String?
+  payoutSubjectTypeSnapshot      PayoutSubjectType?
+  payoutSubjectIdSnapshot        String?
+  destinationMaskedLabelSnapshot String?
+  destinationVersionSnapshot     Int?
+  status                         WithdrawRequestStatus  @default(PENDING_REVIEW)
+  amountCents                    Int
+  currency                       String                 @default("CNY")
+  requestedAt                    DateTime               @default(now())
+  reviewedAt                     DateTime?
+  reviewedBy                     String?
+  paidAt                         DateTime?
+  provider                       PaymentProvider?
+  providerPayoutId               String?                @unique
+  failureReason                  String?
+  idempotencyKey                 String                 @unique
+  createdAt                      DateTime               @default(now())
+  updatedAt                      DateTime               @updatedAt
+  owner                          Owner                  @relation(fields: [ownerId], references: [id])
+  representative                 Representative?        @relation(fields: [representativeId], references: [id])
+  payoutProfile                  CreatorPayoutProfile?  @relation(fields: [payoutProfileId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  payoutDestination              PayoutDestination?     @relation(fields: [payoutDestinationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  allocations                    WithdrawalAllocation[]
+  ledgerEntries                  WalletLedgerEntry[]
 
   @@index([ownerId, status, requestedAt])
   @@index([representativeId, status, requestedAt])
+  @@index([payoutDestinationId, status, requestedAt])
 }
 
 model WithdrawalAllocation {
@@ -1698,6 +1776,7 @@ model Organization {
   members            OrganizationMember[]
   capabilityProfiles CapabilityPolicyProfile[]
   customerAccounts   CustomerAccount[]
+  payoutProfile      CreatorPayoutProfile?     @relation("PayoutProfileOrganization")
 }
 
 model OrganizationMember {
@@ -1817,6 +1896,7 @@ model Representative {
   knowledgePack                    KnowledgePack?
   memoryRecords                    OpenVikingMemoryRecord[]
   pricingPlans                     PricingPlan[]
+  billingProducts                  BillingProduct[]
   recallTraces                     ConversationRecallTrace[]
   skillPackLinks                   RepresentativeSkillPack[]
   mcpBindings                      RepresentativeMcpBinding[]
@@ -1885,26 +1965,26 @@ model RuntimePolicyOverlay {
 }
 
 model TelegramBotConnection {
-  id                     String                       @id @default(cuid())
+  id                     String                         @id @default(cuid())
   ownerId                String?
-  scope                  TelegramBotConnectionScope   @default(OWNER_MANAGED)
-  botId                  String                       @unique
+  scope                  TelegramBotConnectionScope     @default(OWNER_MANAGED)
+  botId                  String                         @unique
   username               String?
   displayName            String?
   label                  String?
-  status                 TelegramBotConnectionStatus @default(PENDING_CREDENTIAL)
-  healthStatus           ChannelHealthStatus          @default(UNKNOWN)
-  activeCredentialId     String?                      @unique
-  credentialRevision     Int                          @default(0)
+  status                 TelegramBotConnectionStatus    @default(PENDING_CREDENTIAL)
+  healthStatus           ChannelHealthStatus            @default(UNKNOWN)
+  activeCredentialId     String?                        @unique
+  credentialRevision     Int                            @default(0)
   lastVerifiedAt         DateTime?
   lastHealthCheckAt      DateTime?
   lastError              String?
   revokedAt              DateTime?
-  createdAt              DateTime                     @default(now())
-  updatedAt              DateTime                     @updatedAt
-  owner                  Owner?                       @relation(fields: [ownerId], references: [id], onDelete: Restrict)
-  activeCredential       TelegramBotCredential?       @relation("ActiveTelegramBotCredential", fields: [activeCredentialId], references: [id], onDelete: SetNull)
-  credentials            TelegramBotCredential[]      @relation("TelegramBotCredentialVersions")
+  createdAt              DateTime                       @default(now())
+  updatedAt              DateTime                       @updatedAt
+  owner                  Owner?                         @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  activeCredential       TelegramBotCredential?         @relation("ActiveTelegramBotCredential", fields: [activeCredentialId], references: [id], onDelete: SetNull)
+  credentials            TelegramBotCredential[]        @relation("TelegramBotCredentialVersions")
   representativeBindings RepresentativeChannelBinding[]
   chatSessions           ChatSession[]
   runtimeLease           TelegramBotRuntimeLease?
@@ -1915,14 +1995,14 @@ model TelegramBotConnection {
 
 model TelegramBotRuntimeLease {
   telegramBotConnectionId String                @id
-  holderId                 String
-  leaseToken               String                @unique
-  expiresAt                DateTime
-  acquiredAt               DateTime
-  renewedAt                DateTime
-  createdAt                DateTime              @default(now())
-  updatedAt                DateTime              @updatedAt
-  telegramBotConnection    TelegramBotConnection @relation(fields: [telegramBotConnectionId], references: [id], onDelete: Cascade)
+  holderId                String
+  leaseToken              String                @unique
+  expiresAt               DateTime
+  acquiredAt              DateTime
+  renewedAt               DateTime
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  telegramBotConnection   TelegramBotConnection @relation(fields: [telegramBotConnectionId], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
   @@index([holderId, expiresAt])
@@ -1957,27 +2037,27 @@ model TelegramBotCredential {
 }
 
 model RepresentativeChannelBinding {
-  id                      String                       @id @default(cuid())
-  representativeId        String
-  kind                    RepresentativeChannelKind
-  transport               ChannelTransport?
-  sourceProvider          ChannelSourceProvider?
-  connectionId            String?
-  telegramBotConnectionId String?
+  id                         String                       @id @default(cuid())
+  representativeId           String
+  kind                       RepresentativeChannelKind
+  transport                  ChannelTransport?
+  sourceProvider             ChannelSourceProvider?
+  connectionId               String?
+  telegramBotConnectionId    String?
   endpointAssignmentRevision Int                          @default(1)
-  desiredState            ChannelDesiredState          @default(ACTIVE)
-  healthStatus            ChannelHealthStatus          @default(UNKNOWN)
-  externalUserId          String?
-  status                  String                       @default("CONNECTED")
-  displayName             String?
-  configuration           Json?
-  lastHealthCheckAt       DateTime?
-  lastError               String?
-  createdAt               DateTime                     @default(now())
-  updatedAt               DateTime                     @updatedAt
-  representative          Representative               @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  telegramBotConnection   TelegramBotConnection?       @relation(fields: [telegramBotConnectionId], references: [id], onDelete: Restrict)
-  conversations           ConversationChannelBinding[]
+  desiredState               ChannelDesiredState          @default(ACTIVE)
+  healthStatus               ChannelHealthStatus          @default(UNKNOWN)
+  externalUserId             String?
+  status                     String                       @default("CONNECTED")
+  displayName                String?
+  configuration              Json?
+  lastHealthCheckAt          DateTime?
+  lastError                  String?
+  createdAt                  DateTime                     @default(now())
+  updatedAt                  DateTime                     @updatedAt
+  representative             Representative               @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  telegramBotConnection      TelegramBotConnection?       @relation(fields: [telegramBotConnectionId], references: [id], onDelete: Restrict)
+  conversations              ConversationChannelBinding[]
 
   @@unique([representativeId, kind])
   @@index([kind, status, updatedAt])
@@ -2010,6 +2090,108 @@ model PricingPlan {
   createdAt               DateTime        @default(now())
   updatedAt               DateTime        @updatedAt
   representative          Representative  @relation(fields: [representativeId], references: [id])
+}
+
+model BillingProduct {
+  id               String                @id @default(cuid())
+  representativeId String
+  code             String
+  name             String
+  description      String?
+  status           BillingProductStatus  @default(DRAFT)
+  revision         Int                   @default(0)
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  representative   Representative        @relation(fields: [representativeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  priceVersions    BillingPriceVersion[]
+  rechargeOrders   RechargeOrder[]
+
+  @@unique([representativeId, code])
+  @@index([representativeId, status, updatedAt])
+}
+
+model CreatorPayoutProfile {
+  id                  String                     @id @default(cuid())
+  subjectType         PayoutSubjectType
+  ownerId             String?                    @unique
+  organizationId      String?                    @unique
+  status              CreatorPayoutProfileStatus @default(PENDING_VERIFICATION)
+  version             Int                        @default(0)
+  verifiedAt          DateTime?
+  verifiedBy          String?
+  rejectionReasonCode String?
+  suspendedAt         DateTime?
+  createdByOwnerId    String
+  createdAt           DateTime                   @default(now())
+  updatedAt           DateTime                   @updatedAt
+  owner               Owner?                     @relation("PayoutProfileOwner", fields: [ownerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  organization        Organization?              @relation("PayoutProfileOrganization", fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdByOwner      Owner                      @relation("PayoutProfileCreator", fields: [createdByOwnerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  destinations        PayoutDestination[]
+  withdrawRequests    WithdrawRequest[]
+
+  @@index([subjectType, status, updatedAt])
+  @@index([createdByOwnerId, createdAt])
+}
+
+model PayoutDestination {
+  id                    String                  @id @default(cuid())
+  profileId             String
+  kind                  PayoutDestinationKind   @default(WECHAT_PAY)
+  status                PayoutDestinationStatus @default(PENDING_VERIFICATION)
+  currency              String                  @default("CNY")
+  maskedLabel           String
+  credentialCiphertext  Bytes?
+  credentialIv          Bytes?
+  credentialAuthTag     Bytes?
+  credentialKeyVersion  String
+  credentialAlgorithm   String                  @default("aes-256-gcm")
+  credentialFingerprint String
+  credentialVersion     Int
+  coolingOffUntil       DateTime?
+  verifiedAt            DateTime?
+  verifiedBy            String?
+  activatedAt           DateTime?
+  disabledAt            DateTime?
+  replacedAt            DateTime?
+  createdByOwnerId      String
+  idempotencyKey        String                  @unique
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
+  profile               CreatorPayoutProfile    @relation(fields: [profileId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  createdByOwner        Owner                   @relation("PayoutDestinationCreator", fields: [createdByOwnerId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  withdrawRequests      WithdrawRequest[]
+
+  @@unique([profileId, credentialVersion])
+  @@index([profileId, status, currency, updatedAt])
+  @@index([credentialFingerprint])
+}
+
+/// Commercial fields on a price version are immutable after insertion.
+/// Publication is a forward-only DRAFT -> ACTIVE -> RETIRED lifecycle.
+model BillingPriceVersion {
+  id                      String                         @id @default(cuid())
+  billingProductId        String
+  version                 Int
+  status                  BillingPriceVersionStatus      @default(DRAFT)
+  currency                String                         @default("CNY")
+  amountMinor             Int
+  unitName                String                         @default("credit")
+  entitlementUnits        Int
+  creatorRevenueShareBps  Int                            @default(2000)
+  platformRevenueShareBps Int                            @default(8000)
+  refundPolicy            BillingRefundPolicy            @default(FULL_WHEN_UNUSED)
+  expiryPolicy            BillingEntitlementExpiryPolicy @default(NEVER_EXPIRES)
+  entitlementValidityDays Int?
+  publishedAt             DateTime?
+  retiredAt               DateTime?
+  createdAt               DateTime                       @default(now())
+  billingProduct          BillingProduct                 @relation(fields: [billingProductId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  rechargeOrders          RechargeOrder[]
+
+  @@unique([billingProductId, version])
+  @@index([billingProductId, status, createdAt])
+  @@index([status, currency, createdAt])
 }
 
 model SkillPack {
@@ -2334,25 +2516,25 @@ model ConversationParticipant {
 }
 
 model ConversationChannelBinding {
-  id                      String                        @id @default(cuid())
-  conversationId          String
-  representativeBindingId String?
+  id                               String                        @id @default(cuid())
+  conversationId                   String
+  representativeBindingId          String?
   representativeAssignmentRevision Int?
-  kind                    RepresentativeChannelKind
-  transport               ChannelTransport?
-  sourceProvider          ChannelSourceProvider?
-  interactionMode         ChannelInteractionMode        @default(PRIVATE_CHAT)
-  connectionId            String?
-  bindingKey              String?                       @unique
-  externalConversationId  String
-  externalThreadId        String?
-  syncCursor              String?
-  metadata                Json?
-  createdAt               DateTime                      @default(now())
-  updatedAt               DateTime                      @updatedAt
-  conversation            Conversation                  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  representativeBinding   RepresentativeChannelBinding? @relation(fields: [representativeBindingId], references: [id], onDelete: SetNull)
-  messages                Message[]
+  kind                             RepresentativeChannelKind
+  transport                        ChannelTransport?
+  sourceProvider                   ChannelSourceProvider?
+  interactionMode                  ChannelInteractionMode        @default(PRIVATE_CHAT)
+  connectionId                     String?
+  bindingKey                       String?                       @unique
+  externalConversationId           String
+  externalThreadId                 String?
+  syncCursor                       String?
+  metadata                         Json?
+  createdAt                        DateTime                      @default(now())
+  updatedAt                        DateTime                      @updatedAt
+  conversation                     Conversation                  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  representativeBinding            RepresentativeChannelBinding? @relation(fields: [representativeBindingId], references: [id], onDelete: SetNull)
+  messages                         Message[]
 
   @@index([conversationId, kind])
   @@index([representativeBindingId])
@@ -2559,27 +2741,27 @@ model ConversationStateTransition {
 }
 
 model ChannelEventInbox {
-  id              String                    @id @default(cuid())
-  conversationId  String?
-  kind            RepresentativeChannelKind
-  transport       ChannelTransport?
-  sourceProvider  ChannelSourceProvider?
-  connectionId    String?
-  originKey       String?                   @unique
-  isBackfill      Boolean                   @default(false)
-  transactionId   String?
-  externalEventId String
-  eventType       String
-  payload         Json
-  privateCredentialHash String?                 @db.Char(64)
-  status          ReliableEventStatus       @default(PENDING)
-  attemptCount    Int                       @default(0)
-  availableAt     DateTime                  @default(now())
-  processedAt     DateTime?
-  lastError       String?
-  createdAt       DateTime                  @default(now())
-  updatedAt       DateTime                  @updatedAt
-  conversation    Conversation?             @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  id                    String                    @id @default(cuid())
+  conversationId        String?
+  kind                  RepresentativeChannelKind
+  transport             ChannelTransport?
+  sourceProvider        ChannelSourceProvider?
+  connectionId          String?
+  originKey             String?                   @unique
+  isBackfill            Boolean                   @default(false)
+  transactionId         String?
+  externalEventId       String
+  eventType             String
+  payload               Json
+  privateCredentialHash String?                   @db.Char(64)
+  status                ReliableEventStatus       @default(PENDING)
+  attemptCount          Int                       @default(0)
+  availableAt           DateTime                  @default(now())
+  processedAt           DateTime?
+  lastError             String?
+  createdAt             DateTime                  @default(now())
+  updatedAt             DateTime                  @updatedAt
+  conversation          Conversation?             @relation(fields: [conversationId], references: [id], onDelete: SetNull)
 
   @@unique([kind, connectionId, externalEventId])
   @@index([status, availableAt, createdAt])
@@ -2994,10 +3176,10 @@ model EventAudit {
   conversation     Conversation?   @relation(fields: [conversationId], references: [id])
   delegationTask   DelegationTask? @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
 
+  @@unique([ownerId, idempotencyKey])
   @@index([delegationTaskId, createdAt])
   @@index([ownerId, createdAt])
   @@index([representativeId, createdAt])
-  @@unique([ownerId, idempotencyKey])
 }
 
 model CapabilityPolicyProfile {

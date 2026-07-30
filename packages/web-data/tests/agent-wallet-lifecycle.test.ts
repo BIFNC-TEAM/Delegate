@@ -5,9 +5,12 @@ import {
   AmnLedgerEntryKind,
   AmnWalletAccountType,
   CreatorEarningStatus,
+  CreatorPayoutProfileStatus,
   CreatorVerificationStatus,
   PaymentProvider,
   PaymentProviderEventType,
+  PayoutDestinationStatus,
+  PayoutSubjectType,
   RechargeOrderStatus,
   RepresentativeClaimStatus,
   WithdrawRequestStatus,
@@ -160,6 +163,12 @@ describe("agent wallet lifecycle acceptance", () => {
       status: "pending_review",
       amountCents: 100,
       frozenCents: 100,
+      payoutProfileId: "payout_profile_owner_1",
+      payoutDestinationId: "payout_destination_owner_1_v1",
+      payoutSubjectType: "owner",
+      payoutSubjectId: "owner_1",
+      destinationMaskedLabel: "WeChat Pay ···· 0001",
+      destinationVersion: 1,
     });
     expect(client.userWallets[0]?.cashBalanceCents).toBe(0);
     expect(client.agentWallets[0]).toMatchObject({
@@ -360,6 +369,12 @@ type WithdrawRequestRow = {
   currency: string;
   requestedAt: Date;
   idempotencyKey: string;
+  payoutProfileId: string | null;
+  payoutDestinationId: string | null;
+  payoutSubjectTypeSnapshot: PayoutSubjectType | null;
+  payoutSubjectIdSnapshot: string | null;
+  destinationMaskedLabelSnapshot: string | null;
+  destinationVersionSnapshot: number | null;
 };
 
 type LedgerRow = {
@@ -452,6 +467,25 @@ class FakeAmnLifecycleClient {
 
   walletFundsWriteGate = {
     assertAllowed: async () => undefined,
+  };
+
+  payoutDestination = {
+    findFirst: async () => ({
+      id: "payout_destination_owner_1_v1",
+      profileId: "payout_profile_owner_1",
+      currency: "CNY",
+      status: PayoutDestinationStatus.ACTIVE,
+      maskedLabel: "WeChat Pay ···· 0001",
+      credentialVersion: 1,
+      coolingOffUntil: null,
+      profile: {
+        id: "payout_profile_owner_1",
+        ownerId: "owner_1",
+        organizationId: null,
+        subjectType: PayoutSubjectType.OWNER,
+        status: CreatorPayoutProfileStatus.VERIFIED,
+      },
+    }),
   };
 
   owner = {
@@ -1047,6 +1081,16 @@ class FakeAmnLifecycleClient {
         currency: args.data.currency,
         requestedAt: new Date(Date.UTC(2026, 6, 3)),
         idempotencyKey: args.data.idempotencyKey,
+        payoutProfileId: args.data.payoutProfileId ?? null,
+        payoutDestinationId: args.data.payoutDestinationId ?? null,
+        payoutSubjectTypeSnapshot:
+          args.data.payoutSubjectTypeSnapshot ?? null,
+        payoutSubjectIdSnapshot:
+          args.data.payoutSubjectIdSnapshot ?? null,
+        destinationMaskedLabelSnapshot:
+          args.data.destinationMaskedLabelSnapshot ?? null,
+        destinationVersionSnapshot:
+          args.data.destinationVersionSnapshot ?? null,
       };
       this.withdrawRequests.push(request);
       return request;

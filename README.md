@@ -22,9 +22,9 @@ Its goal is not to replace you. It catches high-frequency, standardized, priceab
 
 Delegate is the first product wedge for **Agent Monetization Network (AMN)**, an open monetization network for AI Agents and Digital Representatives.
 
-AMN's long-term thesis is simple: any Agent can earn, any user can recharge, any platform can connect, and revenue should be transparent. Delegate turns that thesis into a concrete public digital representative: a web-first interface that answers from approved public knowledge, routes sensitive work through explicit policy, shows recharge/service depth, and hands off to a human when the representative should not act alone.
+AMN's long-term thesis is simple: any Agent can earn, any user can buy scoped service, any platform can connect, and revenue should be transparent. Delegate turns that thesis into a concrete public digital representative: a web-first interface that answers from approved public knowledge, routes sensitive work through explicit policy, shows service packages and depth, and hands off to a human when the representative should not act alone.
 
-It is not a private assistant exposed to the public. Delegate is a separate public runtime and recharge/profile surface for one Digital Representative at a time.
+It is not a private assistant exposed to the public. Delegate is a separate public runtime and service-package/profile surface for one Digital Representative at a time.
 
 The current product wedge is intentionally narrow:
 
@@ -41,11 +41,11 @@ The current product wedge is intentionally narrow:
 Delegate currently includes these working surfaces and services:
 
 - **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
-- **Public representative app** in `apps/reps`, including representative profiles, service tiers, web chat, recharge-entry modules, and signed public-chat session state.
+- **Public representative app** in `apps/reps`, including representative profiles, service packages, web chat, WeChat checkout, and signed public-chat session state.
 - **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, workflow state, and Owner profile, identity-security, and Dashboard notification settings.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and retained as the Telegram-specific edge while business behavior moves toward the shared Conversation Platform.
 - **Matrix Application Service foundation** in `apps/matrix-bridge`, providing authenticated Matrix transaction ingestion and channel event mapping. Native Matrix is an optional channel; it is not required for Telegram availability.
-- **AMN wallet control plane** covering internal wallet ledger entries, local mock recharge, default-off WeChat Pay API v3 Native collection and recovery, Agent token purchase, usage charging, Creator 20% revenue policy, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
+- **AMN wallet control plane** covering immutable billing products and prices, snapshotted orders, internal wallet ledger entries, local mock payment, default-off WeChat Pay API v3 Native collection and recovery, service-credit fulfillment, usage charging, provisional Creator 20% revenue share, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
 - **Prisma/Postgres data model** for representatives, contacts, conversations, delegation tasks, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
@@ -68,7 +68,7 @@ AMN is the broader network Delegate is growing toward. The target model is:
 Creator creates an Agent
   -> Agent receives its own Agent Wallet
   -> Users discover the Agent on the web first, then later on Matrix, Telegram, WhatsApp, Feishu, WeCom, or an app
-  -> Users recharge that specific Agent
+  -> Users buy a service package for that specific Agent
   -> Agent serves the user
   -> Billing charges for tokens, tasks, or subscriptions
   -> Settlement calculates Creator revenue
@@ -77,7 +77,7 @@ Creator creates an Agent
 
 The intended AMN layers are:
 
-- **AMN Pay:** a future unified recharge entry that can be opened from any platform.
+- **AMN Pay:** a future unified service checkout that can be opened from any platform.
 - **Billing Engine:** charges for token usage, completed tasks, subscriptions, or service packages.
 - **Wallet Engine:** manages balances per user × Agent / Digital Representative.
 - **Settlement Engine:** calculates Creator revenue, platform fees, provider costs, and withdrawals.
@@ -85,13 +85,16 @@ The intended AMN layers are:
 
 What is implemented today is the web-first Delegate wedge plus the first AMN
 wallet loop: public representative pages, web chat, pricing tiers,
-development-only mock recharge, default-off WeChat Pay API v3 Native checkout,
-signed payment and refund callbacks, signed query recovery, user cash balance,
-user-and-Agent-scoped service-credit purchase, reserve/settle/release charging
-in public conversations, immediate balance refresh after purchase, return of
-unused demo credits to wallet cash, Creator pending/withdrawable earnings,
+development-only mock payment, default-off WeChat Pay API v3 Native checkout,
+signed payment and refund callbacks, signed query recovery, immutable
+`BillingProduct` / `BillingPriceVersion` terms, snapshotted orders,
+user-and-Agent-scoped service-credit fulfillment, reserve/settle/release
+charging in public conversations, immediate credit refresh after purchase,
+full reversal of wholly unused demo credits, Creator pending/withdrawable earnings,
 creator withdrawal request/cancel UI, development-only mock review and
-settlement, eligible full-unused WeChat refund submission and reversal, the
+settlement, Owner service-package version management, encrypted tokenized
+Owner/Organization payout profiles, verified-destination withdrawal snapshots,
+eligible full-unused WeChat refund submission and reversal, the
 workspace wallet dashboard with an owner-scoped exception queue, provider
 adapter boundaries, and durable follow-up workflows.
 
@@ -116,27 +119,27 @@ Stripe / WeChat Pay / Alipay
   -> collect money, refund, notify, and eventually pay out
 
 Delegate
-  -> user balance, Agent tokens, Creator 20%, costs, profit, withdrawal state, and audit ledger
+  -> scoped service credits, provisional Creator 20%, costs, profit, withdrawal state, and audit ledger
 ```
 
 Current status against the wallet plan:
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Account types | Implemented | User cash, deferred service credit, Creator pending/withdrawable/frozen, platform deferred/earned revenue, provider cost, external settlement, and payout clearing are modeled in Prisma. |
-| Data models | Mostly implemented | `UserWallet`, aggregate `AgentWallet`, scoped `UserAgentWallet`, `WalletTransaction`, append-only `WalletLedgerEntry`, purchase/usage/withdrawal allocation records, recharge/provider events, Creator earnings, and withdrawal requests are implemented. Public users resolve through canonical `AudienceIdentity`; `UserWallet.externalUserId` remains a legacy payment selector while wallet ownership is checked through `audienceIdentityId`. |
+| Account types | Implemented | Internal user-cash clearing, deferred service credit, Creator pending/withdrawable/frozen, platform deferred/earned revenue, provider cost, external settlement, and payout clearing are modeled in Prisma. Internal cash is not a customer product or public balance. |
+| Data models | Mostly implemented | Stable `BillingProduct`, immutable `BillingPriceVersion`, snapshotted `RechargeOrder`, aggregate `AgentWallet`, scoped `UserAgentWallet`, `WalletTransaction`, append-only `WalletLedgerEntry`, purchase/usage/withdrawal allocation records, provider events, Creator earnings, payout profiles/destinations, and destination-snapshotted withdrawal requests are implemented. Public users resolve through canonical `AudienceIdentity`; `UserWallet.externalUserId` remains a legacy payment selector while wallet ownership is checked through `audienceIdentityId`. |
 | Integer money and tokens | Implemented | Money uses integer smallest currency units such as CNY fen and USD cents. Agent tokens are integers. |
-| User recharge | Mock and default-off WeChat Native flows implemented | Recharge creation, idempotent provider facts, payment completion, cash credit, and representative-scoped service-credit purchase complete atomically. Before its first Native POST, Delegate persists a `CREATED` order, exact replay facts, and durable recovery work; uncertain creation queries the same order before exact replay. Local QR expiry never cancels money, and a lost QR permits replacement only after a delayed signed provider close. Verified late success still credits exactly once. Every public recharge write requires a verified Web account; mock endpoints are unavailable in production. Live merchant activation remains gated by the runbook canary. |
-| User buys Agent service credits | Implemented | The service checks `UserWallet`, debits cash, credits the exact `UserAgentWallet`, grants the matching canonical `ServiceEntitlement`, creates a FIFO purchase lot and Creator pending earnings, updates the aggregate Agent projection, and writes all records in one transaction. |
+| Service-package checkout | Mock and default-off WeChat Native flows implemented | The browser submits only a server-published price-version ID. Delegate freezes price, units, revenue share, refund, and expiry terms before its first Native POST, then persists exact replay facts and durable recovery work. Uncertain creation queries the same order before exact replay. Local QR expiry never cancels money, and a lost QR permits replacement only after a delayed signed provider close. Verified late success still grants the snapshotted package exactly once. Every public purchase write requires a verified Web account; mock endpoints are unavailable in production. Live merchant activation remains gated by the runbook canary. |
+| User receives representative service credits | Implemented | Payment credits and clears the internal cash account in the same transaction, credits the exact `UserAgentWallet`, grants the matching canonical `ServiceEntitlement`, creates a FIFO purchase lot and Creator pending earnings from the order snapshot, updates the aggregate Agent projection, and writes all records atomically. |
 | Agent consumes service credits | Implemented for public conversation flow | Acceptance atomically chooses a conversation-locked free slot or reserves the same canonical audience units in both the wallet and entitlement ledgers before publishing work. Successful replies and approved Compute settle both; non-billable, rejected, edited, redacted, canceled, and terminal-failure paths transfer or release both, including retry-backoff runs. Multi-step Compute/MCP tasks transfer one server-verified run owner and finalize it exactly once; generation writes are fenced by renewable worker leases. Wallet/entitlement drift fails closed on a consistent snapshot, and the package root exposes only the composite dual-ledger usage lifecycle. |
-| Creator withdrawal | Operational mock loop implemented | Verified creators can submit and cancel representative-scoped requests from the workspace wallet. Requests allocate and freeze exact earnings FIFO. A non-production-only operations endpoint demonstrates approve, reject, paid, transient failure, retry, and permanent-failure release; it is unavailable in production. Automatic payout submission is not implemented yet. |
+| Creator withdrawal | Profile and operational mock loop implemented | Verified creators configure an Owner/Organization payout profile backed by an encrypted opaque WeChat recipient token and masked display label. A withdrawal requires an active CNY destination, snapshots it immutably, and allocates/freezes exact earnings FIFO. Local-only review/activation and mock operations demonstrate the lifecycle; both are unavailable in production. Production Operator RBAC, maker/checker approval, provider submission, proof, and reconciliation are not implemented yet. |
 | Refund and reversal | Eligible WeChat full-refund loop implemented | The authenticated billing dashboard can queue one idempotent full refund for a wholly unused and unreserved WeChat purchase. Delegate persists the refund intent, freezes entitlement, and durably marks the first submission `UNKNOWN` before the provider call. Every uncertain outcome queries the original `out_refund_no`; exact replay or deterministic rejection is allowed only after signed not-found evidence. Unknown codes and unsafe, ambiguous, abnormal, or unresolved cases remain frozen for reconciliation. Verified callback/query facts drive idempotent reversal. Local demo partial reversal is retained; automatic chargeback/dispute resolution remains future work. |
 | Payment adapters | Mock and WeChat Native implemented | Mock remains development-only. WeChat Pay API v3 Native signs exact request bytes, verifies response/callback signatures, supports public-key rotation with legacy platform-certificate compatibility, and never exposes provider payloads to the browser. Stripe has an injected Checkout-style boundary but no live SDK/webhook wiring; Alipay remains fail closed. Delegate does not handle card numbers, bank cards, payment passwords, or raw sensitive payment data. |
 | WeChat operations | Implemented | The workflow runner executes order reconciliation, refund lifecycle, and refund reversal as independently tracked lanes so one failure does not suppress the others. Liveness, readiness, and redacted operations health have separate semantics; persistent checkpoints and per-lane `FAILED` backlog keep unresolved work visible across idle backoff, restarts, replicas, and unrelated successes. Proven exceptions across all representatives owned by the signed-in Owner appear in one private Dashboard queue with versioned, idempotent claim, exact-Outbox retry, and acknowledge actions; unmatched platform events are never assigned to an owner. |
 | Database safety gate | Implemented | Validated PostgreSQL checks protect cash, scoped-credit, Creator earning, usage, paid-withdrawal, and refund lifecycle invariants. `pnpm test:postgres:wallet` runs real PostgreSQL 16 races and recovery scenarios for duplicate recharge, concurrent spending, payment callback/query convergence, refund idempotency, unknown-outcome query-first recovery, terminal-fact replay, and withdrawal freezing. |
 | First-version exclusions | Preserved | No automatic cross-border payout, Merkle proof, open Wallet API, unclaimed-representative auto-withdrawal, chain ledger, or multi-currency FX. |
 
-Telegram is now an optional, non-production channel runtime for this product direction. If Delegate later ships production bot-based digital goods and services, they should follow Telegram's rules, including Telegram Stars where required. AMN Pay is a future web/unified recharge path, not a reason to bypass platform policy. During the current demo, Telegram sends users to the Web mock-recharge surface. That continuation requires Web sign-in and an exact, verified binding to the active Bot before an order can be created, so credits land on the same canonical Delegate identity. An inline recharge button is emitted only when the Bot-specific `TELEGRAM_WEB_RECHARGE_BASE_URL` (or its `NEXT_PUBLIC_REPRESENTATIVE_URL` fallback) is a public HTTPS origin. Loopback or other non-public HTTP URLs remain plain message text for local testing.
+Telegram is now an optional, non-production channel runtime for this product direction. If Delegate later ships production bot-based digital goods and services, they should follow Telegram's rules, including Telegram Stars where required. AMN Pay is a future unified checkout path, not a reason to bypass platform policy. During the current demo, Telegram sends users to the Web service-package surface. That continuation requires Web sign-in and an exact, verified binding to the active Bot before an order can be created, so credits land on the same canonical Delegate identity. An inline purchase button is emitted only when the Bot-specific `TELEGRAM_WEB_RECHARGE_BASE_URL` (or its `NEXT_PUBLIC_REPRESENTATIVE_URL` fallback) is a public HTTPS origin. Loopback or other non-public HTTP URLs remain plain message text for local testing.
 
 ## Channel Architecture Direction
 
@@ -161,7 +164,7 @@ Delegate is built around a few hard boundaries:
 - **Entitlement is unified, payment rails are not.** Web money and Telegram Stars retain their own settlement and refund semantics while granting audience-scoped service access.
 - **Temporal is orchestration.** Temporal handles start, durable waiting, retry, wake-up, and cancellation delivery for long-running workflow timers.
 - **Public representatives are not private workspaces.** The runtime does not read owner-private files, accounts, secrets, or hidden notes.
-- **Users recharge an Agent, not the platform generically.** The page should make clear which Digital Representative receives the balance.
+- **Users buy scoped service, not generic platform cash.** The page must identify the Digital Representative, package, included credits, and refund terms.
 - **Compute is isolated and governed.** General-purpose commands and browser work go through the compute broker, capability policy, audit records, and owner-visible approvals.
 - **Memory is scoped.** OpenViking stores representative-scoped public resources and public-safe long-term context, not owner-private state.
 - **Policy beats prompt luck.** Sensitive actions pass through explicit `allow`, `ask`, or `deny` decisions instead of relying only on model behavior.
@@ -360,7 +363,7 @@ The default `.env.example` is safe for local development. Important settings:
 - `DELEGATE_AUTH_SESSION_SECRET` signs dashboard auth and callback-state cookies. Set a strong secret in production.
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` forces dashboard auth in non-production environments; production always requires it.
 - `DELEGATE_AUTH_DEV_LOGIN` and the `DELEGATE_AUTH_DEV_*` identities are accepted only outside production. `DELEGATE_LOCAL_AUTH_BOOTSTRAP=true` separately permits the local fixture binding step. `pnpm docker:up:local` enables both switches without weakening the production login boundary.
-- `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` exposes the explicitly labeled local recharge panel so the mock recharge, service-credit purchase, usage, and unused-credit return loop can be exercised. Recharge creation, completion, and reversal require a signed-in audience account. Telegram continuations additionally require the current verified Bot binding. Keep it `false` outside development; the mock mutation endpoints also return `404` in production. This switch does not enable WeChat Pay.
+- `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` exposes the explicitly labeled local service-package panel so mock payment, direct credit grant, usage, and wholly-unused reversal can be exercised. Order creation, completion, and reversal require a signed-in audience account. Telegram continuations additionally require the current verified Bot binding. Keep it `false` outside development; the mock mutation endpoints also return `404` in production. This switch does not enable WeChat Pay.
 - `DELEGATE_WECHAT_PAY_COLLECTION_ENABLED` controls creation of new WeChat
   Native orders. `DELEGATE_WECHAT_PAY_PROCESSING_ENABLED` independently keeps
   callbacks, signed order/refund queries, refund submission recovery, and
@@ -380,6 +383,7 @@ The default `.env.example` is safe for local development. Important settings:
 - `DELEGATE_SKILL_TRUSTED_KEYS` is a JSON object mapping registry publisher key IDs to trusted Ed25519 public-key PEM strings. Signed patch auto-adoption remains disabled when the matching key is absent.
 - `DELEGATE_CLAWHUB_URL` selects a credential-free HTTPS Registry origin, `DELEGATE_CLAWHUB_ALLOWED_HOSTS` allowlists its hostname, and `DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` bounds exact-version verification freshness (24 hours by default). Redirects are rejected. Adoption and rollback re-fetch the exact publisher/version manifest and verdict, reject stale or changed evidence, and re-evaluate signatures against the current trusted-key set before changing release state.
 - `CHANNEL_CREDENTIAL_MASTER_KEY` encrypts Dashboard-managed Telegram Bot tokens at rest and must be an independently generated, base64-encoded 32-byte key (`openssl rand -base64 32`). `CHANNEL_CREDENTIAL_MASTER_KEY_VERSION` identifies the active key version; because the current runtime reads one key version, changing either value requires re-entering each Bot token. Each digital representative can select its own Bot connection, while multiple representatives owned by the same account may deliberately reuse one connection. `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_ID`, and `TELEGRAM_BOT_USERNAME` remain only as the legacy single-Bot bootstrap path; new Bot connections are added and verified in Dashboard without exposing tokens back to the browser.
+- `PAYOUT_CREDENTIAL_MASTER_KEY` encrypts opaque WeChat Pay recipient tokens for Creator payout destinations. Generate a separate base64-encoded 32-byte key (`openssl rand -base64 32`) and identify it with `PAYOUT_CREDENTIAL_MASTER_KEY_VERSION`; never reuse the channel credential key. Delegate stores only encrypted provider tokens and masked labels—never bank-card numbers, payment passwords, or identity-document contents. Rotating the active key requires a controlled destination re-binding flow.
 - `TELEGRAM_RUNTIME_RECONCILE_MS`, `TELEGRAM_RUNTIME_LEASE_MS`, `TELEGRAM_RUNTIME_LEASE_RENEW_MS`, and `TELEGRAM_RUNTIME_LEASE_DB_TIMEOUT_MS` control multi-replica long-poll ownership (defaults: 5s, 120s, 20s, and 10s). Replicas discover only credential-free Bot descriptors; the database lease winner alone decrypts one token and starts polling. A lost or timed-out heartbeat stops that runtime, while an expired lease allows crash takeover. This lease coordinates only Delegate Bot processes—an external script using the same token is still reported through Telegram's `409 Conflict` and must be stopped separately.
 - `REP_PUBLIC_CHAT_SESSION_SECRET` can override the public-chat cookie signing secret. If unset, the reps app falls back to `TELEGRAM_WEBHOOK_SECRET` and then a local development secret.
 - `DELEGATE_MODEL_ENABLED`, `DELEGATE_MODEL_PROVIDER`, `DELEGATE_MODEL_FALLBACK_PROVIDER`, and the provider-specific model variables control model-backed representative replies.
@@ -616,7 +620,9 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 
 - [Architecture](./docs/architecture.md): product thesis, runtime loop, security boundary, and OpenViking rules.
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
-- [Public audience identity](./docs/public-audience-identity.md): web anonymous identity, Contact/Conversation, recharge, and sandbox linkage.
+- [Public audience identity](./docs/public-audience-identity.md): web identity, Contact/Conversation, service purchase, and sandbox linkage.
+- [Wallet & Billing product contract](./docs/wallet-billing-product-contract.md): V1 package, price-version, entitlement, revenue, refund, and production-gate rules.
+- [Wallet & Billing funds-flow ADR](./docs/adr-wallet-billing-funds-flow.md): immutable checkout terms, internal clearing, ledger flow, and consequences.
 - [Conversation platform](./docs/conversation-platform.md): channel-neutral messages, episodes, versions, human control, SSE, and Matrix Application Service boundaries.
 - [Channel Conversation Platform ADR](./docs/adr-channel-conversation-platform.md): source/transport separation, identity proof, Web/Stars entitlement, channel MVP, migration, and rollback decisions.
 - [Delegation tasks](./docs/delegation-tasks.md): task aggregate, lifecycle, ownership validation, approvals, outputs, and audit linkage.
@@ -637,8 +643,8 @@ Delegate can:
 - answer from public representative knowledge
 - collect structured intake
 - offer paid continuation
-- show web-first recharge/service-depth UI and invoice records
-- show early Agent Wallet / recharge-entry state for a specific Digital Representative
+- show web-first service-package/service-depth UI and order records
+- show representative-scoped service credits and wallet operations for a specific Digital Representative
 - run a default-off, signed WeChat Pay Native collection and eligible
   full-unused refund recovery path after its explicit production gates are met
 - create owner handoff requests

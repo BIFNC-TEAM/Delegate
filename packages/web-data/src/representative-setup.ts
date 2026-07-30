@@ -26,6 +26,10 @@ import {
   policyDecisionSchema,
 } from "@delegate/compute-protocol";
 import {
+  BillingEntitlementExpiryPolicy,
+  BillingPriceVersionStatus,
+  BillingProductStatus,
+  BillingRefundPolicy,
   CapabilityPlanTier,
   Channel,
   ComputeFilesystemMode,
@@ -50,6 +54,30 @@ import { resolveChannelAvailability } from "./channel-availability";
 import { maybeSyncRepresentativeOpenVikingResources } from "./openviking";
 import { getDemoCreatorTrainingKnowledgeOverlay } from "./creator-training";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
+
+const defaultCnyServicePackages = [
+  {
+    code: "service-pack-cny-500",
+    name: "¥5 服务包",
+    amountMinor: 500,
+    entitlementUnits: 500,
+  },
+  {
+    code: "service-pack-cny-2000",
+    name: "¥20 服务包",
+    amountMinor: 2_000,
+    entitlementUnits: 2_000,
+  },
+  {
+    code: "service-pack-cny-10000",
+    name: "¥100 服务包",
+    amountMinor: 10_000,
+    entitlementUnits: 10_000,
+  },
+] as const;
+
+const defaultCnyServicePackageDescription =
+  "一次性购买，当前数字代表专属；永久有效；仅在完全未使用时支持全额退款。";
 
 const representativeSetupInclude = {
   owner: true,
@@ -535,6 +563,31 @@ export async function createRepresentative(
               tokenUnitPriceCents: 1,
               creatorRevenueShareBps: 2000,
             },
+          },
+          billingProducts: {
+            create: defaultCnyServicePackages.map((servicePackage) => ({
+              code: servicePackage.code,
+              name: servicePackage.name,
+              description: defaultCnyServicePackageDescription,
+              status: BillingProductStatus.ACTIVE,
+              priceVersions: {
+                create: {
+                  version: 1,
+                  status: BillingPriceVersionStatus.ACTIVE,
+                  currency: "CNY",
+                  amountMinor: servicePackage.amountMinor,
+                  unitName: "credit",
+                  entitlementUnits: servicePackage.entitlementUnits,
+                  creatorRevenueShareBps: 2_000,
+                  platformRevenueShareBps: 8_000,
+                  refundPolicy: BillingRefundPolicy.FULL_WHEN_UNUSED,
+                  expiryPolicy:
+                    BillingEntitlementExpiryPolicy.NEVER_EXPIRES,
+                  entitlementValidityDays: null,
+                  publishedAt: now,
+                },
+              },
+            })),
           },
         },
       });

@@ -51,6 +51,11 @@ describe("public wallet client updates", () => {
     const snapshot = walletStateFixture();
     snapshot.orders.unshift({
       id: "order-new-unpaid",
+      billingProductId: "product-basic",
+      billingPriceVersionId: "price-basic-v1",
+      productName: "基础服务包",
+      entitlementUnits: 5,
+      unitName: "服务额度",
       amountCents: 500,
       currency: "CNY",
       provider: "mock",
@@ -122,14 +127,30 @@ function walletStateFixture(): PublicWalletStateSnapshot {
   return {
     summary: {
       currency: "CNY",
-      cashBalanceCents: 300,
       serviceCreditsAvailable: 7,
       serviceCreditsReserved: 1,
       serviceCreditsPurchased: 12,
       serviceCreditsConsumed: 4,
     },
+    servicePackages: [{
+      productId: "product-standard",
+      priceVersionId: "price-standard-v1",
+      name: "标准服务包",
+      description: "适用于当前数字代表",
+      amountCents: 2000,
+      currency: "CNY",
+      entitlementUnits: 20,
+      unitName: "服务额度",
+      refundPolicy: "FULL_WHEN_UNUSED",
+      expiryPolicy: "NEVER_EXPIRES",
+    }],
     orders: [{
       id: "order-latest",
+      billingProductId: "product-standard",
+      billingPriceVersionId: "price-standard-v1",
+      productName: "标准服务包",
+      entitlementUnits: 20,
+      unitName: "服务额度",
       amountCents: 2000,
       currency: "CNY",
       provider: "mock",

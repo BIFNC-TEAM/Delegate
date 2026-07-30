@@ -3,6 +3,7 @@ import {
   AmnLedgerEntryKind,
   AmnWalletAccountType,
   CreatorEarningStatus,
+  RechargeOrderStatus,
   type Prisma,
 } from "@prisma/client";
 import { describe, expect, it } from "vitest";
@@ -86,6 +87,71 @@ describe("agent wallet token purchase", () => {
         expect.objectContaining({
           accountType: AmnWalletAccountType.PLATFORM_DEFERRED_REVENUE,
           amountCents: 800,
+        }),
+      ]),
+    );
+  });
+
+  it("fulfills a paid billing order from its immutable snapshot", async () => {
+    const client = Object.assign(
+      new FakeTokenPurchaseClient({
+        tokenUnitPriceCents: 25,
+      }),
+      {
+        rechargeOrder: {
+          findUnique: async () => ({
+            id: "recharge_snapshot_1",
+            userWalletId: "user_wallet_1",
+            representativeId: "rep_1",
+            productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+            currency: "CNY",
+            amountCents: 1000,
+            status: RechargeOrderStatus.PAID,
+            billingPriceVersionId: "price-v1",
+            unitNameSnapshot: "credit",
+            entitlementUnitsSnapshot: 500,
+            creatorRevenueShareBpsSnapshot: 2500,
+            platformRevenueShareBpsSnapshot: 7500,
+            refundPolicySnapshot: "FULL_WHEN_UNUSED",
+            expiryPolicySnapshot: "NEVER_EXPIRES",
+            entitlementValidityDaysSnapshot: null,
+          }),
+        },
+      },
+    );
+    client.agentWallets[0]!.creatorRevenueShareBps = 9000;
+
+    const purchase = await purchaseAgentTokens(
+      {
+        externalUserId: "user_1",
+        representativeId: "rep_1",
+        amountCents: 1000,
+        rechargeOrderId: "recharge_snapshot_1",
+        idempotencyKey: "purchase_snapshot_1",
+      },
+      client,
+    );
+
+    expect(purchase).toMatchObject({
+      tokenAmount: 500,
+      tokenUnitPriceCents: 2,
+      creatorRevenueShareBps: 2500,
+      creatorPendingCents: 250,
+    });
+    expect(client.entitlementAccounts[0]).toMatchObject({
+      unitName: "credit",
+      grantedUnits: 500,
+      remainingUnits: 500,
+    });
+    expect(client.ledgerEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountType: AmnWalletAccountType.CREATOR_PENDING,
+          amountCents: 250,
+        }),
+        expect.objectContaining({
+          accountType: AmnWalletAccountType.PLATFORM_DEFERRED_REVENUE,
+          amountCents: 750,
         }),
       ]),
     );

@@ -188,6 +188,53 @@ describe("agent wallet mock recharge", () => {
     ).rejects.toThrow("different representative");
   });
 
+  it("freezes a complete immutable commercial snapshot on a billing order", async () => {
+    const client = new FakeRechargeClient();
+    const input = {
+      externalUserId: "user_1",
+      representativeId: "rep_1",
+      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      billingProductId: "product_1",
+      billingPriceVersionId: "price_v1",
+      productNameSnapshot: "标准服务包",
+      unitNameSnapshot: "credit" as const,
+      entitlementUnitsSnapshot: 600,
+      creatorRevenueShareBpsSnapshot: 2500,
+      platformRevenueShareBpsSnapshot: 7500,
+      refundPolicySnapshot: "FULL_WHEN_UNUSED" as const,
+      expiryPolicySnapshot: "NEVER_EXPIRES" as const,
+      entitlementValidityDaysSnapshot: null,
+      amountCents: 1200,
+      idempotencyKey: "recharge_commercial_snapshot",
+    };
+
+    const first = await createMockRechargeOrder(input, client);
+    const replay = await createMockRechargeOrder(input, client);
+
+    expect(replay.id).toBe(first.id);
+    expect(client.rechargeOrders[0]).toMatchObject({
+      billingProductId: "product_1",
+      billingPriceVersionId: "price_v1",
+      productNameSnapshot: "标准服务包",
+      unitNameSnapshot: "credit",
+      entitlementUnitsSnapshot: 600,
+      creatorRevenueShareBpsSnapshot: 2500,
+      platformRevenueShareBpsSnapshot: 7500,
+      refundPolicySnapshot: "FULL_WHEN_UNUSED",
+      expiryPolicySnapshot: "NEVER_EXPIRES",
+      entitlementValidityDaysSnapshot: null,
+    });
+    await expect(
+      createMockRechargeOrder(
+        {
+          ...input,
+          billingPriceVersionId: "price_v2",
+        },
+        client,
+      ),
+    ).rejects.toThrow("different billing price version");
+  });
+
   it("does not collapse separate keyless same-amount recharge operations", async () => {
     const client = new FakeRechargeClient();
     const first = await createMockRechargeOrder(
@@ -1005,6 +1052,16 @@ type RechargeOrderRow = {
   userWalletId: string;
   representativeId: string | null;
   productCode: string | null;
+  billingProductId?: string | null;
+  billingPriceVersionId?: string | null;
+  productNameSnapshot?: string | null;
+  unitNameSnapshot?: string | null;
+  entitlementUnitsSnapshot?: number | null;
+  creatorRevenueShareBpsSnapshot?: number | null;
+  platformRevenueShareBpsSnapshot?: number | null;
+  refundPolicySnapshot?: string | null;
+  expiryPolicySnapshot?: string | null;
+  entitlementValidityDaysSnapshot?: number | null;
   provider: PaymentProvider;
   providerOrderId: string | null;
   providerTransactionId: string | null;
@@ -1178,6 +1235,21 @@ class FakeRechargeClient {
         userWalletId: args.data.userWalletId,
         representativeId: args.data.representativeId ?? null,
         productCode: args.data.productCode ?? null,
+        billingProductId: args.data.billingProductId ?? null,
+        billingPriceVersionId:
+          args.data.billingPriceVersionId ?? null,
+        productNameSnapshot: args.data.productNameSnapshot ?? null,
+        unitNameSnapshot: args.data.unitNameSnapshot ?? null,
+        entitlementUnitsSnapshot:
+          args.data.entitlementUnitsSnapshot ?? null,
+        creatorRevenueShareBpsSnapshot:
+          args.data.creatorRevenueShareBpsSnapshot ?? null,
+        platformRevenueShareBpsSnapshot:
+          args.data.platformRevenueShareBpsSnapshot ?? null,
+        refundPolicySnapshot: args.data.refundPolicySnapshot ?? null,
+        expiryPolicySnapshot: args.data.expiryPolicySnapshot ?? null,
+        entitlementValidityDaysSnapshot:
+          args.data.entitlementValidityDaysSnapshot ?? null,
         provider: args.data.provider,
         providerOrderId: args.data.providerOrderId ?? null,
         providerTransactionId:

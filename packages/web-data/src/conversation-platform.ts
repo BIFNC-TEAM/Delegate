@@ -951,7 +951,6 @@ export async function getRepresentativeOperationsSnapshot(
         },
         knowledgePack: true,
         pricingPlans: true,
-        agentWallet: true,
         _count: { select: { conversations: true, handoffRequests: true } },
       },
     });
@@ -967,10 +966,6 @@ export async function getRepresentativeOperationsSnapshot(
       knowledgeCount: representative.knowledgeAssetLinks.length,
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
       pricingCount: representative.pricingPlans.length,
-      paidPricingCount: representative.pricingPlans.filter(
-        (plan) => plan.starsAmount > 0,
-      ).length,
-      agentWallet: representative.agentWallet,
       channelCount: representative.channelBindings.length,
       enabledSkillCount: representative.skillPackLinks.length,
       skillIssueCount: countRepresentativeSkillIssues(representative.skillPackLinks),
@@ -6832,7 +6827,6 @@ export async function publishRepresentativeVersion(input: {
         knowledgePack: true,
         knowledgeAssetLinks: { where: { enabled: true } },
         pricingPlans: true,
-        agentWallet: true,
         capabilityProfiles: {
           where: { isDefault: true, isManaged: false },
           orderBy: { createdAt: "desc" },
@@ -6872,10 +6866,6 @@ export async function publishRepresentativeVersion(input: {
       knowledgeCount: representative.knowledgeAssetLinks.length,
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
       pricingCount: representative.pricingPlans.length,
-      paidPricingCount: representative.pricingPlans.filter(
-        (plan) => plan.starsAmount > 0,
-      ).length,
-      agentWallet: representative.agentWallet,
       channelCount: representative.channelBindings.length,
       enabledSkillCount: representative.skillPackLinks.filter((link) => link.enabled).length,
       skillIssueCount: countRepresentativeSkillIssues(representative.skillPackLinks.filter((link) => link.enabled)),
@@ -8349,26 +8339,10 @@ export function buildRepresentativeReadiness(input: {
   knowledgeCount: number;
   knowledgePackItemCount: number;
   pricingCount: number;
-  paidPricingCount: number;
-  agentWallet: {
-    currency: string;
-    tokenUnitPriceCents: number;
-    creatorRevenueShareBps: number;
-  } | null;
   channelCount: number;
   enabledSkillCount: number;
   skillIssueCount: number;
 }): RepresentativeOperationsSnapshot["readiness"] {
-  const billingReady =
-    input.paidPricingCount === 0
-    || (
-      ["CNY", "USD"].includes(input.agentWallet?.currency.trim() ?? "")
-      && Number.isSafeInteger(input.agentWallet?.tokenUnitPriceCents)
-      && (input.agentWallet?.tokenUnitPriceCents ?? 0) > 0
-      && Number.isSafeInteger(input.agentWallet?.creatorRevenueShareBps)
-      && (input.agentWallet?.creatorRevenueShareBps ?? -1) >= 0
-      && (input.agentWallet?.creatorRevenueShareBps ?? 10_001) <= 10_000
-    );
   return [
     {
       id: "identity",
@@ -8391,11 +8365,8 @@ export function buildRepresentativeReadiness(input: {
     {
       id: "pricing",
       label: "Pricing and free scope",
-      complete: input.pricingCount === 4 && billingReady,
-      detail:
-        input.paidPricingCount > 0 && !billingReady
-          ? "Paid plans require an initialized service-credit wallet with valid pricing and revenue-share settings."
-          : "Free, pass, deep help, and sponsor tiers are configured.",
+      complete: input.pricingCount === 4,
+      detail: "Free, pass, deep help, and sponsor tiers are configured independently from CNY service packages.",
     },
     {
       id: "skills",
@@ -8436,12 +8407,6 @@ function buildDemoRepresentativeOperations(representativeSlug: string): Represen
       knowledgeCount: 12,
       knowledgePackItemCount: 5,
       pricingCount: 4,
-      paidPricingCount: 3,
-      agentWallet: {
-        currency: "CNY",
-        tokenUnitPriceCents: 1,
-        creatorRevenueShareBps: 2000,
-      },
       channelCount: 3,
       enabledSkillCount: 2,
       skillIssueCount: 0,

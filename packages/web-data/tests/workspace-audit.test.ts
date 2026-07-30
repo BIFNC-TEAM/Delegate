@@ -43,6 +43,9 @@ describe("workspace audit normalization", () => {
     expect(classifyWorkspaceAuditEvent("tool_execution_failed")).toBe("tools");
     expect(classifyWorkspaceAuditEvent("owner_profile_updated")).toBe("settings");
     expect(classifyWorkspaceAuditEvent("owner_notification_preferences_updated")).toBe("settings");
+    expect(classifyWorkspaceAuditEvent("billing_price_version_published")).toBe("wallet");
+    expect(classifyWorkspaceAuditEvent("wallet_payout_destination_changed")).toBe("wallet");
+    expect(classifyWorkspaceAuditEvent("withdrawal_requested")).toBe("wallet");
   });
 
   it("treats an explicit owner scope as authoritative over representative fallback", () => {

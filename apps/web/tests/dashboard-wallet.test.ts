@@ -6,8 +6,16 @@ const walletSource = readFileSync(
   new URL("../app/dashboard/dashboard-wallet.tsx", import.meta.url),
   "utf8",
 );
+const payoutProfileSource = readFileSync(
+  new URL("../app/dashboard/dashboard-payout-profile.tsx", import.meta.url),
+  "utf8",
+);
 const frameworkSource = readFileSync(
   new URL("../app/dashboard/dashboard-framework.tsx", import.meta.url),
+  "utf8",
+);
+const dashboardUiDataSource = readFileSync(
+  new URL("../app/dashboard/dashboard-ui-data.ts", import.meta.url),
   "utf8",
 );
 const designSource = readFileSync(
@@ -26,6 +34,16 @@ describe("Dashboard Wallet & Billing", () => {
     expect(frameworkSource).toContain('"skills", "wallet", "audit"');
     expect(walletSource).toContain("/api/dashboard/wallet?");
     expect(walletSource).not.toContain("¥8,420");
+    expect(frameworkSource).not.toContain("¥8,420");
+    expect(frameworkSource).not.toContain("¥1,240");
+    expect(frameworkSource).not.toContain("¥572");
+    expect(frameworkSource).toContain("概览暂不加载资金数据");
+    expect(frameworkSource).toContain("示例金额冒充真实余额");
+    expect(dashboardUiDataSource).not.toContain("¥8,420");
+    expect(dashboardUiDataSource).not.toContain("¥2,860");
+    expect(dashboardUiDataSource).not.toContain("¥1,240");
+    expect(dashboardUiDataSource).not.toContain("User recharge");
+    expect(dashboardUiDataSource).toContain("购买服务包");
   });
 
   it("keeps business transactions, settlements, and immutable ledger entries separate", () => {
@@ -92,6 +110,27 @@ describe("Dashboard Wallet & Billing", () => {
     expect(walletSource).toContain("/cancel?rep=");
     expect(walletSource).toContain("dashboard-cancel:");
     expect(walletSource).not.toContain("申请提现 · 流程接入中");
+  });
+
+  it("requires a tokenized, version-locked payout destination before withdrawal", () => {
+    expect(walletSource).toContain('"payout_profile"');
+    expect(walletSource).toContain("Set up payout account");
+    expect(walletSource).toContain("<DashboardPayoutProfile");
+    expect(payoutProfileSource).toContain(
+      "/api/dashboard/wallet/payout-profile",
+    );
+    expect(payoutProfileSource).toContain("Provider recipient token");
+    expect(payoutProfileSource).toContain('type="password"');
+    expect(payoutProfileSource).toContain(
+      "Each withdrawal locks its masked destination snapshot",
+    );
+    expect(payoutProfileSource).toContain(
+      "Production review and payout require separate Operator access",
+    );
+    expect(payoutProfileSource).not.toMatch(
+      /bankCard|cardNumber|identityNumber|paymentPassword/,
+    );
+    expect(walletCssSource).toContain(".wallet-payout-profile");
   });
 
   it("queues owner-scoped full WeChat refunds from purchase details", () => {

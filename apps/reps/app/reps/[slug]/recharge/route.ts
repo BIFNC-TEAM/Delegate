@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   PaymentProviderOperationLeaseLostError,
+  PublicServicePackageError,
   WeChatPayConfigurationError,
   WeChatPayProtocolError,
   WalletIdempotencyConflictError,
@@ -17,6 +18,7 @@ import {
   getPublicRepresentativeRuntime,
   isVerifiedPrivateChannelIdentityBinding,
   listActivePrivateChannelIdentityBindings,
+  listPublicServicePackages,
   loadWeChatPayProcessingConfigFromEnv,
   lockPaymentProviderOperationLease,
   privateChannelIdentityProviders,
@@ -25,6 +27,7 @@ import {
   releasePaymentProviderOperation,
   renewPaymentProviderOperationLease,
   resolvePublicAudienceWalletExternalUserId,
+  resolvePublicServicePackage,
   resolveRepresentativeTelegramBotConnectionId,
   resolveWeChatPayReleaseFlags,
   resolveWebAudienceContact,
@@ -39,7 +42,6 @@ import {
 } from "../public-principal";
 
 const PUBLIC_WALLET_CURRENCIES = new Set(["CNY", "USD"]);
-const PUBLIC_RECHARGE_AMOUNTS_CENTS = new Set([500, 2_000, 10_000]);
 const WECHAT_RECHARGE_CREATE_LEASE_MS = 75_000;
 
 export async function GET(
@@ -67,13 +69,38 @@ export async function GET(
       cookieStore,
     });
     await requestPrincipal.revalidate();
-    const state = await getPublicAgentWalletState({
-      audienceIdentityId: requestPrincipal.principal.audienceIdentityId,
-      representativeId: runtime.setup.id,
-      currency,
-    });
+    const [state, servicePackages] = await Promise.all([
+      getPublicAgentWalletState({
+        audienceIdentityId: requestPrincipal.principal.audienceIdentityId,
+        representativeId: runtime.setup.id,
+        currency,
+      }),
+      currency === "CNY"
+        ? listPublicServicePackages({
+            representativeId: runtime.setup.id,
+            currency: "CNY",
+          })
+        : Promise.resolve([]),
+    ]);
 
-    const response = privateJson(state, 200);
+    const response = privateJson(
+      {
+        ...state,
+        summary: {
+          currency: state.summary.currency,
+          serviceCreditsAvailable:
+            state.summary.serviceCreditsAvailable,
+          serviceCreditsReserved:
+            state.summary.serviceCreditsReserved,
+          serviceCreditsPurchased:
+            state.summary.serviceCreditsPurchased,
+          serviceCreditsConsumed:
+            state.summary.serviceCreditsConsumed,
+        },
+        servicePackages,
+      },
+      200,
+    );
     setPublicAudienceSessionCookie(
       response,
       request,
@@ -147,14 +174,13 @@ export async function POST(
     const representative = runtime.setup;
 
     const body = (await request.json()) as Record<string, unknown>;
-    const amountCents = body.amountCents;
-    if (
-      typeof amountCents !== "number"
-      || !Number.isInteger(amountCents)
-      || !PUBLIC_RECHARGE_AMOUNTS_CENTS.has(amountCents)
-    ) {
+    const billingPriceVersionId =
+      typeof body.billingPriceVersionId === "string"
+        ? body.billingPriceVersionId.trim()
+        : "";
+    if (!billingPriceVersionId || billingPriceVersionId.length > 191) {
       return privateJson(
-        { error: "请选择有效的充值金额。" },
+        { error: "请选择有效的服务包。" },
         400,
       );
     }
@@ -163,7 +189,10 @@ export async function POST(
         ? body.continuationChannel.trim().toLowerCase()
         : "";
     if (continuationChannel && continuationChannel !== "telegram") {
-      return privateJson({ error: "Unsupported recharge continuation channel." }, 400);
+      return privateJson(
+        { error: "Unsupported service-package continuation channel." },
+        400,
+      );
     }
     const cookieStore = await cookies();
     const { principal, sessionState } = await resolvePublicAudienceRequestPrincipal({
@@ -177,7 +206,7 @@ export async function POST(
       if (!connectionId) {
         return privateJson(
           {
-            error: "Telegram 渠道尚未连接，暂时不能从 Telegram 继续充值。",
+            error: "Telegram 渠道尚未连接，暂时不能从 Telegram 继续购买服务包。",
             code: "telegram_channel_unavailable",
           },
           503,
@@ -196,7 +225,7 @@ export async function POST(
       if (!telegramBinding) {
         return privateJson(
           {
-            error: "请先把当前 Telegram 账户绑定到这个 Delegate 账户，再创建充值单。",
+            error: "请先把当前 Telegram 账户绑定到这个 Delegate 账户，再创建服务包订单。",
             code: "telegram_binding_required",
           },
           409,
@@ -226,7 +255,7 @@ export async function POST(
       if (activeCheckout) {
         const response = activeWeChatCheckoutResponse(
           activeCheckout,
-          amountCents,
+          billingPriceVersionId,
         );
         setPublicAudienceSessionCookie(
           response,
@@ -253,6 +282,12 @@ export async function POST(
       );
       return response;
     }
+    const servicePackage = await resolvePublicServicePackage({
+      representativeId: representative.id,
+      billingPriceVersionId,
+      currency: "CNY",
+    });
+    const amountCents = servicePackage.amountCents;
     const requestedIdempotencyKey =
       request.headers.get("idempotency-key")?.trim()
       || (typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "");
@@ -301,7 +336,7 @@ export async function POST(
           if (!racedOrder || racedOrder.status === "CREATED") {
             const response = privateJson(
               {
-                error: "充值请求过于频繁，请稍后使用同一操作重试。",
+                error: "服务包下单请求过于频繁，请稍后使用同一操作重试。",
                 code: "payment_rate_limited",
               },
               429,
@@ -335,7 +370,7 @@ export async function POST(
         if (activeCheckout) {
           const response = activeWeChatCheckoutResponse(
             activeCheckout,
-            amountCents,
+            billingPriceVersionId,
           );
           setPublicAudienceSessionCookie(
             response,
@@ -352,6 +387,19 @@ export async function POST(
         audienceIdentityId: principal.audienceIdentityId,
         representativeId: representative.id,
         productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        billingProductId: servicePackage.productId,
+        billingPriceVersionId: servicePackage.priceVersionId,
+        productNameSnapshot: servicePackage.name,
+        unitNameSnapshot: servicePackage.unitName,
+        entitlementUnitsSnapshot: servicePackage.entitlementUnits,
+        creatorRevenueShareBpsSnapshot:
+          servicePackage.creatorRevenueShareBps,
+        platformRevenueShareBpsSnapshot:
+          servicePackage.platformRevenueShareBps,
+        refundPolicySnapshot: servicePackage.refundPolicy,
+        expiryPolicySnapshot: servicePackage.expiryPolicy,
+        entitlementValidityDaysSnapshot:
+          servicePackage.entitlementValidityDays,
         displayName: typeof body.displayName === "string"
           ? body.displayName
           : contact.displayName ?? externalUserId,
@@ -420,10 +468,21 @@ export async function POST(
     if (error instanceof WalletIdempotencyConflictError) {
       return privateJson(
         {
-          error: "本次充值操作与已有订单不一致，请重新发起。",
+          error: "本次服务包购买与已有订单不一致，请重新发起。",
           code: "idempotency_conflict",
         },
         409,
+      );
+    }
+    if (error instanceof PublicServicePackageError) {
+      return privateJson(
+        {
+          error: error.code === "SERVICE_PACKAGE_INVALID"
+            ? "该服务包配置暂不可用，请联系代表主人检查商品设置。"
+            : "所选服务包已下架或不属于当前数字代表，请重新选择。",
+          code: error.code.toLowerCase(),
+        },
+        error.code === "SERVICE_PACKAGE_INVALID" ? 503 : 400,
       );
     }
     const principalErrorStatus = publicAudiencePrincipalErrorStatus(error);
@@ -439,7 +498,7 @@ export async function POST(
     }
     return privateJson(
       {
-        error: "充值单创建失败，请稍后重试；如果问题持续，请联系代表主人检查支付配置。",
+        error: "服务包订单创建失败，请稍后重试；如果问题持续，请联系代表主人检查支付配置。",
       },
       400,
     );
@@ -458,7 +517,11 @@ function serializePublicCheckoutOrder(
     checkoutUrl: order.checkoutUrl,
     checkoutExpiresAt: order.checkoutExpiresAt,
     paidAt: order.paidAt,
-    cashBalanceCents: order.cashBalanceCents,
+    billingProductId: order.billingProductId,
+    billingPriceVersionId: order.billingPriceVersionId,
+    productName: order.productNameSnapshot,
+    entitlementUnits: order.entitlementUnitsSnapshot,
+    unitName: order.unitNameSnapshot,
   };
 }
 
@@ -489,11 +552,11 @@ async function findActiveWeChatRechargeOrder(input: {
       checkoutUrl: true,
       providerPayload: true,
       paidAt: true,
-      userWallet: {
-        select: {
-          cashBalanceCents: true,
-        },
-      },
+      billingProductId: true,
+      billingPriceVersionId: true,
+      productNameSnapshot: true,
+      entitlementUnitsSnapshot: true,
+      unitNameSnapshot: true,
     },
   });
   if (!order) {
@@ -521,7 +584,11 @@ function serializePersistedPublicCheckoutOrder(
     checkoutUrl: order.checkoutUrl,
     checkoutExpiresAt: order.checkoutExpiresAt,
     paidAt: order.paidAt?.toISOString() ?? null,
-    cashBalanceCents: order.userWallet.cashBalanceCents,
+    billingProductId: order.billingProductId,
+    billingPriceVersionId: order.billingPriceVersionId,
+    productName: order.productNameSnapshot,
+    entitlementUnits: order.entitlementUnitsSnapshot,
+    unitName: order.unitNameSnapshot,
   };
 }
 
@@ -529,12 +596,13 @@ function activeWeChatCheckoutResponse(
   activeCheckout: NonNullable<
     Awaited<ReturnType<typeof findActiveWeChatRechargeOrder>>
   >,
-  requestedAmountCents: number,
+  requestedBillingPriceVersionId: string,
 ) {
-  const sameAmount =
-    activeCheckout.amountCents === requestedAmountCents;
+  const samePriceVersion =
+    activeCheckout.billingPriceVersionId
+      === requestedBillingPriceVersionId;
   return privateJson(
-    sameAmount
+    samePriceVersion
       ? {
           rechargeOrder:
             serializePersistedPublicCheckoutOrder(activeCheckout),
@@ -546,7 +614,7 @@ function activeWeChatCheckoutResponse(
           rechargeOrder:
             serializePersistedPublicCheckoutOrder(activeCheckout),
         },
-    sameAmount ? 200 : 409,
+    samePriceVersion ? 200 : 409,
   );
 }
 

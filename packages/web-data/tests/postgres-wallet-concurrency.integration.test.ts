@@ -3,11 +3,19 @@ import {
   AmnLedgerEntryKind,
   AmnWalletAccountType,
   AudienceIdentityStatus,
+  BillingEntitlementExpiryPolicy,
+  BillingPriceVersionStatus,
+  BillingProductStatus,
+  BillingRefundPolicy,
   Channel,
   CreatorEarningStatus,
+  CreatorPayoutProfileStatus,
   CreatorVerificationStatus,
   MessageSenderType,
   PaymentProvider,
+  PayoutDestinationKind,
+  PayoutDestinationStatus,
+  PayoutSubjectType,
   RechargeOrderStatus,
   RepresentativeClaimStatus,
   WithdrawRequestStatus,
@@ -59,6 +67,188 @@ if (process.env.DELEGATE_POSTGRES_E2E === "1") {
 }
 
 describePostgres("agent wallet PostgreSQL concurrency", () => {
+  it("enforces stable billing products and immutable, version-matched order snapshots", async () => {
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const fixture = await createBillingSnapshotFixture(
+          tx,
+          "order-immutability",
+        );
+        await tx.rechargeOrder.update({
+          where: { id: fixture.orderId },
+          data: { amountCents: 600 },
+        });
+      }),
+    ).rejects.toThrow(
+      "Product-bound RechargeOrder commercial fields are immutable",
+    );
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const fixture = await createBillingSnapshotFixture(
+          tx,
+          "product-lifecycle",
+        );
+        await tx.billingProduct.update({
+          where: { id: fixture.productId },
+          data: { status: BillingProductStatus.DRAFT },
+        });
+      }),
+    ).rejects.toThrow(
+      "BillingProduct status cannot move backward",
+    );
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const fixture = await createBillingSnapshotFixture(
+          tx,
+          "product-identity",
+        );
+        await tx.billingProduct.update({
+          where: { id: fixture.productId },
+          data: { code: "repurposed-product-code" },
+        });
+      }),
+    ).rejects.toThrow(
+      "BillingProduct id, representative, code, and creation time are immutable",
+    );
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const fixture = await createBillingSnapshotFixture(
+          tx,
+          "snapshot-mismatch",
+        );
+        const otherProduct = await tx.billingProduct.create({
+          data: {
+            representativeId: fixture.representativeId,
+            code: `other-${crypto.randomUUID()}`,
+            name: "Other service package",
+            status: BillingProductStatus.ACTIVE,
+          },
+        });
+        await tx.rechargeOrder.create({
+          data: {
+            userWalletId: fixture.userWalletId,
+            representativeId: fixture.representativeId,
+            productCode: "agent-wallet:service-credit:v1",
+            billingProductId: otherProduct.id,
+            billingPriceVersionId: fixture.priceVersionId,
+            productNameSnapshot: "Other service package",
+            unitNameSnapshot: "credit",
+            entitlementUnitsSnapshot: 500,
+            creatorRevenueShareBpsSnapshot: 2_000,
+            platformRevenueShareBpsSnapshot: 8_000,
+            refundPolicySnapshot:
+              BillingRefundPolicy.FULL_WHEN_UNUSED,
+            expiryPolicySnapshot:
+              BillingEntitlementExpiryPolicy.NEVER_EXPIRES,
+            entitlementValidityDaysSnapshot: null,
+            provider: PaymentProvider.MOCK,
+            amountCents: 500,
+            currency: "CNY",
+            status: RechargeOrderStatus.REQUIRES_PAYMENT,
+            idempotencyKey:
+              `postgres-billing-mismatch-${crypto.randomUUID()}`,
+          },
+        });
+      }),
+    ).rejects.toThrow(
+      "RechargeOrder billing product and price version do not match",
+    );
+
+    await expect(
+      prisma.$transaction(async (tx) => {
+        const fixture = await createBillingSnapshotFixture(
+          tx,
+          "unsupported-unit",
+        );
+        await tx.billingPriceVersion.create({
+          data: {
+            billingProductId: fixture.productId,
+            version: 2,
+            status: BillingPriceVersionStatus.DRAFT,
+            currency: "CNY",
+            amountMinor: 500,
+            unitName: "session",
+            entitlementUnits: 500,
+            creatorRevenueShareBps: 2_000,
+            platformRevenueShareBps: 8_000,
+            refundPolicy: BillingRefundPolicy.FULL_WHEN_UNUSED,
+            expiryPolicy:
+              BillingEntitlementExpiryPolicy.NEVER_EXPIRES,
+            entitlementValidityDays: null,
+          },
+        });
+      }),
+    ).rejects.toThrow("BillingPriceVersion_v1_unit");
+  }, 30_000);
+
+  it("serializes price retirement against service-package order creation", async () => {
+    const fixture = await prisma.$transaction((tx) =>
+      createBillingSnapshotFixture(tx, "retire-order-race"),
+    );
+    let allowRetirementCommit!: () => void;
+    let markRetirementUpdated!: () => void;
+    const retirementMayCommit = new Promise<void>((resolve) => {
+      allowRetirementCommit = resolve;
+    });
+    const retirementUpdated = new Promise<void>((resolve) => {
+      markRetirementUpdated = resolve;
+    });
+
+    const retirement = prisma.$transaction(async (tx) => {
+      await tx.billingPriceVersion.update({
+        where: { id: fixture.priceVersionId },
+        data: {
+          status: BillingPriceVersionStatus.RETIRED,
+          retiredAt: new Date(),
+        },
+      });
+      markRetirementUpdated();
+      await retirementMayCommit;
+    });
+    await retirementUpdated;
+
+    const idempotencyKey =
+      `postgres-billing-retired-order-${crypto.randomUUID()}`;
+    const orderAttempt = prisma.rechargeOrder.create({
+      data: {
+        userWalletId: fixture.userWalletId,
+        representativeId: fixture.representativeId,
+        productCode: "agent-wallet:service-credit:v1",
+        billingProductId: fixture.productId,
+        billingPriceVersionId: fixture.priceVersionId,
+        productNameSnapshot: "Postgres service package",
+        unitNameSnapshot: "credit",
+        entitlementUnitsSnapshot: 500,
+        creatorRevenueShareBpsSnapshot: 2_000,
+        platformRevenueShareBpsSnapshot: 8_000,
+        refundPolicySnapshot:
+          BillingRefundPolicy.FULL_WHEN_UNUSED,
+        expiryPolicySnapshot:
+          BillingEntitlementExpiryPolicy.NEVER_EXPIRES,
+        entitlementValidityDaysSnapshot: null,
+        provider: PaymentProvider.MOCK,
+        amountCents: 500,
+        currency: "CNY",
+        status: RechargeOrderStatus.REQUIRES_PAYMENT,
+        idempotencyKey,
+      },
+    });
+    const orderExpectation = expect(orderAttempt).rejects.toThrow(
+      "RechargeOrder commercial snapshot does not match its active price version",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    allowRetirementCommit();
+
+    await retirement;
+    await orderExpectation;
+    await expect(
+      prisma.rechargeOrder.count({ where: { idempotencyKey } }),
+    ).resolves.toBe(0);
+  }, 30_000);
+
   it("atomically preserves and query-first recovers a real CREATED WeChat order after an ambiguous create result", async () => {
     const suffix = `${Date.now()}-${crypto.randomUUID()}`;
     const idempotencyKey =
@@ -77,7 +267,9 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
             merchantId: "1900000109",
             description: "Postgres recovery test",
             outTradeNo: input.rechargeOrderId!,
-            expiresAt: "2026-07-28T12:00:00.000Z",
+            expiresAt: new Date(
+              Date.now() + 10 * 60_000,
+            ).toISOString(),
             notifyUrl:
               "https://delegate.example/api/payments/wechat/notify",
             amountCents: input.amountCents,
@@ -163,7 +355,9 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
                 mode: "native",
                 outTradeNo: created.id,
                 expiresAt:
-                  "2026-07-28T12:00:00.000Z",
+                  new Date(
+                    created.createdAt.getTime() + 10 * 60_000,
+                  ).toISOString(),
               },
             },
           }),
@@ -1274,11 +1468,28 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
 
   it("allows only one concurrent withdrawal to freeze the same creator earning", async () => {
     const fixture = await createWalletFixture("withdraw-freeze", 0);
+    const payoutDestination =
+      await createVerifiedOwnerPayoutDestination(fixture);
     const concurrentClient = createReadBarrierClient<
       NonNullable<Parameters<typeof createWithdrawRequest>[1]>
     >("creatorEarning", "findMany");
 
     try {
+      await expect(
+        prisma.withdrawRequest.create({
+          data: {
+            ownerId: fixture.ownerId,
+            representativeId: fixture.representativeId,
+            status: WithdrawRequestStatus.PENDING_REVIEW,
+            amountCents: 1,
+            currency: "CNY",
+            idempotencyKey: `${fixture.suffix}:missing-payout-snapshot`,
+          },
+        }),
+      ).rejects.toThrow(
+        "New WithdrawRequest rows require an active verified payout destination snapshot",
+      );
+
       const earning = await prisma.creatorEarning.create({
         data: {
           ownerId: fixture.ownerId,
@@ -1342,6 +1553,36 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
         withdrawnCents: 0,
       });
       expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        payoutProfileId: payoutDestination.profileId,
+        payoutDestinationId: payoutDestination.destinationId,
+        payoutSubjectTypeSnapshot: PayoutSubjectType.OWNER,
+        payoutSubjectIdSnapshot: fixture.ownerId,
+        destinationMaskedLabelSnapshot: payoutDestination.maskedLabel,
+        destinationVersionSnapshot: payoutDestination.credentialVersion,
+      });
+      await expect(
+        prisma.withdrawRequest.update({
+          where: { id: requests[0]!.id },
+          data: {
+            destinationMaskedLabelSnapshot: "WeChat Pay ···· 9999",
+          },
+        }),
+      ).rejects.toThrow(
+        "Payout-bound WithdrawRequest commercial and destination snapshot fields are immutable",
+      );
+      expect(
+        await prisma.withdrawRequest.findUniqueOrThrow({
+          where: { id: requests[0]!.id },
+          select: {
+            destinationMaskedLabelSnapshot: true,
+            destinationVersionSnapshot: true,
+          },
+        }),
+      ).toEqual({
+        destinationMaskedLabelSnapshot: payoutDestination.maskedLabel,
+        destinationVersionSnapshot: payoutDestination.credentialVersion,
+      });
       expect(allocations).toHaveLength(1);
       expect(allocations[0]?.amountCents).toBe(100);
       expect(ledgerEntries).toHaveLength(2);
@@ -1373,6 +1614,7 @@ describePostgres("agent wallet PostgreSQL concurrency", () => {
     const fixture = await createWalletFixture("withdraw-reconciliation-gate", 10);
 
     try {
+      await createVerifiedOwnerPayoutDestination(fixture);
       await purchaseAgentTokens({
         externalUserId: fixture.externalUserId,
         representativeId: fixture.representativeId,
@@ -1736,6 +1978,101 @@ function expectNoBarrierTimeout(
   ).toBe(false);
 }
 
+async function createBillingSnapshotFixture(
+  tx: Prisma.TransactionClient,
+  scenario: string,
+) {
+  const suffix =
+    `postgres-billing-${scenario}-${Date.now()}-${crypto.randomUUID()}`;
+  const owner = await tx.owner.create({
+    data: {
+      displayName: `Billing constraint owner ${scenario}`,
+      creatorVerificationStatus: CreatorVerificationStatus.VERIFIED,
+    },
+  });
+  const representative = await tx.representative.create({
+    data: {
+      ownerId: owner.id,
+      slug: suffix,
+      displayName: `Billing constraint representative ${scenario}`,
+      roleSummary: "PostgreSQL billing constraint test fixture.",
+      tone: "neutral",
+      languages: ["en"],
+      freeScope: {},
+      paywalledIntents: [],
+      handoffPrompt: "test",
+      allowedSkills: [],
+      actionGate: {},
+      claimStatus: RepresentativeClaimStatus.CLAIMED,
+    },
+  });
+  const userWallet = await tx.userWallet.create({
+    data: {
+      externalUserId: `${suffix}:user`,
+      currency: "CNY",
+    },
+  });
+  const product = await tx.billingProduct.create({
+    data: {
+      representativeId: representative.id,
+      code: `service-package-${crypto.randomUUID()}`,
+      name: "Postgres service package",
+      status: BillingProductStatus.ACTIVE,
+    },
+  });
+  const priceVersion = await tx.billingPriceVersion.create({
+    data: {
+      billingProductId: product.id,
+      version: 1,
+      status: BillingPriceVersionStatus.ACTIVE,
+      currency: "CNY",
+      amountMinor: 500,
+      unitName: "credit",
+      entitlementUnits: 500,
+      creatorRevenueShareBps: 2_000,
+      platformRevenueShareBps: 8_000,
+      refundPolicy: BillingRefundPolicy.FULL_WHEN_UNUSED,
+      expiryPolicy: BillingEntitlementExpiryPolicy.NEVER_EXPIRES,
+      entitlementValidityDays: null,
+      publishedAt: new Date(),
+    },
+  });
+  const order = await tx.rechargeOrder.create({
+    data: {
+      userWalletId: userWallet.id,
+      representativeId: representative.id,
+      productCode: "agent-wallet:service-credit:v1",
+      billingProductId: product.id,
+      billingPriceVersionId: priceVersion.id,
+      productNameSnapshot: product.name,
+      unitNameSnapshot: priceVersion.unitName,
+      entitlementUnitsSnapshot: priceVersion.entitlementUnits,
+      creatorRevenueShareBpsSnapshot:
+        priceVersion.creatorRevenueShareBps,
+      platformRevenueShareBpsSnapshot:
+        priceVersion.platformRevenueShareBps,
+      refundPolicySnapshot: priceVersion.refundPolicy,
+      expiryPolicySnapshot: priceVersion.expiryPolicy,
+      entitlementValidityDaysSnapshot:
+        priceVersion.entitlementValidityDays,
+      provider: PaymentProvider.MOCK,
+      amountCents: priceVersion.amountMinor,
+      currency: priceVersion.currency,
+      status: RechargeOrderStatus.REQUIRES_PAYMENT,
+      idempotencyKey:
+        `postgres-billing-order-${crypto.randomUUID()}`,
+    },
+  });
+
+  return {
+    representativeId: representative.id,
+    userWalletId: userWallet.id,
+    productId: product.id,
+    priceVersionId: priceVersion.id,
+    orderId: order.id,
+  };
+}
+
 async function createWalletFixture(
   scenario: string,
   cashBalanceCents: number,
@@ -1819,6 +2156,52 @@ async function createWalletFixture(
       externalUserId,
     };
   });
+}
+
+async function createVerifiedOwnerPayoutDestination(
+  fixture: Pick<WalletFixture, "ownerId" | "suffix">,
+) {
+  const verifiedAt = new Date();
+  const maskedLabel = "WeChat Pay ···· 2048";
+  const profile = await prisma.creatorPayoutProfile.create({
+    data: {
+      subjectType: PayoutSubjectType.OWNER,
+      ownerId: fixture.ownerId,
+      status: CreatorPayoutProfileStatus.VERIFIED,
+      version: 1,
+      verifiedAt,
+      verifiedBy: "postgres-wallet-test",
+      createdByOwnerId: fixture.ownerId,
+    },
+  });
+  const destination = await prisma.payoutDestination.create({
+    data: {
+      profileId: profile.id,
+      kind: PayoutDestinationKind.WECHAT_PAY,
+      status: PayoutDestinationStatus.ACTIVE,
+      currency: "CNY",
+      maskedLabel,
+      credentialCiphertext: new Uint8Array([1]),
+      credentialIv: new Uint8Array(12).fill(2),
+      credentialAuthTag: new Uint8Array(16).fill(3),
+      credentialKeyVersion: "postgres-wallet-test-v1",
+      credentialAlgorithm: "aes-256-gcm",
+      credentialFingerprint: "a".repeat(64),
+      credentialVersion: 1,
+      verifiedAt,
+      verifiedBy: "postgres-wallet-test",
+      activatedAt: verifiedAt,
+      createdByOwnerId: fixture.ownerId,
+      idempotencyKey: `${fixture.suffix}:payout-destination`,
+    },
+  });
+
+  return {
+    profileId: profile.id,
+    destinationId: destination.id,
+    maskedLabel,
+    credentialVersion: destination.credentialVersion,
+  };
 }
 
 async function createGenerationRun(
@@ -2019,9 +2402,18 @@ async function cleanupWalletFixture(fixture: WalletFixture): Promise<void> {
   await prisma.representative.delete({
     where: { id: fixture.representativeId },
   });
-  await prisma.owner.delete({
-    where: { id: fixture.ownerId },
+  // Payout profiles and credential versions are deliberately append-only.
+  // PostgreSQL withdrawal fixtures that exercise destination binding therefore
+  // retain only their verified owner/profile/destination audit roots.
+  const stablePayoutProfile = await prisma.creatorPayoutProfile.findUnique({
+    where: { ownerId: fixture.ownerId },
+    select: { id: true },
   });
+  if (!stablePayoutProfile) {
+    await prisma.owner.delete({
+      where: { id: fixture.ownerId },
+    });
+  }
   await prisma.audienceIdentity.delete({
     where: { id: fixture.audienceIdentityId },
   });

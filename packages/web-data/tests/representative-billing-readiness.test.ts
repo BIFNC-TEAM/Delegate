@@ -20,7 +20,7 @@ const baseReadinessInput = {
 };
 
 describe("representative billing readiness", () => {
-  it("initializes a service-credit wallet with every newly created representative", () => {
+  it("initializes a wallet and three immutable CNY service packages with every representative", () => {
     const source = readFileSync(
       new URL("../src/representative-setup.ts", import.meta.url),
       "utf8",
@@ -29,53 +29,34 @@ describe("representative billing readiness", () => {
     expect(source).toMatch(
       /representative\.create\([\s\S]*?agentWallet:\s*\{\s*create:\s*\{[\s\S]*?tokenUnitPriceCents:\s*1,[\s\S]*?creatorRevenueShareBps:\s*2000,/,
     );
+    expect(source).toMatch(
+      /defaultCnyServicePackages\s*=\s*\[[\s\S]*?amountMinor:\s*500,[\s\S]*?entitlementUnits:\s*500,[\s\S]*?amountMinor:\s*2_000,[\s\S]*?entitlementUnits:\s*2_000,[\s\S]*?amountMinor:\s*10_000,[\s\S]*?entitlementUnits:\s*10_000,/,
+    );
+    expect(source).toMatch(
+      /representative\.create\([\s\S]*?billingProducts:\s*\{\s*create:\s*defaultCnyServicePackages\.map\([\s\S]*?status:\s*BillingProductStatus\.ACTIVE,[\s\S]*?priceVersions:\s*\{\s*create:\s*\{[\s\S]*?version:\s*1,[\s\S]*?status:\s*BillingPriceVersionStatus\.ACTIVE,[\s\S]*?currency:\s*"CNY",[\s\S]*?unitName:\s*"credit",[\s\S]*?creatorRevenueShareBps:\s*2_000,[\s\S]*?platformRevenueShareBps:\s*8_000,[\s\S]*?refundPolicy:\s*BillingRefundPolicy\.FULL_WHEN_UNUSED,[\s\S]*?expiryPolicy:\s*BillingEntitlementExpiryPolicy\.NEVER_EXPIRES,[\s\S]*?entitlementValidityDays:\s*null,[\s\S]*?publishedAt:\s*now,/,
+    );
   });
 
-  it("blocks paid pricing when the service-credit wallet is missing or invalid", () => {
-    const missingWallet = buildRepresentativeReadiness({
+  it("keeps Telegram Stars pricing independent from CNY service packages", () => {
+    const readiness = buildRepresentativeReadiness({
       ...baseReadinessInput,
-      paidPricingCount: 1,
-      agentWallet: null,
-    });
-    const invalidWallet = buildRepresentativeReadiness({
-      ...baseReadinessInput,
-      paidPricingCount: 1,
-      agentWallet: {
-        currency: "CNY",
-        tokenUnitPriceCents: 0,
-        creatorRevenueShareBps: 2000,
-      },
     });
 
-    expect(missingWallet.find((item) => item.id === "pricing")).toMatchObject({
-      complete: false,
-    });
-    expect(invalidWallet.find((item) => item.id === "pricing")).toMatchObject({
-      complete: false,
+    expect(readiness.find((item) => item.id === "pricing")).toMatchObject({
+      complete: true,
+      detail:
+        "Free, pass, deep help, and sponsor tiers are configured independently from CNY service packages.",
     });
   });
 
-  it("allows free-only pricing without a wallet and paid pricing with a valid wallet", () => {
-    const freeOnly = buildRepresentativeReadiness({
+  it("still requires all four representative pricing tiers", () => {
+    const readiness = buildRepresentativeReadiness({
       ...baseReadinessInput,
-      paidPricingCount: 0,
-      agentWallet: null,
-    });
-    const paid = buildRepresentativeReadiness({
-      ...baseReadinessInput,
-      paidPricingCount: 3,
-      agentWallet: {
-        currency: "CNY",
-        tokenUnitPriceCents: 1,
-        creatorRevenueShareBps: 2000,
-      },
+      pricingCount: 3,
     });
 
-    expect(freeOnly.find((item) => item.id === "pricing")).toMatchObject({
-      complete: true,
-    });
-    expect(paid.find((item) => item.id === "pricing")).toMatchObject({
-      complete: true,
+    expect(readiness.find((item) => item.id === "pricing")).toMatchObject({
+      complete: false,
     });
   });
 });

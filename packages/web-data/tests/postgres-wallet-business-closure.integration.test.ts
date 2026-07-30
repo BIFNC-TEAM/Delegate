@@ -1,10 +1,14 @@
 import {
   AudienceIdentityStatus,
   Channel,
+  CreatorPayoutProfileStatus,
   CreatorVerificationStatus,
   MessageSenderType,
   PaymentProvider,
   PaymentProviderEventType,
+  PayoutDestinationKind,
+  PayoutDestinationStatus,
+  PayoutSubjectType,
   RechargeRefundReversalStatus,
   RechargeRefundSubmissionStatus,
   RechargeOrderStatus,
@@ -1830,6 +1834,8 @@ describePostgres("agent wallet PostgreSQL business closure", () => {
 
   it("closes recharge, paid usage, creator payout, and reconciliation idempotently", async () => {
     const fixture = await createBusinessClosureFixture();
+    const payoutDestination =
+      await createVerifiedOwnerPayoutDestination(fixture);
     const reconciliationInput = {
       ownerId: fixture.ownerId,
       activeRepresentativeSlug: fixture.representativeSlug,
@@ -1971,6 +1977,12 @@ describePostgres("agent wallet PostgreSQL business closure", () => {
         status: "pending_review",
         amountCents: 80,
         frozenCents: 80,
+        payoutProfileId: payoutDestination.profileId,
+        payoutDestinationId: payoutDestination.destinationId,
+        payoutSubjectType: "owner",
+        payoutSubjectId: fixture.ownerId,
+        destinationMaskedLabel: payoutDestination.maskedLabel,
+        destinationVersion: payoutDestination.credentialVersion,
       });
       await expectHealthyReconciliation(reconciliationInput);
 
@@ -2416,6 +2428,52 @@ async function createBusinessClosureFixture(): Promise<BusinessClosureFixture> {
   });
 }
 
+async function createVerifiedOwnerPayoutDestination(
+  fixture: Pick<BusinessClosureFixture, "ownerId" | "suffix">,
+) {
+  const verifiedAt = new Date();
+  const maskedLabel = "WeChat Pay ···· 2048";
+  const profile = await prisma.creatorPayoutProfile.create({
+    data: {
+      subjectType: PayoutSubjectType.OWNER,
+      ownerId: fixture.ownerId,
+      status: CreatorPayoutProfileStatus.VERIFIED,
+      version: 1,
+      verifiedAt,
+      verifiedBy: "postgres-wallet-test",
+      createdByOwnerId: fixture.ownerId,
+    },
+  });
+  const destination = await prisma.payoutDestination.create({
+    data: {
+      profileId: profile.id,
+      kind: PayoutDestinationKind.WECHAT_PAY,
+      status: PayoutDestinationStatus.ACTIVE,
+      currency: "CNY",
+      maskedLabel,
+      credentialCiphertext: new Uint8Array([1]),
+      credentialIv: new Uint8Array(12).fill(2),
+      credentialAuthTag: new Uint8Array(16).fill(3),
+      credentialKeyVersion: "postgres-wallet-test-v1",
+      credentialAlgorithm: "aes-256-gcm",
+      credentialFingerprint: "b".repeat(64),
+      credentialVersion: 1,
+      verifiedAt,
+      verifiedBy: "postgres-wallet-test",
+      activatedAt: verifiedAt,
+      createdByOwnerId: fixture.ownerId,
+      idempotencyKey: `${fixture.suffix}:payout-destination`,
+    },
+  });
+
+  return {
+    profileId: profile.id,
+    destinationId: destination.id,
+    maskedLabel,
+    credentialVersion: destination.credentialVersion,
+  };
+}
+
 async function createGenerationRun(
   fixture: BusinessClosureFixture,
   label: string,
@@ -2560,9 +2618,17 @@ async function cleanupBusinessClosureFixture(
   await prisma.representative.delete({
     where: { id: fixture.representativeId },
   });
-  await prisma.owner.delete({
-    where: { id: fixture.ownerId },
+  // Payout profiles and credential versions are deliberately append-only.
+  // The complete payout closure fixture retains only its verified audit roots.
+  const stablePayoutProfile = await prisma.creatorPayoutProfile.findUnique({
+    where: { ownerId: fixture.ownerId },
+    select: { id: true },
   });
+  if (!stablePayoutProfile) {
+    await prisma.owner.delete({
+      where: { id: fixture.ownerId },
+    });
+  }
   await prisma.audienceIdentity.delete({
     where: { id: fixture.audienceIdentityId },
   });

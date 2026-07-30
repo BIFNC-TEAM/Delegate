@@ -255,11 +255,11 @@ export function RepresentativeIdentityBindingPanel({
                 ? "Matrix 账号已验证并替换完成。当前未加密私聊可以继续使用；旧 MXID 仅在当前 Matrix 连接下失效，其他连接和历史记录不受影响。"
                 : "The Matrix account was verified and replaced. The current unencrypted room can continue; the old MXID is revoked only for this Matrix connection, while other connections and history remain unchanged."
               : zh
-                ? "Matrix 账号绑定成功。当前未加密私聊已与登录的 Delegate 账号对应，Web 余额和服务权益会保持一致。"
-                : "Matrix linked. This unencrypted room now maps to the signed-in Delegate account and shares its Web balance and service entitlements."
+                ? "Matrix 账号绑定成功。当前未加密私聊已与登录的 Delegate 账号对应，代表专属服务额度会在 Web 与 Matrix 间保持一致。"
+                : "Matrix linked. This unencrypted room now maps to the signed-in Delegate account and shares its representative-scoped service credits with Web."
             : zh
-              ? "Telegram 绑定成功。这个私聊账号现在会使用当前 Delegate 账号的余额和服务权益。"
-              : "Telegram linked. This private-chat account now uses the current Delegate balance and service entitlements.",
+              ? "Telegram 绑定成功。这个私聊账号现在会使用当前 Delegate 账号在该代表下的服务额度。"
+              : "Telegram linked. This private-chat account now uses the signed-in Delegate account's service credits for this representative.",
         );
       } catch (nextError) {
         if (!active) return;
@@ -416,11 +416,11 @@ export function RepresentativeIdentityBindingPanel({
     const confirmed = window.confirm(
       binding.provider === "TELEGRAM"
         ? zh
-          ? `解除后，此 Telegram 账号在 ${target} 下将不再对应当前 Delegate 账号。如果同一个 Bot 被多个数字代表共用，这些代表都会受影响。历史消息、余额和订单不会删除。继续吗？`
-          : `This Telegram account will no longer map to the current Delegate account on ${target}. If several representatives share that Bot, all of them are affected. History, balance, and orders are preserved. Continue?`
+          ? `解除后，此 Telegram 账号在 ${target} 下将不再对应当前 Delegate 账号。如果同一个 Bot 被多个数字代表共用，这些代表都会受影响。历史消息、服务额度和订单不会删除。继续吗？`
+          : `This Telegram account will no longer map to the current Delegate account on ${target}. If several representatives share that Bot, all of them are affected. History, service credits, and orders are preserved. Continue?`
         : zh
-          ? `解除后，此 Matrix 账号在连接 ${target} 下将不再对应当前 Delegate 账号；共用该连接的代表都会受影响。历史消息、余额和订单不会删除。继续吗？`
-          : `This Matrix account will no longer map to the current Delegate account on connection ${target}; representatives sharing it are affected. History, balance, and orders are preserved. Continue?`,
+          ? `解除后，此 Matrix 账号在连接 ${target} 下将不再对应当前 Delegate 账号；共用该连接的代表都会受影响。历史消息、服务额度和订单不会删除。继续吗？`
+          : `This Matrix account will no longer map to the current Delegate account on connection ${target}; representatives sharing it are affected. History, service credits, and orders are preserved. Continue?`,
     );
     if (!confirmed) return;
 
@@ -450,11 +450,11 @@ export function RepresentativeIdentityBindingPanel({
         } catch (refreshError) {
           const reason =
             refreshError instanceof Error ? refreshError.message : "";
-          if (result.changed) {
-            setNotice(
-              zh
-                ? "解除绑定已经完成，但页面暂时无法同步最新状态，正在重新读取；历史消息、余额和订单均已保留。"
-                : "The binding was unlinked, but the page could not synchronize the latest state and is reloading it. History, balance, and orders are preserved.",
+            if (result.changed) {
+              setNotice(
+                zh
+                ? "解除绑定已经完成，但页面暂时无法同步最新状态，正在重新读取；历史消息、服务额度和订单均已保留。"
+                : "The binding was unlinked, but the page could not synchronize the latest state and is reloading it. History, service credits, and orders are preserved.",
             );
             setBindingLoadAttempt((current) => current + 1);
             return;
@@ -487,15 +487,15 @@ export function RepresentativeIdentityBindingPanel({
               : "The unlink completed, but another concurrent operation verified the same connection again. The page now reflects the authoritative server state."
             : result.changed
               ? zh
-                ? "已解除该渠道连接。历史消息、余额和订单均已保留；如需恢复，请重新生成并发送一次性绑定命令。"
-                : "The channel connection is unlinked. History, balance, and orders are preserved; create and send a new one-time command to restore it."
+                ? "已解除该渠道连接。历史消息、服务额度和订单均已保留；如需恢复，请重新生成并发送一次性绑定命令。"
+                : "The channel connection is unlinked. History, service credits, and orders are preserved; create and send a new one-time command to restore it."
               : stillLinked
                 ? zh
                   ? "绑定状态已在其他操作中发生变化，当前连接仍然有效；页面已同步最新状态。"
                   : "The binding changed in another operation and is still active. The page now shows the latest state."
                 : zh
-                  ? "该连接此前已解除，页面已同步最新状态。历史消息、余额和订单均已保留。"
-                  : "This connection was already unlinked. The page now shows the latest state, and history, balance, and orders are preserved.",
+                  ? "该连接此前已解除，页面已同步最新状态。历史消息、服务额度和订单均已保留。"
+                  : "This connection was already unlinked. The page now shows the latest state, and history, service credits, and orders are preserved.",
         );
       })
       .catch((nextError: unknown) => {
@@ -610,8 +610,8 @@ export function RepresentativeIdentityBindingPanel({
           <strong>Telegram</strong>
           <p>
             {zh
-              ? "把当前登录的 Delegate 账号与 Telegram 私聊身份关联，Web 充值余额和服务权益会保持一致。系统会明确显示当前代表使用的目标 Bot，请只在该 Bot 私聊中发送一次性命令。"
-              : "Link the signed-in Delegate account to your Telegram private-chat identity so Web balance and service entitlements stay aligned. The exact Bot for this representative will be shown with the one-time command."}
+              ? "把当前登录的 Delegate 账号与 Telegram 私聊身份关联，Web 与 Telegram 中的代表专属服务额度会保持一致。系统会明确显示当前代表使用的目标 Bot，请只在该 Bot 私聊中发送一次性命令。"
+              : "Link the signed-in Delegate account to your Telegram private-chat identity so representative-scoped service credits stay aligned across Web and Telegram. The exact Bot for this representative will be shown with the one-time command."}
           </p>
           <div className="field-stack">
             <span className="field-hint">
@@ -628,7 +628,7 @@ export function RepresentativeIdentityBindingPanel({
             </strong>
             {readiness.telegram ? (
               <span className="footer-note">
-                {zh ? "已验证，可共享 Web 余额与权益。" : "Verified and sharing Web balance and entitlements."}
+                {zh ? "已验证，可共享该代表的 Web 服务额度。" : "Verified and sharing this representative's Web service credits."}
               </span>
             ) : null}
           </div>
@@ -731,7 +731,7 @@ export function RepresentativeIdentityBindingPanel({
               </span>
             ) : readiness.matrix ? (
               <span className="footer-note">
-                {zh ? "已验证，可共享 Web 余额与权益。" : "Verified and sharing Web balance and entitlements."}
+                {zh ? "已验证，可共享该代表的 Web 服务额度。" : "Verified and sharing this representative's Web service credits."}
               </span>
             ) : null}
           </label>

@@ -1,6 +1,9 @@
 import {
   AmnLedgerEntryKind,
+  CreatorPayoutProfileStatus,
   CreatorVerificationStatus,
+  PayoutDestinationStatus,
+  PayoutSubjectType,
   Prisma,
   WalletTransactionEventType,
   WithdrawRequestStatus,
@@ -108,7 +111,7 @@ export type WorkspaceWalletSnapshot = {
     payoutInProgressCents: number;
   };
   primaryAction: {
-    kind: "withdraw" | "verify" | "none";
+    kind: "withdraw" | "verify" | "payout_profile" | "none";
     reason: string | null;
   };
   eventTypes: Array<{ id: string; count: number }>;
@@ -155,7 +158,9 @@ type WorkspaceWalletClient = Pick<
   | "walletTransaction"
   | "walletLedgerEntry"
   | "withdrawRequest"
->;
+> & {
+  payoutDestination?: Pick<typeof prisma.payoutDestination, "findFirst">;
+};
 
 export type WorkspaceWalletCursor = {
   view: WorkspaceWalletView;
@@ -390,7 +395,6 @@ export async function getWorkspaceWalletSnapshot(
   if (!activeRepresentativeSlug) {
     throw new WorkspaceWalletInputError("activeRepresentativeSlug is required.");
   }
-
   const [owner, representatives] = await Promise.all([
     client.owner.findUnique({
       where: { id: ownerId },
@@ -430,7 +434,46 @@ export async function getWorkspaceWalletSnapshot(
     },
   );
 
-  const [metricResult, eventPage, settlementPage, ledgerPage] = await Promise.all([
+  const [
+    activePayoutDestination,
+    metricResult,
+    eventPage,
+    settlementPage,
+    ledgerPage,
+  ] = await Promise.all([
+    client.payoutDestination
+      ? client.payoutDestination.findFirst({
+          where: {
+            currency: normalized.currency,
+            status: PayoutDestinationStatus.ACTIVE,
+            OR: [
+              { coolingOffUntil: null },
+              { coolingOffUntil: { lte: new Date() } },
+            ],
+            profile: {
+              status: CreatorPayoutProfileStatus.VERIFIED,
+              OR: [
+                {
+                  ownerId,
+                  subjectType: PayoutSubjectType.OWNER,
+                },
+                {
+                  subjectType: PayoutSubjectType.ORGANIZATION,
+                  organization: {
+                    members: {
+                      some: {
+                        ownerId,
+                        canManageBilling: true,
+                      },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+          select: { id: true },
+        })
+      : Promise.resolve({ id: "embedded-client-payout-destination" }),
     loadWorkspaceWalletMetrics(normalized, client),
     normalized.view === "overview" || normalized.view === "transactions"
       ? loadWorkspaceWalletEvents(normalized, client)
@@ -475,6 +518,7 @@ export async function getWorkspaceWalletSnapshot(
     );
   const primaryAction = resolveWorkspaceWalletPrimaryAction({
     creatorVerificationStatus: owner.creatorVerificationStatus,
+    hasVerifiedPayoutDestination: Boolean(activePayoutDestination),
     withdrawableCents: eligibleWithdrawableCents,
     hasPayoutInProgress: hasBlockingPayout,
   });
@@ -948,6 +992,7 @@ export function summarizeWorkspaceWalletEarningAggregate(input: {
 
 export function resolveWorkspaceWalletPrimaryAction(input: {
   creatorVerificationStatus: CreatorVerificationStatus;
+  hasVerifiedPayoutDestination?: boolean;
   withdrawableCents: number;
   payoutInProgressCents?: number;
   hasPayoutInProgress?: boolean;
@@ -960,6 +1005,12 @@ export function resolveWorkspaceWalletPrimaryAction(input: {
   }
   if (input.creatorVerificationStatus !== CreatorVerificationStatus.VERIFIED) {
     return { kind: "verify", reason: "creator_verification_required" };
+  }
+  if (input.hasVerifiedPayoutDestination === false) {
+    return {
+      kind: "payout_profile",
+      reason: "verified_payout_destination_required",
+    };
   }
   return { kind: "withdraw", reason: null };
 }

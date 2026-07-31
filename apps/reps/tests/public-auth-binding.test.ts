@@ -9,6 +9,7 @@ const profile = {
   issuer: "https://auth.example.com/oidc",
   subject: "logto-user-b",
   email: "user-b@example.com",
+  name: "User B",
   emailVerified: true,
 };
 
@@ -47,7 +48,13 @@ describe("public audience auth binding", () => {
       rotated: false,
     });
     expect(dependencies.createPublicChatSessionState).not.toHaveBeenCalled();
-    expect(dependencies.resolveWebAudienceContact).not.toHaveBeenCalled();
+    expect(dependencies.resolveWebAudienceContact).toHaveBeenCalledWith({
+      representativeId: "rep-1",
+      representativeSlug: "demo",
+      audienceId: "aud_existing",
+      displayName: "User B",
+      username: "user-b@example.com",
+    });
   });
 
   it("rotates the browser chat identity before switching registered accounts", async () => {
@@ -94,6 +101,8 @@ describe("public audience auth binding", () => {
       representativeId: "rep-1",
       representativeSlug: "demo",
       audienceId: "aud_rotated",
+      displayName: "User B",
+      username: "user-b@example.com",
     });
     expect(linkAudienceIdentityToAuth).toHaveBeenNthCalledWith(1, {
       audienceIdentityId: "identity-account-a",

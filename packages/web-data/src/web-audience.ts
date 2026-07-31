@@ -1397,7 +1397,7 @@ export async function resolveWebAudienceContact(
     const audienceId = normalizeWebAudienceId(input.audienceId);
     const channelUserId = buildWebChannelUserId(audienceId);
     const now = input.now ?? new Date();
-    const displayName = normalizeOptionalString(input.displayName) ?? "Web visitor";
+    const displayName = normalizeOptionalString(input.displayName);
     const username = normalizeOptionalString(input.username);
     const identity = await resolveAnonymousAudienceIdentity({ audienceId, now }, client);
 
@@ -1423,7 +1423,7 @@ export async function resolveWebAudienceContact(
         telegramUserId: channelUserId,
         channelUserId,
         ...(username ? { username } : {}),
-        displayName,
+        displayName: displayName ?? "Web visitor",
         source: "web",
         sourceChannel: "web",
         lastSeenAt: now,

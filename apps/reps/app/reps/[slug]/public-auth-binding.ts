@@ -51,6 +51,13 @@ export async function bindPublicAudienceAuthProfile(
       profile: input.profile,
       ...(input.now ? { now: input.now } : {}),
     });
+    await dependencies.resolveWebAudienceContact({
+      representativeId: input.representativeId,
+      representativeSlug: input.representativeSlug,
+      audienceId: input.sessionState.audienceId,
+      ...buildAudienceContactProfile(input.profile),
+      ...(input.now ? { now: input.now } : {}),
+    });
     return {
       audienceIdentityId: audienceIdentity.id,
       sessionState: input.sessionState,
@@ -69,6 +76,7 @@ export async function bindPublicAudienceAuthProfile(
     representativeId: input.representativeId,
     representativeSlug: input.representativeSlug,
     audienceId: rotatedSessionState.audienceId,
+    ...buildAudienceContactProfile(input.profile),
     ...(input.now ? { now: input.now } : {}),
   });
   if (!rotatedContact.audienceIdentityId) {
@@ -86,5 +94,18 @@ export async function bindPublicAudienceAuthProfile(
     audienceIdentityId: audienceIdentity.id,
     sessionState: rotatedSessionState,
     rotated: true,
+  };
+}
+
+function buildAudienceContactProfile(profile: ExternalAuthProfile) {
+  const displayName =
+    profile.name?.trim()
+    || profile.email?.trim()
+    || profile.phone?.trim();
+  const username = profile.email?.trim();
+
+  return {
+    ...(displayName ? { displayName } : {}),
+    ...(username ? { username } : {}),
   };
 }

@@ -2082,7 +2082,9 @@
 }
 .inbox-conversation-meta em.is-needs_human { color: #92400e; background: #fef3c7; }
 .inbox-conversation-meta em.is-human_active { color: #4338ca; background: var(--v2-indigo-soft); }
-.inbox-conversation-meta em.is-matrix { color: #4338ca; }
+.inbox-conversation-meta em.is-web { color: #0f766e; background: #ccfbf1; }
+.inbox-conversation-meta em.is-matrix { color: #4338ca; background: var(--v2-indigo-soft); }
+.inbox-conversation-meta em.is-telegram { color: #1d4ed8; background: #dbeafe; }
 .inbox-conversation-meta b { color: #0f766e; background: #ccfbf1; }
 .inbox-conversation-list > button > i { display: grid; min-width: 19px; height: 19px; padding: 0 4px; place-items: center; border-radius: 999px; color: #fff; background: var(--v2-teal); font-size: .52rem; font-style: normal; font-weight: 800; }
 .inbox-empty-list, .inbox-empty-thread { display: grid; justify-items: center; align-content: center; min-height: 240px; padding: 28px; text-align: center; }

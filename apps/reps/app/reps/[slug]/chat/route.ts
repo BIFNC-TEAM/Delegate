@@ -130,7 +130,8 @@ export async function POST(
           conversationId: conversation.id,
           text: body.message,
           senderId: principal.audienceId,
-          senderDisplayName: "Web visitor",
+          senderDisplayName:
+            contact.displayName || contact.username || "Web visitor",
           clientMessageId,
           channel: "web",
           walletBilling: {

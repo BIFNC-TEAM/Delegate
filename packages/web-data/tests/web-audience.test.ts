@@ -59,6 +59,32 @@ describe("web audience identity resolver", () => {
     });
   });
 
+  it("preserves an authenticated contact name during later web requests", async () => {
+    const client = new FakeWebAudienceClient();
+
+    await resolveWebAudienceContact(
+      {
+        representativeId: "rep-1",
+        representativeSlug: "lao-jia",
+        audienceId: "aud_123",
+        displayName: "Lin Chen",
+        username: "lin@example.com",
+      },
+      client,
+    );
+    const contact = await resolveWebAudienceContact(
+      {
+        representativeId: "rep-1",
+        representativeSlug: "lao-jia",
+        audienceId: "aud_123",
+      },
+      client,
+    );
+
+    expect(contact.displayName).toBe("Lin Chen");
+    expect(contact.username).toBe("lin@example.com");
+  });
+
   it("keeps the same anonymous audience isolated between representatives", async () => {
     const client = new FakeWebAudienceClient();
 

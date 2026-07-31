@@ -78,8 +78,6 @@ const frameworkCopy = {
     commandKey: "⌘ K",
     activeRepresentative: "当前代表",
     allRepresentatives: "全部代表",
-    online: "Control plane online",
-    systemStatus: "Web-first · Trust-first",
     pageActions: "页面操作",
     filters: "筛选",
     searchList: "搜索当前列表",
@@ -107,8 +105,6 @@ const frameworkCopy = {
     commandKey: "⌘ K",
     activeRepresentative: "Active representative",
     allRepresentatives: "All representatives",
-    online: "Control plane online",
-    systemStatus: "Web-first · Trust-first",
     pageActions: "Page actions",
     filters: "Filters",
     searchList: "Search this list",
@@ -284,13 +280,6 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
           </nav>
 
           <div className="dashboard-v2-sidebar-footer">
-            <div className="dashboard-v2-system-status">
-              <span />
-              <div>
-                <strong>{t.online}</strong>
-                <small>{t.systemStatus}</small>
-              </div>
-            </div>
             <div className="dashboard-v2-account">
               <span>{props.accountLabel.slice(0, 1).toUpperCase()}</span>
               <div>

@@ -231,18 +231,15 @@
 .dashboard-v2-nav-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--v2-teal); }
 
 .dashboard-v2-sidebar-footer { display: grid; gap: 10px; margin-top: auto; padding-top: 26px; }
-.dashboard-v2-system-status, .dashboard-v2-account {
+.dashboard-v2-account {
   display: grid; grid-template-columns: auto minmax(0,1fr) auto; gap: 9px; align-items: center;
   padding: 10px; border: 1px solid var(--v2-line); border-radius: 10px; background: #fff;
 }
-.dashboard-v2-system-status > span {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--v2-teal); box-shadow: 0 0 0 4px var(--v2-teal-soft-strong);
-}
-.dashboard-v2-system-status > div, .dashboard-v2-account > div { display: grid; min-width: 0; }
-.dashboard-v2-system-status strong, .dashboard-v2-account strong {
+.dashboard-v2-account > div { display: grid; min-width: 0; }
+.dashboard-v2-account strong {
   overflow: hidden; font-size: .72rem; text-overflow: ellipsis; white-space: nowrap;
 }
-.dashboard-v2-system-status small, .dashboard-v2-account small { color: var(--v2-muted); font-size: .64rem; }
+.dashboard-v2-account small { color: var(--v2-muted); font-size: .64rem; }
 .dashboard-v2-account > span {
   display: grid; width: 30px; height: 30px; place-items: center; border-radius: 50%;
   color: #fff; background: var(--v2-indigo); font-size: .68rem; font-weight: 800;

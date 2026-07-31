@@ -1,0 +1,108 @@
+# Local/CI Logto OSS baseline only.
+#
+# This stack intentionally binds both HTTP surfaces to loopback, uses generated
+# local credentials, and keeps database seeding/upgrades as explicit one-shot
+# jobs. It is not a production deployment manifest; see
+# docs/logto-self-hosting-runbook.md for the production contract.
+name: delegate-logto-local
+
+x-logto-environment: &logto-environment
+  NODE_ENV: production
+  DB_URL: postgresql://${LOGTO_OSS_DB_USER:-logto}:${LOGTO_OSS_DB_PASSWORD:-logto-local-only-change-me}@logto-postgres:5432/${LOGTO_OSS_DB_NAME:-logto}
+  DATABASE_STATEMENT_TIMEOUT: ${LOGTO_OSS_DATABASE_STATEMENT_TIMEOUT:-30000}
+  ENDPOINT: ${LOGTO_OSS_ENDPOINT:-http://127.0.0.1:3301}
+  ADMIN_ENDPOINT: ${LOGTO_OSS_ADMIN_ENDPOINT:-http://127.0.0.1:3302}
+  TRUST_PROXY_HEADER: "0"
+  SECRET_VAULT_KEK: ${LOGTO_OSS_SECRET_VAULT_KEK:-}
+  PRIVATE_KEY_ROTATION_GRACE_PERIOD: ${LOGTO_OSS_PRIVATE_KEY_ROTATION_GRACE_PERIOD:-0}
+
+x-logto-job: &logto-job
+  image: ${LOGTO_OSS_IMAGE:-svhd/logto:1.41.0}
+  environment: *logto-environment
+  depends_on:
+    logto-postgres:
+      condition: service_healthy
+  restart: "no"
+  networks:
+    - logto-local
+
+services:
+  logto-postgres:
+    image: ${LOGTO_OSS_POSTGRES_IMAGE:-postgres:17-alpine}
+    environment:
+      POSTGRES_DB: ${LOGTO_OSS_DB_NAME:-logto}
+      POSTGRES_USER: ${LOGTO_OSS_DB_USER:-logto}
+      POSTGRES_PASSWORD: ${LOGTO_OSS_DB_PASSWORD:-logto-local-only-change-me}
+    volumes:
+      - logto-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - logto-local
+
+  # Run exactly once against a new, empty Logto database:
+  #   pnpm logto:local:init
+  logto-seed:
+    <<: *logto-job
+    profiles: ["seed"]
+    entrypoint: ["sh", "-c"]
+    # Local/CI is deliberately offline-capable. Production must omit the
+    # breached-password-check bypass.
+    command:
+      - >
+        npm run cli db seed -- --swe
+        --disable-admin-pwned-password-check
+
+  # Run exactly once per reviewed Logto version upgrade, after a backup:
+  #   pnpm logto:local:alter -- --confirm-local-backup
+  logto-alteration:
+    <<: *logto-job
+    profiles: ["alteration"]
+    environment:
+      <<: *logto-environment
+      CI: "true"
+    entrypoint: ["sh", "-c"]
+    command:
+      - npm run alteration deploy latest
+
+  logto:
+    image: ${LOGTO_OSS_IMAGE:-svhd/logto:1.41.0}
+    environment: *logto-environment
+    depends_on:
+      logto-postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${LOGTO_OSS_CORE_PORT:-3301}:3001"
+      - "127.0.0.1:${LOGTO_OSS_ADMIN_PORT:-3302}:3002"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/oidc/.well-known/openid-configuration').then((response)=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - logto-local
+
+networks:
+  logto-local:
+    name: delegate-logto-local
+
+volumes:
+  logto-postgres-data:
+    name: delegate-logto-postgres-v1

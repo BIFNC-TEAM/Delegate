@@ -302,12 +302,13 @@ pnpm docker:up:temporal
 默认 `.env.example` 适合本地开发。重要配置包括：
 
 - `DATABASE_URL` 指向 Prisma 使用的 Postgres。
-- `LOGTO_ENDPOINT`、`LOGTO_APP_ID`、`LOGTO_APP_SECRET`、`LOGTO_REDIRECT_URI` 和 `LOGTO_SCOPES` 启用兼容 Logto OIDC 的 creator dashboard 登录。
+- `LOGTO_ENDPOINT` 与 `LOGTO_SCOPES` 是共享 OIDC 配置；Dashboard 只读取 `LOGTO_DASHBOARD_APP_ID` / `LOGTO_DASHBOARD_APP_SECRET`，Public Representatives 只读取 `LOGTO_REPS_APP_ID` / `LOGTO_REPS_APP_SECRET`。两者都从各自 canonical `NEXT_PUBLIC_*` origin 派生固定 `/auth/callback`，不会跨 namespace fallback，也不再读取 `LOGTO_REDIRECT_URI`。
+- `LOGTO_BACKCHANNEL_ENDPOINT` 可为 token 与 JWKS 请求提供受信的服务端内网地址，但 authorize URL 与 issuer 校验始终使用公网 `LOGTO_ENDPOINT`。旧 Reps 动态回调只在完整 `LOGTO_REPS_LEGACY_*` tuple 和有效未来 `DELEGATE_REPS_LEGACY_CALLBACK_UNTIL` 下原地完成；否则在 token 请求前返回 `410`。
 - `LOGTO_ACCOUNT_CENTER_URL` 可在 Owner Settings 中显示经过校验的 Logto 自助账户管理入口。生产值必须使用 HTTPS；本地开发可以使用 loopback HTTP。
 - Owner Settings 的通知偏好目前只控制 Dashboard 导航提醒，不会启用 Email、SMS、Slack、Webhook 或免打扰时段。
 - `NEXT_PUBLIC_DASHBOARD_URL` 和 `NEXT_PUBLIC_REPRESENTATIVE_URL` 是 production-shaped 应用必填的 canonical public origin。本地 override 会把它们固定为 loopback origin，避免复用远端环境文件时把开发登录重定向到远端主机。
 - `TELEGRAM_WEB_RECHARGE_BASE_URL` 可只为 Bot 配置公网 Web 充值 origin，而不改变 representative app 自身的 canonical origin；未配置时回退到 `NEXT_PUBLIC_REPRESENTATIVE_URL`。只有公网 HTTPS 值会生成内联按钮，本地 HTTP 值只以文本发送。
-- `DELEGATE_AUTH_SESSION_SECRET` 用于签名 dashboard auth 和 callback-state cookie。生产环境必须使用强 secret。
+- `DELEGATE_AUTH_SESSION_SECRET` 用于签名 Dashboard/Reps auth 与 callback-state cookie。Reps 固定回调的签名 state 同时携带 Representative slug 和完整匿名聊天绑定，不从 Host 或未签名 query 推导身份。生产环境必须使用强 secret。
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` 可以在非生产环境强制开启 dashboard 登录；生产环境始终要求登录。
 - `DELEGATE_AUTH_DEV_LOGIN` 和 `DELEGATE_AUTH_DEV_*` 身份仅在非生产环境接受；`DELEGATE_LOCAL_AUTH_BOOTSTRAP=true` 独立允许本地 fixture 绑定步骤。`pnpm docker:up:local` 会开启这两个开关，不会削弱生产登录边界。
 - `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` 会显示带明确本地演示标识的充值面板，便于测试 mock 充值、购买代表专属服务额度、用量扣减和未用额度退回闭环。创建、完成和退回充值都要求用户先登录；Telegram 来源还必须完成当前 Bot 的验证绑定。开发环境之外应保持为 `false`；mock mutation endpoints 在生产环境也会返回 `404`。真实 provider checkout、签名 payment webhook 和生产退款尚未形成 Web 支付闭环。

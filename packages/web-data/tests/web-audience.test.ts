@@ -1,6 +1,8 @@
+import { Prisma } from "@prisma/client";
 import { describe, expect, it } from "vitest";
 
 import {
+  AudienceAuthSessionRotationRequiredError,
   buildWebAudienceKey,
   buildWebAudienceExternalUserId,
   buildWebChannelUserId,
@@ -15,6 +17,8 @@ import {
   resolveWebAudienceConversation,
   resolveWebAudienceContact,
 } from "../src/web-audience";
+
+const LOGTO_ISSUER = "https://auth.example.com/oidc";
 
 describe("web audience identity resolver", () => {
   it("upserts one contact per representative/audience pair", async () => {
@@ -340,7 +344,7 @@ describe("web audience identity resolver", () => {
       audienceIdentityId: registered.id,
       provider: "LOGTO",
       providerSubject: "LogtoUserA",
-      issuer: null,
+      issuer: LOGTO_ISSUER,
       connectionId: null,
       verifiedAt: new Date("2026-07-04T12:00:00.000Z"),
       metadata: null,
@@ -358,6 +362,7 @@ describe("web audience identity resolver", () => {
         audienceIdentityId: anonymous.id,
         provider: "LOGTO",
         providerSubject: "LogtoUserA",
+        issuer: LOGTO_ISSUER,
         verifiedAt: new Date("2026-07-04T13:00:00.000Z"),
         now: new Date("2026-07-04T13:00:00.000Z"),
       },
@@ -378,6 +383,179 @@ describe("web audience identity resolver", () => {
       status: "REGISTERED",
       lastSeenAt: new Date("2026-07-04T13:00:00.000Z"),
     });
+  });
+
+  it("retries a serializable write conflict while binding an authenticated identity", async () => {
+    const client = new FakeWebAudienceClient();
+    const anonymous = await resolveAnonymousAudienceIdentity(
+      { audienceId: "aud_retry_anonymous" },
+      client,
+    );
+    const registered = await resolveAnonymousAudienceIdentity(
+      { audienceId: "aud_retry_registered" },
+      client,
+    );
+    registerIdentity(client, registered.id);
+    client.identityLinks.push({
+      id: "identity-link-retry-logto",
+      audienceIdentityId: registered.id,
+      provider: "LOGTO",
+      providerSubject: "RetryLogtoUser",
+      issuer: LOGTO_ISSUER,
+      connectionId: null,
+      verifiedAt: new Date("2026-07-04T12:00:00.000Z"),
+      metadata: null,
+    });
+    client.contacts.push(
+      buildContactRow({
+        id: "contact-retry-anonymous",
+        audienceIdentityId: anonymous.id,
+      }),
+    );
+
+    let transactionAttempts = 0;
+    let mergeClaimAttempts = 0;
+    const updateMany = client.audienceIdentity.updateMany;
+    client.audienceIdentity.updateMany = async (args: any) => {
+      if (
+        args.where.id === anonymous.id
+        && args.where.status === "ANONYMOUS"
+      ) {
+        mergeClaimAttempts += 1;
+        if (mergeClaimAttempts === 1) {
+          throw new Prisma.PrismaClientKnownRequestError(
+            "Transaction failed due to a write conflict or a deadlock.",
+            {
+              code: "P2034",
+              clientVersion: "test",
+            },
+          );
+        }
+      }
+      return updateMany(args);
+    };
+    client.$transaction = async (callback: any, _options?: unknown) => {
+      transactionAttempts += 1;
+      const transactionClient = Object.assign(
+        Object.create(Object.getPrototypeOf(client)),
+        client,
+        { $transaction: undefined },
+      );
+      return callback(transactionClient);
+    };
+
+    await expect(
+      resolveAuthenticatedAudienceIdentity(
+        {
+          audienceIdentityId: anonymous.id,
+          provider: "LOGTO",
+          providerSubject: "RetryLogtoUser",
+          issuer: LOGTO_ISSUER,
+        },
+        client,
+      ),
+    ).resolves.toMatchObject({ id: registered.id });
+    expect(transactionAttempts).toBe(2);
+    expect(mergeClaimAttempts).toBe(2);
+    expect(
+      client.audienceIdentities.find((identity) => identity.id === anonymous.id),
+    ).toMatchObject({
+      status: "MERGED",
+      mergedIntoId: registered.id,
+    });
+    expect(client.contacts[0]?.audienceIdentityId).toBe(registered.id);
+  });
+
+  it("shadow-reads evidenced legacy Audience links without mutating their issuer", async () => {
+    const client = new FakeWebAudienceClient();
+    const anonymous = await resolveAnonymousAudienceIdentity(
+      { audienceId: "aud_legacy_device" },
+      client,
+    );
+    const registered = await resolveAnonymousAudienceIdentity(
+      { audienceId: "aud_legacy_account" },
+      client,
+    );
+    registerIdentity(client, registered.id);
+    client.identityLinks.push({
+      id: "identity-link-legacy-logto",
+      audienceIdentityId: registered.id,
+      provider: "LOGTO",
+      providerSubject: "LegacyLogtoUser",
+      issuer: "delegate",
+      connectionId: null,
+      verifiedAt: new Date("2026-07-04T12:00:00.000Z"),
+      metadata: {
+        issuer: LOGTO_ISSUER,
+        source: "verified-id-token",
+      },
+    });
+
+    const resolved = await resolveAuthenticatedAudienceIdentity(
+      {
+        audienceIdentityId: anonymous.id,
+        provider: "LOGTO",
+        providerSubject: "LegacyLogtoUser",
+        issuer: LOGTO_ISSUER,
+        identityIssuerMode: "shadow",
+      },
+      client,
+    );
+
+    expect(resolved.id).toBe(registered.id);
+    expect(
+      client.identityLinks.find(
+        (link) => link.id === "identity-link-legacy-logto",
+      ),
+    ).toMatchObject({
+      issuer: "delegate",
+      metadata: {
+        issuer: LOGTO_ISSUER,
+      },
+    });
+  });
+
+  it("does not shadow-read a legacy Audience link with mismatched issuer evidence", async () => {
+    const client = new FakeWebAudienceClient();
+    const anonymous = await resolveAnonymousAudienceIdentity(
+      { audienceId: "aud_mismatch_device" },
+      client,
+    );
+    const registered = await resolveAnonymousAudienceIdentity(
+      { audienceId: "aud_mismatch_account" },
+      client,
+    );
+    registerIdentity(client, registered.id);
+    client.identityLinks.push({
+      id: "identity-link-mismatch-logto",
+      audienceIdentityId: registered.id,
+      provider: "LOGTO",
+      providerSubject: "MismatchedLogtoUser",
+      issuer: "delegate",
+      connectionId: null,
+      verifiedAt: new Date("2026-07-04T12:00:00.000Z"),
+      metadata: {
+        issuer: "https://other-auth.example.com/oidc",
+      },
+    });
+
+    await expect(
+      resolveAuthenticatedAudienceIdentity(
+        {
+          audienceIdentityId: anonymous.id,
+          provider: "LOGTO",
+          providerSubject: "MismatchedLogtoUser",
+          issuer: LOGTO_ISSUER,
+          identityIssuerMode: "shadow",
+        },
+        client,
+      ),
+    ).rejects.toMatchObject({ code: "P2002" });
+    expect(
+      client.audienceIdentities.find(
+        (identity) => identity.id === anonymous.id,
+      ),
+    ).toMatchObject({ status: "ANONYMOUS", mergedIntoId: null });
   });
 
   it("rejects a revoked authenticated identity link without restoring or merging it", async () => {
@@ -402,7 +580,7 @@ describe("web audience identity resolver", () => {
       audienceIdentityId: registered.id,
       provider: "LOGTO",
       providerSubject: "RevokedLogtoUser",
-      issuer: null,
+      issuer: LOGTO_ISSUER,
       connectionId: null,
       verifiedAt: originalVerifiedAt,
       revokedAt,
@@ -415,6 +593,7 @@ describe("web audience identity resolver", () => {
           audienceIdentityId: current.id,
           provider: "LOGTO",
           providerSubject: "RevokedLogtoUser",
+          issuer: LOGTO_ISSUER,
           verifiedAt: new Date("2026-07-04T13:00:00.000Z"),
           now: new Date("2026-07-04T13:00:00.000Z"),
         },
@@ -539,7 +718,50 @@ describe("web audience identity resolver", () => {
     ).toHaveLength(1);
   });
 
-  it("rejects automatic registered-to-registered account merges", async () => {
+  it("requires browser-session rotation before linking an unseen subject to a registered identity", async () => {
+    const client = new FakeWebAudienceClient();
+    const current = await resolveAnonymousAudienceIdentity(
+      { audienceId: "aud_current" },
+      client,
+    );
+    registerIdentity(client, current.id);
+    await linkAudienceIdentity(
+      {
+        audienceIdentityId: current.id,
+        provider: "LOGTO",
+        providerSubject: "current-logto-account",
+        issuer: LOGTO_ISSUER,
+      },
+      client,
+    );
+
+    await expect(
+      resolveAuthenticatedAudienceIdentity(
+        {
+          audienceIdentityId: current.id,
+          provider: "LOGTO",
+          providerSubject: "new-logto-account",
+          issuer: LOGTO_ISSUER,
+        },
+        client,
+      ),
+    ).rejects.toMatchObject({
+      code: "AUDIENCE_AUTH_SESSION_ROTATION_REQUIRED",
+    });
+    expect(
+      client.identityLinks.find(
+        (link) =>
+          link.provider === "LOGTO"
+          && link.providerSubject === "new-logto-account",
+      ),
+    ).toBeUndefined();
+    expect(client.audienceIdentities.find((identity) => identity.id === current.id)).toMatchObject({
+      status: "REGISTERED",
+      mergedIntoId: null,
+    });
+  });
+
+  it("requires browser-session rotation instead of merging registered accounts", async () => {
     const client = new FakeWebAudienceClient();
     const current = await resolveAnonymousAudienceIdentity({ audienceId: "aud_current" }, client);
     const existing = await resolveAnonymousAudienceIdentity({ audienceId: "aud_existing" }, client);
@@ -550,6 +772,7 @@ describe("web audience identity resolver", () => {
         audienceIdentityId: existing.id,
         provider: "LOGTO",
         providerSubject: "logto-account",
+        issuer: LOGTO_ISSUER,
       },
       client,
     );
@@ -560,14 +783,57 @@ describe("web audience identity resolver", () => {
           audienceIdentityId: current.id,
           provider: "LOGTO",
           providerSubject: "logto-account",
+          issuer: LOGTO_ISSUER,
         },
         client,
       ),
-    ).rejects.toThrow(/registered-to-registered merge is not allowed/i);
+    ).rejects.toBeInstanceOf(AudienceAuthSessionRotationRequiredError);
     expect(client.audienceIdentities.find((identity) => identity.id === current.id)).toMatchObject({
       status: "REGISTERED",
       mergedIntoId: null,
     });
+    expect(client.audienceIdentities.find((identity) => identity.id === existing.id)).toMatchObject({
+      status: "REGISTERED",
+      mergedIntoId: null,
+    });
+  });
+
+  it("reuses the current registered identity when the verified subject already owns it", async () => {
+    const client = new FakeWebAudienceClient();
+    const current = await resolveAnonymousAudienceIdentity(
+      { audienceId: "aud_current" },
+      client,
+    );
+    registerIdentity(client, current.id);
+    await linkAudienceIdentity(
+      {
+        audienceIdentityId: current.id,
+        provider: "LOGTO",
+        providerSubject: "same-logto-account",
+        issuer: LOGTO_ISSUER,
+      },
+      client,
+    );
+
+    const resolved = await resolveAuthenticatedAudienceIdentity(
+      {
+        audienceIdentityId: current.id,
+        provider: "LOGTO",
+        providerSubject: "same-logto-account",
+        issuer: LOGTO_ISSUER,
+        verifiedAt: new Date("2026-07-29T12:00:00.000Z"),
+      },
+      client,
+    );
+
+    expect(resolved.id).toBe(current.id);
+    expect(
+      client.identityLinks.filter(
+        (link) =>
+          link.provider === "LOGTO"
+          && link.providerSubject === "same-logto-account",
+      ),
+    ).toHaveLength(1);
   });
 
   it("resolves multi-hop merged identities to their canonical registered identity", async () => {
@@ -1054,10 +1320,39 @@ class FakeWebAudienceClient {
   };
 
   identityLink = {
-    findUnique: async (args: any) => {
-      const key = args.where.provider_providerSubject;
+    findFirst: async (args: any) => {
       const link = this.identityLinks.find(
-        (item) => item.provider === key.provider && item.providerSubject === key.providerSubject,
+        (item) =>
+          item.provider === args.where.provider
+          && item.issuer === args.where.issuer
+          && item.providerSubject === args.where.providerSubject
+          && (
+            typeof item.metadata === "object"
+            && item.metadata !== null
+            && !Array.isArray(item.metadata)
+            && (item.metadata as Record<string, unknown>).issuer
+              === args.where.metadata.equals
+          ),
+      );
+      return link
+        ? {
+            id: link.id,
+            audienceIdentityId: link.audienceIdentityId,
+            ...(link.issuer ? { issuer: link.issuer } : {}),
+            connectionId: link.connectionId,
+            revokedAt: link.revokedAt ?? null,
+          }
+        : null;
+    },
+    findUnique: async (args: any) => {
+      const key =
+        args.where.provider_issuer_providerSubject
+        ?? args.where.provider_providerSubject;
+      const link = this.identityLinks.find(
+        (item) =>
+          item.provider === key.provider
+          && (key.issuer === undefined || item.issuer === key.issuer)
+          && item.providerSubject === key.providerSubject,
       );
       return link
         ? {
@@ -1125,7 +1420,8 @@ class FakeWebAudienceClient {
             link.audienceIdentityId === args.where.audienceIdentityId) &&
           (args.where.provider === undefined || link.provider === args.where.provider) &&
           (args.where.providerSubject === undefined ||
-            link.providerSubject === args.where.providerSubject)
+            link.providerSubject === args.where.providerSubject) &&
+          (args.where.issuer === undefined || link.issuer === args.where.issuer)
         ) {
           Object.assign(link, args.data);
           count += 1;

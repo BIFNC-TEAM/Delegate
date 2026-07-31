@@ -14,7 +14,11 @@ export async function GET(
   const { slug } = await params;
   try {
     const session = await requireDashboardRepresentativeAccess(slug);
-    const snapshot = await listConversationInboxSnapshot(slug, session?.ownerId || "local-owner");
+    const snapshot = await listConversationInboxSnapshot(
+      slug,
+      session?.ownerId || "local-owner",
+      session?.ownerId,
+    );
     if (!snapshot) {
       return NextResponse.json({ error: "Representative not found." }, { status: 404 });
     }

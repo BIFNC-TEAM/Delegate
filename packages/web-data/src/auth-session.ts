@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import {
   createRemoteJWKSet,
@@ -13,18 +13,32 @@ export const DELEGATE_OWNER_AUTH_SESSION_COOKIE = "delegate_owner_auth_session";
 export const DELEGATE_OWNER_AUTH_STATE_COOKIE = "delegate_owner_auth_state";
 export const DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE = "delegate_audience_auth_session";
 export const DELEGATE_AUDIENCE_AUTH_STATE_COOKIE = "delegate_audience_auth_state";
+export const DELEGATE_REPRESENTATIVES_AUTH_STATE_COOKIE =
+  "delegate_representatives_auth_state_v3";
+export const DELEGATE_REPRESENTATIVES_AUTH_STATE_COOKIE_PATH = "/auth/callback";
 export const LEGACY_DELEGATE_AUTH_SESSION_COOKIE = "delegate_auth_session";
 export const LEGACY_DELEGATE_AUTH_STATE_COOKIE = "delegate_auth_state";
 export const DELEGATE_AUTH_SESSION_COOKIE = DELEGATE_OWNER_AUTH_SESSION_COOKIE;
 export const DELEGATE_AUTH_STATE_COOKIE = DELEGATE_OWNER_AUTH_STATE_COOKIE;
 export const DEFAULT_AUTH_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+export const DEFAULT_AUTH_STATE_TTL_SECONDS = 10 * 60;
+export const DEFAULT_AUTH_STATE_FUTURE_SKEW_SECONDS = 60;
+export const DEFAULT_DELEGATE_DEV_AUTH_ISSUER =
+  "https://local-auth.delegate.invalid/oidc";
 
 export type DelegateAuthActor = "owner" | "audience";
+export type LogtoApplication = "dashboard" | "representatives";
 
 export type DelegateAuthSession = {
   version: 1;
   actor: DelegateAuthActor;
   provider: "logto";
+  /**
+   * Optional only so legacy signed sessions still parse during the expand
+   * deployment. New sessions always contain an issuer, and authenticated
+   * identity revalidation must reject a session that does not contain one.
+   */
+  issuer?: string;
   subject: string;
   ownerId?: string;
   audienceIdentityId?: string;
@@ -34,8 +48,7 @@ export type DelegateAuthSession = {
   expiresAt: number;
 };
 
-export type DelegateAuthState = {
-  version: 1;
+type DelegateAuthStateBase = {
   actor: DelegateAuthActor;
   state: string;
   nonce: string;
@@ -46,8 +59,37 @@ export type DelegateAuthState = {
   expiresAt: number;
 };
 
+export type DelegateLegacyAuthState = DelegateAuthStateBase & {
+  version: 1;
+};
+
+export type DelegatePkceAuthState = DelegateAuthStateBase & {
+  version: 2;
+  codeVerifier: string;
+};
+
+export type DelegateRepresentativePublicChatState = {
+  audienceId: string;
+  sessionToken: string;
+  expiresAt: string;
+};
+
+export type DelegateRepresentativePkceAuthState = DelegateAuthStateBase & {
+  version: 3;
+  actor: "audience";
+  codeVerifier: string;
+  representativeSlug: string;
+  publicChat: DelegateRepresentativePublicChatState;
+};
+
+export type DelegateAuthState =
+  | DelegateLegacyAuthState
+  | DelegatePkceAuthState
+  | DelegateRepresentativePkceAuthState;
+
 export type LogtoOidcConfig = {
   endpoint: string;
+  backchannelEndpoint?: string;
   appId: string;
   appSecret: string;
   redirectUri: string;
@@ -72,6 +114,7 @@ type JwtClaims = {
   name?: unknown;
   iss?: unknown;
   aud?: unknown;
+  azp?: unknown;
   nonce?: unknown;
 };
 
@@ -86,15 +129,32 @@ type VerifyLogtoIdTokenOptions = {
 const logtoJwksCache = new Map<string, JWTVerifyGetKey>();
 
 export function readLogtoOidcConfig(
+  application: LogtoApplication,
   env: Record<string, string | undefined> = process.env,
 ): LogtoOidcConfig {
-  const endpoint = normalizeRequiredEnv(env.LOGTO_ENDPOINT, "LOGTO_ENDPOINT");
-  const appId = normalizeRequiredEnv(env.LOGTO_APP_ID, "LOGTO_APP_ID");
-  const appSecret = normalizeRequiredEnv(env.LOGTO_APP_SECRET, "LOGTO_APP_SECRET");
-  const redirectUri = normalizeRequiredEnv(env.LOGTO_REDIRECT_URI, "LOGTO_REDIRECT_URI");
+  const endpoint = normalizeOidcEndpoint(
+    normalizeRequiredEnv(env.LOGTO_ENDPOINT, "LOGTO_ENDPOINT"),
+    "LOGTO_ENDPOINT",
+  );
+  const backchannelEndpoint = normalizeOptionalOidcEndpoint(
+    env.LOGTO_BACKCHANNEL_ENDPOINT,
+    "LOGTO_BACKCHANNEL_ENDPOINT",
+  );
+  const namespace = getLogtoApplicationNamespace(application);
+  const appId = normalizeRequiredEnv(env[namespace.appId], namespace.appId);
+  const appSecret = normalizeRequiredEnv(
+    env[namespace.appSecret],
+    namespace.appSecret,
+  );
+  const redirectUri = buildCanonicalCallbackUri(
+    env[namespace.canonicalOrigin],
+    namespace.canonicalOrigin,
+    "/auth/callback",
+  );
 
   return {
     endpoint,
+    ...(backchannelEndpoint ? { backchannelEndpoint } : {}),
     appId,
     appSecret,
     redirectUri,
@@ -103,13 +163,119 @@ export function readLogtoOidcConfig(
 }
 
 export function isLogtoOidcConfigured(
+  application: LogtoApplication,
   env: Record<string, string | undefined> = process.env,
 ): boolean {
-  return Boolean(
-    env.LOGTO_ENDPOINT?.trim() &&
-      env.LOGTO_APP_ID?.trim() &&
-      env.LOGTO_APP_SECRET?.trim() &&
-      env.LOGTO_REDIRECT_URI?.trim(),
+  const namespace = getLogtoApplicationNamespace(application);
+  const clientTuple = [
+    ["LOGTO_ENDPOINT", env.LOGTO_ENDPOINT],
+    [namespace.appId, env[namespace.appId]],
+    [namespace.appSecret, env[namespace.appSecret]],
+  ] as const;
+  const configured = clientTuple.filter(([, value]) => Boolean(value?.trim()));
+  if (configured.length === 0) {
+    return false;
+  }
+  if (configured.length !== clientTuple.length) {
+    const missing = clientTuple
+      .filter(([, value]) => !value?.trim())
+      .map(([name]) => name);
+    throw new Error(
+      `Incomplete Logto ${application} configuration; missing ${missing.join(", ")}`,
+    );
+  }
+
+  readLogtoOidcConfig(application, env);
+  return true;
+}
+
+export function readLegacyRepresentativeLogtoOidcConfig(
+  representativeSlug: string,
+  env: Record<string, string | undefined> = process.env,
+): LogtoOidcConfig {
+  const endpoint = normalizeOidcEndpoint(
+    normalizeRequiredEnv(
+      env.LOGTO_REPS_LEGACY_ENDPOINT,
+      "LOGTO_REPS_LEGACY_ENDPOINT",
+    ),
+    "LOGTO_REPS_LEGACY_ENDPOINT",
+  );
+  const backchannelEndpoint = normalizeOptionalOidcEndpoint(
+    env.LOGTO_REPS_LEGACY_BACKCHANNEL_ENDPOINT,
+    "LOGTO_REPS_LEGACY_BACKCHANNEL_ENDPOINT",
+  );
+  const appId = normalizeRequiredEnv(
+    env.LOGTO_REPS_LEGACY_APP_ID,
+    "LOGTO_REPS_LEGACY_APP_ID",
+  );
+  const appSecret = normalizeRequiredEnv(
+    env.LOGTO_REPS_LEGACY_APP_SECRET,
+    "LOGTO_REPS_LEGACY_APP_SECRET",
+  );
+  const slug = normalizeRequiredText(representativeSlug, "representativeSlug");
+  const redirectUri = buildCanonicalCallbackUri(
+    env.NEXT_PUBLIC_REPRESENTATIVE_URL,
+    "NEXT_PUBLIC_REPRESENTATIVE_URL",
+    `/reps/${encodeURIComponent(slug)}/auth/callback`,
+  );
+
+  return {
+    endpoint,
+    ...(backchannelEndpoint ? { backchannelEndpoint } : {}),
+    appId,
+    appSecret,
+    redirectUri,
+    scopes: normalizeScopes(env.LOGTO_SCOPES),
+  };
+}
+
+export function isLegacyRepresentativeCallbackEnabled(
+  env: Record<string, string | undefined> = process.env,
+  now = new Date(),
+): boolean {
+  const deadline = env.DELEGATE_REPS_LEGACY_CALLBACK_UNTIL?.trim();
+  const match = deadline?.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|([+-])(\d{2}):(\d{2}))$/u,
+  );
+  if (!deadline || !match) {
+    return false;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const millisecond = Number((match[7] ?? "").padEnd(3, "0") || "0");
+  const offsetHour = Number(match[10] ?? "0");
+  const offsetMinute = Number(match[11] ?? "0");
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 23 ||
+    offsetMinute > 59
+  ) {
+    return false;
+  }
+  const offsetDirection = match[9] === "-" ? -1 : 1;
+  const offsetMs =
+    match[8] === "Z"
+      ? 0
+      : offsetDirection * (offsetHour * 60 + offsetMinute) * 60_000;
+  const normalizedDeadlineMs =
+    Date.UTC(year, month - 1, day, hour, minute, second, millisecond) -
+    offsetMs;
+  const deadlineMs = Date.parse(deadline);
+  return (
+    Number.isFinite(deadlineMs) &&
+    deadlineMs === normalizedDeadlineMs &&
+    deadlineMs > now.getTime()
   );
 }
 
@@ -122,7 +288,7 @@ export function shouldUseDelegateAuthDevLogin(
 
   const value = env.DELEGATE_AUTH_DEV_LOGIN?.trim().toLowerCase();
   if (!value) {
-    return true;
+    return false;
   }
 
   return value === "1" || value === "true" || value === "yes" || value === "on";
@@ -160,6 +326,7 @@ export function buildLogtoAuthorizeUrl(
   input: {
     state: string;
     nonce: string;
+    codeChallenge: string;
     prompt?: string | undefined;
   },
 ): string {
@@ -170,6 +337,11 @@ export function buildLogtoAuthorizeUrl(
   url.searchParams.set("scope", getLogtoScopes(config).join(" "));
   url.searchParams.set("state", input.state);
   url.searchParams.set("nonce", input.nonce);
+  url.searchParams.set(
+    "code_challenge",
+    normalizePkceCodeChallenge(input.codeChallenge),
+  );
+  url.searchParams.set("code_challenge_method", "S256");
   if (input.prompt) {
     url.searchParams.set("prompt", input.prompt);
   }
@@ -180,7 +352,11 @@ export async function exchangeLogtoCodeForTokens(
   config: LogtoOidcConfig,
   input: {
     code: string;
-    codeVerifier?: string | undefined;
+    /**
+     * Undefined is accepted only while an already-issued v1 auth-state cookie
+     * completes its bounded compatibility window.
+     */
+    codeVerifier: string | undefined;
   },
   fetchImpl: FetchLike = fetch,
 ): Promise<LogtoTokenSet> {
@@ -191,10 +367,13 @@ export async function exchangeLogtoCodeForTokens(
   body.set("client_secret", config.appSecret);
   body.set("redirect_uri", config.redirectUri);
   if (input.codeVerifier) {
-    body.set("code_verifier", input.codeVerifier);
+    body.set("code_verifier", normalizePkceCodeVerifier(input.codeVerifier));
   }
 
-  const response = await fetchImpl(new URL("/oidc/token", normalizeLogtoEndpoint(config.endpoint)).toString(), {
+  const tokenEndpoint = normalizeLogtoEndpoint(
+    config.backchannelEndpoint ?? config.endpoint,
+  );
+  const response = await fetchImpl(new URL("/oidc/token", tokenEndpoint).toString(), {
     method: "POST",
     headers: {
       "content-type": "application/x-www-form-urlencoded",
@@ -232,38 +411,59 @@ export async function buildVerifiedExternalAuthProfileFromLogtoIdToken(
   input: VerifyLogtoIdTokenOptions,
 ): Promise<ExternalAuthProfile> {
   const endpoint = normalizeLogtoEndpoint(config.endpoint);
+  const jwksEndpoint = normalizeLogtoEndpoint(
+    config.backchannelEndpoint ?? config.endpoint,
+  );
+  const issuer = getLogtoIssuer(endpoint);
   const verifyOptions: JWTVerifyOptions = {
     audience: normalizeRequiredText(config.appId, "appId"),
     clockTolerance: "60s",
+    issuer,
   };
   if (input.now) {
     verifyOptions.currentDate = input.now;
   }
   const { payload } = await jwtVerify(
     input.idToken,
-    input.jwks ?? getLogtoRemoteJwks(endpoint),
+    input.jwks ?? getLogtoRemoteJwks(jwksEndpoint),
     verifyOptions,
   );
   const claims = payload as JwtClaims;
-  if (!isAcceptedLogtoIssuer(claims.iss, endpoint)) {
-    throw new Error("Logto id_token issuer mismatch");
-  }
   if (claims.nonce !== normalizeRequiredText(input.nonce, "nonce")) {
     throw new Error("Logto id_token nonce mismatch");
   }
+  validateLogtoAuthorizedParty(claims, config.appId);
   return buildExternalAuthProfileFromLogtoClaims(claims);
+}
+
+function validateLogtoAuthorizedParty(
+  claims: JwtClaims,
+  appId: string,
+): void {
+  const expected = normalizeRequiredText(appId, "appId");
+  const multipleAudiences = Array.isArray(claims.aud) && claims.aud.length > 1;
+  if (
+    (multipleAudiences && claims.azp !== expected) ||
+    (claims.azp !== undefined && claims.azp !== expected)
+  ) {
+    throw new Error("Logto id_token authorized party mismatch");
+  }
 }
 
 function buildExternalAuthProfileFromLogtoClaims(claims: JwtClaims): ExternalAuthProfile {
   if (typeof claims.sub !== "string" || !claims.sub.trim()) {
     throw new Error("Logto id_token is missing sub");
   }
+  if (typeof claims.iss !== "string" || !claims.iss.trim()) {
+    throw new Error("Logto id_token is missing iss");
+  }
 
   const profile: ExternalAuthProfile = {
     provider: "logto",
+    issuer: claims.iss,
     subject: claims.sub,
     metadata: {
-      issuer: typeof claims.iss === "string" ? claims.iss : null,
+      issuer: claims.iss,
       audience: claims.aud ?? null,
     },
   };
@@ -290,6 +490,7 @@ export function buildDelegateDevAuthProfile(input: {
   subject?: string | undefined;
   email?: string | null | undefined;
   name?: string | null | undefined;
+  issuer?: string | undefined;
   representativeSlug?: string | undefined;
   audienceId?: string | undefined;
 }): ExternalAuthProfile {
@@ -304,6 +505,10 @@ export function buildDelegateDevAuthProfile(input: {
 
   return {
     provider: "logto",
+    issuer: normalizeRequiredText(
+      input.issuer ?? DEFAULT_DELEGATE_DEV_AUTH_ISSUER,
+      "issuer",
+    ),
     subject,
     email,
     emailVerified: Boolean(email),
@@ -321,6 +526,7 @@ export function buildDelegateDevAuthProfile(input: {
 
 export function createDelegateAuthSession(input: {
   actor: DelegateAuthActor;
+  issuer: string;
   subject: string;
   ownerId?: string | undefined;
   audienceIdentityId?: string | undefined;
@@ -336,6 +542,7 @@ export function createDelegateAuthSession(input: {
     version: 1,
     actor: input.actor,
     provider: "logto",
+    issuer: normalizeRequiredText(input.issuer, "issuer"),
     subject: normalizeRequiredText(input.subject, "subject"),
     issuedAt,
     expiresAt: issuedAt + ttlSeconds,
@@ -359,26 +566,60 @@ export function createDelegateAuthState(input: {
   actor: DelegateAuthActor;
   state: string;
   nonce: string;
+  codeVerifier: string;
   returnTo: string;
   representativeSlug?: string | undefined;
   audienceId?: string | undefined;
   now?: Date | undefined;
   ttlSeconds?: number | undefined;
-}): DelegateAuthState {
+}): DelegatePkceAuthState {
   const now = input.now ?? new Date();
   const issuedAt = Math.floor(now.getTime() / 1000);
-  const ttlSeconds = input.ttlSeconds ?? 10 * 60;
+  const ttlSeconds = normalizeAuthStateTtlSeconds(input.ttlSeconds);
 
   return {
-    version: 1,
+    version: 2,
     actor: input.actor,
     state: normalizeRequiredText(input.state, "state"),
     nonce: normalizeRequiredText(input.nonce, "nonce"),
+    codeVerifier: normalizePkceCodeVerifier(input.codeVerifier),
     returnTo: sanitizeRelativeReturnTo(input.returnTo),
     ...(input.representativeSlug
       ? { representativeSlug: normalizeRequiredText(input.representativeSlug, "representativeSlug") }
       : {}),
     ...(input.audienceId ? { audienceId: normalizeRequiredText(input.audienceId, "audienceId") } : {}),
+    issuedAt,
+    expiresAt: issuedAt + ttlSeconds,
+  };
+}
+
+export function createDelegateRepresentativeAuthState(input: {
+  state: string;
+  nonce: string;
+  codeVerifier: string;
+  returnTo: string;
+  representativeSlug: string;
+  publicChat: DelegateRepresentativePublicChatState;
+  now?: Date | undefined;
+  ttlSeconds?: number | undefined;
+}): DelegateRepresentativePkceAuthState {
+  const now = input.now ?? new Date();
+  const issuedAt = Math.floor(now.getTime() / 1000);
+  const ttlSeconds = normalizeAuthStateTtlSeconds(input.ttlSeconds);
+  const publicChat = normalizeRepresentativePublicChatState(input.publicChat);
+
+  return {
+    version: 3,
+    actor: "audience",
+    state: normalizeRequiredText(input.state, "state"),
+    nonce: normalizeRequiredText(input.nonce, "nonce"),
+    codeVerifier: normalizePkceCodeVerifier(input.codeVerifier),
+    returnTo: sanitizeRelativeReturnTo(input.returnTo),
+    representativeSlug: normalizeRequiredText(
+      input.representativeSlug,
+      "representativeSlug",
+    ),
+    publicChat,
     issuedAt,
     expiresAt: issuedAt + ttlSeconds,
   };
@@ -447,7 +688,13 @@ export function verifyDelegateAuthState(
     if (!isDelegateAuthState(state)) {
       return null;
     }
-    if (state.expiresAt <= Math.floor(now.getTime() / 1000)) {
+    const nowSeconds = Math.floor(now.getTime() / 1000);
+    if (
+      state.expiresAt <= nowSeconds ||
+      state.issuedAt > nowSeconds + DEFAULT_AUTH_STATE_FUTURE_SKEW_SECONDS ||
+      (state.version === 3 &&
+        Date.parse(state.publicChat.expiresAt) <= now.getTime())
+    ) {
       return null;
     }
     return state;
@@ -468,8 +715,21 @@ export function generateAuthStateToken(bytes = 24): string {
   return randomBytes(bytes).toString("base64url");
 }
 
+export function generatePkceCodeVerifier(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+export function derivePkceCodeChallenge(codeVerifier: string): string {
+  return createHash("sha256")
+    .update(normalizePkceCodeVerifier(codeVerifier), "ascii")
+    .digest("base64url");
+}
+
 function normalizeLogtoEndpoint(endpoint: string): string {
-  return normalizeRequiredText(endpoint, "endpoint").replace(/\/+$/, "");
+  return normalizeOidcEndpoint(
+    normalizeRequiredText(endpoint, "endpoint"),
+    "endpoint",
+  );
 }
 
 function getLogtoRemoteJwks(endpoint: string): JWTVerifyGetKey {
@@ -484,8 +744,8 @@ function getLogtoRemoteJwks(endpoint: string): JWTVerifyGetKey {
   return jwks;
 }
 
-function isAcceptedLogtoIssuer(value: unknown, endpoint: string): boolean {
-  return typeof value === "string" && (value === endpoint || value === `${endpoint}/oidc`);
+function getLogtoIssuer(endpoint: string): string {
+  return new URL("/oidc", endpoint).toString().replace(/\/+$/, "");
 }
 
 function getLogtoScopes(config: LogtoOidcConfig): string[] {
@@ -500,6 +760,83 @@ function normalizeScopes(scopes: string | undefined): string[] {
   return normalized?.length ? normalized : ["openid", "profile", "email", "phone"];
 }
 
+function getLogtoApplicationNamespace(application: LogtoApplication): {
+  appId: "LOGTO_DASHBOARD_APP_ID" | "LOGTO_REPS_APP_ID";
+  appSecret: "LOGTO_DASHBOARD_APP_SECRET" | "LOGTO_REPS_APP_SECRET";
+  canonicalOrigin:
+    | "NEXT_PUBLIC_DASHBOARD_URL"
+    | "NEXT_PUBLIC_REPRESENTATIVE_URL";
+} {
+  if (application === "dashboard") {
+    return {
+      appId: "LOGTO_DASHBOARD_APP_ID",
+      appSecret: "LOGTO_DASHBOARD_APP_SECRET",
+      canonicalOrigin: "NEXT_PUBLIC_DASHBOARD_URL",
+    };
+  }
+  return {
+    appId: "LOGTO_REPS_APP_ID",
+    appSecret: "LOGTO_REPS_APP_SECRET",
+    canonicalOrigin: "NEXT_PUBLIC_REPRESENTATIVE_URL",
+  };
+}
+
+function buildCanonicalCallbackUri(
+  value: string | undefined,
+  name: string,
+  callbackPath: string,
+): string {
+  const normalized = normalizeRequiredEnv(value, name);
+  if (normalized.includes("\\")) {
+    throw new Error(`${name} must be an HTTP(S) origin`);
+  }
+  let origin: URL;
+  try {
+    origin = new URL(normalized);
+  } catch {
+    throw new Error(`${name} must be an HTTP(S) origin`);
+  }
+  if (
+    (origin.protocol !== "http:" && origin.protocol !== "https:") ||
+    origin.username ||
+    origin.password ||
+    (origin.pathname !== "/" && origin.pathname !== "") ||
+    origin.search ||
+    origin.hash
+  ) {
+    throw new Error(`${name} must be an HTTP(S) origin`);
+  }
+  return new URL(callbackPath, `${origin.origin}/`).toString();
+}
+
+function normalizeOptionalOidcEndpoint(
+  value: string | undefined,
+  name: string,
+): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalizeOidcEndpoint(normalized, name) : undefined;
+}
+
+function normalizeOidcEndpoint(value: string, name: string): string {
+  if (value.includes("\\")) {
+    throw new Error(`${name} must be an HTTP(S) endpoint`);
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an HTTP(S) endpoint`);
+  }
+  if (
+    (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") ||
+    endpoint.username ||
+    endpoint.password
+  ) {
+    throw new Error(`${name} must be an HTTP(S) endpoint`);
+  }
+  return endpoint.toString().replace(/\/+$/, "");
+}
+
 function normalizeRequiredEnv(value: string | undefined, name: string): string {
   return normalizeRequiredText(value, name);
 }
@@ -510,6 +847,57 @@ function normalizeRequiredText(value: string | undefined, name: string): string 
     throw new Error(`${name} is required`);
   }
   return normalized;
+}
+
+function normalizePkceCodeVerifier(value: string): string {
+  const normalized = normalizeRequiredText(value, "codeVerifier");
+  if (!/^[A-Za-z0-9._~-]{43,128}$/.test(normalized)) {
+    throw new Error("codeVerifier must be a valid RFC 7636 PKCE verifier");
+  }
+  return normalized;
+}
+
+function normalizePkceCodeChallenge(value: string): string {
+  const normalized = normalizeRequiredText(value, "codeChallenge");
+  if (!/^[A-Za-z0-9_-]{43}$/.test(normalized)) {
+    throw new Error("codeChallenge must be a valid S256 PKCE challenge");
+  }
+  return normalized;
+}
+
+function normalizeAuthStateTtlSeconds(value: number | undefined): number {
+  const ttlSeconds = value ?? DEFAULT_AUTH_STATE_TTL_SECONDS;
+  if (
+    !Number.isInteger(ttlSeconds) ||
+    ttlSeconds <= 0 ||
+    ttlSeconds > DEFAULT_AUTH_STATE_TTL_SECONDS
+  ) {
+    throw new Error(
+      `ttlSeconds must be an integer between 1 and ${DEFAULT_AUTH_STATE_TTL_SECONDS}`,
+    );
+  }
+  return ttlSeconds;
+}
+
+function normalizeRepresentativePublicChatState(
+  state: DelegateRepresentativePublicChatState,
+): DelegateRepresentativePublicChatState {
+  const audienceId = normalizeRequiredText(state.audienceId, "publicChat.audienceId");
+  const sessionToken = normalizeRequiredText(
+    state.sessionToken,
+    "publicChat.sessionToken",
+  );
+  if (sessionToken.length < 24) {
+    throw new Error("publicChat.sessionToken must contain at least 24 characters");
+  }
+  const expiresAt = normalizeRequiredText(
+    state.expiresAt,
+    "publicChat.expiresAt",
+  );
+  if (!Number.isFinite(Date.parse(expiresAt))) {
+    throw new Error("publicChat.expiresAt must be an absolute timestamp");
+  }
+  return { audienceId, sessionToken, expiresAt };
 }
 
 function sanitizeRelativeReturnTo(value: string): string {
@@ -552,19 +940,61 @@ function isDelegateAuthState(value: unknown): value is DelegateAuthState {
     return false;
   }
   const state = value as Partial<DelegateAuthState>;
-  return (
-    state.version === 1 &&
-    (state.actor === "owner" || state.actor === "audience") &&
-    typeof state.state === "string" &&
-    typeof state.nonce === "string" &&
-    typeof state.returnTo === "string" &&
-    isOptionalString(state.representativeSlug) &&
-    isOptionalString(state.audienceId) &&
-    typeof state.issuedAt === "number" &&
-    typeof state.expiresAt === "number"
-  );
+  if (
+    (state.actor !== "owner" && state.actor !== "audience") ||
+    typeof state.state !== "string" ||
+    !state.state ||
+    typeof state.nonce !== "string" ||
+    !state.nonce ||
+    typeof state.returnTo !== "string" ||
+    !state.returnTo ||
+    !isOptionalString(state.representativeSlug) ||
+    !isOptionalString(state.audienceId) ||
+    typeof state.issuedAt !== "number" ||
+    typeof state.expiresAt !== "number" ||
+    !Number.isInteger(state.issuedAt) ||
+    !Number.isInteger(state.expiresAt) ||
+    state.expiresAt <= state.issuedAt ||
+    state.expiresAt - state.issuedAt > DEFAULT_AUTH_STATE_TTL_SECONDS
+  ) {
+    return false;
+  }
+  if (state.version === 2) {
+    return (
+      typeof state.codeVerifier === "string" &&
+      /^[A-Za-z0-9._~-]{43,128}$/.test(state.codeVerifier)
+    );
+  }
+  if (state.version === 3) {
+    return (
+      state.actor === "audience" &&
+      typeof state.representativeSlug === "string" &&
+      Boolean(state.representativeSlug) &&
+      typeof state.codeVerifier === "string" &&
+      /^[A-Za-z0-9._~-]{43,128}$/.test(state.codeVerifier) &&
+      isRepresentativePublicChatState(state.publicChat)
+    );
+  }
+  return state.version === 1;
 }
 
 function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
+}
+
+function isRepresentativePublicChatState(
+  value: unknown,
+): value is DelegateRepresentativePublicChatState {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const state = value as Partial<DelegateRepresentativePublicChatState>;
+  return (
+    typeof state.audienceId === "string" &&
+    Boolean(state.audienceId) &&
+    typeof state.sessionToken === "string" &&
+    state.sessionToken.length >= 24 &&
+    typeof state.expiresAt === "string" &&
+    Number.isFinite(Date.parse(state.expiresAt))
+  );
 }

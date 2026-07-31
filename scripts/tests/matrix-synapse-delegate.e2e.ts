@@ -24,6 +24,8 @@ const connectionId =
   process.env.MATRIX_AS_CONNECTION_ID?.trim() || "delegate-matrix-as";
 const suffix = randomBytes(6).toString("hex");
 const representativeSlug = "lin-founder-rep";
+const matrixLocalE2eLogtoIssuer =
+  "https://matrix-local-e2e.delegate.invalid/oidc";
 
 async function main() {
   try {
@@ -756,7 +758,7 @@ async function ensureRegisteredWebTestIdentity(localUsername: string) {
       audienceIdentityId: identity.id,
       provider: "LOGTO",
       providerSubject,
-      issuer: "matrix-local-e2e",
+      issuer: matrixLocalE2eLogtoIssuer,
       verifiedAt: new Date(),
       assuranceLevel: "PLATFORM_VERIFIED",
       proofMetadata: {
@@ -765,7 +767,7 @@ async function ensureRegisteredWebTestIdentity(localUsername: string) {
     },
     update: {
       audienceIdentityId: identity.id,
-      issuer: "matrix-local-e2e",
+      issuer: matrixLocalE2eLogtoIssuer,
       verifiedAt: new Date(),
       assuranceLevel: "PLATFORM_VERIFIED",
       revokedAt: null,

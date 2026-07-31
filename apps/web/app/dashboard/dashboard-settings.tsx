@@ -754,14 +754,11 @@ export function DashboardSettings({
                     setProfileDraft((current) => ({
                       ...current,
                       preferredLocale:
-                        (event.target.value as OwnerPreferredLocale) || null,
+                        event.target.value as OwnerPreferredLocale,
                     }))
                   }
-                  value={profileDraft.preferredLocale ?? ""}
+                  value={profileDraft.preferredLocale ?? "zh"}
                 >
-                  <option disabled value="">
-                    {copy.languageUnsetOption}
-                  </option>
                   <option value="zh">中文</option>
                   <option value="en">English</option>
                 </select>
@@ -914,9 +911,14 @@ export function DashboardSettings({
             </div>
             {logoutHref ? (
               <div className="settings-card-actions">
-                <a className="dashboard-v2-button-secondary" href={logoutHref}>
-                  {copy.signOutCurrentSession}
-                </a>
+                <form action={logoutHref} method="post">
+                  <button
+                    className="dashboard-v2-button-secondary"
+                    type="submit"
+                  >
+                    {copy.signOutCurrentSession}
+                  </button>
+                </form>
               </div>
             ) : null}
           </SettingsCard>
@@ -1231,7 +1233,7 @@ function profileDraftFromSnapshot(
   return {
     displayName: snapshot.profile?.displayName ?? "",
     timezone: snapshot.profile?.timezone ?? "UTC",
-    preferredLocale: snapshot.profile?.preferredLocale ?? null,
+    preferredLocale: snapshot.profile?.preferredLocale ?? "zh",
   };
 }
 
@@ -1260,7 +1262,7 @@ function isProfileDirty(
     profile &&
       (profile.displayName !== draft.displayName ||
         profile.timezone !== draft.timezone ||
-        profile.preferredLocale !== draft.preferredLocale),
+        (profile.preferredLocale ?? "zh") !== draft.preferredLocale),
   );
 }
 
@@ -1428,7 +1430,6 @@ const settingsCopy = {
     invalidStoredTimeZone: (timeZone: string) => `需更新：${timeZone}`,
     languageLabel: "默认界面语言",
     languageHelp: "保存后用于后续 Dashboard 访问。",
-    languageUnsetOption: "请选择账户默认语言",
     languageInvalid: "请选择支持的界面语言。",
     profileSavedTitle: "资料已保存",
     profileSavedMessage: "Owner 资料与偏好已经更新。",
@@ -1541,7 +1542,6 @@ const settingsCopy = {
     invalidStoredTimeZone: (timeZone: string) => `Update required: ${timeZone}`,
     languageLabel: "Default interface language",
     languageHelp: "Applied to future Dashboard visits after saving.",
-    languageUnsetOption: "Choose an account default",
     languageInvalid: "Choose a supported interface language.",
     profileSavedTitle: "Profile saved",
     profileSavedMessage: "The Owner profile and preferences are up to date.",

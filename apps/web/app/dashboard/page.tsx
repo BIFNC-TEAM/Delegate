@@ -1,12 +1,9 @@
 import { cookies, headers } from "next/headers";
 
-import { demoRepresentative } from "@delegate/domain";
 import {
-  extractCountryHint,
   getCookieLocale,
   localeCookieName,
   normalizeLocale,
-  resolveLocale,
   resolveServiceUrl,
 } from "@delegate/web-ui";
 import {
@@ -73,15 +70,12 @@ export default async function DashboardPage({
       ? getOwnerOperationalAlertSummary({ ownerId }).catch(() => unavailableAlerts)
       : Promise.resolve(unavailableAlerts),
   ]);
-  const locale = resolveLocale({
-    requestedLocale:
-      normalizeLocale(params?.lang)
-      ?? ownerPreferences?.preferredLocale
-      ?? getCookieLocale(cookieStore.get(localeCookieName)?.value),
-    acceptLanguage: headerStore.get("accept-language"),
-    countryHint: extractCountryHint(headerStore),
-  });
-  const fallbackSlug = representatives[0]?.slug ?? demoRepresentative.slug;
+  const locale =
+    normalizeLocale(params?.lang)
+    ?? ownerPreferences?.preferredLocale
+    ?? getCookieLocale(cookieStore.get(localeCookieName)?.value)
+    ?? "zh";
+  const fallbackSlug = representatives[0]?.slug ?? "";
   const requestedSlug = params?.rep?.trim();
   const activeSlug =
     requestedSlug && representatives.some((representative) => representative.slug === requestedSlug)
@@ -92,18 +86,29 @@ export default async function DashboardPage({
     ownerSettings.profile?.timezone ?? "UTC",
   );
   const [inboxSnapshot, representativeOperations] = await Promise.all([
-    activeView === "inbox"
-      ? listConversationInboxSnapshot(activeSlug, ownerSession?.ownerId || "local-owner")
+    activeView === "inbox" && activeSlug
+      ? listConversationInboxSnapshot(
+          activeSlug,
+          ownerSession?.ownerId || "local-owner",
+          ownerSession?.ownerId,
+        )
       : Promise.resolve(null),
-    activeView === "representatives"
-      ? getRepresentativeOperationsSnapshot(activeSlug)
+    activeView === "representatives" && activeSlug
+      ? getRepresentativeOperationsSnapshot({
+          representativeSlug: activeSlug,
+          ownerId,
+        })
       : Promise.resolve(null),
   ]);
   const selectedConversationId =
     params?.conversation?.trim() || inboxSnapshot?.conversations[0]?.id || null;
   const conversationDetail =
     activeView === "inbox" && selectedConversationId
-      ? await getConversationDetailSnapshot(activeSlug, selectedConversationId)
+      ? await getConversationDetailSnapshot(
+          activeSlug,
+          selectedConversationId,
+          ownerSession?.ownerId,
+        )
       : null;
   const currentHost = headerStore.get("x-forwarded-host") ?? headerStore.get("host");
   const websiteBaseUrl = resolveServiceUrl(process.env.NEXT_PUBLIC_SITE_URL, "http://localhost:3000", {

@@ -17,7 +17,11 @@ export async function GET(
     async start(controller) {
       let previous = "";
       const send = async () => {
-        const snapshot = await listConversationInboxSnapshot(slug, operatorId);
+        const snapshot = await listConversationInboxSnapshot(
+          slug,
+          operatorId,
+          session?.ownerId,
+        );
         if (!snapshot) {
           controller.enqueue(encoder.encode("event: unavailable\ndata: {}\n\n"));
           return;

@@ -63,18 +63,6 @@ export function getRepresentativeAuthCookiePath(representativeSlug: string): str
   return `/reps/${representativeSlug}`;
 }
 
-export function buildRepresentativeAuthCallbackUrl(
-  request: Request,
-  representativeSlug: string,
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return buildRepresentativeAuthRedirectUrl(
-    request,
-    `/reps/${representativeSlug}/auth/callback`,
-    env,
-  ).toString();
-}
-
 export function buildRepresentativeAuthRedirectUrl(
   request: Request,
   pathname: string,

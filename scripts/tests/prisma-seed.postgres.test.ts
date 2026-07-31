@@ -53,6 +53,7 @@ describePostgres("fresh PostgreSQL seed", () => {
         identityLinks: [
           {
             email: "creator@delegate.local",
+            issuer: "https://local-auth.delegate.invalid/oidc",
             providerSubject: "delegate-dev-owner",
             verifiedAt: expect.any(Date),
           },
@@ -62,6 +63,21 @@ describePostgres("fresh PostgreSQL seed", () => {
     expect(seeded.skillInstallCount).toBeGreaterThan(0);
     expect(seeded.skillReleaseCount).toBeGreaterThan(0);
 
+    await prisma.ownerIdentityLink.updateMany({
+      where: {
+        ownerId: "owner_lin_demo",
+        provider: "LOGTO",
+        providerSubject: "delegate-dev-owner",
+      },
+      data: {
+        issuer: null,
+        metadata: {
+          mode: "development",
+          actor: "owner",
+          fixture: "prisma-seed",
+        },
+      },
+    });
     const secondRun = runSeedCommand();
     expect(secondRun).toContain(
       `Seed skipped: representative "${representativeSlug}" already exists.`,
@@ -86,6 +102,7 @@ async function readSeedSnapshot() {
             },
             select: {
               email: true,
+              issuer: true,
               providerSubject: true,
               verifiedAt: true,
             },

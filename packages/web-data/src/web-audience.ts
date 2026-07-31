@@ -4,6 +4,7 @@ import {
   normalizeMatrixServerName,
   normalizeMatrixUserId,
 } from "./matrix-identifiers";
+import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
 import { prisma } from "./prisma";
 
 const WEB_RECENT_TURN_LIMIT = 8;
@@ -100,13 +101,45 @@ export type WebAudienceClient = {
     }): Promise<WebAudienceIdentity | null>;
   };
   identityLink: {
-    findUnique(args: {
+    findFirst(args: {
       where: {
-        provider_providerSubject: {
-          provider: WebAudienceIdentityLinkProvider;
-          providerSubject: string;
+        provider: WebAudienceIdentityLinkProvider;
+        issuer: string;
+        providerSubject: string;
+        metadata: {
+          path: string[];
+          equals: string;
         };
       };
+      select: {
+        id: true;
+        audienceIdentityId: true;
+        issuer: true;
+        connectionId: true;
+        revokedAt: true;
+      };
+    }): Promise<{
+      id?: string;
+      audienceIdentityId: string;
+      issuer?: string;
+      connectionId?: string | null;
+      revokedAt?: Date | null;
+    } | null>;
+    findUnique(args: {
+      where:
+        | {
+            provider_providerSubject: {
+              provider: WebAudienceIdentityLinkProvider;
+              providerSubject: string;
+            };
+          }
+        | {
+            provider_issuer_providerSubject: {
+              provider: WebAudienceIdentityLinkProvider;
+              issuer: string;
+              providerSubject: string;
+            };
+          };
       select: {
         id: true;
         audienceIdentityId: true;
@@ -167,6 +200,7 @@ export type WebAudienceClient = {
         audienceIdentityId?: string;
         provider?: WebAudienceIdentityLinkProvider;
         providerSubject?: string;
+        issuer?: string;
       };
       data: {
         audienceIdentityId?: string;
@@ -481,6 +515,34 @@ export type WebAudienceIdentity = {
   lastSeenAt: Date;
 };
 
+export const AUDIENCE_AUTH_SESSION_ROTATION_REQUIRED_CODE =
+  "AUDIENCE_AUTH_SESSION_ROTATION_REQUIRED";
+
+export class AudienceAuthSessionRotationRequiredError extends Error {
+  readonly code = AUDIENCE_AUTH_SESSION_ROTATION_REQUIRED_CODE;
+
+  constructor() {
+    super(
+      "Switching authenticated audience accounts requires a fresh anonymous browser session.",
+    );
+    this.name = "AudienceAuthSessionRotationRequiredError";
+  }
+}
+
+export function isAudienceAuthSessionRotationRequiredError(
+  error: unknown,
+): error is AudienceAuthSessionRotationRequiredError {
+  return (
+    error instanceof AudienceAuthSessionRotationRequiredError
+    || (
+      typeof error === "object"
+      && error !== null
+      && "code" in error
+      && error.code === AUDIENCE_AUTH_SESSION_ROTATION_REQUIRED_CODE
+    )
+  );
+}
+
 export type WebAudienceConversation = {
   id: string;
   representativeId: string;
@@ -573,7 +635,12 @@ export async function resolveChannelAudienceIdentity(
     throw new Error("Channel identity resolution requires a connection id.");
   }
   const now = input.now ?? new Date();
-  const existingLink = await findIdentityLink(client, input.provider, providerSubject);
+  const existingLink = await findIdentityLink(
+    client,
+    input.provider,
+    providerSubject,
+    issuer,
+  );
   if (existingLink) {
     if (existingLink.revokedAt) {
       throw new Error("Channel identity link has been revoked.");
@@ -671,20 +738,29 @@ export async function linkAudienceIdentity(
     assuranceLevel?: "UNVERIFIED" | "PLATFORM_VERIFIED" | "STEP_UP_VERIFIED";
     proofMetadata?: unknown;
     metadata?: unknown;
+    identityIssuerMode?: "shadow" | "enforce";
   },
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ) {
   const providerSubject = normalizeIdentityProviderSubject(input.provider, input.providerSubject);
-  const issuer = input.issuer === undefined
-    ? undefined
-    : normalizeIdentityIssuer(input.provider, input.issuer);
+  const issuer = input.provider === "LOGTO"
+    ? normalizeRequiredIdentityIssuer(input.provider, input.issuer)
+    : input.issuer === undefined
+      ? undefined
+      : normalizeIdentityIssuer(input.provider, input.issuer);
   const requestedIdentity = await resolveCanonicalAudienceIdentity(
     {
       audienceIdentityId: input.audienceIdentityId,
     },
     client,
   );
-  const existingLink = await findIdentityLink(client, input.provider, providerSubject);
+  const existingLink = await findIdentityLink(
+    client,
+    input.provider,
+    providerSubject,
+    issuer,
+    input.identityIssuerMode === "shadow",
+  );
 
   if (existingLink) {
     const updated = await updateOwnedIdentityLink({
@@ -696,10 +772,15 @@ export async function linkAudienceIdentity(
       ...(existingLink.issuer !== undefined
         ? { existingIssuer: existingLink.issuer }
         : {}),
+      ...(existingLink.issuer !== undefined
+        ? { matchIssuer: existingLink.issuer }
+        : {}),
       ...(existingLink.connectionId !== undefined
         ? { existingConnectionId: existingLink.connectionId }
         : {}),
-      ...(issuer !== undefined ? { issuer } : {}),
+      ...(issuer !== undefined && !("legacyIssuerEvidence" in existingLink)
+        ? { issuer }
+        : {}),
       ...(input.connectionId !== undefined && !client.identityLinkConnectionProof
         ? { connectionId: input.connectionId }
         : {}),
@@ -777,7 +858,13 @@ export async function linkAudienceIdentity(
       throw error;
     }
 
-    const concurrentLink = await findIdentityLink(client, input.provider, providerSubject);
+    const concurrentLink = await findIdentityLink(
+      client,
+      input.provider,
+      providerSubject,
+      issuer,
+      input.identityIssuerMode === "shadow",
+    );
     if (!concurrentLink) {
       throw error;
     }
@@ -790,10 +877,15 @@ export async function linkAudienceIdentity(
       ...(concurrentLink.issuer !== undefined
         ? { existingIssuer: concurrentLink.issuer }
         : {}),
+      ...(concurrentLink.issuer !== undefined
+        ? { matchIssuer: concurrentLink.issuer }
+        : {}),
       ...(concurrentLink.connectionId !== undefined
         ? { existingConnectionId: concurrentLink.connectionId }
         : {}),
-      ...(issuer !== undefined ? { issuer } : {}),
+      ...(issuer !== undefined && !("legacyIssuerEvidence" in concurrentLink)
+        ? { issuer }
+        : {}),
       ...(input.connectionId !== undefined && !client.identityLinkConnectionProof
         ? { connectionId: input.connectionId }
         : {}),
@@ -884,13 +976,16 @@ export async function resolveAuthenticatedAudienceIdentity(
     audienceIdentityId: string;
     provider: WebAudienceIdentityLinkProvider;
     providerSubject: string;
+    issuer: string;
     verifiedAt?: Date | null | undefined;
     metadata?: unknown;
     now?: Date | undefined;
+    identityIssuerMode?: "shadow" | "enforce";
   },
   client: WebAudienceClient = prisma as unknown as WebAudienceClient,
 ): Promise<WebAudienceIdentity> {
   const providerSubject = normalizeIdentityProviderSubject(input.provider, input.providerSubject);
+  const issuer = normalizeRequiredIdentityIssuer(input.provider, input.issuer);
   const currentAudienceIdentityId = normalizeRequiredId(
     input.audienceIdentityId,
     "audienceIdentityId",
@@ -903,7 +998,13 @@ export async function resolveAuthenticatedAudienceIdentity(
       },
       tx,
     );
-    const existingLink = await findIdentityLink(tx, input.provider, providerSubject);
+    const existingLink = await findIdentityLink(
+      tx,
+      input.provider,
+      providerSubject,
+      issuer,
+      input.identityIssuerMode === "shadow",
+    );
     let targetIdentity = currentIdentity;
 
     if (existingLink) {
@@ -919,9 +1020,7 @@ export async function resolveAuthenticatedAudienceIdentity(
 
       if (targetIdentity.id !== currentIdentity.id) {
         if (currentIdentity.status !== "ANONYMOUS") {
-          throw new Error(
-            "Authenticated identity conflict: automatic registered-to-registered merge is not allowed.",
-          );
+          throw new AudienceAuthSessionRotationRequiredError();
         }
 
         if (targetIdentity.status === "ANONYMOUS") {
@@ -943,6 +1042,12 @@ export async function resolveAuthenticatedAudienceIdentity(
           tx,
         );
       }
+    } else if (currentIdentity.status !== "ANONYMOUS") {
+      // A verified subject that has never been seen before must not be attached
+      // to whichever registered account happens to be present in this browser.
+      // The caller must rotate the public-chat cookie, resolve a fresh anonymous
+      // identity, and retry the binding against that new identity.
+      throw new AudienceAuthSessionRotationRequiredError();
     }
 
     await linkAudienceIdentity(
@@ -950,6 +1055,7 @@ export async function resolveAuthenticatedAudienceIdentity(
         audienceIdentityId: targetIdentity.id,
         provider: input.provider,
         providerSubject,
+        issuer,
         verifiedAt: input.verifiedAt ?? now,
         assuranceLevel: "PLATFORM_VERIFIED",
         proofMetadata: {
@@ -957,6 +1063,9 @@ export async function resolveAuthenticatedAudienceIdentity(
           provider: input.provider,
         },
         metadata: input.metadata,
+        ...(input.identityIssuerMode
+          ? { identityIssuerMode: input.identityIssuerMode }
+          : {}),
       },
       tx,
     );
@@ -971,7 +1080,9 @@ export async function resolveAuthenticatedAudienceIdentity(
   };
 
   return client.$transaction
-    ? client.$transaction(run, { isolationLevel: "Serializable" })
+    ? runWithPrismaWriteConflictRetry(() =>
+        client.$transaction!(run, { isolationLevel: "Serializable" }),
+      )
     : run(client);
 }
 
@@ -1167,7 +1278,9 @@ export async function mergeAudienceIdentity(
   };
 
   return client.$transaction
-    ? client.$transaction(run, { isolationLevel: "Serializable" })
+    ? runWithPrismaWriteConflictRetry(() =>
+        client.$transaction!(run, { isolationLevel: "Serializable" }),
+      )
     : run(client);
 }
 
@@ -1605,16 +1718,76 @@ function normalizeIdentityIssuer(
   value: string | null | undefined,
 ): string {
   const issuer = value?.trim() || "delegate";
-  return provider === "MATRIX"
-    ? normalizeMatrixServerName(issuer)
-    : issuer.toLowerCase();
+  if (provider === "MATRIX") {
+    return normalizeMatrixServerName(issuer);
+  }
+  if (provider === "LOGTO") {
+    return issuer;
+  }
+  return issuer.toLowerCase();
+}
+
+function normalizeRequiredIdentityIssuer(
+  provider: WebAudienceIdentityLinkProvider,
+  value: string | null | undefined,
+): string {
+  const issuer = value?.trim();
+  if (!issuer) {
+    throw new Error(`${provider} issuer is required.`);
+  }
+  return normalizeIdentityIssuer(provider, issuer);
 }
 
 async function findIdentityLink(
   client: WebAudienceClient,
   provider: WebAudienceIdentityLinkProvider,
   providerSubject: string,
+  issuer?: string,
+  allowLegacyIssuerEvidence = false,
 ) {
+  if (provider === "LOGTO") {
+    const exactIssuer = normalizeRequiredIdentityIssuer(provider, issuer);
+    const exactLink = await client.identityLink.findUnique({
+      where: {
+        provider_issuer_providerSubject: {
+          provider,
+          issuer: exactIssuer,
+          providerSubject,
+        },
+      },
+      select: {
+        id: true,
+        audienceIdentityId: true,
+        issuer: true,
+        connectionId: true,
+        revokedAt: true,
+      },
+    });
+    if (exactLink || !allowLegacyIssuerEvidence) {
+      return exactLink;
+    }
+    const evidencedLegacyLink = await client.identityLink.findFirst({
+      where: {
+        provider,
+        issuer: "delegate",
+        providerSubject,
+        metadata: {
+          path: ["issuer"],
+          equals: exactIssuer,
+        },
+      },
+      select: {
+        id: true,
+        audienceIdentityId: true,
+        issuer: true,
+        connectionId: true,
+        revokedAt: true,
+      },
+    });
+    return evidencedLegacyLink
+      ? { ...evidencedLegacyLink, legacyIssuerEvidence: true as const }
+      : null;
+  }
   return client.identityLink.findUnique({
     where: {
       provider_providerSubject: {
@@ -1681,6 +1854,7 @@ async function updateOwnedIdentityLink(input: {
   provider: WebAudienceIdentityLinkProvider;
   providerSubject: string;
   existingIssuer?: string;
+  matchIssuer?: string;
   existingConnectionId?: string | null;
   issuer?: string;
   connectionId?: string | null;
@@ -1724,6 +1898,9 @@ async function updateOwnedIdentityLink(input: {
       audienceIdentityId: input.existingAudienceIdentityId,
       provider: input.provider,
       providerSubject: input.providerSubject,
+      ...(input.matchIssuer !== undefined
+        ? { issuer: input.matchIssuer }
+        : {}),
     },
     data: {
       audienceIdentityId: input.requestedAudienceIdentityId,

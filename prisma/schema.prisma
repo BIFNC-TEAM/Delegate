@@ -331,6 +331,27 @@ enum OwnerIdentityLinkProvider {
   TELEGRAM
 }
 
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  DELETION_PENDING
+  DELETED
+}
+
+enum AuthIdentityProvider {
+  LOGTO
+}
+
+enum AuthIdentityStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum AppSessionApplication {
+  DASHBOARD
+  PUBLIC_REPRESENTATIVES
+}
+
 enum CreatorTrainingSourceKind {
   URL
   PDF
@@ -1012,6 +1033,7 @@ enum ReliableEventStatus {
 
 model Owner {
   id                           String                     @id @default(cuid())
+  accountId                    String?                    @unique
   organizationId               String?
   telegramUserId               String?                    @unique
   displayName                  String
@@ -1023,6 +1045,7 @@ model Owner {
   creatorVerificationStatus    CreatorVerificationStatus  @default(UNVERIFIED)
   createdAt                    DateTime                   @default(now())
   updatedAt                    DateTime                   @updatedAt
+  account                      Account?                   @relation(fields: [accountId], references: [id], onDelete: SetNull)
   wallet                       Wallet?
   notificationSettings         OwnerNotificationSettings?
   organization                 Organization?              @relation(fields: [organizationId], references: [id])
@@ -1050,22 +1073,24 @@ model Owner {
 }
 
 model OwnerIdentityLink {
-  id              String                    @id @default(cuid())
-  ownerId         String
-  provider        OwnerIdentityLinkProvider
-  providerSubject String
-  email           String?
-  phone           String?
-  verifiedAt      DateTime?
-  emailVerifiedAt DateTime?
-  phoneVerifiedAt DateTime?
-  metadata        Json?
-  createdAt       DateTime                  @default(now())
-  updatedAt       DateTime                  @updatedAt
-  owner           Owner                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  id                String                    @id @default(cuid())
+  ownerId           String
+  provider          OwnerIdentityLinkProvider
+  providerSubject   String
+  issuer            String?
+  email             String?
+  phone             String?
+  verifiedAt        DateTime?
+  emailVerifiedAt   DateTime?
+  phoneVerifiedAt   DateTime?
+  metadata          Json?
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+  owner             Owner                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerSubject])
   @@index([ownerId, provider])
+  @@index([provider, issuer, providerSubject])
 }
 
 model OwnerNotificationSettings {
@@ -1090,12 +1115,14 @@ model Wallet {
 
 model AudienceIdentity {
   id                   String                      @id @default(cuid())
+  accountId            String?                     @unique
   audienceKey          String                      @unique
   status               AudienceIdentityStatus      @default(ANONYMOUS)
   mergedIntoId         String?
   createdAt            DateTime                    @default(now())
   updatedAt            DateTime                    @updatedAt
   lastSeenAt           DateTime                    @default(now())
+  account              Account?                    @relation(fields: [accountId], references: [id], onDelete: SetNull)
   mergedInto           AudienceIdentity?           @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
   mergedFrom           AudienceIdentity[]          @relation("AudienceIdentityMerge")
   contacts             Contact[]
@@ -1116,6 +1143,73 @@ model AudienceIdentity {
   @@index([mergedIntoId])
 }
 
+model Account {
+  id               String         @id @default(cuid())
+  status           AccountStatus  @default(ACTIVE)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  authIdentities   AuthIdentity[]
+  owner            Owner?
+  audienceIdentity AudienceIdentity?
+  appSessions      AppSession[]
+
+  @@index([status, updatedAt])
+}
+
+model AuthIdentity {
+  id                  String               @id @default(cuid())
+  accountId           String
+  provider            AuthIdentityProvider
+  issuer              String               @db.VarChar(2048)
+  subject             String               @db.VarChar(255)
+  status              AuthIdentityStatus   @default(ACTIVE)
+  email               String?              @db.VarChar(320)
+  emailVerifiedAt     DateTime?
+  phone               String?              @db.VarChar(64)
+  phoneVerifiedAt     DateTime?
+  displayName         String?              @db.VarChar(160)
+  verifiedAt          DateTime
+  lastAuthenticatedAt DateTime
+  metadata            Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  account             Account              @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  appSessions         AppSession[]
+
+  @@unique([provider, issuer, subject])
+  @@unique([id, accountId])
+  @@index([accountId, status])
+}
+
+model AppSession {
+  id                   String                @id @default(cuid())
+  accountId            String
+  authIdentityId       String
+  application          AppSessionApplication
+  tokenHash            Bytes                 @unique
+  activeOrganizationId String?
+  logtoSessionId       String?               @db.VarChar(255)
+  issuedAt             DateTime              @default(now())
+  lastSeenAt           DateTime              @default(now())
+  idleExpiresAt        DateTime
+  absoluteExpiresAt    DateTime
+  revokedAt            DateTime?
+  revokedReason        String?               @db.VarChar(200)
+  deviceLabel          String?               @db.VarChar(120)
+  userAgent            String?               @db.VarChar(512)
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+  account              Account               @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  authIdentity         AuthIdentity          @relation(fields: [authIdentityId, accountId], references: [id, accountId], onDelete: Restrict)
+  activeOrganization   Organization?         @relation("AppSessionActiveOrganization", fields: [activeOrganizationId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, application, revokedAt])
+  @@index([authIdentityId, application, revokedAt])
+  @@index([application, idleExpiresAt])
+  @@index([application, absoluteExpiresAt])
+  @@index([activeOrganizationId, revokedAt])
+}
+
 model IdentityLink {
   id                 String                        @id @default(cuid())
   audienceIdentityId String
@@ -1134,6 +1228,7 @@ model IdentityLink {
   connectionProofs   IdentityLinkConnectionProof[]
 
   @@unique([provider, providerSubject])
+  @@unique([provider, issuer, providerSubject])
   @@index([audienceIdentityId, provider])
   @@index([provider, issuer, providerSubject])
   @@index([revokedAt])
@@ -1777,6 +1872,7 @@ model Organization {
   capabilityProfiles CapabilityPolicyProfile[]
   customerAccounts   CustomerAccount[]
   payoutProfile      CreatorPayoutProfile?     @relation("PayoutProfileOrganization")
+  activeAppSessions  AppSession[]              @relation("AppSessionActiveOrganization")
 }
 
 model OrganizationMember {

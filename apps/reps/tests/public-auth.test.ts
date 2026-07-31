@@ -4,7 +4,6 @@ import {
   buildPublicAudienceLoginHref,
   buildPublicAudienceLogoutHref,
   buildPublicAudienceReturnTo,
-  buildRepresentativeAuthCallbackUrl,
   buildRepresentativeCanonicalAuthRequestUrl,
   buildRepresentativeAuthRedirectUrl,
   sanitizePublicAudienceReturnTo,
@@ -69,16 +68,6 @@ describe("public representative auth links", () => {
         env,
       ).toString(),
     ).toBe("http://localhost:3002/reps/lin-founder-rep?lang=zh#chat");
-    expect(
-      buildRepresentativeAuthCallbackUrl(
-        new Request("https://reps.example.com/reps/demo/auth/login"),
-        "demo",
-        {
-          NODE_ENV: "production",
-          NEXT_PUBLIC_REPRESENTATIVE_URL: "https://reps.example.com",
-        },
-      ),
-    ).toBe("https://reps.example.com/reps/demo/auth/callback");
   });
 
   it("fails closed without a configured production origin", () => {
@@ -87,9 +76,13 @@ describe("public representative auth links", () => {
     );
 
     expect(() =>
-      buildRepresentativeAuthCallbackUrl(request, "demo", {
-        NODE_ENV: "production",
-      }),
+      buildRepresentativeAuthRedirectUrl(
+        request,
+        "/reps/demo/auth/callback",
+        {
+          NODE_ENV: "production",
+        },
+      ),
     ).toThrow("NEXT_PUBLIC_REPRESENTATIVE_URL is required in production.");
     expect(() =>
       buildRepresentativeCanonicalAuthRequestUrl(request, {
@@ -100,33 +93,33 @@ describe("public representative auth links", () => {
 
   it("allows an unconfigured origin only for matching development loopback requests", () => {
     expect(
-      buildRepresentativeAuthCallbackUrl(
+      buildRepresentativeAuthRedirectUrl(
         new Request("http://127.0.0.1:3002/reps/demo/auth/login"),
-        "demo",
+        "/reps/demo/auth/callback",
         { NODE_ENV: "development" },
-      ),
+      ).toString(),
     ).toBe("http://127.0.0.1:3002/reps/demo/auth/callback");
     expect(
-      buildRepresentativeAuthCallbackUrl(
+      buildRepresentativeAuthRedirectUrl(
         new Request("http://[::1]:3002/reps/demo/auth/login"),
-        "demo",
+        "/reps/demo/auth/callback",
         { NODE_ENV: "test" },
-      ),
+      ).toString(),
     ).toBe("http://[::1]:3002/reps/demo/auth/callback");
 
     expect(() =>
-      buildRepresentativeAuthCallbackUrl(
+      buildRepresentativeAuthRedirectUrl(
         new Request("https://reps.example.com/reps/demo/auth/login"),
-        "demo",
+        "/reps/demo/auth/callback",
         { NODE_ENV: "development" },
       ),
     ).toThrow(/development request uses a loopback origin/);
     expect(() =>
-      buildRepresentativeAuthCallbackUrl(
+      buildRepresentativeAuthRedirectUrl(
         new Request("http://127.0.0.1:3002/reps/demo/auth/login", {
           headers: { host: "reps.example.com" },
         }),
-        "demo",
+        "/reps/demo/auth/callback",
         { NODE_ENV: "development" },
       ),
     ).toThrow(/development request uses a loopback origin/);

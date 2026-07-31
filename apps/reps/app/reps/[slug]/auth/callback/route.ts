@@ -4,17 +4,20 @@ import { NextResponse } from "next/server";
 import {
   DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
   DELEGATE_AUDIENCE_AUTH_STATE_COOKIE,
+  DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
   LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   LEGACY_DELEGATE_AUTH_STATE_COOKIE,
   buildVerifiedExternalAuthProfileFromLogtoIdToken,
   createDelegateAuthSession,
   exchangeLogtoCodeForTokens,
   getPublicRepresentativeRuntime,
-  linkAudienceIdentityToAuth,
+  isLegacyRepresentativeCallbackEnabled,
+  readLegacyRepresentativeLogtoOidcConfig,
   readDelegateAuthSessionSecret,
-  readLogtoOidcConfig,
+  readAccountSessionMode,
   resolveWebAudienceContact,
   signDelegateAuthSession,
+  usesLegacyAccountSessionAuthority,
   verifyDelegateAuthState,
 } from "@delegate/web-data";
 
@@ -25,9 +28,12 @@ import {
   shouldUseSecurePublicChatCookie,
   writePublicChatSessionState,
 } from "../../public-chat";
+import { bindPublicAudienceAuthProfile } from "../../public-auth-binding";
 import {
-  buildRepresentativeAuthCallbackUrl,
-  buildRepresentativeCanonicalAuthRequestUrl,
+  issuePublicAudienceAccountSessionShadow,
+  type PublicAudienceAccountSessionShadowOutcome,
+} from "../../public-account-session-shadow";
+import {
   buildRepresentativeAuthRedirectUrl,
   getRepresentativeAuthCookiePath,
 } from "../../public-auth";
@@ -39,45 +45,67 @@ export async function GET(
   const { slug } = await params;
 
   try {
-    const canonicalRequestUrl =
-      buildRepresentativeCanonicalAuthRequestUrl(request);
-    if (canonicalRequestUrl) {
-      return NextResponse.redirect(canonicalRequestUrl);
+    // This endpoint exists only to finish already-issued v1/v2 state. It must
+    // never redirect an authorization response to the new callback because the
+    // authorization code is bound to this exact legacy redirect_uri.
+    if (!isLegacyRepresentativeCallbackEnabled()) {
+      return legacyCallbackGoneResponse();
+    }
+
+    const accountSessionMode = readAccountSessionMode();
+    if (!usesLegacyAccountSessionAuthority(accountSessionMode)) {
+      return accountSessionAuthorityUnavailableResponse();
     }
 
     const url = new URL(request.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     if (!code || !state) {
-      return NextResponse.json({ error: "Missing Logto callback code or state." }, { status: 400 });
+      return legacyCallbackGoneResponse();
     }
 
     const cookieStore = await cookies();
     const secret = readDelegateAuthSessionSecret();
-    const authState = verifyDelegateAuthState(
-      cookieStore.get(DELEGATE_AUDIENCE_AUTH_STATE_COOKIE)?.value ??
+    const authStateCandidates = [
+      verifyDelegateAuthState(
+        cookieStore.get(DELEGATE_AUDIENCE_AUTH_STATE_COOKIE)?.value,
+        secret,
+      ),
+      verifyDelegateAuthState(
         cookieStore.get(LEGACY_DELEGATE_AUTH_STATE_COOKIE)?.value,
-      secret,
+        secret,
+      ),
+    ];
+    const authState = authStateCandidates.find(
+      (candidate) =>
+        candidate &&
+        (candidate.version === 1 || candidate.version === 2) &&
+        candidate.state === state &&
+        candidate.actor === "audience" &&
+        candidate.representativeSlug === slug &&
+        Boolean(candidate.audienceId),
     );
-    if (
-      !authState ||
-      authState.state !== state ||
-      authState.actor !== "audience" ||
-      authState.representativeSlug !== slug ||
-      !authState.audienceId
-    ) {
-      return NextResponse.json({ error: "Invalid or expired login state." }, { status: 400 });
+    if (!authState || !authState.audienceId) {
+      return legacyCallbackGoneResponse();
+    }
+
+    let logtoConfig: ReturnType<
+      typeof readLegacyRepresentativeLogtoOidcConfig
+    >;
+    try {
+      logtoConfig = readLegacyRepresentativeLogtoOidcConfig(slug);
+    } catch {
+      return legacyCallbackGoneResponse();
     }
 
     const runtime = await getPublicRepresentativeRuntime(slug);
     if (runtime.status !== "available") return NextResponse.json({ error: "Representative is not publicly available." }, { status: runtime.status === "paused" ? 423 : 404 });
     const setup = runtime.setup;
 
-    const logtoConfig = {
-      ...readLogtoOidcConfig(),
-      redirectUri: buildRepresentativeAuthCallbackUrl(request, slug),
-    };
-    const tokens = await exchangeLogtoCodeForTokens(logtoConfig, { code });
+    const tokens = await exchangeLogtoCodeForTokens(logtoConfig, {
+      code,
+      codeVerifier: authState.version === 2 ? authState.codeVerifier : undefined,
+    });
     if (!tokens.idToken) {
       return NextResponse.json({ error: "Logto did not return an id_token." }, { status: 400 });
     }
@@ -86,7 +114,7 @@ export async function GET(
       representativeSlug: slug,
       cookieValue: cookieStore.get(getPublicChatCookieName(slug))?.value,
     });
-    const sessionState =
+    let sessionState =
       cookieSessionState.audienceId === authState.audienceId
         ? cookieSessionState
         : { ...cookieSessionState, audienceId: authState.audienceId };
@@ -103,14 +131,49 @@ export async function GET(
       idToken: tokens.idToken,
       nonce: authState.nonce,
     });
-    const audienceIdentity = await linkAudienceIdentityToAuth({
-      audienceIdentityId: contact.audienceIdentityId,
+    const verifiedAt = new Date();
+    const binding = await bindPublicAudienceAuthProfile({
+      representativeId: setup.id,
+      representativeSlug: slug,
+      initialAudienceIdentityId: contact.audienceIdentityId,
+      sessionState,
       profile,
     });
+    sessionState = binding.sessionState;
+    const shadowOutcome =
+      accountSessionMode === "shadow"
+        ? await issuePublicAudienceAccountSessionShadow({
+            principal: {
+              provider: "logto",
+              issuer: profile.issuer,
+              subject: profile.subject,
+              verifiedAt,
+              email: profile.email,
+              emailVerified: profile.emailVerified,
+              phone: profile.phone,
+              phoneVerified: profile.phoneVerified,
+              displayName: profile.name,
+              metadata: {
+                verificationSource: "logto_jwks_callback",
+              },
+            },
+            persona: {
+              kind: "audience",
+              audienceIdentityId: binding.audienceIdentityId,
+            },
+            application: "PUBLIC_REPRESENTATIVES",
+            previousToken: cookieStore.get(
+              DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
+            )?.value,
+            userAgent: readBoundedUserAgent(request),
+            now: verifiedAt,
+          })
+        : null;
     const session = createDelegateAuthSession({
       actor: "audience",
+      issuer: profile.issuer,
       subject: profile.subject,
-      audienceIdentityId: audienceIdentity.id,
+      audienceIdentityId: binding.audienceIdentityId,
       audienceId: sessionState.audienceId,
       email: profile.email ?? null,
     });
@@ -160,6 +223,15 @@ export async function GET(
       path: authCookiePath,
       maxAge: 0,
     });
+    if (shadowOutcome?.status === "issued") {
+      setRepresentativesAppSessionCookie(
+        response,
+        request,
+        shadowOutcome.session,
+      );
+    } else if (shadowOutcome?.status === "review_required") {
+      clearRepresentativesAppSessionCookie(response, request);
+    }
     return response;
   } catch (error) {
     return NextResponse.json(
@@ -169,4 +241,71 @@ export async function GET(
       { status: 500 },
     );
   }
+}
+
+function accountSessionAuthorityUnavailableResponse() {
+  return NextResponse.json(
+    {
+      error:
+        "Account/AppSession v2 authority is not enabled in this build.",
+    },
+    { status: 503 },
+  );
+}
+
+function legacyCallbackGoneResponse() {
+  return NextResponse.json(
+    {
+      error:
+        "This legacy representative login callback is no longer available. Start a new login.",
+    },
+    { status: 410 },
+  );
+}
+
+function readBoundedUserAgent(request: Request): string | null {
+  return request.headers.get("user-agent")?.trim().slice(0, 512) || null;
+}
+
+function setRepresentativesAppSessionCookie(
+  response: NextResponse,
+  request: Request,
+  issued: Extract<
+    PublicAudienceAccountSessionShadowOutcome,
+    { status: "issued" }
+  >["session"],
+) {
+  response.cookies.set(
+    DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
+    issued.token,
+    {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: shouldUseSecurePublicChatCookie(request),
+      path: "/",
+      maxAge: Math.floor(
+        (
+          issued.session.absoluteExpiresAt.getTime()
+          - issued.session.issuedAt.getTime()
+        ) / 1_000,
+      ),
+    },
+  );
+}
+
+function clearRepresentativesAppSessionCookie(
+  response: NextResponse,
+  request: Request,
+) {
+  response.cookies.set(
+    DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
+    "",
+    {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: shouldUseSecurePublicChatCookie(request),
+      path: "/",
+      maxAge: 0,
+    },
+  );
 }

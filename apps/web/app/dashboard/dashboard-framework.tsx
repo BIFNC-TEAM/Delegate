@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-import { LanguageSwitcher, buildLocalizedHref, type Locale } from "@delegate/web-ui";
+import { buildLocalizedHref, type Locale } from "@delegate/web-ui";
 import type {
   ConversationDetailSnapshot,
   ConversationInboxSnapshot,
@@ -123,6 +123,11 @@ const frameworkCopy = {
 
 export function DashboardFramework(props: DashboardFrameworkProps) {
   const t = frameworkCopy[props.locale];
+  const hasActiveRepresentative =
+    Boolean(props.activeSlug)
+    && props.representatives.some(
+      (representative) => representative.slug === props.activeSlug,
+    );
   const activeNavigationItem = dashboardNavigation
     .flatMap((group) => group.items)
     .find((item) => item.id === props.activeView);
@@ -168,6 +173,25 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
             </summary>
             <div className="dashboard-v2-workspace-menu">
               <p>{t.switchWorkspace}</p>
+              {props.representatives.length === 0 ? (
+                <Link
+                  href={buildDashboardHref("representatives", "", props.locale)}
+                >
+                  <span>＋</span>
+                  <span>
+                    <strong>
+                      {props.locale === "zh"
+                        ? "创建第一个数字代表"
+                        : "Create the first representative"}
+                    </strong>
+                    <small>
+                      {props.locale === "zh"
+                        ? "进入代表目录"
+                        : "Open the representative directory"}
+                    </small>
+                  </span>
+                </Link>
+              ) : null}
               {props.representatives.map((representative) => (
                 <Link
                   className={representative.slug === props.activeSlug ? "is-active" : undefined}
@@ -274,9 +298,15 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                 <small>Owner</small>
               </div>
               {props.logoutHref ? (
-                <a aria-label={t.signOut} href={props.logoutHref} title={t.signOut}>
-                  <span aria-hidden="true">↗</span>
-                </a>
+                <form action={props.logoutHref} method="post">
+                  <button
+                    aria-label={t.signOut}
+                    title={t.signOut}
+                    type="submit"
+                  >
+                    <span aria-hidden="true">↗</span>
+                  </button>
+                </form>
               ) : props.loginHref ? (
                 <a aria-label={t.signIn} href={props.loginHref} title={t.signIn}>
                   <span aria-hidden="true">↗</span>
@@ -298,44 +328,18 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
               <kbd>{t.commandKey}</kbd>
             </button>
             <div className="dashboard-v2-top-actions">
-              <LanguageSwitcher
-                activeLocale={props.locale}
-                ariaLabel="Language"
-                items={[
-                  {
-                    locale: "zh",
-                    href: buildDashboardHref(
-                      props.activeView,
-                      props.activeSlug,
-                      "zh",
-                      props.activeView === "settings" ? props.settingsSection : undefined,
-                    ),
-                    label: "中文",
-                    shortLabel: "中",
-                  },
-                  {
-                    locale: "en",
-                    href: buildDashboardHref(
-                      props.activeView,
-                      props.activeSlug,
-                      "en",
-                      props.activeView === "settings" ? props.settingsSection : undefined,
-                    ),
-                    label: "English",
-                    shortLabel: "EN",
-                  },
-                ]}
-              />
               <a className="dashboard-v2-text-link" href={buildLocalizedHref(`${props.websiteBaseUrl}/`, props.locale)}>
                 {t.website}
               </a>
-              {props.activeView !== "settings" ? <a
-                className="dashboard-v2-top-button"
-                href={buildLocalizedHref(`${props.representativeBaseUrl}/reps/${props.activeSlug}`, props.locale)}
-              >
-                {t.publicPage}
-                <span>↗</span>
-              </a> : null}
+              {props.activeView !== "settings" && hasActiveRepresentative ? (
+                <a
+                  className="dashboard-v2-top-button"
+                  href={buildLocalizedHref(`${props.representativeBaseUrl}/reps/${props.activeSlug}`, props.locale)}
+                >
+                  {t.publicPage}
+                  <span>↗</span>
+                </a>
+              ) : null}
             </div>
           </header>
 
@@ -347,7 +351,15 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
           ) : null}
 
           <div className="dashboard-v2-content">
-            {props.activeView === "overview" ? (
+            {!hasActiveRepresentative
+              && props.activeView !== "representatives"
+              && props.activeView !== "knowledge"
+              && props.activeView !== "settings" ? (
+              <DashboardRepresentativeOnboarding
+                activeView={props.activeView}
+                locale={props.locale}
+              />
+            ) : props.activeView === "overview" ? (
               <DashboardOverviewFramework
                 activeSlug={props.activeSlug}
                 locale={props.locale}
@@ -408,6 +420,75 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
         </section>
       </div>
     </main>
+  );
+}
+
+function DashboardRepresentativeOnboarding({
+  activeView,
+  locale,
+}: {
+  activeView: DashboardView;
+  locale: Locale;
+}) {
+  const zh = locale === "zh";
+  const activeNavigationItem = dashboardNavigation
+    .flatMap((group) => group.items)
+    .find((item) => item.id === activeView);
+  const viewLabel = activeNavigationItem
+    ? localize(locale, activeNavigationItem.label)
+    : zh
+      ? "当前模块"
+      : "This module";
+
+  return (
+    <>
+      <header className="dashboard-v2-page-header">
+        <div>
+          <p>ONBOARDING / 00</p>
+          <h1>
+            {zh
+              ? "先创建第一个数字代表。"
+              : "Create your first representative."}
+          </h1>
+          <span>
+            {zh
+              ? `${viewLabel} 只会显示当前 Owner 真实拥有的数据；创建完成前不会加载示例代表或其他 Owner 的记录。`
+              : `${viewLabel} only shows data owned by the current Owner. No demo representative or another Owner's records are loaded before creation.`}
+          </span>
+        </div>
+      </header>
+
+      <section
+        aria-labelledby="dashboard-empty-representative-title"
+        className="dashboard-v2-panel is-teal"
+      >
+        <div className="representative-directory-empty">
+          <span>REPRESENTATIVES / 00</span>
+          <h3 id="dashboard-empty-representative-title">
+            {zh ? "当前工作区还没有数字代表" : "No representatives in this workspace"}
+          </h3>
+          <p>
+            {zh
+              ? "创建后会直接进入六步草稿配置；在你完成发布前，不会生成公开页面。"
+              : "Creation opens the six-step draft setup. Nothing becomes public until you publish it."}
+          </p>
+          <div className="dashboard-v2-page-actions">
+            <Link
+              className="dashboard-v2-button-primary"
+              href={buildDashboardHref("representatives", "", locale)}
+            >
+              {zh ? "创建数字代表" : "Create representative"}
+            </Link>
+            <Link
+              className="dashboard-v2-button-secondary"
+              href={buildDashboardHref("settings", "", locale)}
+            >
+              {zh ? "先查看账户设置" : "Review account settings"}
+            </Link>
+          </div>
+        </div>
+      </section>
+    </>
   );
 }
 
@@ -700,10 +781,12 @@ function buildDashboardHref(
   settingsSection?: SettingsSection,
 ): string {
   const parameters = new URLSearchParams({
-    rep: representativeSlug,
     view,
     lang: locale,
   });
+  if (representativeSlug) {
+    parameters.set("rep", representativeSlug);
+  }
   if (view === "settings" && settingsSection) {
     parameters.set("settingsSection", settingsSection);
   }

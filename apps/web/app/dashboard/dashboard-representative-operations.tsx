@@ -19,6 +19,7 @@ import {
   planRepresentativeSectionNavigation,
   type RepresentativeSection,
 } from "./representative-section-navigation";
+import { formatVersionDateTime } from "./dashboard-time";
 
 export function DashboardRepresentativeOperations({
   accountLabel,
@@ -320,7 +321,7 @@ export function DashboardRepresentativeOperations({
               <header><div><p>{zh ? "版本历史" : "Version history"}</p><h2>{zh ? "每次发布都可追踪、可回滚" : "Every release is traceable and reversible"}</h2></div></header>
               <div className="representative-version-list">
                 {snapshot.versions.length ? snapshot.versions.map((version) => (
-                  <article className={version.active ? "is-active" : undefined} key={version.id}><span>v{version.versionNumber}</span><div><strong>{version.changeSummary || (zh ? "未填写变更摘要" : "No change summary")}</strong><small>{formatVersionDate(version.publishedAt, locale)} · {version.publishedBy || "Owner"}</small></div>{version.active ? <em>{zh ? "当前版本" : "Active"}</em> : <button disabled={isPending} onClick={() => activateVersion(version.id)} type="button">{zh ? "重新激活" : "Reactivate"}</button>}</article>
+                  <article className={version.active ? "is-active" : undefined} key={version.id}><span>v{version.versionNumber}</span><div><strong>{version.changeSummary || (zh ? "未填写变更摘要" : "No change summary")}</strong><small>{formatVersionDateTime(version.publishedAt, locale, snapshot.representative.timeZone)} · {version.publishedBy || "Owner"}</small></div>{version.active ? <em>{zh ? "当前版本" : "Active"}</em> : <button disabled={isPending} onClick={() => activateVersion(version.id)} type="button">{zh ? "重新激活" : "Reactivate"}</button>}</article>
                 )) : <p className="representative-empty-copy">{zh ? "尚未发布版本。完成检查后发布第一个版本。" : "No published versions yet. Complete readiness and publish v1."}</p>}
               </div>
             </section>
@@ -411,10 +412,6 @@ function localizeReadinessDetail(id: string, fallback: string, complete: boolean
   if (locale === "en") return fallback;
   const labels: Record<string, string> = { identity: "名称、角色说明与表达语气已配置。", knowledge: "至少包含一份已审核知识或知识包。", handoff: "人工介入路径和提示已经明确。", pricing: "免费、通行、深度帮助与赞助价格已配置。", skills: complete ? "已启用技能通过当前治理检查。" : "存在尚未满足治理或连接要求的技能绑定。", channel: "至少启用了一个公开或已连接渠道。" };
   return labels[id] || fallback;
-}
-
-function formatVersionDate(value: string, locale: Locale) {
-  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
 function buildChannelsHref(representativeSlug: string, locale: Locale) {

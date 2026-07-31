@@ -364,7 +364,10 @@ export default async function HomePage({
   });
   const demoHref = buildLocalizedHref(`${representativeBaseUrl}/reps/${demoRepresentative.slug}`, locale);
   const dashboardHref = buildLocalizedHref(`${dashboardBaseUrl}/dashboard?view=overview`, locale);
-  const setupHref = buildLocalizedHref(`${dashboardBaseUrl}/dashboard?view=setup`, locale);
+  const setupHref = buildLocalizedHref(
+    `${dashboardBaseUrl}/dashboard?view=representatives&repSection=directory`,
+    locale,
+  );
   const footerHrefs = ["#how", "#use-cases", "#trust", "#faq"];
 
   return (

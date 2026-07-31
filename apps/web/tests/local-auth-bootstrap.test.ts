@@ -6,6 +6,9 @@ import { bootstrapLocalOwnerAuth } from "../../../scripts/local-auth-bootstrap";
 function createBootstrapClient(options?: {
   representative?: { id: string; ownerId: string } | null;
   existingOwnerId?: string | null;
+  legacyOwnerId?: string | null;
+  existingIssuer?: string | null;
+  legacyMetadata?: unknown;
 }) {
   const representativeFindUnique = vi.fn().mockResolvedValue(
     options && "representative" in options
@@ -15,14 +18,35 @@ function createBootstrapClient(options?: {
           ownerId: "owner_lin_demo",
         },
   );
-  const ownerIdentityLinkFindUnique = vi.fn().mockResolvedValue(
+  const ownerIdentityLinkFindFirst = vi.fn().mockResolvedValue(
     options?.existingOwnerId
       ? {
+          id: "owner-link-exact",
           ownerId: options.existingOwnerId,
+          issuer:
+            options.existingIssuer
+            ?? "https://local-auth.delegate.invalid/oidc",
         }
       : null,
   );
-  const ownerIdentityLinkUpsert = vi.fn().mockResolvedValue({});
+  const ownerIdentityLinkFindUnique = vi.fn().mockResolvedValue(
+    options?.legacyOwnerId
+      ? {
+          id: "owner-link-legacy",
+          ownerId: options.legacyOwnerId,
+          issuer: options.existingIssuer ?? null,
+          metadata:
+            options.legacyMetadata
+            ?? {
+              mode: "development",
+              actor: "owner",
+              fixture: "local-compose-bootstrap",
+            },
+        }
+      : null,
+  );
+  const ownerIdentityLinkCreate = vi.fn().mockResolvedValue({});
+  const ownerIdentityLinkUpdate = vi.fn().mockResolvedValue({});
 
   return {
     client: {
@@ -30,12 +54,16 @@ function createBootstrapClient(options?: {
         findUnique: representativeFindUnique,
       },
       ownerIdentityLink: {
+        findFirst: ownerIdentityLinkFindFirst,
         findUnique: ownerIdentityLinkFindUnique,
-        upsert: ownerIdentityLinkUpsert,
+        create: ownerIdentityLinkCreate,
+        update: ownerIdentityLinkUpdate,
       },
     } as unknown as Parameters<typeof bootstrapLocalOwnerAuth>[0],
+    ownerIdentityLinkCreate,
+    ownerIdentityLinkFindFirst,
     ownerIdentityLinkFindUnique,
-    ownerIdentityLinkUpsert,
+    ownerIdentityLinkUpdate,
     representativeFindUnique,
   };
 }
@@ -61,7 +89,8 @@ describe("local owner auth bootstrap", () => {
         "Local auth bootstrap is only allowed when NODE_ENV=development.",
       );
       expect(fixture.representativeFindUnique).not.toHaveBeenCalled();
-      expect(fixture.ownerIdentityLinkUpsert).not.toHaveBeenCalled();
+      expect(fixture.ownerIdentityLinkCreate).not.toHaveBeenCalled();
+      expect(fixture.ownerIdentityLinkUpdate).not.toHaveBeenCalled();
     },
   );
 
@@ -91,7 +120,8 @@ describe("local owner auth bootstrap", () => {
       bootstrapLocalOwnerAuth(fixture.client, env),
     ).rejects.toThrow(message);
     expect(fixture.representativeFindUnique).not.toHaveBeenCalled();
-    expect(fixture.ownerIdentityLinkUpsert).not.toHaveBeenCalled();
+    expect(fixture.ownerIdentityLinkCreate).not.toHaveBeenCalled();
+    expect(fixture.ownerIdentityLinkUpdate).not.toHaveBeenCalled();
   });
 
   it("rejects a missing or unexpected demo representative fixture", async () => {
@@ -108,7 +138,8 @@ describe("local owner auth bootstrap", () => {
       'Local auth bootstrap requires the "lin-founder-rep" demo fixture.',
     );
     expect(fixture.ownerIdentityLinkFindUnique).not.toHaveBeenCalled();
-    expect(fixture.ownerIdentityLinkUpsert).not.toHaveBeenCalled();
+    expect(fixture.ownerIdentityLinkCreate).not.toHaveBeenCalled();
+    expect(fixture.ownerIdentityLinkUpdate).not.toHaveBeenCalled();
   });
 
   it("rejects an auth subject that is already bound to another owner", async () => {
@@ -121,10 +152,11 @@ describe("local owner auth bootstrap", () => {
     ).rejects.toThrow(
       'Development auth subject "delegate-dev-owner" already belongs to another owner.',
     );
-    expect(fixture.ownerIdentityLinkUpsert).not.toHaveBeenCalled();
+    expect(fixture.ownerIdentityLinkCreate).not.toHaveBeenCalled();
+    expect(fixture.ownerIdentityLinkUpdate).not.toHaveBeenCalled();
   });
 
-  it("upserts the local-only identity link for the demo owner", async () => {
+  it("creates the local-only issuer-scoped identity link for the demo owner", async () => {
     const fixture = createBootstrapClient();
 
     await expect(
@@ -135,36 +167,64 @@ describe("local owner auth bootstrap", () => {
       }),
     ).resolves.toEqual({
       ownerId: "owner_lin_demo",
+      issuer: "https://local-auth.delegate.invalid/oidc",
       providerSubject: "local-owner",
     });
-    expect(fixture.ownerIdentityLinkUpsert).toHaveBeenCalledWith({
-      where: {
-        provider_providerSubject: {
-          provider: OwnerIdentityLinkProvider.LOGTO,
-          providerSubject: "local-owner",
-        },
-      },
-      create: expect.objectContaining({
+    expect(fixture.ownerIdentityLinkCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
         ownerId: "owner_lin_demo",
         provider: OwnerIdentityLinkProvider.LOGTO,
         providerSubject: "local-owner",
+        issuer: "https://local-auth.delegate.invalid/oidc",
         email: "local@example.test",
         verifiedAt: expect.any(Date),
         metadata: {
-          mode: "development",
-          actor: "owner",
-          fixture: "local-compose-bootstrap",
-        },
-      }),
-      update: expect.objectContaining({
-        email: "local@example.test",
-        verifiedAt: expect.any(Date),
-        metadata: {
+          issuer: "https://local-auth.delegate.invalid/oidc",
           mode: "development",
           actor: "owner",
           fixture: "local-compose-bootstrap",
         },
       }),
     });
+  });
+
+  it("adopts the confirmed demo owner's legacy null-issuer link in place", async () => {
+    const fixture = createBootstrapClient({
+      legacyOwnerId: "owner_lin_demo",
+      existingIssuer: null,
+    });
+
+    await expect(
+      bootstrapLocalOwnerAuth(fixture.client, enabledDevelopmentEnv),
+    ).resolves.toMatchObject({
+      ownerId: "owner_lin_demo",
+      issuer: "https://local-auth.delegate.invalid/oidc",
+    });
+    expect(fixture.ownerIdentityLinkCreate).not.toHaveBeenCalled();
+    expect(fixture.ownerIdentityLinkUpdate).toHaveBeenCalledWith({
+      where: { id: "owner-link-legacy" },
+      data: expect.objectContaining({
+        issuer: "https://local-auth.delegate.invalid/oidc",
+        metadata: expect.objectContaining({
+          issuer: "https://local-auth.delegate.invalid/oidc",
+        }),
+      }),
+    });
+  });
+
+  it("rejects a subject-only legacy fixture without trusted local metadata", async () => {
+    const fixture = createBootstrapClient({
+      legacyOwnerId: "owner_lin_demo",
+      existingIssuer: null,
+      legacyMetadata: { fixture: "unknown" },
+    });
+
+    await expect(
+      bootstrapLocalOwnerAuth(fixture.client, enabledDevelopmentEnv),
+    ).rejects.toThrow(
+      'Development auth subject "delegate-dev-owner" lacks approved local fixture issuer evidence.',
+    );
+    expect(fixture.ownerIdentityLinkCreate).not.toHaveBeenCalled();
+    expect(fixture.ownerIdentityLinkUpdate).not.toHaveBeenCalled();
   });
 });

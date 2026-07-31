@@ -21,8 +21,12 @@ export async function GET(
 ) {
   const { slug, conversationId } = await params;
   try {
-    await requireDashboardRepresentativeAccess(slug);
-    const detail = await getConversationDetailSnapshot(slug, conversationId);
+    const session = await requireDashboardRepresentativeAccess(slug);
+    const detail = await getConversationDetailSnapshot(
+      slug,
+      conversationId,
+      session?.ownerId,
+    );
     if (!detail) return NextResponse.json({ error: "Conversation not found." }, { status: 404 });
     return NextResponse.json(detail);
   } catch (error) {

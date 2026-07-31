@@ -63,6 +63,15 @@ DATABASE_URL="$FIXTURE_DATABASE_URL" \
   pnpm --dir "$REPO_ROOT" exec prisma migrate deploy \
   --schema "$REPO_ROOT/prisma/schema.prisma" >/dev/null
 
+printf 'phase=validate_bounded_logto_issuer_backfill\n'
+docker exec -i "$FIXTURE_CONTAINER" \
+  psql \
+  --username postgres \
+  --dbname delegate_seed_test \
+  --set ON_ERROR_STOP=1 \
+  --set batch_size=50 \
+  < "$REPO_ROOT/prisma/backfill/logto-issuer-safe-legacy.sql" >/dev/null
+
 printf 'phase=run_fresh_seed_postgres_regression\n'
 DATABASE_URL="$FIXTURE_DATABASE_URL" \
 NODE_ENV=test \

@@ -4,6 +4,10 @@ import {
 } from "@prisma/client";
 
 import type { DelegateAuthSession } from "./auth-session";
+import {
+  readAuthIdentityIssuerMode,
+  type AuthIdentityIssuerMode,
+} from "./auth-identities";
 import { prisma } from "./prisma";
 import {
   buildWebAudienceExternalUserId,
@@ -27,6 +31,12 @@ export type PublicAudiencePrincipalClient = {
   };
   identityLink: {
     findUnique(args: unknown): Promise<{
+      audienceIdentityId: string;
+      verifiedAt: Date | null;
+      assuranceLevel: IdentityAssuranceLevel;
+      revokedAt: Date | null;
+    } | null>;
+    findFirst(args: unknown): Promise<{
       audienceIdentityId: string;
       verifiedAt: Date | null;
       assuranceLevel: IdentityAssuranceLevel;
@@ -77,6 +87,7 @@ export async function resolvePublicAudiencePrincipal(
   input: {
     audienceId: string;
     verifiedAuthSession?: DelegateAuthSession | null;
+    identityIssuerMode?: AuthIdentityIssuerMode;
     now?: Date;
   },
   client: PublicAudiencePrincipalClient =
@@ -123,6 +134,7 @@ export async function resolvePublicAudiencePrincipal(
 
   const sessionAudienceId = authSession.audienceId?.trim().toLowerCase();
   const sessionAudienceIdentityId = authSession.audienceIdentityId?.trim();
+  const issuer = authSession.issuer?.trim();
   const subject = authSession.subject?.trim();
   if (
     authSession.actor !== "audience"
@@ -135,20 +147,66 @@ export async function resolvePublicAudiencePrincipal(
     throw invalidAuthenticatedPrincipal();
   }
 
-  const link = await client.identityLink.findUnique({
-    where: {
-      provider_providerSubject: {
-        provider: IdentityLinkProvider.LOGTO,
-        providerSubject: subject,
+  const identityIssuerMode =
+    input.identityIssuerMode ?? readAuthIdentityIssuerMode();
+  if (!issuer && identityIssuerMode === "enforce") {
+    throw invalidAuthenticatedPrincipal();
+  }
+  let link;
+  if (issuer) {
+    link = await client.identityLink.findUnique({
+      where: {
+          provider_issuer_providerSubject: {
+            provider: IdentityLinkProvider.LOGTO,
+            issuer,
+            providerSubject: subject,
+          },
+        },
+      select: {
+        audienceIdentityId: true,
+        verifiedAt: true,
+        assuranceLevel: true,
+        revokedAt: true,
       },
-    },
-    select: {
-      audienceIdentityId: true,
-      verifiedAt: true,
-      assuranceLevel: true,
-      revokedAt: true,
-    },
-  });
+    });
+    if (!link && identityIssuerMode === "shadow") {
+      link = await client.identityLink.findFirst({
+        where: {
+          provider: IdentityLinkProvider.LOGTO,
+          issuer: "delegate",
+          providerSubject: subject,
+          metadata: {
+            path: ["issuer"],
+            equals: issuer,
+          },
+        },
+        select: {
+          audienceIdentityId: true,
+          verifiedAt: true,
+          assuranceLevel: true,
+          revokedAt: true,
+        },
+      });
+    }
+  } else {
+    link = await client.identityLink.findUnique({
+      where: {
+          // Expand-only compatibility for signed v1 sessions created before
+          // issuer was embedded. The legacy provider/subject unique constraint
+          // must remain until shadow mode is retired.
+          provider_providerSubject: {
+            provider: IdentityLinkProvider.LOGTO,
+            providerSubject: subject,
+          },
+        },
+      select: {
+        audienceIdentityId: true,
+        verifiedAt: true,
+        assuranceLevel: true,
+        revokedAt: true,
+      },
+    });
+  }
   if (
     !link
     || link.revokedAt

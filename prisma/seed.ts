@@ -99,9 +99,15 @@ export async function seedDatabase(
   // balances, conversations, and every other piece of user-owned state.
   const existingWorkspace = await client.representative.findUnique({
     where: { slug: demoRepresentative.slug },
-    select: { id: true },
+    select: { id: true, ownerId: true },
   });
   if (existingWorkspace) {
+    if (
+      existingWorkspace.id === DEMO_REPRESENTATIVE_ID
+      && existingWorkspace.ownerId === DEMO_OWNER_ID
+    ) {
+      await reconcileLegacyDemoOwnerDevIssuer(client, existingWorkspace.ownerId);
+    }
     console.log(`Seed skipped: representative "${demoRepresentative.slug}" already exists.`);
     return "skipped";
   }
@@ -152,52 +158,79 @@ export async function seedDatabase(
       },
     });
 
-    const existingDevAuthLink = await tx.ownerIdentityLink.findUnique({
+    const devAuthIssuer = "https://local-auth.delegate.invalid/oidc";
+    const exactDevAuthLink = await tx.ownerIdentityLink.findFirst({
       where: {
-        provider_providerSubject: {
-          provider: OwnerIdentityLinkProvider.LOGTO,
-          providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
-        },
+        provider: OwnerIdentityLinkProvider.LOGTO,
+        issuer: devAuthIssuer,
+        providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
       },
-      select: { ownerId: true },
+      select: { id: true, ownerId: true, issuer: true, metadata: true },
     });
+    const existingDevAuthLink =
+      exactDevAuthLink ??
+      await tx.ownerIdentityLink.findUnique({
+        where: {
+          provider_providerSubject: {
+            provider: OwnerIdentityLinkProvider.LOGTO,
+            providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
+          },
+        },
+        select: { id: true, ownerId: true, issuer: true, metadata: true },
+      });
     if (existingDevAuthLink && existingDevAuthLink.ownerId !== owner.id) {
       throw new Error(
         `Seed development auth subject "${DEMO_OWNER_DEV_AUTH_SUBJECT}" already belongs to another owner.`,
       );
     }
-    await tx.ownerIdentityLink.upsert({
-      where: {
-        provider_providerSubject: {
+    if (
+      existingDevAuthLink?.issuer
+      && existingDevAuthLink.issuer !== devAuthIssuer
+    ) {
+      throw new Error(
+        `Seed development auth subject "${DEMO_OWNER_DEV_AUTH_SUBJECT}" belongs to issuer "${existingDevAuthLink.issuer}".`,
+      );
+    }
+    if (
+      !exactDevAuthLink
+      && existingDevAuthLink
+      && !hasApprovedSeedIssuerEvidence(
+        existingDevAuthLink.metadata,
+        devAuthIssuer,
+      )
+    ) {
+      throw new Error(
+        `Seed development auth subject "${DEMO_OWNER_DEV_AUTH_SUBJECT}" lacks approved local fixture issuer evidence.`,
+      );
+    }
+    const devAuthIdentityData = {
+      issuer: devAuthIssuer,
+      email: "creator@delegate.local",
+      verifiedAt: now,
+      emailVerifiedAt: now,
+      metadata: {
+        issuer: devAuthIssuer,
+        mode: "development",
+        actor: "owner",
+        fixture: "prisma-seed",
+      },
+    };
+    if (existingDevAuthLink) {
+      await tx.ownerIdentityLink.update({
+        where: { id: existingDevAuthLink.id },
+        data: devAuthIdentityData,
+      });
+    } else {
+      await tx.ownerIdentityLink.create({
+        data: {
+          id: "owner_identity_link_dev_demo",
+          ownerId: owner.id,
           provider: OwnerIdentityLinkProvider.LOGTO,
           providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
+          ...devAuthIdentityData,
         },
-      },
-      create: {
-        id: "owner_identity_link_dev_demo",
-        ownerId: owner.id,
-        provider: OwnerIdentityLinkProvider.LOGTO,
-        providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
-        email: "creator@delegate.local",
-        verifiedAt: now,
-        emailVerifiedAt: now,
-        metadata: {
-          mode: "development",
-          actor: "owner",
-          fixture: "prisma-seed",
-        },
-      },
-      update: {
-        email: "creator@delegate.local",
-        verifiedAt: now,
-        emailVerifiedAt: now,
-        metadata: {
-          mode: "development",
-          actor: "owner",
-          fixture: "prisma-seed",
-        },
-      },
-    });
+      });
+    }
 
     await tx.wallet.upsert({
       where: { ownerId: DEMO_OWNER_ID },
@@ -1180,6 +1213,97 @@ export async function seedDatabase(
   });
 
   return "seeded";
+}
+
+async function reconcileLegacyDemoOwnerDevIssuer(
+  client: Pick<PrismaClient, "ownerIdentityLink">,
+  ownerId: string,
+) {
+  const issuer = "https://local-auth.delegate.invalid/oidc";
+  const exactLink = await client.ownerIdentityLink.findFirst({
+    where: {
+      provider: OwnerIdentityLinkProvider.LOGTO,
+      issuer,
+      providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
+    },
+    select: { id: true },
+  });
+  if (exactLink) {
+    return;
+  }
+  const legacyLink = await client.ownerIdentityLink.findUnique({
+    where: {
+      provider_providerSubject: {
+        provider: OwnerIdentityLinkProvider.LOGTO,
+        providerSubject: DEMO_OWNER_DEV_AUTH_SUBJECT,
+      },
+    },
+    select: {
+      id: true,
+      ownerId: true,
+      issuer: true,
+      metadata: true,
+    },
+  });
+  if (!legacyLink) {
+    return;
+  }
+  if (legacyLink.ownerId !== ownerId) {
+    throw new Error(
+      `Seed development auth subject "${DEMO_OWNER_DEV_AUTH_SUBJECT}" already belongs to another owner.`,
+    );
+  }
+  if (legacyLink.issuer && legacyLink.issuer !== issuer) {
+    throw new Error(
+      `Seed development auth subject "${DEMO_OWNER_DEV_AUTH_SUBJECT}" belongs to issuer "${legacyLink.issuer}".`,
+    );
+  }
+  if (!hasApprovedSeedIssuerEvidence(legacyLink.metadata, issuer)) {
+    throw new Error(
+      `Seed development auth subject "${DEMO_OWNER_DEV_AUTH_SUBJECT}" lacks approved local fixture issuer evidence.`,
+    );
+  }
+  await client.ownerIdentityLink.update({
+    where: { id: legacyLink.id },
+    data: {
+      issuer,
+      metadata: {
+        ...toJsonRecord(legacyLink.metadata),
+        issuer,
+        mode: "development",
+        actor: "owner",
+        fixture: "prisma-seed",
+      },
+    },
+  });
+}
+
+function toJsonRecord(value: Prisma.JsonValue | null): Record<string, Prisma.JsonValue> {
+  return (
+    typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+  )
+    ? value as Record<string, Prisma.JsonValue>
+    : {};
+}
+
+function hasApprovedSeedIssuerEvidence(
+  metadata: Prisma.JsonValue | null,
+  issuer: string,
+): boolean {
+  const record = toJsonRecord(metadata);
+  if (typeof record.issuer === "string") {
+    return record.issuer.trim() === issuer;
+  }
+  return (
+    record.mode === "development"
+    && record.actor === "owner"
+    && (
+      record.fixture === "prisma-seed"
+      || record.fixture === "local-compose-bootstrap"
+    )
+  );
 }
 
 function buildSeedRepresentativeVersionSnapshot(): Prisma.InputJsonObject {

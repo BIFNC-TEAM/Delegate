@@ -41,6 +41,16 @@ describe("public representative visitor-first page", () => {
     expect(pageSource).not.toContain("representative.skillPacks");
   });
 
+  it("stops reading legacy audience cookies when v2 enforcement modes are selected", () => {
+    expect(pageSource).toContain(
+      "usesLegacyAccountSessionAuthority(",
+    );
+    expect(pageSource).toContain("readAccountSessionMode()");
+    expect(pageSource).toMatch(
+      /const authSession = legacyAuthorityEnabled[\s\S]*?: null;/u,
+    );
+  });
+
   it("keeps existing WeChat orders visible when new collection is paused", () => {
     expect(pageSource).toContain(
       "weChatPayReleaseFlags?.processingEnabled === true",

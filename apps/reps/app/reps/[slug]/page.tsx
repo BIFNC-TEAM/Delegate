@@ -8,10 +8,12 @@ import {
   LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   getRepresentativePublicDeliverables,
   getPublicRepresentativeRuntime,
+  readAccountSessionMode,
   readDelegateAuthSessionSecret,
   resolveWeChatPayReleaseFlags,
   resolvePublicAudiencePrincipal,
   verifyDelegateAuthSession,
+  usesLegacyAccountSessionAuthority,
 } from "@delegate/web-data";
 import {
   HashScrollRestorer,
@@ -89,11 +91,16 @@ export default async function RepresentativePage({
   const deliverableSnapshot = await getRepresentativePublicDeliverables(slug);
 
   const representative = runtime.setup;
-  const authSession = verifyDelegateAuthSession(
-    cookieStore.get(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE)?.value ??
-      cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value,
-    readDelegateAuthSessionSecret(),
+  const legacyAuthorityEnabled = usesLegacyAccountSessionAuthority(
+    readAccountSessionMode(),
   );
+  const authSession = legacyAuthorityEnabled
+    ? verifyDelegateAuthSession(
+        cookieStore.get(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE)?.value ??
+          cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value,
+        readDelegateAuthSessionSecret(),
+      )
+    : null;
   let audienceSession =
     authSession?.actor === "audience"
     && authSession.audienceIdentityId

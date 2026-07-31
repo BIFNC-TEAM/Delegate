@@ -11,6 +11,8 @@ import {
   type PublicAudienceWalletClient,
 } from "../src/public-audience-principal";
 
+const LOGTO_ISSUER = "https://auth.example.com/oidc";
+
 describe("public audience principal", () => {
   it("revalidates the Logto link while preserving the signed device Web thread", async () => {
     const client = new FakePublicAudiencePrincipalClient({
@@ -29,6 +31,8 @@ describe("public audience principal", () => {
         },
       ],
       link: {
+        issuer: LOGTO_ISSUER,
+        providerSubject: "logto-user-1",
         audienceIdentityId: "identity-account",
         verifiedAt: new Date("2026-07-24T00:00:00.000Z"),
         assuranceLevel: IdentityAssuranceLevel.PLATFORM_VERIFIED,
@@ -59,6 +63,8 @@ describe("public audience principal", () => {
     {
       label: "revoked link",
       link: {
+        issuer: LOGTO_ISSUER,
+        providerSubject: "logto-user-1",
         audienceIdentityId: "identity-account",
         verifiedAt: new Date("2026-07-24T00:00:00.000Z"),
         assuranceLevel: IdentityAssuranceLevel.PLATFORM_VERIFIED,
@@ -69,6 +75,8 @@ describe("public audience principal", () => {
     {
       label: "link target mismatch",
       link: {
+        issuer: LOGTO_ISSUER,
+        providerSubject: "logto-user-1",
         audienceIdentityId: "identity-other",
         verifiedAt: new Date("2026-07-24T00:00:00.000Z"),
         assuranceLevel: IdentityAssuranceLevel.STEP_UP_VERIFIED,
@@ -148,6 +156,98 @@ describe("public audience principal", () => {
       code: "ANONYMOUS_SESSION_ROTATION_REQUIRED",
     });
   });
+
+  it("rejects the same subject from a different issuer", async () => {
+    const client = authenticatedPrincipalClient();
+
+    await expect(
+      resolvePublicAudiencePrincipal(
+        {
+          audienceId: "device-session",
+          verifiedAuthSession: audienceSession({
+            audienceId: "device-session",
+            audienceIdentityId: "identity-account",
+            issuer: "https://other-auth.example.com/oidc",
+          }),
+        },
+        client,
+      ),
+    ).rejects.toMatchObject({
+      code: "AUTHENTICATED_PRINCIPAL_INVALID",
+    });
+  });
+
+  it("keeps issuer-less legacy sessions only in the finite shadow window", async () => {
+    const client = authenticatedPrincipalClient();
+    const legacySession = audienceSession({
+      audienceId: "device-session",
+      audienceIdentityId: "identity-account",
+      issuer: null,
+    });
+
+    await expect(
+      resolvePublicAudiencePrincipal(
+        {
+          audienceId: "device-session",
+          verifiedAuthSession: legacySession,
+          identityIssuerMode: "shadow",
+        },
+        client,
+      ),
+    ).resolves.toMatchObject({
+      mode: "authenticated",
+      audienceIdentityId: "identity-account",
+    });
+    await expect(
+      resolvePublicAudiencePrincipal(
+        {
+          audienceId: "device-session",
+          verifiedAuthSession: legacySession,
+          identityIssuerMode: "enforce",
+        },
+        client,
+      ),
+    ).rejects.toMatchObject({
+      code: "AUTHENTICATED_PRINCIPAL_INVALID",
+    });
+  });
+
+  it("revalidates exact sessions against matching legacy issuer evidence only in shadow", async () => {
+    const client = authenticatedPrincipalClient({
+      issuer: "delegate",
+      metadataIssuer: LOGTO_ISSUER,
+    });
+    const session = audienceSession({
+      audienceId: "device-session",
+      audienceIdentityId: "identity-account",
+    });
+
+    await expect(
+      resolvePublicAudiencePrincipal(
+        {
+          audienceId: "device-session",
+          verifiedAuthSession: session,
+          identityIssuerMode: "shadow",
+        },
+        client,
+      ),
+    ).resolves.toMatchObject({
+      mode: "authenticated",
+      audienceIdentityId: "identity-account",
+    });
+    await expect(
+      resolvePublicAudiencePrincipal(
+        {
+          audienceId: "device-session",
+          verifiedAuthSession: session,
+          identityIssuerMode: "enforce",
+        },
+        client,
+      ),
+    ).rejects.toMatchObject({
+      code: "AUTHENTICATED_PRINCIPAL_INVALID",
+    });
+  });
 });
 
 describe("public audience wallet selector", () => {
@@ -223,6 +323,9 @@ type IdentityRow = {
 };
 
 type LinkRow = {
+  issuer: string;
+  metadataIssuer?: string;
+  providerSubject: string;
   audienceIdentityId: string;
   verifiedAt: Date | null;
   assuranceLevel: IdentityAssuranceLevel;
@@ -268,21 +371,100 @@ implements PublicAudiencePrincipalClient {
   };
 
   identityLink = {
-    findUnique: async () => this.link,
+    findUnique: async (args: unknown) => {
+      if (!this.link) return null;
+      const input = args as {
+        where:
+          | {
+              provider_issuer_providerSubject: {
+                issuer: string;
+                providerSubject: string;
+              };
+            }
+          | {
+              provider_providerSubject: {
+                providerSubject: string;
+              };
+            };
+      };
+      if ("provider_issuer_providerSubject" in input.where) {
+        const key = input.where.provider_issuer_providerSubject;
+        return key.issuer === this.link.issuer
+          && key.providerSubject === this.link.providerSubject
+          ? this.link
+          : null;
+      }
+      return input.where.provider_providerSubject.providerSubject
+        === this.link.providerSubject
+        ? this.link
+        : null;
+    },
+    findFirst: async (args: unknown) => {
+      if (!this.link) return null;
+      const input = args as {
+        where: {
+          issuer: string;
+          providerSubject: string;
+          metadata: { equals: string };
+        };
+      };
+      return input.where.issuer === this.link.issuer
+        && input.where.providerSubject === this.link.providerSubject
+        && input.where.metadata.equals === this.link.metadataIssuer
+        ? this.link
+        : null;
+    },
   };
 }
 
 function audienceSession(
-  input: { audienceId: string; audienceIdentityId: string },
+  input: {
+    audienceId: string;
+    audienceIdentityId: string;
+    issuer?: string | null;
+  },
 ): DelegateAuthSession {
   return {
     version: 1,
     actor: "audience",
     provider: "logto",
+    ...(input.issuer === null
+      ? {}
+      : { issuer: input.issuer ?? LOGTO_ISSUER }),
     subject: "logto-user-1",
     audienceId: input.audienceId,
     audienceIdentityId: input.audienceIdentityId,
     issuedAt: 1,
     expiresAt: 4_102_444_800,
   };
+}
+
+function authenticatedPrincipalClient(
+  linkOverrides: Partial<LinkRow> = {},
+) {
+  return new FakePublicAudiencePrincipalClient({
+    identities: [
+      {
+        id: "identity-device",
+        audienceKey: "web:device-session",
+        status: "MERGED",
+        mergedIntoId: "identity-account",
+      },
+      {
+        id: "identity-account",
+        audienceKey: "web:account-stable",
+        status: "REGISTERED",
+        mergedIntoId: null,
+      },
+    ],
+    link: {
+      issuer: LOGTO_ISSUER,
+      providerSubject: "logto-user-1",
+      audienceIdentityId: "identity-account",
+      verifiedAt: new Date("2026-07-24T00:00:00.000Z"),
+      assuranceLevel: IdentityAssuranceLevel.PLATFORM_VERIFIED,
+      revokedAt: null,
+      ...linkOverrides,
+    },
+  });
 }

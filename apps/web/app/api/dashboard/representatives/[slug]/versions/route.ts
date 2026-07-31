@@ -17,8 +17,11 @@ export async function GET(
 ) {
   const { slug } = await params;
   try {
-    await requireDashboardRepresentativeAccess(slug);
-    const snapshot = await getRepresentativeOperationsSnapshot(slug);
+    const session = await requireDashboardRepresentativeAccess(slug);
+    const snapshot = await getRepresentativeOperationsSnapshot({
+      representativeSlug: slug,
+      ...(session?.ownerId ? { ownerId: session.ownerId } : {}),
+    });
     if (!snapshot) return NextResponse.json({ error: "Representative not found." }, { status: 404 });
     return NextResponse.json(snapshot);
   } catch (error) {

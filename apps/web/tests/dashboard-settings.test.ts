@@ -14,6 +14,10 @@ const page = readFileSync(
   new URL("../app/dashboard/page.tsx", import.meta.url),
   "utf8",
 );
+const layout = readFileSync(
+  new URL("../app/layout.tsx", import.meta.url),
+  "utf8",
+);
 const blueprints = readFileSync(
   new URL("../app/dashboard/dashboard-ui-data.ts", import.meta.url),
   "utf8",
@@ -34,6 +38,7 @@ describe("dashboard owner settings", () => {
     expect(framework).toContain('props.activeView === "settings"');
     expect(framework).toContain("dashboard-v2-settings-scope");
     expect(framework).toContain('props.activeView !== "settings"');
+    expect(framework).not.toContain("LanguageSwitcher");
     expect(blueprints).toContain(
       'Exclude<DashboardView, "overview" | "settings">',
     );
@@ -59,9 +64,15 @@ describe("dashboard owner settings", () => {
     expect(component).toContain("displayName");
     expect(component).toContain("preferredLocale");
     expect(component).toContain(
-      "profile.preferredLocale !== draft.preferredLocale",
+      '(profile.preferredLocale ?? "zh") !== draft.preferredLocale',
     );
-    expect(component).toContain('value={profileDraft.preferredLocale ?? ""}');
+    expect(component).toContain(
+      'preferredLocale: snapshot.profile?.preferredLocale ?? "zh"',
+    );
+    expect(component).toContain(
+      'value={profileDraft.preferredLocale ?? "zh"}',
+    );
+    expect(component).not.toContain("languageUnsetOption");
     expect(component).toContain("invalidStoredTimeZone");
     expect(component).not.toContain("supportedValuesOf");
     expect(framework).toContain("timeZones={props.settingsTimeZones}");
@@ -131,17 +142,23 @@ describe("dashboard owner settings", () => {
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
   });
 
-  it("resolves locale with URL, saved Owner preference, cookie, then request hints", () => {
+  it("resolves locale with URL, saved Owner preference, cookie, then Chinese default", () => {
     expect(page).toContain("normalizeLocale(params?.lang)");
     expect(page).toContain("ownerPreferences?.preferredLocale");
     expect(page).toContain("getCookieLocale");
-    expect(page).toContain('headerStore.get("accept-language")');
-    const localeResolution = page.slice(page.indexOf("const locale = resolveLocale"));
+    expect(page).toContain('?? "zh"');
+    expect(layout).toContain(
+      'getCookieLocale(cookieStore.get(localeCookieName)?.value) ?? "zh"',
+    );
+    const localeResolution = page.slice(page.indexOf("const locale ="));
     expect(localeResolution.indexOf("normalizeLocale(params?.lang)")).toBeLessThan(
       localeResolution.indexOf("ownerPreferences?.preferredLocale"),
     );
     expect(localeResolution.indexOf("ownerPreferences?.preferredLocale")).toBeLessThan(
       localeResolution.indexOf("getCookieLocale"),
+    );
+    expect(localeResolution.indexOf("getCookieLocale")).toBeLessThan(
+      localeResolution.indexOf('?? "zh"'),
     );
   });
 });

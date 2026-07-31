@@ -322,6 +322,7 @@ export type RepresentativeOperationsSnapshot = {
     lifecycleState: "draft" | "configuring" | "ready" | "published" | "paused" | "archived";
     publicMode: boolean;
     activeVersion?: number;
+    timeZone: string;
     updatedAt: string;
   };
   readiness: Array<{
@@ -572,14 +573,22 @@ function delegationTaskOwnsGenerationBilling(input: {
 export async function listConversationInboxSnapshot(
   representativeSlug: string,
   operatorId = "local-owner",
+  ownerId?: string | null,
 ): Promise<ConversationInboxSnapshot | null> {
+  const scopedOwnerId = ownerId?.trim();
   if (!process.env.DATABASE_URL?.trim()) {
+    if (scopedOwnerId) {
+      throw new Error("Conversation inbox is temporarily unavailable.");
+    }
     return buildDemoInboxSnapshot(representativeSlug);
   }
 
   try {
-    const representative = await prisma.representative.findUnique({
-      where: { slug: representativeSlug },
+    const representative = await prisma.representative.findFirst({
+      where: {
+        slug: representativeSlug,
+        ...(scopedOwnerId ? { ownerId: scopedOwnerId } : {}),
+      },
       select: {
         id: true,
         slug: true,
@@ -761,6 +770,9 @@ export async function listConversationInboxSnapshot(
     };
   } catch (error) {
     if (isConversationPlatformUnavailable(error)) {
+      if (scopedOwnerId) {
+        throw new Error("Conversation inbox is temporarily unavailable.");
+      }
       return buildDemoInboxSnapshot(representativeSlug);
     }
     throw error;
@@ -770,14 +782,25 @@ export async function listConversationInboxSnapshot(
 export async function getConversationDetailSnapshot(
   representativeSlug: string,
   conversationId: string,
+  ownerId?: string | null,
 ): Promise<ConversationDetailSnapshot | null> {
+  const scopedOwnerId = ownerId?.trim();
   if (!process.env.DATABASE_URL?.trim()) {
+    if (scopedOwnerId) {
+      throw new Error("Conversation detail is temporarily unavailable.");
+    }
     return buildDemoConversationDetail(representativeSlug, conversationId);
   }
 
   try {
     const conversation = await prisma.conversation.findFirst({
-      where: { id: conversationId, representative: { slug: representativeSlug } },
+      where: {
+        id: conversationId,
+        representative: {
+          slug: representativeSlug,
+          ...(scopedOwnerId ? { ownerId: scopedOwnerId } : {}),
+        },
+      },
       include: {
         representative: { select: { slug: true, displayName: true } },
         contact: true,
@@ -912,6 +935,9 @@ export async function getConversationDetailSnapshot(
     };
   } catch (error) {
     if (isConversationPlatformUnavailable(error)) {
+      if (scopedOwnerId) {
+        throw new Error("Conversation detail is temporarily unavailable.");
+      }
       return buildDemoConversationDetail(representativeSlug, conversationId);
     }
     throw error;
@@ -919,17 +945,31 @@ export async function getConversationDetailSnapshot(
 }
 
 export async function getRepresentativeOperationsSnapshot(
-  representativeSlug: string,
+  input: {
+    representativeSlug: string;
+    ownerId?: string | null;
+  },
 ): Promise<RepresentativeOperationsSnapshot | null> {
+  const representativeSlug = input.representativeSlug.trim();
+  const ownerId = input.ownerId?.trim();
+  if (!representativeSlug) return null;
+
   if (!process.env.DATABASE_URL?.trim()) {
+    if (ownerId) {
+      throw new Error("Representative operations are temporarily unavailable.");
+    }
     return buildDemoRepresentativeOperations(representativeSlug);
   }
 
   try {
-    const representative = await prisma.representative.findUnique({
-      where: { slug: representativeSlug },
+    const representative = await prisma.representative.findFirst({
+      where: {
+        slug: representativeSlug,
+        ...(ownerId ? { ownerId } : {}),
+      },
       include: {
         activeVersion: { select: { id: true, versionNumber: true } },
+        owner: { select: { timezone: true } },
         versions: { orderBy: { versionNumber: "desc" }, take: 20 },
         channelBindings: { orderBy: { kind: "asc" } },
         knowledgeAssetLinks: { where: { enabled: true } },
@@ -982,6 +1022,7 @@ export async function getRepresentativeOperationsSnapshot(
         ...(representative.activeVersion
           ? { activeVersion: representative.activeVersion.versionNumber }
           : {}),
+        timeZone: normalizeIanaTimeZone(representative.owner.timezone),
         updatedAt: representative.updatedAt.toISOString(),
       },
       readiness,
@@ -1008,6 +1049,9 @@ export async function getRepresentativeOperationsSnapshot(
     };
   } catch (error) {
     if (isConversationPlatformUnavailable(error)) {
+      if (ownerId) {
+        throw new Error("Representative operations are temporarily unavailable.");
+      }
       return buildDemoRepresentativeOperations(representativeSlug);
     }
     throw error;
@@ -8395,6 +8439,7 @@ function buildDemoRepresentativeOperations(representativeSlug: string): Represen
       lifecycleState: "published",
       publicMode: true,
       activeVersion: 3,
+      timeZone: "UTC",
       updatedAt: "2026-07-16T06:00:00.000Z",
     },
     readiness: buildRepresentativeReadiness({

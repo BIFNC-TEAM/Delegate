@@ -238,6 +238,24 @@ pnpm docker:up:local
 
 Use `pnpm docker:up` for the production-shaped local stack; it requires a
 configured Logto Traditional Web application before creator login can succeed.
+The repository also includes a separate, loopback-only Logto OSS v1.41.0
+baseline with its own PostgreSQL database. Bootstrap its generated local
+credentials and initialize the database exactly once:
+
+```bash
+pnpm logto:local:bootstrap
+pnpm logto:local:config
+pnpm logto:local:init
+```
+
+Subsequent starts use `pnpm logto:local:up`; `pnpm logto:local:smoke` verifies
+OIDC discovery, JWKS, the token endpoint, and the Admin Console SPA.
+`pnpm logto:local:backup` creates a checksummed database + credential + Secret
+Vault KEK recovery set before an upgrade. Application IDs and secrets still
+need to be created manually in the Console. See
+[`docs/logto-self-hosting-runbook.md`](docs/logto-self-hosting-runbook.md) for
+the exact Console setup, one-shot upgrade flow, and production boundaries.
+
 Native Matrix is optional and is not part of Telegram delivery. The Matrix
 command bootstraps a development-only Synapse instance with random local
 Application Service tokens, then includes the same local app override. Its
@@ -291,6 +309,8 @@ Useful local URLs for the default Docker profile:
 - Matrix Application Service bridge (Matrix profile): `http://127.0.0.1:4030`
 - Isolated Matrix E2E Client API: `http://127.0.0.1:8009`
 - Isolated Matrix E2E bridge: `http://127.0.0.1:4031`
+- Local Logto core: `http://127.0.0.1:3301`
+- Local Logto Admin Console: `http://127.0.0.1:3302`
 
 If you are running the three Next.js apps manually side by side, use explicit ports:
 
@@ -355,14 +375,18 @@ If Temporal configuration is incomplete, Delegate falls back to `local_runner` r
 The default `.env.example` is safe for local development. Important settings:
 
 - `DATABASE_URL` points Prisma to Postgres.
-- `LOGTO_ENDPOINT`, `LOGTO_APP_ID`, `LOGTO_APP_SECRET`, `LOGTO_REDIRECT_URI`, and `LOGTO_SCOPES` enable Logto-compatible OIDC login for creator dashboard sessions.
+- `LOGTO_ENDPOINT` and `LOGTO_SCOPES` are shared OIDC settings. `LOGTO_BACKCHANNEL_ENDPOINT` may provide a trusted server-only route for token and JWKS calls, but authorization URLs and issuer validation always use the public `LOGTO_ENDPOINT`. Dashboard uses only `LOGTO_DASHBOARD_APP_ID` / `LOGTO_DASHBOARD_APP_SECRET`; Public Representatives uses only `LOGTO_REPS_APP_ID` / `LOGTO_REPS_APP_SECRET`. Each callback is derived from its canonical `NEXT_PUBLIC_*` origin at `/auth/callback`; there is no deployment-supplied redirect URI or cross-application credential fallback.
+- `LOGTO_REPS_LEGACY_ENDPOINT`, `LOGTO_REPS_LEGACY_APP_ID`, `LOGTO_REPS_LEGACY_APP_SECRET`, and the future RFC3339 `DELEGATE_REPS_LEGACY_CALLBACK_UNTIL` belong only to the Reps service and exist solely to drain already-issued v1/v2 dynamic callbacks in place. Missing, malformed, or expired compatibility configuration makes the old callback return `410` without a token request. Remove the complete tuple after the drain deadline.
+- The self-hosted local Logto infrastructure uses a separate generated `.local/logto/logto.env`, not the root application `.env`. `pnpm logto:local:bootstrap` creates it with a dedicated database password and Secret Vault KEK; its committed key contract is documented in `deploy/logto/logto.env.example`.
 - `LOGTO_ACCOUNT_CENTER_URL` optionally exposes a validated Logto self-service account-management link in Owner Settings. Production values must use HTTPS; local development may use loopback HTTP.
+- `DELEGATE_CREATOR_ADMISSION_PRINCIPALS` is the comma- or newline-separated allowlist of exact `issuer|subject` Logto principals that may create a new Creator account. A successful Logto login alone never creates an Owner. Existing Owner identity links continue to work after their principal is removed; subject-only entries and wildcards are intentionally rejected.
+- `DELEGATE_ACCOUNT_SESSION_MODE` is the finite `legacy | shadow | enforce | contract` rollout state for Account/AppSession v2 and defaults to `legacy`. `legacy` never accesses the v2 account/session tables. `shadow` keeps the signed legacy cookies authoritative while callbacks atomically resolve the exact issuer+subject Account, CAS-bind the already-authorized persona, rotate any prior v2 token, and issue the HttpOnly `delegate_dashboard_session_v2` or cross-representative `delegate_reps_session_v2` cookie. Shadow logout revokes the browser-held application token when storage is available, while every mode deletes the browser cookie. `enforce` and `contract` deliberately reject login and stop trusting legacy cookies until v2 read authority is implemented; setting either early cannot silently fall back to legacy authentication.
 - Owner Settings notification preferences control Dashboard navigation reminders only. They do not enable email, SMS, Slack, webhook, or quiet-hours delivery.
 - `NEXT_PUBLIC_DASHBOARD_URL` and `NEXT_PUBLIC_REPRESENTATIVE_URL` are required canonical public origins for the production-shaped apps. The local override fixes them to loopback origins so development login cannot be redirected to a remote host through a reused environment file.
 - `TELEGRAM_WEB_RECHARGE_BASE_URL` optionally gives only the Bot a public Web-recharge origin without changing the representative app's canonical origin. It falls back to `NEXT_PUBLIC_REPRESENTATIVE_URL`; only public HTTPS values produce an inline button, while local HTTP values are sent as text.
-- `DELEGATE_AUTH_SESSION_SECRET` signs dashboard auth and callback-state cookies. Set a strong secret in production.
+- `DELEGATE_AUTH_SESSION_SECRET` signs dashboard and representative auth/callback-state cookies. Reps fixed-callback state also carries the signed Representative slug and complete anonymous public-chat binding so the root callback never derives identity from Host or unsigned query values. Set a strong secret in production.
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` forces dashboard auth in non-production environments; production always requires it.
-- `DELEGATE_AUTH_DEV_LOGIN` and the `DELEGATE_AUTH_DEV_*` identities are accepted only outside production. `DELEGATE_LOCAL_AUTH_BOOTSTRAP=true` separately permits the local fixture binding step. `pnpm docker:up:local` enables both switches without weakening the production login boundary.
+- `DELEGATE_AUTH_DEV_LOGIN` and the `DELEGATE_AUTH_DEV_*` identities are accepted only outside production and only when the login switch is explicitly enabled. `DELEGATE_LOCAL_AUTH_BOOTSTRAP=true` separately permits the local fixture binding step. Both default to disabled in `.env.example`; `pnpm docker:up:local` explicitly enables them and binds the development subject to the seeded demo Owner without weakening the production login boundary.
 - `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` exposes the explicitly labeled local service-package panel so mock payment, direct credit grant, usage, and wholly-unused reversal can be exercised. Order creation, completion, and reversal require a signed-in audience account. Telegram continuations additionally require the current verified Bot binding. Keep it `false` outside development; the mock mutation endpoints also return `404` in production. This switch does not enable WeChat Pay.
 - `DELEGATE_WECHAT_PAY_COLLECTION_ENABLED` controls creation of new WeChat
   Native orders. `DELEGATE_WECHAT_PAY_PROCESSING_ENABLED` independently keeps
@@ -421,12 +445,17 @@ pnpm db:setup
 pnpm test:channels
 pnpm test:channels:pg16
 pnpm test:postgres:owner-settings
+pnpm test:logto:config
 
 pnpm docker:ps
 pnpm docker:logs
 pnpm docker:down
 pnpm docker:up:local
 pnpm docker:up:matrix
+pnpm logto:local:config
+pnpm logto:local:init
+pnpm logto:local:smoke
+pnpm logto:local:backup
 pnpm matrix:local:e2e
 
 pnpm registry:search:clawhub "qualification"

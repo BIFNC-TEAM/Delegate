@@ -9,14 +9,19 @@ import {
   buildLogtoAuthorizeUrl,
   createDelegateAuthSession,
   createDelegateAuthState,
+  createDelegateRepresentativeAuthState,
   decodeJwtPayload,
   DELEGATE_OWNER_AUTH_SESSION_COOKIE,
   DELEGATE_OWNER_AUTH_STATE_COOKIE,
   buildVerifiedExternalAuthProfileFromLogtoIdToken,
+  derivePkceCodeChallenge,
   exchangeLogtoCodeForTokens,
+  generatePkceCodeVerifier,
   isDelegateAuthPersistenceUnavailableError,
+  isLegacyRepresentativeCallbackEnabled,
   isLogtoOidcConfigured,
   readDelegateAuthSessionSecret,
+  readLegacyRepresentativeLogtoOidcConfig,
   readLogtoOidcConfig,
   shouldUseDelegateAuthDevLogin,
   signDelegateAuthSession,
@@ -25,12 +30,18 @@ import {
   verifyDelegateAuthSession,
 } from "../src/auth-session";
 
+const rfc7636CodeVerifier =
+  "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+const rfc7636CodeChallenge =
+  "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+
 describe("Logto OIDC helpers", () => {
   it("builds a Logto authorize URL with standard OIDC parameters", () => {
     const url = new URL(
       buildLogtoAuthorizeUrl(
         {
           endpoint: "https://auth.example.com/",
+          backchannelEndpoint: "http://logto.internal:3001",
           appId: "app-1",
           appSecret: "secret",
           redirectUri: "https://delegate.example.com/auth/callback",
@@ -39,6 +50,7 @@ describe("Logto OIDC helpers", () => {
         {
           state: "state-1",
           nonce: "nonce-1",
+          codeChallenge: rfc7636CodeChallenge,
         },
       ),
     );
@@ -50,6 +62,22 @@ describe("Logto OIDC helpers", () => {
     expect(url.searchParams.get("scope")).toBe("openid profile email");
     expect(url.searchParams.get("state")).toBe("state-1");
     expect(url.searchParams.get("nonce")).toBe("nonce-1");
+    expect(url.searchParams.get("code_challenge")).toBe(
+      rfc7636CodeChallenge,
+    );
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+  });
+
+  it("generates high-entropy PKCE verifiers and derives the RFC 7636 S256 challenge", () => {
+    const firstVerifier = generatePkceCodeVerifier();
+    const secondVerifier = generatePkceCodeVerifier();
+
+    expect(firstVerifier).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(secondVerifier).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(firstVerifier).not.toBe(secondVerifier);
+    expect(derivePkceCodeChallenge(rfc7636CodeVerifier)).toBe(
+      rfc7636CodeChallenge,
+    );
   });
 
   it("exchanges an authorization code against the Logto token endpoint", async () => {
@@ -57,13 +85,14 @@ describe("Logto OIDC helpers", () => {
     const tokens = await exchangeLogtoCodeForTokens(
       {
         endpoint: "https://auth.example.com",
+        backchannelEndpoint: "http://logto.internal:3001",
         appId: "app-1",
         appSecret: "secret",
         redirectUri: "https://delegate.example.com/auth/callback",
       },
       {
         code: "code-1",
-        codeVerifier: "verifier-1",
+        codeVerifier: rfc7636CodeVerifier,
       },
       async (url, init) => {
         requests.push({ url, init });
@@ -89,14 +118,14 @@ describe("Logto OIDC helpers", () => {
       tokenType: "Bearer",
       scope: "openid profile email",
     });
-    expect(requests[0]?.url).toBe("https://auth.example.com/oidc/token");
+    expect(requests[0]?.url).toBe("http://logto.internal:3001/oidc/token");
     const body = requests[0]?.init.body as URLSearchParams;
     expect(body.get("grant_type")).toBe("authorization_code");
     expect(body.get("code")).toBe("code-1");
     expect(body.get("client_id")).toBe("app-1");
     expect(body.get("client_secret")).toBe("secret");
     expect(body.get("redirect_uri")).toBe("https://delegate.example.com/auth/callback");
-    expect(body.get("code_verifier")).toBe("verifier-1");
+    expect(body.get("code_verifier")).toBe(rfc7636CodeVerifier);
   });
 
   it("normalizes a Logto id_token into an external auth profile", () => {
@@ -113,6 +142,7 @@ describe("Logto OIDC helpers", () => {
 
     expect(buildExternalAuthProfileFromLogtoIdToken(idToken)).toEqual({
       provider: "logto",
+      issuer: "https://auth.example.com",
       subject: "logto-user-1",
       email: "Ada@Example.com",
       emailVerified: true,
@@ -151,6 +181,7 @@ describe("Logto OIDC helpers", () => {
       buildVerifiedExternalAuthProfileFromLogtoIdToken(
         {
           endpoint: "https://auth.example.com",
+          backchannelEndpoint: "http://logto.internal:3001",
           appId: "app-1",
           appSecret: "secret",
           redirectUri: "https://delegate.example.com/auth/callback",
@@ -168,6 +199,7 @@ describe("Logto OIDC helpers", () => {
       buildVerifiedExternalAuthProfileFromLogtoIdToken(
         {
           endpoint: "https://auth.example.com",
+          backchannelEndpoint: "http://logto.internal:3001",
           appId: "app-1",
           appSecret: "secret",
           redirectUri: "https://delegate.example.com/auth/callback",
@@ -181,53 +213,249 @@ describe("Logto OIDC helpers", () => {
       ),
     ).resolves.toMatchObject({
       provider: "logto",
+      issuer: "https://auth.example.com/oidc",
       subject: "logto-user-1",
       email: "Ada@Example.com",
       emailVerified: true,
       name: "Ada Lovelace",
     });
+
+    const bareEndpointIssuerToken = await new SignJWT({
+      nonce: "nonce-1",
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer("https://auth.example.com")
+      .setAudience("app-1")
+      .setSubject("logto-user-1")
+      .setIssuedAt(Math.floor(new Date("2026-07-04T12:00:00.000Z").getTime() / 1000))
+      .setExpirationTime(Math.floor(new Date("2026-07-04T12:05:00.000Z").getTime() / 1000))
+      .sign(privateKey);
+    await expect(
+      buildVerifiedExternalAuthProfileFromLogtoIdToken(
+        {
+          endpoint: "https://auth.example.com",
+          backchannelEndpoint: "http://logto.internal:3001",
+          appId: "app-1",
+          appSecret: "secret",
+          redirectUri: "https://delegate.example.com/auth/callback",
+        },
+        {
+          idToken: bareEndpointIssuerToken,
+          nonce: "nonce-1",
+          jwks,
+          now: new Date("2026-07-04T12:01:00.000Z"),
+        },
+      ),
+    ).rejects.toThrow();
+
+    const wrongAuthorizedPartyToken = await new SignJWT({
+      nonce: "nonce-1",
+      azp: "other-app",
+    })
+      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+      .setIssuer("https://auth.example.com/oidc")
+      .setAudience(["app-1", "resource-api"])
+      .setSubject("logto-user-1")
+      .setIssuedAt(
+        Math.floor(
+          new Date("2026-07-04T12:00:00.000Z").getTime() / 1000,
+        ),
+      )
+      .setExpirationTime(
+        Math.floor(
+          new Date("2026-07-04T12:05:00.000Z").getTime() / 1000,
+        ),
+      )
+      .sign(privateKey);
+    await expect(
+      buildVerifiedExternalAuthProfileFromLogtoIdToken(
+        {
+          endpoint: "https://auth.example.com",
+          backchannelEndpoint: "http://logto.internal:3001",
+          appId: "app-1",
+          appSecret: "secret",
+          redirectUri: "https://delegate.example.com/auth/callback",
+        },
+        {
+          idToken: wrongAuthorizedPartyToken,
+          nonce: "nonce-1",
+          jwks,
+          now: new Date("2026-07-04T12:01:00.000Z"),
+        },
+      ),
+    ).rejects.toThrow("Logto id_token authorized party mismatch");
   });
 
-  it("reads Logto config and requires all deployment secrets", () => {
+  it("reads isolated Dashboard and Reps Logto configs from canonical origins", () => {
     expect(
-      readLogtoOidcConfig({
+      readLogtoOidcConfig("dashboard", {
         LOGTO_ENDPOINT: "https://auth.example.com",
-        LOGTO_APP_ID: "app-1",
-        LOGTO_APP_SECRET: "secret",
-        LOGTO_REDIRECT_URI: "https://delegate.example.com/auth/callback",
+        LOGTO_BACKCHANNEL_ENDPOINT: "http://logto.internal:3001",
+        LOGTO_DASHBOARD_APP_ID: "dashboard-app",
+        LOGTO_DASHBOARD_APP_SECRET: "dashboard-secret",
+        LOGTO_REPS_APP_ID: "reps-app",
+        LOGTO_REPS_APP_SECRET: "reps-secret",
+        NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.example.com/",
+        NEXT_PUBLIC_REPRESENTATIVE_URL: "https://reps.example.com",
         LOGTO_SCOPES: "openid profile email",
       }),
     ).toEqual({
       endpoint: "https://auth.example.com",
-      appId: "app-1",
-      appSecret: "secret",
-      redirectUri: "https://delegate.example.com/auth/callback",
+      backchannelEndpoint: "http://logto.internal:3001",
+      appId: "dashboard-app",
+      appSecret: "dashboard-secret",
+      redirectUri: "https://dashboard.example.com/auth/callback",
       scopes: ["openid", "profile", "email"],
     });
-    expect(() => readLogtoOidcConfig({})).toThrow("LOGTO_ENDPOINT is required");
+    expect(
+      readLogtoOidcConfig("representatives", {
+        LOGTO_ENDPOINT: "https://auth.example.com",
+        LOGTO_DASHBOARD_APP_ID: "dashboard-app",
+        LOGTO_DASHBOARD_APP_SECRET: "dashboard-secret",
+        LOGTO_REPS_APP_ID: "reps-app",
+        LOGTO_REPS_APP_SECRET: "reps-secret",
+        NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.example.com",
+        NEXT_PUBLIC_REPRESENTATIVE_URL: "https://reps.example.com/",
+      }),
+    ).toMatchObject({
+      appId: "reps-app",
+      appSecret: "reps-secret",
+      redirectUri: "https://reps.example.com/auth/callback",
+    });
+    expect(() => readLogtoOidcConfig("dashboard", {})).toThrow(
+      "LOGTO_ENDPOINT is required",
+    );
   });
 
-  it("detects whether Logto is configured without reading secrets", () => {
+  it("fails closed on partial namespaced config and never falls back across apps", () => {
     expect(
-      isLogtoOidcConfigured({
+      isLogtoOidcConfigured("dashboard", {
         LOGTO_ENDPOINT: "https://auth.example.com",
-        LOGTO_APP_ID: "app-1",
-        LOGTO_APP_SECRET: "secret",
-        LOGTO_REDIRECT_URI: "https://delegate.example.com/auth/callback",
+        LOGTO_DASHBOARD_APP_ID: "dashboard-app",
+        LOGTO_DASHBOARD_APP_SECRET: "dashboard-secret",
+        NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.example.com",
       }),
     ).toBe(true);
     expect(
-      isLogtoOidcConfigured({
-        LOGTO_ENDPOINT: "https://auth.example.com",
-        LOGTO_APP_ID: "app-1",
-        LOGTO_APP_SECRET: "",
-        LOGTO_REDIRECT_URI: "https://delegate.example.com/auth/callback",
+      isLogtoOidcConfigured("dashboard", {
+        NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.example.com",
       }),
     ).toBe(false);
+    expect(() =>
+      isLogtoOidcConfigured("representatives", {
+        LOGTO_ENDPOINT: "https://auth.example.com",
+        LOGTO_DASHBOARD_APP_ID: "dashboard-app",
+        LOGTO_DASHBOARD_APP_SECRET: "dashboard-secret",
+        NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.example.com",
+      }),
+    ).toThrow(
+      /Incomplete Logto representatives configuration; missing LOGTO_REPS_APP_ID, LOGTO_REPS_APP_SECRET/,
+    );
+    expect(() =>
+      isLogtoOidcConfigured("representatives", {
+        LOGTO_ENDPOINT: "https://auth.example.com",
+        LOGTO_REPS_APP_ID: "reps-app",
+        LOGTO_REPS_APP_SECRET: "reps-secret",
+      }),
+    ).toThrow("NEXT_PUBLIC_REPRESENTATIVE_URL is required");
+    expect(() =>
+      readLogtoOidcConfig("representatives", {
+        LOGTO_ENDPOINT: "https://auth.example.com",
+        LOGTO_APP_ID: "old-shared-app",
+        LOGTO_APP_SECRET: "old-shared-secret",
+        LOGTO_REDIRECT_URI: "https://reps.example.com/auth/callback",
+        NEXT_PUBLIC_REPRESENTATIVE_URL: "https://reps.example.com",
+      }),
+    ).toThrow("LOGTO_REPS_APP_ID is required");
+    expect(() =>
+      readLogtoOidcConfig("dashboard", {
+        LOGTO_ENDPOINT: "https://auth.example.com",
+        LOGTO_DASHBOARD_APP_ID: "dashboard-app",
+        LOGTO_DASHBOARD_APP_SECRET: "dashboard-secret",
+        NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.example.com/base",
+      }),
+    ).toThrow("NEXT_PUBLIC_DASHBOARD_URL must be an HTTP(S) origin");
+    expect(() =>
+      readLogtoOidcConfig("dashboard", {
+        LOGTO_ENDPOINT: "https://auth.example.com",
+        LOGTO_BACKCHANNEL_ENDPOINT: "file:///var/run/logto",
+        LOGTO_DASHBOARD_APP_ID: "dashboard-app",
+        LOGTO_DASHBOARD_APP_SECRET: "dashboard-secret",
+        NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.example.com",
+      }),
+    ).toThrow("LOGTO_BACKCHANNEL_ENDPOINT must be an HTTP(S) endpoint");
+    expect(() =>
+      readLogtoOidcConfig("dashboard", {
+        LOGTO_ENDPOINT: "ftp://auth.example.com",
+        LOGTO_DASHBOARD_APP_ID: "dashboard-app",
+        LOGTO_DASHBOARD_APP_SECRET: "dashboard-secret",
+        NEXT_PUBLIC_DASHBOARD_URL: "https://dashboard.example.com",
+      }),
+    ).toThrow("LOGTO_ENDPOINT must be an HTTP(S) endpoint");
+  });
+
+  it("builds the bounded legacy Reps tuple only from its isolated namespace", () => {
+    expect(
+      readLegacyRepresentativeLogtoOidcConfig("demo rep", {
+        LOGTO_REPS_LEGACY_ENDPOINT: "https://legacy-auth.example.com",
+        LOGTO_REPS_LEGACY_BACKCHANNEL_ENDPOINT:
+          "http://legacy-logto.internal:3001",
+        LOGTO_REPS_LEGACY_APP_ID: "legacy-app",
+        LOGTO_REPS_LEGACY_APP_SECRET: "legacy-secret",
+        NEXT_PUBLIC_REPRESENTATIVE_URL: "https://reps.example.com",
+        LOGTO_SCOPES: "openid email",
+      }),
+    ).toEqual({
+      endpoint: "https://legacy-auth.example.com",
+      backchannelEndpoint: "http://legacy-logto.internal:3001",
+      appId: "legacy-app",
+      appSecret: "legacy-secret",
+      redirectUri:
+        "https://reps.example.com/reps/demo%20rep/auth/callback",
+      scopes: ["openid", "email"],
+    });
+    expect(() =>
+      readLegacyRepresentativeLogtoOidcConfig("demo", {
+        LOGTO_ENDPOINT: "https://auth.example.com",
+        LOGTO_REPS_APP_ID: "new-app",
+        LOGTO_REPS_APP_SECRET: "new-secret",
+        NEXT_PUBLIC_REPRESENTATIVE_URL: "https://reps.example.com",
+      }),
+    ).toThrow("LOGTO_REPS_LEGACY_ENDPOINT is required");
+
+    const now = new Date("2026-07-04T12:00:00.000Z");
+    expect(
+      isLegacyRepresentativeCallbackEnabled(
+        { DELEGATE_REPS_LEGACY_CALLBACK_UNTIL: "2026-07-04T12:10:00Z" },
+        now,
+      ),
+    ).toBe(true);
+    for (const deadline of [
+      "",
+      "tomorrow",
+      "2026-07-04T11:59:59Z",
+      "2026-07-04T12:00:00Z",
+      "2026-07-04T12:10:00",
+      "2026-02-30T12:10:00Z",
+      "2026-07-04T12:10:00+24:00",
+    ]) {
+      expect(
+        isLegacyRepresentativeCallbackEnabled(
+          { DELEGATE_REPS_LEGACY_CALLBACK_UNTIL: deadline },
+          now,
+        ),
+      ).toBe(false);
+    }
   });
 
   it("uses development login only outside production", () => {
-    expect(shouldUseDelegateAuthDevLogin({ NODE_ENV: "development" })).toBe(true);
+    expect(shouldUseDelegateAuthDevLogin({ NODE_ENV: "development" })).toBe(false);
+    expect(
+      shouldUseDelegateAuthDevLogin({
+        NODE_ENV: "development",
+        DELEGATE_AUTH_DEV_LOGIN: "true",
+      }),
+    ).toBe(true);
     expect(
       shouldUseDelegateAuthDevLogin({
         NODE_ENV: "development",
@@ -260,6 +488,7 @@ describe("Logto OIDC helpers", () => {
       }),
     ).toEqual({
       provider: "logto",
+      issuer: "https://local-auth.delegate.invalid/oidc",
       subject: "delegate-dev-audience",
       email: "audience@delegate.local",
       emailVerified: true,
@@ -285,6 +514,7 @@ describe("delegate auth session cookies", () => {
   it("signs and verifies a compact owner session", () => {
     const session = createDelegateAuthSession({
       actor: "owner",
+      issuer: "https://auth.example.com/oidc",
       subject: "logto-user-1",
       ownerId: "owner-1",
       email: "ada@example.com",
@@ -303,6 +533,7 @@ describe("delegate auth session cookies", () => {
   it("rejects tampered session payloads", () => {
     const session = createDelegateAuthSession({
       actor: "audience",
+      issuer: "https://auth.example.com/oidc",
       subject: "logto-user-1",
       audienceIdentityId: "audience-identity-1",
       audienceId: "aud_123",
@@ -331,12 +562,15 @@ describe("delegate auth session cookies", () => {
       actor: "owner",
       state: "state-1",
       nonce: "nonce-1",
+      codeVerifier: rfc7636CodeVerifier,
       returnTo: "https://evil.example.com/phish",
       now: new Date("2026-07-04T12:00:00.000Z"),
       ttlSeconds: 60,
     });
     const cookie = signDelegateAuthState(state, "secret");
 
+    expect(state.version).toBe(2);
+    expect(state.codeVerifier).toBe(rfc7636CodeVerifier);
     expect(state.returnTo).toBe("/dashboard");
     expect(verifyDelegateAuthState(cookie, "secret", new Date("2026-07-04T12:00:30.000Z"))).toEqual(
       state,
@@ -349,6 +583,7 @@ describe("delegate auth session cookies", () => {
       actor: "audience",
       state: "state-1",
       nonce: "nonce-1",
+      codeVerifier: rfc7636CodeVerifier,
       returnTo: "/reps/lin-founder-rep?lang=zh#chat",
       representativeSlug: "lin-founder-rep",
       audienceId: "aud_123",
@@ -360,6 +595,97 @@ describe("delegate auth session cookies", () => {
     expect(verifyDelegateAuthState(cookie, "secret", new Date("2026-07-04T12:00:30.000Z"))).toEqual(
       state,
     );
+  });
+
+  it("carries the complete Reps public-chat binding only in v3 signed state", () => {
+    const state = createDelegateRepresentativeAuthState({
+      state: "state-1",
+      nonce: "nonce-1",
+      codeVerifier: rfc7636CodeVerifier,
+      returnTo: "/reps/lin-founder-rep?lang=zh#chat",
+      representativeSlug: "lin-founder-rep",
+      publicChat: {
+        audienceId: "aud_123",
+        sessionToken: "session-token-with-at-least-24-characters",
+        expiresAt: "2026-07-11T12:00:00.000Z",
+      },
+      now: new Date("2026-07-04T12:00:00.000Z"),
+    });
+    const cookie = signDelegateAuthState(state, "secret");
+
+    expect(state.version).toBe(3);
+    expect(
+      verifyDelegateAuthState(
+        cookie,
+        "secret",
+        new Date("2026-07-04T12:05:00.000Z"),
+      ),
+    ).toEqual(state);
+  });
+
+  it("rejects every overlong state version and obviously future issuedAt", () => {
+    expect(() =>
+      createDelegateAuthState({
+        actor: "owner",
+        state: "state-1",
+        nonce: "nonce-1",
+        codeVerifier: rfc7636CodeVerifier,
+        returnTo: "/dashboard",
+        ttlSeconds: 601,
+      }),
+    ).toThrow(/ttlSeconds/);
+
+    const futureState = createDelegateAuthState({
+      actor: "owner",
+      state: "state-1",
+      nonce: "nonce-1",
+      codeVerifier: rfc7636CodeVerifier,
+      returnTo: "/dashboard",
+      now: new Date("2026-07-04T12:02:00.000Z"),
+    });
+    expect(
+      verifyDelegateAuthState(
+        signDelegateAuthState(futureState, "secret"),
+        "secret",
+        new Date("2026-07-04T12:00:00.000Z"),
+      ),
+    ).toBeNull();
+  });
+
+  it("accepts only short-lived signed v1 state during the PKCE rollout", () => {
+    const legacyState = {
+      version: 1 as const,
+      actor: "owner" as const,
+      state: "legacy-state",
+      nonce: "legacy-nonce",
+      returnTo: "/dashboard",
+      issuedAt: 1_783_166_400,
+      expiresAt: 1_783_167_000,
+    };
+    const cookie = signDelegateAuthState(legacyState, "secret");
+
+    expect(
+      verifyDelegateAuthState(
+        cookie,
+        "secret",
+        new Date("2026-07-04T12:05:00.000Z"),
+      ),
+    ).toEqual(legacyState);
+
+    const overlongLegacyCookie = signDelegateAuthState(
+      {
+        ...legacyState,
+        expiresAt: legacyState.issuedAt + 601,
+      },
+      "secret",
+    );
+    expect(
+      verifyDelegateAuthState(
+        overlongLegacyCookie,
+        "secret",
+        new Date("2026-07-04T12:05:00.000Z"),
+      ),
+    ).toBeNull();
   });
 });
 

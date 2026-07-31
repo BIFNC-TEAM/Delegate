@@ -80,7 +80,11 @@ const defaultCnyServicePackageDescription =
   "一次性购买，当前数字代表专属；永久有效；仅在完全未使用时支持全额退款。";
 
 const representativeSetupInclude = {
-  owner: true,
+  owner: {
+    select: {
+      displayName: true,
+    },
+  },
   knowledgePack: true,
   pricingPlans: true,
   capabilityProfiles: {
@@ -447,16 +451,24 @@ const defaultDelegationSetup: RepresentativeSetupSnapshot["delegation"] = {
 };
 
 export async function listRepresentativeDirectoryItems(ownerId?: string | null): Promise<RepresentativeDirectoryItem[]> {
+  const scopedOwnerId = ownerId?.trim();
   if (!process.env.DATABASE_URL?.trim()) {
+    if (scopedOwnerId) {
+      throw new Error("Representative directory is temporarily unavailable.");
+    }
     return [buildDemoDirectoryItem()];
   }
 
   try {
-    const effectiveOwnerId = ownerId?.trim() || (await findLocalDashboardOwnerId());
+    const effectiveOwnerId = scopedOwnerId || (await findLocalDashboardOwnerId());
     const representatives = await prisma.representative.findMany({
       ...(effectiveOwnerId ? { where: { ownerId: effectiveOwnerId } } : {}),
       include: {
-        owner: true,
+        owner: {
+          select: {
+            displayName: true,
+          },
+        },
         activeVersion: true,
       },
       orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
@@ -474,6 +486,9 @@ export async function listRepresentativeDirectoryItems(ownerId?: string | null):
     }));
   } catch (error) {
     if (isPrismaUnavailableError(error)) {
+      if (scopedOwnerId) {
+        throw new Error("Representative directory is temporarily unavailable.");
+      }
       return [buildDemoDirectoryItem()];
     }
 

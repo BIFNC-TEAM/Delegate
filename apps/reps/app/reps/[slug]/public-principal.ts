@@ -4,9 +4,11 @@ import {
   DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
   LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   PublicAudiencePrincipalError,
+  readAccountSessionMode,
   readDelegateAuthSessionSecret,
   resolvePublicAudiencePrincipal,
   verifyDelegateAuthSession,
+  usesLegacyAccountSessionAuthority,
   type PublicAudiencePrincipal,
 } from "@delegate/web-data";
 
@@ -57,10 +59,21 @@ export async function resolvePublicAudienceRequestPrincipal(input: {
   const authCookieValue =
     audienceAuthCookieValue
     ?? input.cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value;
-  const verifiedSession = verifyDelegateAuthSession(
-    authCookieValue,
-    readDelegateAuthSessionSecret(),
+  const legacyAuthorityEnabled = usesLegacyAccountSessionAuthority(
+    readAccountSessionMode(),
   );
+  if (authCookieValue && !legacyAuthorityEnabled) {
+    throw new PublicAudiencePrincipalError(
+      "AUTHENTICATED_PRINCIPAL_INVALID",
+      "Legacy audience sessions are disabled in the current account-session mode.",
+    );
+  }
+  const verifiedSession = legacyAuthorityEnabled
+    ? verifyDelegateAuthSession(
+        authCookieValue,
+        readDelegateAuthSessionSecret(),
+      )
+    : null;
   if (
     authCookieValue
     && (
@@ -142,6 +155,15 @@ function createRequestPrincipal(input: {
     principal: expectedPrincipal,
     sessionState: input.sessionState,
     async revalidate() {
+      if (
+        verifiedAuthSession
+        && !usesLegacyAccountSessionAuthority(readAccountSessionMode())
+      ) {
+        throw new PublicAudiencePrincipalError(
+          "AUTHENTICATED_PRINCIPAL_INVALID",
+          "Legacy audience sessions are disabled in the current account-session mode.",
+        );
+      }
       if (
         verifiedAuthSession
         && verifiedAuthSession.expiresAt <= Math.floor(Date.now() / 1_000)

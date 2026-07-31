@@ -33,6 +33,9 @@ export {
 export * from "./agent-wallet-withdrawals";
 export * from "./agent-wallet-write";
 export * from "./payment-provider-operation-gate";
+export * from "./account-session-shadow";
+export * from "./account-shadow";
+export * from "./app-sessions";
 export * from "./auth-identities";
 export * from "./auth-session";
 export * from "./audience-identity-binding";

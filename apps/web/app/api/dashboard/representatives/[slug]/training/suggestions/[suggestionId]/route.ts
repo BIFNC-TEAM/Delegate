@@ -6,8 +6,14 @@ import {
 } from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
-  authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccessActor,
 } from "../../../../../auth";
+import { withPrivateNoStore } from "../../../../../../private-response";
+import { creatorTrainingApiErrorResponse } from "../../errors";
+import {
+  toDashboardDevelopmentSuggestionDto,
+  toDashboardDevelopmentVersionDto,
+} from "../../safe-dto";
 
 
 const reviewActions = new Set(["approve", "reject", "private"]);
@@ -17,44 +23,46 @@ export async function PATCH(
   { params }: { params: Promise<{ slug: string; suggestionId: string }> },
 ) {
   const { slug, suggestionId } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
 
   try {
+    const actor = await requireDashboardRepresentativeAccessActor(slug);
     const body = (await request.json()) as Record<string, unknown>;
     const action =
       typeof body.action === "string" && reviewActions.has(body.action)
         ? (body.action as CreatorTrainingReviewAction)
         : null;
     if (!action) {
-      return NextResponse.json({ error: "Unsupported review action." }, { status: 400 });
+      return withPrivateNoStore(
+        NextResponse.json({ error: "Unsupported review action." }, { status: 400 }),
+      );
     }
 
     const result = await reviewCreatorTrainingSuggestion(slug, suggestionId, {
       action,
-      ...(typeof body.reviewedBy === "string" ? { reviewedBy: body.reviewedBy } : {}),
+      reviewedBy: actor,
       ...(typeof body.reviewNote === "string" ? { reviewNote: body.reviewNote } : {}),
       ...(body.editedDraftPayload !== undefined
         ? { editedDraftPayload: body.editedDraftPayload }
         : {}),
-      ...(body.evaluationReport !== undefined ? { evaluationReport: body.evaluationReport } : {}),
     });
 
-    return NextResponse.json(result);
+    return withPrivateNoStore(
+      NextResponse.json({
+        suggestion: toDashboardDevelopmentSuggestionDto(result.suggestion),
+        version: result.version
+          ? toDashboardDevelopmentVersionDto(result.version)
+          : null,
+      }),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to review creator training suggestion.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to review the development suggestion.",
     );
   }
 }

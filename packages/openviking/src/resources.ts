@@ -7,6 +7,7 @@ import {
   buildRepresentativePoliciesUri,
   buildRepresentativePricingUri,
   buildRepresentativeContactMemoryUri,
+  buildRepresentativeVersionResourceRootUri,
 } from "./uris";
 import type { OpenVikingDocumentSpec } from "./types";
 
@@ -27,7 +28,8 @@ type PricingPlan = {
 
 type RepresentativeKnowledgeInput = {
   slug: string;
-  ownerName: string;
+  representativeVersionId?: string;
+  ownerName?: string;
   name: string;
   tagline: string;
   tone: string;
@@ -53,9 +55,13 @@ type RepresentativeKnowledgeInput = {
 export function buildRepresentativeKnowledgeDocuments(
   input: RepresentativeKnowledgeInput,
 ): OpenVikingDocumentSpec[] {
+  const resourceRootUri = input.representativeVersionId
+    ? buildRepresentativeVersionResourceRootUri(input.slug, input.representativeVersionId)
+    : undefined;
+
   return [
     {
-      uri: buildRepresentativeIdentityUri(input.slug),
+      uri: buildRepresentativeIdentityUri(input.slug, resourceRootUri),
       filename: "identity.md",
       reason: "Representative public identity and runtime boundary",
       contextType: "resource",
@@ -64,7 +70,7 @@ export function buildRepresentativeKnowledgeDocuments(
       content: compactMarkdownLines([
         `# ${input.name}`,
         ``,
-        `Owner: ${input.ownerName}`,
+        ...(input.ownerName ? [`Owner: ${input.ownerName}`] : []),
         `Tagline: ${input.tagline}`,
         `Tone: ${input.tone}`,
         `Languages: ${input.languages.join(", ")}`,
@@ -83,7 +89,7 @@ export function buildRepresentativeKnowledgeDocuments(
       ]),
     },
     {
-      uri: buildRepresentativeFaqUri(input.slug),
+      uri: buildRepresentativeFaqUri(input.slug, resourceRootUri),
       filename: "faq.md",
       reason: "Representative FAQ answers",
       contextType: "resource",
@@ -92,7 +98,7 @@ export function buildRepresentativeKnowledgeDocuments(
       content: renderDocumentList("FAQ", input.knowledgePack.faq),
     },
     {
-      uri: buildRepresentativeMaterialsUri(input.slug),
+      uri: buildRepresentativeMaterialsUri(input.slug, resourceRootUri),
       filename: "materials.md",
       reason: "Representative public materials and links",
       contextType: "resource",
@@ -101,7 +107,7 @@ export function buildRepresentativeKnowledgeDocuments(
       content: renderDocumentList("Materials", input.knowledgePack.materials),
     },
     {
-      uri: buildRepresentativePoliciesUri(input.slug),
+      uri: buildRepresentativePoliciesUri(input.slug, resourceRootUri),
       filename: "policies.md",
       reason: "Representative public policies and capability boundaries",
       contextType: "resource",
@@ -120,7 +126,7 @@ export function buildRepresentativeKnowledgeDocuments(
       ]),
     },
     {
-      uri: buildRepresentativePricingUri(input.slug),
+      uri: buildRepresentativePricingUri(input.slug, resourceRootUri),
       filename: "pricing.md",
       reason: "Representative public pricing and paid continuation plans",
       contextType: "resource",

@@ -5,6 +5,8 @@ import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
 } from "../../../../auth";
+import { withPrivateNoStore } from "../../../../../private-response";
+import { toDashboardGovernedMemoryDto } from "../safe-dto";
 
 export async function GET(
   _request: Request,
@@ -13,26 +15,29 @@ export async function GET(
   const { slug } = await params;
   const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
   if (accessResponse) {
-    return accessResponse;
+    return withPrivateNoStore(accessResponse);
   }
 
   try {
     const memories = await getRepresentativeOpenVikingMemoryPreview(slug);
-    return NextResponse.json({ memories });
+    return withPrivateNoStore(
+      NextResponse.json({
+        memories: memories.map(toDashboardGovernedMemoryDto),
+      }),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to load OpenViking memory preview.",
-      },
-      { status: 500 },
+    return withPrivateNoStore(
+      NextResponse.json(
+        {
+          error: "Failed to load governed memory records.",
+        },
+        { status: 500 },
+      ),
     );
   }
 }

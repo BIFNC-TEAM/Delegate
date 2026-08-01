@@ -22,6 +22,7 @@ export async function POST(
       representativeSlug: slug,
       versionId,
       activatedBy: session?.ownerId || "Owner",
+      ...(session?.ownerId ? { ownerId: session.ownerId } : {}),
     });
     return NextResponse.json({ version });
   } catch (error) {

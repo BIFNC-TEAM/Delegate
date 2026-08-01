@@ -29,6 +29,7 @@ import { DashboardAuditLogs } from "./dashboard-audit-logs";
 import { DashboardChannels } from "./dashboard-channels";
 import { DashboardWallet } from "./dashboard-wallet";
 import { DashboardSettings } from "./dashboard-settings";
+import { DashboardTraining } from "./dashboard-training";
 import type { SettingsSection } from "./settings-section-navigation";
 
 const channelControlPlaneViews = ["channels", "audit"] as const;
@@ -37,6 +38,7 @@ const functionalDashboardViews = new Set<DashboardView>([
   "representatives",
   "inbox",
   "approvals",
+  "memory",
   "skills", "wallet", "audit", "settings",
   ...channelControlPlaneViews,
 ]);
@@ -388,6 +390,11 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                   name: representative.name,
                 }))}
               />
+            ) : props.activeView === "memory" ? (
+              <DashboardTraining
+                locale={props.locale}
+                representativeSlug={props.activeSlug}
+              />
             ) : props.activeView === "audit" ? (
               <DashboardAuditLogs activeSlug={props.activeSlug} locale={props.locale} />
             ) : props.activeView === "settings" ? (
@@ -507,7 +514,7 @@ function DashboardOverviewFramework({
     ["FAQ", "36", zh ? "31 已批准" : "31 approved"],
     [zh ? "服务范围" : "Service scopes", "12", zh ? "9 已发布" : "9 published"],
     [zh ? "技能" : "Skills", "08", zh ? "6 已启用" : "6 enabled"],
-    [zh ? "公开记忆" : "Public memories", "42", zh ? "状态正常" : "Healthy"],
+    [zh ? "养成修订" : "Development revisions", "42", zh ? "可审核历史" : "Reviewable history"],
     [zh ? "待处理 Inbox" : "Open inbox", "12", zh ? "4 需接手" : "4 handoffs"],
     [zh ? "未发布草稿" : "Unpublished drafts", "03", zh ? "需要审核" : "Needs review"],
   ];

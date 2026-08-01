@@ -21,6 +21,9 @@ import {
   type WeChatPayOperationsTickResult,
   updateWeChatPayOperationsFailureCodes,
 } from "./wechat-pay-operations";
+import {
+  runOpenVikingOperationsTick,
+} from "./openviking-operations";
 
 let lastTickAt: string | null = null;
 let lastTickSummary: WorkflowTickSummary | null = null;
@@ -198,8 +201,37 @@ async function boot(): Promise<void> {
   }
 
   void tickLoop();
+  void openVikingMaintenanceLoop();
   if (workflowRunnerConfig.paymentReconciliation.enabled) {
     void paymentReconciliationLoop();
+  }
+}
+
+async function openVikingMaintenanceLoop(): Promise<void> {
+  try {
+    const result = await runOpenVikingOperationsTick(
+      workflowRunnerConfig.openVikingMaintenance,
+    );
+    if (result.failedLaneCodes.length > 0) {
+      console.error(
+        "OpenViking maintenance lanes failed:",
+        result.failedLaneCodes.join(","),
+      );
+    }
+  } catch (error) {
+    const maintenanceError =
+      error instanceof Error
+        ? error.message
+        : "openviking_maintenance_tick_failed";
+    console.error(
+      "OpenViking maintenance tick failed:",
+      maintenanceError,
+    );
+  } finally {
+    setTimeout(
+      () => void openVikingMaintenanceLoop(),
+      workflowRunnerConfig.openVikingMaintenance.pollMs,
+    );
   }
 }
 

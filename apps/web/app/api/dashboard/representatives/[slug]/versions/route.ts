@@ -66,6 +66,7 @@ export async function POST(
     const version = await publishRepresentativeVersion({
       representativeSlug: slug,
       publishedBy: session?.ownerId || "Owner",
+      ...(session?.ownerId ? { ownerId: session.ownerId } : {}),
       ...(changeSummary ? { changeSummary } : {}),
     });
     return NextResponse.json({ version }, { status: 201 });

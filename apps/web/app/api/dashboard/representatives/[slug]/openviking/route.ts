@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 import {
   getRepresentativeOpenVikingSnapshot,
@@ -6,40 +7,49 @@ import {
 } from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
-  authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccess,
 } from "../../../auth";
+import { withPrivateNoStore } from "../../../../private-response";
+import { toDashboardGovernedContextDto } from "./safe-dto";
+
+const contextSettingsSchema = z.object({
+  enabled: z.boolean(),
+  autoRecall: z.boolean(),
+  autoCapture: z.literal(false).optional().default(false),
+  recallLimit: z.number().int().min(1).max(20),
+  recallScoreThreshold: z.number().min(0).max(1),
+}).strict();
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
-
   try {
+    await requireDashboardRepresentativeAccess(slug);
     const snapshot = await getRepresentativeOpenVikingSnapshot(slug);
     if (!snapshot) {
-      return NextResponse.json({ error: "Representative not found." }, { status: 404 });
+      return withPrivateNoStore(
+        NextResponse.json({ error: "Representative not found." }, { status: 404 }),
+      );
     }
 
-    return NextResponse.json(snapshot);
+    return withPrivateNoStore(
+      NextResponse.json(toDashboardGovernedContextDto(snapshot)),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to load OpenViking representative settings.",
-      },
-      { status: 500 },
+    return withPrivateNoStore(
+      NextResponse.json(
+        {
+          error: "Failed to load governed context settings.",
+        },
+        { status: 500 },
+      ),
     );
   }
 }
@@ -49,48 +59,47 @@ export async function PATCH(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
-
   try {
-    const body = (await request.json()) as Record<string, unknown>;
+    const session = await requireDashboardRepresentativeAccess(slug);
+    const body = await request.json().catch(() => null);
+    const parsed = contextSettingsSchema.safeParse(body);
+    if (!parsed.success) {
+      return withPrivateNoStore(
+        NextResponse.json(
+          {
+            error: "Invalid governed context settings.",
+            issues: parsed.error.issues.map((issue) => ({
+              path: issue.path.join("."),
+              message: issue.message,
+            })),
+          },
+          { status: 422 },
+        ),
+      );
+    }
+
     const snapshot = await updateRepresentativeOpenVikingConfig({
       representativeSlug: slug,
-      input: {
-        enabled: Boolean(body.enabled),
-        agentIdOverride:
-          typeof body.agentIdOverride === "string" && body.agentIdOverride.trim()
-            ? body.agentIdOverride
-            : undefined,
-        autoRecall: Boolean(body.autoRecall),
-        autoCapture: Boolean(body.autoCapture),
-        captureMode: body.captureMode === "keyword" ? "keyword" : "semantic",
-        recallLimit: Number(body.recallLimit ?? 0),
-        recallScoreThreshold: Number(body.recallScoreThreshold ?? 0),
-        targetUri:
-          typeof body.targetUri === "string" && body.targetUri.trim()
-            ? body.targetUri
-            : undefined,
-      },
+      input: parsed.data,
+      ...(session?.ownerId ? { ownerId: session.ownerId } : {}),
     });
 
-    return NextResponse.json(snapshot);
+    return withPrivateNoStore(
+      NextResponse.json(toDashboardGovernedContextDto(snapshot)),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to update OpenViking representative settings.",
-      },
-      { status: 400 },
+    return withPrivateNoStore(
+      NextResponse.json(
+        {
+          error: "Failed to update governed context settings.",
+        },
+        { status: 400 },
+      ),
     );
   }
 }

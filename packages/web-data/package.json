@@ -13,6 +13,8 @@
     "test": "vitest run",
     "test:postgres:entitlements": "DELEGATE_POSTGRES_E2E=1 vitest run tests/postgres-service-entitlements.integration.test.ts",
     "test:postgres:owner-settings": "DELEGATE_POSTGRES_E2E=1 vitest run --no-file-parallelism tests/postgres-owner-settings.integration.test.ts",
+    "test:postgres:creator-training": "DELEGATE_POSTGRES_E2E=1 vitest run --no-file-parallelism tests/postgres-creator-training-concurrency.integration.test.ts",
+    "test:postgres:openviking": "DELEGATE_POSTGRES_E2E=1 vitest run --no-file-parallelism tests/postgres-openviking-operations.integration.test.ts",
     "test:postgres:wallet": "DELEGATE_POSTGRES_E2E=1 vitest run --no-file-parallelism tests/postgres-wallet-concurrency.integration.test.ts tests/postgres-wallet-business-closure.integration.test.ts tests/postgres-wechat-operations.integration.test.ts",
     "test:postgres:telegram-lease": "DELEGATE_TELEGRAM_LEASE_POSTGRES_E2E=1 vitest run tests/postgres-telegram-runtime-lease.integration.test.ts",
     "test:postgres:skills": "DELEGATE_POSTGRES_E2E=1 vitest run tests/postgres-skill-concurrency.integration.test.ts tests/postgres-skill-trust.integration.test.ts tests/postgres-runtime-release-pin.integration.test.ts tests/postgres-workspace-audit.integration.test.ts"

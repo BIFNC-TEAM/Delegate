@@ -35,6 +35,7 @@ import {
   buildPublicAudienceLoginHref,
   buildPublicAudienceLogoutHref,
 } from "./public-auth";
+import { getGovernedContextDisclosure } from "./governed-context-disclosure";
 
 type RepresentativeSkill = Representative["skills"][number];
 
@@ -91,6 +92,10 @@ export default async function RepresentativePage({
   const deliverableSnapshot = await getRepresentativePublicDeliverables(slug);
 
   const representative = runtime.setup;
+  const governedContextDisclosure = getGovernedContextDisclosure(
+    locale,
+    runtime.governedContextEnabled,
+  );
   const legacyAuthorityEnabled = usesLegacyAccountSessionAuthority(
     readAccountSessionMode(),
   );
@@ -259,7 +264,7 @@ export default async function RepresentativePage({
         <div className="representative-visitor-start">
           <span className="panel-title">{t.startEyebrow}</span>
           <h2>{t.startTitle}</h2>
-          <p>{t.startSummary(representative.name)}</p>
+          <p>{t.startSummary(representative.name, runtime.governedContextEnabled)}</p>
           <a className="button-primary" href="#chat">{t.startChat}</a>
         </div>
       </section>
@@ -267,6 +272,7 @@ export default async function RepresentativePage({
       <RepresentativeChatPanel
         computeEnabled={representative.compute.enabled}
         freeReplyLimit={representative.contract.freeReplyLimit}
+        governedContextEnabled={runtime.governedContextEnabled}
         humanInLoop={representative.humanInLoop}
         locale={locale}
         ownerName={representative.ownerName}
@@ -388,7 +394,8 @@ export default async function RepresentativePage({
           <p className="eyebrow">{t.trustEyebrow}</p>
           <h2>{t.trustTitle}</h2>
           <div className="representative-trust-list">
-            {t.trustItems.map((item) => <p key={item}>{item}</p>)}
+            {t.trustItems(runtime.governedContextEnabled).map((item) => <p key={item}>{item}</p>)}
+            <p>{governedContextDisclosure}</p>
           </div>
         </article>
         <article className="representative-handoff-card" id="handoff">
@@ -499,7 +506,10 @@ const copy = {
     humanAvailable: "必要时可转真人",
     startEyebrow: "从这里开始",
     startTitle: "直接说说你想解决什么",
-    startSummary: (name: string) => `${name} 会先理解问题，再根据已发布资料回答或帮你找到下一步。`,
+    startSummary: (name: string, governedContextEnabled: boolean) =>
+      governedContextEnabled
+        ? `${name} 会先理解问题，以已发布资料为基础，并在需要时使用仅限你与当前代表的受治理历史摘要。`
+        : `${name} 会先理解问题，再根据已发布资料回答或帮你找到下一步。`,
     startChat: "开始提问",
     capabilitiesEyebrow: "我可以帮你",
     capabilitiesTitle: "把问题推进到清楚的下一步",
@@ -510,9 +520,11 @@ const copy = {
     demoEyebrow: "本地演示",
     demoTitle: "验证服务包购买流程",
     demoSummary: "这里只用于开发测试，不会产生真实扣款；模拟支付后会直接发放当前代表的演示服务额度。",
-    trustItems: [
+    trustItems: (governedContextEnabled: boolean) => [
       "这是 AI 数字代表，AI 和真人消息会明确区分。",
-      "回答只使用已发布、允许公开使用的资料，并在相关回答下展示来源。",
+      governedContextEnabled
+        ? "回答以已发布、允许公开使用的资料为基础，也可能使用仅限当前访客与本代表的受治理历史摘要。"
+        : "回答使用已发布、允许公开使用的资料，并在相关回答下展示来源。",
       "不会读取主人的私人文件、账号或工作区；报价、承诺和日程需要真人确认。",
     ],
     handoffVisitorTitle: (ownerName: string) => `需要 ${ownerName} 本人判断？`,
@@ -541,8 +553,6 @@ const copy = {
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",
     worksForLabel: "Who this representative works for",
-    memoryDisclosure:
-      "这个代表只会记住属于本代表范围内的公开安全互动，不会读取主人的私有工作区、私有文件或私有账号。",
     startOnWeb: "在网页中开始",
     viewControlPlane: "查看控制台",
     reviewBoundary: "查看能力边界",
@@ -681,7 +691,10 @@ const copy = {
     humanAvailable: "Human help when needed",
     startEyebrow: "Start here",
     startTitle: "Tell me what you want to solve",
-    startSummary: (name: string) => `${name} will understand the request, answer from published information, and help you find the next step.`,
+    startSummary: (name: string, governedContextEnabled: boolean) =>
+      governedContextEnabled
+        ? `${name} will understand the request, use published information as the foundation, and when useful apply governed history scoped only to you and this representative.`
+        : `${name} will understand the request, answer from published information, and help you find the next step.`,
     startChat: "Ask a question",
     capabilitiesEyebrow: "How I can help",
     capabilitiesTitle: "Move your request toward a clear next step",
@@ -692,9 +705,11 @@ const copy = {
     demoEyebrow: "Local demo",
     demoTitle: "Verify the service-package purchase flow",
     demoSummary: "This is for development testing only and does not create a real charge. Simulated payment directly grants demo credits for this representative.",
-    trustItems: [
+    trustItems: (governedContextEnabled: boolean) => [
       "This is an AI representative. AI and human messages are always labeled separately.",
-      "Replies use published information approved for public use, with sources shown on relevant answers.",
+      governedContextEnabled
+        ? "Replies are grounded in published information approved for public use and may also use governed history scoped only to this visitor and representative."
+        : "Replies use published information approved for public use, with sources shown on relevant answers.",
       "It cannot read the owner's private files, accounts, or workspace. Quotes, commitments, and calendars require human confirmation.",
     ],
     handoffVisitorTitle: (ownerName: string) => `Need ${ownerName} to make the call?`,
@@ -723,8 +738,6 @@ const copy = {
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",
     worksForLabel: "Who this representative works for",
-    memoryDisclosure:
-      "This representative may remember prior public, safe interactions within this representative only. It does not access the owner's private workspace, private files, or private accounts.",
     startOnWeb: "Start on web",
     viewControlPlane: "View control plane",
     reviewBoundary: "Review boundaries",

@@ -13,6 +13,8 @@ import {
   DelegationTaskStepStatus,
   GenerationRunStatus,
   HandoffStatus,
+  KnowledgeAssetReviewStatus,
+  KnowledgeAssetStatus,
   LeadStatus,
   MessageContentType,
   MessageDeliveryStatus,
@@ -6862,14 +6864,35 @@ export async function returnConversationToAi(input: {
 export async function publishRepresentativeVersion(input: {
   representativeSlug: string;
   publishedBy: string;
+  ownerId?: string;
   changeSummary?: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const version = await prisma.$transaction(async (tx) => {
     const representative = await tx.representative.findUnique({
       where: { slug: input.representativeSlug },
       include: {
         knowledgePack: true,
-        knowledgeAssetLinks: { where: { enabled: true } },
+        knowledgeAssetLinks: {
+          where: {
+            enabled: true,
+            reviewStatus: KnowledgeAssetReviewStatus.APPROVED,
+            asset: {
+              status: KnowledgeAssetStatus.READY,
+              archivedAt: null,
+              checksum: { not: null },
+            },
+          },
+          orderBy: { assetId: "asc" },
+          select: {
+            assetId: true,
+            asset: {
+              select: {
+                checksum: true,
+                processingVersion: true,
+              },
+            },
+          },
+        },
         pricingPlans: true,
         capabilityProfiles: {
           where: { isDefault: true, isManaged: false },
@@ -6934,11 +6957,31 @@ export async function publishRepresentativeVersion(input: {
         publishedBy: input.publishedBy,
       },
     });
+    const syncRequestedAt = new Date();
+    const syncJob = await tx.representativeContextSync.create({
+      data: {
+        representativeId: representative.id,
+        requestedVersionId: version.id,
+        trigger: "publish",
+        requestedByOwnerId:
+          input.ownerId === representative.ownerId
+            ? representative.ownerId
+            : null,
+        status: "queued",
+        itemCount: 0,
+        attemptCount: 0,
+        availableAt: syncRequestedAt,
+        startedAt: syncRequestedAt,
+      },
+    });
     await tx.representative.update({
       where: { id: representative.id },
       data: {
         activeVersionId: version.id,
         lifecycleState: RepresentativeLifecycleState.PUBLISHED,
+        openvikingLastSyncJobId: syncJob.id,
+        openvikingLastSyncStatus: "queued",
+        openvikingLastSyncError: null,
       },
     });
     if (representative.publicMode) {
@@ -6972,6 +7015,9 @@ export async function publishRepresentativeVersion(input: {
     }
     await tx.eventAudit.create({
       data: {
+        ...(input.ownerId === representative.ownerId
+          ? { ownerId: representative.ownerId }
+          : {}),
         representativeId: representative.id,
         type: "REPRESENTATIVE_VERSION_PUBLISHED",
         payload: {
@@ -6984,14 +7030,16 @@ export async function publishRepresentativeVersion(input: {
     });
     return version;
   });
+  return version;
 }
 
 export async function activateRepresentativeVersion(input: {
   representativeSlug: string;
   versionId: string;
   activatedBy: string;
+  ownerId?: string;
 }) {
-  return prisma.$transaction(async (tx) => {
+  const version = await prisma.$transaction(async (tx) => {
     const version = await tx.representativeVersion.findFirst({
       where: {
         id: input.versionId,
@@ -7001,6 +7049,7 @@ export async function activateRepresentativeVersion(input: {
         representative: {
           select: {
             id: true,
+            ownerId: true,
             activeVersionId: true,
             skillPackLinks: {
               where: { enabled: true },
@@ -7053,15 +7102,38 @@ export async function activateRepresentativeVersion(input: {
       ),
     ];
 
+    const syncRequestedAt = new Date();
+    const syncJob = await tx.representativeContextSync.create({
+      data: {
+        representativeId: version.representative.id,
+        requestedVersionId: version.id,
+        trigger: "activate",
+        requestedByOwnerId:
+          input.ownerId === version.representative.ownerId
+            ? version.representative.ownerId
+            : null,
+        status: "queued",
+        itemCount: 0,
+        attemptCount: 0,
+        availableAt: syncRequestedAt,
+        startedAt: syncRequestedAt,
+      },
+    });
     await tx.representative.update({
       where: { id: version.representative.id },
       data: {
         activeVersionId: version.id,
         lifecycleState: RepresentativeLifecycleState.PUBLISHED,
+        openvikingLastSyncJobId: syncJob.id,
+        openvikingLastSyncStatus: "queued",
+        openvikingLastSyncError: null,
       },
     });
     await tx.eventAudit.create({
       data: {
+        ...(input.ownerId === version.representative.ownerId
+          ? { ownerId: version.representative.ownerId }
+          : {}),
         representativeId: version.representative.id,
         type: "REPRESENTATIVE_VERSION_ACTIVATED",
         payload: {
@@ -7079,6 +7151,7 @@ export async function activateRepresentativeVersion(input: {
       runtimeFilteredSkillIds,
     };
   });
+  return version;
 }
 
 function buildRepresentativeSnapshot(representative: {
@@ -7113,6 +7186,13 @@ function buildRepresentativeSnapshot(representative: {
   delegationMaxCostCents: number;
   delegationKnowledgeScope: string;
   knowledgePack: { identitySummary: string; faq: Prisma.JsonValue; materials: Prisma.JsonValue; policies: Prisma.JsonValue } | null;
+  knowledgeAssetLinks: Array<{
+    assetId: string;
+    asset: {
+      checksum: string | null;
+      processingVersion: number;
+    };
+  }>;
   pricingPlans: Array<{ type: string; name: string; starsAmount: number; summary: string; includedReplies: number; includesPriorityHandoff: boolean }>;
   capabilityProfiles: Array<{
     defaultDecision: string;
@@ -7277,6 +7357,11 @@ function buildRepresentativeSnapshot(representative: {
           policies: representative.knowledgePack.policies,
         }
       : null,
+    knowledgeAssets: representative.knowledgeAssetLinks.map((link) => ({
+      assetId: link.assetId,
+      checksum: link.asset.checksum,
+      processingVersion: link.asset.processingVersion,
+    })),
     pricing: representative.pricingPlans.map((plan) => ({
       tier: plan.type.toLowerCase(),
       name: plan.name,

@@ -72,6 +72,29 @@ export function resolveWorkflowRunnerConfig(
         24 * 60 * 60_000,
       ),
     },
+    openVikingMaintenance: {
+      pollMs: readBoundedInteger(
+        env,
+        "OPENVIKING_MAINTENANCE_POLL_MS",
+        5_000,
+        1_000,
+        60_000,
+      ),
+      syncBatchSize: readBoundedInteger(
+        env,
+        "OPENVIKING_SYNC_BATCH_SIZE",
+        2,
+        1,
+        20,
+      ),
+      memoryDeletionBatchSize: readBoundedInteger(
+        env,
+        "OPENVIKING_MEMORY_DELETE_BATCH_SIZE",
+        12,
+        1,
+        100,
+      ),
+    },
     engine: getWorkflowEngineConfig(env),
   } as const;
 }

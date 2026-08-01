@@ -7,7 +7,11 @@ import {
 import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccessActor,
 } from "../../../../auth";
+import { withPrivateNoStore } from "../../../../../private-response";
+import { creatorTrainingApiErrorResponse } from "../errors";
+import { toDashboardDevelopmentFeedbackDto } from "../safe-dto";
 
 export async function GET(
   request: Request,
@@ -16,7 +20,7 @@ export async function GET(
   const { slug } = await params;
   const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
   if (accessResponse) {
-    return accessResponse;
+    return withPrivateNoStore(accessResponse);
   }
 
   try {
@@ -28,19 +32,22 @@ export async function GET(
       limit: Number.isFinite(limitValue) ? limitValue : 50,
     });
 
-    return NextResponse.json({ feedbackSignals });
+    return withPrivateNoStore(
+      NextResponse.json({
+        feedbackSignals: feedbackSignals.map(
+          toDashboardDevelopmentFeedbackDto,
+        ),
+      }),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to load creator feedback signals.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to load representative feedback.",
     );
   }
 }
@@ -50,12 +57,9 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
 
   try {
+    const actor = await requireDashboardRepresentativeAccessActor(slug);
     const body = (await request.json()) as Record<string, unknown>;
     const feedbackSignal = await createCreatorFeedbackSignal(slug, {
       signalType: String(body.signalType ?? ""),
@@ -65,22 +69,26 @@ export async function POST(
       ...(typeof body.publicSafe === "boolean" ? { publicSafe: body.publicSafe } : {}),
       ...(typeof body.note === "string" ? { note: body.note } : {}),
       ...(typeof body.suggestedText === "string" ? { suggestedText: body.suggestedText } : {}),
-      ...(typeof body.createdBy === "string" ? { createdBy: body.createdBy } : {}),
+      createdBy: actor,
     });
 
-    return NextResponse.json({ feedbackSignal }, { status: 201 });
+    return withPrivateNoStore(
+      NextResponse.json(
+        {
+          feedbackSignal: toDashboardDevelopmentFeedbackDto(feedbackSignal),
+        },
+        { status: 201 },
+      ),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to create creator feedback signal.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to create representative feedback.",
     );
   }
 }

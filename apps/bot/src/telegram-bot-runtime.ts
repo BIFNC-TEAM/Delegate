@@ -72,10 +72,7 @@ import {
 } from "./runtime-store";
 import { getRepresentativeRuntimeConfig } from "./representative-config";
 import {
-  captureTurnToOpenViking,
   recallOpenVikingContext,
-  storeCollectorMemory,
-  storePaymentMemory,
 } from "./openviking-runtime";
 import {
   buildTelegramUpdateMetadata,
@@ -488,33 +485,6 @@ bot.on("message:successful_payment", async (ctx) => {
 
     await ctx.reply(replyText);
 
-    const context = await getConversationContext(confirmed.representativeSlug, {
-      telegramUserId: ctx.from.id,
-      ...(ctx.from.username ? { username: ctx.from.username } : {}),
-      ...buildDisplayName(ctx.from.first_name, ctx.from.last_name),
-      chatId: ctx.chat.id,
-      channel: Channel.PRIVATE_CHAT,
-    });
-
-    await storePaymentMemory({
-      context,
-      planName: confirmed.planName,
-      starsAmount: confirmed.starsAmount,
-    });
-    await captureTurnToOpenViking({
-      context,
-      chatId: ctx.chat.id,
-      userText: `Payment confirmed for ${confirmed.planName}.`,
-      assistantText: replyText,
-      recalled: [],
-      reason: "payment_confirmed",
-      usedSkill: {
-        uri: "delegate://skills/payment-confirmation",
-        input: { planType: confirmed.planType },
-        output: replyText,
-        success: true,
-      },
-    });
   } catch (error) {
     if (paymentSafelyPersisted) {
       console.error("Telegram payment post-confirmation side effect failed:", error);
@@ -674,7 +644,6 @@ bot.on("message:text", async (ctx) => {
       rawText: normalizedText,
       representative,
       conversationContext,
-      recalled,
     });
     return;
   }
@@ -707,14 +676,6 @@ bot.on("message:text", async (ctx) => {
         plan: collectorPlan,
         messageText: replyText,
         subagentId: collectorSubagent.id,
-      });
-      await captureTurnToOpenViking({
-        context: conversationContext,
-        chatId: ctx.chat.id,
-        userText: normalizedText,
-        assistantText: replyText,
-        recalled,
-        reason: "collector_cancelled",
       });
       return;
     }
@@ -753,24 +714,6 @@ bot.on("message:text", async (ctx) => {
         plan: collectorPlan,
         messageText: replyText,
         subagentId: collectorSubagent.id,
-      });
-      await captureTurnToOpenViking({
-        context: conversationContext,
-        chatId: ctx.chat.id,
-        userText: normalizedText,
-        assistantText: replyText,
-        recalled,
-        reason: "collector_step",
-        usedSkill: {
-          uri: "delegate://skills/structured-collector",
-          input: {
-            kind: advanced.state.kind,
-            stepIndex: advanced.state.stepIndex,
-            subagentId: collectorSubagent.id,
-          },
-          output: replyText,
-          success: true,
-        },
       });
       return;
     }
@@ -811,29 +754,6 @@ bot.on("message:text", async (ctx) => {
       plan: collectorPlan,
       messageText: replyText,
       subagentId: collectorSubagent.id,
-    });
-    await storeCollectorMemory({
-      context: conversationContext,
-      collectorState: advanced.state,
-      summary: submitted.summary,
-    });
-    await captureTurnToOpenViking({
-      context: conversationContext,
-      chatId: ctx.chat.id,
-      userText: normalizedText,
-      assistantText: replyText,
-      recalled,
-      reason: advanced.state.kind === "scheduling" ? "scheduling_collector_completed" : "quote_collector_completed",
-      usedSkill: {
-        uri: "delegate://skills/structured-collector",
-        input: {
-          kind: advanced.state.kind,
-          answers: advanced.state.answers,
-          subagentId: collectorSubagent.id,
-        },
-        output: submitted.summary,
-        success: true,
-      },
     });
     return;
   }
@@ -878,24 +798,6 @@ bot.on("message:text", async (ctx) => {
       plan,
       messageText: replyText,
       subagentId: planSubagent.id,
-    });
-    await captureTurnToOpenViking({
-      context: conversationContext,
-      chatId: ctx.chat.id,
-      userText: normalizedText,
-      assistantText: replyText,
-      recalled,
-      reason: "collector_started",
-      usedSkill: {
-        uri: "delegate://skills/structured-collector",
-        input: {
-          kind: collector.kind,
-          intent: collector.intent,
-          subagentId: planSubagent.id,
-        },
-        output: replyText,
-        success: true,
-      },
     });
     return;
   }
@@ -944,15 +846,6 @@ bot.on("message:text", async (ctx) => {
     .filter(Boolean)
     .join("\n\n");
   let replyText = fallbackReplyText;
-  let usedModelSkill:
-    | {
-        uri: string;
-        input?: Record<string, unknown>;
-        output?: string;
-        success: boolean;
-      }
-    | undefined;
-
   if (plan.nextStep === "answer") {
     const recentTurns = conversationContext
       ? await getRecentConversationTurns({
@@ -1045,16 +938,6 @@ bot.on("message:text", async (ctx) => {
         });
       }
 
-      usedModelSkill = {
-        uri: `delegate://skills/model-reply/${generated.provider}`,
-        input: {
-          model: generated.model,
-          intent: plan.intent,
-          subagentId: planSubagent.id,
-        },
-        output: replyText,
-        success: true,
-      };
     } else {
       console.warn("Model runtime fallback:", generated.reason);
       if (conversationContext) {
@@ -1076,17 +959,6 @@ bot.on("message:text", async (ctx) => {
             : {}),
         });
       }
-      usedModelSkill = {
-        uri: "delegate://skills/model-reply/fallback",
-        input: {
-          reason: generated.reason,
-          state: generated.state,
-          provider: generated.provider ?? null,
-          subagentId: planSubagent.id,
-        },
-        output: fallbackReplyText,
-        success: false,
-      };
     }
   }
 
@@ -1102,15 +974,6 @@ bot.on("message:text", async (ctx) => {
       plan,
       messageText: replyText,
       subagentId: planSubagent.id,
-    });
-    await captureTurnToOpenViking({
-      context: conversationContext,
-      chatId: ctx.chat.id,
-      userText: normalizedText,
-      assistantText: replyText,
-      recalled,
-      reason: normalizeOpenVikingReason(plan.nextStep),
-      ...(usedModelSkill ? { usedSkill: usedModelSkill } : {}),
     });
   }
 });
@@ -1583,22 +1446,6 @@ function buildStartPayloadForPurchase(representativeSlug: string, tier: PlanTier
   return `buy_${representativeSlug}__${tier}`;
 }
 
-function normalizeOpenVikingReason(nextStep: ConversationPlan["nextStep"]): string {
-  switch (nextStep) {
-    case "handoff":
-      return "handoff_requested";
-    case "ask_owner":
-      return "ask_owner";
-    case "offer_paid_unlock":
-      return "offer_paid_unlock";
-    case "collect_intake":
-      return "collect_intake";
-    case "answer":
-    default:
-      return "answer_turn";
-  }
-}
-
 async function handleComputeRequest(params: {
   ctx: any;
   representativeSlug: string;
@@ -1606,7 +1453,6 @@ async function handleComputeRequest(params: {
   rawText: string;
   representative?: Awaited<ReturnType<typeof getRepresentativeRuntimeConfig>>;
   conversationContext?: Awaited<ReturnType<typeof getConversationContext>>;
-  recalled?: Awaited<ReturnType<typeof recallOpenVikingContext>>;
 }) {
   const parsed = params.parsed;
   if (!parsed || !params.ctx.from || params.ctx.chat.type !== "private") {
@@ -1696,24 +1542,6 @@ async function handleComputeRequest(params: {
       capability: parsed.capability,
       outcome: execution.outcome,
       subagentId: computeSubagent.id,
-    });
-    await captureTurnToOpenViking({
-      context: conversationContext,
-      chatId: params.ctx.chat.id,
-      userText: params.rawText,
-      assistantText: replyText,
-      recalled: params.recalled ?? [],
-      reason: "compute_turn",
-      usedSkill: {
-        uri: `delegate://skills/compute/${parsed.capability}`,
-        input: {
-          capability: parsed.capability,
-          target: parsed.displayTarget,
-          subagentId: computeSubagent.id,
-        },
-        output: replyText,
-        success: execution.outcome === "completed",
-      },
     });
   } catch (error) {
     const replyText =

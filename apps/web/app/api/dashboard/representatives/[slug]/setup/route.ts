@@ -4,6 +4,7 @@ import {
   assertOwnerCanManageSkills,
   getRepresentativeSetupSnapshot,
   maybeSyncRepresentativeOpenVikingResources,
+  RepresentativeSetupConflictError,
   updateRepresentativeSetup,
 } from "@delegate/web-data";
 
@@ -61,6 +62,10 @@ export async function PATCH(
       syncOpenViking: false,
       changedBy: session?.ownerId ?? "local-owner",
       input: {
+        knowledgePackRevision:
+          typeof body.knowledgePackRevision === "number"
+            ? body.knowledgePackRevision
+            : -1,
         ownerName: String(body.ownerName ?? ""),
         name: String(body.name ?? ""),
         tagline: String(body.tagline ?? ""),
@@ -257,6 +262,7 @@ export async function PATCH(
       await maybeSyncRepresentativeOpenVikingResources({
         representativeSlug: snapshot.slug,
         trigger: "setup_update",
+        ...(session?.ownerId ? { ownerId: session.ownerId } : {}),
       });
     });
 
@@ -265,6 +271,15 @@ export async function PATCH(
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
       return authResponse;
+    }
+    if (error instanceof RepresentativeSetupConflictError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          code: error.code,
+        },
+        { status: error.statusCode },
+      );
     }
 
     return NextResponse.json(

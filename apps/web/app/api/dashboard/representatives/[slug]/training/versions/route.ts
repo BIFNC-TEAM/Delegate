@@ -5,6 +5,9 @@ import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
 } from "../../../../auth";
+import { withPrivateNoStore } from "../../../../../private-response";
+import { creatorTrainingApiErrorResponse } from "../errors";
+import { toDashboardDevelopmentVersionDto } from "../safe-dto";
 
 export async function GET(
   request: Request,
@@ -13,7 +16,7 @@ export async function GET(
   const { slug } = await params;
   const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
   if (accessResponse) {
-    return accessResponse;
+    return withPrivateNoStore(accessResponse);
   }
 
   try {
@@ -23,19 +26,20 @@ export async function GET(
       limit: Number.isFinite(limitValue) ? limitValue : 20,
     });
 
-    return NextResponse.json({ versions });
+    return withPrivateNoStore(
+      NextResponse.json({
+        versions: versions.map(toDashboardDevelopmentVersionDto),
+      }),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to load creator training versions.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to load development revisions.",
     );
   }
 }

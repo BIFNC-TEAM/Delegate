@@ -10,24 +10,52 @@ export function buildRepresentativeResourceRootUri(representativeSlug: string): 
   return `viking://resources/delegate/reps/${sanitizeSegment(representativeSlug)}/`;
 }
 
-export function buildRepresentativeIdentityUri(representativeSlug: string): string {
-  return `${buildRepresentativeResourceRootUri(representativeSlug)}identity/profile.md`;
+export function buildRepresentativeVersionResourceRootUri(
+  representativeSlug: string,
+  representativeVersionId: string,
+): string {
+  return `${buildRepresentativeResourceRootUri(representativeSlug)}versions/${sanitizeSegment(
+    representativeVersionId,
+  )}/`;
 }
 
-export function buildRepresentativeFaqUri(representativeSlug: string): string {
-  return `${buildRepresentativeResourceRootUri(representativeSlug)}faq/index.md`;
+export function buildRepresentativeKnowledgeRootUri(representativeSlug: string): string {
+  return `${buildRepresentativeResourceRootUri(representativeSlug)}knowledge/`;
 }
 
-export function buildRepresentativeMaterialsUri(representativeSlug: string): string {
-  return `${buildRepresentativeResourceRootUri(representativeSlug)}materials/index.md`;
+export function buildRepresentativeIdentityUri(
+  representativeSlug: string,
+  resourceRootUri = buildRepresentativeResourceRootUri(representativeSlug),
+): string {
+  return `${normalizeRootUri(resourceRootUri)}identity/profile.md`;
 }
 
-export function buildRepresentativePoliciesUri(representativeSlug: string): string {
-  return `${buildRepresentativeResourceRootUri(representativeSlug)}policies/index.md`;
+export function buildRepresentativeFaqUri(
+  representativeSlug: string,
+  resourceRootUri = buildRepresentativeResourceRootUri(representativeSlug),
+): string {
+  return `${normalizeRootUri(resourceRootUri)}faq/index.md`;
 }
 
-export function buildRepresentativePricingUri(representativeSlug: string): string {
-  return `${buildRepresentativeResourceRootUri(representativeSlug)}pricing/index.md`;
+export function buildRepresentativeMaterialsUri(
+  representativeSlug: string,
+  resourceRootUri = buildRepresentativeResourceRootUri(representativeSlug),
+): string {
+  return `${normalizeRootUri(resourceRootUri)}materials/index.md`;
+}
+
+export function buildRepresentativePoliciesUri(
+  representativeSlug: string,
+  resourceRootUri = buildRepresentativeResourceRootUri(representativeSlug),
+): string {
+  return `${normalizeRootUri(resourceRootUri)}policies/index.md`;
+}
+
+export function buildRepresentativePricingUri(
+  representativeSlug: string,
+  resourceRootUri = buildRepresentativeResourceRootUri(representativeSlug),
+): string {
+  return `${normalizeRootUri(resourceRootUri)}pricing/index.md`;
 }
 
 export function buildRepresentativeContactMemoryRootUri(
@@ -65,12 +93,16 @@ export function buildRepresentativeAgentMemoryUri(params: {
 
 export function buildSessionScopedSearchRoot(params: {
   representativeSlug: string;
+  representativeVersionId: string;
   contactId: string;
 }): string[] {
   return [
-    buildRepresentativeResourceRootUri(params.representativeSlug),
+    buildRepresentativeVersionResourceRootUri(
+      params.representativeSlug,
+      params.representativeVersionId,
+    ),
+    buildRepresentativeKnowledgeRootUri(params.representativeSlug),
     buildRepresentativeContactMemoryRootUri(params.representativeSlug, params.contactId),
-    buildRepresentativeAgentMemoryRootUri(params.representativeSlug),
   ];
 }
 
@@ -80,4 +112,8 @@ export function buildSyncStagingUri(representativeSlug: string, filename: string
 
 export function sanitizeVikingSegment(value: string): string {
   return sanitizeSegment(value);
+}
+
+function normalizeRootUri(uri: string): string {
+  return `${uri.replace(/\/+$/, "")}/`;
 }

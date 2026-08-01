@@ -8,6 +8,9 @@ import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
 } from "../../../../../auth";
+import { withPrivateNoStore } from "../../../../../../private-response";
+import { creatorTrainingApiErrorResponse } from "../../errors";
+import { toDashboardDevelopmentSourceDto } from "../../safe-dto";
 
 export async function PATCH(
   request: Request,
@@ -16,7 +19,7 @@ export async function PATCH(
   const { slug, sourceId } = await params;
   const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
   if (accessResponse) {
-    return accessResponse;
+    return withPrivateNoStore(accessResponse);
   }
 
   try {
@@ -37,19 +40,20 @@ export async function PATCH(
         : {}),
     });
 
-    return NextResponse.json({ source });
+    return withPrivateNoStore(
+      NextResponse.json({
+        source: toDashboardDevelopmentSourceDto(source),
+      }),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to update creator training source.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to update the development source.",
     );
   }
 }
@@ -61,24 +65,25 @@ export async function DELETE(
   const { slug, sourceId } = await params;
   const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
   if (accessResponse) {
-    return accessResponse;
+    return withPrivateNoStore(accessResponse);
   }
 
   try {
     const source = await disableCreatorTrainingSource(slug, sourceId);
-    return NextResponse.json({ source });
+    return withPrivateNoStore(
+      NextResponse.json({
+        source: toDashboardDevelopmentSourceDto(source),
+      }),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to disable creator training source.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to disable the development source.",
     );
   }
 }

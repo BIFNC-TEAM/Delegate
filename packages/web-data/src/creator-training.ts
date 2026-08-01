@@ -6,9 +6,14 @@ import {
   shouldDispatchWorkflowViaTemporalOutbox,
 } from "@delegate/workflows";
 import { demoRepresentative } from "@delegate/domain";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 import { prisma } from "./prisma";
+import {
+  acquireRepresentativeKnowledgePackLock,
+  type RepresentativeKnowledgePackLockClient,
+} from "./knowledge-pack-lock";
 
 export type CreatorTrainingSourceKind =
   | "url"
@@ -36,7 +41,8 @@ export type CreatorTrainingSuggestionStatus =
   | "approved"
   | "rejected"
   | "private"
-  | "published";
+  | "published"
+  | "superseded";
 export type CreatorTrainingReviewAction = "approve" | "reject" | "private";
 
 export type CreatorTrainingEvaluationReport = {
@@ -100,6 +106,8 @@ type CreatorFeedbackSignalRecord = {
 type CreatorTrainingSuggestionRecord = {
   id: string;
   representativeId: string;
+  originKey: string;
+  originRevision: number;
   sourceId: string | null;
   feedbackSignalId: string | null;
   suggestionType: string;
@@ -141,6 +149,8 @@ export type CreatorFeedbackSignalSnapshot = {
 export type CreatorTrainingSuggestionSnapshot = {
   id: string;
   representativeId: string;
+  originKey: string;
+  originRevision: number;
   sourceId: string | null;
   feedbackSignalId: string | null;
   suggestionType: CreatorTrainingSuggestionType;
@@ -160,6 +170,7 @@ export type CreatorTrainingSuggestionSnapshot = {
 export type CreatorTrainingVersionSnapshot = {
   id: string;
   representativeId: string;
+  revisionNumber: number;
   suggestionId: string | null;
   status: "published" | "rolled_back";
   title: string;
@@ -168,6 +179,7 @@ export type CreatorTrainingVersionSnapshot = {
   evaluationReport: unknown;
   publishedBy: string | null;
   publishedAt: string;
+  rolledBackBy: string | null;
   rolledBackAt: string | null;
   createdAt: string;
 };
@@ -183,6 +195,20 @@ export type CreatorTrainingReviewWorkflowSnapshot = {
   scheduledAt: string;
   nextWakeAt: string | null;
   createdAt: string;
+};
+
+export type CreatorTrainingDashboardSnapshot = {
+  sources: CreatorTrainingSourceSnapshot[];
+  feedbackSignals: CreatorFeedbackSignalSnapshot[];
+  suggestions: CreatorTrainingSuggestionSnapshot[];
+  versions: CreatorTrainingVersionSnapshot[];
+  latestWorkflow: CreatorTrainingReviewWorkflowSnapshot | null;
+  summary: {
+    availableSourceCount: number;
+    pendingFeedbackCount: number;
+    pendingSuggestionCount: number;
+    appliedVersionCount: number;
+  };
 };
 
 type RepresentativeLookupClient = {
@@ -280,7 +306,11 @@ type CreatorTrainingSourceClient = RepresentativeLookupClient & {
   };
 };
 
-type CreatorTrainingSuggestionClient = RepresentativeLookupClient & {
+type CreatorTrainingSuggestionClient = RepresentativeLookupClient &
+  RepresentativeKnowledgePackLockClient & {
+  $transaction?: <T>(
+    callback: (client: CreatorTrainingSuggestionClient) => Promise<T>,
+  ) => Promise<T>;
   creatorTrainingSource: {
     findMany(args: {
       where: {
@@ -319,25 +349,54 @@ type CreatorTrainingSuggestionClient = RepresentativeLookupClient & {
       take: number;
     }): Promise<UnknownQuestionTurnRecord[]>;
   };
-  creatorTrainingSuggestion: {
-    upsert(args: {
+  creatorTrainingVersion: {
+    findFirst(args: {
       where: {
-        representativeId_dedupeKey: {
-          representativeId: string;
-          dedupeKey: string;
+        representativeId: string;
+        status: "PUBLISHED";
+        suggestion: {
+          is: {
+            originKey: string;
+          };
         };
       };
-      update: {
-        suggestionType: "FAQ_UPDATE" | "POLICY_UPDATE" | "MATERIAL_UPDATE" | "TONE_RULE" | "SKILL_RECOMMENDATION" | "KNOWLEDGE_GAP";
-        title: string;
-        rationale: string;
-        draftPayload: unknown;
-        riskLevel: string;
-        sourceId?: string | null;
-        feedbackSignalId?: string | null;
+      orderBy: {
+        revisionNumber: "desc";
       };
-      create: {
+      select: {
+        suggestion: true;
+      };
+    }): Promise<{ suggestion: CreatorTrainingSuggestionRecord | null } | null>;
+  };
+  creatorTrainingSuggestion: {
+    findFirst(args: {
+      where: {
         representativeId: string;
+        originKey: string;
+        status?: "PUBLISHED" | undefined;
+      };
+      orderBy: {
+        originRevision: "desc";
+      };
+    }): Promise<CreatorTrainingSuggestionRecord | null>;
+    updateMany(args: {
+      where: {
+        representativeId: string;
+        originKey: string;
+        status: "PENDING";
+        id?: {
+          not: string;
+        };
+      };
+      data: {
+        status: "SUPERSEDED";
+      };
+    }): Promise<{ count: number }>;
+    create(args: {
+      data: {
+        representativeId: string;
+        originKey: string;
+        originRevision: number;
         sourceId?: string | null;
         feedbackSignalId?: string | null;
         suggestionType: "FAQ_UPDATE" | "POLICY_UPDATE" | "MATERIAL_UPDATE" | "TONE_RULE" | "SKILL_RECOMMENDATION" | "KNOWLEDGE_GAP";
@@ -352,7 +411,7 @@ type CreatorTrainingSuggestionClient = RepresentativeLookupClient & {
     findMany(args: {
       where: {
         representativeId: string;
-        status?: "PENDING" | "APPROVED" | "REJECTED" | "PRIVATE" | "PUBLISHED" | undefined;
+        status?: "PENDING" | "APPROVED" | "REJECTED" | "PRIVATE" | "PUBLISHED" | "SUPERSEDED" | undefined;
       };
       orderBy: Array<{ createdAt: "desc" }>;
       take: number;
@@ -371,6 +430,7 @@ type KnowledgePackRecord = {
 type CreatorTrainingVersionRecord = {
   id: string;
   representativeId: string;
+  revisionNumber: number;
   suggestionId: string | null;
   status: string;
   title: string;
@@ -379,6 +439,7 @@ type CreatorTrainingVersionRecord = {
   evaluationReport: unknown;
   publishedBy: string | null;
   publishedAt: Date;
+  rolledBackBy: string | null;
   rolledBackAt: Date | null;
   createdAt: Date;
 };
@@ -396,7 +457,7 @@ type CreatorTrainingWorkflowRecord = {
   createdAt: Date;
 };
 
-type CreatorTrainingReviewClient = RepresentativeLookupClient & {
+type CreatorTrainingReviewClient = RepresentativeLookupClient & RepresentativeKnowledgePackLockClient & {
   $transaction?: <T>(callback: (client: CreatorTrainingReviewClient) => Promise<T>) => Promise<T>;
   creatorTrainingSource: {
     update(args: {
@@ -410,6 +471,30 @@ type CreatorTrainingReviewClient = RepresentativeLookupClient & {
     findFirst(args: {
       where: { id: string; representativeId: string };
     }): Promise<CreatorTrainingSuggestionRecord | null>;
+    findMany(args: {
+      where: {
+        representativeId: string;
+        originKey: string;
+      };
+      select: {
+        id: true;
+        draftPayload: true;
+      };
+    }): Promise<Array<Pick<CreatorTrainingSuggestionRecord, "id" | "draftPayload">>>;
+    updateMany(args: {
+      where: {
+        id: string;
+        representativeId: string;
+        status: "PENDING";
+      };
+      data: {
+        status: "APPROVED" | "REJECTED" | "PRIVATE";
+        reviewedAt: Date;
+        reviewedBy?: string | null;
+        reviewNote?: string | null;
+        draftPayload?: unknown;
+      };
+    }): Promise<{ count: number }>;
     update(args: {
       where: { id: string };
       data: {
@@ -428,6 +513,9 @@ type CreatorTrainingReviewClient = RepresentativeLookupClient & {
     upsert(args: {
       where: { representativeId: string };
       update: {
+        revision: {
+          increment: 1;
+        };
         identitySummary: string;
         faq: unknown;
         materials: unknown;
@@ -435,6 +523,7 @@ type CreatorTrainingReviewClient = RepresentativeLookupClient & {
       };
       create: {
         representativeId: string;
+        revision: number;
         identitySummary: string;
         faq: unknown;
         materials: unknown;
@@ -443,9 +532,21 @@ type CreatorTrainingReviewClient = RepresentativeLookupClient & {
     }): Promise<KnowledgePackRecord>;
   };
   creatorTrainingVersion: {
+    findFirst(args: {
+      where: {
+        representativeId: string;
+      };
+      orderBy: {
+        revisionNumber: "desc";
+      };
+      select: {
+        revisionNumber: true;
+      };
+    }): Promise<Pick<CreatorTrainingVersionRecord, "revisionNumber"> | null>;
     create(args: {
       data: {
         representativeId: string;
+        revisionNumber: number;
         suggestionId?: string | null;
         title: string;
         snapshotBefore: unknown;
@@ -505,29 +606,58 @@ type CreatorTrainingWorkflowClient = RepresentativeLookupClient & {
   };
 };
 
+type CreatorTrainingWorkflowListClient = RepresentativeLookupClient & {
+  workflowRun: {
+    findFirst(args: {
+      where: {
+        representativeId: string;
+        kind: "CREATOR_TRAINING_REVIEW";
+      };
+      orderBy: Array<{ scheduledAt: "desc" } | { createdAt: "desc" }>;
+      select: CreatorTrainingWorkflowSelect;
+    }): Promise<CreatorTrainingWorkflowRecord | null>;
+  };
+};
+
 type CreatorTrainingVersionListClient = RepresentativeLookupClient & {
   creatorTrainingVersion: {
     findMany(args: {
       where: {
         representativeId: string;
       };
-      orderBy: Array<{ publishedAt: "desc" } | { createdAt: "desc" }>;
+      orderBy: {
+        revisionNumber: "desc";
+      };
       take: number;
     }): Promise<CreatorTrainingVersionRecord[]>;
   };
 };
 
-type CreatorTrainingRollbackClient = RepresentativeLookupClient & {
+type CreatorTrainingRollbackClient = RepresentativeLookupClient & RepresentativeKnowledgePackLockClient & {
   $transaction?: <T>(callback: (client: CreatorTrainingRollbackClient) => Promise<T>) => Promise<T>;
   knowledgePack: CreatorTrainingReviewClient["knowledgePack"];
   creatorTrainingVersion: {
+    findMany(args: {
+      where: {
+        representativeId: string;
+        status: "PUBLISHED";
+      };
+    }): Promise<CreatorTrainingVersionRecord[]>;
     findFirst(args: {
-      where: { id: string; representativeId: string };
+      where: {
+        id?: string;
+        representativeId: string;
+        status?: "PUBLISHED";
+      };
+      orderBy?: {
+        revisionNumber: "desc";
+      };
     }): Promise<CreatorTrainingVersionRecord | null>;
     update(args: {
       where: { id: string };
       data: {
         status: "ROLLED_BACK";
+        rolledBackBy?: string | null;
         rolledBackAt: Date;
       };
     }): Promise<CreatorTrainingVersionRecord>;
@@ -735,81 +865,133 @@ export async function buildCreatorTrainingSuggestions(
   }
 
   const representative = await requireRepresentative(representativeSlug, client);
-  const feedbackSignals = await client.creatorFeedbackSignal.findMany({
-    where: {
-      representativeId: representative.id,
-      status: "new",
-    },
-    orderBy: [{ createdAt: "desc" }],
-    take: input.feedbackLimit ?? 100,
-  });
-  const sources = await client.creatorTrainingSource.findMany({
-    where: {
-      representativeId: representative.id,
-      status: {
-        not: "DISABLED",
-      },
-    },
-    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
-    take: input.sourceLimit ?? 100,
-  });
-  const unknownTurns = await client.conversationTurn.findMany({
-    where: {
-      direction: "inbound",
-      intent: "unknown",
-      conversation: {
-        representativeId: representative.id,
-      },
-    },
-    select: {
-      messageText: true,
-      conversationId: true,
-      createdAt: true,
-    },
-    orderBy: [{ createdAt: "desc" }],
-    take: input.unknownQuestionLimit ?? 200,
-  });
-  const candidates = [
-    ...sources.flatMap((source) => buildSourceSuggestionCandidates(source)),
-    ...feedbackSignals.flatMap((signal) => buildFeedbackSuggestionCandidates(signal)),
-    ...buildUnknownQuestionCandidates(unknownTurns),
-  ];
-  const suggestions: CreatorTrainingSuggestionSnapshot[] = [];
-
-  for (const candidate of candidates) {
-    const suggestion = await client.creatorTrainingSuggestion.upsert({
+  const requireAdvisoryLock = isProductionCreatorTrainingClient(client);
+  const run = async (tx: CreatorTrainingSuggestionClient) => {
+    await acquireRepresentativeKnowledgePackLock(
+      tx,
+      representative.id,
+      { required: requireAdvisoryLock },
+    );
+    const feedbackSignals = await tx.creatorFeedbackSignal.findMany({
       where: {
-        representativeId_dedupeKey: {
-          representativeId: representative.id,
-          dedupeKey: candidate.dedupeKey,
+        representativeId: representative.id,
+        status: "new",
+      },
+      orderBy: [{ createdAt: "desc" }],
+      take: input.feedbackLimit ?? 100,
+    });
+    const sources = await tx.creatorTrainingSource.findMany({
+      where: {
+        representativeId: representative.id,
+        status: {
+          not: "DISABLED",
         },
       },
-      update: {
-        suggestionType: mapSuggestionTypeToDb(candidate.suggestionType),
-        title: candidate.title,
-        rationale: candidate.rationale,
-        draftPayload: candidate.draftPayload,
-        riskLevel: candidate.riskLevel,
-        ...(candidate.sourceId ? { sourceId: candidate.sourceId } : {}),
-        ...(candidate.feedbackSignalId ? { feedbackSignalId: candidate.feedbackSignalId } : {}),
-      },
-      create: {
-        representativeId: representative.id,
-        ...(candidate.sourceId ? { sourceId: candidate.sourceId } : {}),
-        ...(candidate.feedbackSignalId ? { feedbackSignalId: candidate.feedbackSignalId } : {}),
-        suggestionType: mapSuggestionTypeToDb(candidate.suggestionType),
-        status: "PENDING",
-        title: candidate.title,
-        rationale: candidate.rationale,
-        draftPayload: candidate.draftPayload,
-        dedupeKey: candidate.dedupeKey,
-        riskLevel: candidate.riskLevel,
-      },
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+      take: input.sourceLimit ?? 100,
     });
-    suggestions.push(serializeCreatorTrainingSuggestion(suggestion));
-  }
+    const unknownTurns = await tx.conversationTurn.findMany({
+      where: {
+        direction: "inbound",
+        intent: "unknown",
+        conversation: {
+          representativeId: representative.id,
+        },
+      },
+      select: {
+        messageText: true,
+        conversationId: true,
+        createdAt: true,
+      },
+      orderBy: [{ createdAt: "desc" }],
+      take: input.unknownQuestionLimit ?? 200,
+    });
+    const candidates = [
+      ...sources.flatMap((source) => buildSourceSuggestionCandidates(source)),
+      ...feedbackSignals.flatMap((signal) => buildFeedbackSuggestionCandidates(signal)),
+      ...buildUnknownQuestionCandidates(unknownTurns),
+    ];
+    const suggestions: CreatorTrainingSuggestionSnapshot[] = [];
 
-  return suggestions;
+    for (const candidate of candidates) {
+      const latestApplied = await tx.creatorTrainingVersion.findFirst({
+        where: {
+          representativeId: representative.id,
+          status: "PUBLISHED",
+          suggestion: {
+            is: {
+              originKey: candidate.originKey,
+            },
+          },
+        },
+        orderBy: { revisionNumber: "desc" },
+        select: { suggestion: true },
+      });
+      const appliedSuggestion = latestApplied?.suggestion ?? null;
+      const latest = await tx.creatorTrainingSuggestion.findFirst({
+        where: {
+          representativeId: representative.id,
+          originKey: candidate.originKey,
+        },
+        orderBy: { originRevision: "desc" },
+      });
+      const latestStatus = latest ? mapSuggestionStatusFromDb(latest.status) : null;
+      let current =
+        latest
+        && latest.dedupeKey === candidate.dedupeKey
+        && latestStatus !== "superseded"
+        && (
+          latestStatus !== "published"
+          || appliedSuggestion?.id === latest.id
+        )
+          ? latest
+          : null;
+      if (!current && appliedSuggestion?.dedupeKey === candidate.dedupeKey) {
+        current = appliedSuggestion;
+      }
+      await tx.creatorTrainingSuggestion.updateMany({
+        where: {
+          representativeId: representative.id,
+          originKey: candidate.originKey,
+          status: "PENDING",
+          ...(current && mapSuggestionStatusFromDb(current.status) === "pending"
+            ? { id: { not: current.id } }
+            : {}),
+        },
+        data: {
+          status: "SUPERSEDED",
+        },
+      });
+      if (current) {
+        suggestions.push(serializeCreatorTrainingSuggestion(current));
+        continue;
+      }
+
+      // A suggestion is the immutable payload that the owner reviews. Changed
+      // evidence creates a successor and supersedes the prior pending draft.
+      const suggestion = await tx.creatorTrainingSuggestion.create({
+        data: {
+          representativeId: representative.id,
+          originKey: candidate.originKey,
+          originRevision: (latest?.originRevision ?? 0) + 1,
+          ...(candidate.sourceId ? { sourceId: candidate.sourceId } : {}),
+          ...(candidate.feedbackSignalId ? { feedbackSignalId: candidate.feedbackSignalId } : {}),
+          suggestionType: mapSuggestionTypeToDb(candidate.suggestionType),
+          status: "PENDING",
+          title: candidate.title,
+          rationale: candidate.rationale,
+          draftPayload: candidate.draftPayload,
+          dedupeKey: candidate.dedupeKey,
+          riskLevel: candidate.riskLevel,
+        },
+      });
+      suggestions.push(serializeCreatorTrainingSuggestion(suggestion));
+    }
+
+    return suggestions;
+  };
+
+  return client.$transaction ? client.$transaction(run) : run(client);
 }
 
 export async function listCreatorTrainingSuggestions(
@@ -881,7 +1063,6 @@ export async function reviewCreatorTrainingSuggestion(
     reviewedBy?: string | null | undefined;
     reviewNote?: string | null | undefined;
     editedDraftPayload?: unknown;
-    evaluationReport?: unknown;
     now?: Date | undefined;
   },
   client: CreatorTrainingReviewClient = prisma as unknown as CreatorTrainingReviewClient,
@@ -896,20 +1077,34 @@ export async function reviewCreatorTrainingSuggestion(
   const representative = await requireRepresentative(representativeSlug, client);
   const now = input.now ?? new Date();
   const action = normalizeReviewAction(input.action);
+  const normalizedSuggestionId = normalizeRequiredText(suggestionId, "suggestionId");
+  const requireAdvisoryLock = isProductionCreatorTrainingClient(client);
   const run = async (tx: CreatorTrainingReviewClient) => {
+    await acquireRepresentativeKnowledgePackLock(
+      tx,
+      representative.id,
+      { required: requireAdvisoryLock },
+    );
     const suggestion = await tx.creatorTrainingSuggestion.findFirst({
       where: {
-        id: normalizeRequiredText(suggestionId, "suggestionId"),
+        id: normalizedSuggestionId,
         representativeId: representative.id,
       },
     });
     if (!suggestion) {
       throw new Error("Creator training suggestion not found.");
     }
+    if (mapSuggestionStatusFromDb(suggestion.status) !== "pending") {
+      throw new Error("Creator training suggestion is no longer pending.");
+    }
 
     if (action === "reject" || action === "private") {
-      const reviewed = await tx.creatorTrainingSuggestion.update({
-        where: { id: suggestion.id },
+      const claimed = await tx.creatorTrainingSuggestion.updateMany({
+        where: {
+          id: suggestion.id,
+          representativeId: representative.id,
+          status: "PENDING",
+        },
         data: {
           status: action === "reject" ? "REJECTED" : "PRIVATE",
           reviewedAt: now,
@@ -921,6 +1116,18 @@ export async function reviewCreatorTrainingSuggestion(
             : {}),
         },
       });
+      if (claimed.count !== 1) {
+        throw new Error("Creator training suggestion is no longer pending.");
+      }
+      const reviewed = await tx.creatorTrainingSuggestion.findFirst({
+        where: {
+          id: suggestion.id,
+          representativeId: representative.id,
+        },
+      });
+      if (!reviewed) {
+        throw new Error("Creator training suggestion not found after review.");
+      }
       return {
         suggestion: serializeCreatorTrainingSuggestion(reviewed),
         version: null,
@@ -929,19 +1136,55 @@ export async function reviewCreatorTrainingSuggestion(
 
     const draftPayload =
       input.editedDraftPayload === undefined ? suggestion.draftPayload : input.editedDraftPayload;
-    const before = await loadKnowledgePackSnapshot(representative.id, tx);
-    const after = applySuggestionToKnowledgePack(before, {
-      ...suggestion,
-      draftPayload,
-    });
-    const evaluationReport =
-      input.evaluationReport ?? evaluateCreatorTrainingDraftPayload(draftPayload);
+    assertKnowledgeGapHasCreatorAnswer(suggestion.suggestionType, draftPayload);
+    const evaluationReport = evaluateCreatorTrainingDraftPayload(draftPayload);
     if (!isEvaluationReportPassing(evaluationReport)) {
       throw new Error("Creator training evaluation failed.");
+    }
+    const originSuggestions = await tx.creatorTrainingSuggestion.findMany({
+      where: {
+        representativeId: representative.id,
+        originKey: suggestion.originKey,
+      },
+      select: {
+        id: true,
+        draftPayload: true,
+      },
+    });
+    const before = await loadKnowledgePackSnapshot(representative.id, tx);
+    const after = applySuggestionToKnowledgePack(
+      before,
+      {
+        ...suggestion,
+        draftPayload,
+      },
+      originSuggestions,
+    );
+    const claimed = await tx.creatorTrainingSuggestion.updateMany({
+      where: {
+        id: suggestion.id,
+        representativeId: representative.id,
+        status: "PENDING",
+      },
+      data: {
+        status: "APPROVED",
+        reviewedAt: now,
+        ...(input.reviewedBy !== undefined
+          ? { reviewedBy: normalizeNullableText(input.reviewedBy) }
+          : {}),
+        ...(input.reviewNote !== undefined
+          ? { reviewNote: normalizeNullableText(input.reviewNote) }
+          : {}),
+        ...(input.editedDraftPayload !== undefined ? { draftPayload } : {}),
+      },
+    });
+    if (claimed.count !== 1) {
+      throw new Error("Creator training suggestion is no longer pending.");
     }
     await tx.knowledgePack.upsert({
       where: { representativeId: representative.id },
       update: {
+        revision: { increment: 1 },
         identitySummary: after.identitySummary,
         faq: after.faq,
         materials: after.materials,
@@ -949,6 +1192,7 @@ export async function reviewCreatorTrainingSuggestion(
       },
       create: {
         representativeId: representative.id,
+        revision: 1,
         identitySummary: after.identitySummary,
         faq: after.faq,
         materials: after.materials,
@@ -975,9 +1219,21 @@ export async function reviewCreatorTrainingSuggestion(
         ...(input.editedDraftPayload !== undefined ? { draftPayload } : {}),
       },
     });
+    const latestVersion = await tx.creatorTrainingVersion.findFirst({
+      where: {
+        representativeId: representative.id,
+      },
+      orderBy: {
+        revisionNumber: "desc",
+      },
+      select: {
+        revisionNumber: true,
+      },
+    });
     const version = await tx.creatorTrainingVersion.create({
       data: {
         representativeId: representative.id,
+        revisionNumber: (latestVersion?.revisionNumber ?? 0) + 1,
         suggestionId: suggestion.id,
         title: suggestion.title,
         snapshotBefore: before,
@@ -1014,11 +1270,60 @@ export async function listCreatorTrainingVersions(
     where: {
       representativeId: representative.id,
     },
-    orderBy: [{ publishedAt: "desc" }, { createdAt: "desc" }],
+    orderBy: { revisionNumber: "desc" },
     take: input.limit ?? 20,
   });
 
   return versions.map(serializeCreatorTrainingVersion);
+}
+
+export async function getLatestCreatorTrainingReviewWorkflow(
+  representativeSlug: string,
+  client: CreatorTrainingWorkflowListClient = prisma as unknown as CreatorTrainingWorkflowListClient,
+): Promise<CreatorTrainingReviewWorkflowSnapshot | null> {
+  if (shouldUseStaticFallbackMode(representativeSlug)) {
+    const workflow = getDemoTrainingState().workflow;
+    return workflow ? { ...workflow } : null;
+  }
+
+  const representative = await requireRepresentative(representativeSlug, client);
+  const workflow = await client.workflowRun.findFirst({
+    where: {
+      representativeId: representative.id,
+      kind: "CREATOR_TRAINING_REVIEW",
+    },
+    orderBy: [{ scheduledAt: "desc" }, { createdAt: "desc" }],
+    select: creatorTrainingWorkflowSelect,
+  });
+  return workflow ? serializeCreatorTrainingReviewWorkflow(workflow) : null;
+}
+
+export async function getCreatorTrainingDashboardSnapshot(
+  representativeSlug: string,
+): Promise<CreatorTrainingDashboardSnapshot> {
+  const [sources, feedbackSignals, suggestions, versions, latestWorkflow] = await Promise.all([
+    listCreatorTrainingSources(representativeSlug),
+    listCreatorFeedbackSignals(representativeSlug, { status: "new", limit: 50 }),
+    listCreatorTrainingSuggestions(representativeSlug, { status: "pending", limit: 50 }),
+    listCreatorTrainingVersions(representativeSlug, { limit: 20 }),
+    getLatestCreatorTrainingReviewWorkflow(representativeSlug),
+  ]);
+
+  return {
+    sources,
+    feedbackSignals,
+    suggestions,
+    versions,
+    latestWorkflow,
+    summary: {
+      availableSourceCount: sources.filter(
+        (source) => source.status !== "disabled" && source.status !== "failed",
+      ).length,
+      pendingFeedbackCount: feedbackSignals.length,
+      pendingSuggestionCount: suggestions.length,
+      appliedVersionCount: versions.filter((version) => version.status === "published").length,
+    },
+  };
 }
 
 export async function rollbackCreatorTrainingVersion(
@@ -1026,6 +1331,7 @@ export async function rollbackCreatorTrainingVersion(
   versionId: string,
   input: {
     now?: Date | undefined;
+    rolledBackBy?: string | null | undefined;
   } = {},
   client: CreatorTrainingRollbackClient = prisma as unknown as CreatorTrainingRollbackClient,
 ): Promise<CreatorTrainingVersionSnapshot> {
@@ -1035,10 +1341,17 @@ export async function rollbackCreatorTrainingVersion(
 
   const representative = await requireRepresentative(representativeSlug, client);
   const now = input.now ?? new Date();
+  const normalizedVersionId = normalizeRequiredText(versionId, "versionId");
+  const requireAdvisoryLock = isProductionCreatorTrainingClient(client);
   const run = async (tx: CreatorTrainingRollbackClient) => {
+    await acquireRepresentativeKnowledgePackLock(
+      tx,
+      representative.id,
+      { required: requireAdvisoryLock },
+    );
     const version = await tx.creatorTrainingVersion.findFirst({
       where: {
-        id: normalizeRequiredText(versionId, "versionId"),
+        id: normalizedVersionId,
         representativeId: representative.id,
       },
     });
@@ -1049,10 +1362,48 @@ export async function rollbackCreatorTrainingVersion(
       return serializeCreatorTrainingVersion(version);
     }
 
+    const latestPublished = await tx.creatorTrainingVersion.findFirst({
+      where: {
+        representativeId: representative.id,
+        status: "PUBLISHED",
+      },
+      orderBy: { revisionNumber: "desc" },
+    });
+    if (!latestPublished || latestPublished.id !== version.id) {
+      throw new Error("Only the latest applied creator training version can be rolled back.");
+    }
+
+    const current = await loadKnowledgePackSnapshot(representative.id, tx);
+    const matchingPublishedVersions = (
+      await tx.creatorTrainingVersion.findMany({
+        where: {
+          representativeId: representative.id,
+          status: "PUBLISHED",
+        },
+      })
+    ).filter((candidate) =>
+      knowledgePackSnapshotsEqual(
+        normalizeKnowledgePackSnapshot(candidate.snapshotAfter),
+        current,
+      ),
+    );
+    if (matchingPublishedVersions.length > 1) {
+      throw new Error(
+        "Creator training history is ambiguous for the current knowledge draft. Publish a new update before rolling back.",
+      );
+    }
+    const expectedCurrent = normalizeKnowledgePackSnapshot(version.snapshotAfter);
+    if (!knowledgePackSnapshotsEqual(current, expectedCurrent)) {
+      throw new Error(
+        "Knowledge draft changed after this creator training version. Refresh before rolling back.",
+      );
+    }
+
     const before = normalizeKnowledgePackSnapshot(version.snapshotBefore);
     await tx.knowledgePack.upsert({
       where: { representativeId: representative.id },
       update: {
+        revision: { increment: 1 },
         identitySummary: before.identitySummary,
         faq: before.faq,
         materials: before.materials,
@@ -1060,6 +1411,7 @@ export async function rollbackCreatorTrainingVersion(
       },
       create: {
         representativeId: representative.id,
+        revision: 1,
         identitySummary: before.identitySummary,
         faq: before.faq,
         materials: before.materials,
@@ -1071,6 +1423,9 @@ export async function rollbackCreatorTrainingVersion(
       where: { id: version.id },
       data: {
         status: "ROLLED_BACK",
+        ...(input.rolledBackBy !== undefined
+          ? { rolledBackBy: normalizeNullableText(input.rolledBackBy) }
+          : {}),
         rolledBackAt: now,
       },
     });
@@ -1256,6 +1611,8 @@ function getDemoTrainingState(): DemoCreatorTrainingState {
         {
           id: "demo-suggestion-1",
           representativeId: demoRepresentative.slug,
+          originKey: "feedback:demo-feedback-1:faq_update",
+          originRevision: 1,
           sourceId: null,
           feedbackSignalId: "demo-feedback-1",
           suggestionType: "faq_update",
@@ -1306,9 +1663,26 @@ function readDemoTrainingStateFromDisk(): DemoCreatorTrainingState | null {
     const parsed = JSON.parse(
       readFileSync(/* turbopackIgnore: true */ DEMO_TRAINING_STATE_PATH, "utf8"),
     ) as DemoCreatorTrainingState;
-    if (!parsed || !Array.isArray(parsed.sources) || !Array.isArray(parsed.suggestions)) {
+    if (
+      !parsed
+      || !Array.isArray(parsed.sources)
+      || !Array.isArray(parsed.suggestions)
+      || !Array.isArray(parsed.versions)
+    ) {
       return null;
     }
+    parsed.versions = parsed.versions.map((version, index, versions) => ({
+      ...version,
+      revisionNumber:
+        Number.isInteger(version.revisionNumber) && version.revisionNumber > 0
+          ? version.revisionNumber
+          : versions.length - index,
+      rolledBackBy:
+        typeof version.rolledBackBy === "string" && version.rolledBackBy.trim()
+          ? version.rolledBackBy.trim()
+          : null,
+    }));
+    parsed.suggestions = normalizeDemoSuggestionOriginRevisions(parsed.suggestions);
     return parsed;
   } catch {
     return null;
@@ -1453,12 +1827,37 @@ function buildDemoCreatorTrainingSuggestions(
   for (const source of state.sources) {
     const sourceRecord = demoSourceSnapshotToRecord(source);
     for (const candidate of buildSourceSuggestionCandidates(sourceRecord)) {
-      if (state.suggestions.some((suggestion) => suggestion.dedupeKey === candidate.dedupeKey)) {
+      const originSuggestions = state.suggestions
+        .filter((suggestion) => suggestion.originKey === candidate.originKey)
+        .sort((left, right) => right.originRevision - left.originRevision);
+      const latest = originSuggestions[0] ?? null;
+      const latestPublished = originSuggestions.find(
+        (suggestion) => suggestion.status === "published",
+      ) ?? null;
+      const current =
+        latest?.dedupeKey === candidate.dedupeKey && latest.status !== "superseded"
+          ? latest
+          : latestPublished?.dedupeKey === candidate.dedupeKey
+            ? latestPublished
+            : null;
+      for (const suggestion of state.suggestions) {
+        if (
+          suggestion.originKey === candidate.originKey
+          && suggestion.status === "pending"
+          && suggestion.id !== current?.id
+        ) {
+          suggestion.status = "superseded";
+          suggestion.updatedAt = now;
+        }
+      }
+      if (current) {
         continue;
       }
       state.suggestions.unshift({
         id: `demo-suggestion-${state.suggestions.length + 1}`,
         representativeId: demoRepresentative.slug,
+        originKey: candidate.originKey,
+        originRevision: (latest?.originRevision ?? 0) + 1,
         sourceId: candidate.sourceId ?? null,
         feedbackSignalId: candidate.feedbackSignalId ?? null,
         suggestionType: candidate.suggestionType,
@@ -1489,7 +1888,6 @@ function reviewDemoCreatorTrainingSuggestion(
     reviewedBy?: string | null | undefined;
     reviewNote?: string | null | undefined;
     editedDraftPayload?: unknown;
-    evaluationReport?: unknown;
     now?: Date | undefined;
   },
 ): {
@@ -1502,15 +1900,18 @@ function reviewDemoCreatorTrainingSuggestion(
   if (!suggestion) {
     throw new Error("Creator training suggestion not found.");
   }
+  if (suggestion.status !== "pending") {
+    throw new Error("Creator training suggestion is no longer pending.");
+  }
 
   const now = (input.now ?? new Date()).toISOString();
   const action = normalizeReviewAction(input.action);
-  suggestion.reviewedAt = now;
-  suggestion.reviewedBy = normalizeNullableText(input.reviewedBy);
-  suggestion.reviewNote = normalizeNullableText(input.reviewNote);
-  suggestion.updatedAt = now;
 
   if (action === "reject" || action === "private") {
+    suggestion.reviewedAt = now;
+    suggestion.reviewedBy = normalizeNullableText(input.reviewedBy);
+    suggestion.reviewNote = normalizeNullableText(input.reviewNote);
+    suggestion.updatedAt = now;
     suggestion.status = action === "reject" ? "rejected" : "private";
     persistDemoTrainingState();
     return {
@@ -1519,15 +1920,21 @@ function reviewDemoCreatorTrainingSuggestion(
     };
   }
 
-  if (input.editedDraftPayload !== undefined) {
-    suggestion.draftPayload = input.editedDraftPayload;
-  }
-  const evaluationReport =
-    input.evaluationReport ?? evaluateCreatorTrainingDraftPayload(suggestion.draftPayload);
+  const draftPayload =
+    input.editedDraftPayload === undefined ? suggestion.draftPayload : input.editedDraftPayload;
+  assertKnowledgeGapHasCreatorAnswer(suggestion.suggestionType, draftPayload);
+  const evaluationReport = evaluateCreatorTrainingDraftPayload(draftPayload);
   if (!isEvaluationReportPassing(evaluationReport)) {
     throw new Error("Creator training evaluation failed.");
   }
 
+  suggestion.reviewedAt = now;
+  suggestion.reviewedBy = normalizeNullableText(input.reviewedBy);
+  suggestion.reviewNote = normalizeNullableText(input.reviewNote);
+  suggestion.updatedAt = now;
+  if (input.editedDraftPayload !== undefined) {
+    suggestion.draftPayload = draftPayload;
+  }
   suggestion.status = "published";
   const source = suggestion.sourceId
     ? state.sources.find((item) => item.id === suggestion.sourceId)
@@ -1537,13 +1944,29 @@ function reviewDemoCreatorTrainingSuggestion(
     source.updatedAt = now;
   }
   const before = loadDemoKnowledgePackSnapshot(state);
-  const after = applySuggestionToKnowledgePack(before, {
-    ...suggestion,
-    suggestionType: mapSuggestionTypeToDb(suggestion.suggestionType),
-  });
+  const after = applySuggestionToKnowledgePack(
+    before,
+    {
+      ...suggestion,
+      suggestionType: mapSuggestionTypeToDb(suggestion.suggestionType),
+    },
+    state.suggestions
+      .filter((item) => item.originKey === suggestion.originKey)
+      .map((item) => ({
+        id: item.id,
+        draftPayload: item.draftPayload,
+      })),
+  );
   const version: CreatorTrainingVersionSnapshot = {
     id: `demo-version-${state.versions.length + 1}`,
     representativeId: demoRepresentative.slug,
+    revisionNumber:
+      Math.max(
+        0,
+        ...state.versions.map((item) =>
+          Number.isInteger(item.revisionNumber) ? item.revisionNumber : 0
+        ),
+      ) + 1,
     suggestionId: suggestion.id,
     status: "published",
     title: suggestion.title,
@@ -1552,6 +1975,7 @@ function reviewDemoCreatorTrainingSuggestion(
     evaluationReport,
     publishedBy: normalizeNullableText(input.reviewedBy),
     publishedAt: now,
+    rolledBackBy: null,
     rolledBackAt: null,
     createdAt: now,
   };
@@ -1583,18 +2007,28 @@ function rollbackDemoCreatorTrainingVersion(
   versionId: string,
   input: {
     now?: Date | undefined;
+    rolledBackBy?: string | null | undefined;
   },
 ): CreatorTrainingVersionSnapshot {
   assertDemoRepresentative(representativeSlug);
-  const version = getDemoTrainingState().versions.find((item) => item.id === versionId);
+  const state = getDemoTrainingState();
+  const version = state.versions.find((item) => item.id === versionId);
   if (!version) {
     throw new Error("Creator training version not found.");
   }
-  if (version.status !== "rolled_back") {
-    version.status = "rolled_back";
-    version.rolledBackAt = (input.now ?? new Date()).toISOString();
-    persistDemoTrainingState();
+  if (version.status === "rolled_back") {
+    return cloneTrainingVersion(version);
   }
+  const latestPublished = state.versions.find((item) => item.status === "published");
+  if (!latestPublished || latestPublished.id !== version.id) {
+    throw new Error("Only the latest applied creator training version can be rolled back.");
+  }
+  version.status = "rolled_back";
+  if (input.rolledBackBy !== undefined) {
+    version.rolledBackBy = normalizeNullableText(input.rolledBackBy);
+  }
+  version.rolledBackAt = (input.now ?? new Date()).toISOString();
+  persistDemoTrainingState();
   return cloneTrainingVersion(version);
 }
 
@@ -1686,6 +2120,7 @@ function cloneJsonLike(value: unknown): unknown {
 }
 
 type SuggestionCandidate = {
+  originKey: string;
   sourceId?: string | null;
   feedbackSignalId?: string | null;
   suggestionType: CreatorTrainingSuggestionType;
@@ -1712,22 +2147,25 @@ function buildSourceSuggestionCandidates(
     sourceKind === "website" || sourceKind === "url" || sourceKind === "notion"
       ? "deck"
       : "download";
+  const draftPayload = {
+    kind: documentKind,
+    title,
+    summary,
+    sourceTrainingSourceId: source.id,
+    sourceKind,
+    ...(locator ? { url: locator } : {}),
+  };
 
   return [
     {
+      originKey: `source:${source.id}:material_update`,
       sourceId: source.id,
       suggestionType: "material_update",
       title: `Publish source: ${title}`,
       rationale: "Creator added a public training source that can improve future answers after review.",
-      draftPayload: {
-        kind: documentKind,
-        title,
-        summary,
-        sourceTrainingSourceId: source.id,
-        sourceKind,
-        ...(locator ? { url: locator } : {}),
-      },
-      dedupeKey: `source:${source.id}:material_update`,
+      draftPayload,
+      dedupeKey:
+        `source:${source.id}:material_update:${fingerprintSuggestionEvidence(draftPayload)}`,
       riskLevel: sourceKind === "pdf" || sourceKind === "drive" ? "medium" : "low",
     },
   ];
@@ -1772,23 +2210,30 @@ function stripInlineUploadPreamble(value: string): string {
 function buildFeedbackSuggestionCandidates(
   signal: CreatorFeedbackSignalRecord,
 ): SuggestionCandidate[] {
+  if (!signal.publicSafe) {
+    return [];
+  }
+
   if (signal.signalType === "CORRECTION" || signal.signalType === "SUGGESTED_ANSWER") {
-    if (!signal.publicSafe || !signal.suggestedText?.trim()) {
+    if (!signal.suggestedText?.trim()) {
       return [];
     }
+    const draftPayload = {
+      kind: "faq",
+      title: signal.note?.trim() || "Creator corrected answer",
+      summary: truncateTrainingText(signal.suggestedText),
+      sourceFeedbackSignalId: signal.id,
+    };
     return [
       {
+        originKey: `feedback:${signal.id}:faq_update`,
         feedbackSignalId: signal.id,
         suggestionType: "faq_update",
         title: "Add corrected public answer",
         rationale: "Creator supplied a public-safe correction that can improve future answers.",
-        draftPayload: {
-          kind: "faq",
-          title: signal.note?.trim() || "Creator corrected answer",
-          summary: truncateTrainingText(signal.suggestedText),
-          sourceFeedbackSignalId: signal.id,
-        },
-        dedupeKey: `feedback:${signal.id}:faq_update`,
+        draftPayload,
+        dedupeKey:
+          `feedback:${signal.id}:faq_update:${fingerprintSuggestionEvidence(draftPayload)}`,
         riskLevel: "medium",
       },
     ];
@@ -1799,17 +2244,20 @@ function buildFeedbackSuggestionCandidates(
     if (!text) {
       return [];
     }
+    const draftPayload = {
+      rule: truncateTrainingText(text),
+      sourceFeedbackSignalId: signal.id,
+    };
     return [
       {
+        originKey: `feedback:${signal.id}:tone_rule`,
         feedbackSignalId: signal.id,
         suggestionType: "tone_rule",
         title: "Add creator do-not-say rule",
         rationale: "Creator marked wording that the Delegate should avoid.",
-        draftPayload: {
-          rule: truncateTrainingText(text),
-          sourceFeedbackSignalId: signal.id,
-        },
-        dedupeKey: `feedback:${signal.id}:tone_rule`,
+        draftPayload,
+        dedupeKey:
+          `feedback:${signal.id}:tone_rule:${fingerprintSuggestionEvidence(draftPayload)}`,
         riskLevel: "high",
       },
     ];
@@ -1819,7 +2267,15 @@ function buildFeedbackSuggestionCandidates(
 }
 
 function buildUnknownQuestionCandidates(turns: UnknownQuestionTurnRecord[]): SuggestionCandidate[] {
-  const buckets = new Map<string, { text: string; count: number; latestAt: Date }>();
+  const buckets = new Map<
+    string,
+    {
+      text: string;
+      count: number;
+      latestAt: Date;
+      evidence: string[];
+    }
+  >();
   for (const turn of turns) {
     const text = truncateTrainingText(turn.messageText);
     const key = normalizeSuggestionDedupeText(text);
@@ -1832,10 +2288,16 @@ function buildUnknownQuestionCandidates(turns: UnknownQuestionTurnRecord[]): Sug
         text,
         count: 1,
         latestAt: turn.createdAt,
+        evidence: [
+          `${turn.conversationId}:${turn.createdAt.toISOString()}:${key}`,
+        ],
       });
       continue;
     }
     existing.count += 1;
+    existing.evidence.push(
+      `${turn.conversationId}:${turn.createdAt.toISOString()}:${key}`,
+    );
     if (turn.createdAt > existing.latestAt) {
       existing.latestAt = turn.createdAt;
       existing.text = text;
@@ -1844,17 +2306,31 @@ function buildUnknownQuestionCandidates(turns: UnknownQuestionTurnRecord[]): Sug
 
   return [...buckets.entries()]
     .filter(([, bucket]) => bucket.count >= 2)
-    .map(([key, bucket]) => ({
-      suggestionType: "knowledge_gap",
-      title: "Fill repeated unanswered question",
-      rationale: `This unknown question appeared ${bucket.count} times.`,
-      draftPayload: {
-        question: bucket.text,
-        occurrenceCount: bucket.count,
-      },
-      dedupeKey: `unknown:${key}`,
-      riskLevel: "low",
-    }));
+    .map(([key, bucket]) => {
+      const evidenceFingerprint = fingerprintSuggestionEvidence({
+        question: key,
+        evidence: [...bucket.evidence].sort(),
+      });
+      return {
+        originKey: `unknown:${key}`,
+        suggestionType: "knowledge_gap" as const,
+        title: "Fill repeated unanswered question",
+        rationale: `This unknown question appeared ${bucket.count} times.`,
+        draftPayload: {
+          question: bucket.text,
+          occurrenceCount: bucket.count,
+        },
+        dedupeKey: `unknown:${key}:${evidenceFingerprint}`,
+        riskLevel: "low",
+      };
+    });
+}
+
+function fingerprintSuggestionEvidence(value: unknown): string {
+  return createHash("sha256")
+    .update(stableJson(value))
+    .digest("hex")
+    .slice(0, 16);
 }
 
 type KnowledgePackSnapshot = {
@@ -1866,7 +2342,7 @@ type KnowledgePackSnapshot = {
 
 async function loadKnowledgePackSnapshot(
   representativeId: string,
-  client: CreatorTrainingReviewClient,
+  client: Pick<CreatorTrainingReviewClient, "knowledgePack">,
 ): Promise<KnowledgePackSnapshot> {
   const knowledgePack = await client.knowledgePack.findUnique({
     where: {
@@ -1892,26 +2368,38 @@ async function loadKnowledgePackSnapshot(
 
 function applySuggestionToKnowledgePack(
   snapshot: KnowledgePackSnapshot,
-  suggestion: Pick<CreatorTrainingSuggestionRecord, "id" | "suggestionType" | "draftPayload">,
+  suggestion: Pick<
+    CreatorTrainingSuggestionRecord,
+    "id" | "originKey" | "suggestionType" | "draftPayload"
+  >,
+  originSuggestions: Array<
+    Pick<CreatorTrainingSuggestionRecord, "id" | "draftPayload">
+  > = [],
 ): KnowledgePackSnapshot {
+  const documentId = stableTrainingKnowledgeDocumentId(suggestion.originKey);
+  const replacedDocumentIds = collectLegacyTrainingKnowledgeDocumentIds([
+    ...originSuggestions,
+    suggestion,
+  ]);
+  replacedDocumentIds.add(documentId);
   const next: KnowledgePackSnapshot = {
     identitySummary: snapshot.identitySummary,
-    faq: [...snapshot.faq],
-    materials: [...snapshot.materials],
-    policies: [...snapshot.policies],
+    faq: withoutKnowledgeDocuments(snapshot.faq, replacedDocumentIds),
+    materials: withoutKnowledgeDocuments(snapshot.materials, replacedDocumentIds),
+    policies: withoutKnowledgeDocuments(snapshot.policies, replacedDocumentIds),
   };
   const type = mapSuggestionTypeFromDb(suggestion.suggestionType);
 
   if (type === "faq_update" || type === "knowledge_gap") {
-    next.faq.push(normalizeTrainingKnowledgeDocument(suggestion, "faq"));
+    next.faq.push(normalizeTrainingKnowledgeDocument(suggestion, "faq", documentId));
     return next;
   }
   if (type === "material_update") {
-    next.materials.push(normalizeTrainingKnowledgeDocument(suggestion, "download"));
+    next.materials.push(normalizeTrainingKnowledgeDocument(suggestion, "download", documentId));
     return next;
   }
   if (type === "policy_update" || type === "tone_rule") {
-    next.policies.push(normalizeTrainingKnowledgeDocument(suggestion, "policy"));
+    next.policies.push(normalizeTrainingKnowledgeDocument(suggestion, "policy", documentId));
     return next;
   }
 
@@ -1921,6 +2409,7 @@ function applySuggestionToKnowledgePack(
 function normalizeTrainingKnowledgeDocument(
   suggestion: Pick<CreatorTrainingSuggestionRecord, "id" | "draftPayload">,
   fallbackKind: string,
+  documentId: string,
 ) {
   const payload = isRecord(suggestion.draftPayload) ? suggestion.draftPayload : {};
   const title =
@@ -1932,24 +2421,82 @@ function normalizeTrainingKnowledgeDocument(
   const summary =
     typeof payload.summary === "string" && payload.summary.trim()
       ? normalizeUploadedSourceText(payload.summary)
-      : typeof payload.rule === "string" && payload.rule.trim()
-        ? normalizeUploadedSourceText(payload.rule)
-        : typeof payload.question === "string" && payload.question.trim()
-          ? `Needs a creator-approved answer for: ${normalizeUploadedSourceText(payload.question)}`
-          : "Creator-approved training update.";
+      : typeof payload.answer === "string" && payload.answer.trim()
+        ? normalizeUploadedSourceText(payload.answer)
+        : typeof payload.rule === "string" && payload.rule.trim()
+          ? normalizeUploadedSourceText(payload.rule)
+          : typeof payload.question === "string" && payload.question.trim()
+            ? `Needs a creator-approved answer for: ${normalizeUploadedSourceText(payload.question)}`
+            : "Creator-approved training update.";
   const kind =
     typeof payload.kind === "string" && payload.kind.trim() ? payload.kind.trim() : fallbackKind;
 
   return {
-    id:
-      typeof payload.id === "string" && payload.id.trim()
-        ? payload.id.trim()
-        : `training_${suggestion.id}`,
+    id: documentId,
     title,
     kind,
     summary,
     ...(typeof payload.url === "string" && payload.url.trim() ? { url: payload.url.trim() } : {}),
   };
+}
+
+function stableTrainingKnowledgeDocumentId(originKey: string): string {
+  return `training_origin_${createHash("sha256").update(originKey).digest("hex")}`;
+}
+
+function collectLegacyTrainingKnowledgeDocumentIds(
+  suggestions: Array<Pick<CreatorTrainingSuggestionRecord, "id" | "draftPayload">>,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const suggestion of suggestions) {
+    ids.add(`training_${suggestion.id}`);
+    const payload = isRecord(suggestion.draftPayload) ? suggestion.draftPayload : {};
+    if (typeof payload.id === "string" && payload.id.trim()) {
+      ids.add(payload.id.trim());
+    }
+  }
+  return ids;
+}
+
+function withoutKnowledgeDocuments(
+  documents: unknown[],
+  replacedDocumentIds: ReadonlySet<string>,
+): unknown[] {
+  return documents.filter((document) => {
+    if (!isRecord(document) || typeof document.id !== "string") {
+      return true;
+    }
+    return !replacedDocumentIds.has(document.id);
+  });
+}
+
+function assertKnowledgeGapHasCreatorAnswer(
+  suggestionType: string,
+  draftPayload: unknown,
+) {
+  if (mapSuggestionTypeFromDb(suggestionType) !== "knowledge_gap") return;
+
+  const payload = isRecord(draftPayload) ? draftPayload : {};
+  const answer =
+    typeof payload.summary === "string"
+      ? normalizeUploadedSourceText(payload.summary)
+      : typeof payload.answer === "string"
+        ? normalizeUploadedSourceText(payload.answer)
+        : "";
+  const normalized = answer.toLowerCase().replace(/\s+/g, " ").trim();
+  const isPlaceholder =
+    normalized.startsWith("needs a creator-approved answer")
+    || normalized === "creator-approved training update."
+    || normalized === "creator-approved training update"
+    || normalized === "awaiting owner review."
+    || normalized === "awaiting owner review"
+    || normalized.includes("等待 owner 审核")
+    || normalized.includes("待 owner 填写")
+    || normalized.includes("请 owner 填写");
+
+  if (answer.length < 2 || isPlaceholder) {
+    throw new Error("Knowledge gap requires a creator-authored answer.");
+  }
 }
 
 async function resolveFeedbackScope(
@@ -2164,7 +2711,8 @@ function mapSuggestionStatusToDb(value: CreatorTrainingSuggestionStatus) {
     | "APPROVED"
     | "REJECTED"
     | "PRIVATE"
-    | "PUBLISHED";
+    | "PUBLISHED"
+    | "SUPERSEDED";
 }
 
 function mapSuggestionStatusFromDb(value: string): CreatorTrainingSuggestionStatus {
@@ -2221,6 +2769,8 @@ function serializeCreatorTrainingSuggestion(
   return {
     id: suggestion.id,
     representativeId: suggestion.representativeId,
+    originKey: suggestion.originKey,
+    originRevision: suggestion.originRevision,
     sourceId: suggestion.sourceId,
     feedbackSignalId: suggestion.feedbackSignalId,
     suggestionType: mapSuggestionTypeFromDb(suggestion.suggestionType),
@@ -2238,12 +2788,54 @@ function serializeCreatorTrainingSuggestion(
   };
 }
 
+function normalizeStoredSuggestionOriginKey(
+  suggestion: Pick<
+    CreatorTrainingSuggestionSnapshot,
+    "id" | "sourceId" | "feedbackSignalId" | "suggestionType" | "dedupeKey"
+  > & { originKey?: unknown },
+): string {
+  if (typeof suggestion.originKey === "string" && suggestion.originKey.trim()) {
+    return suggestion.originKey.trim();
+  }
+  if (suggestion.sourceId) {
+    return `source:${suggestion.sourceId}:${suggestion.suggestionType}`;
+  }
+  if (suggestion.feedbackSignalId) {
+    return `feedback:${suggestion.feedbackSignalId}:${suggestion.suggestionType}`;
+  }
+  if (suggestion.dedupeKey.startsWith("unknown:")) {
+    return suggestion.dedupeKey.replace(/:[0-9a-f]{16}$/u, "");
+  }
+  return `legacy:${suggestion.id}`;
+}
+
+function normalizeDemoSuggestionOriginRevisions(
+  suggestions: CreatorTrainingSuggestionSnapshot[],
+): CreatorTrainingSuggestionSnapshot[] {
+  const normalized = suggestions.map((suggestion) => ({
+    ...suggestion,
+    originKey: normalizeStoredSuggestionOriginKey(suggestion),
+    originRevision: 0,
+  }));
+  const nextRevisionByOrigin = new Map<string, number>();
+  for (const suggestion of [...normalized].sort((left, right) => {
+    const createdAtOrder = left.createdAt.localeCompare(right.createdAt);
+    return createdAtOrder || left.id.localeCompare(right.id);
+  })) {
+    const originRevision = (nextRevisionByOrigin.get(suggestion.originKey) ?? 0) + 1;
+    suggestion.originRevision = originRevision;
+    nextRevisionByOrigin.set(suggestion.originKey, originRevision);
+  }
+  return normalized;
+}
+
 function serializeCreatorTrainingVersion(
   version: CreatorTrainingVersionRecord,
 ): CreatorTrainingVersionSnapshot {
   return {
     id: version.id,
     representativeId: version.representativeId,
+    revisionNumber: version.revisionNumber,
     suggestionId: version.suggestionId,
     status: mapVersionStatusFromDb(version.status),
     title: version.title,
@@ -2252,6 +2844,7 @@ function serializeCreatorTrainingVersion(
     evaluationReport: version.evaluationReport,
     publishedBy: version.publishedBy,
     publishedAt: version.publishedAt.toISOString(),
+    rolledBackBy: version.rolledBackBy,
     rolledBackAt: version.rolledBackAt ? version.rolledBackAt.toISOString() : null,
     createdAt: version.createdAt.toISOString(),
   };
@@ -2312,6 +2905,26 @@ function normalizeKnowledgePackSnapshot(value: unknown): KnowledgePackSnapshot {
   };
 }
 
+function knowledgePackSnapshotsEqual(
+  left: KnowledgePackSnapshot,
+  right: KnowledgePackSnapshot,
+): boolean {
+  return stableJson(left) === stableJson(right);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 function isEvaluationReportPassing(value: unknown): boolean {
   if (!isRecord(value)) {
     return false;
@@ -2354,6 +2967,12 @@ function containsGuaranteedOutcomeClaim(value: string): boolean {
     "稳赚",
     "包赚",
   ].some((pattern) => value.includes(pattern));
+}
+
+function isProductionCreatorTrainingClient(
+  client: RepresentativeKnowledgePackLockClient,
+): boolean {
+  return client === (prisma as unknown as RepresentativeKnowledgePackLockClient);
 }
 
 function shouldUseStaticFallbackMode(representativeSlug: string): boolean {

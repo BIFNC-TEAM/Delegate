@@ -3,8 +3,11 @@ import { NextResponse } from "next/server";
 import { rollbackCreatorTrainingVersion } from "@delegate/web-data";
 import {
   dashboardAuthErrorResponse,
-  authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccessActor,
 } from "../../../../../../auth";
+import { withPrivateNoStore } from "../../../../../../../private-response";
+import { creatorTrainingApiErrorResponse } from "../../../errors";
+import { toDashboardDevelopmentVersionDto } from "../../../safe-dto";
 
 type RouteContext = {
   params: Promise<{ slug: string; versionId: string }>;
@@ -13,22 +16,25 @@ type RouteContext = {
 export async function POST(_request: Request, context: RouteContext) {
   try {
     const { slug, versionId } = await context.params;
-    const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-    if (accessResponse) {
-      return accessResponse;
-    }
-    const version = await rollbackCreatorTrainingVersion(slug, versionId);
+    const actor = await requireDashboardRepresentativeAccessActor(slug);
+    const version = await rollbackCreatorTrainingVersion(slug, versionId, {
+      rolledBackBy: actor,
+    });
 
-    return NextResponse.json({ version });
+    return withPrivateNoStore(
+      NextResponse.json({
+        version: toDashboardDevelopmentVersionDto(version),
+      }),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to roll back training version." },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to revert the development revision.",
     );
   }
 }

@@ -7,10 +7,7 @@ import {
   Prisma,
 } from "@prisma/client";
 
-import {
-  getRepresentativeOpenVikingOverviewMetrics,
-  maybeStoreHandoffPatternFromStatusChange,
-} from "./openviking";
+import { getRepresentativeOpenVikingOverviewMetrics } from "./openviking";
 import { prisma } from "./prisma";
 
 export type DashboardOverviewSnapshot = {
@@ -553,12 +550,6 @@ export async function setHandoffRequestStatus(params: {
       }
 
       return nextHandoff;
-    });
-
-    await maybeStoreHandoffPatternFromStatusChange({
-      representativeSlug: params.representativeSlug,
-      handoffId: updated.id,
-      nextStatus: params.status,
     });
 
     return {

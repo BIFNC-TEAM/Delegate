@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { getGovernedContextDisclosure } from "../app/reps/[slug]/governed-context-disclosure";
+
 const pageSource = readFileSync(
   resolve(__dirname, "../app/reps/[slug]/page.tsx"),
   "utf8",
@@ -39,6 +41,41 @@ describe("public representative visitor-first page", () => {
     expect(pageSource).not.toContain('id="skills"');
     expect(pageSource).not.toContain('id="plans"');
     expect(pageSource).not.toContain("representative.skillPacks");
+  });
+
+  it("renders explicit enabled and disabled governed-context disclosures", () => {
+    const enabledZh = getGovernedContextDisclosure("zh", true);
+    const disabledZh = getGovernedContextDisclosure("zh", false);
+    const enabledEn = getGovernedContextDisclosure("en", true);
+    const disabledEn = getGovernedContextDisclosure("en", false);
+
+    expect(enabledZh).toContain("当前已启用");
+    expect(enabledZh).toContain("仅在这个数字代表范围内");
+    expect(disabledZh).toContain("当前未启用");
+    expect(disabledZh).toContain("不会形成或调用跨会话长期记忆");
+    expect(enabledEn).toContain("is enabled");
+    expect(enabledEn).toContain("scoped to this representative");
+    expect(disabledEn).toContain("is disabled");
+    expect(disabledEn).toContain("does not create or use memory across conversations");
+    expect(enabledZh).not.toBe(disabledZh);
+    expect(enabledEn).not.toBe(disabledEn);
+
+    expect(pageSource).toContain(
+      "runtime.governedContextEnabled",
+    );
+    expect(pageSource).toContain(
+      "governedContextEnabled={runtime.governedContextEnabled}",
+    );
+    expect(chatSource).toContain(
+      "props.governedContextEnabled",
+    );
+    expect(pageSource).not.toMatch(
+      /openvikingAgentId|openvikingAutoRecall|openvikingTargetUri|baseUrl|consoleUrl/u,
+    );
+    expect(chatSource).toContain('citationsLabel: "回答依据"');
+    expect(chatSource).toContain('citationsLabel: "Context used"');
+    expect(chatSource).toContain("props.governedContextEnabled");
+    expect(pageSource).not.toContain("回答只使用已发布");
   });
 
   it("stops reading legacy audience cookies when v2 enforcement modes are selected", () => {

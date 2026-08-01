@@ -66,6 +66,7 @@
     "test:postgres:channel-platform": "bash scripts/tests/channel-platform.pg16.sh",
     "test:postgres:entitlements": "bash scripts/tests/service-entitlements-concurrency.pg16.sh",
     "test:postgres:owner-settings": "bash scripts/tests/owner-settings.pg16.sh",
+    "test:postgres:openviking": "bash scripts/tests/openviking-operations.pg16.sh",
     "test:postgres:telegram-lease": "bash scripts/tests/telegram-runtime-lease.pg16.sh",
     "test:postgres:wallet": "bash scripts/tests/wallet-concurrency.pg16.sh",
     "test:postgres:skills": "pnpm --filter @delegate/web-data test:postgres:skills",

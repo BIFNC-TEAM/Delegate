@@ -9,6 +9,9 @@ import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
 } from "../../../../auth";
+import { withPrivateNoStore } from "../../../../../private-response";
+import { creatorTrainingApiErrorResponse } from "../errors";
+import { toDashboardDevelopmentSuggestionDto } from "../safe-dto";
 
 
 const suggestionStatuses = new Set([
@@ -17,6 +20,7 @@ const suggestionStatuses = new Set([
   "rejected",
   "private",
   "published",
+  "superseded",
 ]);
 
 export async function GET(
@@ -26,7 +30,7 @@ export async function GET(
   const { slug } = await params;
   const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
   if (accessResponse) {
-    return accessResponse;
+    return withPrivateNoStore(accessResponse);
   }
 
   try {
@@ -40,19 +44,20 @@ export async function GET(
       limit: Number.isFinite(limitValue) ? limitValue : 50,
     });
 
-    return NextResponse.json({ suggestions });
+    return withPrivateNoStore(
+      NextResponse.json({
+        suggestions: suggestions.map(toDashboardDevelopmentSuggestionDto),
+      }),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to load creator training suggestions.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to load development suggestions.",
     );
   }
 }
@@ -64,24 +69,28 @@ export async function POST(
   const { slug } = await params;
   const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
   if (accessResponse) {
-    return accessResponse;
+    return withPrivateNoStore(accessResponse);
   }
 
   try {
     const suggestions = await buildCreatorTrainingSuggestions(slug);
-    return NextResponse.json({ suggestions }, { status: 201 });
+    return withPrivateNoStore(
+      NextResponse.json(
+        {
+          suggestions: suggestions.map(toDashboardDevelopmentSuggestionDto),
+        },
+        { status: 201 },
+      ),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to build creator training suggestions.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to build development suggestions.",
     );
   }
 }

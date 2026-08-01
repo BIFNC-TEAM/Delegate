@@ -16,6 +16,11 @@ describe("workflow-runner payment reconciliation config", () => {
       maxBackoffMs: 600_000,
     });
     expect(config.readinessStaleMs).toBe(180_000);
+    expect(config.openVikingMaintenance).toEqual({
+      pollMs: 5_000,
+      syncBatchSize: 2,
+      memoryDeletionBatchSize: 12,
+    });
   });
 
   it("supports the legacy flag while preferring processing over collection", () => {
@@ -53,5 +58,24 @@ describe("workflow-runner payment reconciliation config", () => {
         WECHAT_PAY_RECONCILIATION_LEASE_MS: "74999",
       }),
     ).toThrow("must be an integer between 75000");
+  });
+
+  it("bounds OpenViking maintenance cadence and batches", () => {
+    expect(
+      resolveWorkflowRunnerConfig({
+        OPENVIKING_MAINTENANCE_POLL_MS: "1000",
+        OPENVIKING_SYNC_BATCH_SIZE: "20",
+        OPENVIKING_MEMORY_DELETE_BATCH_SIZE: "100",
+      }).openVikingMaintenance,
+    ).toEqual({
+      pollMs: 1_000,
+      syncBatchSize: 20,
+      memoryDeletionBatchSize: 100,
+    });
+    expect(() =>
+      resolveWorkflowRunnerConfig({
+        OPENVIKING_SYNC_BATCH_SIZE: "21",
+      }),
+    ).toThrow("OPENVIKING_SYNC_BATCH_SIZE must be an integer between 1 and 20");
   });
 });

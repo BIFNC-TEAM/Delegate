@@ -83,7 +83,7 @@ export function resolveOpenVikingEnv(env: NodeJS.ProcessEnv = process.env): Open
     agentIdPrefix: normalizeOptionalString(parsed.OPENVIKING_AGENT_ID_PREFIX) ?? "delegate-rep",
     resourceSyncEnabled: parseBoolean(parsed.OPENVIKING_RESOURCE_SYNC_ENABLED, true),
     autoRecallDefault: parseBoolean(parsed.OPENVIKING_AUTO_RECALL_DEFAULT, true),
-    autoCaptureDefault: parseBoolean(parsed.OPENVIKING_AUTO_CAPTURE_DEFAULT, true),
+    autoCaptureDefault: false,
     captureModeDefault,
     provider,
     vlmModel: normalizeOptionalString(parsed.OPENVIKING_VLM_MODEL) ?? "gpt-4o-mini",

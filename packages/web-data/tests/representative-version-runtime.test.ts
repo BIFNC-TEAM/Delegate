@@ -6,9 +6,11 @@ import { describe, expect, it } from "vitest";
 import {
   applyRepresentativeVersionSnapshot,
   buildComputePolicyAuditPayload,
+  getPublicRepresentativeRuntime,
   getRepresentativeRuntimeAuthoritySnapshot,
   getRepresentativeRuntimeSetupSnapshot,
   resolveRepresentativeRuntimeMcpBindings,
+  resolveGovernedContextEnabled,
   resolvePublicRepresentativeAvailability,
   type RepresentativeSetupSnapshot,
 } from "../src/representative-setup";
@@ -17,6 +19,7 @@ function currentDraft(): RepresentativeSetupSnapshot {
   return {
     id: demoRepresentative.id,
     slug: demoRepresentative.slug,
+    knowledgePackRevision: 0,
     ownerName: demoRepresentative.ownerName,
     name: "Unpublished draft name",
     tagline: "Unpublished draft tagline",
@@ -177,6 +180,70 @@ describe("representative published runtime snapshot", () => {
     expect(resolvePublicRepresentativeAvailability({ ...available, publicMode: false })).toBe("private");
     expect(resolvePublicRepresentativeAvailability({ ...available, activeVersionId: null })).toBe("unpublished");
     expect(resolvePublicRepresentativeAvailability({ ...available, webChannelStatuses: ["DISCONNECTED"] })).toBe("web_disabled");
+  });
+
+  it("exposes governed context only when controls and runtime prerequisites are enabled", () => {
+    expect(
+      resolveGovernedContextEnabled({
+        openvikingEnabled: true,
+        openvikingAutoRecall: true,
+        environmentEnabled: true,
+        modelCredentialsAvailable: true,
+      }),
+    ).toBe(true);
+    expect(
+      resolveGovernedContextEnabled({
+        openvikingEnabled: true,
+        openvikingAutoRecall: false,
+        environmentEnabled: true,
+        modelCredentialsAvailable: true,
+      }),
+    ).toBe(false);
+    expect(
+      resolveGovernedContextEnabled({
+        openvikingEnabled: false,
+        openvikingAutoRecall: true,
+        environmentEnabled: true,
+        modelCredentialsAvailable: true,
+      }),
+    ).toBe(false);
+    expect(
+      resolveGovernedContextEnabled({
+        openvikingEnabled: true,
+        openvikingAutoRecall: true,
+        environmentEnabled: false,
+        modelCredentialsAvailable: true,
+      }),
+    ).toBe(false);
+    expect(
+      resolveGovernedContextEnabled({
+        openvikingEnabled: true,
+        openvikingAutoRecall: true,
+        environmentEnabled: true,
+        modelCredentialsAvailable: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the public demo runtime's governed context disabled", async () => {
+    const previousDatabaseUrl = process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL;
+
+    try {
+      const runtime = await getPublicRepresentativeRuntime(
+        demoRepresentative.slug,
+      );
+      expect(runtime.status).toBe("available");
+      if (runtime.status === "available") {
+        expect(runtime.governedContextEnabled).toBe(false);
+      }
+    } finally {
+      if (previousDatabaseUrl === undefined) {
+        delete process.env.DATABASE_URL;
+      } else {
+        process.env.DATABASE_URL = previousDatabaseUrl;
+      }
+    }
   });
 
   it("reads legacy pricing fields and uses a conservative group trigger for old versions", () => {

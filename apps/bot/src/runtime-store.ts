@@ -1234,40 +1234,6 @@ export async function recordOpenVikingCommitTrace(params: {
   });
 }
 
-export async function upsertOpenVikingMemoryRecord(params: {
-  representativeId: string;
-  representativeSlug: string;
-  contactId?: string;
-  uri: string;
-  contextType: string;
-  scope: string;
-  category: string;
-  summary: string;
-  sourceKind: string;
-}): Promise<void> {
-  await prisma.openVikingMemoryRecord.upsert({
-    where: { uri: params.uri },
-    create: {
-      representativeId: params.representativeId,
-      contactId: params.contactId ?? null,
-      uri: params.uri,
-      contextType: params.contextType,
-      scope: params.scope,
-      category: params.category,
-      summary: params.summary,
-      sourceKind: params.sourceKind,
-    },
-    update: {
-      contactId: params.contactId ?? null,
-      contextType: params.contextType,
-      scope: params.scope,
-      category: params.category,
-      summary: params.summary,
-      sourceKind: params.sourceKind,
-    },
-  });
-}
-
 export async function submitStructuredCollector(params: {
   context: ConversationContextRecord;
   collectorState: StructuredCollectorState;

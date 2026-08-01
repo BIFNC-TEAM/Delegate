@@ -7,7 +7,11 @@ import {
 import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
+  requireDashboardRepresentativeAccessActor,
 } from "../../../../auth";
+import { withPrivateNoStore } from "../../../../../private-response";
+import { creatorTrainingApiErrorResponse } from "../errors";
+import { toDashboardDevelopmentSourceDto } from "../safe-dto";
 
 export async function GET(
   _request: Request,
@@ -16,24 +20,25 @@ export async function GET(
   const { slug } = await params;
   const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
   if (accessResponse) {
-    return accessResponse;
+    return withPrivateNoStore(accessResponse);
   }
 
   try {
     const sources = await listCreatorTrainingSources(slug);
-    return NextResponse.json({ sources });
+    return withPrivateNoStore(
+      NextResponse.json({
+        sources: sources.map(toDashboardDevelopmentSourceDto),
+      }),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to load creator training sources.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to load development sources.",
     );
   }
 }
@@ -43,12 +48,9 @@ export async function POST(
   { params }: { params: Promise<{ slug: string }> },
 ) {
   const { slug } = await params;
-  const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
-  if (accessResponse) {
-    return accessResponse;
-  }
 
   try {
+    const actor = await requireDashboardRepresentativeAccessActor(slug);
     const body = (await request.json()) as Record<string, unknown>;
     const source = await createCreatorTrainingSource(slug, {
       kind: String(body.kind ?? ""),
@@ -56,22 +58,24 @@ export async function POST(
       ...(typeof body.locator === "string" ? { locator: body.locator } : {}),
       ...(typeof body.contentText === "string" ? { contentText: body.contentText } : {}),
       ...(body.metadata !== undefined ? { metadata: body.metadata } : {}),
-      ...(typeof body.createdBy === "string" ? { createdBy: body.createdBy } : {}),
+      createdBy: actor,
     });
 
-    return NextResponse.json({ source }, { status: 201 });
+    return withPrivateNoStore(
+      NextResponse.json(
+        { source: toDashboardDevelopmentSourceDto(source) },
+        { status: 201 },
+      ),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to create creator training source.",
-      },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to create the development source.",
     );
   }
 }

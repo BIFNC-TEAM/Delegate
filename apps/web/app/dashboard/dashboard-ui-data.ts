@@ -49,6 +49,8 @@ export type DashboardSectionBlueprint = {
   }>;
 };
 
+type BlueprintDashboardView = Exclude<DashboardView, "overview" | "settings">;
+
 const text = (zh: string, en: string): LocalizedText => ({ zh, en });
 
 export const dashboardNavigation: Array<{
@@ -70,7 +72,7 @@ export const dashboardNavigation: Array<{
     items: [
       { id: "skills", index: "05", label: text("技能 / 工具", "Skills & Tools"), shortLabel: text("技能", "Skills") },
       { id: "wallet", index: "06", label: text("钱包 / 账单", "Wallet & Billing"), shortLabel: text("钱包", "Wallet") },
-      { id: "memory", index: "07", label: text("公开记忆", "Public Memory"), shortLabel: text("记忆", "Memory") },
+      { id: "memory", index: "07", label: text("养成", "Representative Development"), shortLabel: text("养成", "Development") },
       { id: "analytics", index: "08", label: text("数据分析", "Analytics"), shortLabel: text("分析", "Analytics") },
       { id: "channels", index: "09", label: text("发布渠道", "Channels"), shortLabel: text("渠道", "Channels") },
     ],
@@ -85,7 +87,7 @@ export const dashboardNavigation: Array<{
 ];
 
 export const dashboardSectionBlueprints: Record<
-  Exclude<DashboardView, "overview" | "settings">,
+  Exclude<BlueprintDashboardView, "memory">,
   DashboardSectionBlueprint
 > = {
   knowledge: {
@@ -244,33 +246,6 @@ export const dashboardSectionBlueprints: Record<
     modules: [
       { title: text("资金流", "Money flow"), description: text("外部支付负责收钱；Delegate 内部账本负责服务权益、收益、成本和审计。", "Payment providers collect funds; Delegate tracks service entitlements, earnings, cost, and audit state."), items: [text("购买服务包", "Service-package purchase"), text("发放代表专属权益", "Representative entitlement grant"), text("Usage charge", "Usage charge"), text("Creator settlement", "Creator settlement")] },
       { title: text("提现与退款", "Withdrawals & refunds"), description: text("提现先冻结，退款与冲正必须保留原事件关联。", "Withdrawals freeze funds first; refunds and reversals retain original event links."), items: [text("发起提现", "Request withdrawal"), text("提现审核", "Withdrawal review"), text("Refund / reversal", "Refund / reversal"), text("Chargeback", "Chargeback")] },
-    ],
-  },
-  memory: {
-    eyebrow: text("Public Memory", "Public Memory"),
-    title: text("公开记忆必须能看到来源、范围和每次召回。", "Public memory should expose provenance, scope, and every recall."),
-    description: text("管理代表级记忆、用户会话摘要、公开资源，并检查 Recall 与 Commit traces。", "Govern representative memory, conversation summaries, public resources, recall traces, and commit traces."),
-    primaryAction: text("同步公开资源", "Sync public resources"),
-    tabs: [text("记忆概览", "Overview"), text("Memory records", "Memory records"), text("Recall traces", "Recall traces"), text("Commit traces", "Commit traces")],
-    metrics: [
-      { label: text("公开记忆", "Public memories"), value: "42", detail: text("代表与用户范围", "Representative and user scopes"), tone: "teal" },
-      { label: text("公开资源", "Public resources"), value: "19", detail: text("最近一次成功同步", "Last successful sync") },
-      { label: text("今日召回", "Recalls today"), value: "28", detail: text("进入回复链路", "Injected into responses") },
-      { label: text("同步异常", "Sync issues"), value: "01", detail: text("需要检查来源", "Source needs review"), tone: "warning" },
-    ],
-    table: {
-      title: text("Memory records", "Memory records"),
-      description: text("查看 URI、Scope、Category、Summary 和来源。", "Inspect URI, scope, category, summary, and provenance."),
-      columns: [text("URI", "URI"), text("Scope", "Scope"), text("Category", "Category"), text("来源", "Source"), text("状态", "Status")],
-      rows: [
-        [text("viking://resources/.../profile", "viking://resources/.../profile"), text("Representative", "Representative"), text("Identity", "Identity"), text("Founder profile.pdf", "Founder profile.pdf"), text("启用", "Enabled")],
-        [text("viking://user/memories/.../184", "viking://user/memories/.../184"), text("Contact", "Contact"), text("Preference", "Preference"), text("Conversation #184", "Conversation #184"), text("启用", "Enabled")],
-        [text("viking://agent/memories/.../handoff", "viking://agent/memories/.../handoff"), text("Agent", "Agent"), text("Pattern", "Pattern"), text("Owner feedback", "Owner feedback"), text("待审核", "Review")],
-      ],
-    },
-    modules: [
-      { title: text("Recall traces", "Recall traces"), description: text("记录 query、命中 URI、score 和 layer，回答为什么使用这条记忆。", "Record query, URI, score, and layer to explain why memory was used."), items: [text("Query", "Query"), text("Recalled URI", "Recalled URI"), text("Score / Layer", "Score / Layer")] },
-      { title: text("Commit traces", "Commit traces"), description: text("每次保存都带有 Session、原因、提取结果和状态。", "Every commit carries session, reason, extracted results, and state."), items: [text("Session ID", "Session ID"), text("Commit reason", "Commit reason"), text("Extracted memories", "Extracted memories"), text("Status", "Status")], status: text("边界正常", "Boundary healthy") },
     ],
   },
   analytics: {

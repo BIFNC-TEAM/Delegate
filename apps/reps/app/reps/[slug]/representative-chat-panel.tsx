@@ -9,6 +9,7 @@ import {
   PUBLIC_WALLET_UPDATED_EVENT,
   type PublicWalletUpdatedDetail,
 } from "./public-wallet-client";
+import { getGovernedContextDisclosure } from "./governed-context-disclosure";
 
 type Citation = { title: string; excerpt?: string; uri?: string };
 type ChatAttachment = { id: string; fileName: string; mimeType?: string; sizeBytes?: number; url?: string };
@@ -49,8 +50,13 @@ export function RepresentativeChatPanel(props: {
   locale: "zh" | "en";
   freeReplyLimit: number;
   computeEnabled: boolean;
+  governedContextEnabled: boolean;
 }) {
   const t = props.locale === "zh" ? zhCopy : enCopy;
+  const governedContextDisclosure = getGovernedContextDisclosure(
+    props.locale,
+    props.governedContextEnabled,
+  );
   const demoCommerceEnabled = process.env.NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS === "true";
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
@@ -61,7 +67,11 @@ export function RepresentativeChatPanel(props: {
   const [showPlans, setShowPlans] = useState(false);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([
-    { id: "welcome", role: "assistant", text: t.welcome(props.representativeName) },
+    {
+      id: "welcome",
+      role: "assistant",
+      text: t.welcome(props.representativeName, props.governedContextEnabled),
+    },
   ]);
   const [usage, setUsage] = useState<PublicChatResponse["usage"]>({
     freeRepliesUsed: 0,
@@ -320,7 +330,7 @@ export function RepresentativeChatPanel(props: {
         <div>
           <p className="eyebrow">{t.eyebrow}</p>
           <h2>{t.title(props.representativeName)}</h2>
-          <p>{t.summary}</p>
+          <p>{t.summary(props.governedContextEnabled)}</p>
         </div>
         <span className={humanActive ? "representative-responder-pill is-human" : "representative-responder-pill"}>
           <i aria-hidden="true" />{humanActive ? t.humanStatus : t.aiStatus}
@@ -385,7 +395,7 @@ export function RepresentativeChatPanel(props: {
                 </article>
               );
             })}
-            {busy ? <article className="representative-chat-message representative-chat-message-assistant is-pending"><span className="panel-title">{props.representativeName} · {t.aiLabel}</span><p>{t.thinking}</p></article> : null}
+            {busy ? <article className="representative-chat-message representative-chat-message-assistant is-pending"><span className="panel-title">{props.representativeName} · {t.aiLabel}</span><p>{t.thinking(props.governedContextEnabled)}</p></article> : null}
           </div>
 
           {messages.length <= 1 ? (
@@ -406,6 +416,9 @@ export function RepresentativeChatPanel(props: {
                 ) : null}
               </div>
             ) : null}
+            <p className="footer-note representative-chat-memory-note">
+              {governedContextDisclosure}
+            </p>
             <div className="dashboard-form-footer"><p className="footer-note">{t.footnote}</p><div className="button-row"><button className="button-primary" disabled={busy || hydrating || !input.trim()} type="submit">{hydrating ? t.loadingHistory : busy ? t.sending : t.send}</button></div></div>
           </form>
           {error ? <p className="feedback-error" role="alert">{error}</p> : null}
@@ -528,14 +541,17 @@ function getComputeAssist(value: string, locale: "zh" | "en", enabled: boolean) 
 const zhCopy = {
   eyebrow: "与数字代表对话",
   title: (name: string) => `向 ${name} 提问`,
-  summary: "直接描述你的问题；回答会保留在本次会话中，并在使用公开资料时标明来源。",
+  summary: (governedContextEnabled: boolean) =>
+    governedContextEnabled
+      ? "直接描述你的问题；回答以已发布资料为基础，也可能使用仅限你与当前代表的受治理历史摘要。"
+      : "直接描述你的问题；回答以已发布资料为基础，并在使用公开来源时标明依据。",
   aiStatus: "AI 正在接待", humanStatus: "真人正在接待",
-  aiLabel: "AI", humanLabel: "真人", youLabel: "你", citationsLabel: "参考的公开资料", openSource: "打开来源",
+  aiLabel: "AI", humanLabel: "真人", youLabel: "你", citationsLabel: "回答依据", openSource: "打开公开来源",
   artifactsLabel: "任务结果", downloadArtifact: "下载",
   startersLabel: "你可以这样开始",
   starters: ["我想了解你们提供什么服务", "我有一个合作需求", "帮我整理报价所需信息", "我希望联系本人"],
   inputLabel: "想解决什么？", placeholder: "描述你的问题、背景和期望结果…", footnote: "请勿发送密码、密钥或不应公开的敏感信息。",
-  sending: "正在处理…", send: "发送", thinking: "正在结合公开知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
+  sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
   sessionLabel: "本次会话",
   currentResponder: "当前接待", freeRepliesLabel: "免费回复", serviceCreditsLabel: "服务额度",
@@ -553,20 +569,26 @@ const zhCopy = {
   openDemoRecharge: "前往演示充值",
   contactOwner: "申请真人协助",
   privacyLabel: "隐私提示", privacyDetail: "不会读取主人的私人文件、账号或工作区。重要承诺需要真人确认。", privacyAction: "查看完整说明",
-  welcome: (name: string) => `你好，我是 ${name}，你可以直接告诉我想了解什么。我会根据已发布的公开资料回答；遇到需要本人判断的事情，我会说明并帮你转交。`,
+  welcome: (name: string, governedContextEnabled: boolean) =>
+    governedContextEnabled
+      ? `你好，我是 ${name}，你可以直接告诉我想了解什么。我会以已发布资料为基础，并可能使用仅限你与当前代表的受治理历史摘要；需要本人判断时，我会说明并帮你转交。`
+      : `你好，我是 ${name}，你可以直接告诉我想了解什么。我会根据已发布的公开资料回答；遇到需要本人判断的事情，我会说明并帮你转交。`,
 };
 
 const enCopy = {
   eyebrow: "Talk to the digital representative",
   title: (name: string) => `Ask ${name}`,
-  summary: "Describe what you need. This conversation persists, and answers show the public sources they use.",
+  summary: (governedContextEnabled: boolean) =>
+    governedContextEnabled
+      ? "Describe what you need. Replies are grounded in published information and may also use governed history scoped only to you and this representative."
+      : "Describe what you need. Replies are grounded in published information and show the public sources they use.",
   aiStatus: "AI is responding", humanStatus: "Human is responding",
-  aiLabel: "AI", humanLabel: "Human", youLabel: "You", citationsLabel: "Public sources used", openSource: "Open source",
+  aiLabel: "AI", humanLabel: "Human", youLabel: "You", citationsLabel: "Context used", openSource: "Open public source",
   artifactsLabel: "Task results", downloadArtifact: "Download",
   startersLabel: "Try one of these",
   starters: ["What services do you offer?", "I have a partnership request", "Help me prepare a quote request", "I want to contact the owner"],
   inputLabel: "What do you need?", placeholder: "Describe the problem, context, and outcome you want…", footnote: "Do not send passwords, API keys, or sensitive information that should not be public.",
-  sending: "Working…", send: "Send", thinking: "Reviewing public knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
+  sending: "Working…", send: "Send", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "Reviewing published knowledge and permitted context…" : "Reviewing published knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
   humanQueueNotice: "This conversation is now in the human queue. You can keep adding context while the operator reviews the full thread.",
   sessionLabel: "This conversation",
   currentResponder: "Current responder", freeRepliesLabel: "Free replies", serviceCreditsLabel: "Service credits",
@@ -584,5 +606,8 @@ const enCopy = {
   openDemoRecharge: "Open demo recharge",
   contactOwner: "Request human help",
   privacyLabel: "Privacy", privacyDetail: "This representative cannot read the owner's private files, accounts, or workspace. Important commitments require human confirmation.", privacyAction: "Read the full explanation",
-  welcome: (name: string) => `Hi, I’m ${name}. Tell me what you want to understand. I answer from published public information and will clearly offer a handoff when the owner needs to decide.`,
+  welcome: (name: string, governedContextEnabled: boolean) =>
+    governedContextEnabled
+      ? `Hi, I’m ${name}. Tell me what you want to understand. I use published information and may use governed history scoped only to you and this representative; I will offer a handoff when the owner needs to decide.`
+      : `Hi, I’m ${name}. Tell me what you want to understand. I answer from published public information and will clearly offer a handoff when the owner needs to decide.`,
 };

@@ -10,6 +10,7 @@ import {
   type Locale,
 } from "@delegate/web-ui";
 
+import { getGovernedContextSyncPresentation } from "./dashboard-governed-context-status";
 import { DashboardRepresentativeBillingProducts } from "./dashboard-representative-billing-products";
 import { saveRepresentativeSetupRequests } from "./representative-setup-save";
 
@@ -82,6 +83,7 @@ type ActionGateKey =
 type RepresentativeSetupSnapshot = {
   id: string;
   slug: string;
+  knowledgePackRevision: number;
   ownerName: string;
   name: string;
   tagline: string;
@@ -130,26 +132,15 @@ type RepresentativeSetupSnapshot = {
 type RepresentativeOpenVikingSnapshot = {
   representativeSlug: string;
   enabled: boolean;
-  agentId: string;
-  agentIdOverride?: string;
   autoRecall: boolean;
-  autoCapture: boolean;
-  captureMode: "semantic" | "keyword";
+  autoCapture: false;
   recallLimit: number;
   recallScoreThreshold: number;
-  targetUri: string;
-  resourceSyncEnabled: boolean;
+  serviceStatus: "available" | "unavailable" | "disabled";
+  publicKnowledgeSyncAvailable: boolean;
   lastSyncAt?: string;
   lastSyncStatus: string;
   lastSyncItemCount: number;
-  lastSyncError?: string;
-  health: {
-    status: "healthy" | "degraded" | "disabled";
-    detail: string;
-    mode: "local" | "remote";
-    baseUrl: string;
-    consoleUrl?: string;
-  };
 };
 
 type RepresentativeKnowledgeAsset = {
@@ -400,8 +391,8 @@ const setupSections: Array<{
   {
     id: "memory",
     step: "06",
-    label: "Memory",
-    blurb: "最后再配置 OpenViking 这层进阶记忆和资源同步。",
+    label: "记忆与使用",
+    blurb: "最后配置已发布知识检索和受治理的长期上下文。",
   },
 ];
 
@@ -444,8 +435,8 @@ const setupSectionsEn: Array<{
   {
     id: "memory",
     step: "06",
-    label: "Memory",
-    blurb: "Configure advanced OpenViking memory and sync last.",
+    label: "Memory & Use",
+    blurb: "Configure published-source retrieval and governed long-term context last.",
   },
 ];
 
@@ -536,7 +527,7 @@ export function DashboardRepresentativeSetup({
     startTransition(() => {
       void (async () => {
         const bindingChanged = !sameStringSet(knowledgeAssetIds, savedKnowledgeAssetIds);
-        const { setupResponse: response, bindingResponse } =
+        const { setupResponse: response, bindingResponse, bindingError } =
           await saveRepresentativeSetupRequests({
             representativeSlug,
             setup: draft,
@@ -545,13 +536,39 @@ export function DashboardRepresentativeSetup({
           });
 
         if (!response.ok) {
-          throw new Error(await extractError(response));
+          const failure = await extractErrorPayload(response);
+          if (
+            response.status === 409
+            && failure.code === "KNOWLEDGE_PACK_CONFLICT"
+          ) {
+            const refreshed = await refreshSetupAfterConflict(
+              representativeSlug,
+              setSnapshot,
+              setDraft,
+            );
+            if (!refreshed) {
+              throw new Error(t.setupConflictReloadError);
+            }
+            setError(t.setupConflictMessage);
+            return;
+          }
+          throw new Error(failure.error);
+        }
+
+        // The setup CAS has already committed at this point. Adopt its new
+        // revision before reporting a later binding failure, otherwise the
+        // next save would retry with a stale revision and always conflict.
+        const nextSnapshot = (await response.json()) as RepresentativeSetupSnapshot;
+        setSnapshot(nextSnapshot);
+        setDraft(cloneSnapshot(nextSnapshot));
+
+        if (bindingError) {
+          throw bindingError;
         }
         if (bindingResponse && !bindingResponse.ok) {
           throw new Error(await extractError(bindingResponse));
         }
 
-        const nextSnapshot = (await response.json()) as RepresentativeSetupSnapshot;
         if (bindingResponse) {
           const bindingResult = (await bindingResponse.json()) as {
             assets: RepresentativeKnowledgeAsset[];
@@ -561,8 +578,6 @@ export function DashboardRepresentativeSetup({
           setKnowledgeAssetIds(bindingResult.selectedAssetIds);
           setSavedKnowledgeAssetIds(bindingResult.selectedAssetIds);
         }
-        setSnapshot(nextSnapshot);
-        setDraft(cloneSnapshot(nextSnapshot));
         setMessage(t.savedMessage);
       })().catch((nextError: unknown) => {
         setError(
@@ -600,13 +615,10 @@ export function DashboardRepresentativeSetup({
             },
             body: JSON.stringify({
               enabled: openVikingDraft.enabled,
-              agentIdOverride: openVikingDraft.agentIdOverride,
               autoRecall: openVikingDraft.autoRecall,
-              autoCapture: openVikingDraft.autoCapture,
-              captureMode: openVikingDraft.captureMode,
+              autoCapture: false,
               recallLimit: openVikingDraft.recallLimit,
               recallScoreThreshold: openVikingDraft.recallScoreThreshold,
-              targetUri: openVikingDraft.targetUri,
             }),
           },
         );
@@ -654,7 +666,15 @@ export function DashboardRepresentativeSetup({
         const nextSnapshot = (await response.json()) as RepresentativeOpenVikingSnapshot;
         setOpenVikingSnapshot(nextSnapshot);
         setOpenVikingDraft(cloneOpenVikingSnapshot(nextSnapshot));
-        setMessage(t.memorySyncedMessage);
+        const syncState = getGovernedContextSyncPresentation(
+          nextSnapshot.lastSyncStatus,
+          locale,
+        );
+        if (syncState.outcome === "success" || syncState.outcome === "in_progress") {
+          setMessage(syncState.actionMessage);
+        } else {
+          setError(syncState.actionMessage);
+        }
       })()
         .catch((nextError: unknown) => {
           setError(
@@ -688,6 +708,10 @@ export function DashboardRepresentativeSetup({
     localizedSetupSections.findIndex((section) => section.id === activeSection),
   );
   const currentSection = localizedSetupSections[activeSectionIndex]!;
+  const contextSyncState = getGovernedContextSyncPresentation(
+    openVikingDraft?.lastSyncStatus ?? "",
+    locale,
+  );
   const totalKnowledgeItems =
     draft.knowledgePack.faq.length +
     draft.knowledgePack.materials.length +
@@ -1673,19 +1697,20 @@ export function DashboardRepresentativeSetup({
             eyebrow={t.memoryEyebrow}
             meta={
               <div className="chip-row">
-                <span className="chip">{openVikingDraft.health.mode}</span>
                 <span
                   className={
-                    openVikingDraft.health.status === "healthy"
+                    openVikingDraft.serviceStatus === "available"
                       ? "chip chip-safe"
-                      : openVikingDraft.health.status === "disabled"
+                      : openVikingDraft.serviceStatus === "disabled"
                         ? "chip"
                         : "chip chip-danger"
                   }
                 >
-                  {openVikingDraft.health.status}
+                  {formatContextHealthStatus(openVikingDraft.serviceStatus, locale)}
                 </span>
-                <span className="chip">{openVikingDraft.lastSyncStatus}</span>
+                <span className="chip">
+                  {contextSyncState.label}
+                </span>
               </div>
             }
             title={t.memoryTitle}
@@ -1694,11 +1719,9 @@ export function DashboardRepresentativeSetup({
             <div className="setup-grid">
               <div className="field-stack field-span-full">
                 <span>{t.healthLabel}</span>
-                <p className="muted">{openVikingDraft.health.detail}</p>
-                <p className="footer-note">{t.baseUrlLabel(openVikingDraft.health.baseUrl)}</p>
-                {openVikingDraft.health.consoleUrl ? (
-                  <p className="footer-note">{t.consoleLabel(openVikingDraft.health.consoleUrl)}</p>
-                ) : null}
+                <p className="muted">
+                  {t.healthDetail(formatContextHealthStatus(openVikingDraft.serviceStatus, locale))}
+                </p>
               </div>
 
               <div className="field-stack field-span-full">
@@ -1730,78 +1753,9 @@ export function DashboardRepresentativeSetup({
                     />
                     <span>{t.autoRecall}</span>
                   </label>
-                  <label className="toggle-row">
-                    <input
-                      checked={openVikingDraft.autoCapture}
-                      onChange={(event) =>
-                        updateOpenVikingDraft((value) => ({
-                          ...value,
-                          autoCapture: event.target.checked,
-                        }))
-                      }
-                      type="checkbox"
-                    />
-                    <span>{t.autoCapture}</span>
-                  </label>
                 </div>
+                <p className="footer-note">{t.captureDisabledNotice}</p>
               </div>
-
-              <label className="field-stack">
-                <span>{t.agentIdOverride}</span>
-                <input
-                  className="text-input"
-                  onChange={(event) =>
-                    updateOpenVikingDraft((value) => {
-                      const nextOverride = event.target.value.trim();
-                      return {
-                        representativeSlug: value.representativeSlug,
-                        enabled: value.enabled,
-                        agentId: value.agentId,
-                        ...(nextOverride ? { agentIdOverride: nextOverride } : {}),
-                        autoRecall: value.autoRecall,
-                        autoCapture: value.autoCapture,
-                        captureMode: value.captureMode,
-                        recallLimit: value.recallLimit,
-                        recallScoreThreshold: value.recallScoreThreshold,
-                        targetUri: value.targetUri,
-                        resourceSyncEnabled: value.resourceSyncEnabled,
-                        ...(value.lastSyncAt ? { lastSyncAt: value.lastSyncAt } : {}),
-                        lastSyncStatus: value.lastSyncStatus,
-                        lastSyncItemCount: value.lastSyncItemCount,
-                        ...(value.lastSyncError ? { lastSyncError: value.lastSyncError } : {}),
-                        health: {
-                          status: value.health.status,
-                          detail: value.health.detail,
-                          mode: value.health.mode,
-                          baseUrl: value.health.baseUrl,
-                          ...(value.health.consoleUrl
-                            ? { consoleUrl: value.health.consoleUrl }
-                            : {}),
-                        },
-                      };
-                    })
-                  }
-                  placeholder={openVikingDraft.agentId}
-                  value={openVikingDraft.agentIdOverride ?? ""}
-                />
-              </label>
-
-              <label className="field-stack">
-                <span>{t.captureMode}</span>
-                <select
-                  className="text-input"
-                  onChange={(event) =>
-                    updateOpenVikingDraft((value) => ({
-                      ...value,
-                      captureMode: event.target.value as "semantic" | "keyword",
-                    }))
-                  }
-                  value={openVikingDraft.captureMode}
-                >
-                  <option value="semantic">semantic</option>
-                  <option value="keyword">keyword</option>
-                </select>
-              </label>
 
               <label className="field-stack">
                 <span>{t.recallLimit}</span>
@@ -1838,20 +1792,6 @@ export function DashboardRepresentativeSetup({
                 />
               </label>
 
-              <label className="field-stack field-span-full">
-                <span>{t.targetResourceScope}</span>
-                <input
-                  className="text-input"
-                  onChange={(event) =>
-                    updateOpenVikingDraft((value) => ({
-                      ...value,
-                      targetUri: event.target.value,
-                    }))
-                  }
-                  value={openVikingDraft.targetUri}
-                />
-              </label>
-
               <div className="field-stack field-span-full">
                 <span>{t.syncStatus}</span>
                 <p className="muted">
@@ -1862,19 +1802,24 @@ export function DashboardRepresentativeSetup({
                   )}
                 </p>
                 <p className="footer-note">
-                  {t.syncStatusLine(openVikingDraft.lastSyncStatus, openVikingDraft.lastSyncItemCount)}
+                  {t.syncStatusLine(
+                    contextSyncState.label,
+                    openVikingDraft.lastSyncItemCount,
+                  )}
                 </p>
-                {openVikingDraft.lastSyncError ? (
-                  openVikingDraft.enabled && openVikingSnapshot?.enabled ? (
-                    <p className="footer-note">{t.errorLine(openVikingDraft.lastSyncError)}</p>
-                  ) : null
-                ) : null}
                 {!openVikingDraft.enabled ? (
                   <p className="footer-note">{t.enableBeforeSync}</p>
                 ) : openVikingSnapshot?.enabled !== true ? (
                   <p className="footer-note">{t.saveBeforeSync}</p>
-                ) : openVikingDraft.health.status !== "healthy" ? (
+                ) : openVikingDraft.serviceStatus !== "available" ? (
                   <p className="footer-note">{t.healthBeforeSync}</p>
+                ) : (
+                  contextSyncState.outcome === "blocked_unpublished"
+                  || contextSyncState.outcome === "blocked_service_setup"
+                  || contextSyncState.outcome === "failed"
+                  || contextSyncState.outcome === "attention_required"
+                ) ? (
+                  <p className="footer-note">{contextSyncState.actionMessage}</p>
                 ) : null}
               </div>
             </div>
@@ -1895,8 +1840,8 @@ export function DashboardRepresentativeSetup({
                   busyKey === "openviking:sync" ||
                   !openVikingDraft.enabled ||
                   openVikingSnapshot?.enabled !== true ||
-                  openVikingDraft.health.status !== "healthy" ||
-                  !openVikingDraft.resourceSyncEnabled
+                  openVikingDraft.serviceStatus !== "available" ||
+                  !openVikingDraft.publicKnowledgeSyncAvailable
                 }
                 onClick={handleOpenVikingSync}
                 type="button"
@@ -1993,15 +1938,18 @@ export function DashboardRepresentativeSetup({
 
 const setupCopy = {
   zh: {
-    savedMessage: "代表配置已保存；变更的知识关联正在后台同步索引。",
+    savedMessage: "代表配置已保存为草稿；发布新版本后才会进入公开回答。",
     saveError: "保存代表配置失败。",
+    setupConflictMessage:
+      "知识草稿已被养成审批或其他设置更新。已加载最新版本，请确认后重新应用并保存你的修改。",
+    setupConflictReloadError:
+      "知识草稿已发生冲突，但无法加载最新版本。请刷新页面后重试。",
     successNotificationTitle: "保存成功",
     errorNotificationTitle: "操作失败",
     dismissNotification: "关闭通知",
-    memorySavedMessage: "OpenViking 记忆设置已保存。",
-    memorySaveError: "保存 OpenViking 记忆设置失败。",
-    memorySyncedMessage: "代表公开知识已同步到 OpenViking。",
-    memorySyncError: "同步代表公开知识到 OpenViking 失败。",
+    memorySavedMessage: "受治理的上下文设置已保存。",
+    memorySaveError: "保存上下文设置失败。",
+    memorySyncError: "同步已发布知识失败。",
     loadingHeadline: "把 demo 配置变成真的 owner 配置",
     loadingCopy: "正在加载当前代表配置。",
     panelEyebrow: "Representative Setup",
@@ -2088,8 +2036,8 @@ const setupCopy = {
     networkAllowlistPlaceholder: "api.example.com\n*.trusted.tools",
     networkAllowlistHint: "Only MCP-bound traffic can use allowlist mode today. Add one hostname per line.",
     filesystemMode: "Filesystem mode",
-    memoryEyebrow: "OpenViking Memory",
-    memoryTitle: "代表级公开记忆层：资源同步、recall、capture 和可观测性。",
+    memoryEyebrow: "记忆与使用",
+    memoryTitle: "只让当前已发布版本进入回答上下文。",
     documentEditor: {
       itemsLabel: (count: number) => `${count} 项`,
       addItem: "添加条目",
@@ -2100,47 +2048,45 @@ const setupCopy = {
       remove: "删除",
       empty: "还没有任何条目。",
     },
-    healthLabel: "Health",
-    baseUrlLabel: (value: string) => `Base URL: ${value}`,
-    consoleLabel: (value?: string) => `Console: ${value ?? ""}`,
-    togglesLabel: "Toggles",
-    enableOpenViking: "Enable OpenViking",
-    autoRecall: "Auto recall",
-    autoCapture: "Auto capture",
-    agentIdOverride: "Agent ID override",
-    captureMode: "Capture mode",
-    recallLimit: "Recall limit",
-    recallScoreThreshold: "Recall score threshold",
-    targetResourceScope: "Target resource scope",
-    syncStatus: "Sync status",
-    never: "never",
-    lastSyncLabel: (value: string) => `Last sync: ${value}`,
-    syncStatusLine: (status: string, items: number) => `Status: ${status} · items: ${items}`,
-    errorLine: (value: string) => `Error: ${value}`,
+    healthLabel: "服务状态",
+    healthDetail: (status: string) => `检索服务当前状态：${status}。`,
+    togglesLabel: "回答上下文",
+    enableOpenViking: "启用已发布知识检索",
+    autoRecall: "回答前自动检索",
+    captureDisabledNotice: "会话、支付和人工交接内容不会自动写入长期记忆；养成建议必须由 Owner 审核，并在发布新代表版本后才会影响回答。",
+    recallLimit: "单次检索上限",
+    recallScoreThreshold: "最低匹配阈值",
+    syncStatus: "同步状态",
+    never: "尚未同步",
+    lastSyncLabel: (value: string) => `最近同步：${value}`,
+    syncStatusLine: (status: string, items: number) => `状态：${status} · 项目：${items}`,
     saving: "保存中...",
-    saveOpenVikingSettings: "保存 OpenViking 设置",
+    saveOpenVikingSettings: "保存上下文设置",
     syncing: "同步中...",
     syncPublicKnowledge: "同步公开知识",
-    enableBeforeSync: "请先开启 OpenViking 并保存设置，再同步公开知识。",
-    saveBeforeSync: "启用状态尚未保存；请先保存 OpenViking 设置。",
-    healthBeforeSync: "OpenViking 服务连接恢复健康后才能同步公开知识。",
-    loadingMemoryTitle: "正在加载代表级公开记忆配置。",
-    loadingMemoryCopy: "再等一下，加载完成后这里会展示代表级公开记忆配置。",
+    enableBeforeSync: "请先开启已发布知识检索并保存设置，再同步公开知识。",
+    saveBeforeSync: "启用状态尚未保存；请先保存上下文设置。",
+    healthBeforeSync: "检索服务恢复可用后才能同步公开知识。",
+    loadingMemoryTitle: "正在加载记忆与使用设置。",
+    loadingMemoryCopy: "再等一下，加载完成后这里会展示已发布知识的上下文设置。",
     previousStep: "上一步",
     nextStep: "下一步",
     stepCount: (current: number, total: number) => `第 ${current} / ${total} 步`,
     saveRepresentativeSetup: "保存代表配置",
   },
   en: {
-    savedMessage: "Representative setup saved. Changed knowledge bindings are syncing in the background.",
+    savedMessage: "Representative setup saved as a draft. Changes affect public replies only after a new version is published.",
     saveError: "Failed to save representative setup.",
+    setupConflictMessage:
+      "The knowledge draft changed through an approval or another setup update. The latest version is loaded; review it, reapply your edits, and save again.",
+    setupConflictReloadError:
+      "The knowledge draft changed, but the latest version could not be loaded. Refresh the page and try again.",
     successNotificationTitle: "Saved successfully",
     errorNotificationTitle: "Action failed",
     dismissNotification: "Dismiss notification",
-    memorySavedMessage: "OpenViking memory settings saved.",
-    memorySaveError: "Failed to save OpenViking memory settings.",
-    memorySyncedMessage: "Representative public knowledge synced into OpenViking.",
-    memorySyncError: "Failed to sync representative public knowledge into OpenViking.",
+    memorySavedMessage: "Governed context settings saved.",
+    memorySaveError: "Failed to save governed context settings.",
+    memorySyncError: "Failed to sync the current released version.",
     loadingHeadline: "Turn the demo configuration into a real owner configuration",
     loadingCopy: "Loading the current representative setup.",
     panelEyebrow: "Representative Setup",
@@ -2228,8 +2174,8 @@ const setupCopy = {
     networkAllowlistHint:
       "Allowlist mode currently applies to MCP-bound traffic. Enter one hostname per line.",
     filesystemMode: "Filesystem mode",
-    memoryEyebrow: "OpenViking Memory",
-    memoryTitle: "Representative-level public memory: sync, recall, capture, and observability.",
+    memoryEyebrow: "MEMORY & USE",
+    memoryTitle: "Only the current published version may enter reply context.",
     documentEditor: {
       itemsLabel: (count: number) => `${count} items`,
       addItem: "Add item",
@@ -2240,32 +2186,27 @@ const setupCopy = {
       remove: "Remove",
       empty: "No items yet.",
     },
-    healthLabel: "Health",
-    baseUrlLabel: (value: string) => `Base URL: ${value}`,
-    consoleLabel: (value?: string) => `Console: ${value ?? ""}`,
-    togglesLabel: "Toggles",
-    enableOpenViking: "Enable OpenViking",
-    autoRecall: "Auto recall",
-    autoCapture: "Auto capture",
-    agentIdOverride: "Agent ID override",
-    captureMode: "Capture mode",
+    healthLabel: "Service status",
+    healthDetail: (status: string) => `Retrieval service status: ${status}.`,
+    togglesLabel: "Reply context",
+    enableOpenViking: "Enable published-source retrieval",
+    autoRecall: "Retrieve before replies",
+    captureDisabledNotice: "Conversations, payments, and handoffs are never written to long-term memory automatically. Development suggestions require owner review and a new representative release before they can affect replies.",
     recallLimit: "Recall limit",
     recallScoreThreshold: "Recall score threshold",
-    targetResourceScope: "Target resource scope",
     syncStatus: "Sync status",
     never: "never",
     lastSyncLabel: (value: string) => `Last sync: ${value}`,
     syncStatusLine: (status: string, items: number) => `Status: ${status} · items: ${items}`,
-    errorLine: (value: string) => `Error: ${value}`,
     saving: "Saving...",
-    saveOpenVikingSettings: "Save OpenViking settings",
+    saveOpenVikingSettings: "Save context settings",
     syncing: "Syncing...",
     syncPublicKnowledge: "Sync public knowledge",
-    enableBeforeSync: "Enable OpenViking and save the settings before syncing public knowledge.",
-    saveBeforeSync: "The enabled state has not been saved yet. Save OpenViking settings first.",
-    healthBeforeSync: "Public knowledge can be synced after the OpenViking connection is healthy.",
-    loadingMemoryTitle: "Loading representative memory configuration.",
-    loadingMemoryCopy: "One moment. This section will show representative-level public memory settings when loading finishes.",
+    enableBeforeSync: "Enable published-source retrieval and save the settings before syncing public knowledge.",
+    saveBeforeSync: "The enabled state has not been saved yet. Save the context settings first.",
+    healthBeforeSync: "Public knowledge can be synced after the retrieval service is available.",
+    loadingMemoryTitle: "Loading Memory & Use settings.",
+    loadingMemoryCopy: "One moment. This section will show context settings for published knowledge.",
     previousStep: "Previous step",
     nextStep: "Next step",
     stepCount: (current: number, total: number) => `Step ${current} of ${total}`,
@@ -2482,34 +2423,44 @@ function buildSetupStepCards(
     case "memory":
       if (locale === "en") {
         return [
-          { label: "OpenViking", value: openVikingDraft?.enabled ? "Enabled" : "Off", detail: "Whether the representative-level public memory layer is enabled.", tone: "accent" },
-          { label: "Recall", value: openVikingDraft?.autoRecall ? "Auto" : "Manual", detail: "Whether public context is recalled automatically before responses.", },
-          { label: "Capture", value: openVikingDraft?.autoCapture ? "Auto" : "Manual", detail: "Whether public-safe memory is committed automatically at key workflow points.", tone: "safe" },
-          { label: "Last sync", value: openVikingDraft?.lastSyncStatus ?? "unknown", detail: "Status of the most recent resource sync.", },
+          { label: "Published context", value: openVikingDraft?.enabled ? "Enabled" : "Off", detail: "Whether the active published version can be retrieved for replies.", tone: "accent" },
+          { label: "Retrieval", value: openVikingDraft?.autoRecall ? "Automatic" : "Manual", detail: "Whether published context is retrieved before replies.", },
+          { label: "Conversation capture", value: "Off", detail: "Raw conversations, payments, and handoffs are not written to long-term memory.", tone: "safe" },
+          {
+            label: "Last sync",
+            value: getGovernedContextSyncPresentation(
+              openVikingDraft?.lastSyncStatus ?? "",
+              locale,
+            ).label,
+            detail: "Status of the most recent published-content sync.",
+          },
         ];
       }
       return [
         {
-          label: "OpenViking",
-          value: openVikingDraft?.enabled ? "Enabled" : "Off",
-          detail: "是否启用代表级公开记忆层。",
+          label: "已发布上下文",
+          value: openVikingDraft?.enabled ? "已开启" : "已关闭",
+          detail: "是否允许回答检索当前活动的已发布版本。",
           tone: "accent",
         },
         {
-          label: "Recall",
-          value: openVikingDraft?.autoRecall ? "Auto" : "Manual",
-          detail: "是否在回复前自动召回公开上下文。",
+          label: "检索",
+          value: openVikingDraft?.autoRecall ? "自动" : "手动",
+          detail: "是否在回复前检索已发布上下文。",
         },
         {
-          label: "Capture",
-          value: openVikingDraft?.autoCapture ? "Auto" : "Manual",
-          detail: "是否在关键节点自动提交公开安全记忆。",
+          label: "会话采集",
+          value: "关闭",
+          detail: "原始会话、支付和人工交接内容不会写入长期记忆。",
           tone: "safe",
         },
         {
-          label: "Last sync",
-          value: openVikingDraft?.lastSyncStatus ?? "unknown",
-          detail: "最近一次资源同步的状态。",
+          label: "最近同步",
+          value: getGovernedContextSyncPresentation(
+            openVikingDraft?.lastSyncStatus ?? "",
+            locale,
+          ).label,
+          detail: "最近一次已发布内容同步的状态。",
         },
       ];
   }
@@ -2842,6 +2793,25 @@ async function refreshSetup(
   setError(null);
 }
 
+async function refreshSetupAfterConflict(
+  representativeSlug: string,
+  setSnapshot: (value: RepresentativeSetupSnapshot) => void,
+  setDraft: (value: RepresentativeSetupSnapshot) => void,
+): Promise<boolean> {
+  const response = await fetch(
+    `/api/dashboard/representatives/${representativeSlug}/setup`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) {
+    return false;
+  }
+
+  const nextSnapshot = (await response.json()) as RepresentativeSetupSnapshot;
+  setSnapshot(nextSnapshot);
+  setDraft(cloneSnapshot(nextSnapshot));
+  return true;
+}
+
 async function refreshRepresentativeKnowledgeAssets(
   representativeSlug: string,
   setAssets: (value: RepresentativeKnowledgeAsset[]) => void,
@@ -2944,26 +2914,15 @@ function cloneOpenVikingSnapshot(
   return {
     representativeSlug: snapshot.representativeSlug,
     enabled: snapshot.enabled,
-    agentId: snapshot.agentId,
-    ...(snapshot.agentIdOverride ? { agentIdOverride: snapshot.agentIdOverride } : {}),
     autoRecall: snapshot.autoRecall,
-    autoCapture: snapshot.autoCapture,
-    captureMode: snapshot.captureMode,
+    autoCapture: false,
     recallLimit: snapshot.recallLimit,
     recallScoreThreshold: snapshot.recallScoreThreshold,
-    targetUri: snapshot.targetUri,
-    resourceSyncEnabled: snapshot.resourceSyncEnabled,
+    serviceStatus: snapshot.serviceStatus,
+    publicKnowledgeSyncAvailable: snapshot.publicKnowledgeSyncAvailable,
     ...(snapshot.lastSyncAt ? { lastSyncAt: snapshot.lastSyncAt } : {}),
     lastSyncStatus: snapshot.lastSyncStatus,
     lastSyncItemCount: snapshot.lastSyncItemCount,
-    ...(snapshot.lastSyncError ? { lastSyncError: snapshot.lastSyncError } : {}),
-    health: {
-      status: snapshot.health.status,
-      detail: snapshot.health.detail,
-      mode: snapshot.health.mode,
-      baseUrl: snapshot.health.baseUrl,
-      ...(snapshot.health.consoleUrl ? { consoleUrl: snapshot.health.consoleUrl } : {}),
-    },
   };
 }
 
@@ -2987,12 +2946,31 @@ function toggleIntent(
 }
 
 async function extractError(response: Response): Promise<string> {
+  return (await extractErrorPayload(response)).error;
+}
+
+async function extractErrorPayload(
+  response: Response,
+): Promise<{ error: string; code?: string }> {
   try {
-    const payload = (await response.json()) as { error?: string };
-    return payload.error ?? `Request failed with status ${response.status}.`;
+    const payload = (await response.json()) as { error?: string; code?: string };
+    return {
+      error: payload.error ?? `Request failed with status ${response.status}.`,
+      ...(payload.code ? { code: payload.code } : {}),
+    };
   } catch {
-    return `Request failed with status ${response.status}.`;
+    return { error: `Request failed with status ${response.status}.` };
   }
+}
+
+function formatContextHealthStatus(
+  value: RepresentativeOpenVikingSnapshot["serviceStatus"],
+  locale: Locale,
+): string {
+  if (locale === "zh") {
+    return value === "available" ? "可用" : value === "unavailable" ? "暂时异常" : "未启用";
+  }
+  return value === "available" ? "Available" : value === "unavailable" ? "Temporarily unavailable" : "Disabled";
 }
 
 function formatTimestamp(value: string, locale: Locale): string {

@@ -33,6 +33,31 @@ export async function requireDashboardRepresentativeAccess(representativeSlug: s
   return session;
 }
 
+export function resolveDashboardSessionActor(
+  session: {
+    ownerId?: string | undefined;
+    email?: string | null | undefined;
+  } | null,
+) {
+  const ownerId = session?.ownerId?.trim();
+  if (ownerId) return ownerId;
+
+  const email = session?.email?.trim().toLowerCase();
+  if (email) return email;
+
+  if (!session && !shouldRequireCreatorDashboardAuth()) {
+    return "local-owner";
+  }
+  throw new RepresentativeAccessError("Authentication required.", 401);
+}
+
+export async function requireDashboardRepresentativeAccessActor(
+  representativeSlug: string,
+) {
+  const session = await requireDashboardRepresentativeAccess(representativeSlug);
+  return resolveDashboardSessionActor(session);
+}
+
 export async function requireDashboardBillingAccess() {
   const session = await requireDashboardApiOwnerSession();
   const ownerId = session?.ownerId?.trim();

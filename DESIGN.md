@@ -148,7 +148,7 @@
   - **Owner dashboard:** operational, dense, navigable
 - Reuse the same palette and typography across all three, but shift density and layout.
 - Use teal as the default "trusted/live system" color and indigo for decisions, automation, and secondary emphasis.
-- Dashboard v2 top-level information architecture is fixed to: Overview, Knowledge Library, Digital Representatives, Inbox, Approvals, Skills, Wallet, Memory, Analytics, Channels, Audit Logs, and Settings.
+- Dashboard v2 top-level information architecture is fixed to: Overview, Knowledge Library, Digital Representatives, Inbox, Approvals, Skills, Wallet, Representative Development（养成）, Analytics, Channels, Audit Logs, and Settings.
 - Representative-specific identity, knowledge bindings, FAQ, service scope, safety boundaries, pricing, publishing, and runtime data live under Digital Representatives rather than becoming top-level dashboard tabs.
 - General compute is exposed through Approvals and Skills/MCP surfaces; artifacts and deliverables attach to the business object that produced them instead of becoming a single oversized control-plane page.
 

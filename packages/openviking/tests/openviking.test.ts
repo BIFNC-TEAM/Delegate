@@ -6,7 +6,9 @@ import {
   OpenVikingClient,
   buildRepresentativeContactMemoryRootUri,
   buildRepresentativeKnowledgeDocuments,
+  buildRepresentativeKnowledgeRootUri,
   buildRepresentativeResourceRootUri,
+  buildRepresentativeVersionResourceRootUri,
   buildSessionScopedSearchRoot,
   isPublicSafeText,
   resolveOpenVikingEnv,
@@ -39,17 +41,27 @@ describe("OpenViking URI strategy", () => {
     ).toBe("delegate:tg:lin-founder-rep:12345:contact_a");
   });
 
-  it("returns resource, contact memory, and agent memory search roots in order", () => {
+  it("returns pinned resources, approved knowledge, and current-contact memory roots", () => {
     expect(
       buildSessionScopedSearchRoot({
         representativeSlug: "lin-founder-rep",
+        representativeVersionId: "version_7",
         contactId: "contact_a",
       }),
     ).toEqual([
-      "viking://resources/delegate/reps/lin-founder-rep/",
+      "viking://resources/delegate/reps/lin-founder-rep/versions/version_7/",
+      "viking://resources/delegate/reps/lin-founder-rep/knowledge/",
       "viking://user/memories/delegate/lin-founder-rep/contact_a/",
-      "viking://agent/memories/delegate/lin-founder-rep/",
     ]);
+  });
+
+  it("builds non-overlapping published-version and knowledge roots", () => {
+    expect(buildRepresentativeVersionResourceRootUri("lin-founder-rep", "version_7")).toBe(
+      "viking://resources/delegate/reps/lin-founder-rep/versions/version_7/",
+    );
+    expect(buildRepresentativeKnowledgeRootUri("lin-founder-rep")).toBe(
+      "viking://resources/delegate/reps/lin-founder-rep/knowledge/",
+    );
   });
 });
 
@@ -70,6 +82,7 @@ describe("OpenViking document builders", () => {
   it("creates representative knowledge documents", () => {
     const docs = buildRepresentativeKnowledgeDocuments({
       slug: "lin-founder-rep",
+      representativeVersionId: "version_7",
       ownerName: "Lin",
       name: "Lin Rep",
       tagline: "Web founder representative",
@@ -103,7 +116,7 @@ describe("OpenViking document builders", () => {
     });
 
     expect(docs).toHaveLength(5);
-    expect(docs[0]?.uri).toContain("/identity/");
+    expect(docs[0]?.uri).toContain("/versions/version_7/identity/");
     expect(docs[1]?.uri).toContain("/faq/");
   });
 
@@ -158,9 +171,17 @@ describe("OpenViking env config", () => {
   it("uses safe defaults", () => {
     const config = resolveOpenVikingEnv({});
     expect(config.enabled).toBe(false);
-    expect(config.autoCaptureDefault).toBe(true);
+    expect(config.autoCaptureDefault).toBe(false);
     expect(config.autoRecallDefault).toBe(true);
     expect(config.embeddingDimension).toBe(3072);
+  });
+
+  it("keeps automatic capture disabled even when the legacy env flag is true", () => {
+    const config = resolveOpenVikingEnv({
+      OPENVIKING_AUTO_CAPTURE_DEFAULT: "true",
+    });
+
+    expect(config.autoCaptureDefault).toBe(false);
   });
 
   it("falls back to the root API key when the client key is omitted", () => {

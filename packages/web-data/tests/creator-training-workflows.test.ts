@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { enqueueCreatorTrainingReviewWorkflow } from "../src/creator-training";
+import {
+  enqueueCreatorTrainingReviewWorkflow,
+  getLatestCreatorTrainingReviewWorkflow,
+} from "../src/creator-training";
 
 describe("creator training workflow enqueue", () => {
   beforeEach(() => {
@@ -102,6 +105,28 @@ describe("creator training workflow enqueue", () => {
     expect(second.id).toBe("workflow-1");
     expect(client.workflowRun.createCalls).toHaveLength(1);
   });
+
+  it("returns the latest durable workflow state for the dashboard", async () => {
+    const client = new FakeCreatorTrainingWorkflowClient();
+    await enqueueCreatorTrainingReviewWorkflow(
+      "lin",
+      { now: new Date("2026-07-04T12:10:00.000Z") },
+      client,
+    );
+    await enqueueCreatorTrainingReviewWorkflow(
+      "lin",
+      { now: new Date("2026-07-04T13:10:00.000Z") },
+      client,
+    );
+
+    const latest = await getLatestCreatorTrainingReviewWorkflow("lin", client);
+
+    expect(latest).toMatchObject({
+      id: "workflow-2",
+      status: "queued",
+      scheduledAt: "2026-07-04T13:10:00.000Z",
+    });
+  });
 });
 
 type WorkflowRow = {
@@ -132,6 +157,20 @@ class FakeCreatorTrainingWorkflowClient {
     createCalls: [] as any[],
     findUnique: async (args: any) =>
       this.workflows.find((workflow) => workflow.dedupeKey === args.where.dedupeKey) ?? null,
+    findFirst: async (args: any) =>
+      this.workflows
+        .filter(
+          (workflow) =>
+            workflow.kind === args.where.kind
+            && this.representatives.some(
+              (representative) =>
+                representative.id === args.where.representativeId,
+            ),
+        )
+        .sort(
+          (left, right) =>
+            right.scheduledAt.getTime() - left.scheduledAt.getTime(),
+        )[0] ?? null,
     create: async (args: any) => {
       this.workflowRun.createCalls.push(args);
       const workflow: WorkflowRow = {

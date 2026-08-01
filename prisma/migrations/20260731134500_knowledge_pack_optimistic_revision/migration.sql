@@ -1,0 +1,2 @@
+ALTER TABLE "KnowledgePack"
+  ADD COLUMN "revision" INTEGER NOT NULL DEFAULT 0;

@@ -51,8 +51,8 @@ import { z } from "zod";
 
 import { prisma } from "./prisma";
 import { resolveChannelAvailability } from "./channel-availability";
-import { maybeSyncRepresentativeOpenVikingResources } from "./openviking";
 import { getDemoCreatorTrainingKnowledgeOverlay } from "./creator-training";
+import { acquireRepresentativeKnowledgePackLock } from "./knowledge-pack-lock";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
 
 const defaultCnyServicePackages = [
@@ -152,6 +152,7 @@ const editableKnowledgeDocumentSchema = z.object({
 });
 
 const representativeSetupUpdateSchema = z.object({
+  knowledgePackRevision: z.number().int().min(0),
   ownerName: z.string().trim().min(1),
   name: z.string().trim().min(1),
   tagline: z.string().trim().min(1),
@@ -248,6 +249,7 @@ export type RepresentativeSetupSnapshot = Pick<
   | "handoffPrompt"
   | "actionGate"
 > & {
+  knowledgePackRevision: number;
   publicMode: boolean;
   humanInLoop: boolean;
   compute: {
@@ -274,6 +276,18 @@ export type RepresentativeSetupSnapshot = Pick<
 
 export type RepresentativeSetupUpdateInput = z.infer<typeof representativeSetupUpdateSchema>;
 export type RepresentativeCreateInput = z.infer<typeof representativeCreateSchema>;
+
+export class RepresentativeSetupConflictError extends Error {
+  readonly code = "KNOWLEDGE_PACK_CONFLICT";
+  readonly statusCode = 409;
+
+  constructor() {
+    super(
+      "This representative knowledge draft changed after you opened it. The latest draft must be reloaded before saving.",
+    );
+    this.name = "RepresentativeSetupConflictError";
+  }
+}
 export type RepresentativeRuntimeMcpBindingGrant = {
   id: string;
   slug: string;
@@ -328,8 +342,26 @@ export type RepresentativeDirectoryItem = {
 };
 
 export type PublicRepresentativeRuntimeResult =
-  | { status: "available"; setup: RepresentativeSetupSnapshot }
+  | {
+      status: "available";
+      setup: RepresentativeSetupSnapshot;
+      governedContextEnabled: boolean;
+    }
   | { status: "not_found" | "unpublished" | "paused" | "private" | "web_disabled" };
+
+export function resolveGovernedContextEnabled(input: {
+  openvikingEnabled: boolean;
+  openvikingAutoRecall: boolean;
+  environmentEnabled: boolean;
+  modelCredentialsAvailable: boolean;
+}): boolean {
+  return (
+    input.openvikingEnabled
+    && input.openvikingAutoRecall
+    && input.environmentEnabled
+    && input.modelCredentialsAvailable
+  );
+}
 
 export function resolvePublicRepresentativeAvailability(input: {
   lifecycleState: string;
@@ -552,7 +584,7 @@ export async function createRepresentative(
           openvikingEnabled: false,
           openvikingAgentId: buildOpenVikingAgentId(slug, openVikingEnv),
           openvikingAutoRecall: openVikingEnv.autoRecallDefault,
-          openvikingAutoCapture: openVikingEnv.autoCaptureDefault,
+          openvikingAutoCapture: false,
           openvikingCaptureMode: openVikingEnv.captureModeDefault,
           openvikingRecallLimit: 6,
           openvikingRecallScoreThreshold: 0.01,
@@ -607,6 +639,9 @@ export async function createRepresentative(
         },
       });
 
+      await acquireRepresentativeKnowledgePackLock(tx, representative.id, {
+        required: true,
+      });
       await upsertDefaultCapabilityPolicyProfile(tx, representative.id, template.compute);
       await upsertManagedCapabilityPolicyProfile(tx, representative.id);
       await upsertOwnerManagedCapabilityProfiles(tx, owner.id);
@@ -759,12 +794,7 @@ export async function createRepresentative(
       return createdRepresentative;
     });
 
-    const snapshot = serializeRepresentativeSetup(created);
-    await maybeSyncRepresentativeOpenVikingResources({
-      representativeSlug: snapshot.slug,
-      trigger: "create",
-    });
-    return snapshot;
+    return serializeRepresentativeSetup(created);
   } catch (error) {
     if (isPrismaUnavailableError(error)) {
       throw new Error("Creating representatives requires a reachable Postgres instance.");
@@ -992,7 +1022,13 @@ export async function getPublicRepresentativeRuntime(
 ): Promise<PublicRepresentativeRuntimeResult> {
   if (!process.env.DATABASE_URL?.trim()) {
     const setup = await getRepresentativeRuntimeSetupSnapshot(representativeSlug);
-    return setup ? { status: "available", setup } : { status: "not_found" };
+    return setup
+      ? {
+          status: "available",
+          setup,
+          governedContextEnabled: false,
+        }
+      : { status: "not_found" };
   }
 
   const representative = await prisma.representative.findUnique({
@@ -1001,6 +1037,8 @@ export async function getPublicRepresentativeRuntime(
       lifecycleState: true,
       publicMode: true,
       activeVersionId: true,
+      openvikingEnabled: true,
+      openvikingAutoRecall: true,
       channelBindings: {
         where: { kind: RepresentativeChannelKind.WEB },
         select: { status: true, desiredState: true, healthStatus: true },
@@ -1038,15 +1076,30 @@ export async function getPublicRepresentativeRuntime(
     representativeSlug,
     representative.activeVersionId,
   );
-  return setup ? { status: "available", setup } : { status: "unpublished" };
+  if (!setup) return { status: "unpublished" };
+
+  const governedContextEnvironment = resolveOpenVikingEnv();
+  return {
+    status: "available",
+    setup,
+    governedContextEnabled: resolveGovernedContextEnabled({
+      openvikingEnabled: representative.openvikingEnabled,
+      openvikingAutoRecall: representative.openvikingAutoRecall,
+      environmentEnabled: governedContextEnvironment.enabled,
+      modelCredentialsAvailable: governedContextEnvironment.hasModelCredentials,
+    }),
+  };
 }
 
-export async function updateRepresentativeSetup(params: {
-  representativeSlug: string;
-  input: RepresentativeSetupUpdateInput;
-  syncOpenViking?: boolean;
-  changedBy?: string;
-}): Promise<RepresentativeSetupSnapshot> {
+export async function updateRepresentativeSetup(
+  params: {
+    representativeSlug: string;
+    input: RepresentativeSetupUpdateInput;
+    syncOpenViking?: boolean;
+    changedBy?: string;
+  },
+  client: Pick<typeof prisma, "representative" | "$transaction"> = prisma,
+): Promise<RepresentativeSetupSnapshot> {
   const input = representativeSetupUpdateSchema.parse(params.input);
 
   if (shouldUseStaticFallbackMode(params.representativeSlug)) {
@@ -1054,7 +1107,7 @@ export async function updateRepresentativeSetup(params: {
   }
 
   try {
-    const representative = await prisma.representative.findUnique({
+    const representative = await client.representative.findUnique({
       where: { slug: params.representativeSlug },
       include: representativeSetupInclude,
     });
@@ -1071,7 +1124,18 @@ export async function updateRepresentativeSetup(params: {
       changedBy: params.changedBy?.trim() || representative.ownerId,
     });
 
-    const updated = await prisma.$transaction(async (tx) => {
+    const updated = await client.$transaction(async (tx) => {
+      await acquireRepresentativeKnowledgePackLock(tx, representative.id, {
+        required: true,
+      });
+      const currentKnowledgePack = await tx.knowledgePack.findUnique({
+        where: { representativeId: representative.id },
+        select: { revision: true },
+      });
+      const currentKnowledgePackRevision = currentKnowledgePack?.revision ?? 0;
+      if (currentKnowledgePackRevision !== input.knowledgePackRevision) {
+        throw new RepresentativeSetupConflictError();
+      }
       await tx.representative.update({
         where: { id: representative.id },
         data: {
@@ -1123,12 +1187,14 @@ export async function updateRepresentativeSetup(params: {
         where: { representativeId: representative.id },
         create: {
           representativeId: representative.id,
+          revision: 1,
           identitySummary: input.knowledgePack.identitySummary,
           faq: normalizeKnowledgeDocuments(input.knowledgePack.faq, "faq"),
           materials: normalizeKnowledgeDocuments(input.knowledgePack.materials, "materials"),
           policies: normalizeKnowledgeDocuments(input.knowledgePack.policies, "policies"),
         },
         update: {
+          revision: { increment: 1 },
           identitySummary: input.knowledgePack.identitySummary,
           faq: normalizeKnowledgeDocuments(input.knowledgePack.faq, "faq"),
           materials: normalizeKnowledgeDocuments(input.knowledgePack.materials, "materials"),
@@ -1197,14 +1263,7 @@ export async function updateRepresentativeSetup(params: {
       return refreshed;
     });
 
-    const snapshot = serializeRepresentativeSetup(updated);
-    if (params.syncOpenViking !== false) {
-      await maybeSyncRepresentativeOpenVikingResources({
-        representativeSlug: snapshot.slug,
-        trigger: "setup_update",
-      });
-    }
-    return snapshot;
+    return serializeRepresentativeSetup(updated);
   } catch (error) {
     if (shouldUseDemoFallback(error, params.representativeSlug)) {
       return updateDemoFallbackRepresentativeSetup(input);
@@ -1329,6 +1388,7 @@ function serializeRepresentativeSetup(
   return {
     id: representative.id,
     slug: representative.slug,
+    knowledgePackRevision: representative.knowledgePack?.revision ?? 0,
     ownerName: representative.owner.displayName,
     name: representative.displayName,
     tagline: representative.roleSummary,
@@ -2117,6 +2177,7 @@ function getOrCreateDemoFallbackSetupSnapshot(): RepresentativeSetupSnapshot {
     demoFallbackSetupSnapshot = {
       id: demoRepresentative.id,
       slug: demoRepresentative.slug,
+      knowledgePackRevision: 0,
       ownerName: demoRepresentative.ownerName,
       name: demoRepresentative.name,
       tagline: demoRepresentative.tagline,
@@ -2156,7 +2217,11 @@ function updateDemoFallbackRepresentativeSetup(
   input: RepresentativeSetupUpdateInput,
 ): RepresentativeSetupSnapshot {
   const snapshot = getOrCreateDemoFallbackSetupSnapshot();
+  if (snapshot.knowledgePackRevision !== input.knowledgePackRevision) {
+    throw new RepresentativeSetupConflictError();
+  }
 
+  snapshot.knowledgePackRevision += 1;
   snapshot.ownerName = input.ownerName;
   snapshot.name = input.name;
   snapshot.tagline = input.tagline;
@@ -2346,7 +2411,7 @@ function buildRepresentativeTemplate(params: {
   ownerName: string;
   representativeName: string;
   tagline?: string;
-}): Omit<RepresentativeSetupSnapshot, "id" | "slug"> {
+}): Omit<RepresentativeSetupSnapshot, "id" | "slug" | "knowledgePackRevision"> {
   const safeOwnerName = params.ownerName.trim();
   const safeRepresentativeName = params.representativeName.trim();
   const tagline =

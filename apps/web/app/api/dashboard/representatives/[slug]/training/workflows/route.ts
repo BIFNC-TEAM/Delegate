@@ -5,6 +5,9 @@ import {
   dashboardAuthErrorResponse,
   authorizeDashboardRepresentativeAccess,
 } from "../../../../auth";
+import { withPrivateNoStore } from "../../../../../private-response";
+import { creatorTrainingApiErrorResponse } from "../errors";
+import { toDashboardDevelopmentWorkflowDto } from "../safe-dto";
 
 type RouteContext = {
   params: Promise<{ slug: string }>;
@@ -15,7 +18,7 @@ export async function POST(request: Request, context: RouteContext) {
     const { slug } = await context.params;
     const accessResponse = await authorizeDashboardRepresentativeAccess(slug);
     if (accessResponse) {
-      return accessResponse;
+      return withPrivateNoStore(accessResponse);
     }
     const body = (await request.json().catch(() => ({}))) as {
       feedbackLimit?: number;
@@ -28,16 +31,21 @@ export async function POST(request: Request, context: RouteContext) {
         : {}),
     });
 
-    return NextResponse.json({ workflow }, { status: 202 });
+    return withPrivateNoStore(
+      NextResponse.json(
+        { workflow: toDashboardDevelopmentWorkflowDto(workflow) },
+        { status: 202 },
+      ),
+    );
   } catch (error) {
     const authResponse = dashboardAuthErrorResponse(error);
     if (authResponse) {
-      return authResponse;
+      return withPrivateNoStore(authResponse);
     }
 
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Failed to enqueue training workflow." },
-      { status: 400 },
+    return creatorTrainingApiErrorResponse(
+      error,
+      "Failed to queue the development organization run.",
     );
   }
 }

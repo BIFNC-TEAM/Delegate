@@ -212,6 +212,9 @@ enum EventType {
   WALLET_PAYOUT_PROFILE_SUBMITTED
   WALLET_PAYOUT_DESTINATION_CHANGED
   WALLET_PAYOUT_DESTINATION_VERIFIED
+  OPENVIKING_CONFIG_CHANGED
+  OPENVIKING_MEMORY_STATUS_CHANGED
+  OPENVIKING_RESOURCE_SYNC_COMPLETED
 }
 
 enum CapabilityKind {
@@ -431,6 +434,7 @@ enum CreatorTrainingSuggestionStatus {
   REJECTED
   PRIVATE
   PUBLISHED
+  SUPERSEDED
 }
 
 enum CreatorTrainingVersionStatus {
@@ -886,6 +890,14 @@ enum RepresentativeLifecycleState {
   PUBLISHED
   PAUSED
   ARCHIVED
+}
+
+enum OpenVikingMemoryStatus {
+  ACTIVE
+  SUPPRESSED
+  DELETE_PENDING
+  DELETED
+  DELETE_FAILED
 }
 
 enum RepresentativeChannelKind {
@@ -1936,7 +1948,7 @@ model Representative {
   openvikingEnabled                Boolean                        @default(false)
   openvikingAgentId                String?
   openvikingAutoRecall             Boolean                        @default(true)
-  openvikingAutoCapture            Boolean                        @default(true)
+  openvikingAutoCapture            Boolean                        @default(false)
   openvikingCaptureMode            String                         @default("semantic")
   openvikingRecallLimit            Int                            @default(6)
   openvikingRecallScoreThreshold   Float                          @default(0.01)
@@ -1945,6 +1957,7 @@ model Representative {
   openvikingLastSyncStatus         String?
   openvikingLastSyncError          String?
   openvikingLastSyncItemCount      Int?
+  openvikingLastSyncJobId          String?
   computeEnabled                   Boolean                        @default(false)
   computeDefaultPolicyMode         PolicyDecision                 @default(ASK)
   computeBaseImage                 String                         @default("debian:bookworm-slim")
@@ -2165,6 +2178,7 @@ model RepresentativeChannelBinding {
 model KnowledgePack {
   id               String         @id @default(cuid())
   representativeId String         @unique
+  revision         Int            @default(0)
   identitySummary  String
   faq              Json
   materials        Json
@@ -3105,6 +3119,8 @@ model CreatorFeedbackSignal {
 model CreatorTrainingSuggestion {
   id               String                          @id @default(cuid())
   representativeId String
+  originKey        String
+  originRevision   Int
   sourceId         String?
   feedbackSignalId String?
   suggestionType   CreatorTrainingSuggestionType
@@ -3124,7 +3140,9 @@ model CreatorTrainingSuggestion {
   feedbackSignal   CreatorFeedbackSignal?          @relation(fields: [feedbackSignalId], references: [id], onDelete: SetNull)
   versions         CreatorTrainingVersion[]
 
-  @@unique([representativeId, dedupeKey])
+  @@unique([representativeId, originKey, originRevision])
+  @@index([representativeId, originKey])
+  @@index([representativeId, dedupeKey])
   @@index([representativeId, status, createdAt])
   @@index([sourceId, createdAt])
   @@index([feedbackSignalId, createdAt])
@@ -3133,6 +3151,7 @@ model CreatorTrainingSuggestion {
 model CreatorTrainingVersion {
   id               String                       @id @default(cuid())
   representativeId String
+  revisionNumber   Int
   suggestionId     String?
   status           CreatorTrainingVersionStatus @default(PUBLISHED)
   title            String
@@ -3141,12 +3160,13 @@ model CreatorTrainingVersion {
   evaluationReport Json?
   publishedBy      String?
   publishedAt      DateTime                     @default(now())
+  rolledBackBy     String?
   rolledBackAt     DateTime?
   createdAt        DateTime                     @default(now())
   representative   Representative               @relation(fields: [representativeId], references: [id])
   suggestion       CreatorTrainingSuggestion?   @relation(fields: [suggestionId], references: [id], onDelete: SetNull)
 
-  @@index([representativeId, publishedAt])
+  @@unique([representativeId, revisionNumber])
   @@index([suggestionId])
 }
 
@@ -4009,17 +4029,27 @@ model LedgerEntry {
 }
 
 model RepresentativeContextSync {
-  id               String         @id @default(cuid())
-  representativeId String
-  status           String
-  itemCount        Int            @default(0)
-  error            String?
-  startedAt        DateTime
-  finishedAt       DateTime?
-  createdAt        DateTime       @default(now())
-  representative   Representative @relation(fields: [representativeId], references: [id])
+  id                 String         @id @default(cuid())
+  representativeId   String
+  requestedVersionId String?
+  trigger            String?
+  requestedByOwnerId String?
+  status             String
+  itemCount          Int            @default(0)
+  error              String?
+  attemptCount       Int            @default(0)
+  availableAt        DateTime       @default(now())
+  leaseToken         String?
+  leaseExpiresAt     DateTime?
+  startedAt          DateTime
+  finishedAt         DateTime?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+  representative     Representative @relation(fields: [representativeId], references: [id])
 
   @@index([representativeId, createdAt])
+  @@index([representativeId, requestedVersionId, createdAt], map: "RepContextSync_rep_version_created_idx")
+  @@index([status, availableAt, leaseExpiresAt], map: "RepContextSync_status_due_lease_idx")
 }
 
 model ConversationRecallTrace {
@@ -4063,23 +4093,34 @@ model ConversationCommitTrace {
 }
 
 model OpenVikingMemoryRecord {
-  id                 String            @id @default(cuid())
-  representativeId   String
-  contactId          String?
-  audienceIdentityId String?
-  uri                String            @unique
-  contextType        String
-  scope              String
-  category           String
-  summary            String
-  sourceKind         String
-  createdAt          DateTime          @default(now())
-  updatedAt          DateTime          @updatedAt
-  representative     Representative    @relation(fields: [representativeId], references: [id])
-  contact            Contact?          @relation(fields: [contactId], references: [id])
-  audienceIdentity   AudienceIdentity? @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  id                   String                  @id @default(cuid())
+  representativeId     String
+  contactId            String?
+  audienceIdentityId   String?
+  uri                  String                  @unique
+  contextType          String
+  scope                String
+  category             String
+  summary              String
+  sourceKind           String
+  status               OpenVikingMemoryStatus  @default(ACTIVE)
+  suppressedAt         DateTime?
+  deletedAt            DateTime?
+  lastDeleteAttemptAt  DateTime?
+  nextDeleteAttemptAt  DateTime?
+  deletionAttemptCount Int                     @default(0)
+  deletionError        String?
+  deletionRequestedByOwnerId String?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  representative       Representative          @relation(fields: [representativeId], references: [id])
+  contact              Contact?                @relation(fields: [contactId], references: [id])
+  audienceIdentity     AudienceIdentity?       @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
 
   @@index([representativeId, createdAt])
   @@index([representativeId, contactId, createdAt])
+  @@index([representativeId, contactId, status, updatedAt])
   @@index([audienceIdentityId, createdAt])
+  @@index([status, updatedAt])
+  @@index([status, nextDeleteAttemptAt, lastDeleteAttemptAt], map: "OVMemory_status_next_attempt_lease_idx")
 }

@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  buildGovernedContactChannelMemoryRootUri,
+  buildGovernedContactChannelMemoryVersionUri,
+  buildGovernedRepresentativeExperienceRootUri,
+  buildGovernedRepresentativeExperienceVersionUri,
   buildOpenVikingAgentId,
-  buildSessionScopedSearchRoot,
   buildRepresentativeKnowledgeDocuments,
+  buildRepresentativeKnowledgeRootUri,
   buildRepresentativeResourceRootUri,
   buildRepresentativeVersionResourceRootUri,
   OpenVikingClient,
@@ -12,6 +16,7 @@ import {
   sanitizePublicSafeText,
   type OpenVikingCaptureMode,
   type OpenVikingDocumentSpec,
+  type OpenVikingMatchedContext,
   type OpenVikingRecallItem,
 } from "@delegate/openviking";
 import { EventType, Prisma, type Representative } from "@prisma/client";
@@ -953,8 +958,26 @@ function openVikingMemoryDeleteBackoffMs(attemptCount: number): number {
   );
 }
 
+export type RepresentativeRecallSourceKind =
+  | "PUBLIC_KNOWLEDGE"
+  | "CONTACT_MEMORY"
+  | "REPRESENTATIVE_EXPERIENCE";
+
+/**
+ * Server-only authorization metadata. Public citation DTOs deliberately do
+ * not include these identifiers or any OpenViking diagnostics.
+ */
+export type RepresentativeRecallItem = OpenVikingRecallItem & {
+  internalSource: {
+    sourceKind: RepresentativeRecallSourceKind;
+    contentHash?: string;
+    memoryVersionId?: string;
+    projectionItemId?: string;
+  };
+};
+
 export type RepresentativeRecallContext = {
-  items: OpenVikingRecallItem[];
+  items: RepresentativeRecallItem[];
   citations: Array<{
     knowledgeAssetId?: string;
     title: string;
@@ -962,6 +985,45 @@ export type RepresentativeRecallContext = {
     score: number;
   }>;
 };
+
+type RecallSourceChannel = "web" | "matrix" | "telegram";
+
+type GovernedMemoryRecallGrant = {
+  uri: string;
+  sourceKind: Exclude<RepresentativeRecallSourceKind, "PUBLIC_KNOWLEDGE">;
+  memoryVersionId: string;
+  projectionItemId: string;
+  contentHash: string;
+  safeText: string;
+  summary: string;
+};
+
+type RepresentativeRecallAuthorization = {
+  publishedVersionRoot?: string;
+  knowledgeRoot?: string;
+  allowedAssetIds: Set<string>;
+  memoryRoots: string[];
+  memoryGrantsByUri: Map<string, GovernedMemoryRecallGrant>;
+  memorySearchConfig?: {
+    limit: number;
+    scoreThreshold: number;
+  };
+};
+
+type AuthorizedRecallSource =
+  | { sourceKind: "PUBLIC_KNOWLEDGE" }
+  | GovernedMemoryRecallGrant;
+
+type AuthorizedRemoteRecallCandidate = {
+  item: OpenVikingMatchedContext;
+  source: AuthorizedRecallSource;
+};
+
+const REPRESENTATIVE_RECALL_SOURCE_KINDS = [
+  "PUBLIC_KNOWLEDGE",
+  "CONTACT_MEMORY",
+  "REPRESENTATIVE_EXPERIENCE",
+] as const satisfies readonly RepresentativeRecallSourceKind[];
 
 /**
  * Recall only the public representative resources plus memory scopes that are
@@ -972,15 +1034,22 @@ export async function recallRepresentativeContext(params: {
   representativeSlug: string;
   conversationId: string;
   contactId: string;
+  sourceChannel: RecallSourceChannel;
   queryText: string;
+  allowedSourceKinds?: readonly RepresentativeRecallSourceKind[];
 }): Promise<RepresentativeRecallContext> {
   const queryText = params.queryText.trim();
-  if (!queryText) return { items: [], citations: [] };
+  if (!queryText || !isRecallSourceChannel(params.sourceChannel)) {
+    return { items: [], citations: [] };
+  }
+  const allowedSourceKinds = normalizeRecallSourceKinds(params.allowedSourceKinds);
+  if (!allowedSourceKinds.size) return { items: [], citations: [] };
 
   const conversation = await prisma.conversation.findFirst({
     where: {
       id: params.conversationId,
       contactId: params.contactId,
+      sourceChannel: params.sourceChannel,
       representative: {
         slug: params.representativeSlug,
       },
@@ -1059,72 +1128,103 @@ export async function recallRepresentativeContext(params: {
     return { items: [], citations: [] };
   }
 
-  const activeMemoryRecords = await prisma.openVikingMemoryRecord.findMany({
-    where: {
-      representativeId: representative.id,
-      contactId: params.contactId,
-      status: "ACTIVE",
-    },
-    select: {
-      uri: true,
-      status: true,
-      scope: true,
-      category: true,
-      sourceKind: true,
-    },
-  });
-  const allowedMemoryUris = new Set(
-    activeMemoryRecords
-      .filter(isOpenVikingMemoryRecallEligible)
-      .map((memory) => memory.uri),
-  );
-  const client = buildRepresentativeClient(representative);
-  const targetRoots = buildSessionScopedSearchRoot({
-    representativeSlug: representative.slug,
-    representativeVersionId: pinnedVersion.id,
+  const allowedAssetIds = allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+    ? resolveAllowedPublishedKnowledgeAssetIds({
+        pins: pinnedSnapshot.data.knowledgeAssets,
+        currentLinks: representative.knowledgeAssetLinks,
+      })
+    : new Set<string>();
+  const memoryAuthorization = await loadGovernedMemoryRecallAuthorization({
+    representativeId: representative.id,
     contactId: params.contactId,
+    sourceChannel: params.sourceChannel,
+    allowedSourceKinds,
   });
-  const searchResults = await Promise.allSettled(
-    targetRoots.map((targetUri) => client.search({
-      query: queryText,
+  const authorization: RepresentativeRecallAuthorization = {
+    ...(allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+      ? {
+          publishedVersionRoot: buildRepresentativeVersionResourceRootUri(
+            representative.slug,
+            pinnedVersion.id,
+          ),
+          knowledgeRoot: buildRepresentativeKnowledgeRootUri(representative.slug),
+        }
+      : {}),
+    allowedAssetIds,
+    memoryRoots: memoryAuthorization.memoryRoots,
+    memoryGrantsByUri: memoryAuthorization.memoryGrantsByUri,
+    ...(memoryAuthorization.memorySearchConfig
+      ? { memorySearchConfig: memoryAuthorization.memorySearchConfig }
+      : {}),
+  };
+  const client = buildRepresentativeClient(representative);
+  const publicSearchConfig = {
+    limit: representative.openvikingRecallLimit,
+    scoreThreshold: representative.openvikingRecallScoreThreshold,
+  };
+  const searchTargets = [
+    ...uniqueRecallRoots([
+      authorization.publishedVersionRoot,
+      authorization.knowledgeRoot,
+    ]).map((targetUri) => ({
       targetUri,
-      limit: representative.openvikingRecallLimit,
-      scoreThreshold: representative.openvikingRecallScoreThreshold,
+      lane: "PUBLIC_KNOWLEDGE" as const,
+      ...publicSearchConfig,
+    })),
+    ...(authorization.memorySearchConfig
+      ? authorization.memoryRoots.map((targetUri) => ({
+          targetUri,
+          lane: "GOVERNED_MEMORY" as const,
+          ...authorization.memorySearchConfig!,
+        }))
+      : []),
+  ];
+  if (!searchTargets.length) return { items: [], citations: [] };
+  const searchResults = await Promise.allSettled(
+    searchTargets.map((target) => client.search({
+      query: queryText,
+      targetUri: target.targetUri,
+      limit: target.limit,
+      scoreThreshold: target.scoreThreshold,
     })),
   );
-  const allowedAssetIds = resolveAllowedPublishedKnowledgeAssetIds({
-    pins: pinnedSnapshot.data.knowledgeAssets,
-    currentLinks: representative.knowledgeAssetLinks,
-  });
-  const [publishedVersionRoot, knowledgeRoot, contactMemoryRoot] = targetRoots;
-  const candidates = searchResults.flatMap((result) => {
+  const candidates = searchResults.flatMap((result, targetIndex) => {
     if (result.status !== "fulfilled") return [];
-    return [
+    const target = searchTargets[targetIndex];
+    if (!target) return [];
+    return ([
       ...result.value.resources,
       ...result.value.memories,
-    ];
+    ]).map((item) => ({ item, target }));
   })
-    .filter((item) => isAllowedRecallUri(item.uri, {
-      publishedVersionRoot,
-      knowledgeRoot,
-      contactMemoryRoot,
-      allowedAssetIds,
-      allowedMemoryUris,
-    }))
-    .filter((item) => !/\/(?:\.overview|\.abstract)\.md$/i.test(item.uri))
-    .sort((left, right) => (right.score ?? 0) - (left.score ?? 0));
+    .flatMap(({ item, target }) => {
+      const source = authorizeRecallUri(item.uri, authorization);
+      if (!source || (item.score ?? 0) < target.scoreThreshold) return [];
+      const sourceIsPublic = source.sourceKind === "PUBLIC_KNOWLEDGE";
+      if (
+        (target.lane === "PUBLIC_KNOWLEDGE" && !sourceIsPublic)
+        || (target.lane === "GOVERNED_MEMORY" && sourceIsPublic)
+      ) {
+        return [];
+      }
+      return [{ item, source }];
+    })
+    .filter(({ item }) => !/\/(?:\.overview|\.abstract)\.md$/i.test(item.uri));
+  const selected = [
+    ...rankAuthorizedRecallCandidates(
+      candidates.filter(({ source }) => source.sourceKind === "PUBLIC_KNOWLEDGE"),
+      publicSearchConfig,
+    ),
+    ...rankAuthorizedRecallCandidates(
+      candidates.filter(({ source }) => source.sourceKind !== "PUBLIC_KNOWLEDGE"),
+      authorization.memorySearchConfig ?? { limit: 0, scoreThreshold: 1 },
+    ),
+  ].sort((left, right) => (right.item.score ?? 0) - (left.item.score ?? 0));
+  const hydrated = await Promise.all(selected.map(async ({ item, source }) => {
+    if (source.sourceKind !== "PUBLIC_KNOWLEDGE") {
+      return hydrateGovernedMemoryRecall(item, source);
+    }
 
-  const unique = new Map<string, (typeof candidates)[number]>();
-  for (const candidate of candidates) {
-    if (!unique.has(candidate.uri)) unique.set(candidate.uri, candidate);
-  }
-  const ranked = [...unique.values()];
-  const topScore = ranked[0]?.score ?? 0;
-  const relativeScoreFloor = Math.max(representative.openvikingRecallScoreThreshold, topScore * 0.72);
-  const selected = ranked
-    .filter((candidate) => (candidate.score ?? 0) >= relativeScoreFloor)
-    .slice(0, representative.openvikingRecallLimit);
-  const hydrated = await Promise.all(selected.map(async (item) => {
     const content = await client.read(item.uri, 100).catch(() => "");
     const abstract = sanitizePublicSafeText(item.abstract || "", 800) ?? "";
     const safeContent = sanitizePublicSafeText(content, 4_000) ?? "";
@@ -1137,7 +1237,8 @@ export async function recallRepresentativeContext(params: {
         score,
         abstract,
         ...(safeContent ? { content: safeContent } : {}),
-      } satisfies OpenVikingRecallItem,
+        internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
+      } satisfies RepresentativeRecallItem,
       citation: {
         ...resolveKnowledgeAssetId(item.uri),
         title: resolveRecallTitle(content, item.uri),
@@ -1154,24 +1255,54 @@ export async function recallRepresentativeContext(params: {
     activeEpisodeId: conversation.activeEpisodeId,
     representativeVersionId: pinnedVersion.id,
     knowledgeAssetPins: pinnedSnapshot.data.knowledgeAssets,
+    sourceChannel: params.sourceChannel,
+    allowedSourceKinds,
   });
-  const authorizedHydrated = revalidatedAuthorization
-    ? hydrated.filter(({ item }) => isAllowedRecallUri(item.uri, revalidatedAuthorization))
+  const revalidatedHydrated = revalidatedAuthorization
+    ? hydrated.flatMap(({ item, citation }) => {
+        const revalidatedSource = authorizeRecallUri(item.uri, revalidatedAuthorization);
+        if (!revalidatedSource) return [];
+        if (revalidatedSource.sourceKind === "PUBLIC_KNOWLEDGE") {
+          return item.internalSource.sourceKind === "PUBLIC_KNOWLEDGE"
+            ? [{ item, citation }]
+            : [];
+        }
+        return [hydrateGovernedMemoryRecall(item, revalidatedSource)];
+      })
     : [];
+  const authorizedHydrated = [
+    ...revalidatedHydrated.filter(
+      ({ item }) => item.internalSource.sourceKind === "PUBLIC_KNOWLEDGE",
+    ),
+    ...(revalidatedAuthorization?.memorySearchConfig
+      ? rankHydratedRecallResults(
+          revalidatedHydrated.filter(
+            ({ item }) => item.internalSource.sourceKind !== "PUBLIC_KNOWLEDGE",
+          ),
+          revalidatedAuthorization.memorySearchConfig,
+        )
+      : []),
+  ].sort((left, right) => right.item.score - left.item.score);
 
   if (authorizedHydrated.length) {
-    await prisma.conversationRecallTrace.createMany({
-      data: authorizedHydrated.map(({ item }) => ({
-        representativeId: representative.id,
-        conversationId: params.conversationId,
-        contactId: params.contactId,
-        queryText,
-        recalledUri: item.uri,
-        contextType: item.contextType,
-        layer: item.layer,
-        score: item.score,
-      })),
-    });
+    try {
+      await prisma.conversationRecallTrace.createMany({
+        data: authorizedHydrated.map(({ item }) => ({
+          representativeId: representative.id,
+          conversationId: params.conversationId,
+          contactId: params.contactId,
+          queryText,
+          recalledUri: item.uri,
+          contextType: item.contextType,
+          layer: item.layer,
+          score: item.score,
+        })),
+      });
+    } catch {
+      // Diagnostics are best-effort and must not turn an already-authorized
+      // answer into an availability failure. Do not log query text or URIs.
+      console.warn("Recall diagnostics persistence failed; authorized context will continue.");
+    }
   }
 
   return {
@@ -1184,24 +1315,28 @@ async function revalidateRepresentativeRecallAuthorization(params: {
   representativeSlug: string;
   conversationId: string;
   contactId: string;
+  sourceChannel: RecallSourceChannel;
   activeEpisodeId: string;
   representativeVersionId: string;
+  allowedSourceKinds: ReadonlySet<RepresentativeRecallSourceKind>;
   knowledgeAssetPins: Array<{
     assetId: string;
     checksum: string | null;
     processingVersion: number;
   }>;
 }): Promise<{
-  publishedVersionRoot: string | undefined;
-  knowledgeRoot: string | undefined;
-  contactMemoryRoot: string | undefined;
+  publishedVersionRoot?: string;
+  knowledgeRoot?: string;
   allowedAssetIds: Set<string>;
-  allowedMemoryUris: Set<string>;
+  memoryRoots: string[];
+  memoryGrantsByUri: Map<string, GovernedMemoryRecallGrant>;
+  memorySearchConfig?: { limit: number; scoreThreshold: number };
 } | null> {
   const conversation = await prisma.conversation.findFirst({
     where: {
       id: params.conversationId,
       contactId: params.contactId,
+      sourceChannel: params.sourceChannel,
       activeEpisodeId: params.activeEpisodeId,
       representative: {
         slug: params.representativeSlug,
@@ -1244,8 +1379,7 @@ async function revalidateRepresentativeRecallAuthorization(params: {
     return null;
   }
 
-  const [episode, activeMemoryRecords] = await Promise.all([
-    prisma.conversationEpisode.findFirst({
+  const episode = await prisma.conversationEpisode.findFirst({
       where: {
         id: params.activeEpisodeId,
         conversationId: conversation.id,
@@ -1259,22 +1393,7 @@ async function revalidateRepresentativeRecallAuthorization(params: {
           },
         },
       },
-    }),
-    prisma.openVikingMemoryRecord.findMany({
-      where: {
-        representativeId: conversation.representative.id,
-        contactId: params.contactId,
-        status: "ACTIVE",
-      },
-      select: {
-        uri: true,
-        status: true,
-        scope: true,
-        category: true,
-        sourceKind: true,
-      },
-    }),
-  ]);
+    });
   if (
     episode?.representativeVersion?.id !== params.representativeVersionId ||
     episode.representativeVersion.representativeId !== conversation.representative.id ||
@@ -1283,26 +1402,457 @@ async function revalidateRepresentativeRecallAuthorization(params: {
     return null;
   }
 
-  const roots = buildSessionScopedSearchRoot({
-    representativeSlug: conversation.representative.slug,
-    representativeVersionId: params.representativeVersionId,
+  const memoryAuthorization = await loadGovernedMemoryRecallAuthorization({
+    representativeId: conversation.representative.id,
     contactId: params.contactId,
+    sourceChannel: params.sourceChannel,
+    allowedSourceKinds: params.allowedSourceKinds,
   });
-  const [publishedVersionRoot, knowledgeRoot, contactMemoryRoot] = roots;
   return {
-    publishedVersionRoot,
-    knowledgeRoot,
-    contactMemoryRoot,
-    allowedAssetIds: resolveAllowedPublishedKnowledgeAssetIds({
-      pins: params.knowledgeAssetPins,
-      currentLinks: conversation.representative.knowledgeAssetLinks,
-    }),
-    allowedMemoryUris: new Set(
-      activeMemoryRecords
-        .filter(isOpenVikingMemoryRecallEligible)
-        .map((memory) => memory.uri),
-    ),
+    ...(params.allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+      ? {
+          publishedVersionRoot: buildRepresentativeVersionResourceRootUri(
+            conversation.representative.slug,
+            params.representativeVersionId,
+          ),
+          knowledgeRoot: buildRepresentativeKnowledgeRootUri(
+            conversation.representative.slug,
+          ),
+        }
+      : {}),
+    allowedAssetIds: params.allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+      ? resolveAllowedPublishedKnowledgeAssetIds({
+          pins: params.knowledgeAssetPins,
+          currentLinks: conversation.representative.knowledgeAssetLinks,
+        })
+      : new Set<string>(),
+    memoryRoots: memoryAuthorization.memoryRoots,
+    memoryGrantsByUri: memoryAuthorization.memoryGrantsByUri,
+    ...(memoryAuthorization.memorySearchConfig
+      ? { memorySearchConfig: memoryAuthorization.memorySearchConfig }
+      : {}),
   };
+}
+
+async function loadGovernedMemoryRecallAuthorization(params: {
+  representativeId: string;
+  contactId: string;
+  sourceChannel: RecallSourceChannel;
+  allowedSourceKinds: ReadonlySet<RepresentativeRecallSourceKind>;
+}): Promise<Pick<
+  RepresentativeRecallAuthorization,
+  "memoryRoots" | "memoryGrantsByUri" | "memorySearchConfig"
+>> {
+  const empty = {
+    memoryRoots: [],
+    memoryGrantsByUri: new Map<string, GovernedMemoryRecallGrant>(),
+  };
+  if (
+    !params.allowedSourceKinds.has("CONTACT_MEMORY")
+    && !params.allowedSourceKinds.has("REPRESENTATIVE_EXPERIENCE")
+  ) {
+    return empty;
+  }
+
+  try {
+    const policy = await prisma.representativeMemoryPolicy.findUnique({
+      where: { representativeId: params.representativeId },
+      select: {
+        namespaceKey: true,
+        longTermMemoryEnabled: true,
+        contactMemoryEnabled: true,
+        representativeExperienceEnabled: true,
+        webRecallEnabled: true,
+        matrixRecallEnabled: true,
+        telegramRecallEnabled: true,
+        provider: true,
+        recallLimit: true,
+        recallScoreThreshold: true,
+      },
+    });
+    if (
+      !policy?.longTermMemoryEnabled
+      || policy.provider !== "openviking"
+      || !isMemoryRecallEnabledForChannel(policy, params.sourceChannel)
+      || !Number.isInteger(policy.recallLimit)
+      || policy.recallLimit < 1
+      || policy.recallLimit > 50
+      || !Number.isFinite(policy.recallScoreThreshold)
+      || policy.recallScoreThreshold < 0
+      || policy.recallScoreThreshold > 1
+    ) {
+      return empty;
+    }
+
+    const allowContact =
+      params.allowedSourceKinds.has("CONTACT_MEMORY")
+      && policy.contactMemoryEnabled;
+    const allowExperience =
+      params.allowedSourceKinds.has("REPRESENTATIVE_EXPERIENCE")
+      && policy.representativeExperienceEnabled;
+    const scopeFilters: Prisma.GovernedMemoryWhereInput[] = [];
+    if (allowContact) {
+      scopeFilters.push({
+        scope: "CONTACT_CHANNEL",
+        contactId: params.contactId,
+        sourceChannel: toRepresentativeMemoryChannel(params.sourceChannel),
+      });
+    }
+    if (allowExperience) {
+      scopeFilters.push({
+        scope: "REPRESENTATIVE",
+        contactId: null,
+        sourceChannel: null,
+      });
+    }
+    if (!scopeFilters.length) return empty;
+
+    const now = new Date();
+    const memories = await prisma.governedMemory.findMany({
+      where: {
+        representativeId: params.representativeId,
+        status: "ACTIVE",
+        currentVersionId: { not: null },
+        recallDisabledAt: null,
+        OR: scopeFilters,
+        AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] }],
+      },
+      select: {
+        id: true,
+        representativeId: true,
+        scope: true,
+        contactId: true,
+        sourceChannel: true,
+        category: true,
+        status: true,
+        recallDisabledAt: true,
+        expiresAt: true,
+        currentVersionId: true,
+        currentVersion: {
+          select: {
+            id: true,
+            representativeId: true,
+            scope: true,
+            safeText: true,
+            summary: true,
+            contentHash: true,
+            purgedAt: true,
+            deidentifiedAt: true,
+            deidentificationMethod: true,
+            sourceCandidate: {
+              select: {
+                representativeId: true,
+                contactId: true,
+                scope: true,
+                scopeChannel: true,
+                status: true,
+                contentPurgedAt: true,
+                deidentifiedAt: true,
+              },
+            },
+            reviewDecisions: {
+              select: { id: true, representativeId: true, outcome: true },
+              orderBy: { createdAt: "desc" },
+              take: 1,
+            },
+            projectionItems: {
+              where: {
+                provider: policy.provider,
+                lane: "RECALL",
+                status: "ACTIVE",
+              },
+              select: {
+                id: true,
+                representativeId: true,
+                provider: true,
+                lane: true,
+                status: true,
+                contentHash: true,
+                remoteUri: true,
+                projectedAt: true,
+                deletedAt: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const memoryRoots: string[] = [];
+    if (allowContact) {
+      memoryRoots.push(buildGovernedContactChannelMemoryRootUri({
+        namespaceKey: policy.namespaceKey,
+        contactId: params.contactId,
+        channel: params.sourceChannel,
+      }));
+    }
+    if (allowExperience) {
+      memoryRoots.push(buildGovernedRepresentativeExperienceRootUri(policy.namespaceKey));
+    }
+
+    const memoryGrantsByUri = new Map<string, GovernedMemoryRecallGrant>();
+    for (const memory of memories) {
+      const version = memory.currentVersion;
+      if (
+        memory.representativeId !== params.representativeId
+        || memory.status !== "ACTIVE"
+        || memory.recallDisabledAt !== null
+        || (memory.expiresAt !== null && memory.expiresAt <= now)
+        || !version
+        || version.representativeId !== params.representativeId
+        || memory.currentVersionId !== version.id
+        || version.purgedAt
+        || !version.safeText?.trim()
+        || version.reviewDecisions[0]?.outcome !== "APPROVED"
+        || version.reviewDecisions[0]?.representativeId !== params.representativeId
+        || (version.sourceCandidate
+          && (
+            version.sourceCandidate.representativeId !== params.representativeId
+            || version.sourceCandidate.status !== "APPROVED"
+            || version.sourceCandidate.contentPurgedAt !== null
+          ))
+      ) {
+        continue;
+      }
+
+      let sourceKind: GovernedMemoryRecallGrant["sourceKind"];
+      let expectedUri: string;
+      if (memory.scope === "CONTACT_CHANNEL") {
+        if (
+          !allowContact
+          || memory.contactId !== params.contactId
+          || memory.sourceChannel !== toRepresentativeMemoryChannel(params.sourceChannel)
+          || version.scope !== "CONTACT_CHANNEL"
+          || !memory.category.startsWith("CONTACT_")
+          || (version.sourceCandidate
+            && (
+              version.sourceCandidate.scope !== "CONTACT_CHANNEL"
+              || version.sourceCandidate.contactId !== params.contactId
+              || version.sourceCandidate.scopeChannel
+                !== toRepresentativeMemoryChannel(params.sourceChannel)
+            ))
+        ) {
+          continue;
+        }
+        sourceKind = "CONTACT_MEMORY";
+        expectedUri = buildGovernedContactChannelMemoryVersionUri({
+          namespaceKey: policy.namespaceKey,
+          contactId: params.contactId,
+          channel: params.sourceChannel,
+          memoryId: memory.id,
+          memoryVersionId: version.id,
+        });
+      } else {
+        if (
+          !allowExperience
+          || memory.scope !== "REPRESENTATIVE"
+          || memory.contactId !== null
+          || memory.sourceChannel !== null
+          || version.scope !== "REPRESENTATIVE"
+          || !memory.category.startsWith("REPRESENTATIVE_")
+          || !version.deidentifiedAt
+          || !version.deidentificationMethod?.trim()
+          || (version.sourceCandidate
+            && (
+              version.sourceCandidate.scope !== "REPRESENTATIVE"
+              || version.sourceCandidate.contactId !== null
+              || version.sourceCandidate.scopeChannel !== null
+              || !version.sourceCandidate.deidentifiedAt
+            ))
+        ) {
+          continue;
+        }
+        sourceKind = "REPRESENTATIVE_EXPERIENCE";
+        expectedUri = buildGovernedRepresentativeExperienceVersionUri({
+          namespaceKey: policy.namespaceKey,
+          memoryId: memory.id,
+          memoryVersionId: version.id,
+        });
+      }
+
+      for (const projection of version.projectionItems) {
+        if (
+          projection.representativeId !== params.representativeId
+          || projection.provider !== policy.provider
+          || projection.lane !== "RECALL"
+          || projection.status !== "ACTIVE"
+          || projection.remoteUri !== expectedUri
+          || projection.contentHash !== version.contentHash
+          || !projection.projectedAt
+          || projection.deletedAt
+        ) {
+          continue;
+        }
+        memoryGrantsByUri.set(expectedUri, {
+          uri: expectedUri,
+          sourceKind,
+          memoryVersionId: version.id,
+          projectionItemId: projection.id,
+          contentHash: version.contentHash,
+          safeText: version.safeText.trim(),
+          summary: version.summary?.trim() || version.safeText.trim(),
+        });
+        break;
+      }
+    }
+    return {
+      memoryRoots,
+      memoryGrantsByUri,
+      memorySearchConfig: {
+        limit: policy.recallLimit,
+        scoreThreshold: policy.recallScoreThreshold,
+      },
+    };
+  } catch {
+    // Memory governance is fail-closed. Public, version-pinned knowledge is
+    // intentionally resolved independently and remains available.
+    return empty;
+  }
+}
+
+function hydrateGovernedMemoryRecall(
+  remoteItem: {
+    uri: string;
+    context_type?: OpenVikingRecallItem["contextType"] | undefined;
+    contextType?: OpenVikingRecallItem["contextType"] | undefined;
+    score?: number | undefined;
+  },
+  grant: GovernedMemoryRecallGrant,
+): {
+  item: RepresentativeRecallItem;
+  citation: RepresentativeRecallContext["citations"][number];
+} {
+  const safeContent = sanitizePublicSafeText(grant.safeText, 4_000) ?? "";
+  const abstract = sanitizePublicSafeText(grant.summary, 800) ?? "";
+  const score = remoteItem.score ?? 0;
+  const item: RepresentativeRecallItem = {
+    uri: grant.uri,
+    contextType: remoteItem.contextType ?? remoteItem.context_type ?? "memory",
+    layer: safeContent ? "L2" : "L0",
+    score,
+    abstract,
+    ...(safeContent ? { content: safeContent } : {}),
+    internalSource: {
+      sourceKind: grant.sourceKind,
+      contentHash: grant.contentHash,
+      memoryVersionId: grant.memoryVersionId,
+      projectionItemId: grant.projectionItemId,
+    },
+  };
+  return {
+    item,
+    citation: {
+      title: grant.sourceKind === "CONTACT_MEMORY"
+        ? "Remembered preference"
+        : "Approved representative experience",
+      ...(abstract || safeContent ? { excerpt: (abstract || safeContent).slice(0, 480) } : {}),
+      score,
+    },
+  };
+}
+
+function authorizeRecallUri(
+  uri: string,
+  authorization: RepresentativeRecallAuthorization,
+): AuthorizedRecallSource | null {
+  if (
+    authorization.publishedVersionRoot
+    && uri.startsWith(authorization.publishedVersionRoot)
+  ) {
+    return { sourceKind: "PUBLIC_KNOWLEDGE" };
+  }
+
+  if (authorization.knowledgeRoot && uri.startsWith(authorization.knowledgeRoot)) {
+    const assetId = resolveKnowledgeAssetId(uri).knowledgeAssetId;
+    return assetId && authorization.allowedAssetIds.has(assetId)
+      ? { sourceKind: "PUBLIC_KNOWLEDGE" }
+      : null;
+  }
+
+  return authorization.memoryGrantsByUri.get(uri) ?? null;
+}
+
+function rankAuthorizedRecallCandidates(
+  candidates: AuthorizedRemoteRecallCandidate[],
+  config: { limit: number; scoreThreshold: number },
+): AuthorizedRemoteRecallCandidate[] {
+  if (config.limit < 1) return [];
+  const unique = new Map<string, AuthorizedRemoteRecallCandidate>();
+  for (const candidate of candidates) {
+    const existing = unique.get(candidate.item.uri);
+    if (!existing || (candidate.item.score ?? 0) > (existing.item.score ?? 0)) {
+      unique.set(candidate.item.uri, candidate);
+    }
+  }
+  const ranked = [...unique.values()]
+    .sort((left, right) => (right.item.score ?? 0) - (left.item.score ?? 0));
+  const topScore = ranked[0]?.item.score ?? 0;
+  const relativeScoreFloor = Math.max(config.scoreThreshold, topScore * 0.72);
+  return ranked
+    .filter((candidate) => (candidate.item.score ?? 0) >= relativeScoreFloor)
+    .slice(0, config.limit);
+}
+
+function rankHydratedRecallResults(
+  results: Array<{
+    item: RepresentativeRecallItem;
+    citation: RepresentativeRecallContext["citations"][number];
+  }>,
+  config: { limit: number; scoreThreshold: number },
+) {
+  const unique = new Map<string, (typeof results)[number]>();
+  for (const result of results) {
+    const existing = unique.get(result.item.uri);
+    if (!existing || result.item.score > existing.item.score) {
+      unique.set(result.item.uri, result);
+    }
+  }
+  const ranked = [...unique.values()].sort(
+    (left, right) => right.item.score - left.item.score,
+  );
+  const topScore = ranked[0]?.item.score ?? 0;
+  const relativeScoreFloor = Math.max(config.scoreThreshold, topScore * 0.72);
+  return ranked
+    .filter(({ item }) => item.score >= relativeScoreFloor)
+    .slice(0, config.limit);
+}
+
+function normalizeRecallSourceKinds(
+  sourceKinds?: readonly RepresentativeRecallSourceKind[],
+): ReadonlySet<RepresentativeRecallSourceKind> {
+  const requested = sourceKinds ?? REPRESENTATIVE_RECALL_SOURCE_KINDS;
+  return new Set(
+    requested.filter((sourceKind): sourceKind is RepresentativeRecallSourceKind => (
+      REPRESENTATIVE_RECALL_SOURCE_KINDS.includes(sourceKind)
+    )),
+  );
+}
+
+function uniqueRecallRoots(roots: Array<string | undefined>): string[] {
+  return [...new Set(roots.filter((root): root is string => Boolean(root)))];
+}
+
+function isRecallSourceChannel(channel: string): channel is RecallSourceChannel {
+  return channel === "web" || channel === "matrix" || channel === "telegram";
+}
+
+function toRepresentativeMemoryChannel(channel: RecallSourceChannel) {
+  if (channel === "web") return "WEB" as const;
+  if (channel === "matrix") return "MATRIX" as const;
+  return "TELEGRAM" as const;
+}
+
+function isMemoryRecallEnabledForChannel(
+  policy: {
+    webRecallEnabled: boolean;
+    matrixRecallEnabled: boolean;
+    telegramRecallEnabled: boolean;
+  },
+  channel: RecallSourceChannel,
+): boolean {
+  if (channel === "web") return policy.webRecallEnabled;
+  if (channel === "matrix") return policy.matrixRecallEnabled;
+  return policy.telegramRecallEnabled;
 }
 
 export async function getRepresentativeOpenVikingRecallTraces(
@@ -1372,6 +1922,7 @@ export async function getRepresentativeOpenVikingRecallUsage(
   return { today, total };
 }
 
+/** @deprecated Legacy-ledger compatibility only; governed recall never calls this helper. */
 export function isOpenVikingMemoryRecallEligible(memory: {
   status: string;
   scope: string;
@@ -1430,34 +1981,12 @@ export function resolveAllowedPublishedKnowledgeAssetIds(params: {
   );
 }
 
+/** @deprecated Legacy-ledger compatibility only; governed recall uses exact projection grants. */
 export function isOpenVikingMemoryUriAllowed(
   uri: string,
   allowedMemoryUris: ReadonlySet<string>,
 ): boolean {
   return allowedMemoryUris.has(uri);
-}
-
-function isAllowedRecallUri(uri: string, params: {
-  publishedVersionRoot: string | undefined;
-  knowledgeRoot: string | undefined;
-  contactMemoryRoot: string | undefined;
-  allowedAssetIds: Set<string>;
-  allowedMemoryUris: Set<string>;
-}): boolean {
-  if (params.publishedVersionRoot && uri.startsWith(params.publishedVersionRoot)) {
-    return true;
-  }
-
-  if (params.contactMemoryRoot && uri.startsWith(params.contactMemoryRoot)) {
-    return isOpenVikingMemoryUriAllowed(uri, params.allowedMemoryUris);
-  }
-
-  if (!params.knowledgeRoot || !uri.startsWith(params.knowledgeRoot)) {
-    return false;
-  }
-
-  const assetId = resolveKnowledgeAssetId(uri).knowledgeAssetId;
-  return Boolean(assetId && params.allowedAssetIds.has(assetId));
 }
 
 function resolveKnowledgeAssetId(uri: string): { knowledgeAssetId?: string } {

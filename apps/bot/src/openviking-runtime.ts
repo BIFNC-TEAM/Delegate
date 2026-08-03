@@ -20,6 +20,7 @@ export async function recallOpenVikingContext(params: {
       representativeSlug: params.context.representativeSlug,
       conversationId: params.context.conversationId,
       contactId: params.context.contactId,
+      sourceChannel: "telegram",
       queryText: params.queryText,
     });
     return recalled.items;

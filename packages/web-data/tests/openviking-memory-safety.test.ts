@@ -197,8 +197,12 @@ describe("OpenViking memory safety", () => {
     expect(remoteRead).toBeGreaterThan(-1);
     expect(revalidation).toBeGreaterThan(remoteRead);
     expect(recallSource).toContain(
-      "hydrated.filter(({ item }) => isAllowedRecallUri(item.uri, revalidatedAuthorization))",
+      "authorizeRecallUri(item.uri, revalidatedAuthorization)",
     );
+    expect(recallSource).toContain(
+      "hydrateGovernedMemoryRecall(item, revalidatedSource)",
+    );
+    expect(recallSource).not.toContain("openVikingMemoryRecord.findMany");
     expect(recallSource).toContain("data: authorizedHydrated.map");
   });
 

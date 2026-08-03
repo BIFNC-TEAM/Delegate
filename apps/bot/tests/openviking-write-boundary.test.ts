@@ -104,6 +104,7 @@ describe("OpenViking long-term write boundary", () => {
       representativeSlug: "lin-founder-rep",
       conversationId: "conversation-1",
       contactId: "contact-1",
+      sourceChannel: "telegram",
       queryText: "What is the policy?",
     });
     expect(result).toHaveLength(1);

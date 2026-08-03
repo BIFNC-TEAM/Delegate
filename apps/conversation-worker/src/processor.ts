@@ -1,7 +1,7 @@
 import {
   generateRepresentativeReply,
   planNaturalLanguageComputeRequest,
-  renderGroundedKnowledgeFallback,
+  renderGroundedKnowledgeFallbackWithTrace,
   type ModelRuntimeState,
 } from "@delegate/model-runtime";
 import {
@@ -78,6 +78,25 @@ function resolveFallbackReason(
     return "policy_fallback";
   }
   return "provider_failed";
+}
+
+function filterInjectedRecallCitations(
+  recalled: {
+    items: Array<{ uri: string }>;
+    citations: Array<{
+      knowledgeAssetId?: string;
+      title: string;
+      excerpt?: string;
+      score: number;
+    }>;
+  },
+  selectedRecallUris: readonly string[],
+) {
+  const selected = new Set(selectedRecallUris);
+  return recalled.citations.filter((_citation, index) => {
+    const sourceUri = recalled.items[index]?.uri;
+    return Boolean(sourceUri && selected.has(sourceUri));
+  });
 }
 
 export async function processNextConversationWork(config: ConversationWorkerConfig) {
@@ -651,6 +670,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           representativeSlug: item.representativeSlug,
           conversationId: item.conversationId,
           contactId: item.contactId,
+          sourceChannel: item.channel,
           queryText: item.userText,
         })
       : { items: [], citations: [] };
@@ -658,7 +678,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     let replyText = renderReplyPreview(representative, plan);
     let runtime: { provider?: "openai" | "bailian" | "anthropic"; model?: string; inputTokens?: number; outputTokens?: number; costCents?: number } = {};
     let runtimeOutcome: GenerationRuntimeOutcome | undefined;
-    let citations: typeof recalled.citations = recalled.citations;
+    let citations: typeof recalled.citations = [];
     if (plan.nextStep === "answer") {
       const generated = await generateRepresentativeReply({
         representative,
@@ -672,6 +692,10 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       leaseGuard.assertOwned();
       if (generated.ok) {
         replyText = generated.replyText;
+        citations = filterInjectedRecallCitations(
+          recalled,
+          generated.contextTrace.selectedRecallUris,
+        );
         runtimeOutcome = { mode: "model" };
         runtime = {
           provider: generated.provider,
@@ -681,12 +705,16 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           ...(generated.usage?.costCents !== undefined ? { costCents: generated.usage.costCents } : {}),
         };
       } else {
-        const groundedFallback = renderGroundedKnowledgeFallback({
+        const groundedFallback = renderGroundedKnowledgeFallbackWithTrace({
           userText: item.userText,
           recalled: recalled.items,
         });
         if (groundedFallback) {
-          replyText = groundedFallback;
+          replyText = groundedFallback.replyText;
+          citations = filterInjectedRecallCitations(
+            recalled,
+            groundedFallback.selectedRecallUris,
+          );
         }
         runtimeOutcome = {
           mode: "fallback",
@@ -929,9 +957,12 @@ async function buildDelegationPlannerInput(input: {
     representativeSlug: input.item.representativeSlug,
     conversationId: input.item.conversationId,
     contactId: input.item.contactId,
+    sourceChannel: input.item.channel,
     queryText: input.taskInput,
+    allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
   });
   const publicKnowledge = recalled.items
+    .filter((item) => item.internalSource.sourceKind === "PUBLIC_KNOWLEDGE")
     .slice(0, 3)
     .map((item, index) => {
       const content = item.content?.trim() || item.abstract.trim();

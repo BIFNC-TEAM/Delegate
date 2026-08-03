@@ -2211,7 +2211,7 @@ model RepresentativeVersion {
   memoryUseItems           MemoryUseItem[]
 
   @@unique([representativeId, versionNumber])
-  @@unique([id, representativeId])
+  @@unique([id, representativeId], map: "RepresentativeVersion_id_rep_key")
   @@index([representativeId, publishedAt])
 }
 
@@ -2715,7 +2715,7 @@ model Conversation {
   memoryExtractionRuns          MemoryExtractionRun[]
 
   @@unique([representativeId, telegramChatId, contactId])
-  @@unique([id, representativeId, contactId])
+  @@unique([id, representativeId, contactId], map: "Conversation_id_rep_contact_key")
   @@index([audienceIdentityId, lastMessageAt])
   @@index([representativeId, sourceChannel, channelThreadId])
   @@index([representativeId, state, lastMessageAt])
@@ -3252,7 +3252,7 @@ model KnowledgeAssetRepresentative {
   memoryUseItems   MemoryUseItem[]
 
   @@unique([assetId, representativeId])
-  @@unique([id, representativeId])
+  @@unique([id, representativeId], map: "KnowledgeAssetRep_id_rep_key")
   @@index([representativeId, enabled, updatedAt])
   @@index([assetId, reviewStatus])
 }
@@ -4332,22 +4332,22 @@ model MemoryCandidate {
   reviewedAt           DateTime?
   createdAt            DateTime                   @default(now())
   updatedAt            DateTime                   @updatedAt
-  representative       Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  extractionRun        MemoryExtractionRun?       @relation(fields: [extractionRunId, representativeId, sourceContactId, sourceConversationId], references: [id, representativeId, contactId, sourceConversationId], onDelete: Restrict)
-  contact              Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict)
-  sourceConversation   Conversation               @relation(fields: [sourceConversationId, representativeId, sourceContactId], references: [id, representativeId, contactId], onDelete: Restrict)
-  sourceMessage        Message                    @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict)
+  representative       Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryCandidate_rep_fkey")
+  extractionRun        MemoryExtractionRun?       @relation(fields: [extractionRunId, representativeId, sourceContactId, sourceConversationId], references: [id, representativeId, contactId, sourceConversationId], onDelete: Restrict, map: "MemoryCandidate_extraction_scope_fkey")
+  contact              Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryCandidate_contact_scope_fkey")
+  sourceConversation   Conversation               @relation(fields: [sourceConversationId, representativeId, sourceContactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryCandidate_conversation_scope_fkey")
+  sourceMessage        Message                    @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryCandidate_message_scope_fkey")
   reviewDecisions      MemoryReviewDecision[]
   version              GovernedMemoryVersion?
 
-  @@unique([representativeId, dedupeKey])
-  @@unique([id, representativeId])
-  @@unique([id, representativeId, scope])
-  @@index([representativeId, status, createdAt])
+  @@unique([representativeId, dedupeKey], map: "MemoryCandidate_rep_dedupe_key")
+  @@unique([id, representativeId], map: "MemoryCandidate_id_rep_key")
+  @@unique([id, representativeId, scope], map: "MemoryCandidate_id_rep_scope_key")
+  @@index([representativeId, status, createdAt], map: "MemoryCandidate_rep_status_created_idx")
   @@index([representativeId, contactId, scopeChannel, status, createdAt], map: "MemoryCandidate_contact_scope_status_idx")
   @@index([sourceConversationId, sourceMessageId, createdAt], map: "MemoryCandidate_source_message_idx")
-  @@index([extractionRunId, createdAt])
-  @@index([expiresAt, status])
+  @@index([extractionRunId, createdAt], map: "MemoryCandidate_extraction_created_idx")
+  @@index([expiresAt, status], map: "MemoryCandidate_expires_status_idx")
 }
 
 model GovernedMemory {
@@ -4368,20 +4368,20 @@ model GovernedMemory {
   deletedAt         DateTime?
   createdAt         DateTime                   @default(now())
   updatedAt         DateTime                   @updatedAt
-  representative    Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  contact           Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict)
-  currentVersion    GovernedMemoryVersion?     @relation("GovernedMemoryCurrentVersion", fields: [currentVersionId, id], references: [id, memoryId], onDelete: Restrict)
+  representative    Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "GovernedMemory_rep_fkey")
+  contact           Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "GovernedMemory_contact_scope_fkey")
+  currentVersion    GovernedMemoryVersion?     @relation("GovernedMemoryCurrentVersion", fields: [currentVersionId, id], references: [id, memoryId], onDelete: Restrict, map: "GovernedMemory_currentVersion_fkey")
   versions          GovernedMemoryVersion[]    @relation("GovernedMemoryVersions")
   reviewDecisions   MemoryReviewDecision[]
   deletionProof     MemoryDeletionProof?
 
-  @@unique([id, representativeId])
-  @@unique([id, representativeId, scope])
-  @@unique([currentVersionId, id])
-  @@index([representativeId, status, updatedAt])
+  @@unique([id, representativeId], map: "GovernedMemory_id_rep_key")
+  @@unique([id, representativeId, scope], map: "GovernedMemory_id_rep_scope_key")
+  @@unique([currentVersionId, id], map: "GovernedMemory_current_id_key")
+  @@index([representativeId, status, updatedAt], map: "GovernedMemory_rep_status_updated_idx")
   @@index([representativeId, contactId, sourceChannel, status, updatedAt], map: "GovernedMemory_contact_scope_status_idx")
-  @@index([status, recallDisabledAt, expiresAt])
-  @@index([status, deleteRequestedAt])
+  @@index([status, recallDisabledAt, expiresAt], map: "GovernedMemory_status_recall_expiry_idx")
+  @@index([status, deleteRequestedAt], map: "GovernedMemory_status_deleteRequested_idx")
 }
 
 model GovernedMemoryVersion {
@@ -4401,25 +4401,25 @@ model GovernedMemoryVersion {
   correctionReasonCode   String?
   createdByActorId       String
   createdAt              DateTime                @default(now())
-  memory                 GovernedMemory          @relation("GovernedMemoryVersions", fields: [memoryId, representativeId, scope], references: [id, representativeId, scope], onDelete: Restrict)
-  sourceCandidate        MemoryCandidate?        @relation(fields: [sourceCandidateId, representativeId, scope], references: [id, representativeId, scope], onDelete: Restrict)
-  supersedesVersion      GovernedMemoryVersion?  @relation("GovernedMemoryVersionChain", fields: [supersedesVersionId, memoryId], references: [id, memoryId], onDelete: Restrict)
+  memory                 GovernedMemory          @relation("GovernedMemoryVersions", fields: [memoryId, representativeId, scope], references: [id, representativeId, scope], onDelete: Restrict, map: "GovernedMemoryVersion_memory_scope_fkey")
+  sourceCandidate        MemoryCandidate?        @relation(fields: [sourceCandidateId, representativeId, scope], references: [id, representativeId, scope], onDelete: Restrict, map: "GovernedMemoryVersion_candidate_scope_fkey")
+  supersedesVersion      GovernedMemoryVersion?  @relation("GovernedMemoryVersionChain", fields: [supersedesVersionId, memoryId], references: [id, memoryId], onDelete: Restrict, map: "GovernedMemoryVersion_supersedes_fkey")
   supersededByVersions   GovernedMemoryVersion[] @relation("GovernedMemoryVersionChain")
   currentForMemory       GovernedMemory?         @relation("GovernedMemoryCurrentVersion")
   reviewDecisions        MemoryReviewDecision[]
   projectionItems        MemoryProjectionItem[]
   useItems               MemoryUseItem[]
-  representative         Representative          @relation(fields: [representativeId], references: [id])
+  representative         Representative          @relation(fields: [representativeId], references: [id], map: "GovernedMemoryVersion_rep_fkey")
 
-  @@unique([sourceCandidateId, representativeId, scope])
-  @@unique([memoryId, versionNumber])
-  @@unique([id, memoryId])
-  @@unique([id, representativeId])
-  @@unique([id, representativeId, scope])
-  @@unique([id, memoryId, representativeId])
-  @@index([memoryId, contentHash])
-  @@index([representativeId, createdAt])
-  @@index([supersedesVersionId])
+  @@unique([sourceCandidateId, representativeId, scope], map: "GovernedMemoryVersion_source_rep_scope_key")
+  @@unique([memoryId, versionNumber], map: "GovernedMemoryVersion_memory_version_key")
+  @@unique([id, memoryId], map: "GovernedMemoryVersion_id_memory_key")
+  @@unique([id, representativeId], map: "GovernedMemoryVersion_id_rep_key")
+  @@unique([id, representativeId, scope], map: "GovernedMemoryVersion_id_rep_scope_key")
+  @@unique([id, memoryId, representativeId], map: "GovernedMemoryVersion_id_memory_rep_key")
+  @@index([memoryId, contentHash], map: "GovernedMemoryVersion_memory_hash_idx")
+  @@index([representativeId, createdAt], map: "GovernedMemoryVersion_rep_created_idx")
+  @@index([supersedesVersionId], map: "GovernedMemoryVersion_supersedes_idx")
 }
 
 model MemoryReviewDecision {
@@ -4434,15 +4434,15 @@ model MemoryReviewDecision {
   reasonCode       String
   note             String?
   createdAt        DateTime               @default(now())
-  representative   Representative         @relation(fields: [representativeId], references: [id], onDelete: Restrict)
-  candidate        MemoryCandidate?       @relation(fields: [candidateId, representativeId], references: [id, representativeId], onDelete: Restrict)
-  memory           GovernedMemory?        @relation(fields: [memoryId, representativeId], references: [id, representativeId], onDelete: Restrict)
-  resultVersion    GovernedMemoryVersion? @relation(fields: [resultVersionId, memoryId, representativeId], references: [id, memoryId, representativeId], onDelete: Restrict)
+  representative   Representative         @relation(fields: [representativeId], references: [id], onDelete: Restrict, map: "MemoryReviewDecision_rep_fkey")
+  candidate        MemoryCandidate?       @relation(fields: [candidateId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryReviewDecision_candidate_scope_fkey")
+  memory           GovernedMemory?        @relation(fields: [memoryId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryReviewDecision_memory_scope_fkey")
+  resultVersion    GovernedMemoryVersion? @relation(fields: [resultVersionId, memoryId, representativeId], references: [id, memoryId, representativeId], onDelete: Restrict, map: "MemoryReviewDecision_result_scope_fkey")
 
-  @@index([representativeId, createdAt])
-  @@index([candidateId, createdAt])
-  @@index([memoryId, createdAt])
-  @@index([resultVersionId])
+  @@index([representativeId, createdAt], map: "MemoryReviewDecision_rep_created_idx")
+  @@index([candidateId, createdAt], map: "MemoryReviewDecision_candidate_created_idx")
+  @@index([memoryId, createdAt], map: "MemoryReviewDecision_memory_created_idx")
+  @@index([resultVersionId], map: "MemoryReviewDecision_resultVersion_idx")
 }
 
 model RepresentativeMemoryPolicy {
@@ -4468,9 +4468,9 @@ model RepresentativeMemoryPolicy {
   revision                        Int                @default(0)
   createdAt                       DateTime           @default(now())
   updatedAt                       DateTime           @updatedAt
-  representative                  Representative     @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  representative                  Representative     @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "RepresentativeMemoryPolicy_rep_fkey")
 
-  @@index([longTermMemoryEnabled, updatedAt])
+  @@index([longTermMemoryEnabled, updatedAt], map: "RepresentativeMemoryPolicy_enabled_updatedAt_idx")
 }
 
 model MemoryExtractionRun {
@@ -4497,16 +4497,16 @@ model MemoryExtractionRun {
   errorCode            String?
   createdAt            DateTime                  @default(now())
   updatedAt            DateTime                  @updatedAt
-  representative       Representative            @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  contact              Contact?                  @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict)
-  sourceConversation   Conversation?             @relation(fields: [sourceConversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict)
-  sourceMessage        Message?                  @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict)
+  representative       Representative            @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryExtractionRun_rep_fkey")
+  contact              Contact?                  @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryExtractionRun_contact_scope_fkey")
+  sourceConversation   Conversation?             @relation(fields: [sourceConversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryExtractionRun_conversation_scope_fkey")
+  sourceMessage        Message?                  @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryExtractionRun_message_scope_fkey")
   candidates           MemoryCandidate[]
 
-  @@unique([representativeId, idempotencyKey])
-  @@unique([id, representativeId])
-  @@unique([id, representativeId, contactId, sourceConversationId])
-  @@index([representativeId, status, createdAt])
+  @@unique([representativeId, idempotencyKey], map: "MemoryExtractionRun_rep_idempotency_key")
+  @@unique([id, representativeId], map: "MemoryExtractionRun_id_rep_key")
+  @@unique([id, representativeId, contactId, sourceConversationId], map: "MemoryExtractionRun_provenance_key")
+  @@index([representativeId, status, createdAt], map: "MemoryExtractionRun_rep_status_created_idx")
   @@index([representativeId, contactId, sourceChannel, createdAt], map: "MemoryExtractionRun_contact_channel_idx")
   @@index([status, availableAt, leaseExpiresAt], map: "MemoryExtractionRun_due_lease_idx")
   @@index([sourceMessageId])
@@ -4534,19 +4534,19 @@ model MemoryProjectionItem {
   lastErrorCode       String?
   createdAt           DateTime                   @default(now())
   updatedAt           DateTime                   @updatedAt
-  representative      Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  memoryVersion       GovernedMemoryVersion      @relation(fields: [memoryVersionId, memoryId, representativeId], references: [id, memoryId, representativeId], onDelete: Restrict)
+  representative      Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryProjectionItem_rep_fkey")
+  memoryVersion       GovernedMemoryVersion      @relation(fields: [memoryVersionId, memoryId, representativeId], references: [id, memoryId, representativeId], onDelete: Restrict, map: "MemoryProjectionItem_version_scope_fkey")
   useItems            MemoryUseItem[]
   reconciliationItems MemoryReconciliationItem[]
 
-  @@unique([representativeId, idempotencyKey])
-  @@unique([id, representativeId])
-  @@unique([id, representativeId, memoryVersionId])
-  @@unique([provider, lane, memoryVersionId])
-  @@index([representativeId, lane, status, updatedAt])
-  @@index([memoryId, status, updatedAt])
+  @@unique([representativeId, idempotencyKey], map: "MemoryProjectionItem_rep_idempotency_key")
+  @@unique([id, representativeId], map: "MemoryProjectionItem_id_rep_key")
+  @@unique([id, representativeId, memoryVersionId], map: "MemoryProjectionItem_id_rep_version_key")
+  @@unique([provider, lane, memoryVersionId], map: "MemoryProjectionItem_provider_lane_version_key")
+  @@index([representativeId, lane, status, updatedAt], map: "MemoryProjectionItem_rep_lane_status_idx")
+  @@index([memoryId, status, updatedAt], map: "MemoryProjectionItem_memory_status_idx")
   @@index([status, availableAt, leaseExpiresAt], map: "MemoryProjectionItem_due_lease_idx")
-  @@index([status, deleteRequestedAt])
+  @@index([status, deleteRequestedAt], map: "MemoryProjectionItem_status_delete_idx")
 }
 
 model MemoryUseRun {
@@ -4570,24 +4570,25 @@ model MemoryUseRun {
   completedAt             DateTime?
   createdAt               DateTime                  @default(now())
   updatedAt               DateTime                  @updatedAt
-  representative          Representative            @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  contact                 Contact                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict)
-  conversation            Conversation              @relation(fields: [conversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict)
-  representativeVersion   RepresentativeVersion     @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict)
-  inputMessage            Message                   @relation("MemoryUseInputMessage", fields: [inputMessageId, conversationId], references: [id, conversationId], onDelete: Restrict)
-  outputMessage           Message?                  @relation("MemoryUseOutputMessage", fields: [outputMessageId, conversationId], references: [id, conversationId], onDelete: Restrict)
-  generationRun           GenerationRun?            @relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Restrict)
+  representative          Representative            @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryUseRun_rep_fkey")
+  contact                 Contact                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseRun_contact_scope_fkey")
+  conversation            Conversation              @relation(fields: [conversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryUseRun_conversation_scope_fkey")
+  representativeVersion   RepresentativeVersion     @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseRun_rep_version_fkey")
+  inputMessage            Message                   @relation("MemoryUseInputMessage", fields: [inputMessageId, conversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryUseRun_input_message_fkey")
+  outputMessage           Message?                  @relation("MemoryUseOutputMessage", fields: [outputMessageId, conversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryUseRun_output_message_fkey")
+  generationRun           GenerationRun?            @relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryUseRun_generation_fkey")
   items                   MemoryUseItem[]
 
-  @@unique([representativeId, idempotencyKey])
-  @@unique([id, representativeId])
-  @@unique([generationRunId, conversationId])
-  @@index([representativeId, createdAt])
+  @@unique([representativeId, idempotencyKey], map: "MemoryUseRun_rep_idempotency_key")
+  @@unique([id, representativeId], map: "MemoryUseRun_id_rep_key")
+  @@unique([generationRunId, conversationId], map: "MemoryUseRun_generation_conversation_key")
+  @@index([representativeId, createdAt], map: "MemoryUseRun_rep_created_idx")
   @@index([representativeId, contactId, sourceChannel, createdAt], map: "MemoryUseRun_contact_channel_idx")
-  @@index([conversationId, createdAt])
-  @@index([inputMessageId])
-  @@index([outputMessageId])
-  @@index([status, startedAt])
+  @@index([conversationId, createdAt], map: "MemoryUseRun_conversation_created_idx")
+  @@index([representativeVersionId], map: "MemoryUseRun_rep_version_idx")
+  @@index([inputMessageId], map: "MemoryUseRun_inputMessage_idx")
+  @@index([outputMessageId], map: "MemoryUseRun_outputMessage_idx")
+  @@index([status, startedAt], map: "MemoryUseRun_status_started_idx")
 }
 
 model MemoryUseItem {
@@ -4615,20 +4616,20 @@ model MemoryUseItem {
   rejectionReasonCode     String?
   createdAt               DateTime                      @default(now())
   updatedAt               DateTime                      @updatedAt
-  useRun                  MemoryUseRun                  @relation(fields: [useRunId, representativeId], references: [id, representativeId], onDelete: Cascade)
-  representative          Representative                @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  memoryVersion           GovernedMemoryVersion?        @relation(fields: [memoryVersionId, representativeId, memoryScope], references: [id, representativeId, scope], onDelete: Restrict)
-  projectionItem          MemoryProjectionItem?         @relation(fields: [projectionItemId, representativeId, memoryVersionId], references: [id, representativeId, memoryVersionId], onDelete: Restrict)
-  knowledgeBinding        KnowledgeAssetRepresentative? @relation(fields: [knowledgeBindingId, representativeId], references: [id, representativeId], onDelete: Restrict)
-  representativeVersion   RepresentativeVersion?        @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict)
-  displayedCitation       MessageCitation?              @relation(fields: [displayedCitationId], references: [id], onDelete: Restrict)
+  useRun                  MemoryUseRun                  @relation(fields: [useRunId, representativeId], references: [id, representativeId], onDelete: Cascade, map: "MemoryUseItem_run_scope_fkey")
+  representative          Representative                @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryUseItem_rep_fkey")
+  memoryVersion           GovernedMemoryVersion?        @relation(fields: [memoryVersionId, representativeId, memoryScope], references: [id, representativeId, scope], onDelete: Restrict, map: "MemoryUseItem_version_scope_fkey")
+  projectionItem          MemoryProjectionItem?         @relation(fields: [projectionItemId, representativeId, memoryVersionId], references: [id, representativeId, memoryVersionId], onDelete: Restrict, map: "MemoryUseItem_projection_scope_fkey")
+  knowledgeBinding        KnowledgeAssetRepresentative? @relation(fields: [knowledgeBindingId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseItem_knowledge_binding_fkey")
+  representativeVersion   RepresentativeVersion?        @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseItem_rep_version_fkey")
+  displayedCitation       MessageCitation?              @relation(fields: [displayedCitationId], references: [id], onDelete: Restrict, map: "MemoryUseItem_citation_fkey")
 
-  @@unique([useRunId, itemKey])
-  @@index([memoryVersionId, createdAt])
+  @@unique([useRunId, itemKey], map: "MemoryUseItem_run_item_key")
+  @@index([memoryVersionId, createdAt], map: "MemoryUseItem_memoryVersion_created_idx")
   @@index([knowledgeBindingId, representativeVersionId, createdAt], map: "MemoryUseItem_public_knowledge_idx")
-  @@index([projectionItemId])
-  @@index([useRunId, injectedAt])
-  @@index([useRunId, displayedAt])
+  @@index([projectionItemId], map: "MemoryUseItem_projection_idx")
+  @@index([useRunId, injectedAt], map: "MemoryUseItem_run_injected_idx")
+  @@index([useRunId, displayedAt], map: "MemoryUseItem_run_displayed_idx")
 }
 
 model MemoryDeletionProof {
@@ -4647,13 +4648,13 @@ model MemoryDeletionProof {
   completedAt            DateTime?
   createdAt              DateTime       @default(now())
   updatedAt              DateTime       @updatedAt
-  representative         Representative @relation(fields: [representativeId], references: [id], onDelete: Restrict)
-  memory                 GovernedMemory @relation(fields: [memoryId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  representative         Representative @relation(fields: [representativeId], references: [id], onDelete: Restrict, map: "MemoryDeletionProof_rep_fkey")
+  memory                 GovernedMemory @relation(fields: [memoryId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryDeletionProof_memory_scope_fkey")
 
-  @@unique([representativeId, requestId])
-  @@unique([memoryId, representativeId])
-  @@index([representativeId, createdAt])
-  @@index([completedAt, createdAt])
+  @@unique([representativeId, requestId], map: "MemoryDeletionProof_rep_request_key")
+  @@unique([memoryId, representativeId], map: "MemoryDeletionProof_memory_rep_key")
+  @@index([representativeId, createdAt], map: "MemoryDeletionProof_rep_created_idx")
+  @@index([completedAt, createdAt], map: "MemoryDeletionProof_completed_created_idx")
 }
 
 model MemoryReconciliationRun {
@@ -4678,12 +4679,12 @@ model MemoryReconciliationRun {
   errorCode        String?
   createdAt        DateTime                   @default(now())
   updatedAt        DateTime                   @updatedAt
-  representative   Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  representative   Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryReconciliationRun_rep_fkey")
   items            MemoryReconciliationItem[]
 
-  @@unique([representativeId, idempotencyKey])
-  @@unique([id, representativeId])
-  @@index([representativeId, createdAt])
+  @@unique([representativeId, idempotencyKey], map: "MemoryReconciliationRun_rep_idempotency_key")
+  @@unique([id, representativeId], map: "MemoryReconciliationRun_id_rep_key")
+  @@index([representativeId, createdAt], map: "MemoryReconciliationRun_rep_created_idx")
   @@index([status, availableAt, leaseExpiresAt], map: "MemoryReconciliationRun_due_lease_idx")
 }
 
@@ -4705,12 +4706,12 @@ model MemoryReconciliationItem {
   lastErrorCode       String?
   createdAt           DateTime                       @default(now())
   updatedAt           DateTime                       @updatedAt
-  reconciliationRun   MemoryReconciliationRun        @relation(fields: [reconciliationRunId, representativeId], references: [id, representativeId], onDelete: Cascade)
-  representative      Representative                 @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  projectionItem      MemoryProjectionItem?          @relation(fields: [projectionItemId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  reconciliationRun   MemoryReconciliationRun        @relation(fields: [reconciliationRunId, representativeId], references: [id, representativeId], onDelete: Cascade, map: "MemoryReconciliationItem_run_scope_fkey")
+  representative      Representative                 @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryReconciliationItem_rep_fkey")
+  projectionItem      MemoryProjectionItem?          @relation(fields: [projectionItemId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryReconciliationItem_projection_scope_fkey")
 
-  @@unique([reconciliationRunId, itemKey])
-  @@index([representativeId, status, createdAt])
-  @@index([projectionItemId])
-  @@index([status, availableAt])
+  @@unique([reconciliationRunId, itemKey], map: "MemoryReconciliationItem_run_item_key")
+  @@index([representativeId, status, createdAt], map: "MemoryReconciliationItem_rep_status_idx")
+  @@index([projectionItemId], map: "MemoryReconciliationItem_projection_idx")
+  @@index([status, availableAt], map: "MemoryReconciliationItem_status_available_idx")
 }

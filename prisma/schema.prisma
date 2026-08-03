@@ -900,6 +900,152 @@ enum OpenVikingMemoryStatus {
   DELETE_FAILED
 }
 
+enum MemoryScope {
+  CONTACT_CHANNEL
+  REPRESENTATIVE
+}
+
+enum MemoryCategory {
+  CONTACT_PREFERENCE
+  CONTACT_GOAL
+  CONTACT_CONSTRAINT
+  CONTACT_CONTEXT
+  REPRESENTATIVE_RESPONSE_PATTERN
+  REPRESENTATIVE_SERVICE_PATTERN
+  REPRESENTATIVE_SAFETY_PATTERN
+  REPRESENTATIVE_ROUTING_PATTERN
+}
+
+enum MemorySourceKind {
+  AUDIENCE_MESSAGE
+  VERIFIED_CONTACT_FIELD
+  OWNER_VERIFIED_CORRECTION
+}
+
+enum MemoryCandidateStatus {
+  EXTRACTED
+  QUARANTINED
+  BLOCKED
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum MemorySafetyClass {
+  UNCLASSIFIED
+  LOW_RISK
+  REVIEW_REQUIRED
+  SENSITIVE
+  PROHIBITED
+}
+
+enum GovernedMemoryStatus {
+  ACTIVE
+  SUPPRESSED
+  SUPERSEDED
+  EXPIRED
+  ARCHIVED
+  DELETE_PENDING
+  DELETED
+}
+
+enum MemoryReviewOutcome {
+  APPROVED
+  REJECTED
+  BLOCKED
+  CORRECTION_REQUESTED
+}
+
+enum MemoryReviewerRole {
+  OWNER
+  ADMIN
+  REVIEWER
+  SYSTEM
+}
+
+enum MemoryExpiryAction {
+  ARCHIVE
+  DELETE
+}
+
+enum MemoryExtractionTrigger {
+  MANUAL
+  SHADOW
+  CHANNEL_MESSAGE
+  SCHEDULED
+}
+
+enum MemoryExtractionStatus {
+  QUEUED
+  RUNNING
+  PARTIAL
+  SUCCEEDED
+  FAILED
+  CANCELED
+}
+
+enum MemoryProjectionLane {
+  STAGING
+  RECALL
+}
+
+enum MemoryProjectionStatus {
+  DISABLED
+  QUEUED
+  PROJECTING
+  STAGED
+  ACTIVE
+  RETRYING
+  SUPERSEDED
+  DELETE_PENDING
+  DELETING
+  DELETED
+  FAILED
+  DELETE_FAILED
+}
+
+enum MemoryUseRunStatus {
+  STARTED
+  COMPLETED
+  DEGRADED
+  FAILED
+  CANCELED
+}
+
+enum MemoryUseSourceKind {
+  PUBLIC_KNOWLEDGE
+  CONTACT_MEMORY
+  REPRESENTATIVE_EXPERIENCE
+}
+
+enum MemoryReconciliationStatus {
+  QUEUED
+  RUNNING
+  PARTIAL
+  SUCCEEDED
+  FAILED
+  CANCELED
+}
+
+enum MemoryReconciliationIssueKind {
+  MISSING_REMOTE
+  ORPHAN_REMOTE
+  HASH_MISMATCH
+  STALE_ACTIVE_POINTER
+  DUPLICATE_REMOTE
+  FOREIGN_REMOTE
+  HEALTHY
+}
+
+enum MemoryReconciliationItemStatus {
+  OPEN
+  RETRYING
+  RESOLVED
+  IGNORED
+  FAILED
+}
+
 enum RepresentativeChannelKind {
   WEB
   MATRIX
@@ -1085,20 +1231,20 @@ model Owner {
 }
 
 model OwnerIdentityLink {
-  id                String                    @id @default(cuid())
-  ownerId           String
-  provider          OwnerIdentityLinkProvider
-  providerSubject   String
-  issuer            String?
-  email             String?
-  phone             String?
-  verifiedAt        DateTime?
-  emailVerifiedAt   DateTime?
-  phoneVerifiedAt   DateTime?
-  metadata          Json?
-  createdAt         DateTime                  @default(now())
-  updatedAt         DateTime                  @updatedAt
-  owner             Owner                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  id              String                    @id @default(cuid())
+  ownerId         String
+  provider        OwnerIdentityLinkProvider
+  providerSubject String
+  issuer          String?
+  email           String?
+  phone           String?
+  verifiedAt      DateTime?
+  emailVerifiedAt DateTime?
+  phoneVerifiedAt DateTime?
+  metadata        Json?
+  createdAt       DateTime                  @default(now())
+  updatedAt       DateTime                  @updatedAt
+  owner           Owner                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
 
   @@unique([provider, providerSubject])
   @@index([ownerId, provider])
@@ -1156,10 +1302,10 @@ model AudienceIdentity {
 }
 
 model Account {
-  id               String         @id @default(cuid())
-  status           AccountStatus  @default(ACTIVE)
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  id               String            @id @default(cuid())
+  status           AccountStatus     @default(ACTIVE)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
   authIdentities   AuthIdentity[]
   owner            Owner?
   audienceIdentity AudienceIdentity?
@@ -1373,7 +1519,7 @@ model UserAgentWallet {
 model WalletTransaction {
   id               String                     @id @default(cuid())
   eventGroupId     String                     @unique
-  idempotencyKey   String                     @unique
+  idempotencyKey   String
   sourceType       String
   sourceId         String?
   eventType        WalletTransactionEventType
@@ -2028,6 +2174,18 @@ model Representative {
   entitlementAccounts              ServiceEntitlementAccount[]
   servicePaymentOrders             ServicePaymentOrder[]
   walletExceptionCases             WalletExceptionCase[]
+  memoryCandidates                 MemoryCandidate[]
+  governedMemories                 GovernedMemory[]
+  governedMemoryVersions           GovernedMemoryVersion[]
+  memoryReviewDecisions            MemoryReviewDecision[]
+  memoryPolicy                     RepresentativeMemoryPolicy?
+  memoryExtractionRuns             MemoryExtractionRun[]
+  memoryProjectionItems            MemoryProjectionItem[]
+  memoryUseRuns                    MemoryUseRun[]
+  memoryUseItems                   MemoryUseItem[]
+  memoryDeletionProofs             MemoryDeletionProof[]
+  memoryReconciliationRuns         MemoryReconciliationRun[]
+  memoryReconciliationItems        MemoryReconciliationItem[]
 
   @@index([ownerId, lifecycleState, updatedAt])
   @@index([activeVersionId])
@@ -2049,8 +2207,11 @@ model RepresentativeVersion {
   generationRuns           GenerationRun[]
   delegationTasks          DelegationTask[]
   computeSessions          ComputeSession[]
+  memoryUseRuns            MemoryUseRun[]
+  memoryUseItems           MemoryUseItem[]
 
   @@unique([representativeId, versionNumber])
+  @@unique([id, representativeId])
   @@index([representativeId, publishedAt])
 }
 
@@ -2480,8 +2641,13 @@ model Contact {
   delegationTasks       DelegationTask[]
   feedbackSignals       CreatorFeedbackSignal[]
   leads                 Lead[]
+  memoryCandidates      MemoryCandidate[]
+  governedMemories      GovernedMemory[]
+  memoryExtractionRuns  MemoryExtractionRun[]
+  memoryUseRuns         MemoryUseRun[]
 
   @@unique([representativeId, telegramUserId])
+  @@unique([id, representativeId])
   @@index([audienceIdentityId, updatedAt])
   @@index([representativeId, sourceChannel, channelUserId])
 }
@@ -2544,8 +2710,12 @@ model Conversation {
   internalNotes                 ConversationInternalNote[]
   leads                         Lead[]
   usageCharges                  AgentUsageCharge[]
+  memoryUseRuns                 MemoryUseRun[]
+  memoryCandidates              MemoryCandidate[]
+  memoryExtractionRuns          MemoryExtractionRun[]
 
   @@unique([representativeId, telegramChatId, contactId])
+  @@unique([id, representativeId, contactId])
   @@index([audienceIdentityId, lastMessageAt])
   @@index([representativeId, sourceChannel, channelThreadId])
   @@index([representativeId, state, lastMessageAt])
@@ -2689,9 +2859,14 @@ model Message {
   citations               MessageCitation[]
   inputForGenerationRuns  GenerationRun[]             @relation("GenerationInputMessage")
   outputForGenerationRuns GenerationRun[]             @relation("GenerationOutputMessage")
+  memoryCandidates        MemoryCandidate[]
+  memoryExtractionRuns    MemoryExtractionRun[]
+  memoryUseRunInputs      MemoryUseRun[]              @relation("MemoryUseInputMessage")
+  memoryUseRunOutputs     MemoryUseRun[]              @relation("MemoryUseOutputMessage")
 
   @@unique([conversationId, clientMessageId])
   @@unique([channelBindingId, externalMessageId])
+  @@unique([id, conversationId])
   @@index([conversationId, createdAt])
   @@index([conversationId, deliveryStatus, createdAt])
   @@index([episodeId, createdAt])
@@ -2729,7 +2904,7 @@ model MessageAttachment {
 }
 
 model MessageCitation {
-  id                String   @id @default(cuid())
+  id                String         @id @default(cuid())
   messageId         String
   knowledgeAssetId  String?
   knowledgeRevision String?
@@ -2737,8 +2912,9 @@ model MessageCitation {
   uri               String?
   excerpt           String?
   score             Float?
-  createdAt         DateTime @default(now())
-  message           Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  createdAt         DateTime       @default(now())
+  message           Message        @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  memoryUseItem     MemoryUseItem?
 
   @@index([messageId, createdAt])
   @@index([knowledgeAssetId])
@@ -2782,7 +2958,9 @@ model GenerationRun {
   computeSessions         ComputeSession[]
   entitlementEntries      ServiceEntitlementLedgerEntry[]
   usageCharges            AgentUsageCharge[]
+  memoryUseRun            MemoryUseRun?
 
+  @@unique([id, conversationId])
   @@index([conversationId, status, queuedAt])
   @@index([episodeId, queuedAt])
   @@index([delegationTaskId, status, queuedAt])
@@ -3071,8 +3249,10 @@ model KnowledgeAssetRepresentative {
   updatedAt        DateTime                   @updatedAt
   asset            KnowledgeAsset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
   representative   Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  memoryUseItems   MemoryUseItem[]
 
   @@unique([assetId, representativeId])
+  @@unique([id, representativeId])
   @@index([representativeId, enabled, updatedAt])
   @@index([assetId, reviewStatus])
 }
@@ -4093,29 +4273,29 @@ model ConversationCommitTrace {
 }
 
 model OpenVikingMemoryRecord {
-  id                   String                  @id @default(cuid())
-  representativeId     String
-  contactId            String?
-  audienceIdentityId   String?
-  uri                  String                  @unique
-  contextType          String
-  scope                String
-  category             String
-  summary              String
-  sourceKind           String
-  status               OpenVikingMemoryStatus  @default(ACTIVE)
-  suppressedAt         DateTime?
-  deletedAt            DateTime?
-  lastDeleteAttemptAt  DateTime?
-  nextDeleteAttemptAt  DateTime?
-  deletionAttemptCount Int                     @default(0)
-  deletionError        String?
+  id                         String                 @id @default(cuid())
+  representativeId           String
+  contactId                  String?
+  audienceIdentityId         String?
+  uri                        String                 @unique
+  contextType                String
+  scope                      String
+  category                   String
+  summary                    String
+  sourceKind                 String
+  status                     OpenVikingMemoryStatus @default(ACTIVE)
+  suppressedAt               DateTime?
+  deletedAt                  DateTime?
+  lastDeleteAttemptAt        DateTime?
+  nextDeleteAttemptAt        DateTime?
+  deletionAttemptCount       Int                    @default(0)
+  deletionError              String?
   deletionRequestedByOwnerId String?
-  createdAt            DateTime                @default(now())
-  updatedAt            DateTime                @updatedAt
-  representative       Representative          @relation(fields: [representativeId], references: [id])
-  contact              Contact?                @relation(fields: [contactId], references: [id])
-  audienceIdentity     AudienceIdentity?       @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  createdAt                  DateTime               @default(now())
+  updatedAt                  DateTime               @updatedAt
+  representative             Representative         @relation(fields: [representativeId], references: [id])
+  contact                    Contact?               @relation(fields: [contactId], references: [id])
+  audienceIdentity           AudienceIdentity?      @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
 
   @@index([representativeId, createdAt])
   @@index([representativeId, contactId, createdAt])
@@ -4123,4 +4303,414 @@ model OpenVikingMemoryRecord {
   @@index([audienceIdentityId, createdAt])
   @@index([status, updatedAt])
   @@index([status, nextDeleteAttemptAt, lastDeleteAttemptAt], map: "OVMemory_status_next_attempt_lease_idx")
+}
+
+model MemoryCandidate {
+  id                   String                     @id @default(cuid())
+  representativeId     String
+  extractionRunId      String?
+  contactId            String?
+  scope                MemoryScope
+  scopeChannel         RepresentativeChannelKind?
+  originChannel        RepresentativeChannelKind
+  category             MemoryCategory
+  sourceKind           MemorySourceKind
+  safeText             String?
+  summary              String?
+  contentHash          String?
+  contentPurgedAt      DateTime?
+  dedupeKey            String
+  status               MemoryCandidateStatus      @default(EXTRACTED)
+  safetyClass          MemorySafetyClass          @default(UNCLASSIFIED)
+  safetyReasonCode     String?
+  extractionReasonCode String
+  sourceContactId      String
+  sourceConversationId String
+  sourceMessageId      String
+  deidentifiedAt       DateTime?
+  expiresAt            DateTime?
+  reviewedAt           DateTime?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  representative       Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  extractionRun        MemoryExtractionRun?       @relation(fields: [extractionRunId, representativeId, sourceContactId, sourceConversationId], references: [id, representativeId, contactId, sourceConversationId], onDelete: Restrict)
+  contact              Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  sourceConversation   Conversation               @relation(fields: [sourceConversationId, representativeId, sourceContactId], references: [id, representativeId, contactId], onDelete: Restrict)
+  sourceMessage        Message                    @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict)
+  reviewDecisions      MemoryReviewDecision[]
+  version              GovernedMemoryVersion?
+
+  @@unique([representativeId, dedupeKey])
+  @@unique([id, representativeId])
+  @@unique([id, representativeId, scope])
+  @@index([representativeId, status, createdAt])
+  @@index([representativeId, contactId, scopeChannel, status, createdAt], map: "MemoryCandidate_contact_scope_status_idx")
+  @@index([sourceConversationId, sourceMessageId, createdAt], map: "MemoryCandidate_source_message_idx")
+  @@index([extractionRunId, createdAt])
+  @@index([expiresAt, status])
+}
+
+model GovernedMemory {
+  id                String                     @id @default(cuid())
+  representativeId  String
+  contactId         String?
+  scope             MemoryScope
+  sourceChannel     RepresentativeChannelKind?
+  category          MemoryCategory
+  status            GovernedMemoryStatus       @default(SUPPRESSED)
+  currentVersionId  String?                    @unique
+  recallDisabledAt  DateTime?                  @default(now())
+  expiresAt         DateTime?
+  suppressedAt      DateTime?
+  supersededAt      DateTime?
+  archivedAt        DateTime?
+  deleteRequestedAt DateTime?
+  deletedAt         DateTime?
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
+  representative    Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  contact           Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  currentVersion    GovernedMemoryVersion?     @relation("GovernedMemoryCurrentVersion", fields: [currentVersionId, id], references: [id, memoryId], onDelete: Restrict)
+  versions          GovernedMemoryVersion[]    @relation("GovernedMemoryVersions")
+  reviewDecisions   MemoryReviewDecision[]
+  deletionProof     MemoryDeletionProof?
+
+  @@unique([id, representativeId])
+  @@unique([id, representativeId, scope])
+  @@unique([currentVersionId, id])
+  @@index([representativeId, status, updatedAt])
+  @@index([representativeId, contactId, sourceChannel, status, updatedAt], map: "GovernedMemory_contact_scope_status_idx")
+  @@index([status, recallDisabledAt, expiresAt])
+  @@index([status, deleteRequestedAt])
+}
+
+model GovernedMemoryVersion {
+  id                     String                  @id @default(cuid())
+  memoryId               String
+  representativeId       String
+  scope                  MemoryScope
+  sourceCandidateId      String?                 @unique
+  supersedesVersionId    String?
+  versionNumber          Int
+  safeText               String?
+  summary                String?
+  contentHash            String
+  deidentifiedAt         DateTime?
+  deidentificationMethod String?
+  purgedAt               DateTime?
+  correctionReasonCode   String?
+  createdByActorId       String
+  createdAt              DateTime                @default(now())
+  memory                 GovernedMemory          @relation("GovernedMemoryVersions", fields: [memoryId, representativeId, scope], references: [id, representativeId, scope], onDelete: Restrict)
+  sourceCandidate        MemoryCandidate?        @relation(fields: [sourceCandidateId, representativeId, scope], references: [id, representativeId, scope], onDelete: Restrict)
+  supersedesVersion      GovernedMemoryVersion?  @relation("GovernedMemoryVersionChain", fields: [supersedesVersionId, memoryId], references: [id, memoryId], onDelete: Restrict)
+  supersededByVersions   GovernedMemoryVersion[] @relation("GovernedMemoryVersionChain")
+  currentForMemory       GovernedMemory?         @relation("GovernedMemoryCurrentVersion")
+  reviewDecisions        MemoryReviewDecision[]
+  projectionItems        MemoryProjectionItem[]
+  useItems               MemoryUseItem[]
+  representative         Representative          @relation(fields: [representativeId], references: [id])
+
+  @@unique([sourceCandidateId, representativeId, scope])
+  @@unique([memoryId, versionNumber])
+  @@unique([id, memoryId])
+  @@unique([id, representativeId])
+  @@unique([id, representativeId, scope])
+  @@unique([id, memoryId, representativeId])
+  @@index([memoryId, contentHash])
+  @@index([representativeId, createdAt])
+  @@index([supersedesVersionId])
+}
+
+model MemoryReviewDecision {
+  id               String                 @id @default(cuid())
+  representativeId String
+  candidateId      String?
+  memoryId         String?
+  resultVersionId  String?
+  outcome          MemoryReviewOutcome
+  reviewerRole     MemoryReviewerRole
+  reviewerActorId  String
+  reasonCode       String
+  note             String?
+  createdAt        DateTime               @default(now())
+  representative   Representative         @relation(fields: [representativeId], references: [id], onDelete: Restrict)
+  candidate        MemoryCandidate?       @relation(fields: [candidateId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  memory           GovernedMemory?        @relation(fields: [memoryId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  resultVersion    GovernedMemoryVersion? @relation(fields: [resultVersionId, memoryId, representativeId], references: [id, memoryId, representativeId], onDelete: Restrict)
+
+  @@index([representativeId, createdAt])
+  @@index([candidateId, createdAt])
+  @@index([memoryId, createdAt])
+  @@index([resultVersionId])
+}
+
+model RepresentativeMemoryPolicy {
+  representativeId                String             @id
+  namespaceKey                    String             @unique
+  longTermMemoryEnabled           Boolean            @default(false)
+  contactMemoryEnabled            Boolean            @default(false)
+  representativeExperienceEnabled Boolean            @default(false)
+  autoExtract                     Boolean            @default(false)
+  webRecallEnabled                Boolean            @default(false)
+  webExtractEnabled               Boolean            @default(false)
+  matrixRecallEnabled             Boolean            @default(false)
+  matrixExtractEnabled            Boolean            @default(false)
+  telegramRecallEnabled           Boolean            @default(false)
+  telegramExtractEnabled          Boolean            @default(false)
+  retentionDays                   Int                @default(30)
+  expiryAction                    MemoryExpiryAction @default(ARCHIVE)
+  provider                        String             @default("openviking")
+  managedAgentId                  String?
+  managedTargetUri                String?
+  recallLimit                     Int                @default(6)
+  recallScoreThreshold            Float              @default(0.01)
+  revision                        Int                @default(0)
+  createdAt                       DateTime           @default(now())
+  updatedAt                       DateTime           @updatedAt
+  representative                  Representative     @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+
+  @@index([longTermMemoryEnabled, updatedAt])
+}
+
+model MemoryExtractionRun {
+  id                   String                    @id @default(cuid())
+  representativeId     String
+  contactId            String?
+  sourceChannel        RepresentativeChannelKind
+  sourceConversationId String?
+  sourceMessageId      String?
+  trigger              MemoryExtractionTrigger
+  status               MemoryExtractionStatus    @default(QUEUED)
+  idempotencyKey       String
+  candidateCount       Int                       @default(0)
+  acceptedCount        Int                       @default(0)
+  rejectedCount        Int                       @default(0)
+  quarantinedCount     Int                       @default(0)
+  reasonCounts         Json?
+  attemptCount         Int                       @default(0)
+  availableAt          DateTime                  @default(now())
+  leaseToken           String?
+  leaseExpiresAt       DateTime?
+  startedAt            DateTime?
+  finishedAt           DateTime?
+  errorCode            String?
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+  representative       Representative            @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  contact              Contact?                  @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  sourceConversation   Conversation?             @relation(fields: [sourceConversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict)
+  sourceMessage        Message?                  @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict)
+  candidates           MemoryCandidate[]
+
+  @@unique([representativeId, idempotencyKey])
+  @@unique([id, representativeId])
+  @@unique([id, representativeId, contactId, sourceConversationId])
+  @@index([representativeId, status, createdAt])
+  @@index([representativeId, contactId, sourceChannel, createdAt], map: "MemoryExtractionRun_contact_channel_idx")
+  @@index([status, availableAt, leaseExpiresAt], map: "MemoryExtractionRun_due_lease_idx")
+  @@index([sourceMessageId])
+}
+
+model MemoryProjectionItem {
+  id                  String                     @id @default(cuid())
+  representativeId    String
+  memoryId            String
+  memoryVersionId     String
+  provider            String                     @default("openviking")
+  lane                MemoryProjectionLane
+  status              MemoryProjectionStatus     @default(DISABLED)
+  contentHash         String
+  idempotencyKey      String
+  remoteObjectId      String?
+  remoteUri           String?
+  attemptCount        Int                        @default(0)
+  availableAt         DateTime                   @default(now())
+  leaseToken          String?
+  leaseExpiresAt      DateTime?
+  projectedAt         DateTime?
+  deleteRequestedAt   DateTime?
+  deletedAt           DateTime?
+  lastErrorCode       String?
+  createdAt           DateTime                   @default(now())
+  updatedAt           DateTime                   @updatedAt
+  representative      Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  memoryVersion       GovernedMemoryVersion      @relation(fields: [memoryVersionId, memoryId, representativeId], references: [id, memoryId, representativeId], onDelete: Restrict)
+  useItems            MemoryUseItem[]
+  reconciliationItems MemoryReconciliationItem[]
+
+  @@unique([representativeId, idempotencyKey])
+  @@unique([id, representativeId])
+  @@unique([id, representativeId, memoryVersionId])
+  @@unique([provider, lane, memoryVersionId])
+  @@index([representativeId, lane, status, updatedAt])
+  @@index([memoryId, status, updatedAt])
+  @@index([status, availableAt, leaseExpiresAt], map: "MemoryProjectionItem_due_lease_idx")
+  @@index([status, deleteRequestedAt])
+}
+
+model MemoryUseRun {
+  id                      String                    @id @default(cuid())
+  representativeId        String
+  conversationId          String
+  contactId               String
+  sourceChannel           RepresentativeChannelKind
+  representativeVersionId String
+  inputMessageId          String
+  outputMessageId         String?
+  generationRunId         String?
+  idempotencyKey          String
+  status                  MemoryUseRunStatus        @default(STARTED)
+  searchedCount           Int                       @default(0)
+  scopePassedCount        Int                       @default(0)
+  safetyPassedCount       Int                       @default(0)
+  injectedCount           Int                       @default(0)
+  displayedCount          Int                       @default(0)
+  startedAt               DateTime                  @default(now())
+  completedAt             DateTime?
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  representative          Representative            @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  contact                 Contact                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  conversation            Conversation              @relation(fields: [conversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict)
+  representativeVersion   RepresentativeVersion     @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  inputMessage            Message                   @relation("MemoryUseInputMessage", fields: [inputMessageId, conversationId], references: [id, conversationId], onDelete: Restrict)
+  outputMessage           Message?                  @relation("MemoryUseOutputMessage", fields: [outputMessageId, conversationId], references: [id, conversationId], onDelete: Restrict)
+  generationRun           GenerationRun?            @relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Restrict)
+  items                   MemoryUseItem[]
+
+  @@unique([representativeId, idempotencyKey])
+  @@unique([id, representativeId])
+  @@unique([generationRunId, conversationId])
+  @@index([representativeId, createdAt])
+  @@index([representativeId, contactId, sourceChannel, createdAt], map: "MemoryUseRun_contact_channel_idx")
+  @@index([conversationId, createdAt])
+  @@index([inputMessageId])
+  @@index([outputMessageId])
+  @@index([status, startedAt])
+}
+
+model MemoryUseItem {
+  id                      String                        @id @default(cuid())
+  useRunId                String
+  representativeId        String
+  itemKey                 String
+  sourceKind              MemoryUseSourceKind
+  memoryScope             MemoryScope?
+  memoryVersionId         String?
+  projectionItemId        String?
+  knowledgeBindingId      String?
+  representativeVersionId String?
+  displayedCitationId     String?                       @unique
+  contentHash             String
+  searchRank              Int?
+  searchScore             Float?
+  searchedAt              DateTime?
+  scopeCheckedAt          DateTime?
+  scopePassedAt           DateTime?
+  safetyCheckedAt         DateTime?
+  safetyPassedAt          DateTime?
+  injectedAt              DateTime?
+  displayedAt             DateTime?
+  rejectionReasonCode     String?
+  createdAt               DateTime                      @default(now())
+  updatedAt               DateTime                      @updatedAt
+  useRun                  MemoryUseRun                  @relation(fields: [useRunId, representativeId], references: [id, representativeId], onDelete: Cascade)
+  representative          Representative                @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  memoryVersion           GovernedMemoryVersion?        @relation(fields: [memoryVersionId, representativeId, memoryScope], references: [id, representativeId, scope], onDelete: Restrict)
+  projectionItem          MemoryProjectionItem?         @relation(fields: [projectionItemId, representativeId, memoryVersionId], references: [id, representativeId, memoryVersionId], onDelete: Restrict)
+  knowledgeBinding        KnowledgeAssetRepresentative? @relation(fields: [knowledgeBindingId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  representativeVersion   RepresentativeVersion?        @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict)
+  displayedCitation       MessageCitation?              @relation(fields: [displayedCitationId], references: [id], onDelete: Restrict)
+
+  @@unique([useRunId, itemKey])
+  @@index([memoryVersionId, createdAt])
+  @@index([knowledgeBindingId, representativeVersionId, createdAt], map: "MemoryUseItem_public_knowledge_idx")
+  @@index([projectionItemId])
+  @@index([useRunId, injectedAt])
+  @@index([useRunId, displayedAt])
+}
+
+model MemoryDeletionProof {
+  id                     String         @id @default(cuid())
+  representativeId       String
+  memoryId               String         @unique
+  requestId              String
+  requestedByActorId     String
+  reasonCode             String
+  contentHash            String
+  recallBlockedAt        DateTime
+  localPurgeCompletedAt  DateTime?
+  remotePurgeCompletedAt DateTime?
+  providerReceiptHash    String?
+  proofHash              String?        @unique
+  completedAt            DateTime?
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
+  representative         Representative @relation(fields: [representativeId], references: [id], onDelete: Restrict)
+  memory                 GovernedMemory @relation(fields: [memoryId, representativeId], references: [id, representativeId], onDelete: Restrict)
+
+  @@unique([representativeId, requestId])
+  @@unique([memoryId, representativeId])
+  @@index([representativeId, createdAt])
+  @@index([completedAt, createdAt])
+}
+
+model MemoryReconciliationRun {
+  id               String                     @id @default(cuid())
+  representativeId String
+  provider         String                     @default("openviking")
+  status           MemoryReconciliationStatus @default(QUEUED)
+  idempotencyKey   String
+  asOf             DateTime                   @default(now())
+  expectedCount    Int                        @default(0)
+  observedCount    Int                        @default(0)
+  matchedCount     Int                        @default(0)
+  issueCount       Int                        @default(0)
+  resolvedCount    Int                        @default(0)
+  cursor           String?
+  attemptCount     Int                        @default(0)
+  availableAt      DateTime                   @default(now())
+  leaseToken       String?
+  leaseExpiresAt   DateTime?
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  errorCode        String?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  representative   Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  items            MemoryReconciliationItem[]
+
+  @@unique([representativeId, idempotencyKey])
+  @@unique([id, representativeId])
+  @@index([representativeId, createdAt])
+  @@index([status, availableAt, leaseExpiresAt], map: "MemoryReconciliationRun_due_lease_idx")
+}
+
+model MemoryReconciliationItem {
+  id                  String                         @id @default(cuid())
+  reconciliationRunId String
+  representativeId    String
+  projectionItemId    String?
+  itemKey             String
+  issueKind           MemoryReconciliationIssueKind
+  status              MemoryReconciliationItemStatus @default(OPEN)
+  expectedContentHash String?
+  observedContentHash String?
+  remoteObjectIdHash  String?
+  reasonCode          String?
+  attemptCount        Int                            @default(0)
+  availableAt         DateTime                       @default(now())
+  resolvedAt          DateTime?
+  lastErrorCode       String?
+  createdAt           DateTime                       @default(now())
+  updatedAt           DateTime                       @updatedAt
+  reconciliationRun   MemoryReconciliationRun        @relation(fields: [reconciliationRunId, representativeId], references: [id, representativeId], onDelete: Cascade)
+  representative      Representative                 @relation(fields: [representativeId], references: [id], onDelete: Cascade)
+  projectionItem      MemoryProjectionItem?          @relation(fields: [projectionItemId, representativeId], references: [id, representativeId], onDelete: Restrict)
+
+  @@unique([reconciliationRunId, itemKey])
+  @@index([representativeId, status, createdAt])
+  @@index([projectionItemId])
+  @@index([status, availableAt])
 }

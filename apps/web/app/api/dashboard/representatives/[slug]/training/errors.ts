@@ -16,6 +16,17 @@ type PublicTrainingError = {
   status: 400 | 404 | 409 | 422;
 };
 
+export const CREATOR_TRAINING_RETIRED_ERROR = {
+  error: "Legacy representative development writes are retired and no longer accepted.",
+  code: "CREATOR_TRAINING_RETIRED",
+} as const;
+
+export function creatorTrainingWriteRetiredResponse() {
+  return withPrivateNoStore(
+    NextResponse.json(CREATOR_TRAINING_RETIRED_ERROR, { status: 410 }),
+  );
+}
+
 export function creatorTrainingApiErrorResponse(
   error: unknown,
   fallbackMessage: string,

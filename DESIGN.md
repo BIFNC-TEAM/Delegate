@@ -148,7 +148,7 @@
   - **Owner dashboard:** operational, dense, navigable
 - Reuse the same palette and typography across all three, but shift density and layout.
 - Use teal as the default "trusted/live system" color and indigo for decisions, automation, and secondary emphasis.
-- Dashboard v2 top-level information architecture is fixed to: Overview, Knowledge Library, Digital Representatives, Inbox, Approvals, Skills, Wallet, Representative Development（养成）, Analytics, Channels, Audit Logs, and Settings.
+- Dashboard v2 top-level information architecture is fixed to: Overview, Knowledge Library, Digital Representatives, Inbox, Approvals, Skills, Wallet, Memory System（记忆系统）, Analytics, Channels, Audit Logs, and Settings.
 - Representative-specific identity, knowledge bindings, FAQ, service scope, safety boundaries, pricing, publishing, and runtime data live under Digital Representatives rather than becoming top-level dashboard tabs.
 - General compute is exposed through Approvals and Skills/MCP surfaces; artifacts and deliverables attach to the business object that produced them instead of becoming a single oversized control-plane page.
 
@@ -189,6 +189,22 @@
 - **Empty and failure states:** An empty queue, filtered-empty queue, failed generation, and disconnected channel each provide a recovery action and enough vertical space to remain legible.
 - **Composer:** Human reply is an inline composer, enabled only while a named Operator owns the conversation. Internal notes use a separate team-only input in the inspector.
 - **Realtime:** Queue changes arrive without a page reload. Realtime state must preserve the current selection and must not erase unsent operator text.
+
+## Memory System Pattern
+- **Scope:** Memory System manages only governed Contact Memory and Representative Experience. It is not another public-knowledge editor, training console, or raw OpenViking browser.
+- **Knowledge boundary:** Public FAQs, materials, policies, files, URLs, and authored text belong to Knowledge Library. Memory System may show a compact public-knowledge status and a direct jump to Knowledge Library, but it must not duplicate knowledge import, editing, binding, publishing, or deletion controls.
+- **Primary hierarchy:** Lead with whether governed memory is enabled and healthy, then show Contact Memory, Representative Experience, Candidates, and Recall & Sync as distinct operational destinations.
+- **Contact Memory:** Every P0 record is scoped to one representative, one contact, and one source channel. A different representative, contact, or channel must never inherit it. Cross-channel continuity is a P2 capability and requires explicit contact consent in addition to verified identity linkage.
+- **Representative Experience:** Experience captures approved, non-personal patterns that improve one representative across contacts. It must never contain contact-specific facts, payment truth, credentials, private notes, or raw conversation transcripts, and it never crosses representative boundaries.
+- **Candidate governance:** New memory and experience enter as candidates with a visible safety class and reason. Only approved, active candidates may be projected for recall; review-required, denied, withdrawn, deleting, failed, and deleted records remain non-recallable.
+- **Recall trace:** Present a human-readable staged trace—searched, scope checked, safety checked, selected, and used—without exposing raw queries, internal URIs, model scores, prompts, or provider diagnostics. Only context actually injected into a reply may be counted as used.
+- **Draft boundary:** Draft knowledge, draft representative configuration, and unapproved memory candidates never affect public recall. Public knowledge continues to resolve from the active published representative version through Knowledge Library.
+- **Withdrawal and deletion:** Withdrawal blocks new recall immediately. Under healthy service conditions, permanent deletion converges locally and remotely within 60 seconds; remote failure keeps the record blocked and exposes a retryable operational state.
+- **Sync truth:** Postgres is the source of truth and OpenViking is a rebuildable projection. Sync UI distinguishes queued, running, partial success, retrying, reconciled, and failed states; retries are idempotent, newer active versions fence older work, and reconciliation identifies missing, stale, duplicate, or foreign records.
+- **Permissions:** Read, review, configuration, sync, reconciliation, withdrawal, and deletion are separate capabilities. Unauthorized users receive no raw trace or provider data, and all private responses remain non-cacheable.
+- **Public disclosure:** Web, Telegram, and Matrix explain whether governed memory is enabled, that chats do not automatically become public knowledge, and that P0 retained contact context is scoped to the current representative, contact, and channel. Internal implementation vocabulary stays out of public surfaces.
+- **Status language:** Color supports but never replaces a textual state, reason, and recovery action. Teal indicates active/trusted, indigo indicates review or synchronization, amber indicates retryable attention, red indicates blocked failure, and neutral gray indicates withdrawn or deleted history.
+- **Responsive behavior:** Desktop may use an operational list plus detail rail. Narrow screens keep scope, safety state, last use, and destructive actions visible; details become a full-width sheet and destructive actions retain explicit confirmation.
 
 ## Wallet & Billing Pattern
 - **Scope:** Wallet is a workspace money view first. It opens on all owned representatives and narrows by representative, currency, date, and event type without changing the active representative used to authorize the Dashboard session.
@@ -246,3 +262,4 @@
 | 2026-07-17 | Defined Conversations / Pending / Leads and Chat-first public runtime | Separates identity, work, and opportunity state; makes operator authorship, durable async chat, public citations, and one strict availability gate part of the product contract. |
 | 2026-07-23 | Defined workspace Wallet & Billing | Separates explainable money events from immutable ledger movements, enforces single-currency totals, makes payout prerequisites explicit, and establishes traceable desktop/mobile behavior for owner financial operations. |
 | 2026-07-28 | Defined truthful Owner Settings | Limits Settings to real Owner profile, Logto security truth, and Dashboard reminder preferences; establishes independent saves, owner-scoped audit, idempotency, and honest unavailable states. |
+| 2026-08-03 | Replaced Representative Development with Memory System | Separates governed Contact Memory and Representative Experience from public knowledge, which remains owned by Knowledge Library; establishes isolation, candidate safety, staged recall, 60-second deletion, reconciliation, permissions, and public-disclosure boundaries. |

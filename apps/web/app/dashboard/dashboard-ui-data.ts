@@ -72,7 +72,7 @@ export const dashboardNavigation: Array<{
     items: [
       { id: "skills", index: "05", label: text("技能 / 工具", "Skills & Tools"), shortLabel: text("技能", "Skills") },
       { id: "wallet", index: "06", label: text("钱包 / 账单", "Wallet & Billing"), shortLabel: text("钱包", "Wallet") },
-      { id: "memory", index: "07", label: text("养成", "Representative Development"), shortLabel: text("养成", "Development") },
+      { id: "memory", index: "07", label: text("记忆系统", "Memory System"), shortLabel: text("记忆", "Memory") },
       { id: "analytics", index: "08", label: text("数据分析", "Analytics"), shortLabel: text("分析", "Analytics") },
       { id: "channels", index: "09", label: text("发布渠道", "Channels"), shortLabel: text("渠道", "Channels") },
     ],

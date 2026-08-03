@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 
 import {
-  buildCreatorTrainingSuggestions,
   listCreatorTrainingSuggestions,
   type CreatorTrainingSuggestionStatus,
 } from "@delegate/web-data";
@@ -10,7 +9,10 @@ import {
   authorizeDashboardRepresentativeAccess,
 } from "../../../../auth";
 import { withPrivateNoStore } from "../../../../../private-response";
-import { creatorTrainingApiErrorResponse } from "../errors";
+import {
+  creatorTrainingApiErrorResponse,
+  creatorTrainingWriteRetiredResponse,
+} from "../errors";
 import { toDashboardDevelopmentSuggestionDto } from "../safe-dto";
 
 
@@ -72,25 +74,5 @@ export async function POST(
     return withPrivateNoStore(accessResponse);
   }
 
-  try {
-    const suggestions = await buildCreatorTrainingSuggestions(slug);
-    return withPrivateNoStore(
-      NextResponse.json(
-        {
-          suggestions: suggestions.map(toDashboardDevelopmentSuggestionDto),
-        },
-        { status: 201 },
-      ),
-    );
-  } catch (error) {
-    const authResponse = dashboardAuthErrorResponse(error);
-    if (authResponse) {
-      return withPrivateNoStore(authResponse);
-    }
-
-    return creatorTrainingApiErrorResponse(
-      error,
-      "Failed to build development suggestions.",
-    );
-  }
+  return creatorTrainingWriteRetiredResponse();
 }

@@ -29,7 +29,7 @@ import { DashboardAuditLogs } from "./dashboard-audit-logs";
 import { DashboardChannels } from "./dashboard-channels";
 import { DashboardWallet } from "./dashboard-wallet";
 import { DashboardSettings } from "./dashboard-settings";
-import { DashboardTraining } from "./dashboard-training";
+import { DashboardMemory } from "./dashboard-memory";
 import type { SettingsSection } from "./settings-section-navigation";
 
 const channelControlPlaneViews = ["channels", "audit"] as const;
@@ -391,7 +391,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                 }))}
               />
             ) : props.activeView === "memory" ? (
-              <DashboardTraining
+              <DashboardMemory
                 locale={props.locale}
                 representativeSlug={props.activeSlug}
               />
@@ -514,7 +514,7 @@ function DashboardOverviewFramework({
     ["FAQ", "36", zh ? "31 已批准" : "31 approved"],
     [zh ? "服务范围" : "Service scopes", "12", zh ? "9 已发布" : "9 published"],
     [zh ? "技能" : "Skills", "08", zh ? "6 已启用" : "6 enabled"],
-    [zh ? "养成修订" : "Development revisions", "42", zh ? "可审核历史" : "Reviewable history"],
+    [zh ? "记忆系统" : "Memory System", "—", zh ? "打开记忆系统查看实时状态" : "Open Memory System for live status"],
     [zh ? "待处理 Inbox" : "Open inbox", "12", zh ? "4 需接手" : "4 handoffs"],
     [zh ? "未发布草稿" : "Unpublished drafts", "03", zh ? "需要审核" : "Needs review"],
   ];

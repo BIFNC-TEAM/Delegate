@@ -1,0 +1,105 @@
+# 记忆系统开发计划
+
+状态：执行中
+
+日期：2026-08-03
+
+取代：[代表养成模块开发计划](./representative-development-plan.md)
+
+## 1. 产品边界
+
+Dashboard 顶层模块统一命名为“记忆系统 / Memory System”，保留 `view=memory` URL key。
+
+记忆系统只管理：
+
+- 联系人记忆：P0 严格限定为当前代表、当前联系人、当前来源渠道。
+- 代表经验：必须去标识化并经人工独立审核，作用于当前代表的访客。
+
+公开知识仍由知识库负责创建、编辑、绑定、发布和删除。记忆系统只提供知识库跳转、只读投影健康和实际使用来源分类，不复制公开知识工作流。
+
+原始聊天、Owner 私有备注、Compute/Tool 原始产物、凭据、支付金额、余额、退款和权益事实不得直接进入长期记忆。交易与授权始终实时读取 PostgreSQL。
+
+## 2. 权威数据与投影
+
+PostgreSQL 保存候选、不可变版本、审核、权限、保留、使用记录、清理证明和投影账本，是唯一业务真相。OpenViking 只保存可重建的检索投影，远端记录不能绕过 PostgreSQL allowlist 获得召回权。
+
+```text
+会话消息 ID
+  -> 来源白名单
+  -> 安全分类/去标识化
+  -> 候选
+  -> Owner/Reviewer 审核
+  -> PostgreSQL 记忆与不可变版本
+  -> 逐项 OpenViking 投影
+  -> 搜索 -> 作用域检查 -> 安全检查 -> 模型注入 -> 来源展示
+```
+
+## 3. 生命周期
+
+```text
+候选：
+EXTRACTED -> QUARANTINED | BLOCKED | PENDING_REVIEW
+PENDING_REVIEW -> APPROVED | REJECTED | EXPIRED
+
+记忆：
+ACTIVE <-> SUPPRESSED
+ACTIVE -> SUPERSEDED | EXPIRED | ARCHIVED
+SUPPRESSED | EXPIRED | ARCHIVED -> DELETE_PENDING -> DELETED
+```
+
+远端 `DELETE_FAILED` 是投影任务状态，不会让业务记忆恢复召回。纠正创建新版本并在同一事务内使旧版本停止召回。删除先立即设置本地召回阻断，再异步物理清理，并保存不含正文的删除证明。
+
+## 4. 开发顺序
+
+### T0：旧养成退役
+
+- 导航和页面切换为记忆系统。
+- 页面停止调用 `/training/*`，公开知识只跳知识库。
+- 旧写接口鉴权后返回 `410 CREATOR_TRAINING_RETIRED`。
+- 保留旧数据和已排队 workflow 的只读兼容期，不把旧建议迁移成记忆。
+- 移除旧养成假指标，数据库不可用时展示诚实不可用态。
+
+### T1：权威模型
+
+新增候选、记忆、不可变版本、审核决定、代表记忆策略、提取运行、投影项、使用运行/项、删除证明和库存对账模型。候选只保存安全摘要与来源消息引用，不复制原始聊天。
+
+### T2：遗留隔离与读取栅栏
+
+无法证明经过审核的历史 ACTIVE 记录全部隔离或停用。召回必须同时匹配代表、联系人、P0 来源渠道、当前有效版本、审核状态、到期状态和有效投影，并在模型注入前二次复核。
+
+### T3：安全分类与候选提取
+
+Web、Matrix、Telegram 使用同一提取命令和稳定原因码。确定性规则先阻断凭据、PII、支付/权益、内部备注、Compute/Tool 输出和持久化提示注入；分类失败或超时一律隔离。P0 自动提取默认关闭，Shadow/手动提取也只能创建候选。
+
+### T4：审核、权限与治理动作
+
+支持批准、拒绝、阻止、纠正、停用、归档、恢复、永久删除和清理重试。Owner/Admin 完整管理；Reviewer 仅在显式权限内审核；Operator 只能在当前 Inbox 服务上下文读取最小安全摘要；系统永远不能批准代表经验。
+
+### T5：逐项投影、清理与对账
+
+每个版本使用 `provider + versionId + contentHash` 幂等投影。支持 staging、逐项状态、部分失败、租约、退避、并发 fence 和逐项重试。定期对账 OpenViking 与 PostgreSQL 的缺失、孤儿、哈希漂移和旧 active pointer。
+
+### T6：真实使用记录
+
+一次提问对应一个 UseRun，每个候选分别记录搜索命中、作用域/安全通过、模型实际注入和最终来源展示。只有成功回复中实际进入 Prompt 的内容计为“用于回答”；展示来源必须是注入集合的子集，并可通过消息 ID 跳转 Inbox。
+
+### T7：业务 API 与页面
+
+新增 `/memory/overview`、`/entries`、`/usage`、`/operations`、`/reconciliation` 和 `/settings` 业务 API，统一使用严格校验、cursor + asOf 分页、乐观并发、幂等键、稳定错误码及 `private, no-store`。页面提供总览、记忆条目、使用记录、提取与同步四个 URL 深链子页面。
+
+### T8：P0 门禁、灰度与旧代码清理
+
+通过完整隔离、安全、草稿、纠正、删除、同步、对账、权限和公开披露测试后，按 Shadow -> Web 内部 -> 单渠道小流量 -> 三渠道分档灰度。稳定一个发布周期且确认无调用后，归档/导出旧数据并删除旧 `/training/*`、Creator Training 服务、测试和 Prisma 模型。
+
+## 5. 设置与分期
+
+数字代表配置中的 Memory 拆为基础策略、渠道能力、保留策略和高级设置。Agent ID 与 Target URI 由服务端生成并锁定。启用长期记忆前必须明确配置保留期限。
+
+P1 开放联系人自助查看、纠正、删除、导出、完整审核队列和批量治理。P2 才允许经明确同意的跨渠道共享、白名单低风险字段自动批准及多 Provider 架构。
+
+## 6. 回滚原则
+
+- 应用回滚不得重新开启自动采集。
+- 遗留隔离、`recallDisabledAt` 和删除证明不可回滚。
+- OpenViking 投影必须能够从 PostgreSQL 版本重建。
+- Provider 不可用时聊天可降级为无长期记忆回答，但不得伪造使用记录或来源。

@@ -70,10 +70,10 @@ describe("Memory System authoritative schema", () => {
     expect(candidate).toContain("category             MemoryCategory");
     expect(candidate).toContain("sourceKind           MemorySourceKind");
     expect(candidate).toContain(
-      "@relation(fields: [sourceConversationId, representativeId, sourceContactId], references: [id, representativeId, contactId], onDelete: Restrict)",
+      "@relation(fields: [sourceConversationId, representativeId, sourceContactId], references: [id, representativeId, contactId], onDelete: Restrict, map: \"MemoryCandidate_conversation_scope_fkey\")",
     );
     expect(candidate).toContain(
-      "@relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict)",
+      "@relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: \"MemoryCandidate_message_scope_fkey\")",
     );
     expect(candidate).not.toMatch(
       /\b(rawText|rawTranscript|queryText|prompt|credential|paymentAmount|balance|ownerNote|toolOutput|computeOutput)\b/u,
@@ -115,7 +115,9 @@ describe("Memory System authoritative schema", () => {
     expect(version).toContain("deidentificationMethod");
     expect(version).toContain("purgedAt");
     expect(version).not.toContain("@@unique([memoryId, contentHash])");
-    expect(version).toContain("@@index([memoryId, contentHash])");
+    expect(version).toContain(
+      '@@index([memoryId, contentHash], map: "GovernedMemoryVersion_memory_hash_idx")',
+    );
     expect(migration).toContain('CONSTRAINT "GovernedMemoryVersion_deidentification_check"');
     expect(migration).toContain('CONSTRAINT = \'GovernedMemoryVersion_contact_scope_binding_check\'');
     expect(migration).toContain('CONSTRAINT = \'GovernedMemory_locked_coordinates_check\'');
@@ -137,11 +139,11 @@ describe("Memory System authoritative schema", () => {
 
     expect(extraction).toContain("sourceConversationId");
     expect(extraction).toContain(
-      "@relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict)",
+      "@relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: \"MemoryExtractionRun_message_scope_fkey\")",
     );
     expect(useRun).toContain("representativeVersionId");
     expect(useRun).toContain(
-      "@relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Restrict)",
+      "@relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Restrict, map: \"MemoryUseRun_generation_fkey\")",
     );
     expect(migration).toContain("'MemoryExtractionRun_source_channel_check'");
     expect(migration).toContain("'MemoryUseRun_source_channel_check'");

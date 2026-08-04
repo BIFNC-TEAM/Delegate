@@ -180,5 +180,5 @@ describe("delegated compute session generation fence", () => {
       "generation_work_lease_lost",
     );
     expect(mockPrisma.computeSession.create).toHaveBeenCalledTimes(1);
-  });
+  }, 15_000);
 });

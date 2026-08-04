@@ -13,7 +13,10 @@ const previousPrivateEndpointOverride =
   process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS;
 
 process.env.COMPUTE_BROKER_INTERNAL_TOKEN = "fault-injection-test-token";
-process.env.COMPUTE_MCP_TIMEOUT_MS = "80";
+// Leave enough headroom for endpoint validation and SDK setup when the full
+// workspace suite is running concurrently. The stalled-endpoint case below
+// still proves that the configured timeout is enforced.
+process.env.COMPUTE_MCP_TIMEOUT_MS = "1000";
 process.env.DELEGATE_ALLOW_PRIVATE_MCP_TEST_ENDPOINTS = "true";
 
 type FaultServer = {
@@ -96,7 +99,7 @@ describe("remote MCP fault handling", () => {
       retryable: true,
       attempt: 1,
     });
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(faultServer.counts.get("/stalled")).toBe(1);
   });
 

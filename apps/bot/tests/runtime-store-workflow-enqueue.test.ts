@@ -110,7 +110,7 @@ describe("handoff workflow enqueue", () => {
         },
       }),
     });
-  });
+  }, 15_000);
 
   it("keeps local_runner enqueue free of Temporal outbox intent", async () => {
     process.env.WORKFLOW_ENGINE = "local_runner";

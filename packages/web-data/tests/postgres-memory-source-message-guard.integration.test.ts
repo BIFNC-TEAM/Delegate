@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 
+import { buildGovernedContactChannelMemoryVersionUri } from "@delegate/openviking";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { prisma } from "../src/prisma";
@@ -388,19 +389,34 @@ describePostgres("Memory System source-message PostgreSQL guards", () => {
           lane: "RECALL",
           status: "QUEUED",
           contentHash: approved.version.contentHash,
+          remoteUri: buildGovernedContactChannelMemoryVersionUri({
+            namespaceKey: fixture.namespaceKey,
+            contactId: fixture.contactId,
+            channel: "web",
+            memoryId: approved.memory.id,
+            memoryVersionId: approved.version.id,
+          }),
           idempotencyKey: `projection-${mutation}-${crypto.randomUUID()}`,
         },
       });
       await prisma.memoryProjectionItem.update({
         where: { id: projection.id },
-        data: { status: "PROJECTING" },
+        data: {
+          status: "PROJECTING",
+          attemptCount: { increment: 1 },
+          leaseToken: `projection-${crypto.randomUUID()}`,
+          leaseExpiresAt: new Date(Date.now() + 60_000),
+        },
       });
       await prisma.memoryProjectionItem.update({
         where: { id: projection.id },
         data: {
           status: "ACTIVE",
-          remoteObjectId: `remote-${mutation}-${crypto.randomUUID()}`,
-          remoteUri: `viking://memory-source-test/${crypto.randomUUID()}`,
+          remoteObjectId: projection.remoteUri,
+          writeReceiptHash: crypto.createHash("sha256").update(`write-${projection.id}`).digest("hex"),
+          writeVerifiedAt: new Date(),
+          leaseToken: null,
+          leaseExpiresAt: null,
           projectedAt: new Date(),
         },
       });
@@ -579,6 +595,7 @@ describePostgres("Memory System source-message PostgreSQL guards", () => {
 
 async function createFixture() {
   const suffix = crypto.randomUUID();
+  const namespaceKey = `memory-source-guard-${suffix}`;
   const owner = await prisma.owner.create({
     data: { displayName: `Memory source guard ${suffix}` },
   });
@@ -600,7 +617,7 @@ async function createFixture() {
   await prisma.representativeMemoryPolicy.create({
     data: {
       representativeId: representative.id,
-      namespaceKey: `memory-source-guard-${suffix}`,
+      namespaceKey,
       longTermMemoryEnabled: true,
       contactMemoryEnabled: true,
       representativeExperienceEnabled: false,
@@ -624,6 +641,7 @@ async function createFixture() {
   return {
     ownerId: owner.id,
     representativeId: representative.id,
+    namespaceKey,
     contactId: contact.id,
     conversationId: conversation.id,
   };

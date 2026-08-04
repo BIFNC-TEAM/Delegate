@@ -1,12 +1,14 @@
 import {
   buildGovernedContactChannelMemoryRootUri,
   buildGovernedContactChannelMemoryVersionUri,
+  buildGovernedMemoryManagedUserId,
   buildGovernedRepresentativeExperienceVersionUri,
 } from "@delegate/openviking";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { clientMocks, mockPrisma } = vi.hoisted(() => ({
   clientMocks: {
+    construct: vi.fn(),
     search: vi.fn(),
     read: vi.fn(),
   },
@@ -24,6 +26,10 @@ vi.mock("@delegate/openviking", async (importOriginal) => {
   return {
     ...actual,
     OpenVikingClient: class {
+      constructor(options: unknown) {
+        clientMocks.construct(options);
+      }
+
       search(input: unknown) {
         return clientMocks.search(input);
       }
@@ -215,6 +221,12 @@ describe("governed memory recall fence", () => {
           contactId,
           channel: sourceChannel,
         }),
+      }));
+      expect(clientMocks.construct).toHaveBeenCalledWith(expect.objectContaining({
+        userId: buildGovernedMemoryManagedUserId(namespaceKey),
+      }));
+      expect(clientMocks.construct).toHaveBeenCalledWith(expect.objectContaining({
+        userId: `rep-${representativeSlug}`,
       }));
       expect(mockPrisma.governedMemory.findMany).toHaveBeenCalledWith(
         expect.objectContaining({

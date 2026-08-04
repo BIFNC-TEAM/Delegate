@@ -6,6 +6,16 @@
 
 取代：[代表养成模块开发计划](./representative-development-plan.md)
 
+## 执行状态
+
+| 阶段 | 状态 | 结果 |
+| --- | --- | --- |
+| T0–T4 | 已完成 | 旧入口退役、权威模型、召回栅栏、安全候选、审核与治理动作已落地 |
+| T5 | 已完成 | 精确投影、异步删除与清理、删除证明、已知投影对账、独立调度与就绪检查已落地 |
+| T6–T8 | 待执行 | 真实使用记录、业务 API/UI、P0 门禁与旧数据清理 |
+
+T5 对 OpenViking 已知精确 URI 做逐项核查。当前 Provider 不提供可证明完整且稳定的库存快照/游标，因此每次对账如实标记为 `PARTIAL`；系统不会把“未能枚举远端孤儿”误报为库存健康，也不会凭模糊匹配删除远端内容。远端孤儿自动治理必须等待 Provider 提供安全的全量库存能力。
+
 ## 1. 产品边界
 
 Dashboard 顶层模块统一命名为“记忆系统 / Memory System”，保留 `view=memory` URL key。
@@ -77,7 +87,7 @@ Web、Matrix、Telegram 使用同一提取命令和稳定原因码。确定性�
 
 ### T5：逐项投影、清理与对账
 
-每个版本使用 `provider + versionId + contentHash` 幂等投影。支持 staging、逐项状态、部分失败、租约、退避、并发 fence 和逐项重试。定期对账 OpenViking 与 PostgreSQL 的缺失、孤儿、哈希漂移和旧 active pointer。
+每个版本使用 `provider + versionId + contentHash` 幂等投影。支持 staging、逐项状态、部分失败、租约、退避、并发 fence 和逐项重试。定期核查 PostgreSQL 已知精确 URI 的缺失、哈希漂移和旧 active pointer；只有 Provider 能提供完整稳定库存时，才启用远端孤儿发现和治理。
 
 ### T6：真实使用记录
 

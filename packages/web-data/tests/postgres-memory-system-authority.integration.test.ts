@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 
+import { buildGovernedContactChannelMemoryVersionUri } from "@delegate/openviking";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { prisma } from "../src/prisma";
@@ -19,6 +20,7 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
 
   it("fails closed across approval, staging, active-version, and deletion boundaries", async () => {
     const suffix = crypto.randomUUID();
+    const namespaceKey = `memory-authority-${suffix}`;
     const hash = crypto.createHash("sha256").update(`memory-${suffix}`).digest("hex");
     const owner = await prisma.owner.create({
       data: { displayName: `Memory authority ${suffix}` },
@@ -41,7 +43,7 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
     await prisma.representativeMemoryPolicy.create({
       data: {
         representativeId: representative.id,
-        namespaceKey: `memory-authority-${suffix}`,
+        namespaceKey,
         longTermMemoryEnabled: true,
         contactMemoryEnabled: true,
         representativeExperienceEnabled: false,
@@ -166,19 +168,35 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
         lane: "STAGING",
         status: "QUEUED",
         contentHash: hash,
+        remoteUri: buildGovernedContactChannelMemoryVersionUri({
+          namespaceKey,
+          contactId: contact.id,
+          channel: "web",
+          memoryId: memory.id,
+          memoryVersionId: memoryVersion.id,
+        }),
         idempotencyKey: `staging-success-${suffix}`,
       },
     });
+    const stagedLeaseToken = `staging-lease-${suffix}`;
     await prisma.memoryProjectionItem.update({
       where: { id: stagedProjection.id },
-      data: { status: "PROJECTING" },
+      data: {
+        status: "PROJECTING",
+        attemptCount: { increment: 1 },
+        leaseToken: stagedLeaseToken,
+        leaseExpiresAt: new Date(Date.now() + 60_000),
+      },
     });
     await expect(prisma.memoryProjectionItem.update({
       where: { id: stagedProjection.id },
       data: {
         status: "ACTIVE",
         remoteObjectId: `remote-${suffix}`,
-        remoteUri: `viking://staging/${suffix}`,
+        writeReceiptHash: crypto.createHash("sha256").update(`staging-write-${suffix}`).digest("hex"),
+        writeVerifiedAt: new Date(),
+        leaseToken: null,
+        leaseExpiresAt: null,
         projectedAt: new Date(),
       },
     })).rejects.toThrow();
@@ -186,8 +204,9 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
       where: { id: stagedProjection.id },
       data: {
         status: "STAGED",
-        remoteObjectId: `staged-${suffix}`,
-        remoteUri: `viking://staged/${suffix}`,
+        remoteObjectId: stagedProjection.remoteUri,
+        leaseToken: null,
+        leaseExpiresAt: null,
         projectedAt: new Date(),
       },
     });
@@ -232,19 +251,35 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
         lane: "RECALL",
         status: "QUEUED",
         contentHash: hash,
+        remoteUri: buildGovernedContactChannelMemoryVersionUri({
+          namespaceKey,
+          contactId: contact.id,
+          channel: "web",
+          memoryId: memory.id,
+          memoryVersionId: memoryVersion.id,
+        }),
         idempotencyKey: `recall-success-${suffix}`,
       },
     });
+    const recallLeaseToken = `recall-lease-${suffix}`;
     await prisma.memoryProjectionItem.update({
       where: { id: recallProjection.id },
-      data: { status: "PROJECTING" },
+      data: {
+        status: "PROJECTING",
+        attemptCount: { increment: 1 },
+        leaseToken: recallLeaseToken,
+        leaseExpiresAt: new Date(Date.now() + 60_000),
+      },
     });
     await prisma.memoryProjectionItem.update({
       where: { id: recallProjection.id },
       data: {
         status: "ACTIVE",
-        remoteObjectId: `remote-recall-${suffix}`,
-        remoteUri: `viking://recall/${suffix}`,
+        remoteObjectId: recallProjection.remoteUri,
+        writeReceiptHash: crypto.createHash("sha256").update(`recall-write-${suffix}`).digest("hex"),
+        writeVerifiedAt: new Date(),
+        leaseToken: null,
+        leaseExpiresAt: null,
         projectedAt: new Date(),
       },
     });
@@ -306,17 +341,31 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
       });
       await prisma.memoryProjectionItem.update({
         where: { id: projectionId },
-        data: { status: "DELETING" },
+        data: {
+          status: "DELETING",
+          attemptCount: { increment: 1 },
+          leaseToken: `delete-${projectionId}`,
+          leaseExpiresAt: new Date(Date.now() + 60_000),
+          lastErrorCode: null,
+        },
       });
       await prisma.memoryProjectionItem.update({
         where: { id: projectionId },
-        data: { status: "DELETED", deletedAt: new Date() },
+        data: {
+          status: "DELETED",
+          deleteReceiptHash: crypto.createHash("sha256").update(`delete-${projectionId}`).digest("hex"),
+          remoteAbsentAt: new Date(),
+          deletedAt: new Date(),
+          leaseToken: null,
+          leaseExpiresAt: null,
+        },
       });
     }
     const remotePurgeCompletedAt = new Date();
+    const providerReceiptHash = crypto.createHash("sha256").update(`provider-${suffix}`).digest("hex");
     await prisma.memoryDeletionProof.update({
       where: { id: proof.id },
-      data: { remotePurgeCompletedAt },
+      data: { remotePurgeCompletedAt, providerReceiptHash },
     });
     await prisma.memoryDeletionProof.update({
       where: { id: proof.id },

@@ -1,12 +1,18 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  assertExactGovernedMemoryRootUri,
+  assertExactGovernedMemoryVersionUri,
   buildGovernedContactChannelMemoryRootUri,
   buildGovernedContactChannelMemoryVersionUri,
+  buildGovernedMemoryManagedUserId,
   buildGovernedRepresentativeExperienceRootUri,
   buildGovernedRepresentativeExperienceVersionUri,
+  GovernedMemoryRootProvisionError,
+  GovernedMemoryUnsupportedError,
   OpenVikingClient,
   buildRepresentativeKnowledgeDocuments,
   buildRepresentativeKnowledgeRootUri,
@@ -53,7 +59,7 @@ describe("OpenViking URI strategy", () => {
     });
 
     expect(versionA).toBe(
-      "viking://user/memories/delegate/Rep_Namespace_A/contacts/Contact_A/channels/matrix/memories/Memory_A/versions/Version_A.md",
+      "viking://user/delegate-memory-Rep_Namespace_A/memories/delegate/Rep_Namespace_A/contacts/Contact_A/channels/matrix/memories/Memory_A/versions/Version_A.md",
     );
     expect(versionA).not.toBe(versionB);
   });
@@ -119,7 +125,7 @@ describe("OpenViking URI strategy", () => {
     });
 
     expect(experienceRoot).toBe(
-      "viking://agent/memories/delegate/rep_namespace_a/representative-experience/",
+      "viking://user/delegate-memory-rep_namespace_a/memories/delegate/rep_namespace_a/representative-experience/",
     );
     expect(experienceRoot.startsWith(contactRoot)).toBe(false);
     expect(contactRoot.startsWith(experienceRoot)).toBe(false);
@@ -134,6 +140,74 @@ describe("OpenViking URI strategy", () => {
         channel: "wechat" as "web",
       }),
     ).toThrow("Unsupported governed memory channel");
+  });
+
+  it("derives the managed OpenViking user from the locked namespace key", () => {
+    expect(buildGovernedMemoryManagedUserId("Rep_Namespace_A")).toBe(
+      "delegate-memory-Rep_Namespace_A",
+    );
+  });
+
+  it("validates only exact governed roots and immutable leaves", () => {
+    const namespaceKey = "rep_namespace_a";
+    const root = buildGovernedContactChannelMemoryRootUri({
+      namespaceKey,
+      contactId: "contact_a",
+      channel: "web",
+    });
+    const version = buildGovernedContactChannelMemoryVersionUri({
+      namespaceKey,
+      contactId: "contact_a",
+      channel: "web",
+      memoryId: "memory_a",
+      memoryVersionId: "version_a",
+    });
+
+    expect(assertExactGovernedMemoryRootUri({ namespaceKey, uri: root })).toMatchObject({
+      kind: "contact",
+      rootUri: root,
+      userId: "delegate-memory-rep_namespace_a",
+    });
+    expect(assertExactGovernedMemoryVersionUri({ namespaceKey, uri: version })).toMatchObject({
+      kind: "contact",
+      rootUri: root,
+      uri: version,
+      memoryId: "memory_a",
+      memoryVersionId: "version_a",
+    });
+  });
+
+  it.each([
+    "viking://user/memories/delegate/rep_namespace_a/contacts/contact_a/channels/web/",
+    "viking://agent/memories/delegate/rep_namespace_a/representative-experience/",
+    "viking://user/delegate-memory-other/memories/delegate/rep_namespace_a/contacts/contact_a/channels/web/",
+    "viking://user/delegate-memory-rep_namespace_a/memories/delegate/rep_namespace_a/contacts/../channels/web/",
+    "viking://user/delegate-memory-rep_namespace_a/memories/delegate/rep_namespace_a/contacts/%63ontact_a/channels/web/",
+    "viking://user/delegate-memory-rep_namespace_a/memories/delegate/rep_namespace_a/contacts/contact_a\\channels\\web/",
+    "viking://user/delegate-memory-rep_namespace_a/memories/delegate/rep_namespace_a/contacts/contact_a/channels/web/?scope=other",
+  ])("rejects a non-exact governed root: %s", (uri) => {
+    expect(() =>
+      assertExactGovernedMemoryRootUri({ namespaceKey: "rep_namespace_a", uri }),
+    ).toThrow("exact canonical managed-user root or immutable version leaf");
+  });
+
+  it("rejects immutable-leaf suffix spoofing and non-terminal dots", () => {
+    const version = buildGovernedRepresentativeExperienceVersionUri({
+      namespaceKey: "rep_namespace_a",
+      memoryId: "memory_a",
+      memoryVersionId: "version_a",
+    });
+
+    for (const uri of [
+      `${version}/spoofed-child.md`,
+      `${version}.bak`,
+      version.replace("version_a.md", "version.a.md"),
+      `${version}?other=true`,
+    ]) {
+      expect(() =>
+        assertExactGovernedMemoryVersionUri({ namespaceKey: "rep_namespace_a", uri }),
+      ).toThrow("exact canonical managed-user root or immutable version leaf");
+    }
   });
 
   it("builds representative-scoped resource roots", () => {
@@ -351,6 +425,501 @@ describe("OpenViking client", () => {
     ).resolves.toMatchObject({ status: "processed" });
   });
 
+  it("provisions only an exact governed-memory root and verifies it with stat", async () => {
+    const namespaceKey = "memory_namespace_a";
+    const userId = buildGovernedMemoryManagedUserId(namespaceKey);
+    const rootUri = buildGovernedContactChannelMemoryRootUri({
+      namespaceKey,
+      contactId: "contact_a",
+      channel: "matrix",
+    });
+    const transportRootUri = rootUri.slice(0, -1);
+    const requests: Array<{
+      method: string;
+      url: string;
+      body?: unknown;
+      user: string | null;
+    }> = [];
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId,
+      fetchImpl: async (input, init) => {
+        requests.push({
+          method: init?.method ?? "",
+          url: String(input),
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+          user: new Headers(init?.headers).get("X-OpenViking-User"),
+        });
+        const request = new URL(String(input));
+        if (request.pathname === "/api/v1/fs/mkdir") {
+          return okResponse({ uri: transportRootUri });
+        }
+        return okResponse({
+          uri: transportRootUri,
+          name: "matrix",
+          isDir: true,
+        });
+      },
+    });
+
+    await expect(client.ensureGovernedMemoryRoot({
+      namespaceKey,
+      uri: rootUri,
+    })).resolves.toEqual({ rootUri, outcome: "ready" });
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        url: "http://openviking.test/api/v1/fs/mkdir",
+        body: { uri: transportRootUri },
+        user: userId,
+      },
+      {
+        method: "GET",
+        url: `http://openviking.test/api/v1/fs/stat?uri=${encodeURIComponent(transportRootUri)}`,
+        user: userId,
+      },
+    ]);
+  });
+
+  it("treats a concurrent mkdir conflict as success only after exact stat verification", async () => {
+    const fixture = governedMemoryClientFixture();
+    const transportRootUri = fixture.rootUri.slice(0, -1);
+    let requestCount = 0;
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl: async () => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return new Response(JSON.stringify({
+            status: "error",
+            error: { code: "CONFLICT", message: "directory already exists" },
+          }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return okResponse({ uri: transportRootUri, isDir: true });
+      },
+    });
+
+    await expect(client.ensureGovernedMemoryRoot({
+      namespaceKey: fixture.write.namespaceKey,
+      uri: fixture.rootUri,
+    })).resolves.toEqual({ rootUri: fixture.rootUri, outcome: "ready" });
+    expect(requestCount).toBe(2);
+  });
+
+  it("classifies unsupported mkdir and failed directory verification consistently", async () => {
+    const fixture = governedMemoryClientFixture();
+    const unsupportedClient = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl: async () => new Response(null, { status: 501 }),
+    });
+    const unsupported = await unsupportedClient.ensureGovernedMemoryRoot({
+      namespaceKey: fixture.write.namespaceKey,
+      uri: fixture.rootUri,
+    }).catch((reason: unknown) => reason);
+    expect(unsupported).toBeInstanceOf(GovernedMemoryRootProvisionError);
+    expect(unsupported).toMatchObject({
+      status: 501,
+      code: "GOVERNED_MEMORY_ROOT_PROVISION_UNSUPPORTED",
+      failure: "unsupported",
+      stage: "mkdir",
+      capabilityStatus: "degraded",
+    });
+
+    let requestCount = 0;
+    const fileAtRootClient = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl: async () => {
+        requestCount += 1;
+        return requestCount === 1
+          ? okResponse({ uri: fixture.rootUri.slice(0, -1) })
+          : okResponse({ uri: fixture.rootUri.slice(0, -1), isDir: false });
+      },
+    });
+    const verificationFailure = await fileAtRootClient.ensureGovernedMemoryRoot({
+      namespaceKey: fixture.write.namespaceKey,
+      uri: fixture.rootUri,
+    }).catch((reason: unknown) => reason);
+    expect(verificationFailure).toBeInstanceOf(GovernedMemoryRootProvisionError);
+    expect(verificationFailure).toMatchObject({
+      status: 409,
+      code: "GOVERNED_MEMORY_ROOT_PROVISION_FAILED",
+      failure: "verification_failed",
+      stage: "verify",
+    });
+  });
+
+  it("rejects cross-scope and non-root provisioning targets before mkdir", async () => {
+    const fixture = governedMemoryClientFixture();
+    const fetchImpl = vi.fn();
+    const wrongScopeClient = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: "delegate-memory-another_namespace",
+      fetchImpl,
+    });
+    await expect(wrongScopeClient.ensureGovernedMemoryRoot({
+      namespaceKey: fixture.write.namespaceKey,
+      uri: fixture.rootUri,
+    })).rejects.toThrow("client scope does not match");
+
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl,
+    });
+    for (const uri of [
+      fixture.rootUri.replace("viking://user/", "viking://agent/"),
+      `${fixture.rootUri}nested/`,
+      fixture.uri,
+    ]) {
+      await expect(client.ensureGovernedMemoryRoot({
+        namespaceKey: fixture.write.namespaceKey,
+        uri,
+      })).rejects.toThrow("exact canonical managed-user root or immutable version leaf");
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("creates one governed memory version with exact safeText bytes", async () => {
+    const namespaceKey = "memory_namespace_a";
+    const userId = buildGovernedMemoryManagedUserId(namespaceKey);
+    const uri = buildGovernedContactChannelMemoryVersionUri({
+      namespaceKey,
+      contactId: "contact_a",
+      channel: "telegram",
+      memoryId: "memory_a",
+      memoryVersionId: "version_a",
+    });
+    const rootUri = buildGovernedContactChannelMemoryRootUri({
+      namespaceKey,
+      contactId: "contact_a",
+      channel: "telegram",
+    });
+    const safeText = "Preference: reply_length=detailed\n\n  Keep this spacing.\n";
+    const contentHash = sha256(safeText);
+    let requestBody: unknown;
+    let requestUser = "";
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId,
+      fetchImpl: async (_input, init) => {
+        requestBody = JSON.parse(String(init?.body));
+        requestUser = new Headers(init?.headers).get("X-OpenViking-User") ?? "";
+        return okResponse({
+          root_uri: rootUri.slice(0, -1),
+          created: [uri],
+          updated: [],
+          unchanged: [],
+        });
+      },
+    });
+
+    await expect(client.createGovernedMemoryVersion({
+      namespaceKey,
+      uri,
+      safeText,
+      contentHash,
+    })).resolves.toEqual({
+      uri,
+      rootUri,
+      contentHash,
+      outcome: "created",
+    });
+    expect(requestUser).toBe(userId);
+    expect(requestBody).toEqual({
+      root_uri: rootUri.slice(0, -1),
+      operations: [
+        {
+          uri,
+          content: safeText,
+          precondition: { kind: "create_if_absent" },
+        },
+      ],
+      wait: true,
+    });
+  });
+
+  it("accepts an unchanged idempotent governed memory write", async () => {
+    const fixture = governedMemoryClientFixture();
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl: async () => okResponse({
+        root_uri: fixture.rootUri.slice(0, -1),
+        created: [],
+        updated: [],
+        unchanged: [fixture.uri],
+      }),
+    });
+
+    await expect(client.createGovernedMemoryVersion(fixture.write)).resolves.toMatchObject({
+      uri: fixture.uri,
+      outcome: "unchanged",
+    });
+  });
+
+  it("uses the v0.4.12 wait and timeout fields for governed memory writes", async () => {
+    const fixture = governedMemoryClientFixture();
+    let requestBody: unknown;
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      timeoutMs: 50,
+      userId: fixture.userId,
+      fetchImpl: async (_input, init) => {
+        requestBody = JSON.parse(String(init?.body));
+        return okResponse({
+          root_uri: fixture.rootUri.slice(0, -1),
+          created: [fixture.uri],
+          updated: [],
+          unchanged: [],
+          queue_status: {},
+        });
+      },
+    });
+
+    await expect(client.createGovernedMemoryVersion({
+      ...fixture.write,
+      timeoutSeconds: 12,
+    })).resolves.toMatchObject({ outcome: "created" });
+    expect(requestBody).toEqual({
+      root_uri: fixture.rootUri.slice(0, -1),
+      operations: [
+        {
+          uri: fixture.uri,
+          content: fixture.write.safeText,
+          precondition: { kind: "create_if_absent" },
+        },
+      ],
+      wait: true,
+      timeout: 12,
+    });
+  });
+
+  it.each([404, 405, 501])(
+    "fails closed with a governed-memory degraded error when batch-write returns %s",
+    async (status) => {
+      const fixture = governedMemoryClientFixture();
+      const fetchImpl = vi.fn(async (_input: string | URL | Request) => {
+        if (status === 404) {
+          return new Response("<html>route not found</html>", {
+            status,
+            headers: { "Content-Type": "text/html" },
+          });
+        }
+        if (status === 405) {
+          return new Response(JSON.stringify({ detail: "Method Not Allowed" }), {
+            status,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(null, { status });
+      });
+      const client = new OpenVikingClient({
+        baseUrl: "http://openviking.test",
+        userId: fixture.userId,
+        fetchImpl,
+      });
+
+      const error = await client.createGovernedMemoryVersion(fixture.write).catch(
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(GovernedMemoryUnsupportedError);
+      expect(error).toMatchObject({
+        status,
+        code: "GOVERNED_MEMORY_BATCH_WRITE_UNSUPPORTED",
+        capability: "content.batch-write",
+        capabilityStatus: "degraded",
+      });
+      expect(error).toHaveProperty(
+        "message",
+        expect.stringContaining("no unsafe content/write fallback was attempted"),
+      );
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+        "http://openviking.test/api/v1/content/batch-write",
+      );
+    },
+  );
+
+  it("preserves a governed memory batch-write conflict as HTTP 409", async () => {
+    const fixture = governedMemoryClientFixture();
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl: async () => new Response(JSON.stringify({
+        status: "error",
+        error: { code: "CONFLICT", message: "already exists with different bytes" },
+      }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      }),
+    });
+
+    await expect(client.createGovernedMemoryVersion(fixture.write)).rejects.toMatchObject({
+      status: 409,
+    });
+  });
+
+  it("rejects a malformed successful batch-write result after the request was dispatched", async () => {
+    const fixture = governedMemoryClientFixture();
+    const fetchImpl = vi.fn(async () => okResponse({
+      root_uri: fixture.rootUri.slice(0, -1),
+      created: [],
+      updated: [],
+      unchanged: [],
+    }));
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl,
+    });
+
+    await expect(client.createGovernedMemoryVersion(fixture.write)).rejects.toThrow(
+      "invalid governed memory write result",
+    );
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("preserves HTTP 200 on an invalid response envelope so execution can treat it as unconfirmed", async () => {
+    const fixture = governedMemoryClientFixture();
+    const fetchImpl = vi.fn(async () => new Response("not-json", {
+      status: 200,
+      headers: { "Content-Type": "text/plain" },
+    }));
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl,
+    });
+
+    await expect(client.createGovernedMemoryVersion(fixture.write)).rejects.toMatchObject({
+      status: 200,
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a local content hash mismatch before issuing a request", async () => {
+    const fixture = governedMemoryClientFixture();
+    const fetchImpl = vi.fn();
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl,
+    });
+
+    await expect(client.createGovernedMemoryVersion({
+      ...fixture.write,
+      contentHash: "0".repeat(64),
+    })).rejects.toThrow("content hash does not match safeText");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("rejects wrong-user, Agent, shorthand, and suffix-spoofed targets before fetch", async () => {
+    const fixture = governedMemoryClientFixture();
+    const fetchImpl = vi.fn();
+    const wrongScopeClient = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: "delegate-memory-wrong_namespace",
+      fetchImpl,
+    });
+    await expect(wrongScopeClient.createGovernedMemoryVersion(fixture.write)).rejects.toThrow(
+      "client scope does not match",
+    );
+
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl,
+    });
+    for (const uri of [
+      fixture.uri.replace("viking://user/", "viking://agent/"),
+      fixture.uri.replace(`viking://user/${fixture.userId}/`, "viking://user/"),
+      `${fixture.uri}/spoofed-child.md`,
+    ]) {
+      await expect(client.createGovernedMemoryVersion({
+        ...fixture.write,
+        uri,
+      })).rejects.toThrow("exact canonical managed-user root or immutable version leaf");
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("strictly rejects a suffix-spoofed URI returned by batch-write", async () => {
+    const fixture = governedMemoryClientFixture();
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl: async () => okResponse({
+        root_uri: fixture.rootUri.slice(0, -1),
+        created: [`${fixture.uri}/spoofed-child.md`],
+        updated: [],
+        unchanged: [],
+      }),
+    });
+
+    await expect(client.createGovernedMemoryVersion(fixture.write)).rejects.toThrow(
+      "exact canonical managed-user root or immutable version leaf",
+    );
+  });
+
+  it("reads the complete raw governed memory for reconciliation", async () => {
+    const fixture = governedMemoryClientFixture();
+    const content = "line one\n\nline three\n";
+    let requestUrl = "";
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl: async (input) => {
+        requestUrl = String(input);
+        return okResponse(content);
+      },
+    });
+
+    await expect(client.readGovernedMemoryVersion({
+      namespaceKey: fixture.write.namespaceKey,
+      uri: fixture.uri,
+    })).resolves.toEqual({
+      uri: fixture.uri,
+      content,
+      contentHash: sha256(content),
+    });
+    const request = new URL(requestUrl);
+    expect(request.pathname).toBe("/api/v1/content/read");
+    expect(request.searchParams.get("offset")).toBe("0");
+    expect(request.searchParams.get("limit")).toBe("-1");
+    expect(request.searchParams.get("raw")).toBe("true");
+  });
+
+  it("deletes only an exact governed memory leaf with recursive=false", async () => {
+    const fixture = governedMemoryClientFixture();
+    let requestUrl = "";
+    let requestMethod = "";
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      userId: fixture.userId,
+      fetchImpl: async (input, init) => {
+        requestUrl = String(input);
+        requestMethod = init?.method ?? "";
+        return okResponse({ uri: fixture.uri });
+      },
+    });
+
+    await expect(client.deleteGovernedMemoryVersion({
+      namespaceKey: fixture.write.namespaceKey,
+      uri: fixture.uri,
+    })).resolves.toEqual({ uri: fixture.uri });
+    const request = new URL(requestUrl);
+    expect(requestMethod).toBe("DELETE");
+    expect(request.pathname).toBe("/api/v1/fs");
+    expect(request.searchParams.get("uri")).toBe(fixture.uri);
+    expect(request.searchParams.get("recursive")).toBe("false");
+  });
+
   it.each([
     "viking://user/memories/delegate/legacy/contact/memory.md",
     "viking://resources/delegate/../user/memories/memory.md",
@@ -374,3 +943,37 @@ describe("OpenViking client", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+function governedMemoryClientFixture() {
+  const namespaceKey = "memory_namespace_a";
+  const userId = buildGovernedMemoryManagedUserId(namespaceKey);
+  const rootUri = buildGovernedRepresentativeExperienceRootUri(namespaceKey);
+  const uri = buildGovernedRepresentativeExperienceVersionUri({
+    namespaceKey,
+    memoryId: "memory_a",
+    memoryVersionId: "version_a",
+  });
+  const safeText = "Deidentified representative experience.";
+  return {
+    userId,
+    rootUri,
+    uri,
+    write: {
+      namespaceKey,
+      uri,
+      safeText,
+      contentHash: sha256(safeText),
+    },
+  };
+}
+
+function okResponse(result: unknown): Response {
+  return new Response(JSON.stringify({ status: "ok", result }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}

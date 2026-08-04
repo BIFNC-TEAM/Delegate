@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   buildGovernedContactChannelMemoryRootUri,
   buildGovernedContactChannelMemoryVersionUri,
+  buildGovernedMemoryManagedUserId,
   buildGovernedRepresentativeExperienceRootUri,
   buildGovernedRepresentativeExperienceVersionUri,
   buildOpenVikingAgentId,
@@ -1017,6 +1018,7 @@ type RepresentativeRecallAuthorization = {
   publishedVersionRoot?: string;
   knowledgeRoot?: string;
   allowedAssetIds: Set<string>;
+  memoryManagedUserId?: string;
   memoryRoots: string[];
   memoryGrantsByUri: Map<string, GovernedMemoryRecallGrant>;
   memorySearchConfig?: {
@@ -1166,37 +1168,55 @@ export async function recallRepresentativeContext(params: {
         }
       : {}),
     allowedAssetIds,
+    ...(memoryAuthorization.memoryManagedUserId
+      ? { memoryManagedUserId: memoryAuthorization.memoryManagedUserId }
+      : {}),
     memoryRoots: memoryAuthorization.memoryRoots,
     memoryGrantsByUri: memoryAuthorization.memoryGrantsByUri,
     ...(memoryAuthorization.memorySearchConfig
       ? { memorySearchConfig: memoryAuthorization.memorySearchConfig }
       : {}),
   };
-  const client = buildRepresentativeClient(representative);
+  const publicClient = allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+    ? buildRepresentativeClient(representative)
+    : null;
+  const memoryClient = authorization.memoryManagedUserId
+    ? buildGovernedMemoryClient(representative, authorization.memoryManagedUserId)
+    : null;
   const publicSearchConfig = {
     limit: representative.openvikingRecallLimit,
     scoreThreshold: representative.openvikingRecallScoreThreshold,
   };
-  const searchTargets = [
-    ...uniqueRecallRoots([
+  const searchTargets: Array<{
+    targetUri: string;
+    lane: "PUBLIC_KNOWLEDGE" | "GOVERNED_MEMORY";
+    client: OpenVikingClient;
+    limit: number;
+    scoreThreshold: number;
+  }> = [];
+  if (publicClient) {
+    searchTargets.push(...uniqueRecallRoots([
       authorization.publishedVersionRoot,
       authorization.knowledgeRoot,
     ]).map((targetUri) => ({
       targetUri,
       lane: "PUBLIC_KNOWLEDGE" as const,
+      client: publicClient,
       ...publicSearchConfig,
-    })),
-    ...(authorization.memorySearchConfig
-      ? authorization.memoryRoots.map((targetUri) => ({
-          targetUri,
-          lane: "GOVERNED_MEMORY" as const,
-          ...authorization.memorySearchConfig!,
-        }))
-      : []),
-  ];
+    })));
+  }
+  const memorySearchConfig = authorization.memorySearchConfig;
+  if (memoryClient && memorySearchConfig) {
+    searchTargets.push(...authorization.memoryRoots.map((targetUri) => ({
+      targetUri,
+      lane: "GOVERNED_MEMORY" as const,
+      client: memoryClient,
+      ...memorySearchConfig,
+    })));
+  }
   if (!searchTargets.length) return { items: [], citations: [] };
   const searchResults = await Promise.allSettled(
-    searchTargets.map((target) => client.search({
+    searchTargets.map((target) => target.client.search({
       query: queryText,
       targetUri: target.targetUri,
       limit: target.limit,
@@ -1240,7 +1260,9 @@ export async function recallRepresentativeContext(params: {
       return hydrateGovernedMemoryRecall(item, source);
     }
 
-    const content = await client.read(item.uri, 100).catch(() => "");
+    const content = publicClient
+      ? await publicClient.read(item.uri, 100).catch(() => "")
+      : "";
     const abstract = sanitizePublicSafeText(item.abstract || "", 800) ?? "";
     const safeContent = sanitizePublicSafeText(content, 4_000) ?? "";
     const score = item.score ?? 0;
@@ -1343,6 +1365,7 @@ async function revalidateRepresentativeRecallAuthorization(params: {
   publishedVersionRoot?: string;
   knowledgeRoot?: string;
   allowedAssetIds: Set<string>;
+  memoryManagedUserId?: string;
   memoryRoots: string[];
   memoryGrantsByUri: Map<string, GovernedMemoryRecallGrant>;
   memorySearchConfig?: { limit: number; scoreThreshold: number };
@@ -1441,6 +1464,9 @@ async function revalidateRepresentativeRecallAuthorization(params: {
           currentLinks: conversation.representative.knowledgeAssetLinks,
         })
       : new Set<string>(),
+    ...(memoryAuthorization.memoryManagedUserId
+      ? { memoryManagedUserId: memoryAuthorization.memoryManagedUserId }
+      : {}),
     memoryRoots: memoryAuthorization.memoryRoots,
     memoryGrantsByUri: memoryAuthorization.memoryGrantsByUri,
     ...(memoryAuthorization.memorySearchConfig
@@ -1456,7 +1482,7 @@ async function loadGovernedMemoryRecallAuthorization(params: {
   allowedSourceKinds: ReadonlySet<RepresentativeRecallSourceKind>;
 }): Promise<Pick<
   RepresentativeRecallAuthorization,
-  "memoryRoots" | "memoryGrantsByUri" | "memorySearchConfig"
+  "memoryManagedUserId" | "memoryRoots" | "memoryGrantsByUri" | "memorySearchConfig"
 >> {
   const empty = {
     memoryRoots: [],
@@ -1711,6 +1737,7 @@ async function loadGovernedMemoryRecallAuthorization(params: {
       }
     }
     return {
+      memoryManagedUserId: buildGovernedMemoryManagedUserId(policy.namespaceKey),
       memoryRoots,
       memoryGrantsByUri,
       memorySearchConfig: {
@@ -2644,6 +2671,23 @@ function buildRepresentativeClient(representative: Pick<
     timeoutMs: env.timeoutMs,
     accountId: "delegate",
     userId: `rep-${representative.slug}`,
+    agentId,
+  });
+}
+
+function buildGovernedMemoryClient(
+  representative: Pick<Representative, "slug" | "openvikingAgentId">,
+  managedUserId: string,
+): OpenVikingClient {
+  const env = resolveOpenVikingEnv();
+  const agentId = representative.openvikingAgentId
+    ?? buildOpenVikingAgentId(representative.slug, env);
+  return new OpenVikingClient({
+    baseUrl: env.baseUrl,
+    ...(env.apiKey ? { apiKey: env.apiKey } : {}),
+    timeoutMs: env.timeoutMs,
+    accountId: "delegate",
+    userId: managedUserId,
     agentId,
   });
 }

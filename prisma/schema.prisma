@@ -1061,6 +1061,23 @@ enum MemoryReconciliationItemStatus {
   FAILED
 }
 
+enum MemoryReconciliationTargetKind {
+  EXPECTED_ACTIVE
+  KNOWN_STALE
+  RETAINED_INACTIVE
+  LIVE_IN_FLIGHT
+}
+
+enum MemoryReconciliationTargetStatus {
+  PENDING
+  CHECKING
+  RETRYING
+  MATCHED
+  ISSUE
+  SKIPPED
+  FAILED
+}
+
 enum RepresentativeChannelKind {
   WEB
   MATRIX
@@ -2201,6 +2218,7 @@ model Representative {
   memoryDeletionProofs             MemoryDeletionProof[]
   memoryReconciliationRuns         MemoryReconciliationRun[]
   memoryReconciliationItems        MemoryReconciliationItem[]
+  memoryReconciliationTargets      MemoryReconciliationTarget[]
 
   @@index([ownerId, lifecycleState, updatedAt])
   @@index([activeVersionId])
@@ -4536,31 +4554,36 @@ model MemoryExtractionRun {
 }
 
 model MemoryProjectionItem {
-  id                  String                     @id @default(cuid())
-  representativeId    String
-  memoryId            String
-  memoryVersionId     String
-  provider            String                     @default("openviking")
-  lane                MemoryProjectionLane
-  status              MemoryProjectionStatus     @default(DISABLED)
-  contentHash         String
-  idempotencyKey      String
-  remoteObjectId      String?
-  remoteUri           String?
-  attemptCount        Int                        @default(0)
-  availableAt         DateTime                   @default(now())
-  leaseToken          String?
-  leaseExpiresAt      DateTime?
-  projectedAt         DateTime?
-  deleteRequestedAt   DateTime?
-  deletedAt           DateTime?
-  lastErrorCode       String?
-  createdAt           DateTime                   @default(now())
-  updatedAt           DateTime                   @updatedAt
-  representative      Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryProjectionItem_rep_fkey")
-  memoryVersion       GovernedMemoryVersion      @relation(fields: [memoryVersionId, memoryId, representativeId], references: [id, memoryId, representativeId], onDelete: Restrict, map: "MemoryProjectionItem_version_scope_fkey")
-  useItems            MemoryUseItem[]
-  reconciliationItems MemoryReconciliationItem[]
+  id                    String                       @id @default(cuid())
+  representativeId      String
+  memoryId              String
+  memoryVersionId       String
+  provider              String                       @default("openviking")
+  lane                  MemoryProjectionLane
+  status                MemoryProjectionStatus       @default(DISABLED)
+  contentHash           String
+  idempotencyKey        String
+  remoteObjectId        String?
+  remoteUri             String
+  writeReceiptHash      String?
+  writeVerifiedAt       DateTime?
+  deleteReceiptHash     String?
+  remoteAbsentAt        DateTime?
+  attemptCount          Int                          @default(0)
+  availableAt           DateTime                     @default(now())
+  leaseToken            String?
+  leaseExpiresAt        DateTime?
+  projectedAt           DateTime?
+  deleteRequestedAt     DateTime?
+  deletedAt             DateTime?
+  lastErrorCode         String?
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+  representative        Representative               @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryProjectionItem_rep_fkey")
+  memoryVersion         GovernedMemoryVersion        @relation(fields: [memoryVersionId, memoryId, representativeId], references: [id, memoryId, representativeId], onDelete: Restrict, map: "MemoryProjectionItem_version_scope_fkey")
+  useItems              MemoryUseItem[]
+  reconciliationItems   MemoryReconciliationItem[]
+  reconciliationTargets MemoryReconciliationTarget[]
 
   @@unique([representativeId, idempotencyKey], map: "MemoryProjectionItem_rep_idempotency_key")
   @@unique([id, representativeId], map: "MemoryProjectionItem_id_rep_key")
@@ -4688,34 +4711,66 @@ model MemoryDeletionProof {
 }
 
 model MemoryReconciliationRun {
-  id               String                     @id @default(cuid())
+  id               String                       @id @default(cuid())
   representativeId String
-  provider         String                     @default("openviking")
-  status           MemoryReconciliationStatus @default(QUEUED)
+  provider         String                       @default("openviking")
+  status           MemoryReconciliationStatus   @default(QUEUED)
   idempotencyKey   String
-  asOf             DateTime                   @default(now())
-  expectedCount    Int                        @default(0)
-  observedCount    Int                        @default(0)
-  matchedCount     Int                        @default(0)
-  issueCount       Int                        @default(0)
-  resolvedCount    Int                        @default(0)
+  asOf             DateTime                     @default(now())
+  expectedCount    Int                          @default(0)
+  observedCount    Int                          @default(0)
+  matchedCount     Int                          @default(0)
+  issueCount       Int                          @default(0)
+  resolvedCount    Int                          @default(0)
   cursor           String?
-  attemptCount     Int                        @default(0)
-  availableAt      DateTime                   @default(now())
+  attemptCount     Int                          @default(0)
+  availableAt      DateTime                     @default(now())
   leaseToken       String?
   leaseExpiresAt   DateTime?
   startedAt        DateTime?
   finishedAt       DateTime?
   errorCode        String?
-  createdAt        DateTime                   @default(now())
-  updatedAt        DateTime                   @updatedAt
-  representative   Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryReconciliationRun_rep_fkey")
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+  representative   Representative               @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryReconciliationRun_rep_fkey")
   items            MemoryReconciliationItem[]
+  targets          MemoryReconciliationTarget[]
 
   @@unique([representativeId, idempotencyKey], map: "MemoryReconciliationRun_rep_idempotency_key")
   @@unique([id, representativeId], map: "MemoryReconciliationRun_id_rep_key")
   @@index([representativeId, createdAt], map: "MemoryReconciliationRun_rep_created_idx")
   @@index([status, availableAt, leaseExpiresAt], map: "MemoryReconciliationRun_due_lease_idx")
+}
+
+model MemoryReconciliationTarget {
+  reconciliationRunId         String
+  representativeId            String
+  projectionItemId            String
+  kind                        MemoryReconciliationTargetKind
+  status                      MemoryReconciliationTargetStatus @default(PENDING)
+  snapshotProjectionStatus    MemoryProjectionStatus
+  snapshotProjectionUpdatedAt DateTime
+  snapshotAttemptCount        Int
+  snapshotRemoteUri           String
+  expectedContentHash         String
+  remoteExists                Boolean?
+  observedContentHash         String?
+  checkedAt                   DateTime?
+  attemptCount                Int                              @default(0)
+  availableAt                 DateTime                         @default(now())
+  leaseToken                  String?
+  leaseExpiresAt              DateTime?
+  lastErrorCode               String?
+  createdAt                   DateTime                         @default(now())
+  updatedAt                   DateTime                         @updatedAt
+  reconciliationRun           MemoryReconciliationRun          @relation(fields: [reconciliationRunId, representativeId], references: [id, representativeId], onDelete: Cascade, map: "MemoryReconciliationTarget_run_scope_fkey")
+  representative              Representative                   @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryReconciliationTarget_rep_fkey")
+  projectionItem              MemoryProjectionItem             @relation(fields: [projectionItemId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryReconciliationTarget_projection_scope_fkey")
+
+  @@id([reconciliationRunId, projectionItemId])
+  @@index([reconciliationRunId, status, availableAt, projectionItemId], map: "MemoryReconciliationTarget_run_due_idx")
+  @@index([status, leaseExpiresAt], map: "MemoryReconciliationTarget_lease_idx")
+  @@index([projectionItemId], map: "MemoryReconciliationTarget_projection_idx")
 }
 
 model MemoryReconciliationItem {

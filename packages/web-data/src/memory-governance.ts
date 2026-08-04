@@ -21,6 +21,10 @@ import {
   type OrganizationMemberRole,
   type PrismaClient,
 } from "@prisma/client";
+import {
+  buildGovernedContactChannelMemoryVersionUri,
+  buildGovernedRepresentativeExperienceVersionUri,
+} from "@delegate/openviking";
 
 import { classifyMemoryCandidate } from "./memory-extraction";
 import { prisma } from "./prisma";
@@ -249,6 +253,7 @@ export async function approveMemoryCandidate(
       where: { representativeId: actor.representativeId },
       select: {
         provider: true,
+        namespaceKey: true,
         longTermMemoryEnabled: true,
         contactMemoryEnabled: true,
         representativeExperienceEnabled: true,
@@ -416,6 +421,7 @@ export async function approveMemoryCandidate(
           deleteRequestedAt: occurredAt,
           leaseToken: null,
           leaseExpiresAt: null,
+          lastErrorCode: null,
         },
       });
     }
@@ -439,6 +445,12 @@ export async function approveMemoryCandidate(
         lane: MemoryProjectionLane.RECALL,
         status: MemoryProjectionStatus.QUEUED,
         contentHash: version.contentHash,
+        remoteUri: buildCanonicalMemoryProjectionUri({
+          namespaceKey: policy.namespaceKey,
+          candidate,
+          memoryId: memory.id,
+          memoryVersionId: version.id,
+        }),
         idempotencyKey: projectionIdempotencyKey(
           policy.provider,
           version.id,
@@ -814,6 +826,7 @@ export async function requestGovernedMemoryDeletion(
         deleteRequestedAt: occurredAt,
         leaseToken: null,
         leaseExpiresAt: null,
+        lastErrorCode: null,
       },
     });
     const proof = await tx.memoryDeletionProof.create({
@@ -1896,6 +1909,38 @@ function policyAllowsCandidate(
     return policy.matrixRecallEnabled;
   }
   return policy.telegramRecallEnabled;
+}
+
+function buildCanonicalMemoryProjectionUri(input: {
+  namespaceKey: string;
+  candidate: {
+    scope: MemoryScope;
+    contactId: string | null;
+    scopeChannel: RepresentativeChannelKind | null;
+  };
+  memoryId: string;
+  memoryVersionId: string;
+}) {
+  if (input.candidate.scope === MemoryScope.REPRESENTATIVE) {
+    return buildGovernedRepresentativeExperienceVersionUri({
+      namespaceKey: input.namespaceKey,
+      memoryId: input.memoryId,
+      memoryVersionId: input.memoryVersionId,
+    });
+  }
+  if (!input.candidate.contactId || !input.candidate.scopeChannel) {
+    throw stateConflict("Contact memory projection coordinates are incomplete.");
+  }
+  return buildGovernedContactChannelMemoryVersionUri({
+    namespaceKey: input.namespaceKey,
+    contactId: input.candidate.contactId,
+    channel: input.candidate.scopeChannel.toLowerCase() as
+      | "web"
+      | "matrix"
+      | "telegram",
+    memoryId: input.memoryId,
+    memoryVersionId: input.memoryVersionId,
+  });
 }
 
 async function findMutationReplay(

@@ -512,7 +512,7 @@ services:
     build:
       context: .
       dockerfile: deploy/openviking/Dockerfile
-    image: delegate-openviking:v0.4.9-compat
+    image: delegate-openviking:v0.4.12-compat
     container_name: delegate-openviking
     restart: unless-stopped
     environment:

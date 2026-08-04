@@ -150,7 +150,10 @@ describe("Memory System governance service", () => {
       contentHash: candidate.contentHash,
       lane: "RECALL",
       status: "QUEUED",
+      remoteUri:
+        "viking://user/delegate-memory-rep_1/memories/delegate/rep_1/contacts/contact-1/channels/web/memories/memory-1/versions/version-1.md",
     });
+    expect(projectionData.remoteUri).not.toContain("viking://agent/");
     const auditData = vi.mocked(tx.eventAudit.create).mock.calls[0]![0].data;
     expect(auditData.requestHash).toMatch(/^[0-9a-f]{64}$/u);
     expect(JSON.stringify(auditData.payload)).not.toContain(candidate.safeText);
@@ -432,6 +435,7 @@ describe("Memory System governance service", () => {
           deleteRequestedAt: timestamp,
           leaseToken: null,
           leaseExpiresAt: null,
+          lastErrorCode: null,
         },
       },
     ]);
@@ -1157,6 +1161,7 @@ function contactMemory() {
 function enabledPolicy() {
   return {
     provider: "openviking",
+    namespaceKey: "rep_1",
     longTermMemoryEnabled: true,
     contactMemoryEnabled: true,
     representativeExperienceEnabled: true,

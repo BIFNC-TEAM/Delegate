@@ -184,8 +184,8 @@ describe("Memory System authoritative schema", () => {
   it("keeps projection failure separate and allows only one active projection pointer", () => {
     const projection = modelBlock("MemoryProjectionItem");
 
-    expect(projection).toContain("status              MemoryProjectionStatus     @default(DISABLED)");
-    expect(projection).toContain("lane                MemoryProjectionLane");
+    expect(projection).toMatch(/status\s+MemoryProjectionStatus\s+@default\(DISABLED\)/u);
+    expect(projection).toMatch(/lane\s+MemoryProjectionLane\b/u);
     expect(migration).toContain('"MemoryProjectionItem_one_active_memory_key"');
     expect(migration).toContain('WHERE "status" = \'ACTIVE\'::"MemoryProjectionStatus"');
     expect(migration).toContain('CONSTRAINT = \'MemoryProjectionItem_locked_coordinates_check\'');

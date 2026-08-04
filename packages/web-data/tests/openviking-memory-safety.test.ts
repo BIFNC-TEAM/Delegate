@@ -204,7 +204,7 @@ describe("OpenViking memory safety", () => {
       recallStart,
     );
     const recallSource = source.slice(recallStart, recallEnd);
-    const remoteRead = recallSource.indexOf("await client.read");
+    const remoteRead = recallSource.indexOf("await publicClient.read");
     const revalidation = recallSource.indexOf(
       "await revalidateRepresentativeRecallAuthorization",
     );

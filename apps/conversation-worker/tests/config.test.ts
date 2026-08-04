@@ -10,10 +10,47 @@ describe("conversation worker config", () => {
     expect(resolveConversationWorkerConfig({})).toMatchObject({
       port: 4040,
       pollMs: 500,
+      memoryProjectionPollMs: 500,
+      memoryCleanupPollMs: 1_000,
+      memoryReconciliationPollMs: 60_000,
+      memoryTickTimeoutMs: 60_000,
+      readinessStaleMs: 180_000,
       telegramConversationPlatformMode: "worker",
       telegramRequestTimeoutMs: 15_000,
       outboxProcessingLeaseMs: 5 * 60_000,
     });
+  });
+
+  it("validates independent memory loop polling and readiness bounds", () => {
+    expect(resolveConversationWorkerConfig({
+      MEMORY_PROJECTION_POLL_MS: "700",
+      MEMORY_CLEANUP_POLL_MS: "900",
+      MEMORY_RECONCILIATION_POLL_MS: "120000",
+      MEMORY_WORKER_TICK_TIMEOUT_MS: "45000",
+      CONVERSATION_WORKER_READINESS_STALE_MS: "240000",
+    })).toMatchObject({
+      memoryProjectionPollMs: 700,
+      memoryCleanupPollMs: 900,
+      memoryReconciliationPollMs: 120_000,
+      memoryTickTimeoutMs: 45_000,
+      readinessStaleMs: 240_000,
+    });
+
+    expect(() => resolveConversationWorkerConfig({
+      MEMORY_PROJECTION_POLL_MS: "99",
+    })).toThrow();
+    expect(() => resolveConversationWorkerConfig({
+      MEMORY_CLEANUP_POLL_MS: "60001",
+    })).toThrow();
+    expect(() => resolveConversationWorkerConfig({
+      MEMORY_RECONCILIATION_POLL_MS: "999",
+    })).toThrow();
+    expect(() => resolveConversationWorkerConfig({
+      MEMORY_WORKER_TICK_TIMEOUT_MS: "999",
+    })).toThrow();
+    expect(() => resolveConversationWorkerConfig({
+      CONVERSATION_WORKER_READINESS_STALE_MS: "999",
+    })).toThrow();
   });
 
   it("requires Matrix URL and application-service token together", () => {

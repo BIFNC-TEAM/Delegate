@@ -1,5 +1,9 @@
 import { generateAnthropicResponse } from "./anthropic";
 import { generateBailianResponse } from "./bailian";
+import {
+  parseMemoryCitationsFromReply,
+  prepareMemoryCitationPrompt,
+} from "./citations";
 import { assembleRepresentativeReplyPrompt } from "./context";
 import { resolveModelRuntimeEnv, resolveProviderAttemptOrder } from "./config";
 import { generateOpenAIResponse } from "./openai";
@@ -18,6 +22,7 @@ import type {
 
 export * from "./config";
 export * from "./context";
+export * from "./citations";
 export * from "./pricing";
 export * from "./types";
 
@@ -80,6 +85,7 @@ export async function generateRepresentativeReply(
       ok: false,
       reason: `Subagent ${params.subagent.id} cannot handle conversation step ${params.plan.nextStep}.`,
       state: "invalid_subagent_route",
+      citedMemoryUseItemIds: [],
     };
   }
 
@@ -96,6 +102,7 @@ export async function generateRepresentativeReply(
       ok: false,
       reason: `Model runtime unavailable: ${env.state}.`,
       state: env.state,
+      citedMemoryUseItemIds: [],
       contextTrace: assembled.trace,
       provider: env.provider,
       ...(env.provider === "openai"
@@ -114,6 +121,7 @@ export async function generateRepresentativeReply(
       ok: false,
       reason: "Model runtime has no credentialed providers available.",
       state: "missing_credentials",
+      citedMemoryUseItemIds: [],
       contextTrace: assembled.trace,
       provider: env.provider,
     };
@@ -122,9 +130,25 @@ export async function generateRepresentativeReply(
   const failures: string[] = [];
   for (const provider of attemptOrder) {
     try {
-      const response = await generateProviderResponse(provider, env, assembled.prompt);
+      const preparedCitationPrompt = prepareMemoryCitationPrompt({
+        prompt: assembled.prompt,
+        selectedMemoryUseItemIds: assembled.trace.selectedMemoryUseItemIds,
+      });
+      const response = await generateProviderResponse(
+        provider,
+        env,
+        preparedCitationPrompt.prompt,
+      );
+      const parsedReply = parseMemoryCitationsFromReply({
+        replyText: response.replyText,
+        protocol: preparedCitationPrompt.protocol,
+      });
+      if (!parsedReply.replyText) {
+        failures.push(`${provider}: Model generation returned only citation control data.`);
+        continue;
+      }
       const policyViolation = detectRepresentativeReplyPolicyViolation(
-        response.replyText,
+        parsedReply.replyText,
         params.plan,
       );
       if (policyViolation) {
@@ -134,7 +158,8 @@ export async function generateRepresentativeReply(
 
       return {
         ok: true,
-        replyText: response.replyText,
+        replyText: parsedReply.replyText,
+        citedMemoryUseItemIds: parsedReply.citedMemoryUseItemIds,
         provider,
         model: resolveProviderModel(provider, env),
         contextTrace: assembled.trace,
@@ -151,6 +176,7 @@ export async function generateRepresentativeReply(
     ok: false,
     reason: failures.join(" | "),
     state: "ready",
+    citedMemoryUseItemIds: [],
     contextTrace: assembled.trace,
     provider: env.provider,
     ...(env.provider === "openai"

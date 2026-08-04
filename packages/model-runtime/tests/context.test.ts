@@ -12,6 +12,7 @@ import {
   renderGroundedKnowledgeFallbackWithTrace,
   resolveModelRuntimeEnv,
   resolveProviderAttemptOrder,
+  type RepresentativeRecallItem,
 } from "../src/index";
 
 describe("buildRepresentativeReplyPrompt", () => {
@@ -38,6 +39,7 @@ describe("buildRepresentativeReplyPrompt", () => {
       recalled: [
         {
           uri: "viking://resources/delegate/reps/lin-founder-rep/identity/bio",
+          memoryUseItemId: "memory-use-public-bio",
           contextType: "resource",
           layer: "L1",
           score: 0.91,
@@ -85,6 +87,7 @@ describe("buildRepresentativeReplyPrompt", () => {
       recentTurns: [],
       recalled: [{
         uri: "viking://user/memories/delegate/memory-ns/contacts/contact-secret/channels/web/memories/memory-1/versions/version-1.md",
+        memoryUseItemId: "memory-use-contact-preference",
         contextType: "memory",
         layer: "L2",
         score: 0.987654,
@@ -92,13 +95,15 @@ describe("buildRepresentativeReplyPrompt", () => {
         content: "Use concise answers with concrete examples.",
         internalSource: { sourceKind: "CONTACT_MEMORY" },
       } as OpenVikingRecallItem & {
+        memoryUseItemId: string;
         internalSource: { sourceKind: "CONTACT_MEMORY" };
       }],
     });
 
-    expect(prompt.input).toContain(
-      '"sourceKind":"CONTACT_MEMORY","text":"Use concise answers with concrete examples."',
-    );
+    expect(prompt.input).toContain('"sourceAlias":"S1"');
+    expect(prompt.input).toContain('"sourceKind":"CONTACT_MEMORY"');
+    expect(prompt.input).toContain("Use concise answers with concrete examples.");
+    expect(prompt.input).not.toContain("memory-use-contact-preference");
     expect(prompt.input).not.toContain("viking://");
     expect(prompt.input).not.toContain("contact-secret");
     expect(prompt.input).not.toContain("0.987654");
@@ -144,6 +149,7 @@ describe("buildRepresentativeReplyPrompt", () => {
       recalled: [
         {
           uri: "viking://resources/delegate/reps/sktone/knowledge/peppa.md",
+          memoryUseItemId: "memory-use-peppa-fallback",
           contextType: "resource",
           layer: "L2",
           score: 0.91,
@@ -165,12 +171,14 @@ describe("buildRepresentativeReplyPrompt", () => {
   it("never echoes governed memory through provider-failure fallback", () => {
     const recalled = [{
       uri: "viking://user/memories/delegate/memory-ns/contacts/contact-secret/channels/web/memories/memory-1/versions/version-1.md",
+      memoryUseItemId: "memory-use-contact-fallback",
       contextType: "memory",
       layer: "L2",
       score: 0.99,
       abstract: "用户偏好简洁回答，并希望附带示例。",
       internalSource: { sourceKind: "CONTACT_MEMORY" },
     }] as Array<OpenVikingRecallItem & {
+      memoryUseItemId: string;
       internalSource: { sourceKind: "CONTACT_MEMORY" };
     }>;
 
@@ -182,12 +190,13 @@ describe("buildRepresentativeReplyPrompt", () => {
     expect(reply).toBeNull();
   });
 
-  it("returns only the source URIs that contribute to a grounded public fallback", () => {
+  it("does not report fallback passages as model-prompt inclusion or model citations", () => {
     const selected = renderGroundedKnowledgeFallbackWithTrace({
       userText: "佩奇画恐龙时发生了什么？",
       recalled: [
         {
           uri: "viking://resources/delegate/reps/sktone/knowledge/peppa.md",
+          memoryUseItemId: "memory-use-peppa",
           contextType: "resource",
           layer: "L2",
           score: 0.91,
@@ -196,6 +205,7 @@ describe("buildRepresentativeReplyPrompt", () => {
         },
         {
           uri: "viking://resources/delegate/reps/sktone/knowledge/pricing.md",
+          memoryUseItemId: "memory-use-pricing",
           contextType: "resource",
           layer: "L2",
           score: 0.99,
@@ -207,9 +217,9 @@ describe("buildRepresentativeReplyPrompt", () => {
 
     expect(selected?.replyText).toContain("佩奇当小老师");
     expect(selected?.replyText).not.toContain("每月一百元");
-    expect(selected?.selectedRecallUris).toEqual([
-      "viking://resources/delegate/reps/sktone/knowledge/peppa.md",
-    ]);
+    expect(selected?.selectedMemoryUseItemIds).toEqual([]);
+    expect(selected?.citedMemoryUseItemIds).toEqual([]);
+    expect(selected?.replyText).not.toContain("memory-use-peppa");
   });
 
   it("quotes prompt-injection text as JSON data and marks its instructions untrusted", () => {
@@ -228,6 +238,7 @@ describe("buildRepresentativeReplyPrompt", () => {
       recentTurns: [],
       recalled: [{
         uri: "viking://resources/delegate/reps/demo/knowledge/policy.md",
+        memoryUseItemId: "memory-use-policy",
         contextType: "resource",
         layer: "L2",
         score: 0.88,
@@ -282,6 +293,7 @@ describe("buildRepresentativeReplyPrompt", () => {
         recalled: [
           {
             uri: "viking://resources/delegate/reps/lin-founder-rep/identity/bio",
+            memoryUseItemId: "memory-use-tight-budget-bio",
             contextType: "resource",
             layer: "L1",
             score: 0.91,
@@ -301,7 +313,7 @@ describe("buildRepresentativeReplyPrompt", () => {
     expect(assembled.trace.segments.some((segment) => segment.trimReason === "max_input_tokens")).toBe(true);
   });
 
-  it("records clean knowledge titles and recall URIs in the context trace", () => {
+  it("records clean knowledge titles and opaque ledger IDs in the context trace", () => {
     const assembled = assembleRepresentativeReplyPrompt({
       representative: demoRepresentative,
       plan: {
@@ -318,6 +330,7 @@ describe("buildRepresentativeReplyPrompt", () => {
       recalled: [
         {
           uri: "viking://resources/delegate/reps/lin-founder-rep/identity/bio",
+          memoryUseItemId: "memory-use-identity",
           contextType: "resource",
           layer: "L1",
           score: 0.91,
@@ -327,9 +340,10 @@ describe("buildRepresentativeReplyPrompt", () => {
       ],
     });
 
-    expect(assembled.trace.selectedRecallUris).toEqual([
-      "viking://resources/delegate/reps/lin-founder-rep/identity/bio",
-    ]);
+    expect(assembled.trace.selectedMemoryUseItemIds).toEqual(["memory-use-identity"]);
+    expect(JSON.stringify(assembled.trace)).not.toContain("viking://");
+    expect(assembled.prompt.input).not.toContain("memory-use-identity");
+    expect(JSON.stringify(assembled.trace)).not.toContain("sourceAlias");
     expect(assembled.trace.selectedKnowledgeTitles.length).toBeGreaterThan(0);
     expect(assembled.trace.selectedKnowledgeTitles[0]).not.toContain("[");
     expect(assembled.trace.selectedKnowledgeTitles[0]).not.toContain("- ");
@@ -352,6 +366,7 @@ describe("buildRepresentativeReplyPrompt", () => {
         recentTurns: [],
         recalled: [{
           uri: "viking://resources/delegate/reps/demo/knowledge/dropped.md",
+          memoryUseItemId: "memory-use-dropped",
           contextType: "resource",
           layer: "L2",
           score: 0.99,
@@ -361,7 +376,7 @@ describe("buildRepresentativeReplyPrompt", () => {
       { maxInputTokens: 1 },
     );
 
-    expect(assembled.trace.selectedRecallUris).toEqual([]);
+    expect(assembled.trace.selectedMemoryUseItemIds).toEqual([]);
     expect(assembled.prompt.input).not.toContain("THIS RECALL MUST BE DROPPED");
     expect(assembled.trace.segments).toContainEqual(expect.objectContaining({
       kind: "recalled_context",
@@ -370,9 +385,44 @@ describe("buildRepresentativeReplyPrompt", () => {
     }));
   });
 
+  it.each([undefined, "", "   "])(
+    "filters recalled text with an invalid runtime ledger ID: %j",
+    (memoryUseItemId) => {
+    const assembled = assembleRepresentativeReplyPrompt({
+      representative: demoRepresentative,
+      plan: {
+        intent: "faq",
+        audienceRole: "other",
+        action: "answer_faq",
+        nextStep: "answer",
+        reasons: ["Public answer allowed."],
+        responseOutline: ["Answer directly."],
+      },
+      subagent: getScopedSubagent("triage-agent"),
+      userText: "What is the legacy fact?",
+      recentTurns: [],
+      recalled: [{
+        uri: "viking://resources/delegate/reps/demo/knowledge/legacy.md",
+        memoryUseItemId,
+        contextType: "resource",
+        layer: "L2",
+        score: 0.91,
+        abstract: "Legacy public fact.",
+      }] as unknown as RepresentativeRecallItem[],
+    });
+
+    expect(assembled.trace.selectedMemoryUseItemIds).toEqual([]);
+    expect(assembled.prompt.input).not.toContain("Legacy public fact.");
+    expect(assembled.trace.segments).not.toContainEqual(expect.objectContaining({
+      kind: "recalled_context",
+    }));
+    },
+  );
+
   it("tracks only the recall candidates actually injected under the subagent item limit", () => {
     const recalled = Array.from({ length: 5 }, (_, index) => ({
       uri: `viking://resources/delegate/reps/demo/knowledge/item-${index + 1}.md`,
+      memoryUseItemId: `memory-use-${index + 1}`,
       contextType: "resource" as const,
       layer: "L2" as const,
       score: 0.95 - index / 100,
@@ -394,8 +444,8 @@ describe("buildRepresentativeReplyPrompt", () => {
       recalled,
     });
 
-    expect(assembled.trace.selectedRecallUris).toEqual(
-      recalled.slice(0, 4).map((item) => item.uri),
+    expect(assembled.trace.selectedMemoryUseItemIds).toEqual(
+      recalled.slice(0, 4).map((item) => item.memoryUseItemId),
     );
     expect(assembled.prompt.input).toContain("Published fact 4.");
     expect(assembled.prompt.input).not.toContain("Published fact 5.");
@@ -424,6 +474,7 @@ describe("buildRepresentativeReplyPrompt", () => {
       recalled: [
         {
           uri: "viking://user/memories/events/delegate/lin-founder-rep/contact/demo",
+          memoryUseItemId: "memory-use-handoff-history",
           contextType: "memory",
           layer: "L1",
           score: 0.72,

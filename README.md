@@ -42,14 +42,14 @@ Delegate currently includes these working surfaces and services:
 
 - **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
 - **Public representative app** in `apps/reps`, including representative profiles, service packages, web chat, WeChat checkout, and signed public-chat session state.
-- **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, OpenViking traces, creator training, workflow state, and Owner profile, identity-security, and Dashboard notification settings.
+- **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, the governed Memory System, workflow state, and Owner profile, identity-security, and Dashboard notification settings. Public knowledge authoring and publishing remain in Knowledge Library.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and retained as the Telegram-specific edge while business behavior moves toward the shared Conversation Platform.
 - **Matrix Application Service foundation** in `apps/matrix-bridge`, providing authenticated Matrix transaction ingestion and channel event mapping. Native Matrix is an optional channel; it is not required for Telegram availability.
 - **AMN wallet control plane** covering immutable billing products and prices, snapshotted orders, internal wallet ledger entries, local mock payment, default-off WeChat Pay API v3 Native collection and recovery, service-credit fulfillment, usage charging, provisional Creator 20% revenue share, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
 - **Prisma/Postgres data model** for representatives, contacts, conversations, delegation tasks, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
-- **OpenViking integration** for representative-scoped public resources, recall, session commit traces, and safe memory previews.
+- **OpenViking integration** as a rebuildable retrieval projection behind PostgreSQL-authoritative public knowledge and governed memory, with exact-version/hash sync and safe operational diagnostics.
 - **Workspace skill governance** with ClawHub metadata discovery, immutable version pinning, representative draft bindings, MCP/Compute readiness checks, unified approvals/audit, and signed patch-update policy. Third-party package code is not executed.
 
 The durable workflow kinds implemented today are:

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   buildGovernedContactChannelMemoryRootUri,
@@ -8,9 +8,9 @@ import {
   buildGovernedRepresentativeExperienceVersionUri,
   buildOpenVikingAgentId,
   buildRepresentativeKnowledgeDocuments,
-  buildRepresentativeKnowledgeRootUri,
   buildRepresentativeResourceRootUri,
   buildRepresentativeVersionResourceRootUri,
+  buildRepresentativeVersionKnowledgeAssetUri,
   OpenVikingClient,
   OpenVikingRequestError,
   resolveOpenVikingEnv,
@@ -20,14 +20,28 @@ import {
   type OpenVikingMatchedContext,
   type OpenVikingRecallItem,
 } from "@delegate/openviking";
-import { EventType, Prisma, type Representative } from "@prisma/client";
+import {
+  EventType,
+  KnowledgeAssetStatus,
+  MemoryUseSourceKind,
+  Prisma,
+  PublicKnowledgeProjectionSourceKind,
+  type Representative,
+} from "@prisma/client";
 import { z } from "zod";
 
 import { prisma } from "./prisma";
 import {
+  failMemoryUseRun,
+  markMemoryUseRunDegraded,
+  recordMemoryUseSearchHits,
+  startOrReuseMemoryUseRun,
+} from "./memory-use-execution";
+import {
   assertLegacyOpenVikingMemoryUriForRepresentative,
   LegacyOpenVikingMemoryUriError,
   syncRepresentativeResourceDocumentToOpenViking,
+  type VerifiedRepresentativeResourceProjection,
 } from "./openviking-boundaries";
 
 const REPRESENTATIVE_RESOURCE_SYNC_TIMEOUT_SECONDS = 300;
@@ -70,7 +84,15 @@ export type OpenVikingMaintenanceTickSummary = {
 type RepresentativeOpenVikingDocumentSync = (params: {
   client: OpenVikingClient;
   document: OpenVikingDocumentSpec;
-}) => Promise<void>;
+}) => Promise<VerifiedRepresentativeResourceProjection>;
+
+type PublishedResourceProjectionSpec = {
+  document: OpenVikingDocumentSpec;
+  sourceKind: PublicKnowledgeProjectionSourceKind;
+  resourceKey: string;
+  knowledgeAssetId?: string;
+  citationTitle?: string;
+};
 
 const representativeOpenVikingArgs = Prisma.validator<Prisma.RepresentativeDefaultArgs>()({
   include: {
@@ -578,39 +600,23 @@ export async function processRepresentativeOpenVikingSyncJob(params: {
     representative.slug,
     requestedVersion.id,
   );
-  const knowledge = runtime.knowledge ?? {
-    identitySummary: "",
-    faq: [],
-    materials: [],
-    policies: [],
-  };
-  const documents = buildRepresentativeKnowledgeDocuments({
-    slug: representative.slug,
-    representativeVersionId: requestedVersion.id,
-    name: runtime.identity.displayName,
-    tagline: runtime.identity.roleSummary,
-    tone: runtime.identity.tone,
-    languages: runtime.identity.languages,
-    groupActivation: runtime.groupActivation,
-    publicMode: runtime.publicMode,
-    humanInLoop: runtime.humanInLoop,
-    freeReplyLimit: runtime.conversation.freeReplyLimit,
-    freeScope: runtime.conversation.freeScope,
-    paywalledIntents: runtime.conversation.paywalledIntents,
-    handoffWindowHours: runtime.conversation.handoffWindowHours,
-    skills: runtime.governance.allowedSkills,
-    knowledgePack: {
-      identitySummary: knowledge.identitySummary,
-      faq: normalizePublishedKnowledgeDocuments(knowledge.faq),
-      materials: normalizePublishedKnowledgeDocuments(knowledge.materials),
-      policies: normalizePublishedKnowledgeDocuments(knowledge.policies),
-    },
-    pricing: runtime.pricing,
-    handoffPrompt: runtime.conversation.handoffPrompt,
-  });
-
+  let verifiedItemCount = 0;
   try {
-    for (const document of documents) {
+    const projectionSpecs = await buildPublishedResourceProjectionSpecs({
+      representative: {
+        id: representative.id,
+        ownerId: representative.ownerId,
+        slug: representative.slug,
+      },
+      publishedVersionId: requestedVersion.id,
+      snapshot: runtime,
+    });
+    await ensurePublishedResourceManifest({
+      representativeId: representative.id,
+      publishedVersionId: requestedVersion.id,
+      specs: projectionSpecs,
+    });
+    for (const spec of projectionSpecs) {
       const leaseRenewed = await renewRepresentativeOpenVikingSyncJobLease({
         jobId: job.id,
         leaseToken,
@@ -619,23 +625,33 @@ export async function processRepresentativeOpenVikingSyncJob(params: {
       if (!leaseRenewed) {
         throw new Error("OpenViking sync job lease was lost.");
       }
-      if (params.syncDocument) {
-        await params.syncDocument({ client, document });
-      } else {
-        await syncRepresentativeResourceDocumentToOpenViking({
+      const receipt = params.syncDocument
+        ? await params.syncDocument({ client, document: spec.document })
+        : await syncRepresentativeResourceDocumentToOpenViking({
           client,
-          document,
+          document: spec.document,
           expectedRootUri: versionResourceRoot,
           timeoutSeconds: REPRESENTATIVE_RESOURCE_SYNC_TIMEOUT_SECONDS,
         });
-      }
+      assertVerifiedPublishedResourceReceipt({
+        document: spec.document,
+        receipt,
+      });
+      await recordVerifiedPublicKnowledgeProjection({
+        representativeId: representative.id,
+        publishedVersionId: requestedVersion.id,
+        spec,
+        receipt,
+        projectedAt: new Date(),
+      });
+      verifiedItemCount += 1;
     }
 
     const settled = await settleRepresentativeOpenVikingSyncJob({
       job,
       leaseToken,
       status: "succeeded",
-      itemCount: documents.length,
+      itemCount: projectionSpecs.length,
       error: null,
       now: new Date(),
       targetUri: versionResourceRoot,
@@ -656,7 +672,7 @@ export async function processRepresentativeOpenVikingSyncJob(params: {
         job,
         leaseToken,
         status: "retry_wait",
-        itemCount: 0,
+        itemCount: verifiedItemCount,
         error: message,
         now: new Date(),
         nextAttemptAt,
@@ -669,7 +685,7 @@ export async function processRepresentativeOpenVikingSyncJob(params: {
       job,
       leaseToken,
       status: "failed",
-      itemCount: 0,
+      itemCount: verifiedItemCount,
       error: message,
       now: new Date(),
     });
@@ -677,6 +693,243 @@ export async function processRepresentativeOpenVikingSyncJob(params: {
       ? { processed: true, status: "failed" }
       : { processed: false };
   }
+}
+
+const REPRESENTATIVE_AGGREGATE_RESOURCE_KEYS = {
+  identity: "identity/profile.md",
+  faq: "faq/index.md",
+  materials: "materials/index.md",
+  policies: "policies/index.md",
+  pricing: "pricing/index.md",
+} as const;
+
+async function buildPublishedResourceProjectionSpecs(params: {
+  representative: { id: string; ownerId: string; slug: string };
+  publishedVersionId: string;
+  snapshot: z.output<typeof publishedRepresentativeSnapshotSchema>;
+}): Promise<PublishedResourceProjectionSpec[]> {
+  const knowledge = params.snapshot.knowledge ?? {
+    identitySummary: "",
+    faq: [],
+    materials: [],
+    policies: [],
+  };
+  const aggregateDocuments = buildRepresentativeKnowledgeDocuments({
+    slug: params.representative.slug,
+    representativeVersionId: params.publishedVersionId,
+    name: params.snapshot.identity.displayName,
+    tagline: params.snapshot.identity.roleSummary,
+    tone: params.snapshot.identity.tone,
+    languages: params.snapshot.identity.languages,
+    groupActivation: params.snapshot.groupActivation,
+    publicMode: params.snapshot.publicMode,
+    humanInLoop: params.snapshot.humanInLoop,
+    freeReplyLimit: params.snapshot.conversation.freeReplyLimit,
+    freeScope: params.snapshot.conversation.freeScope,
+    paywalledIntents: params.snapshot.conversation.paywalledIntents,
+    handoffWindowHours: params.snapshot.conversation.handoffWindowHours,
+    skills: params.snapshot.governance.allowedSkills,
+    knowledgePack: {
+      identitySummary: knowledge.identitySummary,
+      faq: normalizePublishedKnowledgeDocuments(knowledge.faq),
+      materials: normalizePublishedKnowledgeDocuments(knowledge.materials),
+      policies: normalizePublishedKnowledgeDocuments(knowledge.policies),
+    },
+    pricing: params.snapshot.pricing,
+    handoffPrompt: params.snapshot.conversation.handoffPrompt,
+  });
+  const aggregateSpecs = aggregateDocuments.map((document) => {
+    const resourceKey = REPRESENTATIVE_AGGREGATE_RESOURCE_KEYS[
+      document.category as keyof typeof REPRESENTATIVE_AGGREGATE_RESOURCE_KEYS
+    ];
+    if (!resourceKey) {
+      throw new Error(`Unexpected published representative resource category: ${document.category}.`);
+    }
+    return {
+      document,
+      sourceKind: PublicKnowledgeProjectionSourceKind.REPRESENTATIVE_VERSION_RESOURCE,
+      resourceKey,
+    } satisfies PublishedResourceProjectionSpec;
+  });
+  if (
+    aggregateSpecs.length !== Object.keys(REPRESENTATIVE_AGGREGATE_RESOURCE_KEYS).length
+    || new Set(aggregateSpecs.map(({ resourceKey }) => resourceKey)).size
+      !== aggregateSpecs.length
+  ) {
+    throw new Error("Published representative snapshot did not produce the five canonical resources.");
+  }
+
+  const pins = [...params.snapshot.knowledgeAssets].sort((left, right) =>
+    left.assetId.localeCompare(right.assetId),
+  );
+  if (new Set(pins.map(({ assetId }) => assetId)).size !== pins.length) {
+    throw new Error("Published representative snapshot contains duplicate knowledge asset pins.");
+  }
+  const assets = pins.length
+    ? await prisma.knowledgeAsset.findMany({
+        where: { id: { in: pins.map(({ assetId }) => assetId) } },
+        select: {
+          id: true,
+          ownerId: true,
+          title: true,
+          status: true,
+          archivedAt: true,
+          checksum: true,
+          processingVersion: true,
+          extractedText: true,
+        },
+      })
+    : [];
+  const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+  const assetSpecs = pins.map((pin) => {
+    const asset = assetsById.get(pin.assetId);
+    if (
+      !asset
+      || asset.ownerId !== params.representative.ownerId
+      || asset.status !== KnowledgeAssetStatus.READY
+      || asset.archivedAt !== null
+      || !asset.extractedText
+      || !pin.checksum
+      || !/^[0-9a-f]{64}$/u.test(pin.checksum)
+      || asset.checksum !== pin.checksum
+      || asset.processingVersion !== pin.processingVersion
+      || sha256Text(asset.extractedText) !== pin.checksum
+    ) {
+      throw new Error(
+        `Published knowledge asset pin ${pin.assetId} no longer matches its authoritative PostgreSQL content.`,
+      );
+    }
+    const document: OpenVikingDocumentSpec = {
+      uri: buildRepresentativeVersionKnowledgeAssetUri(
+        params.representative.slug,
+        params.publishedVersionId,
+        asset.id,
+      ),
+      filename: `${asset.id}.md`,
+      content: asset.extractedText,
+      reason: "Published KnowledgeAsset pinned to a RepresentativeVersion",
+      contextType: "resource",
+      scope: "representative",
+      category: "knowledge_asset",
+    };
+    return {
+      document,
+      sourceKind: PublicKnowledgeProjectionSourceKind.KNOWLEDGE_ASSET,
+      resourceKey: `knowledge/${asset.id}.md`,
+      knowledgeAssetId: asset.id,
+      citationTitle: sanitizePublicSafeText(asset.title, 200) ?? "Published knowledge",
+    } satisfies PublishedResourceProjectionSpec;
+  });
+  return [...aggregateSpecs, ...assetSpecs];
+}
+
+async function ensurePublishedResourceManifest(params: {
+  representativeId: string;
+  publishedVersionId: string;
+  specs: PublishedResourceProjectionSpec[];
+}): Promise<void> {
+  const expected = params.specs.map((spec) => ({
+    publishedVersionId: params.publishedVersionId,
+    representativeId: params.representativeId,
+    sourceKind: spec.sourceKind,
+    resourceKey: spec.resourceKey,
+    knowledgeAssetId: spec.knowledgeAssetId ?? null,
+    contentHash: sha256Text(spec.document.content),
+  }));
+  await prisma.$transaction(async (tx) => {
+    await tx.representativeVersionResource.createMany({
+      data: expected,
+      skipDuplicates: true,
+    });
+    const stored = await tx.representativeVersionResource.findMany({
+      where: {
+        publishedVersionId: params.publishedVersionId,
+        resourceKey: { in: expected.map(({ resourceKey }) => resourceKey) },
+      },
+    });
+    const storedByKey = new Map(stored.map((item) => [item.resourceKey, item]));
+    for (const item of expected) {
+      const persisted = storedByKey.get(item.resourceKey);
+      if (
+        !persisted
+        || persisted.representativeId !== item.representativeId
+        || persisted.sourceKind !== item.sourceKind
+        || persisted.knowledgeAssetId !== item.knowledgeAssetId
+        || persisted.contentHash !== item.contentHash
+      ) {
+        throw new Error(
+          "Published representative resource manifest conflicts with the immutable version snapshot.",
+        );
+      }
+    }
+  });
+}
+
+function assertVerifiedPublishedResourceReceipt(params: {
+  document: OpenVikingDocumentSpec;
+  receipt: VerifiedRepresentativeResourceProjection;
+}): void {
+  const contentHash = sha256Text(params.document.content);
+  if (
+    params.receipt.remoteUri !== params.document.uri
+    || params.receipt.contentHash !== contentHash
+  ) {
+    throw new Error(
+      "Published representative knowledge sync returned an unverified URI or content hash.",
+    );
+  }
+}
+
+async function recordVerifiedPublicKnowledgeProjection(params: {
+  representativeId: string;
+  publishedVersionId: string;
+  spec: PublishedResourceProjectionSpec;
+  receipt: VerifiedRepresentativeResourceProjection;
+  projectedAt: Date;
+}): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const existing = await tx.publicKnowledgeProjectionItem.findFirst({
+      where: {
+        publishedVersionId: params.publishedVersionId,
+        resourceKey: params.spec.resourceKey,
+      },
+    });
+    const expected = {
+      representativeId: params.representativeId,
+      publishedVersionId: params.publishedVersionId,
+      sourceKind: params.spec.sourceKind,
+      resourceKey: params.spec.resourceKey,
+      knowledgeAssetId: params.spec.knowledgeAssetId ?? null,
+      provider: "openviking",
+      contentHash: params.receipt.contentHash,
+      remoteUri: params.receipt.remoteUri,
+    };
+    if (existing) {
+      if (
+        existing.representativeId !== expected.representativeId
+        || existing.publishedVersionId !== expected.publishedVersionId
+        || existing.sourceKind !== expected.sourceKind
+        || existing.resourceKey !== expected.resourceKey
+        || existing.knowledgeAssetId !== expected.knowledgeAssetId
+        || existing.provider !== expected.provider
+        || existing.contentHash !== expected.contentHash
+        || existing.remoteUri !== expected.remoteUri
+      ) {
+        throw new Error(
+          "Published knowledge projection ledger conflicts with the verified immutable resource.",
+        );
+      }
+      // Projection rows are immutable evidence. A matching retry is already
+      // idempotently complete; the sync job records the new attempt time.
+      return;
+    }
+    await tx.publicKnowledgeProjectionItem.create({
+      data: {
+        ...expected,
+        projectedAt: params.projectedAt,
+      },
+    });
+  });
 }
 
 export async function maybeSyncRepresentativeOpenVikingResources(params: {
@@ -984,11 +1237,14 @@ export type RepresentativeRecallSourceKind =
  * not include these identifiers or any OpenViking diagnostics.
  */
 export type RepresentativeRecallItem = OpenVikingRecallItem & {
+  memoryUseItemId: string;
   internalSource: {
     sourceKind: RepresentativeRecallSourceKind;
     contentHash?: string;
     memoryVersionId?: string;
     projectionItemId?: string;
+    publicKnowledgeProjectionId?: string;
+    memoryUseItemId?: string;
   };
 };
 
@@ -1000,6 +1256,7 @@ export type RepresentativeRecallContext = {
     excerpt?: string;
     score: number;
   }>;
+  memoryUseRunId?: string;
 };
 
 type RecallSourceChannel = "web" | "matrix" | "telegram";
@@ -1014,10 +1271,20 @@ type GovernedMemoryRecallGrant = {
   summary: string;
 };
 
+type PublicKnowledgeRecallGrant = {
+  uri: string;
+  sourceKind: "PUBLIC_KNOWLEDGE";
+  publicKnowledgeProjectionId: string;
+  contentHash: string;
+  resourceKey: string;
+  safeText: string;
+  title: string;
+  knowledgeAssetId?: string;
+};
+
 type RepresentativeRecallAuthorization = {
   publishedVersionRoot?: string;
-  knowledgeRoot?: string;
-  allowedAssetIds: Set<string>;
+  publicKnowledgeGrantsByUri: Map<string, PublicKnowledgeRecallGrant>;
   memoryManagedUserId?: string;
   memoryRoots: string[];
   memoryGrantsByUri: Map<string, GovernedMemoryRecallGrant>;
@@ -1028,7 +1295,7 @@ type RepresentativeRecallAuthorization = {
 };
 
 type AuthorizedRecallSource =
-  | { sourceKind: "PUBLIC_KNOWLEDGE" }
+  | PublicKnowledgeRecallGrant
   | GovernedMemoryRecallGrant;
 
 type AuthorizedRemoteRecallCandidate = {
@@ -1052,6 +1319,7 @@ export async function recallRepresentativeContext(params: {
   conversationId: string;
   contactId: string;
   sourceChannel: RecallSourceChannel;
+  generationRunId: string;
   queryText: string;
   allowedSourceKinds?: readonly RepresentativeRecallSourceKind[];
 }): Promise<RepresentativeRecallContext> {
@@ -1077,6 +1345,7 @@ export async function recallRepresentativeContext(params: {
       representative: {
         select: {
           id: true,
+          ownerId: true,
           slug: true,
           lifecycleState: true,
           openvikingEnabled: true,
@@ -1084,21 +1353,6 @@ export async function recallRepresentativeContext(params: {
           openvikingAgentId: true,
           openvikingRecallLimit: true,
           openvikingRecallScoreThreshold: true,
-          knowledgeAssetLinks: {
-            select: {
-              assetId: true,
-              enabled: true,
-              reviewStatus: true,
-              asset: {
-                select: {
-                  status: true,
-                  archivedAt: true,
-                  checksum: true,
-                  processingVersion: true,
-                },
-              },
-            },
-          },
         },
       },
     },
@@ -1107,8 +1361,7 @@ export async function recallRepresentativeContext(params: {
   const env = resolveOpenVikingEnv();
   if (
     !conversation?.activeEpisodeId ||
-    !representative?.openvikingEnabled ||
-    !representative.openvikingAutoRecall ||
+    !representative ||
     representative.lifecycleState !== "PUBLISHED" ||
     !env.enabled ||
     !env.hasModelCredentials
@@ -1145,12 +1398,23 @@ export async function recallRepresentativeContext(params: {
     return { items: [], citations: [] };
   }
 
-  const allowedAssetIds = allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
-    ? resolveAllowedPublishedKnowledgeAssetIds({
-        pins: pinnedSnapshot.data.knowledgeAssets,
-        currentLinks: representative.knowledgeAssetLinks,
+  const publicKnowledgeLaneEnabled =
+    allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+    && representative.openvikingEnabled
+    && representative.openvikingAutoRecall;
+  const publicAuthorization = publicKnowledgeLaneEnabled
+    ? await loadPublicKnowledgeRecallAuthorization({
+        representative: {
+          id: representative.id,
+          ownerId: representative.ownerId,
+          slug: representative.slug,
+        },
+        publishedVersionId: pinnedVersion.id,
+        snapshot: pinnedSnapshot.data,
       })
-    : new Set<string>();
+    : {
+        publicKnowledgeGrantsByUri: new Map<string, PublicKnowledgeRecallGrant>(),
+      };
   const memoryAuthorization = await loadGovernedMemoryRecallAuthorization({
     representativeId: representative.id,
     contactId: params.contactId,
@@ -1158,16 +1422,15 @@ export async function recallRepresentativeContext(params: {
     allowedSourceKinds,
   });
   const authorization: RepresentativeRecallAuthorization = {
-    ...(allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+    ...(publicKnowledgeLaneEnabled
       ? {
           publishedVersionRoot: buildRepresentativeVersionResourceRootUri(
             representative.slug,
             pinnedVersion.id,
           ),
-          knowledgeRoot: buildRepresentativeKnowledgeRootUri(representative.slug),
         }
       : {}),
-    allowedAssetIds,
+    publicKnowledgeGrantsByUri: publicAuthorization.publicKnowledgeGrantsByUri,
     ...(memoryAuthorization.memoryManagedUserId
       ? { memoryManagedUserId: memoryAuthorization.memoryManagedUserId }
       : {}),
@@ -1177,7 +1440,7 @@ export async function recallRepresentativeContext(params: {
       ? { memorySearchConfig: memoryAuthorization.memorySearchConfig }
       : {}),
   };
-  const publicClient = allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+  const publicClient = publicKnowledgeLaneEnabled
     ? buildRepresentativeClient(representative)
     : null;
   const memoryClient = authorization.memoryManagedUserId
@@ -1197,7 +1460,6 @@ export async function recallRepresentativeContext(params: {
   if (publicClient) {
     searchTargets.push(...uniqueRecallRoots([
       authorization.publishedVersionRoot,
-      authorization.knowledgeRoot,
     ]).map((targetUri) => ({
       targetUri,
       lane: "PUBLIC_KNOWLEDGE" as const,
@@ -1215,6 +1477,27 @@ export async function recallRepresentativeContext(params: {
     })));
   }
   if (!searchTargets.length) return { items: [], citations: [] };
+  let memoryUseRunId: string;
+  try {
+    const started = await startOrReuseMemoryUseRun({
+      generationRunId: params.generationRunId,
+      sourceChannel: params.sourceChannel,
+    });
+    if (
+      started.run.representativeId !== representative.id
+      || started.run.conversationId !== conversation.id
+      || started.run.contactId !== params.contactId
+      || started.run.representativeVersionId !== pinnedVersion.id
+    ) {
+      await failMemoryUseRun(started.run.id, "memory_ledger_failed").catch(() => undefined);
+      return { items: [], citations: [] };
+    }
+    memoryUseRunId = started.run.id;
+  } catch {
+    // Recall is fail-closed when its authoritative use ledger cannot be
+    // started. The generation may continue without memory context.
+    return { items: [], citations: [] };
+  }
   const searchResults = await Promise.allSettled(
     searchTargets.map((target) => target.client.search({
       query: queryText,
@@ -1223,28 +1506,74 @@ export async function recallRepresentativeContext(params: {
       scoreThreshold: target.scoreThreshold,
     })),
   );
-  const candidates = searchResults.flatMap((result, targetIndex) => {
-    if (result.status !== "fulfilled") return [];
+  const rejectedSearchCount = searchResults.filter(
+    (result) => result.status === "rejected",
+  ).length;
+  if (rejectedSearchCount > 0) {
+    try {
+      await markMemoryUseRunDegraded(
+        memoryUseRunId,
+        rejectedSearchCount === searchResults.length
+          ? "memory_recall_provider_unavailable"
+          : "memory_recall_partial",
+      );
+    } catch {
+      await failMemoryUseRun(memoryUseRunId, "memory_ledger_failed").catch(() => undefined);
+      return { items: [], citations: [] };
+    }
+  }
+  let observedUnmappedCandidateCount = 0;
+  const mappedCandidates: AuthorizedRemoteRecallCandidate[] = [];
+  for (const [targetIndex, result] of searchResults.entries()) {
+    if (result.status !== "fulfilled") continue;
     const target = searchTargets[targetIndex];
-    if (!target) return [];
-    return ([
-      ...result.value.resources,
-      ...result.value.memories,
-    ]).map((item) => ({ item, target }));
-  })
-    .flatMap(({ item, target }) => {
+    if (!target) continue;
+    for (const item of [...result.value.resources, ...result.value.memories]) {
       const source = authorizeRecallUri(item.uri, authorization);
-      if (!source || (item.score ?? 0) < target.scoreThreshold) return [];
-      const sourceIsPublic = source.sourceKind === "PUBLIC_KNOWLEDGE";
+      const sourceIsPublic = source?.sourceKind === "PUBLIC_KNOWLEDGE";
       if (
-        (target.lane === "PUBLIC_KNOWLEDGE" && !sourceIsPublic)
+        !source
+        || (target.lane === "PUBLIC_KNOWLEDGE" && !sourceIsPublic)
         || (target.lane === "GOVERNED_MEMORY" && sourceIsPublic)
       ) {
-        return [];
+        observedUnmappedCandidateCount += 1;
+        continue;
       }
-      return [{ item, source }];
-    })
-    .filter(({ item }) => !/\/(?:\.overview|\.abstract)\.md$/i.test(item.uri));
+      mappedCandidates.push({ item, source });
+    }
+  }
+  const auditedCandidates = deduplicateAuthorizedRecallCandidates(mappedCandidates);
+  const boundedAuditedCandidates = auditedCandidates.slice(0, 100);
+  observedUnmappedCandidateCount += Math.max(
+    0,
+    auditedCandidates.length - boundedAuditedCandidates.length,
+  );
+  let eligibleMemoryUseItems: Awaited<ReturnType<typeof recordMemoryUseSearchHits>>;
+  try {
+    eligibleMemoryUseItems = await recordMemoryUseSearchHits({
+      useRunId: memoryUseRunId,
+      hits: boundedAuditedCandidates.map(({ source }, index) => ({
+        ...memoryUseSearchCoordinate(source),
+        searchRank: index + 1,
+      })),
+      observedUnmappedCandidateCount,
+    });
+  } catch {
+    await failMemoryUseRun(memoryUseRunId, "memory_ledger_failed").catch(() => undefined);
+    return { items: [], citations: [] };
+  }
+  const eligibleMemoryUseItemIds = new Map(
+    eligibleMemoryUseItems.eligibleItems.map((eligible) => [
+      memoryUseSourceCoordinateKey(eligible),
+      eligible.memoryUseItemId,
+    ]),
+  );
+  const candidates = boundedAuditedCandidates.flatMap((candidate) => {
+    const memoryUseItemId = eligibleMemoryUseItemIds.get(
+      recallSourceCoordinateKey(candidate.source),
+    );
+    return memoryUseItemId ? [{ ...candidate, memoryUseItemId }] : [];
+  });
   const selected = [
     ...rankAuthorizedRecallCandidates(
       candidates.filter(({ source }) => source.sourceKind === "PUBLIC_KNOWLEDGE"),
@@ -1255,58 +1584,54 @@ export async function recallRepresentativeContext(params: {
       authorization.memorySearchConfig ?? { limit: 0, scoreThreshold: 1 },
     ),
   ].sort((left, right) => (right.item.score ?? 0) - (left.item.score ?? 0));
-  const hydrated = await Promise.all(selected.map(async ({ item, source }) => {
-    if (source.sourceKind !== "PUBLIC_KNOWLEDGE") {
-      return hydrateGovernedMemoryRecall(item, source);
-    }
 
-    const content = publicClient
-      ? await publicClient.read(item.uri, 100).catch(() => "")
-      : "";
-    const abstract = sanitizePublicSafeText(item.abstract || "", 800) ?? "";
-    const safeContent = sanitizePublicSafeText(content, 4_000) ?? "";
-    const score = item.score ?? 0;
-    return {
-      item: {
-        uri: item.uri,
-        contextType: item.context_type,
-        layer: safeContent ? ("L2" as const) : ("L0" as const),
-        score,
-        abstract,
-        ...(safeContent ? { content: safeContent } : {}),
-        internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
-      } satisfies RepresentativeRecallItem,
-      citation: {
-        ...resolveKnowledgeAssetId(item.uri),
-        title: resolveRecallTitle(content, item.uri),
-        ...(abstract || safeContent ? { excerpt: (abstract || safeContent).slice(0, 480) } : {}),
-        score,
-      },
-    };
-  }));
-
-  const revalidatedAuthorization = await revalidateRepresentativeRecallAuthorization({
-    representativeSlug: params.representativeSlug,
-    conversationId: params.conversationId,
-    contactId: params.contactId,
-    activeEpisodeId: conversation.activeEpisodeId,
-    representativeVersionId: pinnedVersion.id,
-    knowledgeAssetPins: pinnedSnapshot.data.knowledgeAssets,
-    sourceChannel: params.sourceChannel,
-    allowedSourceKinds,
-  });
+  let revalidatedAuthorization: RepresentativeRecallAuthorization | null;
+  try {
+    revalidatedAuthorization = await revalidateRepresentativeRecallAuthorization({
+      representativeSlug: params.representativeSlug,
+      conversationId: params.conversationId,
+      contactId: params.contactId,
+      activeEpisodeId: conversation.activeEpisodeId,
+      representativeVersionId: pinnedVersion.id,
+      sourceChannel: params.sourceChannel,
+      allowedSourceKinds,
+    });
+  } catch {
+    await markMemoryUseRunDegraded(
+      memoryUseRunId,
+      "memory_recall_source_changed",
+    ).catch(() => undefined);
+    return { items: [], citations: [], memoryUseRunId };
+  }
   const revalidatedHydrated = revalidatedAuthorization
-    ? hydrated.flatMap(({ item, citation }) => {
+    ? selected.flatMap(({ item, source, memoryUseItemId }) => {
         const revalidatedSource = authorizeRecallUri(item.uri, revalidatedAuthorization);
-        if (!revalidatedSource) return [];
+        if (
+          !revalidatedSource
+          || recallSourceCoordinateKey(revalidatedSource)
+            !== recallSourceCoordinateKey(source)
+          || revalidatedSource.contentHash !== source.contentHash
+        ) return [];
         if (revalidatedSource.sourceKind === "PUBLIC_KNOWLEDGE") {
-          return item.internalSource.sourceKind === "PUBLIC_KNOWLEDGE"
-            ? [{ item, citation }]
-            : [];
+          return [hydratePublicKnowledgeRecall(item, revalidatedSource, memoryUseItemId)];
         }
-        return [hydrateGovernedMemoryRecall(item, revalidatedSource)];
+        return [hydrateGovernedMemoryRecall(item, revalidatedSource, memoryUseItemId)];
       })
     : [];
+  if (
+    revalidatedHydrated.length < selected.length
+    && rejectedSearchCount === 0
+  ) {
+    try {
+      await markMemoryUseRunDegraded(
+        memoryUseRunId,
+        "memory_recall_source_changed",
+      );
+    } catch {
+      await failMemoryUseRun(memoryUseRunId, "memory_ledger_failed").catch(() => undefined);
+      return { items: [], citations: [] };
+    }
+  }
   const authorizedHydrated = [
     ...revalidatedHydrated.filter(
       ({ item }) => item.internalSource.sourceKind === "PUBLIC_KNOWLEDGE",
@@ -1321,30 +1646,12 @@ export async function recallRepresentativeContext(params: {
       : []),
   ].sort((left, right) => right.item.score - left.item.score);
 
-  if (authorizedHydrated.length) {
-    try {
-      await prisma.conversationRecallTrace.createMany({
-        data: authorizedHydrated.map(({ item }) => ({
-          representativeId: representative.id,
-          conversationId: params.conversationId,
-          contactId: params.contactId,
-          queryText,
-          recalledUri: item.uri,
-          contextType: item.contextType,
-          layer: item.layer,
-          score: item.score,
-        })),
-      });
-    } catch {
-      // Diagnostics are best-effort and must not turn an already-authorized
-      // answer into an availability failure. Do not log query text or URIs.
-      console.warn("Recall diagnostics persistence failed; authorized context will continue.");
-    }
-  }
-
   return {
     items: authorizedHydrated.map(({ item }) => item),
-    citations: authorizedHydrated.map(({ citation }) => citation),
+    // Sources become public citations only after the model cites injected
+    // aliases and the output transaction binds them to the reply.
+    citations: [],
+    memoryUseRunId,
   };
 }
 
@@ -1356,20 +1663,7 @@ async function revalidateRepresentativeRecallAuthorization(params: {
   activeEpisodeId: string;
   representativeVersionId: string;
   allowedSourceKinds: ReadonlySet<RepresentativeRecallSourceKind>;
-  knowledgeAssetPins: Array<{
-    assetId: string;
-    checksum: string | null;
-    processingVersion: number;
-  }>;
-}): Promise<{
-  publishedVersionRoot?: string;
-  knowledgeRoot?: string;
-  allowedAssetIds: Set<string>;
-  memoryManagedUserId?: string;
-  memoryRoots: string[];
-  memoryGrantsByUri: Map<string, GovernedMemoryRecallGrant>;
-  memorySearchConfig?: { limit: number; scoreThreshold: number };
-} | null> {
+}): Promise<RepresentativeRecallAuthorization | null> {
   const conversation = await prisma.conversation.findFirst({
     where: {
       id: params.conversationId,
@@ -1385,34 +1679,18 @@ async function revalidateRepresentativeRecallAuthorization(params: {
       representative: {
         select: {
           id: true,
+          ownerId: true,
           slug: true,
           lifecycleState: true,
           openvikingEnabled: true,
           openvikingAutoRecall: true,
-          knowledgeAssetLinks: {
-            select: {
-              assetId: true,
-              enabled: true,
-              reviewStatus: true,
-              asset: {
-                select: {
-                  status: true,
-                  archivedAt: true,
-                  checksum: true,
-                  processingVersion: true,
-                },
-              },
-            },
-          },
         },
       },
     },
   });
   if (
     !conversation ||
-    conversation.representative.lifecycleState !== "PUBLISHED" ||
-    !conversation.representative.openvikingEnabled ||
-    !conversation.representative.openvikingAutoRecall
+    conversation.representative.lifecycleState !== "PUBLISHED"
   ) {
     return null;
   }
@@ -1428,6 +1706,7 @@ async function revalidateRepresentativeRecallAuthorization(params: {
             id: true,
             representativeId: true,
             status: true,
+            snapshot: true,
           },
         },
       },
@@ -1439,7 +1718,28 @@ async function revalidateRepresentativeRecallAuthorization(params: {
   ) {
     return null;
   }
+  const pinnedSnapshot = publishedRepresentativeSnapshotSchema.safeParse(
+    episode.representativeVersion.snapshot,
+  );
+  if (!pinnedSnapshot.success) return null;
 
+  const publicKnowledgeLaneEnabled =
+    params.allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+    && conversation.representative.openvikingEnabled
+    && conversation.representative.openvikingAutoRecall;
+  const publicAuthorization = publicKnowledgeLaneEnabled
+    ? await loadPublicKnowledgeRecallAuthorization({
+        representative: {
+          id: conversation.representative.id,
+          ownerId: conversation.representative.ownerId,
+          slug: conversation.representative.slug,
+        },
+        publishedVersionId: params.representativeVersionId,
+        snapshot: pinnedSnapshot.data,
+      })
+    : {
+        publicKnowledgeGrantsByUri: new Map<string, PublicKnowledgeRecallGrant>(),
+      };
   const memoryAuthorization = await loadGovernedMemoryRecallAuthorization({
     representativeId: conversation.representative.id,
     contactId: params.contactId,
@@ -1447,23 +1747,15 @@ async function revalidateRepresentativeRecallAuthorization(params: {
     allowedSourceKinds: params.allowedSourceKinds,
   });
   return {
-    ...(params.allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
+    ...(publicKnowledgeLaneEnabled
       ? {
           publishedVersionRoot: buildRepresentativeVersionResourceRootUri(
             conversation.representative.slug,
             params.representativeVersionId,
           ),
-          knowledgeRoot: buildRepresentativeKnowledgeRootUri(
-            conversation.representative.slug,
-          ),
         }
       : {}),
-    allowedAssetIds: params.allowedSourceKinds.has("PUBLIC_KNOWLEDGE")
-      ? resolveAllowedPublishedKnowledgeAssetIds({
-          pins: params.knowledgeAssetPins,
-          currentLinks: conversation.representative.knowledgeAssetLinks,
-        })
-      : new Set<string>(),
+    publicKnowledgeGrantsByUri: publicAuthorization.publicKnowledgeGrantsByUri,
     ...(memoryAuthorization.memoryManagedUserId
       ? { memoryManagedUserId: memoryAuthorization.memoryManagedUserId }
       : {}),
@@ -1473,6 +1765,79 @@ async function revalidateRepresentativeRecallAuthorization(params: {
       ? { memorySearchConfig: memoryAuthorization.memorySearchConfig }
       : {}),
   };
+}
+
+async function loadPublicKnowledgeRecallAuthorization(params: {
+  representative: { id: string; ownerId: string; slug: string };
+  publishedVersionId: string;
+  snapshot: z.output<typeof publishedRepresentativeSnapshotSchema>;
+}): Promise<Pick<RepresentativeRecallAuthorization, "publicKnowledgeGrantsByUri">> {
+  const empty = {
+    publicKnowledgeGrantsByUri: new Map<string, PublicKnowledgeRecallGrant>(),
+  };
+  try {
+    const [specs, ledgerItems] = await Promise.all([
+      buildPublishedResourceProjectionSpecs(params),
+      prisma.publicKnowledgeProjectionItem.findMany({
+        where: {
+          representativeId: params.representative.id,
+          publishedVersionId: params.publishedVersionId,
+          provider: "openviking",
+        },
+        select: {
+          id: true,
+          representativeId: true,
+          publishedVersionId: true,
+          sourceKind: true,
+          resourceKey: true,
+          knowledgeAssetId: true,
+          provider: true,
+          contentHash: true,
+          remoteUri: true,
+          projectedAt: true,
+        },
+      }),
+    ]);
+    const ledgerByResourceKey = new Map(
+      ledgerItems.map((item) => [item.resourceKey, item]),
+    );
+    const publicKnowledgeGrantsByUri = new Map<string, PublicKnowledgeRecallGrant>();
+    for (const spec of specs) {
+      const ledger = ledgerByResourceKey.get(spec.resourceKey);
+      const contentHash = sha256Text(spec.document.content);
+      if (
+        !ledger
+        || ledger.representativeId !== params.representative.id
+        || ledger.publishedVersionId !== params.publishedVersionId
+        || ledger.sourceKind !== spec.sourceKind
+        || ledger.knowledgeAssetId !== (spec.knowledgeAssetId ?? null)
+        || ledger.provider !== "openviking"
+        || ledger.contentHash !== contentHash
+        || ledger.remoteUri !== spec.document.uri
+        || !ledger.projectedAt
+      ) {
+        continue;
+      }
+      publicKnowledgeGrantsByUri.set(ledger.remoteUri, {
+        uri: ledger.remoteUri,
+        sourceKind: "PUBLIC_KNOWLEDGE",
+        publicKnowledgeProjectionId: ledger.id,
+        contentHash,
+        resourceKey: ledger.resourceKey,
+        safeText: spec.document.content,
+        title: spec.citationTitle
+          ?? resolveRecallTitle(spec.document.content, spec.document.uri),
+        ...(spec.knowledgeAssetId
+          ? { knowledgeAssetId: spec.knowledgeAssetId }
+          : {}),
+      });
+    }
+    return { publicKnowledgeGrantsByUri };
+  } catch {
+    // A missing or changed authoritative snapshot removes only public
+    // knowledge from this recall. Remote bytes are never used as fallback.
+    return empty;
+  }
 }
 
 async function loadGovernedMemoryRecallAuthorization(params: {
@@ -1488,6 +1853,13 @@ async function loadGovernedMemoryRecallAuthorization(params: {
     memoryRoots: [],
     memoryGrantsByUri: new Map<string, GovernedMemoryRecallGrant>(),
   };
+  // P0 supports governed long-term memory on Web only. Public knowledge is
+  // authorized independently above and remains available on every channel.
+  // Keep this runtime fence even though policy writes and PostgreSQL also
+  // reject the unsupported flags: an older database row must fail closed.
+  if (params.sourceChannel !== "web") {
+    return empty;
+  }
   if (
     !params.allowedSourceKinds.has("CONTACT_MEMORY")
     && !params.allowedSourceKinds.has("REPRESENTATIVE_EXPERIENCE")
@@ -1504,8 +1876,6 @@ async function loadGovernedMemoryRecallAuthorization(params: {
         contactMemoryEnabled: true,
         representativeExperienceEnabled: true,
         webRecallEnabled: true,
-        matrixRecallEnabled: true,
-        telegramRecallEnabled: true,
         provider: true,
         recallLimit: true,
         recallScoreThreshold: true,
@@ -1514,7 +1884,7 @@ async function loadGovernedMemoryRecallAuthorization(params: {
     if (
       !policy?.longTermMemoryEnabled
       || policy.provider !== "openviking"
-      || !isMemoryRecallEnabledForChannel(policy, params.sourceChannel)
+      || !policy.webRecallEnabled
       || !Number.isInteger(policy.recallLimit)
       || policy.recallLimit < 1
       || policy.recallLimit > 50
@@ -1760,6 +2130,7 @@ function hydrateGovernedMemoryRecall(
     score?: number | undefined;
   },
   grant: GovernedMemoryRecallGrant,
+  memoryUseItemId: string,
 ): {
   item: RepresentativeRecallItem;
   citation: RepresentativeRecallContext["citations"][number];
@@ -1774,11 +2145,13 @@ function hydrateGovernedMemoryRecall(
     score,
     abstract,
     ...(safeContent ? { content: safeContent } : {}),
+    memoryUseItemId,
     internalSource: {
       sourceKind: grant.sourceKind,
       contentHash: grant.contentHash,
       memoryVersionId: grant.memoryVersionId,
       projectionItemId: grant.projectionItemId,
+      memoryUseItemId,
     },
   };
   return {
@@ -1793,33 +2166,115 @@ function hydrateGovernedMemoryRecall(
   };
 }
 
+function hydratePublicKnowledgeRecall(
+  remoteItem: OpenVikingMatchedContext,
+  grant: PublicKnowledgeRecallGrant,
+  memoryUseItemId: string,
+): {
+  item: RepresentativeRecallItem;
+  citation: RepresentativeRecallContext["citations"][number];
+} {
+  // Both prompt text and citation excerpts are derived from the PostgreSQL
+  // snapshot/KnowledgeAsset bytes captured in the exact projection grant.
+  // OpenViking's remote body and generated abstract are intentionally ignored.
+  const safeContent = sanitizePublicSafeText(grant.safeText, 4_000) ?? "";
+  const abstract = sanitizePublicSafeText(grant.safeText, 800) ?? "";
+  const score = remoteItem.score ?? 0;
+  return {
+    item: {
+      uri: grant.uri,
+      contextType: remoteItem.context_type,
+      layer: safeContent ? "L2" : "L0",
+      score,
+      abstract,
+      ...(safeContent ? { content: safeContent } : {}),
+      memoryUseItemId,
+      internalSource: {
+        sourceKind: "PUBLIC_KNOWLEDGE",
+        contentHash: grant.contentHash,
+        publicKnowledgeProjectionId: grant.publicKnowledgeProjectionId,
+        memoryUseItemId,
+      },
+    },
+    citation: {
+      ...(grant.knowledgeAssetId
+        ? { knowledgeAssetId: grant.knowledgeAssetId }
+        : {}),
+      title: grant.title,
+      ...(abstract || safeContent
+        ? { excerpt: (abstract || safeContent).slice(0, 480) }
+        : {}),
+      score,
+    },
+  };
+}
+
 function authorizeRecallUri(
   uri: string,
   authorization: RepresentativeRecallAuthorization,
 ): AuthorizedRecallSource | null {
-  if (
-    authorization.publishedVersionRoot
-    && uri.startsWith(authorization.publishedVersionRoot)
-  ) {
-    return { sourceKind: "PUBLIC_KNOWLEDGE" };
-  }
-
-  if (authorization.knowledgeRoot && uri.startsWith(authorization.knowledgeRoot)) {
-    const assetId = resolveKnowledgeAssetId(uri).knowledgeAssetId;
-    return assetId && authorization.allowedAssetIds.has(assetId)
-      ? { sourceKind: "PUBLIC_KNOWLEDGE" }
-      : null;
-  }
-
-  return authorization.memoryGrantsByUri.get(uri) ?? null;
+  return authorization.publicKnowledgeGrantsByUri.get(uri)
+    ?? authorization.memoryGrantsByUri.get(uri)
+    ?? null;
 }
 
-function rankAuthorizedRecallCandidates(
+function recallSourceCoordinateKey(source: AuthorizedRecallSource): string {
+  return source.sourceKind === "PUBLIC_KNOWLEDGE"
+    ? `${source.sourceKind}:${source.publicKnowledgeProjectionId}`
+    : `${source.sourceKind}:${source.projectionItemId}`;
+}
+
+function memoryUseSourceCoordinateKey(source:
+  | { sourceKind: typeof MemoryUseSourceKind.PUBLIC_KNOWLEDGE; publicKnowledgeProjectionId: string }
+  | {
+      sourceKind:
+        | typeof MemoryUseSourceKind.CONTACT_MEMORY
+        | typeof MemoryUseSourceKind.REPRESENTATIVE_EXPERIENCE;
+      projectionItemId: string;
+    }
+): string {
+  return source.sourceKind === MemoryUseSourceKind.PUBLIC_KNOWLEDGE
+    ? `${source.sourceKind}:${source.publicKnowledgeProjectionId}`
+    : `${source.sourceKind}:${source.projectionItemId}`;
+}
+
+function memoryUseSearchCoordinate(source: AuthorizedRecallSource) {
+  if (source.sourceKind === "PUBLIC_KNOWLEDGE") {
+    return {
+      sourceKind: MemoryUseSourceKind.PUBLIC_KNOWLEDGE,
+      publicKnowledgeProjectionId: source.publicKnowledgeProjectionId,
+    } as const;
+  }
+  return {
+    sourceKind: source.sourceKind === "CONTACT_MEMORY"
+      ? MemoryUseSourceKind.CONTACT_MEMORY
+      : MemoryUseSourceKind.REPRESENTATIVE_EXPERIENCE,
+    projectionItemId: source.projectionItemId,
+  } as const;
+}
+
+function deduplicateAuthorizedRecallCandidates(
   candidates: AuthorizedRemoteRecallCandidate[],
-  config: { limit: number; scoreThreshold: number },
 ): AuthorizedRemoteRecallCandidate[] {
-  if (config.limit < 1) return [];
   const unique = new Map<string, AuthorizedRemoteRecallCandidate>();
+  for (const candidate of candidates) {
+    const key = recallSourceCoordinateKey(candidate.source);
+    const existing = unique.get(key);
+    if (!existing || (candidate.item.score ?? 0) > (existing.item.score ?? 0)) {
+      unique.set(key, candidate);
+    }
+  }
+  return [...unique.values()].sort(
+    (left, right) => (right.item.score ?? 0) - (left.item.score ?? 0),
+  );
+}
+
+function rankAuthorizedRecallCandidates<T extends AuthorizedRemoteRecallCandidate>(
+  candidates: T[],
+  config: { limit: number; scoreThreshold: number },
+): T[] {
+  if (config.limit < 1) return [];
+  const unique = new Map<string, T>();
   for (const candidate of candidates) {
     const existing = unique.get(candidate.item.uri);
     if (!existing || (candidate.item.score ?? 0) > (existing.item.score ?? 0)) {
@@ -1884,58 +2339,6 @@ function toRepresentativeMemoryChannel(channel: RecallSourceChannel) {
   return "TELEGRAM" as const;
 }
 
-function isMemoryRecallEnabledForChannel(
-  policy: {
-    webRecallEnabled: boolean;
-    matrixRecallEnabled: boolean;
-    telegramRecallEnabled: boolean;
-  },
-  channel: RecallSourceChannel,
-): boolean {
-  if (channel === "web") return policy.webRecallEnabled;
-  if (channel === "matrix") return policy.matrixRecallEnabled;
-  return policy.telegramRecallEnabled;
-}
-
-export async function getRepresentativeOpenVikingRecallTraces(
-  representativeSlug: string,
-): Promise<
-  Array<{
-    id: string;
-    queryText: string;
-    recalledUri: string;
-    contextType: string;
-    layer: string;
-    score: number;
-    createdAt: string;
-  }>
-> {
-  const representative = await prisma.representative.findUnique({
-    where: { slug: representativeSlug },
-    select: { id: true },
-  });
-
-  if (!representative) {
-    return [];
-  }
-
-  const traces = await prisma.conversationRecallTrace.findMany({
-    where: { representativeId: representative.id },
-    orderBy: [{ createdAt: "desc" }],
-    take: 40,
-  });
-
-  return traces.map((trace) => ({
-    id: trace.id,
-    queryText: trace.queryText,
-    recalledUri: trace.recalledUri,
-    contextType: trace.contextType,
-    layer: trace.layer,
-    score: trace.score,
-    createdAt: trace.createdAt.toISOString(),
-  }));
-}
-
 export async function getRepresentativeOpenVikingRecallUsage(
   representativeSlug: string,
 ): Promise<{ today: number; total: number }> {
@@ -1950,15 +2353,18 @@ export async function getRepresentativeOpenVikingRecallUsage(
 
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
-  const where = { representativeId: representative.id };
+  const where = {
+    representativeId: representative.id,
+    injectedCount: { gt: 0 },
+  };
   const [today, total] = await Promise.all([
-    prisma.conversationRecallTrace.count({
+    prisma.memoryUseRun.count({
       where: {
         ...where,
         createdAt: { gte: startOfToday },
       },
     }),
-    prisma.conversationRecallTrace.count({ where }),
+    prisma.memoryUseRun.count({ where }),
   ]);
 
   return { today, total };
@@ -2001,11 +2407,6 @@ export function resolveAllowedPublishedKnowledgeAssetIds(params: {
       return [link.assetId];
     }),
   );
-}
-
-function resolveKnowledgeAssetId(uri: string): { knowledgeAssetId?: string } {
-  const match = uri.match(/\/knowledge\/([^/]+?)\.md(?:\/|$)/i);
-  return match?.[1] ? { knowledgeAssetId: match[1] } : {};
 }
 
 function resolveRecallTitle(content: string, uri: string) {
@@ -2615,9 +3016,10 @@ export async function getRepresentativeOpenVikingOverviewMetrics(
           status: "succeeded",
         },
       }),
-      prisma.conversationRecallTrace.count({
+      prisma.memoryUseRun.count({
         where: {
           representativeId: representative.id,
+          injectedCount: { gt: 0 },
           createdAt: {
             gte: startOfToday,
           },
@@ -2719,4 +3121,8 @@ function normalizePublishedKnowledgeDocuments(
     summary: document.summary,
     ...(document.url ? { url: document.url } : {}),
   }));
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }

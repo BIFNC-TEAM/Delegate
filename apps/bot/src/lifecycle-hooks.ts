@@ -24,7 +24,6 @@ export const botLifecycleHooks = createLifecycleHookBus(
               estimatedInputTokens: event.estimatedInputTokens,
               segments: event.segments,
               selectedKnowledgeTitles: event.selectedKnowledgeTitles,
-              selectedRecallUris: event.selectedRecallUris,
             });
             return;
           case "model_reply_completed":

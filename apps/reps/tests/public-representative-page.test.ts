@@ -13,6 +13,10 @@ const chatSource = readFileSync(
   resolve(__dirname, "../app/reps/[slug]/representative-chat-panel.tsx"),
   "utf8",
 );
+const disclosureSource = readFileSync(
+  resolve(__dirname, "../app/reps/[slug]/governed-context-disclosure.ts"),
+  "utf8",
+);
 const identityBindingSource = readFileSync(
   resolve(
     __dirname,
@@ -44,19 +48,61 @@ describe("public representative visitor-first page", () => {
   });
 
   it("renders explicit enabled and disabled governed-context disclosures", () => {
-    const enabledZh = getGovernedContextDisclosure("zh", true);
-    const disabledZh = getGovernedContextDisclosure("zh", false);
-    const enabledEn = getGovernedContextDisclosure("en", true);
-    const disabledEn = getGovernedContextDisclosure("en", false);
+    const enabledPolicy = {
+      enabled: true,
+      contactMemoryEnabled: true,
+      representativeExperienceEnabled: true,
+      automaticExtractionEnabled: false,
+      retentionDays: 45,
+      expiryAction: "ARCHIVE" as const,
+      policyRevision: 7,
+      fingerprint: "a".repeat(43),
+    };
+    const disabledPolicy = {
+      enabled: false,
+      contactMemoryEnabled: false,
+      representativeExperienceEnabled: false,
+      automaticExtractionEnabled: false,
+      retentionDays: null,
+      expiryAction: null,
+      policyRevision: null,
+      fingerprint: "b".repeat(43),
+    };
+    const enabledZh = getGovernedContextDisclosure("zh", enabledPolicy);
+    const disabledZh = getGovernedContextDisclosure("zh", disabledPolicy);
+    const enabledEn = getGovernedContextDisclosure("en", enabledPolicy);
+    const disabledEn = getGovernedContextDisclosure("en", disabledPolicy);
+    const extractionOnlyZh = getGovernedContextDisclosure("zh", {
+      ...enabledPolicy,
+      enabled: false,
+      automaticExtractionEnabled: true,
+      expiryAction: "DELETE",
+    });
 
-    expect(enabledZh).toContain("当前已启用");
-    expect(enabledZh).toContain("仅在这个数字代表范围内");
+    expect(enabledZh).toContain("长期记忆已启用");
+    expect(enabledZh).toContain("当前联系人、当前数字代表和 Web 渠道");
+    expect(enabledZh).toContain("去标识化且经人工审核");
+    expect(enabledZh).toContain("原始聊天全文");
+    expect(enabledZh).toContain("付款、余额、退款和权益");
+    expect(enabledZh).toContain("保留 45 天");
+    expect(enabledZh).toContain("到期后归档并停止召回");
+    expect(enabledZh).toContain("查看、纠正或删除");
     expect(disabledZh).toContain("当前未启用");
-    expect(disabledZh).toContain("不会形成或调用跨会话长期记忆");
+    expect(disabledZh).toContain("不会创建或调用跨会话");
+    expect(disabledZh).not.toMatch(/保留 \d+ 天/u);
     expect(enabledEn).toContain("is enabled");
-    expect(enabledEn).toContain("scoped to this representative");
-    expect(disabledEn).toContain("is disabled");
-    expect(disabledEn).toContain("does not create or use memory across conversations");
+    expect(enabledEn).toContain("this contact, this representative, and the Web channel");
+    expect(enabledEn).toContain("deidentified representative experience");
+    expect(enabledEn).toContain("retained for 45 days");
+    expect(enabledEn).toContain("view, correct, or delete");
+    expect(disabledEn).toContain("is currently disabled");
+    expect(disabledEn).toContain("will not create or recall cross-conversation");
+    expect(extractionOnlyZh).toContain("召回当前未启用");
+    expect(extractionOnlyZh).toContain("联系人记忆候选自动提取已启用");
+    expect(extractionOnlyZh).toContain("只可能生成联系人偏好、目标、约束与必要背景候选");
+    expect(extractionOnlyZh).toContain("代表经验不会从 Web 消息自动提取");
+    expect(extractionOnlyZh).toContain("保留 45 天");
+    expect(extractionOnlyZh).toContain("异步清理");
     expect(enabledZh).not.toBe(disabledZh);
     expect(enabledEn).not.toBe(disabledEn);
 
@@ -64,17 +110,25 @@ describe("public representative visitor-first page", () => {
       "runtime.governedContextEnabled",
     );
     expect(pageSource).toContain(
-      "governedContextEnabled={runtime.governedContextEnabled}",
+      "governedMemoryDisclosure={runtime.governedMemoryDisclosure}",
     );
     expect(chatSource).toContain(
-      "props.governedContextEnabled",
+      "props.governedMemoryDisclosure",
     );
+    expect(chatSource).toContain("policyRevision: governedMemoryDisclosure.policyRevision");
+    expect(chatSource).toContain("fingerprint: governedMemoryDisclosure.fingerprint");
+    expect(chatSource).toContain('payload.code === "memory_disclosure_stale"');
+    expect(chatSource).toContain("setGovernedMemoryDisclosure(payload.governedMemoryDisclosure)");
+    expect(chatSource).toContain("setInput(text)");
     expect(pageSource).not.toMatch(
       /openvikingAgentId|openvikingAutoRecall|openvikingTargetUri|baseUrl|consoleUrl/u,
     );
+    expect(`${chatSource}\n${disclosureSource}`).not.toMatch(
+      /openviking|agent id|target uri|provider/u,
+    );
     expect(chatSource).toContain('citationsLabel: "回答依据"');
     expect(chatSource).toContain('citationsLabel: "Context used"');
-    expect(chatSource).toContain("props.governedContextEnabled");
+    expect(chatSource).toContain("props.governedMemoryDisclosure");
     expect(pageSource).not.toContain("回答只使用已发布");
   });
 

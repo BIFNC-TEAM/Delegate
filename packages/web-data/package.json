@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./compute-conversation-results": "./src/compute-conversation-results.ts",
+    "./memory-dashboard": "./src/memory-dashboard.ts",
     "./owner-settings": "./src/owner-settings.ts"
   },
   "scripts": {

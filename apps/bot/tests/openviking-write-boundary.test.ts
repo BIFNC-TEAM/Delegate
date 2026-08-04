@@ -48,7 +48,7 @@ describe("OpenViking long-term write boundary", () => {
     expect(runtimeStoreSource).not.toContain("recordOpenVikingRecallTrace");
   });
 
-  it("uses the centralized published-version and contact allowlist for recall", async () => {
+  it("disables recall in the legacy Telegram runtime without a GenerationRun ledger", async () => {
     webDataMocks.recallRepresentativeContext.mockResolvedValue({
       items: [
         {
@@ -68,14 +68,8 @@ describe("OpenViking long-term write boundary", () => {
       queryText: "What is the policy?",
     });
 
-    expect(webDataMocks.recallRepresentativeContext).toHaveBeenCalledWith({
-      representativeSlug: "lin-founder-rep",
-      conversationId: "conversation-1",
-      contactId: "contact-1",
-      sourceChannel: "telegram",
-      queryText: "What is the policy?",
-    });
-    expect(result).toHaveLength(1);
+    expect(webDataMocks.recallRepresentativeContext).not.toHaveBeenCalled();
+    expect(result).toEqual([]);
   });
 });
 

@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    memoryUseRun: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
     message: {
       update: vi.fn(),
     },

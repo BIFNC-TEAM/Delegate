@@ -112,9 +112,24 @@ describe("Memory System governance service", () => {
       client,
       now: () => timestamp,
     });
-    const replay = await approveMemoryCandidate(request, {
+    const replay = await approveMemoryCandidate({
+      ...request,
+      requestId: "memory-request-retry-trace",
+    }, {
       client,
       now: () => laterTimestamp,
+    });
+
+    await expect(approveMemoryCandidate({
+      ...request,
+      requestId: "memory-request-conflicting-trace",
+      reasonCode: "different_business_reason",
+    }, {
+      client,
+      now: () => laterTimestamp,
+    })).rejects.toMatchObject({
+      code: "memory_idempotency_conflict",
+      statusCode: 409,
     });
 
     expect(first).toMatchObject({

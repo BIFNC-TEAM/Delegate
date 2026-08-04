@@ -9,7 +9,10 @@ import {
   PUBLIC_WALLET_UPDATED_EVENT,
   type PublicWalletUpdatedDetail,
 } from "./public-wallet-client";
-import { getGovernedContextDisclosure } from "./governed-context-disclosure";
+import {
+  getGovernedContextDisclosure,
+  type GovernedMemoryDisclosure,
+} from "./governed-context-disclosure";
 
 type Citation = { title: string; excerpt?: string; uri?: string };
 type ChatAttachment = { id: string; fileName: string; mimeType?: string; sizeBytes?: number; url?: string };
@@ -37,6 +40,8 @@ type PublicChatAccepted = {
   tier: PlanTier;
   usage: PublicChatResponse["usage"];
   error?: string;
+  code?: string;
+  governedMemoryDisclosure?: GovernedMemoryDisclosure;
 };
 
 const RUN_SUBSCRIPTION_DEADLINE_MS = 150_000;
@@ -50,12 +55,16 @@ export function RepresentativeChatPanel(props: {
   locale: "zh" | "en";
   freeReplyLimit: number;
   computeEnabled: boolean;
-  governedContextEnabled: boolean;
+  governedMemoryDisclosure: GovernedMemoryDisclosure;
 }) {
   const t = props.locale === "zh" ? zhCopy : enCopy;
+  const [governedMemoryDisclosure, setGovernedMemoryDisclosure] = useState(
+    props.governedMemoryDisclosure,
+  );
+  const governedContextEnabled = governedMemoryDisclosure.enabled;
   const governedContextDisclosure = getGovernedContextDisclosure(
     props.locale,
-    props.governedContextEnabled,
+    governedMemoryDisclosure,
   );
   const demoCommerceEnabled = process.env.NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS === "true";
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -70,7 +79,7 @@ export function RepresentativeChatPanel(props: {
     {
       id: "welcome",
       role: "assistant",
-      text: t.welcome(props.representativeName, props.governedContextEnabled),
+      text: t.welcome(props.representativeName, governedContextEnabled),
     },
   ]);
   const [usage, setUsage] = useState<PublicChatResponse["usage"]>({
@@ -224,10 +233,32 @@ export function RepresentativeChatPanel(props: {
       const response = await fetch(`/reps/${props.representativeSlug}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text, clientMessageId: userMessage.id }),
+        body: JSON.stringify({
+          message: text,
+          clientMessageId: userMessage.id,
+          memoryDisclosure: {
+            policyRevision: governedMemoryDisclosure.policyRevision,
+            fingerprint: governedMemoryDisclosure.fingerprint,
+          },
+        }),
       });
       const payload = (await response.json()) as PublicChatAccepted;
       if (!response.ok) {
+        if (
+          response.status === 409
+          && payload.code === "memory_disclosure_stale"
+          && payload.governedMemoryDisclosure
+        ) {
+          setGovernedMemoryDisclosure(payload.governedMemoryDisclosure);
+          setMessages((current) => current.filter(
+            (message) => message.id !== userMessage.id,
+          ));
+          setInput(text);
+          setError(t.memoryPolicyChanged);
+          setBusy(false);
+          requestAnimationFrame(() => inputRef.current?.focus());
+          return;
+        }
         if (response.status === 402 && payload.usage) {
           setUsage(payload.usage);
           if (props.pricing.some((plan) => plan.tier === "pass")) {
@@ -330,7 +361,7 @@ export function RepresentativeChatPanel(props: {
         <div>
           <p className="eyebrow">{t.eyebrow}</p>
           <h2>{t.title(props.representativeName)}</h2>
-          <p>{t.summary(props.governedContextEnabled)}</p>
+          <p>{t.summary(governedContextEnabled)}</p>
         </div>
         <span className={humanActive ? "representative-responder-pill is-human" : "representative-responder-pill"}>
           <i aria-hidden="true" />{humanActive ? t.humanStatus : t.aiStatus}
@@ -395,7 +426,7 @@ export function RepresentativeChatPanel(props: {
                 </article>
               );
             })}
-            {busy ? <article className="representative-chat-message representative-chat-message-assistant is-pending"><span className="panel-title">{props.representativeName} · {t.aiLabel}</span><p>{t.thinking(props.governedContextEnabled)}</p></article> : null}
+            {busy ? <article className="representative-chat-message representative-chat-message-assistant is-pending"><span className="panel-title">{props.representativeName} · {t.aiLabel}</span><p>{t.thinking(governedContextEnabled)}</p></article> : null}
           </div>
 
           {messages.length <= 1 ? (
@@ -551,7 +582,7 @@ const zhCopy = {
   startersLabel: "你可以这样开始",
   starters: ["我想了解你们提供什么服务", "我有一个合作需求", "帮我整理报价所需信息", "我希望联系本人"],
   inputLabel: "想解决什么？", placeholder: "描述你的问题、背景和期望结果…", footnote: "请勿发送密码、密钥或不应公开的敏感信息。",
-  sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
+  sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", memoryPolicyChanged: "记忆策略刚刚更新。请阅读新的记忆说明后重新发送；上一条内容尚未提交。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
   sessionLabel: "本次会话",
   currentResponder: "当前接待", freeRepliesLabel: "免费回复", serviceCreditsLabel: "服务额度",
@@ -588,7 +619,7 @@ const enCopy = {
   startersLabel: "Try one of these",
   starters: ["What services do you offer?", "I have a partnership request", "Help me prepare a quote request", "I want to contact the owner"],
   inputLabel: "What do you need?", placeholder: "Describe the problem, context, and outcome you want…", footnote: "Do not send passwords, API keys, or sensitive information that should not be public.",
-  sending: "Working…", send: "Send", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "Reviewing published knowledge and permitted context…" : "Reviewing published knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
+  sending: "Working…", send: "Send", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "Reviewing published knowledge and permitted context…" : "Reviewing published knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", memoryPolicyChanged: "The memory policy just changed. Review the updated memory notice and send again; your previous message was not submitted.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
   humanQueueNotice: "This conversation is now in the human queue. You can keep adding context while the operator reviews the full thread.",
   sessionLabel: "This conversation",
   currentResponder: "Current responder", freeRepliesLabel: "Free replies", serviceCreditsLabel: "Service credits",

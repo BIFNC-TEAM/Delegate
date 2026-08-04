@@ -13,6 +13,13 @@ const migration = readFileSync(
   ),
   "utf8",
 );
+const truthLedgerMigration = readFileSync(
+  new URL(
+    "../../../prisma/migrations/20260804130000_memory_use_truth_ledger/migration.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const provenanceIndexMigrations = [
   "20260803160000_memory_contact_provenance_index",
   "20260803160010_memory_conversation_provenance_index",
@@ -142,14 +149,21 @@ describe("Memory System authoritative schema", () => {
       "@relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: \"MemoryExtractionRun_message_scope_fkey\")",
     );
     expect(useRun).toContain("representativeVersionId");
+    expect(useRun).toMatch(/generationRunId\s+String\b/u);
+    expect(useRun).not.toMatch(/generationRunId\s+String\?/u);
     expect(useRun).toContain(
-      "@relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Restrict, map: \"MemoryUseRun_generation_fkey\")",
+      "@relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Cascade, map: \"MemoryUseRun_generation_fkey\")",
     );
+    expect(useRun).toContain("unmappedCandidateCount");
+    expect(useRun).toContain("reasonCode");
+    expect(useRun).toContain("citedCount");
     expect(migration).toContain("'MemoryExtractionRun_source_channel_check'");
-    expect(migration).toContain("'MemoryUseRun_source_channel_check'");
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseRun_pinned_version_check\'');
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseRun_active_version_check\'');
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseRun_generation_version_check\'');
+    expect(truthLedgerMigration).toContain("'MemoryUseRun_source_channel_check'");
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_pinned_version_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_active_version_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_generation_version_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_generation_input_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_generation_output_check\'');
   });
 
   it("records searched, scope-checked, safety-checked, injected, and displayed as distinct stages", () => {
@@ -162,23 +176,60 @@ describe("Memory System authoritative schema", () => {
       "safetyCheckedAt",
       "safetyPassedAt",
       "injectedAt",
+      "citedAt",
       "displayedAt",
     ]) {
       expect(item, field).toContain(field);
     }
     expect(item).toContain("representativeId");
     expect(item).toContain("memoryScope");
-    expect(item).toContain("knowledgeBindingId");
-    expect(item).toContain("representativeVersionId");
+    expect(item).toContain("publicKnowledgeProjectionId");
+    expect(item).toContain("citationPurgedAt");
+    expect(item).not.toContain("knowledgeBindingId");
+    expect(item).not.toContain("representativeVersionId");
     expect(item).not.toContain("knowledgeAssetId");
-    expect(migration).toContain('CONSTRAINT "MemoryUseItem_stage_chain_check"');
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseItem_contact_scope_check\'');
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseItem_rep_experience_scope_check\'');
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseItem_injection_allowlist_check\'');
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseItem_published_knowledge_check\'');
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseItem_content_hash_check\'');
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseItem_knowledge_snapshot_check\'');
-    expect(migration).toContain('CONSTRAINT = \'MemoryUseItem_displayed_source_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT "MemoryUseItem_stage_chain_check"');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseItem_contact_scope_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseItem_rep_experience_scope_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseItem_injection_allowlist_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseItem_published_knowledge_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseItem_content_hash_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseItem_cited_source_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseItem_display_ack_check\'');
+  });
+
+  it("pins public knowledge use to an exact immutable published-version projection", () => {
+    const projection = modelBlock("PublicKnowledgeProjectionItem");
+
+    expect(enumBlock("PublicKnowledgeProjectionSourceKind")).toMatch(
+      /REPRESENTATIVE_VERSION_RESOURCE[\s\S]*KNOWLEDGE_ASSET/u,
+    );
+    for (const field of [
+      "publishedVersionId",
+      "resourceKey",
+      "contentHash",
+      "remoteUri",
+      "projectedAt",
+    ]) {
+      expect(projection, field).toContain(field);
+    }
+    expect(projection).toContain("knowledgeAssetId");
+    expect(projection).not.toContain("knowledgeAsset          KnowledgeAsset");
+    expect(truthLedgerMigration).toContain(
+      'CONSTRAINT "PublicKnowledgeProjectionItem_version_resource_key"',
+    );
+    expect(truthLedgerMigration).toContain(
+      'CONSTRAINT "PublicKnowledgeProjectionItem_provider_uri_key"',
+    );
+    expect(truthLedgerMigration).toContain(
+      "'PublicKnowledgeProjectionItem_exact_uri_check'",
+    );
+    expect(truthLedgerMigration).toContain(
+      "'PublicKnowledgeProjectionItem_asset_snapshot_check'",
+    );
+    expect(truthLedgerMigration).toContain(
+      "'PublicKnowledgeProjectionItem_append_only_check'",
+    );
   });
 
   it("keeps projection failure separate and allows only one active projection pointer", () => {

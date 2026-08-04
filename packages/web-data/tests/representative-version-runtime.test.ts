@@ -11,6 +11,7 @@ import {
   getRepresentativeRuntimeSetupSnapshot,
   resolveRepresentativeRuntimeMcpBindings,
   resolveGovernedContextEnabled,
+  resolvePublicGovernedMemoryDisclosure,
   resolvePublicRepresentativeAvailability,
   type RepresentativeSetupSnapshot,
 } from "../src/representative-setup";
@@ -183,46 +184,140 @@ describe("representative published runtime snapshot", () => {
   });
 
   it("exposes governed context only when controls and runtime prerequisites are enabled", () => {
+    const policy = {
+      longTermMemoryEnabled: true,
+      contactMemoryEnabled: true,
+      representativeExperienceEnabled: true,
+      autoExtract: false,
+      webRecallEnabled: true,
+      webExtractEnabled: false,
+      retentionDays: 45,
+      expiryAction: "ARCHIVE" as const,
+      provider: "openviking",
+      revision: 7,
+    };
     expect(
       resolveGovernedContextEnabled({
-        openvikingEnabled: true,
-        openvikingAutoRecall: true,
+        policy,
         environmentEnabled: true,
         modelCredentialsAvailable: true,
       }),
     ).toBe(true);
     expect(
       resolveGovernedContextEnabled({
-        openvikingEnabled: true,
-        openvikingAutoRecall: false,
+        policy: { ...policy, webRecallEnabled: false },
         environmentEnabled: true,
         modelCredentialsAvailable: true,
       }),
     ).toBe(false);
     expect(
       resolveGovernedContextEnabled({
-        openvikingEnabled: false,
-        openvikingAutoRecall: true,
+        policy: {
+          ...policy,
+          contactMemoryEnabled: false,
+          representativeExperienceEnabled: false,
+        },
         environmentEnabled: true,
         modelCredentialsAvailable: true,
       }),
     ).toBe(false);
     expect(
       resolveGovernedContextEnabled({
-        openvikingEnabled: true,
-        openvikingAutoRecall: true,
+        policy,
         environmentEnabled: false,
         modelCredentialsAvailable: true,
       }),
     ).toBe(false);
     expect(
       resolveGovernedContextEnabled({
-        openvikingEnabled: true,
-        openvikingAutoRecall: true,
+        policy,
         environmentEnabled: true,
         modelCredentialsAvailable: false,
       }),
     ).toBe(false);
+    expect(
+      resolveGovernedContextEnabled({
+        policy: { ...policy, provider: "unsupported" },
+        environmentEnabled: true,
+        modelCredentialsAvailable: true,
+      }),
+    ).toBe(false);
+
+    const enabledDisclosure = resolvePublicGovernedMemoryDisclosure({
+      policy,
+      environmentEnabled: true,
+      modelCredentialsAvailable: true,
+    });
+    expect(enabledDisclosure).toEqual({
+      enabled: true,
+      contactMemoryEnabled: true,
+      representativeExperienceEnabled: true,
+      automaticExtractionEnabled: false,
+      retentionDays: 45,
+      expiryAction: "ARCHIVE",
+      policyRevision: 7,
+      fingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
+    });
+    const disabledDisclosure = resolvePublicGovernedMemoryDisclosure({
+      policy: null,
+      environmentEnabled: true,
+      modelCredentialsAvailable: true,
+    });
+    expect(disabledDisclosure).toEqual(expect.objectContaining({
+      enabled: false,
+      retentionDays: null,
+      expiryAction: null,
+      policyRevision: null,
+      fingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
+    }));
+    const extractionOnlyDisclosure = resolvePublicGovernedMemoryDisclosure({
+      policy: {
+        ...policy,
+        autoExtract: true,
+        webRecallEnabled: false,
+        webExtractEnabled: true,
+        expiryAction: "DELETE",
+      },
+      environmentEnabled: false,
+      modelCredentialsAvailable: false,
+    });
+    expect(extractionOnlyDisclosure).toEqual({
+      enabled: false,
+      contactMemoryEnabled: true,
+      representativeExperienceEnabled: true,
+      automaticExtractionEnabled: true,
+      retentionDays: 45,
+      expiryAction: "DELETE",
+      policyRevision: 7,
+      fingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
+    });
+
+    const contactDisabledDisclosure = resolvePublicGovernedMemoryDisclosure({
+      policy: {
+        ...policy,
+        contactMemoryEnabled: false,
+        representativeExperienceEnabled: true,
+        autoExtract: true,
+        webRecallEnabled: false,
+        webExtractEnabled: true,
+        expiryAction: "DELETE",
+      },
+      environmentEnabled: false,
+      modelCredentialsAvailable: false,
+    });
+    expect(contactDisabledDisclosure).toEqual({
+      enabled: false,
+      contactMemoryEnabled: false,
+      representativeExperienceEnabled: false,
+      automaticExtractionEnabled: false,
+      retentionDays: null,
+      expiryAction: null,
+      policyRevision: 7,
+      fingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
+    });
+    expect(contactDisabledDisclosure.fingerprint).not.toBe(
+      extractionOnlyDisclosure.fingerprint,
+    );
   });
 
   it("keeps the public demo runtime's governed context disabled", async () => {
@@ -236,6 +331,10 @@ describe("representative published runtime snapshot", () => {
       expect(runtime.status).toBe("available");
       if (runtime.status === "available") {
         expect(runtime.governedContextEnabled).toBe(false);
+        expect(runtime.governedMemoryDisclosure).toEqual(expect.objectContaining({
+          enabled: false,
+          retentionDays: null,
+        }));
       }
     } finally {
       if (previousDatabaseUrl === undefined) {

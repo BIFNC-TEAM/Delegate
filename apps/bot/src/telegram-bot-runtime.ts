@@ -876,7 +876,8 @@ bot.on("message:text", async (ctx) => {
         estimatedInputTokens: generated.contextTrace.estimatedInputTokens,
         segments: generated.contextTrace.segments,
         selectedKnowledgeTitles: generated.contextTrace.selectedKnowledgeTitles,
-        selectedRecallUris: generated.contextTrace.selectedRecallUris,
+        selectedMemoryUseItemIds:
+          generated.contextTrace.selectedMemoryUseItemIds,
       });
     }
 

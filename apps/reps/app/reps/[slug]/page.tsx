@@ -94,7 +94,7 @@ export default async function RepresentativePage({
   const representative = runtime.setup;
   const governedContextDisclosure = getGovernedContextDisclosure(
     locale,
-    runtime.governedContextEnabled,
+    runtime.governedMemoryDisclosure,
   );
   const legacyAuthorityEnabled = usesLegacyAccountSessionAuthority(
     readAccountSessionMode(),
@@ -272,7 +272,7 @@ export default async function RepresentativePage({
       <RepresentativeChatPanel
         computeEnabled={representative.compute.enabled}
         freeReplyLimit={representative.contract.freeReplyLimit}
-        governedContextEnabled={runtime.governedContextEnabled}
+        governedMemoryDisclosure={runtime.governedMemoryDisclosure}
         humanInLoop={representative.humanInLoop}
         locale={locale}
         ownerName={representative.ownerName}

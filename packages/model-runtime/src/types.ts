@@ -8,6 +8,18 @@ import type {
 } from "@delegate/runtime";
 import type { ModelContextSegmentTrace } from "@delegate/lifecycle-hooks";
 
+/**
+ * Recall input accepted by the model runtime.
+ *
+ * `memoryUseItemId` is an opaque Postgres identifier used to correlate the
+ * final prompt selection with the governed memory-use ledger. The identifier
+ * is required at the type boundary and is never rendered into the model
+ * prompt. Runtime validation still filters empty IDs fail closed.
+ */
+export type RepresentativeRecallItem = OpenVikingRecallItem & {
+  memoryUseItemId: string;
+};
+
 export type ModelProvider = "openai" | "bailian" | "anthropic";
 
 export type ModelRuntimeState =
@@ -62,7 +74,7 @@ export type RepresentativeReplyInput = {
   plan: ConversationPlan;
   subagent: ResolvedSubagentRoute;
   userText: string;
-  recalled: OpenVikingRecallItem[];
+  recalled: RepresentativeRecallItem[];
   recentTurns: ModelRuntimeRecentTurn[];
   collectorState?: StructuredCollectorState | null;
 };
@@ -76,7 +88,8 @@ export type RepresentativeReplyContextTrace = {
   estimatedInputTokens: number;
   segments: ModelContextSegmentTrace[];
   selectedKnowledgeTitles: string[];
-  selectedRecallUris: string[];
+  /** Opaque ledger identifiers for only the recall items included in the prompt. */
+  selectedMemoryUseItemIds: string[];
 };
 
 export type ModelUsageSnapshot = {
@@ -94,6 +107,8 @@ export type RepresentativeReplyResult =
   | {
       ok: true;
       replyText: string;
+      /** Opaque ledger IDs for sources the model explicitly cited in its reply. */
+      citedMemoryUseItemIds: string[];
       provider: ModelProvider;
       model: string;
       contextTrace: RepresentativeReplyContextTrace;
@@ -103,6 +118,8 @@ export type RepresentativeReplyResult =
       ok: false;
       reason: string;
       state: ModelRuntimeState;
+      /** Always empty when generation or citation parsing did not succeed. */
+      citedMemoryUseItemIds: string[];
       contextTrace?: RepresentativeReplyContextTrace;
       provider?: string;
       model?: string;

@@ -23,16 +23,11 @@ describePostgres("Memory extraction PostgreSQL pipeline", () => {
     await prisma.$disconnect();
   });
 
-  it("queues Web, Matrix, and Telegram work and claims each run once", async () => {
+  it("queues Web work once and hard-denies unsupported channel extraction", async () => {
     const fixture = await createFixture();
-    const channelPreferences = {
-      web: "I prefer concise replies",
-      matrix: "I prefer detailed replies",
-      telegram: "I prefer formal replies",
-    } as const;
-    for (const channel of ["web", "matrix", "telegram"] as const) {
+    for (const channel of ["web"] as const) {
       const source = await createSource(fixture.representativeId, channel, {
-        text: channelPreferences[channel],
+        text: "I prefer concise replies",
       });
       const input = {
         representativeId: fixture.representativeId,
@@ -102,6 +97,30 @@ describePostgres("Memory extraction PostgreSQL pipeline", () => {
         where: { representativeId: fixture.representativeId },
       })).toBe(0);
     }
+
+    for (const channel of ["matrix", "telegram"] as const) {
+      const source = await createSource(fixture.representativeId, channel, {
+        text: `I prefer ${channel} replies`,
+      });
+      await expect(prisma.$transaction((tx) =>
+        enqueueInboundMessageMemoryExtraction(tx, {
+          representativeId: fixture.representativeId,
+          contactId: source.contactId,
+          conversationId: source.conversationId,
+          messageId: source.messageId,
+          channel,
+        }),
+      )).resolves.toEqual({
+        enqueued: false,
+        reasonCode: "memory_channel_disclosure_unavailable",
+      });
+      expect(await prisma.memoryExtractionRun.count({
+        where: { sourceMessageId: source.messageId },
+      })).toBe(0);
+      expect(await prisma.memoryCandidate.count({
+        where: { sourceMessageId: source.messageId },
+      })).toBe(0);
+    }
   });
 
   it("stores prohibited input only as a bodyless marker", async () => {
@@ -140,7 +159,7 @@ describePostgres("Memory extraction PostgreSQL pipeline", () => {
 
   it("keeps representative experience deidentified and pending manual review", async () => {
     const fixture = await createFixture();
-    const source = await createSource(fixture.representativeId, "matrix", {
+    const source = await createSource(fixture.representativeId, "web", {
       text: "I prefer concise replies",
     });
     const result = await enqueueManualMemoryExtraction({
@@ -148,7 +167,7 @@ describePostgres("Memory extraction PostgreSQL pipeline", () => {
       contactId: source.contactId,
       conversationId: source.conversationId,
       messageId: source.messageId,
-      channel: "matrix",
+      channel: "web",
       scope: "REPRESENTATIVE",
       requestId: `manual-${crypto.randomUUID()}`,
     });
@@ -175,7 +194,7 @@ describePostgres("Memory extraction PostgreSQL pipeline", () => {
 
   it("persists retry backoff and moves the final attempt to FAILED", async () => {
     const fixture = await createFixture();
-    const source = await createSource(fixture.representativeId, "telegram", {
+    const source = await createSource(fixture.representativeId, "web", {
       text: "I prefer concise replies",
     });
     const enqueued = await prisma.$transaction((tx) =>
@@ -184,7 +203,7 @@ describePostgres("Memory extraction PostgreSQL pipeline", () => {
         contactId: source.contactId,
         conversationId: source.conversationId,
         messageId: source.messageId,
-        channel: "telegram",
+        channel: "web",
       }),
     );
     if (!enqueued.enqueued) throw new Error(enqueued.reasonCode);
@@ -289,7 +308,7 @@ describePostgres("Memory extraction PostgreSQL pipeline", () => {
 
     const crashedSource = await createSource(
       fixture.representativeId,
-      "telegram",
+      "web",
       { text: "I prefer detailed replies" },
     );
     const crashedRun = await prisma.$transaction((tx) =>
@@ -298,7 +317,7 @@ describePostgres("Memory extraction PostgreSQL pipeline", () => {
         contactId: crashedSource.contactId,
         conversationId: crashedSource.conversationId,
         messageId: crashedSource.messageId,
-        channel: "telegram",
+        channel: "web",
       }),
     );
     if (!crashedRun.enqueued) throw new Error(crashedRun.reasonCode);
@@ -365,8 +384,8 @@ async function createFixture() {
       representativeExperienceEnabled: true,
       autoExtract: true,
       webExtractEnabled: true,
-      matrixExtractEnabled: true,
-      telegramExtractEnabled: true,
+      matrixExtractEnabled: false,
+      telegramExtractEnabled: false,
     },
   });
   return { representativeId: representative.id };

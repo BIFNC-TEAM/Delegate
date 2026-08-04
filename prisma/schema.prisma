@@ -1034,6 +1034,11 @@ enum MemoryUseSourceKind {
   REPRESENTATIVE_EXPERIENCE
 }
 
+enum PublicKnowledgeProjectionSourceKind {
+  REPRESENTATIVE_VERSION_RESOURCE
+  KNOWLEDGE_ASSET
+}
+
 enum MemoryReconciliationStatus {
   QUEUED
   RUNNING
@@ -2102,62 +2107,62 @@ model CustomerAccount {
 }
 
 model Representative {
-  id                               String                         @id @default(cuid())
+  id                               String                          @id @default(cuid())
   ownerId                          String
-  slug                             String                         @unique
+  slug                             String                          @unique
   displayName                      String
   roleSummary                      String
   tone                             String
   avatarUrl                        String?
-  publicMode                       Boolean                        @default(true)
-  claimStatus                      RepresentativeClaimStatus      @default(CLAIMED)
-  groupModeEnabled                 Boolean                        @default(false)
-  groupActivation                  GroupActivation                @default(REPLY_OR_MENTION)
-  humanInLoop                      Boolean                        @default(true)
+  publicMode                       Boolean                         @default(true)
+  claimStatus                      RepresentativeClaimStatus       @default(CLAIMED)
+  groupModeEnabled                 Boolean                         @default(false)
+  groupActivation                  GroupActivation                 @default(REPLY_OR_MENTION)
+  humanInLoop                      Boolean                         @default(true)
   languages                        Json
-  freeReplyLimit                   Int                            @default(4)
+  freeReplyLimit                   Int                             @default(4)
   freeScope                        Json
   paywalledIntents                 Json
-  handoffWindowHours               Int                            @default(24)
-  freeMonthlyCredit                Int                            @default(100)
+  handoffWindowHours               Int                             @default(24)
+  freeMonthlyCredit                Int                             @default(100)
   handoffPrompt                    String
   allowedSkills                    Json
   actionGate                       Json
-  openvikingEnabled                Boolean                        @default(false)
+  openvikingEnabled                Boolean                         @default(false)
   openvikingAgentId                String?
-  openvikingAutoRecall             Boolean                        @default(true)
-  openvikingAutoCapture            Boolean                        @default(false)
-  openvikingCaptureMode            String                         @default("semantic")
-  openvikingRecallLimit            Int                            @default(6)
-  openvikingRecallScoreThreshold   Float                          @default(0.01)
+  openvikingAutoRecall             Boolean                         @default(true)
+  openvikingAutoCapture            Boolean                         @default(false)
+  openvikingCaptureMode            String                          @default("semantic")
+  openvikingRecallLimit            Int                             @default(6)
+  openvikingRecallScoreThreshold   Float                           @default(0.01)
   openvikingTargetUri              String?
   openvikingLastSyncAt             DateTime?
   openvikingLastSyncStatus         String?
   openvikingLastSyncError          String?
   openvikingLastSyncItemCount      Int?
   openvikingLastSyncJobId          String?
-  computeEnabled                   Boolean                        @default(false)
-  computeDefaultPolicyMode         PolicyDecision                 @default(ASK)
-  computeBaseImage                 String                         @default("debian:bookworm-slim")
-  computeMaxSessionMinutes         Int                            @default(15)
-  computeAutoApproveBudgetCents    Int                            @default(0)
-  computeArtifactRetentionDays     Int                            @default(14)
-  computeNetworkMode               ComputeNetworkMode             @default(NO_NETWORK)
-  computeNetworkAllowlist          String[]                       @default([])
-  computeFilesystemMode            ComputeFilesystemMode          @default(WORKSPACE_ONLY)
-  delegationEnabled                Boolean                        @default(true)
-  delegationNaturalLanguageEnabled Boolean                        @default(true)
-  delegationExplicitComputeEnabled Boolean                        @default(true)
-  delegationMaxSteps               Int                            @default(5)
-  delegationMaxCostCents           Int                            @default(0)
-  delegationKnowledgeScope         DelegationKnowledgeScope       @default(USER_INPUT_ONLY)
-  lifecycleState                   RepresentativeLifecycleState   @default(DRAFT)
+  computeEnabled                   Boolean                         @default(false)
+  computeDefaultPolicyMode         PolicyDecision                  @default(ASK)
+  computeBaseImage                 String                          @default("debian:bookworm-slim")
+  computeMaxSessionMinutes         Int                             @default(15)
+  computeAutoApproveBudgetCents    Int                             @default(0)
+  computeArtifactRetentionDays     Int                             @default(14)
+  computeNetworkMode               ComputeNetworkMode              @default(NO_NETWORK)
+  computeNetworkAllowlist          String[]                        @default([])
+  computeFilesystemMode            ComputeFilesystemMode           @default(WORKSPACE_ONLY)
+  delegationEnabled                Boolean                         @default(true)
+  delegationNaturalLanguageEnabled Boolean                         @default(true)
+  delegationExplicitComputeEnabled Boolean                         @default(true)
+  delegationMaxSteps               Int                             @default(5)
+  delegationMaxCostCents           Int                             @default(0)
+  delegationKnowledgeScope         DelegationKnowledgeScope        @default(USER_INPUT_ONLY)
+  lifecycleState                   RepresentativeLifecycleState    @default(DRAFT)
   activeVersionId                  String?
-  createdAt                        DateTime                       @default(now())
-  updatedAt                        DateTime                       @updatedAt
-  owner                            Owner                          @relation(fields: [ownerId], references: [id])
-  activeVersion                    RepresentativeVersion?         @relation("RepresentativeActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
-  versions                         RepresentativeVersion[]        @relation("RepresentativeVersions")
+  createdAt                        DateTime                        @default(now())
+  updatedAt                        DateTime                        @updatedAt
+  owner                            Owner                           @relation(fields: [ownerId], references: [id])
+  activeVersion                    RepresentativeVersion?          @relation("RepresentativeActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  versions                         RepresentativeVersion[]         @relation("RepresentativeVersions")
   runtimePolicyOverlays            RuntimePolicyOverlay[]
   channelBindings                  RepresentativeChannelBinding[]
   matrixVirtualUsers               MatrixVirtualUserBinding[]
@@ -2184,7 +2189,6 @@ model Representative {
   memoryRecords                    OpenVikingMemoryRecord[]
   pricingPlans                     PricingPlan[]
   billingProducts                  BillingProduct[]
-  recallTraces                     ConversationRecallTrace[]
   skillPackLinks                   RepresentativeSkillPack[]
   mcpBindings                      RepresentativeMcpBinding[]
   chatSessions                     ChatSession[]
@@ -2213,6 +2217,8 @@ model Representative {
   memoryPolicy                     RepresentativeMemoryPolicy?
   memoryExtractionRuns             MemoryExtractionRun[]
   memoryProjectionItems            MemoryProjectionItem[]
+  representativeVersionResources  RepresentativeVersionResource[]
+  publicKnowledgeProjectionItems   PublicKnowledgeProjectionItem[]
   memoryUseRuns                    MemoryUseRun[]
   memoryUseItems                   MemoryUseItem[]
   memoryDeletionProofs             MemoryDeletionProof[]
@@ -2225,23 +2231,24 @@ model Representative {
 }
 
 model RepresentativeVersion {
-  id                       String                @id @default(cuid())
-  representativeId         String
-  versionNumber            Int
-  status                   String                @default("PUBLISHED")
-  snapshot                 Json
-  changeSummary            String?
-  publishedBy              String?
-  publishedAt              DateTime              @default(now())
-  createdAt                DateTime              @default(now())
-  representative           Representative        @relation("RepresentativeVersions", fields: [representativeId], references: [id], onDelete: Cascade)
-  activeForRepresentatives Representative[]      @relation("RepresentativeActiveVersion")
-  episodes                 ConversationEpisode[]
-  generationRuns           GenerationRun[]
-  delegationTasks          DelegationTask[]
-  computeSessions          ComputeSession[]
-  memoryUseRuns            MemoryUseRun[]
-  memoryUseItems           MemoryUseItem[]
+  id                             String                          @id @default(cuid())
+  representativeId               String
+  versionNumber                  Int
+  status                         String                          @default("PUBLISHED")
+  snapshot                       Json
+  changeSummary                  String?
+  publishedBy                    String?
+  publishedAt                    DateTime                        @default(now())
+  createdAt                      DateTime                        @default(now())
+  representative                 Representative                  @relation("RepresentativeVersions", fields: [representativeId], references: [id], onDelete: Cascade)
+  activeForRepresentatives       Representative[]                @relation("RepresentativeActiveVersion")
+  episodes                       ConversationEpisode[]
+  generationRuns                 GenerationRun[]
+  delegationTasks                DelegationTask[]
+  computeSessions                ComputeSession[]
+  memoryUseRuns                  MemoryUseRun[]
+  publishedResources            RepresentativeVersionResource[]
+  publicKnowledgeProjectionItems PublicKnowledgeProjectionItem[]
 
   @@unique([representativeId, versionNumber])
   @@unique([id, representativeId], map: "RepresentativeVersion_id_rep_key")
@@ -2667,7 +2674,6 @@ model Contact {
   ledgerEntries         LedgerEntry[]
   browserSessions       BrowserSession[]
   browserNavigations    BrowserNavigation[]
-  recallTraces          ConversationRecallTrace[]
   computeTrustTier      String?
   lastApprovalGrantedAt DateTime?
   workflowRuns          WorkflowRun[]
@@ -2716,7 +2722,6 @@ model Conversation {
   representative                Representative                @relation(fields: [representativeId], references: [id])
   contact                       Contact                       @relation(fields: [contactId], references: [id])
   audienceIdentity              AudienceIdentity?             @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
-  recallTraces                  ConversationRecallTrace[]
   turns                         ConversationTurn[]
   events                        EventAudit[]
   artifacts                     Artifact[]
@@ -2942,9 +2947,7 @@ model MessageCitation {
   knowledgeAssetId  String?
   knowledgeRevision String?
   title             String
-  uri               String?
   excerpt           String?
-  score             Float?
   createdAt         DateTime       @default(now())
   message           Message        @relation(fields: [messageId], references: [id], onDelete: Cascade)
   memoryUseItem     MemoryUseItem?
@@ -3282,7 +3285,6 @@ model KnowledgeAssetRepresentative {
   updatedAt        DateTime                   @updatedAt
   asset            KnowledgeAsset             @relation(fields: [assetId], references: [id], onDelete: Cascade)
   representative   Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade)
-  memoryUseItems   MemoryUseItem[]
 
   @@unique([assetId, representativeId])
   @@unique([id, representativeId], map: "KnowledgeAssetRep_id_rep_key")
@@ -4265,25 +4267,6 @@ model RepresentativeContextSync {
   @@index([status, availableAt, leaseExpiresAt], map: "RepContextSync_status_due_lease_idx")
 }
 
-model ConversationRecallTrace {
-  id               String         @id @default(cuid())
-  representativeId String
-  conversationId   String?
-  contactId        String?
-  queryText        String
-  recalledUri      String
-  contextType      String
-  layer            String
-  score            Float
-  createdAt        DateTime       @default(now())
-  representative   Representative @relation(fields: [representativeId], references: [id])
-  conversation     Conversation?  @relation(fields: [conversationId], references: [id])
-  contact          Contact?       @relation(fields: [contactId], references: [id])
-
-  @@index([representativeId, createdAt])
-  @@index([conversationId, createdAt])
-}
-
 model ConversationCommitTrace {
   id                String         @id @default(cuid())
   representativeId  String
@@ -4595,6 +4578,48 @@ model MemoryProjectionItem {
   @@index([status, deleteRequestedAt], map: "MemoryProjectionItem_status_delete_idx")
 }
 
+model RepresentativeVersionResource {
+  publishedVersionId String
+  representativeId   String
+  sourceKind         PublicKnowledgeProjectionSourceKind
+  resourceKey        String
+  knowledgeAssetId   String?
+  contentHash        String
+  createdAt          DateTime                            @default(now())
+  representative     Representative                      @relation(fields: [representativeId], references: [id], onDelete: Restrict, map: "RepresentativeVersionResource_rep_fkey")
+  publishedVersion   RepresentativeVersion               @relation(fields: [publishedVersionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "RepresentativeVersionResource_version_scope_fkey")
+  projections        PublicKnowledgeProjectionItem[]     @relation("PublicProjectionPublishedResource")
+
+  @@id([publishedVersionId, resourceKey])
+  @@unique([publishedVersionId, resourceKey, contentHash], map: "RepresentativeVersionResource_version_resource_hash_key")
+  @@index([representativeId, publishedVersionId, createdAt], map: "RepresentativeVersionResource_rep_version_idx")
+  @@index([knowledgeAssetId, createdAt], map: "RepresentativeVersionResource_asset_idx")
+}
+
+model PublicKnowledgeProjectionItem {
+  id                 String                              @id @default(cuid())
+  representativeId   String
+  publishedVersionId String
+  sourceKind         PublicKnowledgeProjectionSourceKind
+  resourceKey        String
+  knowledgeAssetId   String?
+  provider           String                              @default("openviking")
+  contentHash        String
+  remoteUri          String
+  projectedAt        DateTime
+  createdAt          DateTime                            @default(now())
+  representative     Representative                      @relation(fields: [representativeId], references: [id], onDelete: Restrict, map: "PublicKnowledgeProjectionItem_rep_fkey")
+  publishedVersion   RepresentativeVersion               @relation(fields: [publishedVersionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "PublicKnowledgeProjectionItem_version_scope_fkey")
+  publishedResource  RepresentativeVersionResource       @relation("PublicProjectionPublishedResource", fields: [publishedVersionId, resourceKey, contentHash], references: [publishedVersionId, resourceKey, contentHash], onDelete: Restrict, map: "PublicKnowledgeProjectionItem_resource_manifest_fkey")
+  useItems           MemoryUseItem[]
+
+  @@unique([id, representativeId], map: "PublicKnowledgeProjectionItem_id_rep_key")
+  @@unique([publishedVersionId, resourceKey], map: "PublicKnowledgeProjectionItem_version_resource_key")
+  @@unique([provider, remoteUri], map: "PublicKnowledgeProjectionItem_provider_uri_key")
+  @@index([representativeId, publishedVersionId, createdAt], map: "PublicKnowledgeProjectionItem_rep_version_idx")
+  @@index([knowledgeAssetId, createdAt], map: "PublicKnowledgeProjectionItem_asset_idx")
+}
+
 model MemoryUseRun {
   id                      String                    @id @default(cuid())
   representativeId        String
@@ -4604,13 +4629,16 @@ model MemoryUseRun {
   representativeVersionId String
   inputMessageId          String
   outputMessageId         String?
-  generationRunId         String?
+  generationRunId         String
   idempotencyKey          String
   status                  MemoryUseRunStatus        @default(STARTED)
+  reasonCode              String?
+  unmappedCandidateCount  Int                       @default(0)
   searchedCount           Int                       @default(0)
   scopePassedCount        Int                       @default(0)
   safetyPassedCount       Int                       @default(0)
   injectedCount           Int                       @default(0)
+  citedCount              Int                       @default(0)
   displayedCount          Int                       @default(0)
   startedAt               DateTime                  @default(now())
   completedAt             DateTime?
@@ -4620,10 +4648,11 @@ model MemoryUseRun {
   contact                 Contact                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseRun_contact_scope_fkey")
   conversation            Conversation              @relation(fields: [conversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryUseRun_conversation_scope_fkey")
   representativeVersion   RepresentativeVersion     @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseRun_rep_version_fkey")
-  inputMessage            Message                   @relation("MemoryUseInputMessage", fields: [inputMessageId, conversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryUseRun_input_message_fkey")
-  outputMessage           Message?                  @relation("MemoryUseOutputMessage", fields: [outputMessageId, conversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryUseRun_output_message_fkey")
-  generationRun           GenerationRun?            @relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryUseRun_generation_fkey")
+  inputMessage            Message                   @relation("MemoryUseInputMessage", fields: [inputMessageId, conversationId], references: [id, conversationId], onDelete: Cascade, map: "MemoryUseRun_input_message_fkey")
+  outputMessage           Message?                  @relation("MemoryUseOutputMessage", fields: [outputMessageId], references: [id], onDelete: SetNull, map: "MemoryUseRun_output_message_fkey")
+  generationRun           GenerationRun             @relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Cascade, map: "MemoryUseRun_generation_fkey")
   items                   MemoryUseItem[]
+  unmappedObservations    MemoryUseUnmappedObservation[]
 
   @@unique([representativeId, idempotencyKey], map: "MemoryUseRun_rep_idempotency_key")
   @@unique([id, representativeId], map: "MemoryUseRun_id_rep_key")
@@ -4637,44 +4666,58 @@ model MemoryUseRun {
   @@index([status, startedAt], map: "MemoryUseRun_status_started_idx")
 }
 
+model MemoryUseUnmappedObservation {
+  id                  String       @id @default(cuid())
+  useRunId            String
+  representativeId    String
+  observationKey      String
+  candidateCount      Int
+  createdAt           DateTime     @default(now())
+  useRun              MemoryUseRun @relation(fields: [useRunId, representativeId], references: [id, representativeId], onDelete: Cascade, map: "MemoryUseUnmappedObservation_run_scope_fkey")
+
+  @@unique([useRunId, observationKey], map: "MemoryUseUnmappedObservation_run_key")
+  @@index([useRunId, createdAt], map: "MemoryUseUnmappedObservation_run_created_idx")
+}
+
 model MemoryUseItem {
-  id                      String                        @id @default(cuid())
-  useRunId                String
-  representativeId        String
-  itemKey                 String
-  sourceKind              MemoryUseSourceKind
-  memoryScope             MemoryScope?
-  memoryVersionId         String?
-  projectionItemId        String?
-  knowledgeBindingId      String?
-  representativeVersionId String?
-  displayedCitationId     String?                       @unique
-  contentHash             String
-  searchRank              Int?
-  searchScore             Float?
-  searchedAt              DateTime?
-  scopeCheckedAt          DateTime?
-  scopePassedAt           DateTime?
-  safetyCheckedAt         DateTime?
-  safetyPassedAt          DateTime?
-  injectedAt              DateTime?
-  displayedAt             DateTime?
-  rejectionReasonCode     String?
-  createdAt               DateTime                      @default(now())
-  updatedAt               DateTime                      @updatedAt
-  useRun                  MemoryUseRun                  @relation(fields: [useRunId, representativeId], references: [id, representativeId], onDelete: Cascade, map: "MemoryUseItem_run_scope_fkey")
-  representative          Representative                @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryUseItem_rep_fkey")
-  memoryVersion           GovernedMemoryVersion?        @relation(fields: [memoryVersionId, representativeId, memoryScope], references: [id, representativeId, scope], onDelete: Restrict, map: "MemoryUseItem_version_scope_fkey")
-  projectionItem          MemoryProjectionItem?         @relation(fields: [projectionItemId, representativeId, memoryVersionId], references: [id, representativeId, memoryVersionId], onDelete: Restrict, map: "MemoryUseItem_projection_scope_fkey")
-  knowledgeBinding        KnowledgeAssetRepresentative? @relation(fields: [knowledgeBindingId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseItem_knowledge_binding_fkey")
-  representativeVersion   RepresentativeVersion?        @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseItem_rep_version_fkey")
-  displayedCitation       MessageCitation?              @relation(fields: [displayedCitationId], references: [id], onDelete: Restrict, map: "MemoryUseItem_citation_fkey")
+  id                          String                         @id @default(cuid())
+  useRunId                    String
+  representativeId            String
+  itemKey                     String
+  sourceKind                  MemoryUseSourceKind
+  memoryScope                 MemoryScope?
+  memoryVersionId             String?
+  projectionItemId            String?
+  publicKnowledgeProjectionId String?
+  citationId                  String?                        @unique
+  contentHash                 String
+  searchRank                  Int?
+  searchScore                 Float?
+  searchedAt                  DateTime?
+  scopeCheckedAt              DateTime?
+  scopePassedAt               DateTime?
+  safetyCheckedAt             DateTime?
+  safetyPassedAt              DateTime?
+  injectedAt                  DateTime?
+  citedAt                     DateTime?
+  displayedAt                 DateTime?
+  citationPurgedAt            DateTime?
+  rejectionReasonCode         String?
+  createdAt                   DateTime                       @default(now())
+  updatedAt                   DateTime                       @updatedAt
+  useRun                      MemoryUseRun                   @relation(fields: [useRunId, representativeId], references: [id, representativeId], onDelete: Cascade, map: "MemoryUseItem_run_scope_fkey")
+  representative              Representative                 @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryUseItem_rep_fkey")
+  memoryVersion               GovernedMemoryVersion?         @relation(fields: [memoryVersionId, representativeId, memoryScope], references: [id, representativeId, scope], onDelete: Restrict, map: "MemoryUseItem_version_scope_fkey")
+  projectionItem              MemoryProjectionItem?          @relation(fields: [projectionItemId, representativeId, memoryVersionId], references: [id, representativeId, memoryVersionId], onDelete: Restrict, map: "MemoryUseItem_projection_scope_fkey")
+  publicKnowledgeProjection   PublicKnowledgeProjectionItem? @relation(fields: [publicKnowledgeProjectionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseItem_public_projection_fkey")
+  citation                    MessageCitation?               @relation(fields: [citationId], references: [id], onDelete: SetNull, map: "MemoryUseItem_citation_fkey")
 
   @@unique([useRunId, itemKey], map: "MemoryUseItem_run_item_key")
   @@index([memoryVersionId, createdAt], map: "MemoryUseItem_memoryVersion_created_idx")
-  @@index([knowledgeBindingId, representativeVersionId, createdAt], map: "MemoryUseItem_public_knowledge_idx")
+  @@index([publicKnowledgeProjectionId, createdAt], map: "MemoryUseItem_public_knowledge_idx")
   @@index([projectionItemId], map: "MemoryUseItem_projection_idx")
   @@index([useRunId, injectedAt], map: "MemoryUseItem_run_injected_idx")
+  @@index([useRunId, citedAt], map: "MemoryUseItem_run_cited_idx")
   @@index([useRunId, displayedAt], map: "MemoryUseItem_run_displayed_idx")
 }
 

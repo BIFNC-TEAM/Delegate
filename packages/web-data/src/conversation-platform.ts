@@ -71,6 +71,12 @@ import {
   invalidateMemoryExtractionForSourceMessage,
 } from "./memory-extraction";
 import {
+  cancelMemoryUseRunInTransaction,
+  failMemoryUseRunInTransaction,
+  finalizeMemoryUseGenerationInTransaction,
+  markMemoryUseItemsDisplayedInTransaction,
+} from "./memory-use-execution";
+import {
   lockMatrixRoomSecurityState,
   withActiveMatrixRepresentativeChannelFence,
 } from "./matrix-room-security";
@@ -300,7 +306,7 @@ export type ConversationDetailSnapshot = {
     editedAt?: string;
     redactedAt?: string;
     createdAt: string;
-    citations: Array<{ title: string; excerpt?: string; uri?: string }>;
+    citations: Array<{ title: string; excerpt?: string }>;
   }>;
   runs: Array<{
     id: string;
@@ -874,7 +880,6 @@ export async function getConversationDetailSnapshot(
           citations: message.citations.map((citation) => ({
             title: citation.title,
             ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
-            ...(citation.uri ? { uri: citation.uri } : {}),
           })),
         }))
       : conversation.turns.map((turn) => ({
@@ -1752,12 +1757,17 @@ export async function completeInlineGenerationRun(input: {
     artifactId: string;
     url: string;
   }>;
-  citations?: Array<{
-    knowledgeAssetId?: string;
-    title: string;
-    excerpt?: string;
-    score?: number;
-  }>;
+  memoryUse?:
+    | {
+        runId: string;
+        outcome: "completed";
+        injectedItemIds: string[];
+        citedItemIds: string[];
+      }
+    | {
+        runId: string;
+        outcome: "generation_failed";
+      };
 }) {
   const replyText = input.replyText.trim();
   if (!replyText) throw new Error("Reply text is required.");
@@ -1870,6 +1880,12 @@ export async function completeInlineGenerationRun(input: {
           failureReason: null,
         },
       });
+      await cancelStartedMemoryUseForGeneration(
+        tx,
+        run.id,
+        "memory_handoff_canceled",
+        deferredAt,
+      );
       const completedOutbox = await tx.outboxEvent.updateMany({
         where: {
           id: input.outboxId,
@@ -2007,6 +2023,12 @@ export async function completeInlineGenerationRun(input: {
           lastError: failureCode,
         },
       });
+      await cancelStartedMemoryUseForGeneration(
+        tx,
+        run.id,
+        "memory_generation_canceled",
+        canceledAt,
+      );
       return { channelUnavailableCode: failureCode };
     }
     if (!delegationTaskOwnsBilling && input.entitlementReservation) {
@@ -2080,18 +2102,6 @@ export async function completeInlineGenerationRun(input: {
             : MessageDeliveryStatus.SENT,
         retentionExpiresAt: buildMessageRetentionExpiry(now),
         createdAt: now,
-        ...(input.citations?.length
-          ? {
-              citations: {
-                create: input.citations.map((citation) => ({
-                  ...(citation.knowledgeAssetId ? { knowledgeAssetId: citation.knowledgeAssetId } : {}),
-                  title: citation.title,
-                  ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
-                  ...(citation.score !== undefined ? { score: citation.score } : {}),
-                })),
-              },
-            }
-          : {}),
         ...(input.attachments?.length
           ? {
               attachments: {
@@ -2131,6 +2141,21 @@ export async function completeInlineGenerationRun(input: {
         errorMessage: null,
       },
     });
+    if (input.memoryUse?.outcome === "completed") {
+      await finalizeMemoryUseGenerationInTransaction(tx, {
+        useRunId: input.memoryUse.runId,
+        outputMessageId: message.id,
+        injectedItemIds: input.memoryUse.injectedItemIds,
+        citedItemIds: input.memoryUse.citedItemIds,
+      }, now);
+    } else if (input.memoryUse?.outcome === "generation_failed") {
+      await failMemoryUseRunInTransaction(
+        tx,
+        input.memoryUse.runId,
+        "memory_generation_failed",
+        now,
+      );
+    }
     await tx.message.update({
       where: { id: run.inputMessageId },
       data: { deliveryStatus: MessageDeliveryStatus.SENT },
@@ -2239,6 +2264,28 @@ export async function completeInlineGenerationRun(input: {
     throw new ConversationAiDeliveryControlError();
   }
   return completedResult;
+}
+
+async function cancelStartedMemoryUseForGeneration(
+  tx: Prisma.TransactionClient,
+  generationRunId: string,
+  reasonCode: "memory_generation_canceled" | "memory_handoff_canceled",
+  occurredAt: Date,
+) {
+  const memoryUseRun = await tx.memoryUseRun.findFirst({
+    where: {
+      generationRunId,
+      status: "STARTED",
+    },
+    select: { id: true },
+  });
+  if (!memoryUseRun) return;
+  await cancelMemoryUseRunInTransaction(
+    tx,
+    memoryUseRun.id,
+    reasonCode,
+    occurredAt,
+  );
 }
 
 export async function waitGenerationRunForComputeApproval(input: {
@@ -3957,6 +4004,30 @@ export async function markGenerationDeliveryComplete(input: {
         ...(input.externalMessageId ? { externalMessageId: input.externalMessageId } : {}),
       },
     });
+    const memoryUseRun = await tx.memoryUseRun.findFirst({
+      where: {
+        generationRunId: input.runId,
+        sourceChannel: RepresentativeChannelKind.WEB,
+        status: { in: ["COMPLETED", "DEGRADED"] },
+      },
+      select: { id: true },
+    });
+    if (memoryUseRun) {
+      const citedItems = await tx.memoryUseItem.findMany({
+        where: {
+          useRunId: memoryUseRun.id,
+          citedAt: { not: null },
+          citationId: { not: null },
+        },
+        select: { id: true },
+      });
+      if (citedItems.length) {
+        await markMemoryUseItemsDisplayedInTransaction(tx, {
+          useRunId: memoryUseRun.id,
+          displayedItemIds: citedItems.map((item) => item.id),
+        });
+      }
+    }
     const completedOutbox = await tx.outboxEvent.updateMany({
       where: {
         id: input.outboxId,
@@ -4522,6 +4593,23 @@ export async function failGenerationRun(input: {
     if (run.conversationId !== input.conversationId) {
       throw new Error("Generation run does not belong to the conversation.");
     }
+    if (terminalFailure) {
+      const memoryUseRun = await tx.memoryUseRun.findFirst({
+        where: {
+          generationRunId: run.id,
+          status: "STARTED",
+        },
+        select: { id: true },
+      });
+      if (memoryUseRun) {
+        await failMemoryUseRunInTransaction(
+          tx,
+          memoryUseRun.id,
+          "memory_generation_failed",
+          now,
+        );
+      }
+    }
     await tx.message.update({
       where: { id: run.inputMessageId },
       data: {
@@ -4606,7 +4694,7 @@ export async function getPublicGenerationRunSnapshot(input: {
           deliveryStatus: true,
           createdAt: true,
           citations: {
-            select: { title: true, excerpt: true, uri: true },
+            select: { title: true, excerpt: true },
           },
           attachments: {
             select: { id: true, fileName: true, mimeType: true, sizeBytes: true, externalUrl: true },
@@ -4632,7 +4720,6 @@ export async function getPublicGenerationRunSnapshot(input: {
             citations: run.outputMessage.citations.map((citation) => ({
               title: citation.title,
               ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
-              ...(citation.uri ? { uri: citation.uri } : {}),
             })),
             attachments: run.outputMessage.attachments.map((attachment) => ({
               id: attachment.id,
@@ -4665,7 +4752,7 @@ export async function getPublicConversationHistory(input: {
         where: { redactedAt: null },
         include: {
           citations: {
-            select: { title: true, excerpt: true, uri: true },
+            select: { title: true, excerpt: true },
           },
           attachments: {
             select: { id: true, fileName: true, mimeType: true, sizeBytes: true, externalUrl: true },
@@ -4701,7 +4788,6 @@ export async function getPublicConversationHistory(input: {
       citations: message.citations.map((citation) => ({
         title: citation.title,
         ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
-        ...(citation.uri ? { uri: citation.uri } : {}),
       })),
       attachments: message.attachments.map((attachment) => ({
         id: attachment.id,

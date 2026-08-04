@@ -46,6 +46,51 @@ export class GovernedMemoryUnsupportedError extends OpenVikingRequestError {
   }
 }
 
+export class ExactResourceUnsupportedError extends OpenVikingRequestError {
+  readonly code = "EXACT_RESOURCE_BATCH_WRITE_UNSUPPORTED";
+  readonly capability = "content.batch-write";
+  readonly capabilityStatus = "degraded";
+
+  constructor(status: number) {
+    super(
+      "Exact published-resource projection is degraded: this OpenViking deployment does not "
+      + "support /api/v1/content/batch-write (requires OpenViking v0.4.12 or newer); no unsafe "
+      + "resource upload fallback was attempted.",
+      status,
+    );
+    this.name = "ExactResourceUnsupportedError";
+  }
+}
+
+export class ExactResourceRootProvisionError extends OpenVikingRequestError {
+  readonly code: "EXACT_RESOURCE_ROOT_PROVISION_UNSUPPORTED"
+    | "EXACT_RESOURCE_ROOT_PROVISION_FAILED";
+  readonly capability = "fs.mkdir";
+  readonly capabilityStatus = "degraded";
+  readonly failure: GovernedMemoryRootProvisionFailure;
+  readonly stage: "mkdir" | "verify";
+
+  constructor(params: {
+    status: number;
+    failure: GovernedMemoryRootProvisionFailure;
+    stage: "mkdir" | "verify";
+  }) {
+    const unsupported = params.failure === "unsupported";
+    super(
+      unsupported
+        ? "Exact published-resource root provisioning is degraded: this OpenViking deployment does not support the required mkdir contract."
+        : `Exact published-resource root provisioning failed during ${params.stage}; the root was not verified ready.`,
+      params.status,
+    );
+    this.name = "ExactResourceRootProvisionError";
+    this.code = unsupported
+      ? "EXACT_RESOURCE_ROOT_PROVISION_UNSUPPORTED"
+      : "EXACT_RESOURCE_ROOT_PROVISION_FAILED";
+    this.failure = params.failure;
+    this.stage = params.stage;
+  }
+}
+
 export type GovernedMemoryRootProvisionFailure =
   | "unsupported"
   | "mkdir_failed"
@@ -112,6 +157,19 @@ export type GovernedMemoryRootEnsureResult = {
   outcome: "ready";
 };
 
+export type ExactResourceWriteResult = {
+  uri: string;
+  rootUri: string;
+  contentHash: string;
+  outcome: "created" | "unchanged";
+};
+
+export type ExactResourceReadResult = {
+  uri: string;
+  content: string;
+  contentHash: string;
+};
+
 /**
  * Rejects cross-scope and non-canonical resource targets before any OpenViking
  * write is attempted. Percent-encoded and backslash paths are deliberately
@@ -143,6 +201,33 @@ export function assertCanonicalOpenVikingResourceUri(uri: string): void {
     )
   ) {
     throw new Error("OpenViking resource target must be a canonical viking://resources/ URI.");
+  }
+}
+
+/**
+ * Validates an immutable resource leaf below one exact version-scoped root.
+ * This deliberately rejects the root itself and directory targets.
+ */
+export function assertExactOpenVikingResourceLeaf(params: {
+  rootUri: string;
+  uri: string;
+}): void {
+  assertCanonicalOpenVikingResourceUri(params.rootUri);
+  assertCanonicalOpenVikingResourceUri(params.uri);
+  if (
+    !params.rootUri.endsWith("/")
+    || params.uri.endsWith("/")
+    || params.uri === params.rootUri
+    || !params.uri.startsWith(params.rootUri)
+  ) {
+    throw new Error("OpenViking resource URI must be an exact leaf below its pinned root.");
+  }
+}
+
+export function assertExactOpenVikingResourceRootUri(rootUri: string): void {
+  assertCanonicalOpenVikingResourceUri(rootUri);
+  if (!rootUri.endsWith("/") || rootUri === OPENVIKING_RESOURCE_URI_PREFIX) {
+    throw new Error("OpenViking exact resource root must be a canonical non-root directory URI.");
   }
 }
 
@@ -392,6 +477,166 @@ export class OpenVikingClient {
         version,
         transportRootUri,
       }),
+    };
+  }
+
+  /**
+   * Creates one immutable resource leaf and verifies caller-provided bytes
+   * before issuing the request. It is used for published-version projections,
+   * never for mutable workspace knowledge roots.
+   */
+  async createExactResource(params: {
+    rootUri: string;
+    uri: string;
+    content: string;
+    contentHash: string;
+    timeoutSeconds?: number;
+  }): Promise<ExactResourceWriteResult> {
+    assertExactOpenVikingResourceLeaf(params);
+    if (typeof params.content !== "string") {
+      throw new Error("OpenViking exact resource content must be a string.");
+    }
+    if (!SHA256_HEX_PATTERN.test(params.contentHash)) {
+      throw new Error("OpenViking exact resource contentHash must be a lowercase SHA-256 digest.");
+    }
+    if (sha256Text(params.content) !== params.contentHash) {
+      throw new Error("OpenViking exact resource content hash does not match content.");
+    }
+    if (
+      typeof params.timeoutSeconds !== "undefined"
+      && (!Number.isFinite(params.timeoutSeconds) || params.timeoutSeconds <= 0)
+    ) {
+      throw new Error("OpenViking exact resource timeout must be a positive number of seconds.");
+    }
+
+    const transportRootUri = params.rootUri.slice(0, -1);
+    let result: unknown;
+    try {
+      result = await this.request<unknown>("/api/v1/content/batch-write", {
+        method: "POST",
+        body: JSON.stringify({
+          root_uri: transportRootUri,
+          operations: [
+            {
+              uri: params.uri,
+              content: params.content,
+              precondition: { kind: "create_if_absent" },
+            },
+          ],
+          wait: true,
+          ...(typeof params.timeoutSeconds === "number"
+            ? { timeout: params.timeoutSeconds }
+            : {}),
+        }),
+        ...(typeof params.timeoutSeconds === "number"
+          ? { timeoutMs: Math.max(this.timeoutMs, params.timeoutSeconds * 1000 + 5000) }
+          : {}),
+      });
+    } catch (error) {
+      if (
+        error instanceof OpenVikingRequestError
+        && isUnsupportedBatchWriteStatus(error.status)
+      ) {
+        throw new ExactResourceUnsupportedError(error.status);
+      }
+      throw error;
+    }
+
+    return {
+      uri: params.uri,
+      rootUri: params.rootUri,
+      contentHash: params.contentHash,
+      outcome: parseExactResourceBatchWriteResult({
+        result,
+        rootUri: params.rootUri,
+        uri: params.uri,
+      }),
+    };
+  }
+
+  /**
+   * Creates and independently verifies one exact version-scoped resource
+   * directory. A 409 is accepted only after stat proves the same URI is a
+   * directory, preventing a conflicting file from being treated as ready.
+   */
+  async ensureExactResourceRoot(rootUri: string): Promise<{ rootUri: string }> {
+    assertExactOpenVikingResourceRootUri(rootUri);
+    const transportRootUri = rootUri.slice(0, -1);
+    try {
+      const mkdirResult = await this.request<unknown>("/api/v1/fs/mkdir", {
+        method: "POST",
+        body: JSON.stringify({ uri: transportRootUri }),
+      });
+      if (
+        !isRecord(mkdirResult)
+        || (typeof mkdirResult.uri !== "undefined" && mkdirResult.uri !== transportRootUri)
+      ) {
+        throw new ExactResourceRootProvisionError({
+          status: 502,
+          failure: "mkdir_failed",
+          stage: "mkdir",
+        });
+      }
+    } catch (error) {
+      if (error instanceof ExactResourceRootProvisionError) throw error;
+      if (!(error instanceof OpenVikingRequestError)) throw error;
+      if (error.status !== 409) {
+        throw new ExactResourceRootProvisionError({
+          status: normalizeProvisionStatus(error.status),
+          failure: isUnsupportedMkdirStatus(error.status) ? "unsupported" : "mkdir_failed",
+          stage: "mkdir",
+        });
+      }
+    }
+
+    let statResult: unknown;
+    try {
+      const searchParams = new URLSearchParams({ uri: transportRootUri });
+      statResult = await this.request<unknown>(
+        `/api/v1/fs/stat?${searchParams.toString()}`,
+        { method: "GET" },
+      );
+    } catch (error) {
+      if (!(error instanceof OpenVikingRequestError)) throw error;
+      throw new ExactResourceRootProvisionError({
+        status: normalizeProvisionStatus(error.status),
+        failure: "verification_failed",
+        stage: "verify",
+      });
+    }
+    if (!isVerifiedDirectoryStat(statResult, transportRootUri)) {
+      throw new ExactResourceRootProvisionError({
+        status: isRecord(statResult) && statResult.isDir === false ? 409 : 502,
+        failure: "verification_failed",
+        stage: "verify",
+      });
+    }
+    return { rootUri };
+  }
+
+  /** Reads the complete raw UTF-8 bytes for an exact published resource. */
+  async readExactResource(params: {
+    rootUri: string;
+    uri: string;
+  }): Promise<ExactResourceReadResult> {
+    assertExactOpenVikingResourceLeaf(params);
+    const searchParams = new URLSearchParams({
+      uri: params.uri,
+      offset: "0",
+      limit: "-1",
+      raw: "true",
+    });
+    const result = await this.request<unknown>(
+      `/api/v1/content/read?${searchParams.toString()}`,
+      { method: "GET" },
+    );
+    if (typeof result !== "string") {
+      throw new Error("OpenViking returned invalid exact resource content.");
+    }
+    return {
+      uri: params.uri,
+      content: result,
+      contentHash: sha256Text(result),
     };
   }
 
@@ -651,6 +896,29 @@ function parseGovernedMemoryBatchWriteResult(params: {
     throw new Error("OpenViking returned an invalid governed memory write result.");
   }
   return outcome;
+}
+
+function parseExactResourceBatchWriteResult(params: {
+  result: unknown;
+  rootUri: string;
+  uri: string;
+}): ExactResourceWriteResult["outcome"] {
+  const transportRootUri = params.rootUri.slice(0, -1);
+  if (!isRecord(params.result) || params.result.root_uri !== transportRootUri) {
+    throw new Error("OpenViking returned an invalid exact resource write result.");
+  }
+  const created = requireStringArray(params.result.created);
+  const updated = requireStringArray(params.result.updated);
+  const unchanged = requireStringArray(params.result.unchanged);
+  if (updated.length !== 0 || created.length + unchanged.length !== 1) {
+    throw new Error("OpenViking returned an invalid exact resource write result.");
+  }
+  const returnedUri = (created[0] ?? unchanged[0])!;
+  assertExactOpenVikingResourceLeaf({ rootUri: params.rootUri, uri: returnedUri });
+  if (returnedUri !== params.uri) {
+    throw new Error("OpenViking returned an invalid exact resource write result.");
+  }
+  return created.length === 1 ? "created" : "unchanged";
 }
 
 function isUnsupportedBatchWriteStatus(status: number): boolean {

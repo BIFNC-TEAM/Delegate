@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   assertCanonicalOpenVikingResourceUri,
   sanitizeVikingSegment,
@@ -21,12 +23,17 @@ export class LegacyOpenVikingMemoryUriError extends Error {
   }
 }
 
+export type VerifiedRepresentativeResourceProjection = {
+  remoteUri: string;
+  contentHash: string;
+};
+
 export async function syncRepresentativeResourceDocumentToOpenViking(params: {
   client: OpenVikingClient;
   document: OpenVikingDocumentSpec;
   expectedRootUri: string;
   timeoutSeconds: number;
-}): Promise<void> {
+}): Promise<VerifiedRepresentativeResourceProjection> {
   if (
     params.document.contextType !== "resource"
     || params.document.scope !== "representative"
@@ -46,20 +53,30 @@ export async function syncRepresentativeResourceDocumentToOpenViking(params: {
     throw new Error("Published representative knowledge URI is outside its pinned version root.");
   }
 
-  const temp = await params.client.tempUpload({
-    filename: params.document.filename,
+  const contentHash = createHash("sha256")
+    .update(params.document.content, "utf8")
+    .digest("hex");
+  await params.client.ensureExactResourceRoot(params.expectedRootUri);
+  await params.client.createExactResource({
+    rootUri: params.expectedRootUri,
+    uri: params.document.uri,
     content: params.document.content,
+    contentHash,
+    timeoutSeconds: params.timeoutSeconds,
   });
-
-  await params.client.addResource({
-    ...(temp.temp_file_id ? { tempFileId: temp.temp_file_id } : {}),
-    ...(temp.temp_path ? { tempPath: temp.temp_path } : {}),
-    to: params.document.uri,
-    reason: params.document.reason,
-    instruction: "Delegate representative public knowledge sync",
-    wait: true,
-    timeout: params.timeoutSeconds,
+  const verified = await params.client.readExactResource({
+    rootUri: params.expectedRootUri,
+    uri: params.document.uri,
   });
+  if (
+    verified.uri !== params.document.uri
+    || verified.contentHash !== contentHash
+  ) {
+    throw new Error(
+      "Published representative knowledge read-back did not match the authoritative content hash.",
+    );
+  }
+  return { remoteUri: verified.uri, contentHash };
 }
 
 export function assertLegacyOpenVikingMemoryUriForRepresentative(params: {

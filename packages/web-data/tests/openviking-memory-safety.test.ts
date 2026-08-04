@@ -193,7 +193,7 @@ describe("OpenViking memory safety", () => {
     expect(activateSource).toContain("openvikingLastSyncJobId: syncJob.id");
   });
 
-  it("revalidates recall authorization after remote hydration and before returning", () => {
+  it("revalidates authoritative sources without hydrating from remote bytes", () => {
     const source = readFileSync(
       new URL("../src/openviking.ts", import.meta.url),
       "utf8",
@@ -204,21 +204,25 @@ describe("OpenViking memory safety", () => {
       recallStart,
     );
     const recallSource = source.slice(recallStart, recallEnd);
-    const remoteRead = recallSource.indexOf("await publicClient.read");
+    const useLedger = recallSource.indexOf("await recordMemoryUseSearchHits");
     const revalidation = recallSource.indexOf(
       "await revalidateRepresentativeRecallAuthorization",
     );
 
-    expect(remoteRead).toBeGreaterThan(-1);
-    expect(revalidation).toBeGreaterThan(remoteRead);
+    expect(recallSource).not.toContain("publicClient.read");
+    expect(useLedger).toBeGreaterThan(-1);
+    expect(revalidation).toBeGreaterThan(useLedger);
     expect(recallSource).toContain(
       "authorizeRecallUri(item.uri, revalidatedAuthorization)",
     );
     expect(recallSource).toContain(
-      "hydrateGovernedMemoryRecall(item, revalidatedSource)",
+      "hydrateGovernedMemoryRecall(item, revalidatedSource, memoryUseItemId)",
+    );
+    expect(recallSource).toContain(
+      "hydratePublicKnowledgeRecall(item, revalidatedSource, memoryUseItemId)",
     );
     expect(recallSource).not.toContain("openVikingMemoryRecord.findMany");
-    expect(recallSource).toContain("data: authorizedHydrated.map");
+    expect(recallSource).not.toContain("conversationRecallTrace");
   });
 
   it("suppresses locally before returning the memory", async () => {

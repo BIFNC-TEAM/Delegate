@@ -22,6 +22,7 @@ import {
 import {
   deriveTierUsage,
   normalizePublicChatRequest,
+  publicMemoryDisclosureMatches,
   resolvePublicChatTier,
 } from "../public-chat";
 import {
@@ -91,6 +92,19 @@ export async function POST(
     if (runtime.status !== "available") return publicRuntimeError(runtime.status);
     const body = normalizePublicChatRequest(await request.json());
     if (!body.message) return privateJson({ error: "Message is required." }, 400);
+    if (!publicMemoryDisclosureMatches(
+      body.memoryDisclosure,
+      runtime.governedMemoryDisclosure,
+    )) {
+      return privateJson(
+        {
+          error: "Memory policy changed. Review the updated disclosure before sending.",
+          code: "memory_disclosure_stale",
+          governedMemoryDisclosure: runtime.governedMemoryDisclosure,
+        },
+        409,
+      );
+    }
 
     const { principal, sessionState } =
       await resolvePublicAudienceRequestPrincipal({

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockPrisma } = vi.hoisted(() => ({
@@ -18,6 +20,16 @@ const { mockPrisma } = vi.hoisted(() => ({
     },
     representativeVersion: {
       findFirst: vi.fn(),
+    },
+    knowledgeAsset: { findMany: vi.fn() },
+    representativeVersionResource: {
+      createMany: vi.fn(),
+      findMany: vi.fn(),
+    },
+    publicKnowledgeProjectionItem: {
+      findFirst: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
     },
   },
 }));
@@ -46,6 +58,16 @@ describe("durable OpenViking sync jobs", () => {
       callback as (tx: typeof mockPrisma) => Promise<unknown>
     )(mockPrisma));
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "audit-1" });
+    mockPrisma.knowledgeAsset.findMany.mockResolvedValue([]);
+    mockPrisma.publicKnowledgeProjectionItem.findFirst.mockResolvedValue(null);
+    mockPrisma.publicKnowledgeProjectionItem.create.mockResolvedValue({ id: "projection-1" });
+    mockPrisma.publicKnowledgeProjectionItem.update.mockResolvedValue({ id: "projection-1" });
+    mockPrisma.representativeVersionResource.createMany.mockImplementation(
+      async ({ data }) => {
+        mockPrisma.representativeVersionResource.findMany.mockResolvedValue(data);
+        return { count: data.length };
+      },
+    );
   });
 
   it("rejects memory documents before any temporary upload", async () => {
@@ -125,41 +147,48 @@ describe("durable OpenViking sync jobs", () => {
     expect(client.addResource).not.toHaveBeenCalled();
   });
 
-  it("continues to upload published knowledge resources", async () => {
+  it("creates and reads back exact published knowledge resources", async () => {
+    const uri = "viking://resources/delegate/reps/delegate/versions/version-1/faq/index.md";
+    const content = "# FAQ\n\nPublished answer.";
+    const contentHash = createHash("sha256").update(content).digest("hex");
     const client = {
-      tempUpload: vi.fn().mockResolvedValue({ temp_file_id: "temp-resource-1" }),
-      addResource: vi.fn().mockResolvedValue({ status: "processed" }),
-      move: vi.fn(),
+      ensureExactResourceRoot: vi.fn().mockResolvedValue({ rootUri: representativeVersionRoot }),
+      createExactResource: vi.fn().mockResolvedValue({
+        rootUri: representativeVersionRoot,
+        uri,
+        contentHash,
+        outcome: "created",
+      }),
+      readExactResource: vi.fn().mockResolvedValue({ uri, content, contentHash }),
     };
 
-    await syncRepresentativeResourceDocumentToOpenViking({
+    await expect(syncRepresentativeResourceDocumentToOpenViking({
       client: client as never,
       expectedRootUri: representativeVersionRoot,
       timeoutSeconds: 300,
       document: {
-        uri: "viking://resources/delegate/reps/delegate/versions/version-1/faq/index.md",
+        uri,
         filename: "faq.md",
         reason: "published FAQ",
         contextType: "resource",
         scope: "representative",
         category: "faq",
-        content: "# FAQ\n\nPublished answer.",
+        content,
       },
-    });
+    })).resolves.toEqual({ remoteUri: uri, contentHash });
 
-    expect(client.tempUpload).toHaveBeenCalledWith({
-      filename: "faq.md",
-      content: "# FAQ\n\nPublished answer.",
+    expect(client.ensureExactResourceRoot).toHaveBeenCalledWith(representativeVersionRoot);
+    expect(client.createExactResource).toHaveBeenCalledWith({
+      rootUri: representativeVersionRoot,
+      uri,
+      content,
+      contentHash,
+      timeoutSeconds: 300,
     });
-    expect(client.addResource).toHaveBeenCalledWith({
-      tempFileId: "temp-resource-1",
-      to: "viking://resources/delegate/reps/delegate/versions/version-1/faq/index.md",
-      reason: "published FAQ",
-      instruction: "Delegate representative public knowledge sync",
-      wait: true,
-      timeout: 300,
+    expect(client.readExactResource).toHaveBeenCalledWith({
+      rootUri: representativeVersionRoot,
+      uri,
     });
-    expect(client.move).not.toHaveBeenCalled();
   });
 
   it("persists the requested version, trigger, actor, and aggregate fence before returning", async () => {
@@ -207,6 +236,8 @@ describe("durable OpenViking sync jobs", () => {
 
   it("lets an old version job finish without overwriting the active version aggregate", async () => {
     const now = new Date();
+    const assetText = "Authoritative extracted PostgreSQL knowledge asset body.";
+    const assetChecksum = createHash("sha256").update(assetText).digest("hex");
     const job = {
       id: "sync-v1",
       representativeId: "rep-1",
@@ -246,13 +277,34 @@ describe("durable OpenViking sync jobs", () => {
       count: 1,
     });
     mockPrisma.representative.updateMany.mockResolvedValue({ count: 0 });
+    const snapshot = {
+      ...publishedSnapshot("Version one"),
+      knowledgeAssets: [{
+        assetId: "asset-1",
+        checksum: assetChecksum,
+        processingVersion: 3,
+      }],
+    };
     mockPrisma.representativeVersion.findFirst.mockResolvedValue({
       id: "version-1",
       representativeId: "rep-1",
       status: "PUBLISHED",
-      snapshot: publishedSnapshot("Version one"),
+      snapshot,
     });
-    const syncDocument = vi.fn().mockResolvedValue(undefined);
+    mockPrisma.knowledgeAsset.findMany.mockResolvedValue([{
+      id: "asset-1",
+      ownerId: "owner-1",
+      title: "Pinned asset",
+      status: "READY",
+      archivedAt: null,
+      checksum: assetChecksum,
+      processingVersion: 3,
+      extractedText: assetText,
+    }]);
+    const syncDocument = vi.fn().mockImplementation(async ({ document }) => ({
+      remoteUri: document.uri,
+      contentHash: createHash("sha256").update(document.content).digest("hex"),
+    }));
 
     const result = await processRepresentativeOpenVikingSyncJob({
       jobId: job.id,
@@ -261,7 +313,45 @@ describe("durable OpenViking sync jobs", () => {
     });
 
     expect(result).toEqual({ processed: true, status: "succeeded" });
-    expect(syncDocument).toHaveBeenCalled();
+    expect(syncDocument).toHaveBeenCalledTimes(6);
+    expect(mockPrisma.representativeVersionResource.createMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          publishedVersionId: "version-1",
+          resourceKey: "identity/profile.md",
+          sourceKind: "REPRESENTATIVE_VERSION_RESOURCE",
+          contentHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        }),
+        expect.objectContaining({
+          publishedVersionId: "version-1",
+          resourceKey: "knowledge/asset-1.md",
+          sourceKind: "KNOWLEDGE_ASSET",
+          contentHash: assetChecksum,
+        }),
+      ]),
+      skipDuplicates: true,
+    });
+    expect(mockPrisma.publicKnowledgeProjectionItem.create).toHaveBeenCalledTimes(6);
+    expect(mockPrisma.publicKnowledgeProjectionItem.create.mock.calls.map(
+      (call) => call[0].data.resourceKey,
+    )).toEqual([
+      "identity/profile.md",
+      "faq/index.md",
+      "materials/index.md",
+      "policies/index.md",
+      "pricing/index.md",
+      "knowledge/asset-1.md",
+    ]);
+    expect(mockPrisma.publicKnowledgeProjectionItem.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        publishedVersionId: "version-1",
+        sourceKind: "KNOWLEDGE_ASSET",
+        knowledgeAssetId: "asset-1",
+        remoteUri:
+          "viking://resources/delegate/reps/delegate/versions/version-1/knowledge/asset-1.md",
+        contentHash: assetChecksum,
+      }),
+    });
     expect(mockPrisma.representativeVersion.findFirst).toHaveBeenCalledWith({
       where: {
         id: "version-1",
@@ -361,10 +451,18 @@ describe("durable OpenViking sync jobs", () => {
       snapshot: publishedSnapshot("Version two"),
     });
 
+    let syncAttempt = 0;
     const result = await processRepresentativeOpenVikingSyncJob({
       jobId: job.id,
       now,
-      syncDocument: vi.fn().mockRejectedValue(new Error("provider timeout")),
+      syncDocument: vi.fn().mockImplementation(async ({ document }) => {
+        syncAttempt += 1;
+        if (syncAttempt > 1) throw new Error("provider timeout");
+        return {
+          remoteUri: document.uri,
+          contentHash: createHash("sha256").update(document.content).digest("hex"),
+        };
+      }),
     });
 
     expect(result).toEqual({ processed: true, status: "retry_wait" });
@@ -379,6 +477,7 @@ describe("durable OpenViking sync jobs", () => {
       },
       data: {
         status: "retry_wait",
+        itemCount: 1,
         error: "provider timeout",
         leaseToken: null,
         leaseExpiresAt: null,

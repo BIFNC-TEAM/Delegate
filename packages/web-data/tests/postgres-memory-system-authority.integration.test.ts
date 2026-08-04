@@ -82,6 +82,15 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
         text: "Please remember that concise answers are preferred.",
       },
     });
+    const generationRun = await prisma.generationRun.create({
+      data: {
+        conversationId: conversation.id,
+        inputMessageId: message.id,
+        representativeVersionId: publishedVersion.id,
+        status: "PROCESSING",
+        idempotencyKey: `memory-authority-generation-${suffix}`,
+      },
+    });
     const candidate = await prisma.memoryCandidate.create({
       data: {
         representativeId: representative.id,
@@ -234,6 +243,7 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
         sourceChannel: "WEB",
         representativeVersionId: publishedVersion.id,
         inputMessageId: message.id,
+        generationRunId: generationRun.id,
         idempotencyKey: `stale-run-${suffix}`,
       },
     })).rejects.toThrow();

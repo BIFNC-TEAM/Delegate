@@ -153,21 +153,16 @@ the internal caller without granting ROOT access to tenant data APIs.
 
 ## Dashboard surface
 
-Delegate exposes OpenViking controls in the dashboard:
+OpenViking is a rebuildable projection, not an Owner-editable source of truth. The Dashboard exposes business controls through **Memory System** and **Digital Representatives → Configuration → Memory**:
 
-- enable / disable per representative
-- agent id override
-- auto recall toggle
-- auto capture toggle
-- capture mode
-- recall limit
-- recall score threshold
-- target URI root
-- manual public knowledge sync
-- health, sync status, sync error, sync counts
-- recent recall traces
-- recent commit traces
-- safe memory preview
+- governed Contact Memory and Representative Experience policy;
+- Web recall/extraction capability and honest unsupported states for Matrix/Telegram;
+- retention and expiry behavior;
+- search, scope/safety pass, model injection, answer citation, and public-display stages as separate usage facts;
+- projection, cleanup, and reconciliation health with idempotent retry;
+- Provider and namespace information as read-only advanced diagnostics.
+
+Owners cannot edit arbitrary Agent IDs or target URIs. Public knowledge import, editing, representative binding, draft work, and publishing stay in Knowledge Library; the Memory System only links there and reports projection/use health. Legacy `/openviking` management routes remain temporarily for compatibility but are no longer called by the current Dashboard UI.
 
 ## Verification checklist
 

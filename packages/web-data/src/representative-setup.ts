@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   actionGateSchema,
   conversationContractSchema,
@@ -346,21 +348,115 @@ export type PublicRepresentativeRuntimeResult =
       status: "available";
       setup: RepresentativeSetupSnapshot;
       governedContextEnabled: boolean;
+      governedMemoryDisclosure: PublicGovernedMemoryDisclosure;
     }
   | { status: "not_found" | "unpublished" | "paused" | "private" | "web_disabled" };
 
-export function resolveGovernedContextEnabled(input: {
-  openvikingEnabled: boolean;
-  openvikingAutoRecall: boolean;
+export type PublicGovernedMemoryDisclosure = {
+  enabled: boolean;
+  contactMemoryEnabled: boolean;
+  representativeExperienceEnabled: boolean;
+  automaticExtractionEnabled: boolean;
+  retentionDays: number | null;
+  expiryAction: "ARCHIVE" | "DELETE" | null;
+  policyRevision: number | null;
+  fingerprint: string;
+};
+
+type PublicGovernedMemoryPolicy = {
+  longTermMemoryEnabled: boolean;
+  contactMemoryEnabled: boolean;
+  representativeExperienceEnabled: boolean;
+  autoExtract: boolean;
+  webRecallEnabled: boolean;
+  webExtractEnabled: boolean;
+  retentionDays: number;
+  expiryAction: "ARCHIVE" | "DELETE";
+  provider: string;
+  revision: number;
+};
+
+const PUBLIC_MEMORY_DISCLOSURE_FINGERPRINT_VERSION = 1;
+
+export function resolvePublicGovernedMemoryDisclosure(input: {
+  policy: PublicGovernedMemoryPolicy | null;
   environmentEnabled: boolean;
   modelCredentialsAvailable: boolean;
-}): boolean {
-  return (
-    input.openvikingEnabled
-    && input.openvikingAutoRecall
+}): PublicGovernedMemoryDisclosure {
+  const hasEnabledMemoryKind = Boolean(
+    input.policy?.longTermMemoryEnabled
+    && (
+      input.policy.contactMemoryEnabled
+      || input.policy.representativeExperienceEnabled
+    ),
+  );
+  const enabled = Boolean(
+    hasEnabledMemoryKind
+    && input.policy?.webRecallEnabled
+    && input.policy.provider === "openviking"
     && input.environmentEnabled
     && input.modelCredentialsAvailable
   );
+  const automaticExtractionEnabled = Boolean(
+    hasEnabledMemoryKind
+    && input.policy?.contactMemoryEnabled
+    && input.policy?.autoExtract
+    && input.policy.webExtractEnabled,
+  );
+  const policyAppliesToWeb = enabled || automaticExtractionEnabled;
+  const policyRevision = Number.isInteger(input.policy?.revision)
+    && (input.policy?.revision ?? -1) >= 0
+    ? input.policy!.revision
+    : null;
+
+  if (!policyAppliesToWeb || !input.policy) {
+    return buildPublicGovernedMemoryDisclosure({
+      enabled: false,
+      contactMemoryEnabled: false,
+      representativeExperienceEnabled: false,
+      automaticExtractionEnabled: false,
+      retentionDays: null,
+      expiryAction: null,
+      policyRevision,
+    });
+  }
+
+  return buildPublicGovernedMemoryDisclosure({
+    enabled,
+    contactMemoryEnabled: input.policy.contactMemoryEnabled,
+    representativeExperienceEnabled: input.policy.representativeExperienceEnabled,
+    automaticExtractionEnabled,
+    retentionDays: input.policy.retentionDays,
+    expiryAction: input.policy.expiryAction,
+    policyRevision,
+  });
+}
+
+function buildPublicGovernedMemoryDisclosure(input: Omit<
+  PublicGovernedMemoryDisclosure,
+  "fingerprint"
+>): PublicGovernedMemoryDisclosure {
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify([
+      PUBLIC_MEMORY_DISCLOSURE_FINGERPRINT_VERSION,
+      input.policyRevision,
+      input.enabled,
+      input.contactMemoryEnabled,
+      input.representativeExperienceEnabled,
+      input.automaticExtractionEnabled,
+      input.retentionDays,
+      input.expiryAction,
+    ]))
+    .digest("base64url");
+  return { ...input, fingerprint };
+}
+
+export function resolveGovernedContextEnabled(input: {
+  policy: PublicGovernedMemoryPolicy | null;
+  environmentEnabled: boolean;
+  modelCredentialsAvailable: boolean;
+}): boolean {
+  return resolvePublicGovernedMemoryDisclosure(input).enabled;
 }
 
 export function resolvePublicRepresentativeAvailability(input: {
@@ -1027,6 +1123,11 @@ export async function getPublicRepresentativeRuntime(
           status: "available",
           setup,
           governedContextEnabled: false,
+          governedMemoryDisclosure: resolvePublicGovernedMemoryDisclosure({
+            policy: null,
+            environmentEnabled: false,
+            modelCredentialsAvailable: false,
+          }),
         }
       : { status: "not_found" };
   }
@@ -1037,8 +1138,20 @@ export async function getPublicRepresentativeRuntime(
       lifecycleState: true,
       publicMode: true,
       activeVersionId: true,
-      openvikingEnabled: true,
-      openvikingAutoRecall: true,
+      memoryPolicy: {
+        select: {
+          longTermMemoryEnabled: true,
+          contactMemoryEnabled: true,
+          representativeExperienceEnabled: true,
+          autoExtract: true,
+          webRecallEnabled: true,
+          webExtractEnabled: true,
+          retentionDays: true,
+          expiryAction: true,
+          provider: true,
+          revision: true,
+        },
+      },
       channelBindings: {
         where: { kind: RepresentativeChannelKind.WEB },
         select: { status: true, desiredState: true, healthStatus: true },
@@ -1079,15 +1192,16 @@ export async function getPublicRepresentativeRuntime(
   if (!setup) return { status: "unpublished" };
 
   const governedContextEnvironment = resolveOpenVikingEnv();
+  const governedMemoryDisclosure = resolvePublicGovernedMemoryDisclosure({
+    policy: representative.memoryPolicy,
+    environmentEnabled: governedContextEnvironment.enabled,
+    modelCredentialsAvailable: governedContextEnvironment.hasModelCredentials,
+  });
   return {
     status: "available",
     setup,
-    governedContextEnabled: resolveGovernedContextEnabled({
-      openvikingEnabled: representative.openvikingEnabled,
-      openvikingAutoRecall: representative.openvikingAutoRecall,
-      environmentEnabled: governedContextEnvironment.enabled,
-      modelCredentialsAvailable: governedContextEnvironment.hasModelCredentials,
-    }),
+    governedContextEnabled: governedMemoryDisclosure.enabled,
+    governedMemoryDisclosure,
   };
 }
 

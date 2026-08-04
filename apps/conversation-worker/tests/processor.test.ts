@@ -184,24 +184,23 @@ describe("conversation worker knowledge recall", () => {
         layer: "L2",
         score: 0.91,
         abstract: "佩奇临时代课并带大家画恐龙。",
-        internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
+        memoryUseItemId: "memory-use-item-1",
+        internalSource: {
+          sourceKind: "PUBLIC_KNOWLEDGE",
+          memoryUseItemId: "memory-use-item-1",
+        },
       }],
-      citations: [{
-        knowledgeAssetId: "asset-1",
-        title: "佩奇当老师",
-        excerpt: "佩奇临时代课并带大家画恐龙。",
-        score: 0.91,
-      }],
+      citations: [],
+      memoryUseRunId: "memory-use-run-1",
     });
     mocks.generateRepresentativeReply.mockResolvedValue({
       ok: true,
       replyText: "佩奇临时代课，和同学们一起完成了一幅有想象力的恐龙画。",
       provider: "openai",
       model: "test-model",
+      citedMemoryUseItemIds: ["memory-use-item-1"],
       contextTrace: {
-        selectedRecallUris: [
-          "viking://resources/delegate/reps/sktone/knowledge/asset-1.md/asset-1.md",
-        ],
+        selectedMemoryUseItemIds: ["memory-use-item-1"],
       },
     });
     mocks.renderGroundedKnowledgeFallbackWithTrace.mockReturnValue({
@@ -228,20 +227,26 @@ describe("conversation worker knowledge recall", () => {
       conversationId: "conversation-1",
       contactId: "contact-1",
       sourceChannel: "web",
+      generationRunId: "run-1",
       queryText: "佩奇当老师时发生了什么？",
     });
     expect(mocks.generateRepresentativeReply).toHaveBeenCalledWith(expect.objectContaining({
       recalled: [expect.objectContaining({ abstract: "佩奇临时代课并带大家画恐龙。" })],
     }));
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
-      citations: [expect.objectContaining({ title: "佩奇当老师" })],
+      memoryUse: {
+        runId: "memory-use-run-1",
+        outcome: "completed",
+        injectedItemIds: ["memory-use-item-1"],
+        citedItemIds: ["memory-use-item-1"],
+      },
       runtimeOutcome: {
         mode: "model",
       },
     }));
   });
 
-  it("persists citations only for recall URIs actually injected into the model prompt", async () => {
+  it("records only the ledger item actually injected and cited by the model", async () => {
     const firstUri = "viking://resources/delegate/reps/sktone/knowledge/asset-1.md/asset-1.md";
     const secondUri = "viking://resources/delegate/reps/sktone/knowledge/asset-2.md/asset-2.md";
     mocks.recallRepresentativeContext.mockResolvedValue({
@@ -252,7 +257,8 @@ describe("conversation worker knowledge recall", () => {
           layer: "L2",
           score: 0.95,
           abstract: "First searched candidate.",
-          internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
+          memoryUseItemId: "memory-use-item-1",
+          internalSource: { sourceKind: "PUBLIC_KNOWLEDGE", memoryUseItemId: "memory-use-item-1" },
         },
         {
           uri: secondUri,
@@ -260,27 +266,32 @@ describe("conversation worker knowledge recall", () => {
           layer: "L2",
           score: 0.9,
           abstract: "Second injected candidate.",
-          internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
+          memoryUseItemId: "memory-use-item-2",
+          internalSource: { sourceKind: "PUBLIC_KNOWLEDGE", memoryUseItemId: "memory-use-item-2" },
         },
       ],
-      citations: [
-        { knowledgeAssetId: "asset-1", title: "First source", score: 0.95 },
-        { knowledgeAssetId: "asset-2", title: "Second source", score: 0.9 },
-      ],
+      citations: [],
+      memoryUseRunId: "memory-use-run-1",
     });
     mocks.generateRepresentativeReply.mockResolvedValue({
       ok: true,
       replyText: "Answer grounded in the injected source.",
       provider: "openai",
       model: "test-model",
-      contextTrace: { selectedRecallUris: [secondUri] },
+      citedMemoryUseItemIds: ["memory-use-item-2"],
+      contextTrace: { selectedMemoryUseItemIds: ["memory-use-item-2"] },
     });
 
     await processNextConversationWork({ port: 4040, pollMs: 500 });
 
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        citations: [{ knowledgeAssetId: "asset-2", title: "Second source", score: 0.9 }],
+        memoryUse: {
+          runId: "memory-use-run-1",
+          outcome: "completed",
+          injectedItemIds: ["memory-use-item-2"],
+          citedItemIds: ["memory-use-item-2"],
+        },
       }),
     );
   });
@@ -291,19 +302,28 @@ describe("conversation worker knowledge recall", () => {
       replyText: "Answer without recalled context.",
       provider: "openai",
       model: "test-model",
-      contextTrace: { selectedRecallUris: [] },
+      citedMemoryUseItemIds: [],
+      contextTrace: { selectedMemoryUseItemIds: [] },
     });
 
     await processNextConversationWork({ port: 4040, pollMs: 500 });
 
-    expect(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]).not.toHaveProperty("citations");
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      memoryUse: {
+        runId: "memory-use-run-1",
+        outcome: "completed",
+        injectedItemIds: [],
+        citedItemIds: [],
+      },
+    }));
   });
 
-  it("uses recalled knowledge and keeps citations when model generation fails", async () => {
+  it("does not use or cite recalled knowledge when model generation fails", async () => {
     mocks.generateRepresentativeReply.mockResolvedValue({
       ok: false,
       reason: "provider timed out with secret upstream details",
       state: "ready",
+      citedMemoryUseItemIds: [],
     });
 
     await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
@@ -311,16 +331,15 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
 
-    expect(mocks.renderGroundedKnowledgeFallbackWithTrace).toHaveBeenCalledWith({
-      userText: "佩奇当老师时发生了什么？",
-      recalled: [expect.objectContaining({ abstract: "佩奇临时代课并带大家画恐龙。" })],
-    });
+    expect(mocks.renderGroundedKnowledgeFallbackWithTrace).not.toHaveBeenCalled();
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
-      replyText: expect.stringContaining("佩奇临时代课"),
-      citations: [expect.objectContaining({ title: "佩奇当老师" })],
+      memoryUse: {
+        runId: "memory-use-run-1",
+        outcome: "generation_failed",
+      },
       runtimeOutcome: {
         mode: "fallback",
-        fallbackStrategy: "grounded_knowledge",
+        fallbackStrategy: "deterministic_preview",
         modelRuntimeState: "ready",
         fallbackReason: "provider_failed",
       },
@@ -330,7 +349,7 @@ describe("conversation worker knowledge recall", () => {
     ).not.toContain("secret upstream details");
   });
 
-  it("persists only the public source selected by deterministic fallback", async () => {
+  it("never attributes a deterministic fallback to searched sources", async () => {
     const firstUri = "viking://resources/delegate/reps/sktone/knowledge/asset-1.md/asset-1.md";
     const secondUri = "viking://resources/delegate/reps/sktone/knowledge/asset-2.md/asset-2.md";
     mocks.recallRepresentativeContext.mockResolvedValue({
@@ -341,7 +360,8 @@ describe("conversation worker knowledge recall", () => {
           layer: "L2",
           score: 0.91,
           abstract: "Relevant fallback fact.",
-          internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
+          memoryUseItemId: "memory-use-item-1",
+          internalSource: { sourceKind: "PUBLIC_KNOWLEDGE", memoryUseItemId: "memory-use-item-1" },
         },
         {
           uri: secondUri,
@@ -349,18 +369,18 @@ describe("conversation worker knowledge recall", () => {
           layer: "L2",
           score: 0.99,
           abstract: "Unrelated searched fact.",
-          internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
+          memoryUseItemId: "memory-use-item-2",
+          internalSource: { sourceKind: "PUBLIC_KNOWLEDGE", memoryUseItemId: "memory-use-item-2" },
         },
       ],
-      citations: [
-        { knowledgeAssetId: "asset-1", title: "Relevant source", score: 0.91 },
-        { knowledgeAssetId: "asset-2", title: "Unrelated source", score: 0.99 },
-      ],
+      citations: [],
+      memoryUseRunId: "memory-use-run-1",
     });
     mocks.generateRepresentativeReply.mockResolvedValue({
       ok: false,
       reason: "provider unavailable",
       state: "ready",
+      citedMemoryUseItemIds: [],
     });
     mocks.renderGroundedKnowledgeFallbackWithTrace.mockReturnValue({
       replyText: "Relevant fallback fact.",
@@ -371,7 +391,10 @@ describe("conversation worker knowledge recall", () => {
 
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        citations: [{ knowledgeAssetId: "asset-1", title: "Relevant source", score: 0.91 }],
+        memoryUse: {
+          runId: "memory-use-run-1",
+          outcome: "generation_failed",
+        },
       }),
     );
   });
@@ -385,19 +408,23 @@ describe("conversation worker knowledge recall", () => {
         score: 0.99,
         abstract: "Private unrelated preference.",
         content: "Private unrelated preference.",
+        memoryUseItemId: "memory-use-contact-1",
         internalSource: {
           sourceKind: "CONTACT_MEMORY",
           memoryVersionId: "memory-version-1",
           projectionItemId: "projection-1",
           contentHash: "sha256-memory",
+          memoryUseItemId: "memory-use-contact-1",
         },
       }],
-      citations: [{ title: "Remembered preference", score: 0.99 }],
+      citations: [],
+      memoryUseRunId: "memory-use-run-1",
     });
     mocks.generateRepresentativeReply.mockResolvedValue({
       ok: false,
       reason: "provider unavailable",
       state: "ready",
+      citedMemoryUseItemIds: [],
     });
     mocks.renderGroundedKnowledgeFallbackWithTrace.mockReturnValue(null);
 
@@ -405,6 +432,10 @@ describe("conversation worker knowledge recall", () => {
 
     const completion = mocks.completeInlineGenerationRun.mock.calls[0]?.[0];
     expect(completion).not.toHaveProperty("citations");
+    expect(completion).toHaveProperty("memoryUse", {
+      runId: "memory-use-run-1",
+      outcome: "generation_failed",
+    });
     expect(JSON.stringify(completion)).not.toContain("Private unrelated preference");
   });
 
@@ -2000,7 +2031,7 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
   });
 
-  it("adds approved public knowledge to the planner only when the owner enables that scope", async () => {
+  it("keeps delegation planning isolated from the unaudited recall path", async () => {
     mocks.recallRepresentativeContext.mockResolvedValue({
       items: [
         {
@@ -2081,22 +2112,16 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
     expect(mocks.planNaturalLanguageComputeRequest).toHaveBeenCalledWith({
-      userText: expect.stringContaining("Owner 已授权本任务使用以下已审核公开资料"),
+      userText: "佩奇当老师时发生了什么？",
       maxSteps: 3,
     });
-    expect(mocks.planNaturalLanguageComputeRequest.mock.calls[0]?.[0]?.userText).toContain(
-      "佩奇临时代课并带大家画恐龙",
-    );
     expect(mocks.planNaturalLanguageComputeRequest.mock.calls[0]?.[0]?.userText).not.toContain(
       "PRIVATE CONTACT MEMORY",
     );
-    expect(mocks.recallRepresentativeContext).toHaveBeenCalledWith(expect.objectContaining({
-      sourceChannel: "web",
-      allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-    }));
-    expect(mocks.createComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
-      authorizedKnowledge: [{ assetId: "asset-1", title: "佩奇当老师" }],
-    }));
+    expect(mocks.recallRepresentativeContext).not.toHaveBeenCalled();
+    expect(mocks.createComputeDelegationTask.mock.calls[0]?.[0]).not.toHaveProperty(
+      "authorizedKnowledge",
+    );
   });
 
   it("stops a task whose estimate exceeds the representative cost limit", async () => {

@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  assertExactOpenVikingResourceLeaf,
+  assertExactOpenVikingResourceRootUri,
   assertExactGovernedMemoryRootUri,
   assertExactGovernedMemoryVersionUri,
   buildGovernedContactChannelMemoryRootUri,
@@ -13,11 +15,14 @@ import {
   buildGovernedRepresentativeExperienceVersionUri,
   GovernedMemoryRootProvisionError,
   GovernedMemoryUnsupportedError,
+  ExactResourceUnsupportedError,
+  ExactResourceRootProvisionError,
   OpenVikingClient,
   buildRepresentativeKnowledgeDocuments,
   buildRepresentativeKnowledgeRootUri,
   buildRepresentativeResourceRootUri,
   buildRepresentativeVersionResourceRootUri,
+  buildRepresentativeVersionKnowledgeAssetUri,
   isPublicSafeText,
   resolveOpenVikingEnv,
   sanitizePublicSafeText,
@@ -223,6 +228,35 @@ describe("OpenViking URI strategy", () => {
     expect(buildRepresentativeKnowledgeRootUri("lin-founder-rep")).toBe(
       "viking://resources/delegate/reps/lin-founder-rep/knowledge/",
     );
+    expect(buildRepresentativeVersionKnowledgeAssetUri(
+      "lin-founder-rep",
+      "version_7",
+      "asset_9",
+    )).toBe(
+      "viking://resources/delegate/reps/lin-founder-rep/versions/version_7/knowledge/asset_9.md",
+    );
+  });
+
+  it("accepts only exact immutable leaves below a pinned version root", () => {
+    const rootUri = buildRepresentativeVersionResourceRootUri("lin-founder-rep", "version_7");
+    const uri = buildRepresentativeVersionKnowledgeAssetUri(
+      "lin-founder-rep",
+      "version_7",
+      "asset_9",
+    );
+    expect(() => assertExactOpenVikingResourceLeaf({ rootUri, uri })).not.toThrow();
+    for (const invalidUri of [
+      rootUri,
+      `${rootUri}knowledge-assets/`,
+      buildRepresentativeVersionKnowledgeAssetUri("other-rep", "version_7", "asset_9"),
+      `${uri}?other=true`,
+    ]) {
+      expect(() => assertExactOpenVikingResourceLeaf({ rootUri, uri: invalidUri })).toThrow();
+    }
+    expect(() => assertExactOpenVikingResourceRootUri(rootUri)).not.toThrow();
+    expect(() => assertExactOpenVikingResourceRootUri(uri)).toThrow(
+      "canonical non-root directory URI",
+    );
   });
 });
 
@@ -424,6 +458,191 @@ describe("OpenViking client", () => {
       }),
     ).resolves.toMatchObject({ status: "processed" });
   });
+
+  it("creates and reads one exact published-version resource without upload fallback", async () => {
+    const rootUri = buildRepresentativeVersionResourceRootUri("delegate", "version_1");
+    const uri = buildRepresentativeVersionKnowledgeAssetUri(
+      "delegate",
+      "version_1",
+      "asset_1",
+    );
+    const content = "# Published asset\n\nAuthoritative PostgreSQL snapshot.";
+    const contentHash = sha256(content);
+    const requests: Array<{ url: string; method: string; body?: unknown }> = [];
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      fetchImpl: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: init?.method ?? "",
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+        });
+        const request = new URL(String(input));
+        if (request.pathname === "/api/v1/content/batch-write") {
+          return okResponse({
+            root_uri: rootUri.slice(0, -1),
+            created: [uri],
+            updated: [],
+            unchanged: [],
+          });
+        }
+        return okResponse(content);
+      },
+    });
+
+    await expect(client.createExactResource({
+      rootUri,
+      uri,
+      content,
+      contentHash,
+    })).resolves.toEqual({
+      rootUri,
+      uri,
+      contentHash,
+      outcome: "created",
+    });
+    await expect(client.readExactResource({ rootUri, uri })).resolves.toEqual({
+      uri,
+      content,
+      contentHash,
+    });
+    expect(requests).toEqual([
+      {
+        url: "http://openviking.test/api/v1/content/batch-write",
+        method: "POST",
+        body: {
+          root_uri: rootUri.slice(0, -1),
+          operations: [{
+            uri,
+            content,
+            precondition: { kind: "create_if_absent" },
+          }],
+          wait: true,
+        },
+      },
+      {
+        url: `http://openviking.test/api/v1/content/read?uri=${encodeURIComponent(uri)}&offset=0&limit=-1&raw=true`,
+        method: "GET",
+      },
+    ]);
+  });
+
+  it("provisions and verifies the exact published-version resource root", async () => {
+    const rootUri = buildRepresentativeVersionResourceRootUri("delegate", "version_1");
+    const transportRootUri = rootUri.slice(0, -1);
+    const requests: Array<{ method: string; url: string; body?: unknown }> = [];
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      fetchImpl: async (input, init) => {
+        requests.push({
+          method: init?.method ?? "",
+          url: String(input),
+          ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+        });
+        const request = new URL(String(input));
+        return request.pathname === "/api/v1/fs/mkdir"
+          ? okResponse({ uri: transportRootUri })
+          : okResponse({ uri: transportRootUri, isDir: true });
+      },
+    });
+    await expect(client.ensureExactResourceRoot(rootUri)).resolves.toEqual({ rootUri });
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        url: "http://openviking.test/api/v1/fs/mkdir",
+        body: { uri: transportRootUri },
+      },
+      {
+        method: "GET",
+        url: `http://openviking.test/api/v1/fs/stat?uri=${encodeURIComponent(transportRootUri)}`,
+      },
+    ]);
+  });
+
+  it("accepts a root mkdir conflict only after exact stat verification", async () => {
+    const rootUri = buildRepresentativeVersionResourceRootUri("delegate", "version_1");
+    const transportRootUri = rootUri.slice(0, -1);
+    let requestCount = 0;
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      fetchImpl: async () => {
+        requestCount += 1;
+        if (requestCount === 1) {
+          return new Response(JSON.stringify({
+            status: "error",
+            error: { code: "CONFLICT", message: "already exists" },
+          }), {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return okResponse({ uri: transportRootUri, isDir: true });
+      },
+    });
+    await expect(client.ensureExactResourceRoot(rootUri)).resolves.toEqual({ rootUri });
+    expect(requestCount).toBe(2);
+  });
+
+  it("fails closed on unsupported, mismatched, or non-directory exact roots", async () => {
+    const rootUri = buildRepresentativeVersionResourceRootUri("delegate", "version_1");
+    const unsupportedClient = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      fetchImpl: async () => new Response(null, { status: 501 }),
+    });
+    await expect(unsupportedClient.ensureExactResourceRoot(rootUri)).rejects.toMatchObject({
+      code: "EXACT_RESOURCE_ROOT_PROVISION_UNSUPPORTED",
+      stage: "mkdir",
+    });
+
+    for (const stat of [
+      { uri: `${rootUri.slice(0, -1)}-other`, isDir: true },
+      { uri: rootUri.slice(0, -1), isDir: false },
+    ]) {
+      let requestCount = 0;
+      const client = new OpenVikingClient({
+        baseUrl: "http://openviking.test",
+        fetchImpl: async () => {
+          requestCount += 1;
+          return requestCount === 1
+            ? okResponse({ uri: rootUri.slice(0, -1) })
+            : okResponse(stat);
+        },
+      });
+      const error = await client.ensureExactResourceRoot(rootUri).catch(
+        (reason: unknown) => reason,
+      );
+      expect(error).toBeInstanceOf(ExactResourceRootProvisionError);
+      expect(error).toMatchObject({
+        code: "EXACT_RESOURCE_ROOT_PROVISION_FAILED",
+        stage: "verify",
+      });
+    }
+  });
+
+  it.each([404, 405, 501])(
+    "fails closed when exact resource batch-write is unsupported (%s)",
+    async (status) => {
+      const rootUri = buildRepresentativeVersionResourceRootUri("delegate", "version_1");
+      const uri = `${rootUri}faq/index.md`;
+      const content = "# FAQ";
+      const client = new OpenVikingClient({
+        baseUrl: "http://openviking.test",
+        fetchImpl: async () => new Response(null, { status }),
+      });
+      const error = await client.createExactResource({
+        rootUri,
+        uri,
+        content,
+        contentHash: sha256(content),
+      }).catch((reason: unknown) => reason);
+      expect(error).toBeInstanceOf(ExactResourceUnsupportedError);
+      expect(error).toMatchObject({
+        status,
+        code: "EXACT_RESOURCE_BATCH_WRITE_UNSUPPORTED",
+        capabilityStatus: "degraded",
+      });
+    },
+  );
 
   it("provisions only an exact governed-memory root and verifies it with stat", async () => {
     const namespaceKey = "memory_namespace_a";

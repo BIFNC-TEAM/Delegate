@@ -2,18 +2,24 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import { getGovernedContextSyncPresentation } from "../app/dashboard/dashboard-governed-context-status";
-
 const component = readFileSync(
   new URL("../app/dashboard/dashboard-memory.tsx", import.meta.url),
+  "utf8",
+);
+const api = readFileSync(
+  new URL("../app/dashboard/dashboard-memory-api.ts", import.meta.url),
+  "utf8",
+);
+const framework = readFileSync(
+  new URL("../app/dashboard/dashboard-framework.tsx", import.meta.url),
   "utf8",
 );
 const representativeSetup = readFileSync(
   new URL("../app/dashboard/dashboard-representative-setup.tsx", import.meta.url),
   "utf8",
 );
-const framework = readFileSync(
-  new URL("../app/dashboard/dashboard-framework.tsx", import.meta.url),
+const representativeMemorySettings = readFileSync(
+  new URL("../app/dashboard/dashboard-representative-memory-settings.tsx", import.meta.url),
   "utf8",
 );
 const navigation = readFileSync(
@@ -27,147 +33,199 @@ const styles = readFileSync(
 const memoryStyles = styles.slice(styles.indexOf("/* Memory System */"));
 
 describe("Memory System dashboard", () => {
-  it("keeps the memory URL key while replacing Representative Development", () => {
+  it("keeps the memory module and exposes four URL-addressable business pages", () => {
     expect(navigation).toContain('id: "memory"');
     expect(navigation).toContain('text("记忆系统", "Memory System")');
-    expect(navigation).toContain('shortLabel: text("记忆", "Memory")');
-    expect(navigation).not.toContain('text("养成", "Representative Development")');
     expect(framework).toContain('props.activeView === "memory"');
     expect(framework).toContain("<DashboardMemory");
-    expect(framework).toContain('from "./dashboard-memory"');
-    expect(framework).not.toContain("<DashboardTraining");
-    expect(framework).not.toContain('from "./dashboard-training"');
-    expect(framework).toContain(
-      '[zh ? "记忆系统" : "Memory System", "—", zh ? "打开记忆系统查看实时状态" : "Open Memory System for live status"]',
+    expect(api).toContain(
+      'type MemorySection = "overview" | "entries" | "usage" | "operations"',
     );
-    expect(framework).not.toContain('"养成修订" : "Development revisions"');
-    expect(framework).not.toContain('[zh ? "记忆系统" : "Memory System", "42"');
+    expect(component).toContain('aria-current={section === item ? "page" : undefined}');
+    expect(component).toContain('params.set("section", updates.section)');
+    expect(component).toContain('return sections.includes(value as MemorySection)');
   });
 
-  it("does not load or manage public knowledge through the retired training UI", () => {
+  it("uses only the new private business API surface and centralizes requests", () => {
+    expect(api).toContain(
+      '"overview" | "entries" | "usage" | "operations" | "reconciliation"',
+    );
+    expect(api).toContain("/api/dashboard/memory/${resource}?");
+    expect(api).toContain('cache: "no-store"');
+    expect(api).toContain("loadMemoryOverview");
+    expect(api).toContain("loadMemoryEntries");
+    expect(api).toContain("loadMemoryUsage");
+    expect(api).toContain("loadMemoryOperations");
+    expect(api).toContain("loadMemoryReconciliation");
     expect(component).not.toContain("/training");
-    expect(component).not.toContain("training/sources");
-    expect(component).not.toContain("training/suggestions");
-    expect(component).not.toContain("training/versions");
-    expect(component).toContain('buildDashboardHref("knowledge"');
-    expect(component).toContain("打开知识库");
-    expect(component).toContain("Public knowledge remains in the Knowledge Library");
-    expect(component).toContain("草稿继续留在知识库，不参与线上检索");
+    expect(component).not.toContain("/openviking");
+    expect(api).not.toContain("/training");
+    expect(api).not.toContain("/openviking");
   });
 
-  it("uses real governed-memory and retrieval-summary APIs with read-only sync health", () => {
-    expect(component).toContain('fetch(root, { cache: "no-store" })');
-    expect(component).toContain('fetch(`${root}/memories`, { cache: "no-store" })');
-    expect(component).toContain('fetch(`${root}/recall-traces`, { cache: "no-store" })');
-    expect(component).not.toContain("/openviking/sync");
-    expect(component).not.toContain("resyncPublishedKnowledge");
-    expect(component).not.toContain("重新同步");
-    expect(component).toContain('action === "delete"');
-    expect(component).toContain('{ method: "DELETE" }');
-    expect(component).toContain('manageMemory(memory, "suppress")');
-    expect(component).toContain('manageMemory(memory, "retry")');
-    expect(component).toContain('memory.status === "ACTIVE"');
-    expect(component).toContain("snapshot.usage.today");
-    expect(component).toContain("snapshot.settings.recentSyncJobs");
-  });
-
-  it("reports retrieval records without claiming model injection or citation", () => {
-    expect(component).toContain("今日检索记录");
-    expect(component).toContain("仅表示检索与授权记录");
-    expect(component).toContain("不等于内容实际注入模型、用于回答或展示为来源");
-    expect(component).toContain("does not prove that content was injected into the model");
-    expect(component).not.toContain("今日实际用于回答");
-    expect(component).not.toContain("使用记录数量");
+  it("separates search, injection, citation, and display instead of inflating usage", () => {
+    expect(component).toContain("今日搜索命中");
+    expect(component).toContain("今日注入模型");
+    expect(component).toContain("今日模型引用");
+    expect(component).toContain("今日最终展示");
+    expect(component).toContain("today.injectedIntoModel");
+    expect(component).toContain("today.citedByModel");
+    expect(component).toContain("today.displayedSources");
+    expect(component).toContain("today.answersUsingMemory");
+    expect(component).toContain("今日实际用于回答");
+    expect(component).toContain("counts.searchHits");
+    expect(component).toContain("counts.scopePassed");
+    expect(component).toContain("counts.safetyPassed");
+    expect(component).toContain("counts.injectedIntoModel");
+    expect(component).toContain("counts.citedByModel");
+    expect(component).toContain("counts.displayedSources");
+    expect(component).toContain("source.stages.scopePassedAt");
+    expect(component).toContain("source.stages.safetyPassedAt");
+    expect(component).toContain("source.stages.injectedAt");
+    expect(component).toContain("source.stages.citedAt");
+    expect(component).toContain("source.stages.displayedAt");
+    expect(component).toContain("Candidate stage details");
     expect(component).not.toContain("Recall Trace");
   });
 
-  it("shows honest unsupported and unavailable states instead of demo data", () => {
-    expect(component).toContain("当前接口尚未提供 Web、Matrix、Telegram");
-    expect(component).toContain("候选审核、代表经验和完整筛选能力尚未接入");
-    expect(component).toContain("不会显示伪造队列");
-    expect(component).toContain("当前页面不会用示例数字代替真实数据");
-    expect(component).toContain("!snapshot ?");
+  it("supports truthful entry filtering, stable pagination, and detail deep links", () => {
+    for (const filter of [
+      "contactId",
+      "scope",
+      "category",
+      "status",
+      "source",
+      "channel",
+      "from",
+      "to",
+      "query",
+    ]) {
+      expect(component).toContain(`name="${filter}"`);
+    }
+    expect(component).toContain('params.set("entryId", updates.entryId)');
+    expect(component).toContain('params.set("cursor", updates.cursor)');
+    expect(component).toContain('params.set("asOf", updates.asOf)');
+    expect(component).toContain("page.nextCursor");
+    expect(component).toContain("page.asOf");
+    expect(component).toContain("window.location.assign");
+    expect(component).toContain("date.toISOString()");
+  });
+
+  it("offers every governed lifecycle action with idempotency and explicit deletion confirmation", () => {
+    for (const action of [
+      "approve_candidate",
+      "reject_candidate",
+      "block_candidate",
+      "request_correction",
+      "suppress_memory",
+      "archive_memory",
+      "restore_memory",
+      "request_deletion",
+      "retry_cleanup",
+      "retry_projection",
+      "retry_extraction",
+      "enqueue_reconciliation",
+    ]) {
+      expect(component).toContain(action);
+    }
+    expect(api).toContain('"Idempotency-Key": idempotencyKey');
+    expect(api).toContain('"X-Request-Id": createClientRequestId()');
+    expect(component).toContain('command === "retry_cleanup"');
+    expect(component).toContain("entry.cleanup?.updatedAt");
+    expect(component).toContain("永久删除会立即停止召回，并异步清理物理投影");
+    expect(component).toContain("批准后，该候选将获得线上召回资格");
+    expect(component).toContain("window.confirm(confirmation)");
+  });
+
+  it("keeps public knowledge in Knowledge Library and reports projection read-only", () => {
+    expect(component).toContain("公开知识继续由知识库创建、编辑、绑定和发布");
+    expect(component).toContain("overview.publicKnowledge.knowledgeLibraryHref");
+    expect(component).toContain("overview.publicKnowledge.projectedItemCount");
+    expect(component).not.toContain("知识草稿");
+    expect(component).not.toContain("发布版本建议");
+    expect(component).not.toContain("重新同步公开知识");
+  });
+
+  it("shows honest empty, unavailable, unsupported, partial, and recoverable states", () => {
+    expect(component).toContain("页面不会用示例数据替代真实结果");
+    expect(component).toContain("data.items.length ?");
     expect(component).toContain('role="alert"');
-    expect(component).toContain("snapshot.memories.length ?");
-    expect(component).toContain("recentSyncJobs.length ?");
+    expect(component).toContain('inventoryStatus === "partial"');
+    expect(component).toContain("对账只能报告已知精确投影");
+    expect(component).toContain("retry_cleanup");
+    expect(component).toContain("partialSuccess");
+    expect(component).toContain("Promise.allSettled");
+    expect(component).toContain("reconciliationCursor");
+    expect(component).toContain("reconciliationItemCursor");
+    expect(component).toContain("itemCursor: query.reconciliationItemCursor");
+    expect(api).toContain("issuesPage");
+    expect(component).toContain("public_knowledge_sync");
+    expect(component).not.toMatch(/demo|mock data|sample metric/i);
   });
 
-  it("states the long-term memory boundary and keeps technical fields out of the UI", () => {
-    expect(component).toContain("原始聊天、Owner 私有备注和 Compute 原始产物不会直接进入长期记忆");
-    expect(component).toContain("凭据、支付金额、余额与权益事实不会进入长期记忆");
-    expect(component).toContain("autoCapture: false");
-    expect(component).not.toContain("viking://");
-    expect(component).not.toContain("Target URI");
-    expect(component).not.toContain("Agent ID");
-    expect(component).not.toContain("<pre");
-    expect(component).not.toContain(".score");
-    expect(component).not.toContain(".layer");
-    expect(component).toContain("正文已从控制台清除，不再参与召回");
+  it("never renders internal retrieval coordinates or copies raw questions", () => {
+    expect(component).toContain("提问正文不在记忆控制台展示");
+    expect(component).toContain("仅展示业务版本和清理状态");
+    for (const forbidden of [
+      "viking://",
+      ".uri",
+      ".layer",
+      ".score",
+      "queryText",
+      "sessionId",
+      "Target URI",
+      "Agent ID",
+      "<pre",
+    ]) {
+      expect(component).not.toContain(forbidden);
+      expect(api).not.toContain(forbidden);
+    }
   });
 
-  it("normalizes anonymous web visitors and exposes reversible memory actions", () => {
-    expect(component).toContain("/^web visitor$/i");
-    expect(component).toContain('"匿名访客"');
-    expect(component).toContain("停用后，这条记忆将立即停止参与召回");
-    expect(component).toContain("删除会立即停止召回，并开始异步物理清理");
-    expect(component).toContain("重试清理");
-  });
-
-  it("maps every safe sync result to a business status before showing feedback", () => {
-    expect(component).toContain(
-      "getGovernedContextSyncPresentation(snapshot.settings.lastSyncStatus, locale).label",
-    );
-    expect(component).toContain("snapshot.settings.recentSyncJobs.slice(0, 6)");
-    expect(component).toContain('buildDashboardHref("knowledge"');
-    expect(representativeSetup).toContain(
-      "getGovernedContextSyncPresentation(\n          nextSnapshot.lastSyncStatus",
-    );
-
-    const unpublishedZh = getGovernedContextSyncPresentation(
-      "blocked_unpublished",
-      "zh",
-    );
-    const serviceSetupEn = getGovernedContextSyncPresentation(
-      "blocked_missing_credentials",
-      "en",
-    );
-    const failedZh = getGovernedContextSyncPresentation("failed", "zh");
-
-    expect(unpublishedZh).toMatchObject({
-      outcome: "blocked_unpublished",
-      label: "需要先发布",
-    });
-    expect(serviceSetupEn).toMatchObject({
-      outcome: "blocked_service_setup",
-      label: "Service setup required",
-    });
-    expect(failedZh).toMatchObject({
-      outcome: "failed",
-      label: "同步失败",
-    });
-  });
-
-  it("uses readable design-system typography, focus, rhythm, and mobile actions", () => {
-    expect(styles).toContain("/* Memory System */");
-    expect(styles).toContain(".memory-system-page");
-    expect(styles).toContain(".memory-system-boundary");
-    expect(styles).toContain(".memory-system-record-list");
-    expect(styles).toContain(".memory-system-honesty-note");
-    expect(memoryStyles).toContain(":where(button, a):focus-visible");
-    const remSizes = [...memoryStyles.matchAll(/font-size:\s*([0-9.]+)rem/g)]
-      .map((match) => Number(match[1] ?? 0));
-    expect(remSizes.length).toBeGreaterThan(0);
-    expect(Math.min(...remSizes)).toBeGreaterThanOrEqual(0.75);
-    const spacingValues = [
-      ...memoryStyles.matchAll(
-        /(?:gap|padding|margin-top|margin-bottom):\s*([^;]+);/g,
-      ),
-    ].flatMap((match) =>
-      [...(match[1] ?? "").matchAll(/([0-9]+)px/g)]
-        .map((value) => Number(value[1] ?? 0)),
-    );
-    expect(spacingValues.every((value) => value % 4 === 0)).toBe(true);
+  it("uses textual states, distinct channel markers, focus styles, and mobile-safe controls", () => {
+    expect(component).toContain("supportedEnabled");
+    expect(component).toContain("supportedDisabled");
+    expect(component).toContain("unsupported");
+    expect(styles).toContain(".memory-system-channel.is-web");
+    expect(styles).toContain(".memory-system-channel.is-matrix");
+    expect(styles).toContain(".memory-system-channel.is-telegram");
+    expect(memoryStyles).toContain(':where(button, a, input, select, textarea):focus-visible');
     expect(memoryStyles).toContain("@media (max-width: 680px)");
     expect(memoryStyles).toContain("min-height: 44px");
+    expect(memoryStyles).toContain("position: fixed");
+    expect(component).toContain("aria-modal={mobileModal ? true : undefined}");
+    expect(component).toContain('setAttribute("inert", "")');
+    expect(component).toContain("trapModalFocus");
+    expect(component).toContain("previouslyFocused?.isConnected");
+    const remSizes = [...memoryStyles.matchAll(/font-size:\s*([0-9.]+)rem/g)]
+      .map((match) => Number(match[1] ?? 0));
+    expect(Math.min(...remSizes)).toBeGreaterThanOrEqual(0.75);
+  });
+
+  it("normalizes anonymous web visitors without hiding named contacts", () => {
+    expect(component).toContain("/^web visitor$/i");
+    expect(component).toContain("/^unknown audience$/i");
+    expect(component).toContain('"匿名访客"');
+    expect(component).toContain('"Anonymous visitor"');
+  });
+
+  it("replaces the legacy representative OpenViking panel with governed Memory settings", () => {
+    expect(representativeSetup).toContain("<DashboardRepresentativeMemorySettings");
+    expect(representativeSetup).not.toContain("/openviking");
+    expect(representativeSetup).not.toContain("syncPublicKnowledge");
+    expect(representativeSetup).not.toContain("RepresentativeOpenVikingSnapshot");
+    expect(representativeMemorySettings).toContain("loadMemorySettings");
+    expect(representativeMemorySettings).toContain("updateMemorySettings");
+    expect(representativeMemorySettings).toContain("snapshot.revision");
+    expect(representativeMemorySettings).toContain("Web 自动提取仅为联系人记忆创建候选");
+    expect(representativeMemorySettings).toContain("!draft.basic.contactMemoryEnabled");
+    expect(representativeMemorySettings).toContain("Promise<boolean>");
+    expect(representativeMemorySettings).toContain("reloaded ? t.conflict : t.conflictReloadFailed");
+    expect(representativeMemorySettings).toContain("首次发送前的记忆披露尚未实现");
+    expect(representativeMemorySettings).toContain("serverManaged");
+    expect(representativeSetup).toContain('if (activeSection === "memory")');
+    expect(representativeSetup).toContain('activeSection !== "memory" ? <div className="dashboard-form-footer">');
+    expect(representativeMemorySettings).not.toContain("Agent ID");
+    expect(representativeMemorySettings).not.toContain("Target URI");
   });
 });

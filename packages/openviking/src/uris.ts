@@ -259,6 +259,24 @@ export function buildRepresentativeKnowledgeRootUri(representativeSlug: string):
   return `${buildRepresentativeResourceRootUri(representativeSlug)}knowledge/`;
 }
 
+/**
+ * Builds the immutable, version-scoped projection URI for one KnowledgeAsset.
+ *
+ * Public recall must never search the legacy representative-wide knowledge
+ * root because it is not pinned to a RepresentativeVersion. Each published
+ * snapshot therefore gets its own exact asset leaf below the version root.
+ */
+export function buildRepresentativeVersionKnowledgeAssetUri(
+  representativeSlug: string,
+  representativeVersionId: string,
+  knowledgeAssetId: string,
+): string {
+  return `${buildRepresentativeVersionResourceRootUri(
+    representativeSlug,
+    representativeVersionId,
+  )}knowledge/${sanitizeSegment(knowledgeAssetId)}.md`;
+}
+
 export function buildRepresentativeIdentityUri(
   representativeSlug: string,
   resourceRootUri = buildRepresentativeResourceRootUri(representativeSlug),

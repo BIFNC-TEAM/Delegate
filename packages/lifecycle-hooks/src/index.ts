@@ -23,7 +23,7 @@ export type ModelContextAssembledEvent = {
   estimatedInputTokens: number;
   segments: ModelContextSegmentTrace[];
   selectedKnowledgeTitles: string[];
-  selectedRecallUris: string[];
+  selectedMemoryUseItemIds: string[];
 };
 
 export type ModelReplyCompletedEvent = {

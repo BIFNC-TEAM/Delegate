@@ -197,7 +197,7 @@ export async function approveMemoryCandidate(
   const candidateId = requiredText(input.candidateId, "candidateId");
   const requestHash = hashRequest([
     "approve_candidate",
-    command,
+    semanticCommand(command),
     candidateId,
   ]);
 
@@ -527,7 +527,7 @@ export async function requestMemoryCorrection(
   const correctionRequest = validateCorrectionRequest(input);
   const requestHash = hashRequest([
     "request_correction",
-    command,
+    semanticCommand(command),
     memoryId,
     correctionRequest,
   ]);
@@ -692,7 +692,11 @@ export async function requestGovernedMemoryDeletion(
 ): Promise<MemoryGovernanceMutationResult> {
   const command = validateCommand(input);
   const memoryId = requiredText(input.memoryId, "memoryId");
-  const requestHash = hashRequest(["request_deletion", command, memoryId]);
+  const requestHash = hashRequest([
+    "request_deletion",
+    semanticCommand(command),
+    memoryId,
+  ]);
 
   return runGovernanceTransaction(options, async (tx, occurredAt) => {
     const actor = await resolveMemoryActor(
@@ -874,7 +878,11 @@ export async function retryGovernedMemoryCleanup(
 ): Promise<MemoryGovernanceMutationResult> {
   const command = validateCommand(input);
   const memoryId = requiredText(input.memoryId, "memoryId");
-  const requestHash = hashRequest(["retry_cleanup", command, memoryId]);
+  const requestHash = hashRequest([
+    "retry_cleanup",
+    semanticCommand(command),
+    memoryId,
+  ]);
 
   return runGovernanceTransaction(options, async (tx, occurredAt) => {
     const actor = await resolveMemoryActor(
@@ -1162,7 +1170,11 @@ async function reviewCandidateTerminal(
 ): Promise<MemoryGovernanceMutationResult> {
   const command = validateCommand(input);
   const candidateId = requiredText(input.candidateId, "candidateId");
-  const requestHash = hashRequest([transition.action, command, candidateId]);
+  const requestHash = hashRequest([
+    transition.action,
+    semanticCommand(command),
+    candidateId,
+  ]);
   return runGovernanceTransaction(options, async (tx, occurredAt) => {
     const actor = await resolveMemoryActor(
       tx,
@@ -1240,7 +1252,11 @@ async function changeMemoryStatus(
 ): Promise<MemoryGovernanceMutationResult> {
   const command = validateCommand(input);
   const memoryId = requiredText(input.memoryId, "memoryId");
-  const requestHash = hashRequest([action, command, memoryId]);
+  const requestHash = hashRequest([
+    action,
+    semanticCommand(command),
+    memoryId,
+  ]);
   return runGovernanceTransaction(options, async (tx, occurredAt) => {
     const actor = await resolveMemoryActor(
       tx,
@@ -2235,6 +2251,21 @@ function hashRequest(parts: unknown[]) {
     if (value instanceof Date) return value.toISOString();
     return value;
   }));
+}
+
+/**
+ * The request ID is observability metadata, not part of the mutation's
+ * business meaning. A caller may safely retry the same idempotent command
+ * under a fresh trace/request ID after losing the first response.
+ */
+function semanticCommand(command: ValidatedCommand) {
+  return {
+    actorOwnerId: command.actorOwnerId,
+    representativeSlug: command.representativeSlug,
+    expectedUpdatedAt: command.expectedUpdatedAt,
+    reasonCode: command.reasonCode,
+    note: command.note,
+  };
 }
 
 function sha256(value: string) {

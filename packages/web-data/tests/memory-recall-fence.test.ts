@@ -1,23 +1,33 @@
+import { createHash } from "node:crypto";
+
 import {
   buildGovernedContactChannelMemoryRootUri,
   buildGovernedContactChannelMemoryVersionUri,
   buildGovernedMemoryManagedUserId,
   buildGovernedRepresentativeExperienceVersionUri,
+  buildRepresentativeKnowledgeDocuments,
 } from "@delegate/openviking";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { clientMocks, mockPrisma } = vi.hoisted(() => ({
+const { clientMocks, memoryUseMocks, mockPrisma } = vi.hoisted(() => ({
   clientMocks: {
     construct: vi.fn(),
     search: vi.fn(),
     read: vi.fn(),
+  },
+  memoryUseMocks: {
+    start: vi.fn(),
+    record: vi.fn(),
+    markDegraded: vi.fn(),
+    fail: vi.fn(),
   },
   mockPrisma: {
     conversation: { findFirst: vi.fn() },
     conversationEpisode: { findFirst: vi.fn() },
     representativeMemoryPolicy: { findUnique: vi.fn() },
     governedMemory: { findMany: vi.fn() },
-    conversationRecallTrace: { createMany: vi.fn() },
+    knowledgeAsset: { findMany: vi.fn() },
+    publicKnowledgeProjectionItem: { findMany: vi.fn() },
   },
 }));
 
@@ -42,6 +52,12 @@ vi.mock("@delegate/openviking", async (importOriginal) => {
 });
 
 vi.mock("../src/prisma", () => ({ prisma: mockPrisma }));
+vi.mock("../src/memory-use-execution", () => ({
+  startOrReuseMemoryUseRun: memoryUseMocks.start,
+  recordMemoryUseSearchHits: memoryUseMocks.record,
+  markMemoryUseRunDegraded: memoryUseMocks.markDegraded,
+  failMemoryUseRun: memoryUseMocks.fail,
+}));
 
 import { recallRepresentativeContext } from "../src/openviking";
 
@@ -61,7 +77,37 @@ describe("governed memory recall fence", () => {
     mockPrisma.conversationEpisode.findFirst.mockResolvedValue(buildEpisode());
     mockPrisma.representativeMemoryPolicy.findUnique.mockResolvedValue(null);
     mockPrisma.governedMemory.findMany.mockResolvedValue([]);
-    mockPrisma.conversationRecallTrace.createMany.mockResolvedValue({ count: 1 });
+    mockPrisma.knowledgeAsset.findMany.mockResolvedValue([]);
+    mockPrisma.publicKnowledgeProjectionItem.findMany.mockResolvedValue([
+      buildPublicProjection(),
+    ]);
+    memoryUseMocks.start.mockResolvedValue({
+      replayed: false,
+      run: {
+        id: "memory-use-run-1",
+        representativeId,
+        conversationId: "conversation-1",
+        contactId,
+        representativeVersionId,
+      },
+    });
+    memoryUseMocks.record.mockImplementation(async ({ hits }: {
+      hits: Array<{
+        sourceKind: string;
+        projectionItemId?: string;
+        publicKnowledgeProjectionId?: string;
+      }>;
+    }) => ({
+      eligibleItems: hits.map((hit, index) => ({
+        memoryUseItemId: `memory-use-item-${index + 1}`,
+        sourceKind: hit.sourceKind,
+        ...(hit.publicKnowledgeProjectionId
+          ? { publicKnowledgeProjectionId: hit.publicKnowledgeProjectionId }
+          : { projectionItemId: hit.projectionItemId }),
+      })),
+    }));
+    memoryUseMocks.markDegraded.mockResolvedValue(undefined);
+    memoryUseMocks.fail.mockResolvedValue(undefined);
     clientMocks.search.mockResolvedValue({ resources: [], memories: [] });
     clientMocks.read.mockResolvedValue("");
   });
@@ -76,23 +122,21 @@ describe("governed memory recall fence", () => {
     mockPrisma.governedMemory.findMany.mockRejectedValue(
       new Error("memory inventory storage unavailable"),
     );
-    const publicUri =
-      "viking://resources/delegate/reps/memory-rep/knowledge/asset-1.md/asset-1.md";
+    const publicUri = publicIdentityDocument().uri;
     clientMocks.search.mockImplementation(async ({ targetUri }: { targetUri: string }) => ({
-      resources: targetUri.includes("/knowledge/")
+      resources: targetUri.includes("/versions/")
         ? [remoteMatch(publicUri, "resource", "Remote public abstract")]
         : [],
       memories: [],
     }));
-    clientMocks.read.mockResolvedValue("# Approved public answer\nTrusted published body.");
-
     const recalled = await recall("web");
 
     expect(recalled.items).toEqual([
       expect.objectContaining({
         uri: publicUri,
-        content: expect.stringContaining("Trusted published body"),
-        internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
+        content: expect.stringContaining("Memory Representative"),
+        memoryUseItemId: expect.any(String),
+        internalSource: expect.objectContaining({ sourceKind: "PUBLIC_KNOWLEDGE" }),
       }),
     ]);
     expect(mockPrisma.governedMemory.findMany).toHaveBeenCalled();
@@ -101,34 +145,160 @@ describe("governed memory recall fence", () => {
         where: expect.objectContaining({ sourceChannel: "web" }),
       }),
     );
+    expect(clientMocks.read).not.toHaveBeenCalled();
+    const persistedSearchPayload = JSON.stringify(memoryUseMocks.record.mock.calls);
+    expect(persistedSearchPayload).not.toContain("remembered preference");
+    expect(persistedSearchPayload).not.toContain("viking://");
+    expect(persistedSearchPayload).not.toContain("searchScore");
+    expect(memoryUseMocks.record).toHaveBeenCalledWith(expect.objectContaining({
+      hits: [expect.objectContaining({
+        publicKnowledgeProjectionId: "public-projection-identity",
+      })],
+    }));
   });
 
-  it("returns authorized context when best-effort recall diagnostics persistence fails", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const publicUri =
-      "viking://resources/delegate/reps/memory-rep/knowledge/asset-1.md/asset-1.md";
+  it("terminates the use run when authoritative search-hit persistence fails", async () => {
+    const publicUri = publicIdentityDocument().uri;
     clientMocks.search.mockImplementation(async ({ targetUri }: { targetUri: string }) => ({
-      resources: targetUri.includes("/knowledge/")
+      resources: targetUri.includes("/versions/")
         ? [remoteMatch(publicUri, "resource", "Published diagnostic-independent fact")]
         : [],
       memories: [],
     }));
-    clientMocks.read.mockResolvedValue("# Published source\nDiagnostic-independent fact.");
-    mockPrisma.conversationRecallTrace.createMany.mockRejectedValue(
+    memoryUseMocks.record.mockRejectedValue(
       new Error("diagnostics database unavailable"),
     );
 
     const recalled = await recall("web");
 
-    expect(recalled.items).toEqual([
-      expect.objectContaining({ uri: publicUri }),
-    ]);
-    expect(warn).toHaveBeenCalledWith(
-      "Recall diagnostics persistence failed; authorized context will continue.",
+    expect(recalled).toEqual({ items: [], citations: [] });
+    expect(memoryUseMocks.fail).toHaveBeenCalledWith(
+      "memory-use-run-1",
+      "memory_ledger_failed",
     );
-    expect(JSON.stringify(warn.mock.calls)).not.toContain("remembered preference");
-    expect(JSON.stringify(warn.mock.calls)).not.toContain("viking://");
-    warn.mockRestore();
+  });
+
+  it("records provider-unavailable degradation when every search lane fails", async () => {
+    clientMocks.search.mockRejectedValue(new Error("provider unavailable"));
+
+    await expect(recall("web")).resolves.toEqual({
+      items: [],
+      citations: [],
+      memoryUseRunId: "memory-use-run-1",
+    });
+    expect(memoryUseMocks.markDegraded).toHaveBeenCalledWith(
+      "memory-use-run-1",
+      "memory_recall_provider_unavailable",
+    );
+    expect(memoryUseMocks.record).toHaveBeenCalledWith(expect.objectContaining({
+      hits: [],
+    }));
+  });
+
+  it("records partial degradation while returning the successful public lane", async () => {
+    enableMemoryPolicy();
+    const publicUri = publicIdentityDocument().uri;
+    clientMocks.search.mockImplementation(async ({ targetUri }: { targetUri: string }) => {
+      if (targetUri.includes("/versions/")) {
+        return {
+          resources: [remoteMatch(publicUri, "resource", "REMOTE BODY")],
+          memories: [],
+        };
+      }
+      throw new Error("memory lane unavailable");
+    });
+
+    const recalled = await recall("web");
+
+    expect(recalled.items.map((item) => item.uri)).toEqual([publicUri]);
+    expect(memoryUseMocks.markDegraded).toHaveBeenCalledWith(
+      "memory-use-run-1",
+      "memory_recall_partial",
+    );
+  });
+
+  it("recalls governed memory from the new policy when legacy public recall is disabled", async () => {
+    mockPrisma.conversation.findFirst.mockResolvedValue(buildConversation({
+      openvikingEnabled: false,
+      openvikingAutoRecall: false,
+    }));
+    enableMemoryPolicy();
+    const memory = buildContactMemory({
+      contactId,
+      sourceChannel: "web",
+      memoryId: "memory-policy-only",
+      versionId: "memory-version-policy-only",
+    });
+    mockPrisma.governedMemory.findMany.mockResolvedValue([memory.record]);
+    clientMocks.search.mockResolvedValue({
+      resources: [],
+      memories: [remoteMatch(memory.uri, "memory", "remote body")],
+    });
+
+    const recalled = await recall("web", ["CONTACT_MEMORY"]);
+
+    expect(recalled.items).toEqual([
+      expect.objectContaining({
+        uri: memory.uri,
+        content: "Postgres safe memory text",
+        internalSource: expect.objectContaining({ sourceKind: "CONTACT_MEMORY" }),
+      }),
+    ]);
+    expect(clientMocks.search).toHaveBeenCalledTimes(1);
+    expect(clientMocks.search).toHaveBeenCalledWith(expect.objectContaining({
+      targetUri: expect.stringContaining("/channels/web/"),
+    }));
+    expect(clientMocks.search).not.toHaveBeenCalledWith(expect.objectContaining({
+      targetUri: expect.stringContaining("/versions/"),
+    }));
+    expect(memoryUseMocks.start).toHaveBeenCalledOnce();
+  });
+
+  it("keeps public knowledge on its legacy gate and does not create a use run with no enabled lane", async () => {
+    mockPrisma.conversation.findFirst.mockResolvedValue(buildConversation({
+      openvikingEnabled: false,
+      openvikingAutoRecall: false,
+    }));
+    enableMemoryPolicy();
+
+    const recalled = await recall("web", ["PUBLIC_KNOWLEDGE"]);
+
+    expect(recalled).toEqual({ items: [], citations: [] });
+    expect(mockPrisma.publicKnowledgeProjectionItem.findMany).not.toHaveBeenCalled();
+    expect(mockPrisma.governedMemory.findMany).not.toHaveBeenCalled();
+    expect(clientMocks.search).not.toHaveBeenCalled();
+    expect(memoryUseMocks.start).not.toHaveBeenCalled();
+  });
+
+  it("uses only the policy-backed memory lane when all source kinds are requested but legacy recall is off", async () => {
+    mockPrisma.conversation.findFirst.mockResolvedValue(buildConversation({
+      openvikingEnabled: false,
+      openvikingAutoRecall: false,
+    }));
+    enableMemoryPolicy();
+    const memory = buildContactMemory({
+      contactId,
+      sourceChannel: "web",
+      memoryId: "memory-policy-full-request",
+      versionId: "memory-version-policy-full-request",
+    });
+    mockPrisma.governedMemory.findMany.mockResolvedValue([memory.record]);
+    clientMocks.search.mockResolvedValue({
+      resources: [],
+      memories: [remoteMatch(memory.uri, "memory", "remote body")],
+    });
+
+    const recalled = await recall("web");
+
+    expect(recalled.items.map((item) => item.uri)).toEqual([memory.uri]);
+    expect(mockPrisma.publicKnowledgeProjectionItem.findMany).not.toHaveBeenCalled();
+    expect(clientMocks.search).toHaveBeenCalledTimes(2);
+    for (const [input] of clientMocks.search.mock.calls) {
+      expect(input).not.toEqual(expect.objectContaining({
+        targetUri: expect.stringContaining("/versions/"),
+      }));
+    }
+    expect(memoryUseMocks.start).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -146,9 +316,10 @@ describe("governed memory recall fence", () => {
     expect(recalled).toEqual({ items: [], citations: [] });
     expect(mockPrisma.governedMemory.findMany).not.toHaveBeenCalled();
     expect(clientMocks.search).not.toHaveBeenCalled();
+    expect(memoryUseMocks.start).not.toHaveBeenCalled();
   });
 
-  it.each(["web", "matrix", "telegram"] as const)(
+  it.each(["web"] as const)(
     "isolates contact memory by contact and %s source channel and hydrates only from Postgres",
     async (sourceChannel) => {
       enableMemoryPolicy();
@@ -200,15 +371,7 @@ describe("governed memory recall fence", () => {
           projectionItemId: `projection-${matching.versionId}`,
         },
       });
-      expect(recalled.citations).toEqual([{
-        title: "Remembered preference",
-        excerpt: "Postgres summary",
-        score: 0.95,
-      }]);
-      expect(recalled.citations[0]).not.toHaveProperty("uri");
-      expect(recalled.citations[0]).not.toHaveProperty("layer");
-      expect(recalled.citations[0]).not.toHaveProperty("memoryVersionId");
-      expect(recalled.citations[0]).not.toHaveProperty("projectionItemId");
+      expect(recalled.citations).toEqual([]);
       expect(clientMocks.read).not.toHaveBeenCalled();
       expect(mockPrisma.conversation.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -244,6 +407,178 @@ describe("governed memory recall fence", () => {
     },
   );
 
+  it.each(["matrix", "telegram"] as const)(
+    "hard-denies governed %s recall even when a legacy policy flag remains true",
+    async (sourceChannel) => {
+      enableMemoryPolicy({
+        matrixRecallEnabled: true,
+        telegramRecallEnabled: true,
+      });
+      const recalled = await recall(sourceChannel, ["CONTACT_MEMORY"]);
+      expect(recalled).toEqual({ items: [], citations: [] });
+      expect(mockPrisma.representativeMemoryPolicy.findUnique).not.toHaveBeenCalled();
+      expect(mockPrisma.governedMemory.findMany).not.toHaveBeenCalled();
+      expect(clientMocks.search).not.toHaveBeenCalled();
+      expect(memoryUseMocks.start).not.toHaveBeenCalled();
+    },
+  );
+
+  it("enforces the 2 representatives x 2 contacts x 3 channels P0 isolation matrix", async () => {
+    const representatives = [
+      { id: "rep-isolation-a", slug: "isolation-rep-a", namespaceKey: "isolation-ns-a" },
+      { id: "rep-isolation-b", slug: "isolation-rep-b", namespaceKey: "isolation-ns-b" },
+    ] as const;
+    const contacts = ["contact-isolation-a", "contact-isolation-b"] as const;
+    const channels = ["web", "matrix", "telegram"] as const;
+    const sessionScopes = representatives.flatMap((representative) =>
+      contacts.flatMap((scopedContactId) =>
+        channels.map((sourceChannel) => ({
+          representative,
+          contactId: scopedContactId,
+          sourceChannel,
+          conversationId:
+            `conversation-${representative.id}-${scopedContactId}-${sourceChannel}`,
+          episodeId: `episode-${representative.id}-${scopedContactId}-${sourceChannel}`,
+          versionId: `version-${representative.id}-${scopedContactId}-${sourceChannel}`,
+          generationRunId:
+            `generation-${representative.id}-${scopedContactId}-${sourceChannel}`,
+        })),
+      ),
+    );
+    const memorySources = sessionScopes.map((scope) => ({
+      scope,
+      memory: buildContactMemory({
+        representativeId: scope.representative.id,
+        namespaceKey: scope.representative.namespaceKey,
+        contactId: scope.contactId,
+        sourceChannel: scope.sourceChannel,
+        memoryId:
+          `memory-${scope.representative.id}-${scope.contactId}-${scope.sourceChannel}`,
+        versionId:
+          `memory-version-${scope.representative.id}-${scope.contactId}-${scope.sourceChannel}`,
+      }),
+    }));
+
+    expect(sessionScopes).toHaveLength(12);
+    expect(memorySources).toHaveLength(12);
+    let pairAssertionCount = 0;
+    let admittedPairCount = 0;
+
+    for (const session of sessionScopes) {
+      clientMocks.construct.mockClear();
+      clientMocks.search.mockClear();
+      memoryUseMocks.start.mockClear();
+      memoryUseMocks.record.mockClear();
+      mockPrisma.governedMemory.findMany.mockClear();
+      mockPrisma.representativeMemoryPolicy.findUnique.mockClear();
+      mockPrisma.conversation.findFirst.mockResolvedValue({
+        id: session.conversationId,
+        activeEpisodeId: session.episodeId,
+        representative: {
+          id: session.representative.id,
+          ownerId: `owner-${session.representative.id}`,
+          slug: session.representative.slug,
+          lifecycleState: "PUBLISHED",
+          // These legacy controls govern only public knowledge. The memory
+          // lane below must rely exclusively on RepresentativeMemoryPolicy.
+          openvikingEnabled: false,
+          openvikingAutoRecall: false,
+          openvikingAgentId: `agent-${session.representative.slug}`,
+          openvikingRecallLimit: 10,
+          openvikingRecallScoreThreshold: 0.01,
+        },
+      });
+      mockPrisma.conversationEpisode.findFirst.mockResolvedValue({
+        representativeVersion: {
+          ...buildEpisode().representativeVersion,
+          id: session.versionId,
+          representativeId: session.representative.id,
+        },
+      });
+      mockPrisma.representativeMemoryPolicy.findUnique.mockResolvedValue(
+        buildMemoryPolicy({
+          namespaceKey: session.representative.namespaceKey,
+          representativeExperienceEnabled: false,
+          webRecallEnabled: true,
+          // Matrix and Telegram remain unsupported until they can deliver
+          // the mandatory first-interaction memory disclosure.
+          matrixRecallEnabled: false,
+          telegramRecallEnabled: false,
+        }),
+      );
+      mockPrisma.governedMemory.findMany.mockResolvedValue(
+        memorySources.map(({ memory }) => memory.record),
+      );
+      clientMocks.search.mockResolvedValue({
+        resources: [],
+        memories: memorySources.map(({ memory }) =>
+          remoteMatch(memory.uri, "memory", "untrusted remote body"),
+        ),
+      });
+      memoryUseMocks.start.mockResolvedValue({
+        replayed: false,
+        run: {
+          id: `memory-use-${session.generationRunId}`,
+          representativeId: session.representative.id,
+          conversationId: session.conversationId,
+          contactId: session.contactId,
+          representativeVersionId: session.versionId,
+        },
+      });
+
+      const recalled = await recallRepresentativeContext({
+        representativeSlug: session.representative.slug,
+        conversationId: session.conversationId,
+        contactId: session.contactId,
+        sourceChannel: session.sourceChannel,
+        generationRunId: session.generationRunId,
+        queryText: "isolation matrix query",
+        allowedSourceKinds: ["CONTACT_MEMORY"],
+      });
+      const recalledUris = new Set(recalled.items.map((item) => item.uri));
+      if (session.sourceChannel === "web") {
+        expect(mockPrisma.representativeMemoryPolicy.findUnique).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { representativeId: session.representative.id },
+          }),
+        );
+      } else {
+        expect(mockPrisma.representativeMemoryPolicy.findUnique).not.toHaveBeenCalled();
+      }
+
+      for (const source of memorySources) {
+        const shouldEnter =
+          session.sourceChannel === "web"
+          && source.scope.representative.id === session.representative.id
+          && source.scope.contactId === session.contactId
+          && source.scope.sourceChannel === session.sourceChannel;
+        pairAssertionCount += 1;
+        if (shouldEnter) admittedPairCount += 1;
+        expect(
+          recalledUris.has(source.memory.uri),
+          `${session.representative.id}/${session.contactId}/${session.sourceChannel}`
+          + ` must ${shouldEnter ? "admit" : "reject"} `
+          + `${source.scope.representative.id}/${source.scope.contactId}`
+          + `/${source.scope.sourceChannel}`,
+        ).toBe(shouldEnter);
+      }
+
+      if (session.sourceChannel === "web") {
+        expect(recalled.items).toHaveLength(1);
+        expect(memoryUseMocks.start).toHaveBeenCalledOnce();
+        expect(clientMocks.search).toHaveBeenCalledOnce();
+      } else {
+        expect(recalled).toEqual({ items: [], citations: [] });
+        expect(mockPrisma.governedMemory.findMany).not.toHaveBeenCalled();
+        expect(clientMocks.search).not.toHaveBeenCalled();
+        expect(memoryUseMocks.start).not.toHaveBeenCalled();
+      }
+    }
+
+    expect(pairAssertionCount).toBe(12 * 12);
+    expect(admittedPairCount).toBe(2 * 2);
+  });
+
   it("uses independent public and memory search limits and thresholds", async () => {
     enableMemoryPolicy({ recallLimit: 1, recallScoreThreshold: 0.8 });
     const high = buildContactMemory({
@@ -269,8 +604,7 @@ describe("governed memory recall fence", () => {
       second.record,
       belowThreshold.record,
     ]);
-    const publicUri =
-      "viking://resources/delegate/reps/memory-rep/knowledge/asset-1.md/asset-1.md";
+    const publicUri = publicIdentityDocument().uri;
     clientMocks.search.mockImplementation(async ({
       targetUri,
     }: {
@@ -278,7 +612,7 @@ describe("governed memory recall fence", () => {
       limit: number;
       scoreThreshold: number;
     }) => {
-      if (targetUri.includes("/knowledge/")) {
+      if (targetUri.includes("/versions/")) {
         return {
           resources: [{ ...remoteMatch(publicUri, "resource", "Public low-score fact"), score: 0.2 }],
           memories: [],
@@ -296,8 +630,6 @@ describe("governed memory recall fence", () => {
       }
       return { resources: [], memories: [] };
     });
-    clientMocks.read.mockResolvedValue("# Public source\nPublic low-score fact.");
-
     const recalled = await recall("web");
 
     expect(recalled.items.map((item) => item.uri)).toEqual([high.uri, publicUri]);
@@ -309,7 +641,7 @@ describe("governed memory recall fence", () => {
       scoreThreshold: 0.8,
     }));
     expect(clientMocks.search).toHaveBeenCalledWith(expect.objectContaining({
-      targetUri: expect.stringContaining("/knowledge/"),
+      targetUri: expect.stringContaining("/versions/"),
       limit: 10,
       scoreThreshold: 0.01,
     }));
@@ -317,22 +649,19 @@ describe("governed memory recall fence", () => {
 
   it("keeps public knowledge available when the configured memory provider is unsupported", async () => {
     enableMemoryPolicy({ provider: "another-provider" });
-    const publicUri =
-      "viking://resources/delegate/reps/memory-rep/knowledge/asset-1.md/asset-1.md";
+    const publicUri = publicIdentityDocument().uri;
     clientMocks.search.mockImplementation(async ({ targetUri }: { targetUri: string }) => ({
-      resources: targetUri.includes("/knowledge/")
+      resources: targetUri.includes("/versions/")
         ? [remoteMatch(publicUri, "resource", "Published provider-independent fact")]
         : [],
       memories: [],
     }));
-    clientMocks.read.mockResolvedValue("# Published source\nProvider-independent fact.");
-
     const recalled = await recall("web");
 
     expect(recalled.items).toEqual([
       expect.objectContaining({
         uri: publicUri,
-        internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
+        internalSource: expect.objectContaining({ sourceKind: "PUBLIC_KNOWLEDGE" }),
       }),
     ]);
     expect(mockPrisma.governedMemory.findMany).not.toHaveBeenCalled();
@@ -380,7 +709,11 @@ describe("governed memory recall fence", () => {
       memories: [remoteMatch(memory.expectedUri, "memory", "remote body")],
     });
 
-    await expect(recall("web")).resolves.toEqual({ items: [], citations: [] });
+    await expect(recall("web")).resolves.toEqual({
+      items: [],
+      citations: [],
+      memoryUseRunId: "memory-use-run-1",
+    });
     expect(clientMocks.read).not.toHaveBeenCalled();
   });
 
@@ -449,9 +782,16 @@ describe("governed memory recall fence", () => {
       memories: [remoteMatch(memory.uri, "memory", "remote body")],
     });
 
-    await expect(recall("web")).resolves.toEqual({ items: [], citations: [] });
+    await expect(recall("web")).resolves.toEqual({
+      items: [],
+      citations: [],
+      memoryUseRunId: "memory-use-run-1",
+    });
     expect(mockPrisma.governedMemory.findMany).toHaveBeenCalledTimes(2);
-    expect(mockPrisma.conversationRecallTrace.createMany).not.toHaveBeenCalled();
+    expect(memoryUseMocks.markDegraded).toHaveBeenCalledWith(
+      "memory-use-run-1",
+      "memory_recall_source_changed",
+    );
     expect(clientMocks.read).not.toHaveBeenCalled();
   });
 
@@ -501,6 +841,7 @@ describe("governed memory recall fence", () => {
       conversationId: "conversation-1",
       contactId,
       sourceChannel: "sms" as never,
+      generationRunId: "generation-run-1",
       queryText: "remembered preference",
     })).resolves.toEqual({ items: [], citations: [] });
 
@@ -520,6 +861,7 @@ function recall(
     conversationId: "conversation-1",
     contactId,
     sourceChannel,
+    generationRunId: "generation-run-1",
     queryText: "remembered preference",
     ...(allowedSourceKinds ? { allowedSourceKinds } : {}),
   });
@@ -547,12 +889,13 @@ function buildMemoryPolicy(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function buildConversation() {
+function buildConversation(overrides: Record<string, unknown> = {}) {
   return {
     id: "conversation-1",
     activeEpisodeId: "episode-1",
     representative: {
       id: representativeId,
+      ownerId: "owner-1",
       slug: representativeSlug,
       lifecycleState: "PUBLISHED",
       openvikingEnabled: true,
@@ -560,17 +903,7 @@ function buildConversation() {
       openvikingAgentId: "agent-memory-rep",
       openvikingRecallLimit: 10,
       openvikingRecallScoreThreshold: 0.01,
-      knowledgeAssetLinks: [{
-        assetId: "asset-1",
-        enabled: true,
-        reviewStatus: "APPROVED",
-        asset: {
-          status: "READY",
-          archivedAt: null,
-          checksum: "sha256-asset-1",
-          processingVersion: 1,
-        },
-      }],
+      ...overrides,
     },
   };
 }
@@ -600,14 +933,53 @@ function buildEpisode() {
         },
         governance: { allowedSkills: [] },
         knowledge: null,
-        knowledgeAssets: [{
-          assetId: "asset-1",
-          checksum: "sha256-asset-1",
-          processingVersion: 1,
-        }],
+        knowledgeAssets: [],
         pricing: [],
       },
     },
+  };
+}
+
+function publicIdentityDocument() {
+  return buildRepresentativeKnowledgeDocuments({
+    slug: representativeSlug,
+    representativeVersionId,
+    name: "Memory Representative",
+    tagline: "Test representative",
+    tone: "clear",
+    languages: ["en"],
+    groupActivation: "mention",
+    publicMode: true,
+    humanInLoop: true,
+    freeReplyLimit: 3,
+    freeScope: [],
+    paywalledIntents: [],
+    handoffWindowHours: 24,
+    skills: [],
+    knowledgePack: {
+      identitySummary: "",
+      faq: [],
+      materials: [],
+      policies: [],
+    },
+    pricing: [],
+    handoffPrompt: "Escalate",
+  })[0]!;
+}
+
+function buildPublicProjection() {
+  const document = publicIdentityDocument();
+  return {
+    id: "public-projection-identity",
+    representativeId,
+    publishedVersionId: representativeVersionId,
+    sourceKind: "REPRESENTATIVE_VERSION_RESOURCE",
+    resourceKey: "identity/profile.md",
+    knowledgeAssetId: null,
+    provider: "openviking",
+    contentHash: createHash("sha256").update(document.content).digest("hex"),
+    remoteUri: document.uri,
+    projectedAt: new Date("2026-08-04T00:00:00Z"),
   };
 }
 
@@ -633,14 +1005,18 @@ type ContactMemoryMutation = {
 };
 
 function buildContactMemory(params: {
+  representativeId?: string;
+  namespaceKey?: string;
   contactId: string;
   sourceChannel: "web" | "matrix" | "telegram";
   memoryId: string;
   versionId: string;
   mutation?: ContactMemoryMutation;
 }) {
+  const scopedRepresentativeId = params.representativeId ?? representativeId;
+  const scopedNamespaceKey = params.namespaceKey ?? namespaceKey;
   const expectedUri = buildGovernedContactChannelMemoryVersionUri({
-    namespaceKey,
+    namespaceKey: scopedNamespaceKey,
     contactId: params.contactId,
     channel: params.sourceChannel,
     memoryId: params.memoryId,
@@ -648,7 +1024,7 @@ function buildContactMemory(params: {
   });
   const projection = {
     id: `projection-${params.versionId}`,
-    representativeId,
+    representativeId: scopedRepresentativeId,
     provider: "openviking",
     lane: "RECALL",
     status: "ACTIVE",
@@ -660,7 +1036,7 @@ function buildContactMemory(params: {
   };
   const version = {
     id: params.versionId,
-    representativeId,
+    representativeId: scopedRepresentativeId,
     scope: "CONTACT_CHANNEL",
     safeText: "Postgres safe memory text",
     summary: "Postgres summary",
@@ -669,7 +1045,7 @@ function buildContactMemory(params: {
     deidentifiedAt: null,
     deidentificationMethod: null,
     sourceCandidate: {
-      representativeId,
+      representativeId: scopedRepresentativeId,
       contactId: params.contactId,
       scope: "CONTACT_CHANNEL",
       scopeChannel: params.sourceChannel.toUpperCase(),
@@ -679,7 +1055,7 @@ function buildContactMemory(params: {
     },
     reviewDecisions: [{
       id: `review-${params.versionId}`,
-      representativeId,
+      representativeId: scopedRepresentativeId,
       outcome: "APPROVED",
     }],
     projectionItems: [projection],
@@ -691,7 +1067,7 @@ function buildContactMemory(params: {
     versionId: params.versionId,
     record: {
       id: params.memoryId,
-      representativeId,
+      representativeId: scopedRepresentativeId,
       scope: "CONTACT_CHANNEL",
       contactId: params.contactId,
       sourceChannel: params.sourceChannel.toUpperCase(),

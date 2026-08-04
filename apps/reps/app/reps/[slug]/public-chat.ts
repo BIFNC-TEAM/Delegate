@@ -1,5 +1,6 @@
 import type { PlanTier } from "@delegate/domain";
 import type { ModelRuntimeRecentTurn } from "@delegate/model-runtime";
+import type { PublicGovernedMemoryDisclosure } from "@delegate/web-data";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import {
@@ -10,7 +11,13 @@ import {
 export type PublicChatRequest = {
   message: string;
   clientMessageId?: string;
+  memoryDisclosure: PublicMemoryDisclosureProof | null;
 };
+
+export type PublicMemoryDisclosureProof = Pick<
+  PublicGovernedMemoryDisclosure,
+  "policyRevision" | "fingerprint"
+>;
 
 export type PublicChatResponse = {
   reply: {
@@ -60,6 +67,7 @@ const PUBLIC_CHAT_COOKIE_PREFIX = "delegate-public-chat";
 const PUBLIC_CHAT_AUDIENCE_ID_PREFIX = "aud";
 const PUBLIC_CHAT_RECENT_TURN_LIMIT = 8;
 const PUBLIC_CHAT_TURN_TEXT_LIMIT = 240;
+const PUBLIC_MEMORY_DISCLOSURE_FINGERPRINT_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 
 export const PUBLIC_CHAT_EFFECTIVE_TIER: PlanTier = "free";
 export const PUBLIC_CHAT_COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
@@ -72,11 +80,58 @@ export function normalizePublicChatRequest(payload: unknown): PublicChatRequest 
     typeof body.clientMessageId === "string" && body.clientMessageId.trim().length <= 160
       ? body.clientMessageId.trim()
       : undefined;
+  const memoryDisclosure = normalizePublicMemoryDisclosureProof(
+    body.memoryDisclosure,
+  );
 
   return {
     message,
     ...(clientMessageId ? { clientMessageId } : {}),
+    memoryDisclosure,
   };
+}
+
+export function publicMemoryDisclosureMatches(
+  proof: PublicMemoryDisclosureProof | null,
+  current: Pick<
+    PublicGovernedMemoryDisclosure,
+    "policyRevision" | "fingerprint"
+  >,
+): boolean {
+  if (!proof || proof.policyRevision !== current.policyRevision) {
+    return false;
+  }
+
+  const expected = Buffer.from(current.fingerprint, "utf8");
+  const actual = Buffer.from(proof.fingerprint, "utf8");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function normalizePublicMemoryDisclosureProof(
+  value: unknown,
+): PublicMemoryDisclosureProof | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const policyRevision = candidate.policyRevision;
+  const fingerprint = candidate.fingerprint;
+  const hasValidRevision = policyRevision === null || (
+    typeof policyRevision === "number"
+    && Number.isInteger(policyRevision)
+    && policyRevision >= 0
+  );
+
+  if (
+    !hasValidRevision
+    || typeof fingerprint !== "string"
+    || !PUBLIC_MEMORY_DISCLOSURE_FINGERPRINT_PATTERN.test(fingerprint)
+  ) {
+    return null;
+  }
+
+  return { policyRevision, fingerprint };
 }
 
 export function deriveTierUsage(params: {

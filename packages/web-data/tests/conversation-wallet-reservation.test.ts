@@ -21,6 +21,9 @@ const mocks = vi.hoisted(() => {
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    memoryUseRun: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
     message: {
       create: vi.fn(),
       findFirst: vi.fn(),

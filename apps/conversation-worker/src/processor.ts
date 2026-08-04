@@ -1,7 +1,6 @@
 import {
   generateRepresentativeReply,
   planNaturalLanguageComputeRequest,
-  renderGroundedKnowledgeFallbackWithTrace,
   type ModelRuntimeState,
 } from "@delegate/model-runtime";
 import {
@@ -78,25 +77,6 @@ function resolveFallbackReason(
     return "policy_fallback";
   }
   return "provider_failed";
-}
-
-function filterInjectedRecallCitations(
-  recalled: {
-    items: Array<{ uri: string }>;
-    citations: Array<{
-      knowledgeAssetId?: string;
-      title: string;
-      excerpt?: string;
-      score: number;
-    }>;
-  },
-  selectedRecallUris: readonly string[],
-) {
-  const selected = new Set(selectedRecallUris);
-  return recalled.citations.filter((_citation, index) => {
-    const sourceUri = recalled.items[index]?.uri;
-    return Boolean(sourceUri && selected.has(sourceUri));
-  });
 }
 
 export async function processNextConversationWork(config: ConversationWorkerConfig) {
@@ -671,14 +651,26 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           conversationId: item.conversationId,
           contactId: item.contactId,
           sourceChannel: item.channel,
+          generationRunId: item.runId,
           queryText: item.userText,
         })
-      : { items: [], citations: [] };
+      : { items: [], memoryUseRunId: undefined };
 
     let replyText = renderReplyPreview(representative, plan);
     let runtime: { provider?: "openai" | "bailian" | "anthropic"; model?: string; inputTokens?: number; outputTokens?: number; costCents?: number } = {};
     let runtimeOutcome: GenerationRuntimeOutcome | undefined;
-    let citations: typeof recalled.citations = [];
+    let memoryUse:
+      | {
+          runId: string;
+          outcome: "completed";
+          injectedItemIds: string[];
+          citedItemIds: string[];
+        }
+      | {
+          runId: string;
+          outcome: "generation_failed";
+        }
+      | undefined;
     if (plan.nextStep === "answer") {
       const generated = await generateRepresentativeReply({
         representative,
@@ -692,11 +684,15 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       leaseGuard.assertOwned();
       if (generated.ok) {
         replyText = generated.replyText;
-        citations = filterInjectedRecallCitations(
-          recalled,
-          generated.contextTrace.selectedRecallUris,
-        );
         runtimeOutcome = { mode: "model" };
+        if (recalled.memoryUseRunId) {
+          memoryUse = {
+            runId: recalled.memoryUseRunId,
+            outcome: "completed",
+            injectedItemIds: generated.contextTrace.selectedMemoryUseItemIds,
+            citedItemIds: generated.citedMemoryUseItemIds,
+          };
+        }
         runtime = {
           provider: generated.provider,
           model: generated.model,
@@ -705,25 +701,18 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           ...(generated.usage?.costCents !== undefined ? { costCents: generated.usage.costCents } : {}),
         };
       } else {
-        const groundedFallback = renderGroundedKnowledgeFallbackWithTrace({
-          userText: item.userText,
-          recalled: recalled.items,
-        });
-        if (groundedFallback) {
-          replyText = groundedFallback.replyText;
-          citations = filterInjectedRecallCitations(
-            recalled,
-            groundedFallback.selectedRecallUris,
-          );
-        }
         runtimeOutcome = {
           mode: "fallback",
-          fallbackStrategy: groundedFallback
-            ? "grounded_knowledge"
-            : "deterministic_preview",
+          fallbackStrategy: "deterministic_preview",
           modelRuntimeState: generated.state,
           fallbackReason: resolveFallbackReason(generated.state),
         };
+        if (recalled.memoryUseRunId) {
+          memoryUse = {
+            runId: recalled.memoryUseRunId,
+            outcome: "generation_failed",
+          };
+        }
       }
     }
 
@@ -750,7 +739,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           }
         : {}),
       ...(entitlementReservation ? { entitlementReservation } : {}),
-      ...(citations.length ? { citations } : {}),
+      ...(memoryUse ? { memoryUse } : {}),
       ...(runtimeOutcome ? { runtimeOutcome } : {}),
       ...runtime,
     });
@@ -949,36 +938,12 @@ async function buildDelegationPlannerInput(input: {
   item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
   taskInput: string;
 }) {
-  if (resolveDelegationConfig(input.setup).knowledgeScope !== "public_knowledge") {
-    return { text: input.taskInput, authorizedKnowledge: [] };
-  }
-
-  const recalled = await recallRepresentativeContext({
-    representativeSlug: input.item.representativeSlug,
-    conversationId: input.item.conversationId,
-    contactId: input.item.contactId,
-    sourceChannel: input.item.channel,
-    queryText: input.taskInput,
-    allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-  });
-  const publicKnowledge = recalled.items
-    .filter((item) => item.internalSource.sourceKind === "PUBLIC_KNOWLEDGE")
-    .slice(0, 3)
-    .map((item, index) => {
-      const content = item.content?.trim() || item.abstract.trim();
-      return content ? `[公开资料 ${index + 1}] ${content.slice(0, 2_000)}` : "";
-    })
-    .filter(Boolean);
-
-  const authorizedKnowledge = recalled.citations
-    .filter((citation): citation is typeof citation & { knowledgeAssetId: string } => Boolean(citation.knowledgeAssetId))
-    .slice(0, 3)
-    .map((citation) => ({ assetId: citation.knowledgeAssetId, title: citation.title }));
+  // Delegation planning is a separate model invocation and does not yet share
+  // the answer UseRun. Until it has its own auditable usage ledger, fail closed
+  // to caller input instead of silently injecting OpenViking recall.
   return {
-    text: publicKnowledge.length
-      ? `${input.taskInput}\n\nOwner 已授权本任务使用以下已审核公开资料：\n${publicKnowledge.join("\n")}`
-      : input.taskInput,
-    authorizedKnowledge,
+    text: input.taskInput,
+    authorizedKnowledge: [],
   };
 }
 

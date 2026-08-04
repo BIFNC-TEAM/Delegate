@@ -60,28 +60,30 @@ describe("memory extraction policy", () => {
     }
   });
 
-  it("requires the matching extraction capability for every channel", () => {
-    const channels: MemoryExtractionChannel[] = ["web", "matrix", "telegram"];
-    for (const channel of channels) {
+  it("hard-denies undisclosed channels even when legacy flags remain true", () => {
+    expect(resolveMemoryExtractionPolicyGate(
+      enabledPolicy,
+      "web",
+      MemoryExtractionTrigger.CHANNEL_MESSAGE,
+      MemoryScope.CONTACT_CHANNEL,
+    )).toEqual({ allowed: true });
+    for (const channel of ["matrix", "telegram"] as const) {
       expect(resolveMemoryExtractionPolicyGate(
         enabledPolicy,
         channel,
         MemoryExtractionTrigger.CHANNEL_MESSAGE,
         MemoryScope.CONTACT_CHANNEL,
-      )).toEqual({ allowed: true });
+      )).toEqual({
+        allowed: false,
+        reasonCode: "memory_channel_disclosure_unavailable",
+      });
     }
-    expect(resolveMemoryExtractionPolicyGate(
-      { ...enabledPolicy, matrixExtractEnabled: false },
-      "matrix",
-      MemoryExtractionTrigger.CHANNEL_MESSAGE,
-      MemoryScope.CONTACT_CHANNEL,
-    )).toEqual({ allowed: false, reasonCode: "channel_extraction_disabled" });
   });
 
   it("never allows channel messages to create representative experience", () => {
     expect(resolveMemoryExtractionPolicyGate(
       enabledPolicy,
-      "telegram",
+      "web",
       MemoryExtractionTrigger.CHANNEL_MESSAGE,
       MemoryScope.REPRESENTATIVE,
     )).toEqual({
@@ -90,13 +92,13 @@ describe("memory extraction policy", () => {
     });
     expect(resolveMemoryExtractionPolicyGate(
       enabledPolicy,
-      "telegram",
+      "web",
       MemoryExtractionTrigger.MANUAL,
       MemoryScope.REPRESENTATIVE,
     )).toEqual({ allowed: true });
     expect(resolveMemoryExtractionPolicyGate(
       enabledPolicy,
-      "telegram",
+      "web",
       MemoryExtractionTrigger.SHADOW,
       MemoryScope.REPRESENTATIVE,
     )).toEqual({ allowed: true });
@@ -319,7 +321,7 @@ describe("memory candidate safety classification", () => {
 });
 
 describe("memory extraction enqueue", () => {
-  it.each(["web", "matrix", "telegram"] as const)(
+  it.each(["web"] as const)(
     "uses one idempotent queue path for %s",
     async (channel) => {
       const { tx, createdRuns } = buildEnqueueTransaction(channel, enabledPolicy);
@@ -351,6 +353,24 @@ describe("memory extraction enqueue", () => {
     },
   );
 
+  it.each(["matrix", "telegram"] as const)(
+    "does not enqueue %s even when a legacy extraction flag is true",
+    async (channel) => {
+      const { tx, createdRuns } = buildEnqueueTransaction(channel, enabledPolicy);
+      await expect(enqueueInboundMessageMemoryExtraction(tx, {
+        representativeId: "rep-1",
+        contactId: "contact-1",
+        conversationId: "conversation-1",
+        messageId: "message-1",
+        channel,
+      })).resolves.toEqual({
+        enqueued: false,
+        reasonCode: "memory_channel_disclosure_unavailable",
+      });
+      expect(createdRuns).toHaveLength(0);
+    },
+  );
+
   it("creates no run when automatic extraction is off", async () => {
     const { tx, createdRuns } = buildEnqueueTransaction("web", {
       ...enabledPolicy,
@@ -372,7 +392,7 @@ describe("memory extraction enqueue", () => {
 
   it("does not treat a delivery-only updatedAt change as a content edit", async () => {
     const { tx, createdRuns, sourceState } = buildEnqueueTransaction(
-      "telegram",
+      "web",
       enabledPolicy,
     );
     const input = {
@@ -380,7 +400,7 @@ describe("memory extraction enqueue", () => {
       contactId: "contact-1",
       conversationId: "conversation-1",
       messageId: "message-1",
-      channel: "telegram",
+      channel: "web",
     } as const;
     const first = await enqueueInboundMessageMemoryExtraction(tx, input);
     sourceState.updatedAt = new Date("2026-08-03T00:10:00.000Z");
@@ -430,7 +450,7 @@ describe("memory extraction enqueue", () => {
 
   it("only enqueues in the inbound transaction and never writes a candidate", async () => {
     const { tx, createdRuns, candidateUpsert } = buildEnqueueTransaction(
-      "telegram",
+      "web",
       enabledPolicy,
     );
     const input = {
@@ -438,7 +458,7 @@ describe("memory extraction enqueue", () => {
       contactId: "contact-1",
       conversationId: "conversation-1",
       messageId: "message-1",
-      channel: "telegram",
+      channel: "web",
     } as const;
     const first = await enqueueInboundMessageMemoryExtraction(tx, input);
     const replay = await enqueueInboundMessageMemoryExtraction(tx, input);
@@ -557,7 +577,7 @@ describe("memory extraction worker retry semantics", () => {
 });
 
 describe("memory extraction processor", () => {
-  it.each(["web", "matrix", "telegram"] as const)(
+  it.each(["web"] as const)(
     "creates only a pending local candidate for %s",
     async (channel) => {
       const rawText = "I prefer concise replies";
@@ -657,7 +677,7 @@ describe("memory extraction processor", () => {
   it("creates only deidentified pending representative experience", async () => {
     const rawText = "I prefer concise replies";
     const { tx, candidateCreates } = buildProcessorTransaction({
-      channel: "matrix",
+      channel: "web",
       text: rawText,
       scope: MemoryScope.REPRESENTATIVE,
       trigger: MemoryExtractionTrigger.MANUAL,

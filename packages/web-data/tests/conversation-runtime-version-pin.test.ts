@@ -34,6 +34,9 @@ vi.hoisted(() => {
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    memoryUseRun: {
+      findFirst: vi.fn().mockResolvedValue(null),
+    },
     delegationTask: {
       updateMany: vi.fn(),
     },

@@ -626,7 +626,10 @@ describePostgres("Memory System T4 PostgreSQL governance guards", () => {
     const remotePurgeCompletedAt = new Date(localPurgeCompletedAt.getTime() + 1);
     await prisma.memoryDeletionProof.update({
       where: { id: proof.id },
-      data: { remotePurgeCompletedAt },
+      data: {
+        remotePurgeCompletedAt,
+        providerReceiptHash: hashOf(`provider-receipt-${fixture.suffix}`),
+      },
     });
     const completedAt = new Date(remotePurgeCompletedAt.getTime() + 1);
     await prisma.memoryDeletionProof.update({
@@ -681,9 +684,9 @@ async function createFixture(label: string) {
       autoExtract: false,
       webRecallEnabled: true,
       webExtractEnabled: false,
-      matrixRecallEnabled: true,
+      matrixRecallEnabled: false,
       matrixExtractEnabled: false,
-      telegramRecallEnabled: true,
+      telegramRecallEnabled: false,
       telegramExtractEnabled: false,
     },
   });

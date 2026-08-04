@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  enqueueRepresentativeOpenVikingSync,
   processRepresentativeOpenVikingSyncJob,
   runOpenVikingMemoryDeletionRecoveryTick,
 } from "../src/openviking";
@@ -77,7 +78,10 @@ describePostgres("OpenViking durable PostgreSQL operations", () => {
 
   it("does not let an older version job overwrite a newer completed sync", async () => {
     const fixture = await createFixture();
-    const syncDocument = vi.fn().mockResolvedValue(undefined);
+    const syncDocument = vi.fn().mockImplementation(async ({ document }) => ({
+      remoteUri: document.uri,
+      contentHash: crypto.createHash("sha256").update(document.content).digest("hex"),
+    }));
 
     try {
       const versionOne = await publishRepresentativeVersion({
@@ -111,6 +115,16 @@ describePostgres("OpenViking durable PostgreSQL operations", () => {
           syncDocument,
         }),
       ).resolves.toEqual({ processed: true, status: "succeeded" });
+      const idempotentRetry = await enqueueRepresentativeOpenVikingSync({
+        representativeSlug: fixture.representativeSlug,
+        requestedVersionId: versionTwo.id,
+        trigger: "retry",
+        ownerId: fixture.ownerId,
+      });
+      await expect(processRepresentativeOpenVikingSyncJob({
+        jobId: idempotentRetry.id,
+        syncDocument,
+      })).resolves.toEqual({ processed: true, status: "succeeded" });
       const afterNewer = await prisma.representative.findUniqueOrThrow({
         where: { id: fixture.representativeId },
         select: {
@@ -151,10 +165,17 @@ describePostgres("OpenViking durable PostgreSQL operations", () => {
         },
         orderBy: { createdAt: "desc" },
       });
+      const projectedResources = await prisma.publicKnowledgeProjectionItem.findMany({
+        where: {
+          representativeId: fixture.representativeId,
+          publishedVersionId: versionTwo.id,
+        },
+        orderBy: { resourceKey: "asc" },
+      });
 
       expect(afterOlder).toEqual(afterNewer);
       expect(afterOlder.activeVersionId).toBe(versionTwo.id);
-      expect(afterOlder.openvikingLastSyncJobId).toBe(jobTwo.id);
+      expect(afterOlder.openvikingLastSyncJobId).toBe(idempotentRetry.id);
       expect(afterOlder.openvikingTargetUri).toContain(versionTwo.id);
       expect(oldAudit.ownerId).toBe(fixture.ownerId);
       expect(oldAudit.payload).toMatchObject({
@@ -162,6 +183,25 @@ describePostgres("OpenViking durable PostgreSQL operations", () => {
         versionId: versionOne.id,
         trigger: "publish",
         aggregateUpdated: false,
+      });
+      expect(projectedResources).toHaveLength(6);
+      expect(projectedResources.map((item) => item.resourceKey)).toEqual([
+        "faq/index.md",
+        "identity/profile.md",
+        `knowledge/${fixture.knowledgeAssetId}.md`,
+        "materials/index.md",
+        "policies/index.md",
+        "pricing/index.md",
+      ]);
+      expect(projectedResources.every((item) =>
+        item.remoteUri.includes(`/versions/${versionTwo.id}/`)
+        && /^[0-9a-f]{64}$/u.test(item.contentHash)
+      )).toBe(true);
+      expect(projectedResources.find(
+        (item) => item.knowledgeAssetId === fixture.knowledgeAssetId,
+      )).toMatchObject({
+        sourceKind: "KNOWLEDGE_ASSET",
+        contentHash: fixture.knowledgeAssetChecksum,
       });
     } finally {
       await deleteFixture(fixture);
@@ -183,7 +223,7 @@ describePostgres("OpenViking durable PostgreSQL operations", () => {
       const memory = await prisma.openVikingMemoryRecord.create({
         data: {
           representativeId: fixture.representativeId,
-          uri: `viking://user/memories/${fixture.representativeSlug}/contact/preferences/crash.md`,
+          uri: `viking://user/memories/delegate/${fixture.representativeSlug}/contact/preferences/crash.md`,
           contextType: "memory",
           scope: "contact",
           category: "preference",
@@ -277,10 +317,37 @@ async function createFixture() {
     },
     select: { id: true, slug: true },
   });
+  const assetText = "Authoritative PostgreSQL knowledge asset used by the published snapshot.";
+  const assetChecksum = crypto.createHash("sha256").update(assetText).digest("hex");
+  const knowledgeAsset = await prisma.knowledgeAsset.create({
+    data: {
+      ownerId: owner.id,
+      kind: "TEXT",
+      status: "READY",
+      visibility: "SELECTED_REPRESENTATIVES",
+      title: "Pinned PostgreSQL knowledge",
+      sourceText: assetText,
+      extractedText: assetText,
+      checksum: assetChecksum,
+      processingVersion: 1,
+      processedAt: new Date(),
+      representativeLinks: {
+        create: {
+          representativeId: representative.id,
+          usageMode: "QA_SOURCE",
+          reviewStatus: "APPROVED",
+          enabled: true,
+        },
+      },
+    },
+    select: { id: true },
+  });
   return {
     ownerId: owner.id,
     representativeId: representative.id,
     representativeSlug: representative.slug,
+    knowledgeAssetId: knowledgeAsset.id,
+    knowledgeAssetChecksum: assetChecksum,
   };
 }
 
@@ -316,6 +383,15 @@ async function deleteFixture(
   await prisma.representativeContextSync.deleteMany({
     where: { representativeId: fixture.representativeId },
   });
+  const immutableReceiptCount = await prisma.publicKnowledgeProjectionItem.count({
+    where: { representativeId: fixture.representativeId },
+  });
+  if (immutableReceiptCount > 0) {
+    // Projection receipts intentionally outlive mutable sync jobs. This test
+    // database is disposable, so retain the receipt and its restricted parent
+    // rows instead of weakening the production append-only invariant.
+    return;
+  }
   await prisma.representativeChannelBinding.deleteMany({
     where: { representativeId: fixture.representativeId },
   });

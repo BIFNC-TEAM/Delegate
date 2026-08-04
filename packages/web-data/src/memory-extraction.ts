@@ -44,6 +44,7 @@ export type MemoryExtractionPolicyGate =
         | "contact_memory_disabled"
         | "representative_experience_disabled"
         | "automatic_extraction_disabled"
+        | "memory_channel_disclosure_unavailable"
         | "channel_extraction_disabled"
         | "channel_trigger_contact_scope_only";
     };
@@ -321,6 +322,15 @@ export function resolveMemoryExtractionPolicyGate(
   if (!policy.longTermMemoryEnabled) {
     return { allowed: false, reasonCode: "long_term_memory_disabled" };
   }
+  // Until Matrix and Telegram can present the same pre-interaction disclosure
+  // as Web, no trigger (automatic, manual, shadow, or scheduled) may extract
+  // governed memory from those channels. Do not trust legacy true flags.
+  if (channel !== "web") {
+    return {
+      allowed: false,
+      reasonCode: "memory_channel_disclosure_unavailable",
+    };
+  }
   if (scope === MemoryScope.CONTACT_CHANNEL && !policy.contactMemoryEnabled) {
     return { allowed: false, reasonCode: "contact_memory_disabled" };
   }
@@ -342,13 +352,7 @@ export function resolveMemoryExtractionPolicyGate(
   if (!policy.autoExtract) {
     return { allowed: false, reasonCode: "automatic_extraction_disabled" };
   }
-  const channelEnabled =
-    channel === "web"
-      ? policy.webExtractEnabled
-      : channel === "matrix"
-        ? policy.matrixExtractEnabled
-        : policy.telegramExtractEnabled;
-  return channelEnabled
+  return policy.webExtractEnabled
     ? { allowed: true }
     : { allowed: false, reasonCode: "channel_extraction_disabled" };
 }

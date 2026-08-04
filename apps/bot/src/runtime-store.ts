@@ -887,7 +887,6 @@ export async function recordModelContextAssembly(params: {
   estimatedInputTokens: number;
   segments: ModelContextSegmentTrace[];
   selectedKnowledgeTitles: string[];
-  selectedRecallUris: string[];
 }): Promise<void> {
   await prisma.eventAudit.create({
     data: {
@@ -902,7 +901,6 @@ export async function recordModelContextAssembly(params: {
         estimatedInputTokens: params.estimatedInputTokens,
         segments: params.segments,
         selectedKnowledgeTitles: params.selectedKnowledgeTitles,
-        selectedRecallUris: params.selectedRecallUris,
       },
     },
   });

@@ -32,7 +32,9 @@ The product loop is:
 - Setup CAS must succeed before knowledge-asset bindings are saved, preventing a 409 conflict from producing a partial save.
 - Public pages and new conversations continue to use the active immutable `RepresentativeVersion` until the owner explicitly publishes a new version.
 
-## Workflow Path
+> Legacy compatibility note (2026-08-03): Representative Development / 养成 is retired from the current Dashboard. Public knowledge source intake, suggestions, review, drafts, and publishing now belong exclusively to Knowledge Library. The historical workflow below documents retained compatibility data and must not be used as the Memory System implementation.
+
+## Historical Workflow Path
 
 `CREATOR_TRAINING_REVIEW` is the durable workflow kind for asynchronous suggestion generation.
 
@@ -63,20 +65,11 @@ All Dashboard training responses are marked `Cache-Control: private, no-store`.
 - Reverting marks that development revision `rolled_back` and restores its before-snapshot to the editable knowledge draft. It does not change the active public representative version. If public behavior must change, the Owner must release a new `RepresentativeVersion`.
 - In the governed-memory support area, disable prevents future use but currently has no restore action. Delete immediately clears the local summary, then moves through deletion pending to deleted or deletion failed. Stale pending work and due failures are recovered automatically with leases and exponential backoff; the Dashboard retry action is an additional recovery path. Deleted content is not recoverable from the Dashboard.
 
-## Dashboard Product Boundary
+## Current Dashboard Product Boundary
 
-The stable Dashboard URL remains `?view=memory` for backwards compatibility, but the user-facing module is named **Representative Development / 养成**.
+The stable Dashboard URL remains `?view=memory`, and the user-facing module is **Memory System / 记忆系统**. It manages only governed Contact Memory and Representative Experience. It does not expose legacy training sources, feedback, generated suggestions, knowledge drafts, or release-version editing; those public-knowledge workflows live in Knowledge Library.
 
-The page:
-
-- shows real source, feedback, suggestion, workflow, and revision data;
-- presents suggestion payloads as human-readable FAQ, material, or policy previews rather than raw JSON;
-- labels approval as writing to the knowledge draft, never as an immediate public release;
-- links the owner to the representative release flow after a draft change is approved;
-- includes a **Memory & Use / 记忆与使用** support area for the released-content projection switch, sync status, published-item count, and aggregate usage count;
-- states that automatic chat capture is off and raw conversations are not automatically turned into memory;
-- shows governed memories only as user-facing status plus a safe summary, with disable, delete, and failed-deletion retry actions;
-- does not expose storage URIs, raw retrieval records, queries, ranking values, provider endpoints, or provider errors.
+The legacy training service and routes are retained only for a no-new-writes compatibility period. Once a full release cycle confirms no callers remain, their historical data is archived/exported and the compatibility code can be removed under the Memory System retirement plan.
 
 ## Main Files
 

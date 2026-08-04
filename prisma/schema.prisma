@@ -215,6 +215,13 @@ enum EventType {
   OPENVIKING_CONFIG_CHANGED
   OPENVIKING_MEMORY_STATUS_CHANGED
   OPENVIKING_RESOURCE_SYNC_COMPLETED
+  MEMORY_CANDIDATE_APPROVED
+  MEMORY_CANDIDATE_REJECTED
+  MEMORY_CANDIDATE_BLOCKED
+  MEMORY_CORRECTION_REQUESTED
+  MEMORY_STATUS_CHANGED
+  MEMORY_DELETION_REQUESTED
+  MEMORY_CLEANUP_RETRY_REQUESTED
 }
 
 enum CapabilityKind {
@@ -967,6 +974,14 @@ enum MemoryReviewerRole {
 enum MemoryExpiryAction {
   ARCHIVE
   DELETE
+}
+
+enum MemoryCleanupStatus {
+  QUEUED
+  RUNNING
+  RETRYING
+  FAILED
+  SUCCEEDED
 }
 
 enum MemoryExtractionTrigger {
@@ -4306,39 +4321,43 @@ model OpenVikingMemoryRecord {
 }
 
 model MemoryCandidate {
-  id                   String                     @id @default(cuid())
-  representativeId     String
-  extractionRunId      String?
-  contactId            String?
-  scope                MemoryScope
-  scopeChannel         RepresentativeChannelKind?
-  originChannel        RepresentativeChannelKind
-  category             MemoryCategory
-  sourceKind           MemorySourceKind
-  safeText             String?
-  summary              String?
-  contentHash          String?
-  contentPurgedAt      DateTime?
-  dedupeKey            String
-  status               MemoryCandidateStatus      @default(EXTRACTED)
-  safetyClass          MemorySafetyClass          @default(UNCLASSIFIED)
-  safetyReasonCode     String?
-  extractionReasonCode String
-  sourceContactId      String
-  sourceConversationId String
-  sourceMessageId      String
-  deidentifiedAt       DateTime?
-  expiresAt            DateTime?
-  reviewedAt           DateTime?
-  createdAt            DateTime                   @default(now())
-  updatedAt            DateTime                   @updatedAt
-  representative       Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryCandidate_rep_fkey")
-  extractionRun        MemoryExtractionRun?       @relation(fields: [extractionRunId, representativeId, sourceContactId, sourceConversationId], references: [id, representativeId, contactId, sourceConversationId], onDelete: Restrict, map: "MemoryCandidate_extraction_scope_fkey")
-  contact              Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryCandidate_contact_scope_fkey")
-  sourceConversation   Conversation               @relation(fields: [sourceConversationId, representativeId, sourceContactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryCandidate_conversation_scope_fkey")
-  sourceMessage        Message                    @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryCandidate_message_scope_fkey")
-  reviewDecisions      MemoryReviewDecision[]
-  version              GovernedMemoryVersion?
+  id                      String                     @id @default(cuid())
+  representativeId        String
+  extractionRunId         String?
+  contactId               String?
+  scope                   MemoryScope
+  scopeChannel            RepresentativeChannelKind?
+  originChannel           RepresentativeChannelKind
+  category                MemoryCategory
+  sourceKind              MemorySourceKind
+  safeText                String?
+  summary                 String?
+  contentHash             String?
+  contentPurgedAt         DateTime?
+  dedupeKey               String
+  status                  MemoryCandidateStatus      @default(EXTRACTED)
+  safetyClass             MemorySafetyClass          @default(UNCLASSIFIED)
+  safetyReasonCode        String?
+  extractionReasonCode    String
+  sourceContactId         String
+  sourceConversationId    String
+  sourceMessageId         String
+  correctionMemoryId      String?
+  correctionBaseVersionId String?
+  deidentifiedAt          DateTime?
+  expiresAt               DateTime?
+  reviewedAt              DateTime?
+  createdAt               DateTime                   @default(now())
+  updatedAt               DateTime                   @updatedAt
+  representative          Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryCandidate_rep_fkey")
+  extractionRun           MemoryExtractionRun?       @relation(fields: [extractionRunId, representativeId, sourceContactId, sourceConversationId], references: [id, representativeId, contactId, sourceConversationId], onDelete: Restrict, map: "MemoryCandidate_extraction_scope_fkey")
+  contact                 Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryCandidate_contact_scope_fkey")
+  sourceConversation      Conversation               @relation(fields: [sourceConversationId, representativeId, sourceContactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryCandidate_conversation_scope_fkey")
+  sourceMessage           Message                    @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryCandidate_message_scope_fkey")
+  correctionMemory        GovernedMemory?            @relation("MemoryCandidateCorrectionMemory", fields: [correctionMemoryId, representativeId, scope], references: [id, representativeId, scope], onDelete: Restrict, map: "MemoryCandidate_correction_memory_scope_fkey")
+  correctionBaseVersion   GovernedMemoryVersion?     @relation("MemoryCandidateCorrectionBaseVersion", fields: [correctionBaseVersionId, correctionMemoryId, representativeId, scope], references: [id, memoryId, representativeId, scope], onDelete: Restrict, map: "MemoryCandidate_correction_base_scope_fkey")
+  reviewDecisions         MemoryReviewDecision[]
+  version                 GovernedMemoryVersion?
 
   @@unique([representativeId, dedupeKey], map: "MemoryCandidate_rep_dedupe_key")
   @@unique([id, representativeId], map: "MemoryCandidate_id_rep_key")
@@ -4346,34 +4365,36 @@ model MemoryCandidate {
   @@index([representativeId, status, createdAt], map: "MemoryCandidate_rep_status_created_idx")
   @@index([representativeId, contactId, scopeChannel, status, createdAt], map: "MemoryCandidate_contact_scope_status_idx")
   @@index([sourceConversationId, sourceMessageId, createdAt], map: "MemoryCandidate_source_message_idx")
+  @@index([correctionMemoryId, status, createdAt], map: "MemoryCandidate_correction_pending_idx")
   @@index([extractionRunId, createdAt], map: "MemoryCandidate_extraction_created_idx")
   @@index([expiresAt, status], map: "MemoryCandidate_expires_status_idx")
 }
 
 model GovernedMemory {
-  id                String                     @id @default(cuid())
-  representativeId  String
-  contactId         String?
-  scope             MemoryScope
-  sourceChannel     RepresentativeChannelKind?
-  category          MemoryCategory
-  status            GovernedMemoryStatus       @default(SUPPRESSED)
-  currentVersionId  String?                    @unique
-  recallDisabledAt  DateTime?                  @default(now())
-  expiresAt         DateTime?
-  suppressedAt      DateTime?
-  supersededAt      DateTime?
-  archivedAt        DateTime?
-  deleteRequestedAt DateTime?
-  deletedAt         DateTime?
-  createdAt         DateTime                   @default(now())
-  updatedAt         DateTime                   @updatedAt
-  representative    Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "GovernedMemory_rep_fkey")
-  contact           Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "GovernedMemory_contact_scope_fkey")
-  currentVersion    GovernedMemoryVersion?     @relation("GovernedMemoryCurrentVersion", fields: [currentVersionId, id], references: [id, memoryId], onDelete: Restrict, map: "GovernedMemory_currentVersion_fkey")
-  versions          GovernedMemoryVersion[]    @relation("GovernedMemoryVersions")
-  reviewDecisions   MemoryReviewDecision[]
-  deletionProof     MemoryDeletionProof?
+  id                   String                     @id @default(cuid())
+  representativeId     String
+  contactId            String?
+  scope                MemoryScope
+  sourceChannel        RepresentativeChannelKind?
+  category             MemoryCategory
+  status               GovernedMemoryStatus       @default(SUPPRESSED)
+  currentVersionId     String?                    @unique
+  recallDisabledAt     DateTime?                  @default(now())
+  expiresAt            DateTime?
+  suppressedAt         DateTime?
+  supersededAt         DateTime?
+  archivedAt           DateTime?
+  deleteRequestedAt    DateTime?
+  deletedAt            DateTime?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  representative       Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "GovernedMemory_rep_fkey")
+  contact              Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "GovernedMemory_contact_scope_fkey")
+  currentVersion       GovernedMemoryVersion?     @relation("GovernedMemoryCurrentVersion", fields: [currentVersionId, id], references: [id, memoryId], onDelete: Restrict, map: "GovernedMemory_currentVersion_fkey")
+  versions             GovernedMemoryVersion[]    @relation("GovernedMemoryVersions")
+  reviewDecisions      MemoryReviewDecision[]
+  deletionProof        MemoryDeletionProof?
+  correctionCandidates MemoryCandidate[]          @relation("MemoryCandidateCorrectionMemory")
 
   @@unique([id, representativeId], map: "GovernedMemory_id_rep_key")
   @@unique([id, representativeId, scope], map: "GovernedMemory_id_rep_scope_key")
@@ -4410,6 +4431,7 @@ model GovernedMemoryVersion {
   projectionItems        MemoryProjectionItem[]
   useItems               MemoryUseItem[]
   representative         Representative          @relation(fields: [representativeId], references: [id], map: "GovernedMemoryVersion_rep_fkey")
+  correctionCandidates   MemoryCandidate[]       @relation("MemoryCandidateCorrectionBaseVersion")
 
   @@unique([sourceCandidateId, representativeId, scope], map: "GovernedMemoryVersion_source_rep_scope_key")
   @@unique([memoryId, versionNumber], map: "GovernedMemoryVersion_memory_version_key")
@@ -4417,6 +4439,7 @@ model GovernedMemoryVersion {
   @@unique([id, representativeId], map: "GovernedMemoryVersion_id_rep_key")
   @@unique([id, representativeId, scope], map: "GovernedMemoryVersion_id_rep_scope_key")
   @@unique([id, memoryId, representativeId], map: "GovernedMemoryVersion_id_memory_rep_key")
+  @@unique([id, memoryId, representativeId, scope], map: "GovernedMemoryVersion_id_memory_rep_scope_key")
   @@index([memoryId, contentHash], map: "GovernedMemoryVersion_memory_hash_idx")
   @@index([representativeId, createdAt], map: "GovernedMemoryVersion_rep_created_idx")
   @@index([supersedesVersionId], map: "GovernedMemoryVersion_supersedes_idx")
@@ -4633,9 +4656,9 @@ model MemoryUseItem {
 }
 
 model MemoryDeletionProof {
-  id                     String         @id @default(cuid())
+  id                     String              @id @default(cuid())
   representativeId       String
-  memoryId               String         @unique
+  memoryId               String              @unique
   requestId              String
   requestedByActorId     String
   reasonCode             String
@@ -4644,17 +4667,24 @@ model MemoryDeletionProof {
   localPurgeCompletedAt  DateTime?
   remotePurgeCompletedAt DateTime?
   providerReceiptHash    String?
-  proofHash              String?        @unique
+  proofHash              String?             @unique
   completedAt            DateTime?
-  createdAt              DateTime       @default(now())
-  updatedAt              DateTime       @updatedAt
-  representative         Representative @relation(fields: [representativeId], references: [id], onDelete: Restrict, map: "MemoryDeletionProof_rep_fkey")
-  memory                 GovernedMemory @relation(fields: [memoryId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryDeletionProof_memory_scope_fkey")
+  cleanupStatus          MemoryCleanupStatus @default(QUEUED)
+  attemptCount           Int                 @default(0)
+  availableAt            DateTime            @default(now())
+  leaseToken             String?
+  leaseExpiresAt         DateTime?
+  lastErrorCode          String?
+  createdAt              DateTime            @default(now())
+  updatedAt              DateTime            @updatedAt
+  representative         Representative      @relation(fields: [representativeId], references: [id], onDelete: Restrict, map: "MemoryDeletionProof_rep_fkey")
+  memory                 GovernedMemory      @relation(fields: [memoryId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryDeletionProof_memory_scope_fkey")
 
   @@unique([representativeId, requestId], map: "MemoryDeletionProof_rep_request_key")
   @@unique([memoryId, representativeId], map: "MemoryDeletionProof_memory_rep_key")
   @@index([representativeId, createdAt], map: "MemoryDeletionProof_rep_created_idx")
   @@index([completedAt, createdAt], map: "MemoryDeletionProof_completed_created_idx")
+  @@index([cleanupStatus, availableAt, leaseExpiresAt], map: "MemoryDeletionProof_cleanup_due_idx")
 }
 
 model MemoryReconciliationRun {

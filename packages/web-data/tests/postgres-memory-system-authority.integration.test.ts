@@ -38,6 +38,18 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
         actionGate: {},
       },
     });
+    await prisma.representativeMemoryPolicy.create({
+      data: {
+        representativeId: representative.id,
+        namespaceKey: `memory-authority-${suffix}`,
+        longTermMemoryEnabled: true,
+        contactMemoryEnabled: true,
+        representativeExperienceEnabled: false,
+        autoExtract: false,
+        webRecallEnabled: true,
+        webExtractEnabled: false,
+      },
+    });
     const publishedVersion = await prisma.representativeVersion.create({
       data: {
         representativeId: representative.id,
@@ -261,6 +273,15 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
         recallBlockedAt,
       },
     });
+    await prisma.memoryDeletionProof.update({
+      where: { id: proof.id },
+      data: {
+        cleanupStatus: "RUNNING",
+        attemptCount: 1,
+        leaseToken: `cleanup-${suffix}`,
+        leaseExpiresAt: new Date(Date.now() + 60_000),
+      },
+    });
     await prisma.memoryCandidate.update({
       where: { id: candidate.id },
       data: { safeText: null, summary: null, contentPurgedAt: new Date() },
@@ -300,6 +321,9 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
     await prisma.memoryDeletionProof.update({
       where: { id: proof.id },
       data: {
+        cleanupStatus: "SUCCEEDED",
+        leaseToken: null,
+        leaseExpiresAt: null,
         proofHash: crypto.createHash("sha256").update(`proof-${suffix}`).digest("hex"),
         completedAt: new Date(remotePurgeCompletedAt.getTime() + 1),
       },

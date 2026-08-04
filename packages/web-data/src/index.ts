@@ -65,6 +65,7 @@ export * from "./matrix-provisioning";
 export * from "./matrix-identifiers";
 export * from "./matrix-room-security";
 export * from "./matrix-runtime-health";
+export * from "./memory-governance";
 export * from "./openviking";
 export * from "./owner-access";
 export * from "./owner-billing-products";

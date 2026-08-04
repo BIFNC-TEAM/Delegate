@@ -67,8 +67,8 @@ describe("Memory System authoritative schema", () => {
     expect(candidate).toContain("sourceContactId");
     expect(candidate).toContain("sourceConversationId");
     expect(candidate).toContain("sourceMessageId");
-    expect(candidate).toContain("category             MemoryCategory");
-    expect(candidate).toContain("sourceKind           MemorySourceKind");
+    expect(candidate).toMatch(/\bcategory\s+MemoryCategory\b/u);
+    expect(candidate).toMatch(/\bsourceKind\s+MemorySourceKind\b/u);
     expect(candidate).toContain(
       "@relation(fields: [sourceConversationId, representativeId, sourceContactId], references: [id, representativeId, contactId], onDelete: Restrict, map: \"MemoryCandidate_conversation_scope_fkey\")",
     );

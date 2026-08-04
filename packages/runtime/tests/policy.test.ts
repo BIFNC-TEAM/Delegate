@@ -11,6 +11,7 @@ import {
   resolveComputeSubagent,
   resolveConversationSubagent,
   resolveTelegramGroupHandling,
+  renderFailClosedReplyPreview,
   renderReplyPreview,
   shouldStartStructuredCollector,
 } from "../src/index";
@@ -129,6 +130,17 @@ describe("conversation planning", () => {
 
     expect(plan.intent).toBe("refund");
     expect(plan.nextStep).toBe("ask_owner");
+  });
+
+  it("fails closed without Representative snapshot knowledge when factual generation is unavailable", () => {
+    const reply = renderFailClosedReplyPreview({ name: demoRepresentative.name }, "你们是做什么的？");
+
+    expect(reply).toContain(demoRepresentative.name);
+    expect(reply).toContain("稍后重试");
+    expect(reply).toContain("人工接管");
+    expect(reply).not.toContain(demoRepresentative.tagline);
+    expect(reply).not.toContain(demoRepresentative.knowledgePack.identitySummary);
+    expect(reply).not.toContain(demoRepresentative.knowledgePack.faq[0]!.summary);
   });
 });
 

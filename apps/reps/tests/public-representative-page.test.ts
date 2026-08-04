@@ -120,6 +120,9 @@ describe("public representative visitor-first page", () => {
     expect(chatSource).toContain('payload.code === "memory_disclosure_stale"');
     expect(chatSource).toContain("setGovernedMemoryDisclosure(payload.governedMemoryDisclosure)");
     expect(chatSource).toContain("setInput(text)");
+    expect(chatSource).toContain("collectPendingMemoryDisplayAcks(");
+    expect(chatSource).toContain("acknowledgedDisplayKeysRef.current.add(key)");
+    expect(chatSource).toContain("sendPublicMemoryDisplayAck(props.representativeSlug, ack)");
     expect(pageSource).not.toMatch(
       /openvikingAgentId|openvikingAutoRecall|openvikingTargetUri|baseUrl|consoleUrl/u,
     );

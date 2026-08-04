@@ -167,6 +167,115 @@ describePostgres("Memory use PostgreSQL execution", () => {
     });
   });
 
+  it("keeps an Episode-pinned memory run valid after a newer release becomes active", async () => {
+    const fixture = await createFixture();
+    const nextVersion = await prisma.representativeVersion.create({
+      data: {
+        representativeId: fixture.representativeId,
+        versionNumber: 2,
+        status: "PUBLISHED",
+        snapshot: { knowledgeAssets: [] },
+      },
+    });
+    await prisma.representative.update({
+      where: { id: fixture.representativeId },
+      data: { activeVersionId: nextVersion.id },
+    });
+
+    const started = await startOrReuseMemoryUseRun({
+      generationRunId: fixture.generationRunId,
+      sourceChannel: "web",
+    }, { client: prisma });
+    const recorded = await recordMemoryUseSearchHits({
+      useRunId: started.run.id,
+      hits: [{
+        sourceKind: "PUBLIC_KNOWLEDGE",
+        publicKnowledgeProjectionId: fixture.publicProjectionId,
+      }],
+    }, { client: prisma });
+    const publicItemId = recorded.eligibleItems[0]!.memoryUseItemId;
+    const output = await prisma.$transaction(async (tx) => {
+      const message = await tx.message.create({
+        data: {
+          conversationId: fixture.conversationAId,
+          senderType: "REPRESENTATIVE",
+          deliveryStatus: "ACCEPTED",
+          text: "Reply from the Episode-pinned release.",
+        },
+      });
+      await tx.generationRun.update({
+        where: { id: fixture.generationRunId },
+        data: {
+          outputMessageId: message.id,
+          status: "COMPLETED",
+          completedAt: new Date(),
+        },
+      });
+      await finalizeMemoryUseGenerationInTransaction(tx, {
+        useRunId: started.run.id,
+        outputMessageId: message.id,
+        injectedItemIds: [publicItemId],
+        citedItemIds: [],
+      });
+      return message;
+    });
+
+    await expect(prisma.memoryUseRun.findUniqueOrThrow({
+      where: { id: started.run.id },
+      select: {
+        representativeVersionId: true,
+        outputMessageId: true,
+        status: true,
+        injectedCount: true,
+      },
+    })).resolves.toEqual({
+      representativeVersionId: fixture.representativeVersionId,
+      outputMessageId: output.id,
+      status: "COMPLETED",
+      injectedCount: 1,
+    });
+  });
+
+  it("stops an open memory run when the conversation moves to another Episode", async () => {
+    const fixture = await createFixture();
+    const started = await startOrReuseMemoryUseRun({
+      generationRunId: fixture.generationRunId,
+      sourceChannel: "web",
+    }, { client: prisma });
+    const nextEpisode = await prisma.conversationEpisode.create({
+      data: {
+        conversationId: fixture.conversationAId,
+        representativeVersionId: fixture.representativeVersionId,
+        sequence: 2,
+        status: "ACTIVE",
+      },
+    });
+    await prisma.$transaction([
+      prisma.conversationEpisode.update({
+        where: { id: fixture.episodeAId },
+        data: { status: "RESOLVED", endedAt: new Date() },
+      }),
+      prisma.conversation.update({
+        where: { id: fixture.conversationAId },
+        data: { activeEpisodeId: nextEpisode.id },
+      }),
+    ]);
+
+    await expect(recordMemoryUseSearchHits({
+      useRunId: started.run.id,
+      hits: [{
+        sourceKind: "PUBLIC_KNOWLEDGE",
+        publicKnowledgeProjectionId: fixture.publicProjectionId,
+      }],
+    }, { client: prisma })).rejects.toMatchObject({
+      code: "memory_use_scope_conflict",
+    });
+    await expect(prisma.memoryUseRun.findUniqueOrThrow({
+      where: { id: started.run.id },
+      select: { searchedCount: true, injectedCount: true },
+    })).resolves.toEqual({ searchedCount: 0, injectedCount: 0 });
+  });
+
   it("rolls back the output when a selected memory is withdrawn before injection", async () => {
     const fixture = await createFixture();
     const started = await startOrReuseMemoryUseRun({
@@ -401,6 +510,18 @@ async function createFixture() {
       sourceChannel: "WEB",
     },
   });
+  const episodeA = await prisma.conversationEpisode.create({
+    data: {
+      conversationId: conversationA.id,
+      representativeVersionId: representativeVersion.id,
+      sequence: 1,
+      status: "ACTIVE",
+    },
+  });
+  await prisma.conversation.update({
+    where: { id: conversationA.id },
+    data: { activeEpisodeId: episodeA.id },
+  });
 
   const contactAMemory = await createApprovedContactMemory({
     ownerId: owner.id,
@@ -442,15 +563,15 @@ async function createFixture() {
   const generationRun = await prisma.generationRun.create({
     data: {
       conversationId: conversationA.id,
+      episodeId: episodeA.id,
       inputMessageId: inputMessage.id,
       representativeVersionId: representativeVersion.id,
       status: "PROCESSING",
       idempotencyKey: `memory-use-generation-${suffix}`,
     },
   });
-  const publicHash = createHash("sha256")
-    .update(`published-profile-${suffix}`)
-    .digest("hex");
+  const publicSafeText = `published-profile-${suffix}`;
+  const publicHash = createHash("sha256").update(publicSafeText).digest("hex");
   await prisma.representativeVersionResource.create({
     data: {
       representativeId: representative.id,
@@ -458,6 +579,8 @@ async function createFixture() {
       sourceKind: "REPRESENTATIVE_VERSION_RESOURCE",
       resourceKey: "identity/profile.md",
       contentHash: publicHash,
+      safeText: publicSafeText,
+      citationTitle: "Identity",
     },
   });
   const publicProjection = await prisma.publicKnowledgeProjectionItem.create({
@@ -475,8 +598,10 @@ async function createFixture() {
   });
 
   return {
+    representativeId: representative.id,
     representativeVersionId: representativeVersion.id,
     conversationAId: conversationA.id,
+    episodeAId: episodeA.id,
     generationRunId: generationRun.id,
     contactAMemoryId: contactAMemory.memoryId,
     contactAProjectionId: contactAMemory.projectionId,

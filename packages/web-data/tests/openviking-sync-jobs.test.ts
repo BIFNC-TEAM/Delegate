@@ -59,6 +59,7 @@ describe("durable OpenViking sync jobs", () => {
     )(mockPrisma));
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "audit-1" });
     mockPrisma.knowledgeAsset.findMany.mockResolvedValue([]);
+    mockPrisma.representativeVersionResource.findMany.mockResolvedValue([]);
     mockPrisma.publicKnowledgeProjectionItem.findFirst.mockResolvedValue(null);
     mockPrisma.publicKnowledgeProjectionItem.create.mockResolvedValue({ id: "projection-1" });
     mockPrisma.publicKnowledgeProjectionItem.update.mockResolvedValue({ id: "projection-1" });
@@ -291,15 +292,25 @@ describe("durable OpenViking sync jobs", () => {
       status: "PUBLISHED",
       snapshot,
     });
+    mockPrisma.representativeVersionResource.findMany.mockResolvedValue([{
+      publishedVersionId: "version-1",
+      representativeId: "rep-1",
+      sourceKind: "KNOWLEDGE_ASSET",
+      resourceKey: "knowledge/asset-1.md",
+      knowledgeAssetId: "asset-1",
+      contentHash: assetChecksum,
+      safeText: assetText,
+      citationTitle: "Pinned asset",
+    }]);
     mockPrisma.knowledgeAsset.findMany.mockResolvedValue([{
       id: "asset-1",
       ownerId: "owner-1",
-      title: "Pinned asset",
+      title: "Edited draft title",
       status: "READY",
       archivedAt: null,
-      checksum: assetChecksum,
-      processingVersion: 3,
-      extractedText: assetText,
+      checksum: createHash("sha256").update("Edited draft body").digest("hex"),
+      processingVersion: 4,
+      extractedText: "Edited draft body",
     }]);
     const syncDocument = vi.fn().mockImplementation(async ({ document }) => ({
       remoteUri: document.uri,
@@ -313,6 +324,7 @@ describe("durable OpenViking sync jobs", () => {
     });
 
     expect(result).toEqual({ processed: true, status: "succeeded" });
+    expect(mockPrisma.knowledgeAsset.findMany).not.toHaveBeenCalled();
     expect(syncDocument).toHaveBeenCalledTimes(6);
     expect(mockPrisma.representativeVersionResource.createMany).toHaveBeenCalledWith({
       data: expect.arrayContaining([
@@ -327,6 +339,8 @@ describe("durable OpenViking sync jobs", () => {
           resourceKey: "knowledge/asset-1.md",
           sourceKind: "KNOWLEDGE_ASSET",
           contentHash: assetChecksum,
+          safeText: assetText,
+          citationTitle: "Pinned asset",
         }),
       ]),
       skipDuplicates: true,

@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import {
   buildGovernedContactChannelMemoryVersionUri,
 } from "@delegate/openviking";
-import { Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -411,7 +410,7 @@ describe("memory dashboard hardened service truth", () => {
     });
   });
 
-  it("retries the full extraction transaction after P2002 and replays its audit", async () => {
+  it("replays a committed extraction retry without repeating its side effects", async () => {
     const sourceText = "I prefer concise replies";
     const revisionDigest = hashText(`message-1\u0000${sourceText}`);
     const runUpdatedAt = new Date("2026-08-04T00:00:00.000Z");
@@ -483,7 +482,7 @@ describe("memory dashboard hardened service truth", () => {
         })),
       },
     };
-    const client = transactionClientWithOneP2002(tx);
+    const client = transactionClient(tx);
     const action = {
       action: "retry_extraction",
       extractionRunId: "extract-1",
@@ -506,7 +505,7 @@ describe("memory dashboard hardened service truth", () => {
     }, { client: client as never, now: () => now });
     expect(first.result).toMatchObject({
       action: "retry_extraction",
-      replayed: true,
+      replayed: false,
       target: { kind: "extraction", id: "extract-1" },
       status: "QUEUED",
     });
@@ -655,7 +654,7 @@ describe("memory dashboard hardened service truth", () => {
     expect(JSON.stringify(response)).not.toMatch(/(?:remoteUri|viking:\/\/|contentHash|score|layer)/u);
   });
 
-  it("retries the full reconciliation transaction after P2002 and replays its audit", async () => {
+  it("replays a committed reconciliation enqueue without creating another run", async () => {
     let storedAudit: Record<string, unknown> | null = null;
     const auditCreate = vi.fn(async ({ data }) => {
       storedAudit = data;
@@ -681,18 +680,31 @@ describe("memory dashboard hardened service truth", () => {
         findUnique: vi.fn(async () => ({ provider: "openviking" })),
       },
     };
-    const response = await executeMemoryDashboardAction({
+    const first = await executeMemoryDashboardAction({
       actorOwnerId: "owner-1",
       representativeSlug: "delegate",
       requestId: "request-reconciliation-1",
       idempotencyKey: "manual-reconciliation-1",
       action: { action: "enqueue_reconciliation" },
-    }, { client: transactionClientWithOneP2002(tx) as never, now: () => now });
-    expect(response.result).toMatchObject({
+    }, { client: transactionClient(tx) as never, now: () => now });
+    const replay = await executeMemoryDashboardAction({
+      actorOwnerId: "owner-1",
+      representativeSlug: "delegate",
+      requestId: "request-reconciliation-2",
+      idempotencyKey: "manual-reconciliation-1",
+      action: { action: "enqueue_reconciliation" },
+    }, { client: transactionClient(tx) as never, now: () => now });
+    expect(first.result).toMatchObject({
       action: "enqueue_reconciliation",
-      replayed: true,
+      replayed: false,
       runId: "recon-manual-1",
     });
+    expect(replay).toEqual({
+      requestId: "request-reconciliation-2",
+      result: { ...first.result, replayed: true },
+    });
+    expect(tx.memoryReconciliationRun.create).toHaveBeenCalledTimes(1);
+    expect(auditCreate).toHaveBeenCalledTimes(1);
     expect(auditCreate).toHaveBeenCalledWith({
       data: expect.objectContaining({
         ownerId: "owner-1",
@@ -988,24 +1000,6 @@ function transactionClient(tx: Record<string, unknown>) {
     ...tx,
     $transaction: async (operation: (inner: unknown) => Promise<unknown>) =>
       operation(tx),
-  };
-}
-
-function transactionClientWithOneP2002(tx: Record<string, unknown>) {
-  let shouldRace = true;
-  return {
-    ...tx,
-    $transaction: async (operation: (inner: unknown) => Promise<unknown>) => {
-      const result = await operation(tx);
-      if (shouldRace) {
-        shouldRace = false;
-        throw new Prisma.PrismaClientKnownRequestError(
-          "Concurrent request committed the same idempotency key.",
-          { code: "P2002", clientVersion: "test" },
-        );
-      }
-      return result;
-    },
   };
 }
 

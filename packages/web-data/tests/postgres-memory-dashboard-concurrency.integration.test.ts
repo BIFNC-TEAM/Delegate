@@ -1,9 +1,20 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
-import type { Prisma } from "@prisma/client";
+import {
+  Channel,
+  MemoryExtractionStatus,
+  MemoryExtractionTrigger,
+  MessageContentType,
+  MessageSenderType,
+  RepresentativeChannelKind,
+  type Prisma,
+} from "@prisma/client";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { updateMemoryDashboardSettings } from "../src/memory-dashboard";
+import {
+  executeMemoryDashboardAction,
+  updateMemoryDashboardSettings,
+} from "../src/memory-dashboard";
 import { prisma } from "../src/prisma";
 
 const describePostgres = process.env.DELEGATE_POSTGRES_E2E === "1"
@@ -94,7 +105,222 @@ describePostgres("Memory dashboard PostgreSQL concurrency", () => {
       where: { ownerId: owner.id, idempotencyKey: request.idempotencyKey },
     })).toBe(1);
   });
+
+  it("replays a concurrent extraction retry with one semantic requeue", async () => {
+    const suffix = randomUUID();
+    const { owner, representative } = await createDashboardFixture(
+      suffix,
+      "extraction retry",
+    );
+    const contact = await prisma.contact.create({
+      data: {
+        representativeId: representative.id,
+        externalUserId: `memory-dashboard-contact-${suffix}`,
+        displayName: "Concurrency contact",
+        sourceChannel: "web",
+      },
+    });
+    const conversation = await prisma.conversation.create({
+      data: {
+        representativeId: representative.id,
+        contactId: contact.id,
+        channel: Channel.PRIVATE_CHAT,
+        sourceChannel: "web",
+        externalConversationId: `memory-dashboard-conversation-${suffix}`,
+      },
+    });
+    const sourceText = "I prefer concise replies";
+    const message = await prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        senderType: MessageSenderType.AUDIENCE,
+        contentType: MessageContentType.TEXT,
+        text: sourceText,
+      },
+    });
+    await createEnabledMemoryPolicy(representative.id, suffix);
+    const sourceRevisionDigest = hashText(`${message.id}\u0000${sourceText}`);
+    const failedAt = new Date();
+    const extractionRun = await prisma.memoryExtractionRun.create({
+      data: {
+        representativeId: representative.id,
+        contactId: contact.id,
+        sourceChannel: RepresentativeChannelKind.WEB,
+        sourceConversationId: conversation.id,
+        sourceMessageId: message.id,
+        trigger: MemoryExtractionTrigger.CHANNEL_MESSAGE,
+        status: MemoryExtractionStatus.FAILED,
+        idempotencyKey: [
+          "memory-extraction",
+          "v1",
+          MemoryExtractionTrigger.CHANNEL_MESSAGE,
+          "CONTACT_CHANNEL",
+          "web",
+          sourceRevisionDigest,
+          "a".repeat(64),
+        ].join(":"),
+        attemptCount: 3,
+        errorCode: "memory_extraction_attempts_exhausted",
+        startedAt: failedAt,
+        finishedAt: failedAt,
+        createdAt: failedAt,
+        updatedAt: failedAt,
+      },
+    });
+    const barrier = createTwoPartyBarrier();
+    const clients = [
+      createAuditBarrierClient(barrier),
+      createAuditBarrierClient(barrier),
+    ];
+    const idempotencyKey = `retry-extraction-${suffix}`;
+    const action = {
+      action: "retry_extraction",
+      extractionRunId: extractionRun.id,
+      expectedUpdatedAt: extractionRun.updatedAt.toISOString(),
+      reasonCode: "owner_retry",
+    } as const;
+    const now = new Date();
+
+    const responses = await Promise.all(clients.map((client, index) =>
+      executeMemoryDashboardAction({
+        actorOwnerId: owner.id,
+        representativeSlug: representative.slug,
+        requestId: `retry-extraction-request-${index}-${suffix}`,
+        idempotencyKey,
+        action,
+      }, { client: client as never, now: () => now }),
+    ));
+
+    expect(responses.filter((response) => response.result.replayed)).toHaveLength(1);
+    expect(responses.filter((response) => !response.result.replayed)).toHaveLength(1);
+    expect(responses.map((response) => withoutReplay(response.result)))
+      .toEqual([withoutReplay(responses[0]!.result), withoutReplay(responses[0]!.result)]);
+    expect(responses[0]!.result).toMatchObject({
+      action: "retry_extraction",
+      target: { kind: "extraction", id: extractionRun.id },
+      status: MemoryExtractionStatus.QUEUED,
+      previousStatus: MemoryExtractionStatus.FAILED,
+      previousAttemptCount: 3,
+      previousErrorCode: "memory_extraction_attempts_exhausted",
+    });
+    expect(await prisma.memoryExtractionRun.findUniqueOrThrow({
+      where: { id: extractionRun.id },
+      select: {
+        status: true,
+        attemptCount: true,
+        errorCode: true,
+        leaseToken: true,
+        leaseExpiresAt: true,
+      },
+    })).toEqual({
+      status: MemoryExtractionStatus.QUEUED,
+      attemptCount: 0,
+      errorCode: null,
+      leaseToken: null,
+      leaseExpiresAt: null,
+    });
+    expect(await prisma.memoryExtractionRun.count({
+      where: { id: extractionRun.id, representativeId: representative.id },
+    })).toBe(1);
+    expect(await prisma.eventAudit.count({
+      where: { ownerId: owner.id, idempotencyKey },
+    })).toBe(1);
+  }, 30_000);
+
+  it("replays a concurrent reconciliation enqueue with one queued run", async () => {
+    const suffix = randomUUID();
+    const { owner, representative } = await createDashboardFixture(
+      suffix,
+      "reconciliation enqueue",
+    );
+    await createEnabledMemoryPolicy(representative.id, suffix);
+    const barrier = createTwoPartyBarrier();
+    const clients = [
+      createAuditBarrierClient(barrier),
+      createAuditBarrierClient(barrier),
+    ];
+    const idempotencyKey = `reconciliation-${suffix}`;
+    const now = new Date();
+
+    const responses = await Promise.all(clients.map((client, index) =>
+      executeMemoryDashboardAction({
+        actorOwnerId: owner.id,
+        representativeSlug: representative.slug,
+        requestId: `reconciliation-request-${index}-${suffix}`,
+        idempotencyKey,
+        action: { action: "enqueue_reconciliation" },
+      }, { client: client as never, now: () => now }),
+    ));
+
+    expect(responses.filter((response) => response.result.replayed)).toHaveLength(1);
+    expect(responses.filter((response) => !response.result.replayed)).toHaveLength(1);
+    expect(responses.map((response) => withoutReplay(response.result)))
+      .toEqual([withoutReplay(responses[0]!.result), withoutReplay(responses[0]!.result)]);
+    const runs = await prisma.memoryReconciliationRun.findMany({
+      where: {
+        representativeId: representative.id,
+        idempotencyKey: `manual:${idempotencyKey}`,
+      },
+      select: { id: true, status: true, attemptCount: true },
+    });
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "QUEUED", attemptCount: 0 });
+    expect(responses[0]!.result).toMatchObject({
+      action: "enqueue_reconciliation",
+      runId: runs[0]!.id,
+      status: "QUEUED",
+    });
+    expect(await prisma.eventAudit.count({
+      where: { ownerId: owner.id, idempotencyKey },
+    })).toBe(1);
+  }, 30_000);
 });
+
+async function createDashboardFixture(suffix: string, purpose: string) {
+  const owner = await prisma.owner.create({
+    data: { displayName: `Memory dashboard owner ${suffix}` },
+  });
+  const representative = await prisma.representative.create({
+    data: {
+      ownerId: owner.id,
+      slug: `memory-dashboard-concurrency-${purpose.replaceAll(" ", "-")}-${suffix}`,
+      displayName: "Memory dashboard concurrency",
+      roleSummary: `Exercises idempotent ${purpose}.`,
+      tone: "clear",
+      languages: ["en", "zh"],
+      freeScope: [],
+      paywalledIntents: [],
+      handoffPrompt: "Escalate.",
+      allowedSkills: [],
+      actionGate: {},
+    },
+  });
+  return { owner, representative };
+}
+
+function createEnabledMemoryPolicy(representativeId: string, suffix: string) {
+  return prisma.representativeMemoryPolicy.create({
+    data: {
+      representativeId,
+      namespaceKey: `memory-dashboard-${suffix}`,
+      longTermMemoryEnabled: true,
+      contactMemoryEnabled: true,
+      representativeExperienceEnabled: false,
+      autoExtract: true,
+      webRecallEnabled: true,
+      webExtractEnabled: true,
+    },
+  });
+}
+
+function withoutReplay<T extends { replayed: boolean }>(result: T) {
+  const { replayed: _replayed, ...semanticResult } = result;
+  return semanticResult;
+}
+
+function hashText(value: string) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
 
 type ReleaseBarrier = () => Promise<void>;
 

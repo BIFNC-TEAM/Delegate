@@ -25,16 +25,35 @@ describe("Memory use truth ledger schema", () => {
     expect(migration).toContain("entry.key <> 'selectedRecallUris'");
   });
 
-  it("fails closed instead of inventing legacy generation or public projection provenance", () => {
-    expect(migration).toContain("MemoryUseRun_generation_required_preflight");
-    expect(migration).toContain("MemoryUseItem_public_projection_preflight");
-    expect(migration).toContain("MemoryUseRun_terminal_reason_preflight");
-    expect(migration).not.toMatch(
-      /UPDATE\s+"MemoryUseRun"[\s\S]{0,300}SET\s+"generationRunId"/u,
+  it("remediates only uniquely provable legacy generations and fails closed otherwise", () => {
+    expect(migration).toContain("LEGACY_MEMORY_USE_REMEDIATION_BEGIN");
+    expect(migration).toContain("generation_candidates");
+    expect(migration).toContain(
+      'COUNT(*) OVER (PARTITION BY use_run."id") AS "generationCount"',
+    );
+    expect(migration).toContain(
+      'COUNT(*) OVER (PARTITION BY generation."id") AS "useRunCount"',
+    );
+    expect(migration).toContain('WHERE "generationCount" = 1');
+    expect(migration).toContain('AND "useRunCount" = 1');
+    expect(migration).toMatch(
+      /DELETE FROM "MemoryUseRun"\s+WHERE "generationRunId" IS NULL/u,
+    );
+    expect(migration).toMatch(
+      /DELETE FROM "MemoryUseItem"\s+WHERE "sourceKind" = 'PUBLIC_KNOWLEDGE'/u,
     );
     expect(migration).not.toMatch(
       /INSERT\s+INTO\s+"PublicKnowledgeProjectionItem"/u,
     );
+    expect(migration).toContain("legacy_scope_rejected");
+    expect(migration).toContain("legacy_safety_rejected");
+    expect(migration).toContain(
+      '"rejectionReasonCode" ~ \'^[a-z][a-z0-9_]{0,63}$\'',
+    );
+    expect(migration).toContain("LEGACY_MEMORY_USE_TERMINAL_REASON_BEGIN");
+    expect(migration).toContain("legacy_degraded");
+    expect(migration).toContain("legacy_failed");
+    expect(migration).toContain("legacy_canceled");
   });
 
   it("keeps checked failures observable while enforcing five monotonic truth stages", () => {
@@ -69,6 +88,17 @@ describe("Memory use truth ledger schema", () => {
     expect(migration).toContain('"displayedCount" BETWEEN 0 AND "citedCount"');
   });
 
+  it("re-derives legacy displayed counts before adding the cited-count invariant", () => {
+    const historicalRecount = migration.indexOf(
+      'UPDATE "MemoryUseRun" AS use_run\n   SET "searchedCount" = counts."searchedCount"',
+    );
+    const strictCountConstraint = migration.indexOf(
+      'ADD CONSTRAINT "MemoryUseRun_counts_check" CHECK',
+    );
+    expect(historicalRecount).toBeGreaterThan(-1);
+    expect(strictCountConstraint).toBeGreaterThan(historicalRecount);
+  });
+
   it("requires stable terminal reasons without storing raw provider errors", () => {
     const run = modelBlock("MemoryUseRun");
     expect(run).toMatch(/reasonCode\s+String\?/u);
@@ -84,19 +114,47 @@ describe("Memory use truth ledger schema", () => {
     expect(manifest).toContain("publishedVersionId");
     expect(manifest).toContain("resourceKey");
     expect(manifest).toContain("contentHash");
+    expect(manifest).toContain("safeText");
+    expect(manifest).toContain("citationTitle");
     expect(projection).toContain("publishedResource");
     expect(migration).toContain("PublicKnowledgeProjectionItem_resource_manifest_fkey");
     expect(migration).toContain("RepresentativeVersion_published_immutable_check");
+    expect(migration).toContain("BEFORE UPDATE OR DELETE ON \"RepresentativeVersion\"");
     expect(migration).toContain("RepresentativeVersionResource_append_only_check");
+    expect(migration).toContain("RepresentativeVersion_snapshot_resources");
+    expect(migration).toContain("representative_version_snapshot_resources");
+    expect(migration).toContain(
+      'AFTER INSERT OR UPDATE OF "status" ON "RepresentativeVersion"',
+    );
+    expect(migration).toContain('asset_record."extractedText"');
     expect(migration).toContain("MemoryUseItem_public_manifest_check");
   });
 
-  it("normalizes unsupported channel flags and structurally keeps governed memory Web-only", () => {
+  it("normalizes legacy policy dependencies and structurally keeps governed memory Web-only", () => {
+    expect(migration).toContain("LEGACY_MEMORY_POLICY_NORMALIZATION_BEGIN");
     expect(migration).toContain('UPDATE "RepresentativeMemoryPolicy"');
+    expect(migration).toContain('WHEN NOT "contactMemoryEnabled" THEN false');
+    expect(migration).toContain(
+      'WHEN NOT "contactMemoryEnabled" OR NOT "autoExtract" THEN false',
+    );
     expect(migration).toContain('CONSTRAINT "MemoryPolicy_p0_web_only_check"');
     expect(migration).toContain(
       'run_record."sourceChannel" <> \'WEB\'::"RepresentativeChannelKind"',
     );
+  });
+
+  it("uses the generation Episode version pin after a newer release becomes active", () => {
+    expect(migration).toContain("MemoryUseRun_episode_version_check");
+    expect(migration).toContain("MemoryUseItem_episode_version_check");
+    expect(migration).toContain('generation_record."episodeId" IS NULL');
+    expect(migration).toContain('conversation."activeEpisodeId"');
+    expect(migration).toContain(
+      "episode_status IS DISTINCT FROM 'ACTIVE'::\"ConversationEpisodeStatus\"",
+    );
+    expect(migration).toContain("MemoryUseRun_legacy_active_version_check");
+    expect(migration).toContain("MemoryUseItem_legacy_active_version_check");
+    expect(migration).not.toContain("MemoryUseRun_active_version_check");
+    expect(migration).not.toContain("MemoryUseItem_active_version_check");
   });
 
   it("lets message and generation retention remove or detach usage safely", () => {

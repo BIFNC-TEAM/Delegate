@@ -74,7 +74,6 @@ import {
   cancelMemoryUseRunInTransaction,
   failMemoryUseRunInTransaction,
   finalizeMemoryUseGenerationInTransaction,
-  markMemoryUseItemsDisplayedInTransaction,
 } from "./memory-use-execution";
 import {
   lockMatrixRoomSecurityState,
@@ -3893,14 +3892,20 @@ export async function loadGenerationRecentTurns(input: {
       redactedAt: null,
       text: { not: null },
       ...(before ? { createdAt: { lt: before.createdAt } } : {}),
-      senderType: { in: [MessageSenderType.AUDIENCE, MessageSenderType.REPRESENTATIVE, MessageSenderType.OPERATOR] },
+      // Outbound replies can contain facts injected from a source that has
+      // since been disabled or deleted. Re-injecting that text as an
+      // unclassified recent turn would bypass the new generation's UseRun
+      // and defeat immediate recall revocation. Keep only audience-authored
+      // short-term context; every system/representative fact must be
+      // re-authorized through the current generation ledger.
+      senderType: MessageSenderType.AUDIENCE,
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: input.limit || 10,
     select: { senderType: true, text: true },
   });
   return rows.reverse().map((message) => ({
-    direction: message.senderType === MessageSenderType.AUDIENCE ? ("inbound" as const) : ("outbound" as const),
+    direction: "inbound" as const,
     messageText: message.text || "",
   }));
 }
@@ -4004,30 +4009,6 @@ export async function markGenerationDeliveryComplete(input: {
         ...(input.externalMessageId ? { externalMessageId: input.externalMessageId } : {}),
       },
     });
-    const memoryUseRun = await tx.memoryUseRun.findFirst({
-      where: {
-        generationRunId: input.runId,
-        sourceChannel: RepresentativeChannelKind.WEB,
-        status: { in: ["COMPLETED", "DEGRADED"] },
-      },
-      select: { id: true },
-    });
-    if (memoryUseRun) {
-      const citedItems = await tx.memoryUseItem.findMany({
-        where: {
-          useRunId: memoryUseRun.id,
-          citedAt: { not: null },
-          citationId: { not: null },
-        },
-        select: { id: true },
-      });
-      if (citedItems.length) {
-        await markMemoryUseItemsDisplayedInTransaction(tx, {
-          useRunId: memoryUseRun.id,
-          displayedItemIds: citedItems.map((item) => item.id),
-        });
-      }
-    }
     const completedOutbox = await tx.outboxEvent.updateMany({
       where: {
         id: input.outboxId,
@@ -4694,7 +4675,11 @@ export async function getPublicGenerationRunSnapshot(input: {
           deliveryStatus: true,
           createdAt: true,
           citations: {
-            select: { title: true, excerpt: true },
+            select: {
+              title: true,
+              excerpt: true,
+              memoryUseItem: { select: { id: true } },
+            },
           },
           attachments: {
             select: { id: true, fileName: true, mimeType: true, sizeBytes: true, externalUrl: true },
@@ -4721,6 +4706,16 @@ export async function getPublicGenerationRunSnapshot(input: {
               title: citation.title,
               ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
             })),
+            ...(run.outputMessage.citations.some(
+              (citation) => Boolean(citation.memoryUseItem),
+            )
+              ? {
+                  displayAck: {
+                    runId: run.id,
+                    outputMessageId: run.outputMessage.id,
+                  },
+                }
+              : {}),
             attachments: run.outputMessage.attachments.map((attachment) => ({
               id: attachment.id,
               fileName: attachment.fileName,
@@ -4752,7 +4747,15 @@ export async function getPublicConversationHistory(input: {
         where: { redactedAt: null },
         include: {
           citations: {
-            select: { title: true, excerpt: true },
+            select: {
+              title: true,
+              excerpt: true,
+              memoryUseItem: {
+                select: {
+                  useRun: { select: { generationRunId: true } },
+                },
+              },
+            },
           },
           attachments: {
             select: { id: true, fileName: true, mimeType: true, sizeBytes: true, externalUrl: true },
@@ -4777,26 +4780,39 @@ export async function getPublicConversationHistory(input: {
     state: conversation.state.toLowerCase(),
     humanActive: Boolean(conversation.assignments[0]),
     freeRepliesUsed: conversation.freeRepliesUsed,
-    messages: conversation.messages.map((message) => ({
-      id: message.id,
-      role: message.senderType === MessageSenderType.AUDIENCE ? ("user" as const) : ("assistant" as const),
-      senderType: normalizeSenderType(message.senderType),
-      ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
-      text: renderPublicConversationMessageText(message),
-      status: message.deliveryStatus.toLowerCase(),
-      createdAt: message.createdAt.toISOString(),
-      citations: message.citations.map((citation) => ({
-        title: citation.title,
-        ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
-      })),
-      attachments: message.attachments.map((attachment) => ({
-        id: attachment.id,
-        fileName: attachment.fileName,
-        ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
-        ...(typeof attachment.sizeBytes === "number" ? { sizeBytes: attachment.sizeBytes } : {}),
-        ...(attachment.externalUrl ? { url: attachment.externalUrl } : {}),
-      })),
-    })),
+    messages: conversation.messages.map((message) => {
+      const displayRunId = message.citations.find(
+        (citation) => Boolean(citation.memoryUseItem),
+      )?.memoryUseItem?.useRun.generationRunId;
+      return {
+        id: message.id,
+        role: message.senderType === MessageSenderType.AUDIENCE ? ("user" as const) : ("assistant" as const),
+        senderType: normalizeSenderType(message.senderType),
+        ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
+        text: renderPublicConversationMessageText(message),
+        status: message.deliveryStatus.toLowerCase(),
+        createdAt: message.createdAt.toISOString(),
+        citations: message.citations.map((citation) => ({
+          title: citation.title,
+          ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
+        })),
+        ...(displayRunId
+          ? {
+              displayAck: {
+                runId: displayRunId,
+                outputMessageId: message.id,
+              },
+            }
+          : {}),
+        attachments: message.attachments.map((attachment) => ({
+          id: attachment.id,
+          fileName: attachment.fileName,
+          ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
+          ...(typeof attachment.sizeBytes === "number" ? { sizeBytes: attachment.sizeBytes } : {}),
+          ...(attachment.externalUrl ? { url: attachment.externalUrl } : {}),
+        })),
+      };
+    }),
   };
 }
 

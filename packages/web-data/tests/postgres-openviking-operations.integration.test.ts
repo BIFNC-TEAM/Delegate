@@ -383,13 +383,18 @@ async function deleteFixture(
   await prisma.representativeContextSync.deleteMany({
     where: { representativeId: fixture.representativeId },
   });
-  const immutableReceiptCount = await prisma.publicKnowledgeProjectionItem.count({
-    where: { representativeId: fixture.representativeId },
-  });
-  if (immutableReceiptCount > 0) {
-    // Projection receipts intentionally outlive mutable sync jobs. This test
-    // database is disposable, so retain the receipt and its restricted parent
-    // rows instead of weakening the production append-only invariant.
+  const [immutableReceiptCount, immutableResourceCount] = await Promise.all([
+    prisma.publicKnowledgeProjectionItem.count({
+      where: { representativeId: fixture.representativeId },
+    }),
+    prisma.representativeVersionResource.count({
+      where: { representativeId: fixture.representativeId },
+    }),
+  ]);
+  if (immutableReceiptCount > 0 || immutableResourceCount > 0) {
+    // Published resource snapshots and projection receipts intentionally
+    // outlive mutable sync jobs. This database is disposable, so retain their
+    // restricted parent rows instead of weakening the append-only invariant.
     return;
   }
   await prisma.representativeChannelBinding.deleteMany({

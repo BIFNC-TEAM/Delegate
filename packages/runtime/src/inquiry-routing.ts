@@ -406,6 +406,30 @@ export function renderReplyPreview(
   }
 }
 
+/**
+ * Model-failure fallback for factual answer turns.
+ *
+ * This intentionally reads neither the Representative knowledge pack nor any
+ * recalled context. Those sources may affect an answer only through their
+ * governed execution paths, so an unavailable model must fail closed instead
+ * of silently turning a snapshot preview into an unledgered factual reply.
+ */
+export function renderFailClosedReplyPreview(
+  representative: Pick<Representative, "name">,
+  userText: string,
+): string {
+  const chinese = /\p{Script=Han}/u.test(userText);
+  return chinese
+    ? [
+        representative.name,
+        "当前无法完成基于已授权资料的回答，请稍后重试，或请求人工接管。",
+      ].join("\n\n")
+    : [
+        representative.name,
+        "I cannot complete an answer from authorized sources right now. Please try again later or request human support.",
+      ].join("\n\n");
+}
+
 function selectPreviewKnowledge(
   representative: Representative,
   plan: ConversationPlan,

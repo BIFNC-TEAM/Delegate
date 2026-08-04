@@ -7,6 +7,7 @@ import {
   buildComputeRequestsFromDelegationPlan,
   createConversationPlan,
   parseComputeDirective,
+  renderFailClosedReplyPreview,
   renderReplyPreview,
   readPersistedDelegationStepRequest,
   resolveComputeSubagent,
@@ -655,8 +656,15 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           queryText: item.userText,
         })
       : { items: [], memoryUseRunId: undefined };
+    // A source item without its generation-scoped UseRun cannot be finalized
+    // into injection/citation truth. Never let such an orphan reach the model.
+    const ledgerBackedRecalledItems = recalled.memoryUseRunId
+      ? recalled.items
+      : [];
 
-    let replyText = renderReplyPreview(representative, plan);
+    let replyText = plan.nextStep === "answer"
+      ? renderFailClosedReplyPreview(representative, item.userText)
+      : renderReplyPreview(representative, plan);
     let runtime: { provider?: "openai" | "bailian" | "anthropic"; model?: string; inputTokens?: number; outputTokens?: number; costCents?: number } = {};
     let runtimeOutcome: GenerationRuntimeOutcome | undefined;
     let memoryUse:
@@ -677,7 +685,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         plan,
         subagent,
         userText: item.userText,
-        recalled: recalled.items,
+        recalled: ledgerBackedRecalledItems,
         recentTurns,
         collectorState: null,
       });

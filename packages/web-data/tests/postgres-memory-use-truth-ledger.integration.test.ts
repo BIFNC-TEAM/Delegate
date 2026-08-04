@@ -263,11 +263,15 @@ describePostgres("Memory use PostgreSQL truth ledger guards", () => {
       where: { id: fixture.version.id },
       data: { snapshot: { knowledgeAssets: [], mutated: true } },
     })).rejects.toThrow(/published representative versions are immutable/u);
+    await expect(prisma.representativeVersion.delete({
+      where: { id: fixture.version.id },
+    })).rejects.toThrow(/published representative versions cannot be deleted/u);
   });
 
-  it("keeps the projection receipt after its KnowledgeAsset is deleted", async () => {
+  it("keeps immutable published bytes after its KnowledgeAsset changes and is deleted", async () => {
     const suffix = randomUUID();
-    const contentHash = hashOf(`asset-${suffix}`);
+    const publishedText = `Published content ${suffix}`;
+    const contentHash = hashOf(publishedText);
     const owner = await prisma.owner.create({
       data: { displayName: `Knowledge receipt ${suffix}` },
     });
@@ -293,7 +297,8 @@ describePostgres("Memory use PostgreSQL truth ledger guards", () => {
         status: "READY",
         visibility: "PUBLIC_MATERIAL",
         title: "Published asset",
-        sourceText: "Public content",
+        sourceText: publishedText,
+        extractedText: publishedText,
         checksum: contentHash,
         processingVersion: 7,
       },
@@ -322,14 +327,29 @@ describePostgres("Memory use PostgreSQL truth ledger guards", () => {
     });
     const projectionId = `asset_projection_${suffix}`;
     const remoteUri = `viking://resources/delegate/reps/${representative.slug}/versions/${version.id}/knowledge/${asset.id}.md`;
-    await prisma.representativeVersionResource.create({
+    await expect(prisma.representativeVersionResource.findUniqueOrThrow({
+      where: {
+        publishedVersionId_resourceKey: {
+          publishedVersionId: version.id,
+          resourceKey: `knowledge/${asset.id}.md`,
+        },
+      },
+      select: { safeText: true, citationTitle: true, contentHash: true },
+    })).resolves.toEqual({
+      safeText: publishedText,
+      citationTitle: "Published asset",
+      contentHash,
+    });
+
+    const editedText = `Edited draft ${suffix}`;
+    await prisma.knowledgeAsset.update({
+      where: { id: asset.id },
       data: {
-        publishedVersionId: version.id,
-        representativeId: representative.id,
-        sourceKind: "KNOWLEDGE_ASSET",
-        resourceKey: `knowledge/${asset.id}.md`,
-        knowledgeAssetId: asset.id,
-        contentHash,
+        title: "Edited draft title",
+        sourceText: editedText,
+        extractedText: editedText,
+        checksum: hashOf(editedText),
+        processingVersion: 8,
       },
     });
     await prisma.$executeRawUnsafe(`
@@ -356,6 +376,19 @@ describePostgres("Memory use PostgreSQL truth ledger guards", () => {
        WHERE "id" = '${projectionId}'
     `);
     expect(receipt).toEqual({ knowledgeAssetId: asset.id, remoteUri });
+    await expect(prisma.representativeVersionResource.findUniqueOrThrow({
+      where: {
+        publishedVersionId_resourceKey: {
+          publishedVersionId: version.id,
+          resourceKey: `knowledge/${asset.id}.md`,
+        },
+      },
+      select: { safeText: true, citationTitle: true, contentHash: true },
+    })).resolves.toEqual({
+      safeText: publishedText,
+      citationTitle: "Published asset",
+      contentHash,
+    });
   });
 
   it.each(["MATRIX", "TELEGRAM"] as const)(
@@ -495,6 +528,7 @@ describePostgres("Memory use PostgreSQL truth ledger guards", () => {
         visibility: "PUBLIC_MATERIAL",
         title: "Foreign owner's asset",
         sourceText: "This must not cross owner scope.",
+        extractedText: "This must not cross owner scope.",
         checksum: contentHash,
         processingVersion: 1,
       },
@@ -507,7 +541,7 @@ describePostgres("Memory use PostgreSQL truth ledger guards", () => {
         enabled: true,
       },
     });
-    const version = await prisma.representativeVersion.create({
+    await expect(prisma.representativeVersion.create({
       data: {
         representativeId: representative.id,
         versionNumber: 1,
@@ -520,24 +554,11 @@ describePostgres("Memory use PostgreSQL truth ledger guards", () => {
           }],
         },
       },
-    });
-    const projectionId = `foreign_owner_projection_${suffix}`;
-    const resourceKey = `knowledge/${foreignAsset.id}.md`;
-
-    await expect(prisma.representativeVersionResource.create({
-      data: {
-        representativeId: representative.id,
-        publishedVersionId: version.id,
-        sourceKind: "KNOWLEDGE_ASSET",
-        resourceKey,
-        knowledgeAssetId: foreignAsset.id,
-        contentHash,
-      },
     })).rejects.toThrow(
-      /knowledge asset manifest is not byte-pinned/u,
+      /published knowledge asset pin no longer matches approved authoritative bytes/u,
     );
-    await expect(prisma.publicKnowledgeProjectionItem.findUnique({
-      where: { id: projectionId },
+    await expect(prisma.representativeVersion.findFirst({
+      where: { representativeId: representative.id, versionNumber: 1 },
     })).resolves.toBeNull();
   });
 });
@@ -681,6 +702,7 @@ async function createInjectedPublicItem(input: {
 async function createRepresentativeResourceManifest(
   fixture: Awaited<ReturnType<typeof createUseFixture>>,
 ) {
+  const safeText = `identity-${fixture.suffix}`;
   await prisma.representativeVersionResource.create({
     data: {
       publishedVersionId: fixture.version.id,
@@ -688,6 +710,8 @@ async function createRepresentativeResourceManifest(
       sourceKind: "REPRESENTATIVE_VERSION_RESOURCE",
       resourceKey: "identity/profile.md",
       contentHash: fixture.contentHash,
+      safeText,
+      citationTitle: "Published identity",
     },
   });
 }

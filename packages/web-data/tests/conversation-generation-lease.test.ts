@@ -333,6 +333,7 @@ describe("conversation generation work leases", () => {
         deliveryStatus: "SENT",
       },
     });
+    expect(mocks.tx.memoryUseRun.findFirst).not.toHaveBeenCalled();
     expect(mocks.tx.outboxEvent.updateMany).toHaveBeenLastCalledWith({
       where: {
         id: "outbox-stale",

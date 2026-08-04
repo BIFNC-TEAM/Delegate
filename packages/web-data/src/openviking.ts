@@ -708,6 +708,148 @@ async function buildPublishedResourceProjectionSpecs(params: {
   publishedVersionId: string;
   snapshot: z.output<typeof publishedRepresentativeSnapshotSchema>;
 }): Promise<PublishedResourceProjectionSpec[]> {
+  const aggregateSpecs = buildPublishedAggregateProjectionSpecs(params);
+  const pins = [...params.snapshot.knowledgeAssets].sort((left, right) =>
+    left.assetId.localeCompare(right.assetId),
+  );
+  if (new Set(pins.map(({ assetId }) => assetId)).size !== pins.length) {
+    throw new Error("Published representative snapshot contains duplicate knowledge asset pins.");
+  }
+  const storedResources = pins.length
+    ? await prisma.representativeVersionResource.findMany({
+        where: {
+          publishedVersionId: params.publishedVersionId,
+          representativeId: params.representative.id,
+          sourceKind: PublicKnowledgeProjectionSourceKind.KNOWLEDGE_ASSET,
+        },
+        select: {
+          publishedVersionId: true,
+          representativeId: true,
+          sourceKind: true,
+          resourceKey: true,
+          knowledgeAssetId: true,
+          contentHash: true,
+          safeText: true,
+          citationTitle: true,
+        },
+      })
+    : [];
+  const storedByAssetId = new Map(
+    storedResources.flatMap((resource) =>
+      resource.knowledgeAssetId ? [[resource.knowledgeAssetId, resource] as const] : []),
+  );
+  const missingPins = pins.filter((pin) => !storedByAssetId.has(pin.assetId));
+  const assets = missingPins.length
+    ? await prisma.knowledgeAsset.findMany({
+        where: {
+          id: { in: missingPins.map(({ assetId }) => assetId) },
+          representativeLinks: {
+            some: {
+              representativeId: params.representative.id,
+              enabled: true,
+              reviewStatus: "APPROVED",
+            },
+          },
+        },
+        select: {
+          id: true,
+          ownerId: true,
+          title: true,
+          status: true,
+          archivedAt: true,
+          checksum: true,
+          processingVersion: true,
+          extractedText: true,
+        },
+      })
+    : [];
+  const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+  const assetSpecs = pins.flatMap((pin): PublishedResourceProjectionSpec[] => {
+    const expectedResourceKey = `knowledge/${pin.assetId}.md`;
+    const stored = storedByAssetId.get(pin.assetId);
+    if (stored) {
+      if (
+        stored.publishedVersionId !== params.publishedVersionId
+        || stored.representativeId !== params.representative.id
+        || stored.sourceKind !== PublicKnowledgeProjectionSourceKind.KNOWLEDGE_ASSET
+        || stored.resourceKey !== expectedResourceKey
+        || stored.knowledgeAssetId !== pin.assetId
+        || stored.contentHash !== pin.checksum
+        || !stored.safeText
+        || sha256Text(stored.safeText) !== stored.contentHash
+      ) {
+        // A malformed immutable row is isolated to this resource. Never fall
+        // back to current mutable KnowledgeAsset bytes for the same pin.
+        return [];
+      }
+      return [{
+        document: {
+          uri: buildRepresentativeVersionKnowledgeAssetUri(
+            params.representative.slug,
+            params.publishedVersionId,
+            pin.assetId,
+          ),
+          filename: `${pin.assetId}.md`,
+          content: stored.safeText,
+          reason: "Immutable KnowledgeAsset snapshot pinned to a RepresentativeVersion",
+          contextType: "resource",
+          scope: "representative",
+          category: "knowledge_asset",
+        },
+        sourceKind: PublicKnowledgeProjectionSourceKind.KNOWLEDGE_ASSET,
+        resourceKey: expectedResourceKey,
+        knowledgeAssetId: pin.assetId,
+        citationTitle: sanitizePublicSafeText(stored.citationTitle ?? "", 200)
+          ?? "Published knowledge",
+      }];
+    }
+
+    // Compatibility path for releases created before atomic resource
+    // snapshots existed. Capture only an exact still-current pin; otherwise
+    // omit this resource while allowing unrelated published resources to sync.
+    const asset = assetsById.get(pin.assetId);
+    if (
+      !asset
+      || asset.ownerId !== params.representative.ownerId
+      || asset.status !== KnowledgeAssetStatus.READY
+      || asset.archivedAt !== null
+      || !asset.extractedText
+      || !pin.checksum
+      || !/^[0-9a-f]{64}$/u.test(pin.checksum)
+      || asset.checksum !== pin.checksum
+      || asset.processingVersion !== pin.processingVersion
+      || sha256Text(asset.extractedText) !== pin.checksum
+    ) {
+      return [];
+    }
+    return [{
+      document: {
+        uri: buildRepresentativeVersionKnowledgeAssetUri(
+          params.representative.slug,
+          params.publishedVersionId,
+          asset.id,
+        ),
+        filename: `${asset.id}.md`,
+        content: asset.extractedText,
+        reason: "Published KnowledgeAsset pinned to a RepresentativeVersion",
+        contextType: "resource",
+        scope: "representative",
+        category: "knowledge_asset",
+      },
+      sourceKind: PublicKnowledgeProjectionSourceKind.KNOWLEDGE_ASSET,
+      resourceKey: expectedResourceKey,
+      knowledgeAssetId: asset.id,
+      citationTitle: sanitizePublicSafeText(asset.title, 200) ?? "Published knowledge",
+    }];
+  });
+  return [...aggregateSpecs, ...assetSpecs];
+}
+
+function buildPublishedAggregateProjectionSpecs(params: {
+  representative: { slug: string };
+  publishedVersionId: string;
+  snapshot: z.output<typeof publishedRepresentativeSnapshotSchema>;
+}): PublishedResourceProjectionSpec[] {
   const knowledge = params.snapshot.knowledge ?? {
     identitySummary: "",
     faq: [],
@@ -758,69 +900,7 @@ async function buildPublishedResourceProjectionSpecs(params: {
   ) {
     throw new Error("Published representative snapshot did not produce the five canonical resources.");
   }
-
-  const pins = [...params.snapshot.knowledgeAssets].sort((left, right) =>
-    left.assetId.localeCompare(right.assetId),
-  );
-  if (new Set(pins.map(({ assetId }) => assetId)).size !== pins.length) {
-    throw new Error("Published representative snapshot contains duplicate knowledge asset pins.");
-  }
-  const assets = pins.length
-    ? await prisma.knowledgeAsset.findMany({
-        where: { id: { in: pins.map(({ assetId }) => assetId) } },
-        select: {
-          id: true,
-          ownerId: true,
-          title: true,
-          status: true,
-          archivedAt: true,
-          checksum: true,
-          processingVersion: true,
-          extractedText: true,
-        },
-      })
-    : [];
-  const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
-  const assetSpecs = pins.map((pin) => {
-    const asset = assetsById.get(pin.assetId);
-    if (
-      !asset
-      || asset.ownerId !== params.representative.ownerId
-      || asset.status !== KnowledgeAssetStatus.READY
-      || asset.archivedAt !== null
-      || !asset.extractedText
-      || !pin.checksum
-      || !/^[0-9a-f]{64}$/u.test(pin.checksum)
-      || asset.checksum !== pin.checksum
-      || asset.processingVersion !== pin.processingVersion
-      || sha256Text(asset.extractedText) !== pin.checksum
-    ) {
-      throw new Error(
-        `Published knowledge asset pin ${pin.assetId} no longer matches its authoritative PostgreSQL content.`,
-      );
-    }
-    const document: OpenVikingDocumentSpec = {
-      uri: buildRepresentativeVersionKnowledgeAssetUri(
-        params.representative.slug,
-        params.publishedVersionId,
-        asset.id,
-      ),
-      filename: `${asset.id}.md`,
-      content: asset.extractedText,
-      reason: "Published KnowledgeAsset pinned to a RepresentativeVersion",
-      contextType: "resource",
-      scope: "representative",
-      category: "knowledge_asset",
-    };
-    return {
-      document,
-      sourceKind: PublicKnowledgeProjectionSourceKind.KNOWLEDGE_ASSET,
-      resourceKey: `knowledge/${asset.id}.md`,
-      knowledgeAssetId: asset.id,
-      citationTitle: sanitizePublicSafeText(asset.title, 200) ?? "Published knowledge",
-    } satisfies PublishedResourceProjectionSpec;
-  });
-  return [...aggregateSpecs, ...assetSpecs];
+  return aggregateSpecs;
 }
 
 async function ensurePublishedResourceManifest(params: {
@@ -835,6 +915,9 @@ async function ensurePublishedResourceManifest(params: {
     resourceKey: spec.resourceKey,
     knowledgeAssetId: spec.knowledgeAssetId ?? null,
     contentHash: sha256Text(spec.document.content),
+    safeText: spec.document.content,
+    citationTitle: spec.citationTitle
+      ?? resolveRecallTitle(spec.document.content, spec.document.uri),
   }));
   await prisma.$transaction(async (tx) => {
     await tx.representativeVersionResource.createMany({
@@ -856,6 +939,8 @@ async function ensurePublishedResourceManifest(params: {
         || persisted.sourceKind !== item.sourceKind
         || persisted.knowledgeAssetId !== item.knowledgeAssetId
         || persisted.contentHash !== item.contentHash
+        || persisted.safeText !== item.safeText
+        || persisted.citationTitle !== item.citationTitle
       ) {
         throw new Error(
           "Published representative resource manifest conflicts with the immutable version snapshot.",
@@ -1309,6 +1394,96 @@ const REPRESENTATIVE_RECALL_SOURCE_KINDS = [
   "REPRESENTATIVE_EXPERIENCE",
 ] as const satisfies readonly RepresentativeRecallSourceKind[];
 
+const MEMORY_RECALL_QUERY_BLOCKED_REASON = "memory_recall_query_blocked";
+
+const SAFE_RECALL_QUERIES = {
+  pricing: "published pricing and service terms",
+  refund: "published refund and cancellation policy",
+  materials: "published materials and case studies",
+  scheduling: "published scheduling and availability policy",
+  contact: "published collaboration and contact process",
+  identity: "published representative identity and services",
+  preferences: "approved communication preferences",
+  general: "published representative knowledge and approved communication preferences",
+} as const;
+
+type RecallQueryClassification =
+  | { kind: "empty" }
+  | { kind: "blocked" }
+  | { kind: "safe"; query: (typeof SAFE_RECALL_QUERIES)[keyof typeof SAFE_RECALL_QUERIES] };
+
+/**
+ * Convert untrusted audience text into a small, fixed semantic vocabulary.
+ * OpenViking must never receive the original message, fragments of it, or
+ * tokens derived from it: search infrastructure is outside the conversation
+ * privacy boundary.
+ */
+function classifyRecallQuery(rawQueryText: string): RecallQueryClassification {
+  const queryText = rawQueryText.trim();
+  if (!queryText) return { kind: "empty" };
+  if (recallQueryContainsRestrictedData(queryText)) return { kind: "blocked" };
+
+  const normalized = queryText.toLocaleLowerCase("en-US");
+  if (/refund|cancel|cancellation|退款|退费|取消/u.test(normalized)) {
+    return { kind: "safe", query: SAFE_RECALL_QUERIES.refund };
+  }
+  if (/price|pricing|cost|quote|plan|多少钱|价格|报价|套餐|收费/u.test(normalized)) {
+    return { kind: "safe", query: SAFE_RECALL_QUERIES.pricing };
+  }
+  if (/case stud|portfolio|material|guide|download|案例|作品|材料|资料|指南/u.test(normalized)) {
+    return { kind: "safe", query: SAFE_RECALL_QUERIES.materials };
+  }
+  if (/schedule|availability|appointment|meeting|calendar|时间|日程|预约|会议/u.test(normalized)) {
+    return { kind: "safe", query: SAFE_RECALL_QUERIES.scheduling };
+  }
+  if (/contact|collaborat|handoff|human|owner|联系|合作|人工|转接/u.test(normalized)) {
+    return { kind: "safe", query: SAFE_RECALL_QUERIES.contact };
+  }
+  if (/remember|preference|prefer|previous|last time|记得|偏好|上次|此前/u.test(normalized)) {
+    return { kind: "safe", query: SAFE_RECALL_QUERIES.preferences };
+  }
+  if (/who are|what do you|about you|service|representative|你是谁|做什么|服务|代表/u.test(normalized)) {
+    return { kind: "safe", query: SAFE_RECALL_QUERIES.identity };
+  }
+  return { kind: "safe", query: SAFE_RECALL_QUERIES.general };
+}
+
+function recallQueryContainsRestrictedData(queryText: string): boolean {
+  if (queryText.length > 4_000) return true;
+
+  const restrictedPatterns = [
+    // Prompt-injection instructions are not converted into recall semantics.
+    /(?:ignore|disregard|override|forget)\s+(?:all\s+)?(?:previous|prior|above|system|developer)\s+instructions?/iu,
+    /(?:ignore|disregard|override|forget)\s+(?:all\s+)?instructions?/iu,
+    /(?:reveal|show|print|repeat|expose)\s+(?:the\s+)?(?:system|developer)\s+prompt/iu,
+    /(?:system|developer)\s*prompt\s*[:：]/iu,
+    /(?:忽略|无视|覆盖|绕过|忘掉).{0,16}(?:之前|以上|系统|开发者).{0,8}(?:指令|提示词|规则)/u,
+    /(?:忽略|无视|覆盖|绕过|忘掉).{0,8}(?:全部|所有)?.{0,4}(?:指令|提示词|规则)/u,
+    /(?:泄露|显示|输出|复述).{0,12}(?:系统|开发者).{0,6}(?:提示词|指令)/u,
+    /(?:永久|长期).{0,8}(?:记住|保存).{0,12}(?:指令|提示词|规则)/u,
+
+    // Credentials and common machine-secret formats.
+    /\b(?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|password|passwd|private[_ -]?key|client[_ -]?secret|secret|credential|bearer)\s*(?:[:=]|\bis\b)\s*\S+/iu,
+    /(?:密码|口令|密钥|令牌|私钥|访问令牌|凭据)\s*(?:[:：=]|是|为)\s*\S+/u,
+    /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16})\b/u,
+
+    // Direct contact identifiers and high-risk identity fields.
+    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
+    /(?:^|[^\d])(?:\+?\d[\d\s().-]{7,}\d)(?:$|[^\d])/u,
+    /\b\d{15}(?:\d{2}[\dXx])?\b/u,
+    /\b\d{3}-?\d{2}-?\d{4}\b/u,
+    /(?:身份证|护照|社保号|住址|家庭地址|passport|social security|ssn|home address)\s*(?:[:：=]|\bis\b|是|为)\s*\S+/iu,
+
+    // Payment facts and monetary values are always read from the live system,
+    // never searched in long-term memory. Generic pricing questions remain
+    // eligible and are mapped to the fixed pricing query above.
+    /(?:[$€£¥￥]\s*\d|\b\d+(?:\.\d{1,2})?\s*(?:usd|cny|rmb|eur|gbp|dollars?|元|人民币|美元)\b)/iu,
+    /(?:balance|余额|card number|银行卡号|信用卡号|payment id|transaction id|支付单号|交易单号|订单号)\s*(?:[:：=]|\bis\b|是|为)\s*\S+/iu,
+    /(?:\bpaid\b|\bpayment\b|付款|支付|消费|充值).{0,12}\d+(?:\.\d{1,2})?/iu,
+  ];
+  return restrictedPatterns.some((pattern) => pattern.test(queryText));
+}
+
 /**
  * Recall only the public representative resources plus memory scopes that are
  * safe for the current contact. The returned URIs are retained internally for
@@ -1323,8 +1498,8 @@ export async function recallRepresentativeContext(params: {
   queryText: string;
   allowedSourceKinds?: readonly RepresentativeRecallSourceKind[];
 }): Promise<RepresentativeRecallContext> {
-  const queryText = params.queryText.trim();
-  if (!queryText || !isRecallSourceChannel(params.sourceChannel)) {
+  const recallQuery = classifyRecallQuery(params.queryText);
+  if (recallQuery.kind === "empty" || !isRecallSourceChannel(params.sourceChannel)) {
     return { items: [], citations: [] };
   }
   const allowedSourceKinds = normalizeRecallSourceKinds(params.allowedSourceKinds);
@@ -1498,9 +1673,23 @@ export async function recallRepresentativeContext(params: {
     // started. The generation may continue without memory context.
     return { items: [], citations: [] };
   }
+  if (recallQuery.kind === "blocked") {
+    try {
+      // Keep the run open until generation finalization binds its output. A
+      // degradation reason on an open run naturally finalizes as DEGRADED.
+      await markMemoryUseRunDegraded(
+        memoryUseRunId,
+        MEMORY_RECALL_QUERY_BLOCKED_REASON,
+      );
+    } catch {
+      await failMemoryUseRun(memoryUseRunId, "memory_ledger_failed").catch(() => undefined);
+      return { items: [], citations: [] };
+    }
+    return { items: [], citations: [], memoryUseRunId };
+  }
   const searchResults = await Promise.allSettled(
     searchTargets.map((target) => target.client.search({
-      query: queryText,
+      query: recallQuery.query,
       targetUri: target.targetUri,
       limit: target.limit,
       scoreThreshold: target.scoreThreshold,
@@ -1535,6 +1724,7 @@ export async function recallRepresentativeContext(params: {
         !source
         || (target.lane === "PUBLIC_KNOWLEDGE" && !sourceIsPublic)
         || (target.lane === "GOVERNED_MEMORY" && sourceIsPublic)
+        || !authorizedRecallSourceHasSafeText(source)
       ) {
         observedUnmappedCandidateCount += 1;
         continue;
@@ -1611,6 +1801,7 @@ export async function recallRepresentativeContext(params: {
           || recallSourceCoordinateKey(revalidatedSource)
             !== recallSourceCoordinateKey(source)
           || revalidatedSource.contentHash !== source.contentHash
+          || !authorizedRecallSourceHasSafeText(revalidatedSource)
         ) return [];
         if (revalidatedSource.sourceKind === "PUBLIC_KNOWLEDGE") {
           return [hydratePublicKnowledgeRecall(item, revalidatedSource, memoryUseItemId)];
@@ -1776,8 +1967,29 @@ async function loadPublicKnowledgeRecallAuthorization(params: {
     publicKnowledgeGrantsByUri: new Map<string, PublicKnowledgeRecallGrant>(),
   };
   try {
-    const [specs, ledgerItems] = await Promise.all([
-      buildPublishedResourceProjectionSpecs(params),
+    const aggregateByKey = new Map(
+      buildPublishedAggregateProjectionSpecs(params).map((spec) => [spec.resourceKey, spec]),
+    );
+    const pinByAssetId = new Map(
+      params.snapshot.knowledgeAssets.map((pin) => [pin.assetId, pin]),
+    );
+    const [manifestItems, ledgerItems] = await Promise.all([
+      prisma.representativeVersionResource.findMany({
+        where: {
+          representativeId: params.representative.id,
+          publishedVersionId: params.publishedVersionId,
+        },
+        select: {
+          publishedVersionId: true,
+          representativeId: true,
+          sourceKind: true,
+          resourceKey: true,
+          knowledgeAssetId: true,
+          contentHash: true,
+          safeText: true,
+          citationTitle: true,
+        },
+      }),
       prisma.publicKnowledgeProjectionItem.findMany({
         where: {
           representativeId: params.representative.id,
@@ -1802,18 +2014,61 @@ async function loadPublicKnowledgeRecallAuthorization(params: {
       ledgerItems.map((item) => [item.resourceKey, item]),
     );
     const publicKnowledgeGrantsByUri = new Map<string, PublicKnowledgeRecallGrant>();
-    for (const spec of specs) {
-      const ledger = ledgerByResourceKey.get(spec.resourceKey);
-      const contentHash = sha256Text(spec.document.content);
+    const expectedRoot = buildRepresentativeVersionResourceRootUri(
+      params.representative.slug,
+      params.publishedVersionId,
+    );
+    for (const manifest of manifestItems) {
+      if (
+        manifest.representativeId !== params.representative.id
+        || manifest.publishedVersionId !== params.publishedVersionId
+        || !manifest.safeText
+        || sha256Text(manifest.safeText) !== manifest.contentHash
+      ) {
+        continue;
+      }
+      let title: string;
+      if (
+        manifest.sourceKind
+          === PublicKnowledgeProjectionSourceKind.REPRESENTATIVE_VERSION_RESOURCE
+      ) {
+        const expected = aggregateByKey.get(manifest.resourceKey);
+        if (
+          !expected
+          || manifest.knowledgeAssetId !== null
+          || expected.document.content !== manifest.safeText
+          || sha256Text(expected.document.content) !== manifest.contentHash
+        ) {
+          continue;
+        }
+        title = sanitizePublicSafeText(manifest.citationTitle ?? "", 200)
+          ?? resolveRecallTitle(manifest.safeText, `${expectedRoot}${manifest.resourceKey}`);
+      } else {
+        const assetId = manifest.knowledgeAssetId;
+        const pin = assetId ? pinByAssetId.get(assetId) : undefined;
+        if (
+          !assetId
+          || !pin
+          || manifest.resourceKey !== `knowledge/${assetId}.md`
+          || manifest.contentHash !== pin.checksum
+        ) {
+          continue;
+        }
+        title = sanitizePublicSafeText(manifest.citationTitle ?? "", 200)
+          ?? "Published knowledge";
+      }
+
+      const ledger = ledgerByResourceKey.get(manifest.resourceKey);
+      const expectedUri = `${expectedRoot}${manifest.resourceKey}`;
       if (
         !ledger
         || ledger.representativeId !== params.representative.id
         || ledger.publishedVersionId !== params.publishedVersionId
-        || ledger.sourceKind !== spec.sourceKind
-        || ledger.knowledgeAssetId !== (spec.knowledgeAssetId ?? null)
+        || ledger.sourceKind !== manifest.sourceKind
+        || ledger.knowledgeAssetId !== manifest.knowledgeAssetId
         || ledger.provider !== "openviking"
-        || ledger.contentHash !== contentHash
-        || ledger.remoteUri !== spec.document.uri
+        || ledger.contentHash !== manifest.contentHash
+        || ledger.remoteUri !== expectedUri
         || !ledger.projectedAt
       ) {
         continue;
@@ -1822,13 +2077,12 @@ async function loadPublicKnowledgeRecallAuthorization(params: {
         uri: ledger.remoteUri,
         sourceKind: "PUBLIC_KNOWLEDGE",
         publicKnowledgeProjectionId: ledger.id,
-        contentHash,
+        contentHash: manifest.contentHash,
         resourceKey: ledger.resourceKey,
-        safeText: spec.document.content,
-        title: spec.citationTitle
-          ?? resolveRecallTitle(spec.document.content, spec.document.uri),
-        ...(spec.knowledgeAssetId
-          ? { knowledgeAssetId: spec.knowledgeAssetId }
+        safeText: manifest.safeText,
+        title,
+        ...(manifest.knowledgeAssetId
+          ? { knowledgeAssetId: manifest.knowledgeAssetId }
           : {}),
       });
     }
@@ -2216,6 +2470,10 @@ function authorizeRecallUri(
   return authorization.publicKnowledgeGrantsByUri.get(uri)
     ?? authorization.memoryGrantsByUri.get(uri)
     ?? null;
+}
+
+function authorizedRecallSourceHasSafeText(source: AuthorizedRecallSource) {
+  return Boolean(sanitizePublicSafeText(source.safeText, 4_000)?.trim());
 }
 
 function recallSourceCoordinateKey(source: AuthorizedRecallSource): string {

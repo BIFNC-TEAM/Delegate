@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  ConversationEpisodeStatus,
   GovernedMemoryStatus,
   MemoryCandidateStatus,
   MemoryProjectionLane,
@@ -30,6 +31,7 @@ const sha256Pattern = /^[0-9a-f]{64}$/u;
 const opaqueIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,190}$/u;
 
 export const memoryUseDegradationReasonCodes = [
+  "memory_recall_query_blocked",
   "memory_recall_provider_unavailable",
   "memory_recall_partial",
   "memory_recall_source_changed",
@@ -215,6 +217,7 @@ export async function startOrReuseMemoryUseRunInTransaction(
     select: {
       id: true,
       conversationId: true,
+      episodeId: true,
       inputMessageId: true,
       representativeVersionId: true,
       conversation: {
@@ -222,6 +225,7 @@ export async function startOrReuseMemoryUseRunInTransaction(
           representativeId: true,
           contactId: true,
           sourceChannel: true,
+          activeEpisodeId: true,
           representative: { select: { activeVersionId: true } },
         },
       },
@@ -234,6 +238,14 @@ export async function startOrReuseMemoryUseRunInTransaction(
       },
       representativeVersion: {
         select: { id: true, representativeId: true, status: true },
+      },
+      episode: {
+        select: {
+          id: true,
+          conversationId: true,
+          representativeVersionId: true,
+          status: true,
+        },
       },
     },
   });
@@ -254,15 +266,14 @@ export async function startOrReuseMemoryUseRunInTransaction(
     || generation.representativeVersion.representativeId
       !== generation.conversation.representativeId
     || generation.representativeVersion.status !== "PUBLISHED"
-    || generation.conversation.representative.activeVersionId
-      !== representativeVersionId
+    || !generationPinsRepresentativeVersion(generation, representativeVersionId)
     || generation.inputMessage.id !== generation.inputMessageId
     || generation.inputMessage.conversationId !== generation.conversationId
     || generationChannel !== sourceChannel
   ) {
     throw new MemoryUseExecutionError(
       "memory_use_scope_conflict",
-      "Generation run is not pinned to the current representative, conversation, message, and channel scope.",
+      "Generation run is not pinned to its representative, episode, conversation, message, and channel scope.",
       409,
     );
   }
@@ -640,15 +651,24 @@ export async function markMemoryUseItemsDisplayedInTransaction(
   if (displayedItemIds.length) {
     const items = await tx.memoryUseItem.findMany({
       where: { useRunId: run.id, id: { in: displayedItemIds } },
-      select: { id: true, citedAt: true, citationId: true },
+      select: {
+        id: true,
+        citedAt: true,
+        citationId: true,
+        citation: { select: { messageId: true } },
+      },
     });
     if (
       items.length !== displayedItemIds.length
-      || items.some((item) => !item.citedAt || !item.citationId)
+      || items.some((item) => (
+        !item.citedAt
+        || !item.citationId
+        || item.citation?.messageId !== run.outputMessageId
+      ))
     ) {
       throw new MemoryUseExecutionError(
         "memory_use_state_conflict",
-        "Displayed items must be cited by the completed output.",
+        "Displayed items must be cited by this completed output.",
         409,
       );
     }
@@ -883,29 +903,96 @@ async function assertRunStillCurrent(
   tx: MemoryUseTransaction,
   run: RunSnapshotRecord,
 ) {
-  const [representative, conversation] = await Promise.all([
+  const [representative, conversation, generation] = await Promise.all([
     tx.representative.findUnique({
       where: { id: run.representativeId },
       select: { activeVersionId: true },
     }),
     tx.conversation.findUnique({
       where: { id: run.conversationId },
-      select: { representativeId: true, contactId: true, sourceChannel: true },
+      select: {
+        representativeId: true,
+        contactId: true,
+        sourceChannel: true,
+        activeEpisodeId: true,
+      },
+    }),
+    tx.generationRun.findUnique({
+      where: { id: run.generationRunId },
+      select: {
+        id: true,
+        conversationId: true,
+        episodeId: true,
+        inputMessageId: true,
+        representativeVersionId: true,
+        episode: {
+          select: {
+            id: true,
+            conversationId: true,
+            representativeVersionId: true,
+            status: true,
+          },
+        },
+      },
     }),
   ]);
   if (
-    representative?.activeVersionId !== run.representativeVersionId
-    || conversation?.representativeId !== run.representativeId
+    !representative
+    || !conversation
+    || !generation
+    || generation.conversationId !== run.conversationId
+    || generation.inputMessageId !== run.inputMessageId
+    || generation.representativeVersionId !== run.representativeVersionId
+    || !generationPinsRepresentativeVersion({
+      ...generation,
+      conversation: {
+        activeEpisodeId: conversation.activeEpisodeId,
+        representative,
+      },
+    }, run.representativeVersionId)
+    || conversation.representativeId !== run.representativeId
     || conversation.contactId !== run.contactId
     || normalizeOptionalSourceChannel(conversation.sourceChannel)
       !== run.sourceChannel
   ) {
     throw new MemoryUseExecutionError(
       "memory_use_scope_conflict",
-      "Memory use run no longer matches the current representative, contact, and channel scope.",
+      "Memory use run no longer matches its generation, episode, representative, contact, and channel scope.",
       409,
     );
   }
+}
+
+function generationPinsRepresentativeVersion(
+  generation: {
+    conversationId: string;
+    episodeId: string | null;
+    conversation: {
+      activeEpisodeId: string | null;
+      representative: { activeVersionId: string | null };
+    };
+    episode: {
+      id: string;
+      conversationId: string;
+      representativeVersionId: string | null;
+      status: ConversationEpisodeStatus;
+    } | null;
+  },
+  representativeVersionId: string,
+) {
+  if (!generation.episodeId) {
+    // Pre-Episode generation rows are allowed only while they still pin the
+    // representative's active release. New conversation runs always carry an
+    // Episode pin, which remains authoritative after a later publication.
+    return generation.conversation.activeEpisodeId === null
+      && generation.conversation.representative.activeVersionId
+        === representativeVersionId;
+  }
+  return generation.conversation.activeEpisodeId === generation.episodeId
+    && generation.episode?.id === generation.episodeId
+    && generation.episode.conversationId === generation.conversationId
+    && generation.episode.representativeVersionId === representativeVersionId
+    && generation.episode.status === ConversationEpisodeStatus.ACTIVE;
 }
 
 async function loadGovernedProjectionSources(

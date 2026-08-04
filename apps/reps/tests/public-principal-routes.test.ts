@@ -219,6 +219,7 @@ describe("public principal route coverage", () => {
     "../app/reps/[slug]/chat/route.ts",
     "../app/reps/[slug]/chat/events/route.ts",
     "../app/reps/[slug]/chat/runs/[runId]/events/route.ts",
+    "../app/reps/[slug]/chat/runs/[runId]/display-ack/route.ts",
     "../app/reps/[slug]/chat/artifacts/[artifactId]/download/route.ts",
     "../app/reps/[slug]/compute/route.ts",
   ];

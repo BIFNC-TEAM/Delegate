@@ -130,6 +130,7 @@ describe("provider fallback", () => {
         score: 0.93,
         abstract: "Concise-answer preference.",
         content: "Use concise answers.",
+        internalSource: { sourceKind: "CONTACT_MEMORY" },
       }],
     });
 
@@ -174,6 +175,7 @@ describe("provider fallback", () => {
         score: 0.93,
         abstract: "Concise-answer preference.",
         content: "Use concise answers.",
+        internalSource: { sourceKind: "CONTACT_MEMORY" },
       }],
     });
 
@@ -225,6 +227,7 @@ describe("provider fallback", () => {
         score: 0.93,
         abstract: "Concise-answer preference.",
         content: "Use concise answers.",
+        internalSource: { sourceKind: "CONTACT_MEMORY" },
       }],
     });
 
@@ -270,6 +273,7 @@ describe("provider fallback", () => {
         score: 0.99,
         abstract: "Dropped recall fact.",
         content: "DROPPED RECALL FACT",
+        internalSource: { sourceKind: "PUBLIC_KNOWLEDGE" },
       }],
     });
 

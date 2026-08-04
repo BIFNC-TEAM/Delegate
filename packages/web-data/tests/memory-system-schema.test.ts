@@ -160,7 +160,8 @@ describe("Memory System authoritative schema", () => {
     expect(migration).toContain("'MemoryExtractionRun_source_channel_check'");
     expect(truthLedgerMigration).toContain("'MemoryUseRun_source_channel_check'");
     expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_pinned_version_check\'');
-    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_active_version_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_episode_version_check\'');
+    expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_legacy_active_version_check\'');
     expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_generation_version_check\'');
     expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_generation_input_check\'');
     expect(truthLedgerMigration).toContain('CONSTRAINT = \'MemoryUseRun_generation_output_check\'');

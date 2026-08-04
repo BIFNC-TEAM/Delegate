@@ -1,4 +1,5 @@
 import {
+  ConversationEpisodeStatus,
   MemoryUseRunStatus,
   MemoryUseSourceKind,
   Prisma,
@@ -24,12 +25,14 @@ describe("memory use execution", () => {
     const generationFind = vi.fn().mockResolvedValue({
       id: run.generationRunId,
       conversationId: run.conversationId,
+      episodeId: null,
       inputMessageId: run.inputMessageId,
       representativeVersionId: run.representativeVersionId,
       conversation: {
         representativeId: run.representativeId,
         contactId: run.contactId,
         sourceChannel: "web",
+        activeEpisodeId: null,
         representative: { activeVersionId: run.representativeVersionId },
       },
       inputMessage: {
@@ -42,6 +45,7 @@ describe("memory use execution", () => {
         representativeId: run.representativeId,
         status: "PUBLISHED",
       },
+      episode: null,
     });
     const create = vi.fn();
     const tx = asTransaction({
@@ -71,12 +75,14 @@ describe("memory use execution", () => {
         findUnique: vi.fn().mockResolvedValue({
           id: run.generationRunId,
           conversationId: run.conversationId,
+          episodeId: null,
           inputMessageId: run.inputMessageId,
           representativeVersionId: run.representativeVersionId,
           conversation: {
             representativeId: run.representativeId,
             contactId: run.contactId,
             sourceChannel: "matrix",
+            activeEpisodeId: null,
             representative: { activeVersionId: run.representativeVersionId },
           },
           inputMessage: {
@@ -89,6 +95,7 @@ describe("memory use execution", () => {
             representativeId: run.representativeId,
             status: "PUBLISHED",
           },
+          episode: null,
         }),
       },
     });
@@ -99,6 +106,112 @@ describe("memory use execution", () => {
     }, occurredAt)).rejects.toMatchObject({
       code: "memory_use_scope_conflict",
     });
+  });
+
+  it("keeps an Episode-pinned run valid after a newer release becomes active", async () => {
+    const run = runSnapshot();
+    const create = vi.fn().mockResolvedValue(run);
+    const tx = asTransaction({
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      generationRun: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: run.generationRunId,
+          conversationId: run.conversationId,
+          episodeId: "episode_1",
+          inputMessageId: run.inputMessageId,
+          representativeVersionId: run.representativeVersionId,
+          conversation: {
+            representativeId: run.representativeId,
+            contactId: run.contactId,
+            sourceChannel: "web",
+            activeEpisodeId: "episode_1",
+            representative: { activeVersionId: "representative_version_2" },
+          },
+          inputMessage: {
+            id: run.inputMessageId,
+            conversationId: run.conversationId,
+            channelBinding: { kind: RepresentativeChannelKind.WEB },
+          },
+          representativeVersion: {
+            id: run.representativeVersionId,
+            representativeId: run.representativeId,
+            status: "PUBLISHED",
+          },
+          episode: {
+            id: "episode_1",
+            conversationId: run.conversationId,
+            representativeVersionId: run.representativeVersionId,
+            status: ConversationEpisodeStatus.ACTIVE,
+          },
+        }),
+      },
+      memoryUseRun: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create,
+      },
+    });
+
+    await expect(startOrReuseMemoryUseRunInTransaction(tx, {
+      generationRunId: run.generationRunId,
+      sourceChannel: "web",
+    }, occurredAt)).resolves.toEqual({ replayed: false, run });
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        representativeVersionId: run.representativeVersionId,
+      }),
+    }));
+  });
+
+  it("rejects a historical archived Episode even when it pins the same release", async () => {
+    const run = runSnapshot();
+    const create = vi.fn();
+    const tx = asTransaction({
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      generationRun: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: run.generationRunId,
+          conversationId: run.conversationId,
+          episodeId: "episode_closed",
+          inputMessageId: run.inputMessageId,
+          representativeVersionId: run.representativeVersionId,
+          conversation: {
+            representativeId: run.representativeId,
+            contactId: run.contactId,
+            sourceChannel: "web",
+            activeEpisodeId: "episode_closed",
+            representative: { activeVersionId: run.representativeVersionId },
+          },
+          inputMessage: {
+            id: run.inputMessageId,
+            conversationId: run.conversationId,
+            channelBinding: { kind: RepresentativeChannelKind.WEB },
+          },
+          representativeVersion: {
+            id: run.representativeVersionId,
+            representativeId: run.representativeId,
+            status: "PUBLISHED",
+          },
+          episode: {
+            id: "episode_closed",
+            conversationId: run.conversationId,
+            representativeVersionId: run.representativeVersionId,
+            status: ConversationEpisodeStatus.ARCHIVED,
+          },
+        }),
+      },
+      memoryUseRun: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create,
+      },
+    });
+
+    await expect(startOrReuseMemoryUseRunInTransaction(tx, {
+      generationRunId: run.generationRunId,
+      sourceChannel: "web",
+    }, occurredAt)).rejects.toMatchObject({
+      code: "memory_use_scope_conflict",
+    });
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("counts unknown and cross-boundary search sources anonymously", async () => {
@@ -114,18 +227,7 @@ describe("memory use execution", () => {
           return run;
         }),
       },
-      representative: {
-        findUnique: vi.fn().mockResolvedValue({
-          activeVersionId: run.representativeVersionId,
-        }),
-      },
-      conversation: {
-        findUnique: vi.fn().mockResolvedValue({
-          representativeId: run.representativeId,
-          contactId: run.contactId,
-          sourceChannel: "web",
-        }),
-      },
+      ...runScopeClient(run),
       memoryProjectionItem: { findMany: vi.fn().mockResolvedValue([]) },
       publicKnowledgeProjectionItem: { findMany: vi.fn().mockResolvedValue([]) },
       representativeMemoryPolicy: { findUnique: vi.fn().mockResolvedValue(null) },
@@ -188,18 +290,7 @@ describe("memory use execution", () => {
         findUniqueOrThrow: vi.fn().mockImplementation(async () => run),
         update: vi.fn(),
       },
-      representative: {
-        findUnique: vi.fn().mockResolvedValue({
-          activeVersionId: run.representativeVersionId,
-        }),
-      },
-      conversation: {
-        findUnique: vi.fn().mockResolvedValue({
-          representativeId: run.representativeId,
-          contactId: run.contactId,
-          sourceChannel: "web",
-        }),
-      },
+      ...runScopeClient(run),
       memoryProjectionItem: { findMany: vi.fn().mockResolvedValue([]) },
       publicKnowledgeProjectionItem: {
         findMany: vi.fn().mockResolvedValue([{
@@ -275,18 +366,7 @@ describe("memory use execution", () => {
         findUniqueOrThrow: vi.fn().mockResolvedValue(run),
         update: vi.fn(),
       },
-      representative: {
-        findUnique: vi.fn().mockResolvedValue({
-          activeVersionId: run.representativeVersionId,
-        }),
-      },
-      conversation: {
-        findUnique: vi.fn().mockResolvedValue({
-          representativeId: run.representativeId,
-          contactId: run.contactId,
-          sourceChannel: "web",
-        }),
-      },
+      ...runScopeClient(run),
       memoryProjectionItem: { findMany: vi.fn().mockResolvedValue([source]) },
       publicKnowledgeProjectionItem: { findMany: vi.fn().mockResolvedValue([]) },
       representativeMemoryPolicy: {
@@ -361,18 +441,7 @@ describe("memory use execution", () => {
           return run;
         }),
       },
-      representative: {
-        findUnique: vi.fn().mockResolvedValue({
-          activeVersionId: run.representativeVersionId,
-        }),
-      },
-      conversation: {
-        findUnique: vi.fn().mockResolvedValue({
-          representativeId: run.representativeId,
-          contactId: run.contactId,
-          sourceChannel: "web",
-        }),
-      },
+      ...runScopeClient(run),
       message: {
         findUnique: vi.fn().mockResolvedValue({
           id: "output_message_1",
@@ -470,11 +539,53 @@ describe("memory use execution", () => {
     expect(tx.memoryUseItem.updateMany).not.toHaveBeenCalled();
   });
 
-  it("records degradation while keeping the run open for generation", async () => {
+  it("never marks a citation attached to a different output as displayed", async () => {
+    const run = runSnapshot({
+      status: MemoryUseRunStatus.COMPLETED,
+      outputMessageId: "output_message_1",
+      completedAt: occurredAt,
+    });
+    const updateMany = vi.fn();
+    const tx = asTransaction({
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      memoryUseRun: {
+        findUnique: vi.fn().mockResolvedValue(run),
+        findUniqueOrThrow: vi.fn().mockResolvedValue(run),
+      },
+      message: {
+        findUnique: vi.fn().mockResolvedValue({
+          conversationId: run.conversationId,
+          deliveryStatus: "SENT",
+        }),
+      },
+      memoryUseItem: {
+        findMany: vi.fn().mockResolvedValue([{
+          id: "memory_use_item_1",
+          citedAt: occurredAt,
+          citationId: "citation_1",
+          citation: { messageId: "output_message_other" },
+        }]),
+        updateMany,
+      },
+    });
+
+    await expect(markMemoryUseItemsDisplayedInTransaction(tx, {
+      useRunId: run.id,
+      displayedItemIds: ["memory_use_item_1"],
+    }, occurredAt)).rejects.toMatchObject({
+      code: "memory_use_state_conflict",
+    });
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "memory_recall_partial",
+    "memory_recall_query_blocked",
+  ] as const)("records degradation reason %s while keeping the run open for generation", async (reasonCode) => {
     const run = runSnapshot();
     const update = vi.fn().mockResolvedValue({
       ...run,
-      reasonCode: "memory_recall_partial",
+      reasonCode,
     });
     const tx = asTransaction({
       $executeRaw: vi.fn().mockResolvedValue(1),
@@ -484,14 +595,14 @@ describe("memory use execution", () => {
     await expect(markMemoryUseRunDegradedInTransaction(
       tx,
       run.id,
-      "memory_recall_partial",
+      reasonCode,
     )).resolves.toMatchObject({
       status: MemoryUseRunStatus.STARTED,
-      reasonCode: "memory_recall_partial",
+      reasonCode,
       completedAt: null,
     });
     expect(update).toHaveBeenCalledWith(expect.objectContaining({
-      data: { reasonCode: "memory_recall_partial" },
+      data: { reasonCode },
     }));
   });
 
@@ -590,6 +701,35 @@ function governedProjectionSource(
         recallDisabledAt: null,
         expiresAt: null,
       },
+    },
+  };
+}
+
+function runScopeClient(
+  run: MemoryUseRunSnapshot,
+  activeVersionId = run.representativeVersionId,
+) {
+  return {
+    representative: {
+      findUnique: vi.fn().mockResolvedValue({ activeVersionId }),
+    },
+    conversation: {
+      findUnique: vi.fn().mockResolvedValue({
+        representativeId: run.representativeId,
+        contactId: run.contactId,
+        sourceChannel: "web",
+        activeEpisodeId: null,
+      }),
+    },
+    generationRun: {
+      findUnique: vi.fn().mockResolvedValue({
+        id: run.generationRunId,
+        conversationId: run.conversationId,
+        episodeId: null,
+        inputMessageId: run.inputMessageId,
+        representativeVersionId: run.representativeVersionId,
+        episode: null,
+      }),
     },
   };
 }

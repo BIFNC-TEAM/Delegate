@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => ({
   generateRepresentativeReply: vi.fn(),
   hasPersistedTelegramBotConnections: vi.fn(),
   planNaturalLanguageComputeRequest: vi.fn(),
+  renderFailClosedReplyPreview: vi.fn(),
   renderGroundedKnowledgeFallbackWithTrace: vi.fn(),
   claimNextOperatorMessageWorkItem: vi.fn(),
   claimNextGenerationWorkItem: vi.fn(),
@@ -55,6 +56,7 @@ vi.mock("@delegate/runtime", () => ({
   buildComputeRequestsFromDelegationPlan: mocks.buildComputeRequestsFromDelegationPlan,
   createConversationPlan: mocks.createConversationPlan,
   parseComputeDirective: mocks.parseComputeDirective,
+  renderFailClosedReplyPreview: mocks.renderFailClosedReplyPreview,
   renderReplyPreview: () => "fallback",
   readPersistedDelegationStepRequest: mocks.readPersistedDelegationStepRequest,
   resolveComputeSubagent: () => ({ id: "compute-agent" }),
@@ -176,6 +178,7 @@ describe("conversation worker knowledge recall", () => {
       intent: "faq",
       nextStep: "answer",
     });
+    mocks.renderFailClosedReplyPreview.mockReturnValue("SAFE FAIL-CLOSED REPLY");
     mocks.loadGenerationRecentTurns.mockResolvedValue([]);
     mocks.recallRepresentativeContext.mockResolvedValue({
       items: [{
@@ -296,6 +299,41 @@ describe("conversation worker knowledge recall", () => {
     );
   });
 
+  it("drops public recall items that are not bound to a generation UseRun", async () => {
+    mocks.recallRepresentativeContext.mockResolvedValue({
+      items: [{
+        uri: "viking://resources/delegate/reps/sktone/versions/version-1/faq/index.md",
+        contextType: "resource",
+        layer: "L2",
+        score: 0.95,
+        abstract: "Orphaned public fact that must not reach the model.",
+        memoryUseItemId: "orphaned-memory-use-item",
+        internalSource: {
+          sourceKind: "PUBLIC_KNOWLEDGE",
+          memoryUseItemId: "orphaned-memory-use-item",
+        },
+      }],
+      citations: [],
+    });
+    mocks.generateRepresentativeReply.mockResolvedValue({
+      ok: true,
+      replyText: "Answer without orphaned knowledge.",
+      provider: "openai",
+      model: "test-model",
+      citedMemoryUseItemIds: [],
+      contextTrace: { selectedMemoryUseItemIds: [] },
+    });
+
+    await processNextConversationWork({ port: 4040, pollMs: 500 });
+
+    expect(mocks.generateRepresentativeReply).toHaveBeenCalledWith(
+      expect.objectContaining({ recalled: [] }),
+    );
+    const completion = mocks.completeInlineGenerationRun.mock.calls[0]?.[0];
+    expect(completion).not.toHaveProperty("memoryUse");
+    expect(JSON.stringify(completion)).not.toContain("Orphaned public fact");
+  });
+
   it("persists no citation when the token budget drops the recall segment", async () => {
     mocks.generateRepresentativeReply.mockResolvedValue({
       ok: true,
@@ -332,7 +370,12 @@ describe("conversation worker knowledge recall", () => {
     });
 
     expect(mocks.renderGroundedKnowledgeFallbackWithTrace).not.toHaveBeenCalled();
+    expect(mocks.renderFailClosedReplyPreview).toHaveBeenCalledWith(
+      expect.any(Object),
+      "佩奇当老师时发生了什么？",
+    );
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      replyText: "SAFE FAIL-CLOSED REPLY",
       memoryUse: {
         runId: "memory-use-run-1",
         outcome: "generation_failed",
@@ -347,9 +390,18 @@ describe("conversation worker knowledge recall", () => {
     expect(
       JSON.stringify(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]),
     ).not.toContain("secret upstream details");
+    expect(
+      JSON.stringify(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]),
+    ).not.toContain("佩奇临时代课并带大家画恐龙");
+    expect(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]?.memoryUse).not.toHaveProperty(
+      "injectedItemIds",
+    );
+    expect(mocks.completeInlineGenerationRun.mock.calls[0]?.[0]?.memoryUse).not.toHaveProperty(
+      "citedItemIds",
+    );
   });
 
-  it("never attributes a deterministic fallback to searched sources", async () => {
+  it("never attributes a fail-closed fallback to searched, injected, cited, or displayed sources", async () => {
     const firstUri = "viking://resources/delegate/reps/sktone/knowledge/asset-1.md/asset-1.md";
     const secondUri = "viking://resources/delegate/reps/sktone/knowledge/asset-2.md/asset-2.md";
     mocks.recallRepresentativeContext.mockResolvedValue({
@@ -389,14 +441,20 @@ describe("conversation worker knowledge recall", () => {
 
     await processNextConversationWork({ port: 4040, pollMs: 500 });
 
-    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
-      expect.objectContaining({
-        memoryUse: {
-          runId: "memory-use-run-1",
-          outcome: "generation_failed",
-        },
-      }),
-    );
+    expect(mocks.renderGroundedKnowledgeFallbackWithTrace).not.toHaveBeenCalled();
+    const completion = mocks.completeInlineGenerationRun.mock.calls[0]?.[0];
+    expect(completion).toEqual(expect.objectContaining({
+      replyText: "SAFE FAIL-CLOSED REPLY",
+      memoryUse: {
+        runId: "memory-use-run-1",
+        outcome: "generation_failed",
+      },
+    }));
+    expect(completion?.memoryUse).not.toHaveProperty("injectedItemIds");
+    expect(completion?.memoryUse).not.toHaveProperty("citedItemIds");
+    expect(completion).not.toHaveProperty("citations");
+    expect(JSON.stringify(completion)).not.toContain("Relevant fallback fact.");
+    expect(JSON.stringify(completion)).not.toContain("Unrelated searched fact.");
   });
 
   it("never echoes or cites contact memory through provider-failure fallback", async () => {
@@ -454,7 +512,7 @@ describe("conversation worker knowledge recall", () => {
 
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        replyText: "fallback",
+        replyText: "SAFE FAIL-CLOSED REPLY",
         runtimeOutcome: {
           mode: "fallback",
           fallbackStrategy: "deterministic_preview",

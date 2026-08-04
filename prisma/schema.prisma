@@ -4585,6 +4585,8 @@ model RepresentativeVersionResource {
   resourceKey        String
   knowledgeAssetId   String?
   contentHash        String
+  safeText           String                              @db.Text
+  citationTitle      String?                             @db.VarChar(200)
   createdAt          DateTime                            @default(now())
   representative     Representative                      @relation(fields: [representativeId], references: [id], onDelete: Restrict, map: "RepresentativeVersionResource_rep_fkey")
   publishedVersion   RepresentativeVersion               @relation(fields: [publishedVersionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "RepresentativeVersionResource_version_scope_fkey")

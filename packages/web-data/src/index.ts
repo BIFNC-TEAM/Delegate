@@ -70,6 +70,7 @@ export * from "./memory-use-execution";
 export * from "./memory-projection-execution";
 export * from "./memory-reconciliation-execution";
 export * from "./openviking";
+export * from "./public-memory-display";
 export * from "./owner-access";
 export * from "./owner-billing-products";
 export * from "./owner-dashboard";

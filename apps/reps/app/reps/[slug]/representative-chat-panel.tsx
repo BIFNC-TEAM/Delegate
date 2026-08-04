@@ -13,6 +13,12 @@ import {
   getGovernedContextDisclosure,
   type GovernedMemoryDisclosure,
 } from "./governed-context-disclosure";
+import {
+  collectPendingMemoryDisplayAcks,
+  memoryDisplayAckKey,
+  sendPublicMemoryDisplayAck,
+  type PublicMemoryDisplayAck,
+} from "./memory-display-client";
 
 type Citation = { title: string; excerpt?: string; uri?: string };
 type ChatAttachment = { id: string; fileName: string; mimeType?: string; sizeBytes?: number; url?: string };
@@ -25,6 +31,7 @@ type ChatMessage = {
   attachments?: ChatAttachment[];
   senderType?: string;
   senderDisplayName?: string;
+  displayAck?: PublicMemoryDisplayAck;
 };
 type PublicChatHistory = {
   state: string;
@@ -72,6 +79,9 @@ export function RepresentativeChatPanel(props: {
   const keepChatPinnedRef = useRef(true);
   const activeRunSourceRef = useRef<EventSource | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
+  const acknowledgedDisplayKeysRef = useRef(new Set<string>());
+  const displayAckRetryTimersRef = useRef(new Set<number>());
+  const displayAckMountedRef = useRef(false);
   const [selectedTier, setSelectedTier] = useState<PlanTier>("free");
   const [showPlans, setShowPlans] = useState(false);
   const [input, setInput] = useState("");
@@ -119,6 +129,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+            ...(message.displayAck ? { displayAck: message.displayAck } : {}),
           })));
         }
         setHumanActive(payload.humanActive);
@@ -149,6 +160,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.status ? { status: message.status } : {}),
             ...(message.citations?.length ? { citations: message.citations } : {}),
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+            ...(message.displayAck ? { displayAck: message.displayAck } : {}),
           })));
         }
         setHumanActive(payload.humanActive);
@@ -160,11 +172,19 @@ export function RepresentativeChatPanel(props: {
     return () => source.close();
   }, [hydrating, props.representativeSlug]);
 
-  useEffect(() => () => {
-    activeRunSourceRef.current?.close();
-    if (activeRunTimeoutRef.current !== null) {
-      window.clearTimeout(activeRunTimeoutRef.current);
-    }
+  useEffect(() => {
+    displayAckMountedRef.current = true;
+    return () => {
+      displayAckMountedRef.current = false;
+      activeRunSourceRef.current?.close();
+      if (activeRunTimeoutRef.current !== null) {
+        window.clearTimeout(activeRunTimeoutRef.current);
+      }
+      for (const timer of displayAckRetryTimersRef.current) {
+        window.clearTimeout(timer);
+      }
+      displayAckRetryTimersRef.current.clear();
+    };
   }, []);
 
   useEffect(() => {
@@ -213,6 +233,42 @@ export function RepresentativeChatPanel(props: {
     });
     return () => window.cancelAnimationFrame(frame);
   }, [messages]);
+
+  useEffect(() => {
+    const pending = collectPendingMemoryDisplayAcks(
+      messages,
+      acknowledgedDisplayKeysRef.current,
+    );
+    for (const ack of pending) {
+      const key = memoryDisplayAckKey(ack);
+      // This effect runs only after React has committed the message and its
+      // citations to the visible chat log. Mark the key before issuing the
+      // request so Strict Mode and concurrent history updates remain quiet.
+      acknowledgedDisplayKeysRef.current.add(key);
+      sendDisplayAckWithRetry(ack, key, 0);
+    }
+
+    function sendDisplayAckWithRetry(
+      ack: PublicMemoryDisplayAck,
+      key: string,
+      attempt: number,
+    ) {
+      void sendPublicMemoryDisplayAck(props.representativeSlug, ack).catch(() => {
+        if (!displayAckMountedRef.current) return;
+        if (attempt >= 2) {
+          // Undercount rather than overcount when the acknowledgement cannot
+          // be confirmed. A later history render or page reload can retry.
+          acknowledgedDisplayKeysRef.current.delete(key);
+          return;
+        }
+        const timer = window.setTimeout(() => {
+          displayAckRetryTimersRef.current.delete(timer);
+          sendDisplayAckWithRetry(ack, key, attempt + 1);
+        }, 500 * (2 ** attempt));
+        displayAckRetryTimersRef.current.add(timer);
+      });
+    }
+  }, [messages, props.representativeSlug]);
 
   function chooseStarter(starter: string) {
     setInput(starter);
@@ -323,7 +379,14 @@ export function RepresentativeChatPanel(props: {
         const snapshot = JSON.parse((event as MessageEvent<string>).data) as {
           status: string;
           errorMessage?: string;
-          message?: { id: string; text: string; status: string; citations: Citation[]; attachments?: ChatAttachment[] };
+          message?: {
+            id: string;
+            text: string;
+            status: string;
+            citations: Citation[];
+            attachments?: ChatAttachment[];
+            displayAck?: PublicMemoryDisplayAck;
+          };
         };
         if (["completed", "waiting_approval"].includes(snapshot.status) && snapshot.message) {
           appendAssistant({
@@ -333,6 +396,7 @@ export function RepresentativeChatPanel(props: {
             status: snapshot.message.status,
             citations: snapshot.message.citations,
             ...(snapshot.message.attachments?.length ? { attachments: snapshot.message.attachments } : {}),
+            ...(snapshot.message.displayAck ? { displayAck: snapshot.message.displayAck } : {}),
           });
           finish();
         } else if (["failed", "canceled"].includes(snapshot.status)) {

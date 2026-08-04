@@ -18,6 +18,13 @@ import type { ModelContextSegmentTrace } from "@delegate/lifecycle-hooks";
  */
 export type RepresentativeRecallItem = OpenVikingRecallItem & {
   memoryUseItemId: string;
+  /** Server-classified source family used for subagent scope enforcement. */
+  internalSource: {
+    sourceKind:
+      | "PUBLIC_KNOWLEDGE"
+      | "CONTACT_MEMORY"
+      | "REPRESENTATIVE_EXPERIENCE";
+  };
 };
 
 export type ModelProvider = "openai" | "bailian" | "anthropic";
@@ -88,7 +95,7 @@ export type RepresentativeReplyContextTrace = {
   estimatedInputTokens: number;
   segments: ModelContextSegmentTrace[];
   selectedKnowledgeTitles: string[];
-  /** Opaque ledger identifiers for only the recall items included in the prompt. */
+  /** Opaque ledger identifiers for only the sources included in the prompt. */
   selectedMemoryUseItemIds: string[];
 };
 

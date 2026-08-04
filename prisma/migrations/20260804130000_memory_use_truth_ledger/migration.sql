@@ -1,72 +1,18 @@
 BEGIN;
 
--- Pre-T6 public-knowledge usage cannot be mapped to an exact immutable
--- projection without inventing a remote URI. Fail closed and require an
--- explicit archive/remediation instead of manufacturing provenance.
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-      FROM "MemoryUseRun"
-     WHERE "generationRunId" IS NULL
-  ) THEN
-    RAISE EXCEPTION USING
-      ERRCODE = '23514',
-      CONSTRAINT = 'MemoryUseRun_generation_required_preflight',
-      MESSAGE = 'pre-T6 memory use runs without a generation run require explicit remediation';
-  END IF;
-
-  IF EXISTS (
-    SELECT 1
-      FROM "MemoryUseItem"
-     WHERE "sourceKind" = 'PUBLIC_KNOWLEDGE'::"MemoryUseSourceKind"
-  ) THEN
-    RAISE EXCEPTION USING
-      ERRCODE = '23514',
-      CONSTRAINT = 'MemoryUseItem_public_projection_preflight',
-      MESSAGE = 'pre-T6 public knowledge usage cannot be assigned an exact projection ledger entry';
-  END IF;
-
-  IF EXISTS (
-    SELECT 1
-      FROM "MemoryUseItem"
-     WHERE (
-       "scopeCheckedAt" IS NOT NULL
-       AND "scopePassedAt" IS NULL
-       AND "rejectionReasonCode" IS NULL
-     ) OR (
-       "safetyCheckedAt" IS NOT NULL
-       AND "safetyPassedAt" IS NULL
-       AND "rejectionReasonCode" IS NULL
-     )
-  ) THEN
-    RAISE EXCEPTION USING
-      ERRCODE = '23514',
-      CONSTRAINT = 'MemoryUseItem_rejection_reason_preflight',
-      MESSAGE = 'checked-but-rejected legacy use items require a stable rejection reason';
-  END IF;
-
-  IF EXISTS (
-    SELECT 1
-      FROM "MemoryUseRun"
-     WHERE "status" IN (
-       'DEGRADED'::"MemoryUseRunStatus",
-       'FAILED'::"MemoryUseRunStatus",
-       'CANCELED'::"MemoryUseRunStatus"
-     )
-  ) THEN
-    RAISE EXCEPTION USING
-      ERRCODE = '23514',
-      CONSTRAINT = 'MemoryUseRun_terminal_reason_preflight',
-      MESSAGE = 'legacy non-success memory use runs require an explicit stable reason code';
-  END IF;
-END;
-$$;
-
 -- P0 exposes governed long-term memory on Web only. Normalize any policy
 -- written by an earlier build before making the invariant structural.
+-- LEGACY_MEMORY_POLICY_NORMALIZATION_BEGIN
 UPDATE "RepresentativeMemoryPolicy"
-   SET "matrixRecallEnabled" = false,
+   SET "autoExtract" = CASE
+         WHEN NOT "contactMemoryEnabled" THEN false
+         ELSE "autoExtract"
+       END,
+       "webExtractEnabled" = CASE
+         WHEN NOT "contactMemoryEnabled" OR NOT "autoExtract" THEN false
+         ELSE "webExtractEnabled"
+       END,
+       "matrixRecallEnabled" = false,
        "matrixExtractEnabled" = false,
        "telegramRecallEnabled" = false,
        "telegramExtractEnabled" = false,
@@ -75,7 +21,13 @@ UPDATE "RepresentativeMemoryPolicy"
  WHERE "matrixRecallEnabled"
     OR "matrixExtractEnabled"
     OR "telegramRecallEnabled"
-    OR "telegramExtractEnabled";
+    OR "telegramExtractEnabled"
+    OR ("autoExtract" AND NOT "contactMemoryEnabled")
+    OR (
+      "webExtractEnabled"
+      AND (NOT "contactMemoryEnabled" OR NOT "autoExtract")
+    );
+-- LEGACY_MEMORY_POLICY_NORMALIZATION_END
 
 ALTER TABLE "RepresentativeMemoryPolicy"
   DROP CONSTRAINT "MemoryPolicy_safe_enablement_check",
@@ -109,6 +61,8 @@ CREATE TABLE "RepresentativeVersionResource" (
   "resourceKey" TEXT NOT NULL,
   "knowledgeAssetId" TEXT,
   "contentHash" TEXT NOT NULL,
+  "safeText" TEXT NOT NULL,
+  "citationTitle" VARCHAR(200),
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
   CONSTRAINT "RepresentativeVersionResource_pkey"
@@ -120,6 +74,14 @@ CREATE TABLE "RepresentativeVersionResource" (
   ),
   CONSTRAINT "RepresentativeVersionResource_text_check" CHECK (
     btrim("resourceKey") <> ''
+    AND btrim("safeText") <> ''
+    AND (
+      "citationTitle" IS NULL
+      OR (
+        btrim("citationTitle") <> ''
+        AND "citationTitle" = btrim("citationTitle")
+      )
+    )
     AND "resourceKey" = btrim("resourceKey")
     AND "resourceKey" !~ '[[:space:]\\%?#]'
     AND "resourceKey" !~ '(^/|/$|(^|/)\.\.(/|$))'
@@ -277,6 +239,158 @@ DROP TABLE "ConversationRecallTrace";
 DROP TRIGGER "MemoryUseRun_channel_guard" ON "MemoryUseRun";
 DROP FUNCTION "memory_use_run_channel_guard"();
 
+-- LEGACY_MEMORY_USE_REMEDIATION_BEGIN
+-- Preserve an old run only when one exact generation has the same
+-- conversation, input message, and published version. Unmappable runs and
+-- public items had no authoritative provenance under the old schema, so they
+-- are removed instead of manufacturing generation IDs, projection IDs, or
+-- remote URIs. Retained governed-memory facts keep their stage timestamps.
+-- LEGACY_MEMORY_USE_GENERATION_MAPPING_BEGIN
+WITH generation_candidates AS (
+  SELECT use_run."id" AS "useRunId",
+         generation."id" AS "generationRunId",
+         COUNT(*) OVER (PARTITION BY use_run."id") AS "generationCount",
+         COUNT(*) OVER (PARTITION BY generation."id") AS "useRunCount"
+    FROM "MemoryUseRun" AS use_run
+    JOIN "GenerationRun" AS generation
+      ON generation."conversationId" = use_run."conversationId"
+     AND generation."inputMessageId" = use_run."inputMessageId"
+     AND generation."representativeVersionId" = use_run."representativeVersionId"
+   WHERE use_run."generationRunId" IS NULL
+     AND NOT EXISTS (
+       SELECT 1
+        FROM "MemoryUseRun" AS bound_run
+        WHERE bound_run."generationRunId" = generation."id"
+     )
+), exact_generation AS (
+  SELECT "useRunId", "generationRunId"
+    FROM generation_candidates
+   WHERE "generationCount" = 1
+     AND "useRunCount" = 1
+)
+UPDATE "MemoryUseRun" AS use_run
+   SET "generationRunId" = exact_generation."generationRunId",
+       "updatedAt" = CURRENT_TIMESTAMP
+  FROM exact_generation
+ WHERE use_run."id" = exact_generation."useRunId";
+
+DELETE FROM "MemoryUseRun"
+ WHERE "generationRunId" IS NULL;
+-- LEGACY_MEMORY_USE_GENERATION_MAPPING_END
+
+-- STARTED + completedAt was legal under the previous one-way terminal check.
+-- Preserve the completion fact, but make the row explicitly failed before
+-- current-Episode re-proof so a later release does not make that historical
+-- completion look like abandoned open work.
+UPDATE "MemoryUseRun"
+   SET "status" = 'FAILED'::"MemoryUseRunStatus",
+       "updatedAt" = CURRENT_TIMESTAMP
+ WHERE "status" = 'STARTED'::"MemoryUseRunStatus"
+   AND "completedAt" IS NOT NULL;
+
+-- Re-prove every pre-existing binding against the stricter generation truth
+-- contract. The previous trigger checked only the representative version for
+-- already-bound runs, so a legacy row could point at another input or output
+-- message while still satisfying all old constraints. Such rows are not safe
+-- to attribute and are removed with their cascade-owned items.
+DELETE FROM "MemoryUseRun" AS use_run
+ WHERE NOT EXISTS (
+   SELECT 1
+     FROM "GenerationRun" AS generation
+     JOIN "Representative" AS representative
+       ON representative."id" = use_run."representativeId"
+     JOIN "RepresentativeVersion" AS published_version
+       ON published_version."id" = use_run."representativeVersionId"
+      AND published_version."representativeId" = use_run."representativeId"
+      AND published_version."status" = 'PUBLISHED'
+     JOIN "Conversation" AS conversation
+      ON conversation."id" = use_run."conversationId"
+      AND conversation."representativeId" = use_run."representativeId"
+      AND conversation."contactId" = use_run."contactId"
+      AND conversation."sourceChannel" = use_run."sourceChannel"::TEXT
+     LEFT JOIN "ConversationEpisode" AS episode
+       ON episode."id" = generation."episodeId"
+     LEFT JOIN "Message" AS output_message
+       ON output_message."id" = use_run."outputMessageId"
+      AND output_message."conversationId" = use_run."conversationId"
+    WHERE generation."id" = use_run."generationRunId"
+      AND generation."conversationId" = use_run."conversationId"
+      AND generation."inputMessageId" = use_run."inputMessageId"
+      AND generation."representativeVersionId" = use_run."representativeVersionId"
+      AND (
+        generation."episodeId" IS NULL
+        OR (
+          generation."episodeId" IS NOT NULL
+          AND episode."conversationId" = use_run."conversationId"
+          AND episode."representativeVersionId" = use_run."representativeVersionId"
+        )
+      )
+      AND (
+        use_run."status" <> 'STARTED'::"MemoryUseRunStatus"
+        OR (
+          generation."episodeId" IS NULL
+          AND conversation."activeEpisodeId" IS NULL
+          AND representative."activeVersionId" = use_run."representativeVersionId"
+        ) OR (
+          generation."episodeId" IS NOT NULL
+          AND conversation."activeEpisodeId" = generation."episodeId"
+          AND episode."status" = 'ACTIVE'::"ConversationEpisodeStatus"
+        )
+      )
+      AND (
+        use_run."outputMessageId" IS NULL
+        OR (
+          generation."outputMessageId" = use_run."outputMessageId"
+          AND output_message."id" IS NOT NULL
+        )
+      )
+      AND (
+        use_run."status" NOT IN (
+          'COMPLETED'::"MemoryUseRunStatus",
+          'DEGRADED'::"MemoryUseRunStatus"
+        ) OR (
+          generation."status" = 'COMPLETED'::"GenerationRunStatus"
+          AND output_message."senderType" = 'REPRESENTATIVE'::"MessageSenderType"
+          AND output_message."deliveryStatus" IN (
+            'ACCEPTED'::"MessageDeliveryStatus",
+            'QUEUED'::"MessageDeliveryStatus",
+            'PROCESSING'::"MessageDeliveryStatus",
+            'SENT'::"MessageDeliveryStatus"
+          )
+        )
+      )
+ );
+
+-- LEGACY_MEMORY_USE_REJECTION_NORMALIZATION_BEGIN
+DELETE FROM "MemoryUseItem"
+ WHERE "sourceKind" = 'PUBLIC_KNOWLEDGE'::"MemoryUseSourceKind";
+
+-- A free-form legacy reason was not proof that either the scope or safety
+-- check failed. Retain it only where a failed check is structurally visible;
+-- otherwise clear it rather than manufacturing a rejection.
+UPDATE "MemoryUseItem"
+   SET "rejectionReasonCode" = NULL,
+       "updatedAt" = CURRENT_TIMESTAMP
+ WHERE "rejectionReasonCode" IS NOT NULL
+   AND NOT (
+     ("scopeCheckedAt" IS NOT NULL AND "scopePassedAt" IS NULL)
+     OR ("safetyCheckedAt" IS NOT NULL AND "safetyPassedAt" IS NULL)
+   );
+
+UPDATE "MemoryUseItem"
+   SET "rejectionReasonCode" = CASE
+         WHEN "scopeCheckedAt" IS NOT NULL AND "scopePassedAt" IS NULL
+           THEN 'legacy_scope_rejected'
+         ELSE 'legacy_safety_rejected'
+       END,
+       "updatedAt" = CURRENT_TIMESTAMP
+ WHERE (
+     ("scopeCheckedAt" IS NOT NULL AND "scopePassedAt" IS NULL)
+     OR ("safetyCheckedAt" IS NOT NULL AND "safetyPassedAt" IS NULL)
+   );
+-- LEGACY_MEMORY_USE_REJECTION_NORMALIZATION_END
+-- LEGACY_MEMORY_USE_REMEDIATION_END
+
 ALTER TABLE "MemoryUseRun"
   DROP CONSTRAINT "MemoryUseRun_counts_check",
   DROP CONSTRAINT "MemoryUseRun_terminal_check",
@@ -288,16 +402,23 @@ ALTER TABLE "MemoryUseRun"
   ADD COLUMN "citedCount" INTEGER NOT NULL DEFAULT 0,
   ALTER COLUMN "generationRunId" SET NOT NULL;
 
+-- LEGACY_MEMORY_USE_TERMINAL_REASON_BEGIN
+UPDATE "MemoryUseRun"
+   SET "reasonCode" = CASE "status"
+         WHEN 'DEGRADED'::"MemoryUseRunStatus" THEN 'legacy_degraded'
+         WHEN 'FAILED'::"MemoryUseRunStatus" THEN 'legacy_failed'
+         WHEN 'CANCELED'::"MemoryUseRunStatus" THEN 'legacy_canceled'
+         ELSE NULL
+       END,
+       "updatedAt" = CURRENT_TIMESTAMP
+ WHERE "status" IN (
+   'DEGRADED'::"MemoryUseRunStatus",
+   'FAILED'::"MemoryUseRunStatus",
+   'CANCELED'::"MemoryUseRunStatus"
+ );
+-- LEGACY_MEMORY_USE_TERMINAL_REASON_END
+
 ALTER TABLE "MemoryUseRun"
-  ADD CONSTRAINT "MemoryUseRun_counts_check" CHECK (
-    "unmappedCandidateCount" >= 0
-    AND "searchedCount" >= 0
-    AND "scopePassedCount" BETWEEN 0 AND "searchedCount"
-    AND "safetyPassedCount" BETWEEN 0 AND "scopePassedCount"
-    AND "injectedCount" BETWEEN 0 AND "safetyPassedCount"
-    AND "citedCount" BETWEEN 0 AND "injectedCount"
-    AND "displayedCount" BETWEEN 0 AND "citedCount"
-  ),
   ADD CONSTRAINT "MemoryUseRun_reason_code_check" CHECK (
     "reasonCode" IS NULL OR "reasonCode" ~ '^[a-z][a-z0-9_]{0,63}$'
   ),
@@ -378,8 +499,16 @@ ALTER TABLE "MemoryUseItem"
 DROP INDEX "MemoryUseItem_public_knowledge_idx";
 
 ALTER TABLE "MemoryUseItem"
+  DROP CONSTRAINT "MemoryUseItem_text_check",
   DROP COLUMN "knowledgeBindingId",
   DROP COLUMN "representativeVersionId",
+  ADD CONSTRAINT "MemoryUseItem_text_check" CHECK (
+    btrim("itemKey") <> ''
+    AND (
+      "rejectionReasonCode" IS NULL
+      OR "rejectionReasonCode" ~ '^[a-z][a-z0-9_]{0,63}$'
+    )
+  ),
   ADD CONSTRAINT "MemoryUseItem_citationId_key" UNIQUE ("citationId"),
   ADD CONSTRAINT "MemoryUseItem_source_shape_check" CHECK (
     (
@@ -467,6 +596,7 @@ CREATE INDEX "MemoryUseItem_run_cited_idx"
 
 -- Existing retained contact/experience usage counts are re-derived once.
 -- Thereafter only the item trigger below can change these six counters.
+-- LEGACY_MEMORY_USE_COUNT_REDERIVATION_BEGIN
 UPDATE "MemoryUseRun" AS use_run
    SET "searchedCount" = counts."searchedCount",
        "scopePassedCount" = counts."scopePassedCount",
@@ -489,11 +619,34 @@ UPDATE "MemoryUseRun" AS use_run
   ) AS counts
  WHERE counts."id" = use_run."id";
 
+-- The old schema allowed displayedCount up to injectedCount and had no
+-- citedCount. Add the stricter aggregate invariant only after historical
+-- citations have been scrubbed and every retained run has been re-derived
+-- from its retained items. Adding this constraint earlier rejects otherwise
+-- valid legacy rows with displayedCount > 0 during an in-place upgrade.
+ALTER TABLE "MemoryUseRun"
+  ADD CONSTRAINT "MemoryUseRun_counts_check" CHECK (
+    "unmappedCandidateCount" >= 0
+    AND "searchedCount" >= 0
+    AND "scopePassedCount" BETWEEN 0 AND "searchedCount"
+    AND "safetyPassedCount" BETWEEN 0 AND "scopePassedCount"
+    AND "injectedCount" BETWEEN 0 AND "safetyPassedCount"
+    AND "citedCount" BETWEEN 0 AND "injectedCount"
+    AND "displayedCount" BETWEEN 0 AND "citedCount"
+  );
+-- LEGACY_MEMORY_USE_COUNT_REDERIVATION_END
+
 -- Published RepresentativeVersion snapshots are the immutable root for the
 -- resource manifest. Publishing creates a new version instead of rewriting
 -- bytes that an existing conversation or projection has already pinned.
 CREATE FUNCTION "representative_published_version_immutable_guard"() RETURNS TRIGGER AS $$
 BEGIN
+  IF TG_OP = 'DELETE' AND OLD."status" = 'PUBLISHED' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '55000',
+      CONSTRAINT = 'RepresentativeVersion_published_immutable_check',
+      MESSAGE = 'published representative versions cannot be deleted';
+  END IF;
   IF OLD."status" = 'PUBLISHED'
      AND (
        NEW."representativeId" IS DISTINCT FROM OLD."representativeId"
@@ -507,12 +660,15 @@ BEGIN
       CONSTRAINT = 'RepresentativeVersion_published_immutable_check',
       MESSAGE = 'published representative versions are immutable';
   END IF;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER "RepresentativeVersion_published_immutable_guard"
-  BEFORE UPDATE ON "RepresentativeVersion"
+  BEFORE UPDATE OR DELETE ON "RepresentativeVersion"
   FOR EACH ROW EXECUTE FUNCTION "representative_published_version_immutable_guard"();
 
 CREATE FUNCTION "representative_version_resource_guard"() RETURNS TRIGGER AS $$
@@ -520,6 +676,8 @@ DECLARE
   version_record "RepresentativeVersion"%ROWTYPE;
   asset_record "KnowledgeAsset"%ROWTYPE;
   representative_owner_id TEXT;
+  asset_found BOOLEAN := FALSE;
+  binding_approved BOOLEAN := FALSE;
 BEGIN
   IF TG_OP = 'UPDATE' THEN
     RAISE EXCEPTION USING
@@ -549,11 +707,22 @@ BEGIN
       FROM "KnowledgeAsset"
      WHERE "id" = NEW."knowledgeAssetId"
      FOR SHARE;
-    IF NOT FOUND
+    asset_found := FOUND;
+    PERFORM 1
+      FROM "KnowledgeAssetRepresentative" AS binding
+     WHERE binding."assetId" = NEW."knowledgeAssetId"
+       AND binding."representativeId" = NEW."representativeId"
+       AND binding."enabled" IS TRUE
+       AND binding."reviewStatus" = 'APPROVED'::"KnowledgeAssetReviewStatus"
+     FOR SHARE;
+    binding_approved := FOUND;
+    IF NOT asset_found
        OR asset_record."ownerId" IS DISTINCT FROM representative_owner_id
        OR asset_record."status" <> 'READY'::"KnowledgeAssetStatus"
        OR asset_record."archivedAt" IS NOT NULL
        OR asset_record."checksum" IS DISTINCT FROM NEW."contentHash"
+       OR asset_record."extractedText" IS DISTINCT FROM NEW."safeText"
+       OR NOT binding_approved
        OR NOT EXISTS (
          SELECT 1
            FROM jsonb_array_elements(
@@ -592,6 +761,138 @@ CREATE TRIGGER "RepresentativeVersionResource_delete_guard"
   BEFORE DELETE ON "RepresentativeVersionResource"
   FOR EACH ROW EXECUTE FUNCTION "representative_version_resource_delete_guard"();
 
+-- Capture linked KnowledgeAsset bytes in the same transaction that publishes
+-- the RepresentativeVersion. Later edits, reprocessing, unlinking, archival,
+-- or deletion of the KnowledgeAsset must not rewrite this published release.
+CREATE FUNCTION "representative_version_snapshot_resources"() RETURNS TRIGGER AS $$
+DECLARE
+  pin JSONB;
+  asset_record "KnowledgeAsset"%ROWTYPE;
+  representative_owner_id TEXT;
+  binding_approved BOOLEAN;
+BEGIN
+  IF NEW."status" IS DISTINCT FROM 'PUBLISHED' THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'UPDATE'
+     AND OLD."status" = 'PUBLISHED' THEN
+    RETURN NEW;
+  END IF;
+  IF jsonb_typeof(COALESCE(NEW."snapshot"::JSONB -> 'knowledgeAssets', '[]'::JSONB))
+     IS DISTINCT FROM 'array' THEN
+    RAISE EXCEPTION USING
+      ERRCODE = '23514',
+      CONSTRAINT = 'RepresentativeVersion_knowledge_assets_shape_check',
+      MESSAGE = 'published knowledge asset pins must be an array';
+  END IF;
+
+  SELECT "ownerId" INTO representative_owner_id
+    FROM "Representative"
+   WHERE "id" = NEW."representativeId"
+   FOR SHARE;
+  FOR pin IN
+    SELECT value
+      FROM jsonb_array_elements(
+        COALESCE(NEW."snapshot"::JSONB -> 'knowledgeAssets', '[]'::JSONB)
+      )
+  LOOP
+    IF btrim(COALESCE(pin ->> 'assetId', '')) = ''
+       OR COALESCE(pin ->> 'checksum', '') !~ '^[0-9a-f]{64}$'
+       OR COALESCE(pin ->> 'processingVersion', '') !~ '^[0-9]+$' THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '23514',
+        CONSTRAINT = 'RepresentativeVersion_knowledge_asset_pin_check',
+        MESSAGE = 'published knowledge asset pin is incomplete';
+    END IF;
+
+    SELECT * INTO asset_record
+      FROM "KnowledgeAsset"
+     WHERE "id" = pin ->> 'assetId'
+     FOR SHARE;
+    PERFORM 1
+      FROM "KnowledgeAssetRepresentative" AS binding
+     WHERE binding."assetId" = pin ->> 'assetId'
+       AND binding."representativeId" = NEW."representativeId"
+       AND binding."enabled" IS TRUE
+       AND binding."reviewStatus" = 'APPROVED'::"KnowledgeAssetReviewStatus"
+     FOR SHARE;
+    binding_approved := FOUND;
+    IF asset_record."id" IS NULL
+       OR asset_record."ownerId" IS DISTINCT FROM representative_owner_id
+       OR asset_record."status" <> 'READY'::"KnowledgeAssetStatus"
+       OR asset_record."archivedAt" IS NOT NULL
+       OR btrim(COALESCE(asset_record."extractedText", '')) = ''
+       OR asset_record."checksum" IS DISTINCT FROM pin ->> 'checksum'
+       OR asset_record."processingVersion" IS DISTINCT FROM (pin ->> 'processingVersion')::INTEGER
+       OR NOT binding_approved THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '23514',
+        CONSTRAINT = 'RepresentativeVersion_knowledge_asset_snapshot_check',
+        MESSAGE = 'published knowledge asset pin no longer matches approved authoritative bytes';
+    END IF;
+
+    INSERT INTO "RepresentativeVersionResource" (
+      "publishedVersionId", "representativeId", "sourceKind",
+      "resourceKey", "knowledgeAssetId", "contentHash", "safeText",
+      "citationTitle"
+    ) VALUES (
+      NEW."id", NEW."representativeId",
+      'KNOWLEDGE_ASSET'::"PublicKnowledgeProjectionSourceKind",
+      'knowledge/' || asset_record."id" || '.md', asset_record."id",
+      asset_record."checksum", asset_record."extractedText", btrim(asset_record."title")
+    );
+  END LOOP;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER "RepresentativeVersion_snapshot_resources"
+  AFTER INSERT OR UPDATE OF "status" ON "RepresentativeVersion"
+  FOR EACH ROW EXECUTE FUNCTION "representative_version_snapshot_resources"();
+
+-- Existing releases predate the atomic snapshot trigger. Preserve every pin
+-- whose current authoritative bytes still match exactly; unrecoverable stale
+-- pins remain absent and therefore fail closed per resource without blocking
+-- the migration or unrelated published resources.
+INSERT INTO "RepresentativeVersionResource" (
+  "publishedVersionId", "representativeId", "sourceKind", "resourceKey",
+  "knowledgeAssetId", "contentHash", "safeText", "citationTitle"
+)
+SELECT version."id", version."representativeId",
+       'KNOWLEDGE_ASSET'::"PublicKnowledgeProjectionSourceKind",
+       'knowledge/' || asset."id" || '.md', asset."id", asset."checksum",
+       asset."extractedText", btrim(asset."title")
+  FROM "RepresentativeVersion" AS version
+  JOIN "Representative" AS representative
+    ON representative."id" = version."representativeId"
+ CROSS JOIN LATERAL jsonb_array_elements(
+    CASE
+      WHEN jsonb_typeof(version."snapshot"::JSONB -> 'knowledgeAssets') = 'array'
+        THEN version."snapshot"::JSONB -> 'knowledgeAssets'
+      ELSE '[]'::JSONB
+    END
+  ) AS pin
+  JOIN "KnowledgeAsset" AS asset
+    ON asset."id" = pin ->> 'assetId'
+   AND asset."id" ~ '^[A-Za-z0-9_-]{1,128}$'
+   AND asset."ownerId" = representative."ownerId"
+   AND asset."status" = 'READY'::"KnowledgeAssetStatus"
+   AND asset."archivedAt" IS NULL
+   AND btrim(COALESCE(asset."extractedText", '')) <> ''
+   AND asset."checksum" ~ '^[0-9a-f]{64}$'
+   AND asset."checksum" = pin ->> 'checksum'
+   AND btrim(asset."title") <> ''
+   AND length(btrim(asset."title")) <= 200
+   AND (pin ->> 'processingVersion') ~ '^[0-9]+$'
+   AND asset."processingVersion" = (pin ->> 'processingVersion')::INTEGER
+  JOIN "KnowledgeAssetRepresentative" AS binding
+    ON binding."assetId" = asset."id"
+   AND binding."representativeId" = version."representativeId"
+   AND binding."enabled" IS TRUE
+   AND binding."reviewStatus" = 'APPROVED'::"KnowledgeAssetReviewStatus"
+ WHERE version."status" = 'PUBLISHED'
+ON CONFLICT ("publishedVersionId", "resourceKey") DO NOTHING;
+
 -- An exact public-knowledge projection is an immutable receipt. KnowledgeAsset
 -- is intentionally checked by trigger but not referenced by FK so the ledger
 -- cannot block normal Knowledge Base deletion/retention.
@@ -599,11 +900,7 @@ CREATE FUNCTION "public_knowledge_projection_guard"() RETURNS TRIGGER AS $$
 DECLARE
   version_record "RepresentativeVersion"%ROWTYPE;
   manifest_record "RepresentativeVersionResource"%ROWTYPE;
-  asset_record "KnowledgeAsset"%ROWTYPE;
   representative_slug TEXT;
-  representative_owner_id TEXT;
-  asset_found BOOLEAN := FALSE;
-  binding_approved BOOLEAN := FALSE;
   canonical_slug TEXT;
   expected_prefix TEXT;
 BEGIN
@@ -642,7 +939,7 @@ BEGIN
       MESSAGE = 'public knowledge projection does not match the immutable published resource manifest';
   END IF;
 
-  SELECT "slug", "ownerId" INTO representative_slug, representative_owner_id
+  SELECT "slug" INTO representative_slug
     FROM "Representative"
    WHERE "id" = NEW."representativeId"
    FOR SHARE;
@@ -670,26 +967,7 @@ BEGIN
   END IF;
 
   IF NEW."sourceKind" = 'KNOWLEDGE_ASSET'::"PublicKnowledgeProjectionSourceKind" THEN
-    SELECT * INTO asset_record
-      FROM "KnowledgeAsset"
-     WHERE "id" = NEW."knowledgeAssetId"
-     FOR SHARE;
-    asset_found := FOUND;
-    PERFORM 1
-      FROM "KnowledgeAssetRepresentative" AS binding
-     WHERE binding."assetId" = NEW."knowledgeAssetId"
-       AND binding."representativeId" = NEW."representativeId"
-       AND binding."enabled" IS TRUE
-       AND binding."reviewStatus" = 'APPROVED'::"KnowledgeAssetReviewStatus"
-     FOR SHARE;
-    binding_approved := FOUND;
-    IF NOT asset_found
-       OR asset_record."status" <> 'READY'::"KnowledgeAssetStatus"
-       OR asset_record."archivedAt" IS NOT NULL
-       OR asset_record."ownerId" IS DISTINCT FROM representative_owner_id
-       OR asset_record."checksum" IS DISTINCT FROM NEW."contentHash"
-       OR NOT binding_approved
-       OR NOT EXISTS (
+    IF NOT EXISTS (
          SELECT 1
            FROM jsonb_array_elements(
              COALESCE(version_record."snapshot"::JSONB -> 'knowledgeAssets', '[]'::JSONB)
@@ -697,12 +975,11 @@ BEGIN
           WHERE pin ->> 'assetId' = NEW."knowledgeAssetId"
             AND pin ->> 'checksum' = NEW."contentHash"
             AND (pin ->> 'processingVersion') ~ '^[0-9]+$'
-            AND (pin ->> 'processingVersion')::INTEGER = asset_record."processingVersion"
        ) THEN
       RAISE EXCEPTION USING
         ERRCODE = '23514',
         CONSTRAINT = 'PublicKnowledgeProjectionItem_asset_snapshot_check',
-        MESSAGE = 'knowledge asset projection is not ready, approved, and byte-pinned by the published snapshot';
+        MESSAGE = 'knowledge asset projection is not byte-pinned by the immutable published snapshot';
     END IF;
   END IF;
 
@@ -732,10 +1009,15 @@ DECLARE
   pinned_version_status TEXT;
   active_version_id TEXT;
   generation_record "GenerationRun"%ROWTYPE;
+  conversation_active_episode_id TEXT;
+  episode_conversation_id TEXT;
+  episode_version_id TEXT;
+  episode_status "ConversationEpisodeStatus";
   output_conversation_id TEXT;
   output_sender_type "MessageSenderType";
   output_delivery_status "MessageDeliveryStatus";
   check_pinned_version BOOLEAN;
+  require_current_episode BOOLEAN;
   output_retention_clear BOOLEAN := FALSE;
 BEGIN
   PERFORM "memory_assert_channel_match"(
@@ -745,6 +1027,7 @@ BEGIN
   );
 
   check_pinned_version := TG_OP = 'INSERT';
+  require_current_episode := TG_OP = 'INSERT';
   IF TG_OP = 'UPDATE' THEN
     check_pinned_version :=
       NEW."representativeVersionId" IS DISTINCT FROM OLD."representativeVersionId"
@@ -753,6 +1036,7 @@ BEGIN
       OLD."outputMessageId" IS NOT NULL
       AND NEW."outputMessageId" IS NULL
       AND pg_trigger_depth() > 1;
+    require_current_episode := OLD."status" = 'STARTED'::"MemoryUseRunStatus";
   END IF;
 
   IF check_pinned_version THEN
@@ -772,16 +1056,6 @@ BEGIN
         ERRCODE = '23514',
         CONSTRAINT = 'MemoryUseRun_pinned_version_check',
         MESSAGE = 'memory use run must pin a published representative version';
-    END IF;
-    SELECT "activeVersionId" INTO active_version_id
-      FROM "Representative"
-     WHERE "id" = NEW."representativeId"
-     FOR SHARE;
-    IF active_version_id IS DISTINCT FROM NEW."representativeVersionId" THEN
-      RAISE EXCEPTION USING
-        ERRCODE = '23514',
-        CONSTRAINT = 'MemoryUseRun_active_version_check',
-        MESSAGE = 'memory use run must pin the representative active published version';
     END IF;
   END IF;
 
@@ -807,6 +1081,55 @@ BEGIN
       ERRCODE = '23514',
       CONSTRAINT = 'MemoryUseRun_generation_input_check',
       MESSAGE = 'memory use run and generation run have different input messages';
+  END IF;
+  IF generation_record."episodeId" IS NULL THEN
+    -- Compatibility for pre-Episode generations: they are safe only while
+    -- an open run is pinned to the representative's active release and the
+    -- conversation has not moved into the Episode lifecycle. Terminal rows
+    -- remain valid historical evidence after a later publication.
+    IF require_current_episode THEN
+      SELECT representative."activeVersionId", conversation."activeEpisodeId"
+        INTO active_version_id, conversation_active_episode_id
+        FROM "Representative" AS representative
+        JOIN "Conversation" AS conversation
+          ON conversation."id" = NEW."conversationId"
+       WHERE representative."id" = NEW."representativeId"
+       FOR SHARE OF representative, conversation;
+    END IF;
+    IF require_current_episode AND (
+      active_version_id IS DISTINCT FROM NEW."representativeVersionId"
+      OR conversation_active_episode_id IS NOT NULL
+    ) THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '23514',
+        CONSTRAINT = 'MemoryUseRun_legacy_active_version_check',
+        MESSAGE = 'open legacy memory use generation is no longer the current conversation generation';
+    END IF;
+  ELSE
+    SELECT episode."conversationId", episode."representativeVersionId",
+           episode."status", conversation."activeEpisodeId"
+      INTO episode_conversation_id, episode_version_id, episode_status,
+           conversation_active_episode_id
+      FROM "ConversationEpisode" AS episode
+      JOIN "Conversation" AS conversation
+        ON conversation."id" = NEW."conversationId"
+     WHERE episode."id" = generation_record."episodeId"
+     FOR SHARE OF episode, conversation;
+    IF NOT FOUND
+       OR episode_conversation_id IS DISTINCT FROM NEW."conversationId"
+       OR episode_version_id IS DISTINCT FROM NEW."representativeVersionId"
+       OR (
+         require_current_episode
+         AND (
+           conversation_active_episode_id IS DISTINCT FROM generation_record."episodeId"
+           OR episode_status IS DISTINCT FROM 'ACTIVE'::"ConversationEpisodeStatus"
+         )
+       ) THEN
+      RAISE EXCEPTION USING
+        ERRCODE = '23514',
+        CONSTRAINT = 'MemoryUseRun_episode_version_check',
+        MESSAGE = 'open memory use run must match the current active generation episode and published version';
+    END IF;
   END IF;
 
   IF NEW."outputMessageId" IS NOT NULL THEN
@@ -1028,17 +1351,18 @@ DECLARE
   public_projection_record "PublicKnowledgeProjectionItem"%ROWTYPE;
   public_manifest_record "RepresentativeVersionResource"%ROWTYPE;
   public_version_record "RepresentativeVersion"%ROWTYPE;
-  asset_record "KnowledgeAsset"%ROWTYPE;
+  generation_record "GenerationRun"%ROWTYPE;
   policy_record "RepresentativeMemoryPolicy"%ROWTYPE;
   active_version_id TEXT;
-  representative_owner_id TEXT;
+  conversation_active_episode_id TEXT;
+  episode_conversation_id TEXT;
+  episode_version_id TEXT;
+  episode_status "ConversationEpisodeStatus";
   citation_message_id TEXT;
   output_delivery_status "MessageDeliveryStatus";
   candidate_approved BOOLEAN := FALSE;
   review_approved BOOLEAN := FALSE;
-  binding_approved BOOLEAN := FALSE;
   policy_found BOOLEAN := FALSE;
-  asset_found BOOLEAN := FALSE;
   public_manifest_found BOOLEAN := FALSE;
   public_version_found BOOLEAN := FALSE;
   injection_transition BOOLEAN;
@@ -1167,16 +1491,54 @@ BEGIN
   END IF;
 
   IF TG_OP = 'INSERT' OR injection_transition THEN
-    SELECT "activeVersionId", "ownerId"
-      INTO active_version_id, representative_owner_id
-      FROM "Representative"
-     WHERE "id" = run_record."representativeId"
+    SELECT * INTO generation_record
+      FROM "GenerationRun"
+     WHERE "id" = run_record."generationRunId"
+       AND "conversationId" = run_record."conversationId"
      FOR SHARE;
-    IF active_version_id IS DISTINCT FROM run_record."representativeVersionId" THEN
+    IF NOT FOUND
+       OR generation_record."representativeVersionId" IS DISTINCT FROM run_record."representativeVersionId"
+       OR generation_record."inputMessageId" IS DISTINCT FROM run_record."inputMessageId" THEN
       RAISE EXCEPTION USING
         ERRCODE = '23514',
-        CONSTRAINT = 'MemoryUseItem_active_version_check',
-        MESSAGE = 'memory use item belongs to a stale representative version';
+        CONSTRAINT = 'MemoryUseItem_generation_version_check',
+        MESSAGE = 'memory use item no longer matches its generation version pin';
+    END IF;
+    IF generation_record."episodeId" IS NULL THEN
+      SELECT representative."activeVersionId", conversation."activeEpisodeId"
+        INTO active_version_id, conversation_active_episode_id
+        FROM "Representative" AS representative
+        JOIN "Conversation" AS conversation
+          ON conversation."id" = run_record."conversationId"
+       WHERE representative."id" = run_record."representativeId"
+       FOR SHARE OF representative, conversation;
+      IF active_version_id IS DISTINCT FROM run_record."representativeVersionId"
+         OR conversation_active_episode_id IS NOT NULL THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '23514',
+          CONSTRAINT = 'MemoryUseItem_legacy_active_version_check',
+          MESSAGE = 'legacy memory use item is no longer in the current conversation generation';
+      END IF;
+    ELSE
+      SELECT episode."conversationId", episode."representativeVersionId",
+             episode."status", conversation."activeEpisodeId"
+        INTO episode_conversation_id, episode_version_id, episode_status,
+             conversation_active_episode_id
+        FROM "ConversationEpisode" AS episode
+        JOIN "Conversation" AS conversation
+          ON conversation."id" = run_record."conversationId"
+       WHERE episode."id" = generation_record."episodeId"
+       FOR SHARE OF episode, conversation;
+      IF NOT FOUND
+         OR episode_conversation_id IS DISTINCT FROM run_record."conversationId"
+         OR episode_version_id IS DISTINCT FROM run_record."representativeVersionId"
+         OR conversation_active_episode_id IS DISTINCT FROM generation_record."episodeId"
+         OR episode_status IS DISTINCT FROM 'ACTIVE'::"ConversationEpisodeStatus" THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '23514',
+          CONSTRAINT = 'MemoryUseItem_episode_version_check',
+          MESSAGE = 'memory use item no longer matches the current active generation episode version pin';
+      END IF;
     END IF;
   END IF;
 
@@ -1367,43 +1729,6 @@ BEGIN
         MESSAGE = 'public knowledge is not backed by the current immutable published resource manifest';
     END IF;
 
-    IF injection_transition
-       AND public_projection_record."sourceKind" = 'KNOWLEDGE_ASSET'::"PublicKnowledgeProjectionSourceKind" THEN
-      SELECT * INTO asset_record
-        FROM "KnowledgeAsset"
-       WHERE "id" = public_projection_record."knowledgeAssetId"
-       FOR SHARE;
-      asset_found := FOUND;
-      PERFORM 1
-        FROM "KnowledgeAssetRepresentative" AS binding
-       WHERE binding."assetId" = public_projection_record."knowledgeAssetId"
-         AND binding."representativeId" = run_record."representativeId"
-         AND binding."enabled" IS TRUE
-         AND binding."reviewStatus" = 'APPROVED'::"KnowledgeAssetReviewStatus"
-       FOR SHARE;
-      binding_approved := FOUND;
-      IF NOT asset_found
-         OR asset_record."status" <> 'READY'::"KnowledgeAssetStatus"
-         OR asset_record."archivedAt" IS NOT NULL
-         OR asset_record."ownerId" IS DISTINCT FROM representative_owner_id
-         OR asset_record."checksum" IS DISTINCT FROM public_projection_record."contentHash"
-         OR NOT binding_approved
-         OR NOT EXISTS (
-           SELECT 1
-             FROM jsonb_array_elements(
-               COALESCE(public_version_record."snapshot"::JSONB -> 'knowledgeAssets', '[]'::JSONB)
-             ) AS pin
-            WHERE pin ->> 'assetId' = public_projection_record."knowledgeAssetId"
-              AND pin ->> 'checksum' = public_projection_record."contentHash"
-              AND (pin ->> 'processingVersion') ~ '^[0-9]+$'
-              AND (pin ->> 'processingVersion')::INTEGER = asset_record."processingVersion"
-         ) THEN
-        RAISE EXCEPTION USING
-          ERRCODE = '23514',
-          CONSTRAINT = 'MemoryUseItem_knowledge_injection_check',
-          MESSAGE = 'knowledge asset was deleted, archived, changed, disabled, or unapproved before injection';
-      END IF;
-    END IF;
   END IF;
 
   IF NEW."citedAt" IS NOT NULL AND NEW."citationId" IS NOT NULL THEN

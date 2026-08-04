@@ -30,6 +30,10 @@ import {
   enqueueRepresentativeOpenVikingSync,
   processRepresentativeOpenVikingSyncJob,
 } from "../src/openviking";
+import { syncRepresentativeResourceDocumentToOpenViking } from "../src/openviking-boundaries";
+
+const representativeVersionRoot =
+  "viking://resources/delegate/reps/delegate/versions/version-1/";
 
 describe("durable OpenViking sync jobs", () => {
   beforeEach(() => {
@@ -42,6 +46,120 @@ describe("durable OpenViking sync jobs", () => {
       callback as (tx: typeof mockPrisma) => Promise<unknown>
     )(mockPrisma));
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "audit-1" });
+  });
+
+  it("rejects memory documents before any temporary upload", async () => {
+    const client = {
+      tempUpload: vi.fn(),
+      addResource: vi.fn(),
+      move: vi.fn(),
+    };
+
+    await expect(syncRepresentativeResourceDocumentToOpenViking({
+      client: client as never,
+      expectedRootUri: representativeVersionRoot,
+      timeoutSeconds: 300,
+      document: {
+        uri: "viking://user/memories/delegate/legacy/contact/memory.md",
+        filename: "memory.md",
+        reason: "legacy memory write",
+        contextType: "memory",
+        scope: "contact",
+        category: "preference",
+        content: "raw conversation content",
+      },
+    })).rejects.toThrow("accepts representative resource documents only");
+
+    expect(client.tempUpload).not.toHaveBeenCalled();
+    expect(client.addResource).not.toHaveBeenCalled();
+    expect(client.move).not.toHaveBeenCalled();
+  });
+
+  it("rejects a resource-labelled memory URI before any temporary upload", async () => {
+    const client = {
+      tempUpload: vi.fn(),
+      addResource: vi.fn(),
+    };
+
+    await expect(syncRepresentativeResourceDocumentToOpenViking({
+      client: client as never,
+      expectedRootUri: representativeVersionRoot,
+      timeoutSeconds: 300,
+      document: {
+        uri: "viking://user/memories/delegate/legacy/contact/memory.md",
+        filename: "memory.md",
+        reason: "resource-labelled memory write",
+        contextType: "resource",
+        scope: "representative",
+        category: "faq",
+        content: "raw conversation content",
+      },
+    })).rejects.toThrow("canonical viking://resources/ URI");
+
+    expect(client.tempUpload).not.toHaveBeenCalled();
+    expect(client.addResource).not.toHaveBeenCalled();
+  });
+
+  it("rejects a canonical resource URI outside the pinned version root before upload", async () => {
+    const client = {
+      tempUpload: vi.fn(),
+      addResource: vi.fn(),
+    };
+
+    await expect(syncRepresentativeResourceDocumentToOpenViking({
+      client: client as never,
+      expectedRootUri: representativeVersionRoot,
+      timeoutSeconds: 300,
+      document: {
+        uri: "viking://resources/delegate/reps/other/versions/version-1/faq/index.md",
+        filename: "faq.md",
+        reason: "cross-representative resource write",
+        contextType: "resource",
+        scope: "representative",
+        category: "faq",
+        content: "Cross-representative content.",
+      },
+    })).rejects.toThrow("outside its pinned version root");
+
+    expect(client.tempUpload).not.toHaveBeenCalled();
+    expect(client.addResource).not.toHaveBeenCalled();
+  });
+
+  it("continues to upload published knowledge resources", async () => {
+    const client = {
+      tempUpload: vi.fn().mockResolvedValue({ temp_file_id: "temp-resource-1" }),
+      addResource: vi.fn().mockResolvedValue({ status: "processed" }),
+      move: vi.fn(),
+    };
+
+    await syncRepresentativeResourceDocumentToOpenViking({
+      client: client as never,
+      expectedRootUri: representativeVersionRoot,
+      timeoutSeconds: 300,
+      document: {
+        uri: "viking://resources/delegate/reps/delegate/versions/version-1/faq/index.md",
+        filename: "faq.md",
+        reason: "published FAQ",
+        contextType: "resource",
+        scope: "representative",
+        category: "faq",
+        content: "# FAQ\n\nPublished answer.",
+      },
+    });
+
+    expect(client.tempUpload).toHaveBeenCalledWith({
+      filename: "faq.md",
+      content: "# FAQ\n\nPublished answer.",
+    });
+    expect(client.addResource).toHaveBeenCalledWith({
+      tempFileId: "temp-resource-1",
+      to: "viking://resources/delegate/reps/delegate/versions/version-1/faq/index.md",
+      reason: "published FAQ",
+      instruction: "Delegate representative public knowledge sync",
+      wait: true,
+      timeout: 300,
+    });
+    expect(client.move).not.toHaveBeenCalled();
   });
 
   it("persists the requested version, trigger, actor, and aggregate fence before returning", async () => {

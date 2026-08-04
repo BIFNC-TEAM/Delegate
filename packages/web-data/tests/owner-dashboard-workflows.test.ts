@@ -36,7 +36,6 @@ const { mockGetRepresentativeOpenVikingOverviewMetrics, mockPrisma } = vi.hoiste
 vi.mock("../src/openviking", () => ({
   getRepresentativeOpenVikingOverviewMetrics:
     mockGetRepresentativeOpenVikingOverviewMetrics,
-  maybeStoreHandoffPatternFromStatusChange: vi.fn(),
 }));
 
 vi.mock("../src/prisma", () => ({

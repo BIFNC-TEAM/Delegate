@@ -23,6 +23,11 @@ import { EventType, Prisma, type Representative } from "@prisma/client";
 import { z } from "zod";
 
 import { prisma } from "./prisma";
+import {
+  assertLegacyOpenVikingMemoryUriForRepresentative,
+  LegacyOpenVikingMemoryUriError,
+  syncRepresentativeResourceDocumentToOpenViking,
+} from "./openviking-boundaries";
 
 const REPRESENTATIVE_RESOURCE_SYNC_TIMEOUT_SECONDS = 300;
 const OPENVIKING_MEMORY_DELETE_LEASE_MS = 60_000;
@@ -60,6 +65,11 @@ export type OpenVikingMaintenanceTickSummary = {
   sync: OpenVikingSyncTickSummary;
   memoryDeletion: OpenVikingMemoryDeletionTickSummary;
 };
+
+type RepresentativeOpenVikingDocumentSync = (params: {
+  client: OpenVikingClient;
+  document: OpenVikingDocumentSpec;
+}) => Promise<void>;
 
 const representativeOpenVikingArgs = Prisma.validator<Prisma.RepresentativeDefaultArgs>()({
   include: {
@@ -481,7 +491,7 @@ export async function processRepresentativeOpenVikingSyncJob(params: {
   jobId: string;
   now?: Date;
   leaseMs?: number;
-  syncDocument?: typeof syncDocumentToOpenViking;
+  syncDocument?: RepresentativeOpenVikingDocumentSync;
 }): Promise<{ processed: boolean; status?: string }> {
   const now = params.now ?? new Date();
   const leaseMs = params.leaseMs ?? OPENVIKING_SYNC_JOB_LEASE_MS;
@@ -608,11 +618,16 @@ export async function processRepresentativeOpenVikingSyncJob(params: {
       if (!leaseRenewed) {
         throw new Error("OpenViking sync job lease was lost.");
       }
-      await (params.syncDocument ?? syncDocumentToOpenViking)({
-        client,
-        representativeSlug: representative.slug,
-        document,
-      });
+      if (params.syncDocument) {
+        await params.syncDocument({ client, document });
+      } else {
+        await syncRepresentativeResourceDocumentToOpenViking({
+          client,
+          document,
+          expectedRootUri: versionResourceRoot,
+          timeoutSeconds: REPRESENTATIVE_RESOURCE_SYNC_TIMEOUT_SECONDS,
+        });
+      }
     }
 
     const settled = await settleRepresentativeOpenVikingSyncJob({
@@ -1922,26 +1937,6 @@ export async function getRepresentativeOpenVikingRecallUsage(
   return { today, total };
 }
 
-/** @deprecated Legacy-ledger compatibility only; governed recall never calls this helper. */
-export function isOpenVikingMemoryRecallEligible(memory: {
-  status: string;
-  scope: string;
-  category: string;
-  sourceKind: string;
-}): boolean {
-  if (memory.status !== "ACTIVE" || memory.scope !== "contact") {
-    return false;
-  }
-
-  const category = memory.category.trim().toLowerCase();
-  const sourceKind = memory.sourceKind.trim().toLowerCase();
-  return (
-    category !== "payment" &&
-    sourceKind !== "payment_unlock" &&
-    sourceKind !== "handoff_resolution"
-  );
-}
-
 export function resolveAllowedPublishedKnowledgeAssetIds(params: {
   pins: Array<{
     assetId: string;
@@ -1981,14 +1976,6 @@ export function resolveAllowedPublishedKnowledgeAssetIds(params: {
   );
 }
 
-/** @deprecated Legacy-ledger compatibility only; governed recall uses exact projection grants. */
-export function isOpenVikingMemoryUriAllowed(
-  uri: string,
-  allowedMemoryUris: ReadonlySet<string>,
-): boolean {
-  return allowedMemoryUris.has(uri);
-}
-
 function resolveKnowledgeAssetId(uri: string): { knowledgeAssetId?: string } {
   const match = uri.match(/\/knowledge\/([^/]+?)\.md(?:\/|$)/i);
   return match?.[1] ? { knowledgeAssetId: match[1] } : {};
@@ -2001,6 +1988,7 @@ function resolveRecallTitle(content: string, uri: string) {
   return sanitizePublicSafeText(fileName || "Knowledge source", 160) || "Knowledge source";
 }
 
+/** @deprecated Legacy OpenVikingMemoryRecord inventory for cleanup only. */
 export async function getRepresentativeOpenVikingMemoryPreview(
   representativeSlug: string,
 ): Promise<RepresentativeOpenVikingMemoryPreview[]> {
@@ -2025,6 +2013,7 @@ export async function getRepresentativeOpenVikingMemoryPreview(
   return memories.map(serializeRepresentativeOpenVikingMemory);
 }
 
+/** @deprecated Legacy OpenVikingMemoryRecord suppression for cleanup only. */
 export async function suppressRepresentativeOpenVikingMemory(params: {
   representativeSlug: string;
   memoryId: string;
@@ -2070,6 +2059,7 @@ export async function suppressRepresentativeOpenVikingMemory(params: {
   return loadRepresentativeOpenVikingMemoryPreview(memory.id);
 }
 
+/** @deprecated Legacy OpenVikingMemoryRecord remote deletion for cleanup only. */
 export async function deleteRepresentativeOpenVikingMemory(params: {
   representativeSlug: string;
   memoryId: string;
@@ -2147,6 +2137,7 @@ export async function deleteRepresentativeOpenVikingMemory(params: {
   });
 }
 
+/** @deprecated Legacy OpenVikingMemoryRecord remote deletion retry for cleanup only. */
 export async function retryRepresentativeOpenVikingMemoryDeletion(params: {
   representativeSlug: string;
   memoryId: string;
@@ -2224,6 +2215,7 @@ export async function retryRepresentativeOpenVikingMemoryDeletion(params: {
   });
 }
 
+/** @deprecated Legacy OpenVikingMemoryRecord recovery worker for cleanup only. */
 export async function runOpenVikingMemoryDeletionRecoveryTick(options?: {
   limit?: number;
   now?: Date;
@@ -2466,6 +2458,10 @@ async function attemptRepresentativeOpenVikingMemoryDeletion(params: {
       slug: params.representativeSlug,
       openvikingAgentId: params.openvikingAgentId,
     });
+    assertLegacyOpenVikingMemoryUriForRepresentative({
+      representativeSlug: params.representativeSlug,
+      uri: params.uri,
+    });
     try {
       await client.remove(params.uri, true);
     } catch (error) {
@@ -2509,6 +2505,10 @@ async function attemptRepresentativeOpenVikingMemoryDeletion(params: {
     const message = (
       error instanceof Error ? error.message : "OpenViking memory deletion failed."
     ).slice(0, 2_000);
+    const errorCode =
+      error instanceof LegacyOpenVikingMemoryUriError
+        ? "LEGACY_MEMORY_URI_REJECTED"
+        : "REMOTE_DELETE_FAILED";
     const nextDeleteAttemptAt = new Date(
       Date.now() + openVikingMemoryDeleteBackoffMs(
         params.expectedDeletionAttemptCount + 1,
@@ -2539,6 +2539,7 @@ async function attemptRepresentativeOpenVikingMemoryDeletion(params: {
             payload: {
               memoryId: params.memoryId,
               status: "DELETE_FAILED",
+              errorCode,
               nextAttemptAt: nextDeleteAttemptAt.toISOString(),
             },
           },
@@ -2614,17 +2615,6 @@ export async function getRepresentativeOpenVikingOverviewMetrics(
   };
 }
 
-export async function maybeStoreHandoffPatternFromStatusChange(params: {
-  representativeSlug: string;
-  handoffId: string;
-  nextStatus: string;
-}): Promise<void> {
-  // Representative-wide learned patterns are intentionally disabled. Any
-  // future promotion from a single conversation must go through explicit
-  // review and publication instead of entering recall automatically.
-  void params;
-}
-
 function resolveRepresentativeDefaults(representative: Pick<
   Representative,
   "slug" | "openvikingAgentId" | "activeVersionId"
@@ -2655,45 +2645,6 @@ function buildRepresentativeClient(representative: Pick<
     accountId: "delegate",
     userId: `rep-${representative.slug}`,
     agentId,
-  });
-}
-
-async function syncDocumentToOpenViking(params: {
-  client: OpenVikingClient;
-  representativeSlug: string;
-  document: OpenVikingDocumentSpec;
-}): Promise<void> {
-  const temp = await params.client.tempUpload({
-    filename: params.document.filename,
-    content: params.document.content,
-  });
-
-  if (params.document.contextType === "resource") {
-    await params.client.addResource({
-      ...(temp.temp_file_id ? { tempFileId: temp.temp_file_id } : {}),
-      ...(temp.temp_path ? { tempPath: temp.temp_path } : {}),
-      to: params.document.uri,
-      reason: params.document.reason,
-      instruction: "Delegate representative public knowledge sync",
-      wait: true,
-      timeout: REPRESENTATIVE_RESOURCE_SYNC_TIMEOUT_SECONDS,
-    });
-    return;
-  }
-
-  const stagingUri = `${buildRepresentativeResourceRootUri(params.representativeSlug)}sync/${params.document.filename}`;
-  await params.client.addResource({
-    ...(temp.temp_file_id ? { tempFileId: temp.temp_file_id } : {}),
-    ...(temp.temp_path ? { tempPath: temp.temp_path } : {}),
-    to: stagingUri,
-    reason: params.document.reason,
-    instruction: "Delegate memory staging sync",
-    wait: true,
-    timeout: REPRESENTATIVE_RESOURCE_SYNC_TIMEOUT_SECONDS,
-  });
-  await params.client.move({
-    fromUri: stagingUri,
-    toUri: params.document.uri,
   });
 }
 

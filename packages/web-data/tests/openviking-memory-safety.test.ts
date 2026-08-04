@@ -23,13 +23,15 @@ vi.mock("../src/prisma", () => ({
 
 import {
   deleteRepresentativeOpenVikingMemory,
-  isOpenVikingMemoryRecallEligible,
-  isOpenVikingMemoryUriAllowed,
   resolveAllowedPublishedKnowledgeAssetIds,
   retryRepresentativeOpenVikingMemoryDeletion,
   runOpenVikingMemoryDeletionRecoveryTick,
   suppressRepresentativeOpenVikingMemory,
 } from "../src/openviking";
+import {
+  assertLegacyOpenVikingMemoryUriForRepresentative,
+  LegacyOpenVikingMemoryUriError,
+} from "../src/openviking-boundaries";
 
 describe("OpenViking memory safety", () => {
   beforeEach(() => {
@@ -45,40 +47,53 @@ describe("OpenViking memory safety", () => {
     vi.unstubAllGlobals();
   });
 
-  it("allows only active contact memory and excludes payment state", () => {
-    expect(isOpenVikingMemoryRecallEligible({
-      status: "ACTIVE",
-      scope: "contact",
-      category: "preference",
-      sourceKind: "collector",
-    })).toBe(true);
-    expect(isOpenVikingMemoryRecallEligible({
-      status: "SUPPRESSED",
-      scope: "contact",
-      category: "preference",
-      sourceKind: "collector",
-    })).toBe(false);
-    expect(isOpenVikingMemoryRecallEligible({
-      status: "ACTIVE",
-      scope: "agent",
-      category: "handoff_case",
-      sourceKind: "handoff_resolution",
-    })).toBe(false);
-    expect(isOpenVikingMemoryRecallEligible({
-      status: "ACTIVE",
-      scope: "contact",
-      category: "payment",
-      sourceKind: "payment_unlock",
-    })).toBe(false);
+  it("keeps the legacy ledger cleanup-only with no create, activation, or recall helper", () => {
+    const source = readFileSync(
+      new URL("../src/openviking.ts", import.meta.url),
+      "utf8",
+    );
+    const cleanupStart = source.indexOf("getRepresentativeOpenVikingMemoryPreview");
+    const cleanupEnd = source.indexOf(
+      "getRepresentativeOpenVikingOverviewMetrics",
+      cleanupStart,
+    );
+    const cleanupSource = source.slice(cleanupStart, cleanupEnd);
+
+    expect(source).not.toMatch(/openVikingMemoryRecord\.(?:create|createMany|upsert)/u);
+    expect(source).not.toContain("isOpenVikingMemoryRecallEligible");
+    expect(source).not.toContain("isOpenVikingMemoryUriAllowed");
+    expect(cleanupSource).toContain("@deprecated Legacy OpenVikingMemoryRecord");
+    expect(cleanupSource).toContain("client.remove");
+    expect(cleanupSource).not.toContain("tempUpload");
+    expect(cleanupSource).not.toContain("addResource");
+    expect(cleanupSource).not.toContain("client.move(");
   });
 
-  it("requires an exact active-ledger URI and rejects spoofed child paths", () => {
-    const allowedUri =
-      "viking://user/memories/delegate/lin-founder-rep/contact-1/preferences/timezone.md";
-    const allowedUris = new Set([allowedUri]);
+  it.each([
+    "viking://user/memories/delegate/lin-founder-rep/contact-1/preferences/timezone.md",
+    "viking://agent/memories/delegate/lin-founder-rep/cases/resolved-case.md",
+  ])("accepts a canonical representative-bound legacy memory leaf: %s", (uri) => {
+    expect(() => assertLegacyOpenVikingMemoryUriForRepresentative({
+      representativeSlug: "lin-founder-rep",
+      uri,
+    })).not.toThrow();
+  });
 
-    expect(isOpenVikingMemoryUriAllowed(allowedUri, allowedUris)).toBe(true);
-    expect(isOpenVikingMemoryUriAllowed(`${allowedUri}/spoofed-child.md`, allowedUris)).toBe(false);
+  it.each([
+    "viking://resources/delegate/reps/lin-founder-rep/",
+    "viking://user/memories/delegate/lin-founder-rep/",
+    "viking://agent/memories/delegate/lin-founder-rep/",
+    "viking://user/memories/delegate/other-rep/contact-1/preferences/timezone.md",
+    "viking://user/memories/delegate/lin-founder-rep/contact-1/preferences/../secret.md",
+    "viking://user/memories/delegate/lin-founder-rep/contact-1/preferences/%2e%2e.md",
+    "viking://user/memories/delegate/lin-founder-rep/contact-1\\preferences\\timezone.md",
+    "viking://user/memories/delegate/lin-founder-rep/contact-1/payment/receipt.md",
+    "viking://agent/memories/delegate/lin-founder-rep/payments/receipt.md",
+  ])("rejects an unsafe legacy cleanup target: %s", (uri) => {
+    expect(() => assertLegacyOpenVikingMemoryUriForRepresentative({
+      representativeSlug: "lin-founder-rep",
+      uri,
+    })).toThrow(LegacyOpenVikingMemoryUriError);
   });
 
   it("allows only snapshot-pinned knowledge that is still approved and byte-version identical", () => {
@@ -278,12 +293,68 @@ describe("OpenViking memory safety", () => {
       deletionAttemptCount: 1,
       deletionError: "REMOTE_DELETE_FAILED",
     });
-    expect(isOpenVikingMemoryRecallEligible({
-      status: result!.status,
-      scope: result!.scope,
-      category: result!.category,
-      sourceKind: result!.sourceKind,
-    })).toBe(false);
+  });
+
+  it.each([
+    "viking://resources/delegate/reps/lin-founder-rep/",
+    "viking://user/memories/delegate/lin-founder-rep/",
+    "viking://user/memories/delegate/other-rep/contact-1/preferences/timezone.md",
+    "viking://agent/memories/delegate/other-rep/cases/resolved-case.md",
+    "viking://user/memories/delegate/lin-founder-rep/contact-1/preferences/../secret.md",
+    "viking://user/memories/delegate/lin-founder-rep/contact-1/preferences/%2e%2e.md",
+    "viking://user/memories/delegate/lin-founder-rep/contact-1\\preferences\\timezone.md",
+  ])("does not issue a remote delete for an unsafe legacy URI: %s", async (uri) => {
+    process.env.OPENVIKING_ENABLED = "true";
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    mockPrisma.openVikingMemoryRecord.findFirst.mockResolvedValue(
+      buildMemory("SUPPRESSED", {
+        uri,
+      }),
+    );
+    mockPrisma.openVikingMemoryRecord.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.openVikingMemoryRecord.findUnique.mockResolvedValue(
+      buildMemory("DELETE_FAILED", {
+        uri,
+        summary: "",
+        suppressedAt: new Date("2026-07-31T04:00:00.000Z"),
+        lastDeleteAttemptAt: new Date("2026-07-31T04:00:01.000Z"),
+        nextDeleteAttemptAt: new Date("2026-07-31T04:00:31.000Z"),
+        deletionAttemptCount: 1,
+        deletionError:
+          "Legacy OpenViking memory deletion refused an out-of-scope or non-canonical URI.",
+      }),
+    );
+
+    const result = await deleteRepresentativeOpenVikingMemory({
+      representativeSlug: "lin-founder-rep",
+      memoryId: "memory-1",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mockPrisma.openVikingMemoryRecord.updateMany.mock.calls.at(-1)?.[0]).toMatchObject({
+      data: {
+        status: "DELETE_FAILED",
+        deletionError:
+          "Legacy OpenViking memory deletion refused an out-of-scope or non-canonical URI.",
+        nextDeleteAttemptAt: expect.any(Date),
+      },
+    });
+    expect(mockPrisma.eventAudit.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        representativeId: "rep-1",
+        payload: expect.objectContaining({
+          memoryId: "memory-1",
+          status: "DELETE_FAILED",
+          errorCode: "LEGACY_MEMORY_URI_REJECTED",
+        }),
+      }),
+    });
+    expect(result).toMatchObject({
+      status: "DELETE_FAILED",
+      summary: "",
+      deletionError: "REMOTE_DELETE_FAILED",
+    });
   });
 
   it("does not steal a live deletion lease", async () => {

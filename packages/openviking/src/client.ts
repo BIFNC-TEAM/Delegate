@@ -1,19 +1,13 @@
 import {
-  openVikingCommitResultSchema,
   openVikingFindResultSchema,
   openVikingHealthSchema,
-  openVikingSessionCreateResultSchema,
-  openVikingSessionDetailSchema,
   openVikingStatusSchema,
   openVikingWaitResultSchema,
   type OpenVikingClientConfig,
   type OpenVikingClientScope,
-  type OpenVikingCommitResult,
   type OpenVikingFindResult,
   type OpenVikingHealth,
   type OpenVikingLsEntry,
-  type OpenVikingSessionCreateResult,
-  type OpenVikingSessionDetail,
   type OpenVikingStatus,
   type OpenVikingWaitResult,
 } from "./types";
@@ -36,6 +30,43 @@ type ApiEnvelope<T> = {
     message?: string;
   };
 };
+
+const OPENVIKING_RESOURCE_URI_PREFIX = "viking://resources/";
+const OPENVIKING_RESOURCE_SEGMENT_PATTERN = /^[A-Za-z0-9._-]+$/u;
+
+/**
+ * Rejects cross-scope and non-canonical resource targets before any OpenViking
+ * write is attempted. Percent-encoded and backslash paths are deliberately
+ * refused so validation cannot disagree with a downstream URI normalizer.
+ */
+export function assertCanonicalOpenVikingResourceUri(uri: string): void {
+  if (
+    typeof uri !== "string"
+    || uri !== uri.trim()
+    || !uri.startsWith(OPENVIKING_RESOURCE_URI_PREFIX)
+    || /[\u0000-\u0020\u007f\\%?#]/u.test(uri)
+  ) {
+    throw new Error("OpenViking resource target must be a canonical viking://resources/ URI.");
+  }
+
+  const suffix = uri.slice(OPENVIKING_RESOURCE_URI_PREFIX.length);
+  if (!suffix) return;
+
+  const segments = suffix.split("/");
+  if (segments.at(-1) === "") segments.pop();
+  if (
+    !segments.length
+    || segments.some(
+      (segment) =>
+        !segment
+        || segment === "."
+        || segment === ".."
+        || !OPENVIKING_RESOURCE_SEGMENT_PATTERN.test(segment),
+    )
+  ) {
+    throw new Error("OpenViking resource target must be a canonical viking://resources/ URI.");
+  }
+}
 
 export class OpenVikingClient {
   private readonly baseUrl: string;
@@ -120,6 +151,8 @@ export class OpenVikingClient {
     wait?: boolean;
     timeout?: number;
   }): Promise<{ root_uri?: string; status?: string; source_path?: string; errors?: string[] }> {
+    assertCanonicalOpenVikingResourceUri(params.to);
+
     const waitsForProcessing = params.wait ?? true;
     const processingTimeoutMs =
       waitsForProcessing && typeof params.timeout === "number"
@@ -141,16 +174,6 @@ export class OpenVikingClient {
       ...(processingTimeoutMs
         ? { timeoutMs: Math.max(this.timeoutMs, processingTimeoutMs) }
         : {}),
-    });
-  }
-
-  async move(params: { fromUri: string; toUri: string }): Promise<{ from: string; to: string }> {
-    return this.request("/api/v1/fs/mv", {
-      method: "POST",
-      body: JSON.stringify({
-        from_uri: params.fromUri,
-        to_uri: params.toUri,
-      }),
     });
   }
 
@@ -188,61 +211,6 @@ export class OpenVikingClient {
     return this.requestContent(
       `/api/v1/content/read?uri=${encodeURIComponent(uri)}&limit=${encodeURIComponent(String(limit))}`,
     );
-  }
-
-  async createSession(): Promise<OpenVikingSessionCreateResult> {
-    const result = await this.request<OpenVikingSessionCreateResult>("/api/v1/sessions", {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    return openVikingSessionCreateResultSchema.parse(result);
-  }
-
-  async getSession(sessionId: string): Promise<OpenVikingSessionDetail> {
-    const result = await this.request<OpenVikingSessionDetail>(`/api/v1/sessions/${sessionId}`, {
-      method: "GET",
-    });
-    return openVikingSessionDetailSchema.parse(result);
-  }
-
-  async addSessionMessage(params: {
-    sessionId: string;
-    role: "user" | "assistant";
-    content?: string;
-    parts?: Array<Record<string, unknown>>;
-  }): Promise<{ session_id: string; message_count: number }> {
-    return this.request(`/api/v1/sessions/${params.sessionId}/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        role: params.role,
-        ...(params.parts ? { parts: params.parts } : { content: params.content ?? "" }),
-      }),
-    });
-  }
-
-  async recordUsed(params: {
-    sessionId: string;
-    contexts?: string[];
-    skill?: Record<string, unknown>;
-  }): Promise<{ session_id: string; contexts_used: number; skills_used: number }> {
-    return this.request(`/api/v1/sessions/${params.sessionId}/used`, {
-      method: "POST",
-      body: JSON.stringify({
-        ...(params.contexts ? { contexts: params.contexts } : {}),
-        ...(params.skill ? { skill: params.skill } : {}),
-      }),
-    });
-  }
-
-  async commitSession(sessionId: string): Promise<OpenVikingCommitResult> {
-    const result = await this.request<OpenVikingCommitResult>(
-      `/api/v1/sessions/${sessionId}/commit`,
-      {
-        method: "POST",
-        body: JSON.stringify({ telemetry: false }),
-      },
-    );
-    return openVikingCommitResultSchema.parse(result);
   }
 
   async find(params: {

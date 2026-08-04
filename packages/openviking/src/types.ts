@@ -23,24 +23,6 @@ export const openVikingFindResultSchema = z.object({
   total: z.number().optional(),
 });
 
-export const openVikingSessionCreateResultSchema = z.object({
-  session_id: z.string(),
-  user: z.unknown().optional(),
-});
-
-export const openVikingSessionDetailSchema = z.object({
-  session_id: z.string(),
-  user: z.unknown().optional(),
-  message_count: z.number().optional(),
-});
-
-export const openVikingCommitResultSchema = z.object({
-  session_id: z.string(),
-  status: z.string().optional(),
-  archived: z.boolean().optional(),
-  memories_extracted: z.number().optional(),
-});
-
 export const openVikingHealthSchema = z.object({
   status: z.string(),
   healthy: z.boolean().optional(),
@@ -73,9 +55,6 @@ export type OpenVikingMode = z.infer<typeof openVikingModeSchema>;
 export type OpenVikingSyncStatus = z.infer<typeof openVikingSyncStatusSchema>;
 export type OpenVikingMatchedContext = z.infer<typeof openVikingMatchedContextSchema>;
 export type OpenVikingFindResult = z.infer<typeof openVikingFindResultSchema>;
-export type OpenVikingSessionCreateResult = z.infer<typeof openVikingSessionCreateResultSchema>;
-export type OpenVikingSessionDetail = z.infer<typeof openVikingSessionDetailSchema>;
-export type OpenVikingCommitResult = z.infer<typeof openVikingCommitResultSchema>;
 export type OpenVikingHealth = z.infer<typeof openVikingHealthSchema>;
 export type OpenVikingStatus = z.infer<typeof openVikingStatusSchema>;
 export type OpenVikingWaitResult = z.infer<typeof openVikingWaitResultSchema>;

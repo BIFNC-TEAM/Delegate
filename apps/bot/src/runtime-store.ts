@@ -80,16 +80,7 @@ export type ConversationContextRecord = {
     sponsor?: StoredPlan;
   };
   openviking: {
-    enabled: boolean;
-    agentId?: string;
     autoRecall: boolean;
-    autoCapture: boolean;
-    captureMode: string;
-    recallLimit: number;
-    recallScoreThreshold: number;
-    targetUri?: string;
-    sessionId?: string;
-    sessionKey?: string;
   };
   compute: {
     enabled: boolean;
@@ -471,18 +462,7 @@ export async function getConversationContext(
       return acc;
     }, {}),
     openviking: {
-      enabled: representative.openvikingEnabled,
-      ...(representative.openvikingAgentId ? { agentId: representative.openvikingAgentId } : {}),
       autoRecall: representative.openvikingAutoRecall,
-      autoCapture: representative.openvikingAutoCapture,
-      captureMode: representative.openvikingCaptureMode,
-      recallLimit: representative.openvikingRecallLimit,
-      recallScoreThreshold: representative.openvikingRecallScoreThreshold,
-      ...(representative.openvikingTargetUri
-        ? { targetUri: representative.openvikingTargetUri }
-        : {}),
-      ...(conversation.openvikingSessionId ? { sessionId: conversation.openvikingSessionId } : {}),
-      ...(conversation.openvikingSessionKey ? { sessionKey: conversation.openvikingSessionKey } : {}),
     },
     compute: {
       enabled: representative.computeEnabled,
@@ -1155,20 +1135,6 @@ export async function clearStructuredCollectorState(context: ConversationContext
   });
 }
 
-export async function setConversationOpenVikingSession(params: {
-  conversationId: string;
-  sessionId: string;
-  sessionKey: string;
-}): Promise<void> {
-  await prisma.conversation.update({
-    where: { id: params.conversationId },
-    data: {
-      openvikingSessionId: params.sessionId,
-      openvikingSessionKey: params.sessionKey,
-    },
-  });
-}
-
 export async function setActiveComputeSession(params: {
   conversationId: string;
   sessionId: string;
@@ -1178,58 +1144,6 @@ export async function setActiveComputeSession(params: {
     data: {
       activeComputeSessionId: params.sessionId,
       lastComputeAt: new Date(),
-    },
-  });
-}
-
-export async function recordOpenVikingRecallTrace(params: {
-  representativeId: string;
-  contactId: string;
-  conversationId: string;
-  queryText: string;
-  recalledUri: string;
-  contextType: string;
-  layer: string;
-  score: number;
-}): Promise<void> {
-  await prisma.conversationRecallTrace.create({
-    data: {
-      representativeId: params.representativeId,
-      contactId: params.contactId,
-      conversationId: params.conversationId,
-      queryText: params.queryText,
-      recalledUri: params.recalledUri,
-      contextType: params.contextType,
-      layer: params.layer,
-      score: params.score,
-    },
-  });
-}
-
-export async function recordOpenVikingCommitTrace(params: {
-  representativeId: string;
-  contactId: string;
-  conversationId: string;
-  sessionId: string;
-  sessionKey?: string;
-  reason: string;
-  status: "succeeded" | "failed";
-  memoriesExtracted?: number;
-  archived?: boolean;
-  error?: string;
-}): Promise<void> {
-  await prisma.conversationCommitTrace.create({
-    data: {
-      representativeId: params.representativeId,
-      contactId: params.contactId,
-      conversationId: params.conversationId,
-      sessionId: params.sessionId,
-      sessionKey: params.sessionKey ?? null,
-      reason: params.reason,
-      status: params.status,
-      memoriesExtracted: params.memoriesExtracted ?? null,
-      archived: params.archived ?? null,
-      error: params.error ?? null,
     },
   });
 }

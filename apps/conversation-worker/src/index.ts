@@ -6,24 +6,30 @@ import {
   resolveConversationWorkerConfig,
   resolveConversationWorkerModelReadiness,
 } from "./config";
-import { processNextConversationWork } from "./processor";
+import { startConversationWorkerLoops } from "./scheduler";
 
 const config = resolveConversationWorkerConfig();
 const modelRuntime = resolveConversationWorkerModelReadiness();
-let lastProcessedAt: string | null = null;
-let lastError: string | null = null;
-let active = false;
+let scheduler: ReturnType<typeof startConversationWorkerLoops> | null = null;
 
 const server = createServer((request, response) => {
   if ((request.method === "GET" || request.method === "HEAD") && request.url === "/health") {
+    const lanes = scheduler?.snapshot() ?? {
+      memory: { active: false, lastProcessedAt: null, lastError: null },
+      conversation: { active: false, lastProcessedAt: null, lastError: null },
+    };
     response.statusCode = 200;
     response.setHeader("content-type", "application/json; charset=utf-8");
     response.end(request.method === "HEAD" ? undefined : JSON.stringify({
       status: modelRuntime.state === "ready" ? "ok" : "degraded",
       service: "conversation-worker",
-      active,
-      lastProcessedAt,
-      lastError,
+      active: lanes.memory.active || lanes.conversation.active,
+      lastProcessedAt: latestTimestamp(
+        lanes.memory.lastProcessedAt,
+        lanes.conversation.lastProcessedAt,
+      ),
+      lastError: lanes.memory.lastError ?? lanes.conversation.lastError,
+      lanes,
       modelRuntime,
     }));
     return;
@@ -39,19 +45,13 @@ server.listen(config.port, "0.0.0.0", () => {
   }
 });
 
-void runLoop();
+scheduler = startConversationWorkerLoops(config);
 
-async function runLoop() {
-  try {
-    active = true;
-    const result = await processNextConversationWork(config);
-    if (result.processed) lastProcessedAt = new Date().toISOString();
-    lastError = result.processed && result.status === "failed" ? result.error : null;
-  } catch (error) {
-    lastError = error instanceof Error ? error.message : "conversation_worker_tick_failed";
-    console.error("conversation worker tick failed", error);
-  } finally {
-    active = false;
-    setTimeout(() => void runLoop(), config.pollMs);
-  }
+function latestTimestamp(
+  first: string | null,
+  second: string | null,
+): string | null {
+  if (!first) return second;
+  if (!second) return first;
+  return first > second ? first : second;
 }

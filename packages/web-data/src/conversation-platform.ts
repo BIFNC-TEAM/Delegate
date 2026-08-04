@@ -67,6 +67,10 @@ import {
   matrixServerNameFromUserId,
 } from "./matrix-identifiers";
 import {
+  enqueueInboundMessageMemoryExtraction,
+  invalidateMemoryExtractionForSourceMessage,
+} from "./memory-extraction";
+import {
   lockMatrixRoomSecurityState,
   withActiveMatrixRepresentativeChannelFence,
 } from "./matrix-room-security";
@@ -80,6 +84,16 @@ import {
   type ServiceEntitlementClient,
 } from "./service-entitlements";
 import { buildWebConversationThreadId } from "./web-audience";
+
+export {
+  enqueueManualMemoryExtraction,
+  enqueueShadowMemoryExtraction,
+  processNextMemoryExtractionWork,
+  processMemoryExtractionRun,
+  type ExplicitMemoryExtractionInput,
+  type MemoryCandidateClassification,
+  type MemoryExtractionWorkResult,
+} from "./memory-extraction";
 
 export type GenerationWalletReservation = {
   usageChargeId: string;
@@ -1312,6 +1326,14 @@ export async function acceptInboundConversationMessage(
         createdAt,
       },
       update: {},
+    });
+
+    await enqueueInboundMessageMemoryExtraction(tx, {
+      representativeId: conversation.representative.id,
+      contactId: conversation.contactId,
+      conversationId: conversation.id,
+      messageId: message.id,
+      channel: normalizedChannel,
     });
 
     let run = shouldQueueAi
@@ -5724,6 +5746,10 @@ export async function editConversationMessage(input: {
       where: { id: message.id },
       data: { text, editedAt: new Date(), deliveryStatus: MessageDeliveryStatus.EDITED },
     });
+    await invalidateMemoryExtractionForSourceMessage(tx, {
+      messageId: message.id,
+      reasonCode: "source_message_edited",
+    });
 
     if (run && (action === "replace_queued_run" || action === "cancel_and_requeue")) {
       const walletReservation = readGenerationWalletReservation(
@@ -6103,6 +6129,11 @@ export async function redactConversationMessage(input: {
         redactionReason: input.reason?.trim() || null,
         retentionExpiresAt: buildRedactionPurgeAt(redactedAt),
       },
+    });
+    await invalidateMemoryExtractionForSourceMessage(tx, {
+      messageId: message.id,
+      reasonCode: "source_message_redacted",
+      occurredAt: redactedAt,
     });
     if (canceledRunCount > 0) {
       await tx.conversation.updateMany({

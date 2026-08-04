@@ -2,23 +2,13 @@ import { readFileSync } from "node:fs";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const runtimeStoreMocks = vi.hoisted(() => ({
-  recordOpenVikingRecallTrace: vi.fn(),
-  setConversationOpenVikingSession: vi.fn(),
-}));
 const webDataMocks = vi.hoisted(() => ({
   recallRepresentativeContext: vi.fn(),
 }));
 
-vi.mock("../src/runtime-store", () => runtimeStoreMocks);
 vi.mock("@delegate/web-data", () => webDataMocks);
 
-import {
-  captureTurnToOpenViking,
-  recallOpenVikingContext,
-  storeCollectorMemory,
-  storePaymentMemory,
-} from "../src/openviking-runtime";
+import { recallOpenVikingContext } from "../src/openviking-runtime";
 
 describe("OpenViking long-term write boundary", () => {
   beforeEach(() => {
@@ -33,50 +23,29 @@ describe("OpenViking long-term write boundary", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps turn, collector, and payment writes fail-closed", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const context = buildConversationContext();
-
-    await captureTurnToOpenViking({
-      context,
-      chatId: 42,
-      userText: "private user message",
-      assistantText: "private assistant reply",
-      recalled: [],
-      reason: "answer_turn",
-    });
-    await storeCollectorMemory({
-      context,
-      collectorState: {
-        kind: "quote",
-        intent: "quote",
-        stepIndex: 1,
-        answers: { email: "visitor@example.com" },
-      } as never,
-      summary: "Sensitive quote intake",
-    });
-    await storePaymentMemory({
-      context,
-      planName: "Deep help",
-      starsAmount: 500,
-    });
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(runtimeStoreMocks.setConversationOpenVikingSession).not.toHaveBeenCalled();
-    expect(runtimeStoreMocks.recordOpenVikingRecallTrace).not.toHaveBeenCalled();
-  });
-
-  it("does not call long-term write helpers from the Telegram runtime", () => {
-    const source = readFileSync(
+  it("does not expose or call legacy long-term write helpers", () => {
+    const telegramSource = readFileSync(
       new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
     );
+    const openVikingRuntimeSource = readFileSync(
+      new URL("../src/openviking-runtime.ts", import.meta.url),
+      "utf8",
+    );
+    const runtimeStoreSource = readFileSync(
+      new URL("../src/runtime-store.ts", import.meta.url),
+      "utf8",
+    );
 
-    expect(source).not.toContain("captureTurnToOpenViking");
-    expect(source).not.toContain("storeCollectorMemory");
-    expect(source).not.toContain("storePaymentMemory");
-    expect(source).toContain("recallOpenVikingContext");
+    for (const source of [telegramSource, openVikingRuntimeSource]) {
+      expect(source).not.toContain("captureTurnToOpenViking");
+      expect(source).not.toContain("storeCollectorMemory");
+      expect(source).not.toContain("storePaymentMemory");
+    }
+    expect(telegramSource).toContain("recallOpenVikingContext");
+    expect(runtimeStoreSource).not.toContain("setConversationOpenVikingSession");
+    expect(runtimeStoreSource).not.toContain("recordOpenVikingCommitTrace");
+    expect(runtimeStoreSource).not.toContain("recordOpenVikingRecallTrace");
   });
 
   it("uses the centralized published-version and contact allowlist for recall", async () => {
@@ -96,7 +65,6 @@ describe("OpenViking long-term write boundary", () => {
 
     const result = await recallOpenVikingContext({
       context: buildConversationContext(),
-      chatId: 42,
       queryText: "What is the policy?",
     });
 
@@ -118,11 +86,7 @@ function buildConversationContext() {
     contactId: "contact-1",
     conversationId: "conversation-1",
     openviking: {
-      enabled: true,
-      autoCapture: true,
       autoRecall: true,
-      recallLimit: 6,
-      recallScoreThreshold: 0.01,
     },
   } as never;
 }

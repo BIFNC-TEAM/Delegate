@@ -1,12 +1,10 @@
 import { compactMarkdownLines, sanitizePublicSafeText } from "./filter";
 import {
-  buildRepresentativeAgentMemoryUri,
   buildRepresentativeFaqUri,
   buildRepresentativeIdentityUri,
   buildRepresentativeMaterialsUri,
   buildRepresentativePoliciesUri,
   buildRepresentativePricingUri,
-  buildRepresentativeContactMemoryUri,
   buildRepresentativeVersionResourceRootUri,
 } from "./uris";
 import type { OpenVikingDocumentSpec } from "./types";
@@ -147,113 +145,6 @@ export function buildRepresentativeKnowledgeDocuments(
       ]),
     },
   ];
-}
-
-export function buildCollectorMemoryDocument(params: {
-  representativeSlug: string;
-  contactId: string;
-  collectorKind: "quote" | "scheduling";
-  key: string;
-  title: string;
-  summary: string;
-  lines: string[];
-}): OpenVikingDocumentSpec | null {
-  const safeSummary = sanitizePublicSafeText(params.summary, 1000);
-  if (!safeSummary) {
-    return null;
-  }
-
-  const safeLines = params.lines.flatMap((line) => {
-    const sanitized = sanitizePublicSafeText(line, 400);
-    return sanitized ? [sanitized] : [];
-  });
-
-  return {
-    uri: buildRepresentativeContactMemoryUri({
-      representativeSlug: params.representativeSlug,
-      contactId: params.contactId,
-      category: "events",
-      key: params.key,
-    }),
-    filename: `${params.key}.md`,
-    reason: "Structured collector completion for future recall inside this representative only",
-    contextType: "memory",
-    scope: "contact",
-    category: params.collectorKind,
-    content: compactMarkdownLines([
-      `# ${params.title}`,
-      ``,
-      safeSummary,
-      ``,
-      ...safeLines,
-    ]),
-  };
-}
-
-export function buildPaymentMemoryDocument(params: {
-  representativeSlug: string;
-  contactId: string;
-  key: string;
-  planName: string;
-  starsAmount: number;
-}): OpenVikingDocumentSpec {
-  return {
-    uri: buildRepresentativeContactMemoryUri({
-      representativeSlug: params.representativeSlug,
-      contactId: params.contactId,
-      category: "events",
-      key: params.key,
-    }),
-    filename: `${params.key}.md`,
-    reason: "Public-safe payment unlock state for future routing and prioritization",
-    contextType: "memory",
-    scope: "contact",
-    category: "payment",
-    content: compactMarkdownLines([
-      `# Paid unlock`,
-      ``,
-      `The contact unlocked ${params.planName} for ${params.starsAmount} Stars.`,
-    ]),
-  };
-}
-
-export function buildHandoffResolutionPatternDocument(params: {
-  representativeSlug: string;
-  key: string;
-  title: string;
-  summary: string;
-  recommendedAction: string;
-  status: string;
-}): OpenVikingDocumentSpec | null {
-  const safeSummary = sanitizePublicSafeText(params.summary, 1000);
-  if (!safeSummary) {
-    return null;
-  }
-
-  const safeRecommendedAction = sanitizePublicSafeText(params.recommendedAction, 400);
-
-  return {
-    uri: buildRepresentativeAgentMemoryUri({
-      representativeSlug: params.representativeSlug,
-      category: "cases",
-      key: params.key,
-    }),
-    filename: `${params.key}.md`,
-    reason: "Representative-level learned case from resolved handoff workflow",
-    contextType: "memory",
-    scope: "agent",
-    category: "handoff_case",
-    content: compactMarkdownLines([
-      `# ${params.title}`,
-      ``,
-      `Status: ${params.status}`,
-      safeRecommendedAction
-        ? `Recommended action: ${safeRecommendedAction}`
-        : "Recommended action omitted because it did not pass the public-safe filter.",
-      ``,
-      safeSummary,
-    ]),
-  };
 }
 
 function renderDocumentList(title: string, documents: KnowledgeDocument[]): string {

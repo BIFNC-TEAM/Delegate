@@ -1,7 +1,7 @@
 import { HandoffStatus } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockMaybeStoreHandoffPatternFromStatusChange, mockPrisma } = vi.hoisted(() => {
+const { mockPrisma } = vi.hoisted(() => {
   const prismaMock = {
     $transaction: vi.fn(),
     handoffRequest: {
@@ -22,15 +22,12 @@ const { mockMaybeStoreHandoffPatternFromStatusChange, mockPrisma } = vi.hoisted(
   });
 
   return {
-    mockMaybeStoreHandoffPatternFromStatusChange: vi.fn(),
     mockPrisma: prismaMock,
   };
 });
 
 vi.mock("../src/openviking", () => ({
   getRepresentativeOpenVikingOverviewMetrics: vi.fn(),
-  maybeStoreHandoffPatternFromStatusChange:
-    mockMaybeStoreHandoffPatternFromStatusChange,
 }));
 
 vi.mock("../src/prisma", () => ({
@@ -55,7 +52,6 @@ describe("owner dashboard handoff cancellation", () => {
     ]);
     mockPrisma.workflowRun.update.mockResolvedValue({ id: "workflow-handoff-1" });
     mockPrisma.workflowCommandOutbox.create.mockResolvedValue({ id: "cmd-cancel-1" });
-    mockMaybeStoreHandoffPatternFromStatusChange.mockResolvedValue(undefined);
   });
 
   it("queues a CANCEL command when a handoff is closed", async () => {

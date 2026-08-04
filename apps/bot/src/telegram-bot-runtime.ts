@@ -630,9 +630,7 @@ bot.on("message:text", async (ctx) => {
   const recalled = conversationContext
     ? await recallOpenVikingContext({
         context: conversationContext,
-        chatId: ctx.chat.id,
         queryText: normalizedText,
-        includeL2: plan.intent === "materials",
       })
     : [];
 

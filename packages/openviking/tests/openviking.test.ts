@@ -1,19 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+
+import { describe, expect, it, vi } from "vitest";
 
 import {
-  buildCollectorMemoryDocument,
-  buildDelegateSessionKey,
   buildGovernedContactChannelMemoryRootUri,
   buildGovernedContactChannelMemoryVersionUri,
   buildGovernedRepresentativeExperienceRootUri,
   buildGovernedRepresentativeExperienceVersionUri,
   OpenVikingClient,
-  buildRepresentativeContactMemoryRootUri,
   buildRepresentativeKnowledgeDocuments,
   buildRepresentativeKnowledgeRootUri,
   buildRepresentativeResourceRootUri,
   buildRepresentativeVersionResourceRootUri,
-  buildSessionScopedSearchRoot,
   isPublicSafeText,
   resolveOpenVikingEnv,
   sanitizePublicSafeText,
@@ -144,39 +142,6 @@ describe("OpenViking URI strategy", () => {
     );
   });
 
-  it("builds contact-scoped memory roots without cross-contact overlap", () => {
-    const a = buildRepresentativeContactMemoryRootUri("lin-founder-rep", "contact_a");
-    const b = buildRepresentativeContactMemoryRootUri("lin-founder-rep", "contact_b");
-
-    expect(a).not.toBe(b);
-    expect(a).toContain("/contact_a/");
-    expect(b).toContain("/contact_b/");
-  });
-
-  it("builds deterministic session keys", () => {
-    expect(
-      buildDelegateSessionKey({
-        representativeSlug: "lin-founder-rep",
-        chatId: 12345,
-        contactId: "contact_a",
-      }),
-    ).toBe("delegate:tg:lin-founder-rep:12345:contact_a");
-  });
-
-  it("returns pinned resources, approved knowledge, and current-contact memory roots", () => {
-    expect(
-      buildSessionScopedSearchRoot({
-        representativeSlug: "lin-founder-rep",
-        representativeVersionId: "version_7",
-        contactId: "contact_a",
-      }),
-    ).toEqual([
-      "viking://resources/delegate/reps/lin-founder-rep/versions/version_7/",
-      "viking://resources/delegate/reps/lin-founder-rep/knowledge/",
-      "viking://user/memories/delegate/lin-founder-rep/contact_a/",
-    ]);
-  });
-
   it("builds non-overlapping published-version and knowledge roots", () => {
     expect(buildRepresentativeVersionResourceRootUri("lin-founder-rep", "version_7")).toBe(
       "viking://resources/delegate/reps/lin-founder-rep/versions/version_7/",
@@ -242,50 +207,26 @@ describe("OpenViking document builders", () => {
     expect(docs[1]?.uri).toContain("/faq/");
   });
 
-  it("creates collector memory docs only for public-safe content", () => {
-    const doc = buildCollectorMemoryDocument({
-      representativeSlug: "lin-founder-rep",
-      contactId: "contact_a",
-      collectorKind: "quote",
-      key: "quote_1",
-      title: "Quote intake",
-      summary: "The contact needs a fast quote for a founder sprint.",
-      lines: ["Budget: 8k USD", "Timeline: next month"],
-    });
+});
 
-    expect(doc?.uri).toContain("contact_a/events/quote_1.md");
-    expect(doc?.content).toContain("Budget: 8k USD");
-    expect(doc?.content).toContain("Timeline: next month");
+describe("OpenViking legacy write boundary", () => {
+  it("does not expose session commits or legacy memory document builders", () => {
+    const clientSource = readFileSync(new URL("../src/client.ts", import.meta.url), "utf8");
+    const resourceSource = readFileSync(new URL("../src/resources.ts", import.meta.url), "utf8");
+    const indexSource = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    const uriSource = readFileSync(new URL("../src/uris.ts", import.meta.url), "utf8");
 
-    const unsafe = buildCollectorMemoryDocument({
-      representativeSlug: "lin-founder-rep",
-      contactId: "contact_a",
-      collectorKind: "quote",
-      key: "quote_2",
-      title: "Unsafe",
-      summary: "Their password is 123456 and should not be stored.",
-      lines: [],
-    });
-
-    expect(unsafe).toBeNull();
-  });
-
-  it("drops unsafe collector lines even when the summary is safe", () => {
-    const doc = buildCollectorMemoryDocument({
-      representativeSlug: "lin-founder-rep",
-      contactId: "contact_a",
-      collectorKind: "quote",
-      key: "quote_3",
-      title: "Quote intake",
-      summary: "The contact needs a quote for a workshop.",
-      lines: [
-        "Budget: 5k USD",
-        "Password: hunter2",
-      ],
-    });
-
-    expect(doc?.content).toContain("Budget: 5k USD");
-    expect(doc?.content).not.toContain("Password: hunter2");
+    expect(clientSource).not.toContain("/api/v1/sessions");
+    expect(clientSource).not.toContain("commitSession");
+    expect(clientSource).not.toContain("/api/v1/fs/mv");
+    expect(resourceSource).not.toContain("buildCollectorMemoryDocument");
+    expect(resourceSource).not.toContain("buildPaymentMemoryDocument");
+    expect(resourceSource).not.toContain("buildHandoffResolutionPatternDocument");
+    expect(indexSource).not.toContain('export * from "./session"');
+    expect(uriSource).not.toContain("buildRepresentativeContactMemoryUri");
+    expect(uriSource).not.toContain("buildRepresentativeAgentMemoryUri");
+    expect(uriSource).not.toContain("buildSessionScopedSearchRoot");
+    expect(uriSource).not.toContain("buildSyncStagingUri");
   });
 });
 
@@ -408,5 +349,28 @@ describe("OpenViking client", () => {
         timeout: 1,
       }),
     ).resolves.toMatchObject({ status: "processed" });
+  });
+
+  it.each([
+    "viking://user/memories/delegate/legacy/contact/memory.md",
+    "viking://resources/delegate/../user/memories/memory.md",
+    "viking://resources/delegate/%2e%2e/user/memories/memory.md",
+    "viking://resources/delegate\\user\\memories\\memory.md",
+    "viking://resources//delegate/test.md",
+    "viking://resources/delegate/test.md?scope=user",
+    "viking://resources/delegate/{env:MEMORY_ROOT}/memory.md",
+  ])("rejects a non-canonical resource target before issuing a request: %s", async (to) => {
+    const fetchImpl = vi.fn();
+    const client = new OpenVikingClient({
+      baseUrl: "http://openviking.test",
+      fetchImpl,
+    });
+
+    await expect(client.addResource({
+      tempFileId: "temp-memory",
+      to,
+      reason: "legacy direct memory write",
+    })).rejects.toThrow("canonical viking://resources/ URI");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

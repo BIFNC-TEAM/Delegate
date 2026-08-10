@@ -101,6 +101,87 @@ describe("memory reconciliation exact-probe execution", () => {
     expect(repository.ensureCalls).toBe(2);
   });
 
+  it("leaves unsupported legacy provider work unclaimed by the production worker", async () => {
+    const repository = new RecordingRepository(
+      claimForProvider("reconciliation-test"),
+    );
+
+    const result = await runNextMemoryReconciliation({ repository });
+
+    expect(result).toMatchObject({ processed: false });
+    expect(repository.ensureInput?.supportedProviderNames).toEqual([
+      "openviking",
+    ]);
+    expect(repository.claimInput?.supportedProviderNames).toEqual([
+      "openviking",
+    ]);
+    expect(repository.completeCalls).toBe(0);
+  });
+
+  it("uses an injected custom provider as an explicit scheduler capability", async () => {
+    const repository = new RecordingRepository(
+      claimForProvider("reconciliation-test"),
+    );
+    const inspectExact = vi.fn(async (input: { uri: string }) => ({
+      uri: input.uri,
+      exists: true,
+      contentHash: expectedHash,
+    }));
+    const provider: MemoryReconciliationProvider = {
+      name: "reconciliation-test",
+      inspectExact,
+    };
+
+    const result = await runNextMemoryReconciliation({ repository, provider });
+
+    expect(result).toMatchObject({ processed: true, operationalStatus: "ok" });
+    expect(repository.ensureInput?.supportedProviderNames).toEqual([
+      "reconciliation-test",
+    ]);
+    expect(repository.claimInput?.supportedProviderNames).toEqual([
+      "reconciliation-test",
+    ]);
+    expect(inspectExact).toHaveBeenCalledOnce();
+  });
+
+  it("claims provider capabilities declared for a custom resolver", async () => {
+    const repository = new RecordingRepository(
+      claimForProvider("resolver-test"),
+    );
+    const provider: MemoryReconciliationProvider = {
+      name: "resolver-test",
+      inspectExact: vi.fn(async (input) => ({
+        uri: input.uri,
+        exists: true,
+        contentHash: expectedHash,
+      })),
+    };
+    const resolveProvider = vi.fn((providerName: string) =>
+      providerName === provider.name ? provider : null
+    );
+
+    const result = await runNextMemoryReconciliation({
+      repository,
+      resolveProvider,
+      supportedProviderNames: ["resolver-test"],
+    });
+
+    expect(result).toMatchObject({ processed: true, operationalStatus: "ok" });
+    expect(repository.claimInput?.supportedProviderNames).toEqual([
+      "resolver-test",
+    ]);
+    expect(resolveProvider).toHaveBeenCalledWith("resolver-test");
+  });
+
+  it("isolates due-run blocking and fairness history by provider", () => {
+    expect(source).toMatch(
+      /WHERE active_run\."representativeId" = policy\."representativeId"\s+AND active_run\."provider" = policy\."provider"/u,
+    );
+    expect(source).toMatch(
+      /WHERE previous_run\."representativeId" = policy\."representativeId"\s+AND previous_run\."provider" = policy\."provider"/u,
+    );
+  });
+
   it("maps an exact OpenViking 404 to MISSING without enumerating remote state", async () => {
     const fetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
       expect(new Headers(init?.headers).get("X-OpenViking-User")).toBe(
@@ -218,9 +299,10 @@ describe("memory reconciliation exact-probe execution", () => {
   it("fails closed without constructing a default client when OpenViking is disabled", async () => {
     vi.stubEnv("OPENVIKING_ENABLED", "false");
     const repository = new RecordingRepository(baseClaim("EXPECTED_ACTIVE"));
+    let result: Awaited<ReturnType<typeof runNextMemoryReconciliation>>;
 
     try {
-      await runNextMemoryReconciliation({ repository });
+      result = await runNextMemoryReconciliation({ repository });
     } finally {
       vi.unstubAllEnvs();
     }
@@ -231,6 +313,17 @@ describe("memory reconciliation exact-probe execution", () => {
         errorCode: "reconciliation_provider_disabled",
       }),
     ]);
+    expect(repository.ensureInput?.supportedProviderNames).toEqual([
+      "openviking",
+    ]);
+    expect(repository.claimInput?.supportedProviderNames).toEqual([
+      "openviking",
+    ]);
+    expect(result).toMatchObject({
+      processed: true,
+      operationalStatus: "failed",
+      operationalErrorCode: "reconciliation_provider_disabled",
+    });
   });
 
   it("always reports partial truth even when every known exact leaf matches", async () => {
@@ -407,6 +500,10 @@ describe("memory reconciliation exact-probe execution", () => {
 
   it("keeps SKIP LOCKED, worklist, lease/CAS, and no-delete boundaries explicit", () => {
     expect(source).toContain("FOR UPDATE SKIP LOCKED");
+    expect(source).toContain(
+      'policy."provider" IN (${supportedProviderSql})',
+    );
+    expect(source).toContain('run."provider" IN (${supportedProviderSql})');
     expect(source).toContain('"MemoryReconciliationTarget"');
     expect(source).toContain('projection."lane" = \'RECALL\'');
     expect(source).toContain('run."leaseToken" = ${claim.leaseToken}');
@@ -462,6 +559,15 @@ function baseClaim(
   };
 }
 
+function claimForProvider(provider: string): MemoryReconciliationClaim {
+  const claim = baseClaim("EXPECTED_ACTIVE");
+  return {
+    ...claim,
+    provider,
+    targets: claim.targets.map((target) => ({ ...target, provider })),
+  };
+}
+
 function matchingProvider(): MemoryReconciliationProvider {
   return {
     name: "openviking",
@@ -477,7 +583,12 @@ class RecordingRepository implements MemoryReconciliationRepository {
   ensureCalls = 0;
   claimCalls = 0;
   completeCalls = 0;
-  claimInput: Parameters<MemoryReconciliationRepository["claimNext"]>[0] | null = null;
+  ensureInput:
+    | Parameters<MemoryReconciliationRepository["ensureDueRun"]>[0]
+    | null = null;
+  claimInput:
+    | Parameters<MemoryReconciliationRepository["claimNext"]>[0]
+    | null = null;
   observations: readonly MemoryReconciliationTargetObservation[] = [];
   private claimed = false;
 
@@ -488,8 +599,11 @@ class RecordingRepository implements MemoryReconciliationRepository {
     ) => MemoryReconciliationPageCommit = defaultCommit,
   ) {}
 
-  async ensureDueRun() {
+  async ensureDueRun(
+    input: Parameters<MemoryReconciliationRepository["ensureDueRun"]>[0],
+  ) {
     this.ensureCalls += 1;
+    this.ensureInput = input;
     return false;
   }
 
@@ -498,6 +612,7 @@ class RecordingRepository implements MemoryReconciliationRepository {
   ) {
     this.claimCalls += 1;
     this.claimInput = input;
+    if (!input.supportedProviderNames.includes(this.claim.provider)) return null;
     if (this.claimed) return null;
     this.claimed = true;
     return {
@@ -534,6 +649,7 @@ class ExpiredLeaseRepository implements MemoryReconciliationRepository {
   async claimNext(
     input: Parameters<MemoryReconciliationRepository["claimNext"]>[0],
   ) {
+    if (!input.supportedProviderNames.includes(this.claim.provider)) return null;
     if (this.claimed) return null;
     this.claimed = true;
     this.recoveredExpiredLease = this.expiredLease.expiresAt.getTime() <= Date.now();
@@ -565,6 +681,7 @@ class PeriodicDueRepository implements MemoryReconciliationRepository {
     input: Parameters<MemoryReconciliationRepository["ensureDueRun"]>[0],
   ) {
     this.ensureCalls += 1;
+    if (!input.supportedProviderNames.includes(this.claim.provider)) return false;
     const bucket = Math.floor(
       input.now.getTime() / input.intervalMilliseconds,
     );
@@ -578,6 +695,7 @@ class PeriodicDueRepository implements MemoryReconciliationRepository {
   async claimNext(
     input: Parameters<MemoryReconciliationRepository["claimNext"]>[0],
   ) {
+    if (!input.supportedProviderNames.includes(this.claim.provider)) return null;
     if (!this.pending) return null;
     this.pending = false;
     return {

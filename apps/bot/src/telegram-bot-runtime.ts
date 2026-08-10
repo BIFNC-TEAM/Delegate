@@ -24,10 +24,17 @@ import {
   acceptInboundConversationMessage,
   assertConversationChannelDeliveryAvailable,
   ChannelUnavailableError,
+  contactMemorySharingConsentContractVersion,
   consumeIdentityBindingChallenge,
   createAudienceComputeSession,
+  createContactMemorySharingChallenge,
+  DelegationMessageEditConflictError,
+  editConversationMessage,
   executeAudienceTool,
+  grantContactMemorySharingConsent,
   privateChannelIdentityProviders,
+  readContactMemorySharingChallengeToken,
+  revokeContactMemorySharingConsent,
 } from "@delegate/web-data";
 import { Bot, InlineKeyboard } from "grammy";
 
@@ -49,6 +56,7 @@ import {
   buildHandoffPreparation,
   clearStructuredCollectorState,
   createPlanInvoice,
+  findTelegramInboundMessageEditTarget,
   getActiveRepresentativeSlugForChat,
   getConversationContext,
   getDefaultRepresentativeSlugForTelegramBot,
@@ -70,6 +78,7 @@ import {
   updateStructuredCollectorState,
   validatePendingInvoice,
 } from "./runtime-store";
+import { prisma } from "./prisma";
 import { getRepresentativeRuntimeConfig } from "./representative-config";
 import {
   recallOpenVikingContext,
@@ -84,9 +93,26 @@ import {
   sanitizeTelegramError,
 } from "./telegram-runtime";
 import {
+  requireTelegramRuntimeContext,
   runWithTelegramRuntimeContext,
   type TelegramRuntimeContext,
 } from "./telegram-runtime-context";
+import {
+  ensureTelegramMemoryDisclosure,
+  resolveTelegramProviderOccurredAt,
+  telegramContactMemoryDeleteText,
+} from "./telegram-memory";
+import {
+  lockTelegramMessageEditLease,
+  persistAndProcessTelegramMessageEdit,
+  retryPendingTelegramMessageEdits,
+  TelegramMessageEditLeaseLostError,
+  TelegramMessageEditNotDurableError,
+  TelegramMessageEditRetryableError,
+  TelegramMessageEditTerminalError,
+  type TelegramMessageEditEvent,
+  type TelegramMessageEditLease,
+} from "./telegram-message-edit-inbox";
 
 export type TelegramBotRuntimeConfig = {
   internalConnectionId: string;
@@ -140,6 +166,57 @@ const telegramPaymentRetryTimer = setInterval(() => {
   });
 }, 5_000);
 telegramPaymentRetryTimer.unref();
+void runWithTelegramRuntimeContext(
+  runtimeContext,
+  () => retryPendingTelegramMessageEdits(applyTelegramMessageEdit),
+).catch((error) => {
+  console.error("Telegram message edit reconciliation startup pass failed:", error);
+});
+const telegramMessageEditRetryTimer = setInterval(() => {
+  void runWithTelegramRuntimeContext(
+    runtimeContext,
+    () => retryPendingTelegramMessageEdits(applyTelegramMessageEdit),
+  ).catch((error) => {
+    console.error("Telegram message edit reconciliation pass failed:", error);
+  });
+}, 5_000);
+telegramMessageEditRetryTimer.unref();
+const pendingTelegramMessageEditDurability = new Set<Promise<unknown>>();
+let telegramMessageEditDurabilityFailure: unknown = null;
+
+function trackTelegramMessageEditDurability<T>(promise: Promise<T>): Promise<T> {
+  pendingTelegramMessageEditDurability.add(promise);
+  void promise.then(
+    () => pendingTelegramMessageEditDurability.delete(promise),
+    (error) => {
+      telegramMessageEditDurabilityFailure = error;
+      pendingTelegramMessageEditDurability.delete(promise);
+    },
+  );
+  return promise;
+}
+
+async function waitForTelegramMessageEditDurabilityFence() {
+  // grammY records lastTriedUpdateId before awaiting middleware. Drain every
+  // edit persistence promise before bot.stop() confirms that offset. Recheck
+  // after a microtask so the sequential update loop can admit its next edit.
+  while (true) {
+    const pending = [...pendingTelegramMessageEditDurability];
+    if (pending.length > 0) {
+      await Promise.allSettled(pending);
+      continue;
+    }
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    if (pendingTelegramMessageEditDurability.size === 0) {
+      if (telegramMessageEditDurabilityFailure) {
+        throw new TelegramMessageEditNotDurableError(
+          telegramMessageEditDurabilityFailure,
+        );
+      }
+      return;
+    }
+  }
+}
 
 bot.use((_ctx, next) =>
   runWithTelegramRuntimeContext(runtimeContext, next),
@@ -199,6 +276,41 @@ bot.command("start", async (ctx) => {
   }
 
   const representative = await getRepresentativeRuntimeConfig(activeRepresentativeSlug);
+
+  if (ctx.chat.type === "private") {
+    try {
+      const conversationContext = await getConversationContext(
+        activeRepresentativeSlug,
+        {
+          telegramUserId: ctx.from.id,
+          ...(ctx.from.username ? { username: ctx.from.username } : {}),
+          ...buildDisplayName(ctx.from.first_name, ctx.from.last_name),
+          chatId: ctx.chat.id,
+          channel: Channel.PRIVATE_CHAT,
+        },
+      );
+      await assertConversationChannelDeliveryAvailable({
+        conversationId: conversationContext.conversationId,
+        channel: "telegram",
+      });
+      await deliverTelegramMemoryDisclosure(
+        ctx,
+        conversationContext.conversationId,
+        String(ctx.message?.message_id ?? `update:${ctx.update.update_id}`),
+      );
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          event: "telegram_memory_disclosure_start_failed",
+          updateId: ctx.update.update_id,
+          error: sanitizeTelegramError(error),
+        }),
+      );
+      await ctx.reply(
+        "记忆说明暂时无法安全确认，本轮不会启用 Telegram 长期记忆；你仍可继续基础对话。",
+      );
+    }
+  }
 
   if (startPayload.purchaseTier && ctx.chat.type === "private") {
     await ctx.reply(
@@ -371,6 +483,202 @@ bot.command("bind", async (ctx) => {
   );
 });
 
+bot.command("memory_share", async (ctx) => {
+  if (ctx.chat.type !== "private" || !ctx.from) {
+    await ctx.reply("跨渠道联系人记忆只能在 Bot 私聊中授权。");
+    return;
+  }
+  const commandArguments = ctx.match?.trim().replace(/\s+/gu, " ") ?? "";
+  const challengeToken = commandArguments
+    ? readContactMemorySharingChallengeToken(commandArguments)
+    : null;
+  if (commandArguments && !challengeToken) {
+    await ctx.reply(
+      "一次性确认令牌缺失或无效。请重新发送 /memory_share 阅读说明并获取新令牌；裸 /memory_share confirm 不会授权。",
+    );
+    return;
+  }
+  const representativeSlug = await resolveRepresentativeSlugForChat(
+    ctx.chat.type,
+    ctx.chat.id,
+  );
+  try {
+    const conversationContext = await getConversationContext(
+      representativeSlug,
+      {
+        telegramUserId: ctx.from.id,
+        ...(ctx.from.username ? { username: ctx.from.username } : {}),
+        ...buildDisplayName(ctx.from.first_name, ctx.from.last_name),
+        chatId: ctx.chat.id,
+        channel: Channel.PRIVATE_CHAT,
+      },
+    );
+    const sourceEvidence = {
+      sourceChannel: "TELEGRAM",
+      providerSubject: String(ctx.from.id),
+      issuer: "delegate-managed-bot",
+      connectionId: String(me.id),
+    } as const;
+    const sourceEventKey = [
+      "telegram",
+      me.id,
+      ctx.chat.id,
+      ctx.from.id,
+      ctx.update.update_id,
+      ctx.message?.message_id ?? "missing-message-id",
+    ].join(":");
+    if (!challengeToken) {
+      const challenge = await createContactMemorySharingChallenge({
+        representativeSlug,
+        audienceIdentityId: conversationContext.audienceIdentityId,
+        disclosureContractVersion:
+          contactMemorySharingConsentContractVersion,
+        sourceEventKey,
+        ...sourceEvidence,
+      });
+      await ctx.reply(
+        [
+          "跨渠道联系人记忆只会共享给当前数字代表，并且只在已验证为同一 Delegate 用户的 Web、Matrix、Telegram 私聊之间使用。",
+          "系统不会把原始聊天、付款或余额、凭据、Owner 私有备注、Compute 原始产物写入长期记忆；每次召回仍会检查当前身份、策略和渠道授权。",
+          "你可以随时发送 /memory_unshare，立即停止共享记忆召回并异步清理远端投影；各渠道原始会话和渠道内记忆不受影响。",
+          `如果你同意，请在 10 分钟内发送：/memory_share confirm ${challenge.challengeToken}`,
+        ].join("\n\n"),
+      );
+      return;
+    }
+    const result = await grantContactMemorySharingConsent({
+      representativeSlug,
+      audienceIdentityId: conversationContext.audienceIdentityId,
+      challengeToken,
+      sourceEventKey,
+      ...sourceEvidence,
+    });
+    await ctx.reply(
+      result.active
+        ? "已允许当前数字代表在已验证为同一 Delegate 用户的 Web、Matrix 和 Telegram 私聊之间使用联系人记忆。"
+        : "跨渠道联系人记忆状态刚刚发生变化，请重新发送 /memory_share。",
+    );
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: challengeToken
+          ? "telegram_contact_memory_sharing_grant_failed"
+          : "telegram_contact_memory_sharing_disclosure_failed",
+        updateId: ctx.update.update_id,
+        error: sanitizeTelegramError(error),
+      }),
+    );
+    await ctx.reply(
+      challengeToken
+        ? "一次性确认令牌无效、已过期或已使用。请重新发送 /memory_share 获取新令牌。"
+        : "暂时无法提供跨渠道联系人记忆授权说明。请确认已从当前代表的 Web 页面登录并绑定这个 Telegram 账号，且 Owner 已开启该策略。",
+    );
+  }
+});
+
+bot.command("memory_unshare", async (ctx) => {
+  if (ctx.chat.type !== "private" || !ctx.from) {
+    await ctx.reply("跨渠道联系人记忆只能在 Bot 私聊中撤回。");
+    return;
+  }
+  const representativeSlug = await resolveRepresentativeSlugForChat(
+    ctx.chat.type,
+    ctx.chat.id,
+  );
+  try {
+    const conversationContext = await getConversationContext(
+      representativeSlug,
+      {
+        telegramUserId: ctx.from.id,
+        ...(ctx.from.username ? { username: ctx.from.username } : {}),
+        ...buildDisplayName(ctx.from.first_name, ctx.from.last_name),
+        chatId: ctx.chat.id,
+        channel: Channel.PRIVATE_CHAT,
+      },
+    );
+    const result = await revokeContactMemorySharingConsent({
+      representativeSlug,
+      audienceIdentityId: conversationContext.audienceIdentityId,
+      sourceChannel: "TELEGRAM",
+    });
+    await ctx.reply(
+      result.changed
+        ? "已立即停止当前数字代表的跨渠道联系人记忆召回；共享记忆的远端投影已进入可重试清理队列。各渠道原始会话和渠道内记忆不受影响。"
+        : "当前没有有效的跨渠道联系人记忆授权；系统已再次确认共享召回处于关闭状态。",
+    );
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "telegram_contact_memory_sharing_revoke_failed",
+        updateId: ctx.update.update_id,
+        error: sanitizeTelegramError(error),
+      }),
+    );
+    await ctx.reply("当前无法安全撤回跨渠道联系人记忆，请稍后重试或在 Web 代表页面操作。");
+  }
+});
+
+const handleContactMemoryDeleteCommand = async (ctx: any) => {
+  if (ctx.chat?.type !== "private" || !ctx.from || !ctx.message) {
+    await ctx.reply("联系人记忆只能在 Bot 私聊中删除。");
+    return;
+  }
+  const representativeSlug = await resolveRepresentativeSlugForChat(
+    ctx.chat.type,
+    ctx.chat.id,
+  );
+  try {
+    const conversationContext = await getConversationContext(
+      representativeSlug,
+      {
+        telegramUserId: ctx.from.id,
+        ...(ctx.from.username ? { username: ctx.from.username } : {}),
+        ...buildDisplayName(ctx.from.first_name, ctx.from.last_name),
+        chatId: ctx.chat.id,
+        channel: Channel.PRIVATE_CHAT,
+      },
+    );
+    await assertConversationChannelDeliveryAvailable({
+      conversationId: conversationContext.conversationId,
+      channel: "telegram",
+    });
+    const deletionInput = {
+      representativeSlug,
+      conversationId: conversationContext.conversationId,
+      text: telegramContactMemoryDeleteText,
+      senderId: String(ctx.from.id),
+      senderDisplayName:
+        [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ")
+        || ctx.from.username
+        || String(ctx.from.id),
+      clientMessageId:
+        `telegram:${me.id}:${ctx.chat.id}:${ctx.message.message_id}`,
+      channel: "telegram",
+      externalMessageId: String(ctx.message.message_id),
+      queueGeneration: false,
+      occurredAt: resolveTelegramProviderOccurredAt(ctx.message.date),
+    } satisfies Parameters<typeof acceptInboundConversationMessage>[0] & {
+      occurredAt: Date;
+    };
+    await acceptInboundConversationMessage(deletionInput);
+    await ctx.reply(
+      "已立即停止召回当前数字代表与当前 Telegram 渠道下的联系人记忆；物理清理已进入可重试队列。代表经验和其他渠道不受影响。",
+    );
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        event: "telegram_contact_memory_delete_failed",
+        updateId: ctx.update.update_id,
+        error: sanitizeTelegramError(error),
+      }),
+    );
+    await ctx.reply("当前无法安全删除联系人记忆，请稍后重试。");
+  }
+};
+
+bot.command("forget", handleContactMemoryDeleteCommand);
+bot.command("delete_memory", handleContactMemoryDeleteCommand);
+
 bot.command("compute", async (ctx) => {
   if (ctx.chat.type !== "private" || !ctx.from) {
     await ctx.reply("Compute 请求目前只在 bot 私聊里开放。");
@@ -502,6 +810,49 @@ bot.on("message:successful_payment", async (ctx) => {
   }
 });
 
+bot.on("edited_message:text", async (ctx) => {
+  const editedMessage = ctx.editedMessage;
+  if (
+    ctx.chat.type !== "private"
+    || !ctx.from
+    || !editedMessage.text.trim()
+  ) return;
+
+  let editedAt: string;
+  try {
+    editedAt = resolveTelegramProviderOccurredAt(
+      editedMessage.edit_date ?? editedMessage.date,
+    ).toISOString();
+  } catch (error) {
+    // Nothing has been durably recorded yet. Escalating this error stops the
+    // current long-poll cycle so Telegram does not confirm the update offset.
+    throw new TelegramMessageEditNotDurableError(error);
+  }
+
+  const result = await trackTelegramMessageEditDurability(
+    persistAndProcessTelegramMessageEdit(
+      {
+        updateId: ctx.update.update_id,
+        telegramUserId: ctx.from.id,
+        chatId: String(ctx.chat.id),
+        externalMessageId: String(editedMessage.message_id),
+        text: editedMessage.text,
+        editedAt,
+      },
+      applyTelegramMessageEdit,
+    ),
+  );
+  if (result.status === "retrying") {
+    console.warn(
+      JSON.stringify({
+        event: "telegram_message_edit_retry_scheduled",
+        updateId: ctx.update.update_id,
+        externalMessageId: String(editedMessage.message_id),
+      }),
+    );
+  }
+});
+
 bot.on("message:text", async (ctx) => {
   const rawText = ctx.message.text.trim();
 
@@ -575,13 +926,31 @@ bot.on("message:text", async (ctx) => {
     return;
   }
 
+  if (isPrivate) {
+    try {
+      await deliverTelegramMemoryDisclosure(
+        ctx,
+        conversationContext.conversationId,
+        String(ctx.message.message_id),
+      );
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          event: "telegram_memory_disclosure_message_failed",
+          updateId: ctx.update.update_id,
+          error: sanitizeTelegramError(error),
+        }),
+      );
+    }
+  }
+
   if (
     isPrivate
     && conversationContext
     && (conversationPlatformMode === "worker" || conversationPlatformMode === "shadow")
   ) {
     try {
-      await acceptInboundConversationMessage({
+      const inboundInput = {
         representativeSlug,
         conversationId: conversationContext.conversationId,
         text: normalizedText,
@@ -595,7 +964,11 @@ bot.on("message:text", async (ctx) => {
         channel: "telegram",
         externalMessageId: String(ctx.message.message_id),
         queueGeneration: conversationPlatformMode === "worker",
-      });
+        occurredAt: resolveTelegramProviderOccurredAt(ctx.message.date),
+      } satisfies Parameters<typeof acceptInboundConversationMessage>[0] & {
+        occurredAt: Date;
+      };
+      await acceptInboundConversationMessage(inboundInput);
       if (conversationPlatformMode === "worker") {
         return;
       }
@@ -977,12 +1350,15 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-bot.catch((error) =>
-  handleTelegramMiddlewareError({
+bot.catch((error) => {
+  if (error.error instanceof TelegramMessageEditNotDurableError) {
+    throw error;
+  }
+  return handleTelegramMiddlewareError({
     error: error.error,
     context: error.ctx,
-  }),
-);
+  });
+});
 
 let telegramBotStopping = false;
 let telegramBotStarted = false;
@@ -994,6 +1370,7 @@ async function stopTelegramBot(
   }
   telegramBotStopping = true;
   clearInterval(telegramPaymentRetryTimer);
+  clearInterval(telegramMessageEditRetryTimer);
   console.info(
     JSON.stringify({
       event: "telegram_polling_stopping",
@@ -1004,6 +1381,7 @@ async function stopTelegramBot(
     return;
   }
   try {
+    await waitForTelegramMessageEditDurabilityFence();
     await bot.stop();
   } catch (error) {
     console.error(
@@ -1042,6 +1420,106 @@ return {
   },
   stop: stopTelegramBot,
 };
+
+async function deliverTelegramMemoryDisclosure(
+  ctx: any,
+  conversationId: string,
+  inboundExternalMessageId: string,
+) {
+  return ensureTelegramMemoryDisclosure({
+    conversationId,
+    inboundExternalMessageId,
+    send: async (text) => {
+      const message = await ctx.reply(text);
+      return {
+        externalMessageId: String(message.message_id),
+        deliveredAt: resolveTelegramProviderOccurredAt(message.date),
+      };
+    },
+  });
+}
+
+async function applyTelegramMessageEdit(
+  event: TelegramMessageEditEvent,
+  lease: TelegramMessageEditLease,
+): Promise<{
+  conversationId: string;
+  providerEditStatus: "applied" | "superseded";
+}> {
+  const target = await findTelegramInboundMessageEditTarget({
+    chatId: event.chatId,
+    externalMessageId: event.externalMessageId,
+    senderId: String(event.telegramUserId),
+  });
+  if (!target) {
+    throw new TelegramMessageEditRetryableError(
+      "telegram_edit_target_not_found",
+    );
+  }
+  const runtime = requireTelegramRuntimeContext();
+  try {
+    return await prisma.$transaction(async (tx) => {
+      await lockTelegramMessageEditLease(tx, lease);
+      try {
+        const result = await editConversationMessage(
+          {
+            representativeSlug: target.representativeSlug,
+            conversationId: target.conversationId,
+            messageId: target.messageId,
+            text: event.text,
+            editedBy: `telegram:${event.telegramUserId}`,
+            telegramGuard: {
+              connectionId: runtime.botId,
+              chatId: event.chatId,
+              senderId: String(event.telegramUserId),
+              externalMessageId: event.externalMessageId,
+              updateId: event.updateId,
+              editedAt: event.editedAt,
+            },
+          },
+          tx,
+        );
+        return {
+          conversationId: target.conversationId,
+          providerEditStatus:
+            result.providerEditStatus === "superseded"
+              ? "superseded" as const
+              : "applied" as const,
+        };
+      } catch (error) {
+        if (!(error instanceof DelegationMessageEditConflictError)) throw error;
+        // The provider edit cannot rewrite an input already committed to a
+        // delegation task, but editConversationMessage has already fenced all
+        // memory derived from the old source inside this transaction. Commit
+        // that privacy control and acknowledge the durable edit event.
+        return {
+          conversationId: target.conversationId,
+          providerEditStatus: "applied" as const,
+        };
+      }
+    });
+  } catch (error) {
+    if (error instanceof TelegramMessageEditLeaseLostError) throw error;
+    if (error instanceof Error) {
+      if (error.message === "Telegram message edit scope is invalid.") {
+        throw new TelegramMessageEditTerminalError(
+          "telegram_edit_scope_invalid",
+        );
+      }
+      if (error.message === "Redacted messages cannot be edited.") {
+        throw new TelegramMessageEditTerminalError(
+          "telegram_edit_message_redacted",
+        );
+      }
+      if (error.message === "Message not found.") {
+        throw new TelegramMessageEditRetryableError(
+          "telegram_edit_target_not_found",
+        );
+      }
+    }
+    throw error;
+  }
+}
 
 async function initializeTelegramBot() {
   try {

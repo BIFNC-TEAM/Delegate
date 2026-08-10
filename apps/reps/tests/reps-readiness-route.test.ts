@@ -75,6 +75,7 @@ describe("representative app readiness route", () => {
     expect(sql).toContain(
       'conversation_binding_contract."representativeAssignmentRevision"',
     );
+    expect(sql).toContain('memory_use_item_contract."citationId"');
     expect(sql).toMatch(/\bLIMIT\s+0\b/u);
     const indexSql = mocks.queryRaw.mock.calls[1]?.[0]?.join(" ") ?? "";
     expect(indexSql).toContain("Owner_accountId_key");
@@ -129,6 +130,28 @@ describe("representative app readiness route", () => {
     );
   });
 
+  it("fails readiness when the memory citation schema migration is missing", async () => {
+    mocks.queryRaw.mockImplementation((strings: TemplateStringsArray) => {
+      const sql = strings.join(" ");
+      if (sql.includes('memory_use_item_contract."citationId"')) {
+        return Promise.reject(
+          new Error('column memory_use_item_contract."citationId" does not exist'),
+        );
+      }
+      return Promise.resolve(validAccountIndexes);
+    });
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(503);
+    expect(body).toMatchObject({
+      status: "not_ready",
+      databaseReady: false,
+    });
+    expect(JSON.stringify(body)).not.toContain("citationId");
+  });
+
   it("fails readiness when an account identity index is missing or invalid", async () => {
     mocks.queryRaw
       .mockResolvedValueOnce([])
@@ -169,6 +192,7 @@ describe("representative app readiness route", () => {
       OwnerIdentityLink: ["issuer"],
       RepresentativeChannelBinding: ["endpointAssignmentRevision"],
       ConversationChannelBinding: ["representativeAssignmentRevision"],
+      MemoryUseItem: ["citationId"],
     });
     expect(mocks.queryRaw).not.toHaveBeenCalled();
   });

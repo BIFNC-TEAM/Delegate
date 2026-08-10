@@ -1,45 +1,51 @@
 import {
-  getMemoryDashboardSettings,
-  memorySettingsQuerySchema,
-  memorySettingsUpdateSchema,
-  updateMemoryDashboardSettings,
-} from "@delegate/web-data/memory-dashboard";
+  getRepresentativeMemorySettings,
+  representativeMemorySettingsQuerySchema,
+  representativeMemorySettingsUpdateSchema,
+  updateRepresentativeMemorySettings,
+} from "@delegate/web-data/memory-settings";
 
 import {
-  memoryDashboardErrorResponse,
-  memoryDashboardJson,
-  parseMemoryDashboardQuery,
-  requireMemoryDashboardOwnerId,
-  requireMemoryDashboardWriteMetadata,
+  memorySettingsErrorResponse,
+  memorySettingsJson,
+  parseMemorySettingsQuery,
+  requireMemorySettingsOwnerId,
+  requireMemorySettingsWriteMetadata,
 } from "../shared";
 
 export async function GET(request: Request) {
   try {
-    const actorOwnerId = await requireMemoryDashboardOwnerId();
-    const query = parseMemoryDashboardQuery(request, memorySettingsQuerySchema);
-    return memoryDashboardJson(await getMemoryDashboardSettings({
+    const actorOwnerId = await requireMemorySettingsOwnerId();
+    const query = parseMemorySettingsQuery(
+      request,
+      representativeMemorySettingsQuerySchema,
+    );
+    return memorySettingsJson(await getRepresentativeMemorySettings({
       actorOwnerId,
       representativeSlug: query.rep,
     }));
   } catch (error) {
-    return memoryDashboardErrorResponse(error);
+    return memorySettingsErrorResponse(error);
   }
 }
 export async function PATCH(request: Request) {
   try {
-    const actorOwnerId = await requireMemoryDashboardOwnerId();
-    const query = parseMemoryDashboardQuery(request, memorySettingsQuerySchema);
-    const metadata = requireMemoryDashboardWriteMetadata(request);
-    const update = memorySettingsUpdateSchema.parse(
+    const actorOwnerId = await requireMemorySettingsOwnerId();
+    const query = parseMemorySettingsQuery(
+      request,
+      representativeMemorySettingsQuerySchema,
+    );
+    const metadata = requireMemorySettingsWriteMetadata(request);
+    const update = representativeMemorySettingsUpdateSchema.parse(
       await request.json().catch(() => null),
     );
-    return memoryDashboardJson(await updateMemoryDashboardSettings({
+    return memorySettingsJson(await updateRepresentativeMemorySettings({
       actorOwnerId,
       representativeSlug: query.rep,
       ...metadata,
       update,
     }));
   } catch (error) {
-    return memoryDashboardErrorResponse(error);
+    return memorySettingsErrorResponse(error);
   }
 }

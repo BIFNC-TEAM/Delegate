@@ -14,7 +14,9 @@ export type ChannelAvailabilityCode =
   | "channel_unhealthy"
   | "matrix_private_room_not_verified"
   | "matrix_identity_reassigned"
+  | "matrix_channel_lifecycle_reactivated"
   | "telegram_connection_reassigned"
+  | "identity_provenance_invalid"
   | "policy_disabled";
 
 export type ChannelAvailabilityResult =

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockGetRepresentativeOpenVikingOverviewMetrics, mockPrisma } = vi.hoisted(() => {
+const { mockPrisma } = vi.hoisted(() => {
   const prismaMock = {
     $transaction: vi.fn(),
     conversation: {
@@ -27,16 +27,8 @@ const { mockGetRepresentativeOpenVikingOverviewMetrics, mockPrisma } = vi.hoiste
     return values;
   });
 
-  return {
-    mockGetRepresentativeOpenVikingOverviewMetrics: vi.fn(),
-    mockPrisma: prismaMock,
-  };
+  return { mockPrisma: prismaMock };
 });
-
-vi.mock("../src/openviking", () => ({
-  getRepresentativeOpenVikingOverviewMetrics:
-    mockGetRepresentativeOpenVikingOverviewMetrics,
-}));
 
 vi.mock("../src/prisma", () => ({
   prisma: mockPrisma,
@@ -82,6 +74,21 @@ describe("owner dashboard workflow observability", () => {
           lastError: null,
           output: null,
         },
+        {
+          id: "retired-training-workflow",
+          kind: "CREATOR_TRAINING_REVIEW",
+          engine: "LOCAL_RUNNER",
+          status: "COMPLETED",
+          enginePhase: "COMPLETED",
+          scheduledAt: new Date("2026-04-04T12:00:00.000Z"),
+          nextWakeAt: null,
+          externalWorkflowId: null,
+          externalRunId: null,
+          cancelRequestedAt: null,
+          completedAt: new Date("2026-04-04T12:01:00.000Z"),
+          lastError: null,
+          output: null,
+        },
       ],
     });
     mockPrisma.conversation.count.mockResolvedValue(0);
@@ -93,7 +100,6 @@ describe("owner dashboard workflow observability", () => {
       .mockResolvedValueOnce(1)
       .mockResolvedValueOnce(0)
       .mockResolvedValueOnce(1);
-    mockGetRepresentativeOpenVikingOverviewMetrics.mockResolvedValue(null);
   });
 
   it("serializes phase-aware workflow metrics and recent workflow fields", async () => {
@@ -113,6 +119,7 @@ describe("owner dashboard workflow observability", () => {
     expect(mockPrisma.workflowRun.count).toHaveBeenNthCalledWith(1, {
       where: {
         representativeId: "rep-1",
+        kind: { not: "CREATOR_TRAINING_REVIEW" },
         status: {
           in: ["QUEUED", "RUNNING"],
         },
@@ -121,6 +128,7 @@ describe("owner dashboard workflow observability", () => {
     expect(mockPrisma.workflowRun.count).toHaveBeenNthCalledWith(2, {
       where: {
         representativeId: "rep-1",
+        kind: { not: "CREATOR_TRAINING_REVIEW" },
         enginePhase: "DISPATCH_PENDING",
       },
     });
@@ -134,5 +142,6 @@ describe("owner dashboard workflow observability", () => {
       externalWorkflowId: "delegate:lin-founder-rep:handoff_follow_up:handoff-1",
       externalRunId: "temporal-run-1",
     });
+    expect(snapshot?.recentWorkflows).toHaveLength(1);
   });
 });

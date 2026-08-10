@@ -191,7 +191,7 @@ export function DashboardRepresentativeOperations({
           actionLabel={zh ? "查看发布检查" : "Review publish readiness"}
           canAct
           onAction={() => navigateSection("operations")}
-          summary={zh ? "配置修改先保存在工作草稿中；公开页面和异步会话继续使用当前已发布版本。" : "Edits stay in the working draft while public pages and asynchronous conversations continue using the active published version."}
+          summary={zh ? "身份、知识等配置先保存在工作草稿中；记忆页单独保存的实时策略立即生效，无需发布代表版本。" : "Identity, knowledge, and other versioned edits stay in the working draft. Runtime policy saved on the Memory page applies immediately without publishing a representative version."}
           title={zh ? `配置 ${snapshot.representative.displayName}` : `Configure ${snapshot.representative.displayName}`}
         />
       ) : snapshot ? (
@@ -356,7 +356,8 @@ function configurationLinks(locale: Locale): Array<{ label: string; section: Rep
   const zh = locale === "zh";
   return [
     { label: zh ? "身份与表达" : "Identity & voice", section: "basics" },
-    { label: zh ? "知识与记忆" : "Knowledge & memory", section: "knowledge" },
+    { label: zh ? "知识" : "Knowledge", section: "knowledge" },
+    { label: zh ? "记忆" : "Memory", section: "memory" },
     { label: zh ? "技能与工具" : "Skills & tools", section: "compute" },
     { label: zh ? "人工接管" : "Human handoff", section: "contract" },
     { label: zh ? "价格与权益" : "Pricing & entitlements", section: "pricing" },

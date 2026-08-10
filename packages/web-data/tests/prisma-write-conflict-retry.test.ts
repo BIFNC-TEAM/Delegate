@@ -56,11 +56,37 @@ describe("Prisma write-conflict retry", () => {
     })).resolves.toBe("replayed");
     expect(operation).toHaveBeenCalledTimes(2);
   });
+
+  it.each(["40001", "40P01"])(
+    "retries raw PostgreSQL write conflict %s wrapped as P2010",
+    async (databaseCode) => {
+      const operation = vi.fn()
+        .mockRejectedValueOnce(prismaRawError(databaseCode))
+        .mockResolvedValue("replayed");
+      const sleep = vi.fn().mockResolvedValue(undefined);
+
+      await expect(runWithPrismaWriteConflictRetry(operation, {
+        sleep,
+      })).resolves.toBe("replayed");
+      expect(operation).toHaveBeenCalledTimes(2);
+    },
+  );
 });
 
 function prismaError(code: string) {
   return new Prisma.PrismaClientKnownRequestError("synthetic Prisma failure", {
     code,
     clientVersion: "test",
+  });
+}
+
+function prismaRawError(databaseCode: string) {
+  return new Prisma.PrismaClientKnownRequestError("synthetic raw failure", {
+    code: "P2010",
+    clientVersion: "test",
+    meta: {
+      code: databaseCode,
+      message: "synthetic PostgreSQL write conflict",
+    },
   });
 }

@@ -130,6 +130,11 @@ export function buildLaneTimings(
       pollMs: config.pollMs,
       ...memoryTiming,
     },
+    memoryLifecycle: {
+      pollMs: config.memoryLifecyclePollMs
+        ?? conversationWorkerMemoryLoopDefaults.memoryLifecyclePollMs,
+      ...memoryTiming,
+    },
     projectionWrite: {
       pollMs: config.memoryProjectionPollMs
         ?? conversationWorkerMemoryLoopDefaults.memoryProjectionPollMs,

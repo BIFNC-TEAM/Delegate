@@ -44,54 +44,63 @@ describe("local Compose source synchronization contract", () => {
   const baseServices = parseServiceBlocks(baseComposeSource);
   const services = parseServiceBlocks(localComposeSource);
 
-  it("regenerates Prisma Client before every hot-mounted application starts", () => {
-    const hotMountedApplications = [...services.entries()].filter(([, block]) =>
-      block.includes("- ./apps/"),
-    );
+  it("runs local Next.js applications with Turbopack and source mounts", () => {
+    for (const serviceName of ["dashboard", "reps"]) {
+      const block = services.get(serviceName);
 
-    expect(hotMountedApplications.map(([name]) => name).sort()).toEqual([
-      "bot",
-      "dashboard",
-      "reps",
-    ]);
-
-    for (const [serviceName, block] of hotMountedApplications) {
-      expect(
-        block,
-        `${serviceName} must read the current Prisma schema`,
-      ).toContain(
-        "./prisma/schema.prisma:/app/prisma/schema.prisma:ro",
+      expect(block, `${serviceName} must have a local service override`).toBeDefined();
+      expect(block, `${serviceName} must regenerate Prisma for the mounted schema`).toContain(
+        "pnpm db:generate",
       );
-
-      const generateIndex = block.indexOf("pnpm db:generate");
-      const applicationStartIndex = Math.max(
-        block.indexOf("next dev"),
-        block.indexOf("exec node"),
+      expect(block, `${serviceName} must run the Turbopack development server`).toContain(
+        "next dev --turbopack",
       );
-      expect(generateIndex, `${serviceName} must generate Prisma Client`).toBeGreaterThan(-1);
-      expect(applicationStartIndex, `${serviceName} must start an application`).toBeGreaterThan(-1);
-      expect(generateIndex, `${serviceName} must generate before startup`).toBeLessThan(
-        applicationStartIndex,
+      expect(block, `${serviceName} must not fall back to Webpack`).not.toContain(
+        "--webpack",
       );
-    }
-  });
-
-  it("keeps the web-data manifest aligned wherever web-data source is mounted", () => {
-    const webDataHotReloadServices = [...services.entries()].filter(([, block]) =>
-      block.includes(
-        "./packages/web-data/src:/app/packages/web-data/src:ro",
-      ),
-    );
-
-    expect(webDataHotReloadServices.length).toBeGreaterThan(0);
-    for (const [serviceName, block] of webDataHotReloadServices) {
-      expect(
-        block,
-        `${serviceName} must use the matching web-data export map`,
-      ).toContain(
+      expect(block, `${serviceName} must not run a precompiled Next.js server`).not.toContain(
+        "next start",
+      );
+      expect(block, `${serviceName} must mount current app source`).toContain(
+        ":/app/apps/",
+      );
+      expect(block, `${serviceName} must mount current workspace package source`).toContain(
+        ":/app/packages/",
+      );
+      expect(block, `${serviceName} must mount the current web-data export map`).toContain(
         "./packages/web-data/package.json:/app/packages/web-data/package.json:ro",
       );
+      expect(block, `${serviceName} must mount the current Prisma schema read-only`).toContain(
+        "./prisma/schema.prisma:/app/prisma/schema.prisma:ro",
+      );
+      expect(block, `${serviceName} must not shadow the image node_modules`).not.toContain(
+        ":/app/node_modules",
+      );
+      expect(block, `${serviceName} must not shadow the whole image workspace`).not.toMatch(
+        /^\s*-\s+\.:\/app(?::|\s|$)/mu,
+      );
     }
+
+    const dashboard = services.get("dashboard") ?? "";
+    const dashboardGenerateIndex = dashboard.indexOf("pnpm db:generate");
+    const bootstrapIndex = dashboard.indexOf("pnpm local:auth:bootstrap");
+    const dashboardDevIndex = dashboard.indexOf("next dev --turbopack");
+    expect(dashboardGenerateIndex).toBeGreaterThan(-1);
+    expect(bootstrapIndex).toBeGreaterThan(-1);
+    expect(dashboardDevIndex).toBeGreaterThan(-1);
+    expect(dashboardGenerateIndex).toBeLessThan(bootstrapIndex);
+    expect(bootstrapIndex).toBeLessThan(dashboardDevIndex);
+
+    const reps = services.get("reps") ?? "";
+    expect(reps.indexOf("pnpm db:generate")).toBeLessThan(
+      reps.indexOf("next dev --turbopack"),
+    );
+
+    const bot = services.get("bot");
+    expect(bot).not.toContain("next dev");
+    expect(bot).not.toContain(":/app/apps/");
+    expect(bot).not.toContain(":/app/packages/");
+    expect(baseServices.get("bot")).not.toContain("pnpm db:generate");
   });
 
   it("runs local migrations from the current Prisma tree", () => {
@@ -217,6 +226,7 @@ describe("local Compose source synchronization contract", () => {
         services?: Record<
           string,
           {
+            command?: string[];
             depends_on?: Record<
               string,
               {
@@ -224,6 +234,11 @@ describe("local Compose source synchronization contract", () => {
                 required?: boolean;
               }
             >;
+            volumes?: Array<{
+              source?: string;
+              target?: string;
+              type?: string;
+            }>;
           }
         >;
       };
@@ -237,6 +252,44 @@ describe("local Compose source synchronization contract", () => {
           required: true,
         });
       }
+
+      expect(mergedConfig.services?.dashboard?.command?.join(" ")).toContain(
+        "pnpm db:generate && pnpm local:auth:bootstrap && exec pnpm --filter @delegate/dashboard exec next dev --turbopack",
+      );
+      expect(mergedConfig.services?.reps?.command?.join(" ")).toContain(
+        "pnpm db:generate && exec pnpm --filter @delegate/reps exec next dev --turbopack",
+      );
+      expect(mergedConfig.services?.bot?.command?.join(" ")).toContain(
+        "exec node --import tsx src/index.ts",
+      );
+
+      for (const serviceName of ["dashboard", "reps"]) {
+        const command = mergedConfig.services?.[serviceName]?.command?.join(" ") ?? "";
+        const volumes = mergedConfig.services?.[serviceName]?.volumes ?? [];
+        const targets = volumes.map((volume) => volume.target);
+        expect(command).toContain("pnpm db:generate");
+        expect(command).toContain("next dev --turbopack");
+        expect(command).not.toContain("--webpack");
+        expect(command).not.toContain("next start");
+        expect(targets).toContain("/app/packages/web-data/src");
+        expect(targets).toContain("/app/packages/web-data/package.json");
+        expect(targets).toContain("/app/packages/web-ui/styles");
+        expect(targets).toContain("/app/prisma/schema.prisma");
+        expect(targets).not.toContain("/app");
+        expect(targets).not.toContain("/app/node_modules");
+      }
+
+      expect(mergedConfig.services?.dashboard?.volumes?.map(({ target }) => target))
+        .toContain("/app/apps/web/app");
+      expect(mergedConfig.services?.reps?.volumes?.map(({ target }) => target))
+        .toContain("/app/apps/reps/app");
+      expect(mergedConfig.services?.bot?.command?.join(" ")).not.toContain(
+        "pnpm db:generate",
+      );
+      expect(mergedConfig.services?.bot?.command?.join(" ")).not.toContain(
+        "next dev",
+      );
+      expect(mergedConfig.services?.bot?.volumes ?? []).toEqual([]);
     },
   );
 });

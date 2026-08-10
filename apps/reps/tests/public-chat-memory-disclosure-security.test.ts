@@ -59,7 +59,9 @@ import { POST as postPublicChat } from "../app/reps/[slug]/chat/route";
 
 const currentDisclosure = {
   enabled: true,
+  shortTermMemoryEnabled: true,
   contactMemoryEnabled: true,
+  contactMemoryCrossChannelEnabled: false,
   representativeExperienceEnabled: true,
   automaticExtractionEnabled: true,
   retentionDays: 45,
@@ -156,7 +158,9 @@ describe("public chat memory disclosure boundary", () => {
   it("rejects the prior extraction disclosure after contact memory is disabled", async () => {
     const disabledDisclosure = {
       enabled: false,
+      shortTermMemoryEnabled: false,
       contactMemoryEnabled: false,
+      contactMemoryCrossChannelEnabled: false,
       representativeExperienceEnabled: false,
       automaticExtractionEnabled: false,
       retentionDays: null,

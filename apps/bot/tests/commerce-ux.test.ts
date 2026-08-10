@@ -35,6 +35,14 @@ describe("Telegram commerce UX", () => {
 
     expect(commands.map((command) => command.command)).toContain("buy");
     expect(commands.map((command) => command.command)).toContain("plans");
+    expect(commands.map((command) => command.command)).toEqual(
+      expect.arrayContaining([
+        "forget",
+        "delete_memory",
+        "memory_share",
+        "memory_unshare",
+      ]),
+    );
     expect(commands.map((command) => command.description).join(" ")).not.toContain(
       "Stars",
     );

@@ -50,7 +50,9 @@ describe("public representative visitor-first page", () => {
   it("renders explicit enabled and disabled governed-context disclosures", () => {
     const enabledPolicy = {
       enabled: true,
+      shortTermMemoryEnabled: true,
       contactMemoryEnabled: true,
+      contactMemoryCrossChannelEnabled: false,
       representativeExperienceEnabled: true,
       automaticExtractionEnabled: false,
       retentionDays: 45,
@@ -60,7 +62,9 @@ describe("public representative visitor-first page", () => {
     };
     const disabledPolicy = {
       enabled: false,
+      shortTermMemoryEnabled: false,
       contactMemoryEnabled: false,
+      contactMemoryCrossChannelEnabled: false,
       representativeExperienceEnabled: false,
       automaticExtractionEnabled: false,
       retentionDays: null,
@@ -78,31 +82,56 @@ describe("public representative visitor-first page", () => {
       automaticExtractionEnabled: true,
       expiryAction: "DELETE",
     });
+    const representativeExtractionOnlyZh = getGovernedContextDisclosure("zh", {
+      ...enabledPolicy,
+      enabled: false,
+      contactMemoryEnabled: false,
+      representativeExperienceEnabled: true,
+      automaticExtractionEnabled: true,
+      expiryAction: "DELETE",
+    });
+    const enabledCrossChannelZh = getGovernedContextDisclosure("zh", {
+      ...enabledPolicy,
+      contactMemoryCrossChannelEnabled: true,
+    });
 
     expect(enabledZh).toContain("长期记忆已启用");
     expect(enabledZh).toContain("当前联系人、当前数字代表和 Web 渠道");
-    expect(enabledZh).toContain("去标识化且经人工审核");
+    expect(enabledZh).toContain("去标识化、经多来源聚合并通过自动策略");
     expect(enabledZh).toContain("原始聊天全文");
     expect(enabledZh).toContain("付款、余额、退款和权益");
     expect(enabledZh).toContain("保留 45 天");
     expect(enabledZh).toContain("到期后归档并停止召回");
-    expect(enabledZh).toContain("查看、纠正或删除");
+    expect(enabledZh).toContain("删除我的记忆");
+    expect(enabledZh).not.toContain("你可以在聊天中");
     expect(disabledZh).toContain("当前未启用");
-    expect(disabledZh).toContain("不会创建或调用跨会话");
+    expect(disabledZh).toContain("不会创建或调用联系人长期记忆");
     expect(disabledZh).not.toMatch(/保留 \d+ 天/u);
     expect(enabledEn).toContain("is enabled");
     expect(enabledEn).toContain("this contact, this representative, and the Web channel");
     expect(enabledEn).toContain("deidentified representative experience");
     expect(enabledEn).toContain("retained for 45 days");
-    expect(enabledEn).toContain("view, correct, or delete");
+    expect(enabledEn).toContain("send “删除我的记忆”");
+    expect(enabledEn).not.toContain("You can ask in chat");
     expect(disabledEn).toContain("is currently disabled");
-    expect(disabledEn).toContain("will not create or recall cross-conversation");
+    expect(disabledEn).toContain("will not create or recall contact long-term memory");
     expect(extractionOnlyZh).toContain("召回当前未启用");
-    expect(extractionOnlyZh).toContain("联系人记忆候选自动提取已启用");
-    expect(extractionOnlyZh).toContain("只可能生成联系人偏好、目标、约束与必要背景候选");
-    expect(extractionOnlyZh).toContain("代表经验不会从 Web 消息自动提取");
+    expect(extractionOnlyZh).toContain("长期记忆自动提取已启用");
+    expect(extractionOnlyZh).toContain("可能提取仅限当前联系人的偏好、目标、约束与必要背景");
+    expect(extractionOnlyZh).toContain("单条消息或单个联系人不会直接生成代表经验");
+    expect(extractionOnlyZh).toContain("自动来源、范围和安全策略");
     expect(extractionOnlyZh).toContain("保留 45 天");
     expect(extractionOnlyZh).toContain("异步清理");
+    expect(extractionOnlyZh).toContain("删除我的记忆");
+    expect(representativeExtractionOnlyZh).toContain("长期记忆自动提取已启用");
+    expect(representativeExtractionOnlyZh).toContain("去标识化、多来源聚合的代表经验输入");
+    expect(representativeExtractionOnlyZh).toContain("联系人事实不会进入代表经验");
+    expect(representativeExtractionOnlyZh).not.toContain("只可能提取联系人偏好");
+    expect(enabledCrossChannelZh).toContain("同一已验证 Delegate 身份");
+    expect(enabledCrossChannelZh).toContain("明确同意");
+    expect(enabledCrossChannelZh).toContain("Web、Matrix、Telegram");
+    expect(enabledCrossChannelZh).toContain("原始会话仍分别保存");
+    expect(enabledCrossChannelZh).not.toContain("暂不支持");
     expect(enabledZh).not.toBe(disabledZh);
     expect(enabledEn).not.toBe(disabledEn);
 
@@ -117,9 +146,9 @@ describe("public representative visitor-first page", () => {
     );
     expect(chatSource).toContain("policyRevision: governedMemoryDisclosure.policyRevision");
     expect(chatSource).toContain("fingerprint: governedMemoryDisclosure.fingerprint");
-    expect(chatSource).toContain('payload.code === "memory_disclosure_stale"');
+    expect(chatSource).toContain('rejection === "memory_disclosure_stale"');
     expect(chatSource).toContain("setGovernedMemoryDisclosure(payload.governedMemoryDisclosure)");
-    expect(chatSource).toContain("setInput(text)");
+    expect(chatSource).toContain("restoreRejectedPublicChatDraft({");
     expect(chatSource).toContain("collectPendingMemoryDisplayAcks(");
     expect(chatSource).toContain("acknowledgedDisplayKeysRef.current.add(key)");
     expect(chatSource).toContain("sendPublicMemoryDisplayAck(props.representativeSlug, ack)");
@@ -154,6 +183,12 @@ describe("public representative visitor-first page", () => {
     );
     expect(pageSource).toContain(
       "collectionEnabled={collectionEnabled}",
+    );
+    expect(pageSource).toContain(
+      "serviceCreditPurchaseEnabled={showPublicPayment && collectionEnabled}",
+    );
+    expect(pageSource).toContain(
+      "serviceCreditPaymentMode={paymentMode}",
     );
   });
 
@@ -208,8 +243,40 @@ describe("public representative visitor-first page", () => {
   it("keeps pricing contextual and long citations collapsed", () => {
     expect(chatSource).toContain("showPlans");
     expect(chatSource).toContain("usage.freeRepliesRemaining > 0");
+    expect(chatSource).toContain(
+      'rejection === "service_credit_required"',
+    );
+    expect(chatSource).toContain("restoreRejectedPublicChatDraft({");
+    expect(chatSource).toContain("resolvePublicChatServiceCreditNextStep({");
+    expect(chatSource).toContain("props.serviceCreditPurchaseEnabled");
+    expect(chatSource).not.toContain(
+      "process.env.NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS",
+    );
+    expect(chatSource).toContain("detail.serviceCreditsReserved > 0");
+    expect(chatSource).toContain("t.serviceCreditPending");
+    expect(chatSource).toContain("t.serviceCreditRequired");
+    expect(chatSource).toContain("t.serviceCreditUnavailable");
+    expect(chatSource).toContain("t.serviceCreditUnavailableWithHandoff");
     expect(chatSource).toContain("<details key=");
     expect(chatSource).toContain("representative-chat-starters");
+  });
+
+  it("shows a localized general-model source note only from the server marker", () => {
+    expect(chatSource).toContain(
+      'message.sourceDisclosure === "general_model"',
+    );
+    expect(chatSource).toContain('message.role === "assistant"');
+    expect(chatSource).toContain("payload.reply.sourceDisclosure");
+    expect(chatSource).toContain("snapshot.message.sourceDisclosure");
+    expect(chatSource).toContain(
+      "来源说明：本回答未引用已授权知识或记忆，内容由通用模型生成。",
+    );
+    expect(chatSource).toContain(
+      "Source note: This answer did not cite authorized knowledge or memory; it was generated by a general-purpose model.",
+    );
+    expect(chatSource).toContain(
+      'className="representative-answer-source-disclosure"',
+    );
   });
 
   it("describes Telegram as visitor identity linking rather than Bot setup", () => {

@@ -6,10 +6,16 @@ const mocks = vi.hoisted(() => ({
     findUnique: vi.fn(),
     findMany: vi.fn(),
   },
+  representativeMemoryPolicy: {
+    findUnique: vi.fn(),
+  },
 }));
 
 vi.mock("../src/prisma", () => ({
-  prisma: { message: mocks.message },
+  prisma: {
+    message: mocks.message,
+    representativeMemoryPolicy: mocks.representativeMemoryPolicy,
+  },
 }));
 
 import { loadGenerationRecentTurns } from "../src/conversation-platform";
@@ -19,6 +25,10 @@ describe("generation recent-turn recall boundary", () => {
     vi.clearAllMocks();
     mocks.message.findUnique.mockResolvedValue({
       createdAt: new Date("2026-08-04T10:05:00.000Z"),
+      episodeId: "episode-1",
+    });
+    mocks.representativeMemoryPolicy.findUnique.mockResolvedValue({
+      shortTermMemoryEnabled: true,
     });
     mocks.message.findMany.mockResolvedValue([
       {
@@ -34,6 +44,7 @@ describe("generation recent-turn recall boundary", () => {
 
   it("queries only audience-authored messages and emits inbound turns", async () => {
     const recentTurns = await loadGenerationRecentTurns({
+      representativeId: "representative-1",
       conversationId: "conversation-1",
       beforeMessageId: "message-current",
       limit: 6,
@@ -42,6 +53,7 @@ describe("generation recent-turn recall boundary", () => {
     expect(mocks.message.findMany).toHaveBeenCalledWith({
       where: {
         conversationId: "conversation-1",
+        episodeId: "episode-1",
         redactedAt: null,
         text: { not: null },
         createdAt: { lt: new Date("2026-08-04T10:05:00.000Z") },
@@ -56,5 +68,34 @@ describe("generation recent-turn recall boundary", () => {
       { direction: "inbound", messageText: "First audience question" },
     ]);
     expect(recentTurns.every((turn) => turn.direction === "inbound")).toBe(true);
+  });
+
+  it("returns no prior turns when short-term memory is disabled", async () => {
+    mocks.representativeMemoryPolicy.findUnique.mockResolvedValue({
+      shortTermMemoryEnabled: false,
+    });
+
+    await expect(loadGenerationRecentTurns({
+      representativeId: "representative-1",
+      conversationId: "conversation-1",
+      beforeMessageId: "message-current",
+    })).resolves.toEqual([]);
+
+    expect(mocks.message.findMany).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the current message has no episode", async () => {
+    mocks.message.findUnique.mockResolvedValue({
+      createdAt: new Date("2026-08-04T10:05:00.000Z"),
+      episodeId: null,
+    });
+
+    await expect(loadGenerationRecentTurns({
+      representativeId: "representative-1",
+      conversationId: "conversation-1",
+      beforeMessageId: "message-current",
+    })).resolves.toEqual([]);
+
+    expect(mocks.message.findMany).not.toHaveBeenCalled();
   });
 });

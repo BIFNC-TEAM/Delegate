@@ -2164,7 +2164,7 @@ describe("channel management", () => {
     expect(mocks.tx.eventAudit.create).not.toHaveBeenCalled();
   });
 
-  it("reactivates a disconnected Matrix channel and its existing virtual user", async () => {
+  it("reactivates a disconnected Matrix channel without replacing its assignment", async () => {
     const previousDatabaseUrl = process.env.DATABASE_URL;
     const previousServerName = process.env.MATRIX_SERVER_NAME;
     process.env.DATABASE_URL = "postgresql://test";
@@ -2187,14 +2187,23 @@ describe("channel management", () => {
       enabled: true,
     });
     mocks.tx.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "binding-matrix-1",
+      representativeId: "rep-1",
+      kind: "MATRIX",
+      connectionId: "delegate-matrix-as",
       endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 4,
       desiredState: "DISCONNECTED",
+      healthStatus: "UNKNOWN",
+      externalUserId: "@_delegate_rep_lin:matrix.example.org",
+      status: "DISCONNECTED",
     });
     mocks.tx.representativeChannelBinding.upsert.mockResolvedValue({
       id: "binding-matrix-1",
       representativeId: "rep-1",
       kind: "MATRIX",
-      endpointAssignmentRevision: 2,
+      endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 5,
       desiredState: "ACTIVE",
       healthStatus: "UNKNOWN",
       externalUserId: "@_delegate_rep_lin:matrix.example.org",
@@ -2221,18 +2230,36 @@ describe("channel management", () => {
         update: expect.objectContaining({ enabled: true }),
       }),
     );
-    expect(mocks.tx.representativeChannelBinding.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        update: expect.objectContaining({
-          endpointAssignmentRevision: { increment: 1 },
-          desiredState: "ACTIVE",
-          healthStatus: "UNKNOWN",
-          status: "CONFIGURED",
-          lastHealthCheckAt: null,
-          lastError: null,
+    const update = mocks.tx.representativeChannelBinding.upsert.mock.calls[0]?.[0]
+      .update;
+    expect(update).toEqual(expect.objectContaining({
+      desiredState: "ACTIVE",
+      healthStatus: "UNKNOWN",
+      status: "CONFIGURED",
+      lastHealthCheckAt: null,
+      lastError: null,
+    }));
+    expect(update).not.toHaveProperty("endpointAssignmentRevision");
+    expect(update).toEqual(expect.objectContaining({
+      endpointLifecycleRevision: { increment: 1 },
+    }));
+    expect(mocks.tx.eventAudit.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        payload: expect.objectContaining({
+          endpointLifecycleRevision: 5,
+          before: expect.objectContaining({
+            endpointAssignmentRevision: 1,
+            endpointLifecycleRevision: 4,
+            desiredState: "DISCONNECTED",
+          }),
+          after: expect.objectContaining({
+            endpointAssignmentRevision: 1,
+            endpointLifecycleRevision: 5,
+            desiredState: "ACTIVE",
+          }),
         }),
       }),
-    );
+    });
   });
 
   it("atomically replaces a paused Matrix identity while preserving history and pause state", async () => {
@@ -2714,6 +2741,7 @@ describe("channel management", () => {
       sourceProvider: "MATRIX",
       connectionId: "delegate-matrix-as",
       endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 5,
       desiredState: "ACTIVE",
       healthStatus: "HEALTHY",
       externalUserId: "@_delegate_rep_lin:matrix.example.org",
@@ -2727,6 +2755,7 @@ describe("channel management", () => {
       sourceProvider: "MATRIX",
       connectionId: "delegate-matrix-as",
       endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 6,
       desiredState: "DISCONNECTED",
       healthStatus: "UNKNOWN",
       externalUserId: "@_delegate_rep_lin:matrix.example.org",
@@ -2745,6 +2774,7 @@ describe("channel management", () => {
         }),
       ).resolves.toMatchObject({
         binding: {
+          endpointLifecycleRevision: 6,
           desiredState: "DISCONNECTED",
           status: "DISCONNECTED",
         },
@@ -2775,11 +2805,26 @@ describe("channel management", () => {
       },
       data: { enabled: false },
     });
+    expect(mocks.tx.representativeChannelBinding.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          desiredState: "DISCONNECTED",
+          endpointLifecycleRevision: { increment: 1 },
+        }),
+      }),
+    );
     expect(mocks.tx.eventAudit.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         representativeId: "rep-1",
         payload: expect.objectContaining({
           action: "MATRIX_CHANNEL_DISCONNECTED",
+          endpointLifecycleRevision: 6,
+          before: expect.objectContaining({
+            endpointLifecycleRevision: 5,
+          }),
+          after: expect.objectContaining({
+            endpointLifecycleRevision: 6,
+          }),
           changed: true,
         }),
       }),

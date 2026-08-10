@@ -4,7 +4,11 @@ import {
   assertExactGovernedMemoryVersionUri,
   OpenVikingRequestError,
 } from "@delegate/openviking";
-import { Prisma, type PrismaClient } from "@prisma/client";
+import {
+  MemoryProjectionStatus,
+  Prisma,
+  type PrismaClient,
+} from "@prisma/client";
 
 import {
   createDefaultMemoryProjectionProvider,
@@ -12,6 +16,10 @@ import {
   MemoryProjectionProviderError,
   type MemoryProjectionProvider,
 } from "./memory-projection-provider";
+import {
+  contactMemorySharingConsentContractVersion,
+  memoryChannelDisclosureContractVersion,
+} from "./memory-disclosure";
 import { prisma } from "./prisma";
 
 export * from "./memory-projection-provider";
@@ -21,6 +29,8 @@ const defaultMaximumWriteAttempts = 8;
 const defaultMaximumCleanupAttempts = 8;
 const defaultRetryBaseMilliseconds = 1_000;
 const defaultRetryMaximumMilliseconds = 5 * 60_000;
+const defaultFailedCleanupRetryMilliseconds = 60 * 60_000;
+const defaultPolicyReprojectionBatchSize = 32;
 const sha256Pattern = /^[0-9a-f]{64}$/u;
 
 export type MemoryProjectionTickResult =
@@ -39,12 +49,84 @@ export type MemoryProjectionExecutionOptions = {
   resolveProvider?: (
     providerName: string,
   ) => MemoryProjectionProvider | null | undefined;
+  /**
+   * Provider names this worker can resolve and is therefore allowed to claim.
+   * Defaults to the injected provider, or OpenViking when no provider is
+   * injected.
+   */
+  supportedProviderNames?: readonly string[];
   leaseMilliseconds?: number;
   maximumWriteAttempts?: number;
   maximumCleanupAttempts?: number;
   retryBaseMilliseconds?: number;
   retryMaximumMilliseconds?: number;
+  /**
+   * Slow retry interval after the bounded fast-retry window is exhausted.
+   * A failed deletion proof remains recall-fenced and is automatically
+   * requeued; it never requires an operator to make deleted content safe.
+   */
+  failedCleanupRetryMilliseconds?: number;
 };
+
+export type GovernedMemoryProjectionDeletionRequest = {
+  representativeId: string;
+  memoryId: string;
+  requestedAt: Date;
+  reasonCode: string;
+};
+
+/**
+ * Withdraws every durable projection for one governed memory without waiting
+ * on provider I/O. In-flight writes retain their lease and observe the delete
+ * fence on completion; every other non-terminal item becomes immediately due
+ * for the independent exact-deletion lane.
+ */
+export async function queueGovernedMemoryProjectionDeletion(
+  tx: Prisma.TransactionClient,
+  input: GovernedMemoryProjectionDeletionRequest,
+) {
+  const inFlight = await tx.memoryProjectionItem.updateMany({
+    where: {
+      representativeId: input.representativeId,
+      memoryId: input.memoryId,
+      status: MemoryProjectionStatus.PROJECTING,
+    },
+    data: {
+      deleteRequestedAt: input.requestedAt,
+      lastErrorCode: input.reasonCode,
+    },
+  });
+  const queued = await tx.memoryProjectionItem.updateMany({
+    where: {
+      representativeId: input.representativeId,
+      memoryId: input.memoryId,
+      status: {
+        in: [
+          MemoryProjectionStatus.DISABLED,
+          MemoryProjectionStatus.QUEUED,
+          MemoryProjectionStatus.RETRYING,
+          MemoryProjectionStatus.STAGED,
+          MemoryProjectionStatus.ACTIVE,
+          MemoryProjectionStatus.SUPERSEDED,
+          MemoryProjectionStatus.FAILED,
+          MemoryProjectionStatus.DELETE_FAILED,
+        ],
+      },
+    },
+    data: {
+      status: MemoryProjectionStatus.DELETE_PENDING,
+      deleteRequestedAt: input.requestedAt,
+      availableAt: input.requestedAt,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      lastErrorCode: input.reasonCode,
+    },
+  });
+  return {
+    deletePendingCount: queued.count,
+    inFlightDeleteRequestedCount: inFlight.count,
+  };
+}
 
 type ProjectionClaim = {
   id: string;
@@ -65,6 +147,10 @@ type ProjectionClaim = {
   memoryStatus: string;
   currentVersionId: string | null;
   recallDisabledAt: Date | null;
+  memoryScope: "CONTACT_CHANNEL" | "CONTACT_SHARED" | "REPRESENTATIVE";
+  memoryContactId: string | null;
+  memoryAudienceIdentityId: string | null;
+  memorySourceChannel: "WEB" | "MATRIX" | "TELEGRAM" | null;
   namespaceKey: string;
   policyProvider: string;
   longTermMemoryEnabled: boolean;
@@ -99,7 +185,19 @@ export async function runNextMemoryProjectionWrite(
   options: MemoryProjectionExecutionOptions = {},
 ): Promise<MemoryProjectionTickResult> {
   const client = options.client ?? prisma;
-  const claim = await claimNextProjectionWrite(client, options);
+  const supportedProviderNames = resolveSupportedProjectionProviderNames(
+    options,
+  );
+  await requeuePolicyEnabledGovernedMemoryProjections(
+    client,
+    options,
+    supportedProviderNames,
+  );
+  const claim = await claimNextProjectionWrite(
+    client,
+    options,
+    supportedProviderNames,
+  );
   if (!claim) return { processed: false };
 
   const preflightError = validateWriteClaim(claim);
@@ -137,6 +235,7 @@ export async function runNextMemoryProjectionWrite(
     if (
       versionCoordinates.memoryId !== claim.memoryId
       || versionCoordinates.memoryVersionId !== claim.memoryVersionId
+      || !projectionCoordinatesMatchClaim(versionCoordinates, claim)
     ) {
       throw new Error("Projection URI coordinates do not match the claimed version.");
     }
@@ -327,11 +426,284 @@ export async function runNextMemoryProjectionWrite(
   return { processed: true, workId: claim.id, status: "completed" };
 }
 
+/**
+ * Rebuilds only policy-withdrawn projection tombstones. Explicit deletion has
+ * a MemoryDeletionProof and is therefore irreversible; ordinary FAILED writes
+ * are deliberately excluded so this is not an unbounded retry mechanism.
+ */
+export async function requeuePolicyEnabledGovernedMemoryProjections(
+  client: PrismaClient,
+  options: Pick<MemoryProjectionExecutionOptions, "representativeId"> = {},
+  supportedProviderNames: readonly string[] = ["openviking"],
+) {
+  const representativeId = optionalNonEmptyText(options.representativeId);
+  const supportedProviderSql = providerNameSqlList(supportedProviderNames);
+  const rows = await client.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    WITH eligible_projection AS MATERIALIZED (
+      SELECT projection."id"
+        FROM "MemoryProjectionItem" projection
+        JOIN "GovernedMemoryVersion" version
+          ON version."id" = projection."memoryVersionId"
+         AND version."memoryId" = projection."memoryId"
+         AND version."representativeId" = projection."representativeId"
+        JOIN "GovernedMemory" memory_record
+          ON memory_record."id" = projection."memoryId"
+         AND memory_record."representativeId" = projection."representativeId"
+        LEFT JOIN "MemoryCandidate" candidate
+          ON candidate."id" = version."sourceCandidateId"
+         AND candidate."representativeId" = projection."representativeId"
+        JOIN "RepresentativeMemoryPolicy" policy
+          ON policy."representativeId" = projection."representativeId"
+       WHERE projection."provider" IN (${supportedProviderSql})
+         AND (${representativeId}::TEXT IS NULL
+           OR projection."representativeId" = ${representativeId})
+         AND projection."lane" = 'RECALL'::"MemoryProjectionLane"
+         AND projection."status" IN (
+           'DELETE_PENDING'::"MemoryProjectionStatus",
+           'DELETE_FAILED'::"MemoryProjectionStatus",
+           'DELETED'::"MemoryProjectionStatus"
+         )
+         AND projection."deleteRequestedAt" IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM "MemoryDeletionProof" proof
+            WHERE proof."memoryId" = projection."memoryId"
+              AND proof."representativeId" = projection."representativeId"
+         )
+         AND memory_record."status" = 'ACTIVE'::"GovernedMemoryStatus"
+         AND memory_record."recallDisabledAt" IS NULL
+         AND memory_record."currentVersionId" = projection."memoryVersionId"
+         AND (
+           memory_record."expiresAt" IS NULL
+           OR memory_record."expiresAt" > CURRENT_TIMESTAMP
+         )
+         AND version."purgedAt" IS NULL
+         AND version."safeText" IS NOT NULL
+         AND version."contentHash" = projection."contentHash"
+         AND policy."provider" = projection."provider"
+         AND policy."longTermMemoryEnabled"
+         AND (
+           (
+             memory_record."scope" = 'CONTACT_CHANNEL'::"MemoryScope"
+             AND memory_record."sourceChannel" = 'WEB'::"RepresentativeChannelKind"
+             AND policy."contactMemoryEnabled"
+             AND policy."webRecallEnabled"
+           )
+           OR (
+             memory_record."scope" = 'CONTACT_CHANNEL'::"MemoryScope"
+             AND memory_record."sourceChannel" IN (
+               'MATRIX'::"RepresentativeChannelKind",
+               'TELEGRAM'::"RepresentativeChannelKind"
+             )
+             AND policy."contactMemoryEnabled"
+             AND candidate."id" IS NOT NULL
+             AND candidate."contactId" IS NOT DISTINCT FROM memory_record."contactId"
+             AND candidate."sourceContactId" IS NOT DISTINCT FROM memory_record."contactId"
+             AND candidate."scopeChannel" IS NOT DISTINCT FROM memory_record."sourceChannel"
+             AND candidate."originChannel" IS NOT DISTINCT FROM memory_record."sourceChannel"
+             AND (
+               (
+                 memory_record."sourceChannel" = 'MATRIX'::"RepresentativeChannelKind"
+                 AND policy."matrixRecallEnabled"
+               )
+               OR (
+                 memory_record."sourceChannel" = 'TELEGRAM'::"RepresentativeChannelKind"
+                 AND policy."telegramRecallEnabled"
+               )
+             )
+             AND "memory_private_channel_disclosure_scope_allows"(
+               projection."representativeId",
+               candidate."sourceContactId",
+               candidate."sourceConversationId",
+               memory_record."sourceChannel",
+               policy."revision",
+               ${memoryChannelDisclosureContractVersion}
+             )
+           )
+           OR (
+             memory_record."scope" = 'CONTACT_SHARED'::"MemoryScope"
+             AND memory_record."contactId" IS NULL
+             AND memory_record."sourceChannel" IS NULL
+             AND memory_record."audienceIdentityId" IS NOT NULL
+             AND policy."contactMemoryEnabled"
+             AND policy."contactMemoryCrossChannelEnabled"
+             AND candidate."id" IS NOT NULL
+             AND candidate."scope" = 'CONTACT_SHARED'::"MemoryScope"
+             AND candidate."contactId" IS NULL
+             AND candidate."scopeChannel" IS NULL
+             AND candidate."audienceIdentityId" = memory_record."audienceIdentityId"
+             AND EXISTS (
+               SELECT 1
+                 FROM "AudienceIdentity" identity
+                WHERE identity."id" = memory_record."audienceIdentityId"
+                  AND identity."status" = 'REGISTERED'::"AudienceIdentityStatus"
+                  AND identity."mergedIntoId" IS NULL
+                  AND EXISTS (
+                    SELECT 1
+                      FROM "IdentityLink" identity_link
+                     WHERE identity_link."audienceIdentityId" = identity."id"
+                       AND identity_link."verifiedAt" IS NOT NULL
+                       AND identity_link."revokedAt" IS NULL
+                       AND identity_link."assuranceLevel" IN (
+                         'PLATFORM_VERIFIED'::"IdentityAssuranceLevel",
+                         'STEP_UP_VERIFIED'::"IdentityAssuranceLevel"
+                       )
+                  )
+             )
+             AND EXISTS (
+               SELECT 1
+                 FROM "Message" source_message
+                 JOIN "Conversation" source_conversation
+                   ON source_conversation."id" = source_message."conversationId"
+                  AND source_conversation."id" = candidate."sourceConversationId"
+                  AND source_conversation."representativeId" = projection."representativeId"
+                  AND source_conversation."contactId" = candidate."sourceContactId"
+                 JOIN "Contact" source_contact
+                   ON source_contact."id" = candidate."sourceContactId"
+                  AND source_contact."representativeId" = projection."representativeId"
+                 JOIN "IdentityLink" source_identity_link
+                   ON source_identity_link."id" = source_message."sourceIdentityLinkId"
+                  AND source_identity_link."audienceIdentityId" = memory_record."audienceIdentityId"
+                 LEFT JOIN "IdentityLinkConnectionProof" source_identity_proof
+                   ON source_identity_proof."id" = source_message."sourceIdentityConnectionProofId"
+                  AND source_identity_proof."identityLinkId" = source_identity_link."id"
+                 LEFT JOIN "ConversationChannelBinding" source_binding
+                   ON source_binding."id" = source_message."channelBindingId"
+                  AND source_binding."conversationId" = source_message."conversationId"
+                WHERE source_message."id" = candidate."sourceMessageId"
+                  AND source_message."senderType" = 'AUDIENCE'::"MessageSenderType"
+                  AND source_conversation."audienceIdentityId" = memory_record."audienceIdentityId"
+                  AND source_contact."audienceIdentityId" = memory_record."audienceIdentityId"
+                  AND source_identity_link."verifiedAt" IS NOT NULL
+                  AND source_identity_link."revokedAt" IS NULL
+                  AND source_identity_link."assuranceLevel" IN (
+                    'PLATFORM_VERIFIED'::"IdentityAssuranceLevel",
+                    'STEP_UP_VERIFIED'::"IdentityAssuranceLevel"
+                  )
+                  AND (
+                    (
+                      candidate."originChannel" = 'WEB'::"RepresentativeChannelKind"
+                      AND source_identity_link."provider" = 'LOGTO'::"IdentityLinkProvider"
+                      AND source_message."sourceIdentityConnectionProofId" IS NULL
+                    )
+                    OR (
+                      candidate."originChannel" IN (
+                        'MATRIX'::"RepresentativeChannelKind",
+                        'TELEGRAM'::"RepresentativeChannelKind"
+                      )
+                      AND source_binding."kind" = candidate."originChannel"
+                      AND source_binding."connectionId" IS NOT NULL
+                      AND source_identity_proof."connectionId" = source_binding."connectionId"
+                      AND source_identity_proof."issuer" = source_identity_link."issuer"
+                      AND source_identity_proof."verifiedAt" IS NOT NULL
+                      AND source_identity_proof."revokedAt" IS NULL
+                      AND source_identity_proof."assuranceLevel" IN (
+                        'PLATFORM_VERIFIED'::"IdentityAssuranceLevel",
+                        'STEP_UP_VERIFIED'::"IdentityAssuranceLevel"
+                      )
+                      AND (
+                        (
+                          candidate."originChannel" = 'MATRIX'::"RepresentativeChannelKind"
+                          AND source_identity_link."provider" = 'MATRIX'::"IdentityLinkProvider"
+                        )
+                        OR (
+                          candidate."originChannel" = 'TELEGRAM'::"RepresentativeChannelKind"
+                          AND source_identity_link."provider" = 'TELEGRAM'::"IdentityLinkProvider"
+                        )
+                      )
+                      AND source_identity_link."providerSubject" = source_message."senderId"
+                    )
+                  )
+             )
+             AND EXISTS (
+               SELECT 1
+                 FROM "ContactMemorySharingConsent" consent
+                 JOIN "ContactMemorySharingChallenge" challenge
+                   ON challenge."id" = consent."challengeId"
+                  AND challenge."representativeId" = consent."representativeId"
+                  AND challenge."audienceIdentityId" = consent."audienceIdentityId"
+                WHERE consent."representativeId" = projection."representativeId"
+                  AND consent."audienceIdentityId" = memory_record."audienceIdentityId"
+                  AND consent."policyRevision" = policy."revision"
+                  AND consent."status" = 'GRANTED'::"ContactMemorySharingConsentStatus"
+                  AND consent."grantedAt" IS NOT NULL
+                  AND consent."revokedAt" IS NULL
+                  AND consent."disclosureContractVersion" = ${contactMemorySharingConsentContractVersion}
+                  AND consent."proofHash" ~ '^[0-9a-f]{64}$'
+                  AND consent."sourceEvidenceHash" ~ '^[0-9a-f]{64}$'
+                  AND consent."confirmationEventHash" ~ '^[0-9a-f]{64}$'
+                  AND challenge."policyRevision" = consent."policyRevision"
+                  AND challenge."disclosureContractVersion" = consent."disclosureContractVersion"
+                  AND challenge."sourceEvidenceHash" = consent."sourceEvidenceHash"
+                  AND challenge."consumedAt" IS NOT NULL
+                  AND challenge."revokedAt" IS NULL
+                  AND consent."consentVersion" = (
+                    SELECT MAX(latest_consent."consentVersion")
+                      FROM "ContactMemorySharingConsent" latest_consent
+                     WHERE latest_consent."representativeId" = consent."representativeId"
+                       AND latest_consent."audienceIdentityId" = consent."audienceIdentityId"
+                       AND latest_consent."policyRevision" = consent."policyRevision"
+                  )
+             )
+             AND EXISTS (
+               SELECT 1
+                 FROM "MemoryPolicyDecision" decision
+                WHERE decision."candidateId" = candidate."id"
+                  AND decision."representativeId" = projection."representativeId"
+                  AND decision."memoryId" = memory_record."id"
+                  AND decision."resultVersionId" = version."id"
+                  AND decision."policyRevision" = policy."revision"
+                  AND decision."outcome" IN (
+                    'ACTIVATED'::"MemoryPolicyDecisionOutcome",
+                    'UPDATED'::"MemoryPolicyDecisionOutcome"
+                  )
+                  AND decision."outputHash" = version."contentHash"
+             )
+           )
+           OR (
+             memory_record."scope" = 'REPRESENTATIVE'::"MemoryScope"
+             AND policy."representativeExperienceEnabled"
+           )
+         )
+       ORDER BY projection."updatedAt" ASC, projection."id" ASC
+       FOR UPDATE OF projection SKIP LOCKED
+       LIMIT ${defaultPolicyReprojectionBatchSize}
+    )
+    UPDATE "MemoryProjectionItem" projection
+       SET "status" = 'QUEUED'::"MemoryProjectionStatus",
+           "remoteObjectId" = NULL,
+           "writeReceiptHash" = NULL,
+           "writeVerifiedAt" = NULL,
+           "deleteReceiptHash" = NULL,
+           "remoteAbsentAt" = NULL,
+           "attemptCount" = 0,
+           "availableAt" = CURRENT_TIMESTAMP,
+           "leaseToken" = NULL,
+           "leaseExpiresAt" = NULL,
+           "projectedAt" = NULL,
+           "deleteRequestedAt" = NULL,
+           "deletedAt" = NULL,
+           "lastErrorCode" = NULL,
+           "updatedAt" = CURRENT_TIMESTAMP
+      FROM eligible_projection
+     WHERE projection."id" = eligible_projection."id"
+    RETURNING projection."id"
+  `);
+  return rows.length;
+}
+
 export async function runNextMemoryProjectionDeletion(
   options: MemoryProjectionExecutionOptions = {},
 ): Promise<MemoryProjectionTickResult> {
   const client = options.client ?? prisma;
-  const claim = await claimNextProjectionDeletion(client, options);
+  const supportedProviderNames = resolveSupportedProjectionProviderNames(
+    options,
+  );
+  const claim = await claimNextProjectionDeletion(
+    client,
+    options,
+    supportedProviderNames,
+  );
   if (!claim) return { processed: false };
 
   const provider = resolveProjectionProvider(claim.provider, options);
@@ -351,6 +723,7 @@ export async function runNextMemoryProjectionDeletion(
     if (
       coordinates.memoryId !== claim.memoryId
       || coordinates.memoryVersionId !== claim.memoryVersionId
+      || !projectionCoordinatesMatchClaim(coordinates, claim)
     ) {
       throw new Error("Projection URI coordinates do not match the claimed version.");
     }
@@ -413,7 +786,14 @@ export async function runNextMemoryDeletionCleanup(
   options: MemoryProjectionExecutionOptions = {},
 ): Promise<MemoryProjectionTickResult> {
   const client = options.client ?? prisma;
-  const claim = await claimNextDeletionCleanup(client, options);
+  const supportedProviderNames = resolveSupportedProjectionProviderNames(
+    options,
+  );
+  const claim = await claimNextDeletionCleanup(
+    client,
+    options,
+    supportedProviderNames,
+  );
   if (!claim) return { processed: false };
 
   try {
@@ -441,6 +821,7 @@ export async function runNextMemoryDeletionCleanup(
 async function claimNextProjectionWrite(
   client: PrismaClient,
   options: MemoryProjectionExecutionOptions,
+  supportedProviderNames: readonly string[],
 ): Promise<ProjectionClaim | null> {
   const leaseToken = randomUUID();
   const leaseMilliseconds = positiveInteger(
@@ -452,12 +833,14 @@ async function claimNextProjectionWrite(
     defaultMaximumWriteAttempts,
   );
   const representativeId = optionalNonEmptyText(options.representativeId);
+  const supportedProviderSql = providerNameSqlList(supportedProviderNames);
   return client.$transaction(async (tx) => {
     await tx.$queryRaw(Prisma.sql`
       WITH expired_projection AS MATERIALIZED (
         SELECT projection."id"
           FROM "MemoryProjectionItem" projection
          WHERE projection."status" = 'PROJECTING'::"MemoryProjectionStatus"
+           AND projection."provider" IN (${supportedProviderSql})
            AND (${representativeId}::TEXT IS NULL
              OR projection."representativeId" = ${representativeId})
            AND projection."leaseExpiresAt" <= CURRENT_TIMESTAMP
@@ -502,6 +885,7 @@ async function claimNextProjectionWrite(
         SELECT projection."id", projection."status"
           FROM "MemoryProjectionItem" projection
          WHERE projection."lane" = 'RECALL'::"MemoryProjectionLane"
+           AND projection."provider" IN (${supportedProviderSql})
            AND (${representativeId}::TEXT IS NULL
              OR projection."representativeId" = ${representativeId})
            AND projection."status" IN (
@@ -542,6 +926,7 @@ async function claimNextProjectionWrite(
                projection."writeReceiptHash" AS "previousWriteReceiptHash"
           FROM "MemoryProjectionItem" projection
          WHERE projection."lane" = 'RECALL'::"MemoryProjectionLane"
+           AND projection."provider" IN (${supportedProviderSql})
            AND (${representativeId}::TEXT IS NULL
              OR projection."representativeId" = ${representativeId})
            AND projection."status" IN (
@@ -600,6 +985,10 @@ async function claimNextProjectionWrite(
              memory_record."status" AS "memoryStatus",
              memory_record."currentVersionId",
              memory_record."recallDisabledAt",
+             memory_record."scope" AS "memoryScope",
+             memory_record."contactId" AS "memoryContactId",
+             memory_record."audienceIdentityId" AS "memoryAudienceIdentityId",
+             memory_record."sourceChannel" AS "memorySourceChannel",
              policy."namespaceKey",
              policy."provider" AS "policyProvider",
              policy."longTermMemoryEnabled",
@@ -623,6 +1012,7 @@ async function claimNextProjectionWrite(
 async function claimNextProjectionDeletion(
   client: PrismaClient,
   options: MemoryProjectionExecutionOptions,
+  supportedProviderNames: readonly string[],
 ): Promise<ProjectionClaim | null> {
   const leaseToken = randomUUID();
   const leaseMilliseconds = positiveInteger(
@@ -630,12 +1020,14 @@ async function claimNextProjectionDeletion(
     defaultLeaseMilliseconds,
   );
   const representativeId = optionalNonEmptyText(options.representativeId);
+  const supportedProviderSql = providerNameSqlList(supportedProviderNames);
   return client.$transaction(async (tx) => {
     await tx.$queryRaw(Prisma.sql`
       WITH expired_projection AS MATERIALIZED (
         SELECT projection."id"
           FROM "MemoryProjectionItem" projection
          WHERE projection."status" = 'DELETING'::"MemoryProjectionStatus"
+           AND projection."provider" IN (${supportedProviderSql})
            AND (${representativeId}::TEXT IS NULL
              OR projection."representativeId" = ${representativeId})
            AND projection."leaseExpiresAt" <= CURRENT_TIMESTAMP
@@ -662,6 +1054,7 @@ async function claimNextProjectionDeletion(
              'DELETE_PENDING'::"MemoryProjectionStatus",
              'DELETE_FAILED'::"MemoryProjectionStatus"
            )
+           AND projection."provider" IN (${supportedProviderSql})
            AND (${representativeId}::TEXT IS NULL
              OR projection."representativeId" = ${representativeId})
            AND projection."availableAt" <= CURRENT_TIMESTAMP
@@ -702,6 +1095,10 @@ async function claimNextProjectionDeletion(
              memory_record."status" AS "memoryStatus",
              memory_record."currentVersionId",
              memory_record."recallDisabledAt",
+             memory_record."scope" AS "memoryScope",
+             memory_record."contactId" AS "memoryContactId",
+             memory_record."audienceIdentityId" AS "memoryAudienceIdentityId",
+             memory_record."sourceChannel" AS "memorySourceChannel",
              policy."namespaceKey",
              policy."provider" AS "policyProvider",
              policy."longTermMemoryEnabled"
@@ -723,6 +1120,7 @@ async function claimNextProjectionDeletion(
 async function claimNextDeletionCleanup(
   client: PrismaClient,
   options: MemoryProjectionExecutionOptions,
+  supportedProviderNames: readonly string[],
 ): Promise<CleanupClaim | null> {
   const leaseToken = randomUUID();
   const leaseMilliseconds = positiveInteger(
@@ -730,7 +1128,40 @@ async function claimNextDeletionCleanup(
     defaultLeaseMilliseconds,
   );
   const representativeId = optionalNonEmptyText(options.representativeId);
+  const supportedProviderSql = providerNameSqlList(supportedProviderNames);
   return client.$transaction(async (tx) => {
+    await tx.$queryRaw(Prisma.sql`
+      WITH retryable_failed AS MATERIALIZED (
+        SELECT proof."id"
+          FROM "MemoryDeletionProof" proof
+          JOIN "GovernedMemory" memory_record
+            ON memory_record."id" = proof."memoryId"
+           AND memory_record."representativeId" = proof."representativeId"
+         WHERE proof."cleanupStatus" = 'FAILED'::"MemoryCleanupStatus"
+           AND proof."availableAt" <= CURRENT_TIMESTAMP
+           AND memory_record."status" = 'DELETE_PENDING'::"GovernedMemoryStatus"
+           AND (${representativeId}::TEXT IS NULL
+             OR proof."representativeId" = ${representativeId})
+           AND NOT EXISTS (
+             SELECT 1
+               FROM "MemoryProjectionItem" unsupported_projection
+              WHERE unsupported_projection."memoryId" = proof."memoryId"
+                AND unsupported_projection."representativeId" = proof."representativeId"
+                AND unsupported_projection."status" <> 'DELETED'::"MemoryProjectionStatus"
+                AND unsupported_projection."provider" NOT IN (${supportedProviderSql})
+           )
+         ORDER BY proof."availableAt" ASC, proof."createdAt" ASC, proof."id" ASC
+         FOR UPDATE OF proof SKIP LOCKED
+         LIMIT 32
+      )
+      UPDATE "MemoryDeletionProof" proof
+         SET "cleanupStatus" = 'QUEUED'::"MemoryCleanupStatus",
+             "availableAt" = CURRENT_TIMESTAMP,
+             "updatedAt" = CURRENT_TIMESTAMP
+        FROM retryable_failed
+       WHERE proof."id" = retryable_failed."id"
+    `);
+
     await tx.$queryRaw(Prisma.sql`
       WITH expired_proof AS MATERIALIZED (
         SELECT proof."id"
@@ -738,6 +1169,14 @@ async function claimNextDeletionCleanup(
          WHERE proof."cleanupStatus" = 'RUNNING'::"MemoryCleanupStatus"
            AND (${representativeId}::TEXT IS NULL
              OR proof."representativeId" = ${representativeId})
+           AND NOT EXISTS (
+             SELECT 1
+               FROM "MemoryProjectionItem" unsupported_projection
+              WHERE unsupported_projection."memoryId" = proof."memoryId"
+                AND unsupported_projection."representativeId" = proof."representativeId"
+                AND unsupported_projection."status" <> 'DELETED'::"MemoryProjectionStatus"
+                AND unsupported_projection."provider" NOT IN (${supportedProviderSql})
+           )
            AND proof."leaseExpiresAt" <= CURRENT_TIMESTAMP
          ORDER BY proof."leaseExpiresAt" ASC, proof."id" ASC
          FOR UPDATE SKIP LOCKED
@@ -767,6 +1206,14 @@ async function claimNextDeletionCleanup(
            )
            AND (${representativeId}::TEXT IS NULL
              OR proof."representativeId" = ${representativeId})
+           AND NOT EXISTS (
+             SELECT 1
+               FROM "MemoryProjectionItem" unsupported_projection
+              WHERE unsupported_projection."memoryId" = proof."memoryId"
+                AND unsupported_projection."representativeId" = proof."representativeId"
+                AND unsupported_projection."status" <> 'DELETED'::"MemoryProjectionStatus"
+                AND unsupported_projection."provider" NOT IN (${supportedProviderSql})
+           )
            AND proof."availableAt" <= CURRENT_TIMESTAMP
            AND memory_record."status" = 'DELETE_PENDING'::"GovernedMemoryStatus"
          ORDER BY proof."availableAt" ASC,
@@ -823,6 +1270,29 @@ function validateWriteClaim(claim: ProjectionClaim): string | null {
   return null;
 }
 
+function projectionCoordinatesMatchClaim(
+  coordinates: ReturnType<typeof assertExactGovernedMemoryVersionUri>,
+  claim: ProjectionClaim,
+) {
+  if (claim.memoryScope === "CONTACT_CHANNEL") {
+    return coordinates.kind === "contact"
+      && claim.memoryContactId !== null
+      && coordinates.contactId === claim.memoryContactId
+      && claim.memorySourceChannel !== null
+      && coordinates.channel === claim.memorySourceChannel.toLowerCase();
+  }
+  if (claim.memoryScope === "CONTACT_SHARED") {
+    return coordinates.kind === "contact_shared"
+      && claim.memoryContactId === null
+      && claim.memorySourceChannel === null
+      && claim.memoryAudienceIdentityId !== null
+      && coordinates.audienceIdentityId === claim.memoryAudienceIdentityId;
+  }
+  return coordinates.kind === "representative_experience"
+    && claim.memoryContactId === null
+    && claim.memorySourceChannel === null;
+}
+
 async function completeProjectionWrite(
   client: PrismaClient,
   claim: ProjectionClaim,
@@ -847,16 +1317,174 @@ async function completeProjectionWrite(
                    SELECT 1 FROM "MemoryCandidate" candidate
                     WHERE candidate."id" = version."sourceCandidateId"
                       AND candidate."representativeId" = projection."representativeId"
+                      AND candidate."sourceKind" <> 'OWNER_VERIFIED_CORRECTION'::"MemorySourceKind"
                       AND candidate."status" = 'APPROVED'::"MemoryCandidateStatus"
                       AND candidate."contentPurgedAt" IS NULL
                  )
                  AND EXISTS (
-                   SELECT 1 FROM "MemoryReviewDecision" decision
+                   SELECT 1 FROM "MemoryPolicyDecision" decision
                     WHERE decision."candidateId" = version."sourceCandidateId"
                       AND decision."resultVersionId" = version."id"
                       AND decision."memoryId" = memory_record."id"
                       AND decision."representativeId" = projection."representativeId"
-                      AND decision."outcome" = 'APPROVED'::"MemoryReviewOutcome"
+                      AND decision."outcome" IN (
+                        'ACTIVATED'::"MemoryPolicyDecisionOutcome",
+                        'UPDATED'::"MemoryPolicyDecisionOutcome"
+                      )
+                      AND decision."outputHash" = version."contentHash"
+                 )
+                 AND (
+                   memory_record."scope" <> 'CONTACT_SHARED'::"MemoryScope"
+                   OR (
+                     memory_record."contactId" IS NULL
+                     AND memory_record."sourceChannel" IS NULL
+                     AND memory_record."audienceIdentityId" IS NOT NULL
+                     AND policy."provider" = projection."provider"
+                     AND policy."longTermMemoryEnabled"
+                     AND policy."contactMemoryEnabled"
+                     AND policy."contactMemoryCrossChannelEnabled"
+                     AND EXISTS (
+                       SELECT 1
+                         FROM "AudienceIdentity" identity
+                        WHERE identity."id" = memory_record."audienceIdentityId"
+                          AND identity."status" = 'REGISTERED'::"AudienceIdentityStatus"
+                          AND identity."mergedIntoId" IS NULL
+                          AND EXISTS (
+                            SELECT 1
+                              FROM "IdentityLink" identity_link
+                             WHERE identity_link."audienceIdentityId" = identity."id"
+                               AND identity_link."verifiedAt" IS NOT NULL
+                               AND identity_link."revokedAt" IS NULL
+                               AND identity_link."assuranceLevel" IN (
+                                 'PLATFORM_VERIFIED'::"IdentityAssuranceLevel",
+                                 'STEP_UP_VERIFIED'::"IdentityAssuranceLevel"
+                               )
+                          )
+                     )
+                     AND EXISTS (
+                       SELECT 1
+                         FROM "MemoryCandidate" shared_source
+                         JOIN "Message" source_message
+                           ON source_message."id" = shared_source."sourceMessageId"
+                          AND source_message."conversationId" = shared_source."sourceConversationId"
+                         JOIN "Conversation" source_conversation
+                           ON source_conversation."id" = shared_source."sourceConversationId"
+                          AND source_conversation."representativeId" = projection."representativeId"
+                          AND source_conversation."contactId" = shared_source."sourceContactId"
+                         JOIN "Contact" source_contact
+                           ON source_contact."id" = shared_source."sourceContactId"
+                          AND source_contact."representativeId" = projection."representativeId"
+                         JOIN "IdentityLink" source_identity_link
+                           ON source_identity_link."id" = source_message."sourceIdentityLinkId"
+                          AND source_identity_link."audienceIdentityId" = memory_record."audienceIdentityId"
+                         LEFT JOIN "IdentityLinkConnectionProof" source_identity_proof
+                           ON source_identity_proof."id" = source_message."sourceIdentityConnectionProofId"
+                          AND source_identity_proof."identityLinkId" = source_identity_link."id"
+                         LEFT JOIN "ConversationChannelBinding" source_binding
+                           ON source_binding."id" = source_message."channelBindingId"
+                          AND source_binding."conversationId" = source_message."conversationId"
+                        WHERE shared_source."id" = version."sourceCandidateId"
+                          AND shared_source."representativeId" = projection."representativeId"
+                          AND shared_source."scope" = 'CONTACT_SHARED'::"MemoryScope"
+                          AND shared_source."contactId" IS NULL
+                          AND shared_source."scopeChannel" IS NULL
+                          AND shared_source."audienceIdentityId" = memory_record."audienceIdentityId"
+                          AND source_message."senderType" = 'AUDIENCE'::"MessageSenderType"
+                          AND source_conversation."audienceIdentityId" = memory_record."audienceIdentityId"
+                          AND source_contact."audienceIdentityId" = memory_record."audienceIdentityId"
+                          AND source_identity_link."verifiedAt" IS NOT NULL
+                          AND source_identity_link."revokedAt" IS NULL
+                          AND source_identity_link."assuranceLevel" IN (
+                            'PLATFORM_VERIFIED'::"IdentityAssuranceLevel",
+                            'STEP_UP_VERIFIED'::"IdentityAssuranceLevel"
+                          )
+                          AND (
+                            (
+                              shared_source."originChannel" = 'WEB'::"RepresentativeChannelKind"
+                              AND source_identity_link."provider" = 'LOGTO'::"IdentityLinkProvider"
+                              AND source_message."sourceIdentityConnectionProofId" IS NULL
+                            )
+                            OR (
+                              shared_source."originChannel" IN (
+                                'MATRIX'::"RepresentativeChannelKind",
+                                'TELEGRAM'::"RepresentativeChannelKind"
+                              )
+                              AND source_binding."kind" = shared_source."originChannel"
+                              AND source_binding."connectionId" IS NOT NULL
+                              AND source_identity_proof."connectionId" = source_binding."connectionId"
+                              AND source_identity_proof."issuer" = source_identity_link."issuer"
+                              AND source_identity_proof."verifiedAt" IS NOT NULL
+                              AND source_identity_proof."revokedAt" IS NULL
+                              AND source_identity_proof."assuranceLevel" IN (
+                                'PLATFORM_VERIFIED'::"IdentityAssuranceLevel",
+                                'STEP_UP_VERIFIED'::"IdentityAssuranceLevel"
+                              )
+                              AND (
+                                (
+                                  shared_source."originChannel" = 'MATRIX'::"RepresentativeChannelKind"
+                                  AND source_identity_link."provider" = 'MATRIX'::"IdentityLinkProvider"
+                                )
+                                OR (
+                                  shared_source."originChannel" = 'TELEGRAM'::"RepresentativeChannelKind"
+                                  AND source_identity_link."provider" = 'TELEGRAM'::"IdentityLinkProvider"
+                                )
+                              )
+                              AND source_identity_link."providerSubject" = source_message."senderId"
+                            )
+                          )
+                     )
+                     AND EXISTS (
+                       SELECT 1
+                         FROM "ContactMemorySharingConsent" consent
+                         JOIN "ContactMemorySharingChallenge" challenge
+                           ON challenge."id" = consent."challengeId"
+                          AND challenge."representativeId" = consent."representativeId"
+                          AND challenge."audienceIdentityId" = consent."audienceIdentityId"
+                        WHERE consent."representativeId" = projection."representativeId"
+                          AND consent."audienceIdentityId" = memory_record."audienceIdentityId"
+                          AND consent."policyRevision" = policy."revision"
+                          AND consent."status" = 'GRANTED'::"ContactMemorySharingConsentStatus"
+                          AND consent."grantedAt" IS NOT NULL
+                          AND consent."revokedAt" IS NULL
+                          AND consent."disclosureContractVersion" = ${contactMemorySharingConsentContractVersion}
+                          AND consent."proofHash" ~ '^[0-9a-f]{64}$'
+                          AND consent."sourceEvidenceHash" ~ '^[0-9a-f]{64}$'
+                          AND consent."confirmationEventHash" ~ '^[0-9a-f]{64}$'
+                          AND challenge."policyRevision" = consent."policyRevision"
+                          AND challenge."disclosureContractVersion" = consent."disclosureContractVersion"
+                          AND challenge."sourceEvidenceHash" = consent."sourceEvidenceHash"
+                          AND challenge."consumedAt" IS NOT NULL
+                          AND challenge."revokedAt" IS NULL
+                          AND consent."consentVersion" = (
+                            SELECT MAX(latest_consent."consentVersion")
+                              FROM "ContactMemorySharingConsent" latest_consent
+                             WHERE latest_consent."representativeId" = consent."representativeId"
+                               AND latest_consent."audienceIdentityId" = consent."audienceIdentityId"
+                               AND latest_consent."policyRevision" = consent."policyRevision"
+                          )
+                     )
+                     AND EXISTS (
+                       SELECT 1
+                         FROM "MemoryCandidate" shared_candidate
+                         JOIN "MemoryPolicyDecision" shared_decision
+                           ON shared_decision."candidateId" = shared_candidate."id"
+                          AND shared_decision."representativeId" = shared_candidate."representativeId"
+                        WHERE shared_candidate."id" = version."sourceCandidateId"
+                          AND shared_candidate."representativeId" = projection."representativeId"
+                          AND shared_candidate."scope" = 'CONTACT_SHARED'::"MemoryScope"
+                          AND shared_candidate."contactId" IS NULL
+                          AND shared_candidate."scopeChannel" IS NULL
+                          AND shared_candidate."audienceIdentityId" = memory_record."audienceIdentityId"
+                          AND shared_decision."memoryId" = memory_record."id"
+                          AND shared_decision."resultVersionId" = version."id"
+                          AND shared_decision."policyRevision" = policy."revision"
+                          AND shared_decision."outcome" IN (
+                            'ACTIVATED'::"MemoryPolicyDecisionOutcome",
+                            'UPDATED'::"MemoryPolicyDecisionOutcome"
+                          )
+                          AND shared_decision."outputHash" = version."contentHash"
+                     )
+                   )
                  )
                ) AS authoritative
           FROM "MemoryProjectionItem" projection
@@ -867,6 +1495,8 @@ async function completeProjectionWrite(
             ON version."id" = projection."memoryVersionId"
            AND version."memoryId" = projection."memoryId"
            AND version."representativeId" = projection."representativeId"
+          JOIN "RepresentativeMemoryPolicy" policy
+            ON policy."representativeId" = projection."representativeId"
          WHERE projection."id" = ${claim.id}
            AND projection."status" = 'PROJECTING'::"MemoryProjectionStatus"
            AND projection."leaseToken" = ${claim.leaseToken}
@@ -1402,7 +2032,12 @@ async function recordCleanupFailure(
     defaultMaximumCleanupAttempts,
   );
   const failed = claim.attemptCount >= maximumAttempts;
-  const delay = retryDelayMilliseconds(claim.attemptCount, options);
+  const delay = failed
+    ? positiveInteger(
+        options.failedCleanupRetryMilliseconds,
+        defaultFailedCleanupRetryMilliseconds,
+      )
+    : retryDelayMilliseconds(claim.attemptCount, options);
   const rows = await client.$queryRaw<Array<{ id: string }>>(Prisma.sql`
     UPDATE "MemoryDeletionProof"
        SET "cleanupStatus" = ${failed
@@ -1439,6 +2074,48 @@ function resolveProjectionProvider(
   if (options.provider?.name === providerName) return options.provider;
   if (providerName !== "openviking") return null;
   return createDefaultMemoryProjectionProvider();
+}
+
+function resolveSupportedProjectionProviderNames(
+  options: MemoryProjectionExecutionOptions,
+) {
+  const providerNames = options.supportedProviderNames
+    ? [...options.supportedProviderNames]
+    : options.provider
+      ? []
+      : ["openviking"];
+  if (options.provider) providerNames.push(options.provider.name);
+  return normalizeSupportedProviderNames(providerNames);
+}
+
+function providerNameSqlList(providerNames: readonly string[]) {
+  return Prisma.join(
+    normalizeSupportedProviderNames(providerNames).map((providerName) =>
+      Prisma.sql`${providerName}`
+    ),
+  );
+}
+
+function normalizeSupportedProviderNames(providerNames: readonly string[]) {
+  const normalized = new Set<string>();
+  for (const providerName of providerNames) {
+    if (
+      typeof providerName !== "string"
+      || providerName.length === 0
+      || providerName !== providerName.trim()
+    ) {
+      throw new TypeError(
+        "Memory projection provider capability names must be non-empty and trimmed.",
+      );
+    }
+    normalized.add(providerName);
+  }
+  if (normalized.size === 0) {
+    throw new TypeError(
+      "Memory projection requires at least one supported provider capability.",
+    );
+  }
+  return [...normalized].sort();
 }
 
 function defaultProviderErrorCode(

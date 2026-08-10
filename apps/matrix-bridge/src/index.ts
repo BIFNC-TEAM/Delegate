@@ -5,18 +5,24 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 
 import {
   activateVerifiedMatrixDirectConversation,
+  admitCurrentMatrixApplicationServiceProviderEvents,
   checkMatrixRuntimePersistenceReadiness,
+  claimMemoryChannelDisclosureDelivery,
   clearMatrixRoomRemoteValidationFailures,
+  completeMemoryChannelDisclosureDelivery,
+  failMemoryChannelDisclosureDelivery,
   getMatrixRoomSecuritySnapshot,
   getMatrixVirtualUserBinding,
   ingestMatrixApplicationServiceTransaction,
   isolateMatrixConversationRoom,
   matrixServerNameFromUserId,
   normalizeMatrixUserId,
+  persistMatrixApplicationServiceProviderArrivals,
   recordMatrixRoomRemoteValidationFailure,
   recordMatrixRuntimeHealth,
   withActiveMatrixRepresentativeChannelFence,
   type MatrixApplicationServiceEvent,
+  type MatrixRoomSecuritySnapshot,
 } from "@delegate/web-data";
 
 import { resolveMatrixBridgeConfig } from "./config";
@@ -290,10 +296,22 @@ export async function processMatrixApplicationServiceTransaction(input: {
   | "content_retry"
   | "join_retry"
 > {
-  const securityEvents = input.events.filter(isMatrixRoomSecurityEvent);
-  const contentEvents = input.events.filter(
+  const incomingSecurityEvents = input.events.filter(isMatrixRoomSecurityEvent);
+  const incomingContentEvents = input.events.filter(
     (event) => !isMatrixRoomSecurityEvent(event),
   );
+  // Provider arrival must be durable before any join, room validation, or
+  // disclosure send. Later business ingestion reuses the immutable event-id
+  // row, preserving homeserver retry idempotency.
+  await persistMatrixApplicationServiceProviderArrivals({
+    transactionId: input.transactionId,
+    events: input.events,
+  });
+  const securityEvents = (
+    await admitCurrentMatrixApplicationServiceProviderEvents(
+      incomingSecurityEvents,
+    )
+  ).events;
   // Persist and apply room security state first. A transient validation
   // failure for any content room must never keep a membership/encryption
   // event in this homeserver transaction out of the durable inbox.
@@ -308,17 +326,101 @@ export async function processMatrixApplicationServiceTransaction(input: {
   const joinFailures = await joinManagedMatrixInvites(securityEvents);
   if (joinFailures.length) return "join_retry";
 
+  // A content event is admitted only in the exact endpoint lifecycle in
+  // which its immutable inbox row was first created. This runs after invite
+  // provisioning (so same-transaction first messages can resolve their room)
+  // and before any remote validation or externally visible disclosure.
+  const contentEvents = (
+    await admitCurrentMatrixApplicationServiceProviderEvents(
+      incomingContentEvents,
+    )
+  ).events;
+
+  const safetyControlEvents = contentEvents.filter(
+    isMatrixMessageSafetyControlEvent,
+  );
+  const disclosureGatedContentEvents = contentEvents.filter(
+    (event) => !isMatrixMessageSafetyControlEvent(event),
+  );
+  const disclosureGatedContentEventIds = new Set(
+    disclosureGatedContentEvents.flatMap((event) => {
+      const eventId = event.event_id?.trim();
+      return eventId ? [eventId] : [];
+    }),
+  );
+  const independentSafetyControlEvents = safetyControlEvents.filter(
+    (event) => {
+      const targetEventId = matrixSafetyControlTargetEventId(event);
+      return !targetEventId
+        || !disclosureGatedContentEventIds.has(targetEventId);
+    },
+  );
+  const dependentSafetyControlEvents = safetyControlEvents.filter(
+    (event) => {
+      const targetEventId = matrixSafetyControlTargetEventId(event);
+      return Boolean(
+        targetEventId
+        && disclosureGatedContentEventIds.has(targetEventId),
+      );
+    },
+  );
+
+  // Edits and redactions are safety controls: they can invalidate derived
+  // memory and must not wait behind the notice required by an unrelated
+  // ordinary message in the same homeserver transaction. A control targeting
+  // an ordinary event in this exact transaction is the only exception: the
+  // target must materialize before the edit/redaction can safely be applied.
+  if (independentSafetyControlEvents.length > 0) {
+    const safetyValidationFailures =
+      await validateActiveMatrixRoomsBeforeIngest(
+        independentSafetyControlEvents,
+      );
+    if (safetyValidationFailures.length) return "validation_retry";
+
+    const safetyResults =
+      await ingestMatrixApplicationServiceTransaction({
+        transactionId: input.transactionId,
+        events: independentSafetyControlEvents,
+      });
+    if (safetyResults.some((result) => result.status === "failed")) {
+      return "content_retry";
+    }
+  }
+
   const validationFailures =
-    await validateActiveMatrixRoomsBeforeIngest(contentEvents);
+    await validateActiveMatrixRoomsBeforeIngest(
+      disclosureGatedContentEvents,
+    );
   if (validationFailures.length) return "validation_retry";
 
   const contentResults =
     await ingestMatrixApplicationServiceTransaction({
       transactionId: input.transactionId,
-      events: contentEvents,
+      events: disclosureGatedContentEvents,
     });
   if (contentResults.some((result) => result.status === "failed")) {
     return "content_retry";
+  }
+
+  // If disclosure or target ingestion failed above, these events were never
+  // handed to the durable inbox and the homeserver retries the transaction.
+  // Once every same-transaction target has materialized, process its dependent
+  // safety controls under the same authoritative room validation.
+  if (dependentSafetyControlEvents.length > 0) {
+    const safetyValidationFailures =
+      await validateActiveMatrixRoomsBeforeIngest(
+        dependentSafetyControlEvents,
+      );
+    if (safetyValidationFailures.length) return "validation_retry";
+
+    const safetyResults =
+      await ingestMatrixApplicationServiceTransaction({
+        transactionId: input.transactionId,
+        events: dependentSafetyControlEvents,
+      });
+    if (safetyResults.some((result) => result.status === "failed")) {
+      return "content_retry";
+    }
   }
   return "processed";
 }
@@ -336,6 +438,12 @@ export async function validateActiveMatrixRoomsBeforeIngest(
     "m.room.encryption",
   ]);
   const roomIds = new Set<string>();
+  const roomsRequiringMemoryDisclosure = new Set<string>();
+  const roomsWithMissingMemoryDisclosureEventId = new Set<string>();
+  const memoryDisclosureEventsByRoomId = new Map<
+    string,
+    MatrixApplicationServiceEvent[]
+  >();
   const securityEventRoomIds = new Set<string>();
   const eventIdByRoomId = new Map<string, string>();
   for (const event of events) {
@@ -347,6 +455,22 @@ export async function validateActiveMatrixRoomsBeforeIngest(
     }
     if (remotelyValidatedContentEventTypes.has(eventType)) {
       roomIds.add(roomId);
+      if (isMatrixMessageRequiringMemoryDisclosure(event)) {
+        roomsRequiringMemoryDisclosure.add(roomId);
+        const disclosureEventId = event.event_id?.trim();
+        if (!disclosureEventId) {
+          roomsWithMissingMemoryDisclosureEventId.add(roomId);
+        } else {
+          const roomEvents =
+            memoryDisclosureEventsByRoomId.get(roomId) ?? [];
+          if (!roomEvents.some(
+            (candidate) => candidate.event_id?.trim() === disclosureEventId,
+          )) {
+            roomEvents.push(event);
+          }
+          memoryDisclosureEventsByRoomId.set(roomId, roomEvents);
+        }
+      }
       const eventId = event.event_id?.trim();
       if (eventId && !eventIdByRoomId.has(roomId)) {
         eventIdByRoomId.set(roomId, eventId);
@@ -361,6 +485,13 @@ export async function validateActiveMatrixRoomsBeforeIngest(
   for (const roomId of roomIds) {
     const roomSecurity = await getMatrixRoomSecuritySnapshot(roomId);
     if (!roomSecurity || roomSecurity.securityState !== "ACTIVE") continue;
+    if (roomSecurity.representativeChannelDesiredState !== "ACTIVE") {
+      // Remote validation and disclosure are admission checks for an active
+      // channel. Paused, disconnected, or orphaned channels must still reach
+      // durable ingest, which terminally consumes the provider event under the
+      // authoritative lifecycle fence without creating business side effects.
+      continue;
+    }
     if (
       roomSecurity.currentRepresentativeAssignmentRevision === null
       || roomSecurity.currentRepresentativeAssignmentRevision <= 0
@@ -407,6 +538,40 @@ export async function validateActiveMatrixRoomsBeforeIngest(
     if (roomCheck.ok) {
       if (roomSecurity.remoteValidationAttemptCount > 0) {
         await clearMatrixRoomRemoteValidationFailures(roomId);
+      }
+      if (roomsRequiringMemoryDisclosure.has(roomId)) {
+        const inboundEvents =
+          memoryDisclosureEventsByRoomId.get(roomId) ?? [];
+        const inboundExternalMessageIds = inboundEvents.flatMap((event) => {
+          const eventId = event.event_id?.trim();
+          return eventId ? [eventId] : [];
+        });
+        if (
+          roomsWithMissingMemoryDisclosureEventId.has(roomId)
+          || inboundExternalMessageIds.length === 0
+        ) {
+          failures.push(`${roomId}:matrix_memory_disclosure_event_id_missing`);
+          continue;
+        }
+        const disclosure = await ensureActiveMatrixMemoryDisclosure({
+          roomId,
+          roomSecurity,
+          audienceMatrixUserId,
+          representativeMatrixUserId,
+          inboundEvents,
+          inboundExternalMessageIds,
+        });
+        if (!disclosure.ok) {
+          failures.push(`${roomId}:${disclosure.errorCode}`);
+          await recordManagedMatrixRuntimeHealth(
+            representativeMatrixUserId,
+            {
+              status: "DEGRADED",
+              errorCode: disclosure.errorCode,
+              ...assignmentHealthScope,
+            },
+          );
+        }
       }
       continue;
     }
@@ -575,6 +740,17 @@ export async function joinManagedMatrixInvites(
         },
       },
       async () => {
+        const arrivalAdmission =
+          await admitCurrentMatrixApplicationServiceProviderEvents([event]);
+        if (arrivalAdmission.events.length !== 1) {
+          return {
+            ok: false as const,
+            staleArrival: true as const,
+            errorCode: "matrix_provider_arrival_lifecycle_stale",
+            failureDetail: "provider_arrival_lifecycle_stale",
+            retryable: false,
+          };
+        }
         const registrationError = await ensureMatrixVirtualUserRegistered(
           binding.matrixUserId,
         );
@@ -626,6 +802,12 @@ export async function joinManagedMatrixInvites(
       continue;
     }
     if (!remoteJoin.value.ok) {
+      if (
+        "staleArrival" in remoteJoin.value
+        && remoteJoin.value.staleArrival === true
+      ) {
+        continue;
+      }
       const disposition =
         await recordMatrixRoomRemoteValidationFailure({
           roomId,
@@ -751,6 +933,173 @@ export async function joinManagedMatrixInvites(
     }
   }
   return failures;
+}
+
+type MatrixMemoryDisclosureResult =
+  | { ok: true; status: "current" | "delivered" }
+  | { ok: false; errorCode: string };
+
+/**
+ * Matrix memory is permitted only after the disclosure is delivered into the
+ * exact verified direct room. The representative channel fence prevents a
+ * disconnect or endpoint reassignment from racing the external send.
+ */
+async function ensureActiveMatrixMemoryDisclosure(input: {
+  roomId: string;
+  roomSecurity: MatrixRoomSecuritySnapshot;
+  audienceMatrixUserId: string;
+  representativeMatrixUserId: string;
+  inboundEvents: readonly MatrixApplicationServiceEvent[];
+  inboundExternalMessageIds: readonly string[];
+}): Promise<MatrixMemoryDisclosureResult> {
+  if (
+    !input.roomSecurity.representativeId
+    || input.roomSecurity.securityState === "ISOLATED"
+    || input.roomSecurity.audienceMatrixUserId
+      !== input.audienceMatrixUserId
+    || input.roomSecurity.representativeMatrixUserId
+      !== input.representativeMatrixUserId
+  ) {
+    return {
+      ok: false,
+      errorCode: "matrix_memory_disclosure_room_not_active",
+    };
+  }
+
+  const fenced = await withActiveMatrixRepresentativeChannelFence(
+    {
+      representativeId: input.roomSecurity.representativeId,
+      representativeMatrixUserId: input.representativeMatrixUserId,
+      room: {
+        roomId: input.roomId,
+        conversationId: input.roomSecurity.conversationId,
+        audienceMatrixUserId: input.audienceMatrixUserId,
+        expectedSecurityState: "ACTIVE",
+      },
+    },
+    async () => {
+      // Re-check after acquiring the same lifecycle lock used by disconnect.
+      // A disconnect/reconnect between the early admission and this external
+      // send must not allow an old provider event to trigger a new notice.
+      const arrivalAdmission =
+        await admitCurrentMatrixApplicationServiceProviderEvents(
+          [...input.inboundEvents],
+        );
+      if (arrivalAdmission.events.length !== input.inboundEvents.length) {
+        return {
+          ok: false as const,
+          errorCode: "matrix_memory_disclosure_arrival_lifecycle_stale",
+        };
+      }
+      return sendMatrixMemoryDisclosureIfRequired({
+        roomId: input.roomId,
+        conversationId: input.roomSecurity.conversationId,
+        representativeMatrixUserId: input.representativeMatrixUserId,
+        inboundExternalMessageIds: input.inboundExternalMessageIds,
+      });
+    },
+  );
+  if (!fenced.executed) {
+    return {
+      ok: false,
+      errorCode: `matrix_memory_disclosure_${fenced.reason}`,
+    };
+  }
+  return fenced.value;
+}
+
+async function sendMatrixMemoryDisclosureIfRequired(input: {
+  roomId: string;
+  conversationId: string;
+  representativeMatrixUserId: string;
+  inboundExternalMessageIds: readonly string[];
+}): Promise<MatrixMemoryDisclosureResult> {
+  let claim: Awaited<
+    ReturnType<typeof claimMemoryChannelDisclosureDelivery>
+  >;
+  try {
+    claim = await claimMemoryChannelDisclosureDelivery({
+      conversationId: input.conversationId,
+      channel: "matrix",
+      inboundExternalMessageIds: input.inboundExternalMessageIds,
+    });
+  } catch {
+    return {
+      ok: false,
+      errorCode: "matrix_memory_disclosure_claim_failed",
+    };
+  }
+
+  if (!claim.send) {
+    return claim.status === "current"
+      ? { ok: true, status: "current" }
+      : {
+          ok: false,
+          errorCode: "matrix_memory_disclosure_in_flight",
+        };
+  }
+
+  const transactionId = `delegate-memory-disclosure-${claim.deliveryId}`;
+  const endpoint = matrixClientEndpoint(
+    `/_matrix/client/v3/rooms/${encodeURIComponent(input.roomId)}`
+      + `/send/m.room.message/${encodeURIComponent(transactionId)}`,
+    input.representativeMatrixUserId,
+  );
+  let failureCode: string | null = null;
+  try {
+    const response = await fetchWithTimeout(endpoint, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        msgtype: "m.text",
+        body: claim.text,
+      }),
+    });
+    if (!response.ok) {
+      failureCode = `matrix_memory_disclosure_${response.status}`;
+    } else {
+      const payload: unknown = await response.json().catch(() => null);
+      const eventId = payload
+        && typeof payload === "object"
+        && !Array.isArray(payload)
+        && "event_id" in payload
+        && typeof payload.event_id === "string"
+        ? payload.event_id.trim()
+        : "";
+      if (!eventId) {
+        failureCode = "matrix_memory_disclosure_event_id_missing";
+      } else {
+        const completed = await completeMemoryChannelDisclosureDelivery({
+          deliveryId: claim.deliveryId,
+          leaseToken: claim.leaseToken,
+          externalMessageId: eventId,
+        });
+        if (completed) return { ok: true, status: "delivered" };
+        failureCode = "matrix_memory_disclosure_proof_failed";
+      }
+    }
+  } catch (error) {
+    failureCode = error instanceof Error && error.name === "AbortError"
+      ? "matrix_memory_disclosure_timeout"
+      : "matrix_memory_disclosure_send_failed";
+  }
+
+  try {
+    await failMemoryChannelDisclosureDelivery({
+      deliveryId: claim.deliveryId,
+      leaseToken: claim.leaseToken,
+      errorCode:
+        failureCode ?? "matrix_memory_disclosure_delivery_failed",
+    });
+  } catch {
+    // The external-send error remains the fail-closed outcome even if the
+    // retry marker itself cannot be persisted during a database outage.
+  }
+  return {
+    ok: false,
+    errorCode:
+      failureCode ?? "matrix_memory_disclosure_delivery_failed",
+  };
 }
 
 async function recordManagedMatrixRuntimeHealth(
@@ -1082,6 +1431,81 @@ function isMatrixRoomSecurityEvent(
   const eventType = event.type?.trim();
   return eventType === "m.room.member"
     || eventType === "m.room.encryption";
+}
+
+function isMatrixMessageRequiringMemoryDisclosure(
+  event: MatrixApplicationServiceEvent,
+) {
+  if (event.type?.trim() !== "m.room.message") return false;
+  const content = event.content;
+  if (!content || typeof content !== "object" || Array.isArray(content)) {
+    return false;
+  }
+  if (
+    content.msgtype !== "m.text"
+    || typeof content.body !== "string"
+    || !content.body.trim()
+  ) return false;
+  const relatesTo = content["m.relates_to"];
+  return !(
+    relatesTo
+    && typeof relatesTo === "object"
+    && !Array.isArray(relatesTo)
+    && (relatesTo as Record<string, unknown>).rel_type === "m.replace"
+  );
+}
+
+function isMatrixMessageSafetyControlEvent(
+  event: MatrixApplicationServiceEvent,
+) {
+  if (event.type?.trim() === "m.room.redaction") return true;
+  if (event.type?.trim() !== "m.room.message") return false;
+  const content = event.content;
+  if (!content || typeof content !== "object" || Array.isArray(content)) {
+    return false;
+  }
+  const relatesTo = content["m.relates_to"];
+  return Boolean(
+    relatesTo
+    && typeof relatesTo === "object"
+    && !Array.isArray(relatesTo)
+    && (relatesTo as Record<string, unknown>).rel_type === "m.replace",
+  );
+}
+
+function matrixSafetyControlTargetEventId(
+  event: MatrixApplicationServiceEvent,
+) {
+  const content = event.content;
+  if (event.type?.trim() === "m.room.redaction") {
+    const redacts = event.redacts?.trim()
+      || (
+        content
+        && typeof content === "object"
+        && !Array.isArray(content)
+        && typeof content.redacts === "string"
+          ? content.redacts.trim()
+          : ""
+      );
+    return redacts || null;
+  }
+  if (
+    event.type?.trim() !== "m.room.message"
+    || !content
+    || typeof content !== "object"
+    || Array.isArray(content)
+  ) return null;
+  const relatesTo = content["m.relates_to"];
+  if (
+    !relatesTo
+    || typeof relatesTo !== "object"
+    || Array.isArray(relatesTo)
+    || (relatesTo as Record<string, unknown>).rel_type !== "m.replace"
+  ) return null;
+  const targetEventId = (relatesTo as Record<string, unknown>).event_id;
+  return typeof targetEventId === "string"
+    ? targetEventId.trim() || null
+    : null;
 }
 
 function json(response: ServerResponse, statusCode: number, payload: unknown) {

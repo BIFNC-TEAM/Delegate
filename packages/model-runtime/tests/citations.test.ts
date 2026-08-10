@@ -30,10 +30,14 @@ describe("memory citation protocol", () => {
     });
     expect(prepared.prompt.instructions).toContain("Available recalled-source aliases: S1, S2");
     expect(prepared.prompt.instructions).toContain(
-      "[[DELEGATE_MEMORY_CITATIONS:challenge123:S1,S2]]",
+      '"citationChallenge":"challenge123"',
+    );
+    expect(prepared.prompt.instructions).toContain(
+      '"citedSourceAliases":["S1","S2"]',
     );
     expect(prepared.prompt.instructions).not.toContain("opaque-use-1");
     expect(prepared.prompt.input).toBe("Recall JSON.");
+    expect(prepared.prompt.responseFormat).toBe("json_object");
   });
 
   it("does not add a protocol when no ledger-backed recall reached the prompt", () => {
@@ -65,10 +69,71 @@ describe("memory citation protocol", () => {
     });
   });
 
+  it("unwraps a strict nonce-bound JSON response and resolves selected aliases", () => {
+    expect(parseMemoryCitationsFromReply({
+      replyText: JSON.stringify({
+        answer: "亚洲是世界上面积最大的大洲。",
+        citationChallenge: "challenge123",
+        citedSourceAliases: ["S2", "S1"],
+      }),
+      protocol: {
+        challenge: "challenge123",
+        bindings: [
+          { alias: "S1", memoryUseItemId: "use-1" },
+          { alias: "S2", memoryUseItemId: "use-2" },
+        ],
+      },
+    })).toEqual({
+      replyText: "亚洲是世界上面积最大的大洲。",
+      citedMemoryUseItemIds: ["use-2", "use-1"],
+    });
+  });
+
+  it.each([
+    {
+      name: "wrong challenge",
+      envelope: {
+        answer: "Answer.",
+        citationChallenge: "forged123",
+        citedSourceAliases: ["S1"],
+      },
+    },
+    {
+      name: "unknown alias",
+      envelope: {
+        answer: "Answer.",
+        citationChallenge: "challenge123",
+        citedSourceAliases: ["S9"],
+      },
+    },
+    {
+      name: "extra control field",
+      envelope: {
+        answer: "Answer.",
+        citationChallenge: "challenge123",
+        citedSourceAliases: ["S1"],
+        debug: "do not expose",
+      },
+    },
+  ])("fails closed without exposing a malformed JSON envelope for $name", ({ envelope }) => {
+    expect(parseMemoryCitationsFromReply({
+      replyText: JSON.stringify(envelope),
+      protocol: {
+        challenge: "challenge123",
+        bindings: [{ alias: "S1", memoryUseItemId: "use-1" }],
+      },
+    })).toEqual({ replyText: "", citedMemoryUseItemIds: [] });
+  });
+
   it.each([
     {
       name: "missing marker",
       replyText: "No recalled source was needed.",
+    },
+    {
+      name: "pseudo JSON control envelope",
+      replyText:
+        "{answer: 'Answer.', citationChallenge: 'challenge123', citedSourceAliases: ['S1']}",
     },
     {
       name: "wrong challenge",
@@ -115,8 +180,7 @@ describe("memory citation protocol", () => {
       },
     });
 
-    expect(parsed.citedMemoryUseItemIds).toEqual([]);
-    expect(parsed.replyText).not.toContain("DELEGATE_MEMORY_CITATIONS");
+    expect(parsed).toEqual({ replyText: "", citedMemoryUseItemIds: [] });
   });
 
   it("sanitizes an unsolicited control marker when no citation protocol exists", () => {

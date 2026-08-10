@@ -59,6 +59,8 @@ import {
   hasActiveMatrixAudienceConnectionProof,
   privateChannelIdentityProviders,
 } from "./audience-identity-binding";
+import { resolveDeterministicContactMemorySharingCommand } from "./contact-memory-sharing";
+import { resolveAndLockIngressIdentityProvenance } from "./contact-memory-source-evidence";
 import {
   provisionMatrixDirectConversation,
   resolveMatrixApplicationServiceConnectionId,
@@ -69,11 +71,23 @@ import {
 import {
   enqueueInboundMessageMemoryExtraction,
   invalidateMemoryExtractionForSourceMessage,
+  isDeterministicContactMemoryDeleteCommand,
 } from "./memory-extraction";
+import {
+  requestAutomaticContactChannelMemoryDeletionInTransaction,
+} from "./memory-governance";
+import {
+  activateCurrentMemoryChannelDisclosureAfterMessage,
+  matrixProviderArrivalFenceMatches,
+  matrixProviderArrivalFencePayloadKey,
+  readMatrixProviderArrivalFence,
+  type MatrixProviderArrivalFence,
+} from "./memory-disclosure";
 import {
   cancelMemoryUseRunInTransaction,
   failMemoryUseRunInTransaction,
   finalizeMemoryUseGenerationInTransaction,
+  revalidateMemoryUseDeliverySourcesInTransaction,
 } from "./memory-use-execution";
 import {
   lockMatrixRoomSecurityState,
@@ -91,11 +105,8 @@ import {
 import { buildWebConversationThreadId } from "./web-audience";
 
 export {
-  enqueueManualMemoryExtraction,
-  enqueueShadowMemoryExtraction,
   processNextMemoryExtractionWork,
   processMemoryExtractionRun,
-  type ExplicitMemoryExtractionInput,
   type MemoryCandidateClassification,
   type MemoryExtractionWorkResult,
 } from "./memory-extraction";
@@ -125,6 +136,24 @@ export type GenerationRuntimeOutcome =
         | "provider_failed"
         | "policy_fallback";
     };
+
+export type PublicWebAnswerSourceDisclosure = "general_model";
+
+/**
+ * Classify the visitor-facing source disclosure from authoritative generation
+ * facts. Search hits and prompt injection are not proof that the answer relied
+ * on a source; only an authoritative output citation suppresses the general
+ * model disclosure.
+ */
+export function resolvePublicWebAnswerSourceDisclosure(input: {
+  modelGenerated: boolean;
+  hasAuthorizedCitation: boolean;
+}): PublicWebAnswerSourceDisclosure | null {
+  if (!input.modelGenerated || input.hasAuthorizedCitation) {
+    return null;
+  }
+  return "general_model";
+}
 
 function mergeGenerationRuntimeOutcome(
   snapshot: Prisma.JsonValue | null,
@@ -379,10 +408,14 @@ export type AcceptInboundMessageInput = {
   conversationId: string;
   text: string;
   senderId?: string;
+  /** Exact verified LOGTO link from the server-resolved Web principal. */
+  sourceIdentityLinkId?: string;
   senderDisplayName?: string;
   clientMessageId: string;
   channel?: "web" | "matrix" | "telegram";
   externalMessageId?: string;
+  /** Trusted provider event time. Web callers must not set this value. */
+  occurredAt?: Date;
   queueGeneration?: boolean;
   walletBilling?: {
     externalUserId: string;
@@ -474,6 +507,7 @@ export type MatrixApplicationServiceEvent = {
   origin_server_ts?: number;
   redacts?: string;
   content?: Record<string, unknown>;
+  "com.delegate.arrival_fence"?: unknown;
 };
 
 export type MatrixApplicationServiceIngestResult = {
@@ -498,6 +532,17 @@ type PersistedMatrixApplicationServiceEvent = {
   attemptCount: number;
   lastError: string | null;
   privateCredentialHash: string | null;
+  arrivalFence: MatrixProviderArrivalFence | null;
+};
+
+export type MatrixProviderArrivalAdmissionResult = {
+  events: MatrixApplicationServiceEvent[];
+  ignored: Array<{
+    eventId: string;
+    reason:
+      | "matrix_provider_arrival_fence_missing"
+      | "matrix_provider_arrival_lifecycle_stale";
+  }>;
 };
 
 const matrixEventProcessingLeaseMs = 30_000;
@@ -1085,6 +1130,7 @@ export async function acceptInboundConversationMessage(
   const text = input.text.trim();
   if (!text) throw new Error("Message text is required.");
   if (!input.clientMessageId.trim()) throw new Error("clientMessageId is required.");
+  const inboundOccurredAt = resolveInboundMessageOccurredAt(input);
 
   const accept = async (tx: Prisma.TransactionClient) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
@@ -1121,6 +1167,7 @@ export async function acceptInboundConversationMessage(
                 externalUserId: true,
                 telegramBotConnectionId: true,
                 endpointAssignmentRevision: true,
+                endpointLifecycleRevision: true,
                 telegramBotConnection: {
                   select: {
                     id: true,
@@ -1214,6 +1261,32 @@ export async function acceptInboundConversationMessage(
       }
     }
 
+    const ingressIdentityProvenance =
+      await resolveAndLockIngressIdentityProvenance(tx, {
+        sourceChannel: channelKind,
+        audienceIdentityId: conversation.audienceIdentityId,
+        senderId: input.senderId ?? null,
+        connectionId: binding?.connectionId ?? null,
+        webIdentityLinkId: input.sourceIdentityLinkId ?? null,
+      });
+    if (
+      (normalizedChannel === "matrix" || normalizedChannel === "telegram")
+      && !ingressIdentityProvenance
+    ) {
+      throw new ChannelUnavailableError(
+        "identity_provenance_invalid",
+      );
+    }
+    if (
+      normalizedChannel === "web"
+      && input.sourceIdentityLinkId
+      && !ingressIdentityProvenance
+    ) {
+      throw new ChannelUnavailableError(
+        "identity_provenance_invalid",
+      );
+    }
+
     const existingRun = await tx.generationRun.findUnique({
       where: {
         idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}`,
@@ -1221,6 +1294,16 @@ export async function acceptInboundConversationMessage(
       include: { inputMessage: true },
     });
     if (existingRun) {
+      if (
+        existingRun.inputMessage.sourceIdentityLinkId
+          !== ingressIdentityProvenance?.sourceIdentityLinkId
+        || existingRun.inputMessage.sourceIdentityConnectionProofId
+          !== ingressIdentityProvenance?.sourceIdentityConnectionProofId
+      ) {
+        throw new ChannelUnavailableError(
+          "identity_provenance_invalid",
+        );
+      }
       return {
         message: existingRun.inputMessage,
         run: existingRun,
@@ -1250,6 +1333,12 @@ export async function acceptInboundConversationMessage(
       episode = await tx.conversationEpisode.update({
         where: { id: episode.id },
         data: { status: ConversationEpisodeStatus.ACTIVE, endedAt: null },
+      });
+    } else if (shouldQueueAi && latestState === "waiting_user") {
+      assertConversationEpisodeTransition(latestState, "active");
+      episode = await tx.conversationEpisode.update({
+        where: { id: episode.id },
+        data: { status: ConversationEpisodeStatus.ACTIVE },
       });
     }
 
@@ -1303,7 +1392,7 @@ export async function acceptInboundConversationMessage(
           ? "service_credit"
           : "free";
     }
-    const createdAt = new Date();
+    const createdAt = inboundOccurredAt;
     const message = await tx.message.upsert({
       where: {
         conversationId_clientMessageId: {
@@ -1315,6 +1404,14 @@ export async function acceptInboundConversationMessage(
         conversationId: conversation.id,
         episodeId: episode.id,
         ...(binding ? { channelBindingId: binding.id } : {}),
+        ...(ingressIdentityProvenance
+          ? {
+              sourceIdentityLinkId:
+                ingressIdentityProvenance.sourceIdentityLinkId,
+              sourceIdentityConnectionProofId:
+                ingressIdentityProvenance.sourceIdentityConnectionProofId,
+            }
+          : {}),
         senderType: MessageSenderType.AUDIENCE,
         ...(input.senderId ? { senderId: input.senderId } : {}),
         ...(input.senderDisplayName ? { senderDisplayName: input.senderDisplayName } : {}),
@@ -1322,6 +1419,16 @@ export async function acceptInboundConversationMessage(
         text,
         clientMessageId: input.clientMessageId,
         ...(input.externalMessageId ? { externalMessageId: input.externalMessageId } : {}),
+        ...(
+          (normalizedChannel === "matrix" || normalizedChannel === "telegram")
+          && binding?.representativeBinding
+          && binding.representativeBinding.endpointLifecycleRevision > 0
+            ? {
+                channelLifecycleRevision:
+                  binding.representativeBinding.endpointLifecycleRevision,
+              }
+            : {}
+        ),
         deliveryStatus:
           input.queueGeneration === false
             ? MessageDeliveryStatus.SENT
@@ -1332,13 +1439,34 @@ export async function acceptInboundConversationMessage(
       update: {},
     });
 
-    await enqueueInboundMessageMemoryExtraction(tx, {
-      representativeId: conversation.representative.id,
-      contactId: conversation.contactId,
-      conversationId: conversation.id,
-      messageId: message.id,
-      channel: normalizedChannel,
-    });
+    if (normalizedChannel === "matrix" || normalizedChannel === "telegram") {
+      await activateCurrentMemoryChannelDisclosureAfterMessage(tx, {
+        representativeId: conversation.representative.id,
+        contactId: conversation.contactId,
+        conversationId: conversation.id,
+        messageId: message.id,
+        channel: normalizedChannel,
+      });
+    }
+
+    if (isDeterministicContactMemoryDeleteCommand(text)) {
+      await requestAutomaticContactChannelMemoryDeletionInTransaction(tx, {
+        representativeId: conversation.representative.id,
+        contactId: conversation.contactId,
+        sourceChannel: channelKind,
+        sourceMessageId: message.id,
+        sourceHash: createHash("sha256").update(text).digest("hex"),
+        occurredAt: new Date(),
+      });
+    } else if (!resolveDeterministicContactMemorySharingCommand(text)) {
+      await enqueueInboundMessageMemoryExtraction(tx, {
+        representativeId: conversation.representative.id,
+        contactId: conversation.contactId,
+        conversationId: conversation.id,
+        messageId: message.id,
+        channel: normalizedChannel,
+      });
+    }
 
     let run = shouldQueueAi
       ? await tx.generationRun.upsert({
@@ -1789,6 +1917,7 @@ export async function completeInlineGenerationRun(input: {
         inputMessage: {
           select: {
             id: true,
+            channelLifecycleRevision: true,
             channelBinding: {
               select: {
                 id: true,
@@ -1800,6 +1929,7 @@ export async function completeInlineGenerationRun(input: {
                   select: {
                     externalUserId: true,
                     endpointAssignmentRevision: true,
+                    endpointLifecycleRevision: true,
                   },
                 },
               },
@@ -1912,6 +2042,18 @@ export async function completeInlineGenerationRun(input: {
       run.inputMessage?.channelBinding?.kind === RepresentativeChannelKind.MATRIX
         ? run.inputMessage.channelBinding
         : null;
+    const matrixLifecycleCurrent = !matrixBinding || (
+      Number.isSafeInteger(run.inputMessage.channelLifecycleRevision)
+      && (run.inputMessage.channelLifecycleRevision ?? 0) > 0
+      && Number.isSafeInteger(
+        matrixBinding.representativeBinding?.endpointLifecycleRevision,
+      )
+      && (matrixBinding.representativeBinding
+        ?.endpointLifecycleRevision ?? 0) > 0
+      && run.inputMessage.channelLifecycleRevision
+        === matrixBinding.representativeBinding
+          ?.endpointLifecycleRevision
+    );
     const matrixEndpointAvailability = matrixBinding
       ? resolveMatrixDeliveryEndpointAvailability({
           conversationRepresentativeMatrixUserId:
@@ -1925,19 +2067,27 @@ export async function completeInlineGenerationRun(input: {
               ?.endpointAssignmentRevision,
         })
       : null;
+    const matrixRoomSafe = matrixBinding
+      && matrixEndpointAvailability?.available === true
+      ? await lockAndVerifyMatrixDirectBinding(tx, {
+          id: matrixBinding.id,
+          externalConversationId: matrixBinding.externalConversationId,
+        })
+      : false;
     if (
       matrixBinding
       && (
         !matrixEndpointAvailability?.available
-        || !await lockAndVerifyMatrixDirectBinding(tx, {
-          id: matrixBinding.id,
-          externalConversationId: matrixBinding.externalConversationId,
-        })
+        || !matrixRoomSafe
+        || !matrixLifecycleCurrent
       )
     ) {
-      const failureCode = matrixEndpointAvailability?.available === false
+      const endpointUnavailable = matrixEndpointAvailability?.available === false;
+      const failureCode = endpointUnavailable
         ? matrixEndpointAvailability.code
-        : "matrix_private_room_not_verified";
+        : !matrixRoomSafe
+          ? "matrix_private_room_not_verified"
+          : "matrix_channel_lifecycle_reactivated";
       const identityReassigned =
         failureCode === "matrix_identity_reassigned";
       const canceledAt = new Date();
@@ -1974,7 +2124,9 @@ export async function completeInlineGenerationRun(input: {
           errorMessage:
             identityReassigned
               ? "Generation canceled because the Matrix room belongs to a previously assigned representative identity."
-              : "Generation canceled because the Matrix room is no longer a verified private conversation.",
+              : failureCode === "matrix_channel_lifecycle_reactivated"
+                ? "Generation canceled because it belongs to an earlier Matrix channel activation."
+                : "Generation canceled because the Matrix room is no longer a verified private conversation.",
           canceledAt,
         },
       });
@@ -1986,7 +2138,9 @@ export async function completeInlineGenerationRun(input: {
           failureReason:
             identityReassigned
               ? "The Matrix room belongs to a previously assigned representative identity."
-              : "The Matrix room is no longer a verified private conversation.",
+              : failureCode === "matrix_channel_lifecycle_reactivated"
+                ? "The request belongs to an earlier Matrix channel activation."
+                : "The Matrix room is no longer a verified private conversation.",
         },
       });
       await tx.conversation.updateMany({
@@ -2433,10 +2587,13 @@ export type ClaimedGenerationWorkItem = {
   episodeId?: string;
   inputMessageId: string;
   userText: string;
+  sourceSenderId?: string;
+  privateChannelConnectionId?: string;
   channel: "web" | "matrix" | "telegram";
   externalConversationId?: string;
   telegramConnectionId?: string;
   matrixSenderUserId?: string;
+  matrixEndpointLifecycleRevision?: number;
   deliveryOnly?: boolean;
   outputMessageId?: string;
   outputText?: string;
@@ -2464,6 +2621,8 @@ export const GENERATION_WORK_LEASE_DURATION_MS = 5 * 60_000;
 
 const GENERATION_WORK_LEASE_EXHAUSTED_ERROR = "generation_work_lease_exhausted";
 const GENERATION_WORK_LEASE_LOST_ERROR = "generation_work_lease_lost";
+const GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR =
+  "generation_memory_delivery_source_revoked";
 const DELEGATION_EXTERNAL_EFFECT_LEASE_LOST_ERROR =
   "delegation_external_effect_lease_lost";
 
@@ -2489,6 +2648,28 @@ export function isGenerationWorkLeaseLostError(
       error instanceof Error
       && "code" in error
       && error.code === GENERATION_WORK_LEASE_LOST_ERROR
+    );
+}
+
+export class GenerationMemoryDeliveryBlockedError extends Error {
+  readonly code = GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR;
+
+  constructor() {
+    super(
+      "Generation delivery was canceled because an injected source is no longer authorized.",
+    );
+    this.name = "GenerationMemoryDeliveryBlockedError";
+  }
+}
+
+export function isGenerationMemoryDeliveryBlockedError(
+  error: unknown,
+): error is GenerationMemoryDeliveryBlockedError {
+  return error instanceof GenerationMemoryDeliveryBlockedError
+    || (
+      error instanceof Error
+      && "code" in error
+      && error.code === GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR
     );
 }
 
@@ -2696,6 +2877,7 @@ export async function claimNextGenerationWorkItem(
                     externalUserId: true,
                     telegramBotConnectionId: true,
                     endpointAssignmentRevision: true,
+                    endpointLifecycleRevision: true,
                     telegramBotConnection: {
                       select: {
                         id: true,
@@ -2775,6 +2957,7 @@ export async function claimNextGenerationWorkItem(
                     externalUserId: true,
                     telegramBotConnectionId: true,
                     endpointAssignmentRevision: true,
+                    endpointLifecycleRevision: true,
                     telegramBotConnection: {
                       select: {
                         id: true,
@@ -3058,16 +3241,50 @@ export async function claimNextGenerationWorkItem(
     }
 
     if (channel === "matrix") {
+      const currentLifecycleRevision =
+        matrixBinding?.representativeBinding?.endpointLifecycleRevision;
+      const matrixLifecycleCurrent =
+        Number.isSafeInteger(run.inputMessage.channelLifecycleRevision)
+        && (run.inputMessage.channelLifecycleRevision ?? 0) > 0
+        && Number.isSafeInteger(currentLifecycleRevision)
+        && (currentLifecycleRevision ?? 0) > 0
+        && run.inputMessage.channelLifecycleRevision
+          === currentLifecycleRevision;
+      const matrixEndpointAvailability = matrixBinding
+        ? resolveMatrixDeliveryEndpointAvailability({
+            conversationRepresentativeMatrixUserId:
+              readMatrixRepresentativeUserId(matrixBinding.metadata),
+            representativeMatrixUserId:
+              matrixBinding.representativeBinding?.externalUserId,
+            conversationRepresentativeAssignmentRevision:
+              matrixBinding.representativeAssignmentRevision,
+            representativeAssignmentRevision:
+              matrixBinding.representativeBinding
+                ?.endpointAssignmentRevision,
+          })
+        : null;
       const matrixBindingSafe = matrixBinding
         ? await lockAndVerifyMatrixDirectBinding(tx, {
             id: matrixBinding.id,
             externalConversationId: matrixBinding.externalConversationId,
           })
         : false;
-      if (!matrixBindingSafe) {
-        const failureCode = "matrix_private_room_not_verified";
+      if (
+        matrixEndpointAvailability?.available === false
+        || !matrixBindingSafe
+        || !matrixLifecycleCurrent
+      ) {
+        const failureCode = matrixEndpointAvailability?.available === false
+          ? matrixEndpointAvailability.code
+          : !matrixBindingSafe
+            ? "matrix_private_room_not_verified"
+            : "matrix_channel_lifecycle_reactivated";
         const failureReason =
-          "Generation canceled because the Matrix room is no longer a verified private conversation.";
+          matrixEndpointAvailability?.available === false
+            ? "Generation canceled because the Matrix room belongs to a previously assigned representative identity."
+            : !matrixBindingSafe
+            ? "Generation canceled because the Matrix room is no longer a verified private conversation."
+            : "Generation canceled because it belongs to an earlier Matrix channel activation.";
         await abortDelegatedTaskForGenerationClaimFailure(
           tx,
           run,
@@ -3088,7 +3305,11 @@ export async function claimNextGenerationWorkItem(
                 deliveryStatus: MessageDeliveryStatus.CANCELED,
                 failureCode,
                 failureReason:
-                  "Matrix delivery was canceled because the room is no longer a verified private conversation.",
+                  matrixEndpointAvailability?.available === false
+                    ? "Matrix delivery was canceled because this room belongs to a previously assigned representative identity."
+                    : !matrixBindingSafe
+                    ? "Matrix delivery was canceled because the room is no longer a verified private conversation."
+                    : "Matrix delivery was canceled because it belongs to an earlier channel activation.",
               },
             });
           }
@@ -3127,7 +3348,11 @@ export async function claimNextGenerationWorkItem(
               deliveryStatus: MessageDeliveryStatus.CANCELED,
               failureCode,
               failureReason:
-                "The Matrix room is no longer a verified private conversation.",
+                matrixEndpointAvailability?.available === false
+                  ? "The Matrix room belongs to a previously assigned representative identity."
+                  : !matrixBindingSafe
+                  ? "The Matrix room is no longer a verified private conversation."
+                  : "The request belongs to an earlier Matrix channel activation.",
             },
           });
         }
@@ -3390,6 +3615,12 @@ export async function claimNextGenerationWorkItem(
       ...(run.episodeId ? { episodeId: run.episodeId } : {}),
       inputMessageId: run.inputMessageId,
       userText: run.inputMessage.text || "",
+      ...(run.inputMessage.senderId
+        ? { sourceSenderId: run.inputMessage.senderId }
+        : {}),
+      ...(activeBinding?.connectionId
+        ? { privateChannelConnectionId: activeBinding.connectionId }
+        : {}),
       channel,
       ...(activeBinding
         ? { externalConversationId: activeBinding.externalConversationId }
@@ -3398,6 +3629,16 @@ export async function claimNextGenerationWorkItem(
         ? { telegramConnectionId }
         : {}),
       ...(matrixVirtualUser ? { matrixSenderUserId: matrixVirtualUser.matrixUserId } : {}),
+      ...(
+        channel === "matrix"
+        && Number.isSafeInteger(run.inputMessage.channelLifecycleRevision)
+        && (run.inputMessage.channelLifecycleRevision ?? 0) > 0
+          ? {
+              matrixEndpointLifecycleRevision:
+                run.inputMessage.channelLifecycleRevision!,
+            }
+          : {}
+      ),
       ...(run.status === GenerationRunStatus.COMPLETED && run.outputMessage
         ? {
             deliveryOnly: true,
@@ -3878,20 +4119,36 @@ async function terminalizeExpiredGenerationLease(
 }
 
 export async function loadGenerationRecentTurns(input: {
+  representativeId: string;
   conversationId: string;
   beforeMessageId: string;
   limit?: number;
 }) {
-  const before = await prisma.message.findUnique({
-    where: { id: input.beforeMessageId },
-    select: { createdAt: true },
-  });
+  const [before, policy] = await Promise.all([
+    prisma.message.findUnique({
+      where: { id: input.beforeMessageId },
+      select: { createdAt: true, episodeId: true },
+    }),
+    prisma.representativeMemoryPolicy.findUnique({
+      where: { representativeId: input.representativeId },
+      select: { shortTermMemoryEnabled: true },
+    }),
+  ]);
+
+  // Short-term context historically existed before it became configurable.
+  // A missing policy therefore preserves the existing same-episode behavior,
+  // while an explicit false value fails closed to the current message only.
+  if (policy?.shortTermMemoryEnabled === false || !before?.episodeId) {
+    return [];
+  }
+
   const rows = await prisma.message.findMany({
     where: {
       conversationId: input.conversationId,
+      episodeId: before.episodeId,
       redactedAt: null,
       text: { not: null },
-      ...(before ? { createdAt: { lt: before.createdAt } } : {}),
+      createdAt: { lt: before.createdAt },
       // Outbound replies can contain facts injected from a source that has
       // since been disabled or deleted. Re-injecting that text as an
       // unclassified recent turn would bypass the new generation's UseRun
@@ -4029,6 +4286,99 @@ export async function markGenerationDeliveryComplete(input: {
   });
 }
 
+export type GenerationMessageDeliveryFenceInput = {
+  conversationId: string;
+  runId: string;
+  outboxId: string;
+  leaseAttempt: number;
+  outputMessageId: string;
+};
+
+async function revalidateGenerationMessageMemoryDeliveryInTransaction(
+  tx: Prisma.TransactionClient,
+  input: GenerationMessageDeliveryFenceInput,
+) {
+  const memoryDelivery = await revalidateMemoryUseDeliverySourcesInTransaction(
+    tx,
+    {
+      generationRunId: input.runId,
+      conversationId: input.conversationId,
+      outputMessageId: input.outputMessageId,
+    },
+  );
+  if (memoryDelivery.authorized) return true;
+
+  const canceledAt = new Date();
+  const canceled = await tx.message.updateMany({
+    where: {
+      id: input.outputMessageId,
+      conversationId: input.conversationId,
+      senderType: MessageSenderType.REPRESENTATIVE,
+      deliveryStatus: {
+        in: [
+          MessageDeliveryStatus.QUEUED,
+          MessageDeliveryStatus.PROCESSING,
+          MessageDeliveryStatus.FAILED,
+        ],
+      },
+    },
+    data: {
+      deliveryStatus: MessageDeliveryStatus.CANCELED,
+      failureCode: GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR,
+      failureReason:
+        "Delivery canceled because an injected source is no longer authorized.",
+    },
+  });
+  const deadLettered = await tx.outboxEvent.updateMany({
+    where: {
+      id: input.outboxId,
+      aggregateType: "generation_run",
+      aggregateId: input.runId,
+      eventType: "generation.requested",
+      status: "PROCESSING",
+      attemptCount: input.leaseAttempt,
+    },
+    data: {
+      status: "DEAD_LETTER",
+      processedAt: canceledAt,
+      lastError: GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR,
+    },
+  });
+  if (canceled.count !== 1 || deadLettered.count !== 1) {
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+  return false;
+}
+
+/**
+ * Holds the contact + representative + channel memory coordinate fence across
+ * the final provider side effect. Forget/delete uses the same advisory lock,
+ * so either deletion commits first and this delivery is canceled, or the
+ * provider side effect completes before deletion is allowed to commit.
+ */
+export async function withGenerationMessageProviderDeliveryFence<T>(
+  tx: Prisma.TransactionClient,
+  input: GenerationMessageDeliveryFenceInput,
+  operation: () => Promise<T>,
+): Promise<
+  | { executed: true; value: T }
+  | { executed: false; reason: "memory_delivery_source_revoked" }
+> {
+  await fenceGenerationWorkLease(tx, input);
+  const authorized =
+    await revalidateGenerationMessageMemoryDeliveryInTransaction(tx, input);
+  if (!authorized) {
+    return {
+      executed: false,
+      reason: "memory_delivery_source_revoked",
+    };
+  }
+  return { executed: true, value: await operation() };
+}
+
 export async function prepareGenerationMessageChannelDelivery(input: {
   conversationId: string;
   runId: string;
@@ -4036,7 +4386,7 @@ export async function prepareGenerationMessageChannelDelivery(input: {
   leaseAttempt: number;
   outputMessageId: string;
 }) {
-  return runConversationWriteTransaction(async (tx) => {
+  const outcome = await runConversationWriteTransaction(async (tx) => {
     await tx.$executeRaw`
       SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))
     `;
@@ -4068,6 +4418,11 @@ export async function prepareGenerationMessageChannelDelivery(input: {
         input.outboxId,
         input.leaseAttempt,
       );
+    }
+    const memoryDeliveryAuthorized =
+      await revalidateGenerationMessageMemoryDeliveryInTransaction(tx, input);
+    if (!memoryDeliveryAuthorized) {
+      return { blocked: true as const };
     }
     const allowNeedsHumanDelivery =
       isNeedsHumanDeliveryAuthorized(
@@ -4125,13 +4480,22 @@ export async function prepareGenerationMessageChannelDelivery(input: {
       );
     }
     return {
-      conversationState: conversation.state,
-      allowNeedsHumanDelivery,
-      leaseExpiresAt: new Date(
-        Date.now() + GENERATION_WORK_LEASE_DURATION_MS,
-      ),
+      blocked: false as const,
+      preparation: {
+        conversationState: conversation.state,
+        allowNeedsHumanDelivery,
+        leaseExpiresAt: new Date(
+          Date.now() + GENERATION_WORK_LEASE_DURATION_MS,
+        ),
+      },
     };
   });
+  if (outcome.blocked) {
+    // Throw only after the transaction commits the cancel/dead-letter writes.
+    // Throwing inside the transaction would roll back the delivery fence.
+    throw new GenerationMemoryDeliveryBlockedError();
+  }
+  return outcome.preparation;
 }
 
 export async function retryGenerationDelivery(input: {
@@ -4188,6 +4552,7 @@ export type ClaimedOperatorMessageWorkItem = {
   externalConversationId: string;
   telegramConnectionId?: string;
   matrixSenderUserId?: string;
+  matrixEndpointLifecycleRevision?: number;
 };
 
 export async function claimNextOperatorMessageWorkItem(
@@ -4259,6 +4624,7 @@ export async function claimNextOperatorMessageWorkItem(
                 externalUserId: true,
                 telegramBotConnectionId: true,
                 endpointAssignmentRevision: true,
+                endpointLifecycleRevision: true,
                 telegramBotConnection: {
                   select: {
                     id: true,
@@ -4393,6 +4759,35 @@ export async function claimNextOperatorMessageWorkItem(
         });
         return null;
       }
+      const currentLifecycleRevision =
+        message.channelBinding.representativeBinding
+          ?.endpointLifecycleRevision;
+      if (
+        !Number.isSafeInteger(message.channelLifecycleRevision)
+        || (message.channelLifecycleRevision ?? 0) <= 0
+        || !Number.isSafeInteger(currentLifecycleRevision)
+        || (currentLifecycleRevision ?? 0) <= 0
+        || message.channelLifecycleRevision !== currentLifecycleRevision
+      ) {
+        const failureCode = "matrix_channel_lifecycle_reactivated";
+        await tx.message.update({
+          where: { id: message.id },
+          data: {
+            deliveryStatus: MessageDeliveryStatus.CANCELED,
+            failureCode,
+            failureReason:
+              "Matrix delivery was canceled because it belongs to an earlier channel activation.",
+          },
+        });
+        await tx.outboxEvent.update({
+          where: { id: outbox.id },
+          data: {
+            status: "DEAD_LETTER",
+            lastError: failureCode,
+          },
+        });
+        return null;
+      }
     }
     if (channel === "telegram" && options.telegramWorkerEnabled === false) {
       await tx.outboxEvent.update({
@@ -4436,7 +4831,11 @@ export async function claimNextOperatorMessageWorkItem(
         ? { telegramConnectionId }
         : {}),
       ...(matrixTransportUser
-        ? { matrixSenderUserId: matrixTransportUser.matrixUserId }
+        ? {
+            matrixSenderUserId: matrixTransportUser.matrixUserId,
+            matrixEndpointLifecycleRevision:
+              message.channelLifecycleRevision!,
+          }
         : {}),
     };
   });
@@ -4673,6 +5072,7 @@ export async function getPublicGenerationRunSnapshot(input: {
           text: true,
           content: true,
           deliveryStatus: true,
+          failureCode: true,
           createdAt: true,
           citations: {
             select: {
@@ -4690,18 +5090,31 @@ export async function getPublicGenerationRunSnapshot(input: {
   });
   if (!run) return null;
 
+  const memoryDeliveryBlocked =
+    run.outputMessage?.failureCode === GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR;
+
+  const sourceDisclosure = run.outputMessage && !memoryDeliveryBlocked
+    ? resolvePublicWebAnswerSourceDisclosure({
+        modelGenerated:
+          readConversationGenerationRuntimeOutcome(run.contextSnapshot)?.mode
+          === "model",
+        hasAuthorizedCitation: run.outputMessage.citations.length > 0,
+      })
+    : null;
+
   return {
     id: run.id,
-    status: run.status.toLowerCase(),
-    ...(run.errorCode ? { errorCode: run.errorCode } : {}),
-    ...(run.errorMessage ? { errorMessage: run.errorMessage } : {}),
-    ...(run.outputMessage
+    status: memoryDeliveryBlocked ? "canceled" : run.status.toLowerCase(),
+    ...(!memoryDeliveryBlocked && run.errorCode ? { errorCode: run.errorCode } : {}),
+    ...(!memoryDeliveryBlocked && run.errorMessage ? { errorMessage: run.errorMessage } : {}),
+    ...(run.outputMessage && !memoryDeliveryBlocked
       ? {
           message: {
             id: run.outputMessage.id,
             text: renderPublicConversationMessageText(run.outputMessage),
             status: run.outputMessage.deliveryStatus.toLowerCase(),
             createdAt: run.outputMessage.createdAt.toISOString(),
+            ...(sourceDisclosure ? { sourceDisclosure } : {}),
             citations: run.outputMessage.citations.map((citation) => ({
               title: citation.title,
               ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
@@ -4744,7 +5157,18 @@ export async function getPublicConversationHistory(input: {
     },
     include: {
       messages: {
-        where: { redactedAt: null },
+        where: {
+          redactedAt: null,
+          OR: [
+            { senderType: { not: MessageSenderType.REPRESENTATIVE } },
+            { failureCode: null },
+            {
+              failureCode: {
+                not: GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR,
+              },
+            },
+          ],
+        },
         include: {
           citations: {
             select: {
@@ -4759,6 +5183,14 @@ export async function getPublicConversationHistory(input: {
           },
           attachments: {
             select: { id: true, fileName: true, mimeType: true, sizeBytes: true, externalUrl: true },
+          },
+          outputForGenerationRuns: {
+            where: { status: GenerationRunStatus.COMPLETED },
+            select: {
+              contextSnapshot: true,
+            },
+            orderBy: { completedAt: "desc" },
+            take: 1,
           },
         },
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -4780,10 +5212,25 @@ export async function getPublicConversationHistory(input: {
     state: conversation.state.toLowerCase(),
     humanActive: Boolean(conversation.assignments[0]),
     freeRepliesUsed: conversation.freeRepliesUsed,
-    messages: conversation.messages.map((message) => {
+    messages: conversation.messages
+      .filter((message) => !(
+        message.senderType === MessageSenderType.REPRESENTATIVE
+        && message.failureCode === GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR
+      ))
+      .map((message) => {
       const displayRunId = message.citations.find(
         (citation) => Boolean(citation.memoryUseItem),
       )?.memoryUseItem?.useRun.generationRunId;
+      const generation = message.outputForGenerationRuns[0];
+      const sourceDisclosure = message.senderType === MessageSenderType.REPRESENTATIVE
+        ? resolvePublicWebAnswerSourceDisclosure({
+            modelGenerated:
+              readConversationGenerationRuntimeOutcome(
+                generation?.contextSnapshot,
+              )?.mode === "model",
+            hasAuthorizedCitation: message.citations.length > 0,
+          })
+        : null;
       return {
         id: message.id,
         role: message.senderType === MessageSenderType.AUDIENCE ? ("user" as const) : ("assistant" as const),
@@ -4792,6 +5239,7 @@ export async function getPublicConversationHistory(input: {
         text: renderPublicConversationMessageText(message),
         status: message.deliveryStatus.toLowerCase(),
         createdAt: message.createdAt.toISOString(),
+        ...(sourceDisclosure ? { sourceDisclosure } : {}),
         citations: message.citations.map((citation) => ({
           title: citation.title,
           ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
@@ -4812,7 +5260,7 @@ export async function getPublicConversationHistory(input: {
           ...(attachment.externalUrl ? { url: attachment.externalUrl } : {}),
         })),
       };
-    }),
+      }),
   };
 }
 
@@ -4851,22 +5299,67 @@ export function renderPublicConversationMessageText(message: {
   return text;
 }
 
-export async function ingestMatrixApplicationServiceTransaction(input: {
+/**
+ * Durably records Matrix provider arrivals before the bridge performs any
+ * remote room validation or disclosure delivery. This is persistence-only:
+ * business ingestion remains in ingestMatrixApplicationServiceTransaction.
+ */
+export async function persistMatrixApplicationServiceProviderArrivals(input: {
   transactionId: string;
   events: MatrixApplicationServiceEvent[];
-}) {
-  const results: MatrixApplicationServiceIngestResult[] = [];
+}): Promise<void> {
+  await persistMatrixApplicationServiceEvents(input);
+}
+
+async function persistMatrixApplicationServiceEvents(input: {
+  transactionId: string;
+  events: MatrixApplicationServiceEvent[];
+}): Promise<PersistedMatrixApplicationServiceEvent[]> {
   const persistedEvents: PersistedMatrixApplicationServiceEvent[] = [];
   const matrixConnectionId = resolveMatrixApplicationServiceConnectionId();
+  const directInviteTargetByRoomId = new Map<string, string>();
+  for (const event of input.events) {
+    const roomId = event.room_id?.trim();
+    const managedMatrixUserId = event.state_key?.trim();
+    if (
+      roomId
+      && managedMatrixUserId
+      && isExplicitMatrixDirectInvite(event)
+      && !directInviteTargetByRoomId.has(roomId)
+    ) {
+      directInviteTargetByRoomId.set(roomId, managedMatrixUserId);
+    }
+  }
+  const arrivalFenceByRoomId = new Map<
+    string,
+    Promise<MatrixProviderArrivalFence | null>
+  >();
 
-  // Persist the whole transaction before applying any business side effects. Matrix
-  // homeservers retry transactions, so the event id is the durable idempotency key.
+  // Matrix homeservers retry transactions, so the immutable provider event id
+  // is both the durable arrival identity and the idempotency key.
   for (const event of input.events) {
     const eventId = event.event_id?.trim();
     const eventType = event.type?.trim();
     if (!eventId || !eventType) continue;
-    const sanitizedEvent =
-      sanitizeMatrixApplicationServiceEvent(event);
+    const sanitizedEvent = sanitizeMatrixApplicationServiceEvent(event);
+    const roomId = event.room_id?.trim();
+    let arrivalFence: MatrixProviderArrivalFence | null = null;
+    if (roomId) {
+      let pendingFence = arrivalFenceByRoomId.get(roomId);
+      if (!pendingFence) {
+        pendingFence = resolveMatrixProviderArrivalFence({
+          roomId,
+          managedMatrixUserId:
+            directInviteTargetByRoomId.get(roomId) ?? null,
+        });
+        arrivalFenceByRoomId.set(roomId, pendingFence);
+      }
+      arrivalFence = await pendingFence;
+    }
+    const arrivalPayload = buildMatrixProviderArrivalPayload(
+      sanitizedEvent.event,
+      arrivalFence,
+    );
 
     const inbox = await prisma.channelEventInbox.upsert({
       where: {
@@ -4885,13 +5378,13 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         transactionId: input.transactionId,
         externalEventId: eventId,
         eventType,
-        payload: sanitizedEvent.event as Prisma.InputJsonObject,
+        payload: arrivalPayload,
         privateCredentialHash: sanitizedEvent.privateCredentialHash,
         status: "PENDING",
         attemptCount: 0,
       },
       // The first payload is canonical. A replay with the same Matrix event id
-      // must not be allowed to replace the forensic record or side effects.
+      // must not replace the forensic record or repeat side effects.
       update: {},
       select: {
         id: true,
@@ -4904,19 +5397,30 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
       },
     });
 
-    const persistedEvent = isJsonRecord(inbox.payload)
-      ? inbox.payload as MatrixApplicationServiceEvent
-      : sanitizedEvent.event;
-    const sanitizedPersistedEvent =
-      sanitizeMatrixApplicationServiceEvent(persistedEvent).event;
+    const persistedPayload = isJsonRecord(inbox.payload)
+      ? inbox.payload
+      : arrivalPayload;
+    // Only the envelope on the immutable first payload is trusted. A replay
+    // cannot add a fence to a legacy row or replace the arrival lifecycle with
+    // the endpoint's current lifecycle.
+    const persistedArrivalFence = readMatrixProviderArrivalFence(
+      persistedPayload[matrixProviderArrivalFencePayloadKey],
+    );
+    const sanitizedPersistedEvent = sanitizeMatrixApplicationServiceEvent(
+      persistedPayload as MatrixApplicationServiceEvent,
+    ).event;
+    const canonicalPersistedPayload = buildMatrixProviderArrivalPayload(
+      sanitizedPersistedEvent,
+      persistedArrivalFence,
+    );
     if (
-      JSON.stringify(sanitizedPersistedEvent)
-      !== JSON.stringify(persistedEvent)
+      JSON.stringify(canonicalPersistedPayload)
+      !== JSON.stringify(persistedPayload)
     ) {
       await prisma.channelEventInbox.update({
         where: { id: inbox.id },
         data: {
-          payload: sanitizedPersistedEvent as Prisma.InputJsonObject,
+          payload: canonicalPersistedPayload,
         },
       });
     }
@@ -4930,8 +5434,136 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
       attemptCount: inbox.attemptCount,
       lastError: inbox.lastError,
       privateCredentialHash: inbox.privateCredentialHash ?? null,
+      arrivalFence: persistedArrivalFence,
     });
   }
+  return persistedEvents;
+}
+
+/**
+ * Loads the immutable provider payload and admits content only when its first
+ * durable arrival happened in the exact lifecycle that is still active.
+ * Encryption plus leave/ban membership state is deliberately exempt because
+ * it can only tighten room safety. Invite/join/knock state can grant access,
+ * so it must prove the same lifecycle as ordinary content.
+ */
+export async function admitCurrentMatrixApplicationServiceProviderEvents(
+  events: MatrixApplicationServiceEvent[],
+): Promise<MatrixProviderArrivalAdmissionResult> {
+  const matrixConnectionId = resolveMatrixApplicationServiceConnectionId();
+  const eventIds = [...new Set(events.flatMap((event) => {
+    const eventId = event.event_id?.trim();
+    return eventId ? [eventId] : [];
+  }))];
+  if (eventIds.length === 0) return { events: [], ignored: [] };
+
+  const rows = await prisma.channelEventInbox.findMany({
+    where: {
+      kind: RepresentativeChannelKind.MATRIX,
+      connectionId: matrixConnectionId,
+      externalEventId: { in: eventIds },
+    },
+    select: {
+      id: true,
+      externalEventId: true,
+      eventType: true,
+      payload: true,
+      status: true,
+    },
+  });
+  const rowByEventId = new Map(
+    rows.map((row) => [row.externalEventId, row]),
+  );
+  const bindingByRoomId = new Map<
+    string,
+    Promise<Awaited<ReturnType<typeof loadCurrentMatrixArrivalBinding>>>
+  >();
+  const admittedEvents: MatrixApplicationServiceEvent[] = [];
+  const ignored: MatrixProviderArrivalAdmissionResult["ignored"] = [];
+
+  for (const incomingEvent of events) {
+    const eventId = incomingEvent.event_id?.trim();
+    if (!eventId) continue;
+    const row = rowByEventId.get(eventId);
+    if (!row || !isJsonRecord(row.payload)) continue;
+    const canonicalEvent = sanitizeMatrixApplicationServiceEvent(
+      row.payload as MatrixApplicationServiceEvent,
+    ).event;
+    if (
+      row.eventType === "m.room.encryption"
+      || isMatrixSafetyTighteningMembershipEvent(canonicalEvent)
+    ) {
+      admittedEvents.push(canonicalEvent);
+      continue;
+    }
+
+    const arrivalFence = readMatrixProviderArrivalFence(
+      row.payload[matrixProviderArrivalFencePayloadKey],
+    );
+    const roomId = canonicalEvent.room_id?.trim();
+    let currentBinding = null;
+    if (roomId) {
+      let pendingBinding = bindingByRoomId.get(roomId);
+      if (!pendingBinding) {
+        pendingBinding = loadCurrentMatrixArrivalBinding(roomId);
+        bindingByRoomId.set(roomId, pendingBinding);
+      }
+      currentBinding = await pendingBinding;
+    }
+    let matchesCurrentLifecycle = Boolean(
+      currentBinding
+      && matrixProviderArrivalFenceMatches({
+        arrivalFence,
+        representativeBindingId:
+          currentBinding.representativeBindingId,
+        representativeAssignmentRevision:
+          currentBinding.representativeAssignmentRevision,
+        currentBinding: currentBinding.representativeBinding,
+      }),
+    );
+    if (
+      !matchesCurrentLifecycle
+      && !currentBinding
+      && arrivalFence
+      && isExplicitMatrixDirectInvite(canonicalEvent)
+    ) {
+      const currentEndpointBinding =
+        await loadCurrentMatrixArrivalEndpointBinding(
+          arrivalFence.representativeBindingId,
+        );
+      matchesCurrentLifecycle = matrixProviderArrivalFenceMatches({
+        arrivalFence,
+        representativeBindingId: arrivalFence.representativeBindingId,
+        representativeAssignmentRevision:
+          arrivalFence.endpointAssignmentRevision,
+        currentBinding: currentEndpointBinding,
+      });
+    }
+    if (matchesCurrentLifecycle) {
+      admittedEvents.push(canonicalEvent);
+      continue;
+    }
+
+    if (row.status !== "PROCESSED") {
+      await markMatrixInboxProcessed(row.id);
+    }
+    ignored.push({
+      eventId,
+      reason: arrivalFence
+        ? "matrix_provider_arrival_lifecycle_stale"
+        : "matrix_provider_arrival_fence_missing",
+    });
+  }
+
+  return { events: admittedEvents, ignored };
+}
+
+export async function ingestMatrixApplicationServiceTransaction(input: {
+  transactionId: string;
+  events: MatrixApplicationServiceEvent[];
+}) {
+  const results: MatrixApplicationServiceIngestResult[] = [];
+  const persistedEvents = await persistMatrixApplicationServiceEvents(input);
 
   // An encryption state event and a direct invite can be delivered in the
   // same transaction. Refuse to create the room even when the invite happens
@@ -4969,12 +5601,31 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
       attemptCount,
       lastError,
       privateCredentialHash,
+      arrivalFence,
     } = persisted;
     if (inboxStatus === "PROCESSED") {
       results.push({ eventId, status: "duplicate" });
       continue;
     }
     if (inboxStatus === "DEAD_LETTER") {
+      if (isMatrixMemorySafetyControlEvent(eventType, event)) {
+        await prisma.channelEventInbox.update({
+          where: { id: inboxId },
+          data: {
+            status: "FAILED",
+            attemptCount: 0,
+            processedAt: null,
+            availableAt: new Date(Date.now() + matrixEventRetryDelayMs),
+            lastError: "matrix_memory_control_reopened",
+          },
+        });
+        results.push({
+          eventId,
+          status: "failed",
+          reason: "matrix_memory_control_reopened",
+        });
+        continue;
+      }
       results.push({
         eventId,
         status: "ignored",
@@ -4983,6 +5634,24 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
       continue;
     }
     if (attemptCount >= matrixEventMaximumAttempts) {
+      if (isMatrixMemorySafetyControlEvent(eventType, event)) {
+        await prisma.channelEventInbox.update({
+          where: { id: inboxId },
+          data: {
+            status: "FAILED",
+            attemptCount: 0,
+            processedAt: null,
+            availableAt: new Date(Date.now() + matrixEventRetryDelayMs),
+            lastError: lastError || "matrix_memory_control_retrying",
+          },
+        });
+        results.push({
+          eventId,
+          status: "failed",
+          reason: "matrix_memory_control_retrying",
+        });
+        continue;
+      }
       await prisma.channelEventInbox.update({
         where: { id: inboxId },
         data: {
@@ -5106,6 +5775,15 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
           && audienceMatrixUserId !== managedTarget.matrixUserId
           && isDirectInvite
         ) {
+          if (!arrivalFence) {
+            await markMatrixInboxProcessed(inboxId);
+            results.push({
+              eventId,
+              status: "ignored",
+              reason: "matrix_provider_arrival_fence_missing",
+            });
+            continue;
+          }
           if (encryptedRoomIds.has(roomId)) {
             await markMatrixInboxProcessed(inboxId);
             results.push({ eventId, status: "ignored", reason: "matrix_room_encrypted" });
@@ -5116,6 +5794,8 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
             roomId,
             audienceMatrixUserId,
             representativeMatrixUserId: managedTarget.matrixUserId,
+            expectedEndpointLifecycleRevision:
+              arrivalFence.endpointLifecycleRevision,
             directInvite: true,
           });
           await markMatrixInboxProcessed(inboxId);
@@ -5188,11 +5868,13 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         include: {
           representativeBinding: {
             select: {
+              id: true,
               status: true,
               desiredState: true,
               healthStatus: true,
               externalUserId: true,
               endpointAssignmentRevision: true,
+              endpointLifecycleRevision: true,
             },
           },
           conversation: {
@@ -5311,6 +5993,15 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
             }),
           ),
       });
+      if (!observedAvailability.available) {
+        await markMatrixInboxProcessed(inboxId);
+        results.push({
+          eventId,
+          status: "ignored",
+          reason: observedAvailability.code,
+        });
+        continue;
+      }
       if (!binding.representativeBinding) {
         throw new ChannelUnavailableError("channel_not_connected");
       }
@@ -5339,11 +6030,13 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
                 },
               },
               select: {
+                id: true,
                 status: true,
                 desiredState: true,
                 healthStatus: true,
                 externalUserId: true,
                 endpointAssignmentRevision: true,
+                endpointLifecycleRevision: true,
                 representative: {
                   select: {
                     lifecycleState: true,
@@ -5400,6 +6093,22 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
           if (!availability.available) {
             throw new ChannelUnavailableError(availability.code);
           }
+          if (!matrixProviderArrivalFenceMatches({
+            arrivalFence,
+            representativeBindingId: binding.representativeBindingId,
+            representativeAssignmentRevision:
+              binding.representativeAssignmentRevision,
+            currentBinding,
+          })) {
+            await markMatrixInboxProcessed(inboxId, tx);
+            return {
+              eventId,
+              status: "ignored",
+              reason: arrivalFence
+                ? "matrix_provider_arrival_lifecycle_stale"
+                : "matrix_provider_arrival_fence_missing",
+            };
+          }
 
           if (eventType === "m.room.redaction") {
             const eventContent = event.content || {};
@@ -5422,14 +6131,24 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
               },
               select: { id: true, senderId: true, senderType: true },
             });
-            if (!target || !isMatrixMessageOwnedBySender(target, sender)) {
+            if (!target) {
+              await deferMatrixInboxEvent(
+                inboxId,
+                "matrix_redaction_target_not_found",
+                tx,
+              );
+              return {
+                eventId,
+                status: "failed",
+                reason: "matrix_redaction_target_not_found",
+              };
+            }
+            if (!isMatrixMessageOwnedBySender(target, sender)) {
               await markMatrixInboxProcessed(inboxId, tx);
               return {
                 eventId,
                 status: "ignored",
-                reason: target
-                  ? "matrix_redaction_author_mismatch"
-                  : "matrix_redaction_target_not_found",
+                reason: "matrix_redaction_author_mismatch",
               };
             }
             try {
@@ -5570,18 +6289,27 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
                 },
                 select: { id: true, senderId: true, senderType: true },
               });
+              if (!target) {
+                await deferMatrixInboxEvent(
+                  inboxId,
+                  "matrix_edit_target_not_found",
+                  tx,
+                );
+                return {
+                  eventId,
+                  status: "failed",
+                  reason: "matrix_edit_target_not_found",
+                };
+              }
               if (
-                !target
-                || !replacementText
+                !replacementText
                 || !isMatrixMessageOwnedBySender(target, sender)
               ) {
                 await markMatrixInboxProcessed(inboxId, tx);
                 return {
                   eventId,
                   status: "ignored",
-                  reason: !target
-                    ? "matrix_edit_target_not_found"
-                    : !isMatrixMessageOwnedBySender(target, sender)
+                  reason: !isMatrixMessageOwnedBySender(target, sender)
                       ? "matrix_edit_author_mismatch"
                       : "matrix_edit_body_missing",
                 };
@@ -5627,6 +6355,9 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
                   clientMessageId: eventId,
                   channel: "matrix",
                   externalMessageId: eventId,
+                  ...(typeof event.origin_server_ts === "number"
+                    ? { occurredAt: new Date(event.origin_server_ts) }
+                    : {}),
                 },
                 tx,
               );
@@ -5649,9 +6380,7 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         results.push({
           eventId,
           status: "ignored",
-          reason: observedAvailability.available
-            ? "channel_disconnected"
-            : observedAvailability.code,
+          reason: "channel_disconnected",
         });
         continue;
       }
@@ -5670,7 +6399,9 @@ export async function ingestMatrixApplicationServiceTransaction(input: {
         continue;
       }
       const nextAttemptCount = attemptCount + 1;
-      const deadLetter = nextAttemptCount >= matrixEventMaximumAttempts;
+      const deadLetter =
+        !isMatrixMemorySafetyControlEvent(eventType, event)
+        && nextAttemptCount >= matrixEventMaximumAttempts;
       await prisma.channelEventInbox.update({
         where: { id: inboxId },
         data: {
@@ -5751,9 +6482,20 @@ export async function editConversationMessage(input: {
   text: string;
   editedBy: string;
   matrixGuard?: MatrixConversationMessageGuard;
+  telegramGuard?: {
+    connectionId: string;
+    chatId: string;
+    senderId: string;
+    externalMessageId: string;
+    updateId: number;
+    editedAt: string;
+  };
 }, existingTransaction?: Prisma.TransactionClient) {
   const text = input.text.trim();
   if (!text) throw new Error("Edited message text is required.");
+  const telegramGuard = input.telegramGuard
+    ? normalizeTelegramMessageEditGuard(input.telegramGuard)
+    : null;
 
   const edit = async (tx: Prisma.TransactionClient) => {
     await tx.$executeRaw`
@@ -5784,6 +6526,13 @@ export async function editConversationMessage(input: {
         conversation: {
           select: { state: true },
         },
+        channelBinding: {
+          select: {
+            kind: true,
+            connectionId: true,
+            externalConversationId: true,
+          },
+        },
         inputForGenerationRuns: {
           orderBy: { createdAt: "desc" },
           select: { id: true, delegationTaskId: true },
@@ -5791,11 +6540,66 @@ export async function editConversationMessage(input: {
       },
     });
     if (!message) throw new Error("Message not found.");
+    if (telegramGuard) {
+      if (
+        message.senderType !== MessageSenderType.AUDIENCE
+        || message.senderId !== telegramGuard.senderId
+        || message.externalMessageId !== telegramGuard.externalMessageId
+        || message.channelBinding?.kind !== RepresentativeChannelKind.TELEGRAM
+        || message.channelBinding.connectionId !== telegramGuard.connectionId
+        || message.channelBinding.externalConversationId !== telegramGuard.chatId
+      ) {
+        throw new Error("Telegram message edit scope is invalid.");
+      }
+      const watermarkClaim = await tx.message.updateMany({
+        where: {
+          id: message.id,
+          conversationId: message.conversationId,
+          OR: [
+            {
+              telegramLastEditAt: null,
+              telegramLastEditUpdateId: null,
+            },
+            {
+              telegramLastEditUpdateId: {
+                lt: telegramGuard.updateId,
+              },
+            },
+          ],
+        },
+        data: {
+          telegramLastEditAt: telegramGuard.editedAt,
+          telegramLastEditUpdateId: telegramGuard.updateId,
+        },
+      });
+      if (watermarkClaim.count !== 1) {
+        return {
+          revision: message.revisions[0] ?? null,
+          action: "update_only" as const,
+          providerEditStatus: "superseded" as const,
+        };
+      }
+    }
+    const providerMemoryControl = Boolean(input.matrixGuard || telegramGuard);
+    if (providerMemoryControl) {
+      // Provider edits are privacy controls first and business-message edits
+      // second. Fence derived memory before any delegation/generation
+      // conflict can reject the body mutation. Matrix catches those conflicts
+      // in its durable inbox transaction; Telegram does the same in the bot
+      // transaction, so this safety mutation still commits.
+      await invalidateMemoryExtractionForSourceMessage(tx, {
+        messageId: message.id,
+        reasonCode: "source_message_edited",
+      });
+    }
     if (message.redactedAt) throw new Error("Redacted messages cannot be edited.");
     if (message.text?.trim() === text) {
       return {
         revision: message.revisions[0] ?? null,
         action: "update_only" as const,
+        ...(telegramGuard
+          ? { providerEditStatus: "applied" as const }
+          : {}),
       };
     }
     if (message.inputForGenerationRuns.some((run) => run.delegationTaskId)) {
@@ -5848,10 +6652,12 @@ export async function editConversationMessage(input: {
       where: { id: message.id },
       data: { text, editedAt: new Date(), deliveryStatus: MessageDeliveryStatus.EDITED },
     });
-    await invalidateMemoryExtractionForSourceMessage(tx, {
-      messageId: message.id,
-      reasonCode: "source_message_edited",
-    });
+    if (!providerMemoryControl) {
+      await invalidateMemoryExtractionForSourceMessage(tx, {
+        messageId: message.id,
+        reasonCode: "source_message_edited",
+      });
+    }
 
     if (run && (action === "replace_queued_run" || action === "cancel_and_requeue")) {
       const walletReservation = readGenerationWalletReservation(
@@ -5975,11 +6781,51 @@ export async function editConversationMessage(input: {
       }
     }
 
-    return { revision, action };
+    return {
+      revision,
+      action,
+      ...(telegramGuard
+        ? { providerEditStatus: "applied" as const }
+        : {}),
+    };
   };
   return existingTransaction
     ? edit(existingTransaction)
     : runConversationWriteTransaction(edit);
+}
+
+function normalizeTelegramMessageEditGuard(input: {
+  connectionId: string;
+  chatId: string;
+  senderId: string;
+  externalMessageId: string;
+  updateId: number;
+  editedAt: string;
+}) {
+  const connectionId = input.connectionId.trim();
+  const chatId = input.chatId.trim();
+  const senderId = input.senderId.trim();
+  const externalMessageId = input.externalMessageId.trim();
+  const editedAt = new Date(input.editedAt);
+  if (
+    !connectionId
+    || !chatId
+    || !senderId
+    || !externalMessageId
+    || !Number.isSafeInteger(input.updateId)
+    || input.updateId < 0
+    || !Number.isFinite(editedAt.getTime())
+  ) {
+    throw new Error("Telegram message edit guard is invalid.");
+  }
+  return {
+    connectionId,
+    chatId,
+    senderId,
+    externalMessageId,
+    updateId: BigInt(input.updateId),
+    editedAt,
+  };
 }
 
 export async function redactConversationMessage(input: {
@@ -6025,6 +6871,20 @@ export async function redactConversationMessage(input: {
       },
     });
     if (!message) throw new Error("Message not found.");
+
+    const providerMemoryControl = Boolean(input.matrixGuard);
+    if (providerMemoryControl) {
+      // A provider redaction must stop Recall even when an active delegation
+      // or an in-flight delivery prevents the rest of the conversation
+      // mutation. The Matrix inbox catches those conflicts inside this same
+      // transaction, allowing the memory fence to commit independently of
+      // the business control outcome.
+      await invalidateMemoryExtractionForSourceMessage(tx, {
+        messageId: message.id,
+        reasonCode: "source_message_redacted",
+        occurredAt: redactedAt,
+      });
+    }
 
     let canceledRunCount = 0;
     const releasedWalletReservations = new Set<string>();
@@ -6232,11 +7092,13 @@ export async function redactConversationMessage(input: {
         retentionExpiresAt: buildRedactionPurgeAt(redactedAt),
       },
     });
-    await invalidateMemoryExtractionForSourceMessage(tx, {
-      messageId: message.id,
-      reasonCode: "source_message_redacted",
-      occurredAt: redactedAt,
-    });
+    if (!providerMemoryControl) {
+      await invalidateMemoryExtractionForSourceMessage(tx, {
+        messageId: message.id,
+        reasonCode: "source_message_redacted",
+        occurredAt: redactedAt,
+      });
+    }
     if (canceledRunCount > 0) {
       await tx.conversation.updateMany({
         where: {
@@ -6352,7 +7214,15 @@ export async function sendOperatorConversationMessage(input: {
           orderBy: { assignedAt: "desc" },
           take: 1,
         },
-        channelBindings: true,
+        channelBindings: {
+          include: {
+            representativeBinding: {
+              select: {
+                endpointLifecycleRevision: true,
+              },
+            },
+          },
+        },
       },
     });
     if (!conversation) throw new Error("Conversation not found.");
@@ -6378,6 +7248,16 @@ export async function sendOperatorConversationMessage(input: {
         contentType: MessageContentType.TEXT,
         text,
         ...(input.clientMessageId ? { clientMessageId: input.clientMessageId } : {}),
+        ...(
+          channelBinding?.kind !== RepresentativeChannelKind.WEB
+          && channelBinding?.representativeBinding
+          && channelBinding.representativeBinding.endpointLifecycleRevision > 0
+            ? {
+                channelLifecycleRevision:
+                  channelBinding.representativeBinding.endpointLifecycleRevision,
+              }
+            : {}
+        ),
         deliveryStatus:
           channelBinding?.kind === RepresentativeChannelKind.WEB
             ? MessageDeliveryStatus.SENT
@@ -7675,6 +8555,27 @@ function mapChannelKind(value: AcceptInboundMessageInput["channel"]): Representa
   return RepresentativeChannelKind.WEB;
 }
 
+function resolveInboundMessageOccurredAt(input: AcceptInboundMessageInput) {
+  if (input.channel !== "matrix" && input.channel !== "telegram") {
+    return new Date();
+  }
+  if (!input.occurredAt) {
+    throw new Error("Trusted provider event time is required for private channels.");
+  }
+  const timestamp = input.occurredAt.getTime();
+  if (!Number.isFinite(timestamp)) {
+    throw new Error("Trusted provider event time is invalid.");
+  }
+  const maximumClockSkewMilliseconds = 5 * 60 * 1_000;
+  if (timestamp > Date.now() + maximumClockSkewMilliseconds) {
+    throw new Error("Trusted provider event time is too far in the future.");
+  }
+  // This timestamp is retained for message chronology/display only. Private
+  // memory authorization uses Message.ingressSequence and the immutable
+  // disclosure activation boundary assigned by PostgreSQL.
+  return new Date(timestamp);
+}
+
 function normalizeSenderType(value: MessageSenderType): ConversationInboxItem["lastSenderType"] {
   return value.toLowerCase() as ConversationInboxItem["lastSenderType"];
 }
@@ -7730,8 +8631,12 @@ async function markMatrixInboxProcessed(
   });
 }
 
-async function deferMatrixInboxEvent(id: string, reason: string) {
-  await prisma.channelEventInbox.update({
+async function deferMatrixInboxEvent(
+  id: string,
+  reason: string,
+  client: Pick<Prisma.TransactionClient, "channelEventInbox"> = prisma,
+) {
+  await client.channelEventInbox.update({
     where: { id },
     data: {
       status: "FAILED",
@@ -7741,6 +8646,30 @@ async function deferMatrixInboxEvent(id: string, reason: string) {
       lastError: reason,
     },
   });
+}
+
+function isMatrixMemorySafetyControlEvent(
+  eventType: string,
+  event: MatrixApplicationServiceEvent,
+) {
+  if (eventType === "m.room.redaction") return true;
+  if (eventType !== "m.room.message") return false;
+  const relatesTo = isJsonRecord(event.content?.["m.relates_to"])
+    ? event.content?.["m.relates_to"]
+    : null;
+  return relatesTo?.rel_type === "m.replace";
+}
+
+function isMatrixSafetyTighteningMembershipEvent(
+  event: MatrixApplicationServiceEvent,
+) {
+  if (event.type !== "m.room.member") return false;
+  const membership = event.content?.membership;
+  // Encryption, leave and ban events can only make a room less usable, so
+  // processing them across an endpoint lifecycle is fail-safe. Invite, join
+  // and knock events may create or reactivate access and therefore must prove
+  // that they arrived in the current endpoint lifecycle.
+  return membership === "leave" || membership === "ban";
 }
 
 async function consumeMatrixIdentityBindingChallenge(input: {
@@ -7820,6 +8749,8 @@ function isTerminalMatrixAvailabilityCode(
     || code === "channel_unhealthy"
     || code === "matrix_private_room_not_verified"
     || code === "matrix_identity_reassigned"
+    || code === "matrix_channel_lifecycle_reactivated"
+    || code === "identity_provenance_invalid"
     || code === "policy_disabled"
   );
 }
@@ -8225,23 +9156,157 @@ function parsePrivateChannelBindingCommand(body: string): string | null {
   return match?.[1] ?? null;
 }
 
+async function resolveMatrixProviderArrivalFence(input: {
+  roomId: string;
+  managedMatrixUserId: string | null;
+}): Promise<MatrixProviderArrivalFence | null> {
+  const currentBinding = await loadCurrentMatrixArrivalBinding(input.roomId);
+  const currentFence = buildMatrixProviderArrivalFence(
+    currentBinding?.representativeBinding ?? null,
+  );
+  if (currentFence) return currentFence;
+  if (!input.managedMatrixUserId) return null;
+
+  // A direct invite and its first content may share one homeserver
+  // transaction before the conversation binding exists. Resolve the managed
+  // virtual user to the representative endpoint so every event in that room
+  // receives the same immutable arrival lifecycle.
+  const managedTarget = await prisma.matrixVirtualUserBinding.findUnique({
+    where: { matrixUserId: input.managedMatrixUserId },
+    select: {
+      enabled: true,
+      representativeId: true,
+      matrixUserId: true,
+      representative: {
+        select: {
+          channelBindings: {
+            where: { kind: RepresentativeChannelKind.MATRIX },
+            take: 1,
+            select: {
+              id: true,
+              externalUserId: true,
+              endpointAssignmentRevision: true,
+              endpointLifecycleRevision: true,
+              desiredState: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  const representativeBinding =
+    managedTarget?.representative?.channelBindings[0];
+  if (
+    !managedTarget?.enabled
+    || !managedTarget.representativeId
+    || managedTarget.matrixUserId !== input.managedMatrixUserId
+    || representativeBinding?.externalUserId !== input.managedMatrixUserId
+  ) return null;
+  return buildMatrixProviderArrivalFence(representativeBinding);
+}
+
+async function loadCurrentMatrixArrivalBinding(roomId: string) {
+  return prisma.conversationChannelBinding.findFirst({
+    where: {
+      kind: RepresentativeChannelKind.MATRIX,
+      externalConversationId: roomId,
+    },
+    select: {
+      id: true,
+      representativeBindingId: true,
+      representativeAssignmentRevision: true,
+      representativeBinding: {
+        select: {
+          id: true,
+          endpointAssignmentRevision: true,
+          endpointLifecycleRevision: true,
+          desiredState: true,
+        },
+      },
+    },
+  });
+}
+
+async function loadCurrentMatrixArrivalEndpointBinding(bindingId: string) {
+  return prisma.representativeChannelBinding.findUnique({
+    where: { id: bindingId },
+    select: {
+      id: true,
+      endpointAssignmentRevision: true,
+      endpointLifecycleRevision: true,
+      desiredState: true,
+    },
+  });
+}
+
+function buildMatrixProviderArrivalFence(
+  binding: {
+    id: string;
+    endpointAssignmentRevision: number;
+    endpointLifecycleRevision: number;
+    desiredState: ChannelDesiredState;
+  } | null | undefined,
+): MatrixProviderArrivalFence | null {
+  if (
+    !binding?.id
+    || !Number.isSafeInteger(binding.endpointAssignmentRevision)
+    || binding.endpointAssignmentRevision <= 0
+    || !Number.isSafeInteger(binding.endpointLifecycleRevision)
+    || binding.endpointLifecycleRevision <= 0
+  ) return null;
+  return {
+    version: 1,
+    representativeBindingId: binding.id,
+    endpointAssignmentRevision: binding.endpointAssignmentRevision,
+    endpointLifecycleRevision: binding.endpointLifecycleRevision,
+    arrivedDesiredState: binding.desiredState,
+  };
+}
+
+function buildMatrixProviderArrivalPayload(
+  event: MatrixApplicationServiceEvent,
+  arrivalFence: MatrixProviderArrivalFence | null,
+): Prisma.InputJsonObject {
+  const providerEvent = stripMatrixProviderArrivalFence(event);
+  return {
+    ...providerEvent,
+    ...(arrivalFence
+      ? { [matrixProviderArrivalFencePayloadKey]: arrivalFence }
+      : {}),
+  } as Prisma.InputJsonObject;
+}
+
+function stripMatrixProviderArrivalFence(
+  event: MatrixApplicationServiceEvent,
+): MatrixApplicationServiceEvent {
+  const {
+    [matrixProviderArrivalFencePayloadKey]: _untrustedArrivalFence,
+    ...providerEvent
+  } = event;
+  return providerEvent;
+}
+
 function sanitizeMatrixApplicationServiceEvent(
   event: MatrixApplicationServiceEvent,
 ): {
   event: MatrixApplicationServiceEvent;
   privateCredentialHash: string | null;
 } {
-  if (event.type !== "m.room.message" || !isJsonRecord(event.content)) {
-    return { event, privateCredentialHash: null };
+  const providerEvent = stripMatrixProviderArrivalFence(event);
+  if (
+    providerEvent.type !== "m.room.message"
+    || !isJsonRecord(providerEvent.content)
+  ) {
+    return { event: providerEvent, privateCredentialHash: null };
   }
-  const content = removeMatrixBindingCredentialMetadata(event.content);
+  const content = removeMatrixBindingCredentialMetadata(providerEvent.content);
   if (!isJsonRecord(content)) {
     return {
-      event: { ...event, content: {} },
+      event: { ...providerEvent, content: {} },
       privateCredentialHash: null,
     };
   }
-  const sanitizedWithoutCredential = { ...event, content };
+  const sanitizedWithoutCredential = { ...providerEvent, content };
   const msgtype = content.msgtype;
   if (msgtype !== "m.text") {
     return {

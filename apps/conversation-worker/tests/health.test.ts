@@ -36,6 +36,7 @@ function readyLanes(): ConversationWorkerSchedulerSnapshot {
   return {
     conversation: readyLane(),
     memoryExtraction: readyLane(),
+    memoryLifecycle: readyLane(),
     projectionWrite: readyLane(),
     projectionDelete: readyLane(),
     cleanup: readyLane(),

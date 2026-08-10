@@ -29,7 +29,6 @@ import { DashboardAuditLogs } from "./dashboard-audit-logs";
 import { DashboardChannels } from "./dashboard-channels";
 import { DashboardWallet } from "./dashboard-wallet";
 import { DashboardSettings } from "./dashboard-settings";
-import { DashboardMemory } from "./dashboard-memory";
 import type { SettingsSection } from "./settings-section-navigation";
 
 const channelControlPlaneViews = ["channels", "audit"] as const;
@@ -38,7 +37,6 @@ const functionalDashboardViews = new Set<DashboardView>([
   "representatives",
   "inbox",
   "approvals",
-  "memory",
   "skills", "wallet", "audit", "settings",
   ...channelControlPlaneViews,
 ]);
@@ -390,11 +388,6 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                   name: representative.name,
                 }))}
               />
-            ) : props.activeView === "memory" ? (
-              <DashboardMemory
-                locale={props.locale}
-                representativeSlug={props.activeSlug}
-              />
             ) : props.activeView === "audit" ? (
               <DashboardAuditLogs activeSlug={props.activeSlug} locale={props.locale} />
             ) : props.activeView === "settings" ? (
@@ -514,7 +507,6 @@ function DashboardOverviewFramework({
     ["FAQ", "36", zh ? "31 已批准" : "31 approved"],
     [zh ? "服务范围" : "Service scopes", "12", zh ? "9 已发布" : "9 published"],
     [zh ? "技能" : "Skills", "08", zh ? "6 已启用" : "6 enabled"],
-    [zh ? "记忆系统" : "Memory System", "—", zh ? "打开记忆系统查看实时状态" : "Open Memory System for live status"],
     [zh ? "待处理 Inbox" : "Open inbox", "12", zh ? "4 需接手" : "4 handoffs"],
     [zh ? "未发布草稿" : "Unpublished drafts", "03", zh ? "需要审核" : "Needs review"],
   ];
@@ -552,7 +544,7 @@ function DashboardOverviewFramework({
           <div className="dashboard-v2-resource-matrix">
             {resources.map(([label, value, detail], index) => (
               <article key={label}>
-                <span className={index === 6 || index === 7 ? "is-attention" : undefined}>{String(index + 1).padStart(2, "0")}</span>
+                <span className={index === 5 || index === 6 ? "is-attention" : undefined}>{String(index + 1).padStart(2, "0")}</span>
                 <div>
                   <strong>{label}</strong>
                   <small>{detail}</small>

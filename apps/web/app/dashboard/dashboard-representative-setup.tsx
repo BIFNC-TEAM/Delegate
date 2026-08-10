@@ -377,8 +377,8 @@ const setupSections: Array<{
   {
     id: "memory",
     step: "06",
-    label: "记忆系统",
-    blurb: "配置联系人记忆、代表经验、渠道能力和保留边界。",
+    label: "记忆",
+    blurb: "配置自动提取、联系人记忆、代表经验、短期上下文与同步边界。",
   },
 ];
 
@@ -421,8 +421,8 @@ const setupSectionsEn: Array<{
   {
     id: "memory",
     step: "06",
-    label: "Memory System",
-    blurb: "Configure Contact Memory, Representative Experience, channel capability, and retention.",
+    label: "Memory",
+    blurb: "Configure automatic extraction, Contact Memory, Representative Experience, short-term context, and synchronization boundaries.",
   },
 ];
 
@@ -1630,27 +1630,50 @@ export function DashboardRepresentativeSetup({
 
         <aside className="representative-config-aside">
           <header>
-            <p>{t.stepPreviewEyebrow}</p>
-            <h3>{t.stepPreviewTitle(currentSection.label)}</h3>
-            <span>{t.stepPreviewCopy}</span>
-          </header>
-          <div className="representative-config-checkpoints">
-            {currentStepCards.map((card) => (
-              <div key={`${card.label}:${card.value}`}>
-                <span>{card.label}</span>
-                <strong>{card.value}</strong>
-                <small>{card.detail}</small>
-              </div>
-            ))}
-          </div>
-          <div className="representative-config-draft-note">
-            <strong>{locale === "zh" ? "草稿安全边界" : "Draft safety boundary"}</strong>
+            <p>{activeSection === "memory" ? "MEMORY RUNTIME POLICY" : t.stepPreviewEyebrow}</p>
+            <h3>
+              {activeSection === "memory"
+                ? (locale === "zh" ? "实时策略，保存即生效" : "Live policy, effective when saved")
+                : t.stepPreviewTitle(currentSection.label)}
+            </h3>
             <span>
-              {locale === "zh"
-                ? "保存只更新工作草稿；发布新版本前，公开页和会话继续使用当前活动版本。"
-                : "Saving updates the working draft only. Public pages and conversations keep using the active version until you publish."}
+              {activeSection === "memory"
+                ? (locale === "zh"
+                    ? "记忆开关和渠道能力是当前代表的实时运行边界，不属于代表草稿或发布版本。"
+                    : "Memory controls and channel capabilities are live runtime boundaries for this representative, not representative draft or release fields.")
+                : t.stepPreviewCopy}
             </span>
-          </div>
+          </header>
+          {activeSection === "memory" ? (
+            <div className="representative-config-draft-note is-runtime-policy">
+              <strong>{locale === "zh" ? "实时策略边界" : "Live policy boundary"}</strong>
+              <span>
+                {locale === "zh"
+                  ? "点击“保存记忆设置”后，服务端立即应用新策略；无需在“发布与运行”中再次发布。"
+                  : "After you select “Save memory settings,” the server applies the policy immediately. No additional release is required in Publish & operate."}
+              </span>
+            </div>
+          ) : (
+            <>
+              <div className="representative-config-checkpoints">
+                {currentStepCards.map((card) => (
+                  <div key={`${card.label}:${card.value}`}>
+                    <span>{card.label}</span>
+                    <strong>{card.value}</strong>
+                    <small>{card.detail}</small>
+                  </div>
+                ))}
+              </div>
+              <div className="representative-config-draft-note">
+                <strong>{locale === "zh" ? "草稿安全边界" : "Draft safety boundary"}</strong>
+                <span>
+                  {locale === "zh"
+                    ? "保存只更新工作草稿；发布新版本前，公开页和会话继续使用当前活动版本。"
+                    : "Saving updates the working draft only. Public pages and conversations keep using the active version until you publish."}
+                </span>
+              </div>
+            </>
+          )}
         </aside>
       </div>
     </section>
@@ -1662,9 +1685,9 @@ const setupCopy = {
     savedMessage: "代表配置已保存为草稿；发布新版本后才会进入公开回答。",
     saveError: "保存代表配置失败。",
     setupConflictMessage:
-      "知识草稿已被审核流程或其他设置更新。已加载最新版本，请确认后重新应用并保存你的修改。",
+      "代表配置草稿已被其他操作更新。已加载最新版本，请确认后重新应用并保存你的修改。",
     setupConflictReloadError:
-      "知识草稿已发生冲突，但无法加载最新版本。请刷新页面后重试。",
+      "代表配置草稿已发生冲突，但无法加载最新版本。请刷新页面后重试。",
     successNotificationTitle: "保存成功",
     errorNotificationTitle: "操作失败",
     dismissNotification: "关闭通知",
@@ -1775,9 +1798,9 @@ const setupCopy = {
     savedMessage: "Representative setup saved as a draft. Changes affect public replies only after a new version is published.",
     saveError: "Failed to save representative setup.",
     setupConflictMessage:
-      "The knowledge draft changed through an approval or another setup update. The latest version is loaded; review it, reapply your edits, and save again.",
+      "Another action changed the representative configuration draft. The latest version is loaded; review it, reapply your edits, and save again.",
     setupConflictReloadError:
-      "The knowledge draft changed, but the latest version could not be loaded. Refresh the page and try again.",
+      "The representative configuration draft changed, but the latest version could not be loaded. Refresh the page and try again.",
     successNotificationTitle: "Saved successfully",
     errorNotificationTitle: "Action failed",
     dismissNotification: "Dismiss notification",
@@ -2093,38 +2116,7 @@ function buildSetupStepCards(
         },
       ];
     case "memory":
-      if (locale === "en") {
-        return [
-          { label: "Contact Memory", value: "Governed", detail: "Isolated to the current contact and representative.", tone: "accent" },
-          { label: "Representative Experience", value: "Reviewed", detail: "De-identified and manually reviewed before recall." },
-          { label: "Automatic extraction", value: "Candidates only", detail: "Automatic extraction never grants recall eligibility.", tone: "safe" },
-          { label: "Public knowledge", value: "Knowledge Library", detail: "Created, edited, and published in the existing Knowledge section." },
-        ];
-      }
-      return [
-        {
-          label: "联系人记忆",
-          value: "受治理",
-          detail: "严格隔离在当前联系人和当前代表范围内。",
-          tone: "accent",
-        },
-        {
-          label: "代表经验",
-          value: "人工审核",
-          detail: "去标识化并通过人工审核后才可召回。",
-        },
-        {
-          label: "自动提取",
-          value: "仅创建候选",
-          detail: "自动提取不会直接获得召回资格。",
-          tone: "safe",
-        },
-        {
-          label: "公开知识",
-          value: "知识库管理",
-          detail: "继续在现有 Knowledge 板块创建、编辑和发布。",
-        },
-      ];
+      return [];
   }
 }
 

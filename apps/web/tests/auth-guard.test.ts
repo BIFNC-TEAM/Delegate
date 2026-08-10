@@ -42,8 +42,8 @@ describe("creator dashboard auth guard", () => {
   });
 
   it("builds a safe creator login path", () => {
-    expect(buildCreatorLoginPath("/dashboard", "?view=training")).toBe(
-      "/auth/login?actor=owner&returnTo=%2Fdashboard%3Fview%3Dtraining",
+    expect(buildCreatorLoginPath("/dashboard", "?view=representatives")).toBe(
+      "/auth/login?actor=owner&returnTo=%2Fdashboard%3Fview%3Drepresentatives",
     );
     expect(buildCreatorLoginPathForReturnTo("/dashboard?view=overview&lang=zh")).toBe(
       "/auth/login?actor=owner&returnTo=%2Fdashboard%3Fview%3Doverview%26lang%3Dzh",

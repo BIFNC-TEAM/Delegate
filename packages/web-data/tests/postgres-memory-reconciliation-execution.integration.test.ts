@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { approveMemoryCandidate } from "../src/memory-governance";
+import { applyAutomaticMemoryPolicyInTransaction } from "../src/memory-governance";
 import {
   runNextMemoryProjectionDeletion,
   runNextMemoryProjectionWrite,
@@ -156,7 +156,7 @@ describePostgres("Memory reconciliation PostgreSQL execution", () => {
 
   it("skips a live in-flight writer without probing or reporting it missing", async () => {
     const provider = new ExactMemoryProvider();
-    const fixture = await createApprovedFixture("live");
+    const fixture = await createAutomaticallyActivatedFixture("live");
     provider.blockNextEnsure();
     const writer = runNextMemoryProjectionWrite({ client: prisma, provider });
     await provider.ensureStarted.promise;
@@ -407,15 +407,19 @@ implements MemoryProjectionProvider, MemoryReconciliationProvider {
 }
 
 async function createActiveFixture(provider: ExactMemoryProvider, label: string) {
-  const fixture = await createApprovedFixture(label);
-  const result = await runNextMemoryProjectionWrite({ client: prisma, provider });
+  const fixture = await createAutomaticallyActivatedFixture(label);
+  const result = await runNextMemoryProjectionWrite({
+    client: prisma,
+    provider,
+    representativeId: fixture.representativeId,
+  });
   if (!result.processed || result.status !== "completed") {
     throw new Error(`Projection activation failed: ${JSON.stringify(result)}`);
   }
   return fixture;
 }
 
-async function createApprovedFixture(label: string) {
+async function createAutomaticallyActivatedFixture(label: string) {
   const suffix = randomUUID();
   const owner = await prisma.owner.create({
     data: { displayName: `Reconciliation owner ${label} ${suffix}` },
@@ -442,9 +446,9 @@ async function createApprovedFixture(label: string) {
       longTermMemoryEnabled: true,
       contactMemoryEnabled: true,
       representativeExperienceEnabled: false,
-      autoExtract: false,
+      autoExtract: true,
       webRecallEnabled: true,
-      webExtractEnabled: false,
+      webExtractEnabled: true,
       provider: "reconciliation-test",
     },
   });
@@ -480,6 +484,7 @@ async function createApprovedFixture(label: string) {
       safeText,
       summary: safeText,
       contentHash,
+      semanticKey: "contact-preference:communication",
       dedupeKey: `candidate-${suffix}`,
       status: "PENDING_REVIEW",
       safetyClass: "LOW_RISK",
@@ -489,27 +494,27 @@ async function createApprovedFixture(label: string) {
       sourceMessageId: message.id,
     },
   });
-  const approved = await approveMemoryCandidate({
-    actorOwnerId: owner.id,
-    representativeSlug: representative.slug,
-    candidateId: candidate.id,
-    requestId: `approve-${suffix}`,
-    idempotencyKey: `approve-${suffix}`,
-    expectedUpdatedAt: candidate.updatedAt.toISOString(),
-    reasonCode: "owner_verified",
-  }, { client: prisma });
-  if (!approved.memoryId || !approved.memoryVersionId) {
-    throw new Error("Approved fixture did not create governed memory coordinates.");
+  const activated = await prisma.$transaction((tx) =>
+    applyAutomaticMemoryPolicyInTransaction(tx, {
+      candidateId: candidate.id,
+      sourceHash: createHash("sha256")
+        .update(message.text ?? "")
+        .digest("hex"),
+      confidence: 1,
+    }),
+  );
+  if (!activated.memoryId || !activated.memoryVersionId) {
+    throw new Error("Automatic policy did not create governed memory coordinates.");
   }
   const projection = await prisma.memoryProjectionItem.findFirstOrThrow({
     where: {
-      memoryId: approved.memoryId,
-      memoryVersionId: approved.memoryVersionId,
+      memoryId: activated.memoryId,
+      memoryVersionId: activated.memoryVersionId,
     },
   });
   return {
     representativeId: representative.id,
-    memoryId: approved.memoryId,
+    memoryId: activated.memoryId,
     projectionId: projection.id,
     remoteUri: projection.remoteUri,
     contentHash,

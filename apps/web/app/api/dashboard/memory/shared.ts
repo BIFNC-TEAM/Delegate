@@ -1,11 +1,8 @@
 import { NextResponse } from "next/server";
 import { z, ZodError } from "zod";
 
-import {
-  MemoryGovernanceError,
-  RepresentativeAccessError,
-} from "@delegate/web-data";
-import { MemoryDashboardError } from "@delegate/web-data/memory-dashboard";
+import { RepresentativeAccessError } from "@delegate/web-data";
+import { MemorySettingsError } from "@delegate/web-data/memory-settings";
 
 import { withPrivateNoStore } from "../../private-response";
 import { requireDashboardApiOwnerSession } from "../auth";
@@ -23,7 +20,7 @@ class MemoryRouteInputError extends Error {
   }
 }
 
-export async function requireMemoryDashboardOwnerId() {
+export async function requireMemorySettingsOwnerId() {
   const session = await requireDashboardApiOwnerSession();
   const ownerId = session?.ownerId?.trim();
   if (!ownerId) {
@@ -32,7 +29,7 @@ export async function requireMemoryDashboardOwnerId() {
   return ownerId;
 }
 
-export function parseMemoryDashboardQuery<T>(
+export function parseMemorySettingsQuery<T>(
   request: Request,
   schema: z.ZodType<T>,
 ) {
@@ -50,7 +47,7 @@ export function parseMemoryDashboardQuery<T>(
   return schema.parse(values);
 }
 
-export function requireMemoryDashboardWriteMetadata(request: Request) {
+export function requireMemorySettingsWriteMetadata(request: Request) {
   const suppliedIdempotencyKey = request.headers.get("idempotency-key")?.trim() ?? "";
   if (!safeRequestToken.test(suppliedIdempotencyKey)) {
     throw new MemoryRouteInputError(
@@ -65,16 +62,16 @@ export function requireMemoryDashboardWriteMetadata(request: Request) {
   };
 }
 
-export function memoryDashboardJson(body: unknown, status = 200) {
+export function memorySettingsJson(body: unknown, status = 200) {
   return withPrivateNoStore(NextResponse.json(body, { status }));
 }
 
-export function memoryDashboardErrorResponse(error: unknown) {
+export function memorySettingsErrorResponse(error: unknown) {
   if (error instanceof MemoryRouteInputError) {
-    return memoryDashboardJson({ error: error.message, code: error.code }, 422);
+    return memorySettingsJson({ error: error.message, code: error.code }, 422);
   }
   if (error instanceof ZodError) {
-    return memoryDashboardJson({
+    return memorySettingsJson({
       error: "Invalid memory system request.",
       code: "memory_dashboard_invalid_request",
       issues: error.issues.map((issue) => {
@@ -95,27 +92,18 @@ export function memoryDashboardErrorResponse(error: unknown) {
   }
   if (error instanceof RepresentativeAccessError) {
     const status = error.statusCode === 401 ? 401 : 404;
-    return memoryDashboardJson({
+    return memorySettingsJson({
       error: status === 401 ? "Authentication required." : "Memory workspace not found.",
       code: status === 401
         ? "memory_dashboard_unauthorized"
         : "memory_dashboard_not_found",
     }, status);
   }
-  if (error instanceof MemoryDashboardError) {
-    return memoryDashboardJson({ error: error.message, code: error.code }, error.statusCode);
+  if (error instanceof MemorySettingsError) {
+    return memorySettingsJson({ error: error.message, code: error.code }, error.statusCode);
   }
-  if (error instanceof MemoryGovernanceError) {
-    if (error.code === "memory_not_found" || error.code === "memory_forbidden") {
-      return memoryDashboardJson({
-        error: "Memory workspace item not found.",
-        code: "memory_dashboard_not_found",
-      }, 404);
-    }
-    return memoryDashboardJson({ error: error.message, code: error.code }, error.statusCode);
-  }
-  return memoryDashboardJson({
-    error: "The memory system request could not be completed.",
+  return memorySettingsJson({
+    error: "The memory settings request could not be completed.",
     code: "memory_dashboard_internal_error",
   }, 500);
 }

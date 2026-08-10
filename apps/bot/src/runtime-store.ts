@@ -38,6 +38,7 @@ import {
   EventType,
   HandoffStatus,
   InvoiceStatus,
+  MessageSenderType,
   PaymentProvider,
   Prisma,
   PricingPlanType,
@@ -484,6 +485,51 @@ export async function getConversationContext(
         : {}),
     },
   };
+}
+
+export async function findTelegramInboundMessageEditTarget(input: {
+  chatId: string;
+  externalMessageId: string;
+  senderId: string;
+}): Promise<{
+  messageId: string;
+  conversationId: string;
+  representativeSlug: string;
+} | null> {
+  const chatId = input.chatId.trim();
+  const externalMessageId = input.externalMessageId.trim();
+  const senderId = input.senderId.trim();
+  if (!chatId || !externalMessageId || !senderId) return null;
+  const connectionId = requireTelegramRuntimeContext().botId;
+
+  const message = await prisma.message.findFirst({
+    where: {
+      externalMessageId,
+      senderId,
+      senderType: MessageSenderType.AUDIENCE,
+      channelBinding: {
+        kind: RepresentativeChannelKind.TELEGRAM,
+        connectionId,
+        externalConversationId: chatId,
+      },
+    },
+    select: {
+      id: true,
+      conversationId: true,
+      conversation: {
+        select: {
+          representative: { select: { slug: true } },
+        },
+      },
+    },
+  });
+  return message
+    ? {
+        messageId: message.id,
+        conversationId: message.conversationId,
+        representativeSlug: message.conversation.representative.slug,
+      }
+    : null;
 }
 
 export async function getActiveRepresentativeSlugForChat(

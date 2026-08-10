@@ -56,6 +56,12 @@ describe("public audience principal", () => {
       audienceId: "device-session",
       audienceIdentityId: "identity-account",
       businessKey: "audience:identity-account",
+      sourceIdentityLinkId: "identity-link-test",
+      sourceIdentityEvidence: {
+        providerSubject: "logto-user-1",
+        issuer: LOGTO_ISSUER,
+        connectionId: "logto-identity-link:identity-link-test",
+      },
     });
   });
 
@@ -323,10 +329,12 @@ type IdentityRow = {
 };
 
 type LinkRow = {
+  id: string;
   issuer: string;
   metadataIssuer?: string;
   providerSubject: string;
   audienceIdentityId: string;
+  connectionId: string | null;
   verifiedAt: Date | null;
   assuranceLevel: IdentityAssuranceLevel;
   revokedAt: Date | null;
@@ -338,11 +346,23 @@ implements PublicAudiencePrincipalClient {
   private nextIdentity = 1;
   private readonly link: LinkRow | null;
 
-  constructor(input: { identities: IdentityRow[]; link: LinkRow | null }) {
+  constructor(input: {
+    identities: IdentityRow[];
+    link: (
+      Omit<LinkRow, "id" | "connectionId">
+      & Partial<Pick<LinkRow, "id" | "connectionId">>
+    ) | null;
+  }) {
     this.identitiesById = new Map(
       input.identities.map((identity) => [identity.id, identity]),
     );
-    this.link = input.link;
+    this.link = input.link
+      ? {
+          id: input.link.id ?? "identity-link-test",
+          connectionId: input.link.connectionId ?? null,
+          ...input.link,
+        }
+      : null;
   }
 
   audienceIdentity = {

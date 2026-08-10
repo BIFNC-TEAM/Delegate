@@ -29,6 +29,9 @@ export async function generateOpenAIResponse(params: {
     instructions: params.prompt.instructions,
     input: params.prompt.input,
     max_output_tokens: params.env.maxOutputTokens,
+    ...(params.prompt.responseFormat === "json_object"
+      ? { text: { format: { type: "json_object" as const } } }
+      : {}),
   });
 
   const replyText = extractResponseText(response);

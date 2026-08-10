@@ -23,34 +23,48 @@ import {
   claimNextGenerationWorkItem,
   completeOperatorMessageDelivery,
   completeInlineGenerationRun,
+  contactMemorySharingConsentContractVersion,
+  ContactMemorySharingError,
   createComputeDelegationTask,
   createClarifyingDelegationTask,
   createAudienceComputeSession,
+  createContactMemorySharingChallenge,
   deferOperatorMessageDelivery,
   deferGenerationRunForHuman,
   executeAudienceTool,
   ensureConversationLeadAndHandoff,
   failGenerationRun,
   getRepresentativeRuntimeSetupSnapshot,
+  grantContactMemorySharingConsent,
   hasPersistedTelegramBotConnections,
+  isDeterministicContactMemoryDeleteCommand,
+  matrixServerNameFromUserId,
   loadGenerationRecentTurns,
   markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval,
   markDelegationTaskRunning,
   GENERATION_WORK_LEASE_DURATION_MS,
+  GenerationMemoryDeliveryBlockedError,
   GenerationWorkLeaseLostError,
   finalizeComputeDelegationTask,
   findConversationClarifyingDelegationTask,
+  isGenerationMemoryDeliveryBlockedError,
   isGenerationWorkLeaseLostError,
   continueClarifyingDelegationTask,
   recallRepresentativeContext,
   prepareGenerationMessageChannelDelivery,
+  privateChannelSourceVerificationUnavailableStatement,
+  readContactMemorySharingChallengeToken,
   reserveGenerationConversationEntitlement,
+  renderPrivateChannelGenerationDeliveryText,
   renewGenerationWorkItemLease,
+  resolveDeterministicContactMemorySharingCommand,
+  revokeContactMemorySharingConsent,
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
   resolveTelegramBotRuntimeCredential,
   withActiveTelegramRepresentativeChannelFence,
+  withGenerationMessageProviderDeliveryFence,
   waitGenerationRunForComputeApproval,
   type AuthorizedDelegationKnowledge,
   type ConversationEntitlementReservation,
@@ -103,11 +117,18 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             "Matrix representative transport user is missing for Operator delivery.",
           );
         }
+        if (!operatorItem.matrixEndpointLifecycleRevision) {
+          throw new Error(
+            "Matrix operator delivery is missing its channel lifecycle fence.",
+          );
+        }
         externalMessageId = await sendMatrixRepresentativeMessage({
           config,
           conversationId: operatorItem.conversationId,
           roomId: operatorItem.externalConversationId,
           senderUserId: operatorItem.matrixSenderUserId,
+          expectedEndpointLifecycleRevision:
+            operatorItem.matrixEndpointLifecycleRevision,
           deliveryId: `operator-${operatorItem.messageId}`,
           senderMode: "human_operator",
           text: `${operatorItem.operatorName.trim().slice(0, 80) || "Operator"}: ${operatorItem.text}`,
@@ -201,6 +222,13 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         status: "completed" as const,
       };
     } catch (error) {
+      if (isGenerationMemoryDeliveryBlockedError(error)) {
+        return {
+          processed: true as const,
+          runId: item.runId,
+          status: "canceled" as const,
+        };
+      }
       if (
         leaseGuard.isLost()
         || isGenerationWorkLeaseLostError(error)
@@ -257,6 +285,158 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         ...workLease,
       });
       return { processed: true as const, runId: item.runId, status: "waiting_human" as const };
+    }
+
+    if (
+      (item.channel === "matrix" || item.channel === "telegram")
+      && isDeterministicContactMemoryDeleteCommand(item.userText)
+    ) {
+      const replyText = renderContactMemoryDeleteConfirmation(item.channel);
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText,
+        senderDisplayName: item.representativeName,
+        intent: "contact_memory_delete_confirmation",
+        completeOutbox: false,
+        countUsage: false,
+        runtimeOutcome: {
+          mode: "fallback",
+          fallbackStrategy: "deterministic_preview",
+          modelRuntimeState: "disabled",
+          fallbackReason: "policy_fallback",
+        },
+      });
+      outputMessageId = completed.message.id;
+      await deliverGenerationOutput({
+        config,
+        item,
+        text: replyText,
+        outputMessageId,
+      });
+      leaseGuard.assertOwned();
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "completed" as const,
+      };
+    }
+
+    const sharingCommand = item.channel === "matrix"
+      ? resolveDeterministicContactMemorySharingCommand(item.userText)
+      : null;
+    if (sharingCommand) {
+      let replyText: string;
+      if (!item.audienceIdentityId) {
+        replyText = renderContactMemorySharingFailure(
+          "contact_memory_sharing_identity_ineligible",
+        );
+      } else if (sharingCommand === "INVALID_CONFIRM") {
+        replyText = renderContactMemorySharingFailure(
+          "contact_memory_sharing_challenge_invalid",
+        );
+      } else {
+        try {
+          if (sharingCommand === "REVOKE") {
+            const revoked = await revokeContactMemorySharingConsent({
+              representativeSlug: item.representativeSlug,
+              audienceIdentityId: item.audienceIdentityId,
+              sourceChannel: "MATRIX",
+            });
+            replyText = revoked.changed
+              ? "已立即停止当前数字代表的跨渠道联系人记忆召回；共享记忆的远端投影已进入可重试清理队列。各渠道原始会话和渠道内记忆不受影响。"
+              : "当前没有有效的跨渠道联系人记忆授权；系统已再次确认共享召回处于关闭状态。";
+          } else {
+            if (
+              !item.sourceSenderId
+              || !item.privateChannelConnectionId
+            ) {
+              throw new ContactMemorySharingError(
+                "contact_memory_sharing_source_unverified",
+                "Matrix source coordinates are missing.",
+                403,
+              );
+            }
+            const sourceEvidence = {
+              sourceChannel: "MATRIX" as const,
+              providerSubject: item.sourceSenderId,
+              issuer: matrixServerNameFromUserId(item.sourceSenderId),
+              connectionId: item.privateChannelConnectionId,
+            };
+            if (sharingCommand === "DISCLOSE") {
+              const challenge = await createContactMemorySharingChallenge({
+                representativeSlug: item.representativeSlug,
+                audienceIdentityId: item.audienceIdentityId,
+                disclosureContractVersion:
+                  contactMemorySharingConsentContractVersion,
+                sourceEventKey: `matrix:${item.inputMessageId}`,
+                ...sourceEvidence,
+              });
+              replyText = renderContactMemorySharingDisclosure(
+                challenge.challengeToken,
+              );
+            } else {
+              const challengeToken = readContactMemorySharingChallengeToken(
+                item.userText.trim().replace(/\s+/gu, " ").slice(
+                  "!memory_share ".length,
+                ),
+              );
+              if (!challengeToken) {
+                throw new ContactMemorySharingError(
+                  "contact_memory_sharing_challenge_invalid",
+                  "Matrix memory-sharing challenge token is missing.",
+                  409,
+                );
+              }
+              const granted = await grantContactMemorySharingConsent({
+                representativeSlug: item.representativeSlug,
+                audienceIdentityId: item.audienceIdentityId,
+                challengeToken,
+                sourceEventKey: `matrix:${item.inputMessageId}`,
+                ...sourceEvidence,
+              });
+              replyText = granted.active
+                ? "已允许当前数字代表在已验证为同一 Delegate 用户的 Web、Matrix 和 Telegram 私聊之间使用联系人记忆。"
+                : renderContactMemorySharingFailure(
+                    "contact_memory_sharing_conflict",
+                  );
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof ContactMemorySharingError)) throw error;
+          replyText = renderContactMemorySharingFailure(error.code);
+        }
+      }
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText,
+        senderDisplayName: item.representativeName,
+        intent: `contact_memory_sharing_${sharingCommand.toLowerCase()}`,
+        completeOutbox: false,
+        countUsage: false,
+        runtimeOutcome: {
+          mode: "fallback",
+          fallbackStrategy: "deterministic_preview",
+          modelRuntimeState: "disabled",
+          fallbackReason: "policy_fallback",
+        },
+      });
+      outputMessageId = completed.message.id;
+      await deliverGenerationOutput({
+        config,
+        item,
+        text: replyText,
+        outputMessageId,
+      });
+      leaseGuard.assertOwned();
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "completed" as const,
+      };
     }
 
     if (item.delegationTerminalRecovery) {
@@ -636,6 +816,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     }
 
     const recentTurns = await loadGenerationRecentTurns({
+      representativeId: setup.id,
       conversationId: item.conversationId,
       beforeMessageId: item.inputMessageId,
     });
@@ -777,6 +958,13 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     leaseGuard.assertOwned();
     return { processed: true as const, runId: item.runId, status: "completed" as const };
   } catch (error) {
+    if (isGenerationMemoryDeliveryBlockedError(error)) {
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "canceled" as const,
+      };
+    }
     if (isComputeGenerationExecutionInProgressError(error)) {
       return {
         processed: true as const,
@@ -1423,6 +1611,12 @@ async function sendTelegramRepresentativeMessage(input: {
   conversationId: string;
   chatId: string;
   connectionId?: string;
+  generationDelivery: {
+    runId: string;
+    outboxId: string;
+    leaseAttempt: number;
+    outputMessageId: string;
+  };
   text: string;
 }) {
   return sendTelegramMessage(input);
@@ -1433,6 +1627,12 @@ async function sendTelegramMessage(input: {
   conversationId: string;
   chatId: string;
   connectionId?: string;
+  generationDelivery?: {
+    runId: string;
+    outboxId: string;
+    leaseAttempt: number;
+    outputMessageId: string;
+  };
   text: string;
 }) {
   const configuredConnectionId = input.connectionId?.trim();
@@ -1447,7 +1647,7 @@ async function sendTelegramMessage(input: {
         conversationId: input.conversationId,
         expectedConnectionId: configuredConnectionId,
       },
-      async () => {
+      async (tx) => {
         const credential = await resolveTelegramBotRuntimeCredential({
           connectionId: configuredConnectionId,
         });
@@ -1475,44 +1675,57 @@ async function sendTelegramMessage(input: {
             "Telegram Bot credential does not match the conversation connection.",
           );
         }
-        let response: Response;
-        try {
-          response = await fetch(
-            `https://api.telegram.org/bot${token}/sendMessage`,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                chat_id: input.chatId,
-                text: input.text,
-              }),
-              signal: AbortSignal.timeout(
-                input.config.telegramRequestTimeoutMs ?? 15_000,
-              ),
-            },
-          );
-        } catch {
-          throw new Error(
-            "Telegram delivery could not reach the provider.",
-          );
+        const send = async () => {
+          let response: Response;
+          try {
+            response = await fetch(
+              `https://api.telegram.org/bot${token}/sendMessage`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  chat_id: input.chatId,
+                  text: input.text,
+                }),
+                signal: AbortSignal.timeout(
+                  input.config.telegramRequestTimeoutMs ?? 15_000,
+                ),
+              },
+            );
+          } catch {
+            throw new Error(
+              "Telegram delivery could not reach the provider.",
+            );
+          }
+          const payload =
+            (await response.json().catch(() => ({}))) as {
+              ok?: boolean;
+              result?: { message_id?: number };
+              description?: string;
+            };
+          if (
+            !response.ok
+            || !payload.ok
+            || !payload.result?.message_id
+          ) {
+            throw new Error(
+              payload.description
+              || `Telegram operator delivery failed (${response.status}).`,
+            );
+          }
+          return String(payload.result.message_id);
+        };
+        if (!input.generationDelivery) {
+          return { executed: true as const, value: await send() };
         }
-        const payload =
-          (await response.json().catch(() => ({}))) as {
-            ok?: boolean;
-            result?: { message_id?: number };
-            description?: string;
-          };
-        if (
-          !response.ok
-          || !payload.ok
-          || !payload.result?.message_id
-        ) {
-          throw new Error(
-            payload.description
-            || `Telegram operator delivery failed (${response.status}).`,
-          );
-        }
-        return String(payload.result.message_id);
+        return withGenerationMessageProviderDeliveryFence(
+          tx,
+          {
+            conversationId: input.conversationId,
+            ...input.generationDelivery,
+          },
+          send,
+        );
       },
     );
   if (!fencedDelivery.executed) {
@@ -1520,7 +1733,12 @@ async function sendTelegramMessage(input: {
       "Telegram channel assignment changed before outbound delivery.",
     );
   }
-  return fencedDelivery.value;
+  const providerDelivery = fencedDelivery.value;
+  if (!providerDelivery.executed) {
+    // The transaction above committed the terminal cancel/dead-letter writes.
+    throw new GenerationMemoryDeliveryBlockedError();
+  }
+  return providerDelivery.value;
 }
 
 async function deliverGenerationOutput(input: {
@@ -1543,20 +1761,51 @@ async function deliverGenerationOutput(input: {
     allowNeedsHumanDelivery:
       deliveryPreparation.allowNeedsHumanDelivery,
   });
+  let deliveryText = input.text;
+  const isContactMemoryDeleteConfirmation =
+    (input.item.channel === "matrix" || input.item.channel === "telegram")
+    && isDeterministicContactMemoryDeleteCommand(input.item.userText);
+  if (
+    (input.item.channel === "matrix" || input.item.channel === "telegram")
+    && !isContactMemoryDeleteConfirmation
+  ) {
+    try {
+      deliveryText = await renderPrivateChannelGenerationDeliveryText({
+        generationRunId: input.item.runId,
+        outputMessageId: input.outputMessageId,
+        text: input.text,
+      });
+    } catch {
+      deliveryText = privateChannelSourceVerificationUnavailableStatement;
+    }
+  }
   let externalMessageId: string | undefined;
   if (input.item.channel === "matrix") {
     if (!input.item.externalConversationId || !input.item.matrixSenderUserId) {
       throw new Error("Matrix room or representative virtual user is missing.");
+    }
+    if (!input.item.matrixEndpointLifecycleRevision) {
+      throw new Error(
+        "Matrix generation delivery is missing its channel lifecycle fence.",
+      );
     }
     externalMessageId = await sendMatrixRepresentativeMessage({
       config: input.config,
       conversationId: input.item.conversationId,
       roomId: input.item.externalConversationId,
       senderUserId: input.item.matrixSenderUserId,
+      expectedEndpointLifecycleRevision:
+        input.item.matrixEndpointLifecycleRevision,
       deliveryId: input.item.runId,
       senderMode: "ai",
       generationRunId: input.item.runId,
-      text: input.text,
+      generationDelivery: {
+        runId: input.item.runId,
+        outboxId: input.item.outboxId,
+        leaseAttempt: input.item.leaseAttempt,
+        outputMessageId: input.outputMessageId,
+      },
+      text: deliveryText,
     });
   } else if (input.item.channel === "telegram") {
     if (input.config.telegramConversationPlatformMode !== "worker") {
@@ -1572,7 +1821,13 @@ async function deliverGenerationOutput(input: {
       ...(input.item.telegramConnectionId
         ? { connectionId: input.item.telegramConnectionId }
         : {}),
-      text: input.text,
+      generationDelivery: {
+        runId: input.item.runId,
+        outboxId: input.item.outboxId,
+        leaseAttempt: input.item.leaseAttempt,
+        outputMessageId: input.outputMessageId,
+      },
+      text: deliveryText,
     });
   }
   await markGenerationDeliveryComplete({
@@ -1583,6 +1838,52 @@ async function deliverGenerationOutput(input: {
     ...(externalMessageId ? { externalMessageId } : {}),
   });
   return externalMessageId;
+}
+
+function renderContactMemoryDeleteConfirmation(
+  channel: "matrix" | "telegram",
+) {
+  const channelName = channel === "matrix" ? "Matrix" : "Telegram";
+  return `已完成：当前数字代表与当前 ${channelName} 渠道下的联系人记忆已立即停止召回，后台将异步清理对应长期记忆。代表经验和其他渠道的联系人记忆不受影响。`;
+}
+
+function renderContactMemorySharingDisclosure(challengeToken?: string) {
+  return [
+    "跨渠道联系人记忆只会共享给当前数字代表，并且只在已验证为同一 Delegate 用户的 Web、Matrix、Telegram 私聊之间使用。",
+    "系统不会把原始聊天、付款或余额、凭据、Owner 私有备注、Compute 原始产物写入长期记忆；每次召回仍会检查当前身份、策略和渠道授权。",
+    "你可以随时发送 !memory_unshare，立即停止共享记忆召回并异步清理远端投影；各渠道原始会话和渠道内记忆不受影响。",
+    challengeToken
+      ? `如果你同意，请在 10 分钟内发送：!memory_share confirm ${challengeToken}`
+      : "请重新发送 !memory_share 获取一次性确认令牌。",
+  ].join("\n\n");
+}
+
+function renderContactMemorySharingFailure(
+  code: ContactMemorySharingError["code"],
+) {
+  if (code === "contact_memory_sharing_policy_disabled") {
+    return "当前数字代表尚未开启跨渠道联系人记忆，授权未生效。";
+  }
+  if (code === "contact_memory_sharing_contract_mismatch") {
+    return `${renderContactMemorySharingDisclosure()}\n\n披露内容已经更新，请重新获取一次性确认令牌。`;
+  }
+  if (
+    code === "contact_memory_sharing_challenge_invalid"
+    || code === "contact_memory_sharing_challenge_expired"
+    || code === "contact_memory_sharing_challenge_consumed"
+  ) {
+    return "一次性确认令牌缺失、无效、已过期或已使用。请重新发送 !memory_share 阅读说明并获取新令牌。";
+  }
+  if (
+    code === "contact_memory_sharing_identity_ineligible"
+    || code === "contact_memory_sharing_source_unverified"
+  ) {
+    return "授权未生效：请先在当前代表的 Web 页面登录并把这个 Matrix 账号绑定到同一个 Delegate 用户。";
+  }
+  if (code === "contact_memory_sharing_representative_not_found") {
+    return "当前数字代表已不可用，跨渠道联系人记忆授权未变更。";
+  }
+  return "跨渠道联系人记忆状态刚刚发生变化，请重试命令。";
 }
 
 function isConversationHumanControlError(error: unknown): boolean {

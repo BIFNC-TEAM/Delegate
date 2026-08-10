@@ -153,11 +153,13 @@ export interface MemoryReconciliationRepository {
   ensureDueRun(input: {
     now: Date;
     intervalMilliseconds: number;
+    supportedProviderNames: readonly string[];
   }): Promise<boolean>;
   claimNext(input: {
     leaseToken: string;
     leaseMilliseconds: number;
     pageSize: number;
+    supportedProviderNames: readonly string[];
   }): Promise<MemoryReconciliationClaim | null>;
   completePage(input: {
     claim: MemoryReconciliationClaim;
@@ -175,6 +177,12 @@ export type MemoryReconciliationExecutionOptions = {
   resolveProvider?: (
     providerName: string,
   ) => MemoryReconciliationProvider | null | undefined;
+  /**
+   * Provider names this worker can resolve and is therefore allowed to
+   * schedule or claim. Defaults to the injected provider, or OpenViking when
+   * no provider is injected.
+   */
+  supportedProviderNames?: readonly string[];
   leaseMilliseconds?: number;
   pageSize?: number;
   maximumTargetAttempts?: number;
@@ -248,6 +256,9 @@ export async function runNextMemoryReconciliation(
   );
   const repository = options.repository
     ?? new PrismaMemoryReconciliationRepository(options.client ?? prisma);
+  const supportedProviderNames = resolveSupportedReconciliationProviderNames(
+    options,
+  );
   const now = options.now?.() ?? new Date();
   await repository.ensureDueRun({
     now,
@@ -255,11 +266,13 @@ export async function runNextMemoryReconciliation(
       options.reconciliationIntervalMilliseconds,
       defaultReconciliationIntervalMilliseconds,
     ),
+    supportedProviderNames,
   });
   const claim = await repository.claimNext({
     leaseToken: randomUUID(),
     leaseMilliseconds,
     pageSize,
+    supportedProviderNames,
   });
   if (!claim) return noWorkResult();
 
@@ -367,27 +380,33 @@ implements MemoryReconciliationRepository {
   async ensureDueRun(input: {
     now: Date;
     intervalMilliseconds: number;
+    supportedProviderNames: readonly string[];
   }) {
     const bucket = Math.floor(
       input.now.getTime() / input.intervalMilliseconds,
     );
     const idempotencyKey = `periodic:${bucket}`;
+    const supportedProviderSql = providerNameSqlList(
+      input.supportedProviderNames,
+    );
     const rows = await this.client.$queryRaw<Array<{ id: string }>>(Prisma.sql`
       WITH due_representative AS MATERIALIZED (
         SELECT policy."representativeId", policy."provider"
           FROM "RepresentativeMemoryPolicy" policy
-         WHERE EXISTS (
-           SELECT 1
-             FROM "MemoryProjectionItem" projection
-            WHERE projection."representativeId" = policy."representativeId"
-              AND projection."provider" = policy."provider"
-              AND projection."lane" = 'RECALL'::"MemoryProjectionLane"
-              AND projection."status" <> 'DELETED'::"MemoryProjectionStatus"
-         )
+         WHERE policy."provider" IN (${supportedProviderSql})
+           AND EXISTS (
+             SELECT 1
+               FROM "MemoryProjectionItem" projection
+              WHERE projection."representativeId" = policy."representativeId"
+                AND projection."provider" = policy."provider"
+                AND projection."lane" = 'RECALL'::"MemoryProjectionLane"
+                AND projection."status" <> 'DELETED'::"MemoryProjectionStatus"
+           )
            AND NOT EXISTS (
              SELECT 1
                FROM "MemoryReconciliationRun" active_run
               WHERE active_run."representativeId" = policy."representativeId"
+                AND active_run."provider" = policy."provider"
                 AND active_run."status" IN (
                   'QUEUED'::"MemoryReconciliationStatus",
                   'RUNNING'::"MemoryReconciliationStatus"
@@ -403,6 +422,7 @@ implements MemoryReconciliationRepository {
            SELECT MAX(previous_run."createdAt")
              FROM "MemoryReconciliationRun" previous_run
             WHERE previous_run."representativeId" = policy."representativeId"
+              AND previous_run."provider" = policy."provider"
          ) ASC NULLS FIRST,
          policy."representativeId" ASC
          FOR UPDATE OF policy SKIP LOCKED
@@ -439,7 +459,11 @@ implements MemoryReconciliationRepository {
     leaseToken: string;
     leaseMilliseconds: number;
     pageSize: number;
+    supportedProviderNames: readonly string[];
   }): Promise<MemoryReconciliationClaim | null> {
+    const supportedProviderSql = providerNameSqlList(
+      input.supportedProviderNames,
+    );
     return this.client.$transaction(async (tx) => {
       await recoverExpiredReconciliationLeases(tx);
       const runRows = await tx.$queryRaw<RunClaimRow[]>(Prisma.sql`
@@ -448,6 +472,7 @@ implements MemoryReconciliationRepository {
             FROM "MemoryReconciliationRun" run
            WHERE run."status" = 'QUEUED'::"MemoryReconciliationStatus"
              AND run."availableAt" <= CURRENT_TIMESTAMP
+             AND run."provider" IN (${supportedProviderSql})
            ORDER BY run."availableAt" ASC,
                     run."createdAt" ASC,
                     run."id" ASC
@@ -1516,6 +1541,48 @@ function resolveReconciliationProvider(
     accountId: "delegate",
     userId: "delegate-memory-bootstrap",
   }));
+}
+
+function resolveSupportedReconciliationProviderNames(
+  options: MemoryReconciliationExecutionOptions,
+) {
+  const providerNames = options.supportedProviderNames
+    ? [...options.supportedProviderNames]
+    : options.provider
+      ? []
+      : ["openviking"];
+  if (options.provider) providerNames.push(options.provider.name);
+  return normalizeSupportedProviderNames(providerNames);
+}
+
+function providerNameSqlList(providerNames: readonly string[]) {
+  return Prisma.join(
+    normalizeSupportedProviderNames(providerNames).map((providerName) =>
+      Prisma.sql`${providerName}`
+    ),
+  );
+}
+
+function normalizeSupportedProviderNames(providerNames: readonly string[]) {
+  const normalized = new Set<string>();
+  for (const providerName of providerNames) {
+    if (
+      typeof providerName !== "string"
+      || providerName.length === 0
+      || providerName !== providerName.trim()
+    ) {
+      throw new TypeError(
+        "Memory reconciliation provider capability names must be non-empty and trimmed.",
+      );
+    }
+    normalized.add(providerName);
+  }
+  if (normalized.size === 0) {
+    throw new TypeError(
+      "Memory reconciliation requires at least one supported provider capability.",
+    );
+  }
+  return [...normalized].sort();
 }
 
 function providerErrorStatus(error: unknown): number | null {

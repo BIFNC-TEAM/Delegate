@@ -6,6 +6,8 @@ import {
   buildGovernedMemoryManagedUserId,
   buildGovernedRepresentativeExperienceRootUri,
   buildGovernedRepresentativeExperienceVersionUri,
+  buildGovernedSharedContactMemoryRootUri,
+  buildGovernedSharedContactMemoryVersionUri,
   buildOpenVikingAgentId,
   buildRepresentativeKnowledgeDocuments,
   buildRepresentativeResourceRootUri,
@@ -15,7 +17,6 @@ import {
   OpenVikingRequestError,
   resolveOpenVikingEnv,
   sanitizePublicSafeText,
-  type OpenVikingCaptureMode,
   type OpenVikingDocumentSpec,
   type OpenVikingMatchedContext,
   type OpenVikingRecallItem,
@@ -23,14 +24,25 @@ import {
 import {
   EventType,
   KnowledgeAssetStatus,
+  MemoryPolicyDecisionOutcome,
   MemoryUseSourceKind,
   Prisma,
   PublicKnowledgeProjectionSourceKind,
+  RepresentativeChannelKind,
   type Representative,
 } from "@prisma/client";
 import { z } from "zod";
 
 import { prisma } from "./prisma";
+import { hasCurrentMemoryChannelDisclosureForMessage } from "./memory-disclosure";
+import { resolveContactMemorySharingEligibility } from "./memory-extraction";
+import { lockAndResolveExactMessageIdentityEvidence } from "./contact-memory-source-evidence";
+import {
+  isContactChannelMemorySourceAfterForgetBoundary,
+  loadLatestContactChannelMemoryForgetBoundary,
+  lockContactChannelMemoryCoordinate,
+} from "./memory-forget-boundary";
+import { lockContactSharedMemoryCoordinate } from "./memory-governance";
 import {
   failMemoryUseRun,
   markMemoryUseRunDegraded,
@@ -94,24 +106,6 @@ type PublishedResourceProjectionSpec = {
   citationTitle?: string;
 };
 
-const representativeOpenVikingArgs = Prisma.validator<Prisma.RepresentativeDefaultArgs>()({
-  include: {
-    activeVersion: true,
-  },
-});
-
-type RepresentativeOpenVikingRecord = Prisma.RepresentativeGetPayload<{
-  include: typeof representativeOpenVikingArgs.include;
-}>;
-
-const openVikingConfigSchema = z.object({
-  enabled: z.boolean(),
-  autoRecall: z.boolean(),
-  autoCapture: z.literal(false).optional().default(false),
-  recallLimit: z.number().int().min(1).max(20),
-  recallScoreThreshold: z.number().min(0).max(1),
-}).strict();
-
 const publishedKnowledgeDocumentSchema = z.object({
   title: z.string().trim().min(1),
   summary: z.string(),
@@ -160,299 +154,6 @@ const publishedRepresentativeSnapshotSchema = z.object({
     includesPriorityHandoff: z.boolean(),
   })),
 });
-
-export type RepresentativeOpenVikingConfigInput = z.input<typeof openVikingConfigSchema>;
-
-export type RepresentativeOpenVikingSnapshot = {
-  representativeSlug: string;
-  enabled: boolean;
-  agentId: string;
-  agentIdOverride?: string;
-  autoRecall: boolean;
-  autoCapture: boolean;
-  captureMode: OpenVikingCaptureMode;
-  recallLimit: number;
-  recallScoreThreshold: number;
-  targetUri: string;
-  resourceSyncEnabled: boolean;
-  modelCredentialsAvailable: boolean;
-  lastSyncAt?: string;
-  lastSyncStatus: string;
-  lastSyncItemCount: number;
-  lastSyncError?: string;
-  health: {
-    status: "healthy" | "degraded" | "disabled";
-    detail: string;
-    mode: "local" | "remote";
-    baseUrl: string;
-    consoleUrl?: string;
-  };
-  recentSyncJobs: Array<{
-    id: string;
-    status: string;
-    itemCount: number;
-    error?: string;
-    startedAt: string;
-    finishedAt?: string;
-  }>;
-  recentCommitTraces: Array<{
-    id: string;
-    sessionId: string;
-    sessionKey?: string;
-    reason: string;
-    status: string;
-    memoriesExtracted?: number;
-    createdAt: string;
-    error?: string;
-  }>;
-};
-
-export type RepresentativeOpenVikingMemoryPreview = {
-  id: string;
-  uri: string;
-  scope: string;
-  category: string;
-  summary: string;
-  sourceKind: string;
-  status: "ACTIVE" | "SUPPRESSED" | "DELETE_PENDING" | "DELETED" | "DELETE_FAILED";
-  suppressedAt?: string;
-  deletedAt?: string;
-  lastDeleteAttemptAt?: string;
-  deletionAttemptCount: number;
-  deletionError?: string;
-  createdAt: string;
-  contact?: {
-    id: string;
-    displayName: string;
-  };
-};
-
-export type RepresentativeOpenVikingOverviewMetrics = {
-  resourcesSynced: number;
-  memoriesCapturedToday: number;
-  sessionsCommittedToday: number;
-  recallsUsedToday: number;
-  syncFailures: number;
-  lastHealthCheckResult: string;
-};
-
-export async function getOpenVikingHealthSnapshot(): Promise<RepresentativeOpenVikingSnapshot["health"]> {
-  const env = resolveOpenVikingEnv();
-  if (!env.enabled) {
-    return {
-      status: "disabled",
-      detail: "OpenViking is disabled in this environment.",
-      mode: env.mode,
-      baseUrl: env.baseUrl,
-      ...(env.consoleUrl ? { consoleUrl: env.consoleUrl } : {}),
-    };
-  }
-
-  try {
-    const client = new OpenVikingClient({
-      baseUrl: env.baseUrl,
-      ...(env.apiKey ? { apiKey: env.apiKey } : {}),
-      timeoutMs: env.timeoutMs,
-      accountId: "delegate",
-      userId: "owner-dashboard",
-      agentId: "delegate-dashboard",
-    });
-    await client.health();
-
-    return {
-      status: "healthy",
-      detail: env.hasModelCredentials
-        ? "OpenViking API is reachable."
-        : "OpenViking API is reachable, but model credentials are not configured yet.",
-      mode: env.mode,
-      baseUrl: env.baseUrl,
-      ...(env.consoleUrl ? { consoleUrl: env.consoleUrl } : {}),
-    };
-  } catch (error) {
-    return {
-      status: "degraded",
-      detail:
-        error instanceof Error ? error.message : "OpenViking health check failed.",
-      mode: env.mode,
-      baseUrl: env.baseUrl,
-      ...(env.consoleUrl ? { consoleUrl: env.consoleUrl } : {}),
-    };
-  }
-}
-
-export async function getRepresentativeOpenVikingSnapshot(
-  representativeSlug: string,
-): Promise<RepresentativeOpenVikingSnapshot | null> {
-  const representative = await prisma.representative.findUnique({
-    where: { slug: representativeSlug },
-    ...representativeOpenVikingArgs,
-  });
-
-  if (!representative) {
-    return null;
-  }
-
-  const [health, recentSyncJobs, recentCommitTraces] = await Promise.all([
-    getOpenVikingHealthSnapshot(),
-    prisma.representativeContextSync.findMany({
-      where: { representativeId: representative.id },
-      orderBy: [{ createdAt: "desc" }],
-      take: 6,
-    }),
-    prisma.conversationCommitTrace.findMany({
-      where: { representativeId: representative.id },
-      orderBy: [{ createdAt: "desc" }],
-      take: 6,
-    }),
-  ]);
-
-  const defaults = resolveRepresentativeDefaults(representative);
-  const env = resolveOpenVikingEnv();
-
-  return {
-    representativeSlug: representative.slug,
-    enabled: representative.openvikingEnabled,
-    agentId: defaults.agentId,
-    ...(representative.openvikingAgentId ? { agentIdOverride: representative.openvikingAgentId } : {}),
-    autoRecall: representative.openvikingAutoRecall,
-    autoCapture: false,
-    captureMode: representative.openvikingCaptureMode as OpenVikingCaptureMode,
-    recallLimit: representative.openvikingRecallLimit,
-    recallScoreThreshold: representative.openvikingRecallScoreThreshold,
-    targetUri: defaults.targetUri,
-    resourceSyncEnabled: env.resourceSyncEnabled,
-    modelCredentialsAvailable: env.hasModelCredentials,
-    ...(representative.openvikingLastSyncAt
-      ? { lastSyncAt: representative.openvikingLastSyncAt.toISOString() }
-      : {}),
-    lastSyncStatus: representative.openvikingLastSyncStatus ?? "idle",
-    lastSyncItemCount: representative.openvikingLastSyncItemCount ?? 0,
-    ...(representative.openvikingLastSyncError
-      ? { lastSyncError: representative.openvikingLastSyncError }
-      : {}),
-    health,
-    recentSyncJobs: recentSyncJobs.map((job) => ({
-      id: job.id,
-      status: job.status,
-      itemCount: job.itemCount,
-      ...(job.error ? { error: job.error } : {}),
-      startedAt: job.startedAt.toISOString(),
-      ...(job.finishedAt ? { finishedAt: job.finishedAt.toISOString() } : {}),
-    })),
-    recentCommitTraces: recentCommitTraces.map((trace) => ({
-      id: trace.id,
-      sessionId: trace.sessionId,
-      ...(trace.sessionKey ? { sessionKey: trace.sessionKey } : {}),
-      reason: trace.reason,
-      status: trace.status,
-      ...(typeof trace.memoriesExtracted === "number"
-        ? { memoriesExtracted: trace.memoriesExtracted }
-        : {}),
-      createdAt: trace.createdAt.toISOString(),
-      ...(trace.error ? { error: trace.error } : {}),
-    })),
-  };
-}
-
-export async function updateRepresentativeOpenVikingConfig(params: {
-  representativeSlug: string;
-  input: RepresentativeOpenVikingConfigInput;
-  ownerId?: string;
-}): Promise<RepresentativeOpenVikingSnapshot> {
-  const input = openVikingConfigSchema.parse(params.input);
-
-  const representative = await prisma.representative.findUnique({
-    where: { slug: params.representativeSlug },
-    select: {
-      id: true,
-      slug: true,
-      activeVersionId: true,
-      openvikingEnabled: true,
-      openvikingAutoRecall: true,
-      openvikingAutoCapture: true,
-      openvikingRecallLimit: true,
-      openvikingRecallScoreThreshold: true,
-      openvikingTargetUri: true,
-      ownerId: true,
-    },
-  });
-
-  if (!representative) {
-    throw new Error(`Representative "${params.representativeSlug}" not found.`);
-  }
-
-  const targetUri = representative.activeVersionId
-    ? buildRepresentativeVersionResourceRootUri(
-        representative.slug,
-        representative.activeVersionId,
-      )
-    : null;
-  const fieldNames = [
-    ...(representative.openvikingEnabled !== input.enabled ? ["enabled"] : []),
-    ...(representative.openvikingAutoRecall !== input.autoRecall ? ["autoRecall"] : []),
-    ...(representative.openvikingAutoCapture ? ["autoCapture"] : []),
-    ...(representative.openvikingRecallLimit !== input.recallLimit ? ["recallLimit"] : []),
-    ...(representative.openvikingRecallScoreThreshold !== input.recallScoreThreshold
-      ? ["recallScoreThreshold"]
-      : []),
-    ...(representative.openvikingTargetUri !== targetUri ? ["targetUri"] : []),
-  ];
-
-  await prisma.$transaction([
-    prisma.representative.update({
-      where: { id: representative.id },
-      data: {
-        openvikingEnabled: input.enabled,
-        openvikingAutoRecall: input.autoRecall,
-        openvikingAutoCapture: false,
-        openvikingRecallLimit: input.recallLimit,
-        openvikingRecallScoreThreshold: input.recallScoreThreshold,
-        openvikingTargetUri: targetUri,
-      },
-    }),
-    prisma.eventAudit.create({
-      data: {
-        ...(params.ownerId === representative.ownerId
-          ? { ownerId: representative.ownerId }
-          : {}),
-        representativeId: representative.id,
-        type: EventType.OPENVIKING_CONFIG_CHANGED,
-        payload: {
-          status: fieldNames.length ? "updated" : "no_change",
-          fieldNames,
-        },
-      },
-    }),
-  ]);
-
-  const snapshot = await getRepresentativeOpenVikingSnapshot(params.representativeSlug);
-  if (!snapshot) {
-    throw new Error("Representative disappeared after updating OpenViking config.");
-  }
-
-  return snapshot;
-}
-
-export async function syncRepresentativeOpenVikingResources(params: {
-  representativeSlug: string;
-  trigger: RepresentativeOpenVikingSyncTrigger;
-  ownerId?: string;
-}): Promise<RepresentativeOpenVikingSnapshot> {
-  const syncJob = await enqueueRepresentativeOpenVikingSync({
-    representativeSlug: params.representativeSlug,
-    trigger: params.trigger,
-    ...(params.ownerId ? { ownerId: params.ownerId } : {}),
-  });
-  await processRepresentativeOpenVikingSyncJob({
-    jobId: syncJob.id,
-  });
-
-  const snapshot = await getRepresentativeOpenVikingSnapshot(params.representativeSlug);
-  if (!snapshot) {
-    throw new Error("Representative disappeared after OpenViking sync.");
-  }
-  return snapshot;
-}
 
 export async function enqueueRepresentativeOpenVikingSync(params: {
   representativeSlug: string;
@@ -1410,13 +1111,30 @@ const SAFE_RECALL_QUERIES = {
 type RecallQueryClassification =
   | { kind: "empty" }
   | { kind: "blocked" }
-  | { kind: "safe"; query: (typeof SAFE_RECALL_QUERIES)[keyof typeof SAFE_RECALL_QUERIES] };
+  | {
+      kind: "safe";
+      publicKnowledgeBaseQuery: string;
+      publicKnowledgeTopicQuery?: string;
+      governedMemoryQuery: (typeof SAFE_RECALL_QUERIES)[keyof typeof SAFE_RECALL_QUERIES];
+    };
+
+const SAFE_PUBLIC_KNOWLEDGE_QUERY_STOP_WORDS = new Set([
+  "a", "about", "an", "and", "are", "at", "be", "can", "could", "did",
+  "do", "does", "explain", "for", "from", "how", "i", "in", "is", "it",
+  "may", "me", "my", "of", "on", "or", "our", "please", "should", "tell",
+  "that", "the", "this", "to", "us", "was", "we", "were", "what", "when",
+  "where", "which", "who", "why", "will", "with", "would", "you", "your",
+  "一下", "为什么", "什么", "你", "你们", "告诉", "告诉我", "呢", "吗", "哪个",
+  "哪些", "如何", "帮", "帮我", "怎么", "我们", "我", "是否", "是", "有", "有没有",
+  "的", "能", "能否", "解释", "请", "请问", "说明", "关于", "可以", "您",
+]);
 
 /**
- * Convert untrusted audience text into a small, fixed semantic vocabulary.
- * OpenViking must never receive the original message, fragments of it, or
- * tokens derived from it: search infrastructure is outside the conversation
- * privacy boundary.
+ * Convert untrusted audience text into a sanitized published-knowledge query
+ * while keeping governed-memory retrieval on a small, fixed vocabulary.
+ * OpenViking never receives the original message. Dynamic topic terms are
+ * admitted later only when they also occur in an authorized published corpus;
+ * visitor-only text stays inside the conversation privacy boundary.
  */
 function classifyRecallQuery(rawQueryText: string): RecallQueryClassification {
   const queryText = rawQueryText.trim();
@@ -1424,28 +1142,113 @@ function classifyRecallQuery(rawQueryText: string): RecallQueryClassification {
   if (recallQueryContainsRestrictedData(queryText)) return { kind: "blocked" };
 
   const normalized = queryText.toLocaleLowerCase("en-US");
+  const topicQuery = buildSanitizedPublicKnowledgeQuery(queryText);
   if (/refund|cancel|cancellation|退款|退费|取消/u.test(normalized)) {
-    return { kind: "safe", query: SAFE_RECALL_QUERIES.refund };
+    return safeRecallQuery(SAFE_RECALL_QUERIES.refund, undefined, topicQuery);
   }
   if (/price|pricing|cost|quote|plan|多少钱|价格|报价|套餐|收费/u.test(normalized)) {
-    return { kind: "safe", query: SAFE_RECALL_QUERIES.pricing };
+    return safeRecallQuery(SAFE_RECALL_QUERIES.pricing, undefined, topicQuery);
   }
   if (/case stud|portfolio|material|guide|download|案例|作品|材料|资料|指南/u.test(normalized)) {
-    return { kind: "safe", query: SAFE_RECALL_QUERIES.materials };
+    return safeRecallQuery(SAFE_RECALL_QUERIES.materials, undefined, topicQuery);
   }
   if (/schedule|availability|appointment|meeting|calendar|时间|日程|预约|会议/u.test(normalized)) {
-    return { kind: "safe", query: SAFE_RECALL_QUERIES.scheduling };
+    return safeRecallQuery(SAFE_RECALL_QUERIES.scheduling, undefined, topicQuery);
   }
   if (/contact|collaborat|handoff|human|owner|联系|合作|人工|转接/u.test(normalized)) {
-    return { kind: "safe", query: SAFE_RECALL_QUERIES.contact };
+    return safeRecallQuery(SAFE_RECALL_QUERIES.contact, undefined, topicQuery);
   }
   if (/remember|preference|prefer|previous|last time|记得|偏好|上次|此前/u.test(normalized)) {
-    return { kind: "safe", query: SAFE_RECALL_QUERIES.preferences };
+    return safeRecallQuery(
+      SAFE_RECALL_QUERIES.general,
+      SAFE_RECALL_QUERIES.preferences,
+      topicQuery,
+    );
   }
   if (/who are|what do you|about you|service|representative|你是谁|做什么|服务|代表/u.test(normalized)) {
-    return { kind: "safe", query: SAFE_RECALL_QUERIES.identity };
+    return safeRecallQuery(SAFE_RECALL_QUERIES.identity, undefined, topicQuery);
   }
-  return { kind: "safe", query: SAFE_RECALL_QUERIES.general };
+  return safeRecallQuery(
+    SAFE_RECALL_QUERIES.general,
+    SAFE_RECALL_QUERIES.general,
+    topicQuery,
+  );
+}
+
+function safeRecallQuery(
+  publicKnowledgeBaseQuery: string,
+  governedMemoryQuery: (typeof SAFE_RECALL_QUERIES)[keyof typeof SAFE_RECALL_QUERIES]
+    = SAFE_RECALL_QUERIES.general,
+  publicKnowledgeTopicQuery?: string,
+): Extract<RecallQueryClassification, { kind: "safe" }> {
+  return {
+    kind: "safe",
+    publicKnowledgeBaseQuery,
+    ...(publicKnowledgeTopicQuery ? { publicKnowledgeTopicQuery } : {}),
+    governedMemoryQuery,
+  };
+}
+
+/**
+ * Preserve low-risk topic semantics for published-knowledge retrieval without
+ * forwarding the audience's original sentence. High-risk queries are blocked
+ * before this helper runs; this second layer removes question scaffolding,
+ * punctuation, identifier-like tokens, duplicates, and excess length.
+ */
+function buildSanitizedPublicKnowledgeQuery(queryText: string): string {
+  const normalized = queryText.normalize("NFKC");
+  const segmenter = new Intl.Segmenter(
+    /\p{Script=Han}/u.test(normalized) ? "zh-CN" : "en-US",
+    { granularity: "word" },
+  );
+  const uniqueTokens = new Set<string>();
+  for (const segment of segmenter.segment(normalized)) {
+    if (!segment.isWordLike) continue;
+    const token = segment.segment.toLocaleLowerCase("en-US").trim();
+    if (
+      !token
+      || token.length > 64
+      || SAFE_PUBLIC_KNOWLEDGE_QUERY_STOP_WORDS.has(token)
+      || /[_@]/u.test(token)
+      || /^\d{5,}$/u.test(token)
+      || /^[a-z]*\d[a-z\d-]{7,}$/iu.test(token)
+    ) continue;
+    uniqueTokens.add(token);
+    if (uniqueTokens.size >= 16) break;
+  }
+  const semanticTerms = [...uniqueTokens].join(" ").slice(0, 220).trim();
+  return semanticTerms
+    ? `published knowledge about ${semanticTerms}`
+    : SAFE_RECALL_QUERIES.general;
+}
+
+/**
+ * Dynamic topic terms may leave the conversation boundary only when the same
+ * normalized term already exists in an authorized, immutable published
+ * resource. This corpus-derived allowlist keeps visitor-only names, private
+ * project codes, health facts, and other arbitrary text out of OpenViking
+ * without reducing known product intents to a generic query.
+ */
+function authorizePublicKnowledgeQueryAgainstPublishedCorpus(params: {
+  baseQuery: string;
+  topicQuery?: string;
+  grants: ReadonlyMap<string, PublicKnowledgeRecallGrant>;
+}): string {
+  if (!params.topicQuery) return params.baseQuery;
+  const prefix = "published knowledge about ";
+  if (!params.topicQuery.startsWith(prefix)) return params.baseQuery;
+  const queryTerms = params.topicQuery.slice(prefix.length).split(/\s+/u).filter(Boolean);
+  const authorizedResources = [...params.grants.values()].map((grant) =>
+    `${grant.title}\n${grant.safeText}`.normalize("NFKC").toLocaleLowerCase("en-US")
+  );
+  const authorizedTerms = queryTerms.filter((term) =>
+    authorizedResources.some((resource) => resource.includes(term))
+  );
+  if (!authorizedTerms.length) return params.baseQuery;
+  const authorizedTopic = authorizedTerms.join(" ");
+  return params.baseQuery === SAFE_RECALL_QUERIES.general
+    ? `${prefix}${authorizedTopic}`
+    : `${params.baseQuery}; authorized published topic: ${authorizedTopic}`;
 }
 
 function recallQueryContainsRestrictedData(queryText: string): boolean {
@@ -1472,7 +1275,16 @@ function recallQueryContainsRestrictedData(queryText: string): boolean {
     /(?:^|[^\d])(?:\+?\d[\d\s().-]{7,}\d)(?:$|[^\d])/u,
     /\b\d{15}(?:\d{2}[\dXx])?\b/u,
     /\b\d{3}-?\d{2}-?\d{4}\b/u,
+    /\b(?:my|full)\s+name\s+is\s+[\p{L}][\p{L}\p{M}' -]{0,80}/iu,
+    /(?:我叫|我的名字是|姓名\s*[:：=]?)[\p{Script=Han}A-Za-z·]{1,40}/u,
     /(?:身份证|护照|社保号|住址|家庭地址|passport|social security|ssn|home address)\s*(?:[:：=]|\bis\b|是|为)\s*\S+/iu,
+
+    // Special-category personal data and private organizational context.
+    /\b(?:my\s+)?(?:diagnosis|medical\s+(?:history|record)|health\s+condition|disability\s+status|religion|religious\s+belief|race|ethnicity|political\s+(?:view|affiliation)|sexual\s+orientation|gender\s+identity|trade\s+union)\s*(?:is|are|:)/iu,
+    /\bi\s+(?:have\s+been|was)\s+diagnosed\s+with\b|\bi\s+(?:have|suffer\s+from|live\s+with)\s+(?:diabetes|cancer|hiv|aids|autism|epilepsy|depression|bipolar\s+disorder|multiple\s+sclerosis)\b/iu,
+    /(?:我的?)?(?:诊断|病历|病史|健康状况|残疾情况|宗教信仰|种族|民族|族裔|政治立场|党派归属|性取向|性别认同|工会归属)\s*(?:是|为|[:：])/u,
+    /我(?:患有|被诊断为|被确诊为)|我是(?:残疾人|残障人士|聋人|盲人|基督徒|穆斯林|共产党员|同性恋|双性恋|跨性别)/u,
+    /(?:trade\s+secret|commercial\s+secret|confidential|strictly\s+internal|under\s+nda|proprietary|internal\s+project|unpublished\s+project|project\s+codename|商业机密|商业秘密|保密信息|严格保密|仅限内部|内部机密|内部项目|未发布项目|项目代号)/iu,
 
     // Payment facts and monetary values are always read from the live system,
     // never searched in long-term memory. Generic pricing questions remain
@@ -1517,6 +1329,11 @@ export async function recallRepresentativeContext(params: {
     select: {
       id: true,
       activeEpisodeId: true,
+      generationRuns: {
+        where: { id: params.generationRunId },
+        take: 1,
+        select: { inputMessageId: true },
+      },
       representative: {
         select: {
           id: true,
@@ -1533,9 +1350,12 @@ export async function recallRepresentativeContext(params: {
     },
   });
   const representative = conversation?.representative;
+  const inputMessageId = conversation?.generationRuns?.[0]?.inputMessageId
+    ?? null;
   const env = resolveOpenVikingEnv();
   if (
     !conversation?.activeEpisodeId ||
+    (params.sourceChannel !== "web" && !inputMessageId) ||
     !representative ||
     representative.lifecycleState !== "PUBLISHED" ||
     !env.enabled ||
@@ -1587,15 +1407,83 @@ export async function recallRepresentativeContext(params: {
         publishedVersionId: pinnedVersion.id,
         snapshot: pinnedSnapshot.data,
       })
-    : {
+      : {
         publicKnowledgeGrantsByUri: new Map<string, PublicKnowledgeRecallGrant>(),
       };
-  const memoryAuthorization = await loadGovernedMemoryRecallAuthorization({
+  const governedAuthorizationInput = {
     representativeId: representative.id,
     contactId: params.contactId,
+    conversationId: conversation.id,
+    inputMessageId: inputMessageId ?? "web-request-bound-disclosure",
     sourceChannel: params.sourceChannel,
     allowedSourceKinds,
+  };
+  const preflightMemoryAuthorization = await prisma.$transaction((tx) =>
+    loadGovernedMemoryRecallAuthorization(governedAuthorizationInput, tx),
+  ).catch(() => emptyGovernedMemoryRecallAuthorization());
+  const hasPublicSearchLane = publicKnowledgeLaneEnabled
+    && publicAuthorization.publicKnowledgeGrantsByUri.size > 0;
+  const hasGovernedMemorySearchLane = Boolean(
+    preflightMemoryAuthorization.memoryManagedUserId
+    && preflightMemoryAuthorization.memorySearchConfig
+    && preflightMemoryAuthorization.memoryRoots.length > 0,
+  );
+  if (!hasPublicSearchLane && !hasGovernedMemorySearchLane) {
+    return { items: [], citations: [] };
+  }
+
+  let memoryUseRunId: string;
+  try {
+    const started = await startOrReuseMemoryUseRun({
+      generationRunId: params.generationRunId,
+      sourceChannel: params.sourceChannel,
+    });
+    if (
+      started.run.representativeId !== representative.id
+      || started.run.conversationId !== conversation.id
+      || started.run.contactId !== params.contactId
+      || started.run.representativeVersionId !== pinnedVersion.id
+    ) {
+      await failMemoryUseRun(started.run.id, "memory_ledger_failed")
+        .catch(() => undefined);
+      return { items: [], citations: [] };
+    }
+    memoryUseRunId = started.run.id;
+  } catch {
+    return { items: [], citations: [] };
+  }
+  if (recallQuery.kind === "blocked") {
+    try {
+      await markMemoryUseRunDegraded(
+        memoryUseRunId,
+        MEMORY_RECALL_QUERY_BLOCKED_REASON,
+      );
+    } catch {
+      await failMemoryUseRun(memoryUseRunId, "memory_ledger_failed")
+        .catch(() => undefined);
+      return { items: [], citations: [] };
+    }
+    return { items: [], citations: [], memoryUseRunId };
+  }
+
+  const publicKnowledgeQuery = recallQuery.kind === "safe"
+    ? authorizePublicKnowledgeQueryAgainstPublishedCorpus({
+        baseQuery: recallQuery.publicKnowledgeBaseQuery,
+        ...(recallQuery.publicKnowledgeTopicQuery
+          ? { topicQuery: recallQuery.publicKnowledgeTopicQuery }
+          : {}),
+        grants: publicAuthorization.publicKnowledgeGrantsByUri,
+      })
+    : SAFE_RECALL_QUERIES.general;
+  const governedMemoryRecall = await loadAndSearchGovernedMemoryRecall({
+    authorization: governedAuthorizationInput,
+    representative,
+    query:
+      recallQuery.kind === "safe"
+        ? recallQuery.governedMemoryQuery
+        : null,
   });
+  const memoryAuthorization = governedMemoryRecall.authorization;
   const authorization: RepresentativeRecallAuthorization = {
     ...(publicKnowledgeLaneEnabled
       ? {
@@ -1616,10 +1504,8 @@ export async function recallRepresentativeContext(params: {
       : {}),
   };
   const publicClient = publicKnowledgeLaneEnabled
+    && publicAuthorization.publicKnowledgeGrantsByUri.size > 0
     ? buildRepresentativeClient(representative)
-    : null;
-  const memoryClient = authorization.memoryManagedUserId
-    ? buildGovernedMemoryClient(representative, authorization.memoryManagedUserId)
     : null;
   const publicSearchConfig = {
     limit: representative.openvikingRecallLimit,
@@ -1628,9 +1514,12 @@ export async function recallRepresentativeContext(params: {
   const searchTargets: Array<{
     targetUri: string;
     lane: "PUBLIC_KNOWLEDGE" | "GOVERNED_MEMORY";
-    client: OpenVikingClient;
+    client: OpenVikingClient | null;
     limit: number;
     scoreThreshold: number;
+    precomputedResult?: PromiseSettledResult<
+      Awaited<ReturnType<OpenVikingClient["search"]>>
+    >;
   }> = [];
   if (publicClient) {
     searchTargets.push(...uniqueRecallRoots([
@@ -1643,57 +1532,40 @@ export async function recallRepresentativeContext(params: {
     })));
   }
   const memorySearchConfig = authorization.memorySearchConfig;
-  if (memoryClient && memorySearchConfig) {
+  if (authorization.memoryManagedUserId && memorySearchConfig) {
     searchTargets.push(...authorization.memoryRoots.map((targetUri) => ({
       targetUri,
       lane: "GOVERNED_MEMORY" as const,
-      client: memoryClient,
+      client: null,
+      precomputedResult:
+        governedMemoryRecall.resultsByRoot.get(targetUri)
+        ?? {
+          status: "rejected" as const,
+          reason: new Error("Governed memory search was not fenced."),
+        },
       ...memorySearchConfig,
     })));
   }
-  if (!searchTargets.length) return { items: [], citations: [] };
-  let memoryUseRunId: string;
-  try {
-    const started = await startOrReuseMemoryUseRun({
-      generationRunId: params.generationRunId,
-      sourceChannel: params.sourceChannel,
-    });
-    if (
-      started.run.representativeId !== representative.id
-      || started.run.conversationId !== conversation.id
-      || started.run.contactId !== params.contactId
-      || started.run.representativeVersionId !== pinnedVersion.id
-    ) {
-      await failMemoryUseRun(started.run.id, "memory_ledger_failed").catch(() => undefined);
-      return { items: [], citations: [] };
-    }
-    memoryUseRunId = started.run.id;
-  } catch {
-    // Recall is fail-closed when its authoritative use ledger cannot be
-    // started. The generation may continue without memory context.
-    return { items: [], citations: [] };
-  }
-  if (recallQuery.kind === "blocked") {
-    try {
-      // Keep the run open until generation finalization binds its output. A
-      // degradation reason on an open run naturally finalizes as DEGRADED.
-      await markMemoryUseRunDegraded(
-        memoryUseRunId,
-        MEMORY_RECALL_QUERY_BLOCKED_REASON,
-      );
-    } catch {
-      await failMemoryUseRun(memoryUseRunId, "memory_ledger_failed").catch(() => undefined);
-      return { items: [], citations: [] };
-    }
+  if (!searchTargets.length) {
     return { items: [], citations: [], memoryUseRunId };
   }
   const searchResults = await Promise.allSettled(
-    searchTargets.map((target) => target.client.search({
-      query: recallQuery.query,
-      targetUri: target.targetUri,
-      limit: target.limit,
-      scoreThreshold: target.scoreThreshold,
-    })),
+    searchTargets.map((target) => {
+      if (target.precomputedResult) {
+        return target.precomputedResult.status === "fulfilled"
+          ? Promise.resolve(target.precomputedResult.value)
+          : Promise.reject(target.precomputedResult.reason);
+      }
+      if (!target.client) {
+        return Promise.reject(new Error("Recall client is unavailable."));
+      }
+      return target.client.search({
+        query: publicKnowledgeQuery,
+        targetUri: target.targetUri,
+        limit: target.limit,
+        scoreThreshold: target.scoreThreshold,
+      });
+    }),
   );
   const rejectedSearchCount = searchResults.filter(
     (result) => result.status === "rejected",
@@ -1742,9 +1614,10 @@ export async function recallRepresentativeContext(params: {
   try {
     eligibleMemoryUseItems = await recordMemoryUseSearchHits({
       useRunId: memoryUseRunId,
-      hits: boundedAuditedCandidates.map(({ source }, index) => ({
+      hits: boundedAuditedCandidates.map(({ item, source }, index) => ({
         ...memoryUseSearchCoordinate(source),
         searchRank: index + 1,
+        ...(typeof item.score === "number" ? { searchScore: item.score } : {}),
       })),
       observedUnmappedCandidateCount,
     });
@@ -1784,6 +1657,7 @@ export async function recallRepresentativeContext(params: {
       activeEpisodeId: conversation.activeEpisodeId,
       representativeVersionId: pinnedVersion.id,
       sourceChannel: params.sourceChannel,
+      inputMessageId: inputMessageId ?? "web-request-bound-disclosure",
       allowedSourceKinds,
     });
   } catch {
@@ -1851,6 +1725,7 @@ async function revalidateRepresentativeRecallAuthorization(params: {
   conversationId: string;
   contactId: string;
   sourceChannel: RecallSourceChannel;
+  inputMessageId: string;
   activeEpisodeId: string;
   representativeVersionId: string;
   allowedSourceKinds: ReadonlySet<RepresentativeRecallSourceKind>;
@@ -1931,12 +1806,16 @@ async function revalidateRepresentativeRecallAuthorization(params: {
     : {
         publicKnowledgeGrantsByUri: new Map<string, PublicKnowledgeRecallGrant>(),
       };
-  const memoryAuthorization = await loadGovernedMemoryRecallAuthorization({
-    representativeId: conversation.representative.id,
-    contactId: params.contactId,
-    sourceChannel: params.sourceChannel,
-    allowedSourceKinds: params.allowedSourceKinds,
-  });
+  const memoryAuthorization = await prisma.$transaction((tx) =>
+    loadGovernedMemoryRecallAuthorization({
+      representativeId: conversation.representative.id,
+      contactId: params.contactId,
+      conversationId: conversation.id,
+      inputMessageId: params.inputMessageId,
+      sourceChannel: params.sourceChannel,
+      allowedSourceKinds: params.allowedSourceKinds,
+    }, tx),
+  );
   return {
     ...(publicKnowledgeLaneEnabled
       ? {
@@ -2094,26 +1973,82 @@ async function loadPublicKnowledgeRecallAuthorization(params: {
   }
 }
 
-async function loadGovernedMemoryRecallAuthorization(params: {
-  representativeId: string;
-  contactId: string;
-  sourceChannel: RecallSourceChannel;
-  allowedSourceKinds: ReadonlySet<RepresentativeRecallSourceKind>;
-}): Promise<Pick<
+async function loadAndSearchGovernedMemoryRecall(input: {
+  authorization: {
+    representativeId: string;
+    contactId: string;
+    conversationId: string;
+    inputMessageId: string;
+    sourceChannel: RecallSourceChannel;
+    allowedSourceKinds: ReadonlySet<RepresentativeRecallSourceKind>;
+  };
+  representative: Pick<Representative, "slug" | "openvikingAgentId">;
+  query: string | null;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const authorization = await loadGovernedMemoryRecallAuthorization(
+      input.authorization,
+      tx,
+    );
+    const resultsByRoot = new Map<
+      string,
+      PromiseSettledResult<Awaited<ReturnType<OpenVikingClient["search"]>>>
+    >();
+    if (
+      !input.query
+      || !authorization.memoryManagedUserId
+      || !authorization.memorySearchConfig
+    ) {
+      return { authorization, resultsByRoot };
+    }
+    const client = buildGovernedMemoryClient(
+      input.representative,
+      authorization.memoryManagedUserId,
+    );
+    const roots = authorization.memoryRoots;
+    const results = await Promise.allSettled(roots.map((targetUri) =>
+      client.search({
+        query: input.query!,
+        targetUri,
+        limit: authorization.memorySearchConfig!.limit,
+        scoreThreshold:
+          authorization.memorySearchConfig!.scoreThreshold,
+      }),
+    ));
+    roots.forEach((root, index) => {
+      const result = results[index];
+      if (result) resultsByRoot.set(root, result);
+    });
+    return { authorization, resultsByRoot };
+  }, {
+    isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+    maxWait: 5_000,
+    timeout: 30_000,
+  });
+}
+
+function emptyGovernedMemoryRecallAuthorization(): Pick<
   RepresentativeRecallAuthorization,
   "memoryManagedUserId" | "memoryRoots" | "memoryGrantsByUri" | "memorySearchConfig"
->> {
-  const empty = {
+> {
+  return {
     memoryRoots: [],
     memoryGrantsByUri: new Map<string, GovernedMemoryRecallGrant>(),
   };
-  // P0 supports governed long-term memory on Web only. Public knowledge is
-  // authorized independently above and remains available on every channel.
-  // Keep this runtime fence even though policy writes and PostgreSQL also
-  // reject the unsupported flags: an older database row must fail closed.
-  if (params.sourceChannel !== "web") {
-    return empty;
-  }
+}
+
+async function loadGovernedMemoryRecallAuthorization(params: {
+  representativeId: string;
+  contactId: string;
+  conversationId: string;
+  inputMessageId: string;
+  sourceChannel: RecallSourceChannel;
+  allowedSourceKinds: ReadonlySet<RepresentativeRecallSourceKind>;
+}, tx: Prisma.TransactionClient): Promise<Pick<
+  RepresentativeRecallAuthorization,
+  "memoryManagedUserId" | "memoryRoots" | "memoryGrantsByUri" | "memorySearchConfig"
+>> {
+  const empty = emptyGovernedMemoryRecallAuthorization();
   if (
     !params.allowedSourceKinds.has("CONTACT_MEMORY")
     && !params.allowedSourceKinds.has("REPRESENTATIVE_EXPERIENCE")
@@ -2122,23 +2057,81 @@ async function loadGovernedMemoryRecallAuthorization(params: {
   }
 
   try {
-    const policy = await prisma.representativeMemoryPolicy.findUnique({
-      where: { representativeId: params.representativeId },
-      select: {
-        namespaceKey: true,
-        longTermMemoryEnabled: true,
-        contactMemoryEnabled: true,
-        representativeExperienceEnabled: true,
-        webRecallEnabled: true,
-        provider: true,
-        recallLimit: true,
-        recallScoreThreshold: true,
+    const sourceChannel = toRepresentativeMemoryChannel(params.sourceChannel);
+    const sourceEvidence = await lockAndResolveExactMessageIdentityEvidence(
+      tx,
+      {
+        representativeId: params.representativeId,
+        contactId: params.contactId,
+        conversationId: params.conversationId,
+        messageId: params.inputMessageId,
+        sourceChannel,
       },
+    );
+    if (sourceEvidence) {
+      await lockContactSharedMemoryCoordinate(tx, {
+        representativeId: params.representativeId,
+        audienceIdentityId: sourceEvidence.canonicalAudienceIdentityId,
+      });
+    }
+    await lockContactChannelMemoryCoordinate(tx, {
+      representativeId: params.representativeId,
+      contactId: params.contactId,
+      sourceChannel,
     });
+    if (!await hasCurrentMemoryChannelDisclosureForMessage(tx, {
+      representativeId: params.representativeId,
+      contactId: params.contactId,
+      conversationId: params.conversationId,
+      messageId: params.inputMessageId,
+      channel: params.sourceChannel,
+      capability: "recall",
+    })) {
+      return empty;
+    }
+    const [policy, forgetBoundary] = await Promise.all([
+      tx.representativeMemoryPolicy.findUnique({
+        where: { representativeId: params.representativeId },
+        select: {
+          namespaceKey: true,
+          revision: true,
+          longTermMemoryEnabled: true,
+          contactMemoryEnabled: true,
+          contactMemoryCrossChannelEnabled: true,
+          representativeExperienceEnabled: true,
+          webRecallEnabled: true,
+          matrixRecallEnabled: true,
+          telegramRecallEnabled: true,
+          provider: true,
+          recallLimit: true,
+          recallScoreThreshold: true,
+        },
+      }),
+      loadLatestContactChannelMemoryForgetBoundary(tx, {
+        representativeId: params.representativeId,
+        contactId: params.contactId,
+        sourceChannel,
+      }),
+    ]);
+    const inputMessage = forgetBoundary
+      ? await tx.message.findFirst({
+          where: {
+            id: params.inputMessageId,
+            conversationId: params.conversationId,
+            senderType: "AUDIENCE",
+          },
+          select: { memoryIngressOrdinal: true },
+        })
+      : null;
+    const contactRecallAfterForget = !forgetBoundary || Boolean(
+      inputMessage?.memoryIngressOrdinal
+      && inputMessage.memoryIngressOrdinal
+        > forgetBoundary.cutoffMemoryIngressOrdinal
+    );
     if (
       !policy?.longTermMemoryEnabled
       || policy.provider !== "openviking"
-      || !policy.webRecallEnabled
+      || !recallEnabledForChannel(policy, params.sourceChannel)
       || !Number.isInteger(policy.recallLimit)
       || policy.recallLimit < 1
       || policy.recallLimit > 50
@@ -2155,12 +2148,40 @@ async function loadGovernedMemoryRecallAuthorization(params: {
     const allowExperience =
       params.allowedSourceKinds.has("REPRESENTATIVE_EXPERIENCE")
       && policy.representativeExperienceEnabled;
+    let sharedAudienceIdentityId: string | null = null;
+    if (allowContact && policy.contactMemoryCrossChannelEnabled) {
+      try {
+        const eligibility = await resolveContactMemorySharingEligibility(tx, {
+          representativeId: params.representativeId,
+          contactId: params.contactId,
+          policy,
+          sourceChannel,
+          sourceEvidence,
+        });
+        sharedAudienceIdentityId = eligibility.eligible
+          ? eligibility.audienceIdentityId
+          : null;
+      } catch {
+        // Shared admission is an independent fail-closed lane. An unavailable
+        // identity/consent lookup must not suppress already-authorized
+        // channel-local memory or deidentified representative experience.
+        sharedAudienceIdentityId = null;
+      }
+    }
     const scopeFilters: Prisma.GovernedMemoryWhereInput[] = [];
     if (allowContact) {
       scopeFilters.push({
         scope: "CONTACT_CHANNEL",
         contactId: params.contactId,
-        sourceChannel: toRepresentativeMemoryChannel(params.sourceChannel),
+        sourceChannel,
+      });
+    }
+    if (allowContact && sharedAudienceIdentityId) {
+      scopeFilters.push({
+        scope: "CONTACT_SHARED",
+        contactId: null,
+        audienceIdentityId: sharedAudienceIdentityId,
+        sourceChannel: null,
       });
     }
     if (allowExperience) {
@@ -2173,7 +2194,7 @@ async function loadGovernedMemoryRecallAuthorization(params: {
     if (!scopeFilters.length) return empty;
 
     const now = new Date();
-    const memories = await prisma.governedMemory.findMany({
+    const memories = await tx.governedMemory.findMany({
       where: {
         representativeId: params.representativeId,
         status: "ACTIVE",
@@ -2187,6 +2208,7 @@ async function loadGovernedMemoryRecallAuthorization(params: {
         representativeId: true,
         scope: true,
         contactId: true,
+        audienceIdentityId: true,
         sourceChannel: true,
         category: true,
         status: true,
@@ -2208,17 +2230,30 @@ async function loadGovernedMemoryRecallAuthorization(params: {
               select: {
                 representativeId: true,
                 contactId: true,
+                audienceIdentityId: true,
                 scope: true,
                 scopeChannel: true,
+                sourceKind: true,
                 status: true,
                 contentPurgedAt: true,
                 deidentifiedAt: true,
+                sourceMessage: {
+                  select: { memoryIngressOrdinal: true },
+                },
+                extractionRun: {
+                  select: { contactChannelMemoryEpoch: true },
+                },
+                policyDecision: {
+                  select: {
+                    representativeId: true,
+                    memoryId: true,
+                    resultVersionId: true,
+                    outcome: true,
+                    outputHash: true,
+                    policyRevision: true,
+                  },
+                },
               },
-            },
-            reviewDecisions: {
-              select: { id: true, representativeId: true, outcome: true },
-              orderBy: { createdAt: "desc" },
-              take: 1,
             },
             projectionItems: {
               where: {
@@ -2235,6 +2270,7 @@ async function loadGovernedMemoryRecallAuthorization(params: {
                 contentHash: true,
                 remoteUri: true,
                 projectedAt: true,
+                writeVerifiedAt: true,
                 deletedAt: true,
               },
             },
@@ -2251,6 +2287,12 @@ async function loadGovernedMemoryRecallAuthorization(params: {
         channel: params.sourceChannel,
       }));
     }
+    if (allowContact && sharedAudienceIdentityId) {
+      memoryRoots.push(buildGovernedSharedContactMemoryRootUri({
+        namespaceKey: policy.namespaceKey,
+        audienceIdentityId: sharedAudienceIdentityId,
+      }));
+    }
     if (allowExperience) {
       memoryRoots.push(buildGovernedRepresentativeExperienceRootUri(policy.namespaceKey));
     }
@@ -2258,6 +2300,23 @@ async function loadGovernedMemoryRecallAuthorization(params: {
     const memoryGrantsByUri = new Map<string, GovernedMemoryRecallGrant>();
     for (const memory of memories) {
       const version = memory.currentVersion;
+      const automaticDecision = version?.sourceCandidate?.policyDecision;
+      const hasValidAutomaticDecision = Boolean(
+        version
+        && automaticDecision
+        && automaticDecision.representativeId === params.representativeId
+        && automaticDecision.memoryId === memory.id
+        && automaticDecision.resultVersionId === version.id
+        && automaticDecision.outputHash === version.contentHash
+        && (
+          memory.scope !== "CONTACT_SHARED"
+          || automaticDecision.policyRevision === policy.revision
+        )
+        && (
+          automaticDecision.outcome === MemoryPolicyDecisionOutcome.ACTIVATED
+          || automaticDecision.outcome === MemoryPolicyDecisionOutcome.UPDATED
+        )
+      );
       if (
         memory.representativeId !== params.representativeId
         || memory.status !== "ACTIVE"
@@ -2268,11 +2327,11 @@ async function loadGovernedMemoryRecallAuthorization(params: {
         || memory.currentVersionId !== version.id
         || version.purgedAt
         || !version.safeText?.trim()
-        || version.reviewDecisions[0]?.outcome !== "APPROVED"
-        || version.reviewDecisions[0]?.representativeId !== params.representativeId
+        || !hasValidAutomaticDecision
         || (version.sourceCandidate
           && (
             version.sourceCandidate.representativeId !== params.representativeId
+            || version.sourceCandidate.sourceKind === "OWNER_VERIFIED_CORRECTION"
             || version.sourceCandidate.status !== "APPROVED"
             || version.sourceCandidate.contentPurgedAt !== null
           ))
@@ -2285,8 +2344,9 @@ async function loadGovernedMemoryRecallAuthorization(params: {
       if (memory.scope === "CONTACT_CHANNEL") {
         if (
           !allowContact
+          || !contactRecallAfterForget
           || memory.contactId !== params.contactId
-          || memory.sourceChannel !== toRepresentativeMemoryChannel(params.sourceChannel)
+          || memory.sourceChannel !== sourceChannel
           || version.scope !== "CONTACT_CHANNEL"
           || !memory.category.startsWith("CONTACT_")
           || (version.sourceCandidate
@@ -2294,7 +2354,18 @@ async function loadGovernedMemoryRecallAuthorization(params: {
               version.sourceCandidate.scope !== "CONTACT_CHANNEL"
               || version.sourceCandidate.contactId !== params.contactId
               || version.sourceCandidate.scopeChannel
-                !== toRepresentativeMemoryChannel(params.sourceChannel)
+                !== sourceChannel
+              || !isContactChannelMemorySourceAfterForgetBoundary(
+                forgetBoundary,
+                {
+                  contactChannelMemoryEpoch:
+                    version.sourceCandidate.extractionRun
+                      ?.contactChannelMemoryEpoch ?? 0,
+                  memoryIngressOrdinal:
+                    version.sourceCandidate.sourceMessage
+                      ?.memoryIngressOrdinal ?? null,
+                },
+              )
             ))
         ) {
           continue;
@@ -2304,6 +2375,33 @@ async function loadGovernedMemoryRecallAuthorization(params: {
           namespaceKey: policy.namespaceKey,
           contactId: params.contactId,
           channel: params.sourceChannel,
+          memoryId: memory.id,
+          memoryVersionId: version.id,
+        });
+      } else if (memory.scope === "CONTACT_SHARED") {
+        if (
+          !allowContact
+          || !sharedAudienceIdentityId
+          || memory.audienceIdentityId !== sharedAudienceIdentityId
+          || memory.contactId !== null
+          || memory.sourceChannel !== null
+          || version.scope !== "CONTACT_SHARED"
+          || !memory.category.startsWith("CONTACT_")
+          || !version.sourceCandidate
+          || version.sourceCandidate.scope !== "CONTACT_SHARED"
+          || version.sourceCandidate.contactId !== null
+          || version.sourceCandidate.scopeChannel !== null
+          || version.sourceCandidate.audienceIdentityId
+            !== sharedAudienceIdentityId
+          || version.sourceCandidate.policyDecision?.policyRevision
+            !== policy.revision
+        ) {
+          continue;
+        }
+        sourceKind = "CONTACT_MEMORY";
+        expectedUri = buildGovernedSharedContactMemoryVersionUri({
+          namespaceKey: policy.namespaceKey,
+          audienceIdentityId: sharedAudienceIdentityId,
           memoryId: memory.id,
           memoryVersionId: version.id,
         });
@@ -2344,6 +2442,7 @@ async function loadGovernedMemoryRecallAuthorization(params: {
           || projection.remoteUri !== expectedUri
           || projection.contentHash !== version.contentHash
           || !projection.projectedAt
+          || !projection.writeVerifiedAt
           || projection.deletedAt
         ) {
           continue;
@@ -2592,40 +2691,22 @@ function isRecallSourceChannel(channel: string): channel is RecallSourceChannel 
 }
 
 function toRepresentativeMemoryChannel(channel: RecallSourceChannel) {
-  if (channel === "web") return "WEB" as const;
-  if (channel === "matrix") return "MATRIX" as const;
-  return "TELEGRAM" as const;
+  if (channel === "web") return RepresentativeChannelKind.WEB;
+  if (channel === "matrix") return RepresentativeChannelKind.MATRIX;
+  return RepresentativeChannelKind.TELEGRAM;
 }
 
-export async function getRepresentativeOpenVikingRecallUsage(
-  representativeSlug: string,
-): Promise<{ today: number; total: number }> {
-  const representative = await prisma.representative.findUnique({
-    where: { slug: representativeSlug },
-    select: { id: true },
-  });
-
-  if (!representative) {
-    return { today: 0, total: 0 };
-  }
-
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-  const where = {
-    representativeId: representative.id,
-    injectedCount: { gt: 0 },
-  };
-  const [today, total] = await Promise.all([
-    prisma.memoryUseRun.count({
-      where: {
-        ...where,
-        createdAt: { gte: startOfToday },
-      },
-    }),
-    prisma.memoryUseRun.count({ where }),
-  ]);
-
-  return { today, total };
+function recallEnabledForChannel(
+  policy: {
+    webRecallEnabled: boolean;
+    matrixRecallEnabled: boolean;
+    telegramRecallEnabled: boolean;
+  },
+  channel: RecallSourceChannel,
+) {
+  if (channel === "web") return policy.webRecallEnabled;
+  if (channel === "matrix") return policy.matrixRecallEnabled;
+  return policy.telegramRecallEnabled;
 }
 
 export function resolveAllowedPublishedKnowledgeAssetIds(params: {
@@ -2672,233 +2753,6 @@ function resolveRecallTitle(content: string, uri: string) {
   if (heading) return sanitizePublicSafeText(heading, 160) || "Knowledge source";
   const fileName = uri.split("/").filter(Boolean).at(-1)?.replace(/\.md$/i, "");
   return sanitizePublicSafeText(fileName || "Knowledge source", 160) || "Knowledge source";
-}
-
-/** @deprecated Legacy OpenVikingMemoryRecord inventory for cleanup only. */
-export async function getRepresentativeOpenVikingMemoryPreview(
-  representativeSlug: string,
-): Promise<RepresentativeOpenVikingMemoryPreview[]> {
-  const representative = await prisma.representative.findUnique({
-    where: { slug: representativeSlug },
-    select: { id: true },
-  });
-
-  if (!representative) {
-    return [];
-  }
-
-  const memories = await prisma.openVikingMemoryRecord.findMany({
-    where: { representativeId: representative.id },
-    include: {
-      contact: true,
-    },
-    orderBy: [{ updatedAt: "desc" }],
-    take: 24,
-  });
-
-  return memories.map(serializeRepresentativeOpenVikingMemory);
-}
-
-/** @deprecated Legacy OpenVikingMemoryRecord suppression for cleanup only. */
-export async function suppressRepresentativeOpenVikingMemory(params: {
-  representativeSlug: string;
-  memoryId: string;
-  ownerId?: string;
-}): Promise<RepresentativeOpenVikingMemoryPreview | null> {
-  const memory = await findRepresentativeOpenVikingMemory(params);
-  if (!memory) {
-    return null;
-  }
-
-  if (memory.status === "ACTIVE") {
-    await prisma.$transaction(async (tx) => {
-      const changed = await tx.openVikingMemoryRecord.updateMany({
-        where: {
-          id: memory.id,
-          representativeId: memory.representativeId,
-          status: "ACTIVE",
-        },
-        data: {
-          status: "SUPPRESSED",
-          suppressedAt: new Date(),
-          deletionError: null,
-        },
-      });
-      if (changed.count > 0) {
-        await tx.eventAudit.create({
-          data: {
-            ...(params.ownerId === memory.representative.ownerId
-              ? { ownerId: memory.representative.ownerId }
-              : {}),
-            representativeId: memory.representativeId,
-            type: EventType.OPENVIKING_MEMORY_STATUS_CHANGED,
-            payload: {
-              memoryId: memory.id,
-              status: "SUPPRESSED",
-            },
-          },
-        });
-      }
-    });
-  }
-
-  return loadRepresentativeOpenVikingMemoryPreview(memory.id);
-}
-
-/** @deprecated Legacy OpenVikingMemoryRecord remote deletion for cleanup only. */
-export async function deleteRepresentativeOpenVikingMemory(params: {
-  representativeSlug: string;
-  memoryId: string;
-  ownerId?: string;
-}): Promise<RepresentativeOpenVikingMemoryPreview | null> {
-  const memory = await findRepresentativeOpenVikingMemory(params);
-  if (!memory) {
-    return null;
-  }
-  if (memory.status === "DELETED") {
-    return serializeRepresentativeOpenVikingMemory(memory);
-  }
-  const auditOwnerId =
-    params.ownerId === memory.representative.ownerId
-      ? memory.representative.ownerId
-      : undefined;
-  const deletionRequestedByOwnerId =
-    auditOwnerId ?? memory.deletionRequestedByOwnerId ?? undefined;
-
-  let expectedLastDeleteAttemptAt = memory.lastDeleteAttemptAt;
-  if (memory.status !== "DELETE_PENDING") {
-    const claimed = await prisma.$transaction(async (tx) => {
-      const result = await tx.openVikingMemoryRecord.updateMany({
-        where: {
-          id: memory.id,
-          representativeId: memory.representativeId,
-          status: {
-            in: ["ACTIVE", "SUPPRESSED", "DELETE_FAILED"],
-          },
-        },
-        data: {
-          status: "DELETE_PENDING",
-          summary: "",
-          suppressedAt: memory.suppressedAt ?? new Date(),
-          lastDeleteAttemptAt: null,
-          nextDeleteAttemptAt: null,
-          deletionError: null,
-          ...(auditOwnerId
-            ? { deletionRequestedByOwnerId: auditOwnerId }
-            : {}),
-        },
-      });
-      if (result.count > 0) {
-        await tx.eventAudit.create({
-          data: {
-            ...(auditOwnerId ? { ownerId: auditOwnerId } : {}),
-            representativeId: memory.representativeId,
-            type: EventType.OPENVIKING_MEMORY_STATUS_CHANGED,
-            payload: {
-              memoryId: memory.id,
-              status: "DELETE_PENDING",
-            },
-          },
-        });
-      }
-      return result;
-    });
-    if (claimed.count === 0) {
-      return loadRepresentativeOpenVikingMemoryPreview(memory.id);
-    }
-    expectedLastDeleteAttemptAt = null;
-  }
-
-  return attemptRepresentativeOpenVikingMemoryDeletion({
-    memoryId: memory.id,
-    representativeId: memory.representativeId,
-    representativeSlug: memory.representative.slug,
-    openvikingAgentId: memory.representative.openvikingAgentId,
-    uri: memory.uri,
-    expectedLastDeleteAttemptAt,
-    expectedDeletionAttemptCount: memory.deletionAttemptCount,
-    ...(deletionRequestedByOwnerId
-      ? { requestedByOwnerId: deletionRequestedByOwnerId }
-      : {}),
-  });
-}
-
-/** @deprecated Legacy OpenVikingMemoryRecord remote deletion retry for cleanup only. */
-export async function retryRepresentativeOpenVikingMemoryDeletion(params: {
-  representativeSlug: string;
-  memoryId: string;
-  ownerId?: string;
-}): Promise<RepresentativeOpenVikingMemoryPreview | null> {
-  const memory = await findRepresentativeOpenVikingMemory(params);
-  if (!memory) {
-    return null;
-  }
-  if (memory.status === "DELETED") {
-    return serializeRepresentativeOpenVikingMemory(memory);
-  }
-  if (memory.status !== "DELETE_FAILED" && memory.status !== "DELETE_PENDING") {
-    return serializeRepresentativeOpenVikingMemory(memory);
-  }
-  const auditOwnerId =
-    params.ownerId === memory.representative.ownerId
-      ? memory.representative.ownerId
-      : undefined;
-  const deletionRequestedByOwnerId =
-    auditOwnerId ?? memory.deletionRequestedByOwnerId ?? undefined;
-
-  let expectedLastDeleteAttemptAt = memory.lastDeleteAttemptAt;
-  if (memory.status === "DELETE_FAILED") {
-    const claimed = await prisma.$transaction(async (tx) => {
-      const result = await tx.openVikingMemoryRecord.updateMany({
-        where: {
-          id: memory.id,
-          representativeId: memory.representativeId,
-          status: "DELETE_FAILED",
-        },
-        data: {
-          status: "DELETE_PENDING",
-          summary: "",
-          lastDeleteAttemptAt: null,
-          nextDeleteAttemptAt: null,
-          deletionError: null,
-          ...(auditOwnerId
-            ? { deletionRequestedByOwnerId: auditOwnerId }
-            : {}),
-        },
-      });
-      if (result.count > 0) {
-        await tx.eventAudit.create({
-          data: {
-            ...(auditOwnerId ? { ownerId: auditOwnerId } : {}),
-            representativeId: memory.representativeId,
-            type: EventType.OPENVIKING_MEMORY_STATUS_CHANGED,
-            payload: {
-              memoryId: memory.id,
-              status: "DELETE_PENDING",
-            },
-          },
-        });
-      }
-      return result;
-    });
-    if (claimed.count === 0) {
-      return loadRepresentativeOpenVikingMemoryPreview(memory.id);
-    }
-    expectedLastDeleteAttemptAt = null;
-  }
-
-  return attemptRepresentativeOpenVikingMemoryDeletion({
-    memoryId: memory.id,
-    representativeId: memory.representativeId,
-    representativeSlug: memory.representative.slug,
-    openvikingAgentId: memory.representative.openvikingAgentId,
-    uri: memory.uri,
-    expectedLastDeleteAttemptAt,
-    expectedDeletionAttemptCount: memory.deletionAttemptCount,
-    ...(deletionRequestedByOwnerId
-      ? { requestedByOwnerId: deletionRequestedByOwnerId }
-      : {}),
-  });
 }
 
 /** @deprecated Legacy OpenVikingMemoryRecord recovery worker for cleanup only. */
@@ -2999,92 +2853,15 @@ export async function runOpenVikingMemoryDeletionRecoveryTick(options?: {
   return summary;
 }
 
-function serializeRepresentativeOpenVikingMemory(memory: {
-  id: string;
-  uri: string;
-  scope: string;
-  category: string;
-  summary: string;
-  sourceKind: string;
-  status: "ACTIVE" | "SUPPRESSED" | "DELETE_PENDING" | "DELETED" | "DELETE_FAILED";
-  suppressedAt: Date | null;
-  deletedAt: Date | null;
-  lastDeleteAttemptAt: Date | null;
-  deletionAttemptCount: number;
-  deletionError: string | null;
-  createdAt: Date;
-  contact: {
-    id: string;
-    displayName: string | null;
-    username: string | null;
-    telegramUserId: string | null;
-    channelUserId: string | null;
-  } | null;
-}): RepresentativeOpenVikingMemoryPreview {
-  return {
-    id: memory.id,
-    uri: memory.uri,
-    scope: memory.scope,
-    category: memory.category,
-    summary: memory.summary,
-    sourceKind: memory.sourceKind,
-    status: memory.status,
-    ...(memory.suppressedAt ? { suppressedAt: memory.suppressedAt.toISOString() } : {}),
-    ...(memory.deletedAt ? { deletedAt: memory.deletedAt.toISOString() } : {}),
-    ...(memory.lastDeleteAttemptAt
-      ? { lastDeleteAttemptAt: memory.lastDeleteAttemptAt.toISOString() }
-      : {}),
-    deletionAttemptCount: memory.deletionAttemptCount,
-    ...(memory.deletionError ? { deletionError: "REMOTE_DELETE_FAILED" } : {}),
-    createdAt: memory.createdAt.toISOString(),
-    ...(memory.contact
-      ? {
-          contact: {
-            id: memory.contact.id,
-            displayName:
-              memory.contact.displayName ??
-              memory.contact.username ??
-              memory.contact.telegramUserId ??
-              memory.contact.channelUserId ??
-              "Unknown audience",
-          },
-        }
-      : {}),
-  };
-}
-
-async function findRepresentativeOpenVikingMemory(params: {
-  representativeSlug: string;
-  memoryId: string;
-}) {
-  return prisma.openVikingMemoryRecord.findFirst({
-    where: {
-      id: params.memoryId,
-      representative: {
-        slug: params.representativeSlug,
-      },
-    },
-    include: {
-      contact: true,
-      representative: {
-        select: {
-          ownerId: true,
-          slug: true,
-          openvikingAgentId: true,
-        },
-      },
-    },
-  });
-}
-
-async function loadRepresentativeOpenVikingMemoryPreview(
+async function loadLegacyOpenVikingMemoryDeletionStatus(
   memoryId: string,
-): Promise<RepresentativeOpenVikingMemoryPreview | null> {
-  const memory = await prisma.openVikingMemoryRecord.findUnique({
+): Promise<{
+  status: "ACTIVE" | "SUPPRESSED" | "DELETE_PENDING" | "DELETED" | "DELETE_FAILED";
+} | null> {
+  return prisma.openVikingMemoryRecord.findUnique({
     where: { id: memoryId },
-    include: { contact: true },
+    select: { status: true },
   });
-  return memory ? serializeRepresentativeOpenVikingMemory(memory) : null;
 }
 
 async function attemptRepresentativeOpenVikingMemoryDeletion(params: {
@@ -3097,14 +2874,14 @@ async function attemptRepresentativeOpenVikingMemoryDeletion(params: {
   expectedDeletionAttemptCount: number;
   requestedByOwnerId?: string;
   now?: Date;
-}): Promise<RepresentativeOpenVikingMemoryPreview | null> {
+}): Promise<Awaited<ReturnType<typeof loadLegacyOpenVikingMemoryDeletionStatus>>> {
   const now = params.now ?? new Date();
   if (
     params.expectedLastDeleteAttemptAt &&
     now.getTime() - params.expectedLastDeleteAttemptAt.getTime()
       < OPENVIKING_MEMORY_DELETE_LEASE_MS
   ) {
-    return loadRepresentativeOpenVikingMemoryPreview(params.memoryId);
+    return loadLegacyOpenVikingMemoryDeletionStatus(params.memoryId);
   }
 
   const attemptAt = new Date(Math.max(
@@ -3131,7 +2908,7 @@ async function attemptRepresentativeOpenVikingMemoryDeletion(params: {
     },
   });
   if (claimed.count === 0) {
-    return loadRepresentativeOpenVikingMemoryPreview(params.memoryId);
+    return loadLegacyOpenVikingMemoryDeletionStatus(params.memoryId);
   }
 
   try {
@@ -3234,72 +3011,7 @@ async function attemptRepresentativeOpenVikingMemoryDeletion(params: {
     });
   }
 
-  return loadRepresentativeOpenVikingMemoryPreview(params.memoryId);
-}
-
-export async function getRepresentativeOpenVikingOverviewMetrics(
-  representativeSlug: string,
-): Promise<RepresentativeOpenVikingOverviewMetrics | null> {
-  const representative = await prisma.representative.findUnique({
-    where: { slug: representativeSlug },
-    select: {
-      id: true,
-      openvikingLastSyncItemCount: true,
-    },
-  });
-
-  if (!representative) {
-    return null;
-  }
-
-  const startOfToday = new Date();
-  startOfToday.setHours(0, 0, 0, 0);
-
-  const [memoriesCapturedToday, sessionsCommittedToday, recallsUsedToday, syncFailures, health] =
-    await Promise.all([
-      prisma.openVikingMemoryRecord.count({
-        where: {
-          representativeId: representative.id,
-          createdAt: {
-            gte: startOfToday,
-          },
-        },
-      }),
-      prisma.conversationCommitTrace.count({
-        where: {
-          representativeId: representative.id,
-          createdAt: {
-            gte: startOfToday,
-          },
-          status: "succeeded",
-        },
-      }),
-      prisma.memoryUseRun.count({
-        where: {
-          representativeId: representative.id,
-          injectedCount: { gt: 0 },
-          createdAt: {
-            gte: startOfToday,
-          },
-        },
-      }),
-      prisma.representativeContextSync.count({
-        where: {
-          representativeId: representative.id,
-          status: "failed",
-        },
-      }),
-      getOpenVikingHealthSnapshot(),
-    ]);
-
-  return {
-    resourcesSynced: representative.openvikingLastSyncItemCount ?? 0,
-    memoriesCapturedToday,
-    sessionsCommittedToday,
-    recallsUsedToday,
-    syncFailures,
-    lastHealthCheckResult: health.status,
-  };
+  return loadLegacyOpenVikingMemoryDeletionStatus(params.memoryId);
 }
 
 function resolveRepresentativeDefaults(representative: Pick<

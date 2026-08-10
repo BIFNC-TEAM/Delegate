@@ -3832,6 +3832,16 @@ button.skill-row:hover {
   font-size: 0.68rem;
 }
 
+.representative-answer-source-disclosure {
+  display: block;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--marketing-line);
+  color: var(--marketing-soft);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
 .representative-chat-citations details {
   border: 1px solid var(--marketing-line);
   border-radius: 7px;

@@ -53,6 +53,7 @@ type IdentityLinkConnectionProofRecord = {
 };
 
 type AudienceBindingClient = {
+  $queryRaw?<T = unknown>(query: Prisma.Sql): Promise<T>;
   $transaction?<T>(
     callback: (client: AudienceBindingClient) => Promise<T>,
     options?: { isolationLevel: Prisma.TransactionIsolationLevel },
@@ -930,7 +931,28 @@ async function replaceMatrixBindingWithinConnection(input: {
           || proof.assuranceLevel === IdentityAssuranceLevel.STEP_UP_VERIFIED
         ),
     );
+    const isLegacyConnection =
+      proofs.length === 0
+      && link.connectionId?.trim().toLowerCase() === input.connectionId;
+    if (matchingProofs.length === 0 && !isLegacyConnection) {
+      continue;
+    }
+
+    // Exact-evidence readers always lock the parent link before its proof.
+    // Mutations must use the same order or a reader holding LINK SHARE while
+    // waiting for PROOF SHARE can deadlock with a writer holding PROOF UPDATE
+    // while waiting to revoke the parent link.
+    if (!await lockIdentityLinkForMutationIfAvailable(tx, link.id)) {
+      continue;
+    }
     for (const proof of matchingProofs) {
+      if (!await lockIdentityConnectionProofForMutationIfAvailable(tx, {
+        identityLinkId: link.id,
+        issuer: proof.issuer,
+        connectionId: proof.connectionId,
+      })) {
+        continue;
+      }
       await tx.identityLinkConnectionProof.updateMany({
         where: {
           identityLinkId: link.id,
@@ -940,13 +962,6 @@ async function replaceMatrixBindingWithinConnection(input: {
         },
         data: { revokedAt: input.now },
       });
-    }
-
-    const isLegacyConnection =
-      proofs.length === 0
-      && link.connectionId?.trim().toLowerCase() === input.connectionId;
-    if (matchingProofs.length === 0 && !isLegacyConnection) {
-      continue;
     }
 
     const activeProofCount = await tx.identityLinkConnectionProof.count({
@@ -1038,7 +1053,34 @@ export async function revokePrivateChannelIdentityBinding(
       data: { revokedAt: now },
     });
 
-    const link = await tx.identityLink.findUnique({
+    let link = await tx.identityLink.findUnique({
+      where: {
+        provider_providerSubject: {
+          provider: input.provider,
+          providerSubject,
+        },
+      },
+      select: {
+        id: true,
+        audienceIdentityId: true,
+        issuer: true,
+        connectionId: true,
+        revokedAt: true,
+      },
+    });
+    if (
+      !link
+      || link.audienceIdentityId !== audienceIdentityId
+      || normalizeIssuer(input.provider, link.issuer) !== issuer
+    ) {
+      return { binding, changed: false };
+    }
+    if (!await lockIdentityLinkForMutationIfAvailable(tx, link.id)) {
+      return { binding, changed: false };
+    }
+    // Re-read after acquiring LINK UPDATE so a concurrent rebind cannot make
+    // the pre-lock snapshot authoritative for this unlink attempt.
+    link = await tx.identityLink.findUnique({
       where: {
         provider_providerSubject: {
           provider: input.provider,
@@ -1063,6 +1105,12 @@ export async function revokePrivateChannelIdentityBinding(
 
     let changed = false;
     if (tx.identityLinkConnectionProof) {
+      const proofLocked =
+        await lockIdentityConnectionProofForMutationIfAvailable(tx, {
+          identityLinkId: link.id,
+          issuer,
+          connectionId,
+        });
       const proof = await tx.identityLinkConnectionProof.findUnique({
         where: {
           identityLinkId_issuer_connectionId: {
@@ -1075,11 +1123,11 @@ export async function revokePrivateChannelIdentityBinding(
       const isLegacyConnection =
         !proof
         && link.connectionId?.trim().toLowerCase() === connectionId;
-      if (!proof && !isLegacyConnection) {
+      if ((!proof || !proofLocked) && !isLegacyConnection) {
         return { binding, changed: false };
       }
 
-      if (proof) {
+      if (proof && proofLocked) {
         const revoked = await tx.identityLinkConnectionProof.updateMany({
           where: {
             identityLinkId: link.id,
@@ -1141,6 +1189,40 @@ export async function revokePrivateChannelIdentityBinding(
 
 export function hashBindingToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+async function lockIdentityLinkForMutationIfAvailable(
+  client: AudienceBindingClient,
+  identityLinkId: string,
+): Promise<boolean> {
+  if (typeof client.$queryRaw !== "function") return true;
+  const rows = await client.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT "id"
+    FROM "IdentityLink"
+    WHERE "id" = ${identityLinkId}
+    FOR UPDATE
+  `);
+  return rows.length === 1;
+}
+
+async function lockIdentityConnectionProofForMutationIfAvailable(
+  client: AudienceBindingClient,
+  input: {
+    identityLinkId: string;
+    issuer: string;
+    connectionId: string;
+  },
+): Promise<boolean> {
+  if (typeof client.$queryRaw !== "function") return true;
+  const rows = await client.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT "id"
+    FROM "IdentityLinkConnectionProof"
+    WHERE "identityLinkId" = ${input.identityLinkId}
+      AND "issuer" = ${input.issuer}
+      AND "connectionId" = ${input.connectionId}
+    FOR UPDATE
+  `);
+  return rows.length === 1;
 }
 
 async function lockMatrixAudienceConnectionScopeIfAvailable(

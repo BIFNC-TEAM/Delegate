@@ -20,7 +20,7 @@ Delegate already has a real durable workflow backbone:
 - a local runner processes due jobs
 - a Temporal bridge and worker entrypoint already exist in `apps/workflow-runner/src/temporal-bridge.ts` and `apps/workflow-runner/src/temporal/workflows.ts`
 
-Temporal-native waiting from creation time is implemented for the timer workflow kinds, and the same outbox/runner boundary now also supports creator training review.
+Temporal-native waiting from creation time is implemented for the timer workflow kinds. Historical creator-training workflow rows are drained as retired work and cannot mutate Knowledge Library drafts.
 
 Today, the Temporal path is:
 
@@ -56,13 +56,14 @@ Relevant code:
 
 ### Durable workflows actually implemented today
 
-There are currently three real durable workflow kinds in the schema:
+There are currently two active durable workflow kinds:
 
 - `APPROVAL_EXPIRATION`
 - `HANDOFF_FOLLOW_UP`
-- `CREATOR_TRAINING_REVIEW`
 
-See `prisma/schema.prisma`.
+The historical `CREATOR_TRAINING_REVIEW` schema value is retained only so
+already-durable rows can be completed as retired work; no new product flow may
+enqueue it. See `prisma/schema.prisma`.
 
 ### Current Temporal integration
 
@@ -512,7 +513,7 @@ That heuristic is approval-specific operational logic, not the generic workflow 
 
 - landed this RFC
 - updated stale docs that claimed Temporal was absent
-- clarified in docs that Delegate has a Temporal bridge, outbox dispatch, native durable timers, cancellation cleanup, and creator training review workflow support
+- clarified in docs that Delegate has a Temporal bridge, outbox dispatch, native durable timers, and cancellation cleanup
 
 ### Phase 1: Outbox-backed Temporal start
 

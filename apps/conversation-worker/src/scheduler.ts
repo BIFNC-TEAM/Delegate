@@ -15,6 +15,7 @@ type ScheduleHandle = ReturnType<typeof setTimeout>;
 export const conversationWorkerLaneNames = [
   "conversation",
   "memoryExtraction",
+  "memoryLifecycle",
   "projectionWrite",
   "projectionDelete",
   "cleanup",
@@ -56,6 +57,7 @@ export type ConversationWorkerLaneWorkResult =
     };
 
 type MemoryWorkerExports = {
+  runNextMemoryLifecycle?: () => Promise<ConversationWorkerLaneWorkResult>;
   runNextMemoryProjectionWrite?: () => Promise<ConversationWorkerLaneWorkResult>;
   runNextMemoryProjectionDeletion?: () => Promise<ConversationWorkerLaneWorkResult>;
   runNextMemoryDeletionCleanup?: () => Promise<ConversationWorkerLaneWorkResult>;
@@ -69,6 +71,7 @@ export type ConversationWorkerSchedulerDependencies = {
     config: ConversationWorkerConfig,
   ) => Promise<ConversationWorkResult>;
   processMemoryExtraction?: () => Promise<ConversationWorkerLaneWorkResult>;
+  processMemoryLifecycle?: () => Promise<ConversationWorkerLaneWorkResult>;
   /** @deprecated Use processMemoryExtraction. */
   processMemory?: () => Promise<ConversationWorkerLaneWorkResult>;
   processProjectionWrite?: () => Promise<ConversationWorkerLaneWorkResult>;
@@ -109,6 +112,7 @@ const failedWorkStatuses = new Set([
 const laneErrorCodes: Record<ConversationWorkerLaneName, string> = {
   conversation: "conversation_worker_tick_failed",
   memoryExtraction: "memory_extraction_tick_failed",
+  memoryLifecycle: "memory_lifecycle_tick_failed",
   projectionWrite: "memory_projection_write_tick_failed",
   projectionDelete: "memory_projection_delete_tick_failed",
   cleanup: "memory_cleanup_tick_failed",
@@ -135,6 +139,8 @@ export function startConversationWorkerLoops(
   const processMemoryExtraction = dependencies.processMemoryExtraction
     ?? dependencies.processMemory
     ?? (() => webData.processNextMemoryExtractionWork());
+  const processMemoryLifecycle = dependencies.processMemoryLifecycle
+    ?? (() => invokeMemoryWorker("runNextMemoryLifecycle"));
   const processProjectionWrite = dependencies.processProjectionWrite
     ?? (() => invokeMemoryWorker("runNextMemoryProjectionWrite"));
   const processProjectionDelete = dependencies.processProjectionDelete
@@ -162,6 +168,17 @@ export function startConversationWorkerLoops(
       state: state.memoryExtraction,
       pollMs: config.pollMs,
       tick: processMemoryExtraction,
+      schedule,
+      clearSchedule,
+      now,
+      isStopped: () => stopped,
+    }),
+    startLane({
+      name: "memoryLifecycle",
+      state: state.memoryLifecycle,
+      pollMs: config.memoryLifecyclePollMs
+        ?? conversationWorkerMemoryLoopDefaults.memoryLifecyclePollMs,
+      tick: processMemoryLifecycle,
       schedule,
       clearSchedule,
       now,
@@ -361,6 +378,7 @@ function createSchedulerSnapshot(): ConversationWorkerSchedulerSnapshot {
   return {
     conversation: emptyLaneState(),
     memoryExtraction: emptyLaneState(),
+    memoryLifecycle: emptyLaneState(),
     projectionWrite: emptyLaneState(),
     projectionDelete: emptyLaneState(),
     cleanup: emptyLaneState(),
@@ -396,6 +414,7 @@ function cloneSchedulerSnapshot(
   return {
     conversation: { ...state.conversation },
     memoryExtraction: { ...state.memoryExtraction },
+    memoryLifecycle: { ...state.memoryLifecycle },
     projectionWrite: { ...state.projectionWrite },
     projectionDelete: { ...state.projectionDelete },
     cleanup: { ...state.cleanup },

@@ -89,6 +89,7 @@ export type RepresentativeReplyInput = {
 export type RepresentativeReplyPrompt = {
   instructions: string;
   input: string;
+  responseFormat?: "json_object";
 };
 
 export type RepresentativeReplyContextTrace = {

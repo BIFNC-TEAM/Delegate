@@ -144,6 +144,9 @@ export async function POST(
           conversationId: conversation.id,
           text: body.message,
           senderId: principal.audienceId,
+          ...(principal.sourceIdentityLinkId
+            ? { sourceIdentityLinkId: principal.sourceIdentityLinkId }
+            : {}),
           senderDisplayName:
             contact.displayName || contact.username || "Web visitor",
           clientMessageId,
@@ -224,6 +227,7 @@ export async function POST(
     });
     const subagent = resolveConversationSubagent(plan);
     let replyText = renderReplyPreview(representative, plan);
+    let sourceDisclosure: "general_model" | undefined;
     if (plan.nextStep === "answer") {
       const generated = await generateRepresentativeReply({
         representative,
@@ -234,11 +238,18 @@ export async function POST(
         recentTurns: [],
         collectorState: null,
       });
-      if (generated.ok) replyText = generated.replyText;
+      if (generated.ok) {
+        replyText = generated.replyText;
+        sourceDisclosure = "general_model";
+      }
     }
     const response = NextResponse.json({
       status: "completed",
-      reply: { role: "assistant", text: replyText },
+      reply: {
+        role: "assistant",
+        text: replyText,
+        ...(sourceDisclosure ? { sourceDisclosure } : {}),
+      },
       tier: resolvePublicChatTier(usage),
       usage,
     });

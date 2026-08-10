@@ -271,6 +271,7 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
   input: {
     representativeId: string;
     representativeMatrixUserId: string;
+    expectedEndpointLifecycleRevision?: number;
     room?: {
       roomId: string;
       conversationId: string;
@@ -288,6 +289,7 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
       executed: false;
       reason:
         | "matrix_channel_not_active"
+        | "matrix_channel_lifecycle_changed"
         | "matrix_room_not_active"
         | "matrix_audience_connection_not_verified";
     }
@@ -311,6 +313,7 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
           externalUserId: true,
           connectionId: true,
           endpointAssignmentRevision: true,
+          endpointLifecycleRevision: true,
           healthStatus: true,
           id: true,
           status: true,
@@ -377,6 +380,20 @@ export async function withActiveMatrixRepresentativeChannelFence<T>(
       return {
         executed: false,
         reason: "matrix_channel_not_active",
+      } as const;
+    }
+    if (
+      input.expectedEndpointLifecycleRevision !== undefined
+      && (
+        !Number.isSafeInteger(input.expectedEndpointLifecycleRevision)
+        || input.expectedEndpointLifecycleRevision <= 0
+        || binding.endpointLifecycleRevision
+          !== input.expectedEndpointLifecycleRevision
+      )
+    ) {
+      return {
+        executed: false,
+        reason: "matrix_channel_lifecycle_changed",
       } as const;
     }
     if (input.room) {

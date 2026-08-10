@@ -1,6 +1,9 @@
 import type { PlanTier } from "@delegate/domain";
 import type { ModelRuntimeRecentTurn } from "@delegate/model-runtime";
-import type { PublicGovernedMemoryDisclosure } from "@delegate/web-data";
+import type {
+  PublicGovernedMemoryDisclosure,
+  PublicWebAnswerSourceDisclosure,
+} from "@delegate/web-data";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 
 import {
@@ -23,6 +26,7 @@ export type PublicChatResponse = {
   reply: {
     role: "assistant";
     text: string;
+    sourceDisclosure?: PublicWebAnswerSourceDisclosure;
   };
   plan: {
     intent: string;
@@ -47,6 +51,78 @@ export type PublicChatResponse = {
     fallbackReason?: string;
   };
 };
+
+export type PublicChatSubmissionRejection =
+  | "memory_disclosure_stale"
+  | "service_credit_required"
+  | "failed";
+
+export function resolvePublicChatSubmissionRejection(input: {
+  status: number;
+  code?: string | undefined;
+}): PublicChatSubmissionRejection {
+  if (input.status === 409 && input.code === "memory_disclosure_stale") {
+    return "memory_disclosure_stale";
+  }
+  if (input.status === 402 && input.code === "service_credit_required") {
+    return "service_credit_required";
+  }
+  return "failed";
+}
+
+export function removeRejectedPublicChatOptimisticMessage<
+  TMessage extends { id: string },
+>(messages: readonly TMessage[], rejectedMessageId: string): TMessage[] {
+  return messages.filter((message) => message.id !== rejectedMessageId);
+}
+
+export function restoreRejectedPublicChatDraft(input: {
+  currentDraft: string;
+  submittedText: string;
+}): string {
+  return input.currentDraft.length > 0
+    ? input.currentDraft
+    : input.submittedText;
+}
+
+export type PublicChatServiceCreditNextStep =
+  | "pending"
+  | "purchase"
+  | "handoff"
+  | "unavailable";
+
+export function resolvePublicChatServiceCreditNextStep(input: {
+  serviceCreditsAvailable: number;
+  serviceCreditsReserved: number;
+  purchaseEnabled: boolean;
+  humanInLoop: boolean;
+}): PublicChatServiceCreditNextStep {
+  if (
+    input.serviceCreditsAvailable > 0
+    || input.serviceCreditsReserved > 0
+  ) {
+    return "pending";
+  }
+  if (input.purchaseEnabled) return "purchase";
+  if (input.humanInLoop) return "handoff";
+  return "unavailable";
+}
+
+export type PublicChatServiceCreditPendingTransition =
+  | "available"
+  | "released"
+  | null;
+
+export function resolvePublicChatServiceCreditPendingTransition(input: {
+  previousReserved: number;
+  serviceCreditsAvailable: number;
+  serviceCreditsReserved: number;
+}): PublicChatServiceCreditPendingTransition {
+  if (input.previousReserved <= 0 || input.serviceCreditsReserved > 0) {
+    return null;
+  }
+  return input.serviceCreditsAvailable > 0 ? "available" : "released";
+}
 
 export type PublicChatSessionState = {
   audienceId: string;

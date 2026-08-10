@@ -394,6 +394,103 @@ describe("conversation human control and message-edit fencing", () => {
     );
   });
 
+  it("claims the Telegram update-id watermark in the same write transaction", async () => {
+    mockEditableMessage(processingRun, "NEEDS_HUMAN");
+
+    const result = await editConversationMessage({
+      representativeSlug: "representative",
+      conversationId,
+      messageId: inputMessageId,
+      text: "newest Telegram request",
+      editedBy: "telegram:123456",
+      telegramGuard: {
+        connectionId: "777000",
+        chatId: "123456",
+        senderId: "123456",
+        externalMessageId: "77",
+        updateId: 43,
+        editedAt: "2026-08-06T12:01:00.000Z",
+      },
+    });
+
+    expect(result.providerEditStatus).toBe("applied");
+    const watermarkClaim = mocks.tx.message.updateMany.mock.calls.find(
+      ([args]) => args?.data?.telegramLastEditUpdateId === 43n,
+    );
+    expect(watermarkClaim?.[0]).toEqual({
+      where: {
+        id: inputMessageId,
+        conversationId,
+        OR: [
+          {
+            telegramLastEditAt: null,
+            telegramLastEditUpdateId: null,
+          },
+          { telegramLastEditUpdateId: { lt: 43n } },
+        ],
+      },
+      data: {
+        telegramLastEditAt: new Date("2026-08-06T12:01:00.000Z"),
+        telegramLastEditUpdateId: 43n,
+      },
+    });
+    expect(mocks.prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(mocks.tx.messageRevision.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not allow a delayed older Telegram update to overwrite the body", async () => {
+    mockEditableMessage(processingRun, "NEEDS_HUMAN");
+    mocks.tx.message.updateMany.mockImplementation(async ({ data }) =>
+      data.telegramLastEditUpdateId === 42n ? { count: 0 } : { count: 1 }
+    );
+
+    const result = await editConversationMessage({
+      representativeSlug: "representative",
+      conversationId,
+      messageId: inputMessageId,
+      text: "older Telegram request",
+      editedBy: "telegram:123456",
+      telegramGuard: {
+        connectionId: "777000",
+        chatId: "123456",
+        senderId: "123456",
+        externalMessageId: "77",
+        updateId: 42,
+        editedAt: "2026-08-06T12:02:00.000Z",
+      },
+    });
+
+    expect(result).toMatchObject({
+      action: "update_only",
+      providerEditStatus: "superseded",
+    });
+    expect(mocks.tx.messageRevision.create).not.toHaveBeenCalled();
+    expect(mocks.tx.message.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects a Telegram edit whose complete provider scope does not match", async () => {
+    mockEditableMessage(processingRun, "NEEDS_HUMAN");
+
+    await expect(editConversationMessage({
+      representativeSlug: "representative",
+      conversationId,
+      messageId: inputMessageId,
+      text: "cross-chat edit",
+      editedBy: "telegram:123456",
+      telegramGuard: {
+        connectionId: "777000",
+        chatId: "different-chat",
+        senderId: "123456",
+        externalMessageId: "77",
+        updateId: 44,
+        editedAt: "2026-08-06T12:03:00.000Z",
+      },
+    })).rejects.toThrow("Telegram message edit scope is invalid.");
+
+    expect(mocks.tx.message.updateMany).not.toHaveBeenCalled();
+    expect(mocks.tx.messageRevision.create).not.toHaveBeenCalled();
+  });
+
   it("does not reinterpret a delegated task authorization as a normal message edit", async () => {
     mockEditableMessage({
       ...processingRun,
@@ -512,7 +609,15 @@ function mockEditableMessage(
     conversationId,
     episodeId,
     text: "original request",
+    senderType: "AUDIENCE",
+    senderId: "123456",
+    externalMessageId: "77",
     redactedAt: null,
+    channelBinding: {
+      kind: "TELEGRAM",
+      connectionId: "777000",
+      externalConversationId: "123456",
+    },
     conversation: { state: conversationState },
     revisions: [],
     inputForGenerationRuns: [run],

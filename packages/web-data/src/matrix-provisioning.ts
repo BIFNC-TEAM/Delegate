@@ -25,6 +25,7 @@ export type ProvisionMatrixDirectConversationInput = {
   roomId: string;
   audienceMatrixUserId: string;
   representativeMatrixUserId: string;
+  expectedEndpointLifecycleRevision: number;
   /**
    * Matrix's invite flag is advisory, but it is the only direct-room signal
    * available to an Application Service at invite time. Callers must have
@@ -86,6 +87,16 @@ export async function provisionMatrixDirectConversation(
   const representativeMatrixUserId = normalizeMatrixUserId(
     input.representativeMatrixUserId,
   );
+  const expectedEndpointLifecycleRevision =
+    input.expectedEndpointLifecycleRevision;
+  if (
+    !Number.isSafeInteger(expectedEndpointLifecycleRevision)
+    || expectedEndpointLifecycleRevision <= 0
+  ) {
+    throw new Error(
+      "Matrix provisioning requires a positive endpoint lifecycle revision.",
+    );
+  }
   if (audienceMatrixUserId === representativeMatrixUserId) {
     throw new Error("Audience and representative Matrix users must be different.");
   }
@@ -113,6 +124,7 @@ export async function provisionMatrixDirectConversation(
           id: true,
           connectionId: true,
           endpointAssignmentRevision: true,
+          endpointLifecycleRevision: true,
           desiredState: true,
           externalUserId: true,
           status: true,
@@ -120,6 +132,14 @@ export async function provisionMatrixDirectConversation(
       });
     if (!representativeBinding) {
       throw new ChannelUnavailableError("channel_not_connected");
+    }
+    if (
+      representativeBinding.endpointLifecycleRevision
+        !== expectedEndpointLifecycleRevision
+    ) {
+      throw new ChannelUnavailableError(
+        "matrix_channel_lifecycle_reactivated",
+      );
     }
     const virtualUser = await tx.matrixVirtualUserBinding.findUnique({
       where: { matrixUserId: representativeMatrixUserId },

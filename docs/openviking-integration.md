@@ -2,14 +2,15 @@
 
 ## Purpose
 
-Delegate uses OpenViking as a context database for Telegram public representatives.
+Delegate uses OpenViking as a rebuildable context projection for public
+representatives on Web, Matrix, and Telegram.
 
 It is used for:
 
 - representative public resources
 - representative-scoped audience memory
 - representative-scoped agent patterns
-- session recall and commit provenance
+- channel-local recall and projection provenance
 
 It is not used for:
 
@@ -46,24 +47,25 @@ Official references:
 
 ### Representative-scoped isolation
 
-Delegate scopes OpenViking state by representative, contact, and Telegram chat.
+Delegate scopes OpenViking state by representative, contact, and source channel.
 
 - resources: `viking://resources/delegate/reps/{slug}/...`
 - user memories: `viking://user/memories/.../delegate/{slug}/{contactId}/...`
 - agent memories: `viking://agent/memories/.../delegate/{slug}/...`
-- session key: `delegate:tg:{repSlug}:{chatId}:{contactId}`
+- session key: a server-generated representative/contact/channel coordinate;
+  clients cannot choose or edit it
 
 This is stricter than a generic assistant integration because Delegate must never leak memory across representatives or audience members.
 
 ### Postgres provenance
 
-Delegate writes recall traces and commit traces back into Postgres so the owner dashboard can show:
+Delegate records search, policy filtering, model injection, final citation, and
+projection outcomes in Postgres. These records are operational evidence for
+runtime enforcement, reconciliation, and audit.
 
-- what was recalled
-- which URI it came from
-- which layer was used
-- the score
-- when a session commit succeeded or failed
+The normal Owner product surface does not expose raw Recall Trace terminology,
+URI, Layer, Score, session identifiers, or provider-internal target paths. Those
+details remain restricted to advanced diagnostics and service logs.
 
 ### Safe memory filter
 
@@ -140,7 +142,7 @@ The config template lives at:
 - `deploy/openviking/ov.conf.example`
 
 Apple Silicon development uses `deploy/openviking/Dockerfile`, a thin image
-over OpenViking `v0.4.9` that pins `cryptography` to an ARM64-compatible wheel.
+over OpenViking `v0.4.12` that pins `cryptography` to an ARM64-compatible wheel.
 This avoids the upstream image's `SIGILL` startup failure under Docker Desktop.
 
 The runtime renders that template into:
@@ -153,16 +155,15 @@ the internal caller without granting ROOT access to tenant data APIs.
 
 ## Dashboard surface
 
-OpenViking is a rebuildable projection, not an Owner-editable source of truth. The Dashboard exposes business controls through **Memory System** and **Digital Representatives → Configuration → Memory**:
+OpenViking is a rebuildable projection, not an Owner-editable source of truth. The Dashboard exposes memory controls only through **Digital Representatives → Configuration → Memory**:
 
 - governed Contact Memory and Representative Experience policy;
-- Web recall/extraction capability and honest unsupported states for Matrix/Telegram;
+- independently configurable Web, Matrix, and Telegram channel-local recall/extraction capability;
+- fail-closed private-channel disclosure, verified binding, first-message exclusion, edit/redaction, and deletion diagnostics;
 - retention and expiry behavior;
-- search, scope/safety pass, model injection, answer citation, and public-display stages as separate usage facts;
-- projection, cleanup, and reconciliation health with idempotent retry;
-- Provider and namespace information as read-only advanced diagnostics.
+- OpenViking projection status and synchronization policy as read-only diagnostics.
 
-Owners cannot edit arbitrary Agent IDs or target URIs. Public knowledge import, editing, representative binding, draft work, and publishing stay in Knowledge Library; the Memory System only links there and reports projection/use health. Legacy `/openviking` management routes remain temporarily for compatibility but are no longer called by the current Dashboard UI.
+Owners cannot edit arbitrary Agent IDs or target URIs. Public knowledge import, editing, representative binding, draft work, and publishing stay in Knowledge Library. The former top-level Memory System, manual review, training, and `/openviking` management routes have been removed.
 
 ## Verification checklist
 
@@ -174,7 +175,6 @@ Expected local verification:
 - `pnpm docker:up`
 - `curl http://localhost:1933/health`
 - `curl http://localhost:8020/health`
-- `curl http://localhost:3001/api/dashboard/openviking/health`
 
 For real memory sync and recall, also set one of:
 

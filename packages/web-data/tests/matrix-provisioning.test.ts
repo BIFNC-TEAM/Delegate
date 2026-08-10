@@ -203,6 +203,8 @@ describe("Matrix direct conversation provisioning", () => {
     tx.representativeChannelBinding.findUnique.mockResolvedValue({
       id: "representative-binding-1",
       connectionId: "delegate-matrix-as",
+      endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 1,
       desiredState: "DISCONNECTED",
       externalUserId: representativeMatrixUserId,
       status: "DISCONNECTED",
@@ -223,17 +225,40 @@ describe("Matrix direct conversation provisioning", () => {
     expect(tx.conversationChannelBinding.findFirst).not.toHaveBeenCalled();
     expect(tx.conversationChannelBinding.upsert).not.toHaveBeenCalled();
   });
+
+  it("does not provision an invite from an earlier endpoint lifecycle", async () => {
+    mockActiveControlPlane(
+      "representative-1",
+      representativeMatrixUserId,
+      1,
+      3,
+    );
+
+    await expect(
+      provisionMatrixDirectConversation(provisionInput({
+        expectedEndpointLifecycleRevision: 1,
+      })),
+    ).rejects.toMatchObject({
+      code: "matrix_channel_lifecycle_reactivated",
+    });
+
+    expect(mockResolveChannelAudienceIdentity).not.toHaveBeenCalled();
+    expect(tx.conversationChannelBinding.findFirst).not.toHaveBeenCalled();
+    expect(tx.conversationChannelBinding.upsert).not.toHaveBeenCalled();
+  });
 });
 
 function mockActiveControlPlane(
   representativeId = "representative-1",
   matrixUserId = representativeMatrixUserId,
   endpointAssignmentRevision = 1,
+  endpointLifecycleRevision = 1,
 ) {
   tx.representativeChannelBinding.findUnique.mockResolvedValue({
     id: "representative-binding-1",
     connectionId: "delegate-matrix-as",
     endpointAssignmentRevision,
+    endpointLifecycleRevision,
     desiredState: "ACTIVE",
     externalUserId: matrixUserId,
     status: "CONNECTED",
@@ -248,6 +273,7 @@ function mockActiveControlPlane(
 function provisionInput(overrides: {
   representativeId?: string;
   representativeMatrixUserId?: string;
+  expectedEndpointLifecycleRevision?: number;
 } = {}) {
   return {
     representativeId: overrides.representativeId ?? "representative-1",
@@ -255,6 +281,8 @@ function provisionInput(overrides: {
     audienceMatrixUserId,
     representativeMatrixUserId:
       overrides.representativeMatrixUserId ?? representativeMatrixUserId,
+    expectedEndpointLifecycleRevision:
+      overrides.expectedEndpointLifecycleRevision ?? 1,
     directInvite: true as const,
   };
 }

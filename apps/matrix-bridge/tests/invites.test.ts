@@ -2,12 +2,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   mockActivateVerifiedMatrixDirectConversation,
+  mockAdmitCurrentMatrixApplicationServiceProviderEvents,
   mockCheckMatrixRuntimePersistenceReadiness,
+  mockClaimMemoryChannelDisclosureDelivery,
   mockClearMatrixRoomRemoteValidationFailures,
+  mockCompleteMemoryChannelDisclosureDelivery,
+  mockFailMemoryChannelDisclosureDelivery,
   mockGetMatrixRoomSecuritySnapshot,
   mockGetMatrixVirtualUserBinding,
   mockIngestMatrixApplicationServiceTransaction,
   mockIsolateMatrixConversationRoom,
+  mockPersistMatrixApplicationServiceProviderArrivals,
   mockRecordMatrixRoomRemoteValidationFailure,
   mockRecordMatrixRuntimeHealth,
   mockWithActiveMatrixRepresentativeChannelFence,
@@ -18,12 +23,17 @@ const {
   process.env.MATRIX_SERVER_NAME = "example.org";
   return {
     mockActivateVerifiedMatrixDirectConversation: vi.fn(),
+    mockAdmitCurrentMatrixApplicationServiceProviderEvents: vi.fn(),
     mockCheckMatrixRuntimePersistenceReadiness: vi.fn(),
+    mockClaimMemoryChannelDisclosureDelivery: vi.fn(),
     mockClearMatrixRoomRemoteValidationFailures: vi.fn(),
+    mockCompleteMemoryChannelDisclosureDelivery: vi.fn(),
+    mockFailMemoryChannelDisclosureDelivery: vi.fn(),
     mockGetMatrixRoomSecuritySnapshot: vi.fn(),
     mockGetMatrixVirtualUserBinding: vi.fn(),
     mockIngestMatrixApplicationServiceTransaction: vi.fn(),
     mockIsolateMatrixConversationRoom: vi.fn(),
+    mockPersistMatrixApplicationServiceProviderArrivals: vi.fn(),
     mockRecordMatrixRoomRemoteValidationFailure: vi.fn(),
     mockRecordMatrixRuntimeHealth: vi.fn(),
     mockWithActiveMatrixRepresentativeChannelFence: vi.fn(),
@@ -33,10 +43,18 @@ const {
 vi.mock("@delegate/web-data", () => ({
   activateVerifiedMatrixDirectConversation:
     mockActivateVerifiedMatrixDirectConversation,
+  admitCurrentMatrixApplicationServiceProviderEvents:
+    mockAdmitCurrentMatrixApplicationServiceProviderEvents,
   checkMatrixRuntimePersistenceReadiness:
     mockCheckMatrixRuntimePersistenceReadiness,
+  claimMemoryChannelDisclosureDelivery:
+    mockClaimMemoryChannelDisclosureDelivery,
   clearMatrixRoomRemoteValidationFailures:
     mockClearMatrixRoomRemoteValidationFailures,
+  completeMemoryChannelDisclosureDelivery:
+    mockCompleteMemoryChannelDisclosureDelivery,
+  failMemoryChannelDisclosureDelivery:
+    mockFailMemoryChannelDisclosureDelivery,
   getMatrixRoomSecuritySnapshot: mockGetMatrixRoomSecuritySnapshot,
   getMatrixVirtualUserBinding: mockGetMatrixVirtualUserBinding,
   ingestMatrixApplicationServiceTransaction:
@@ -52,6 +70,8 @@ vi.mock("@delegate/web-data", () => ({
     }
     return normalized;
   },
+  persistMatrixApplicationServiceProviderArrivals:
+    mockPersistMatrixApplicationServiceProviderArrivals,
   recordMatrixRoomRemoteValidationFailure:
     mockRecordMatrixRoomRemoteValidationFailure,
   recordMatrixRuntimeHealth: mockRecordMatrixRuntimeHealth,
@@ -73,6 +93,9 @@ const representativeMatrixUserId = "@_delegate_rep:example.org";
 describe("managed Matrix invite joining", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mockAdmitCurrentMatrixApplicationServiceProviderEvents.mockImplementation(
+      async (events) => ({ events, ignored: [] }),
+    );
     mockGetMatrixVirtualUserBinding.mockResolvedValue({
       matrixUserId: representativeMatrixUserId,
       representativeId: "representative-1",
@@ -88,6 +111,13 @@ describe("managed Matrix invite joining", () => {
       ),
     );
     mockRecordMatrixRuntimeHealth.mockResolvedValue(true);
+    mockClaimMemoryChannelDisclosureDelivery.mockResolvedValue({
+      send: false,
+      status: "current",
+      deliveryId: "disclosure-1",
+    });
+    mockCompleteMemoryChannelDisclosureDelivery.mockResolvedValue(true);
+    mockFailMemoryChannelDisclosureDelivery.mockResolvedValue(true);
     mockWithActiveMatrixRepresentativeChannelFence.mockImplementation(
       async (_input, operation: () => Promise<unknown>) => ({
         executed: true,
@@ -112,6 +142,28 @@ describe("managed Matrix invite joining", () => {
 
     expect(fetch).not.toHaveBeenCalled();
     expect(mockActivateVerifiedMatrixDirectConversation).not.toHaveBeenCalled();
+  });
+
+  it("does not register or join when an admitted invite becomes stale inside the lifecycle fence", async () => {
+    mockGetMatrixRoomSecuritySnapshot.mockResolvedValue(
+      securitySnapshot("PENDING_REMOTE_VALIDATION"),
+    );
+    mockAdmitCurrentMatrixApplicationServiceProviderEvents.mockResolvedValueOnce({
+      events: [],
+      ignored: [{
+        eventId: "$invite-1",
+        reason: "matrix_provider_arrival_lifecycle_stale",
+      }],
+    });
+
+    await expect(
+      joinManagedMatrixInvites([directInviteEvent()]),
+    ).resolves.toEqual([]);
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(mockActivateVerifiedMatrixDirectConversation).not.toHaveBeenCalled();
+    expect(mockRecordMatrixRoomRemoteValidationFailure).not.toHaveBeenCalled();
+    expect(mockRecordMatrixRuntimeHealth).not.toHaveBeenCalled();
   });
 
   it("does not validate or join an orphaned room assignment", async () => {
@@ -389,6 +441,18 @@ describe("managed Matrix invite joining", () => {
       transactionId: "txn-pending-join",
       events: [directInviteEvent()],
     });
+    expect(
+      mockPersistMatrixApplicationServiceProviderArrivals,
+    ).toHaveBeenCalledWith({
+      transactionId: "txn-pending-join",
+      events: [directInviteEvent(), matrixMessageEvent()],
+    });
+    expect(
+      mockPersistMatrixApplicationServiceProviderArrivals.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(fetch).mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
   });
 
   it("registers the managed virtual user before joining the room", async () => {
@@ -666,6 +730,9 @@ describe("Matrix bridge readiness", () => {
 describe("active Matrix room revalidation", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mockAdmitCurrentMatrixApplicationServiceProviderEvents.mockImplementation(
+      async (events) => ({ events, ignored: [] }),
+    );
     vi.stubGlobal("fetch", vi.fn());
     mockGetMatrixRoomSecuritySnapshot.mockResolvedValue(
       securitySnapshot("ACTIVE"),
@@ -680,6 +747,19 @@ describe("active Matrix room revalidation", () => {
       ),
     );
     mockRecordMatrixRuntimeHealth.mockResolvedValue(true);
+    mockClaimMemoryChannelDisclosureDelivery.mockResolvedValue({
+      send: false,
+      status: "current",
+      deliveryId: "disclosure-1",
+    });
+    mockCompleteMemoryChannelDisclosureDelivery.mockResolvedValue(true);
+    mockFailMemoryChannelDisclosureDelivery.mockResolvedValue(true);
+    mockWithActiveMatrixRepresentativeChannelFence.mockImplementation(
+      async (_input, operation: () => Promise<unknown>) => ({
+        executed: true,
+        value: await operation(),
+      }),
+    );
   });
 
   it("accepts a still-plaintext exact two-member room", async () => {
@@ -696,6 +776,481 @@ describe("active Matrix room revalidation", () => {
       matrixMessageEvent(),
     ])).resolves.toEqual([]);
     expect(mockIsolateMatrixConversationRoom).not.toHaveBeenCalled();
+  });
+
+  it.each(["PAUSED", "DISCONNECTED", null] as const)(
+    "defers a %s channel to durable ingest without remote validation or disclosure",
+    async (representativeChannelDesiredState) => {
+      mockGetMatrixRoomSecuritySnapshot.mockResolvedValueOnce({
+        ...securitySnapshot("ACTIVE"),
+        representativeChannelDesiredState,
+      });
+
+      await expect(validateActiveMatrixRoomsBeforeIngest([
+        matrixMessageEvent(),
+      ])).resolves.toEqual([]);
+
+      expect(fetch).not.toHaveBeenCalled();
+      expect(mockClaimMemoryChannelDisclosureDelivery).not.toHaveBeenCalled();
+      expect(mockRecordMatrixRuntimeHealth).not.toHaveBeenCalled();
+      expect(mockIsolateMatrixConversationRoom).not.toHaveBeenCalled();
+    },
+  );
+
+  it("terminally consumes a disconnected channel transaction instead of retrying validation", async () => {
+    mockGetMatrixRoomSecuritySnapshot.mockResolvedValueOnce({
+      ...securitySnapshot("ACTIVE"),
+      representativeChannelDesiredState: "DISCONNECTED",
+    });
+    mockIngestMatrixApplicationServiceTransaction
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        eventId: "$message-1",
+        status: "ignored",
+        reason: "channel_disconnected",
+      }]);
+
+    await expect(processMatrixApplicationServiceTransaction({
+      transactionId: "txn-disconnected",
+      events: [matrixMessageEvent()],
+    })).resolves.toBe("processed");
+
+    expect(mockPersistMatrixApplicationServiceProviderArrivals)
+      .toHaveBeenCalledWith({
+        transactionId: "txn-disconnected",
+        events: [matrixMessageEvent()],
+      });
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenCalledTimes(2);
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenNthCalledWith(
+      2,
+      {
+        transactionId: "txn-disconnected",
+        events: [matrixMessageEvent()],
+      },
+    );
+    expect(fetch).not.toHaveBeenCalled();
+    expect(mockClaimMemoryChannelDisclosureDelivery).not.toHaveBeenCalled();
+  });
+
+  it("binds every ordinary m.text event in one room transaction to the same disclosure claim", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }));
+    const secondMessage = {
+      ...matrixMessageEvent(),
+      event_id: "$message-2",
+      content: { msgtype: "m.text", body: "second" },
+    };
+
+    await expect(validateActiveMatrixRoomsBeforeIngest([
+      matrixMessageEvent(),
+      secondMessage,
+    ])).resolves.toEqual([]);
+
+    expect(mockClaimMemoryChannelDisclosureDelivery).toHaveBeenCalledOnce();
+    expect(mockClaimMemoryChannelDisclosureDelivery).toHaveBeenCalledWith({
+      conversationId: "conversation-1",
+      channel: "matrix",
+      inboundExternalMessageIds: ["$message-1", "$message-2"],
+    });
+  });
+
+  it.each([
+    {
+      label: "redaction",
+      event: {
+        event_id: "$redaction-1",
+        type: "m.room.redaction",
+        room_id: roomId,
+        sender: audienceMatrixUserId,
+        redacts: "$message-previous",
+        content: {},
+      },
+    },
+    {
+      label: "message edit",
+      event: {
+        ...matrixMessageEvent(),
+        event_id: "$edit-1",
+        content: {
+          msgtype: "m.text",
+          body: "corrected",
+          "m.relates_to": {
+            rel_type: "m.replace",
+            event_id: "$message-previous",
+          },
+          "m.new_content": { msgtype: "m.text", body: "corrected" },
+        },
+      },
+    },
+  ])("does not let disclosure delivery block a $label safety control", async ({ event }) => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }));
+
+    await expect(validateActiveMatrixRoomsBeforeIngest([
+      event,
+    ])).resolves.toEqual([]);
+    expect(mockClaimMemoryChannelDisclosureDelivery).not.toHaveBeenCalled();
+  });
+
+  it("delivers and durably proves the versioned disclosure before admission", async () => {
+    mockClaimMemoryChannelDisclosureDelivery.mockResolvedValueOnce({
+      send: true,
+      status: "claimed",
+      deliveryId: "disclosure-42",
+      leaseToken: "lease-42",
+      conversationId: "conversation-1",
+      channelBindingId: "matrix-binding-1",
+      channel: "matrix",
+      text: "记忆说明 / Memory notice",
+      fingerprint: "fingerprint",
+      disclosureHash: "hash",
+      contractVersion: "private-channel-memory-v1",
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }))
+      .mockResolvedValueOnce(jsonResponse({ event_id: "$disclosure-42" }));
+
+    await expect(validateActiveMatrixRoomsBeforeIngest([
+      matrixMessageEvent(),
+    ])).resolves.toEqual([]);
+
+    expect(mockClaimMemoryChannelDisclosureDelivery).toHaveBeenCalledWith({
+      conversationId: "conversation-1",
+      channel: "matrix",
+      inboundExternalMessageIds: ["$message-1"],
+    });
+
+    const [sendUrl, sendInit] = vi.mocked(fetch).mock.calls[2]!;
+    expect(String(sendUrl)).toContain(
+      "/send/m.room.message/delegate-memory-disclosure-disclosure-42",
+    );
+    expect(String(sendUrl)).toContain(
+      `user_id=${encodeURIComponent(representativeMatrixUserId)}`,
+    );
+    expect(sendInit).toMatchObject({ method: "PUT" });
+    expect(JSON.parse(String(sendInit?.body))).toEqual({
+      msgtype: "m.text",
+      body: "记忆说明 / Memory notice",
+    });
+    expect(
+      mockCompleteMemoryChannelDisclosureDelivery,
+    ).toHaveBeenCalledWith({
+      deliveryId: "disclosure-42",
+      leaseToken: "lease-42",
+      externalMessageId: "$disclosure-42",
+    });
+    expect(mockFailMemoryChannelDisclosureDelivery).not.toHaveBeenCalled();
+  });
+
+  it("does not let a stale pre-reconnect arrival trigger a disclosure send", async () => {
+    mockAdmitCurrentMatrixApplicationServiceProviderEvents.mockResolvedValueOnce({
+      events: [],
+      ignored: [{
+        eventId: "$message-1",
+        reason: "matrix_provider_arrival_lifecycle_stale",
+      }],
+    });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }));
+
+    await expect(validateActiveMatrixRoomsBeforeIngest([
+      matrixMessageEvent(),
+    ])).resolves.toEqual([
+      `${roomId}:matrix_memory_disclosure_arrival_lifecycle_stale`,
+    ]);
+
+    expect(mockClaimMemoryChannelDisclosureDelivery).not.toHaveBeenCalled();
+    expect(mockCompleteMemoryChannelDisclosureDelivery).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("marks a disclosure send failure and keeps the content transaction retryable", async () => {
+    mockClaimMemoryChannelDisclosureDelivery.mockResolvedValueOnce({
+      send: true,
+      status: "claimed",
+      deliveryId: "disclosure-failed",
+      leaseToken: "lease-failed",
+      conversationId: "conversation-1",
+      channelBindingId: "matrix-binding-1",
+      channel: "matrix",
+      text: "memory notice",
+      fingerprint: "fingerprint",
+      disclosureHash: "hash",
+      contractVersion: "private-channel-memory-v1",
+    });
+    mockIngestMatrixApplicationServiceTransaction.mockResolvedValueOnce([]);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }))
+      .mockResolvedValueOnce(new Response("", { status: 503 }));
+
+    await expect(processMatrixApplicationServiceTransaction({
+      transactionId: "txn-disclosure-failed",
+      events: [matrixMessageEvent()],
+    })).resolves.toBe("validation_retry");
+
+    expect(
+      mockFailMemoryChannelDisclosureDelivery,
+    ).toHaveBeenCalledWith({
+      deliveryId: "disclosure-failed",
+      leaseToken: "lease-failed",
+      errorCode: "matrix_memory_disclosure_503",
+    });
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenCalledOnce();
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenCalledWith({
+      transactionId: "txn-disclosure-failed",
+      events: [],
+    });
+  });
+
+  it.each([
+    {
+      label: "redaction",
+      event: {
+        event_id: "$redaction-before-notice",
+        type: "m.room.redaction",
+        room_id: roomId,
+        sender: audienceMatrixUserId,
+        redacts: "$message-previous",
+        content: {},
+      },
+    },
+    {
+      label: "message edit",
+      event: {
+        ...matrixMessageEvent(),
+        event_id: "$edit-before-notice",
+        content: {
+          msgtype: "m.text",
+          body: "corrected",
+          "m.relates_to": {
+            rel_type: "m.replace",
+            event_id: "$message-previous",
+          },
+          "m.new_content": { msgtype: "m.text", body: "corrected" },
+        },
+      },
+    },
+  ])("persists a same-transaction $label before an ordinary message disclosure retry", async ({ event }) => {
+    mockClaimMemoryChannelDisclosureDelivery.mockResolvedValueOnce({
+      send: true,
+      status: "claimed",
+      deliveryId: "disclosure-after-safety-control",
+      leaseToken: "lease-after-safety-control",
+      conversationId: "conversation-1",
+      channelBindingId: "matrix-binding-1",
+      channel: "matrix",
+      text: "memory notice",
+      fingerprint: "fingerprint",
+      disclosureHash: "hash",
+      contractVersion: "private-channel-memory-v1",
+    });
+    mockIngestMatrixApplicationServiceTransaction
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { eventId: event.event_id, status: "processed" },
+      ]);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }))
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }))
+      .mockResolvedValueOnce(new Response("", { status: 503 }));
+
+    await expect(processMatrixApplicationServiceTransaction({
+      transactionId: `txn-${event.event_id}`,
+      events: [matrixMessageEvent(), event],
+    })).resolves.toBe("validation_retry");
+
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenCalledTimes(2);
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenNthCalledWith(
+      2,
+      {
+        transactionId: `txn-${event.event_id}`,
+        events: [event],
+      },
+    );
+  });
+
+  it.each([
+    {
+      label: "redaction",
+      event: {
+        event_id: "$redaction-same-batch-target",
+        type: "m.room.redaction",
+        room_id: roomId,
+        sender: audienceMatrixUserId,
+        redacts: "$message-1",
+        content: {},
+      },
+    },
+    {
+      label: "message edit",
+      event: {
+        ...matrixMessageEvent(),
+        event_id: "$edit-same-batch-target",
+        content: {
+          msgtype: "m.text",
+          body: "corrected",
+          "m.relates_to": {
+            rel_type: "m.replace",
+            event_id: "$message-1",
+          },
+          "m.new_content": { msgtype: "m.text", body: "corrected" },
+        },
+      },
+    },
+  ])("retries a $label targeting an ordinary event in the same transaction without losing it", async ({ event }) => {
+    const disclosureClaim = {
+      send: true as const,
+      status: "claimed" as const,
+      deliveryId: "disclosure-same-batch-target",
+      conversationId: "conversation-1",
+      channelBindingId: "matrix-binding-1",
+      channel: "matrix" as const,
+      text: "memory notice",
+      fingerprint: "fingerprint",
+      disclosureHash: "hash",
+      contractVersion: "private-channel-memory-v1",
+    };
+    mockClaimMemoryChannelDisclosureDelivery
+      .mockResolvedValueOnce({
+        ...disclosureClaim,
+        leaseToken: "lease-first-attempt",
+      })
+      .mockResolvedValueOnce({
+        ...disclosureClaim,
+        leaseToken: "lease-retry",
+      });
+    mockIngestMatrixApplicationServiceTransaction
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { eventId: "$message-1", status: "processed" },
+      ])
+      .mockResolvedValueOnce([
+        { eventId: event.event_id, status: "processed" },
+      ]);
+    vi.mocked(fetch)
+      // First delivery attempt: room validation succeeds, disclosure fails.
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }))
+      .mockResolvedValueOnce(new Response("", { status: 503 }))
+      // Homeserver retry: disclosure succeeds, so the target can materialize.
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }))
+      .mockResolvedValueOnce(jsonResponse({
+        event_id: "$disclosure-same-batch-target",
+      }))
+      // The dependent safety control is independently revalidated afterwards.
+      .mockResolvedValueOnce(jsonResponse({
+        joined: {
+          [audienceMatrixUserId]: {},
+          [representativeMatrixUserId]: {},
+        },
+      }))
+      .mockResolvedValueOnce(new Response("", { status: 404 }));
+
+    const transaction = {
+      transactionId: `txn-${event.event_id}`,
+      events: [matrixMessageEvent(), event],
+    };
+    await expect(
+      processMatrixApplicationServiceTransaction(transaction),
+    ).resolves.toBe("validation_retry");
+
+    // Only the empty security batch reached durable ingest. The dependent
+    // control was not prematurely terminalized as target_not_found.
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenCalledOnce();
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenCalledWith({
+      transactionId: transaction.transactionId,
+      events: [],
+    });
+
+    await expect(
+      processMatrixApplicationServiceTransaction(transaction),
+    ).resolves.toBe("processed");
+
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenCalledTimes(4);
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenNthCalledWith(
+      3,
+      {
+        transactionId: transaction.transactionId,
+        events: [matrixMessageEvent()],
+      },
+    );
+    expect(mockIngestMatrixApplicationServiceTransaction).toHaveBeenNthCalledWith(
+      4,
+      {
+        transactionId: transaction.transactionId,
+        events: [event],
+      },
+    );
+    expect(mockClaimMemoryChannelDisclosureDelivery).toHaveBeenNthCalledWith(
+      1,
+      {
+        conversationId: "conversation-1",
+        channel: "matrix",
+        inboundExternalMessageIds: ["$message-1"],
+      },
+    );
+    expect(mockClaimMemoryChannelDisclosureDelivery).toHaveBeenNthCalledWith(
+      2,
+      {
+        conversationId: "conversation-1",
+        channel: "matrix",
+        inboundExternalMessageIds: ["$message-1"],
+      },
+    );
   });
 
   it("clears a prior transient failure streak after authoritative success", async () => {
@@ -908,6 +1463,7 @@ function securitySnapshot(
   return {
     bindingId: "matrix-binding-1",
     conversationId: "conversation-1",
+    representativeId: "representative-1",
     securityState,
     remoteValidationAttemptCount: 0,
     audienceMatrixUserId,

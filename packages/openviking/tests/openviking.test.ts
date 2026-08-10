@@ -13,6 +13,8 @@ import {
   buildGovernedMemoryManagedUserId,
   buildGovernedRepresentativeExperienceRootUri,
   buildGovernedRepresentativeExperienceVersionUri,
+  buildGovernedSharedContactMemoryRootUri,
+  buildGovernedSharedContactMemoryVersionUri,
   GovernedMemoryRootProvisionError,
   GovernedMemoryUnsupportedError,
   ExactResourceUnsupportedError,
@@ -69,6 +71,50 @@ describe("OpenViking URI strategy", () => {
     expect(versionA).not.toBe(versionB);
   });
 
+  it("isolates shared contact memory by representative namespace and canonical identity", () => {
+    const root = buildGovernedSharedContactMemoryRootUri({
+      namespaceKey: "rep_namespace_a",
+      audienceIdentityId: "identity_a",
+    });
+    const version = buildGovernedSharedContactMemoryVersionUri({
+      namespaceKey: "rep_namespace_a",
+      audienceIdentityId: "identity_a",
+      memoryId: "memory_a",
+      memoryVersionId: "version_a",
+    });
+
+    expect(root).toBe(
+      "viking://user/delegate-memory-rep_namespace_a/memories/delegate/rep_namespace_a/audience-identities/identity_a/contact-memory/",
+    );
+    expect(version).toBe(`${root}memories/memory_a/versions/version_a.md`);
+    expect(buildGovernedSharedContactMemoryRootUri({
+      namespaceKey: "rep_namespace_b",
+      audienceIdentityId: "identity_a",
+    })).not.toBe(root);
+    expect(buildGovernedSharedContactMemoryRootUri({
+      namespaceKey: "rep_namespace_a",
+      audienceIdentityId: "identity_b",
+    })).not.toBe(root);
+    expect(assertExactGovernedMemoryRootUri({
+      namespaceKey: "rep_namespace_a",
+      uri: root,
+    })).toMatchObject({
+      kind: "contact_shared",
+      audienceIdentityId: "identity_a",
+      rootUri: root,
+    });
+    expect(assertExactGovernedMemoryVersionUri({
+      namespaceKey: "rep_namespace_a",
+      uri: version,
+    })).toMatchObject({
+      kind: "contact_shared",
+      audienceIdentityId: "identity_a",
+      memoryId: "memory_a",
+      memoryVersionId: "version_a",
+      rootUri: root,
+    });
+  });
+
   it("preserves case and rejects inputs that lossy normalization could collide", () => {
     const buildRoot = (namespaceKey: string) =>
       buildGovernedContactChannelMemoryRootUri({
@@ -113,6 +159,12 @@ describe("OpenViking URI strategy", () => {
         memoryVersionId: "version/a",
       }),
     ).toThrow("Invalid governed memory memoryVersionId");
+    expect(() =>
+      buildGovernedSharedContactMemoryRootUri({
+        namespaceKey: "rep_namespace_a",
+        audienceIdentityId: "identity/a",
+      }),
+    ).toThrow("Invalid governed memory audienceIdentityId");
   });
 
   it("keeps representative experience outside every contact-channel namespace", () => {
@@ -213,6 +265,33 @@ describe("OpenViking URI strategy", () => {
         assertExactGovernedMemoryVersionUri({ namespaceKey: "rep_namespace_a", uri }),
       ).toThrow("exact canonical managed-user root or immutable version leaf");
     }
+  });
+
+  it("rejects non-canonical shared roots and exposes identity for caller authorization", () => {
+    const root = buildGovernedSharedContactMemoryRootUri({
+      namespaceKey: "rep_namespace_a",
+      audienceIdentityId: "identity_a",
+    });
+    const version = buildGovernedSharedContactMemoryVersionUri({
+      namespaceKey: "rep_namespace_a",
+      audienceIdentityId: "identity_a",
+      memoryId: "memory_a",
+      memoryVersionId: "version_a",
+    });
+    for (const uri of [
+      root.replace("identity_a", "../identity_a"),
+      root.replace("identity_a", "%69dentity_a"),
+      `${root}child/`,
+    ]) {
+      expect(() => assertExactGovernedMemoryRootUri({
+        namespaceKey: "rep_namespace_a",
+        uri,
+      })).toThrow("exact canonical managed-user root or immutable version leaf");
+    }
+    expect(assertExactGovernedMemoryVersionUri({
+      namespaceKey: "rep_namespace_a",
+      uri: version.replace("identity_a", "identity_b"),
+    })).toMatchObject({ audienceIdentityId: "identity_b" });
   });
 
   it("builds representative-scoped resource roots", () => {

@@ -3,6 +3,10 @@ import crypto from "node:crypto";
 import { buildGovernedContactChannelMemoryVersionUri } from "@delegate/openviking";
 import { afterAll, describe, expect, it } from "vitest";
 
+import {
+  enqueueInboundMessageMemoryExtraction,
+  processMemoryExtractionRun,
+} from "../src/memory-extraction";
 import { prisma } from "../src/prisma";
 
 const describePostgres = process.env.DELEGATE_POSTGRES_E2E === "1"
@@ -266,6 +270,79 @@ describePostgres("Memory System source-message PostgreSQL guards", () => {
     expect(redactedCandidate.contentHash).not.toBeNull();
   });
 
+  it("invalidates automatically decided representative evidence without rewriting locked safety coordinates", async () => {
+    const fixture = await createFixture();
+    await prisma.representativeMemoryPolicy.update({
+      where: { representativeId: fixture.representativeId },
+      data: {
+        representativeExperienceEnabled: true,
+        autoExtract: true,
+        webExtractEnabled: true,
+      },
+    });
+    const source = await createMessage(fixture.conversationId, {
+      senderType: "AUDIENCE",
+      text: "I prefer concise replies",
+    });
+    const queued = await prisma.$transaction((tx) =>
+      enqueueInboundMessageMemoryExtraction(tx, {
+        representativeId: fixture.representativeId,
+        contactId: fixture.contactId,
+        conversationId: fixture.conversationId,
+        messageId: source.id,
+        channel: "web",
+      }));
+    expect(queued.enqueued).toBe(true);
+    if (!queued.enqueued) throw new Error("Expected representative evidence extraction.");
+    await expect(processMemoryExtractionRun({ runId: queued.runId })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    const candidate = await prisma.memoryCandidate.findFirstOrThrow({
+      where: { sourceMessageId: source.id, scope: "REPRESENTATIVE" },
+      include: { policyDecision: true },
+    });
+    expect(candidate).toMatchObject({
+      status: "EXTRACTED",
+      safetyClass: "LOW_RISK",
+      safetyReasonCode: null,
+      policyDecision: { outcome: "EVIDENCE_RECORDED" },
+    });
+
+    await expect(prisma.message.update({
+      where: { id: source.id },
+      data: {
+        text: "This source was edited after evidence was recorded.",
+        editedAt: new Date(),
+        deliveryStatus: "EDITED",
+      },
+    })).resolves.toMatchObject({ id: source.id });
+
+    await expect(prisma.memoryCandidate.findUniqueOrThrow({
+      where: { id: candidate.id },
+      select: {
+        status: true,
+        safeText: true,
+        summary: true,
+        contentPurgedAt: true,
+        safetyClass: true,
+        safetyReasonCode: true,
+      },
+    })).resolves.toMatchObject({
+      status: "BLOCKED",
+      safeText: null,
+      summary: null,
+      safetyClass: "LOW_RISK",
+      safetyReasonCode: null,
+    });
+    const invalidated = await prisma.memoryCandidate.findUniqueOrThrow({
+      where: { id: candidate.id },
+      select: { contentPurgedAt: true },
+    });
+    expect(invalidated.contentPurgedAt).not.toBeNull();
+  });
+
   it("expires versioned pending candidates and hands immutable content to cleanup", async () => {
     const fixture = await createFixture();
     const source = await createMessage(fixture.conversationId, {
@@ -487,7 +564,7 @@ describePostgres("Memory System source-message PostgreSQL guards", () => {
     }
   });
 
-  it("does not suppress a corrected current version when an old source changes", async () => {
+  it("does not allow a legacy human correction to reactivate memory", async () => {
     const fixture = await createFixture();
     const oldSource = await createMessage(fixture.conversationId, {
       senderType: "AUDIENCE",
@@ -502,46 +579,14 @@ describePostgres("Memory System source-message PostgreSQL guards", () => {
       sourceMessageId: oldSource.id,
       label: "historical-v1",
     });
-    const currentApproved = await createApprovedMemoryVersion({
+    await expect(createApprovedMemoryVersion({
       fixture,
       sourceMessageId: currentSource.id,
       label: "current-v2",
       memoryId: oldApproved.memory.id,
       versionNumber: 2,
       supersedesVersionId: oldApproved.version.id,
-    });
-
-    await prisma.message.update({
-      where: { id: oldSource.id },
-      data: {
-        text: "The historical source changed after correction.",
-        editedAt: new Date(),
-        deliveryStatus: "EDITED",
-      },
-    });
-
-    await expect(prisma.governedMemory.findUniqueOrThrow({
-      where: { id: oldApproved.memory.id },
-      select: {
-        status: true,
-        currentVersionId: true,
-        recallDisabledAt: true,
-        suppressedAt: true,
-      },
-    })).resolves.toEqual({
-      status: "ACTIVE",
-      currentVersionId: currentApproved.version.id,
-      recallDisabledAt: null,
-      suppressedAt: null,
-    });
-    await expect(prisma.memoryCandidate.findUniqueOrThrow({
-      where: { id: oldApproved.candidate.id },
-      select: { status: true },
-    })).resolves.toEqual({ status: "APPROVED" });
-    await expect(prisma.memoryCandidate.findUniqueOrThrow({
-      where: { id: currentApproved.candidate.id },
-      select: { status: true },
-    })).resolves.toEqual({ status: "APPROVED" });
+    })).rejects.toThrow(/automatic policy decision/u);
   });
 
   it("allows only bodyless blocked/quarantined markers and review transitions", async () => {
@@ -698,6 +743,7 @@ function candidateData(
     safeText,
     summary: `Summary ${label}`,
     contentHash: crypto.createHash("sha256").update(safeText).digest("hex"),
+    semanticKey: "contact-preference:communication",
     dedupeKey: `${label}-${crypto.randomUUID()}`,
     safetyClass: "LOW_RISK" as const,
     extractionReasonCode: "explicit_preference",
@@ -726,6 +772,7 @@ async function createApprovedMemoryVersion(input: {
           scope: "CONTACT_CHANNEL",
           sourceChannel: "WEB",
           category: "CONTACT_PREFERENCE",
+          semanticKey: "contact-preference:communication",
         },
       });
   if (input.supersedesVersionId && memory.status === "ACTIVE") {
@@ -797,20 +844,42 @@ async function createApprovedMemoryVersion(input: {
       createdByActorId: `memory-extraction-${input.label}`,
     },
   });
-  await prisma.memoryReviewDecision.create({
-    data: {
-      representativeId: input.fixture.representativeId,
-      candidateId: candidate.id,
-      memoryId: memory.id,
-      resultVersionId: version.id,
-      outcome: "APPROVED",
-      reviewerRole: "OWNER",
-      reviewerActorId: input.fixture.ownerId,
-      reasonCode: input.supersedesVersionId
-        ? "owner_verified_correction"
-        : "owner_verified",
-    },
-  });
+  if (input.supersedesVersionId) {
+    await prisma.memoryReviewDecision.create({
+      data: {
+        representativeId: input.fixture.representativeId,
+        candidateId: candidate.id,
+        memoryId: memory.id,
+        resultVersionId: version.id,
+        outcome: "APPROVED",
+        reviewerRole: "OWNER",
+        reviewerActorId: input.fixture.ownerId,
+        reasonCode: "owner_verified_correction",
+      },
+    });
+  } else {
+    await prisma.memoryPolicyDecision.create({
+      data: {
+        representativeId: input.fixture.representativeId,
+        candidateId: candidate.id,
+        memoryId: memory.id,
+        resultVersionId: version.id,
+        outcome: "ACTIVATED",
+        policyRevision: 0,
+        policyVersion: "automatic-memory-v2",
+        extractorVersion: "closed-structured-v2",
+        sourceHash: crypto.createHash("sha256")
+          .update(`source-${input.label}`)
+          .digest("hex"),
+        outputHash: version.contentHash,
+        confidence: 1,
+        reasonCode: "automatic_low_risk_activation",
+        decisionHash: crypto.createHash("sha256")
+          .update(`decision-${input.label}-${candidate.id}`)
+          .digest("hex"),
+      },
+    });
+  }
   const approvedCandidate = await prisma.memoryCandidate.update({
     where: { id: candidate.id },
     data: { status: "APPROVED", reviewedAt: new Date() },

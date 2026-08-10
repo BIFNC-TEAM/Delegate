@@ -1,4 +1,5 @@
 import {
+  ContactMemorySharingSourceEventRole,
   ConversationEpisodeStatus,
   MemoryUseRunStatus,
   MemoryUseSourceKind,
@@ -13,6 +14,7 @@ import {
   markMemoryUseItemsDisplayedInTransaction,
   markMemoryUseRunDegradedInTransaction,
   recordMemoryUseSearchHitsInTransaction,
+  revalidateMemoryUseDeliverySourcesInTransaction,
   startOrReuseMemoryUseRunInTransaction,
   type MemoryUseRunSnapshot,
 } from "../src/memory-use-execution";
@@ -348,11 +350,11 @@ describe("memory use execution", () => {
     expect(createData).not.toHaveProperty("excerpt");
   });
 
-  it("does not safety-pass a contact memory approved only by SYSTEM", async () => {
+  it("does not safety-pass a contact memory without an automatic decision", async () => {
     const run = runSnapshot();
     const contentHash = "c".repeat(64);
     const source = governedProjectionSource(run, contentHash);
-    source.memoryVersion.reviewDecisions = [{ reviewerRole: "SYSTEM" }];
+    source.memoryVersion.sourceCandidate.policyDecision = undefined;
     const itemCreate = vi.fn().mockImplementation(async ({ data }) => ({
       id: "memory_use_item_system_review",
       sourceKind: data.sourceKind,
@@ -396,8 +398,175 @@ describe("memory use execution", () => {
       data: expect.objectContaining({
         safetyCheckedAt: occurredAt,
         safetyPassedAt: null,
-        rejectionReasonCode: "memory_review_invalid",
+        rejectionReasonCode: "memory_automatic_policy_invalid",
       }),
+    }));
+  });
+
+  it("safety-passes an automatically activated contact memory without a human review", async () => {
+    const run = runSnapshot();
+    const contentHash = "d".repeat(64);
+    const source = governedProjectionSource(run, contentHash);
+    const itemCreate = vi.fn().mockImplementation(async ({ data }) => ({
+      id: "memory_use_item_automatic_policy",
+      sourceKind: data.sourceKind,
+      contentHash: data.contentHash,
+      safetyPassedAt: data.safetyPassedAt,
+    }));
+    const tx = asTransaction({
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      memoryUseRun: {
+        findUnique: vi.fn().mockResolvedValue(run),
+        findUniqueOrThrow: vi.fn().mockResolvedValue(run),
+        update: vi.fn(),
+      },
+      ...runScopeClient(run),
+      memoryProjectionItem: { findMany: vi.fn().mockResolvedValue([source]) },
+      publicKnowledgeProjectionItem: { findMany: vi.fn().mockResolvedValue([]) },
+      representativeMemoryPolicy: {
+        findUnique: vi.fn().mockResolvedValue({
+          longTermMemoryEnabled: true,
+          contactMemoryEnabled: true,
+          representativeExperienceEnabled: true,
+          webRecallEnabled: true,
+          matrixRecallEnabled: false,
+          telegramRecallEnabled: false,
+        }),
+      },
+      memoryUseItem: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create: itemCreate,
+      },
+    });
+
+    await expect(recordMemoryUseSearchHitsInTransaction(tx, {
+      useRunId: run.id,
+      hits: [{
+        sourceKind: MemoryUseSourceKind.CONTACT_MEMORY,
+        projectionItemId: source.id,
+      }],
+    }, occurredAt)).resolves.toMatchObject({
+      eligibleItems: [{
+        memoryUseItemId: "memory_use_item_automatic_policy",
+      }],
+    });
+    expect(itemCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        safetyCheckedAt: occurredAt,
+        safetyPassedAt: occurredAt,
+        rejectionReasonCode: null,
+      }),
+    }));
+  });
+
+  it("allows shared contact memory only for the current verified identity and consent revision", async () => {
+    const run = runSnapshot({ sourceChannel: RepresentativeChannelKind.WEB });
+    const contentHash = "f".repeat(64);
+    const source = governedProjectionSource(run, contentHash);
+    Object.assign(source.memoryVersion, { scope: "CONTACT_SHARED" });
+    Object.assign(source.memoryVersion.memory, {
+      scope: "CONTACT_SHARED",
+      contactId: null,
+      audienceIdentityId: "identity_1",
+      sourceChannel: null,
+    });
+    Object.assign(source.memoryVersion.sourceCandidate, {
+      scope: "CONTACT_SHARED",
+      contactId: null,
+      audienceIdentityId: "identity_1",
+      scopeChannel: null,
+    });
+    Object.assign(source.memoryVersion.sourceCandidate.policyDecision!, {
+      policyRevision: 7,
+    });
+    const consentFind = vi.fn()
+      .mockResolvedValueOnce({
+        ...sharedConsentGrant("1".repeat(64)),
+      })
+      .mockResolvedValueOnce({
+        status: "REVOKED",
+        grantedAt: occurredAt,
+        revokedAt: occurredAt,
+        policyRevision: 7,
+        consentVersion: 2,
+        disclosureContractVersion: "cross-channel-contact-memory-v1",
+        proofHash: "1".repeat(64),
+      });
+    const itemCreate = vi.fn().mockImplementation(async ({ data }) => ({
+      id: "memory_use_item_shared",
+      sourceKind: data.sourceKind,
+      contentHash: data.contentHash,
+      safetyPassedAt: data.safetyPassedAt,
+    }));
+    const tx = asTransaction({
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      ...exactWebSourceEvidenceClient(run),
+      memoryUseRun: {
+        findUnique: vi.fn().mockResolvedValue(run),
+        findUniqueOrThrow: vi.fn().mockResolvedValue(run),
+        update: vi.fn(),
+      },
+      ...runScopeClient(run),
+      contact: {
+        findFirst: vi.fn().mockResolvedValue({
+          audienceIdentityId: "identity_1",
+        }),
+      },
+      audienceIdentity: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "identity_1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          identityLinks: [{ id: "verified_link_1" }],
+        }),
+      },
+      contactMemorySharingConsent: { findFirst: consentFind },
+      memoryProjectionItem: { findMany: vi.fn().mockResolvedValue([source]) },
+      publicKnowledgeProjectionItem: { findMany: vi.fn().mockResolvedValue([]) },
+      representativeMemoryPolicy: {
+        findUnique: vi.fn().mockResolvedValue({
+          revision: 7,
+          longTermMemoryEnabled: true,
+          contactMemoryEnabled: true,
+          contactMemoryCrossChannelEnabled: true,
+          representativeExperienceEnabled: true,
+          webRecallEnabled: true,
+          matrixRecallEnabled: true,
+          telegramRecallEnabled: true,
+        }),
+      },
+      memoryUseItem: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create: itemCreate,
+      },
+      memoryUseUnmappedObservation: {
+        createMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+    });
+    const input = {
+      useRunId: run.id,
+      hits: [{
+        sourceKind: MemoryUseSourceKind.CONTACT_MEMORY,
+        projectionItemId: source.id,
+      }],
+    };
+
+    await expect(recordMemoryUseSearchHitsInTransaction(tx, input, occurredAt))
+      .resolves.toMatchObject({
+        eligibleItems: [{ memoryUseItemId: "memory_use_item_shared" }],
+        anonymousRejectedCount: 0,
+      });
+    await expect(recordMemoryUseSearchHitsInTransaction(tx, input, occurredAt))
+      .resolves.toMatchObject({
+        eligibleItems: [],
+        anonymousRejectedCount: 1,
+      });
+    expect(consentFind).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        representativeId: run.representativeId,
+        audienceIdentityId: "identity_1",
+        policyRevision: 7,
+      },
     }));
   });
 
@@ -514,6 +683,190 @@ describe("memory use execution", () => {
     expect(citationData).not.toHaveProperty("uri");
     expect(citationData).not.toHaveProperty("score");
     expect(citationData).not.toHaveProperty("excerpt");
+  });
+
+  it("blocks a persisted answer at delivery after its injected memory is revoked", async () => {
+    const run = runSnapshot({
+      status: MemoryUseRunStatus.COMPLETED,
+      outputMessageId: "output_message_1",
+      injectedCount: 1,
+      citedCount: 1,
+      completedAt: occurredAt,
+    });
+    const contentHash = "e".repeat(64);
+    const source = governedProjectionSource(run, contentHash);
+    const deliveryItem = {
+      id: "memory_use_item_1",
+      sourceKind: MemoryUseSourceKind.CONTACT_MEMORY,
+      safetyPassedAt: occurredAt,
+      injectedAt: occurredAt,
+      citedAt: occurredAt,
+      citationId: "citation_1",
+      rejectionReasonCode: null,
+      memoryVersionId: "memory_version_1",
+      projectionItemId: "projection_1",
+      publicKnowledgeProjectionId: null,
+      publicKnowledgeProjection: null,
+      contentHash,
+    };
+    const tx = asTransaction({
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      memoryUseRun: { findUnique: vi.fn().mockResolvedValue(run) },
+      memoryUseItem: { findMany: vi.fn().mockResolvedValue([deliveryItem]) },
+      ...runScopeClient(run),
+      message: {
+        findUnique: vi.fn().mockResolvedValue({ memoryIngressOrdinal: 1n }),
+      },
+      memoryProjectionItem: { findMany: vi.fn().mockResolvedValue([source]) },
+      representativeMemoryPolicy: {
+        findUnique: vi.fn().mockResolvedValue({
+          longTermMemoryEnabled: true,
+          contactMemoryEnabled: true,
+          representativeExperienceEnabled: true,
+          webRecallEnabled: true,
+          matrixRecallEnabled: false,
+          telegramRecallEnabled: false,
+        }),
+      },
+    });
+    const input = {
+      generationRunId: run.generationRunId,
+      conversationId: run.conversationId,
+      outputMessageId: "output_message_1",
+    };
+
+    await expect(revalidateMemoryUseDeliverySourcesInTransaction(
+      tx,
+      input,
+      occurredAt,
+    )).resolves.toEqual({
+      authorized: true,
+      checkedItemCount: 1,
+    });
+
+    const governedMemory = source.memoryVersion.memory as {
+      status: string;
+      recallDisabledAt: Date | null;
+    };
+    governedMemory.status = "SUPPRESSED";
+    governedMemory.recallDisabledAt = occurredAt;
+    await expect(revalidateMemoryUseDeliverySourcesInTransaction(
+      tx,
+      input,
+      occurredAt,
+    )).resolves.toEqual({
+      authorized: false,
+      checkedItemCount: 1,
+      reasonCode: "memory_use_delivery_source_revoked",
+    });
+  });
+
+  it("blocks provider delivery immediately after shared-memory consent is revoked", async () => {
+    const run = runSnapshot({
+      status: MemoryUseRunStatus.COMPLETED,
+      outputMessageId: "output_message_shared",
+      injectedCount: 1,
+      citedCount: 1,
+      completedAt: occurredAt,
+    });
+    const contentHash = "9".repeat(64);
+    const source = governedProjectionSource(run, contentHash);
+    Object.assign(source.memoryVersion, { scope: "CONTACT_SHARED" });
+    Object.assign(source.memoryVersion.memory, {
+      scope: "CONTACT_SHARED",
+      contactId: null,
+      audienceIdentityId: "identity_1",
+      sourceChannel: null,
+    });
+    Object.assign(source.memoryVersion.sourceCandidate, {
+      scope: "CONTACT_SHARED",
+      contactId: null,
+      audienceIdentityId: "identity_1",
+      scopeChannel: null,
+    });
+    Object.assign(source.memoryVersion.sourceCandidate.policyDecision!, {
+      policyRevision: 7,
+    });
+    const consentFind = vi.fn()
+      .mockResolvedValueOnce({
+        ...sharedConsentGrant("2".repeat(64)),
+      })
+      .mockResolvedValueOnce({
+        status: "REVOKED",
+        grantedAt: occurredAt,
+        revokedAt: occurredAt,
+        policyRevision: 7,
+        consentVersion: 2,
+        disclosureContractVersion: "cross-channel-contact-memory-v1",
+        proofHash: "2".repeat(64),
+      });
+    const tx = asTransaction({
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      ...exactWebSourceEvidenceClient(run),
+      memoryUseRun: { findUnique: vi.fn().mockResolvedValue(run) },
+      memoryUseItem: {
+        findMany: vi.fn().mockResolvedValue([{
+          id: "memory_use_item_shared",
+          sourceKind: MemoryUseSourceKind.CONTACT_MEMORY,
+          safetyPassedAt: occurredAt,
+          injectedAt: occurredAt,
+          citedAt: occurredAt,
+          citationId: "citation_shared",
+          rejectionReasonCode: null,
+          memoryVersionId: "memory_version_1",
+          projectionItemId: "projection_1",
+          publicKnowledgeProjectionId: null,
+          publicKnowledgeProjection: null,
+          contentHash,
+        }]),
+      },
+      ...runScopeClient(run),
+      contact: {
+        findFirst: vi.fn().mockResolvedValue({ audienceIdentityId: "identity_1" }),
+      },
+      audienceIdentity: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "identity_1",
+          status: "REGISTERED",
+          mergedIntoId: null,
+          identityLinks: [{ id: "verified_web_link" }],
+        }),
+      },
+      contactMemorySharingConsent: { findFirst: consentFind },
+      memoryProjectionItem: { findMany: vi.fn().mockResolvedValue([source]) },
+      representativeMemoryPolicy: {
+        findUnique: vi.fn().mockResolvedValue({
+          revision: 7,
+          longTermMemoryEnabled: true,
+          contactMemoryEnabled: true,
+          contactMemoryCrossChannelEnabled: true,
+          representativeExperienceEnabled: true,
+          webRecallEnabled: true,
+          matrixRecallEnabled: true,
+          telegramRecallEnabled: true,
+        }),
+      },
+    });
+    const input = {
+      generationRunId: run.generationRunId,
+      conversationId: run.conversationId,
+      outputMessageId: "output_message_shared",
+    };
+
+    await expect(revalidateMemoryUseDeliverySourcesInTransaction(
+      tx,
+      input,
+      occurredAt,
+    )).resolves.toEqual({ authorized: true, checkedItemCount: 1 });
+    await expect(revalidateMemoryUseDeliverySourcesInTransaction(
+      tx,
+      input,
+      occurredAt,
+    )).resolves.toEqual({
+      authorized: false,
+      checkedItemCount: 1,
+      reasonCode: "memory_use_delivery_source_revoked",
+    });
   });
 
   it("never marks Matrix citations as publicly displayed", async () => {
@@ -686,15 +1039,37 @@ function governedProjectionSource(
       deidentificationMethod: null,
       sourceCandidate: {
         id: "candidate_1",
+        contactId: run.contactId,
+        audienceIdentityId: null,
+        scope: "CONTACT_CHANNEL",
+        scopeChannel: run.sourceChannel,
+        sourceKind: "AUDIENCE_MESSAGE",
         status: "APPROVED",
         safetyClass: "LOW_RISK",
         contentPurgedAt: null,
+        policyDecision: {
+          representativeId: run.representativeId,
+          memoryId: "memory_1",
+          resultVersionId: "memory_version_1",
+          outcome: "ACTIVATED" as const,
+          outputHash: contentHash,
+          policyRevision: 7,
+        } as {
+          representativeId: string;
+          memoryId: string;
+          resultVersionId: string;
+          outcome: "ACTIVATED";
+          outputHash: string;
+          policyRevision: number;
+        } | undefined,
       },
-      reviewDecisions: [{ reviewerRole: "OWNER" }],
       memory: {
+        id: "memory_1",
         representativeId: run.representativeId,
         contactId: run.contactId,
+        audienceIdentityId: null,
         sourceChannel: run.sourceChannel,
+        category: "CONTACT_CONTEXT",
         scope: "CONTACT_CHANNEL",
         status: "ACTIVE",
         currentVersionId: "memory_version_1",
@@ -717,7 +1092,7 @@ function runScopeClient(
       findUnique: vi.fn().mockResolvedValue({
         representativeId: run.representativeId,
         contactId: run.contactId,
-        sourceChannel: "web",
+        sourceChannel: run.sourceChannel.toLowerCase(),
         activeEpisodeId: null,
       }),
     },
@@ -730,6 +1105,100 @@ function runScopeClient(
         representativeVersionId: run.representativeVersionId,
         episode: null,
       }),
+    },
+  };
+}
+
+function exactWebSourceEvidenceClient(run: MemoryUseRunSnapshot) {
+  return {
+    $queryRaw: vi.fn().mockResolvedValue([{ id: "verified_web_link" }]),
+    message: {
+      findFirst: vi.fn().mockResolvedValue({
+        senderId: null,
+        sourceIdentityLinkId: "verified_web_link",
+        sourceIdentityConnectionProofId: null,
+        conversation: {
+          audienceIdentityId: "identity_1",
+          contact: { audienceIdentityId: "identity_1" },
+        },
+        channelBinding: { kind: RepresentativeChannelKind.WEB, connectionId: null },
+      }),
+    },
+    identityLink: {
+      findUnique: vi.fn().mockResolvedValue({
+        id: "verified_web_link",
+        audienceIdentityId: "identity_1",
+        provider: "LOGTO",
+        providerSubject: "logto-user-1",
+        issuer: "https://identity.delegate.test",
+        verifiedAt: occurredAt,
+        assuranceLevel: "PLATFORM_VERIFIED",
+        revokedAt: null,
+      }),
+    },
+    identityLinkConnectionProof: { findUnique: vi.fn() },
+    audienceIdentity: {
+      findUnique: vi.fn().mockResolvedValue({
+        id: "identity_1",
+        status: "REGISTERED",
+        mergedIntoId: null,
+      }),
+    },
+  };
+}
+
+function sharedConsentGrant(proofHash: string) {
+  const consentId = "consent_1";
+  const challengeId = "challenge_1";
+  const sourceEvidenceHash = "2".repeat(64);
+  const confirmationEventHash = "3".repeat(64);
+  const disclosureEventHash = "4".repeat(64);
+  const createdAt = new Date(occurredAt.getTime() - 2_000);
+  const consumedAt = new Date(occurredAt.getTime() - 1_000);
+  const expiresAt = new Date(occurredAt.getTime() + 60_000);
+  return {
+    id: consentId,
+    status: "GRANTED",
+    grantedAt: occurredAt,
+    revokedAt: null,
+    policyRevision: 7,
+    consentVersion: 1,
+    disclosureContractVersion: "cross-channel-contact-memory-v1",
+    proofHash,
+    challengeId,
+    sourceEvidenceHash,
+    confirmationEventHash,
+    sourceEventClaim: {
+      eventHash: confirmationEventHash,
+      role: ContactMemorySharingSourceEventRole.CONFIRMATION,
+      representativeId: "representative_1",
+      audienceIdentityId: "identity_1",
+      sourceChannel: RepresentativeChannelKind.WEB,
+      challengeId,
+      consentId,
+    },
+    challenge: {
+      id: challengeId,
+      sourceChannel: RepresentativeChannelKind.WEB,
+      disclosureEventHash,
+      createdAt,
+      expiresAt,
+      sourceEventClaims: [{
+        eventHash: disclosureEventHash,
+        role: ContactMemorySharingSourceEventRole.DISCLOSURE,
+        representativeId: "representative_1",
+        audienceIdentityId: "identity_1",
+        sourceChannel: RepresentativeChannelKind.WEB,
+        challengeId,
+        consentId: null,
+      }],
+      audienceIdentityId: "identity_1",
+      representativeId: "representative_1",
+      policyRevision: 7,
+      disclosureContractVersion: "cross-channel-contact-memory-v1",
+      sourceEvidenceHash,
+      consumedAt,
+      revokedAt: null,
     },
   };
 }

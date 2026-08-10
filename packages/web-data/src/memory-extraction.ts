@@ -1,10 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
+  AudienceIdentityStatus,
+  ContactMemorySharingConsentStatus,
+  ContactMemorySharingSourceEventRole,
+  GovernedMemoryStatus,
+  IdentityAssuranceLevel,
+  IdentityLinkProvider,
   MemoryCandidateStatus,
   MemoryCategory,
   MemoryExtractionStatus,
   MemoryExtractionTrigger,
+  MemoryProjectionStatus,
+  MemoryPolicyDecisionOutcome,
   MemorySafetyClass,
   MemoryScope,
   MemorySourceKind,
@@ -15,23 +23,47 @@ import {
   type RepresentativeMemoryPolicy,
 } from "@prisma/client";
 
+import {
+  applyAutomaticMemoryPolicyInTransaction,
+  lockContactSharedMemoryCoordinate,
+  recordAutomaticMarkerPolicyDecisionInTransaction,
+  recordRepresentativeEvidencePolicyDecisionInTransaction,
+  requestAutomaticContactChannelMemoryDeletionInTransaction,
+  requestAutomaticContactReplyPreferenceDeletionInTransaction,
+} from "./memory-governance";
+import {
+  lockAndResolveExactMessageIdentityEvidence,
+  type ExactMessageIdentityEvidence,
+} from "./contact-memory-source-evidence";
+import {
+  contactMemorySharingConsentContractVersion,
+  hasCurrentMemoryChannelDisclosureForMessage,
+} from "./memory-disclosure";
+import {
+  contactChannelMemoryForgetCutoffReasonCode,
+  currentContactChannelMemoryEpoch,
+  isContactChannelMemorySourceAfterForgetBoundary,
+  loadLatestContactChannelMemoryForgetBoundary,
+  lockContactChannelMemoryCoordinate,
+  toRepresentativeMemoryChannel,
+} from "./memory-forget-boundary";
 import { prisma } from "./prisma";
 import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
 
 export type MemoryExtractionChannel = "web" | "matrix" | "telegram";
-export type ExplicitMemoryExtractionTrigger = "MANUAL" | "SHADOW";
-export type RequestedMemoryScope = "CONTACT_CHANNEL" | "REPRESENTATIVE";
 
 type MemoryExtractionPolicySnapshot = Pick<
   RepresentativeMemoryPolicy,
   | "longTermMemoryEnabled"
   | "contactMemoryEnabled"
+  | "contactMemoryCrossChannelEnabled"
   | "representativeExperienceEnabled"
   | "autoExtract"
   | "webExtractEnabled"
   | "matrixExtractEnabled"
   | "telegramExtractEnabled"
   | "retentionDays"
+  | "revision"
 >;
 
 export type MemoryExtractionPolicyGate =
@@ -45,6 +77,8 @@ export type MemoryExtractionPolicyGate =
         | "representative_experience_disabled"
         | "automatic_extraction_disabled"
         | "memory_channel_disclosure_unavailable"
+        | "memory_channel_disclosure_missing"
+        | "memory_extraction_trigger_retired"
         | "channel_extraction_disabled"
         | "channel_trigger_contact_scope_only";
     };
@@ -129,6 +163,7 @@ export type EnqueueMemoryExtractionResult =
         | "memory_source_not_text"
         | "memory_source_edited"
         | "memory_source_redacted"
+        | typeof contactChannelMemoryForgetCutoffReasonCode
         | "representative_experience_trigger_not_allowed";
     };
 
@@ -138,11 +173,6 @@ export type InboundMemoryExtractionInput = {
   conversationId: string;
   messageId: string;
   channel: MemoryExtractionChannel;
-};
-
-export type ExplicitMemoryExtractionInput = InboundMemoryExtractionInput & {
-  scope: RequestedMemoryScope;
-  requestId: string;
 };
 
 export type MemoryExtractionWorkClaim = {
@@ -165,6 +195,11 @@ export type MemoryExtractionWorkResult =
 type MemoryExtractionSource = {
   id: string;
   conversationId: string;
+  channelBindingId: string | null;
+  channelLifecycleRevision: number | null;
+  createdAt: Date;
+  ingressSequence: number | null;
+  memoryIngressOrdinal: bigint | null;
   senderType: MessageSenderType;
   contentType: MessageContentType;
   text: string | null;
@@ -187,12 +222,26 @@ type MemoryExtractionRunWithSource = {
   trigger: MemoryExtractionTrigger;
   status: MemoryExtractionStatus;
   idempotencyKey: string;
+  contactChannelMemoryEpoch: number;
   leaseToken: string | null;
   leaseExpiresAt: Date | null;
   sourceMessage: MemoryExtractionSource | null;
 };
 
-const extractionContractVersion = "v1";
+type PrivateChannelExtractionEpochErrorCode =
+  | "matrix_memory_extraction_source_lifecycle_missing"
+  | "matrix_memory_extraction_channel_lifecycle_changed"
+  | "matrix_memory_extraction_channel_assignment_missing"
+  | "matrix_memory_extraction_channel_assignment_changed"
+  | "matrix_memory_extraction_channel_identity_changed"
+  | "matrix_memory_extraction_channel_not_active"
+  | "telegram_memory_extraction_channel_assignment_missing"
+  | "telegram_memory_extraction_channel_assignment_changed"
+  | "telegram_memory_extraction_channel_identity_changed"
+  | "telegram_memory_extraction_channel_not_active";
+
+const extractionContractVersion = "v2";
+const compatibleExtractionContractVersions = new Set(["v1", "v2"]);
 const extractionLeaseMilliseconds = 60_000;
 const maximumExtractionAttempts = 5;
 const extractionRetryBaseMilliseconds = 1_000;
@@ -305,6 +354,17 @@ const closedCommunicationPreferences = new Map<string, string>([
 const closedCommunicationPreferenceValues = new Set(
   closedCommunicationPreferences.values(),
 );
+const deterministicContactForgetCommands = new Set([
+  "forget my reply preference",
+  "忘记我的回复偏好",
+]);
+const deterministicContactMemoryDeleteCommands = new Set([
+  "/delete_memory",
+  "/forget",
+  "delete my memory",
+  "forget my memory",
+  "删除我的记忆",
+]);
 const representativeResponseSafeText =
   "Response pattern: adapt the reply format to an explicitly stated communication preference.";
 const representativeResponseSummary =
@@ -322,16 +382,17 @@ export function resolveMemoryExtractionPolicyGate(
   if (!policy.longTermMemoryEnabled) {
     return { allowed: false, reasonCode: "long_term_memory_disabled" };
   }
-  // Until Matrix and Telegram can present the same pre-interaction disclosure
-  // as Web, no trigger (automatic, manual, shadow, or scheduled) may extract
-  // governed memory from those channels. Do not trust legacy true flags.
-  if (channel !== "web") {
-    return {
-      allowed: false,
-      reasonCode: "memory_channel_disclosure_unavailable",
-    };
+  if (trigger !== MemoryExtractionTrigger.CHANNEL_MESSAGE) {
+    return { allowed: false, reasonCode: "memory_extraction_trigger_retired" };
   }
-  if (scope === MemoryScope.CONTACT_CHANNEL && !policy.contactMemoryEnabled) {
+  const representativeOnlyAutomaticRun =
+    scope === MemoryScope.CONTACT_CHANNEL
+    && policy.representativeExperienceEnabled;
+  if (
+    scope === MemoryScope.CONTACT_CHANNEL
+    && !policy.contactMemoryEnabled
+    && !representativeOnlyAutomaticRun
+  ) {
     return { allowed: false, reasonCode: "contact_memory_disabled" };
   }
   if (
@@ -343,18 +404,240 @@ export function resolveMemoryExtractionPolicyGate(
       reasonCode: "representative_experience_disabled",
     };
   }
-  if (trigger !== MemoryExtractionTrigger.CHANNEL_MESSAGE) {
-    return { allowed: true };
-  }
   if (scope !== MemoryScope.CONTACT_CHANNEL) {
     return { allowed: false, reasonCode: "channel_trigger_contact_scope_only" };
   }
   if (!policy.autoExtract) {
     return { allowed: false, reasonCode: "automatic_extraction_disabled" };
   }
-  return policy.webExtractEnabled
+  const channelExtractEnabled = channel === "web"
+    ? policy.webExtractEnabled
+    : channel === "matrix"
+      ? policy.matrixExtractEnabled
+      : policy.telegramExtractEnabled;
+  return channelExtractEnabled
     ? { allowed: true }
     : { allowed: false, reasonCode: "channel_extraction_disabled" };
+}
+
+export type ContactMemorySharingEligibility =
+  | { eligible: true; audienceIdentityId: string }
+  | {
+      eligible: false;
+      reasonCode:
+        | "cross_channel_sharing_disabled"
+        | "contact_identity_missing"
+        | "contact_identity_not_registered"
+        | "verified_identity_link_missing"
+        | "sharing_consent_missing"
+        | "sharing_consent_revoked"
+        | "sharing_consent_stale";
+    };
+
+/**
+ * Cross-channel contact memory is a separate, explicit promotion decision.
+ * The default extraction remains CONTACT_CHANNEL; only a canonical verified
+ * identity with a current explicit consent proof may be promoted.
+ */
+export async function resolveContactMemorySharingEligibility(
+  tx: Prisma.TransactionClient,
+  input: {
+    representativeId: string;
+    contactId: string;
+    policy?: Pick<
+      RepresentativeMemoryPolicy,
+      "contactMemoryCrossChannelEnabled" | "revision"
+    > | null;
+    sourceChannel: RepresentativeChannelKind;
+    sourceEvidence: ExactMessageIdentityEvidence | null;
+  },
+): Promise<ContactMemorySharingEligibility> {
+  const policy = input.policy ?? await tx.representativeMemoryPolicy.findUnique({
+    where: { representativeId: input.representativeId },
+    select: {
+      contactMemoryCrossChannelEnabled: true,
+      revision: true,
+    },
+  });
+  if (!policy?.contactMemoryCrossChannelEnabled) {
+    return { eligible: false, reasonCode: "cross_channel_sharing_disabled" };
+  }
+  const contact = await tx.contact.findFirst({
+    where: {
+      id: input.contactId,
+      representativeId: input.representativeId,
+    },
+    select: { audienceIdentityId: true },
+  });
+  if (!contact?.audienceIdentityId) {
+    return { eligible: false, reasonCode: "contact_identity_missing" };
+  }
+  const visited = new Set<string>();
+  let identityId = contact.audienceIdentityId;
+  let identity: {
+    id: string;
+    status: AudienceIdentityStatus;
+    mergedIntoId: string | null;
+  } | null = null;
+  for (let depth = 0; depth < 32; depth += 1) {
+    if (visited.has(identityId)) {
+      return {
+        eligible: false,
+        reasonCode: "contact_identity_not_registered",
+      };
+    }
+    visited.add(identityId);
+    identity = await tx.audienceIdentity.findUnique({
+      where: { id: identityId },
+      select: {
+        id: true,
+        status: true,
+        mergedIntoId: true,
+      },
+    });
+    if (!identity) {
+      return { eligible: false, reasonCode: "contact_identity_missing" };
+    }
+    if (
+      identity.status === AudienceIdentityStatus.MERGED
+      && identity.mergedIntoId
+    ) {
+      identityId = identity.mergedIntoId;
+      continue;
+    }
+    break;
+  }
+  if (
+    !identity
+    || identity.status !== AudienceIdentityStatus.REGISTERED
+    || identity.mergedIntoId
+  ) {
+    return {
+      eligible: false,
+      reasonCode: "contact_identity_not_registered",
+    };
+  }
+  if (
+    !input.sourceEvidence
+    || input.sourceEvidence.sourceChannel !== input.sourceChannel
+    || input.sourceEvidence.canonicalAudienceIdentityId !== identity.id
+  ) {
+    return { eligible: false, reasonCode: "verified_identity_link_missing" };
+  }
+  const consent = await tx.contactMemorySharingConsent.findFirst({
+    where: {
+      representativeId: input.representativeId,
+      audienceIdentityId: identity.id,
+      policyRevision: policy.revision,
+    },
+    orderBy: { consentVersion: "desc" },
+    select: {
+      id: true,
+      status: true,
+      grantedAt: true,
+      revokedAt: true,
+      policyRevision: true,
+      consentVersion: true,
+      disclosureContractVersion: true,
+      proofHash: true,
+      challengeId: true,
+      sourceEvidenceHash: true,
+      confirmationEventHash: true,
+      sourceEventClaim: {
+        select: {
+          eventHash: true,
+          role: true,
+          representativeId: true,
+          audienceIdentityId: true,
+          sourceChannel: true,
+          challengeId: true,
+          consentId: true,
+        },
+      },
+      challenge: {
+        select: {
+          id: true,
+          audienceIdentityId: true,
+          representativeId: true,
+          sourceChannel: true,
+          policyRevision: true,
+          disclosureContractVersion: true,
+          sourceEvidenceHash: true,
+          disclosureEventHash: true,
+          createdAt: true,
+          expiresAt: true,
+          consumedAt: true,
+          revokedAt: true,
+          sourceEventClaims: {
+            where: {
+              role: ContactMemorySharingSourceEventRole.DISCLOSURE,
+            },
+            select: {
+              eventHash: true,
+              role: true,
+              representativeId: true,
+              audienceIdentityId: true,
+              sourceChannel: true,
+              challengeId: true,
+              consentId: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  if (!consent) {
+    return { eligible: false, reasonCode: "sharing_consent_missing" };
+  }
+  if (
+    consent.status !== ContactMemorySharingConsentStatus.GRANTED
+    || !consent.grantedAt
+    || consent.revokedAt
+  ) {
+    return { eligible: false, reasonCode: "sharing_consent_revoked" };
+  }
+  if (
+    consent.consentVersion < 1
+    || consent.disclosureContractVersion
+      !== contactMemorySharingConsentContractVersion
+    || !/^[0-9a-f]{64}$/u.test(consent.proofHash)
+    || !consent.challengeId
+    || !/^[0-9a-f]{64}$/u.test(consent.sourceEvidenceHash ?? "")
+    || !/^[0-9a-f]{64}$/u.test(consent.confirmationEventHash ?? "")
+    || !consent.challenge
+    || consent.challenge.representativeId !== input.representativeId
+    || consent.challenge.audienceIdentityId !== identity.id
+    || consent.challenge.policyRevision !== policy.revision
+    || consent.challenge.disclosureContractVersion
+      !== contactMemorySharingConsentContractVersion
+    || consent.challenge.sourceEvidenceHash !== consent.sourceEvidenceHash
+    || !consent.challenge.consumedAt
+    || consent.challenge.consumedAt < consent.challenge.createdAt
+    || consent.challenge.consumedAt > consent.challenge.expiresAt
+    || consent.grantedAt < consent.challenge.consumedAt
+    || consent.challenge.revokedAt
+    || !Array.isArray(consent.challenge.sourceEventClaims)
+    || !consent.challenge.sourceEventClaims.some((claim) =>
+      claim.eventHash === consent.challenge?.disclosureEventHash
+      && claim.role === ContactMemorySharingSourceEventRole.DISCLOSURE
+      && claim.representativeId === input.representativeId
+      && claim.audienceIdentityId === identity.id
+      && claim.sourceChannel === consent.challenge?.sourceChannel
+      && claim.challengeId === consent.challengeId
+      && claim.consentId === null
+    )
+    || consent.sourceEventClaim?.eventHash !== consent.confirmationEventHash
+    || consent.sourceEventClaim.role
+      !== ContactMemorySharingSourceEventRole.CONFIRMATION
+    || consent.sourceEventClaim.representativeId !== input.representativeId
+    || consent.sourceEventClaim.audienceIdentityId !== identity.id
+    || consent.sourceEventClaim.sourceChannel !== consent.challenge.sourceChannel
+    || consent.sourceEventClaim.challengeId !== consent.challengeId
+    || consent.sourceEventClaim.consentId !== consent.id
+  ) {
+    return { eligible: false, reasonCode: "sharing_consent_stale" };
+  }
+  return { eligible: true, audienceIdentityId: identity.id };
 }
 
 export function classifyMemoryCandidate(input: {
@@ -470,51 +753,34 @@ export function classifyMemoryCandidate(input: {
   };
 }
 
+export function isDeterministicContactReplyPreferenceForgetCommand(
+  text: string | null,
+): boolean {
+  if (!text?.trim()) return false;
+  return deterministicContactForgetCommands.has(
+    normalizeClosedPreferenceKey(normalizeCandidateText(text)),
+  );
+}
+
+export function isDeterministicContactMemoryDeleteCommand(
+  text: string | null,
+): boolean {
+  if (!text?.trim()) return false;
+  return deterministicContactMemoryDeleteCommands.has(
+    normalizeClosedPreferenceKey(normalizeCandidateText(text)),
+  );
+}
+
 export async function enqueueInboundMessageMemoryExtraction(
   tx: Prisma.TransactionClient,
   input: InboundMemoryExtractionInput,
 ): Promise<EnqueueMemoryExtractionResult> {
-  return enqueueMemoryExtractionInTransaction(tx, {
-    ...input,
-    trigger: MemoryExtractionTrigger.CHANNEL_MESSAGE,
-    scope: MemoryScope.CONTACT_CHANNEL,
-    requestId: "channel-message",
-  });
-}
-
-export async function enqueueManualMemoryExtraction(
-  input: ExplicitMemoryExtractionInput,
-): Promise<EnqueueMemoryExtractionResult> {
-  if (!input.requestId.trim()) throw new Error("requestId is required.");
-  return runMemoryExtractionWriteTransaction((tx) =>
-    enqueueMemoryExtractionInTransaction(tx, {
-      ...input,
-      trigger: MemoryExtractionTrigger.MANUAL,
-      scope: toMemoryScope(input.scope),
-    }),
-  );
-}
-
-export async function enqueueShadowMemoryExtraction(
-  input: ExplicitMemoryExtractionInput,
-): Promise<EnqueueMemoryExtractionResult> {
-  if (!input.requestId.trim()) throw new Error("requestId is required.");
-  return runMemoryExtractionWriteTransaction((tx) =>
-    enqueueMemoryExtractionInTransaction(tx, {
-      ...input,
-      trigger: MemoryExtractionTrigger.SHADOW,
-      scope: toMemoryScope(input.scope),
-    }),
-  );
+  return enqueueMemoryExtractionInTransaction(tx, input);
 }
 
 async function enqueueMemoryExtractionInTransaction(
   tx: Prisma.TransactionClient,
-  input: InboundMemoryExtractionInput & {
-    trigger: MemoryExtractionTrigger;
-    scope: MemoryScope;
-    requestId: string;
-  },
+  input: InboundMemoryExtractionInput,
 ): Promise<EnqueueMemoryExtractionResult> {
   if (!hasMemoryExtractionStorage(tx)) {
     return { enqueued: false, reasonCode: "memory_storage_unavailable" };
@@ -546,16 +812,6 @@ async function enqueueMemoryExtractionInTransaction(
   if (source.editedAt) {
     return { enqueued: false, reasonCode: "memory_source_edited" };
   }
-  if (
-    input.scope === MemoryScope.REPRESENTATIVE
-    && input.trigger !== MemoryExtractionTrigger.MANUAL
-    && input.trigger !== MemoryExtractionTrigger.SHADOW
-  ) {
-    return {
-      enqueued: false,
-      reasonCode: "representative_experience_trigger_not_allowed",
-    };
-  }
   if (source.senderType !== MessageSenderType.AUDIENCE) {
     return {
       enqueued: false,
@@ -566,30 +822,76 @@ async function enqueueMemoryExtractionInTransaction(
     return { enqueued: false, reasonCode: "memory_source_not_text" };
   }
 
+  const forgetCommand =
+    isDeterministicContactReplyPreferenceForgetCommand(source.text)
+    || isDeterministicContactMemoryDeleteCommand(source.text);
+  const sourceChannel = toRepresentativeMemoryChannel(input.channel);
+  await lockContactChannelMemoryCoordinate(tx, {
+    representativeId: input.representativeId,
+    contactId: input.contactId,
+    sourceChannel,
+  });
+  const forgetBoundary = await loadLatestContactChannelMemoryForgetBoundary(
+    tx,
+    {
+      representativeId: input.representativeId,
+      contactId: input.contactId,
+      sourceChannel,
+    },
+  );
+  const contactChannelMemoryEpoch = currentContactChannelMemoryEpoch(
+    forgetBoundary,
+  );
+  if (
+    !isContactChannelMemorySourceAfterForgetBoundary(forgetBoundary, {
+      contactChannelMemoryEpoch,
+      memoryIngressOrdinal: source.memoryIngressOrdinal,
+    })
+  ) {
+    return {
+      enqueued: false,
+      reasonCode: contactChannelMemoryForgetCutoffReasonCode,
+    };
+  }
+
   const policy = await tx.representativeMemoryPolicy.findUnique({
     where: { representativeId: input.representativeId },
     select: memoryExtractionPolicySelect,
   });
-  const gate = resolveMemoryExtractionPolicyGate(
-    policy,
-    input.channel,
-    input.trigger,
-    input.scope,
-  );
-  if (!gate.allowed) return { enqueued: false, reasonCode: gate.reasonCode };
+  if (!forgetCommand) {
+    const gate = resolveMemoryExtractionPolicyGate(
+      policy,
+      input.channel,
+      MemoryExtractionTrigger.CHANNEL_MESSAGE,
+      MemoryScope.CONTACT_CHANNEL,
+    );
+    if (!gate.allowed) return { enqueued: false, reasonCode: gate.reasonCode };
+    if (!await hasCurrentMemoryChannelDisclosureForMessage(tx, {
+      representativeId: input.representativeId,
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      messageId: input.messageId,
+      channel: input.channel,
+      capability: "extract",
+    })) {
+      return {
+        enqueued: false,
+        reasonCode: "memory_channel_disclosure_missing",
+      };
+    }
+  }
 
   const revisionDigest = hashText(`${source.id}\u0000${source.text ?? ""}`);
-  const requestDigest = hashText(input.requestId.trim() || "missing-request-id");
+  const requestDigest = hashText("channel-message");
   const idempotencyKey = [
     "memory-extraction",
     extractionContractVersion,
-    input.trigger,
-    input.scope,
+    MemoryExtractionTrigger.CHANNEL_MESSAGE,
+    MemoryScope.CONTACT_CHANNEL,
     input.channel,
     revisionDigest,
     requestDigest,
   ].join(":");
-  const sourceChannel = toRepresentativeChannelKind(input.channel);
   const existing = await tx.memoryExtractionRun.findUnique({
     where: {
       representativeId_idempotencyKey: {
@@ -614,9 +916,10 @@ async function enqueueMemoryExtractionInTransaction(
       sourceChannel,
       sourceConversationId: input.conversationId,
       sourceMessageId: input.messageId,
-      trigger: input.trigger,
+      trigger: MemoryExtractionTrigger.CHANNEL_MESSAGE,
       status: MemoryExtractionStatus.QUEUED,
       idempotencyKey,
+      contactChannelMemoryEpoch,
     },
     select: { id: true },
   });
@@ -717,6 +1020,140 @@ async function processClaimedMemoryExtractionRun(
   );
 }
 
+/**
+ * Serializes private-channel extraction with endpoint lifecycle changes and
+ * proves that the source message still belongs to the currently active
+ * representative endpoint. Exact deletion commands intentionally bypass this
+ * gate: they only reduce retained data and remain bounded by the existing
+ * source coordinates and contact-channel forget boundary.
+ */
+async function validatePrivateChannelExtractionEpoch(
+  tx: Prisma.TransactionClient,
+  input: {
+    channel: MemoryExtractionChannel;
+    representativeId: string;
+    conversationId: string;
+    source: MemoryExtractionSource;
+  },
+): Promise<PrivateChannelExtractionEpochErrorCode | null> {
+  if (input.channel === "web") return null;
+
+  const channelKind = input.channel === "matrix"
+    ? RepresentativeChannelKind.MATRIX
+    : RepresentativeChannelKind.TELEGRAM;
+  const channelStateLockKey = input.channel === "matrix"
+    ? `matrix-virtual-user:${input.representativeId}`
+    : `telegram-bot-channel:${input.representativeId}`;
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(
+      hashtext(${channelStateLockKey})
+    )
+  `;
+
+  // The extraction transaction may have established its SERIALIZABLE snapshot
+  // before waiting for the endpoint lifecycle advisory lock. Locking the
+  // binding row after that wait forces PostgreSQL to reject that stale snapshot
+  // when a disconnect/reconnect committed in the meantime; the surrounding
+  // write-conflict retry then re-runs this check against the new lifecycle.
+  await tx.$executeRaw`
+    SELECT binding."id"
+    FROM "RepresentativeChannelBinding" binding
+    WHERE binding."representativeId" = ${input.representativeId}
+      AND binding."kind" = CAST(${channelKind} AS "RepresentativeChannelKind")
+    FOR UPDATE
+  `;
+
+  const currentBinding = await tx.representativeChannelBinding.findUnique({
+    where: {
+      representativeId_kind: {
+        representativeId: input.representativeId,
+        kind: channelKind,
+      },
+    },
+    select: {
+      id: true,
+      connectionId: true,
+      endpointAssignmentRevision: true,
+      endpointLifecycleRevision: true,
+      desiredState: true,
+    },
+  });
+  if (!currentBinding || currentBinding.desiredState !== "ACTIVE") {
+    return input.channel === "matrix"
+      ? "matrix_memory_extraction_channel_not_active"
+      : "telegram_memory_extraction_channel_not_active";
+  }
+
+  if (
+    input.channel === "matrix"
+    && !isPositiveSafeInteger(input.source.channelLifecycleRevision)
+  ) {
+    return "matrix_memory_extraction_source_lifecycle_missing";
+  }
+
+  const sourceBinding = input.source.channelBindingId
+    ? await tx.conversationChannelBinding.findFirst({
+        where: {
+          id: input.source.channelBindingId,
+          conversationId: input.conversationId,
+          kind: channelKind,
+        },
+        select: {
+          id: true,
+          representativeBindingId: true,
+          connectionId: true,
+          representativeAssignmentRevision: true,
+        },
+      })
+    : null;
+  if (
+    !sourceBinding
+    || sourceBinding.representativeBindingId !== currentBinding.id
+  ) {
+    return input.channel === "matrix"
+      ? "matrix_memory_extraction_channel_identity_changed"
+      : "telegram_memory_extraction_channel_identity_changed";
+  }
+
+  if (input.channel === "matrix") {
+    if (
+      !isPositiveSafeInteger(currentBinding.endpointLifecycleRevision)
+      || currentBinding.endpointLifecycleRevision
+        !== input.source.channelLifecycleRevision
+    ) {
+      return "matrix_memory_extraction_channel_lifecycle_changed";
+    }
+  } else if (
+    !sourceBinding.connectionId?.trim()
+    || !currentBinding.connectionId?.trim()
+    || sourceBinding.connectionId !== currentBinding.connectionId
+  ) {
+    return "telegram_memory_extraction_channel_identity_changed";
+  }
+
+  if (
+    !isPositiveSafeInteger(sourceBinding.representativeAssignmentRevision)
+    || !isPositiveSafeInteger(currentBinding.endpointAssignmentRevision)
+  ) {
+    return input.channel === "matrix"
+      ? "matrix_memory_extraction_channel_assignment_missing"
+      : "telegram_memory_extraction_channel_assignment_missing";
+  }
+  if (
+    sourceBinding.representativeAssignmentRevision
+      !== currentBinding.endpointAssignmentRevision
+  ) {
+    return input.channel === "matrix"
+      ? "matrix_memory_extraction_channel_assignment_changed"
+      : "telegram_memory_extraction_channel_assignment_changed";
+  }
+  return null;
+}
+
+function isPositiveSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0;
+}
+
 export async function processMemoryExtractionRunInTransaction(
   tx: Prisma.TransactionClient,
   input: { runId: string },
@@ -784,24 +1221,16 @@ export async function processMemoryExtractionRunInTransaction(
       dependencies.leaseToken,
     );
   }
-  if (
-    run.trigger !== MemoryExtractionTrigger.CHANNEL_MESSAGE
-    && run.trigger !== MemoryExtractionTrigger.MANUAL
-    && run.trigger !== MemoryExtractionTrigger.SHADOW
-  ) {
+  if (run.trigger !== MemoryExtractionTrigger.CHANNEL_MESSAGE) {
     return cancelMemoryExtractionRun(
       tx,
       run.id,
-      "memory_extraction_trigger_not_supported",
+      "memory_extraction_trigger_retired",
       now,
       dependencies.leaseToken,
     );
   }
-  if (
-    parsedCoordinates.scope === MemoryScope.REPRESENTATIVE
-    && run.trigger !== MemoryExtractionTrigger.MANUAL
-    && run.trigger !== MemoryExtractionTrigger.SHADOW
-  ) {
+  if (parsedCoordinates.scope !== MemoryScope.CONTACT_CHANNEL) {
     return cancelMemoryExtractionRun(
       tx,
       run.id,
@@ -857,24 +1286,117 @@ export async function processMemoryExtractionRunInTransaction(
       dependencies.leaseToken,
     );
   }
+  const deleteAllCommand =
+    parsedCoordinates.scope === MemoryScope.CONTACT_CHANNEL
+    && source.senderType === MessageSenderType.AUDIENCE
+    && source.contentType === MessageContentType.TEXT
+    && isDeterministicContactMemoryDeleteCommand(source.text);
+  const forgetPreferenceCommand =
+    parsedCoordinates.scope === MemoryScope.CONTACT_CHANNEL
+    && source.senderType === MessageSenderType.AUDIENCE
+    && source.contentType === MessageContentType.TEXT
+    && isDeterministicContactReplyPreferenceForgetCommand(source.text);
+  const forgetCommand = deleteAllCommand || forgetPreferenceCommand;
+  let exactSharedSourceEvidence: ExactMessageIdentityEvidence | null = null;
+  if (!forgetCommand) {
+    // Private-channel delivery takes the endpoint/room fence before the
+    // contact-memory coordinate. Keep extraction in the same canonical order
+    // so extraction and a provider send cannot deadlock each other.
+    const privateChannelEpochError =
+      await validatePrivateChannelExtractionEpoch(tx, {
+        channel: parsedCoordinates.channel,
+        representativeId: run.representativeId,
+        conversationId: run.sourceConversationId,
+        source,
+      });
+    if (privateChannelEpochError) {
+      return cancelMemoryExtractionRun(
+        tx,
+        run.id,
+        privateChannelEpochError,
+        now,
+        dependencies.leaseToken,
+      );
+    }
+    exactSharedSourceEvidence =
+      await lockAndResolveExactMessageIdentityEvidence(tx, {
+        representativeId: run.representativeId,
+        contactId: run.contactId,
+        conversationId: run.sourceConversationId,
+        messageId: source.id,
+        sourceChannel: run.sourceChannel,
+      });
+    if (exactSharedSourceEvidence) {
+      await lockContactSharedMemoryCoordinate(tx, {
+        representativeId: run.representativeId,
+        audienceIdentityId:
+          exactSharedSourceEvidence.canonicalAudienceIdentityId,
+      });
+    }
+  }
+  await lockContactChannelMemoryCoordinate(tx, {
+    representativeId: run.representativeId,
+    contactId: run.contactId,
+    sourceChannel: run.sourceChannel,
+  });
+  const forgetBoundary = await loadLatestContactChannelMemoryForgetBoundary(
+    tx,
+    {
+      representativeId: run.representativeId,
+      contactId: run.contactId,
+      sourceChannel: run.sourceChannel,
+    },
+  );
+  if (
+    !isContactChannelMemorySourceAfterForgetBoundary(forgetBoundary, {
+      contactChannelMemoryEpoch: run.contactChannelMemoryEpoch,
+      memoryIngressOrdinal: source.memoryIngressOrdinal,
+    })
+  ) {
+    return cancelMemoryExtractionRun(
+      tx,
+      run.id,
+      contactChannelMemoryForgetCutoffReasonCode,
+      now,
+      dependencies.leaseToken,
+    );
+  }
   const policy = await tx.representativeMemoryPolicy.findUnique({
     where: { representativeId: run.representativeId },
     select: memoryExtractionPolicySelect,
   });
-  const gate = resolveMemoryExtractionPolicyGate(
-    policy,
-    parsedCoordinates.channel,
-    run.trigger,
-    parsedCoordinates.scope,
-  );
-  if (!gate.allowed) {
-    return cancelMemoryExtractionRun(
-      tx,
-      run.id,
-      gate.reasonCode,
-      now,
-      dependencies.leaseToken,
+  if (!forgetCommand) {
+    const gate = resolveMemoryExtractionPolicyGate(
+      policy,
+      parsedCoordinates.channel,
+      run.trigger,
+      parsedCoordinates.scope,
     );
+    if (!gate.allowed) {
+      return cancelMemoryExtractionRun(
+        tx,
+        run.id,
+        gate.reasonCode,
+        now,
+        dependencies.leaseToken,
+      );
+    }
+    if (!await hasCurrentMemoryChannelDisclosureForMessage(tx, {
+      representativeId: run.representativeId,
+      contactId: run.contactId,
+      conversationId: run.sourceConversationId,
+      messageId: source.id,
+      channel: parsedCoordinates.channel,
+      capability: "extract",
+    })) {
+      return cancelMemoryExtractionRun(
+        tx,
+        run.id,
+        "memory_channel_disclosure_missing",
+        now,
+        dependencies.leaseToken,
+      );
+    }
   }
 
   if (!dependencies.leaseToken) {
@@ -908,6 +1430,63 @@ export async function processMemoryExtractionRunInTransaction(
     }
   }
 
+  if (
+    parsedCoordinates.scope === MemoryScope.CONTACT_CHANNEL
+    && source.senderType === MessageSenderType.AUDIENCE
+    && source.contentType === MessageContentType.TEXT
+    && forgetCommand
+  ) {
+    const deletionInput = {
+      representativeId: run.representativeId,
+      contactId: run.contactId,
+      sourceChannel: run.sourceChannel,
+      sourceMessageId: source.id,
+      sourceHash: hashText(normalizeCandidateText(source.text ?? "")),
+      occurredAt: now,
+    };
+    const reasonCode = deleteAllCommand
+      ? (await requestAutomaticContactChannelMemoryDeletionInTransaction(
+          tx,
+          deletionInput,
+        )).matchedCount > 0
+        ? "contact_channel_memory_delete_requested"
+        : "contact_channel_memory_not_found"
+      : (await requestAutomaticContactReplyPreferenceDeletionInTransaction(
+          tx,
+          deletionInput,
+        )).matched
+        ? "contact_reply_preference_forget_requested"
+        : "contact_reply_preference_not_found";
+    const completed = await tx.memoryExtractionRun.updateMany({
+      where: { id: run.id, leaseToken },
+      data: {
+        status: MemoryExtractionStatus.SUCCEEDED,
+        candidateCount: 0,
+        acceptedCount: 0,
+        rejectedCount: 0,
+        quarantinedCount: 0,
+        reasonCounts: { [reasonCode]: 1 },
+        leaseToken: null,
+        leaseExpiresAt: null,
+        finishedAt: new Date(),
+        errorCode: null,
+      },
+    });
+    if (completed.count !== 1) {
+      throw new Error("Memory extraction lease changed before completion.");
+    }
+    return {
+      processed: true,
+      runId: run.id,
+      status: MemoryExtractionStatus.SUCCEEDED,
+      candidateCount: 0,
+      acceptedCount: 0,
+      rejectedCount: 0,
+      quarantinedCount: 0,
+      reasonCode,
+    };
+  }
+
   const classification = safelyClassifyMemoryCandidate(
     {
       text: source.text,
@@ -926,8 +1505,15 @@ export async function processMemoryExtractionRunInTransaction(
     : classification.kind === "marker"
       ? classification.safetyReasonCode
       : classification.extractionReasonCode;
+  const shouldCreatePrimaryCandidate =
+    parsedCoordinates.scope !== MemoryScope.CONTACT_CHANNEL
+    || policy!.contactMemoryEnabled;
+  const reasonCounts: Record<string, number> = shouldCreatePrimaryCandidate
+    ? { [reasonCode]: 1 }
+    : {};
+  let resultReasonCode = reasonCode;
 
-  if (classification.kind !== "none") {
+  if (classification.kind !== "none" && shouldCreatePrimaryCandidate) {
     const contentPurgedAt = classification.kind === "marker" ? now : null;
     const safeText = classification.kind === "reviewable"
       ? classification.safeText
@@ -939,13 +1525,23 @@ export async function processMemoryExtractionRunInTransaction(
     const candidateStatus = classification.kind === "reviewable"
       ? MemoryCandidateStatus.PENDING_REVIEW
       : classification.status;
+    const semanticKey = classification.kind === "reviewable"
+      ? buildMemorySemanticKey(classification)
+      : null;
     const candidateDedupeKey = [
       "memory-candidate",
       extractionContractVersion,
-      run.id,
+      parsedCoordinates.scope,
+      run.contactId,
+      parsedCoordinates.scope === MemoryScope.CONTACT_CHANNEL
+        ? run.sourceChannel
+        : "representative",
+      semanticKey ?? "safety-marker",
+      source.id,
+      contentHash ?? reasonCode,
       reasonCode,
     ].join(":");
-    await tx.memoryCandidate.upsert({
+    const candidate = await tx.memoryCandidate.upsert({
       where: {
         representativeId_dedupeKey: {
           representativeId: run.representativeId,
@@ -972,6 +1568,7 @@ export async function processMemoryExtractionRunInTransaction(
         contentHash,
         contentPurgedAt,
         dedupeKey: candidateDedupeKey,
+        semanticKey,
         status: candidateStatus,
         safetyClass: classification.safetyClass,
         safetyReasonCode:
@@ -995,12 +1592,119 @@ export async function processMemoryExtractionRunInTransaction(
       },
       update: {},
     });
+    const sourceHash = hashText(normalizeCandidateText(source.text ?? ""));
+    if (classification.kind === "reviewable") {
+      await applyAutomaticMemoryPolicyInTransaction(tx, {
+        candidateId: candidate.id,
+        sourceHash,
+        confidence: 1,
+      }, now);
+    } else {
+      await recordAutomaticMarkerPolicyDecisionInTransaction(tx, {
+        candidateId: candidate.id,
+        sourceHash,
+        confidence: 1,
+      });
+    }
     candidateCount = 1;
     if (classification.kind === "reviewable") acceptedCount = 1;
     else if (classification.status === MemoryCandidateStatus.BLOCKED) {
       rejectedCount = 1;
     } else {
       quarantinedCount = 1;
+    }
+
+    if (
+      classification.kind === "reviewable"
+      && parsedCoordinates.scope === MemoryScope.CONTACT_CHANNEL
+      && policy!.contactMemoryCrossChannelEnabled
+    ) {
+      const sharingEligibility =
+        await resolveContactMemorySharingEligibility(tx, {
+          representativeId: run.representativeId,
+          contactId: run.contactId,
+          sourceChannel: run.sourceChannel,
+          policy: {
+            contactMemoryCrossChannelEnabled:
+              policy!.contactMemoryCrossChannelEnabled,
+            revision: policy!.revision,
+          },
+          sourceEvidence: exactSharedSourceEvidence,
+        });
+      if (sharingEligibility.eligible) {
+        const sharedResult = await createSharedContactMemoryCandidate(tx, {
+          run,
+          source,
+          sourceHash,
+          classification,
+          audienceIdentityId: sharingEligibility.audienceIdentityId,
+          sourceEvidence: exactSharedSourceEvidence!,
+          retentionDays: policy!.retentionDays,
+          occurredAt: now,
+        });
+        candidateCount += 1;
+        if (new Set<MemoryPolicyDecisionOutcome>([
+          MemoryPolicyDecisionOutcome.ACTIVATED,
+          MemoryPolicyDecisionOutcome.UPDATED,
+          MemoryPolicyDecisionOutcome.UNCHANGED,
+        ]).has(sharedResult.outcome)) {
+          acceptedCount += 1;
+          reasonCounts.cross_channel_contact_memory_promoted =
+            (reasonCounts.cross_channel_contact_memory_promoted ?? 0) + 1;
+        } else {
+          rejectedCount += 1;
+          reasonCounts.cross_channel_contact_memory_rejected =
+            (reasonCounts.cross_channel_contact_memory_rejected ?? 0) + 1;
+        }
+      }
+    }
+
+    if (
+      classification.kind === "reviewable"
+      && parsedCoordinates.scope === MemoryScope.CONTACT_CHANNEL
+      && policy!.representativeExperienceEnabled
+    ) {
+      const representativeEvidence = await createRepresentativeEvidenceCandidate(
+        tx,
+        {
+          run,
+          source,
+          sourceHash,
+          retentionDays: policy!.retentionDays,
+          occurredAt: now,
+        },
+      );
+      if (representativeEvidence) {
+        candidateCount += 1;
+        acceptedCount += 1;
+        reasonCounts[representativeEvidence.reasonCode] =
+          (reasonCounts[representativeEvidence.reasonCode] ?? 0) + 1;
+      }
+    }
+  }
+
+  if (
+    !shouldCreatePrimaryCandidate
+    && classification.kind === "reviewable"
+    && parsedCoordinates.scope === MemoryScope.CONTACT_CHANNEL
+    && policy!.representativeExperienceEnabled
+  ) {
+    const representativeEvidence = await createRepresentativeEvidenceCandidate(
+      tx,
+      {
+        run,
+        source,
+        sourceHash: hashText(normalizeCandidateText(source.text ?? "")),
+        retentionDays: policy!.retentionDays,
+        occurredAt: now,
+      },
+    );
+    if (representativeEvidence) {
+      candidateCount = 1;
+      acceptedCount = 1;
+      resultReasonCode = representativeEvidence.reasonCode;
+      reasonCounts[representativeEvidence.reasonCode] =
+        (reasonCounts[representativeEvidence.reasonCode] ?? 0) + 1;
     }
   }
 
@@ -1013,7 +1717,7 @@ export async function processMemoryExtractionRunInTransaction(
       acceptedCount,
       rejectedCount,
       quarantinedCount,
-      reasonCounts: { [reasonCode]: 1 },
+      reasonCounts,
       leaseToken: null,
       leaseExpiresAt: null,
       finishedAt: completedAt,
@@ -1031,8 +1735,226 @@ export async function processMemoryExtractionRunInTransaction(
     acceptedCount,
     rejectedCount,
     quarantinedCount,
-    reasonCode,
+    reasonCode: resultReasonCode,
   };
+}
+
+async function createSharedContactMemoryCandidate(
+  tx: Prisma.TransactionClient,
+  input: {
+    run: MemoryExtractionRunWithSource;
+    source: MemoryExtractionSource;
+    sourceHash: string;
+    classification: Extract<
+      MemoryCandidateClassification,
+      { kind: "reviewable" }
+    >;
+    audienceIdentityId: string;
+    sourceEvidence: ExactMessageIdentityEvidence;
+    retentionDays: number;
+    occurredAt: Date;
+  },
+) {
+  if (!input.run.contactId || !input.run.sourceConversationId) {
+    throw new Error("Shared Contact Memory source coordinates are unavailable.");
+  }
+  const semanticKey = buildMemorySemanticKey(input.classification);
+  const contentHash = hashText(input.classification.safeText);
+  const dedupeKey = [
+    "shared-contact-memory-candidate",
+    extractionContractVersion,
+    input.audienceIdentityId,
+    semanticKey,
+    input.source.id,
+    contentHash,
+  ].join(":");
+  const candidate = await tx.memoryCandidate.upsert({
+    where: {
+      representativeId_dedupeKey: {
+        representativeId: input.run.representativeId,
+        dedupeKey,
+      },
+    },
+    create: {
+      representativeId: input.run.representativeId,
+      extractionRunId: input.run.id,
+      contactId: null,
+      audienceIdentityId: input.audienceIdentityId,
+      scope: MemoryScope.CONTACT_SHARED,
+      scopeChannel: null,
+      originChannel: input.run.sourceChannel,
+      category: input.classification.category,
+      sourceKind: MemorySourceKind.AUDIENCE_MESSAGE,
+      safeText: input.classification.safeText,
+      summary: input.classification.summary,
+      contentHash,
+      contentPurgedAt: null,
+      dedupeKey,
+      semanticKey,
+      status: MemoryCandidateStatus.PENDING_REVIEW,
+      safetyClass: input.classification.safetyClass,
+      safetyReasonCode: null,
+      extractionReasonCode: input.classification.extractionReasonCode,
+      sourceContactId: input.run.contactId,
+      sourceConversationId: input.run.sourceConversationId,
+      sourceMessageId: input.source.id,
+      // CONTACT_SHARED is projected outside a channel-specific contact
+      // namespace. The classifier has reduced the source to a closed,
+      // low-risk structured value by this point; record that transformation
+      // explicitly so every shared version carries auditable deidentification
+      // evidence rather than relying on its canonical identity coordinate.
+      deidentifiedAt: input.occurredAt,
+      expiresAt: new Date(
+        input.occurredAt.getTime()
+          + Math.max(1, input.retentionDays) * 86_400_000,
+      ),
+    },
+    update: {},
+  });
+  return applyAutomaticMemoryPolicyInTransaction(tx, {
+    candidateId: candidate.id,
+    sourceHash: input.sourceHash,
+    confidence: 1,
+    sharedSourceEvidence: input.sourceEvidence,
+  }, input.occurredAt);
+}
+
+async function createRepresentativeEvidenceCandidate(
+  tx: Prisma.TransactionClient,
+  input: {
+    run: MemoryExtractionRunWithSource;
+    source: MemoryExtractionSource;
+    sourceHash: string;
+    retentionDays: number;
+    occurredAt: Date;
+  },
+) {
+  if (!input.run.contactId || !input.run.sourceConversationId) return null;
+  const classification = safelyClassifyMemoryCandidate(
+    {
+      text: input.source.text,
+      senderType: input.source.senderType,
+      contentType: input.source.contentType,
+      scope: MemoryScope.REPRESENTATIVE,
+    },
+    classifyMemoryCandidate,
+  );
+  if (classification.kind !== "reviewable" || !classification.deidentified) {
+    return null;
+  }
+  const semanticKey = buildMemorySemanticKey(classification);
+  const contentHash = hashText(classification.safeText);
+  const dedupeKey = [
+    "representative-evidence",
+    extractionContractVersion,
+    semanticKey,
+    input.source.id,
+    contentHash,
+  ].join(":");
+  const candidate = await tx.memoryCandidate.upsert({
+    where: {
+      representativeId_dedupeKey: {
+        representativeId: input.run.representativeId,
+        dedupeKey,
+      },
+    },
+    create: {
+      representativeId: input.run.representativeId,
+      extractionRunId: input.run.id,
+      contactId: null,
+      audienceIdentityId: null,
+      scope: MemoryScope.REPRESENTATIVE,
+      scopeChannel: null,
+      originChannel: input.run.sourceChannel,
+      category: classification.category,
+      sourceKind: MemorySourceKind.AUDIENCE_MESSAGE,
+      safeText: classification.safeText,
+      summary: classification.summary,
+      contentHash,
+      contentPurgedAt: null,
+      dedupeKey,
+      semanticKey,
+      status: MemoryCandidateStatus.EXTRACTED,
+      safetyClass: classification.safetyClass,
+      safetyReasonCode: null,
+      extractionReasonCode: classification.extractionReasonCode,
+      sourceContactId: input.run.contactId,
+      sourceConversationId: input.run.sourceConversationId,
+      sourceMessageId: input.source.id,
+      deidentifiedAt: input.occurredAt,
+      expiresAt: new Date(
+        input.occurredAt.getTime()
+          + Math.max(1, input.retentionDays) * 86_400_000,
+      ),
+    },
+    update: {},
+  });
+  await processRepresentativeEvidenceCandidateInTransaction(tx, {
+    candidateId: candidate.id,
+    representativeId: input.run.representativeId,
+    semanticKey,
+    sourceHash: input.sourceHash,
+    occurredAt: input.occurredAt,
+  });
+  return { reasonCode: classification.extractionReasonCode };
+}
+
+async function processRepresentativeEvidenceCandidateInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    candidateId: string;
+    representativeId: string;
+    semanticKey: string;
+    sourceHash: string;
+    occurredAt: Date;
+  },
+) {
+  const evidence = await tx.memoryCandidate.findMany({
+    where: {
+      representativeId: input.representativeId,
+      scope: MemoryScope.REPRESENTATIVE,
+      semanticKey: input.semanticKey,
+      status: {
+        in: [
+          MemoryCandidateStatus.EXTRACTED,
+          MemoryCandidateStatus.APPROVED,
+        ],
+      },
+      safetyClass: MemorySafetyClass.LOW_RISK,
+      contentPurgedAt: null,
+      deidentifiedAt: { not: null },
+      extractionRun: {
+        is: { trigger: MemoryExtractionTrigger.CHANNEL_MESSAGE },
+      },
+    },
+    select: {
+      id: true,
+      sourceContactId: true,
+      sourceConversationId: true,
+    },
+  });
+  const distinctContacts = new Set(
+    evidence.map((item) => item.sourceContactId),
+  );
+  const distinctConversations = new Set(
+    evidence.map((item) => item.sourceConversationId),
+  );
+  if (distinctContacts.size < 2 || distinctConversations.size < 2) {
+    return recordRepresentativeEvidencePolicyDecisionInTransaction(tx, {
+      candidateId: input.candidateId,
+      sourceHash: input.sourceHash,
+      confidence: 1,
+    });
+  }
+  await tx.memoryCandidate.update({
+    where: { id: input.candidateId },
+    data: { status: MemoryCandidateStatus.PENDING_REVIEW },
+  });
+  return applyAutomaticMemoryPolicyInTransaction(tx, {
+    candidateId: input.candidateId,
+    sourceHash: input.sourceHash,
+    confidence: 1,
+  }, input.occurredAt);
 }
 
 export async function invalidateMemoryExtractionForSourceMessage(
@@ -1047,6 +1969,145 @@ export async function invalidateMemoryExtractionForSourceMessage(
     return { canceledRunCount: 0, purgedCandidateCount: 0 };
   }
   const occurredAt = input.occurredAt ?? new Date();
+  const governedStorageAvailable = hasGovernedMemoryInvalidationStorage(tx);
+  const memoryIdsToSuppress = new Set<string>();
+  const memoryIdsToCleanUp = new Set<string>();
+
+  if (governedStorageAvailable) {
+    // Include already-suppressed rows because the Postgres source-message
+    // trigger may have fenced Recall before this application hook runs. The
+    // projection cleanup is still application-owned and must not be skipped.
+    const directlyAffectedMemories = await tx.governedMemory.findMany({
+      where: {
+        status: {
+          notIn: [
+            GovernedMemoryStatus.DELETE_PENDING,
+            GovernedMemoryStatus.DELETED,
+          ],
+        },
+        currentVersion: {
+          is: {
+            sourceCandidate: {
+              is: { sourceMessageId: input.messageId },
+            },
+          },
+        },
+      },
+      select: { id: true, status: true },
+    });
+    for (const memory of directlyAffectedMemories) {
+      memoryIdsToCleanUp.add(memory.id);
+      if (memory.status === GovernedMemoryStatus.ACTIVE) {
+        memoryIdsToSuppress.add(memory.id);
+      }
+    }
+
+    // A representative experience may have been activated by a different
+    // source candidate. Re-evaluate every semantic coordinate touched by the
+    // edited/redacted source so losing non-current evidence cannot leave an
+    // under-corroborated pattern available to Recall.
+    const affectedRepresentativeCandidates = await tx.memoryCandidate.findMany({
+      where: {
+        sourceMessageId: input.messageId,
+        scope: MemoryScope.REPRESENTATIVE,
+        semanticKey: { not: null },
+      },
+      select: { representativeId: true, semanticKey: true },
+    });
+    const affectedCoordinates = new Map<
+      string,
+      { representativeId: string; semanticKey: string }
+    >();
+    for (const candidate of affectedRepresentativeCandidates) {
+      if (!candidate.semanticKey) continue;
+      affectedCoordinates.set(
+        `${candidate.representativeId}\u0000${candidate.semanticKey}`,
+        {
+          representativeId: candidate.representativeId,
+          semanticKey: candidate.semanticKey,
+        },
+      );
+    }
+
+    for (const coordinate of affectedCoordinates.values()) {
+      const remainingEvidence = await tx.memoryCandidate.findMany({
+        where: {
+          representativeId: coordinate.representativeId,
+          scope: MemoryScope.REPRESENTATIVE,
+          semanticKey: coordinate.semanticKey,
+          sourceMessageId: { not: input.messageId },
+          status: {
+            in: [
+              MemoryCandidateStatus.EXTRACTED,
+              MemoryCandidateStatus.APPROVED,
+            ],
+          },
+          safetyClass: MemorySafetyClass.LOW_RISK,
+          contentPurgedAt: null,
+          deidentifiedAt: { not: null },
+          extractionRun: {
+            is: { trigger: MemoryExtractionTrigger.CHANNEL_MESSAGE },
+          },
+          sourceMessage: {
+            is: {
+              senderType: MessageSenderType.AUDIENCE,
+              contentType: MessageContentType.TEXT,
+              editedAt: null,
+              redactedAt: null,
+            },
+          },
+        },
+        select: {
+          sourceContactId: true,
+          sourceConversationId: true,
+        },
+      });
+      const distinctContacts = new Set(
+        remainingEvidence.map((candidate) => candidate.sourceContactId),
+      );
+      const distinctConversations = new Set(
+        remainingEvidence.map((candidate) => candidate.sourceConversationId),
+      );
+      if (distinctContacts.size >= 2 && distinctConversations.size >= 2) {
+        continue;
+      }
+      const underCorroboratedMemories = await tx.governedMemory.findMany({
+        where: {
+          representativeId: coordinate.representativeId,
+          scope: MemoryScope.REPRESENTATIVE,
+          semanticKey: coordinate.semanticKey,
+          status: GovernedMemoryStatus.ACTIVE,
+        },
+        select: { id: true, status: true },
+      });
+      for (const memory of underCorroboratedMemories) {
+        memoryIdsToSuppress.add(memory.id);
+        memoryIdsToCleanUp.add(memory.id);
+      }
+    }
+  }
+
+  const suppressedMemories = governedStorageAvailable
+    && memoryIdsToSuppress.size > 0
+    ? await tx.governedMemory.updateMany({
+        where: {
+          id: { in: [...memoryIdsToSuppress] },
+          status: GovernedMemoryStatus.ACTIVE,
+        },
+        data: {
+          status: GovernedMemoryStatus.SUPPRESSED,
+          recallDisabledAt: occurredAt,
+          suppressedAt: occurredAt,
+        },
+      })
+    : { count: 0 };
+  if (governedStorageAvailable && memoryIdsToCleanUp.size > 0) {
+    await queueInvalidatedMemoryProjectionCleanup(
+      tx,
+      [...memoryIdsToCleanUp],
+      occurredAt,
+    );
+  }
   const canceledQueuedRuns = await tx.memoryExtractionRun.updateMany({
     where: {
       sourceMessageId: input.messageId,
@@ -1087,7 +2148,12 @@ export async function invalidateMemoryExtractionForSourceMessage(
       },
       version: null,
     },
-    select: { id: true, representativeId: true, status: true },
+    select: {
+      id: true,
+      representativeId: true,
+      status: true,
+      policyDecision: { select: { id: true } },
+    },
   });
   for (const candidate of reviewableCandidates) {
     const status = candidate.status === MemoryCandidateStatus.PENDING_REVIEW
@@ -1097,8 +2163,16 @@ export async function invalidateMemoryExtractionForSourceMessage(
       where: { id: candidate.id },
       data: {
         status,
-        safetyClass: MemorySafetyClass.PROHIBITED,
-        safetyReasonCode: input.reasonCode,
+        // Automatic decisions make candidate safety/provenance coordinates
+        // immutable. The source invalidation may still perform the permitted
+        // controlled purge and terminal status transition without rewriting
+        // that historical decision's inputs.
+        ...(candidate.policyDecision
+          ? {}
+          : {
+              safetyClass: MemorySafetyClass.PROHIBITED,
+              safetyReasonCode: input.reasonCode,
+            }),
         safeText: null,
         summary: null,
         contentPurgedAt: occurredAt,
@@ -1108,6 +2182,7 @@ export async function invalidateMemoryExtractionForSourceMessage(
   return {
     canceledRunCount: canceledQueuedRuns.count + canceledRunningRuns.count,
     purgedCandidateCount: reviewableCandidates.length,
+    suppressedMemoryCount: suppressedMemories.count,
   };
 }
 
@@ -1225,6 +2300,22 @@ function normalizeCandidateText(text: string): string {
     .trim();
 }
 
+function buildMemorySemanticKey(
+  classification: Extract<MemoryCandidateClassification, { kind: "reviewable" }>,
+) {
+  if (classification.category === MemoryCategory.CONTACT_PREFERENCE) {
+    // P0 stores one canonical communication-preference aggregate. A later
+    // preference statement therefore replaces the prior aggregate instead of
+    // leaving conflicting per-field memories simultaneously recallable.
+    return "contact-preference:communication";
+  }
+  return [
+    "representative-pattern",
+    classification.category.toLowerCase(),
+    classification.extractionReasonCode,
+  ].join(":");
+}
+
 function normalizeClosedPreferenceKey(text: string): string {
   return text
     .toLocaleLowerCase("en-US")
@@ -1256,12 +2347,6 @@ function hashText(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function toMemoryScope(scope: RequestedMemoryScope): MemoryScope {
-  return scope === "REPRESENTATIVE"
-    ? MemoryScope.REPRESENTATIVE
-    : MemoryScope.CONTACT_CHANNEL;
-}
-
 function toRepresentativeChannelKind(
   channel: MemoryExtractionChannel,
 ): RepresentativeChannelKind {
@@ -1288,7 +2373,10 @@ function parseExtractionCoordinates(idempotencyKey: string): {
 } | null {
   const [prefix, version, trigger, scope, channel, revisionDigest, requestDigest] =
     idempotencyKey.split(":");
-  if (prefix !== "memory-extraction" || version !== extractionContractVersion) {
+  if (
+    prefix !== "memory-extraction"
+    || !compatibleExtractionContractVersions.has(version ?? "")
+  ) {
     return null;
   }
   if (scope !== MemoryScope.CONTACT_CHANNEL && scope !== MemoryScope.REPRESENTATIVE) {
@@ -1554,6 +2642,54 @@ function hasMemoryInvalidationStorage(tx: Prisma.TransactionClient): boolean {
     && hasDelegateMethod(candidate["memoryCandidate"], "update");
 }
 
+function hasGovernedMemoryInvalidationStorage(
+  tx: Prisma.TransactionClient,
+): boolean {
+  const candidate = tx as unknown as Record<string, unknown>;
+  return hasDelegateMethod(candidate["governedMemory"], "findMany")
+    && hasDelegateMethod(candidate["governedMemory"], "updateMany")
+    && hasDelegateMethod(candidate["memoryProjectionItem"], "updateMany");
+}
+
+async function queueInvalidatedMemoryProjectionCleanup(
+  tx: Prisma.TransactionClient,
+  memoryIds: string[],
+  occurredAt: Date,
+) {
+  await tx.memoryProjectionItem.updateMany({
+    where: {
+      memoryId: { in: memoryIds },
+      status: MemoryProjectionStatus.PROJECTING,
+    },
+    data: { deleteRequestedAt: occurredAt },
+  });
+  await tx.memoryProjectionItem.updateMany({
+    where: {
+      memoryId: { in: memoryIds },
+      status: {
+        in: [
+          MemoryProjectionStatus.DISABLED,
+          MemoryProjectionStatus.QUEUED,
+          MemoryProjectionStatus.RETRYING,
+          MemoryProjectionStatus.STAGED,
+          MemoryProjectionStatus.ACTIVE,
+          MemoryProjectionStatus.SUPERSEDED,
+          MemoryProjectionStatus.FAILED,
+          MemoryProjectionStatus.DELETE_FAILED,
+        ],
+      },
+    },
+    data: {
+      status: MemoryProjectionStatus.DELETE_PENDING,
+      deleteRequestedAt: occurredAt,
+      availableAt: occurredAt,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      lastErrorCode: null,
+    },
+  });
+}
+
 function hasDelegateMethod(value: unknown, method: string): boolean {
   return Boolean(
     value
@@ -1565,17 +2701,24 @@ function hasDelegateMethod(value: unknown, method: string): boolean {
 const memoryExtractionPolicySelect = {
   longTermMemoryEnabled: true,
   contactMemoryEnabled: true,
+  contactMemoryCrossChannelEnabled: true,
   representativeExperienceEnabled: true,
   autoExtract: true,
   webExtractEnabled: true,
   matrixExtractEnabled: true,
   telegramExtractEnabled: true,
   retentionDays: true,
+  revision: true,
 } as const;
 
 const memoryExtractionSourceSelect = {
   id: true,
   conversationId: true,
+  channelBindingId: true,
+  channelLifecycleRevision: true,
+  createdAt: true,
+  ingressSequence: true,
+  memoryIngressOrdinal: true,
   senderType: true,
   contentType: true,
   text: true,

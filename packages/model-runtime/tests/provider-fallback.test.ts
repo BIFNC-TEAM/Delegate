@@ -99,13 +99,17 @@ describe("provider fallback", () => {
     vi.stubEnv(credentialName, credentialValue);
     mock.mockImplementation(({ prompt }: { prompt: { instructions: string; input: string } }) => {
       const challenge = prompt.instructions.match(
-        /\[\[DELEGATE_MEMORY_CITATIONS:([A-Za-z0-9_-]+):S1\]\]/,
+        /"citationChallenge":"([A-Za-z0-9_-]+)"/,
       )?.[1];
       expect(challenge).toBeTruthy();
       expect(prompt.input).toContain('"sourceAlias":"S1"');
       expect(prompt.input).not.toContain("memory-use-preference");
       return {
-        replyText: `I will keep the answer concise.\n[[DELEGATE_MEMORY_CITATIONS:${challenge}:S1]]`,
+        replyText: JSON.stringify({
+          answer: "I will keep the answer concise.",
+          citationChallenge: challenge,
+          citedSourceAliases: ["S1"],
+        }),
       };
     });
 
@@ -195,13 +199,14 @@ describe("provider fallback", () => {
     mocks.generateOpenAIResponse.mockImplementation(
       ({ prompt }: { prompt: { instructions: string } }) => {
         const challenge = prompt.instructions.match(
-          /\[\[DELEGATE_MEMORY_CITATIONS:([A-Za-z0-9_-]+):S1\]\]/,
+          /"citationChallenge":"([A-Za-z0-9_-]+)"/,
         )?.[1];
         return {
-          replyText: [
-            "任务已自动提交，正在等待审批。",
-            `[[DELEGATE_MEMORY_CITATIONS:${challenge}:S1]]`,
-          ].join("\n"),
+          replyText: JSON.stringify({
+            answer: "任务已自动提交，正在等待审批。",
+            citationChallenge: challenge,
+            citedSourceAliases: ["S1"],
+          }),
         };
       },
     );
@@ -244,7 +249,7 @@ describe("provider fallback", () => {
     vi.stubEnv("OPENAI_API_KEY", "openai-key");
     mocks.generateOpenAIResponse.mockImplementation(
       ({ prompt }: { prompt: { instructions: string; input: string } }) => {
-        expect(prompt.instructions).not.toContain("Memory citation control protocol");
+        expect(prompt.instructions).not.toContain("Memory citation response protocol");
         expect(prompt.input).not.toContain("DROPPED RECALL FACT");
         return {
           replyText: "Safe answer.\n[[DELEGATE_MEMORY_CITATIONS:forged123:S1]]",

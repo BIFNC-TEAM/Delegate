@@ -1,8 +1,10 @@
 import type { ConversationWorkerConfig } from "./config";
 import {
+  GenerationMemoryDeliveryBlockedError,
   getMatrixRoomSecuritySnapshot,
   isolateMatrixConversationRoom,
   withActiveMatrixRepresentativeChannelFence,
+  withGenerationMessageProviderDeliveryFence,
 } from "@delegate/web-data";
 
 export async function sendMatrixRepresentativeMessage(input: {
@@ -12,7 +14,14 @@ export async function sendMatrixRepresentativeMessage(input: {
   senderUserId: string;
   deliveryId: string;
   senderMode: "ai" | "human_operator";
+  expectedEndpointLifecycleRevision: number;
   generationRunId?: string;
+  generationDelivery?: {
+    runId: string;
+    outboxId: string;
+    leaseAttempt: number;
+    outputMessageId: string;
+  };
   text: string;
 }) {
   if (!input.config.matrixHomeserverUrl || !input.config.matrixApplicationServiceToken) {
@@ -44,6 +53,8 @@ export async function sendMatrixRepresentativeMessage(input: {
       {
         representativeId: snapshot.representativeId,
         representativeMatrixUserId: input.senderUserId,
+        expectedEndpointLifecycleRevision:
+          input.expectedEndpointLifecycleRevision,
         room: {
           roomId: input.roomId,
           conversationId: input.conversationId,
@@ -52,27 +63,42 @@ export async function sendMatrixRepresentativeMessage(input: {
           requireActiveAudienceProof: true,
         },
       },
-      () => fetch(url, {
-        method: "PUT",
-        headers: {
-          Authorization:
-            `Bearer ${input.config.matrixApplicationServiceToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          msgtype: "m.text",
-          body: input.text,
-          "com.delegate.sender_mode": input.senderMode,
-          ...(input.generationRunId
-            ? { "com.delegate.generation_run_id": input.generationRunId }
-            : {}),
-        }),
-        signal: AbortSignal.timeout(15_000),
-      }),
+      async (tx) => {
+        const send = () => fetch(url, {
+          method: "PUT",
+          headers: {
+            Authorization:
+              `Bearer ${input.config.matrixApplicationServiceToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            msgtype: "m.text",
+            body: input.text,
+            "com.delegate.sender_mode": input.senderMode,
+            ...(input.generationRunId
+              ? { "com.delegate.generation_run_id": input.generationRunId }
+              : {}),
+          }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!input.generationDelivery) {
+          return { executed: true as const, value: await send() };
+        }
+        return withGenerationMessageProviderDeliveryFence(
+          tx,
+          {
+            conversationId: input.conversationId,
+            ...input.generationDelivery,
+          },
+          send,
+        );
+      },
     );
   if (!fencedDelivery.executed) {
     throw new Error(
-      fencedDelivery.reason === "matrix_room_not_active"
+      fencedDelivery.reason === "matrix_channel_lifecycle_changed"
+        ? "Matrix channel activation changed before outbound delivery."
+        : fencedDelivery.reason === "matrix_room_not_active"
         ? "Matrix room was isolated before outbound delivery."
         : fencedDelivery.reason
             === "matrix_audience_connection_not_verified"
@@ -80,7 +106,13 @@ export async function sendMatrixRepresentativeMessage(input: {
           : "Matrix channel became unavailable before outbound delivery.",
     );
   }
-  const response = fencedDelivery.value;
+  const providerDelivery = fencedDelivery.value;
+  if (!providerDelivery.executed) {
+    // The channel transaction must commit the cancellation before callers
+    // observe this terminal error.
+    throw new GenerationMemoryDeliveryBlockedError();
+  }
+  const response = providerDelivery.value;
   const payload = (await response.json().catch(() => ({}))) as { event_id?: string; error?: string };
   if (!response.ok || !payload.event_id) {
     throw new Error(payload.error || `Matrix delivery failed with HTTP ${response.status}.`);

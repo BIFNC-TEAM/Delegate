@@ -21,7 +21,8 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
   it("fails closed across approval, staging, active-version, and deletion boundaries", async () => {
     const suffix = crypto.randomUUID();
     const namespaceKey = `memory-authority-${suffix}`;
-    const hash = crypto.createHash("sha256").update(`memory-${suffix}`).digest("hex");
+    const safeText = "Prefers concise answers.";
+    const hash = crypto.createHash("sha256").update(safeText).digest("hex");
     const owner = await prisma.owner.create({
       data: { displayName: `Memory authority ${suffix}` },
     });
@@ -100,9 +101,10 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
         originChannel: "WEB",
         category: "CONTACT_PREFERENCE",
         sourceKind: "AUDIENCE_MESSAGE",
-        safeText: "Prefers concise answers.",
+        safeText,
         summary: "Answer concisely.",
         contentHash: hash,
+        semanticKey: "contact-preference:communication",
         dedupeKey: `candidate-${suffix}`,
         status: "PENDING_REVIEW",
         safetyClass: "LOW_RISK",
@@ -135,6 +137,78 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
       },
     });
 
+    const legacySafeText = "Prefers detailed answers.";
+    const legacyHash = crypto.createHash("sha256").update(legacySafeText).digest("hex");
+    const legacyCandidate = await prisma.memoryCandidate.create({
+      data: {
+        representativeId: representative.id,
+        contactId: contact.id,
+        scope: "CONTACT_CHANNEL",
+        scopeChannel: "WEB",
+        originChannel: "WEB",
+        category: "CONTACT_PREFERENCE",
+        sourceKind: "AUDIENCE_MESSAGE",
+        safeText: legacySafeText,
+        summary: legacySafeText,
+        contentHash: legacyHash,
+        semanticKey: "contact-preference:legacy-authority-check",
+        dedupeKey: `legacy-candidate-${suffix}`,
+        status: "PENDING_REVIEW",
+        safetyClass: "LOW_RISK",
+        extractionReasonCode: "legacy_owner_review",
+        sourceContactId: contact.id,
+        sourceConversationId: conversation.id,
+        sourceMessageId: message.id,
+      },
+    });
+    const legacyMemory = await prisma.governedMemory.create({
+      data: {
+        representativeId: representative.id,
+        contactId: contact.id,
+        scope: "CONTACT_CHANNEL",
+        sourceChannel: "WEB",
+        category: "CONTACT_PREFERENCE",
+        semanticKey: "contact-preference:legacy-authority-check",
+      },
+    });
+    const legacyVersion = await prisma.governedMemoryVersion.create({
+      data: {
+        memoryId: legacyMemory.id,
+        representativeId: representative.id,
+        scope: "CONTACT_CHANNEL",
+        sourceCandidateId: legacyCandidate.id,
+        versionNumber: 1,
+        safeText: legacySafeText,
+        summary: legacySafeText,
+        contentHash: legacyHash,
+        createdByActorId: owner.id,
+      },
+    });
+    await prisma.memoryReviewDecision.create({
+      data: {
+        representativeId: representative.id,
+        candidateId: legacyCandidate.id,
+        memoryId: legacyMemory.id,
+        resultVersionId: legacyVersion.id,
+        outcome: "APPROVED",
+        reviewerRole: "OWNER",
+        reviewerActorId: owner.id,
+        reasonCode: "legacy_owner_review",
+      },
+    });
+    await prisma.memoryCandidate.update({
+      where: { id: legacyCandidate.id },
+      data: { status: "APPROVED", reviewedAt: new Date() },
+    });
+    await expect(prisma.governedMemory.update({
+      where: { id: legacyMemory.id },
+      data: {
+        status: "ACTIVE",
+        currentVersionId: legacyVersion.id,
+        recallDisabledAt: null,
+      },
+    })).rejects.toThrow(/automatic policy decision/u);
+
     await expect(prisma.memoryCandidate.update({
       where: { id: candidate.id },
       data: { status: "APPROVED", reviewedAt: new Date() },
@@ -143,16 +217,21 @@ describePostgres("Memory System PostgreSQL authority guards", () => {
       where: { id: candidate.id },
     })).status).toBe("PENDING_REVIEW");
 
-    await prisma.memoryReviewDecision.create({
+    await prisma.memoryPolicyDecision.create({
       data: {
         representativeId: representative.id,
         candidateId: candidate.id,
         memoryId: memory.id,
         resultVersionId: memoryVersion.id,
-        outcome: "APPROVED",
-        reviewerRole: "OWNER",
-        reviewerActorId: owner.id,
-        reasonCode: "owner_verified",
+        outcome: "ACTIVATED",
+        policyRevision: 0,
+        policyVersion: "automatic-memory-v2",
+        extractorVersion: "closed-structured-v2",
+        sourceHash: crypto.createHash("sha256").update(message.text ?? "").digest("hex"),
+        outputHash: hash,
+        confidence: 1,
+        reasonCode: "automatic_low_risk_activation",
+        decisionHash: crypto.createHash("sha256").update(`decision-${suffix}`).digest("hex"),
       },
     });
     await prisma.memoryCandidate.update({

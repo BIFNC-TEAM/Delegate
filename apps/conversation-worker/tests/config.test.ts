@@ -10,6 +10,7 @@ describe("conversation worker config", () => {
     expect(resolveConversationWorkerConfig({})).toMatchObject({
       port: 4040,
       pollMs: 500,
+      memoryLifecyclePollMs: 1_000,
       memoryProjectionPollMs: 500,
       memoryCleanupPollMs: 1_000,
       memoryReconciliationPollMs: 60_000,
@@ -24,18 +25,23 @@ describe("conversation worker config", () => {
   it("validates independent memory loop polling and readiness bounds", () => {
     expect(resolveConversationWorkerConfig({
       MEMORY_PROJECTION_POLL_MS: "700",
+      MEMORY_LIFECYCLE_POLL_MS: "800",
       MEMORY_CLEANUP_POLL_MS: "900",
       MEMORY_RECONCILIATION_POLL_MS: "120000",
       MEMORY_WORKER_TICK_TIMEOUT_MS: "45000",
       CONVERSATION_WORKER_READINESS_STALE_MS: "240000",
     })).toMatchObject({
       memoryProjectionPollMs: 700,
+      memoryLifecyclePollMs: 800,
       memoryCleanupPollMs: 900,
       memoryReconciliationPollMs: 120_000,
       memoryTickTimeoutMs: 45_000,
       readinessStaleMs: 240_000,
     });
 
+    expect(() => resolveConversationWorkerConfig({
+      MEMORY_LIFECYCLE_POLL_MS: "99",
+    })).toThrow();
     expect(() => resolveConversationWorkerConfig({
       MEMORY_PROJECTION_POLL_MS: "99",
     })).toThrow();

@@ -29,6 +29,9 @@ export async function generateBailianResponse(params: {
       { role: "user", content: params.prompt.input },
     ],
     max_tokens: params.env.maxOutputTokens,
+    ...(params.prompt.responseFormat === "json_object"
+      ? { response_format: { type: "json_object" as const } }
+      : {}),
   });
 
   const replyText = response.choices[0]?.message.content?.trim();

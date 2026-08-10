@@ -8,11 +8,16 @@ const {
   mockConsumeIdentityBindingChallenge,
   mockReleaseConversationEntitlement,
   mockReleaseConversationWalletUsage,
+  mockInvalidateMemoryExtractionForSourceMessage,
   mockWithActiveMatrixRepresentativeChannelFence,
   fencedTx,
 } = vi.hoisted(() => {
   const transactionClient = {
     $executeRaw: vi.fn(),
+    $queryRaw: vi.fn(),
+    identityLink: { findUnique: vi.fn() },
+    identityLinkConnectionProof: { findUnique: vi.fn() },
+    audienceIdentity: { findUnique: vi.fn() },
     conversation: {
       findFirst: vi.fn(),
       update: vi.fn(),
@@ -56,6 +61,7 @@ const {
       upsert: vi.fn(),
       updateMany: vi.fn(),
       findUnique: vi.fn(),
+      findMany: vi.fn(),
       update: vi.fn(),
     },
     matrixVirtualUserBinding: {
@@ -65,6 +71,9 @@ const {
       findUnique: vi.fn(),
     },
     identityLinkConnectionProof: {
+      findUnique: vi.fn(),
+    },
+    audienceIdentity: {
       findUnique: vi.fn(),
     },
     conversationChannelBinding: {
@@ -80,10 +89,12 @@ const {
   };
   const fencedTransactionClient = {
     ...transactionClient,
+    $queryRaw: vi.fn(),
     channelEventInbox: prismaClient.channelEventInbox,
     identityLink: prismaClient.identityLink,
     identityLinkConnectionProof:
       prismaClient.identityLinkConnectionProof,
+    audienceIdentity: prismaClient.audienceIdentity,
     representativeChannelBinding:
       prismaClient.representativeChannelBinding,
     message: {
@@ -104,6 +115,7 @@ const {
     mockConsumeIdentityBindingChallenge: vi.fn(),
     mockReleaseConversationEntitlement: vi.fn(),
     mockReleaseConversationWalletUsage: vi.fn(),
+    mockInvalidateMemoryExtractionForSourceMessage: vi.fn(),
     mockWithActiveMatrixRepresentativeChannelFence: vi.fn(),
   };
 });
@@ -140,10 +152,21 @@ vi.mock("../src/matrix-room-security", () => ({
   withActiveMatrixRepresentativeChannelFence:
     mockWithActiveMatrixRepresentativeChannelFence,
 }));
+vi.mock("../src/memory-extraction", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../src/memory-extraction")>();
+  return {
+    ...actual,
+    invalidateMemoryExtractionForSourceMessage:
+      mockInvalidateMemoryExtractionForSourceMessage,
+  };
+});
 
 import {
+  admitCurrentMatrixApplicationServiceProviderEvents,
   ConversationWorkInFlightControlError,
   ingestMatrixApplicationServiceTransaction,
+  persistMatrixApplicationServiceProviderArrivals,
   redactConversationMessage,
   type MatrixApplicationServiceEvent,
 } from "../src/conversation-platform";
@@ -175,20 +198,46 @@ describe("Matrix application service ingress", () => {
     mockPrisma.channelEventInbox.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.channelEventInbox.update.mockResolvedValue({});
     mockPrisma.channelEventInbox.findUnique.mockResolvedValue(null);
+    mockPrisma.channelEventInbox.findMany.mockResolvedValue([]);
+    mockInvalidateMemoryExtractionForSourceMessage.mockResolvedValue({
+      canceledRunCount: 0,
+      purgedCandidateCount: 0,
+      suppressedMemoryCount: 0,
+    });
     mockPrisma.matrixVirtualUserBinding.findUnique.mockResolvedValue(null);
     mockPrisma.identityLink.findUnique.mockResolvedValue({
       id: "matrix-identity-link-1",
       audienceIdentityId: "audience-identity-1",
+      provider: "MATRIX",
+      providerSubject: aliceMatrixUserId,
       issuer: "example.org",
       verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
       assuranceLevel: "PLATFORM_VERIFIED",
       revokedAt: null,
     });
     mockPrisma.identityLinkConnectionProof.findUnique.mockResolvedValue({
+      id: "matrix-identity-proof-1",
+      identityLinkId: "matrix-identity-link-1",
+      issuer: "example.org",
+      connectionId: "delegate-matrix-as",
       verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
       assuranceLevel: "PLATFORM_VERIFIED",
       revokedAt: null,
     });
+    mockPrisma.audienceIdentity.findUnique.mockResolvedValue({
+      id: "audience-identity-1",
+      status: "REGISTERED",
+      mergedIntoId: null,
+    });
+    tx.identityLink.findUnique.mockImplementation(
+      (...args) => mockPrisma.identityLink.findUnique(...args),
+    );
+    tx.identityLinkConnectionProof.findUnique.mockImplementation(
+      (...args) => mockPrisma.identityLinkConnectionProof.findUnique(...args),
+    );
+    tx.audienceIdentity.findUnique.mockImplementation(
+      (...args) => mockPrisma.audienceIdentity.findUnique(...args),
+    );
     mockProvisionMatrixDirectConversation.mockResolvedValue({
       status: "ready",
       securityState: "PENDING_REMOTE_VALIDATION",
@@ -207,9 +256,13 @@ describe("Matrix application service ingress", () => {
     );
     mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(buildMatrixBinding());
     mockPrisma.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "representative-matrix-binding-1",
       status: "CONNECTED",
       desiredState: "ACTIVE",
       healthStatus: "HEALTHY",
+      externalUserId: "@_delegate_rep:example.org",
+      endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 1,
       representative: {
         lifecycleState: "PUBLISHED",
         activeVersionId: "version-1",
@@ -232,8 +285,12 @@ describe("Matrix application service ingress", () => {
       async (callback: (client: typeof tx) => unknown) => callback(tx),
     );
     tx.$executeRaw.mockResolvedValue(0);
+    tx.$queryRaw.mockResolvedValue([{ id: "identity-evidence-row" }]);
+    fencedTx.$queryRaw.mockResolvedValue([{ id: "identity-evidence-row" }]);
     tx.conversation.findFirst.mockResolvedValue({
       id: "conversation-1",
+      contactId: "contact-1",
+      audienceIdentityId: "audience-identity-1",
       state: "ACTIVE",
       representative: {
         id: "representative-1",
@@ -251,12 +308,16 @@ describe("Matrix application service ingress", () => {
       channelBindings: [{
         id: "matrix-binding-1",
         kind: "MATRIX",
+        connectionId: "delegate-matrix-as",
+        representativeBindingId: "representative-matrix-binding-1",
+        representativeAssignmentRevision: 1,
         externalConversationId: "!room:example.org",
         metadata: matrixSafetyMetadata(),
         representativeBinding: {
           status: "CONNECTED",
           desiredState: "ACTIVE",
           healthStatus: "HEALTHY",
+          endpointLifecycleRevision: 1,
         },
       }],
     });
@@ -283,7 +344,7 @@ describe("Matrix application service ingress", () => {
 
     expect(result).toEqual([{ eventId: "$event-1", status: "duplicate" }]);
     expect(mockPrisma.channelEventInbox.updateMany).not.toHaveBeenCalled();
-    expect(mockPrisma.conversationChannelBinding.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.conversationChannelBinding.findFirst).toHaveBeenCalledTimes(1);
     expect(mockPrisma.$transaction).not.toHaveBeenCalled();
   });
 
@@ -312,7 +373,277 @@ describe("Matrix application service ingress", () => {
       status: "failed",
       reason: "matrix_event_already_processing",
     }]);
-    expect(mockPrisma.conversationChannelBinding.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.conversationChannelBinding.findFirst).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the first server-generated arrival lifecycle immutable across reconnect", async () => {
+    const event = {
+      ...matrixTextEvent("$event-before-reconnect", aliceMatrixUserId),
+      ...matrixArrivalFencePayload({ lifecycleRevision: 999 }),
+    };
+
+    await persistMatrixApplicationServiceProviderArrivals({
+      transactionId: "transaction-before-reconnect",
+      events: [event],
+    });
+    const firstPayload = mockPrisma.channelEventInbox.upsert.mock.calls[0]![0]
+      .create.payload as MatrixApplicationServiceEvent;
+    expect(firstPayload["com.delegate.arrival_fence"]).toEqual({
+      version: 1,
+      representativeBindingId: "representative-matrix-binding-1",
+      endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 1,
+      arrivedDesiredState: "ACTIVE",
+    });
+
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({ endpointLifecycleRevision: 3 }),
+    );
+    mockPrisma.channelEventInbox.findMany.mockResolvedValue([{
+      id: "inbox:$event-before-reconnect",
+      externalEventId: "$event-before-reconnect",
+      eventType: "m.room.message",
+      payload: firstPayload,
+      status: "PENDING",
+    }]);
+
+    await expect(
+      admitCurrentMatrixApplicationServiceProviderEvents([event]),
+    ).resolves.toEqual({
+      events: [],
+      ignored: [{
+        eventId: "$event-before-reconnect",
+        reason: "matrix_provider_arrival_lifecycle_stale",
+      }],
+    });
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenLastCalledWith({
+      where: { id: "inbox:$event-before-reconnect" },
+      data: expect.objectContaining({ status: "PROCESSED" }),
+    });
+  });
+
+  it("terminally consumes an event that first arrived while disconnected", async () => {
+    const event = matrixTextEvent(
+      "$event-during-disconnect",
+      aliceMatrixUserId,
+    );
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({
+        desiredState: "DISCONNECTED",
+        endpointLifecycleRevision: 2,
+      }),
+    );
+
+    await persistMatrixApplicationServiceProviderArrivals({
+      transactionId: "transaction-during-disconnect",
+      events: [event],
+    });
+    const firstPayload = mockPrisma.channelEventInbox.upsert.mock.calls[0]![0]
+      .create.payload as MatrixApplicationServiceEvent;
+    expect(firstPayload["com.delegate.arrival_fence"]).toEqual(
+      expect.objectContaining({
+        endpointLifecycleRevision: 2,
+        arrivedDesiredState: "DISCONNECTED",
+      }),
+    );
+
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({ endpointLifecycleRevision: 3 }),
+    );
+    mockPrisma.channelEventInbox.findMany.mockResolvedValue([{
+      id: "inbox:$event-during-disconnect",
+      externalEventId: "$event-during-disconnect",
+      eventType: "m.room.message",
+      payload: firstPayload,
+      status: "PENDING",
+    }]);
+
+    const admitted =
+      await admitCurrentMatrixApplicationServiceProviderEvents([event]);
+    expect(admitted.events).toEqual([]);
+    expect(admitted.ignored).toEqual([{
+      eventId: "$event-during-disconnect",
+      reason: "matrix_provider_arrival_lifecycle_stale",
+    }]);
+  });
+
+  it("admits a new provider event first observed after reconnect", async () => {
+    const event = matrixTextEvent(
+      "$event-after-reconnect",
+      aliceMatrixUserId,
+    );
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({ endpointLifecycleRevision: 3 }),
+    );
+
+    await persistMatrixApplicationServiceProviderArrivals({
+      transactionId: "transaction-after-reconnect",
+      events: [event],
+    });
+    const firstPayload = mockPrisma.channelEventInbox.upsert.mock.calls[0]![0]
+      .create.payload as MatrixApplicationServiceEvent;
+    mockPrisma.channelEventInbox.findMany.mockResolvedValue([{
+      id: "inbox:$event-after-reconnect",
+      externalEventId: "$event-after-reconnect",
+      eventType: "m.room.message",
+      payload: firstPayload,
+      status: "PENDING",
+    }]);
+
+    await expect(
+      admitCurrentMatrixApplicationServiceProviderEvents([event]),
+    ).resolves.toEqual({ events: [event], ignored: [] });
+    expect(mockPrisma.channelEventInbox.update).not.toHaveBeenCalled();
+  });
+
+  it("does not let a stale pre-reconnect invite recreate a Matrix room", async () => {
+    const event: MatrixApplicationServiceEvent = {
+      event_id: "$invite-before-reconnect",
+      type: "m.room.member",
+      room_id: "!new-room:example.org",
+      sender: aliceMatrixUserId,
+      state_key: "@_delegate_rep:example.org",
+      content: { membership: "invite", is_direct: true },
+    };
+    const persistedPayload = {
+      ...event,
+      ...matrixArrivalFencePayload({ lifecycleRevision: 1 }),
+    };
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(null);
+    mockPrisma.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "representative-matrix-binding-1",
+      endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 3,
+      desiredState: "ACTIVE",
+    });
+    mockPrisma.channelEventInbox.findMany.mockResolvedValue([{
+      id: "inbox:$invite-before-reconnect",
+      externalEventId: "$invite-before-reconnect",
+      eventType: "m.room.member",
+      payload: persistedPayload,
+      status: "PENDING",
+    }]);
+
+    await expect(
+      admitCurrentMatrixApplicationServiceProviderEvents([event]),
+    ).resolves.toEqual({
+      events: [],
+      ignored: [{
+        eventId: "$invite-before-reconnect",
+        reason: "matrix_provider_arrival_lifecycle_stale",
+      }],
+    });
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenLastCalledWith({
+      where: { id: "inbox:$invite-before-reconnect" },
+      data: expect.objectContaining({ status: "PROCESSED" }),
+    });
+  });
+
+  it("admits a first direct invite by its current representative endpoint lifecycle", async () => {
+    const event: MatrixApplicationServiceEvent = {
+      event_id: "$invite-current-lifecycle",
+      type: "m.room.member",
+      room_id: "!new-room:example.org",
+      sender: aliceMatrixUserId,
+      state_key: "@_delegate_rep:example.org",
+      content: { membership: "invite", is_direct: true },
+    };
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(null);
+    mockPrisma.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "representative-matrix-binding-1",
+      endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 1,
+      desiredState: "ACTIVE",
+    });
+    mockPrisma.channelEventInbox.findMany.mockResolvedValue([{
+      id: "inbox:$invite-current-lifecycle",
+      externalEventId: "$invite-current-lifecycle",
+      eventType: "m.room.member",
+      payload: {
+        ...event,
+        ...matrixArrivalFencePayload({ lifecycleRevision: 1 }),
+      },
+      status: "PENDING",
+    }]);
+
+    await expect(
+      admitCurrentMatrixApplicationServiceProviderEvents([event]),
+    ).resolves.toEqual({ events: [event], ignored: [] });
+    expect(mockPrisma.channelEventInbox.update).not.toHaveBeenCalled();
+  });
+
+  it("still admits a stale Matrix leave because it can only tighten room safety", async () => {
+    const event: MatrixApplicationServiceEvent = {
+      event_id: "$leave-before-reconnect",
+      type: "m.room.member",
+      room_id: "!room:example.org",
+      sender: aliceMatrixUserId,
+      state_key: aliceMatrixUserId,
+      content: { membership: "leave" },
+    };
+    mockPrisma.conversationChannelBinding.findFirst.mockResolvedValue(
+      buildMatrixBinding({ endpointLifecycleRevision: 3 }),
+    );
+    mockPrisma.channelEventInbox.findMany.mockResolvedValue([{
+      id: "inbox:$leave-before-reconnect",
+      externalEventId: "$leave-before-reconnect",
+      eventType: "m.room.member",
+      payload: {
+        ...event,
+        ...matrixArrivalFencePayload({ lifecycleRevision: 1 }),
+      },
+      status: "PENDING",
+    }]);
+
+    await expect(
+      admitCurrentMatrixApplicationServiceProviderEvents([event]),
+    ).resolves.toEqual({ events: [event], ignored: [] });
+    expect(mockPrisma.channelEventInbox.update).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the immutable lifecycle inside the final ingest fence", async () => {
+    const event = matrixTextEvent(
+      "$event-reconnect-race",
+      aliceMatrixUserId,
+    );
+    mockPrisma.conversationChannelBinding.findFirst
+      .mockResolvedValueOnce(buildMatrixBinding({
+        endpointLifecycleRevision: 1,
+      }))
+      .mockResolvedValueOnce(buildMatrixBinding({
+        endpointLifecycleRevision: 3,
+      }));
+    mockPrisma.representativeChannelBinding.findUnique.mockResolvedValue({
+      id: "representative-matrix-binding-1",
+      status: "CONNECTED",
+      desiredState: "ACTIVE",
+      healthStatus: "HEALTHY",
+      externalUserId: "@_delegate_rep:example.org",
+      endpointAssignmentRevision: 1,
+      endpointLifecycleRevision: 3,
+      representative: {
+        lifecycleState: "PUBLISHED",
+        activeVersionId: "version-1",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+    });
+
+    await expect(ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-reconnect-race",
+      events: [event],
+    })).resolves.toEqual([{
+      eventId: "$event-reconnect-race",
+      status: "ignored",
+      reason: "matrix_provider_arrival_lifecycle_stale",
+    }]);
+
+    expect(tx.message.upsert).not.toHaveBeenCalled();
+    expect(tx.generationRun.upsert).not.toHaveBeenCalled();
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenLastCalledWith({
+      where: { id: "inbox:$event-reconnect-race" },
+      data: expect.objectContaining({ status: "PROCESSED" }),
+    });
   });
 
   it("keeps an unknown room retryable instead of marking it successfully ignored", async () => {
@@ -344,11 +675,9 @@ describe("Matrix application service ingress", () => {
   });
 
   it("provisions a native Matrix DM from a managed representative invite", async () => {
-    mockPrisma.matrixVirtualUserBinding.findUnique.mockResolvedValue({
-      representativeId: "representative-1",
-      matrixUserId: "@_delegate_rep:example.org",
-      enabled: true,
-    });
+    mockPrisma.matrixVirtualUserBinding.findUnique.mockResolvedValue(
+      managedMatrixTarget(),
+    );
     const result = await ingestMatrixApplicationServiceTransaction({
       transactionId: "transaction-invite",
       events: [{
@@ -367,16 +696,15 @@ describe("Matrix application service ingress", () => {
       roomId: "!dm:example.org",
       audienceMatrixUserId: aliceMatrixUserId,
       representativeMatrixUserId: "@_delegate_rep:example.org",
+      expectedEndpointLifecycleRevision: 1,
       directInvite: true,
     });
   });
 
   it("acknowledges a conflicting Matrix invite after provisioning isolates it", async () => {
-    mockPrisma.matrixVirtualUserBinding.findUnique.mockResolvedValue({
-      representativeId: "representative-1",
-      matrixUserId: "@_delegate_rep:example.org",
-      enabled: true,
-    });
+    mockPrisma.matrixVirtualUserBinding.findUnique.mockResolvedValue(
+      managedMatrixTarget(),
+    );
     mockProvisionMatrixDirectConversation.mockResolvedValue({
       status: "isolated_conflict",
       securityState: "ISOLATED",
@@ -408,11 +736,9 @@ describe("Matrix application service ingress", () => {
   });
 
   it("does not provision a managed user from a non-direct Matrix invite", async () => {
-    mockPrisma.matrixVirtualUserBinding.findUnique.mockResolvedValue({
-      representativeId: "representative-1",
-      matrixUserId: "@_delegate_rep:example.org",
-      enabled: true,
-    });
+    mockPrisma.matrixVirtualUserBinding.findUnique.mockResolvedValue(
+      managedMatrixTarget(),
+    );
 
     const result = await ingestMatrixApplicationServiceTransaction({
       transactionId: "transaction-group-invite",
@@ -544,7 +870,10 @@ describe("Matrix application service ingress", () => {
     ]);
     expect(tx.conversationChannelBinding.update.mock.invocationCallOrder[0])
       .toBeLessThan(
-        mockPrisma.conversationChannelBinding.findFirst.mock.invocationCallOrder[0]!,
+        Math.max(
+          ...mockPrisma.conversationChannelBinding.findFirst
+            .mock.invocationCallOrder,
+        ),
       );
     expect(tx.message.upsert).not.toHaveBeenCalled();
   });
@@ -594,7 +923,10 @@ describe("Matrix application service ingress", () => {
     ]);
     expect(tx.conversationChannelBinding.update.mock.invocationCallOrder[0])
       .toBeLessThan(
-        mockPrisma.conversationChannelBinding.findFirst.mock.invocationCallOrder[0]!,
+        Math.max(
+          ...mockPrisma.conversationChannelBinding.findFirst
+            .mock.invocationCallOrder,
+        ),
       );
     expect(tx.message.upsert).not.toHaveBeenCalled();
   });
@@ -683,9 +1015,12 @@ describe("Matrix application service ingress", () => {
   });
 
   it("persists the full batch first and isolates a failed event from its siblings", async () => {
-    mockPrisma.conversationChannelBinding.findFirst
-      .mockResolvedValueOnce(buildMatrixBinding())
-      .mockResolvedValueOnce(null);
+    mockPrisma.conversationChannelBinding.findFirst.mockImplementation(
+      async (args: { where?: { externalConversationId?: string } }) =>
+        args.where?.externalConversationId === "!unknown:example.org"
+          ? null
+          : buildMatrixBinding(),
+    );
 
     const result = await ingestMatrixApplicationServiceTransaction({
       transactionId: "transaction-partial-failure",
@@ -727,6 +1062,31 @@ describe("Matrix application service ingress", () => {
     expect(tx.message.upsert).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps an anonymous Matrix user on the normal chat lane while persisting exact ingress evidence", async () => {
+    mockPrisma.audienceIdentity.findUnique.mockResolvedValue({
+      id: "audience-identity-1",
+      status: "ANONYMOUS",
+      mergedIntoId: null,
+    });
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-anonymous-chat",
+      events: [matrixTextEvent("$event-anonymous-chat", aliceMatrixUserId)],
+    });
+
+    expect(result).toEqual([{
+      eventId: "$event-anonymous-chat",
+      status: "processed",
+    }]);
+    expect(tx.message.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        sourceIdentityLinkId: "matrix-identity-link-1",
+        sourceIdentityConnectionProofId: "matrix-identity-proof-1",
+      }),
+    }));
+    expect(tx.generationRun.upsert).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a room member who is not the bound contact or an allowed audience participant", async () => {
     const result = await ingestMatrixApplicationServiceTransaction({
       transactionId: "transaction-unbound-sender",
@@ -753,6 +1113,25 @@ describe("Matrix application service ingress", () => {
         }],
       }),
     );
+    mockPrisma.identityLink.findUnique.mockResolvedValue({
+      id: "matrix-identity-link-bob",
+      audienceIdentityId: "audience-identity-1",
+      provider: "MATRIX",
+      providerSubject: "@bob:example.org",
+      issuer: "example.org",
+      verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+      assuranceLevel: "PLATFORM_VERIFIED",
+      revokedAt: null,
+    });
+    mockPrisma.identityLinkConnectionProof.findUnique.mockResolvedValue({
+      id: "matrix-identity-proof-bob",
+      identityLinkId: "matrix-identity-link-bob",
+      issuer: "example.org",
+      connectionId: "delegate-matrix-as",
+      verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
+      assuranceLevel: "PLATFORM_VERIFIED",
+      revokedAt: null,
+    });
 
     const result = await ingestMatrixApplicationServiceTransaction({
       transactionId: "transaction-allowed-participant",
@@ -853,6 +1232,7 @@ describe("Matrix application service ingress", () => {
       eventType: "m.room.message",
       payload: {
         ...event,
+        ...matrixArrivalFencePayload(),
         content: {
           msgtype: "m.text",
           body: "!bind [redacted]",
@@ -1517,6 +1897,10 @@ describe("Matrix application service ingress", () => {
     mockPrisma.identityLinkConnectionProof.findUnique.mockImplementation(
       async () => rebound
         ? {
+            id: "matrix-identity-proof-1",
+            identityLinkId: "matrix-identity-link-1",
+            issuer: "example.org",
+            connectionId: "delegate-matrix-as",
             verifiedAt: new Date("2026-07-28T00:00:00.000Z"),
             assuranceLevel: "PLATFORM_VERIFIED",
             revokedAt: null,
@@ -1549,7 +1933,7 @@ describe("Matrix application service ingress", () => {
     expect(mockConsumeIdentityBindingChallenge).toHaveBeenCalledTimes(1);
     expect(
       mockPrisma.identityLinkConnectionProof.findUnique,
-    ).toHaveBeenCalledTimes(1);
+    ).toHaveBeenCalledTimes(3);
     expect(tx.message.upsert).toHaveBeenCalledWith(expect.objectContaining({
       create: expect.objectContaining({
         externalMessageId: "$event-after-rebind",
@@ -1625,6 +2009,92 @@ describe("Matrix application service ingress", () => {
         status: "DEAD_LETTER",
         processedAt: expect.any(Date),
       }),
+    });
+  });
+
+  it("never dead-letters a Matrix memory safety control", async () => {
+    const event: MatrixApplicationServiceEvent = {
+      event_id: "$event-redaction-retry-forever",
+      type: "m.room.redaction",
+      room_id: "!room:example.org",
+      sender: aliceMatrixUserId,
+      redacts: "$event-original",
+      content: {},
+    };
+    mockPrisma.channelEventInbox.upsert.mockImplementationOnce(
+      async (args: any) => ({
+        id: `inbox:${args.create.externalEventId}`,
+        status: "FAILED",
+        attemptCount: 5,
+        eventType: args.create.eventType,
+        payload: args.create.payload,
+        privateCredentialHash: args.create.privateCredentialHash,
+        lastError: "database temporarily unavailable",
+      }),
+    );
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-redaction-retry-forever",
+      events: [event],
+    });
+
+    expect(result).toEqual([{
+      eventId: event.event_id,
+      status: "failed",
+      reason: "matrix_memory_control_retrying",
+    }]);
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenLastCalledWith({
+      where: { id: `inbox:${event.event_id}` },
+      data: expect.objectContaining({
+        status: "FAILED",
+        attemptCount: 0,
+        processedAt: null,
+      }),
+    });
+    expect(mockPrisma.channelEventInbox.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "DEAD_LETTER" }),
+      }),
+    );
+  });
+
+  it("retries a cross-transaction Matrix edit until its target arrives", async () => {
+    mockPrisma.message.findFirst.mockResolvedValueOnce(null);
+    const event: MatrixApplicationServiceEvent = {
+      event_id: "$event-edit-before-target",
+      type: "m.room.message",
+      room_id: "!room:example.org",
+      sender: aliceMatrixUserId,
+      content: {
+        msgtype: "m.text",
+        body: "* corrected",
+        "m.new_content": { msgtype: "m.text", body: "corrected" },
+        "m.relates_to": {
+          rel_type: "m.replace",
+          event_id: "$event-target-not-yet-committed",
+        },
+      },
+    };
+
+    const result = await ingestMatrixApplicationServiceTransaction({
+      transactionId: "transaction-edit-before-target",
+      events: [event],
+    });
+
+    expect(result).toEqual([{
+      eventId: event.event_id,
+      status: "failed",
+      reason: "matrix_edit_target_not_found",
+    }]);
+    expect(mockPrisma.channelEventInbox.update).toHaveBeenCalledWith({
+      where: { id: `inbox:${event.event_id}` },
+      data: {
+        status: "FAILED",
+        attemptCount: { decrement: 1 },
+        processedAt: null,
+        availableAt: expect.any(Date),
+        lastError: "matrix_edit_target_not_found",
+      },
     });
   });
 
@@ -1710,6 +2180,13 @@ describe("Matrix application service ingress", () => {
       status: "ignored",
       reason: "matrix_edit_delegation_active",
     }]);
+    expect(mockInvalidateMemoryExtractionForSourceMessage).toHaveBeenCalledWith(
+      fencedTx,
+      {
+        messageId: "message-delegated",
+        reasonCode: "source_message_edited",
+      },
+    );
     expect(mockPrisma.channelEventInbox.update).not.toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({ status: "FAILED" }),
@@ -1720,6 +2197,8 @@ describe("Matrix application service ingress", () => {
   it("keeps inbound messages waiting for an operator without inventing an active assignment", async () => {
     tx.conversation.findFirst.mockResolvedValue({
       id: "conversation-1",
+      contactId: "contact-1",
+      audienceIdentityId: "audience-identity-1",
       state: "NEEDS_HUMAN",
       representative: {
         id: "representative-1",
@@ -1737,6 +2216,9 @@ describe("Matrix application service ingress", () => {
       channelBindings: [{
         id: "matrix-binding-1",
         kind: "MATRIX",
+        connectionId: "delegate-matrix-as",
+        representativeBindingId: "representative-matrix-binding-1",
+        representativeAssignmentRevision: 1,
         externalConversationId: "!room:example.org",
         metadata: matrixSafetyMetadata(),
         representativeBinding: {
@@ -1868,6 +2350,14 @@ describe("Matrix application service ingress", () => {
       status: "ignored",
       reason: "matrix_redaction_delegation_active",
     }]);
+    expect(mockInvalidateMemoryExtractionForSourceMessage).toHaveBeenCalledWith(
+      fencedTx,
+      {
+        messageId: "message-delegated",
+        reasonCode: "source_message_redacted",
+        occurredAt: expect.any(Date),
+      },
+    );
     expect(tx.generationRun.updateMany).not.toHaveBeenCalled();
     expect(tx.outboxEvent.updateMany).not.toHaveBeenCalled();
     expect(tx.message.update).not.toHaveBeenCalled();
@@ -2114,7 +2604,10 @@ describe("Matrix application service ingress", () => {
       status: "PENDING",
       attemptCount: 4,
       eventType: event.type!,
-      payload: event,
+      payload: {
+        ...event,
+        ...matrixArrivalFencePayload(),
+      },
       lastError: null,
     };
     mockPrisma.channelEventInbox.upsert
@@ -2224,7 +2717,7 @@ describe("Matrix application service ingress", () => {
       status: "ignored",
       reason: "matrix_managed_sender_echo",
     }]);
-    expect(mockPrisma.conversationChannelBinding.findFirst).not.toHaveBeenCalled();
+    expect(mockPrisma.conversationChannelBinding.findFirst).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -2238,9 +2731,43 @@ function matrixTextEvent(
     type: "m.room.message",
     room_id: roomId,
     sender,
+    origin_server_ts: Date.parse("2026-08-01T00:00:00.000Z"),
     content: {
       msgtype: "m.text",
       body: "hello",
+    },
+  };
+}
+
+function matrixArrivalFencePayload(input: {
+  desiredState?: "ACTIVE" | "PAUSED" | "DISCONNECTED";
+  assignmentRevision?: number;
+  lifecycleRevision?: number;
+} = {}) {
+  return {
+    "com.delegate.arrival_fence": {
+      version: 1,
+      representativeBindingId: "representative-matrix-binding-1",
+      endpointAssignmentRevision: input.assignmentRevision ?? 1,
+      endpointLifecycleRevision: input.lifecycleRevision ?? 1,
+      arrivedDesiredState: input.desiredState ?? "ACTIVE",
+    },
+  };
+}
+
+function managedMatrixTarget() {
+  return {
+    representativeId: "representative-1",
+    matrixUserId: "@_delegate_rep:example.org",
+    enabled: true,
+    representative: {
+      channelBindings: [{
+        id: "representative-matrix-binding-1",
+        externalUserId: "@_delegate_rep:example.org",
+        endpointAssignmentRevision: 1,
+        endpointLifecycleRevision: 1,
+        desiredState: "ACTIVE",
+      }],
     },
   };
 }
@@ -2249,13 +2776,16 @@ function buildMatrixBinding(input: {
   contactMatrixUserId?: string | null;
   desiredState?: "ACTIVE" | "PAUSED" | "DISCONNECTED";
   healthStatus?: "HEALTHY" | "UNHEALTHY";
+  endpointLifecycleRevision?: number;
   lifecycleState?: "PUBLISHED" | "PAUSED" | "DRAFT" | "ARCHIVED";
   representativeBinding?: {
+    id?: string;
     status: string;
     desiredState: string;
     healthStatus: string;
     externalUserId?: string;
     endpointAssignmentRevision?: number;
+    endpointLifecycleRevision?: number;
   } | null;
   metadata?: Record<string, unknown>;
   runtimePolicyOverlays?: Array<{
@@ -2275,6 +2805,7 @@ function buildMatrixBinding(input: {
   return {
     id: "matrix-binding-1",
     conversationId: "conversation-1",
+    representativeBindingId: "representative-matrix-binding-1",
     kind: "MATRIX",
     connectionId: "delegate-matrix-as",
     representativeAssignmentRevision: 1,
@@ -2282,21 +2813,30 @@ function buildMatrixBinding(input: {
     metadata: input.metadata ?? matrixSafetyMetadata(),
     representativeBinding: input.representativeBinding === undefined
       ? {
+          id: "representative-matrix-binding-1",
           status: "CONNECTED",
           desiredState: input.desiredState ?? "ACTIVE",
           healthStatus: input.healthStatus ?? "HEALTHY",
           externalUserId: "@_delegate_rep:example.org",
           endpointAssignmentRevision: 1,
+          endpointLifecycleRevision:
+            input.endpointLifecycleRevision ?? 1,
         }
       : input.representativeBinding
         ? {
             ...input.representativeBinding,
+            id:
+              input.representativeBinding.id
+              ?? "representative-matrix-binding-1",
             externalUserId:
               input.representativeBinding.externalUserId
               ?? "@_delegate_rep:example.org",
             endpointAssignmentRevision:
               input.representativeBinding
                 .endpointAssignmentRevision ?? 1,
+            endpointLifecycleRevision:
+              input.representativeBinding
+                .endpointLifecycleRevision ?? 1,
           }
         : null,
     conversation: {

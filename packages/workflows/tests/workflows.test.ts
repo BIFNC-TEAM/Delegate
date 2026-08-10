@@ -3,9 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   approvalExpirationDedupeKey,
   buildWorkflowExternalId,
-  creatorTrainingReviewDedupeKey,
-  creatorTrainingReviewInputSchema,
-  creatorTrainingReviewSubjectId,
   getWorkflowEngineConfig,
   handoffFollowUpDedupeKey,
   isWorkflowEnginePhaseTerminal,
@@ -23,12 +20,6 @@ describe("workflow helpers", () => {
   it("builds stable dedupe keys", () => {
     expect(handoffFollowUpDedupeKey("handoff_123")).toBe("handoff_follow_up:handoff_123");
     expect(approvalExpirationDedupeKey("approval_123")).toBe("approval_expiration:approval_123");
-    expect(creatorTrainingReviewDedupeKey("lin", new Date("2026-07-04T12:30:00.000Z"))).toBe(
-      "creator_training_review:lin:2026-07-04T12",
-    );
-    expect(creatorTrainingReviewSubjectId(new Date("2026-07-04T12:30:00.000Z"))).toBe(
-      "training-review:2026-07-04T12",
-    );
   });
 
   it("schedules handoff follow-up in hours", () => {
@@ -112,20 +103,6 @@ describe("workflow helpers", () => {
     ).toEqual({
       workflowRunId: "workflow-123",
       scheduledAt: "2026-04-05T12:00:00.000Z",
-    });
-  });
-
-  it("parses creator training review workflow input", () => {
-    expect(
-      creatorTrainingReviewInputSchema.parse({
-        representativeSlug: "lin-founder-rep",
-        feedbackLimit: 25,
-        unknownQuestionLimit: 40,
-      }),
-    ).toEqual({
-      representativeSlug: "lin-founder-rep",
-      feedbackLimit: 25,
-      unknownQuestionLimit: 40,
     });
   });
 

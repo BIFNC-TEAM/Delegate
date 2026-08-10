@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  privateChannelSourceVerificationUnavailableStatement:
+    "来源说明：暂时无法核验本次回答是否引用了已授权知识或记忆。为避免发送未经核验的内容，本次回答已被隐藏，请稍后重新提问。",
   generateRepresentativeReply: vi.fn(),
   hasPersistedTelegramBotConnections: vi.fn(),
+  isDeterministicContactMemoryDeleteCommand: vi.fn(),
   planNaturalLanguageComputeRequest: vi.fn(),
   renderFailClosedReplyPreview: vi.fn(),
   renderGroundedKnowledgeFallbackWithTrace: vi.fn(),
@@ -39,10 +42,13 @@ const mocks = vi.hoisted(() => ({
   assertConversationChannelDeliveryAvailable: vi.fn(),
   authorizeGenerationRunFreeUsage: vi.fn(),
   reserveGenerationConversationEntitlement: vi.fn(),
+  renderPrivateChannelGenerationDeliveryText: vi.fn(),
   releaseConversationEntitlement: vi.fn(),
   retryOperatorMessageDelivery: vi.fn(),
   resolveTelegramBotRuntimeCredential: vi.fn(),
   withActiveTelegramRepresentativeChannelFence: vi.fn(),
+  withGenerationMessageProviderDeliveryFence: vi.fn(),
+  sendMatrixRepresentativeMessage: vi.fn(),
 }));
 
 vi.mock("@delegate/model-runtime", () => ({
@@ -84,21 +90,31 @@ vi.mock("@delegate/web-data", () => ({
   findConversationClarifyingDelegationTask: mocks.findConversationClarifyingDelegationTask,
   failGenerationRun: mocks.failGenerationRun,
   GENERATION_WORK_LEASE_DURATION_MS: 3_000,
+  GenerationMemoryDeliveryBlockedError:
+    class GenerationMemoryDeliveryBlockedError extends Error {
+      readonly code = "generation_memory_delivery_source_revoked";
+    },
   GenerationWorkLeaseLostError: class GenerationWorkLeaseLostError extends Error {
     readonly code = "generation_work_lease_lost";
   },
   getRepresentativeRuntimeSetupSnapshot: mocks.getRepresentativeRuntimeSetupSnapshot,
   hasPersistedTelegramBotConnections:
     mocks.hasPersistedTelegramBotConnections,
+  isDeterministicContactMemoryDeleteCommand:
+    mocks.isDeterministicContactMemoryDeleteCommand,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
   markGenerationDeliveryComplete: mocks.markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval: mocks.markDelegationTaskAwaitingApproval,
   markDelegationTaskRunning: mocks.markDelegationTaskRunning,
   prepareGenerationMessageChannelDelivery:
     mocks.prepareGenerationMessageChannelDelivery,
+  privateChannelSourceVerificationUnavailableStatement:
+    mocks.privateChannelSourceVerificationUnavailableStatement,
   recallRepresentativeContext: mocks.recallRepresentativeContext,
   releaseConversationEntitlement: mocks.releaseConversationEntitlement,
   reserveGenerationConversationEntitlement: mocks.reserveGenerationConversationEntitlement,
+  renderPrivateChannelGenerationDeliveryText:
+    mocks.renderPrivateChannelGenerationDeliveryText,
   renewGenerationWorkItemLease: mocks.renewGenerationWorkItemLease,
   retryGenerationDelivery: mocks.retryGenerationDelivery,
   retryOperatorMessageDelivery: mocks.retryOperatorMessageDelivery,
@@ -106,11 +122,21 @@ vi.mock("@delegate/web-data", () => ({
     mocks.resolveTelegramBotRuntimeCredential,
   withActiveTelegramRepresentativeChannelFence:
     mocks.withActiveTelegramRepresentativeChannelFence,
+  withGenerationMessageProviderDeliveryFence:
+    mocks.withGenerationMessageProviderDeliveryFence,
   isGenerationWorkLeaseLostError: (error: unknown) =>
     error instanceof Error
     && "code" in error
     && error.code === "generation_work_lease_lost",
+  isGenerationMemoryDeliveryBlockedError: (error: unknown) =>
+    error instanceof Error
+    && "code" in error
+    && error.code === "generation_memory_delivery_source_revoked",
   waitGenerationRunForComputeApproval: mocks.waitGenerationRunForComputeApproval,
+}));
+
+vi.mock("../src/matrix-outbound", () => ({
+  sendMatrixRepresentativeMessage: mocks.sendMatrixRepresentativeMessage,
 }));
 
 import { GenerationWorkLeaseLostError } from "@delegate/web-data";
@@ -130,6 +156,9 @@ describe("conversation worker knowledge recall", () => {
     mocks.assertConversationChannelDeliveryAvailable.mockResolvedValue(undefined);
     mocks.authorizeGenerationRunFreeUsage.mockResolvedValue(true);
     mocks.reserveGenerationConversationEntitlement.mockResolvedValue(null);
+    mocks.renderPrivateChannelGenerationDeliveryText.mockImplementation(
+      async ({ text }: { text: string }) => text,
+    );
     mocks.releaseConversationEntitlement.mockResolvedValue(undefined);
     mocks.renewGenerationWorkItemLease.mockResolvedValue(true);
     mocks.deferOperatorMessageDelivery.mockResolvedValue(true);
@@ -146,7 +175,23 @@ describe("conversation worker knowledge recall", () => {
         value: await operation({}),
       }),
     );
+    mocks.withGenerationMessageProviderDeliveryFence.mockImplementation(
+      async (_tx, _input, operation) => ({
+        executed: true,
+        value: await operation(),
+      }),
+    );
     mocks.hasPersistedTelegramBotConnections.mockResolvedValue(false);
+    mocks.isDeterministicContactMemoryDeleteCommand.mockImplementation(
+      (text: string | null) => [
+        "/delete_memory",
+        "/forget",
+        "delete my memory",
+        "forget my memory",
+        "删除我的记忆",
+      ].includes(text?.trim().toLocaleLowerCase() ?? ""),
+    );
+    mocks.sendMatrixRepresentativeMessage.mockResolvedValue("$matrix-event-1");
     mocks.createComputeDelegationTask.mockResolvedValue({
       task: { id: "task-1" },
       step: { id: "task-step-1" },
@@ -217,7 +262,137 @@ describe("conversation worker knowledge recall", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
+
+  it.each([
+    {
+      channel: "matrix" as const,
+      command: "删除我的记忆",
+      channelName: "Matrix",
+      externalConversationId: "!memory-room:example.test",
+      matrixSenderUserId: "@delegate:example.test",
+    },
+    {
+      channel: "telegram" as const,
+      command: "/forget",
+      channelName: "Telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "111111111",
+    },
+  ])(
+    "confirms an exact $channel Contact Memory deletion without recall, model, or billing",
+    async (fixture) => {
+      const confirmation =
+        `已完成：当前数字代表与当前 ${fixture.channelName} 渠道下的联系人记忆已立即停止召回，后台将异步清理对应长期记忆。代表经验和其他渠道的联系人记忆不受影响。`;
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          ok: true,
+          result: { message_id: 90212 },
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      if (fixture.channel === "telegram") {
+        mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+          connectionId: "111111111",
+          botId: "111111111",
+          username: "bot_a",
+          displayName: "Bot A",
+          token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+          credentialRevision: 1,
+        });
+      }
+      mocks.claimNextGenerationWorkItem.mockResolvedValue({
+        outboxId: `outbox-delete-${fixture.channel}`,
+        leaseAttempt: 1,
+        runId: `run-delete-${fixture.channel}`,
+        representativeVersionId: "version-1",
+        representativeSlug: "sktone",
+        representativeName: "SKTone",
+        conversationId: `conversation-delete-${fixture.channel}`,
+        contactId: `contact-delete-${fixture.channel}`,
+        controlState: "AI_ACTIVE",
+        inputMessageId: `message-delete-${fixture.channel}`,
+        userText: fixture.command,
+        channel: fixture.channel,
+        externalConversationId: fixture.externalConversationId,
+        ...(fixture.channel === "matrix"
+          ? {
+              matrixSenderUserId: fixture.matrixSenderUserId,
+              matrixEndpointLifecycleRevision: 7,
+            }
+          : { telegramConnectionId: fixture.telegramConnectionId }),
+        usage: {
+          freeRepliesUsed: 99,
+          passUnlocked: false,
+          deepHelpUnlocked: false,
+        },
+      });
+
+      await expect(processNextConversationWork({
+        port: 4040,
+        pollMs: 500,
+        telegramConversationPlatformMode: "worker",
+        matrixHomeserverUrl: "https://matrix.example.test",
+        matrixApplicationServiceToken: "as-token",
+      })).resolves.toMatchObject({
+        processed: true,
+        runId: `run-delete-${fixture.channel}`,
+        status: "completed",
+      });
+
+      expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith({
+        conversationId: `conversation-delete-${fixture.channel}`,
+        runId: `run-delete-${fixture.channel}`,
+        outboxId: `outbox-delete-${fixture.channel}`,
+        leaseAttempt: 1,
+        replyText: confirmation,
+        senderDisplayName: "SKTone",
+        intent: "contact_memory_delete_confirmation",
+        completeOutbox: false,
+        countUsage: false,
+        runtimeOutcome: {
+          mode: "fallback",
+          fallbackStrategy: "deterministic_preview",
+          modelRuntimeState: "disabled",
+          fallbackReason: "policy_fallback",
+        },
+      });
+      expect(mocks.getRepresentativeRuntimeSetupSnapshot).not.toHaveBeenCalled();
+      expect(mocks.loadGenerationRecentTurns).not.toHaveBeenCalled();
+      expect(mocks.recallRepresentativeContext).not.toHaveBeenCalled();
+      expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+      expect(mocks.authorizeGenerationRunFreeUsage).not.toHaveBeenCalled();
+      expect(mocks.reserveGenerationConversationEntitlement).not.toHaveBeenCalled();
+      expect(mocks.renderPrivateChannelGenerationDeliveryText).not.toHaveBeenCalled();
+
+      if (fixture.channel === "matrix") {
+        expect(mocks.sendMatrixRepresentativeMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            conversationId: "conversation-delete-matrix",
+            roomId: fixture.externalConversationId,
+            senderUserId: fixture.matrixSenderUserId,
+            generationRunId: "run-delete-matrix",
+            text: confirmation,
+          }),
+        );
+        expect(fetchMock).not.toHaveBeenCalled();
+      } else {
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.stringContaining(
+            "/bot111111111:AAAAAAAAAAAAAAAAAAAAAAAA/sendMessage",
+          ),
+          expect.objectContaining({
+            body: JSON.stringify({
+              chat_id: fixture.externalConversationId,
+              text: confirmation,
+            }),
+          }),
+        );
+      }
+    },
+  );
 
   it("passes recalled knowledge to the model and persists its citation", async () => {
     await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
@@ -526,6 +701,64 @@ describe("conversation worker knowledge recall", () => {
     ).not.toContain("sk-do-not-persist");
   });
 
+  it("does not send a completed memory-backed answer after deletion fences its delivery retry", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const blocked = Object.assign(
+      new Error("Generation delivery was canceled because an injected source is no longer authorized."),
+      { code: "generation_memory_delivery_source_revoked" },
+    );
+    mocks.prepareGenerationMessageChannelDelivery.mockRejectedValueOnce(blocked);
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-memory-delivery-retry",
+      leaseAttempt: 2,
+      runId: "run-memory-delivery-retry",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-telegram-memory",
+      contactId: "contact-telegram-memory",
+      controlState: "WAITING_USER",
+      inputMessageId: "message-inbound-memory",
+      userText: "original inbound",
+      channel: "telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "111111111",
+      deliveryOnly: true,
+      outputMessageId: "message-output-memory",
+      outputText: "persisted personalized answer that must stay hidden",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+      telegramRequestTimeoutMs: 8_000,
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-memory-delivery-retry",
+      status: "canceled",
+    });
+
+    expect(mocks.prepareGenerationMessageChannelDelivery).toHaveBeenCalledWith({
+      conversationId: "conversation-telegram-memory",
+      runId: "run-memory-delivery-retry",
+      outboxId: "outbox-memory-delivery-retry",
+      leaseAttempt: 2,
+      outputMessageId: "message-output-memory",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mocks.renderPrivateChannelGenerationDeliveryText).not.toHaveBeenCalled();
+    expect(mocks.markGenerationDeliveryComplete).not.toHaveBeenCalled();
+    expect(mocks.retryGenerationDelivery).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
   it("retries only persisted delivery for a completed Telegram generation", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -535,6 +768,9 @@ describe("conversation worker knowledge recall", () => {
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
+    mocks.renderPrivateChannelGenerationDeliveryText.mockResolvedValueOnce(
+      "persisted reply\n\n——\n来源说明：本回答未引用已授权知识或记忆，内容由通用模型生成。",
+    );
     mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
       connectionId: "connection-a",
       botId: "111111111",
@@ -596,6 +832,19 @@ describe("conversation worker knowledge recall", () => {
       },
       expect.any(Function),
     );
+    expect(
+      mocks.withGenerationMessageProviderDeliveryFence,
+    ).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        conversationId: "conversation-telegram",
+        runId: "run-delivery-retry",
+        outboxId: "outbox-delivery-retry",
+        leaseAttempt: 2,
+        outputMessageId: "message-output",
+      },
+      expect.any(Function),
+    );
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(
         "/bot111111111:AAAAAAAAAAAAAAAAAAAAAAAA/sendMessage",
@@ -604,10 +853,18 @@ describe("conversation worker knowledge recall", () => {
         signal: expect.any(AbortSignal),
         body: JSON.stringify({
           chat_id: "123456",
-          text: "persisted reply",
+          text:
+            "persisted reply\n\n——\n来源说明：本回答未引用已授权知识或记忆，内容由通用模型生成。",
         }),
       }),
     );
+    expect(
+      mocks.renderPrivateChannelGenerationDeliveryText,
+    ).toHaveBeenCalledWith({
+      generationRunId: "run-delivery-retry",
+      outputMessageId: "message-output",
+      text: "persisted reply",
+    });
     expect(
       mocks.prepareGenerationMessageChannelDelivery,
     ).toHaveBeenCalledWith(expect.objectContaining({
@@ -626,6 +883,177 @@ describe("conversation worker knowledge recall", () => {
     });
     vi.unstubAllGlobals();
   });
+
+  it("uses the same persisted source footer boundary for Matrix delivery", async () => {
+    mocks.renderPrivateChannelGenerationDeliveryText.mockResolvedValueOnce(
+      "persisted Matrix reply\n\n——\n来源：代表经验",
+    );
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-matrix-delivery",
+      leaseAttempt: 1,
+      runId: "run-matrix-delivery",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-matrix",
+      contactId: "contact-matrix",
+      controlState: "WAITING_USER",
+      inputMessageId: "message-inbound-matrix",
+      userText: "original inbound",
+      channel: "matrix",
+      externalConversationId: "!room:example.test",
+      matrixSenderUserId: "@delegate:example.test",
+      matrixEndpointLifecycleRevision: 7,
+      deliveryOnly: true,
+      outputMessageId: "message-output-matrix",
+      outputText: "persisted Matrix reply",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      matrixHomeserverUrl: "https://matrix.example.test",
+      matrixApplicationServiceToken: "as-token",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-matrix-delivery",
+      status: "completed",
+    });
+
+    expect(
+      mocks.renderPrivateChannelGenerationDeliveryText,
+    ).toHaveBeenCalledWith({
+      generationRunId: "run-matrix-delivery",
+      outputMessageId: "message-output-matrix",
+      text: "persisted Matrix reply",
+    });
+    expect(mocks.sendMatrixRepresentativeMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-matrix",
+        roomId: "!room:example.test",
+        generationRunId: "run-matrix-delivery",
+        generationDelivery: {
+          runId: "run-matrix-delivery",
+          outboxId: "outbox-matrix-delivery",
+          leaseAttempt: 1,
+          outputMessageId: "message-output-matrix",
+        },
+        text: "persisted Matrix reply\n\n——\n来源：代表经验",
+      }),
+    );
+    expect(mocks.markGenerationDeliveryComplete).toHaveBeenCalledWith({
+      runId: "run-matrix-delivery",
+      outboxId: "outbox-matrix-delivery",
+      leaseAttempt: 1,
+      outputMessageId: "message-output-matrix",
+      externalMessageId: "$matrix-event-1",
+    });
+  });
+
+  it.each(["matrix", "telegram"] as const)(
+    "sends only a fixed fail-closed notice when %s source verification throws",
+    async (channel) => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          ok: true,
+          result: { message_id: 90211 },
+        }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      mocks.renderPrivateChannelGenerationDeliveryText.mockRejectedValueOnce(
+        new Error("source verification unavailable"),
+      );
+      if (channel === "telegram") {
+        mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+          connectionId: "connection-a",
+          botId: "111111111",
+          username: "bot_a",
+          displayName: "Bot A",
+          token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+          credentialRevision: 1,
+        });
+      }
+      mocks.claimNextGenerationWorkItem.mockResolvedValue({
+        outboxId: `outbox-${channel}-source-failure`,
+        leaseAttempt: 1,
+        runId: `run-${channel}-source-failure`,
+        representativeVersionId: "version-1",
+        representativeSlug: "sktone",
+        representativeName: "SKTone",
+        conversationId: `conversation-${channel}-source-failure`,
+        contactId: `contact-${channel}`,
+        controlState: "WAITING_USER",
+        inputMessageId: `message-inbound-${channel}`,
+        userText: "original inbound",
+        channel,
+        externalConversationId: channel === "matrix"
+          ? "!room:example.test"
+          : "123456",
+        ...(channel === "matrix"
+          ? {
+              matrixSenderUserId: "@delegate:example.test",
+              matrixEndpointLifecycleRevision: 7,
+            }
+          : { telegramConnectionId: "connection-a" }),
+        deliveryOnly: true,
+        outputMessageId: `message-output-${channel}`,
+        outputText: "UNVERIFIED ANSWER MUST NOT BE SENT",
+        usage: {
+          freeRepliesUsed: 4,
+          passUnlocked: true,
+          deepHelpUnlocked: false,
+        },
+      });
+
+      await expect(processNextConversationWork({
+        port: 4040,
+        pollMs: 500,
+        matrixHomeserverUrl: "https://matrix.example.test",
+        matrixApplicationServiceToken: "as-token",
+        telegramConversationPlatformMode: "worker",
+        telegramRequestTimeoutMs: 8_000,
+      })).resolves.toMatchObject({
+        processed: true,
+        status: "completed",
+      });
+
+      if (channel === "matrix") {
+        expect(mocks.sendMatrixRepresentativeMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            text: mocks.privateChannelSourceVerificationUnavailableStatement,
+          }),
+        );
+      } else {
+        expect(fetchMock).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({
+            body: JSON.stringify({
+              chat_id: "123456",
+              text: mocks.privateChannelSourceVerificationUnavailableStatement,
+            }),
+          }),
+        );
+      }
+      expect(JSON.stringify([
+        ...mocks.sendMatrixRepresentativeMessage.mock.calls,
+        ...fetchMock.mock.calls,
+      ])).not.toContain("UNVERIFIED ANSWER MUST NOT BE SENT");
+      expect(mocks.retryGenerationDelivery).not.toHaveBeenCalled();
+      expect(mocks.markGenerationDeliveryComplete).toHaveBeenCalledWith(
+        expect.objectContaining({
+          runId: `run-${channel}-source-failure`,
+          outputMessageId: `message-output-${channel}`,
+        }),
+      );
+      vi.unstubAllGlobals();
+    },
+  );
 
   it("does not call Telegram after the final assignment-epoch fence closes", async () => {
     const fetchMock = vi.fn();
@@ -685,6 +1113,76 @@ describe("conversation worker knowledge recall", () => {
     expect(
       mocks.markGenerationDeliveryComplete,
     ).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("does not call Telegram after the provider memory fence cancels delivery", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+      connectionId: "111111111",
+      botId: "111111111",
+      username: "bot_a",
+      displayName: "Bot A",
+      token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+      credentialRevision: 1,
+    });
+    mocks.withGenerationMessageProviderDeliveryFence.mockResolvedValueOnce({
+      executed: false,
+      reason: "memory_delivery_source_revoked",
+    });
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-forgotten-telegram",
+      leaseAttempt: 3,
+      runId: "run-forgotten-telegram",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-forgotten-telegram",
+      contactId: "contact-telegram",
+      controlState: "WAITING_USER",
+      inputMessageId: "message-inbound",
+      userText: "original inbound",
+      channel: "telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "111111111",
+      deliveryOnly: true,
+      outputMessageId: "message-output",
+      outputText: "stale personalized reply",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+      telegramRequestTimeoutMs: 8_000,
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-forgotten-telegram",
+      status: "canceled",
+    });
+
+    expect(
+      mocks.withGenerationMessageProviderDeliveryFence,
+    ).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        conversationId: "conversation-forgotten-telegram",
+        runId: "run-forgotten-telegram",
+        outboxId: "outbox-forgotten-telegram",
+        leaseAttempt: 3,
+        outputMessageId: "message-output",
+      },
+      expect.any(Function),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mocks.markGenerationDeliveryComplete).not.toHaveBeenCalled();
+    expect(mocks.retryGenerationDelivery).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
   });
 

@@ -42,7 +42,7 @@ Delegate currently includes these working surfaces and services:
 
 - **Marketing site** in `apps/site`, using the Dispatch Editorial design system.
 - **Public representative app** in `apps/reps`, including representative profiles, service packages, web chat, WeChat checkout, and signed public-chat session state.
-- **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, the governed Memory System, workflow state, and Owner profile, identity-security, and Dashboard notification settings. Public knowledge authoring and publishing remain in Knowledge Library.
+- **Owner dashboard** in `apps/web`, covering representative health, delegated tasks, governed actions, compute sessions, artifacts, deliverables, packages, representative Memory configuration, workflow state, and Owner profile, identity-security, and Dashboard notification settings. Public knowledge authoring and publishing remain in Knowledge Library.
 - **Optional Telegram bot runtime foundation** in `apps/bot`, powered by grammY and retained as the Telegram-specific edge while business behavior moves toward the shared Conversation Platform.
 - **Matrix Application Service foundation** in `apps/matrix-bridge`, providing authenticated Matrix transaction ingestion and channel event mapping. Native Matrix is an optional channel; it is not required for Telegram availability.
 - **AMN wallet control plane** covering immutable billing products and prices, snapshotted orders, internal wallet ledger entries, local mock payment, default-off WeChat Pay API v3 Native collection and recovery, service-credit fulfillment, usage charging, provisional Creator 20% revenue share, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
@@ -56,9 +56,8 @@ The durable workflow kinds implemented today are:
 
 - `APPROVAL_EXPIRATION`
 - `HANDOFF_FOLLOW_UP`
-- `CREATOR_TRAINING_REVIEW`
 
-Temporal is already wired for those workflows through post-commit command outbox dispatch, native workflow timers, cancellation cleanup, asynchronous training review, and dashboard phase observability. Ordinary real-time chat routing still stays out of Temporal.
+Temporal is already wired for those workflows through post-commit command outbox dispatch, native workflow timers, cancellation cleanup, and dashboard phase observability. The historical `CREATOR_TRAINING_REVIEW` enum value is drain-only compatibility and cannot mutate product data. Ordinary real-time chat routing still stays out of Temporal.
 
 ## AMN Target Model
 
@@ -207,7 +206,6 @@ docs/
   public-audience-identity.md
   per-user-sandbox-runtime.md
   temporal-native-workflow-rfc.md
-  creator-training-loop.md
   v2-isolated-compute-plane-plan.md
   openviking-integration.md
   roadmap.md
@@ -228,13 +226,27 @@ pnpm install
 cp .env.example .env
 ```
 
-Start the local test stack. This explicit override runs only the Dashboard and
-representative app in development mode, enables the built-in local identities,
-and keeps production authentication fail-closed:
+Bootstrap the local test stack once, or again after changing `package.json`, the
+lockfile, or a Dockerfile. The local override runs Dashboard and Representatives
+with `next dev --turbopack` and read-only source mounts, while keeping the
+built-in development identities and production authentication boundary:
+
+```bash
+pnpm docker:bootstrap:local
+```
+
+For normal daily startup, use the non-building command below. TypeScript, TSX,
+and CSS changes in Dashboard, Representatives, and their mounted workspace
+packages are picked up by Turbopack Fast Refresh without rebuilding an image:
 
 ```bash
 pnpm docker:up:local
 ```
+
+After a Prisma schema change, run `pnpm docker:migrate:local` and restart the
+Dashboard and Representatives containers so their generated Prisma Clients are
+refreshed. Dependency and image-layer changes still require
+`pnpm docker:bootstrap:local`.
 
 Use `pnpm docker:up` for the production-shaped local stack; it requires a
 configured Logto Traditional Web application before creator login can succeed.
@@ -258,8 +270,10 @@ the exact Console setup, one-shot upgrade flow, and production boundaries.
 
 Native Matrix is optional and is not part of Telegram delivery. The Matrix
 command bootstraps a development-only Synapse instance with random local
-Application Service tokens, then includes the same local app override. Its
-Synapse and bridge ports are published only on host loopback:
+Application Service tokens, then includes the same local-auth and stable-server
+override. It does not switch Dashboard or Representatives back to Next.js
+development servers or enable source hot reload. Its Synapse and bridge ports
+are published only on host loopback:
 
 ```bash
 pnpm docker:up:matrix
@@ -656,7 +670,7 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 - [Channel Conversation Platform ADR](./docs/adr-channel-conversation-platform.md): source/transport separation, identity proof, Web/Stars entitlement, channel MVP, migration, and rollback decisions.
 - [Delegation tasks](./docs/delegation-tasks.md): task aggregate, lifecycle, ownership validation, approvals, outputs, and audit linkage.
 - [Delegation task product contract](./docs/delegation-task-product-contract.md): creation rules, visible lifecycle, owner actions, approval binding, completion, and the current P1 boundary.
-- [Creator training loop](./docs/creator-training-loop.md): source registry, creator feedback, suggestion workflow, review, evaluation, and rollback.
+- [Memory system plan](./docs/memory-system-plan.md): automatic extraction, isolation, recall, retention, projection, and representative-level settings.
 - [Temporal-native workflow RFC](./docs/temporal-native-workflow-rfc.md): workflow state model, outbox, timer, cancellation, and dashboard semantics.
 - [V2 isolated compute plane plan](./docs/v2-isolated-compute-plane-plan.md): compute and browser isolation model.
 - [OpenViking integration](./docs/openviking-integration.md): public memory and recall integration.

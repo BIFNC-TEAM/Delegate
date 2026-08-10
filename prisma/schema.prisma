@@ -909,7 +909,29 @@ enum OpenVikingMemoryStatus {
 
 enum MemoryScope {
   CONTACT_CHANNEL
+  CONTACT_SHARED
   REPRESENTATIVE
+}
+
+enum MemoryPolicyDecisionOutcome {
+  EVIDENCE_RECORDED
+  ACTIVATED
+  UPDATED
+  UNCHANGED
+  BLOCKED
+  QUARANTINED
+  SKIPPED
+  INVALIDATED
+}
+
+enum ContactMemorySharingConsentStatus {
+  GRANTED
+  REVOKED
+}
+
+enum ContactMemorySharingSourceEventRole {
+  DISCLOSURE
+  CONFIRMATION
 }
 
 enum MemoryCategory {
@@ -982,6 +1004,17 @@ enum MemoryCleanupStatus {
   RETRYING
   FAILED
   SUCCEEDED
+}
+
+enum MemoryDisclosureDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+enum MemoryDisclosureEvidenceKind {
+  MATRIX_MESSAGE
+  TELEGRAM_MESSAGE
 }
 
 enum MemoryExtractionTrigger {
@@ -1309,30 +1342,35 @@ model Wallet {
 }
 
 model AudienceIdentity {
-  id                   String                      @id @default(cuid())
-  accountId            String?                     @unique
-  audienceKey          String                      @unique
-  status               AudienceIdentityStatus      @default(ANONYMOUS)
-  mergedIntoId         String?
-  createdAt            DateTime                    @default(now())
-  updatedAt            DateTime                    @updatedAt
-  lastSeenAt           DateTime                    @default(now())
-  account              Account?                    @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  mergedInto           AudienceIdentity?           @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
-  mergedFrom           AudienceIdentity[]          @relation("AudienceIdentityMerge")
-  contacts             Contact[]
-  conversations        Conversation[]
-  userWallets          UserWallet[]
-  sandboxIdentities    SandboxIdentity[]
-  delegationTasks      DelegationTask[]
-  memoryRecords        OpenVikingMemoryRecord[]
-  identityLinks        IdentityLink[]
-  bindingChallenges    IdentityBindingChallenge[]
-  bridgeMappings       BridgeIdentityMapping[]
-  entitlementAccounts  ServiceEntitlementAccount[]
-  servicePaymentOrders ServicePaymentOrder[]
-  tokenPurchases       AgentTokenPurchase[]
-  usageCharges         AgentUsageCharge[]
+  id                    String                        @id @default(cuid())
+  accountId             String?                       @unique
+  audienceKey           String                        @unique
+  status                AudienceIdentityStatus        @default(ANONYMOUS)
+  mergedIntoId          String?
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+  lastSeenAt            DateTime                      @default(now())
+  account               Account?                      @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  mergedInto            AudienceIdentity?             @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedFrom            AudienceIdentity[]            @relation("AudienceIdentityMerge")
+  contacts              Contact[]
+  conversations         Conversation[]
+  userWallets           UserWallet[]
+  sandboxIdentities     SandboxIdentity[]
+  delegationTasks       DelegationTask[]
+  memoryRecords         OpenVikingMemoryRecord[]
+  identityLinks         IdentityLink[]
+  memoryCandidates      MemoryCandidate[]
+  governedMemories      GovernedMemory[]
+  memorySharingConsents ContactMemorySharingConsent[]
+  memorySharingChallenges ContactMemorySharingChallenge[]
+  memorySharingSourceEventClaims ContactMemorySharingSourceEventClaim[]
+  bindingChallenges     IdentityBindingChallenge[]
+  bridgeMappings        BridgeIdentityMapping[]
+  entitlementAccounts   ServiceEntitlementAccount[]
+  servicePaymentOrders  ServicePaymentOrder[]
+  tokenPurchases        AgentTokenPurchase[]
+  usageCharges          AgentUsageCharge[]
 
   @@index([status, lastSeenAt])
   @@index([mergedIntoId])
@@ -1421,6 +1459,7 @@ model IdentityLink {
   updatedAt          DateTime                      @updatedAt
   audienceIdentity   AudienceIdentity              @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade)
   connectionProofs   IdentityLinkConnectionProof[]
+  sourceMessages     Message[]                     @relation("MessageSourceIdentityLink")
 
   @@unique([provider, providerSubject])
   @@unique([provider, issuer, providerSubject])
@@ -1441,6 +1480,7 @@ model IdentityLinkConnectionProof {
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
   identityLink   IdentityLink           @relation(fields: [identityLinkId], references: [id], onDelete: Cascade)
+  sourceMessages Message[]               @relation("MessageSourceIdentityConnectionProof")
 
   @@unique([identityLinkId, issuer, connectionId])
   @@index([issuer, connectionId, revokedAt])
@@ -2107,124 +2147,130 @@ model CustomerAccount {
 }
 
 model Representative {
-  id                               String                          @id @default(cuid())
-  ownerId                          String
-  slug                             String                          @unique
-  displayName                      String
-  roleSummary                      String
-  tone                             String
-  avatarUrl                        String?
-  publicMode                       Boolean                         @default(true)
-  claimStatus                      RepresentativeClaimStatus       @default(CLAIMED)
-  groupModeEnabled                 Boolean                         @default(false)
-  groupActivation                  GroupActivation                 @default(REPLY_OR_MENTION)
-  humanInLoop                      Boolean                         @default(true)
-  languages                        Json
-  freeReplyLimit                   Int                             @default(4)
-  freeScope                        Json
-  paywalledIntents                 Json
-  handoffWindowHours               Int                             @default(24)
-  freeMonthlyCredit                Int                             @default(100)
-  handoffPrompt                    String
-  allowedSkills                    Json
-  actionGate                       Json
-  openvikingEnabled                Boolean                         @default(false)
-  openvikingAgentId                String?
-  openvikingAutoRecall             Boolean                         @default(true)
-  openvikingAutoCapture            Boolean                         @default(false)
-  openvikingCaptureMode            String                          @default("semantic")
-  openvikingRecallLimit            Int                             @default(6)
-  openvikingRecallScoreThreshold   Float                           @default(0.01)
-  openvikingTargetUri              String?
-  openvikingLastSyncAt             DateTime?
-  openvikingLastSyncStatus         String?
-  openvikingLastSyncError          String?
-  openvikingLastSyncItemCount      Int?
-  openvikingLastSyncJobId          String?
-  computeEnabled                   Boolean                         @default(false)
-  computeDefaultPolicyMode         PolicyDecision                  @default(ASK)
-  computeBaseImage                 String                          @default("debian:bookworm-slim")
-  computeMaxSessionMinutes         Int                             @default(15)
-  computeAutoApproveBudgetCents    Int                             @default(0)
-  computeArtifactRetentionDays     Int                             @default(14)
-  computeNetworkMode               ComputeNetworkMode              @default(NO_NETWORK)
-  computeNetworkAllowlist          String[]                        @default([])
-  computeFilesystemMode            ComputeFilesystemMode           @default(WORKSPACE_ONLY)
-  delegationEnabled                Boolean                         @default(true)
-  delegationNaturalLanguageEnabled Boolean                         @default(true)
-  delegationExplicitComputeEnabled Boolean                         @default(true)
-  delegationMaxSteps               Int                             @default(5)
-  delegationMaxCostCents           Int                             @default(0)
-  delegationKnowledgeScope         DelegationKnowledgeScope        @default(USER_INPUT_ONLY)
-  lifecycleState                   RepresentativeLifecycleState    @default(DRAFT)
-  activeVersionId                  String?
-  createdAt                        DateTime                        @default(now())
-  updatedAt                        DateTime                        @updatedAt
-  owner                            Owner                           @relation(fields: [ownerId], references: [id])
-  activeVersion                    RepresentativeVersion?          @relation("RepresentativeActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
-  versions                         RepresentativeVersion[]         @relation("RepresentativeVersions")
-  runtimePolicyOverlays            RuntimePolicyOverlay[]
-  channelBindings                  RepresentativeChannelBinding[]
-  matrixVirtualUsers               MatrixVirtualUserBinding[]
-  capabilityProfiles               CapabilityPolicyProfile[]
-  computeSessions                  ComputeSession[]
-  sandboxIdentities                SandboxIdentity[]
-  conversations                    Conversation[]
-  contextSyncJobs                  RepresentativeContextSync[]
-  contacts                         Contact[]
-  leads                            Lead[]
-  commitTraces                     ConversationCommitTrace[]
-  events                           EventAudit[]
-  handoffRequests                  HandoffRequest[]
-  artifacts                        Artifact[]
-  deliverables                     Deliverable[]
-  approvalRequests                 ApprovalRequest[]
-  intakeSubmissions                IntakeSubmission[]
-  invoices                         Invoice[]
-  ledgerEntries                    LedgerEntry[]
-  browserSessions                  BrowserSession[]
-  browserNavigations               BrowserNavigation[]
-  organizationCustomerAccounts     CustomerAccount[]
-  knowledgePack                    KnowledgePack?
-  memoryRecords                    OpenVikingMemoryRecord[]
-  pricingPlans                     PricingPlan[]
-  billingProducts                  BillingProduct[]
-  skillPackLinks                   RepresentativeSkillPack[]
-  mcpBindings                      RepresentativeMcpBinding[]
-  chatSessions                     ChatSession[]
-  workflowRuns                     WorkflowRun[]
-  delegationTasks                  DelegationTask[]
-  agentWallet                      AgentWallet?
-  tokenPurchases                   AgentTokenPurchase[]
-  usageCharges                     AgentUsageCharge[]
-  knowledgeAssetLinks              KnowledgeAssetRepresentative[]
-  creatorEarnings                  CreatorEarning[]
-  withdrawRequests                 WithdrawRequest[]
-  walletTransactions               WalletTransaction[]
-  walletLedgerEntries              WalletLedgerEntry[]
-  rechargeOrders                   RechargeOrder[]
-  trainingSources                  CreatorTrainingSource[]
-  feedbackSignals                  CreatorFeedbackSignal[]
-  trainingSuggestions              CreatorTrainingSuggestion[]
-  trainingVersions                 CreatorTrainingVersion[]
-  entitlementAccounts              ServiceEntitlementAccount[]
-  servicePaymentOrders             ServicePaymentOrder[]
-  walletExceptionCases             WalletExceptionCase[]
-  memoryCandidates                 MemoryCandidate[]
-  governedMemories                 GovernedMemory[]
-  governedMemoryVersions           GovernedMemoryVersion[]
-  memoryReviewDecisions            MemoryReviewDecision[]
-  memoryPolicy                     RepresentativeMemoryPolicy?
-  memoryExtractionRuns             MemoryExtractionRun[]
-  memoryProjectionItems            MemoryProjectionItem[]
-  representativeVersionResources  RepresentativeVersionResource[]
-  publicKnowledgeProjectionItems   PublicKnowledgeProjectionItem[]
-  memoryUseRuns                    MemoryUseRun[]
-  memoryUseItems                   MemoryUseItem[]
-  memoryDeletionProofs             MemoryDeletionProof[]
-  memoryReconciliationRuns         MemoryReconciliationRun[]
-  memoryReconciliationItems        MemoryReconciliationItem[]
-  memoryReconciliationTargets      MemoryReconciliationTarget[]
+  id                                   String                               @id @default(cuid())
+  ownerId                              String
+  slug                                 String                               @unique
+  displayName                          String
+  roleSummary                          String
+  tone                                 String
+  avatarUrl                            String?
+  publicMode                           Boolean                              @default(true)
+  claimStatus                          RepresentativeClaimStatus            @default(CLAIMED)
+  groupModeEnabled                     Boolean                              @default(false)
+  groupActivation                      GroupActivation                      @default(REPLY_OR_MENTION)
+  humanInLoop                          Boolean                              @default(true)
+  languages                            Json
+  freeReplyLimit                       Int                                  @default(4)
+  freeScope                            Json
+  paywalledIntents                     Json
+  handoffWindowHours                   Int                                  @default(24)
+  freeMonthlyCredit                    Int                                  @default(100)
+  handoffPrompt                        String
+  allowedSkills                        Json
+  actionGate                           Json
+  openvikingEnabled                    Boolean                              @default(false)
+  openvikingAgentId                    String?
+  openvikingAutoRecall                 Boolean                              @default(true)
+  openvikingAutoCapture                Boolean                              @default(false)
+  openvikingCaptureMode                String                               @default("semantic")
+  openvikingRecallLimit                Int                                  @default(6)
+  openvikingRecallScoreThreshold       Float                                @default(0.01)
+  openvikingTargetUri                  String?
+  openvikingLastSyncAt                 DateTime?
+  openvikingLastSyncStatus             String?
+  openvikingLastSyncError              String?
+  openvikingLastSyncItemCount          Int?
+  openvikingLastSyncJobId              String?
+  computeEnabled                       Boolean                              @default(false)
+  computeDefaultPolicyMode             PolicyDecision                       @default(ASK)
+  computeBaseImage                     String                               @default("debian:bookworm-slim")
+  computeMaxSessionMinutes             Int                                  @default(15)
+  computeAutoApproveBudgetCents        Int                                  @default(0)
+  computeArtifactRetentionDays         Int                                  @default(14)
+  computeNetworkMode                   ComputeNetworkMode                   @default(NO_NETWORK)
+  computeNetworkAllowlist              String[]                             @default([])
+  computeFilesystemMode                ComputeFilesystemMode                @default(WORKSPACE_ONLY)
+  delegationEnabled                    Boolean                              @default(true)
+  delegationNaturalLanguageEnabled     Boolean                              @default(true)
+  delegationExplicitComputeEnabled     Boolean                              @default(true)
+  delegationMaxSteps                   Int                                  @default(5)
+  delegationMaxCostCents               Int                                  @default(0)
+  delegationKnowledgeScope             DelegationKnowledgeScope             @default(USER_INPUT_ONLY)
+  lifecycleState                       RepresentativeLifecycleState         @default(DRAFT)
+  activeVersionId                      String?
+  createdAt                            DateTime                             @default(now())
+  updatedAt                            DateTime                             @updatedAt
+  owner                                Owner                                @relation(fields: [ownerId], references: [id])
+  activeVersion                        RepresentativeVersion?               @relation("RepresentativeActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  versions                             RepresentativeVersion[]              @relation("RepresentativeVersions")
+  runtimePolicyOverlays                RuntimePolicyOverlay[]
+  channelBindings                      RepresentativeChannelBinding[]
+  matrixVirtualUsers                   MatrixVirtualUserBinding[]
+  capabilityProfiles                   CapabilityPolicyProfile[]
+  computeSessions                      ComputeSession[]
+  sandboxIdentities                    SandboxIdentity[]
+  conversations                        Conversation[]
+  contextSyncJobs                      RepresentativeContextSync[]
+  contacts                             Contact[]
+  leads                                Lead[]
+  commitTraces                         ConversationCommitTrace[]
+  events                               EventAudit[]
+  handoffRequests                      HandoffRequest[]
+  artifacts                            Artifact[]
+  deliverables                         Deliverable[]
+  approvalRequests                     ApprovalRequest[]
+  intakeSubmissions                    IntakeSubmission[]
+  invoices                             Invoice[]
+  ledgerEntries                        LedgerEntry[]
+  browserSessions                      BrowserSession[]
+  browserNavigations                   BrowserNavigation[]
+  organizationCustomerAccounts         CustomerAccount[]
+  knowledgePack                        KnowledgePack?
+  memoryRecords                        OpenVikingMemoryRecord[]
+  pricingPlans                         PricingPlan[]
+  billingProducts                      BillingProduct[]
+  skillPackLinks                       RepresentativeSkillPack[]
+  mcpBindings                          RepresentativeMcpBinding[]
+  chatSessions                         ChatSession[]
+  workflowRuns                         WorkflowRun[]
+  delegationTasks                      DelegationTask[]
+  agentWallet                          AgentWallet?
+  tokenPurchases                       AgentTokenPurchase[]
+  usageCharges                         AgentUsageCharge[]
+  knowledgeAssetLinks                  KnowledgeAssetRepresentative[]
+  creatorEarnings                      CreatorEarning[]
+  withdrawRequests                     WithdrawRequest[]
+  walletTransactions                   WalletTransaction[]
+  walletLedgerEntries                  WalletLedgerEntry[]
+  rechargeOrders                       RechargeOrder[]
+  trainingSources                      CreatorTrainingSource[]
+  feedbackSignals                      CreatorFeedbackSignal[]
+  trainingSuggestions                  CreatorTrainingSuggestion[]
+  trainingVersions                     CreatorTrainingVersion[]
+  entitlementAccounts                  ServiceEntitlementAccount[]
+  servicePaymentOrders                 ServicePaymentOrder[]
+  walletExceptionCases                 WalletExceptionCase[]
+  memoryCandidates                     MemoryCandidate[]
+  governedMemories                     GovernedMemory[]
+  governedMemoryVersions               GovernedMemoryVersion[]
+  memoryReviewDecisions                MemoryReviewDecision[]
+  memoryPolicyDecisions                MemoryPolicyDecision[]
+  memoryPolicy                         RepresentativeMemoryPolicy?
+  contactChannelMemoryForgetBoundaries ContactChannelMemoryForgetBoundary[]
+  contactMemorySharingConsents         ContactMemorySharingConsent[]
+  contactMemorySharingChallenges       ContactMemorySharingChallenge[]
+  contactMemorySharingSourceEventClaims ContactMemorySharingSourceEventClaim[]
+  memoryChannelDisclosures             MemoryChannelDisclosureDelivery[]
+  memoryExtractionRuns                 MemoryExtractionRun[]
+  memoryProjectionItems                MemoryProjectionItem[]
+  representativeVersionResources       RepresentativeVersionResource[]
+  publicKnowledgeProjectionItems       PublicKnowledgeProjectionItem[]
+  memoryUseRuns                        MemoryUseRun[]
+  memoryUseItems                       MemoryUseItem[]
+  memoryDeletionProofs                 MemoryDeletionProof[]
+  memoryReconciliationRuns             MemoryReconciliationRun[]
+  memoryReconciliationItems            MemoryReconciliationItem[]
+  memoryReconciliationTargets          MemoryReconciliationTarget[]
 
   @@index([ownerId, lifecycleState, updatedAt])
   @@index([activeVersionId])
@@ -2247,7 +2293,7 @@ model RepresentativeVersion {
   delegationTasks                DelegationTask[]
   computeSessions                ComputeSession[]
   memoryUseRuns                  MemoryUseRun[]
-  publishedResources            RepresentativeVersionResource[]
+  publishedResources             RepresentativeVersionResource[]
   publicKnowledgeProjectionItems PublicKnowledgeProjectionItem[]
 
   @@unique([representativeId, versionNumber])
@@ -2355,6 +2401,7 @@ model RepresentativeChannelBinding {
   connectionId               String?
   telegramBotConnectionId    String?
   endpointAssignmentRevision Int                          @default(1)
+  endpointLifecycleRevision  Int                          @default(1)
   desiredState               ChannelDesiredState          @default(ACTIVE)
   healthStatus               ChannelHealthStatus          @default(UNKNOWN)
   externalUserId             String?
@@ -2640,50 +2687,52 @@ model RepresentativeMcpBinding {
 }
 
 model Contact {
-  id                    String                    @id @default(cuid())
-  representativeId      String
-  audienceIdentityId    String?
-  customerAccountId     String?
-  telegramUserId        String?
-  channelUserId         String?
-  externalUserId        String?
-  username              String?
-  displayName           String?
-  role                  AudienceRole              @default(OTHER)
-  stage                 ContactStage              @default(NEW)
-  isPaid                Boolean                   @default(false)
-  source                String?
-  sourceChannel         String?
-  createdAt             DateTime                  @default(now())
-  updatedAt             DateTime                  @updatedAt
-  lastSeenAt            DateTime                  @default(now())
-  representative        Representative            @relation(fields: [representativeId], references: [id])
-  audienceIdentity      AudienceIdentity?         @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
-  customerAccount       CustomerAccount?          @relation(fields: [customerAccountId], references: [id])
-  commitTraces          ConversationCommitTrace[]
-  conversations         Conversation[]
-  events                EventAudit[]
-  handoffRequests       HandoffRequest[]
-  intakeSubmissions     IntakeSubmission[]
-  invoices              Invoice[]
-  memoryRecords         OpenVikingMemoryRecord[]
-  computeSessions       ComputeSession[]
-  sandboxIdentities     SandboxIdentity[]
-  artifacts             Artifact[]
-  approvalRequests      ApprovalRequest[]
-  ledgerEntries         LedgerEntry[]
-  browserSessions       BrowserSession[]
-  browserNavigations    BrowserNavigation[]
-  computeTrustTier      String?
-  lastApprovalGrantedAt DateTime?
-  workflowRuns          WorkflowRun[]
-  delegationTasks       DelegationTask[]
-  feedbackSignals       CreatorFeedbackSignal[]
-  leads                 Lead[]
-  memoryCandidates      MemoryCandidate[]
-  governedMemories      GovernedMemory[]
-  memoryExtractionRuns  MemoryExtractionRun[]
-  memoryUseRuns         MemoryUseRun[]
+  id                       String                               @id @default(cuid())
+  representativeId         String
+  audienceIdentityId       String?
+  customerAccountId        String?
+  telegramUserId           String?
+  channelUserId            String?
+  externalUserId           String?
+  username                 String?
+  displayName              String?
+  role                     AudienceRole                         @default(OTHER)
+  stage                    ContactStage                         @default(NEW)
+  isPaid                   Boolean                              @default(false)
+  source                   String?
+  sourceChannel            String?
+  createdAt                DateTime                             @default(now())
+  updatedAt                DateTime                             @updatedAt
+  lastSeenAt               DateTime                             @default(now())
+  representative           Representative                       @relation(fields: [representativeId], references: [id])
+  audienceIdentity         AudienceIdentity?                    @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  customerAccount          CustomerAccount?                     @relation(fields: [customerAccountId], references: [id])
+  commitTraces             ConversationCommitTrace[]
+  conversations            Conversation[]
+  events                   EventAudit[]
+  handoffRequests          HandoffRequest[]
+  intakeSubmissions        IntakeSubmission[]
+  invoices                 Invoice[]
+  memoryRecords            OpenVikingMemoryRecord[]
+  computeSessions          ComputeSession[]
+  sandboxIdentities        SandboxIdentity[]
+  artifacts                Artifact[]
+  approvalRequests         ApprovalRequest[]
+  ledgerEntries            LedgerEntry[]
+  browserSessions          BrowserSession[]
+  browserNavigations       BrowserNavigation[]
+  computeTrustTier         String?
+  lastApprovalGrantedAt    DateTime?
+  workflowRuns             WorkflowRun[]
+  delegationTasks          DelegationTask[]
+  feedbackSignals          CreatorFeedbackSignal[]
+  leads                    Lead[]
+  memoryCandidates         MemoryCandidate[]
+  governedMemories         GovernedMemory[]
+  memoryExtractionRuns     MemoryExtractionRun[]
+  memoryUseRuns            MemoryUseRun[]
+  memoryChannelDisclosures MemoryChannelDisclosureDelivery[]
+  memoryForgetBoundaries   ContactChannelMemoryForgetBoundary[]
 
   @@unique([representativeId, telegramUserId])
   @@unique([id, representativeId])
@@ -2692,7 +2741,7 @@ model Contact {
 }
 
 model Conversation {
-  id                            String                        @id @default(cuid())
+  id                            String                            @id @default(cuid())
   representativeId              String
   contactId                     String
   audienceIdentityId            String?
@@ -2701,27 +2750,27 @@ model Conversation {
   channel                       Channel
   sourceChannel                 String?
   externalConversationId        String?
-  state                         String                        @default("ACTIVE")
+  state                         String                            @default("ACTIVE")
   activeEpisodeId               String?
   assignedOperatorId            String?
-  unreadCount                   Int                           @default(0)
+  unreadCount                   Int                               @default(0)
   collectorState                Json?
-  freeRepliesUsed               Int                           @default(0)
+  freeRepliesUsed               Int                               @default(0)
   passUnlockedAt                DateTime?
   deepHelpUnlockedAt            DateTime?
   activeComputeSessionId        String?
   computeBudgetRemainingCredits Int?
   lastComputeAt                 DateTime?
-  openvikingSessionId           String?                       @unique
+  openvikingSessionId           String?                           @unique
   openvikingSessionKey          String?
-  createdAt                     DateTime                      @default(now())
-  updatedAt                     DateTime                      @updatedAt
-  lastMessageAt                 DateTime                      @default(now())
+  createdAt                     DateTime                          @default(now())
+  updatedAt                     DateTime                          @updatedAt
+  lastMessageAt                 DateTime                          @default(now())
   commitTraces                  ConversationCommitTrace[]
   computeSessions               ComputeSession[]
-  representative                Representative                @relation(fields: [representativeId], references: [id])
-  contact                       Contact                       @relation(fields: [contactId], references: [id])
-  audienceIdentity              AudienceIdentity?             @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  representative                Representative                    @relation(fields: [representativeId], references: [id])
+  contact                       Contact                           @relation(fields: [contactId], references: [id])
+  audienceIdentity              AudienceIdentity?                 @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
   turns                         ConversationTurn[]
   events                        EventAudit[]
   artifacts                     Artifact[]
@@ -2751,6 +2800,7 @@ model Conversation {
   memoryUseRuns                 MemoryUseRun[]
   memoryCandidates              MemoryCandidate[]
   memoryExtractionRuns          MemoryExtractionRun[]
+  memoryChannelDisclosures      MemoryChannelDisclosureDelivery[]
 
   @@unique([representativeId, telegramChatId, contactId])
   @@unique([id, representativeId, contactId], map: "Conversation_id_rep_contact_key")
@@ -2834,25 +2884,26 @@ model ConversationParticipant {
 }
 
 model ConversationChannelBinding {
-  id                               String                        @id @default(cuid())
+  id                               String                            @id @default(cuid())
   conversationId                   String
   representativeBindingId          String?
   representativeAssignmentRevision Int?
   kind                             RepresentativeChannelKind
   transport                        ChannelTransport?
   sourceProvider                   ChannelSourceProvider?
-  interactionMode                  ChannelInteractionMode        @default(PRIVATE_CHAT)
+  interactionMode                  ChannelInteractionMode            @default(PRIVATE_CHAT)
   connectionId                     String?
-  bindingKey                       String?                       @unique
+  bindingKey                       String?                           @unique
   externalConversationId           String
   externalThreadId                 String?
   syncCursor                       String?
   metadata                         Json?
-  createdAt                        DateTime                      @default(now())
-  updatedAt                        DateTime                      @updatedAt
-  conversation                     Conversation                  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  representativeBinding            RepresentativeChannelBinding? @relation(fields: [representativeBindingId], references: [id], onDelete: SetNull)
+  createdAt                        DateTime                          @default(now())
+  updatedAt                        DateTime                          @updatedAt
+  conversation                     Conversation                      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  representativeBinding            RepresentativeChannelBinding?     @relation(fields: [representativeBindingId], references: [id], onDelete: SetNull)
   messages                         Message[]
+  memoryChannelDisclosures         MemoryChannelDisclosureDelivery[]
 
   @@index([conversationId, kind])
   @@index([representativeBindingId])
@@ -2860,54 +2911,84 @@ model ConversationChannelBinding {
 }
 
 model Message {
-  id                      String                      @id @default(cuid())
-  conversationId          String
-  episodeId               String?
-  channelBindingId        String?
-  senderType              MessageSenderType
-  senderId                String?
-  senderDisplayName       String?
-  contentType             MessageContentType          @default(TEXT)
-  text                    String?
-  content                 Json?
-  clientMessageId         String?
-  externalMessageId       String?
-  replyToMessageId        String?
-  threadRootMessageId     String?
-  delegationTaskId        String?
-  deliveryStatus          MessageDeliveryStatus       @default(ACCEPTED)
-  failureCode             String?
-  failureReason           String?
-  editedAt                DateTime?
-  redactedAt              DateTime?
-  redactionReason         String?
-  retentionExpiresAt      DateTime?
-  createdAt               DateTime                    @default(now())
-  updatedAt               DateTime                    @updatedAt
-  conversation            Conversation                @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  episode                 ConversationEpisode?        @relation(fields: [episodeId], references: [id], onDelete: SetNull)
-  channelBinding          ConversationChannelBinding? @relation(fields: [channelBindingId], references: [id], onDelete: SetNull)
-  replyTo                 Message?                    @relation("MessageReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
-  replies                 Message[]                   @relation("MessageReplies")
-  threadRoot              Message?                    @relation("MessageThreads", fields: [threadRootMessageId], references: [id], onDelete: SetNull)
-  threadMessages          Message[]                   @relation("MessageThreads")
-  delegationTask          DelegationTask?             @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
-  revisions               MessageRevision[]
-  attachments             MessageAttachment[]
-  citations               MessageCitation[]
-  inputForGenerationRuns  GenerationRun[]             @relation("GenerationInputMessage")
-  outputForGenerationRuns GenerationRun[]             @relation("GenerationOutputMessage")
-  memoryCandidates        MemoryCandidate[]
-  memoryExtractionRuns    MemoryExtractionRun[]
-  memoryUseRunInputs      MemoryUseRun[]              @relation("MemoryUseInputMessage")
-  memoryUseRunOutputs     MemoryUseRun[]              @relation("MemoryUseOutputMessage")
+  id                                 String                              @id @default(cuid())
+  conversationId                     String
+  episodeId                          String?
+  channelBindingId                   String?
+  /// Immutable, server-resolved identity provenance captured at ingress.
+  /// Shared Contact Memory fails closed for legacy rows without this evidence.
+  sourceIdentityLinkId               String?
+  /// Exact private-channel connection proof used at ingress. Web messages use
+  /// the verified LOGTO link above and intentionally leave this field NULL.
+  sourceIdentityConnectionProofId    String?
+  senderType                         MessageSenderType
+  senderId                           String?
+  senderDisplayName                  String?
+  contentType                        MessageContentType                  @default(TEXT)
+  text                               String?
+  content                            Json?
+  clientMessageId                    String?
+  externalMessageId                  String?
+  replyToMessageId                   String?
+  threadRootMessageId                String?
+  delegationTaskId                   String?
+  deliveryStatus                     MessageDeliveryStatus               @default(ACCEPTED)
+  failureCode                        String?
+  failureReason                      String?
+  editedAt                           DateTime?
+  redactedAt                         DateTime?
+  redactionReason                    String?
+  retentionExpiresAt                 DateTime?
+  /// Server-assigned, per-conversation receive order for private-channel
+  /// audience messages. Provider timestamps remain display-only and must not
+  /// participate in memory disclosure authorization.
+  ingressSequence                    Int?
+  /// Snapshot of the representative channel lifecycle that admitted this
+  /// private-channel message. Legacy NULL rows fail closed when used as a
+  /// source for new asynchronous channel work.
+  channelLifecycleRevision           Int?
+  /// Monotonic Telegram edit watermark. Both fields are claimed atomically
+  /// with the message edit so delayed/retried provider updates cannot replace
+  /// a newer edit.
+  telegramLastEditAt                 DateTime?
+  telegramLastEditUpdateId           BigInt?
+  /// Server-assigned global receive order for audience messages. Unlike
+  /// provider timestamps, this safely fences memory work across conversations.
+  memoryIngressOrdinal               BigInt?
+  createdAt                          DateTime                            @default(now())
+  updatedAt                          DateTime                            @updatedAt
+  conversation                       Conversation                        @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  episode                            ConversationEpisode?                @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+  channelBinding                     ConversationChannelBinding?         @relation(fields: [channelBindingId], references: [id], onDelete: SetNull)
+  sourceIdentityLink                 IdentityLink?                       @relation("MessageSourceIdentityLink", fields: [sourceIdentityLinkId], references: [id], onDelete: Restrict)
+  sourceIdentityConnectionProof      IdentityLinkConnectionProof?        @relation("MessageSourceIdentityConnectionProof", fields: [sourceIdentityConnectionProofId], references: [id], onDelete: Restrict)
+  replyTo                            Message?                            @relation("MessageReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
+  replies                            Message[]                           @relation("MessageReplies")
+  threadRoot                         Message?                            @relation("MessageThreads", fields: [threadRootMessageId], references: [id], onDelete: SetNull)
+  threadMessages                     Message[]                           @relation("MessageThreads")
+  delegationTask                     DelegationTask?                     @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  revisions                          MessageRevision[]
+  attachments                        MessageAttachment[]
+  citations                          MessageCitation[]
+  inputForGenerationRuns             GenerationRun[]                     @relation("GenerationInputMessage")
+  outputForGenerationRuns            GenerationRun[]                     @relation("GenerationOutputMessage")
+  memoryCandidates                   MemoryCandidate[]
+  memoryExtractionRuns               MemoryExtractionRun[]
+  memoryUseRunInputs                 MemoryUseRun[]                      @relation("MemoryUseInputMessage")
+  memoryUseRunOutputs                MemoryUseRun[]                      @relation("MemoryUseOutputMessage")
+  memoryDisclosureActivationBoundary MemoryChannelDisclosureActivation?  @relation("MemoryDisclosureActivationBoundary")
+  memoryForgetBoundary               ContactChannelMemoryForgetBoundary? @relation("ContactChannelMemoryForgetSourceMessage")
 
   @@unique([conversationId, clientMessageId])
   @@unique([channelBindingId, externalMessageId])
   @@unique([id, conversationId])
+  @@unique([conversationId, ingressSequence], map: "Message_conversation_ingress_sequence_key")
+  @@unique([memoryIngressOrdinal], map: "Message_memory_ingress_ordinal_key")
   @@index([conversationId, createdAt])
   @@index([conversationId, deliveryStatus, createdAt])
   @@index([episodeId, createdAt])
+  @@index([sourceIdentityLinkId])
+  @@index([sourceIdentityConnectionProofId])
   @@index([delegationTaskId, createdAt])
   @@index([retentionExpiresAt])
 }
@@ -3081,6 +3162,8 @@ model ChannelEventInbox {
   status                ReliableEventStatus       @default(PENDING)
   attemptCount          Int                       @default(0)
   availableAt           DateTime                  @default(now())
+  leaseToken            String?                   @unique
+  leaseExpiresAt        DateTime?
   processedAt           DateTime?
   lastError             String?
   createdAt             DateTime                  @default(now())
@@ -3089,6 +3172,7 @@ model ChannelEventInbox {
 
   @@unique([kind, connectionId, externalEventId])
   @@index([status, availableAt, createdAt])
+  @@index([kind, connectionId, eventType, status, availableAt, leaseExpiresAt], map: "ChannelEventInbox_channel_event_due_lease_idx")
   @@index([transactionId])
   @@index([sourceProvider, transport, createdAt])
 }
@@ -4326,6 +4410,7 @@ model MemoryCandidate {
   representativeId        String
   extractionRunId         String?
   contactId               String?
+  audienceIdentityId      String?
   scope                   MemoryScope
   scopeChannel            RepresentativeChannelKind?
   originChannel           RepresentativeChannelKind
@@ -4336,6 +4421,7 @@ model MemoryCandidate {
   contentHash             String?
   contentPurgedAt         DateTime?
   dedupeKey               String
+  semanticKey             String?
   status                  MemoryCandidateStatus      @default(EXTRACTED)
   safetyClass             MemorySafetyClass          @default(UNCLASSIFIED)
   safetyReasonCode        String?
@@ -4353,11 +4439,13 @@ model MemoryCandidate {
   representative          Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryCandidate_rep_fkey")
   extractionRun           MemoryExtractionRun?       @relation(fields: [extractionRunId, representativeId, sourceContactId, sourceConversationId], references: [id, representativeId, contactId, sourceConversationId], onDelete: Restrict, map: "MemoryCandidate_extraction_scope_fkey")
   contact                 Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryCandidate_contact_scope_fkey")
+  audienceIdentity        AudienceIdentity?          @relation(fields: [audienceIdentityId], references: [id], onDelete: Restrict, map: "MemoryCandidate_audience_identity_fkey")
   sourceConversation      Conversation               @relation(fields: [sourceConversationId, representativeId, sourceContactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryCandidate_conversation_scope_fkey")
   sourceMessage           Message                    @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryCandidate_message_scope_fkey")
   correctionMemory        GovernedMemory?            @relation("MemoryCandidateCorrectionMemory", fields: [correctionMemoryId, representativeId, scope], references: [id, representativeId, scope], onDelete: Restrict, map: "MemoryCandidate_correction_memory_scope_fkey")
   correctionBaseVersion   GovernedMemoryVersion?     @relation("MemoryCandidateCorrectionBaseVersion", fields: [correctionBaseVersionId, correctionMemoryId, representativeId, scope], references: [id, memoryId, representativeId, scope], onDelete: Restrict, map: "MemoryCandidate_correction_base_scope_fkey")
   reviewDecisions         MemoryReviewDecision[]
+  policyDecision          MemoryPolicyDecision?
   version                 GovernedMemoryVersion?
 
   @@unique([representativeId, dedupeKey], map: "MemoryCandidate_rep_dedupe_key")
@@ -4365,6 +4453,8 @@ model MemoryCandidate {
   @@unique([id, representativeId, scope], map: "MemoryCandidate_id_rep_scope_key")
   @@index([representativeId, status, createdAt], map: "MemoryCandidate_rep_status_created_idx")
   @@index([representativeId, contactId, scopeChannel, status, createdAt], map: "MemoryCandidate_contact_scope_status_idx")
+  @@index([representativeId, audienceIdentityId, status, createdAt], map: "MemoryCandidate_identity_status_idx")
+  @@index([representativeId, semanticKey, createdAt], map: "MemoryCandidate_rep_semantic_created_idx")
   @@index([sourceConversationId, sourceMessageId, createdAt], map: "MemoryCandidate_source_message_idx")
   @@index([correctionMemoryId, status, createdAt], map: "MemoryCandidate_correction_pending_idx")
   @@index([extractionRunId, createdAt], map: "MemoryCandidate_extraction_created_idx")
@@ -4375,9 +4465,11 @@ model GovernedMemory {
   id                   String                     @id @default(cuid())
   representativeId     String
   contactId            String?
+  audienceIdentityId   String?
   scope                MemoryScope
   sourceChannel        RepresentativeChannelKind?
   category             MemoryCategory
+  semanticKey          String?
   status               GovernedMemoryStatus       @default(SUPPRESSED)
   currentVersionId     String?                    @unique
   recallDisabledAt     DateTime?                  @default(now())
@@ -4391,9 +4483,11 @@ model GovernedMemory {
   updatedAt            DateTime                   @updatedAt
   representative       Representative             @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "GovernedMemory_rep_fkey")
   contact              Contact?                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "GovernedMemory_contact_scope_fkey")
+  audienceIdentity     AudienceIdentity?          @relation(fields: [audienceIdentityId], references: [id], onDelete: Restrict, map: "GovernedMemory_audience_identity_fkey")
   currentVersion       GovernedMemoryVersion?     @relation("GovernedMemoryCurrentVersion", fields: [currentVersionId, id], references: [id, memoryId], onDelete: Restrict, map: "GovernedMemory_currentVersion_fkey")
   versions             GovernedMemoryVersion[]    @relation("GovernedMemoryVersions")
   reviewDecisions      MemoryReviewDecision[]
+  policyDecisions      MemoryPolicyDecision[]
   deletionProof        MemoryDeletionProof?
   correctionCandidates MemoryCandidate[]          @relation("MemoryCandidateCorrectionMemory")
 
@@ -4402,6 +4496,8 @@ model GovernedMemory {
   @@unique([currentVersionId, id], map: "GovernedMemory_current_id_key")
   @@index([representativeId, status, updatedAt], map: "GovernedMemory_rep_status_updated_idx")
   @@index([representativeId, contactId, sourceChannel, status, updatedAt], map: "GovernedMemory_contact_scope_status_idx")
+  @@index([representativeId, audienceIdentityId, status, updatedAt], map: "GovernedMemory_identity_scope_status_idx")
+  @@index([representativeId, semanticKey, updatedAt], map: "GovernedMemory_rep_semantic_updated_idx")
   @@index([status, recallDisabledAt, expiresAt], map: "GovernedMemory_status_recall_expiry_idx")
   @@index([status, deleteRequestedAt], map: "GovernedMemory_status_deleteRequested_idx")
 }
@@ -4429,6 +4525,7 @@ model GovernedMemoryVersion {
   supersededByVersions   GovernedMemoryVersion[] @relation("GovernedMemoryVersionChain")
   currentForMemory       GovernedMemory?         @relation("GovernedMemoryCurrentVersion")
   reviewDecisions        MemoryReviewDecision[]
+  policyDecisions        MemoryPolicyDecision[]
   projectionItems        MemoryProjectionItem[]
   useItems               MemoryUseItem[]
   representative         Representative          @relation(fields: [representativeId], references: [id], map: "GovernedMemoryVersion_rep_fkey")
@@ -4469,63 +4566,266 @@ model MemoryReviewDecision {
   @@index([resultVersionId], map: "MemoryReviewDecision_resultVersion_idx")
 }
 
+model MemoryPolicyDecision {
+  id               String                      @id @default(cuid())
+  representativeId String
+  candidateId      String                      @unique
+  memoryId         String?
+  resultVersionId  String?
+  outcome          MemoryPolicyDecisionOutcome
+  policyRevision   Int
+  policyVersion    String
+  extractorVersion String
+  sourceHash       String
+  outputHash       String?
+  confidence       Float
+  reasonCode       String
+  decisionHash     String                      @unique
+  createdAt        DateTime                    @default(now())
+  representative   Representative              @relation(fields: [representativeId], references: [id], onDelete: Restrict, map: "MemoryPolicyDecision_rep_fkey")
+  candidate        MemoryCandidate             @relation(fields: [candidateId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryPolicyDecision_candidate_scope_fkey")
+  memory           GovernedMemory?             @relation(fields: [memoryId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryPolicyDecision_memory_scope_fkey")
+  resultVersion    GovernedMemoryVersion?      @relation(fields: [resultVersionId, memoryId, representativeId], references: [id, memoryId, representativeId], onDelete: Restrict, map: "MemoryPolicyDecision_result_scope_fkey")
+
+  @@unique([candidateId, representativeId], map: "MemoryPolicyDecision_candidate_rep_key")
+  @@index([representativeId, createdAt], map: "MemoryPolicyDecision_rep_created_idx")
+  @@index([memoryId, createdAt], map: "MemoryPolicyDecision_memory_created_idx")
+  @@index([resultVersionId], map: "MemoryPolicyDecision_resultVersion_idx")
+}
+
 model RepresentativeMemoryPolicy {
-  representativeId                String             @id
-  namespaceKey                    String             @unique
-  longTermMemoryEnabled           Boolean            @default(false)
-  contactMemoryEnabled            Boolean            @default(false)
-  representativeExperienceEnabled Boolean            @default(false)
-  autoExtract                     Boolean            @default(false)
-  webRecallEnabled                Boolean            @default(false)
-  webExtractEnabled               Boolean            @default(false)
-  matrixRecallEnabled             Boolean            @default(false)
-  matrixExtractEnabled            Boolean            @default(false)
-  telegramRecallEnabled           Boolean            @default(false)
-  telegramExtractEnabled          Boolean            @default(false)
-  retentionDays                   Int                @default(30)
-  expiryAction                    MemoryExpiryAction @default(ARCHIVE)
-  provider                        String             @default("openviking")
-  managedAgentId                  String?
-  managedTargetUri                String?
-  recallLimit                     Int                @default(6)
-  recallScoreThreshold            Float              @default(0.01)
-  revision                        Int                @default(0)
-  createdAt                       DateTime           @default(now())
-  updatedAt                       DateTime           @updatedAt
-  representative                  Representative     @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "RepresentativeMemoryPolicy_rep_fkey")
+  representativeId                 String             @id
+  namespaceKey                     String             @unique
+  longTermMemoryEnabled            Boolean            @default(false)
+  shortTermMemoryEnabled           Boolean            @default(true)
+  contactMemoryEnabled             Boolean            @default(false)
+  contactMemoryCrossChannelEnabled Boolean            @default(false)
+  representativeExperienceEnabled  Boolean            @default(false)
+  autoExtract                      Boolean            @default(false)
+  webRecallEnabled                 Boolean            @default(false)
+  webExtractEnabled                Boolean            @default(false)
+  matrixRecallEnabled              Boolean            @default(false)
+  matrixExtractEnabled             Boolean            @default(false)
+  telegramRecallEnabled            Boolean            @default(false)
+  telegramExtractEnabled           Boolean            @default(false)
+  retentionDays                    Int                @default(30)
+  expiryAction                     MemoryExpiryAction @default(ARCHIVE)
+  provider                         String             @default("openviking")
+  managedAgentId                   String?
+  managedTargetUri                 String?
+  recallLimit                      Int                @default(6)
+  recallScoreThreshold             Float              @default(0.01)
+  revision                         Int                @default(0)
+  createdAt                        DateTime           @default(now())
+  updatedAt                        DateTime           @updatedAt
+  representative                   Representative     @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "RepresentativeMemoryPolicy_rep_fkey")
 
   @@index([longTermMemoryEnabled, updatedAt], map: "RepresentativeMemoryPolicy_enabled_updatedAt_idx")
 }
 
+model ContactMemorySharingConsent {
+  id                        String                            @id @default(cuid())
+  representativeId          String
+  audienceIdentityId        String
+  status                    ContactMemorySharingConsentStatus @default(GRANTED)
+  grantedAt                 DateTime
+  revokedAt                 DateTime?
+  policyRevision            Int
+  consentVersion            Int                               @default(1)
+  disclosureContractVersion String
+  sourceChannel             RepresentativeChannelKind
+  challengeId               String?                           @unique
+  sourceEvidenceHash        String?
+  confirmationEventHash     String?                           @unique
+  proofHash                 String
+  createdAt                 DateTime                          @default(now())
+  updatedAt                 DateTime                          @updatedAt
+  representative            Representative                    @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "ContactMemorySharingConsent_rep_fkey")
+  audienceIdentity          AudienceIdentity                  @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade, map: "ContactMemorySharingConsent_identity_fkey")
+  challenge                 ContactMemorySharingChallenge?    @relation(fields: [challengeId], references: [id], onDelete: Restrict, map: "ContactMemorySharingConsent_challenge_fkey")
+  sourceEventClaim          ContactMemorySharingSourceEventClaim?
+
+  @@unique([representativeId, audienceIdentityId, policyRevision, consentVersion], map: "ContactMemorySharingConsent_rep_identity_revision_version_key")
+  @@index([representativeId, audienceIdentityId, status, updatedAt], map: "ContactMemorySharingConsent_rep_identity_status_idx")
+  @@index([audienceIdentityId, status, updatedAt], map: "ContactMemorySharingConsent_identity_status_idx")
+}
+
+model ContactMemorySharingChallenge {
+  id                        String                       @id @default(cuid())
+  representativeId          String
+  audienceIdentityId        String
+  sourceChannel             RepresentativeChannelKind
+  policyRevision            Int
+  disclosureContractVersion String
+  tokenHash                 String                       @unique
+  sourceEvidenceHash        String
+  disclosureEventHash       String                       @unique
+  expiresAt                 DateTime
+  consumedAt                DateTime?
+  revokedAt                 DateTime?
+  createdAt                 DateTime                     @default(now())
+  updatedAt                 DateTime                     @updatedAt
+  representative            Representative               @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "ContactMemorySharingChallenge_rep_fkey")
+  audienceIdentity          AudienceIdentity             @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade, map: "ContactMemorySharingChallenge_identity_fkey")
+  consent                   ContactMemorySharingConsent?
+  sourceEventClaims         ContactMemorySharingSourceEventClaim[]
+
+  @@index([representativeId, audienceIdentityId, sourceChannel, createdAt], map: "ContactMemorySharingChallenge_scope_created_idx")
+  @@index([expiresAt, consumedAt, revokedAt], map: "ContactMemorySharingChallenge_lifecycle_idx")
+}
+
+model ContactMemorySharingSourceEventClaim {
+  eventHash          String                              @id
+  role               ContactMemorySharingSourceEventRole
+  representativeId  String
+  audienceIdentityId String
+  sourceChannel      RepresentativeChannelKind
+  challengeId        String
+  consentId          String?                             @unique
+  createdAt          DateTime                            @default(now())
+  representative     Representative                      @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "ContactMemorySharingSourceEventClaim_rep_fkey")
+  audienceIdentity   AudienceIdentity                    @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade, map: "ContactMemorySharingSourceEventClaim_identity_fkey")
+  challenge          ContactMemorySharingChallenge       @relation(fields: [challengeId], references: [id], onDelete: Cascade, map: "ContactMemorySharingSourceEventClaim_challenge_fkey")
+  consent            ContactMemorySharingConsent?        @relation(fields: [consentId], references: [id], onDelete: Cascade, map: "ContactMemorySharingSourceEventClaim_consent_fkey")
+
+  @@unique([challengeId, role], map: "ContactMemorySharingSourceEventClaim_challenge_role_key")
+  @@index([representativeId, audienceIdentityId, sourceChannel, createdAt], map: "ContactMemorySharingSourceEventClaim_scope_created_idx")
+}
+
+/// Content-free, relation-free replay fence. These rows deliberately survive
+/// representative and audience retention cleanup so a previously consumed
+/// provider event can never become sharing authority again.
+model ContactMemorySharingSourceEventTombstone {
+  eventHash      String                              @id
+  role           ContactMemorySharingSourceEventRole
+  firstClaimedAt DateTime                            @default(now())
+}
+
+model MemoryChannelDisclosureDelivery {
+  id                               String                                   @id @default(cuid())
+  representativeId                 String
+  contactId                        String
+  conversationId                   String
+  channelBindingId                 String
+  bindingEpoch                     String
+  sourceChannel                    RepresentativeChannelKind
+  policyRevision                   Int
+  disclosureContractVersion        String
+  disclosureFingerprint            String
+  disclosureHash                   String
+  disclosureSnapshot               Json
+  evidenceKind                     MemoryDisclosureEvidenceKind
+  status                           MemoryDisclosureDeliveryStatus           @default(PENDING)
+  representativeAssignmentRevision Int?
+  connectionId                     String?
+  externalMessageId                String?
+  proofHash                        String?                                  @unique
+  attemptCount                     Int                                      @default(0)
+  availableAt                      DateTime                                 @default(now())
+  leaseToken                       String?
+  leaseExpiresAt                   DateTime?
+  deliveredAt                      DateTime?
+  /// Highest server receive sequence already present when delivery became
+  /// durable. Authorization uses this floor, never provider timestamps.
+  deliveredAfterIngressSequence    Int?
+  lastErrorCode                    String?
+  createdAt                        DateTime                                 @default(now())
+  updatedAt                        DateTime                                 @updatedAt
+  representative                   Representative                           @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryChannelDisclosureDelivery_rep_fkey")
+  contact                          Contact                                  @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Cascade, map: "MemoryChannelDisclosureDelivery_contact_scope_fkey")
+  conversation                     Conversation                             @relation(fields: [conversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Cascade, map: "MemoryChannelDisclosureDelivery_conversation_scope_fkey")
+  channelBinding                   ConversationChannelBinding               @relation(fields: [channelBindingId], references: [id], onDelete: Cascade, map: "MemoryChannelDisclosureDelivery_binding_fkey")
+  activation                       MemoryChannelDisclosureActivation?
+  excludedInboundMessages          MemoryChannelDisclosureExcludedInbound[]
+
+  @@unique([channelBindingId, policyRevision, disclosureContractVersion, bindingEpoch], map: "MemoryDisclosure_binding_policy_contract_epoch_key")
+  @@unique([id, representativeId, contactId, sourceChannel], map: "MemoryChannelDisclosureDelivery_id_scope_key")
+  @@index([representativeId, contactId, sourceChannel, status, deliveredAt], map: "MemoryChannelDisclosureDelivery_contact_channel_idx")
+  @@index([conversationId, sourceChannel, status, deliveredAt], map: "MemoryChannelDisclosureDelivery_conversation_channel_idx")
+  @@index([status, availableAt, leaseExpiresAt], map: "MemoryChannelDisclosureDelivery_due_idx")
+}
+
+/// Immutable provider IDs observed while a disclosure delivery was not yet
+/// durable. These exact inbound events can never extract or recall memory,
+/// even if concurrent ingestion assigns them a later server receive sequence.
+model MemoryChannelDisclosureExcludedInbound {
+  deliveryId               String
+  externalInboundMessageId String
+  createdAt                DateTime                        @default(now())
+  delivery                 MemoryChannelDisclosureDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade, map: "MemoryDisclosureExcludedInbound_delivery_fkey")
+
+  @@id([deliveryId, externalInboundMessageId], map: "MemoryDisclosureExcludedInbound_pkey")
+  @@index([externalInboundMessageId], map: "MemoryDisclosureExcludedInbound_message_idx")
+}
+
+/// Immutable proof that identifies the first private-channel inbound message
+/// observed after one delivered disclosure. That boundary message is always
+/// excluded; only later server-ordered messages may extract or recall memory.
+model MemoryChannelDisclosureActivation {
+  deliveryId                   String                          @id
+  firstExcludedMessageId       String                          @unique
+  firstExcludedIngressSequence Int
+  createdAt                    DateTime                        @default(now())
+  delivery                     MemoryChannelDisclosureDelivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade, map: "MemoryDisclosureActivation_delivery_fkey")
+  firstExcludedMessage         Message                         @relation("MemoryDisclosureActivationBoundary", fields: [firstExcludedMessageId], references: [id], onDelete: Cascade, map: "MemoryDisclosureActivation_message_fkey")
+
+  @@index([firstExcludedIngressSequence], map: "MemoryDisclosureActivation_ingress_idx")
+}
+
+/// Immutable, bodyless proof of one exact contact-channel forget boundary.
+/// Epoch fences queued work; the server ordinal proves which inputs predate it.
+model ContactChannelMemoryForgetBoundary {
+  id                         String                    @id @default(cuid())
+  representativeId           String
+  contactId                  String
+  sourceChannel              RepresentativeChannelKind
+  epoch                      Int
+  sourceConversationId       String
+  sourceMessageId            String                    @unique
+  cutoffMemoryIngressOrdinal BigInt
+  cutoffIngressSequence      Int?
+  requestHash                String                    @unique
+  createdAt                  DateTime                  @default(now())
+  representative             Representative            @relation(fields: [representativeId], references: [id], onDelete: Restrict, map: "ContactMemoryForgetBoundary_rep_fkey")
+  contact                    Contact                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "ContactMemoryForgetBoundary_contact_scope_fkey")
+  sourceMessage              Message                   @relation("ContactChannelMemoryForgetSourceMessage", fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: "ContactMemoryForgetBoundary_message_scope_fkey")
+
+  @@unique([representativeId, contactId, sourceChannel, epoch], map: "ContactMemoryForgetBoundary_scope_epoch_key")
+  @@unique([sourceMessageId, sourceConversationId], map: "ContactMemoryForgetBoundary_message_scope_key")
+  @@index([representativeId, contactId, sourceChannel, createdAt], map: "ContactMemoryForgetBoundary_scope_created_idx")
+  @@index([sourceConversationId, cutoffIngressSequence], map: "ContactMemoryForgetBoundary_conversation_ingress_idx")
+}
+
 model MemoryExtractionRun {
-  id                   String                    @id @default(cuid())
-  representativeId     String
-  contactId            String?
-  sourceChannel        RepresentativeChannelKind
-  sourceConversationId String?
-  sourceMessageId      String?
-  trigger              MemoryExtractionTrigger
-  status               MemoryExtractionStatus    @default(QUEUED)
-  idempotencyKey       String
-  candidateCount       Int                       @default(0)
-  acceptedCount        Int                       @default(0)
-  rejectedCount        Int                       @default(0)
-  quarantinedCount     Int                       @default(0)
-  reasonCounts         Json?
-  attemptCount         Int                       @default(0)
-  availableAt          DateTime                  @default(now())
-  leaseToken           String?
-  leaseExpiresAt       DateTime?
-  startedAt            DateTime?
-  finishedAt           DateTime?
-  errorCode            String?
-  createdAt            DateTime                  @default(now())
-  updatedAt            DateTime                  @updatedAt
-  representative       Representative            @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryExtractionRun_rep_fkey")
-  contact              Contact?                  @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryExtractionRun_contact_scope_fkey")
-  sourceConversation   Conversation?             @relation(fields: [sourceConversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryExtractionRun_conversation_scope_fkey")
-  sourceMessage        Message?                  @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryExtractionRun_message_scope_fkey")
-  candidates           MemoryCandidate[]
+  id                        String                    @id @default(cuid())
+  representativeId          String
+  contactId                 String?
+  sourceChannel             RepresentativeChannelKind
+  sourceConversationId      String?
+  sourceMessageId           String?
+  trigger                   MemoryExtractionTrigger
+  status                    MemoryExtractionStatus    @default(QUEUED)
+  idempotencyKey            String
+  contactChannelMemoryEpoch Int                       @default(0)
+  candidateCount            Int                       @default(0)
+  acceptedCount             Int                       @default(0)
+  rejectedCount             Int                       @default(0)
+  quarantinedCount          Int                       @default(0)
+  reasonCounts              Json?
+  attemptCount              Int                       @default(0)
+  availableAt               DateTime                  @default(now())
+  leaseToken                String?
+  leaseExpiresAt            DateTime?
+  startedAt                 DateTime?
+  finishedAt                DateTime?
+  errorCode                 String?
+  createdAt                 DateTime                  @default(now())
+  updatedAt                 DateTime                  @updatedAt
+  representative            Representative            @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryExtractionRun_rep_fkey")
+  contact                   Contact?                  @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryExtractionRun_contact_scope_fkey")
+  sourceConversation        Conversation?             @relation(fields: [sourceConversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryExtractionRun_conversation_scope_fkey")
+  sourceMessage             Message?                  @relation(fields: [sourceMessageId, sourceConversationId], references: [id, conversationId], onDelete: Restrict, map: "MemoryExtractionRun_message_scope_fkey")
+  candidates                MemoryCandidate[]
 
   @@unique([representativeId, idempotencyKey], map: "MemoryExtractionRun_rep_idempotency_key")
   @@unique([id, representativeId], map: "MemoryExtractionRun_id_rep_key")
@@ -4623,7 +4923,7 @@ model PublicKnowledgeProjectionItem {
 }
 
 model MemoryUseRun {
-  id                      String                    @id @default(cuid())
+  id                      String                         @id @default(cuid())
   representativeId        String
   conversationId          String
   contactId               String
@@ -4633,26 +4933,26 @@ model MemoryUseRun {
   outputMessageId         String?
   generationRunId         String
   idempotencyKey          String
-  status                  MemoryUseRunStatus        @default(STARTED)
+  status                  MemoryUseRunStatus             @default(STARTED)
   reasonCode              String?
-  unmappedCandidateCount  Int                       @default(0)
-  searchedCount           Int                       @default(0)
-  scopePassedCount        Int                       @default(0)
-  safetyPassedCount       Int                       @default(0)
-  injectedCount           Int                       @default(0)
-  citedCount              Int                       @default(0)
-  displayedCount          Int                       @default(0)
-  startedAt               DateTime                  @default(now())
+  unmappedCandidateCount  Int                            @default(0)
+  searchedCount           Int                            @default(0)
+  scopePassedCount        Int                            @default(0)
+  safetyPassedCount       Int                            @default(0)
+  injectedCount           Int                            @default(0)
+  citedCount              Int                            @default(0)
+  displayedCount          Int                            @default(0)
+  startedAt               DateTime                       @default(now())
   completedAt             DateTime?
-  createdAt               DateTime                  @default(now())
-  updatedAt               DateTime                  @updatedAt
-  representative          Representative            @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryUseRun_rep_fkey")
-  contact                 Contact                   @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseRun_contact_scope_fkey")
-  conversation            Conversation              @relation(fields: [conversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryUseRun_conversation_scope_fkey")
-  representativeVersion   RepresentativeVersion     @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseRun_rep_version_fkey")
-  inputMessage            Message                   @relation("MemoryUseInputMessage", fields: [inputMessageId, conversationId], references: [id, conversationId], onDelete: Cascade, map: "MemoryUseRun_input_message_fkey")
-  outputMessage           Message?                  @relation("MemoryUseOutputMessage", fields: [outputMessageId], references: [id], onDelete: SetNull, map: "MemoryUseRun_output_message_fkey")
-  generationRun           GenerationRun             @relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Cascade, map: "MemoryUseRun_generation_fkey")
+  createdAt               DateTime                       @default(now())
+  updatedAt               DateTime                       @updatedAt
+  representative          Representative                 @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "MemoryUseRun_rep_fkey")
+  contact                 Contact                        @relation(fields: [contactId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseRun_contact_scope_fkey")
+  conversation            Conversation                   @relation(fields: [conversationId, representativeId, contactId], references: [id, representativeId, contactId], onDelete: Restrict, map: "MemoryUseRun_conversation_scope_fkey")
+  representativeVersion   RepresentativeVersion          @relation(fields: [representativeVersionId, representativeId], references: [id, representativeId], onDelete: Restrict, map: "MemoryUseRun_rep_version_fkey")
+  inputMessage            Message                        @relation("MemoryUseInputMessage", fields: [inputMessageId, conversationId], references: [id, conversationId], onDelete: Cascade, map: "MemoryUseRun_input_message_fkey")
+  outputMessage           Message?                       @relation("MemoryUseOutputMessage", fields: [outputMessageId], references: [id], onDelete: SetNull, map: "MemoryUseRun_output_message_fkey")
+  generationRun           GenerationRun                  @relation(fields: [generationRunId, conversationId], references: [id, conversationId], onDelete: Cascade, map: "MemoryUseRun_generation_fkey")
   items                   MemoryUseItem[]
   unmappedObservations    MemoryUseUnmappedObservation[]
 
@@ -4669,13 +4969,13 @@ model MemoryUseRun {
 }
 
 model MemoryUseUnmappedObservation {
-  id                  String       @id @default(cuid())
-  useRunId            String
-  representativeId    String
-  observationKey      String
-  candidateCount      Int
-  createdAt           DateTime     @default(now())
-  useRun              MemoryUseRun @relation(fields: [useRunId, representativeId], references: [id, representativeId], onDelete: Cascade, map: "MemoryUseUnmappedObservation_run_scope_fkey")
+  id               String       @id @default(cuid())
+  useRunId         String
+  representativeId String
+  observationKey   String
+  candidateCount   Int
+  createdAt        DateTime     @default(now())
+  useRun           MemoryUseRun @relation(fields: [useRunId, representativeId], references: [id, representativeId], onDelete: Cascade, map: "MemoryUseUnmappedObservation_run_scope_fkey")
 
   @@unique([useRunId, observationKey], map: "MemoryUseUnmappedObservation_run_key")
   @@index([useRunId, createdAt], map: "MemoryUseUnmappedObservation_run_created_idx")

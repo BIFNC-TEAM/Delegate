@@ -28,6 +28,7 @@ import {
 
 import { RepresentativeChatPanel } from "./representative-chat-panel";
 import { RepresentativeIdentityBindingPanel } from "./representative-identity-binding-panel";
+import { RepresentativeMemorySharingPanel } from "./representative-memory-sharing-panel";
 import { getUsablePublicUrl } from "./public-materials";
 import { RepresentativeMaterialPreview } from "./representative-material-preview";
 import { RepresentativeRechargePanel } from "./representative-recharge-panel";
@@ -279,6 +280,8 @@ export default async function RepresentativePage({
         pricing={representative.pricing}
         representativeName={representative.name}
         representativeSlug={representative.slug}
+        serviceCreditPaymentMode={paymentMode}
+        serviceCreditPurchaseEnabled={showPublicPayment && collectionEnabled}
       />
 
       {audienceSession ? (
@@ -293,6 +296,10 @@ export default async function RepresentativePage({
             </p>
           </div>
           <RepresentativeIdentityBindingPanel
+            locale={locale}
+            representativeSlug={representative.slug}
+          />
+          <RepresentativeMemorySharingPanel
             locale={locale}
             representativeSlug={representative.slug}
           />
@@ -626,7 +633,6 @@ const copy = {
     publicRuntimeLabel: "公开运行中",
     privateDraftLabel: "草稿未公开",
     handoffReadyLabel: "可转人工",
-    contractFootnote: "记忆边界：只会记住这个代表范围内的公开安全互动，不会读取主人的私有工作区、私有文件或私有账号。",
     skillsEyebrow: "Skill Sources",
     skillsSummary: "这里把内置能力和外部技能包分开展示：可以扩展能力，但不能扩大权限。",
     skillsTitle: "技能包可以有来源，但不能有越权",
@@ -677,7 +683,6 @@ const copy = {
     entryPointsTitle: "继续对话的公开入口",
     entryPointsCopy: (strategy: string) => `第一版入口是网页代表页。Telegram、群组和其它消息平台后续接入时，也会沿用 ${strategy} 这类保守激活策略。`,
     openRepresentative: "回到网页对话",
-    inspectMemoryPolicy: "查看记忆策略",
   },
   en: {
     chatNav: "Start chatting",
@@ -811,7 +816,6 @@ const copy = {
     publicRuntimeLabel: "publicly active",
     privateDraftLabel: "draft only",
     handoffReadyLabel: "human follow-up ready",
-    contractFootnote: "Memory boundary: this representative only keeps public, safe interaction context inside this representative. It does not read private workspace files or accounts.",
     skillsEyebrow: "Skill Sources",
     skillsSummary: "Delegate separates built-in abilities from external skill packs, while keeping permission boundaries explicit.",
     skillsTitle: "Skill packs can have sources, but they cannot have authority",
@@ -862,6 +866,5 @@ const copy = {
     entryPointsTitle: "Public paths to continue the conversation",
     entryPointsCopy: (strategy: string) => `The first-version entry point is the web representative page. Telegram, groups, and other message platforms can later reuse conservative activation policies such as ${strategy}.`,
     openRepresentative: "Return to web chat",
-    inspectMemoryPolicy: "Inspect memory policy",
   },
 } as const;

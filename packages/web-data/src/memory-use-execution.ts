@@ -4,11 +4,11 @@ import {
   ConversationEpisodeStatus,
   GovernedMemoryStatus,
   MemoryCandidateStatus,
+  MemoryPolicyDecisionOutcome,
   MemoryProjectionLane,
   MemoryProjectionStatus,
-  MemoryReviewOutcome,
-  MemoryReviewerRole,
   MemorySafetyClass,
+  MemorySourceKind,
   MemoryScope,
   MemoryUseRunStatus,
   MemoryUseSourceKind,
@@ -20,9 +20,33 @@ import {
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
+import { hasCurrentMemoryChannelDisclosureForMessage } from "./memory-disclosure";
+import { resolveContactMemorySharingEligibility } from "./memory-extraction";
+import {
+  lockAndResolveExactMessageIdentityEvidence,
+  type ExactMessageIdentityEvidence,
+} from "./contact-memory-source-evidence";
+import { lockContactSharedMemoryCoordinate } from "./memory-governance";
+import {
+  type ContactChannelMemoryForgetBoundarySnapshot,
+  isContactChannelMemorySourceAfterForgetBoundary,
+  loadLatestContactChannelMemoryForgetBoundary,
+  lockContactChannelMemoryCoordinate,
+} from "./memory-forget-boundary";
 import { runWithPrismaWriteConflictRetry } from "./prisma-write-conflict-retry";
 
 type MemoryUseTransaction = Prisma.TransactionClient;
+
+type MemoryRecallPolicy = {
+  revision: number;
+  longTermMemoryEnabled: boolean;
+  contactMemoryEnabled: boolean;
+  contactMemoryCrossChannelEnabled: boolean;
+  representativeExperienceEnabled: boolean;
+  webRecallEnabled: boolean;
+  matrixRecallEnabled: boolean;
+  telegramRecallEnabled: boolean;
+};
 
 const maximumOpaqueIdLength = 191;
 const maximumSearchHits = 100;
@@ -71,6 +95,17 @@ export type MemoryUseExecutionOptions = {
   client?: PrismaClient;
   now?: () => Date;
 };
+
+export type MemoryUseDeliveryRevalidationResult =
+  | {
+      authorized: true;
+      checkedItemCount: number;
+    }
+  | {
+      authorized: false;
+      checkedItemCount: number;
+      reasonCode: "memory_use_delivery_source_revoked";
+    };
 
 export type MemoryUseExecutionErrorCode =
   | "memory_use_invalid_input"
@@ -278,6 +313,19 @@ export async function startOrReuseMemoryUseRunInTransaction(
     );
   }
 
+  await lockMemoryUseSharedSourceFence(tx, {
+    representativeId: generation.conversation.representativeId,
+    contactId: generation.conversation.contactId,
+    conversationId: generation.conversationId,
+    inputMessageId: generation.inputMessageId,
+    sourceChannel,
+  });
+  await lockContactChannelMemoryCoordinate(tx, {
+    representativeId: generation.conversation.representativeId,
+    contactId: generation.conversation.contactId,
+    sourceChannel,
+  });
+
   const existing = await tx.memoryUseRun.findFirst({
     where: { generationRunId },
     select: memoryUseRunSnapshotSelect,
@@ -340,6 +388,12 @@ export async function recordMemoryUseSearchHitsInTransaction(
   const run = await lockAndLoadRun(tx, useRunId);
   assertRunOpen(run);
   await assertRunStillCurrent(tx, run);
+  const sharedSourceEvidence = await lockMemoryUseSharedSourceFence(tx, run);
+  await lockContactChannelMemoryCoordinate(tx, {
+    representativeId: run.representativeId,
+    contactId: run.contactId,
+    sourceChannel: run.sourceChannel,
+  });
 
   const governedIds = hits
     .filter((hit): hit is GovernedMemorySearchHit =>
@@ -350,21 +404,52 @@ export async function recordMemoryUseSearchHitsInTransaction(
       hit.sourceKind === MemoryUseSourceKind.PUBLIC_KNOWLEDGE)
     .map((hit) => hit.publicKnowledgeProjectionId);
 
-  const [governedRows, publicRows, policy] = await Promise.all([
+  const forgetBoundary = await loadLatestContactChannelMemoryForgetBoundary(
+    tx,
+    {
+      representativeId: run.representativeId,
+      contactId: run.contactId,
+      sourceChannel: run.sourceChannel,
+    },
+  );
+  const inputMessage = forgetBoundary
+    ? await tx.message.findUnique({
+        where: { id: run.inputMessageId },
+        select: { memoryIngressOrdinal: true },
+      })
+    : null;
+
+  const [governedRows, publicRows, policy, disclosureAllowed] = await Promise.all([
     loadGovernedProjectionSources(tx, governedIds),
     loadPublicProjectionSources(tx, publicIds),
     tx.representativeMemoryPolicy.findUnique({
       where: { representativeId: run.representativeId },
       select: {
+        revision: true,
         longTermMemoryEnabled: true,
         contactMemoryEnabled: true,
+        contactMemoryCrossChannelEnabled: true,
         representativeExperienceEnabled: true,
         webRecallEnabled: true,
         matrixRecallEnabled: true,
         telegramRecallEnabled: true,
       },
     }),
+    hasCurrentMemoryChannelDisclosureForMessage(tx, {
+      representativeId: run.representativeId,
+      contactId: run.contactId,
+      conversationId: run.conversationId,
+      messageId: run.inputMessageId,
+      channel: run.sourceChannel.toLowerCase() as "web" | "matrix" | "telegram",
+      capability: "recall",
+    }),
   ]);
+  const sharedAudienceIdentityId = await resolveSharedRecallAudienceIdentityId(
+    tx,
+    run,
+    policy,
+    sharedSourceEvidence,
+  );
   const governedById = new Map(governedRows.map((row) => [row.id, row]));
   const publicById = new Map(publicRows.map((row) => [row.id, row]));
   let anonymousRejectedCount = 0;
@@ -401,11 +486,25 @@ export async function recordMemoryUseSearchHitsInTransaction(
     }
 
     const source = governedById.get(hit.projectionItemId);
-    if (!source || !governedSourceMatchesScope(source, run, hit.sourceKind)) {
+    if (!source || !governedSourceMatchesScope(
+      source,
+      run,
+      hit.sourceKind,
+      sharedAudienceIdentityId,
+    )) {
       anonymousRejectedCount += 1;
       continue;
     }
-    const safety = governedSourceSafety(source, run, policy, occurredAt);
+    const safety = governedSourceSafety(
+      source,
+      run,
+      policy,
+      disclosureAllowed,
+      sharedAudienceIdentityId,
+      forgetBoundary,
+      inputMessage?.memoryIngressOrdinal ?? null,
+      occurredAt,
+    );
     const item = await upsertSearchItem(tx, {
       run,
       itemKey: searchItemKey(hit.sourceKind, source.id),
@@ -499,6 +598,12 @@ export async function finalizeMemoryUseGenerationInTransaction(
   }
   assertRunOpen(run);
   await assertRunStillCurrent(tx, run);
+  const sharedSourceEvidence = await lockMemoryUseSharedSourceFence(tx, run);
+  await lockContactChannelMemoryCoordinate(tx, {
+    representativeId: run.representativeId,
+    contactId: run.contactId,
+    sourceChannel: run.sourceChannel,
+  });
 
   const outputMessage = await tx.message.findUnique({
     where: { id: outputMessageId },
@@ -540,7 +645,13 @@ export async function finalizeMemoryUseGenerationInTransaction(
     throw rejectedSource();
   }
   for (const item of items) {
-    await assertItemStillInjectable(tx, run, item, occurredAt);
+    await assertItemStillInjectable(
+      tx,
+      run,
+      item,
+      occurredAt,
+      sharedSourceEvidence,
+    );
   }
 
   await tx.memoryUseRun.update({
@@ -593,6 +704,100 @@ export async function finalizeMemoryUseGenerationInTransaction(
       memoryUseItemId,
       sourceKind: sourceById.get(memoryUseItemId)!,
     })),
+  };
+}
+
+/**
+ * Final provider delivery is an external side-effect boundary. Revalidate the
+ * exact sources that were injected into the persisted output immediately
+ * before that boundary so a failed delivery cannot later replay an answer
+ * whose knowledge, memory, policy, disclosure, or forget epoch was revoked.
+ */
+export async function revalidateMemoryUseDeliverySourcesInTransaction(
+  tx: MemoryUseTransaction,
+  input: {
+    generationRunId: string;
+    conversationId: string;
+    outputMessageId: string;
+  },
+  occurredAt = new Date(),
+): Promise<MemoryUseDeliveryRevalidationResult> {
+  const run = await tx.memoryUseRun.findUnique({
+    where: {
+      generationRunId_conversationId: {
+        generationRunId: input.generationRunId,
+        conversationId: input.conversationId,
+      },
+    },
+    select: memoryUseRunSnapshotSelect,
+  });
+  if (!run) {
+    return { authorized: true, checkedItemCount: 0 };
+  }
+
+  const sharedSourceEvidence = await lockMemoryUseSharedSourceFence(tx, run);
+  await lockContactChannelMemoryCoordinate(tx, {
+    representativeId: run.representativeId,
+    contactId: run.contactId,
+    sourceChannel: run.sourceChannel,
+  });
+
+  const deliveryItems = await tx.memoryUseItem.findMany({
+    where: {
+      useRunId: run.id,
+      OR: [
+        { injectedAt: { not: null } },
+        { citedAt: { not: null } },
+      ],
+    },
+    select: memoryUseItemFinalizationSelect,
+  });
+  const injectedItems = deliveryItems.filter((item) => item.injectedAt);
+  const citedItems = deliveryItems.filter((item) => item.citedAt);
+  const blocked = () => ({
+    authorized: false as const,
+    checkedItemCount: deliveryItems.length,
+    reasonCode: "memory_use_delivery_source_revoked" as const,
+  });
+
+  if (
+    run.outputMessageId !== input.outputMessageId
+    || !new Set<MemoryUseRunStatus>([
+      MemoryUseRunStatus.COMPLETED,
+      MemoryUseRunStatus.DEGRADED,
+    ]).has(run.status)
+    || run.injectedCount !== injectedItems.length
+    || run.citedCount !== citedItems.length
+    || citedItems.some((item) => !item.injectedAt)
+    || deliveryItems.some((item) =>
+      !item.safetyPassedAt
+      || item.rejectionReasonCode
+    )
+  ) {
+    return blocked();
+  }
+
+  try {
+    await assertRunStillCurrent(tx, run);
+    for (const item of deliveryItems) {
+      await assertItemStillInjectable(
+        tx,
+        run,
+        item,
+        occurredAt,
+        sharedSourceEvidence,
+      );
+    }
+  } catch (error) {
+    if (error instanceof MemoryUseExecutionError) {
+      return blocked();
+    }
+    throw error;
+  }
+
+  return {
+    authorized: true,
+    checkedItemCount: deliveryItems.length,
   };
 }
 
@@ -1021,20 +1226,40 @@ async function loadGovernedProjectionSources(
           sourceCandidate: {
             select: {
               id: true,
+              sourceKind: true,
               status: true,
               safetyClass: true,
+              contactId: true,
+              audienceIdentityId: true,
+              scope: true,
+              scopeChannel: true,
               contentPurgedAt: true,
+              sourceMessage: {
+                select: { memoryIngressOrdinal: true },
+              },
+              extractionRun: {
+                select: { contactChannelMemoryEpoch: true },
+              },
+              policyDecision: {
+                select: {
+                  representativeId: true,
+                  memoryId: true,
+                  resultVersionId: true,
+                  outcome: true,
+                  outputHash: true,
+                  policyRevision: true,
+                },
+              },
             },
-          },
-          reviewDecisions: {
-            where: { outcome: MemoryReviewOutcome.APPROVED },
-            select: { reviewerRole: true },
           },
           memory: {
             select: {
+              id: true,
               representativeId: true,
               contactId: true,
+              audienceIdentityId: true,
               sourceChannel: true,
+              category: true,
               scope: true,
               status: true,
               currentVersionId: true,
@@ -1091,6 +1316,7 @@ function governedSourceMatchesScope(
   source: GovernedProjectionSource,
   run: RunSnapshotRecord,
   requestedKind: GovernedMemorySearchHit["sourceKind"],
+  sharedAudienceIdentityId: string | null,
 ) {
   const memory = source.memoryVersion.memory;
   if (
@@ -1101,9 +1327,15 @@ function governedSourceMatchesScope(
   ) return false;
 
   if (requestedKind === MemoryUseSourceKind.CONTACT_MEMORY) {
-    return memory.scope === MemoryScope.CONTACT_CHANNEL
-      && memory.contactId === run.contactId
-      && memory.sourceChannel === run.sourceChannel;
+    if (memory.scope === MemoryScope.CONTACT_CHANNEL) {
+      return memory.contactId === run.contactId
+        && memory.sourceChannel === run.sourceChannel;
+    }
+    return memory.scope === MemoryScope.CONTACT_SHARED
+      && sharedAudienceIdentityId !== null
+      && memory.audienceIdentityId === sharedAudienceIdentityId
+      && memory.contactId === null
+      && memory.sourceChannel === null;
   }
   return memory.scope === MemoryScope.REPRESENTATIVE
     && memory.contactId === null
@@ -1113,25 +1345,58 @@ function governedSourceMatchesScope(
 function governedSourceSafety(
   source: GovernedProjectionSource,
   run: RunSnapshotRecord,
-  policy: {
-    longTermMemoryEnabled: boolean;
-    contactMemoryEnabled: boolean;
-    representativeExperienceEnabled: boolean;
-    webRecallEnabled: boolean;
-    matrixRecallEnabled: boolean;
-    telegramRecallEnabled: boolean;
-  } | null,
+  policy: MemoryRecallPolicy | null,
+  disclosureAllowed: boolean,
+  sharedAudienceIdentityId: string | null,
+  forgetBoundary: ContactChannelMemoryForgetBoundarySnapshot | null,
+  inputMemoryIngressOrdinal: bigint | null,
   occurredAt: Date,
 ) {
   const version = source.memoryVersion;
   const memory = version.memory;
   const sourceCandidate = version.sourceCandidate;
   if (
+    !disclosureAllowed
+  ) return rejectedSafety("memory_channel_disclosure_missing");
+  if (
+    memory.scope === MemoryScope.CONTACT_SHARED
+    && (
+      !sharedAudienceIdentityId
+      || memory.audienceIdentityId !== sharedAudienceIdentityId
+      || memory.contactId !== null
+      || memory.sourceChannel !== null
+      || sourceCandidate?.scope !== MemoryScope.CONTACT_SHARED
+      || sourceCandidate.contactId !== null
+      || sourceCandidate.scopeChannel !== null
+      || sourceCandidate.audienceIdentityId !== sharedAudienceIdentityId
+    )
+  ) return rejectedSafety("memory_shared_scope_unauthorized");
+  if (
+    memory.scope === MemoryScope.CONTACT_CHANNEL
+    && (
+      !isContactChannelMemorySourceAfterForgetBoundary(forgetBoundary, {
+        contactChannelMemoryEpoch:
+          sourceCandidate?.extractionRun?.contactChannelMemoryEpoch ?? 0,
+        memoryIngressOrdinal:
+          sourceCandidate?.sourceMessage?.memoryIngressOrdinal ?? null,
+      })
+      || (
+        forgetBoundary
+        && (
+          inputMemoryIngressOrdinal === null
+          || inputMemoryIngressOrdinal
+            <= forgetBoundary.cutoffMemoryIngressOrdinal
+        )
+      )
+    )
+  ) return rejectedSafety("memory_forget_boundary_stale");
+  if (
     !policy
     || !policy.longTermMemoryEnabled
     || !channelRecallEnabled(policy, run.sourceChannel)
     || (
       memory.scope === MemoryScope.CONTACT_CHANNEL
+        || memory.scope === MemoryScope.CONTACT_SHARED
         ? !policy.contactMemoryEnabled
         : !policy.representativeExperienceEnabled
     )
@@ -1148,26 +1413,91 @@ function governedSourceSafety(
     || source.contentHash !== version.contentHash
     || !sha256Pattern.test(source.contentHash)
   ) return rejectedSafety("memory_not_recall_active");
+  const automaticDecision = sourceCandidate?.policyDecision;
+  const hasValidAutomaticDecision = Boolean(
+    automaticDecision
+    && automaticDecision.representativeId === run.representativeId
+    && automaticDecision.memoryId === memory.id
+    && automaticDecision.resultVersionId === version.id
+    && automaticDecision.outputHash === version.contentHash
+    && (
+      memory.scope !== MemoryScope.CONTACT_SHARED
+      || automaticDecision.policyRevision === policy?.revision
+    )
+    && new Set<MemoryPolicyDecisionOutcome>([
+      MemoryPolicyDecisionOutcome.ACTIVATED,
+      MemoryPolicyDecisionOutcome.UPDATED,
+    ]).has(automaticDecision.outcome),
+  );
   if (
     !sourceCandidate
+    || sourceCandidate.sourceKind === MemorySourceKind.OWNER_VERIFIED_CORRECTION
     || sourceCandidate.status !== MemoryCandidateStatus.APPROVED
     || sourceCandidate.contentPurgedAt
-    || !new Set<MemorySafetyClass>([
-      MemorySafetyClass.LOW_RISK,
-      MemorySafetyClass.REVIEW_REQUIRED,
-    ]).has(sourceCandidate.safetyClass)
-    || !version.reviewDecisions.some(
-      (decision) => decision.reviewerRole !== MemoryReviewerRole.SYSTEM,
-    )
-  ) return rejectedSafety("memory_review_invalid");
+    || sourceCandidate.safetyClass !== MemorySafetyClass.LOW_RISK
+    || !hasValidAutomaticDecision
+  ) return rejectedSafety("memory_automatic_policy_invalid");
+  if (
+    memory.scope === MemoryScope.CONTACT_SHARED
+    && !policy?.contactMemoryCrossChannelEnabled
+  ) return rejectedSafety("memory_shared_policy_disabled");
   if (
     memory.scope === MemoryScope.REPRESENTATIVE
     && (
       !version.deidentifiedAt
       || !version.deidentificationMethod
     )
-  ) return rejectedSafety("representative_experience_review_invalid");
+  ) return rejectedSafety("representative_experience_policy_invalid");
   return { passed: true, reasonCode: null } as const;
+}
+
+async function resolveSharedRecallAudienceIdentityId(
+  tx: MemoryUseTransaction,
+  run: Pick<
+    RunSnapshotRecord,
+    "representativeId" | "contactId" | "sourceChannel"
+  >,
+  policy: MemoryRecallPolicy | null,
+  sourceEvidence: ExactMessageIdentityEvidence | null,
+) {
+  if (!policy?.contactMemoryCrossChannelEnabled) return null;
+  const eligibility = await resolveContactMemorySharingEligibility(tx, {
+    representativeId: run.representativeId,
+    contactId: run.contactId,
+    policy,
+    sourceChannel: run.sourceChannel,
+    sourceEvidence,
+  });
+  return eligibility.eligible ? eligibility.audienceIdentityId : null;
+}
+
+async function lockMemoryUseSharedSourceFence(
+  tx: MemoryUseTransaction,
+  run: Pick<
+    RunSnapshotRecord,
+    | "representativeId"
+    | "contactId"
+    | "conversationId"
+    | "inputMessageId"
+    | "sourceChannel"
+  >,
+) {
+  const sourceEvidence = await lockAndResolveExactMessageIdentityEvidence(
+    tx,
+    {
+      representativeId: run.representativeId,
+      contactId: run.contactId,
+      conversationId: run.conversationId,
+      messageId: run.inputMessageId,
+      sourceChannel: run.sourceChannel,
+    },
+  );
+  if (!sourceEvidence) return null;
+  await lockContactSharedMemoryCoordinate(tx, {
+    representativeId: run.representativeId,
+    audienceIdentityId: sourceEvidence.canonicalAudienceIdentityId,
+  });
+  return sourceEvidence;
 }
 
 function rejectedSafety(reasonCode: string) {
@@ -1258,6 +1588,27 @@ async function upsertSearchItem(
   });
 }
 
+const memoryUseItemFinalizationSelect = {
+  id: true,
+  sourceKind: true,
+  safetyPassedAt: true,
+  injectedAt: true,
+  citedAt: true,
+  citationId: true,
+  rejectionReasonCode: true,
+  memoryVersionId: true,
+  projectionItemId: true,
+  publicKnowledgeProjectionId: true,
+  publicKnowledgeProjection: {
+    select: {
+      publishedVersionId: true,
+      resourceKey: true,
+      knowledgeAssetId: true,
+    },
+  },
+  contentHash: true,
+} as const;
+
 async function loadItemsForFinalization(
   tx: MemoryUseTransaction,
   useRunId: string,
@@ -1266,26 +1617,7 @@ async function loadItemsForFinalization(
   if (!ids.length) return [];
   return tx.memoryUseItem.findMany({
     where: { useRunId, id: { in: ids } },
-    select: {
-      id: true,
-      sourceKind: true,
-      safetyPassedAt: true,
-      injectedAt: true,
-      citedAt: true,
-      citationId: true,
-      rejectionReasonCode: true,
-      memoryVersionId: true,
-      projectionItemId: true,
-      publicKnowledgeProjectionId: true,
-      publicKnowledgeProjection: {
-        select: {
-          publishedVersionId: true,
-          resourceKey: true,
-          knowledgeAssetId: true,
-        },
-      },
-      contentHash: true,
-    },
+    select: memoryUseItemFinalizationSelect,
   });
 }
 
@@ -1296,6 +1628,7 @@ async function assertItemStillInjectable(
   run: RunSnapshotRecord,
   item: FinalizationItem,
   occurredAt: Date,
+  sharedSourceEvidence: ExactMessageIdentityEvidence | null,
 ) {
   if (item.sourceKind === MemoryUseSourceKind.PUBLIC_KNOWLEDGE) {
     if (!item.publicKnowledgeProjectionId) throw rejectedSource();
@@ -1312,28 +1645,72 @@ async function assertItemStillInjectable(
     return;
   }
   if (!item.projectionItemId || !item.memoryVersionId) throw rejectedSource();
-  const [source, policy] = await Promise.all([
+  const forgetBoundary = await loadLatestContactChannelMemoryForgetBoundary(
+    tx,
+    {
+      representativeId: run.representativeId,
+      contactId: run.contactId,
+      sourceChannel: run.sourceChannel,
+    },
+  );
+  const inputMessage = forgetBoundary
+    ? await tx.message.findUnique({
+        where: { id: run.inputMessageId },
+        select: { memoryIngressOrdinal: true },
+      })
+    : null;
+  const [source, policy, disclosureAllowed] = await Promise.all([
     loadGovernedProjectionSources(tx, [item.projectionItemId]).then(
       (sources) => sources[0],
     ),
     tx.representativeMemoryPolicy.findUnique({
       where: { representativeId: run.representativeId },
       select: {
+        revision: true,
         longTermMemoryEnabled: true,
         contactMemoryEnabled: true,
+        contactMemoryCrossChannelEnabled: true,
         representativeExperienceEnabled: true,
         webRecallEnabled: true,
         matrixRecallEnabled: true,
         telegramRecallEnabled: true,
       },
     }),
+    hasCurrentMemoryChannelDisclosureForMessage(tx, {
+      representativeId: run.representativeId,
+      contactId: run.contactId,
+      conversationId: run.conversationId,
+      messageId: run.inputMessageId,
+      channel: run.sourceChannel.toLowerCase() as "web" | "matrix" | "telegram",
+      capability: "recall",
+    }),
   ]);
+  const sharedAudienceIdentityId = await resolveSharedRecallAudienceIdentityId(
+    tx,
+    run,
+    policy,
+    sharedSourceEvidence,
+  );
   if (
     !source
     || source.memoryVersion.id !== item.memoryVersionId
     || source.contentHash !== item.contentHash
-    || !governedSourceMatchesScope(source, run, item.sourceKind)
-    || !governedSourceSafety(source, run, policy, occurredAt).passed
+    || !governedSourceMatchesScope(
+      source,
+      run,
+      item.sourceKind,
+      sharedAudienceIdentityId,
+    )
+    || !governedSourceSafety(
+      source,
+      run,
+      policy,
+      disclosureAllowed,
+      sharedAudienceIdentityId,
+      forgetBoundary,
+      inputMessage?.memoryIngressOrdinal ?? null,
+      occurredAt,
+    ).passed
   ) throw rejectedSource();
 }
 
@@ -1357,7 +1734,7 @@ async function createAuthoritativeCitation(
     const citation = await tx.messageCitation.create({
       data: {
         messageId: outputMessageId,
-        title: "已审核代表经验",
+        title: "代表经验",
       },
       select: { id: true },
     });
@@ -1559,9 +1936,11 @@ function channelRecallEnabled(
   },
   channel: RepresentativeChannelKind,
 ) {
-  // Defense in depth for legacy rows whose unsupported channel flags were
-  // previously true. Public knowledge does not call this governed-memory gate.
-  return channel === RepresentativeChannelKind.WEB && policy.webRecallEnabled;
+  if (channel === RepresentativeChannelKind.WEB) return policy.webRecallEnabled;
+  if (channel === RepresentativeChannelKind.MATRIX) {
+    return policy.matrixRecallEnabled;
+  }
+  return policy.telegramRecallEnabled;
 }
 
 function assertRunCoordinates(

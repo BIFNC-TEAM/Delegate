@@ -13,6 +13,13 @@ const migration = readFileSync(
   ),
   "utf8",
 );
+const scopeGuardRepairMigration = readFileSync(
+  new URL(
+    "../../../prisma/migrations/20260805120000_memory_reconciliation_scope_guard_repair/migration.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const service = readFileSync(
   new URL("../src/memory-reconciliation-execution.ts", import.meta.url),
   "utf8",
@@ -31,6 +38,43 @@ const scheduler = readFileSync(
 );
 
 describe("Memory System T5 reconciliation execution schema", () => {
+  it("repairs deployed target guards with the current MemoryScope semantics", () => {
+    const expectedGuard = functionBlock(
+      migration,
+      "memory_reconciliation_target_guard",
+    );
+    const repairedGuard = functionBlock(
+      scopeGuardRepairMigration,
+      "memory_reconciliation_target_guard",
+    );
+
+    expect(enumBlock("MemoryScope")).toMatch(
+      /CONTACT_CHANNEL[\s\S]*REPRESENTATIVE/u,
+    );
+    expect(repairedGuard).not.toBe("");
+    expect(repairedGuard).toBe(expectedGuard);
+    expect(scopeGuardRepairMigration).toContain(
+      'memory_record."scope" = \'CONTACT_CHANNEL\'::"MemoryScope"',
+    );
+    expect(scopeGuardRepairMigration).toContain(
+      'memory_record."scope" = \'REPRESENTATIVE\'::"MemoryScope"',
+    );
+    expect(scopeGuardRepairMigration).not.toContain(
+      '\'REPRESENTATIVE_EXPERIENCE\'::"MemoryScope"',
+    );
+    expect(scopeGuardRepairMigration).toContain(
+      "issue_observed_content_hash TEXT",
+    );
+    expect(
+      scopeGuardRepairMigration.match(/CREATE OR REPLACE FUNCTION/gu),
+    ).toHaveLength(1);
+    expect(scopeGuardRepairMigration).not.toMatch(
+      /\b(?:ALTER|CREATE|DROP) TYPE\b/u,
+    );
+    expect(scopeGuardRepairMigration).not.toContain("DROP TRIGGER");
+    expect(scopeGuardRepairMigration.trimEnd().endsWith("COMMIT;")).toBe(true);
+  });
+
   it("persists one immutable bounded target snapshot per known projection", () => {
     const target = modelBlock("MemoryReconciliationTarget");
     expect(enumBlock("MemoryReconciliationTargetKind")).toMatch(
@@ -144,5 +188,15 @@ function modelBlock(modelName: string) {
 
 function enumBlock(enumName: string) {
   const match = schema.match(new RegExp(`enum ${enumName} \\{[\\s\\S]*?\\n\\}`));
+  return match?.[0] ?? "";
+}
+
+function functionBlock(source: string, functionName: string) {
+  const match = source.match(
+    new RegExp(
+      `CREATE OR REPLACE FUNCTION "${functionName}"\\(\\)[\\s\\S]*?\\$\\$ LANGUAGE plpgsql;`,
+      "u",
+    ),
+  );
   return match?.[0] ?? "";
 }

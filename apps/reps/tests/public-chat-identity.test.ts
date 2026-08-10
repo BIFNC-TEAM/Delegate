@@ -5,7 +5,12 @@ import {
   deriveTierUsage,
   getPublicChatCookieName,
   readPublicChatSessionState,
+  removeRejectedPublicChatOptimisticMessage,
+  resolvePublicChatServiceCreditPendingTransition,
+  resolvePublicChatServiceCreditNextStep,
+  resolvePublicChatSubmissionRejection,
   resolvePublicChatTier,
+  restoreRejectedPublicChatDraft,
   shouldUseSecurePublicChatCookie,
   writePublicChatSessionState,
 } from "../app/reps/[slug]/public-chat";
@@ -168,6 +173,98 @@ describe("public chat audience identity cookie", () => {
       passUnlocked: true,
     });
     expect(resolvePublicChatTier(paid)).toBe("pass");
+  });
+
+  it("distinguishes a service-credit rejection from a technical send failure", () => {
+    expect(resolvePublicChatSubmissionRejection({
+      status: 402,
+      code: "service_credit_required",
+    })).toBe("service_credit_required");
+    expect(resolvePublicChatSubmissionRejection({
+      status: 409,
+      code: "memory_disclosure_stale",
+    })).toBe("memory_disclosure_stale");
+    expect(resolvePublicChatSubmissionRejection({
+      status: 402,
+      code: "unexpected",
+    })).toBe("failed");
+    expect(resolvePublicChatSubmissionRejection({
+      status: 500,
+    })).toBe("failed");
+  });
+
+  it("recovers a rejected submission without overwriting a newer draft", () => {
+    const messages = [
+      { id: "before", text: "already sent" },
+      { id: "rejected", text: "not accepted" },
+      { id: "after", text: "another message" },
+    ];
+
+    expect(removeRejectedPublicChatOptimisticMessage(
+      messages,
+      "rejected",
+    )).toEqual([
+      { id: "before", text: "already sent" },
+      { id: "after", text: "another message" },
+    ]);
+    expect(restoreRejectedPublicChatDraft({
+      currentDraft: "",
+      submittedText: "not accepted",
+    })).toBe("not accepted");
+    expect(restoreRejectedPublicChatDraft({
+      currentDraft: "newer draft",
+      submittedText: "not accepted",
+    })).toBe("newer draft");
+  });
+
+  it("offers only the service-credit recovery action that is actually available", () => {
+    expect(resolvePublicChatServiceCreditNextStep({
+      serviceCreditsAvailable: 0,
+      serviceCreditsReserved: 1,
+      purchaseEnabled: true,
+      humanInLoop: true,
+    })).toBe("pending");
+    expect(resolvePublicChatServiceCreditNextStep({
+      serviceCreditsAvailable: 0,
+      serviceCreditsReserved: 0,
+      purchaseEnabled: true,
+      humanInLoop: true,
+    })).toBe("purchase");
+    expect(resolvePublicChatServiceCreditNextStep({
+      serviceCreditsAvailable: 0,
+      serviceCreditsReserved: 0,
+      purchaseEnabled: false,
+      humanInLoop: true,
+    })).toBe("handoff");
+    expect(resolvePublicChatServiceCreditNextStep({
+      serviceCreditsAvailable: 0,
+      serviceCreditsReserved: 0,
+      purchaseEnabled: false,
+      humanInLoop: false,
+    })).toBe("unavailable");
+  });
+
+  it("resolves a pending-credit notice when the reservation finishes or releases", () => {
+    expect(resolvePublicChatServiceCreditPendingTransition({
+      previousReserved: 1,
+      serviceCreditsAvailable: 2,
+      serviceCreditsReserved: 0,
+    })).toBe("available");
+    expect(resolvePublicChatServiceCreditPendingTransition({
+      previousReserved: 1,
+      serviceCreditsAvailable: 0,
+      serviceCreditsReserved: 0,
+    })).toBe("released");
+    expect(resolvePublicChatServiceCreditPendingTransition({
+      previousReserved: 1,
+      serviceCreditsAvailable: 0,
+      serviceCreditsReserved: 1,
+    })).toBeNull();
+    expect(resolvePublicChatServiceCreditPendingTransition({
+      previousReserved: 0,
+      serviceCreditsAvailable: 0,
+      serviceCreditsReserved: 0,
+    })).toBeNull();
   });
 });
 

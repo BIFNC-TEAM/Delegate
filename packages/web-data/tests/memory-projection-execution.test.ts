@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   buildGovernedContactChannelMemoryVersionUri,
+  buildGovernedSharedContactMemoryVersionUri,
   OpenVikingRequestError,
 } from "@delegate/openviking";
 import type { PrismaClient } from "@prisma/client";
@@ -9,6 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   MemoryProjectionProviderError,
+  requeuePolicyEnabledGovernedMemoryProjections,
   runNextMemoryDeletionCleanup,
   runNextMemoryProjectionDeletion,
   runNextMemoryProjectionWrite,
@@ -19,6 +21,52 @@ const safeText = "Prefers concise answers.";
 const contentHash = createHash("sha256").update(safeText).digest("hex");
 
 describe("memory projection execution", () => {
+  it("recovers only proof-free policy tombstones and never ordinary FAILED work", async () => {
+    const query = vi.fn(async (_query: unknown) => [{ id: "projection_1" }]);
+    const client = { $queryRaw: query } as unknown as PrismaClient;
+
+    await expect(requeuePolicyEnabledGovernedMemoryProjections(
+      client,
+      { representativeId: "rep_1" },
+      ["openviking"],
+    )).resolves.toBe(1);
+
+    const sql = sqlText(query.mock.calls[0]![0]);
+    expect(sql).toContain('FROM "MemoryDeletionProof" proof');
+    expect(sql).toContain("projection.\"status\" IN");
+    expect(sql).toContain("'DELETE_PENDING'::\"MemoryProjectionStatus\"");
+    expect(sql).toContain("'DELETE_FAILED'::\"MemoryProjectionStatus\"");
+    expect(sql).toContain("'DELETED'::\"MemoryProjectionStatus\"");
+    expect(sql).not.toContain("'FAILED'::\"MemoryProjectionStatus\"");
+    expect(sql).toContain('memory_record."status" = \'ACTIVE\'');
+    expect(sql).toContain('memory_record."currentVersionId" = projection."memoryVersionId"');
+    expect(sql).toContain('memory_record."expiresAt" > CURRENT_TIMESTAMP');
+    expect(sql).toContain(
+      'memory_record."sourceChannel" = \'WEB\'::"RepresentativeChannelKind"',
+    );
+    expect(sql).toContain('LEFT JOIN "MemoryCandidate" candidate');
+    expect(sql).toContain('policy."matrixRecallEnabled"');
+    expect(sql).toContain('policy."telegramRecallEnabled"');
+    expect(sql).toContain(
+      'memory_record."scope" = \'CONTACT_SHARED\'::"MemoryScope"',
+    );
+    expect(sql).toContain('policy."contactMemoryCrossChannelEnabled"');
+    expect(sql).toContain('consent."policyRevision" = policy."revision"');
+    expect(sql).toContain('consent."consentVersion" =');
+    expect(queryValues(query.mock.calls[0]![0])).toContain(
+      "cross-channel-contact-memory-v1",
+    );
+    expect(sql).toContain('identity_link."revokedAt" IS NULL');
+    expect(sql).toContain(
+      '"memory_private_channel_disclosure_scope_allows"',
+    );
+    expect(sql).toContain(
+      'candidate."sourceContactId" IS NOT DISTINCT FROM memory_record."contactId"',
+    );
+    expect(sql).toContain('SET "status" = \'QUEUED\'');
+    expect(queryValues(query.mock.calls[0]![0])).toContain("rep_1");
+  });
+
   it("claims with SKIP LOCKED, leaves the transaction, ensures the exact root, and verifies before ACTIVE", async () => {
     const claim = projectionClaim();
     const events: string[] = [];
@@ -46,10 +94,160 @@ describe("memory projection execution", () => {
     expect(transactionSql).toContain("FOR UPDATE SKIP LOCKED");
     expect(transactionSql).toContain("projection_write_lease_expired");
     expect(transactionSql).toContain('"leaseToken"');
+    expect(transactionSql).toContain('FROM "MemoryPolicyDecision" decision');
+    expect(transactionSql).toContain("'ACTIVATED'");
+    expect(transactionSql).toContain("'UPDATED'");
+    expect(transactionSql).not.toContain('FROM "MemoryReviewDecision" decision');
     expect(provider.ensureRoot).toHaveBeenCalledWith({
       namespaceKey: claim.namespaceKey,
       rootUri: claim.remoteUri.replace(/memories\/memory_1\/versions\/version_1\.md$/u, ""),
     });
+    expect(sqlValues(client.__txQuery)).toContain("fake");
+    expect(sqlValues(client.__txQuery)).not.toContain("openviking");
+  });
+
+  it("writes a shared-contact projection only below its canonical identity root", async () => {
+    const remoteUri = buildGovernedSharedContactMemoryVersionUri({
+      namespaceKey: "namespace_1",
+      audienceIdentityId: "identity_1",
+      memoryId: "memory_1",
+      memoryVersionId: "version_1",
+    });
+    const claim = projectionClaim({
+      remoteUri,
+      memoryScope: "CONTACT_SHARED",
+      memoryContactId: null,
+      memoryAudienceIdentityId: "identity_1",
+      memorySourceChannel: null,
+    });
+    const provider = fakeProvider();
+    const client = projectionClient(claim, [{ status: "ACTIVE" }]);
+
+    await expect(runNextMemoryProjectionWrite({ client, provider }))
+      .resolves.toMatchObject({ processed: true, status: "completed" });
+    expect(provider.ensureRoot).toHaveBeenCalledWith({
+      namespaceKey: "namespace_1",
+      rootUri: remoteUri.replace(
+        /memories\/memory_1\/versions\/version_1\.md$/u,
+        "",
+      ),
+    });
+    const completionSql = sqlCalls(client.__txQuery);
+    expect(completionSql).toContain('policy."contactMemoryCrossChannelEnabled"');
+    expect(completionSql).toContain('shared_decision."policyRevision" = policy."revision"');
+    expect(completionSql).toContain('consent."revokedAt" IS NULL');
+    expect(completionSql).toContain('MAX(latest_consent."consentVersion")');
+    expect(sqlValues(client.__txQuery)).toContain(
+      "cross-channel-contact-memory-v1",
+    );
+  });
+
+  it("rejects a shared projection URI for a different canonical identity", async () => {
+    const claim = projectionClaim({
+      remoteUri: buildGovernedSharedContactMemoryVersionUri({
+        namespaceKey: "namespace_1",
+        audienceIdentityId: "identity_other",
+        memoryId: "memory_1",
+        memoryVersionId: "version_1",
+      }),
+      memoryScope: "CONTACT_SHARED",
+      memoryContactId: null,
+      memoryAudienceIdentityId: "identity_1",
+      memorySourceChannel: null,
+    });
+    const provider = fakeProvider();
+    const client = projectionClient(claim, [{ status: "FAILED" }]);
+
+    await expect(runNextMemoryProjectionWrite({ client, provider }))
+      .resolves.toMatchObject({
+        processed: true,
+        status: "failed",
+        errorCode: "projection_canonical_uri_invalid",
+      });
+    expect(provider.ensureRoot).not.toHaveBeenCalled();
+    expect(provider.writeExact).not.toHaveBeenCalled();
+  });
+
+  it("leaves unsupported legacy provider work unclaimed by the production worker", async () => {
+    const writeClaim = projectionClaim({ provider: "projection-test" });
+    const writeClient = projectionClient(writeClaim, [{ status: "ACTIVE" }]);
+    const deleteClaim = projectionClaim({
+      provider: "projection-test",
+      deleteRequestedAt: new Date(),
+    });
+    const deleteClient = projectionClient(
+      deleteClaim,
+      [{ id: deleteClaim.id }],
+      [],
+      "delete",
+    );
+    const proof = cleanupClaim();
+    const cleanup = cleanupClient(proof, [], false, "projection-test");
+
+    await expect(runNextMemoryProjectionWrite({ client: writeClient }))
+      .resolves.toEqual({ processed: false });
+    await expect(runNextMemoryProjectionDeletion({ client: deleteClient }))
+      .resolves.toEqual({ processed: false });
+    await expect(runNextMemoryDeletionCleanup({ client: cleanup }))
+      .resolves.toEqual({ processed: false });
+
+    expect(sqlValues(writeClient.__txQuery)).toContain("openviking");
+    expect(sqlCalls(writeClient.__txQuery).match(
+      /projection\."provider" IN/g,
+    )).toHaveLength(3);
+    expect(sqlValues(deleteClient.__txQuery)).toContain("openviking");
+    expect(sqlCalls(deleteClient.__txQuery).match(
+      /projection\."provider" IN/g,
+    )).toHaveLength(2);
+    expect(sqlCalls(cleanup.__txQuery).match(
+      /unsupported_projection\."provider" NOT IN/g,
+    )).toHaveLength(3);
+    expect(cleanup.memoryCandidate.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("claims an explicitly declared resolver capability", async () => {
+    const claim = projectionClaim({
+      provider: "resolver-test",
+      policyProvider: "resolver-test",
+    });
+    const client = projectionClient(claim, [{ status: "ACTIVE" }]);
+    const provider = {
+      ...fakeProvider(),
+      name: "resolver-test",
+    };
+    const resolveProvider = vi.fn((providerName: string) =>
+      providerName === provider.name ? provider : null
+    );
+
+    const result = await runNextMemoryProjectionWrite({
+      client,
+      resolveProvider,
+      supportedProviderNames: ["resolver-test"],
+    });
+
+    expect(result).toMatchObject({ processed: true, status: "completed" });
+    expect(resolveProvider).toHaveBeenCalledWith("resolver-test");
+    expect(sqlValues(client.__txQuery)).toContain("resolver-test");
+  });
+
+  it("still reports a disabled production OpenViking provider", async () => {
+    vi.stubEnv("OPENVIKING_ENABLED", "false");
+    const claim = projectionClaim({
+      provider: "openviking",
+      policyProvider: "openviking",
+    });
+    const client = projectionClient(claim, [{ status: "FAILED" }]);
+
+    try {
+      await expect(runNextMemoryProjectionWrite({ client })).resolves.toEqual({
+        processed: true,
+        workId: claim.id,
+        status: "failed",
+        errorCode: "projection_provider_disabled",
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("never promotes a write when the completion CAS observes a deletion request", async () => {
@@ -447,6 +645,20 @@ describe("memory projection execution", () => {
     expect(client.governedMemory.updateMany).not.toHaveBeenCalled();
   });
 
+  it("automatically requeues due failed deletion proofs behind the recall fence", async () => {
+    const claim = cleanupClaim();
+    const client = cleanupClient(claim, []);
+
+    await runNextMemoryDeletionCleanup({ client });
+
+    const sql = sqlCalls(client.__txQuery);
+    expect(sql).toContain("WITH retryable_failed AS MATERIALIZED");
+    expect(sql).toContain("proof.\"cleanupStatus\" = 'FAILED'::\"MemoryCleanupStatus\"");
+    expect(sql).toContain("memory_record.\"status\" = 'DELETE_PENDING'::\"GovernedMemoryStatus\"");
+    expect(sql).toContain("SET \"cleanupStatus\" = 'QUEUED'::\"MemoryCleanupStatus\"");
+    expect(sql).toContain("FOR UPDATE OF proof SKIP LOCKED");
+  });
+
   it("completes a body-free proof only after every exact absence receipt is present", async () => {
     const claim = cleanupClaim();
     const client = cleanupClient(claim, [
@@ -505,6 +717,10 @@ function projectionClaim(overrides: Record<string, unknown> = {}) {
     memoryStatus: "ACTIVE",
     currentVersionId: "version_1",
     recallDisabledAt: null,
+    memoryScope: "CONTACT_CHANNEL",
+    memoryContactId: "contact_1",
+    memoryAudienceIdentityId: null,
+    memorySourceChannel: "WEB",
     namespaceKey,
     policyProvider: "fake",
     longTermMemoryEnabled: true,
@@ -582,7 +798,9 @@ function projectionClient(
 ) {
   const txQuery = vi.fn(async (query: unknown) => {
     const text = sqlText(query);
-    if (text.includes("claimed_projection")) return [claim];
+    if (text.includes("claimed_projection")) {
+      return queryValues(query).includes(claim.provider) ? [claim] : [];
+    }
     if (
       text.includes("WITH completion_candidate AS MATERIALIZED")
       || text.includes('SET "status" = \'DELETED\'::"MemoryProjectionStatus"')
@@ -612,11 +830,14 @@ function cleanupClient(
   claim: ReturnType<typeof cleanupClaim>,
   projections: Array<Record<string, unknown>>,
   completes = false,
+  projectionProvider = "openviking",
 ) {
   let transactionNumber = 0;
   const txQuery = vi.fn(async (query: unknown) => {
     const text = sqlText(query);
-    if (text.includes("claimed_proof")) return [claim];
+    if (text.includes("claimed_proof")) {
+      return queryValues(query).includes(projectionProvider) ? [claim] : [];
+    }
     if (text.includes("FOR UPDATE OF proof, memory_record")) return [{ id: claim.id }];
     if (text.includes('SELECT "id", "status", "leaseToken"')) return projections;
     if (text.includes("projection_drain_pending")) return [{ id: claim.id }];
@@ -666,14 +887,16 @@ function sqlCalls(mock: ReturnType<typeof vi.fn>) {
 }
 
 function sqlValues(mock: ReturnType<typeof vi.fn>) {
-  return mock.mock.calls.flatMap(([query]) => (
-    typeof query === "object"
-      && query !== null
-      && "values" in query
-      && Array.isArray(query.values)
-      ? query.values
-      : []
-  ));
+  return mock.mock.calls.flatMap(([query]) => queryValues(query));
+}
+
+function queryValues(query: unknown) {
+  return typeof query === "object"
+    && query !== null
+    && "values" in query
+    && Array.isArray(query.values)
+    ? query.values
+    : [];
 }
 
 function sqlText(query: unknown) {

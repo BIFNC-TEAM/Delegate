@@ -1541,6 +1541,7 @@ export async function provisionOwnerMatrixChannel(input: {
           kind: true,
           connectionId: true,
           endpointAssignmentRevision: true,
+          endpointLifecycleRevision: true,
           desiredState: true,
           healthStatus: true,
           externalUserId: true,
@@ -1583,10 +1584,14 @@ export async function provisionOwnerMatrixChannel(input: {
         || payload.matrixUserId !== existingChannel.externalUserId
         || payload.endpointAssignmentRevision
           !== existingChannel.endpointAssignmentRevision
+        || payload.endpointLifecycleRevision
+          !== existingChannel.endpointLifecycleRevision
         || replayAfter?.matrixUserId !== existingChannel.externalUserId
         || replayAfter?.connectionId !== existingChannel.connectionId
         || replayAfter?.endpointAssignmentRevision
           !== existingChannel.endpointAssignmentRevision
+        || replayAfter?.endpointLifecycleRevision
+          !== existingChannel.endpointLifecycleRevision
         || replayAfter?.desiredState !== existingChannel.desiredState
         || !replayMatrixUserId
         || !isManagedMatrixUserIdForServer(replayMatrixUserId, serverName)
@@ -1814,15 +1819,17 @@ export async function provisionOwnerMatrixChannel(input: {
     const assignmentRevisionMissing =
       existingChannel !== null
       && existingChannel.endpointAssignmentRevision <= 0;
+    const assignmentChanged =
+      identityChanged
+      || connectionChanged
+      || assignmentRevisionMissing;
     const nextDesiredState =
       !existingChannel || reconnecting
         ? ChannelDesiredState.ACTIVE
         : existingChannel.desiredState;
     const resetRuntimeState =
       reconnecting
-      || identityChanged
-      || connectionChanged
-      || assignmentRevisionMissing;
+      || assignmentChanged;
     const binding = await tx.representativeChannelBinding.upsert({
       where: {
         representativeId_kind: {
@@ -1837,6 +1844,7 @@ export async function provisionOwnerMatrixChannel(input: {
         sourceProvider: ChannelSourceProvider.MATRIX,
         connectionId,
         endpointAssignmentRevision: 1,
+        endpointLifecycleRevision: 1,
         desiredState: nextDesiredState,
         healthStatus: ChannelHealthStatus.UNKNOWN,
         externalUserId: matrixUserId,
@@ -1856,9 +1864,14 @@ export async function provisionOwnerMatrixChannel(input: {
         externalUserId: matrixUserId,
         desiredState: nextDesiredState,
         displayName: representative.displayName,
-        ...(resetRuntimeState
+        ...(assignmentChanged
           ? {
               endpointAssignmentRevision: { increment: 1 },
+            }
+          : {}),
+        ...(reconnecting
+          ? {
+              endpointLifecycleRevision: { increment: 1 },
             }
           : {}),
         ...(resetRuntimeState
@@ -1882,6 +1895,7 @@ export async function provisionOwnerMatrixChannel(input: {
         kind: true,
         connectionId: true,
         endpointAssignmentRevision: true,
+        endpointLifecycleRevision: true,
         desiredState: true,
         healthStatus: true,
         externalUserId: true,
@@ -1908,6 +1922,8 @@ export async function provisionOwnerMatrixChannel(input: {
           connectionId,
           endpointAssignmentRevision:
             binding.endpointAssignmentRevision,
+          endpointLifecycleRevision:
+            binding.endpointLifecycleRevision,
           requestedMatrixUserIdWasProvided,
           requestedMatrixUserId,
           replaceExisting,
@@ -1920,6 +1936,8 @@ export async function provisionOwnerMatrixChannel(input: {
             connectionId: existingChannel?.connectionId ?? null,
             endpointAssignmentRevision:
               existingChannel?.endpointAssignmentRevision ?? 0,
+            endpointLifecycleRevision:
+              existingChannel?.endpointLifecycleRevision ?? 0,
             desiredState:
               existingChannel?.desiredState
               ?? ChannelDesiredState.DISCONNECTED,
@@ -1932,6 +1950,8 @@ export async function provisionOwnerMatrixChannel(input: {
             connectionId,
             endpointAssignmentRevision:
               binding.endpointAssignmentRevision,
+            endpointLifecycleRevision:
+              binding.endpointLifecycleRevision,
             desiredState: nextDesiredState,
             healthStatus: binding.healthStatus,
           },
@@ -1997,6 +2017,7 @@ export async function disconnectOwnerMatrixChannel(input: {
         sourceProvider: true,
         connectionId: true,
         endpointAssignmentRevision: true,
+        endpointLifecycleRevision: true,
         desiredState: true,
         healthStatus: true,
         externalUserId: true,
@@ -2056,6 +2077,8 @@ export async function disconnectOwnerMatrixChannel(input: {
       if (
         replayAfter?.endpointAssignmentRevision
           !== binding.endpointAssignmentRevision
+        || replayAfter?.endpointLifecycleRevision
+          !== binding.endpointLifecycleRevision
         || replayAfter.desiredState !== binding.desiredState
         || replayAfter.status !== binding.status
         || binding.desiredState !== ChannelDesiredState.DISCONNECTED
@@ -2082,14 +2105,19 @@ export async function disconnectOwnerMatrixChannel(input: {
       );
     }
 
-    const changed =
-      binding.desiredState !== ChannelDesiredState.DISCONNECTED
-      || binding.status !== "DISCONNECTED";
+    const lifecycleChanged =
+      binding.desiredState !== ChannelDesiredState.DISCONNECTED;
+    const changed = lifecycleChanged || binding.status !== "DISCONNECTED";
     const updated = changed
       ? await tx.representativeChannelBinding.update({
           where: { id: binding.id },
           data: {
             desiredState: ChannelDesiredState.DISCONNECTED,
+            ...(lifecycleChanged
+              ? {
+                  endpointLifecycleRevision: { increment: 1 },
+                }
+              : {}),
             healthStatus: ChannelHealthStatus.UNKNOWN,
             status: "DISCONNECTED",
             lastHealthCheckAt: null,
@@ -2103,6 +2131,7 @@ export async function disconnectOwnerMatrixChannel(input: {
             sourceProvider: true,
             connectionId: true,
             endpointAssignmentRevision: true,
+            endpointLifecycleRevision: true,
             desiredState: true,
             healthStatus: true,
             externalUserId: true,
@@ -2132,12 +2161,16 @@ export async function disconnectOwnerMatrixChannel(input: {
           bindingId: binding.id,
           matrixUserId: binding.externalUserId,
           connectionId: binding.connectionId,
+          endpointLifecycleRevision:
+            updated.endpointLifecycleRevision,
           before: {
             desiredState: binding.desiredState,
             healthStatus: binding.healthStatus,
             status: binding.status,
             endpointAssignmentRevision:
               binding.endpointAssignmentRevision,
+            endpointLifecycleRevision:
+              binding.endpointLifecycleRevision,
           },
           after: {
             desiredState: ChannelDesiredState.DISCONNECTED,
@@ -2145,6 +2178,8 @@ export async function disconnectOwnerMatrixChannel(input: {
             status: "DISCONNECTED",
             endpointAssignmentRevision:
               updated.endpointAssignmentRevision,
+            endpointLifecycleRevision:
+              updated.endpointLifecycleRevision,
           },
           changed,
         },

@@ -26,10 +26,6 @@ const { mockPrisma } = vi.hoisted(() => {
   };
 });
 
-vi.mock("../src/openviking", () => ({
-  getRepresentativeOpenVikingOverviewMetrics: vi.fn(),
-}));
-
 vi.mock("../src/prisma", () => ({
   prisma: mockPrisma,
 }));

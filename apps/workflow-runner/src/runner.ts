@@ -10,11 +10,9 @@ import {
 } from "@prisma/client";
 import {
   approvalExpirationInputSchema,
-  creatorTrainingReviewInputSchema,
   handoffFollowUpInputSchema,
 } from "@delegate/workflows";
 import {
-  buildCreatorTrainingSuggestions,
   finalizeComputeApprovalConversation,
 } from "@delegate/web-data";
 
@@ -534,7 +532,7 @@ export async function processWorkflowRunById(workflowRunId: string) {
       await processHandoffFollowUp(workflow);
       break;
     case WorkflowKind.CREATOR_TRAINING_REVIEW:
-      await processCreatorTrainingReview(workflow);
+      await retireCreatorTrainingReview(workflow);
       break;
   }
 }
@@ -707,15 +705,9 @@ async function processHandoffFollowUp(workflow: NonNullable<WorkflowRunRecord>) 
   });
 }
 
-async function processCreatorTrainingReview(workflow: NonNullable<WorkflowRunRecord>) {
-  const input = creatorTrainingReviewInputSchema.parse(workflow.input);
-  const suggestions = await buildCreatorTrainingSuggestions(input.representativeSlug, {
-    ...(input.feedbackLimit !== undefined ? { feedbackLimit: input.feedbackLimit } : {}),
-    ...(input.unknownQuestionLimit !== undefined
-      ? { unknownQuestionLimit: input.unknownQuestionLimit }
-      : {}),
-  });
-
+async function retireCreatorTrainingReview(workflow: NonNullable<WorkflowRunRecord>) {
+  // The former “training” workflow duplicated Knowledge Library ownership.
+  // Drain historical queued rows without reading drafts or writing suggestions.
   await prisma.eventAudit.create({
     data: {
       representativeId: workflow.representativeId,
@@ -725,17 +717,13 @@ async function processCreatorTrainingReview(workflow: NonNullable<WorkflowRunRec
       payload: {
         workflowRunId: workflow.id,
         workflowKind: "creator_training_review",
-        representativeSlug: input.representativeSlug,
-        suggestionCount: suggestions.length,
-        action: "creator_training_suggestions_built",
+        action: "creator_training_workflow_retired",
       },
     },
   });
 
   await completeWorkflowRun(workflow.id, {
-    outcome: "creator_training_suggestions_built",
-    representativeSlug: input.representativeSlug,
-    suggestionCount: suggestions.length,
+    outcome: "creator_training_workflow_retired",
   });
 }
 

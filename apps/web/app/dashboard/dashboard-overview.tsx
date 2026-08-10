@@ -27,11 +27,6 @@ type DashboardOverviewSnapshot = {
     sponsorPoolCredit: number;
     balanceCredits: number;
   };
-  openVikingMetrics: Array<{
-    label: string;
-    value: string;
-    detail: string;
-  }>;
   workflowEngine: {
     configured: "local_runner" | "temporal";
     effective: "local_runner" | "temporal";
@@ -230,26 +225,6 @@ export function DashboardOverview({
           tone: index === 0 ? ("accent" as const) : "default",
         }))}
       />
-
-      {snapshot.openVikingMetrics.length ? (
-        <div className="dashboard-subsection-stack">
-          <div className="dashboard-inline-section-heading">
-            <div>
-              <p className="eyebrow">{t.memoryEyebrow}</p>
-              <h3>{t.openVikingTitle}</h3>
-            </div>
-            <p className="section-copy">{t.openVikingCopy}</p>
-          </div>
-          <DashboardSignalStrip
-            cards={snapshot.openVikingMetrics.map((metric) => ({
-              label: formatMemoryCopy(metric.label, locale),
-              value: metric.value,
-              detail: formatMemoryCopy(metric.detail, locale),
-              tone: "safe" as const,
-            }))}
-          />
-        </div>
-      ) : null}
 
       {snapshot.workflowMetrics.length ? (
         <div className="dashboard-subsection-stack">
@@ -501,10 +476,6 @@ function compactWorkflowId(value: string): string {
   return `${value.slice(0, 16)}...${value.slice(-8)}`;
 }
 
-function formatMemoryCopy(value: string, locale: Locale): string {
-  return value.replaceAll(/OpenViking/gi, locale === "zh" ? "记忆同步" : "Memory sync");
-}
-
 function translateActionLabel(locale: Locale, label: string): string {
   if (locale === "en") {
     switch (label) {
@@ -597,9 +568,6 @@ const copy = {
     heroTitle: "主人需要看到这个数字代表是否还在赚钱、消耗和等待接手。",
     starsLiveChip: (stars: number) => `${stars} credits live`,
     activeHandoffsChip: (count: number) => `${count} 个待接手`,
-    memoryEyebrow: "记忆同步",
-    openVikingTitle: "记忆同步也应该像收件箱一样看得见。",
-    openVikingCopy: "保存、同步、召回来源必须进入日常读数，而不是藏在日志里。",
     workflowEyebrow: "后台定时任务",
     workflowTitle: "跨时间的事情，要能排队、超时、补跑，而不是靠人记得。",
     workflowCopy: "审批过期和人工接手跟进现在会进入后台定时任务，不再只是一次性函数调用。",
@@ -653,9 +621,6 @@ const copy = {
     heroTitle: "Owners need to know whether this Digital Representative is earning, consuming, or waiting for intervention.",
     starsLiveChip: (stars: number) => `${stars} credits live`,
     activeHandoffsChip: (count: number) => `${count} active follow-ups`,
-    memoryEyebrow: "Memory sync",
-    openVikingTitle: "Memory sync should be as observable as the inbox.",
-    openVikingCopy: "Save, sync, and recall sources belong in daily metrics instead of hidden logs.",
     workflowEyebrow: "Background timers",
     workflowTitle: "Anything that spans time should queue, expire, and recover instead of relying on memory.",
     workflowCopy: "Approval expiry and human follow-up now flow through durable background timers instead of one-off function calls.",

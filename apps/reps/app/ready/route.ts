@@ -13,6 +13,7 @@ const REQUIRED_PRISMA_FIELDS = {
   OwnerIdentityLink: ["issuer"],
   RepresentativeChannelBinding: ["endpointAssignmentRevision"],
   ConversationChannelBinding: ["representativeAssignmentRevision"],
+  MemoryUseItem: ["citationId"],
 } as const;
 
 const REQUIRED_ACCOUNT_INDEX_NAMES = [
@@ -62,7 +63,8 @@ async function checkDatabaseReadiness(): Promise<boolean> {
         app_session_contract."application",
         owner_identity_contract."issuer",
         representative_binding_contract."endpointAssignmentRevision",
-        conversation_binding_contract."representativeAssignmentRevision"
+        conversation_binding_contract."representativeAssignmentRevision",
+        memory_use_item_contract."citationId"
       FROM "Owner" AS owner_contract
       CROSS JOIN "AudienceIdentity" AS audience_identity_contract
       CROSS JOIN "Account" AS account_contract
@@ -71,6 +73,7 @@ async function checkDatabaseReadiness(): Promise<boolean> {
       CROSS JOIN "OwnerIdentityLink" AS owner_identity_contract
       CROSS JOIN "RepresentativeChannelBinding" AS representative_binding_contract
       CROSS JOIN "ConversationChannelBinding" AS conversation_binding_contract
+      CROSS JOIN "MemoryUseItem" AS memory_use_item_contract
       LIMIT 0
     `;
     const validAccountIndexes = await prisma.$queryRaw<

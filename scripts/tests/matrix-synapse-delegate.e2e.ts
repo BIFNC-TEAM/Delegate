@@ -45,7 +45,7 @@ async function main() {
     actorId: "matrix-local-e2e",
     representativeId: representative.id,
     requestId: `matrix-local-e2e:provision:${suffix}`,
-    idempotencyKey: "matrix-local-e2e:provision:lin-founder-rep",
+    idempotencyKey: `matrix-local-e2e:provision:${suffix}`,
   });
   const representativeMatrixUserId =
     controlPlane.virtualUser.matrixUserId;
@@ -311,19 +311,25 @@ async function main() {
     text: outboundText,
     clientMessageId: `matrix-local-e2e-operator-${suffix}`,
   });
-  const workerResult = await processNextConversationWork({
-    port: 4040,
-    pollMs: 500,
-    matrixHomeserverUrl: homeserverUrl,
-    matrixApplicationServiceToken: asToken,
-    telegramConversationPlatformMode: "worker",
-    telegramRequestTimeoutMs: 15_000,
-    outboxProcessingLeaseMs: 5 * 60_000,
-  });
+  const workerResult = await poll(async () => {
+    const result = await processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      matrixHomeserverUrl: homeserverUrl,
+      matrixApplicationServiceToken: asToken,
+      telegramConversationPlatformMode: "worker",
+      telegramRequestTimeoutMs: 15_000,
+      outboxProcessingLeaseMs: 5 * 60_000,
+    });
+    // The isolated E2E database is intentionally reusable. Drain an older
+    // pending operator delivery, if present, before asserting this run's exact
+    // message instead of making the smoke test depend on an empty queue.
+    return result.processed && result.runId === operatorMessage.id
+      ? result
+      : null;
+  }, "The conversation worker did not claim the current Matrix operator-message outbox.");
   if (
-    !workerResult.processed
-    || workerResult.runId !== operatorMessage.id
-    || workerResult.status !== "completed"
+    workerResult.status !== "completed"
   ) {
     throw new Error(
       "The conversation worker did not claim and complete the Matrix "

@@ -8,7 +8,6 @@ export type DashboardView =
   | "approvals"
   | "skills"
   | "wallet"
-  | "memory"
   | "analytics"
   | "channels"
   | "audit"
@@ -72,22 +71,21 @@ export const dashboardNavigation: Array<{
     items: [
       { id: "skills", index: "05", label: text("技能 / 工具", "Skills & Tools"), shortLabel: text("技能", "Skills") },
       { id: "wallet", index: "06", label: text("钱包 / 账单", "Wallet & Billing"), shortLabel: text("钱包", "Wallet") },
-      { id: "memory", index: "07", label: text("记忆系统", "Memory System"), shortLabel: text("记忆", "Memory") },
-      { id: "analytics", index: "08", label: text("数据分析", "Analytics"), shortLabel: text("分析", "Analytics") },
-      { id: "channels", index: "09", label: text("发布渠道", "Channels"), shortLabel: text("渠道", "Channels") },
+      { id: "analytics", index: "07", label: text("数据分析", "Analytics"), shortLabel: text("分析", "Analytics") },
+      { id: "channels", index: "08", label: text("发布渠道", "Channels"), shortLabel: text("渠道", "Channels") },
     ],
   },
   {
     label: text("系统", "System"),
     items: [
-      { id: "audit", index: "10", label: text("审计日志", "Audit Logs"), shortLabel: text("审计", "Audit") },
-      { id: "settings", index: "11", label: text("设置", "Settings"), shortLabel: text("设置", "Settings") },
+      { id: "audit", index: "09", label: text("审计日志", "Audit Logs"), shortLabel: text("审计", "Audit") },
+      { id: "settings", index: "10", label: text("设置", "Settings"), shortLabel: text("设置", "Settings") },
     ],
   },
 ];
 
 export const dashboardSectionBlueprints: Record<
-  Exclude<BlueprintDashboardView, "memory">,
+  BlueprintDashboardView,
   DashboardSectionBlueprint
 > = {
   knowledge: {

@@ -10,7 +10,6 @@ const { mockPrisma } = vi.hoisted(() => ({
     },
     openVikingMemoryRecord: {
       findMany: vi.fn(),
-      findFirst: vi.fn(),
       findUnique: vi.fn(),
       updateMany: vi.fn(),
     },
@@ -22,11 +21,8 @@ vi.mock("../src/prisma", () => ({
 }));
 
 import {
-  deleteRepresentativeOpenVikingMemory,
   resolveAllowedPublishedKnowledgeAssetIds,
-  retryRepresentativeOpenVikingMemoryDeletion,
   runOpenVikingMemoryDeletionRecoveryTick,
-  suppressRepresentativeOpenVikingMemory,
 } from "../src/openviking";
 import {
   assertLegacyOpenVikingMemoryUriForRepresentative,
@@ -52,9 +48,11 @@ describe("OpenViking memory safety", () => {
       new URL("../src/openviking.ts", import.meta.url),
       "utf8",
     );
-    const cleanupStart = source.indexOf("getRepresentativeOpenVikingMemoryPreview");
+    const cleanupStart = source.indexOf(
+      "@deprecated Legacy OpenVikingMemoryRecord recovery worker",
+    );
     const cleanupEnd = source.indexOf(
-      "getRepresentativeOpenVikingOverviewMetrics",
+      "function resolveRepresentativeDefaults",
       cleanupStart,
     );
     const cleanupSource = source.slice(cleanupStart, cleanupEnd);
@@ -225,77 +223,73 @@ describe("OpenViking memory safety", () => {
     expect(recallSource).not.toContain("conversationRecallTrace");
   });
 
-  it("suppresses locally before returning the memory", async () => {
-    mockPrisma.openVikingMemoryRecord.findFirst.mockResolvedValue(
-      buildMemory("ACTIVE"),
+  it("gates cross-channel recall on canonical identity, current consent, and the current channel disclosure", () => {
+    const source = readFileSync(
+      new URL("../src/openviking.ts", import.meta.url),
+      "utf8",
     );
-    mockPrisma.openVikingMemoryRecord.updateMany.mockResolvedValue({ count: 1 });
-    mockPrisma.openVikingMemoryRecord.findUnique.mockResolvedValue(
-      buildMemory("SUPPRESSED", {
-        suppressedAt: new Date("2026-07-31T04:00:00.000Z"),
-      }),
+    const authorizationStart = source.indexOf(
+      "async function loadGovernedMemoryRecallAuthorization",
     );
+    const authorizationEnd = source.indexOf(
+      "function hydrateGovernedMemoryRecall",
+      authorizationStart,
+    );
+    const authorization = source.slice(authorizationStart, authorizationEnd);
 
-    const result = await suppressRepresentativeOpenVikingMemory({
-      representativeSlug: "lin-founder-rep",
-      memoryId: "memory-1",
-    });
-
-    expect(mockPrisma.openVikingMemoryRecord.updateMany).toHaveBeenCalledWith({
-      where: {
-        id: "memory-1",
-        representativeId: "rep-1",
-        status: "ACTIVE",
-      },
-      data: {
-        status: "SUPPRESSED",
-        suppressedAt: expect.any(Date),
-        deletionError: null,
-      },
-    });
-    expect(result?.status).toBe("SUPPRESSED");
+    expect(authorization).toContain(
+      "hasCurrentMemoryChannelDisclosureForMessage",
+    );
+    expect(authorization).toContain(
+      "resolveContactMemorySharingEligibility",
+    );
+    expect(authorization).toContain(
+      "buildGovernedSharedContactMemoryRootUri",
+    );
+    expect(authorization).toContain(
+      "buildGovernedSharedContactMemoryVersionUri",
+    );
+    expect(authorization).toContain(
+      "automaticDecision.policyRevision === policy.revision",
+    );
+    expect(authorization).toContain("projection.writeVerifiedAt");
+    expect(authorization).not.toContain(
+      "version.sourceCandidate.originChannel !== sourceChannel",
+    );
   });
 
-  it("keeps a remote deletion failure non-recallable and retryable", async () => {
-    mockPrisma.openVikingMemoryRecord.findFirst.mockResolvedValue(
-      buildMemory("ACTIVE"),
-    );
-    mockPrisma.openVikingMemoryRecord.updateMany.mockResolvedValue({ count: 1 });
-    mockPrisma.openVikingMemoryRecord.findUnique.mockResolvedValue(
-      buildMemory("DELETE_FAILED", {
+  it("keeps a background cleanup failure non-recallable and retryable", async () => {
+    mockPrisma.openVikingMemoryRecord.findMany.mockResolvedValue([
+      buildMemory("DELETE_PENDING", {
         summary: "",
-        suppressedAt: new Date("2026-07-31T04:00:00.000Z"),
-        lastDeleteAttemptAt: new Date("2026-07-31T04:00:01.000Z"),
-        deletionAttemptCount: 1,
-        deletionError: "OpenViking is disabled at the environment level.",
+        lastDeleteAttemptAt: null,
       }),
-    );
-
-    const result = await deleteRepresentativeOpenVikingMemory({
-      representativeSlug: "lin-founder-rep",
-      memoryId: "memory-1",
+    ]);
+    mockPrisma.openVikingMemoryRecord.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.openVikingMemoryRecord.findUnique.mockResolvedValue({
+      status: "DELETE_FAILED",
     });
 
-    const updates = mockPrisma.openVikingMemoryRecord.updateMany.mock.calls;
-    expect(updates[0]?.[0]).toMatchObject({
-      where: { status: { in: ["ACTIVE", "SUPPRESSED", "DELETE_FAILED"] } },
-      data: { status: "DELETE_PENDING", summary: "" },
+    const result = await runOpenVikingMemoryDeletionRecoveryTick({
+      now: new Date("2026-07-31T04:00:00.000Z"),
     });
-    expect(updates.at(-1)?.[0]).toMatchObject({
+
+    expect(result).toEqual({
+      processed: 1,
+      deleted: 0,
+      failed: 1,
+      pending: 0,
+    });
+    expect(mockPrisma.openVikingMemoryRecord.updateMany.mock.calls.at(-1)?.[0]).toMatchObject({
       where: {
         status: "DELETE_PENDING",
-        lastDeleteAttemptAt: updates[1]?.[0].data.lastDeleteAttemptAt,
+        lastDeleteAttemptAt: expect.any(Date),
       },
       data: {
         status: "DELETE_FAILED",
         deletionError: "OpenViking is disabled at the environment level.",
+        nextDeleteAttemptAt: expect.any(Date),
       },
-    });
-    expect(result).toMatchObject({
-      status: "DELETE_FAILED",
-      summary: "",
-      deletionAttemptCount: 1,
-      deletionError: "REMOTE_DELETE_FAILED",
     });
   });
 
@@ -311,28 +305,20 @@ describe("OpenViking memory safety", () => {
     process.env.OPENVIKING_ENABLED = "true";
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    mockPrisma.openVikingMemoryRecord.findFirst.mockResolvedValue(
-      buildMemory("SUPPRESSED", {
-        uri,
-      }),
-    );
-    mockPrisma.openVikingMemoryRecord.updateMany.mockResolvedValue({ count: 1 });
-    mockPrisma.openVikingMemoryRecord.findUnique.mockResolvedValue(
-      buildMemory("DELETE_FAILED", {
+    mockPrisma.openVikingMemoryRecord.findMany.mockResolvedValue([
+      buildMemory("DELETE_PENDING", {
         uri,
         summary: "",
-        suppressedAt: new Date("2026-07-31T04:00:00.000Z"),
-        lastDeleteAttemptAt: new Date("2026-07-31T04:00:01.000Z"),
-        nextDeleteAttemptAt: new Date("2026-07-31T04:00:31.000Z"),
-        deletionAttemptCount: 1,
-        deletionError:
-          "Legacy OpenViking memory deletion refused an out-of-scope or non-canonical URI.",
+        lastDeleteAttemptAt: null,
       }),
-    );
+    ]);
+    mockPrisma.openVikingMemoryRecord.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.openVikingMemoryRecord.findUnique.mockResolvedValue({
+      status: "DELETE_FAILED",
+    });
 
-    const result = await deleteRepresentativeOpenVikingMemory({
-      representativeSlug: "lin-founder-rep",
-      memoryId: "memory-1",
+    const result = await runOpenVikingMemoryDeletionRecoveryTick({
+      now: new Date("2026-07-31T04:00:00.000Z"),
     });
 
     expect(fetchMock).not.toHaveBeenCalled();
@@ -354,80 +340,12 @@ describe("OpenViking memory safety", () => {
         }),
       }),
     });
-    expect(result).toMatchObject({
-      status: "DELETE_FAILED",
-      summary: "",
-      deletionError: "REMOTE_DELETE_FAILED",
+    expect(result).toEqual({
+      processed: 1,
+      deleted: 0,
+      failed: 1,
+      pending: 0,
     });
-  });
-
-  it("does not steal a live deletion lease", async () => {
-    const liveAttemptAt = new Date();
-    mockPrisma.openVikingMemoryRecord.findFirst.mockResolvedValue(
-      buildMemory("DELETE_PENDING", {
-        lastDeleteAttemptAt: liveAttemptAt,
-        deletionAttemptCount: 1,
-      }),
-    );
-    mockPrisma.openVikingMemoryRecord.findUnique.mockResolvedValue(
-      buildMemory("DELETE_PENDING", {
-        lastDeleteAttemptAt: liveAttemptAt,
-        deletionAttemptCount: 1,
-      }),
-    );
-
-    const result = await retryRepresentativeOpenVikingMemoryDeletion({
-      representativeSlug: "lin-founder-rep",
-      memoryId: "memory-1",
-    });
-
-    expect(mockPrisma.openVikingMemoryRecord.updateMany).not.toHaveBeenCalled();
-    expect(result?.status).toBe("DELETE_PENDING");
-  });
-
-  it("lets a confirmed remote success converge DELETE_FAILED to DELETED", async () => {
-    process.env.OPENVIKING_ENABLED = "true";
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(
-      JSON.stringify({ status: "ok", result: {} }),
-      {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      },
-    )));
-    mockPrisma.openVikingMemoryRecord.findFirst.mockResolvedValue(
-      buildMemory("DELETE_FAILED", {
-        lastDeleteAttemptAt: new Date("2026-07-31T03:00:00.000Z"),
-        deletionAttemptCount: 1,
-        deletionError: "provider timeout",
-      }),
-    );
-    mockPrisma.openVikingMemoryRecord.updateMany.mockResolvedValue({ count: 1 });
-    mockPrisma.openVikingMemoryRecord.findUnique.mockResolvedValue(
-      buildMemory("DELETED", {
-        summary: "",
-        deletedAt: new Date("2026-07-31T04:00:00.000Z"),
-        deletionAttemptCount: 2,
-      }),
-    );
-
-    const result = await retryRepresentativeOpenVikingMemoryDeletion({
-      representativeSlug: "lin-founder-rep",
-      memoryId: "memory-1",
-    });
-
-    const deletedUpdate = mockPrisma.openVikingMemoryRecord.updateMany.mock.calls
-      .map((call) => call[0])
-      .find((call) => call.data.status === "DELETED");
-    expect(deletedUpdate).toMatchObject({
-      where: {
-        status: "DELETE_PENDING",
-        lastDeleteAttemptAt: expect.any(Date),
-      },
-      data: {
-        status: "DELETED",
-      },
-    });
-    expect(result?.status).toBe("DELETED");
   });
 
   it("recovers a migration-created DELETE_PENDING row with no lease", async () => {
@@ -478,28 +396,6 @@ describe("OpenViking memory safety", () => {
     );
   });
 
-  it("attributes memory governance audits to the authenticated owner", async () => {
-    mockPrisma.openVikingMemoryRecord.findFirst.mockResolvedValue(
-      buildMemory("ACTIVE"),
-    );
-    mockPrisma.openVikingMemoryRecord.updateMany.mockResolvedValue({ count: 1 });
-    mockPrisma.openVikingMemoryRecord.findUnique.mockResolvedValue(
-      buildMemory("SUPPRESSED"),
-    );
-
-    await suppressRepresentativeOpenVikingMemory({
-      representativeSlug: "lin-founder-rep",
-      memoryId: "memory-1",
-      ownerId: "owner-1",
-    });
-
-    expect(mockPrisma.eventAudit.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        ownerId: "owner-1",
-        representativeId: "rep-1",
-      }),
-    });
-  });
 });
 
 function buildMemory(

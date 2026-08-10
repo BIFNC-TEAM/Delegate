@@ -197,6 +197,65 @@ describe("conversation runtime version pin", () => {
     });
   });
 
+  it("reactivates a waiting-user episode before queueing the next AI generation", async () => {
+    tx.conversation.findFirst.mockResolvedValue({
+      id: "conversation-1",
+      state: "WAITING_USER",
+      representative: {
+        id: "representative-1",
+        activeVersionId: "representative-version-2",
+        lifecycleState: "PUBLISHED",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+      episodes: [{
+        id: "episode-1",
+        sequence: 1,
+        status: "WAITING_USER",
+        representativeVersionId: "representative-version-1",
+      }],
+      channelBindings: [{
+        id: "web-binding-1",
+        kind: "WEB",
+        representativeBinding: {
+          status: "CONNECTED",
+          desiredState: "ACTIVE",
+          healthStatus: "HEALTHY",
+        },
+      }],
+    });
+    tx.conversationEpisode.update.mockResolvedValue({
+      id: "episode-1",
+      sequence: 1,
+      status: "ACTIVE",
+      representativeVersionId: "representative-version-1",
+    });
+
+    await acceptInboundConversationMessage({
+      representativeSlug: "representative",
+      conversationId: "conversation-1",
+      text: "continue after the previous reply",
+      clientMessageId: "client-message-waiting-user",
+    });
+
+    expect(tx.conversationEpisode.update).toHaveBeenCalledWith({
+      where: { id: "episode-1" },
+      data: { status: "ACTIVE" },
+    });
+    expect(tx.conversationEpisode.create).not.toHaveBeenCalled();
+    expect(tx.generationRun.upsert).toHaveBeenCalledWith({
+      where: {
+        idempotencyKey:
+          "reply:conversation-1:client-message-waiting-user",
+      },
+      create: expect.objectContaining({
+        episodeId: "episode-1",
+        representativeVersionId: "representative-version-1",
+      }),
+      update: {},
+    });
+  });
+
   it("fails closed when a Telegram conversation binding has no representative binding", async () => {
     tx.conversation.findFirst.mockResolvedValue({
       id: "conversation-telegram-unbound",
@@ -224,6 +283,7 @@ describe("conversation runtime version pin", () => {
         text: "must not queue",
         clientMessageId: "telegram-message-orphaned",
         channel: "telegram",
+        occurredAt: new Date("2026-08-01T00:00:00.000Z"),
       }),
     ).rejects.toMatchObject({
       name: "ChannelUnavailableError",
@@ -284,6 +344,7 @@ describe("conversation runtime version pin", () => {
         text: "must not cross the isolation boundary",
         clientMessageId: "matrix-message-after-isolation",
         channel: "matrix",
+        occurredAt: new Date("2026-08-01T00:00:00.000Z"),
       }),
     ).rejects.toThrow("matrix_private_room_not_verified");
 
@@ -353,6 +414,7 @@ describe("conversation runtime version pin", () => {
         text: "must not queue on the old identity",
         clientMessageId: "matrix-message-after-reassignment",
         channel: "matrix",
+        occurredAt: new Date("2026-08-01T00:00:00.000Z"),
       }),
     ).rejects.toMatchObject({
       name: "ChannelUnavailableError",
@@ -582,6 +644,108 @@ describe("conversation runtime version pin", () => {
       data: expect.objectContaining({
         status: "DEAD_LETTER",
         lastError: "matrix_identity_reassigned",
+      }),
+    });
+  });
+
+  it("cancels Matrix generation completion from an earlier channel activation", async () => {
+    const matrixMetadata = {
+      directMessageOnly: true,
+      encrypted: false,
+      securityState: "ACTIVE",
+      audienceMatrixUserId: "@alice:example.org",
+      representativeMatrixUserId: "@_delegate_rep:example.org",
+      representativeAssignmentRevision: 3,
+    };
+    tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-matrix-completion-stale-lifecycle",
+      status: "PROCESSING",
+      conversationId: "conversation-matrix-lifecycle",
+      episodeId: "episode-1",
+      inputMessageId: "message-matrix-completion-stale-lifecycle",
+      delegationTaskId: null,
+      runtimePolicySnapshot: null,
+      inputMessage: {
+        id: "message-matrix-completion-stale-lifecycle",
+        channelLifecycleRevision: 1,
+        channelBinding: {
+          id: "matrix-binding-lifecycle",
+          kind: "MATRIX",
+          externalConversationId: "!room:example.org",
+          representativeAssignmentRevision: 3,
+          metadata: matrixMetadata,
+          representativeBinding: {
+            externalUserId: "@_delegate_rep:example.org",
+            endpointAssignmentRevision: 3,
+            endpointLifecycleRevision: 2,
+          },
+        },
+      },
+      outputMessage: null,
+      conversation: {
+        id: "conversation-matrix-lifecycle",
+        state: "AI_QUEUED",
+        audienceIdentityId: "audience-1",
+        representativeId: "representative-1",
+      },
+      delegationTaskStep: null,
+    });
+    tx.conversationChannelBinding.findFirst.mockResolvedValue({
+      kind: "MATRIX",
+      externalConversationId: "!room:example.org",
+      representativeAssignmentRevision: 3,
+      metadata: matrixMetadata,
+      representativeBinding: {
+        endpointAssignmentRevision: 3,
+      },
+    });
+
+    await expect(completeInlineGenerationRun({
+      conversationId: "conversation-matrix-lifecycle",
+      runId: "run-matrix-completion-stale-lifecycle",
+      outboxId: "outbox-matrix-completion-stale-lifecycle",
+      leaseAttempt: 1,
+      replyText: "must never be persisted",
+      senderDisplayName: "Representative",
+      completeOutbox: false,
+      countUsage: false,
+    })).rejects.toMatchObject({
+      name: "ChannelUnavailableError",
+      code: "matrix_channel_lifecycle_reactivated",
+    });
+
+    expect(tx.$executeRaw.mock.calls.at(-1)?.[1]).toBe(
+      "matrix-room-security:!room:example.org",
+    );
+    expect(tx.message.create).not.toHaveBeenCalled();
+    expect(tx.generationRun.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "run-matrix-completion-stale-lifecycle",
+        status: {
+          in: ["QUEUED", "PROCESSING", "WAITING_APPROVAL", "WAITING_HUMAN"],
+        },
+      },
+      data: expect.objectContaining({
+        status: "CANCELED",
+        errorCode: "matrix_channel_lifecycle_reactivated",
+      }),
+    });
+    expect(tx.message.update).toHaveBeenCalledWith({
+      where: { id: "message-matrix-completion-stale-lifecycle" },
+      data: expect.objectContaining({
+        deliveryStatus: "CANCELED",
+        failureCode: "matrix_channel_lifecycle_reactivated",
+      }),
+    });
+    expect(tx.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        aggregateType: "generation_run",
+        aggregateId: "run-matrix-completion-stale-lifecycle",
+        status: { in: ["PENDING", "PROCESSING", "FAILED"] },
+      },
+      data: expect.objectContaining({
+        status: "DEAD_LETTER",
+        lastError: "matrix_channel_lifecycle_reactivated",
       }),
     });
   });
@@ -2040,6 +2204,130 @@ describe("conversation runtime version pin", () => {
     });
   });
 
+  it.each([
+    ["missing", null],
+    ["stale", 1],
+  ])(
+    "cancels queued Matrix work with a %s channel lifecycle revision",
+    async (_case, channelLifecycleRevision) => {
+      const suffix = channelLifecycleRevision === null ? "missing" : "stale";
+      const runId = `run-matrix-lifecycle-${suffix}`;
+      const messageId = `message-matrix-lifecycle-${suffix}`;
+      const outboxId = `outbox-matrix-lifecycle-${suffix}`;
+      const matrixMetadata = {
+        directMessageOnly: true,
+        encrypted: false,
+        securityState: "ACTIVE",
+        audienceMatrixUserId: "@alice:example.org",
+        representativeMatrixUserId: "@_delegate_rep:example.org",
+        representativeAssignmentRevision: 3,
+      };
+      const matrixBinding = {
+        id: "matrix-binding-lifecycle",
+        kind: "MATRIX",
+        representativeAssignmentRevision: 3,
+        externalConversationId: "!room:example.org",
+        metadata: matrixMetadata,
+        representativeBinding: {
+          status: "CONNECTED",
+          desiredState: "ACTIVE",
+          healthStatus: "HEALTHY",
+          externalUserId: "@_delegate_rep:example.org",
+          endpointAssignmentRevision: 3,
+          endpointLifecycleRevision: 2,
+        },
+      };
+      tx.$queryRaw.mockResolvedValue([{
+        id: outboxId,
+        aggregateId: runId,
+        status: "PENDING",
+        attemptCount: 0,
+      }]);
+      tx.outboxEvent.update.mockResolvedValue({
+        id: outboxId,
+        aggregateId: runId,
+        attemptCount: 1,
+      });
+      tx.generationRun.findUnique.mockResolvedValue({
+        id: runId,
+        status: "QUEUED",
+        delegationTaskId: null,
+        delegationTaskStepId: null,
+        delegationTaskStep: null,
+        contextSnapshot: null,
+        runtimePolicySnapshot: null,
+        representativeVersionId: "representative-version-1",
+        episodeId: "episode-1",
+        episode: {
+          representativeVersionId: "representative-version-1",
+        },
+        inputMessageId: messageId,
+        inputMessage: {
+          id: messageId,
+          text: "must not generate",
+          channelLifecycleRevision,
+          channelBinding: matrixBinding,
+        },
+        outputMessage: null,
+        conversation: {
+          id: "conversation-matrix-lifecycle",
+          representativeId: "representative-1",
+          contactId: "contact-1",
+          audienceIdentityId: "audience-1",
+          state: "AI_QUEUED",
+          freeRepliesUsed: 1,
+          passUnlockedAt: null,
+          deepHelpUnlockedAt: null,
+          representative: {
+            slug: "representative",
+            displayName: "Representative",
+            lifecycleState: "PUBLISHED",
+            activeVersionId: "representative-version-1",
+            publicMode: true,
+            runtimePolicyOverlays: [],
+          },
+          channelBindings: [matrixBinding],
+        },
+      });
+      tx.conversationChannelBinding.findFirst.mockResolvedValue({
+        kind: "MATRIX",
+        externalConversationId: "!room:example.org",
+        representativeAssignmentRevision: 3,
+        metadata: matrixMetadata,
+        representativeBinding: {
+          endpointAssignmentRevision: 3,
+        },
+      });
+
+      await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+
+      expect(tx.$executeRaw.mock.calls.at(-1)?.[1]).toBe(
+        "matrix-room-security:!room:example.org",
+      );
+      expect(tx.generationRun.update).toHaveBeenCalledWith({
+        where: { id: runId },
+        data: expect.objectContaining({
+          status: "CANCELED",
+          errorCode: "matrix_channel_lifecycle_reactivated",
+        }),
+      });
+      expect(tx.message.update).toHaveBeenCalledWith({
+        where: { id: messageId },
+        data: expect.objectContaining({
+          deliveryStatus: "CANCELED",
+          failureCode: "matrix_channel_lifecycle_reactivated",
+        }),
+      });
+      expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
+        where: { id: outboxId },
+        data: {
+          status: "DEAD_LETTER",
+          lastError: "matrix_channel_lifecycle_reactivated",
+        },
+      });
+    },
+  );
+
   it("cancels queued Telegram generation after the representative switches Bots", async () => {
     tx.$queryRaw.mockResolvedValue([{
       id: "outbox-telegram-reassigned-queued",
@@ -2432,6 +2720,70 @@ describe("conversation runtime version pin", () => {
       data: {
         status: "DEAD_LETTER",
         lastError: "matrix_identity_reassigned",
+      },
+    });
+  });
+
+  it("dead-letters an Operator reply from an earlier Matrix channel activation", async () => {
+    tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-operator-matrix-stale-lifecycle",
+      attemptCount: 0,
+    }]);
+    tx.outboxEvent.update.mockResolvedValue({
+      id: "outbox-operator-matrix-stale-lifecycle",
+      aggregateId: "message-operator-matrix-stale-lifecycle",
+      connectionId: "delegate-matrix-as",
+    });
+    tx.message.findUnique.mockResolvedValue({
+      id: "message-operator-matrix-stale-lifecycle",
+      conversationId: "conversation-matrix-lifecycle",
+      text: "operator reply",
+      senderDisplayName: "Owner",
+      externalMessageId: null,
+      channelLifecycleRevision: 1,
+      channelBinding: {
+        kind: "MATRIX",
+        connectionId: "delegate-matrix-as",
+        externalConversationId: "!room:example.org",
+        representativeAssignmentRevision: 3,
+        metadata: {
+          directMessageOnly: true,
+          encrypted: false,
+          securityState: "ACTIVE",
+          audienceMatrixUserId: "@alice:example.org",
+          representativeMatrixUserId: "@_delegate_rep:example.org",
+          representativeAssignmentRevision: 3,
+        },
+        representativeBinding: {
+          externalUserId: "@_delegate_rep:example.org",
+          endpointAssignmentRevision: 3,
+          endpointLifecycleRevision: 2,
+        },
+      },
+      conversation: {
+        representative: {
+          id: "representative-1",
+          ownerId: "owner-1",
+        },
+      },
+    });
+
+    await expect(claimNextOperatorMessageWorkItem()).resolves.toBeNull();
+
+    expect(tx.message.update).toHaveBeenCalledWith({
+      where: { id: "message-operator-matrix-stale-lifecycle" },
+      data: {
+        deliveryStatus: "CANCELED",
+        failureCode: "matrix_channel_lifecycle_reactivated",
+        failureReason:
+          "Matrix delivery was canceled because it belongs to an earlier channel activation.",
+      },
+    });
+    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
+      where: { id: "outbox-operator-matrix-stale-lifecycle" },
+      data: {
+        status: "DEAD_LETTER",
+        lastError: "matrix_channel_lifecycle_reactivated",
       },
     });
   });

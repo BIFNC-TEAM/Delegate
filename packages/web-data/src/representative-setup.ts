@@ -53,7 +53,6 @@ import { z } from "zod";
 
 import { prisma } from "./prisma";
 import { resolveChannelAvailability } from "./channel-availability";
-import { getDemoCreatorTrainingKnowledgeOverlay } from "./creator-training";
 import { acquireRepresentativeKnowledgePackLock } from "./knowledge-pack-lock";
 import { isWorkspaceSkillReleaseRuntimeTrusted } from "./workspace-skills";
 
@@ -354,7 +353,9 @@ export type PublicRepresentativeRuntimeResult =
 
 export type PublicGovernedMemoryDisclosure = {
   enabled: boolean;
+  shortTermMemoryEnabled: boolean;
   contactMemoryEnabled: boolean;
+  contactMemoryCrossChannelEnabled: boolean;
   representativeExperienceEnabled: boolean;
   automaticExtractionEnabled: boolean;
   retentionDays: number | null;
@@ -365,7 +366,9 @@ export type PublicGovernedMemoryDisclosure = {
 
 type PublicGovernedMemoryPolicy = {
   longTermMemoryEnabled: boolean;
+  shortTermMemoryEnabled?: boolean;
   contactMemoryEnabled: boolean;
+  contactMemoryCrossChannelEnabled?: boolean;
   representativeExperienceEnabled: boolean;
   autoExtract: boolean;
   webRecallEnabled: boolean;
@@ -376,7 +379,7 @@ type PublicGovernedMemoryPolicy = {
   revision: number;
 };
 
-const PUBLIC_MEMORY_DISCLOSURE_FINGERPRINT_VERSION = 1;
+const PUBLIC_MEMORY_DISCLOSURE_FINGERPRINT_VERSION = 4;
 
 export function resolvePublicGovernedMemoryDisclosure(input: {
   policy: PublicGovernedMemoryPolicy | null;
@@ -390,6 +393,7 @@ export function resolvePublicGovernedMemoryDisclosure(input: {
       || input.policy.representativeExperienceEnabled
     ),
   );
+  const shortTermMemoryEnabled = input.policy?.shortTermMemoryEnabled ?? true;
   const enabled = Boolean(
     hasEnabledMemoryKind
     && input.policy?.webRecallEnabled
@@ -399,7 +403,6 @@ export function resolvePublicGovernedMemoryDisclosure(input: {
   );
   const automaticExtractionEnabled = Boolean(
     hasEnabledMemoryKind
-    && input.policy?.contactMemoryEnabled
     && input.policy?.autoExtract
     && input.policy.webExtractEnabled,
   );
@@ -412,7 +415,9 @@ export function resolvePublicGovernedMemoryDisclosure(input: {
   if (!policyAppliesToWeb || !input.policy) {
     return buildPublicGovernedMemoryDisclosure({
       enabled: false,
+      shortTermMemoryEnabled,
       contactMemoryEnabled: false,
+      contactMemoryCrossChannelEnabled: false,
       representativeExperienceEnabled: false,
       automaticExtractionEnabled: false,
       retentionDays: null,
@@ -423,7 +428,10 @@ export function resolvePublicGovernedMemoryDisclosure(input: {
 
   return buildPublicGovernedMemoryDisclosure({
     enabled,
+    shortTermMemoryEnabled,
     contactMemoryEnabled: input.policy.contactMemoryEnabled,
+    // Public runtime remains channel-local even if a legacy row contains true.
+    contactMemoryCrossChannelEnabled: false,
     representativeExperienceEnabled: input.policy.representativeExperienceEnabled,
     automaticExtractionEnabled,
     retentionDays: input.policy.retentionDays,
@@ -441,7 +449,9 @@ function buildPublicGovernedMemoryDisclosure(input: Omit<
       PUBLIC_MEMORY_DISCLOSURE_FINGERPRINT_VERSION,
       input.policyRevision,
       input.enabled,
+      input.shortTermMemoryEnabled,
       input.contactMemoryEnabled,
+      input.contactMemoryCrossChannelEnabled,
       input.representativeExperienceEnabled,
       input.automaticExtractionEnabled,
       input.retentionDays,
@@ -904,10 +914,7 @@ export async function getRepresentativeSetupSnapshot(
   representativeSlug: string,
 ): Promise<RepresentativeSetupSnapshot | null> {
   if (shouldUseStaticFallbackMode(representativeSlug)) {
-    return applyDemoTrainingOverlay(
-      cloneRepresentativeSetupSnapshot(getOrCreateDemoFallbackSetupSnapshot()),
-      representativeSlug,
-    );
+    return cloneRepresentativeSetupSnapshot(getOrCreateDemoFallbackSetupSnapshot());
   }
 
   try {
@@ -923,10 +930,7 @@ export async function getRepresentativeSetupSnapshot(
     return serializeRepresentativeSetup(representative);
   } catch (error) {
     if (shouldUseDemoFallback(error, representativeSlug)) {
-      return applyDemoTrainingOverlay(
-        cloneRepresentativeSetupSnapshot(getOrCreateDemoFallbackSetupSnapshot()),
-        representativeSlug,
-      );
+      return cloneRepresentativeSetupSnapshot(getOrCreateDemoFallbackSetupSnapshot());
     }
 
     throw error;
@@ -1141,7 +1145,9 @@ export async function getPublicRepresentativeRuntime(
       memoryPolicy: {
         select: {
           longTermMemoryEnabled: true,
+          shortTermMemoryEnabled: true,
           contactMemoryEnabled: true,
+          contactMemoryCrossChannelEnabled: true,
           representativeExperienceEnabled: true,
           autoExtract: true,
           webRecallEnabled: true,
@@ -2396,116 +2402,6 @@ function cloneRepresentativeSetupSnapshot(
     compute: cloneComputeSetup(snapshot.compute),
     delegation: { ...snapshot.delegation },
   };
-}
-
-function applyDemoTrainingOverlay(
-  snapshot: RepresentativeSetupSnapshot,
-  representativeSlug: string,
-): RepresentativeSetupSnapshot {
-  const overlay = getDemoCreatorTrainingKnowledgeOverlay(representativeSlug);
-  if (!overlay) {
-    return snapshot;
-  }
-
-  return {
-    ...snapshot,
-    knowledgePack: {
-      identitySummary: overlay.identitySummary || snapshot.knowledgePack.identitySummary,
-      faq: normalizeOverlayKnowledgeDocuments(overlay.faq, "faq"),
-      materials: normalizeOverlayKnowledgeDocuments(overlay.materials, "download"),
-      policies: normalizeOverlayKnowledgeDocuments(overlay.policies, "policy"),
-    },
-  };
-}
-
-function normalizeOverlayKnowledgeDocuments(
-  value: unknown[],
-  fallbackKind: KnowledgeDocument["kind"],
-): KnowledgeDocument[] {
-  const documents: KnowledgeDocument[] = [];
-
-  value.forEach((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      return;
-    }
-    const record = item as Record<string, unknown>;
-    const title =
-      typeof record.title === "string" && record.title.trim()
-        ? record.title.trim()
-        : `Training item ${index + 1}`;
-    const summary =
-      typeof record.summary === "string" && record.summary.trim()
-        ? normalizeUploadedKnowledgeSummary(record.summary)
-        : title;
-    const id =
-      typeof record.id === "string" && record.id.trim()
-        ? record.id.trim()
-        : `training_overlay_${index + 1}`;
-    const kind = normalizeKnowledgeKind(record.kind, fallbackKind);
-    const url = typeof record.url === "string" && record.url.trim() ? record.url.trim() : undefined;
-
-    documents.push({
-      id,
-      title,
-      kind,
-      summary,
-      ...(url ? { url } : {}),
-    });
-  });
-
-  return documents;
-}
-
-function normalizeUploadedKnowledgeSummary(value: string): string {
-  const lines = value
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const inlineStripped = stripInlineUploadKnowledgePreamble(lines.join(" "));
-  if (inlineStripped) {
-    return inlineStripped;
-  }
-  const extractedTextIndex = lines.findIndex((line) => line.toLowerCase() === "extracted text:");
-  const contentLines = extractedTextIndex >= 0 ? lines.slice(extractedTextIndex + 1) : lines;
-
-  return (
-    contentLines
-      .filter((line) => !/^uploaded file:/i.test(line))
-      .filter((line) => !/^mime type:/i.test(line))
-      .filter((line) => !/^extraction note:/i.test(line))
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim() || value.trim()
-  );
-}
-
-function stripInlineUploadKnowledgePreamble(value: string): string {
-  const stripped = value
-    .replace(/^uploaded file:\s+\S+(?:\s+mime type:\s+\S+)?\s*/i, "")
-    .replace(/\bextracted text:\s*/i, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return stripped === value.trim() ? "" : stripped;
-}
-
-function normalizeKnowledgeKind(
-  value: unknown,
-  fallbackKind: KnowledgeDocument["kind"],
-): KnowledgeDocument["kind"] {
-  if (
-    value === "bio" ||
-    value === "faq" ||
-    value === "policy" ||
-    value === "pricing" ||
-    value === "case_study" ||
-    value === "deck" ||
-    value === "calendar" ||
-    value === "download"
-  ) {
-    return value;
-  }
-  return fallbackKind;
 }
 
 function normalizeKnowledgeDocuments(

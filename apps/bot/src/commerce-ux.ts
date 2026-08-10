@@ -27,6 +27,10 @@ export function buildTelegramBotCommands(
         : "Continue governed compute requests on Web",
     },
     { command: "bind", description: "Bind this Telegram account to your Delegate account" },
+    { command: "memory_share", description: "Review and allow cross-channel Contact Memory" },
+    { command: "memory_unshare", description: "Stop and delete cross-channel Contact Memory" },
+    { command: "delete_memory", description: "Delete Contact Memory for this representative and channel" },
+    { command: "forget", description: "Alias for deleting this channel's Contact Memory" },
     { command: "paysupport", description: "Get payment and refund support" },
   ];
 }

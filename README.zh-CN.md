@@ -42,14 +42,14 @@ Delegate 现在包含这些可运行的页面和服务：
 
 - **营销站点** 位于 `apps/site`，使用 Dispatch Editorial 设计系统。
 - **公开 representative 应用** 位于 `apps/reps`，包含代表档案、服务档位、网页聊天、充值入口模块，以及签名 public-chat session state。
-- **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、委托任务、governed actions、compute sessions、artifacts、deliverables、packages、OpenViking traces、workflow state，以及 Owner 资料、身份安全和 Dashboard 通知设置。
+- **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、委托任务、governed actions、compute sessions、artifacts、deliverables、packages、代表级 Memory 配置、workflow state，以及 Owner 资料、身份安全和 Dashboard 通知设置。
 - **可选 Telegram bot runtime** 位于 `apps/bot`，基于 grammY long-poll 和共享 Conversation Platform；它保留 Telegram 特有命令与交付边界，但不是第一版 Delegate 产品主入口。
 - **可选 Matrix Application Service** 位于 `apps/matrix-bridge`，负责认证 Matrix transaction、映射渠道事件和管理虚拟用户。原生 Matrix 是独立的可选渠道，不是 Telegram 的必需中转层。
 - **AMN wallet control plane** 覆盖内部钱包 ledger、mock recharge、Agent token purchase、usage charging、Creator 20% revenue policy、refund/reversal services、withdrawal request freeze、provider adapters，以及 owner/public wallet views。
 - **Compute broker** 位于 `apps/compute-broker`，在 approval 和 policy gate 后提供受治理的 `exec`、`read`、`write`、`process` 和 `browser` 请求。
 - **Workflow runner** 位于 `apps/workflow-runner`，支持 local runner 和 Temporal-backed durable workflow dispatch。
 - **Prisma/Postgres 数据模型** 覆盖 representatives、contacts、conversations、delegation tasks、handoffs、approvals、invoices、compute、artifacts、deliverables、workflows 和 audit trails。
-- **OpenViking 集成** 支持 representative-scoped public resources、recall、session commit traces 和 safe memory previews。
+- **OpenViking 集成** 作为 PostgreSQL 权威数据之后的可重建投影，支持已发布公开知识与受治理记忆的同步和召回。
 - **工作区技能治理** 支持 ClawHub 元数据发现、不可变版本固定、代表草稿绑定、MCP/Compute 就绪检查、统一审批/审计及签名补丁更新策略；不会执行第三方技能包代码。
 
 当前真正实现的 durable workflow kind 只有两个：
@@ -198,18 +198,31 @@ pnpm install
 cp .env.example .env
 ```
 
-启动本地测试栈。这个显式 override 只让 Dashboard 和 representative app
-以开发模式运行，启用内建本地身份，同时确保生产认证在配置不完整时拒绝访问：
+首次启动，或者修改了 `package.json`、锁文件、Dockerfile 后，执行一次完整初始化：
+
+```bash
+pnpm docker:bootstrap:local
+```
+
+本地 override 会让 Dashboard 和公开代表页使用 `next dev --turbopack`，并以只读
+方式挂载应用及工作区包源码，同时继续启用内建开发身份并保持生产认证边界。日常启动
+使用下面这个不主动构建镜像的命令；普通 TypeScript、TSX 和 CSS 修改会通过
+Turbopack Fast Refresh 直接生效：
 
 ```bash
 pnpm docker:up:local
 ```
 
+修改 Prisma schema 后，需要执行 `pnpm docker:migrate:local`，再重启 Dashboard 和
+Reps 容器以重新生成 Prisma Client。依赖或镜像层发生变化时，仍需执行
+`pnpm docker:bootstrap:local`。
+
 `pnpm docker:up` 用于 production-shaped 本地栈；creator 登录前必须先配置
 Logto Traditional Web application。原生 Matrix 是可选渠道，也不是 Telegram
 交付链路的必需依赖。配置 homeserver 和 Application Service secrets 后再启用
-该 profile。此命令会继续加载同一份本地 override，不会把 Dashboard 或
-representative app 重新创建为生产模式：
+该 profile。`pnpm docker:up:matrix` 会继续加载相同的本地身份与稳定服务
+override，并增加 Synapse 和 bridge；Dashboard 与公开代表页仍保持 Turbopack
+开发服务器和源码热更新：
 
 ```bash
 pnpm docker:up:matrix

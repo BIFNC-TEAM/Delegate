@@ -15,6 +15,7 @@ import {
 const config: ConversationWorkerConfig = {
   port: 4040,
   pollMs: 500,
+  memoryLifecyclePollMs: 1_000,
   memoryProjectionPollMs: 500,
   memoryCleanupPollMs: 1_000,
   memoryReconciliationPollMs: 60_000,
@@ -39,6 +40,7 @@ function readySchedulerSnapshot(): ConversationWorkerSchedulerSnapshot {
   return {
     conversation: lane(),
     memoryExtraction: lane(),
+    memoryLifecycle: lane(),
     projectionWrite: lane(),
     projectionDelete: lane(),
     cleanup: lane(),
@@ -127,6 +129,7 @@ describe("conversation worker probes", () => {
       lanes: {
         conversation: { status: "ready" },
         memoryExtraction: { status: "ready" },
+        memoryLifecycle: { status: "ready" },
         projectionWrite: { status: "ready" },
         projectionDelete: { status: "ready" },
         cleanup: { status: "ready" },
@@ -163,6 +166,7 @@ describe("conversation worker probes", () => {
       lanes: {
         conversation: { status: "failed" },
         memoryExtraction: { status: "ready" },
+        memoryLifecycle: { status: "ready" },
         projectionWrite: { status: "ready" },
         projectionDelete: { status: "ready" },
         cleanup: { status: "ready" },

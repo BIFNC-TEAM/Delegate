@@ -1,4 +1,5 @@
 import { cookies, headers } from "next/headers";
+import { redirect } from "next/navigation";
 
 import {
   getCookieLocale,
@@ -81,6 +82,18 @@ export default async function DashboardPage({
     requestedSlug && representatives.some((representative) => representative.slug === requestedSlug)
       ? requestedSlug
       : fallbackSlug;
+  if (requestedView === "memory") {
+    const legacyMemoryParams = new URLSearchParams({
+      view: "representatives",
+      lang: locale,
+      repSection: activeSlug ? "setup" : "directory",
+    });
+    if (activeSlug) {
+      legacyMemoryParams.set("rep", activeSlug);
+      legacyMemoryParams.set("setupSection", "memory");
+    }
+    redirect(`/dashboard?${legacyMemoryParams.toString()}`);
+  }
   const settingsSection = parseSettingsSection(params?.settingsSection);
   const settingsTimeZones = listSettingsTimeZones(
     ownerSettings.profile?.timezone ?? "UTC",

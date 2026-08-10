@@ -2,7 +2,9 @@ import crypto from "node:crypto";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { requestGovernedMemoryDeletion } from "../src/memory-governance";
+import {
+  requestAutomaticContactReplyPreferenceDeletionInTransaction,
+} from "../src/memory-governance";
 import { prisma } from "../src/prisma";
 
 const describePostgres = process.env.DELEGATE_POSTGRES_E2E === "1"
@@ -18,7 +20,7 @@ describePostgres("Memory System T4 PostgreSQL governance guards", () => {
     await prisma.$disconnect();
   });
 
-  it("locks correction coordinates, permits one pending request, and approves only the current base", async () => {
+  it("locks correction coordinates and prevents legacy human correction from reactivating memory", async () => {
     const fixture = await createFixture("correction");
     const initial = await createApprovedContactMemory(fixture, "initial");
     const suppressedAt = new Date();
@@ -139,10 +141,7 @@ describePostgres("Memory System T4 PostgreSQL governance guards", () => {
         recallDisabledAt: null,
       },
       select: { status: true, currentVersionId: true },
-    })).resolves.toEqual({
-      status: "ACTIVE",
-      currentVersionId: correctedVersion.id,
-    });
+    })).rejects.toThrow(/automatic policy decision/u);
   });
 
   it("rejects restore after source invalidation and while policy is disabled", async () => {
@@ -371,7 +370,7 @@ describePostgres("Memory System T4 PostgreSQL governance guards", () => {
     const fixture = await createFixture("delete-correction");
     const approved = await createApprovedContactMemory(fixture, "delete-correction");
     const suppressedAt = new Date();
-    const suppressed = await prisma.governedMemory.update({
+    await prisma.governedMemory.update({
       where: { id: approved.memory.id },
       data: {
         status: "SUPPRESSED",
@@ -410,19 +409,33 @@ describePostgres("Memory System T4 PostgreSQL governance guards", () => {
       },
     });
 
-    const result = await requestGovernedMemoryDeletion({
-      actorOwnerId: fixture.ownerId,
-      representativeSlug: fixture.representativeSlug,
-      requestId: `delete:${fixture.suffix}`,
-      idempotencyKey: `delete:${fixture.suffix}`,
-      expectedUpdatedAt: suppressed.updatedAt.toISOString(),
-      reasonCode: "owner_request",
-      memoryId: approved.memory.id,
-    }, { client: prisma });
+    const forgetSource = await createAudienceMessage(
+      fixture.conversationId,
+      "forget my reply preference",
+    );
+    const result = await prisma.$transaction((tx) =>
+      requestAutomaticContactReplyPreferenceDeletionInTransaction(tx, {
+        representativeId: fixture.representativeId,
+        contactId: fixture.contactId,
+        sourceChannel: "WEB",
+        sourceMessageId: forgetSource.id,
+        sourceHash: hashOf(forgetSource.text ?? ""),
+        occurredAt: new Date(),
+      }),
+    );
     expect(result).toMatchObject({
-      memoryStatus: "DELETE_PENDING",
-      status: "QUEUED",
+      matched: true,
+      memoryId: approved.memory.id,
+      replayed: false,
     });
+    await expect(prisma.governedMemory.findUniqueOrThrow({
+      where: { id: approved.memory.id },
+      select: { status: true },
+    })).resolves.toEqual({ status: "DELETE_PENDING" });
+    await expect(prisma.memoryDeletionProof.findUniqueOrThrow({
+      where: { memoryId: approved.memory.id },
+      select: { cleanupStatus: true },
+    })).resolves.toEqual({ cleanupStatus: "QUEUED" });
     await expect(prisma.memoryCandidate.findUniqueOrThrow({
       where: { id: correction.id },
       select: {
@@ -432,21 +445,17 @@ describePostgres("Memory System T4 PostgreSQL governance guards", () => {
         contentPurgedAt: true,
       },
     })).resolves.toMatchObject({
-      status: "BLOCKED",
+      status: "EXPIRED",
       safeText: null,
       summary: null,
       contentPurgedAt: expect.any(Date),
     });
-    await expect(prisma.memoryReviewDecision.findFirstOrThrow({
-      where: {
-        candidateId: correction.id,
-        outcome: "BLOCKED",
-      },
-      select: { reasonCode: true, note: true },
-    })).resolves.toEqual({
-      reasonCode: "memory_deletion_requested",
-      note: null,
-    });
+    expect(await prisma.memoryPolicyDecision.count({
+      where: { candidateId: correction.id },
+    })).toBe(0);
+    expect(await prisma.memoryReviewDecision.count({
+      where: { candidateId: correction.id },
+    })).toBe(1);
 
     await expect(prisma.memoryCandidate.create({
       data: {
@@ -729,6 +738,7 @@ async function createApprovedContactMemory(
       scope: "CONTACT_CHANNEL",
       sourceChannel: "WEB",
       category: "CONTACT_PREFERENCE",
+      semanticKey: "contact-preference:communication",
     },
   });
   const version = await prisma.governedMemoryVersion.create({
@@ -744,14 +754,22 @@ async function createApprovedContactMemory(
       createdByActorId: `system:memory-extraction:${fixture.suffix}`,
     },
   });
-  await prisma.memoryReviewDecision.create({
-    data: approvalDecisionData(
-      fixture,
-      candidate.id,
-      memory.id,
-      version.id,
-      `approve-${label}`,
-    ),
+  await prisma.memoryPolicyDecision.create({
+    data: {
+      representativeId: fixture.representativeId,
+      candidateId: candidate.id,
+      memoryId: memory.id,
+      resultVersionId: version.id,
+      outcome: "ACTIVATED",
+      policyRevision: 0,
+      policyVersion: "automatic-memory-v2",
+      extractorVersion: "closed-structured-v2",
+      sourceHash: hashOf(`source-${fixture.suffix}-${label}`),
+      outputHash: version.contentHash,
+      confidence: 1,
+      reasonCode: "automatic_low_risk_activation",
+      decisionHash: hashOf(`decision-${fixture.suffix}-${label}`),
+    },
   });
   const approvedCandidate = await prisma.memoryCandidate.update({
     where: { id: candidate.id },
@@ -783,7 +801,8 @@ function contactCandidateData(
     sourceKind: "AUDIENCE_MESSAGE" as const,
     safeText: "Prefers concise answers.",
     summary: "Answer concisely.",
-    contentHash: hashOf(`${fixture.suffix}-${label}`),
+    contentHash: hashOf("Prefers concise answers."),
+    semanticKey: "contact-preference:communication",
     dedupeKey: `${label}-${fixture.suffix}`,
     status: "PENDING_REVIEW" as const,
     safetyClass: "LOW_RISK" as const,

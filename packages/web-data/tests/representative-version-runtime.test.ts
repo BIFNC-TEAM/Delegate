@@ -186,7 +186,9 @@ describe("representative published runtime snapshot", () => {
   it("exposes governed context only when controls and runtime prerequisites are enabled", () => {
     const policy = {
       longTermMemoryEnabled: true,
+      shortTermMemoryEnabled: true,
       contactMemoryEnabled: true,
+      contactMemoryCrossChannelEnabled: false,
       representativeExperienceEnabled: true,
       autoExtract: false,
       webRecallEnabled: true,
@@ -250,7 +252,9 @@ describe("representative published runtime snapshot", () => {
     });
     expect(enabledDisclosure).toEqual({
       enabled: true,
+      shortTermMemoryEnabled: true,
       contactMemoryEnabled: true,
+      contactMemoryCrossChannelEnabled: false,
       representativeExperienceEnabled: true,
       automaticExtractionEnabled: false,
       retentionDays: 45,
@@ -283,16 +287,18 @@ describe("representative published runtime snapshot", () => {
     });
     expect(extractionOnlyDisclosure).toEqual({
       enabled: false,
+      shortTermMemoryEnabled: true,
       contactMemoryEnabled: true,
+      contactMemoryCrossChannelEnabled: false,
       representativeExperienceEnabled: true,
       automaticExtractionEnabled: true,
       retentionDays: 45,
       expiryAction: "DELETE",
       policyRevision: 7,
-      fingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
+      fingerprint: "gB8MZEg2WKlBNv0btWJyh0VvdW39bsiAHHVzMFhq-Qs",
     });
 
-    const contactDisabledDisclosure = resolvePublicGovernedMemoryDisclosure({
+    const representativeOnlyExtractionDisclosure = resolvePublicGovernedMemoryDisclosure({
       policy: {
         ...policy,
         contactMemoryEnabled: false,
@@ -305,17 +311,19 @@ describe("representative published runtime snapshot", () => {
       environmentEnabled: false,
       modelCredentialsAvailable: false,
     });
-    expect(contactDisabledDisclosure).toEqual({
+    expect(representativeOnlyExtractionDisclosure).toEqual({
       enabled: false,
+      shortTermMemoryEnabled: true,
       contactMemoryEnabled: false,
-      representativeExperienceEnabled: false,
-      automaticExtractionEnabled: false,
-      retentionDays: null,
-      expiryAction: null,
+      contactMemoryCrossChannelEnabled: false,
+      representativeExperienceEnabled: true,
+      automaticExtractionEnabled: true,
+      retentionDays: 45,
+      expiryAction: "DELETE",
       policyRevision: 7,
-      fingerprint: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
+      fingerprint: "u2F1QrJr4iVGr_YUI0FwTvO6KrEf62Q7cSQ08CtdIio",
     });
-    expect(contactDisabledDisclosure.fingerprint).not.toBe(
+    expect(representativeOnlyExtractionDisclosure.fingerprint).not.toBe(
       extractionOnlyDisclosure.fingerprint,
     );
   });

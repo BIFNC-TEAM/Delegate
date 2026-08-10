@@ -4,13 +4,20 @@ const mocks = vi.hoisted(() => ({
   getMatrixRoomSecuritySnapshot: vi.fn(),
   isolateMatrixConversationRoom: vi.fn(),
   withActiveMatrixRepresentativeChannelFence: vi.fn(),
+  withGenerationMessageProviderDeliveryFence: vi.fn(),
 }));
 
 vi.mock("@delegate/web-data", () => ({
+  GenerationMemoryDeliveryBlockedError:
+    class GenerationMemoryDeliveryBlockedError extends Error {
+      readonly code = "generation_memory_delivery_source_revoked";
+    },
   getMatrixRoomSecuritySnapshot: mocks.getMatrixRoomSecuritySnapshot,
   isolateMatrixConversationRoom: mocks.isolateMatrixConversationRoom,
   withActiveMatrixRepresentativeChannelFence:
     mocks.withActiveMatrixRepresentativeChannelFence,
+  withGenerationMessageProviderDeliveryFence:
+    mocks.withGenerationMessageProviderDeliveryFence,
 }));
 
 import { sendMatrixRepresentativeMessage } from "../src/matrix-outbound";
@@ -43,6 +50,7 @@ describe("Matrix outbound authorship", () => {
       conversationId,
       roomId,
       senderUserId,
+      expectedEndpointLifecycleRevision: 7,
       deliveryId: "operator-message-1",
       senderMode: "human_operator",
       text: "Owner: I am taking over.",
@@ -60,6 +68,7 @@ describe("Matrix outbound authorship", () => {
       {
         representativeId: "representative-1",
         representativeMatrixUserId: senderUserId,
+        expectedEndpointLifecycleRevision: 7,
         room: {
           roomId,
           conversationId,
@@ -81,9 +90,16 @@ describe("Matrix outbound authorship", () => {
       conversationId,
       roomId,
       senderUserId,
+      expectedEndpointLifecycleRevision: 7,
       deliveryId: "run-1",
       senderMode: "ai",
       generationRunId: "run-1",
+      generationDelivery: {
+        runId: "run-1",
+        outboxId: "outbox-1",
+        leaseAttempt: 2,
+        outputMessageId: "output-1",
+      },
       text: "AI reply",
     });
 
@@ -94,6 +110,52 @@ describe("Matrix outbound authorship", () => {
       "com.delegate.sender_mode": "ai",
       "com.delegate.generation_run_id": "run-1",
     });
+    expect(
+      mocks.withGenerationMessageProviderDeliveryFence,
+    ).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        conversationId,
+        runId: "run-1",
+        outboxId: "outbox-1",
+        leaseAttempt: 2,
+        outputMessageId: "output-1",
+      },
+      expect.any(Function),
+    );
+  });
+
+  it("does not call Matrix after the provider memory fence cancels delivery", async () => {
+    mockActiveRoom();
+    mocks.withGenerationMessageProviderDeliveryFence.mockResolvedValueOnce({
+      executed: false,
+      reason: "memory_delivery_source_revoked",
+    });
+    const fetchMock = validatedRoomFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(sendMatrixRepresentativeMessage({
+      config,
+      conversationId,
+      roomId,
+      senderUserId,
+      expectedEndpointLifecycleRevision: 7,
+      deliveryId: "run-forgotten",
+      senderMode: "ai",
+      generationRunId: "run-forgotten",
+      generationDelivery: {
+        runId: "run-forgotten",
+        outboxId: "outbox-forgotten",
+        leaseAttempt: 3,
+        outputMessageId: "output-forgotten",
+      },
+      text: "must not leave",
+    })).rejects.toMatchObject({
+      code: "generation_memory_delivery_source_revoked",
+    });
+
+    // Only remote room validation ran; the provider send callback did not.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("isolates a room whose authoritative joined members changed", async () => {
@@ -112,6 +174,7 @@ describe("Matrix outbound authorship", () => {
       conversationId,
       roomId,
       senderUserId,
+      expectedEndpointLifecycleRevision: 7,
       deliveryId: "unsafe-members",
       senderMode: "ai",
       text: "must not leave",
@@ -143,6 +206,7 @@ describe("Matrix outbound authorship", () => {
       conversationId,
       roomId,
       senderUserId,
+      expectedEndpointLifecycleRevision: 7,
       deliveryId: "unsafe-encryption",
       senderMode: "human_operator",
       text: "must not leave",
@@ -171,6 +235,7 @@ describe("Matrix outbound authorship", () => {
       conversationId,
       roomId,
       senderUserId,
+      expectedEndpointLifecycleRevision: 7,
       deliveryId: "disconnected-channel",
       senderMode: "ai",
       text: "must not leave",
@@ -200,6 +265,7 @@ describe("Matrix outbound authorship", () => {
       conversationId,
       roomId,
       senderUserId,
+      expectedEndpointLifecycleRevision: 7,
       deliveryId: "disconnect-race",
       senderMode: "ai",
       text: "must not leave",
@@ -222,11 +288,39 @@ describe("Matrix outbound authorship", () => {
       conversationId,
       roomId,
       senderUserId,
+      expectedEndpointLifecycleRevision: 7,
       deliveryId: "health-flip",
       senderMode: "ai",
       text: "must not leave",
     })).rejects.toThrow("became unavailable before outbound delivery");
 
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not send an earlier activation's work after Matrix reconnects", async () => {
+    mockActiveRoom();
+    mocks.withActiveMatrixRepresentativeChannelFence.mockResolvedValueOnce({
+      executed: false,
+      reason: "matrix_channel_lifecycle_changed",
+    });
+    const fetchMock = validatedRoomFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(sendMatrixRepresentativeMessage({
+      config,
+      conversationId,
+      roomId,
+      senderUserId,
+      expectedEndpointLifecycleRevision: 7,
+      deliveryId: "stale-activation",
+      senderMode: "ai",
+      text: "must not leave",
+    })).rejects.toThrow(
+      "Matrix channel activation changed before outbound delivery",
+    );
+
+    // Remote room validation completed, but the provider send callback stayed
+    // behind the lifecycle fence and was never invoked.
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -244,6 +338,7 @@ describe("Matrix outbound authorship", () => {
       conversationId,
       roomId,
       senderUserId,
+      expectedEndpointLifecycleRevision: 7,
       deliveryId: "isolation-race",
       senderMode: "human_operator",
       text: "must not leave",
@@ -266,6 +361,7 @@ describe("Matrix outbound authorship", () => {
       conversationId,
       roomId,
       senderUserId,
+      expectedEndpointLifecycleRevision: 7,
       deliveryId: "revoked-audience-proof",
       senderMode: "ai",
       text: "must not leave",
@@ -289,7 +385,13 @@ describe("Matrix outbound authorship", () => {
     });
     mocks.isolateMatrixConversationRoom.mockResolvedValue(true);
     mocks.withActiveMatrixRepresentativeChannelFence.mockImplementation(
-      async (_input, operation: () => Promise<unknown>) => ({
+      async (_input, operation: (tx: object) => Promise<unknown>) => ({
+        executed: true,
+        value: await operation({}),
+      }),
+    );
+    mocks.withGenerationMessageProviderDeliveryFence.mockImplementation(
+      async (_tx, _input, operation: () => Promise<unknown>) => ({
         executed: true,
         value: await operation(),
       }),

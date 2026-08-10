@@ -1,8 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { RepresentativeChannelKind } from "@prisma/client";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { approveMemoryCandidate } from "../src/memory-governance";
+import {
+  prepareGenerationMessageChannelDelivery,
+  retryGenerationDelivery,
+  withGenerationMessageProviderDeliveryFence,
+} from "../src/conversation-platform";
+import {
+  applyAutomaticMemoryPolicyInTransaction,
+  requestAutomaticContactChannelMemoryDeletionInTransaction,
+} from "../src/memory-governance";
 import {
   runNextMemoryProjectionWrite,
   type MemoryProjectionProvider,
@@ -102,7 +111,7 @@ describePostgres("Memory use PostgreSQL execution", () => {
           conversationId: fixture.conversationAId,
           senderType: "REPRESENTATIVE",
           deliveryStatus: "ACCEPTED",
-          text: "A concise response grounded in approved memory.",
+          text: "A concise response grounded in automatically governed memory.",
         },
       });
       await tx.generationRun.update({
@@ -165,6 +174,296 @@ describePostgres("Memory use PostgreSQL execution", () => {
     }, { client: prisma })).resolves.toMatchObject({
       displayedCount: 2,
     });
+  });
+
+  it("does not redeliver a completed answer after its cited memory is deleted", async () => {
+    const fixture = await createFixture();
+    const started = await startOrReuseMemoryUseRun({
+      generationRunId: fixture.generationRunId,
+      sourceChannel: "web",
+    }, { client: prisma });
+    const recorded = await recordMemoryUseSearchHits({
+      useRunId: started.run.id,
+      hits: [{
+        sourceKind: "CONTACT_MEMORY",
+        projectionItemId: fixture.contactAProjectionId,
+      }],
+    }, { client: prisma });
+    const memoryUseItemId = recorded.eligibleItems[0]!.memoryUseItemId;
+    const output = await prisma.$transaction(async (tx) => {
+      const message = await tx.message.create({
+        data: {
+          conversationId: fixture.conversationAId,
+          senderType: "REPRESENTATIVE",
+          deliveryStatus: "QUEUED",
+          text: "A completed personalized answer that must not be replayed.",
+        },
+      });
+      await tx.generationRun.update({
+        where: { id: fixture.generationRunId },
+        data: {
+          outputMessageId: message.id,
+          status: "COMPLETED",
+          completedAt: new Date(),
+        },
+      });
+      await finalizeMemoryUseGenerationInTransaction(tx, {
+        useRunId: started.run.id,
+        outputMessageId: message.id,
+        injectedItemIds: [memoryUseItemId],
+        citedItemIds: [memoryUseItemId],
+      });
+      return message;
+    });
+    const outbox = await prisma.outboxEvent.create({
+      data: {
+        conversationId: fixture.conversationAId,
+        aggregateType: "generation_run",
+        aggregateId: fixture.generationRunId,
+        eventType: "generation.requested",
+        payload: {},
+        status: "PROCESSING",
+        idempotencyKey: `memory-delivery-retry-${randomUUID()}`,
+        attemptCount: 1,
+        availableAt: new Date(Date.now() + 60_000),
+      },
+    });
+
+    await prepareGenerationMessageChannelDelivery({
+      conversationId: fixture.conversationAId,
+      runId: fixture.generationRunId,
+      outboxId: outbox.id,
+      leaseAttempt: 1,
+      outputMessageId: output.id,
+    });
+    await expect(prisma.$transaction((tx) =>
+      withGenerationMessageProviderDeliveryFence(
+        tx,
+        {
+          conversationId: fixture.conversationAId,
+          runId: fixture.generationRunId,
+          outboxId: outbox.id,
+          leaseAttempt: 1,
+          outputMessageId: output.id,
+        },
+        async () => {
+          throw new Error("simulated provider send failure");
+        },
+      ),
+    )).rejects.toThrow("simulated provider send failure");
+    await retryGenerationDelivery({
+      runId: fixture.generationRunId,
+      outboxId: outbox.id,
+      leaseAttempt: 1,
+      outputMessageId: output.id,
+      errorMessage: "simulated provider send failure",
+    });
+    await prisma.outboxEvent.update({
+      where: { id: outbox.id },
+      data: {
+        status: "PROCESSING",
+        attemptCount: 2,
+        availableAt: new Date(Date.now() + 60_000),
+      },
+    });
+
+    await prisma.$transaction(async (tx) => {
+      const deleteText = "删除我的记忆";
+      const deleteMessage = await tx.message.create({
+        data: {
+          conversationId: fixture.conversationAId,
+          senderType: "AUDIENCE",
+          deliveryStatus: "ACCEPTED",
+          text: deleteText,
+        },
+      });
+      await requestAutomaticContactChannelMemoryDeletionInTransaction(tx, {
+        representativeId: fixture.representativeId,
+        contactId: fixture.contactAId,
+        sourceChannel: RepresentativeChannelKind.WEB,
+        sourceMessageId: deleteMessage.id,
+        sourceHash: createHash("sha256").update(deleteText).digest("hex"),
+        occurredAt: new Date(),
+      });
+    });
+
+    let replayProviderCalled = false;
+    await expect(prisma.$transaction((tx) =>
+      withGenerationMessageProviderDeliveryFence(
+        tx,
+        {
+          conversationId: fixture.conversationAId,
+          runId: fixture.generationRunId,
+          outboxId: outbox.id,
+          leaseAttempt: 2,
+          outputMessageId: output.id,
+        },
+        async () => {
+          replayProviderCalled = true;
+          return "must-not-send";
+        },
+      ),
+    )).resolves.toEqual({
+      executed: false,
+      reason: "memory_delivery_source_revoked",
+    });
+    expect(replayProviderCalled).toBe(false);
+    await expect(prisma.message.findUniqueOrThrow({
+      where: { id: output.id },
+      select: { deliveryStatus: true, failureCode: true, text: true },
+    })).resolves.toEqual({
+      deliveryStatus: "CANCELED",
+      failureCode: "generation_memory_delivery_source_revoked",
+      text: "A completed personalized answer that must not be replayed.",
+    });
+    await expect(prisma.outboxEvent.findUniqueOrThrow({
+      where: { id: outbox.id },
+      select: { status: true, attemptCount: true, lastError: true },
+    })).resolves.toEqual({
+      status: "DEAD_LETTER",
+      attemptCount: 2,
+      lastError: "generation_memory_delivery_source_revoked",
+    });
+  });
+
+  it("serializes forget between final authorization and the provider side effect", async () => {
+    const fixture = await createFixture();
+    const started = await startOrReuseMemoryUseRun({
+      generationRunId: fixture.generationRunId,
+      sourceChannel: "web",
+    }, { client: prisma });
+    const recorded = await recordMemoryUseSearchHits({
+      useRunId: started.run.id,
+      hits: [{
+        sourceKind: "CONTACT_MEMORY",
+        projectionItemId: fixture.contactAProjectionId,
+      }],
+    }, { client: prisma });
+    const memoryUseItemId = recorded.eligibleItems[0]!.memoryUseItemId;
+    const output = await prisma.$transaction(async (tx) => {
+      const message = await tx.message.create({
+        data: {
+          conversationId: fixture.conversationAId,
+          senderType: "REPRESENTATIVE",
+          deliveryStatus: "QUEUED",
+          text: "A personalized answer whose send must be linearized with forget.",
+        },
+      });
+      await tx.generationRun.update({
+        where: { id: fixture.generationRunId },
+        data: {
+          outputMessageId: message.id,
+          status: "COMPLETED",
+          completedAt: new Date(),
+        },
+      });
+      await finalizeMemoryUseGenerationInTransaction(tx, {
+        useRunId: started.run.id,
+        outputMessageId: message.id,
+        injectedItemIds: [memoryUseItemId],
+        citedItemIds: [memoryUseItemId],
+      });
+      return message;
+    });
+    const outbox = await prisma.outboxEvent.create({
+      data: {
+        conversationId: fixture.conversationAId,
+        aggregateType: "generation_run",
+        aggregateId: fixture.generationRunId,
+        eventType: "generation.requested",
+        payload: {},
+        status: "PROCESSING",
+        idempotencyKey: `memory-provider-fence-${randomUUID()}`,
+        attemptCount: 1,
+        availableAt: new Date(Date.now() + 60_000),
+      },
+    });
+    await prepareGenerationMessageChannelDelivery({
+      conversationId: fixture.conversationAId,
+      runId: fixture.generationRunId,
+      outboxId: outbox.id,
+      leaseAttempt: 1,
+      outputMessageId: output.id,
+    });
+
+    const deleteText = "forget my memory";
+    const deleteMessage = await prisma.message.create({
+      data: {
+        conversationId: fixture.conversationAId,
+        senderType: "AUDIENCE",
+        contentType: "TEXT",
+        deliveryStatus: "SENT",
+        text: deleteText,
+      },
+    });
+    const providerAuthorized = createDeferred<void>();
+    const allowProviderSideEffect = createDeferred<void>();
+    let providerSideEffectExecuted = false;
+    let sequence = 0;
+    let providerSideEffectOrder = 0;
+    let deletionCommitOrder = 0;
+    const providerOutcome = prisma.$transaction(async (tx) =>
+      withGenerationMessageProviderDeliveryFence(
+        tx,
+        {
+          conversationId: fixture.conversationAId,
+          runId: fixture.generationRunId,
+          outboxId: outbox.id,
+          leaseAttempt: 1,
+          outputMessageId: output.id,
+        },
+        async () => {
+          providerAuthorized.resolve();
+          await allowProviderSideEffect.promise;
+          providerSideEffectExecuted = true;
+          providerSideEffectOrder = ++sequence;
+          return "provider-message-id";
+        },
+      ),
+    { timeout: 10_000 });
+    await providerAuthorized.promise;
+
+    const deletionBackendReady = createDeferred<number>();
+    const deletion = prisma.$transaction(async (tx) => {
+      const [backend] = await tx.$queryRawUnsafe<Array<{ pid: number }>>(
+        "SELECT pg_backend_pid()::INTEGER AS pid",
+      );
+      if (!backend) throw new Error("Could not identify deletion backend.");
+      deletionBackendReady.resolve(backend.pid);
+      await requestAutomaticContactChannelMemoryDeletionInTransaction(tx, {
+        representativeId: fixture.representativeId,
+        contactId: fixture.contactAId,
+        sourceChannel: RepresentativeChannelKind.WEB,
+        sourceMessageId: deleteMessage.id,
+        sourceHash: createHash("sha256").update(deleteText).digest("hex"),
+        occurredAt: new Date(),
+      });
+    }, { timeout: 10_000 }).then(() => {
+      deletionCommitOrder = ++sequence;
+    });
+
+    const deletionBackendPid = await deletionBackendReady.promise;
+    await waitForBackendLock(deletionBackendPid);
+    expect(providerSideEffectExecuted).toBe(false);
+    expect(deletionCommitOrder).toBe(0);
+
+    allowProviderSideEffect.resolve();
+    await expect(providerOutcome).resolves.toEqual({
+      executed: true,
+      value: "provider-message-id",
+    });
+    await deletion;
+
+    expect(providerSideEffectExecuted).toBe(true);
+    expect(providerSideEffectOrder).toBeGreaterThan(0);
+    expect(deletionCommitOrder).toBeGreaterThan(providerSideEffectOrder);
+    await expect(prisma.contactChannelMemoryForgetBoundary.count({
+      where: {
+        representativeId: fixture.representativeId,
+        contactId: fixture.contactAId,
+        sourceChannel: "WEB",
+      },
+    })).resolves.toBe(1);
   });
 
   it("keeps an Episode-pinned memory run valid after a newer release becomes active", async () => {
@@ -441,6 +740,113 @@ describePostgres("Memory use PostgreSQL execution", () => {
       citedCount: 0,
     });
   });
+
+  it("blocks final injection behind a concurrent exact-delete boundary and rolls the output back", async () => {
+    const fixture = await createFixture();
+    const started = await startOrReuseMemoryUseRun({
+      generationRunId: fixture.generationRunId,
+      sourceChannel: "web",
+    }, { client: prisma });
+    const recorded = await recordMemoryUseSearchHits({
+      useRunId: started.run.id,
+      hits: [{
+        sourceKind: "CONTACT_MEMORY",
+        projectionItemId: fixture.contactAProjectionId,
+      }],
+    }, { client: prisma });
+    const memoryUseItemId = recorded.eligibleItems[0]!.memoryUseItemId;
+    const deleteText = "forget my memory";
+    const deleteMessage = await prisma.message.create({
+      data: {
+        conversationId: fixture.conversationAId,
+        senderType: "AUDIENCE",
+        contentType: "TEXT",
+        deliveryStatus: "SENT",
+        text: deleteText,
+      },
+    });
+    const deletionLocked = createDeferred<void>();
+    const releaseDeletion = createDeferred<void>();
+    const deletion = prisma.$transaction(async (tx) => {
+      await requestAutomaticContactChannelMemoryDeletionInTransaction(tx, {
+        representativeId: fixture.representativeId,
+        contactId: fixture.contactAId,
+        sourceChannel: RepresentativeChannelKind.WEB,
+        sourceMessageId: deleteMessage.id,
+        sourceHash: createHash("sha256").update(deleteText).digest("hex"),
+        occurredAt: new Date(),
+      });
+      deletionLocked.resolve();
+      await releaseDeletion.promise;
+    }, { timeout: 10_000 });
+    await deletionLocked.promise;
+
+    const outputMessageId = `forget_racing_output_${randomUUID()}`;
+    const finalizationBackendReady = createDeferred<number>();
+    const finalizationOutcome = prisma.$transaction(async (tx) => {
+      const [backend] = await tx.$queryRawUnsafe<Array<{ pid: number }>>(
+        "SELECT pg_backend_pid()::INTEGER AS pid",
+      );
+      if (!backend) throw new Error("Could not identify finalization backend.");
+      await tx.message.create({
+        data: {
+          id: outputMessageId,
+          conversationId: fixture.conversationAId,
+          senderType: "REPRESENTATIVE",
+          deliveryStatus: "ACCEPTED",
+          text: "This output cannot outlive the exact-delete boundary.",
+        },
+      });
+      await tx.generationRun.update({
+        where: { id: fixture.generationRunId },
+        data: {
+          outputMessageId,
+          status: "COMPLETED",
+          completedAt: new Date(),
+        },
+      });
+      finalizationBackendReady.resolve(backend.pid);
+      return finalizeMemoryUseGenerationInTransaction(tx, {
+        useRunId: started.run.id,
+        outputMessageId,
+        injectedItemIds: [memoryUseItemId],
+        citedItemIds: [memoryUseItemId],
+      });
+    }, { timeout: 10_000 }).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+
+    const finalizationBackendPid = await finalizationBackendReady.promise;
+    await waitForBackendLock(finalizationBackendPid);
+    releaseDeletion.resolve();
+    await deletion;
+
+    const outcome = await finalizationOutcome;
+    expect(outcome.ok).toBe(false);
+    if (outcome.ok) {
+      throw new Error("Exact-delete racing injection unexpectedly committed.");
+    }
+    expect(outcome.error).toMatchObject({ code: "memory_use_source_rejected" });
+    await expect(prisma.message.findUnique({
+      where: { id: outputMessageId },
+    })).resolves.toBeNull();
+    await expect(prisma.memoryUseRun.findUniqueOrThrow({
+      where: { id: started.run.id },
+      select: { status: true, injectedCount: true, citedCount: true },
+    })).resolves.toEqual({
+      status: "STARTED",
+      injectedCount: 0,
+      citedCount: 0,
+    });
+    await expect(prisma.contactChannelMemoryForgetBoundary.count({
+      where: {
+        representativeId: fixture.representativeId,
+        contactId: fixture.contactAId,
+        sourceChannel: "WEB",
+      },
+    })).resolves.toBe(1);
+  });
 });
 
 async function createFixture() {
@@ -482,9 +888,9 @@ async function createFixture() {
       longTermMemoryEnabled: true,
       contactMemoryEnabled: true,
       representativeExperienceEnabled: true,
-      autoExtract: false,
+      autoExtract: true,
       webRecallEnabled: true,
-      webExtractEnabled: false,
+      webExtractEnabled: true,
     },
   });
 
@@ -523,19 +929,15 @@ async function createFixture() {
     data: { activeEpisodeId: episodeA.id },
   });
 
-  const contactAMemory = await createApprovedContactMemory({
-    ownerId: owner.id,
+  const contactAMemory = await createAutomaticallyActivatedContactMemory({
     representativeId: representative.id,
-    representativeSlug: representative.slug,
     contactId: contactA.id,
     conversationId: conversationA.id,
     preference: "concise",
     suffix: `${suffix}-a`,
   });
-  const contactBMemory = await createApprovedContactMemory({
-    ownerId: owner.id,
+  const contactBMemory = await createAutomaticallyActivatedContactMemory({
     representativeId: representative.id,
-    representativeSlug: representative.slug,
     contactId: contactB.id,
     conversationId: conversationB.id,
     preference: "detailed",
@@ -599,6 +1001,7 @@ async function createFixture() {
 
   return {
     representativeId: representative.id,
+    contactAId: contactA.id,
     representativeVersionId: representativeVersion.id,
     conversationAId: conversationA.id,
     episodeAId: episodeA.id,
@@ -610,10 +1013,8 @@ async function createFixture() {
   };
 }
 
-async function createApprovedContactMemory(input: {
-  ownerId: string;
+async function createAutomaticallyActivatedContactMemory(input: {
   representativeId: string;
-  representativeSlug: string;
   contactId: string;
   conversationId: string;
   preference: "concise" | "detailed";
@@ -640,6 +1041,7 @@ async function createApprovedContactMemory(input: {
       safeText,
       summary: safeText,
       contentHash,
+      semanticKey: "contact-preference:communication",
       dedupeKey: `memory-use-candidate-${input.suffix}`,
       status: "PENDING_REVIEW",
       safetyClass: "LOW_RISK",
@@ -649,26 +1051,26 @@ async function createApprovedContactMemory(input: {
       sourceMessageId: sourceMessage.id,
     },
   });
-  const approved = await approveMemoryCandidate({
-    actorOwnerId: input.ownerId,
-    representativeSlug: input.representativeSlug,
-    candidateId: candidate.id,
-    requestId: `memory-use-approve-${input.suffix}`,
-    idempotencyKey: `memory-use-approve-${input.suffix}`,
-    expectedUpdatedAt: candidate.updatedAt.toISOString(),
-    reasonCode: "owner_verified",
-  }, { client: prisma });
-  if (!approved.memoryId || !approved.memoryVersionId) {
-    throw new Error("Approved fixture did not create governed memory coordinates.");
+  const activated = await prisma.$transaction((tx) =>
+    applyAutomaticMemoryPolicyInTransaction(tx, {
+      candidateId: candidate.id,
+      sourceHash: createHash("sha256")
+        .update(sourceMessage.text ?? "")
+        .digest("hex"),
+      confidence: 1,
+    }),
+  );
+  if (!activated.memoryId || !activated.memoryVersionId) {
+    throw new Error("Automatic policy did not create governed memory coordinates.");
   }
   const projection = await prisma.memoryProjectionItem.findFirstOrThrow({
     where: {
-      memoryId: approved.memoryId,
-      memoryVersionId: approved.memoryVersionId,
+      memoryId: activated.memoryId,
+      memoryVersionId: activated.memoryVersionId,
     },
   });
   return {
-    memoryId: approved.memoryId,
+    memoryId: activated.memoryId,
     projectionId: projection.id,
   };
 }

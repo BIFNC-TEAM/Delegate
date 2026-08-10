@@ -7,7 +7,6 @@ import {
   Prisma,
 } from "@prisma/client";
 
-import { getRepresentativeOpenVikingOverviewMetrics } from "./openviking";
 import { prisma } from "./prisma";
 
 export type DashboardOverviewSnapshot = {
@@ -26,11 +25,6 @@ export type DashboardOverviewSnapshot = {
     sponsorPoolCredit: number;
     balanceCredits: number;
   };
-  openVikingMetrics: Array<{
-    label: string;
-    value: string;
-    detail: string;
-  }>;
   workflowEngine: {
     configured: "local_runner" | "temporal";
     effective: "local_runner" | "temporal";
@@ -67,7 +61,7 @@ export type DashboardOverviewSnapshot = {
   }>;
   recentWorkflows: Array<{
     id: string;
-    kind: "handoff_follow_up" | "approval_expiration" | "creator_training_review";
+    kind: "handoff_follow_up" | "approval_expiration";
     engine: "local_runner" | "temporal";
     status: "queued" | "running" | "completed" | "failed" | "canceled";
     enginePhase?:
@@ -111,6 +105,11 @@ const overviewArgs = Prisma.validator<Prisma.RepresentativeDefaultArgs>()({
       take: 8,
     },
     workflowRuns: {
+      where: {
+        kind: {
+          not: "CREATOR_TRAINING_REVIEW",
+        },
+      },
       orderBy: [{ createdAt: "desc" }],
       take: 8,
     },
@@ -145,79 +144,77 @@ export async function getDashboardOverviewSnapshot(
     startOfToday.setHours(0, 0, 0, 0);
 
     const [
-      [
-        todayConversationCount,
-        openHandoffCount,
-        paidInvoiceCount,
-        pendingWorkflowCount,
-        dispatchPendingWorkflowCount,
-        waitingTimerWorkflowCount,
-        cancelRequestedWorkflowCount,
-        failedWorkflowCount,
-      ],
-      openVikingMetrics,
-    ] =
-      await Promise.all([
-        prisma.$transaction([
-          prisma.conversation.count({
-            where: {
-              representativeId: representative.id,
-              createdAt: {
-                gte: startOfToday,
-              },
-            },
-          }),
-          prisma.handoffRequest.count({
-            where: {
-              representativeId: representative.id,
-              status: {
-                in: [HandoffStatus.OPEN, HandoffStatus.REVIEWING],
-              },
-            },
-          }),
-          prisma.invoice.count({
-            where: {
-              representativeId: representative.id,
-              status: {
-                in: [InvoiceStatus.PAID, InvoiceStatus.FULFILLED],
-              },
-            },
-          }),
-          prisma.workflowRun.count({
-            where: {
-              representativeId: representative.id,
-              status: {
-                in: ["QUEUED", "RUNNING"],
-              },
-            },
-          }),
-          prisma.workflowRun.count({
-            where: {
-              representativeId: representative.id,
-              enginePhase: "DISPATCH_PENDING",
-            },
-          }),
-          prisma.workflowRun.count({
-            where: {
-              representativeId: representative.id,
-              enginePhase: "WAITING_TIMER",
-            },
-          }),
-          prisma.workflowRun.count({
-            where: {
-              representativeId: representative.id,
-              enginePhase: "CANCEL_REQUESTED",
-            },
-          }),
-          prisma.workflowRun.count({
-            where: {
-              representativeId: representative.id,
-              status: "FAILED",
-            },
-          }),
-        ]),
-        getRepresentativeOpenVikingOverviewMetrics(representative.slug),
-      ]);
+      todayConversationCount,
+      openHandoffCount,
+      paidInvoiceCount,
+      pendingWorkflowCount,
+      dispatchPendingWorkflowCount,
+      waitingTimerWorkflowCount,
+      cancelRequestedWorkflowCount,
+      failedWorkflowCount,
+    ] = await prisma.$transaction([
+      prisma.conversation.count({
+        where: {
+          representativeId: representative.id,
+          createdAt: {
+            gte: startOfToday,
+          },
+        },
+      }),
+      prisma.handoffRequest.count({
+        where: {
+          representativeId: representative.id,
+          status: {
+            in: [HandoffStatus.OPEN, HandoffStatus.REVIEWING],
+          },
+        },
+      }),
+      prisma.invoice.count({
+        where: {
+          representativeId: representative.id,
+          status: {
+            in: [InvoiceStatus.PAID, InvoiceStatus.FULFILLED],
+          },
+        },
+      }),
+      prisma.workflowRun.count({
+        where: {
+          representativeId: representative.id,
+          kind: { not: "CREATOR_TRAINING_REVIEW" },
+          status: {
+            in: ["QUEUED", "RUNNING"],
+          },
+        },
+      }),
+      prisma.workflowRun.count({
+        where: {
+          representativeId: representative.id,
+          kind: { not: "CREATOR_TRAINING_REVIEW" },
+          enginePhase: "DISPATCH_PENDING",
+        },
+      }),
+      prisma.workflowRun.count({
+        where: {
+          representativeId: representative.id,
+          kind: { not: "CREATOR_TRAINING_REVIEW" },
+          enginePhase: "WAITING_TIMER",
+        },
+      }),
+      prisma.workflowRun.count({
+        where: {
+          representativeId: representative.id,
+          kind: { not: "CREATOR_TRAINING_REVIEW" },
+          enginePhase: "CANCEL_REQUESTED",
+        },
+      }),
+      prisma.workflowRun.count({
+        where: {
+          representativeId: representative.id,
+          kind: { not: "CREATOR_TRAINING_REVIEW" },
+          status: "FAILED",
+        },
+      }),
+    ]);
 
     const wallet = representative.owner.wallet;
     const paidBreakdown = buildPaidBreakdown(representative.invoices);
@@ -276,58 +273,6 @@ export async function getDashboardOverviewSnapshot(
         sponsorPoolCredit: wallet?.sponsorPoolCredit ?? 0,
         balanceCredits: wallet?.balanceCredits ?? 0,
       },
-      openVikingMetrics: openVikingMetrics
-        ? [
-            {
-              label: locale === "zh" ? "OpenViking resources" : "OpenViking resources",
-              value: String(openVikingMetrics.resourcesSynced),
-              detail:
-                locale === "zh"
-                  ? "最近一次成功同步的公开资源数"
-                  : "Public resources from the most recent successful sync.",
-            },
-            {
-              label: locale === "zh" ? "Memories today" : "Memories today",
-              value: String(openVikingMetrics.memoriesCapturedToday),
-              detail:
-                locale === "zh"
-                  ? "今天写入的公开安全记忆摘要"
-                  : "Public-safe memory summaries captured today.",
-            },
-            {
-              label: locale === "zh" ? "Commits today" : "Commits today",
-              value: String(openVikingMetrics.sessionsCommittedToday),
-              detail:
-                locale === "zh"
-                  ? "今天完成的 OpenViking session commit 次数"
-                  : "OpenViking session commits completed today.",
-            },
-            {
-              label: locale === "zh" ? "Recalls today" : "Recalls today",
-              value: String(openVikingMetrics.recallsUsedToday),
-              detail:
-                locale === "zh"
-                  ? "今天真正注入回复链路的 recall 次数"
-                  : "Recall operations actually injected into response flow today.",
-            },
-            {
-              label: locale === "zh" ? "Sync failures" : "Sync failures",
-              value: String(openVikingMetrics.syncFailures),
-              detail:
-                locale === "zh"
-                  ? "累计失败的 sync job 数量"
-                  : "Cumulative failed sync jobs.",
-            },
-            {
-              label: "Health",
-              value: openVikingMetrics.lastHealthCheckResult,
-              detail:
-                locale === "zh"
-                  ? "最近一次 OpenViking health check 结果"
-                  : "Most recent OpenViking health check result.",
-            },
-          ]
-        : [],
       workflowEngine: {
         configured: workflowEngine.configuredEngine,
         effective: workflowEngine.effectiveEngine,
@@ -444,28 +389,42 @@ export async function getDashboardOverviewSnapshot(
         ...(invoice.paidAt ? { paidAt: invoice.paidAt.toISOString() } : {}),
         ...(invoice.invoiceLink ? { invoiceLink: invoice.invoiceLink } : {}),
       })),
-      recentWorkflows: representative.workflowRuns.map((workflowRun) => ({
-        id: workflowRun.id,
-        kind: normalizeWorkflowKind(workflowRun.kind),
-        engine: workflowRun.engine === "TEMPORAL" ? "temporal" : "local_runner",
-        status: normalizeWorkflowStatus(workflowRun.status),
-        ...(workflowRun.enginePhase ? { enginePhase: normalizeWorkflowEnginePhase(workflowRun.enginePhase) } : {}),
-        scheduledAt: workflowRun.scheduledAt.toISOString(),
-        ...(workflowRun.nextWakeAt ? { nextWakeAt: workflowRun.nextWakeAt.toISOString() } : {}),
-        ...(workflowRun.externalWorkflowId ? { externalWorkflowId: workflowRun.externalWorkflowId } : {}),
-        ...(workflowRun.externalRunId ? { externalRunId: workflowRun.externalRunId } : {}),
-        ...(workflowRun.cancelRequestedAt ? { cancelRequestedAt: workflowRun.cancelRequestedAt.toISOString() } : {}),
-        ...(workflowRun.completedAt ? { completedAt: workflowRun.completedAt.toISOString() } : {}),
-        detail:
-          typeof workflowRun.lastError === "string" && workflowRun.lastError.length > 0
-            ? workflowRun.lastError
-            : typeof workflowRun.output === "object" &&
-                workflowRun.output &&
-                "outcome" in workflowRun.output &&
-                typeof workflowRun.output.outcome === "string"
-              ? workflowRun.output.outcome
-              : describeWorkflowRun(workflowRun.kind, locale),
-      })),
+      recentWorkflows: representative.workflowRuns
+        .filter(isVisibleWorkflowRun)
+        .map((workflowRun) => ({
+          id: workflowRun.id,
+          kind: normalizeWorkflowKind(workflowRun.kind),
+          engine: workflowRun.engine === "TEMPORAL" ? "temporal" : "local_runner",
+          status: normalizeWorkflowStatus(workflowRun.status),
+          ...(workflowRun.enginePhase
+            ? { enginePhase: normalizeWorkflowEnginePhase(workflowRun.enginePhase) }
+            : {}),
+          scheduledAt: workflowRun.scheduledAt.toISOString(),
+          ...(workflowRun.nextWakeAt
+            ? { nextWakeAt: workflowRun.nextWakeAt.toISOString() }
+            : {}),
+          ...(workflowRun.externalWorkflowId
+            ? { externalWorkflowId: workflowRun.externalWorkflowId }
+            : {}),
+          ...(workflowRun.externalRunId
+            ? { externalRunId: workflowRun.externalRunId }
+            : {}),
+          ...(workflowRun.cancelRequestedAt
+            ? { cancelRequestedAt: workflowRun.cancelRequestedAt.toISOString() }
+            : {}),
+          ...(workflowRun.completedAt
+            ? { completedAt: workflowRun.completedAt.toISOString() }
+            : {}),
+          detail:
+            typeof workflowRun.lastError === "string" && workflowRun.lastError.length > 0
+              ? workflowRun.lastError
+              : typeof workflowRun.output === "object" &&
+                  workflowRun.output &&
+                  "outcome" in workflowRun.output &&
+                  typeof workflowRun.output.outcome === "string"
+                ? workflowRun.output.outcome
+                : describeWorkflowRun(workflowRun.kind, locale),
+        })),
     };
   } catch (error) {
     if (shouldUseDemoFallback(error, representativeSlug)) {
@@ -476,28 +435,41 @@ export async function getDashboardOverviewSnapshot(
 }
 
 function normalizeWorkflowKind(
-  value: RepresentativeOverviewRecord["workflowRuns"][number]["kind"],
+  value: Exclude<
+    RepresentativeOverviewRecord["workflowRuns"][number]["kind"],
+    "CREATOR_TRAINING_REVIEW"
+  >,
 ): DashboardOverviewSnapshot["recentWorkflows"][number]["kind"] {
   switch (value) {
     case "HANDOFF_FOLLOW_UP":
       return "handoff_follow_up";
-    case "CREATOR_TRAINING_REVIEW":
-      return "creator_training_review";
     case "APPROVAL_EXPIRATION":
     default:
       return "approval_expiration";
   }
 }
 
+function isVisibleWorkflowRun(
+  value: RepresentativeOverviewRecord["workflowRuns"][number],
+): value is RepresentativeOverviewRecord["workflowRuns"][number] & {
+  kind: Exclude<
+    RepresentativeOverviewRecord["workflowRuns"][number]["kind"],
+    "CREATOR_TRAINING_REVIEW"
+  >;
+} {
+  return value.kind !== "CREATOR_TRAINING_REVIEW";
+}
+
 function describeWorkflowRun(
-  value: RepresentativeOverviewRecord["workflowRuns"][number]["kind"],
+  value: Exclude<
+    RepresentativeOverviewRecord["workflowRuns"][number]["kind"],
+    "CREATOR_TRAINING_REVIEW"
+  >,
   locale: "zh" | "en",
 ): string {
   switch (value) {
     case "HANDOFF_FOLLOW_UP":
       return locale === "zh" ? "等待 owner 跟进 handoff" : "Waiting for owner handoff follow-up.";
-    case "CREATOR_TRAINING_REVIEW":
-      return locale === "zh" ? "等待生成训练建议" : "Waiting to build training suggestions.";
     case "APPROVAL_EXPIRATION":
     default:
       return locale === "zh" ? "等待审批超时检查" : "Waiting for approval expiry check.";
@@ -593,7 +565,6 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
         sponsorPoolCredit: 1200,
         balanceCredits: 240,
       },
-      openVikingMetrics: [],
       workflowEngine: {
         configured: "local_runner",
         effective: "local_runner",
@@ -803,24 +774,6 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
           { label: "Pending owner review", value: "3", detail: "2 collaboration requests, 1 refund" },
           { label: "Stars balance", value: "2060", detail: "sponsor pool 1200 · credits 240" },
         ];
-  demoFallbackOverviewSnapshot.openVikingMetrics =
-    locale === "zh"
-      ? [
-          { label: "OpenViking resources", value: "5", detail: "最近一次公开知识同步写入了 5 份资源" },
-          { label: "Memories today", value: "3", detail: "今天写入了 3 条公开安全记忆摘要" },
-          { label: "Commits today", value: "4", detail: "今天完成了 4 次 session commit" },
-          { label: "Recalls today", value: "9", detail: "今天有 9 次 recall 被注入回复链路" },
-          { label: "Sync failures", value: "0", detail: "当前 demo 没有失败的 sync job" },
-          { label: "Health", value: "healthy", detail: "OpenViking demo health check 正常" },
-        ]
-      : [
-          { label: "OpenViking resources", value: "5", detail: "5 public resources were written in the latest sync." },
-          { label: "Memories today", value: "3", detail: "3 public-safe memory summaries were captured today." },
-          { label: "Commits today", value: "4", detail: "4 session commits completed today." },
-          { label: "Recalls today", value: "9", detail: "9 recalls were injected into response flow today." },
-          { label: "Sync failures", value: "0", detail: "There are no failed sync jobs in the demo right now." },
-          { label: "Health", value: "healthy", detail: "OpenViking demo health check is healthy." },
-        ];
   demoFallbackOverviewSnapshot.workflowMetrics =
     locale === "zh"
       ? [
@@ -891,7 +844,6 @@ function cloneDashboardOverviewSnapshot(
     representative: { ...snapshot.representative },
     metrics: snapshot.metrics.map((metric) => ({ ...metric })),
     wallet: { ...snapshot.wallet },
-    openVikingMetrics: snapshot.openVikingMetrics.map((metric) => ({ ...metric })),
     workflowEngine: { ...snapshot.workflowEngine },
     handoffRequests: snapshot.handoffRequests.map((request) => ({ ...request })),
     recentInvoices: snapshot.recentInvoices.map((invoice) => ({ ...invoice })),

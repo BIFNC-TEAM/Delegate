@@ -12,6 +12,7 @@ import {
 const config: ConversationWorkerConfig = {
   port: 4040,
   pollMs: 500,
+  memoryLifecyclePollMs: 800,
   memoryProjectionPollMs: 700,
   memoryCleanupPollMs: 900,
   memoryReconciliationPollMs: 1_200,
@@ -59,6 +60,7 @@ function noWorkDependencies(
   return {
     processConversation: vi.fn(async () => ({ processed: false as const })),
     processMemoryExtraction: vi.fn(async () => ({ processed: false as const })),
+    processMemoryLifecycle: vi.fn(async () => ({ processed: false as const })),
     processProjectionWrite: vi.fn(async () => ({ processed: false as const })),
     processProjectionDelete: vi.fn(async () => ({ processed: false as const })),
     processCleanup: vi.fn(async () => ({ processed: false as const })),
@@ -80,7 +82,7 @@ describe("conversation worker scheduler", () => {
       clearSchedule: harness.clearSchedule,
     });
 
-    await vi.waitFor(() => expect(harness.pending).toHaveLength(5));
+    await vi.waitFor(() => expect(harness.pending).toHaveLength(6));
     expect(dependencies.processConversation).toHaveBeenCalledTimes(1);
 
     for (const lane of conversationWorkerLaneNames.filter(
@@ -91,6 +93,7 @@ describe("conversation worker scheduler", () => {
 
     await vi.waitFor(() => {
       expect(dependencies.processMemoryExtraction).toHaveBeenCalledTimes(2);
+      expect(dependencies.processMemoryLifecycle).toHaveBeenCalledTimes(2);
       expect(dependencies.processProjectionWrite).toHaveBeenCalledTimes(2);
       expect(dependencies.processProjectionDelete).toHaveBeenCalledTimes(2);
       expect(dependencies.processCleanup).toHaveBeenCalledTimes(2);
@@ -116,7 +119,7 @@ describe("conversation worker scheduler", () => {
       clearSchedule: harness.clearSchedule,
     });
 
-    await vi.waitFor(() => expect(harness.pending).toHaveLength(5));
+    await vi.waitFor(() => expect(harness.pending).toHaveLength(6));
     for (const lane of [
       "projectionDelete",
       "cleanup",
@@ -150,7 +153,7 @@ describe("conversation worker scheduler", () => {
       clearSchedule: harness.clearSchedule,
     });
 
-    await vi.waitFor(() => expect(harness.pending).toHaveLength(6));
+    await vi.waitFor(() => expect(harness.pending).toHaveLength(7));
     const scheduledCleanup = harness.take("cleanup");
     scheduledCleanup.callback();
     scheduledCleanup.callback();
@@ -417,12 +420,13 @@ describe("conversation worker scheduler", () => {
       clearSchedule: harness.clearSchedule,
     });
 
-    await vi.waitFor(() => expect(harness.pending).toHaveLength(6));
+    await vi.waitFor(() => expect(harness.pending).toHaveLength(7));
     expect(
       Object.fromEntries(harness.pending.map(({ lane, delayMs }) => [lane, delayMs])),
     ).toEqual({
       conversation: 500,
       memoryExtraction: 500,
+      memoryLifecycle: 800,
       projectionWrite: 700,
       projectionDelete: 700,
       cleanup: 900,
@@ -463,10 +467,10 @@ describe("conversation worker scheduler", () => {
       clearSchedule: harness.clearSchedule,
     });
 
-    await vi.waitFor(() => expect(harness.pending).toHaveLength(5));
+    await vi.waitFor(() => expect(harness.pending).toHaveLength(6));
     const callbacks = harness.pending.map((entry) => entry.callback);
     scheduler.stop();
-    expect(harness.clearSchedule).toHaveBeenCalledTimes(5);
+    expect(harness.clearSchedule).toHaveBeenCalledTimes(6);
 
     for (const callback of callbacks) callback();
     resolveReconciliation?.({ processed: false });
@@ -474,10 +478,11 @@ describe("conversation worker scheduler", () => {
 
     expect(dependencies.processConversation).toHaveBeenCalledTimes(1);
     expect(dependencies.processMemoryExtraction).toHaveBeenCalledTimes(1);
+    expect(dependencies.processMemoryLifecycle).toHaveBeenCalledTimes(1);
     expect(dependencies.processProjectionWrite).toHaveBeenCalledTimes(1);
     expect(dependencies.processProjectionDelete).toHaveBeenCalledTimes(1);
     expect(dependencies.processCleanup).toHaveBeenCalledTimes(1);
     expect(dependencies.processReconciliation).toHaveBeenCalledTimes(1);
-    expect(harness.pending).toHaveLength(5);
+    expect(harness.pending).toHaveLength(6);
   });
 });

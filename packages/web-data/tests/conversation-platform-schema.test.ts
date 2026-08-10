@@ -23,6 +23,24 @@ const matrixAssignmentRevisionMigration = readFileSync(
   ),
   "utf8",
 );
+const matrixReconnectPreservationMigration = readFileSync(
+  fileURLToPath(
+    new URL(
+      "../../../prisma/migrations/20260807100000_matrix_reconnect_preserve_assignment/migration.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
+const matrixLifecycleRevisionMigration = readFileSync(
+  fileURLToPath(
+    new URL(
+      "../../../prisma/migrations/20260807110000_matrix_endpoint_lifecycle_revision/migration.sql",
+      import.meta.url,
+    ),
+  ),
+  "utf8",
+);
 
 describe("conversation platform schema", () => {
   it("keeps legacy turns while adding the channel-neutral message model", () => {
@@ -125,6 +143,100 @@ describe("conversation platform schema", () => {
     );
     expect(matrixAssignmentRevisionMigration).not.toMatch(
       /SET\s+"representativeAssignmentRevision"/i,
+    );
+  });
+
+  it("preserves the Matrix assignment epoch across a same-endpoint reconnect", () => {
+    const legacyReconnectClampStart =
+      matrixReconnectPreservationMigration.indexOf(
+        "-- During a rolling deployment",
+      );
+    const matrixBranchStart = matrixReconnectPreservationMigration.indexOf(
+      "IF (\n        NEW.\"kind\"::text = 'MATRIX'",
+      legacyReconnectClampStart,
+    );
+    const telegramBranchStart = matrixReconnectPreservationMigration.indexOf(
+      "NEW.\"kind\"::text = 'TELEGRAM'",
+      matrixBranchStart,
+    );
+    const conditionEnd = matrixReconnectPreservationMigration.indexOf(
+      "THEN",
+      telegramBranchStart,
+    );
+    const matrixAssignmentBranch = matrixReconnectPreservationMigration.slice(
+      matrixBranchStart,
+      telegramBranchStart,
+    );
+    const legacyReconnectClamp = matrixReconnectPreservationMigration.slice(
+      legacyReconnectClampStart,
+      matrixBranchStart,
+    );
+    const telegramAssignmentBranch =
+      matrixReconnectPreservationMigration.slice(
+        telegramBranchStart,
+        conditionEnd,
+      );
+
+    expect(legacyReconnectClampStart).toBeGreaterThanOrEqual(0);
+    expect(matrixBranchStart).toBeGreaterThan(legacyReconnectClampStart);
+    expect(telegramBranchStart).toBeGreaterThan(matrixBranchStart);
+    expect(conditionEnd).toBeGreaterThan(telegramBranchStart);
+    expect(matrixAssignmentBranch).toContain(
+      'OLD."externalUserId" IS DISTINCT FROM NEW."externalUserId"',
+    );
+    expect(matrixAssignmentBranch).toContain(
+      'OLD."connectionId" IS DISTINCT FROM NEW."connectionId"',
+    );
+    expect(matrixAssignmentBranch).not.toContain("DISCONNECTED");
+    expect(telegramAssignmentBranch).toContain(
+      "OLD.\"desiredState\"::text = 'DISCONNECTED'",
+    );
+    expect(legacyReconnectClamp).toContain(
+      'OLD."externalUserId" IS NOT DISTINCT FROM NEW."externalUserId"',
+    );
+    expect(legacyReconnectClamp).toContain(
+      'OLD."connectionId" IS NOT DISTINCT FROM NEW."connectionId"',
+    );
+    expect(legacyReconnectClamp).toContain(
+      "OLD.\"desiredState\"::text = 'DISCONNECTED'",
+    );
+    expect(legacyReconnectClamp).toContain(
+      '= OLD."endpointAssignmentRevision" + 1',
+    );
+    expect(legacyReconnectClamp).toContain(
+      'OLD."endpointAssignmentRevision";',
+    );
+  });
+
+  it("separates Matrix endpoint lifecycle epochs from endpoint assignments", () => {
+    const representativeBinding = schema.match(
+      /model RepresentativeChannelBinding \{[\s\S]*?\n\}/,
+    )?.[0] || "";
+    const message = schema.match(/model Message \{[\s\S]*?\n\}/)?.[0] || "";
+
+    expect(representativeBinding).toContain(
+      "endpointLifecycleRevision  Int",
+    );
+    expect(representativeBinding).toContain("@default(1)");
+    expect(message).toContain("channelLifecycleRevision");
+    expect(message).toMatch(/channelLifecycleRevision\s+Int\?/);
+    expect(matrixLifecycleRevisionMigration).toContain(
+      'ADD COLUMN "endpointLifecycleRevision" INTEGER NOT NULL DEFAULT 1',
+    );
+    expect(matrixLifecycleRevisionMigration).toContain(
+      'ADD COLUMN "channelLifecycleRevision" INTEGER',
+    );
+    expect(matrixLifecycleRevisionMigration).not.toMatch(
+      /UPDATE\s+"Message"/i,
+    );
+    expect(matrixLifecycleRevisionMigration).toContain(
+      "enforce_matrix_endpoint_lifecycle_revision",
+    );
+    expect(matrixLifecycleRevisionMigration).toContain(
+      "OLD.\"desiredState\" IS DISTINCT FROM NEW.\"desiredState\"",
+    );
+    expect(matrixLifecycleRevisionMigration).toContain(
+      'OLD."endpointLifecycleRevision" + 1',
     );
   });
 });

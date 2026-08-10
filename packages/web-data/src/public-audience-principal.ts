@@ -31,13 +31,21 @@ export type PublicAudiencePrincipalClient = {
   };
   identityLink: {
     findUnique(args: unknown): Promise<{
+      id: string;
       audienceIdentityId: string;
+      providerSubject: string;
+      issuer: string;
+      connectionId: string | null;
       verifiedAt: Date | null;
       assuranceLevel: IdentityAssuranceLevel;
       revokedAt: Date | null;
     } | null>;
     findFirst(args: unknown): Promise<{
+      id: string;
       audienceIdentityId: string;
+      providerSubject: string;
+      issuer: string;
+      connectionId: string | null;
       verifiedAt: Date | null;
       assuranceLevel: IdentityAssuranceLevel;
       revokedAt: Date | null;
@@ -60,6 +68,16 @@ export type PublicAudiencePrincipal = {
    * the canonical identity id to the browser.
    */
   businessKey: string;
+  /**
+   * Exact current LOGTO link resolved from the signed server session. This is
+   * internal ingress provenance and must never be serialized to the browser.
+   */
+  sourceIdentityLinkId: string | null;
+  sourceIdentityEvidence: {
+    providerSubject: string;
+    issuer: string;
+    connectionId: string;
+  } | null;
 };
 
 export type PublicAudiencePrincipalErrorCode =
@@ -129,7 +147,13 @@ export async function resolvePublicAudiencePrincipal(
         "The anonymous browser session no longer represents an anonymous identity.",
       );
     }
-    return serializePrincipal("anonymous", audienceId, canonicalIdentity.id);
+    return serializePrincipal(
+      "anonymous",
+      audienceId,
+      canonicalIdentity.id,
+      null,
+      null,
+    );
   }
 
   const sessionAudienceId = authSession.audienceId?.trim().toLowerCase();
@@ -163,7 +187,11 @@ export async function resolvePublicAudiencePrincipal(
           },
         },
       select: {
+        id: true,
         audienceIdentityId: true,
+        providerSubject: true,
+        issuer: true,
+        connectionId: true,
         verifiedAt: true,
         assuranceLevel: true,
         revokedAt: true,
@@ -181,7 +209,11 @@ export async function resolvePublicAudiencePrincipal(
           },
         },
         select: {
+          id: true,
           audienceIdentityId: true,
+          providerSubject: true,
+          issuer: true,
+          connectionId: true,
           verifiedAt: true,
           assuranceLevel: true,
           revokedAt: true,
@@ -200,7 +232,11 @@ export async function resolvePublicAudiencePrincipal(
           },
         },
       select: {
+        id: true,
         audienceIdentityId: true,
+        providerSubject: true,
+        issuer: true,
+        connectionId: true,
         verifiedAt: true,
         assuranceLevel: true,
         revokedAt: true,
@@ -240,6 +276,13 @@ export async function resolvePublicAudiencePrincipal(
     "authenticated",
     audienceId,
     canonicalSessionIdentity.id,
+    link.id,
+    {
+      providerSubject: link.providerSubject,
+      issuer: link.issuer,
+      connectionId:
+        link.connectionId?.trim() || `logto-identity-link:${link.id}`,
+    },
   );
 }
 
@@ -319,12 +362,16 @@ function serializePrincipal(
   mode: PublicAudiencePrincipal["mode"],
   audienceId: string,
   audienceIdentityId: string,
+  sourceIdentityLinkId: string | null,
+  sourceIdentityEvidence: PublicAudiencePrincipal["sourceIdentityEvidence"],
 ): PublicAudiencePrincipal {
   return {
     mode,
     audienceId,
     audienceIdentityId,
     businessKey: `audience:${audienceIdentityId}`,
+    sourceIdentityLinkId,
+    sourceIdentityEvidence,
   };
 }
 

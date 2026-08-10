@@ -67,6 +67,7 @@ function createFakeBindingClient(
   const challenges = new Map<string, FakeChallenge>();
   const connectionProofs = new Map<string, FakeConnectionProof>();
   const advisoryLocks: string[] = [];
+  const rowLocks: string[] = [];
   const links = new Map(
     [
       ...identities
@@ -93,6 +94,13 @@ function createFakeBindingClient(
     $executeRaw: async (...args: unknown[]) => {
       advisoryLocks.push(String(args[1] ?? ""));
       return 0;
+    },
+    $queryRaw: async (query: { strings?: readonly string[] }) => {
+      const sql = query.strings?.join(" ") ?? "";
+      rowLocks.push(
+        sql.includes('"IdentityLinkConnectionProof"') ? "proof" : "link",
+      );
+      return [{ id: "locked-row" }];
     },
     audienceIdentity: {
       findUnique: async (input: unknown) => {
@@ -407,6 +415,7 @@ function createFakeBindingClient(
     links,
     connectionProofs,
     advisoryLocks,
+    rowLocks,
   };
 }
 
@@ -1150,6 +1159,7 @@ describe("audience identity private-channel binding", () => {
       },
       fake.client as never,
     );
+    fake.rowLocks.length = 0;
     await expect(
       revokePrivateChannelIdentityBinding(
         {
@@ -1162,6 +1172,7 @@ describe("audience identity private-channel binding", () => {
         fake.client as never,
       ),
     ).resolves.toMatchObject({ changed: true });
+    expect(fake.rowLocks).toEqual(["link", "proof"]);
 
     const link = fake.links.get("TELEGRAM:123456");
     expect(link?.revokedAt).toBeNull();
@@ -1395,6 +1406,7 @@ describe("audience identity private-channel binding", () => {
       },
       fake.client as never,
     );
+    fake.rowLocks.length = 0;
     await consumeIdentityBindingChallenge(
       {
         token: replacement.token,
@@ -1405,6 +1417,7 @@ describe("audience identity private-channel binding", () => {
       },
       fake.client as never,
     );
+    expect(fake.rowLocks).toEqual(["link", "proof"]);
 
     const aliceLink = fake.links.get("MATRIX:@alice:old.example");
     const bobLink = fake.links.get("MATRIX:@bob:new.example");

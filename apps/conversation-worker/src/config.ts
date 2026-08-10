@@ -13,6 +13,7 @@ const defaultMemoryTickTimeoutMs = 60_000;
 const defaultReadinessStaleMs = 3 * 60_000;
 
 export const conversationWorkerMemoryLoopDefaults = {
+  memoryLifecyclePollMs: 1_000,
   memoryProjectionPollMs: 500,
   memoryCleanupPollMs: 1_000,
   memoryReconciliationPollMs: 60_000,
@@ -23,6 +24,7 @@ export const conversationWorkerMemoryLoopDefaults = {
 const configSchema = z.object({
   port: z.number().int().min(1).max(65535),
   pollMs: z.number().int().min(100).max(60_000),
+  memoryLifecyclePollMs: z.number().int().min(100).max(60_000),
   memoryProjectionPollMs: z.number().int().min(100).max(60_000),
   memoryCleanupPollMs: z.number().int().min(100).max(60_000),
   memoryReconciliationPollMs: z.number().int().min(1_000).max(60 * 60_000),
@@ -103,6 +105,10 @@ export function resolveConversationWorkerConfig(
   return configSchema.parse({
     port: Number(env.CONVERSATION_WORKER_PORT || 4040),
     pollMs: Number(env.CONVERSATION_WORKER_POLL_MS || 500),
+    memoryLifecyclePollMs: Number(
+      env.MEMORY_LIFECYCLE_POLL_MS
+      || conversationWorkerMemoryLoopDefaults.memoryLifecyclePollMs,
+    ),
     memoryProjectionPollMs: Number(
       env.MEMORY_PROJECTION_POLL_MS
       || conversationWorkerMemoryLoopDefaults.memoryProjectionPollMs,

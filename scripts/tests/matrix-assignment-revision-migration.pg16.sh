@@ -67,6 +67,14 @@ CREATE TABLE "ConversationChannelBinding" (
   "metadata" JSONB
 );
 
+CREATE TABLE "Message" (
+  "id" TEXT PRIMARY KEY,
+  "text" TEXT
+);
+
+INSERT INTO "Message" ("id", "text")
+VALUES ('legacy-private-message', 'legacy');
+
 INSERT INTO "RepresentativeChannelBinding" (
   "id",
   "representativeId",
@@ -137,6 +145,18 @@ docker exec -i "$FIXTURE_CONTAINER" \
   < "$REPO_ROOT/prisma/migrations/20260729110000_matrix_assignment_revision_fence/migration.sql" \
   >/dev/null
 
+printf 'phase=apply_matrix_reconnect_preservation_migration\n'
+docker exec -i "$FIXTURE_CONTAINER" \
+  psql -U postgres -d delegate_fixture -X --set ON_ERROR_STOP=1 \
+  < "$REPO_ROOT/prisma/migrations/20260807100000_matrix_reconnect_preserve_assignment/migration.sql" \
+  >/dev/null
+
+printf 'phase=apply_matrix_lifecycle_revision_migration\n'
+docker exec -i "$FIXTURE_CONTAINER" \
+  psql -U postgres -d delegate_fixture -X --set ON_ERROR_STOP=1 \
+  < "$REPO_ROOT/prisma/migrations/20260807110000_matrix_endpoint_lifecycle_revision/migration.sql" \
+  >/dev/null
+
 printf 'phase=exercise_legacy_and_current_writers\n'
 docker exec -i "$FIXTURE_CONTAINER" \
   psql -U postgres -d delegate_fixture -X --set ON_ERROR_STOP=1 <<'SQL' >/dev/null
@@ -191,6 +211,41 @@ SELECT
     "endpointAssignmentRevision"
   )
 FROM "RepresentativeChannelBinding"
+WHERE "id" = 'rep-binding-1';
+
+-- Disconnecting and reconnecting the same Matrix endpoint is a runtime
+-- lifecycle transition. It must preserve both the assignment epoch and the
+-- currently verified room.
+UPDATE "RepresentativeChannelBinding"
+SET "desiredState" = 'DISCONNECTED'
+WHERE "id" = 'rep-binding-1';
+
+UPDATE "RepresentativeChannelBinding"
+SET
+  "desiredState" = 'ACTIVE',
+  -- Simulate an older application instance during a rolling deploy. The new
+  -- trigger must clamp this exact legacy reconnect write back to the existing
+  -- assignment epoch.
+  "endpointAssignmentRevision" = "endpointAssignmentRevision" + 1
+WHERE "id" = 'rep-binding-1';
+
+-- A current writer sends lifecycle + 1. The trigger must preserve that value
+-- rather than double-incrementing it, while assignment remains unchanged.
+UPDATE "RepresentativeChannelBinding"
+SET
+  "desiredState" = 'PAUSED',
+  "endpointLifecycleRevision" = "endpointLifecycleRevision" + 1
+WHERE "id" = 'rep-binding-1';
+
+UPDATE "RepresentativeChannelBinding"
+SET
+  "desiredState" = 'ACTIVE',
+  "endpointLifecycleRevision" = "endpointLifecycleRevision" + 1
+WHERE "id" = 'rep-binding-1';
+
+-- A stale writer cannot roll either epoch back.
+UPDATE "RepresentativeChannelBinding"
+SET "endpointLifecycleRevision" = 1
 WHERE "id" = 'rep-binding-1';
 
 -- A stale writer cannot roll the epoch back.
@@ -269,6 +324,9 @@ DECLARE
   telegram_revision INTEGER;
   legacy_telegram_revision INTEGER;
   telegram_b_revision INTEGER;
+  lifecycle_revision INTEGER;
+  telegram_lifecycle_revision INTEGER;
+  legacy_message_lifecycle_revision INTEGER;
 BEGIN
   SELECT "endpointAssignmentRevision"
   INTO assignment_revision
@@ -277,6 +335,17 @@ BEGIN
 
   IF assignment_revision IS DISTINCT FROM 3 THEN
     RAISE EXCEPTION 'expected A -> B -> A revision 3, got %', assignment_revision;
+  END IF;
+
+  SELECT "endpointLifecycleRevision"
+  INTO lifecycle_revision
+  FROM "RepresentativeChannelBinding"
+  WHERE "id" = 'rep-binding-1';
+
+  IF lifecycle_revision IS DISTINCT FROM 5 THEN
+    RAISE EXCEPTION
+      'expected Matrix disconnect -> reconnect -> pause -> active lifecycle revision 5, got %',
+      lifecycle_revision;
   END IF;
 
   SELECT "metadata"->>'isolationReason'
@@ -357,6 +426,28 @@ BEGIN
     RAISE EXCEPTION
       'expected Telegram A -> B -> A -> reconnect revision 4, got %',
       telegram_revision;
+  END IF;
+
+  SELECT "endpointLifecycleRevision"
+  INTO telegram_lifecycle_revision
+  FROM "RepresentativeChannelBinding"
+  WHERE "id" = 'telegram-binding-1';
+
+  IF telegram_lifecycle_revision IS DISTINCT FROM 1 THEN
+    RAISE EXCEPTION
+      'Telegram desired-state changes must not advance the Matrix lifecycle revision, got %',
+      telegram_lifecycle_revision;
+  END IF;
+
+  SELECT "channelLifecycleRevision"
+  INTO legacy_message_lifecycle_revision
+  FROM "Message"
+  WHERE "id" = 'legacy-private-message';
+
+  IF legacy_message_lifecycle_revision IS NOT NULL THEN
+    RAISE EXCEPTION
+      'legacy private messages must retain a NULL lifecycle snapshot, got %',
+      legacy_message_lifecycle_revision;
   END IF;
 
   SELECT "representativeAssignmentRevision"

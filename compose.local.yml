@@ -17,12 +17,23 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: >
-      sh -lc "pnpm db:generate && pnpm local:auth:bootstrap && pnpm --filter @delegate/dashboard exec next dev -H 0.0.0.0 -p 3001"
+      sh -lc "pnpm db:generate && pnpm local:auth:bootstrap && exec pnpm --filter @delegate/dashboard exec next dev --turbopack -H 0.0.0.0 -p 3001"
     volumes:
       - ./apps/web/app:/app/apps/web/app:ro
       - ./apps/web/auth-guard.ts:/app/apps/web/auth-guard.ts:ro
-      - ./packages/web-data/src:/app/packages/web-data/src:ro
+      - ./apps/web/next.config.ts:/app/apps/web/next.config.ts:ro
+      - ./apps/web/proxy.ts:/app/apps/web/proxy.ts:ro
+      - ./packages/artifacts/src:/app/packages/artifacts/src:ro
+      - ./packages/compute-protocol/src:/app/packages/compute-protocol/src:ro
+      - ./packages/domain/src:/app/packages/domain/src:ro
+      - ./packages/openviking/src:/app/packages/openviking/src:ro
+      - ./packages/registry/src:/app/packages/registry/src:ro
+      - ./packages/runtime/src:/app/packages/runtime/src:ro
       - ./packages/web-data/package.json:/app/packages/web-data/package.json:ro
+      - ./packages/web-data/src:/app/packages/web-data/src:ro
+      - ./packages/web-ui/src:/app/packages/web-ui/src:ro
+      - ./packages/web-ui/styles:/app/packages/web-ui/styles:ro
+      - ./packages/workflows/src:/app/packages/workflows/src:ro
       - ./prisma/schema.prisma:/app/prisma/schema.prisma:ro
       - ./scripts/local-auth-bootstrap.ts:/app/scripts/local-auth-bootstrap.ts:ro
     healthcheck:
@@ -41,11 +52,26 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: >
-      sh -lc "pnpm db:generate && pnpm --filter @delegate/reps exec next dev -H 0.0.0.0 -p 3002"
+      sh -lc "pnpm db:generate && exec pnpm --filter @delegate/reps exec next dev --turbopack -H 0.0.0.0 -p 3002"
     volumes:
       - ./apps/reps/app:/app/apps/reps/app:ro
-      - ./packages/web-data/src:/app/packages/web-data/src:ro
+      - ./apps/reps/instrumentation.ts:/app/apps/reps/instrumentation.ts:ro
+      - ./apps/reps/next.config.ts:/app/apps/reps/next.config.ts:ro
+      - ./apps/reps/proxy.ts:/app/apps/reps/proxy.ts:ro
+      - ./apps/reps/public:/app/apps/reps/public:ro
+      - ./packages/artifacts/src:/app/packages/artifacts/src:ro
+      - ./packages/compute-protocol/src:/app/packages/compute-protocol/src:ro
+      - ./packages/domain/src:/app/packages/domain/src:ro
+      - ./packages/lifecycle-hooks/src:/app/packages/lifecycle-hooks/src:ro
+      - ./packages/model-runtime/src:/app/packages/model-runtime/src:ro
+      - ./packages/openviking/src:/app/packages/openviking/src:ro
+      - ./packages/registry/src:/app/packages/registry/src:ro
+      - ./packages/runtime/src:/app/packages/runtime/src:ro
       - ./packages/web-data/package.json:/app/packages/web-data/package.json:ro
+      - ./packages/web-data/src:/app/packages/web-data/src:ro
+      - ./packages/web-ui/src:/app/packages/web-ui/src:ro
+      - ./packages/web-ui/styles:/app/packages/web-ui/styles:ro
+      - ./packages/workflows/src:/app/packages/workflows/src:ro
       - ./prisma/schema.prisma:/app/prisma/schema.prisma:ro
     healthcheck:
       start_period: 30s
@@ -53,10 +79,3 @@ services:
   bot:
     environment:
       TELEGRAM_WEB_RECHARGE_BASE_URL: ${TELEGRAM_WEB_RECHARGE_BASE_URL:-http://localhost:3002}
-    command: >
-      sh -lc "pnpm db:generate && cd /app/apps/bot && exec node --import tsx src/index.ts"
-    volumes:
-      - ./apps/bot/src:/app/apps/bot/src:ro
-      - ./packages/web-data/src:/app/packages/web-data/src:ro
-      - ./packages/web-data/package.json:/app/packages/web-data/package.json:ro
-      - ./prisma/schema.prisma:/app/prisma/schema.prisma:ro

@@ -23,6 +23,13 @@ export type GovernedMemoryRoot =
       channel: GovernedMemoryChannel;
     }
   | {
+      kind: "contact_shared";
+      namespaceKey: string;
+      userId: string;
+      rootUri: string;
+      audienceIdentityId: string;
+    }
+  | {
       kind: "representative_experience";
       namespaceKey: string;
       userId: string;
@@ -75,6 +82,40 @@ export function buildGovernedContactChannelMemoryVersionUri(params: {
   memoryVersionId: string;
 }): string {
   return `${buildGovernedContactChannelMemoryRootUri(params)}memories/${requireGovernedMemorySegment(
+    params.memoryId,
+    "memoryId",
+  )}/versions/${requireGovernedMemorySegment(
+    params.memoryVersionId,
+    "memoryVersionId",
+  )}.md`;
+}
+
+/**
+ * Builds the cross-channel recall boundary for one canonical, verified
+ * AudienceIdentity. Unlike a channel-contact root, this coordinate is stable
+ * when the same person uses another consented transport.
+ */
+export function buildGovernedSharedContactMemoryRootUri(params: {
+  namespaceKey: string;
+  audienceIdentityId: string;
+}): string {
+  const namespaceKey = requireGovernedMemorySegment(params.namespaceKey, "namespaceKey");
+  return `viking://user/${buildGovernedMemoryManagedUserId(
+    namespaceKey,
+  )}/memories/delegate/${namespaceKey}/audience-identities/${requireGovernedMemorySegment(
+    params.audienceIdentityId,
+    "audienceIdentityId",
+  )}/contact-memory/`;
+}
+
+/** Builds the exact projection URI for one immutable shared-contact version. */
+export function buildGovernedSharedContactMemoryVersionUri(params: {
+  namespaceKey: string;
+  audienceIdentityId: string;
+  memoryId: string;
+  memoryVersionId: string;
+}): string {
+  return `${buildGovernedSharedContactMemoryRootUri(params)}memories/${requireGovernedMemorySegment(
     params.memoryId,
     "memoryId",
   )}/versions/${requireGovernedMemorySegment(
@@ -147,6 +188,27 @@ export function assertExactGovernedMemoryRootUri(params: {
   }
 
   if (
+    segments.length === 4
+    && segments[0] === "audience-identities"
+    && segments[2] === "contact-memory"
+    && segments[3] === ""
+  ) {
+    const audienceIdentityId = requireGovernedMemorySegmentForUri(segments[1]);
+    const rootUri = buildGovernedSharedContactMemoryRootUri({
+      namespaceKey,
+      audienceIdentityId,
+    });
+    if (params.uri !== rootUri) throw new Error(GOVERNED_MEMORY_URI_ERROR);
+    return {
+      kind: "contact_shared",
+      namespaceKey,
+      userId,
+      rootUri,
+      audienceIdentityId,
+    };
+  }
+
+  if (
     segments.length === 2
     && segments[0] === "representative-experience"
     && segments[1] === ""
@@ -208,6 +270,38 @@ export function assertExactGovernedMemoryVersionUri(params: {
       }),
       contactId,
       channel,
+      uri,
+      memoryId,
+      memoryVersionId,
+    };
+  }
+
+  if (
+    segments.length === 7
+    && segments[0] === "audience-identities"
+    && segments[2] === "contact-memory"
+    && segments[3] === "memories"
+    && segments[5] === "versions"
+  ) {
+    const audienceIdentityId = requireGovernedMemorySegmentForUri(segments[1]);
+    const memoryId = requireGovernedMemorySegmentForUri(segments[4]);
+    const memoryVersionId = requireGovernedMemoryVersionFilename(segments[6]);
+    const uri = buildGovernedSharedContactMemoryVersionUri({
+      namespaceKey,
+      audienceIdentityId,
+      memoryId,
+      memoryVersionId,
+    });
+    if (params.uri !== uri) throw new Error(GOVERNED_MEMORY_URI_ERROR);
+    return {
+      kind: "contact_shared",
+      namespaceKey,
+      userId,
+      rootUri: buildGovernedSharedContactMemoryRootUri({
+        namespaceKey,
+        audienceIdentityId,
+      }),
+      audienceIdentityId,
       uri,
       memoryId,
       memoryVersionId,

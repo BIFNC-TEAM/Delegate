@@ -29,6 +29,9 @@ const ORDER_QUERY_PATH_PREFIX =
   "/v3/pay/transactions/out-trade-no/";
 const ORDER_CLOSE_PATH_SUFFIX = "/close";
 const DOMESTIC_REFUND_PATH = "/v3/refund/domestic/refunds";
+const SECURITY_ECHO_PATH = "/v3/security/echo";
+const PUBLIC_KEY_PROBE_ECHO_MESSAGE =
+  "delegate-wechat-pay-public-key-probe";
 const PAYMENT_NOTIFICATION_PATH =
   "/api/payments/wechat/notify";
 const REFUND_NOTIFICATION_PATH =
@@ -70,28 +73,57 @@ export type WeChatPayApiV3Config = {
   requestTimeoutMs?: number;
 };
 
-export type WeChatPayEnvironment =
-  Readonly<Record<string, string | undefined>>;
-
-type ResolvedConfig = {
-  readonly resolved: true;
-  appId: string;
+/**
+ * Narrow configuration for the official WeChat Pay security echo endpoint.
+ * It intentionally does not require an AppID, API v3 key, callback URL, or
+ * release flag because the probe creates no order, callback, or ledger write.
+ */
+export type WeChatPayPublicKeyProbeConfig = {
   merchantId: string;
   merchantCertificateSerialNumber: string;
   merchantPrivateKey: string;
-  apiV3Key: string;
+  publicKeyId: string;
+  publicKey: string;
+  apiBaseUrl?: string;
+  fetch?: typeof globalThis.fetch;
+  now?: () => Date;
+  nonce?: () => string;
+  maxSignatureAgeSeconds?: number;
+  requestTimeoutMs?: number;
+};
+
+export type WeChatPayPublicKeyProbeResult = {
+  status: "verified";
+  requestVerificationMode: "public_key";
+  responseVerificationMode: "public_key";
+  verifiedAt: string;
+};
+
+export type WeChatPayEnvironment =
+  Readonly<Record<string, string | undefined>>;
+
+type ResolvedRequestConfig = {
+  merchantId: string;
+  merchantCertificateSerialNumber: string;
+  merchantPrivateKey: string;
   wechatPayVerificationKeys: Readonly<Record<string, string>>;
   wechatPaySerial: string;
-  notifyUrl: string;
-  refundNotifyUrl: string;
-  description: string;
   apiBaseUrl: string;
   fetch: typeof globalThis.fetch;
   now: () => Date;
   nonce: () => string;
   maxSignatureAgeSeconds: number;
-  checkoutLifetimeSeconds: number;
   requestTimeoutMs: number;
+};
+
+type ResolvedConfig = ResolvedRequestConfig & {
+  readonly resolved: true;
+  appId: string;
+  apiV3Key: string;
+  notifyUrl: string;
+  refundNotifyUrl: string;
+  description: string;
+  checkoutLifetimeSeconds: number;
 };
 
 type EncryptedResource = {
@@ -397,6 +429,87 @@ export function loadWeChatPayApiV3ConfigFromEnv(
     refundNotifyUrl:
       resolveWeChatPayRefundNotifyUrlEnvironment(env),
     ...(description ? { description } : {}),
+  };
+}
+
+export function loadWeChatPayPublicKeyProbeConfigFromEnv(
+  env: WeChatPayEnvironment = process.env,
+): WeChatPayPublicKeyProbeConfig {
+  return {
+    merchantId: requiredEnvironmentText(
+      env.WECHAT_PAY_MERCHANT_ID,
+      "WECHAT_PAY_MERCHANT_ID",
+    ),
+    merchantCertificateSerialNumber: requiredEnvironmentText(
+      env.WECHAT_PAY_MERCHANT_CERTIFICATE_SERIAL_NUMBER,
+      "WECHAT_PAY_MERCHANT_CERTIFICATE_SERIAL_NUMBER",
+    ),
+    merchantPrivateKey: requiredPemEnvironmentValue(
+      env.WECHAT_PAY_MERCHANT_PRIVATE_KEY,
+      env.WECHAT_PAY_MERCHANT_PRIVATE_KEY_BASE64,
+      "WECHAT_PAY_MERCHANT_PRIVATE_KEY",
+    ),
+    publicKeyId: requiredEnvironmentText(
+      env.WECHAT_PAY_PUBLIC_KEY_ID,
+      "WECHAT_PAY_PUBLIC_KEY_ID",
+    ),
+    publicKey: requiredPemEnvironmentValue(
+      env.WECHAT_PAY_PUBLIC_KEY,
+      env.WECHAT_PAY_PUBLIC_KEY_BASE64,
+      "WECHAT_PAY_PUBLIC_KEY",
+    ),
+  };
+}
+
+/**
+ * Calls WeChat Pay's official mutation-free signature verification endpoint.
+ * Success proves that the merchant signature is accepted and that the exact
+ * configured WeChat Pay public key verifies the response.
+ */
+export async function probeWeChatPayPublicKey(
+  config: WeChatPayPublicKeyProbeConfig,
+): Promise<WeChatPayPublicKeyProbeResult> {
+  const resolved = resolvePublicKeyProbeConfig(config);
+  const body = JSON.stringify({
+    echo_message: PUBLIC_KEY_PROBE_ECHO_MESSAGE,
+  });
+  const { response, responseBody, verifiedAt } =
+    await requestWeChatPayApiV3({
+      method: "POST",
+      canonicalPath: SECURITY_ECHO_PATH,
+      body,
+      config: resolved,
+    });
+
+  if (!response.ok) {
+    throw new WeChatPayProtocolError(
+      `WeChat Pay public-key probe was rejected with HTTP ${response.status}.`,
+    );
+  }
+  const responseSerial = normalizeVerificationKeyId(
+    requiredHeader(response.headers, "Wechatpay-Serial"),
+  );
+  if (responseSerial !== resolved.wechatPaySerial) {
+    throw new WeChatPayProtocolError(
+      "WeChat Pay public-key probe response did not use the configured public key.",
+    );
+  }
+  if (
+    requiredText(
+      responseBody.echo_message,
+      "security echo response.echo_message",
+    ) !== PUBLIC_KEY_PROBE_ECHO_MESSAGE
+  ) {
+    throw new WeChatPayProtocolError(
+      "WeChat Pay public-key probe returned an unexpected echo message.",
+    );
+  }
+
+  return {
+    status: "verified",
+    requestVerificationMode: "public_key",
+    responseVerificationMode: "public_key",
+    verifiedAt: verifiedAt.toISOString(),
   };
 }
 
@@ -1842,6 +1955,115 @@ function resolveConfig(config: WeChatPayApiV3Config): ResolvedConfig {
   };
 }
 
+function resolvePublicKeyProbeConfig(
+  config: WeChatPayPublicKeyProbeConfig,
+): ResolvedRequestConfig {
+  const merchantId = requiredConfigText(
+    config.merchantId,
+    "merchantId",
+  );
+  if (!/^\d{6,32}$/.test(merchantId)) {
+    throw new WeChatPayConfigurationError(
+      "WeChat Pay merchantId must contain 6-32 digits.",
+    );
+  }
+  const merchantCertificateSerialNumber = requiredConfigText(
+    config.merchantCertificateSerialNumber,
+    "merchantCertificateSerialNumber",
+  );
+  if (!/^[0-9A-Fa-f]+$/.test(merchantCertificateSerialNumber)) {
+    throw new WeChatPayConfigurationError(
+      "WeChat Pay merchant certificate serial number must be hexadecimal.",
+    );
+  }
+  const merchantPrivateKey = requiredConfigText(
+    config.merchantPrivateKey,
+    "merchantPrivateKey",
+  );
+  try {
+    const merchantPrivateKeyObject = createPrivateKey(merchantPrivateKey);
+    assertRsa2048Key(
+      merchantPrivateKeyObject,
+      "WeChat Pay merchant private key",
+    );
+  } catch (error) {
+    if (error instanceof WeChatPayConfigurationError) {
+      throw error;
+    }
+    throw new WeChatPayConfigurationError(
+      "WeChat Pay merchant private key is not a valid PEM private key.",
+    );
+  }
+
+  const publicKeyId = requiredConfigText(
+    config.publicKeyId,
+    "publicKeyId",
+  );
+  if (!isWeChatPayPublicKeyId(publicKeyId)) {
+    throw new WeChatPayConfigurationError(
+      "WeChat Pay publicKeyId must start with PUB_KEY_ID_ and contain digits after the prefix.",
+    );
+  }
+  const publicKey = requiredConfigText(config.publicKey, "publicKey");
+  try {
+    const publicKeyObject = createPublicKey(publicKey);
+    assertRsa2048Key(
+      publicKeyObject,
+      `WeChat Pay verification key ${publicKeyId}`,
+    );
+  } catch (error) {
+    if (error instanceof WeChatPayConfigurationError) {
+      throw error;
+    }
+    throw new WeChatPayConfigurationError(
+      `WeChat Pay verification key ${publicKeyId} is not a valid PEM public key or certificate.`,
+    );
+  }
+
+  const maxSignatureAgeSeconds =
+    config.maxSignatureAgeSeconds ?? DEFAULT_SIGNATURE_AGE_SECONDS;
+  assertPositiveConfigInteger(
+    maxSignatureAgeSeconds,
+    "maxSignatureAgeSeconds",
+  );
+  const requestTimeoutMs =
+    config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  if (
+    !Number.isSafeInteger(requestTimeoutMs)
+    || requestTimeoutMs <= 0
+    || requestTimeoutMs > MAX_REQUEST_TIMEOUT_MS
+  ) {
+    throw new WeChatPayConfigurationError(
+      `WeChat Pay requestTimeoutMs must be an integer between 1 and ${MAX_REQUEST_TIMEOUT_MS}.`,
+    );
+  }
+  const fetchImplementation = config.fetch ?? globalThis.fetch;
+  if (typeof fetchImplementation !== "function") {
+    throw new WeChatPayConfigurationError(
+      "A fetch implementation is required for WeChat Pay.",
+    );
+  }
+
+  return {
+    merchantId,
+    merchantCertificateSerialNumber,
+    merchantPrivateKey,
+    wechatPayVerificationKeys: {
+      [publicKeyId]: publicKey,
+    },
+    wechatPaySerial: publicKeyId,
+    apiBaseUrl: parseHttpsUrl(
+      config.apiBaseUrl ?? DEFAULT_API_BASE_URL,
+      "apiBaseUrl",
+    ),
+    fetch: fetchImplementation,
+    now: config.now ?? (() => new Date()),
+    nonce: config.nonce ?? (() => randomBytes(16).toString("hex")),
+    maxSignatureAgeSeconds,
+    requestTimeoutMs,
+  };
+}
+
 function isResolvedConfig(
   config: WeChatPayApiV3Config | ResolvedConfig,
 ): config is ResolvedConfig {
@@ -1878,7 +2100,7 @@ async function requestWeChatPayApiV3(input: {
   method: "GET" | "POST";
   canonicalPath: string;
   body?: string;
-  config: ResolvedConfig;
+  config: ResolvedRequestConfig;
 }): Promise<{
   response: Response;
   responseBody: Record<string, unknown>;

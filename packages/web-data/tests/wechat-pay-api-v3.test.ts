@@ -6,7 +6,7 @@ import {
 } from "node:crypto";
 
 import { PaymentProvider, PaymentProviderEventType } from "@prisma/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   closeWeChatPayOrderByOutTradeNo,
@@ -14,7 +14,9 @@ import {
   createWeChatPayNativeCheckout,
   isWeChatPayApiV3Enabled,
   loadWeChatPayApiV3ConfigFromEnv,
+  loadWeChatPayPublicKeyProbeConfigFromEnv,
   loadWeChatPayRefundNotifyUrlFromEnv,
+  probeWeChatPayPublicKey,
   queryWeChatPayOrderByOutTradeNo,
   queryWeChatPayRefundByOutRefundNo,
   submitWeChatPayRefund,
@@ -25,6 +27,7 @@ import {
   WeChatPayProtocolError,
   WeChatPayRefundApiError,
   type WeChatPayApiV3Config,
+  type WeChatPayPublicKeyProbeConfig,
 } from "../src/wechat-pay-api-v3";
 
 const FIXED_NOW = new Date("2026-07-27T08:00:00.000Z");
@@ -124,6 +127,115 @@ describe("WeChat Pay API v3", () => {
         expiresAt: "2026-07-27T10:00:00.000Z",
       },
     });
+  });
+
+  it("proves the configured public key with the official mutation-free security echo", async () => {
+    const rawResponse = JSON.stringify({
+      echo_message: "delegate-wechat-pay-public-key-probe",
+    });
+    let capturedUrl: URL | undefined;
+    let capturedInit: RequestInit | undefined;
+    const config = createPublicKeyProbeConfig({
+      fetch: async (url, init) => {
+        capturedUrl = url instanceof URL ? url : new URL(url.toString());
+        capturedInit = init;
+        return signedResponse(rawResponse);
+      },
+    });
+
+    await expect(probeWeChatPayPublicKey(config)).resolves.toEqual({
+      status: "verified",
+      requestVerificationMode: "public_key",
+      responseVerificationMode: "public_key",
+      verifiedAt: FIXED_NOW.toISOString(),
+    });
+
+    expect(capturedUrl?.toString()).toBe(
+      "https://wechat-pay.example/v3/security/echo",
+    );
+    expect(capturedInit?.method).toBe("POST");
+    expect(capturedInit?.body).toBe(JSON.stringify({
+      echo_message: "delegate-wechat-pay-public-key-probe",
+    }));
+    expect(
+      new Headers(capturedInit?.headers).get("Wechatpay-Serial"),
+    ).toBe(PLATFORM_KEY_ID);
+  });
+
+  it("loads the public-key probe without payment callbacks, AppID, or API v3 decryption key", () => {
+    expect(
+      loadWeChatPayPublicKeyProbeConfigFromEnv({
+        WECHAT_PAY_MERCHANT_ID: "1900000109",
+        WECHAT_PAY_MERCHANT_CERTIFICATE_SERIAL_NUMBER:
+          MERCHANT_CERTIFICATE_SERIAL,
+        WECHAT_PAY_MERCHANT_PRIVATE_KEY_BASE64:
+          encodePem(merchantKeyPair.privateKey),
+        WECHAT_PAY_PUBLIC_KEY_ID: PLATFORM_KEY_ID,
+        WECHAT_PAY_PUBLIC_KEY_BASE64:
+          encodePem(platformKeyPair.publicKey),
+      }),
+    ).toMatchObject({
+      merchantId: "1900000109",
+      merchantCertificateSerialNumber: MERCHANT_CERTIFICATE_SERIAL,
+      publicKeyId: PLATFORM_KEY_ID,
+    });
+  });
+
+  it("fails the public-key probe if WeChat still signs the response with a legacy certificate", async () => {
+    const rawResponse = JSON.stringify({
+      echo_message: "delegate-wechat-pay-public-key-probe",
+    });
+    const fetch = async () => new Response(rawResponse, {
+      status: 200,
+      headers: signedHeaders(rawResponse, {
+        serial: LEGACY_PLATFORM_CERTIFICATE_SERIAL,
+        privateKey: legacyPlatformKeyPair.privateKey,
+      }),
+    });
+
+    await expect(
+      probeWeChatPayPublicKey(createPublicKeyProbeConfig({ fetch })),
+    ).rejects.toThrow(WeChatPayProtocolError);
+  });
+
+  it("fails the public-key probe for a mismatched echo response", async () => {
+    const rawResponse = JSON.stringify({
+      echo_message: "unexpected",
+    });
+
+    await expect(
+      probeWeChatPayPublicKey(createPublicKeyProbeConfig({
+        fetch: async () => signedResponse(rawResponse),
+      })),
+    ).rejects.toThrow("unexpected echo message");
+  });
+
+  it("fails the public-key probe for a signed non-success response", async () => {
+    const rawResponse = JSON.stringify({
+      code: "SIGN_ERROR",
+      message: "request rejected",
+    });
+
+    await expect(
+      probeWeChatPayPublicKey(createPublicKeyProbeConfig({
+        fetch: async () => new Response(rawResponse, {
+          status: 401,
+          headers: signedHeaders(rawResponse),
+        }),
+      })),
+    ).rejects.toThrow("rejected with HTTP 401");
+  });
+
+  it("rejects a non-public verification ID before the probe sends a request", async () => {
+    const fetch = vi.fn(async () => new Response());
+
+    await expect(
+      probeWeChatPayPublicKey(createPublicKeyProbeConfig({
+        publicKeyId: LEGACY_PLATFORM_CERTIFICATE_SERIAL,
+        fetch,
+      })),
+    ).rejects.toThrow("must start with PUB_KEY_ID_");
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("reuses the Native request facts frozen before attempt one when recovery safely resubmits", async () => {
@@ -1643,6 +1755,25 @@ function createConfig(
     },
     wechatPaySerial: PLATFORM_KEY_ID,
     notifyUrl: "https://delegate.example/api/payments/wechat/notify",
+    apiBaseUrl: "https://wechat-pay.example",
+    fetch: async () => {
+      throw new Error("Unexpected network request.");
+    },
+    now: () => FIXED_NOW,
+    nonce: () => "merchant-request-nonce",
+    ...overrides,
+  };
+}
+
+function createPublicKeyProbeConfig(
+  overrides: Partial<WeChatPayPublicKeyProbeConfig> = {},
+): WeChatPayPublicKeyProbeConfig {
+  return {
+    merchantId: "1900000109",
+    merchantCertificateSerialNumber: MERCHANT_CERTIFICATE_SERIAL,
+    merchantPrivateKey: merchantKeyPair.privateKey,
+    publicKeyId: PLATFORM_KEY_ID,
+    publicKey: platformKeyPair.publicKey,
     apiBaseUrl: "https://wechat-pay.example",
     fetch: async () => {
       throw new Error("Unexpected network request.");

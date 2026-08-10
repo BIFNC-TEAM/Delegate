@@ -59,6 +59,9 @@ jobs:
       - name: Test workspace
         run: pnpm exec turbo run test --concurrency=1
 
+      - name: Test WeChat Pay public-key probe CLI
+        run: pnpm test:wechat-public-key-probe-cli
+
       - name: Build applications
         run: pnpm build
 

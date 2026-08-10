@@ -123,6 +123,33 @@ The live canary additionally requires:
 
 No Stripe account or Stripe credential is needed for this release gate.
 
+## Public-key response probe
+
+Before enabling collection, run one mutation-free request against WeChat Pay's
+official `/v3/security/echo` endpoint:
+
+```bash
+pnpm wechat:public-key:probe
+```
+
+The command loads `.env` when present, but it also works with environment
+variables supplied by the deployment runtime. It requires only the merchant
+ID, merchant API certificate serial/private key, and the WeChat Pay public key
+ID/key. It does not require an AppID, API v3 decryption key, callback URL,
+database, or enabled collection flag because it creates no order, callback, or
+ledger write.
+
+A successful result is one redacted JSON line whose request and response modes
+are both `public_key`. Failure output contains only a stable reason code. The
+command never prints the merchant ID, public-key ID, key material,
+Authorization header, echo payload, or raw provider response.
+
+This probe proves that WeChat accepts the merchant signature and that the
+configured public key verifies a real response signed under the requested
+public-key ID. The merchant-console response percentage remains an external
+rolling metric; after a successful probe, observe its next hourly refresh and
+still complete the live payment/refund canary below.
+
 ## Repository gates
 
 Before deploying, require all of these to pass against the release commit:

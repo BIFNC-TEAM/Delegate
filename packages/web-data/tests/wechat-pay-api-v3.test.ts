@@ -90,6 +90,9 @@ describe("WeChat Pay API v3", () => {
     expect(
       new Headers(capturedInit?.headers).get("Wechatpay-Serial"),
     ).toBe(PLATFORM_KEY_ID);
+    expect(
+      new Headers(capturedInit?.headers).get("Accept-Language"),
+    ).toBe("zh-CN");
 
     const authorization = requiredHeader(
       new Headers(capturedInit?.headers),
@@ -322,6 +325,40 @@ describe("WeChat Pay API v3", () => {
         config,
       ),
     ).rejects.toThrow("signature verification failed");
+  });
+
+  it("retains only safe Native API diagnostics for operational follow-up", async () => {
+    const rawResponse = JSON.stringify({
+      code: "NO_AUTH",
+      message: "private provider detail must not be persisted",
+    });
+    const config = createConfig({
+      fetch: async () => new Response(rawResponse, {
+        status: 403,
+        headers: {
+          ...signedHeaders(rawResponse),
+          "Request-ID": "wechat-request-123",
+        },
+      }),
+    });
+
+    const promise = createWeChatPayNativeCheckout(
+      {
+        rechargeOrderId: "recharge_no_auth",
+        externalUserId: "web:user_1",
+        amountCents: 500,
+        currency: "CNY",
+        idempotencyKey: "wechat_recharge_no_auth",
+      },
+      config,
+    );
+
+    await expect(promise).rejects.toMatchObject({
+      code: "WECHAT_PAY_PROTOCOL_ERROR",
+      providerErrorCode: "NO_AUTH",
+      providerHttpStatus: 403,
+      providerRequestId: "wechat-request-123",
+    });
   });
 
   it("rejects weak or non-RSA merchant and verification keys during config preflight", async () => {
@@ -633,6 +670,9 @@ describe("WeChat Pay API v3", () => {
     expect(capturedInit?.method).toBe("GET");
     expect(capturedInit?.body).toBeUndefined();
     expect(
+      new Headers(capturedInit?.headers).get("Accept-Language"),
+    ).toBe("zh-CN");
+    expect(
       new Headers(capturedInit?.headers).get("Wechatpay-Serial"),
     ).toBe(PLATFORM_KEY_ID);
     const authorization = requiredHeader(
@@ -690,6 +730,7 @@ describe("WeChat Pay API v3", () => {
     ["NOTPAY", "pending"],
     ["USERPAYING", "pending"],
     ["CLOSED", "closed"],
+    ["REVOKED", "closed"],
     ["REFUND", "refunded"],
     ["PAYERROR", "failed"],
   ] as const)(
@@ -721,6 +762,102 @@ describe("WeChat Pay API v3", () => {
     },
   );
 
+  it("accepts a signed unpaid order query that omits trade_type", async () => {
+    const rawResponse = JSON.stringify({
+      appid: "wx-test-app-id",
+      mchid: "1900000109",
+      out_trade_no: "recharge_q_no_type",
+      trade_state: "NOTPAY",
+      amount: {
+        total: 10,
+        currency: "CNY",
+      },
+    });
+
+    await expect(
+      queryWeChatPayOrderByOutTradeNo(
+        "recharge_q_no_type",
+        createConfig({
+          fetch: async () => signedResponse(rawResponse),
+        }),
+      ),
+    ).resolves.toEqual({
+      status: "pending",
+      tradeState: "NOTPAY",
+      event: null,
+    });
+  });
+
+  it("rejects a non-Native trade_type when an unpaid query includes it", async () => {
+    const rawResponse = JSON.stringify({
+      appid: "wx-test-app-id",
+      mchid: "1900000109",
+      out_trade_no: "recharge_q_wrong_type",
+      trade_type: "JSAPI",
+      trade_state: "NOTPAY",
+      amount: {
+        total: 10,
+        currency: "CNY",
+      },
+    });
+
+    await expect(
+      queryWeChatPayOrderByOutTradeNo(
+        "recharge_q_wrong_type",
+        createConfig({
+          fetch: async () => signedResponse(rawResponse),
+        }),
+      ),
+    ).rejects.toThrow("not a Native payment");
+  });
+
+  it("rejects an invalid trade_type when the optional field is present", async () => {
+    const rawResponse = JSON.stringify({
+      appid: "wx-test-app-id",
+      mchid: "1900000109",
+      out_trade_no: "recharge_q_invalid_type",
+      trade_type: null,
+      trade_state: "NOTPAY",
+      amount: {
+        total: 10,
+        currency: "CNY",
+      },
+    });
+
+    await expect(
+      queryWeChatPayOrderByOutTradeNo(
+        "recharge_q_invalid_type",
+        createConfig({
+          fetch: async () => signedResponse(rawResponse),
+        }),
+      ),
+    ).rejects.toThrow("query.trade_type is required");
+  });
+
+  it("rejects a signed successful query that omits trade_type", async () => {
+    const rawResponse = JSON.stringify({
+      appid: "wx-test-app-id",
+      mchid: "1900000109",
+      out_trade_no: "recharge_q_paid_no_type",
+      transaction_id: "4200000000202608110000000001",
+      trade_state: "SUCCESS",
+      success_time: "2026-08-11T09:21:30+08:00",
+      amount: {
+        total: 10,
+        currency: "CNY",
+      },
+    });
+
+    await expect(
+      queryWeChatPayOrderByOutTradeNo(
+        "recharge_q_paid_no_type",
+        createConfig({
+          fetch: async () => signedResponse(rawResponse),
+        }),
+      ),
+    ).rejects.toThrow("query.trade_type is required");
+  });
+
   it.each(["ORDER_NOT_EXIST", "NOT_FOUND"] as const)(
     "maps only a signed 404 %s order query response to not_found",
     async (providerCode) => {
@@ -749,21 +886,34 @@ describe("WeChat Pay API v3", () => {
 
   it("keeps other signed non-2xx order query responses as safe protocol errors", async () => {
     const rawResponse = JSON.stringify({
-      code: "SYSTEM_ERROR",
+      code: "PARAM_ERROR",
       message: "private upstream detail",
     });
+    const requestId = "wechat-query-request-id";
     const error = await queryWeChatPayOrderByOutTradeNo(
       "recharge_query_error",
       createConfig({
         fetch: async () =>
           new Response(rawResponse, {
-            status: 500,
-            headers: signedHeaders(rawResponse),
+            status: 406,
+            headers: {
+              ...signedHeaders(rawResponse),
+              "Request-ID": requestId,
+            },
           }),
       }),
     ).catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(WeChatPayProtocolError);
+    expect(
+      (error as WeChatPayProtocolError).providerErrorCode,
+    ).toBe("PARAM_ERROR");
+    expect(
+      (error as WeChatPayProtocolError).providerHttpStatus,
+    ).toBe(406);
+    expect(
+      (error as WeChatPayProtocolError).providerRequestId,
+    ).toBe(requestId);
     expect(String((error as Error).message)).not.toContain(
       "private upstream detail",
     );

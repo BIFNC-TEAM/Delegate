@@ -305,10 +305,32 @@ export class WeChatPayConfigurationError extends Error {
 
 export class WeChatPayProtocolError extends Error {
   readonly code = "WECHAT_PAY_PROTOCOL_ERROR";
+  readonly providerErrorCode: string | null;
+  readonly providerHttpStatus: number | null;
+  readonly providerRequestId: string | null;
 
-  constructor(message: string) {
+  constructor(
+    message: string,
+    details: {
+      providerErrorCode?: string | null;
+      providerHttpStatus?: number | null;
+      providerRequestId?: string | null;
+    } = {},
+  ) {
     super(message);
     this.name = "WeChatPayProtocolError";
+    this.providerErrorCode = normalizeProviderDiagnosticText(
+      details.providerErrorCode,
+      64,
+    );
+    this.providerHttpStatus =
+      Number.isInteger(details.providerHttpStatus)
+        ? details.providerHttpStatus ?? null
+        : null;
+    this.providerRequestId = normalizeProviderDiagnosticText(
+      details.providerRequestId,
+      128,
+    );
   }
 }
 
@@ -323,7 +345,10 @@ export class WeChatPayRefundApiError extends WeChatPayProtocolError {
     readonly providerCode: string,
     readonly httpStatus: number,
   ) {
-    super(message);
+    super(message, {
+      providerErrorCode: providerCode,
+      providerHttpStatus: httpStatus,
+    });
     this.name = "WeChatPayRefundApiError";
   }
 }
@@ -584,6 +609,11 @@ export async function createWeChatPayNativeCheckout(
     const providerCode = optionalText(responseBody.code) ?? "HTTP_ERROR";
     throw new WeChatPayProtocolError(
       `WeChat Pay Native order creation failed (${response.status}, ${providerCode}).`,
+      {
+        providerErrorCode: providerCode,
+        providerHttpStatus: response.status,
+        providerRequestId: readWeChatPayRequestId(response.headers),
+      },
     );
   }
   const codeUrl = requiredText(responseBody.code_url, "code_url");
@@ -768,6 +798,11 @@ export async function queryWeChatPayOrderByOutTradeNo(
     }
     throw new WeChatPayProtocolError(
       `WeChat Pay order query failed (${response.status}, ${providerCode}).`,
+      {
+        providerErrorCode: providerCode,
+        providerHttpStatus: response.status,
+        providerRequestId: readWeChatPayRequestId(response.headers),
+      },
     );
   }
 
@@ -786,11 +821,18 @@ export async function queryWeChatPayOrderByOutTradeNo(
       "WeChat Pay order query identity does not match the request.",
     );
   }
-  const tradeType = requiredText(
-    responseBody.trade_type,
-    "query.trade_type",
+  const tradeState = requiredText(
+    responseBody.trade_state,
+    "query.trade_state",
   );
-  if (tradeType !== "NATIVE") {
+  const hasTradeType = Object.prototype.hasOwnProperty.call(
+    responseBody,
+    "trade_type",
+  );
+  const tradeType = tradeState === "SUCCESS" || hasTradeType
+    ? requiredText(responseBody.trade_type, "query.trade_type")
+    : undefined;
+  if (tradeType !== undefined && tradeType !== "NATIVE") {
     throw new WeChatPayProtocolError(
       "WeChat Pay order query is not a Native payment.",
     );
@@ -807,10 +849,6 @@ export async function queryWeChatPayOrderByOutTradeNo(
       "WeChat Pay order query currency must be CNY.",
     );
   }
-  const tradeState = requiredText(
-    responseBody.trade_state,
-    "query.trade_state",
-  );
   if (tradeState !== "SUCCESS") {
     if (!isUnpaidTradeState(tradeState)) {
       throw new WeChatPayProtocolError(
@@ -840,7 +878,7 @@ export async function queryWeChatPayOrderByOutTradeNo(
     outTradeNo,
     transactionId,
     tradeState,
-    tradeType,
+    ...(tradeType ? { tradeType } : {}),
     successTime: providerOccurredAt.toISOString(),
     amount: {
       total: amountCents,
@@ -2139,6 +2177,7 @@ async function requestWeChatPayApiV3(input: {
     + `signature="${signature}"`;
   const headers: Record<string, string> = {
     Accept: "application/json",
+    "Accept-Language": "zh-CN",
     Authorization: authorization,
   };
   headers["Wechatpay-Serial"] = input.config.wechatPaySerial;
@@ -2215,6 +2254,28 @@ function requiredCanonicalIsoTimestamp(
     );
   }
   return text;
+}
+
+function readWeChatPayRequestId(headers: Headers): string | null {
+  return normalizeProviderDiagnosticText(
+    headers.get("Request-ID"),
+    128,
+  );
+}
+
+function normalizeProviderDiagnosticText(
+  value: string | null | undefined,
+  maxLength: number,
+): string | null {
+  const normalized = value?.trim();
+  if (
+    !normalized
+    || normalized.length > maxLength
+    || !/^[0-9A-Za-z._:-]+$/u.test(normalized)
+  ) {
+    return null;
+  }
+  return normalized;
 }
 
 function parseWeChatPaySuccessTime(

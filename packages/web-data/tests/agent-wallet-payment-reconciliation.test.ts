@@ -13,6 +13,7 @@ import {
   runWeChatPayOrderReconciliationTick,
 } from "../src/agent-wallet-payment-reconciliation";
 import type { NormalizedPaymentProviderEvent } from "../src/agent-wallet-payment-providers";
+import { WeChatPayProtocolError } from "../src/wechat-pay-api-v3";
 
 const databaseNow = new Date("2026-07-27T10:00:00.000Z");
 
@@ -796,6 +797,39 @@ describe("WeChat Pay order reconciliation", () => {
     });
     expect(JSON.stringify(client.outboxRows)).not.toContain(
       "merchant-secret",
+    );
+  });
+
+  it("persists provider code and Request-ID without persisting its message", async () => {
+    const client = await clientWithClaimableOrder();
+    const providerError = new WeChatPayProtocolError(
+      "private provider detail must not be stored",
+      {
+        providerErrorCode: "NO_AUTH",
+        providerHttpStatus: 403,
+        providerRequestId: "wechat-request-123",
+      },
+    );
+
+    await expect(
+      reconcileWeChatPayOrderIfDue("order-1", {
+        client,
+        queryOrder: vi.fn(async () => {
+          throw providerError;
+        }),
+        completePaidEvent: vi.fn(),
+        initialDelayMs: 0,
+        now: () => databaseNow,
+      }),
+    ).rejects.toBe(providerError);
+
+    expect(client.outboxRows[0]).toMatchObject({
+      status: "FAILED",
+      lastError:
+        "WECHAT_PAY_PROTOCOL_ERROR|provider=NO_AUTH|request_id=wechat-request-123",
+    });
+    expect(JSON.stringify(client.outboxRows)).not.toContain(
+      "private provider detail",
     );
   });
 

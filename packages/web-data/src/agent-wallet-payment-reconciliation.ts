@@ -16,6 +16,7 @@ import {
   closeWeChatPayOrderByOutTradeNo,
   createWeChatPayApiV3PaymentProviderAdapter,
   queryWeChatPayOrderByOutTradeNo,
+  WeChatPayProtocolError,
   type WeChatPayEnvironment,
   type WeChatPayOrderQueryResult,
 } from "./wechat-pay-api-v3";
@@ -1449,6 +1450,20 @@ function validDateOrNow(value: Date): Date {
 }
 
 function safeErrorCode(error: unknown): string {
+  if (error instanceof WeChatPayProtocolError) {
+    return [
+      error.code,
+      error.providerErrorCode
+        ? `provider=${error.providerErrorCode}`
+        : null,
+      error.providerRequestId
+        ? `request_id=${error.providerRequestId}`
+        : null,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join("|")
+      .slice(0, 200);
+  }
   if (
     error
     && typeof error === "object"

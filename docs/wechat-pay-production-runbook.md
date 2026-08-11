@@ -150,6 +150,50 @@ public-key ID. The merchant-console response percentage remains an external
 rolling metric; after a successful probe, observe its next hourly refresh and
 still complete the live payment/refund canary below.
 
+## Local real-payment callback testing
+
+A local real-payment test still requires public HTTPS payment and refund
+callback URLs. Do not expose the full representative application through a
+temporary tunnel. Start the callback-only proxy instead:
+
+```bash
+pnpm wechat:callback-proxy
+cloudflared tunnel --url http://127.0.0.1:4302 --no-autoupdate
+```
+
+The proxy binds only to loopback, forwards the exact request body and WeChat
+signature headers to `http://127.0.0.1:3002`, and permits only these two exact
+targets:
+
+- `POST /api/payments/wechat/notify`
+- `POST /api/payments/wechat/refund-notify`
+
+All other methods, paths, and query-bearing targets return 404. Configure the
+temporary tunnel origin as the two explicit callback URLs while leaving the
+representative application's canonical origin on localhost. The tunnel must
+remain alive until payment and refund reconciliation finish. Never put a
+credential or query parameter in either callback URL.
+
+When an existing HTTPS server is available instead of Cloudflare Tunnel, keep
+the same callback-only boundary:
+
+1. Run `pnpm wechat:callback-proxy` on the development machine.
+2. Create a reverse SSH tunnel from server loopback port `4302` to local
+   loopback port `4302`.
+3. If the HTTPS gateway runs in a container that cannot reach host loopback,
+   run `scripts/wechat-pay-private-bridge.mjs` on an RFC 1918 host address and
+   point it only at server loopback port `4302`.
+4. Configure the HTTPS gateway from
+   `deploy/wechat/pay.bonary.xyz.subdomain.conf`, or an equivalent
+   environment-specific file, so only the two exact POST callback paths reach
+   that private bridge.
+
+The callback proxy, reverse SSH tunnel, and private bridge must all remain
+alive for the canary. The private bridge rejects public bind addresses and
+non-loopback targets. Keep collection disabled until public TLS, callback
+rejection behavior, service readiness, operations health, and the public-key
+probe all pass.
+
 ## Repository gates
 
 Before deploying, require all of these to pass against the release commit:
@@ -333,6 +377,29 @@ result. If WeChat reports the order pending but Delegate has no `code_url`,
 wait at least five minutes and use the signed close API; allow a replacement
 only after the close response succeeds. A late verified payment still credits
 exactly once.
+
+### Native create returns `403 NO_AUTH`
+
+Keep new collection disabled and processing enabled. Do not switch to the
+service-provider endpoint unless the merchant platform identifies the account
+as a service provider; the ordinary-merchant Native endpoint is correct for an
+account whose merchant type is `普通商户`.
+
+Confirm all of the following before escalating:
+
+- the configured merchant ID matches `账户中心 -> 商户信息`;
+- `产品中心 -> Native支付` shows the product as enabled;
+- the configured AppID appears as associated under AppID account management;
+- the provider returned `NO_AUTH`, rather than `APPID_MCHID_NOT_MATCH` or
+  `SIGN_ERROR`.
+
+If all checks pass, treat the incident as a provider entitlement mismatch.
+Capture the response `Request-ID`, request time, merchant ID, AppID, method,
+path, and redacted request facts, then ask WeChat Pay support to verify the
+Native API entitlement for that merchant. Never include the merchant private
+key, API v3 key, Authorization header, or decrypted callback payload. Keep the
+same-order reconciliation item recoverable while the frozen request remains
+unexpired; do not create repeated user-facing orders to probe the permission.
 
 ### Refund outcome unknown
 

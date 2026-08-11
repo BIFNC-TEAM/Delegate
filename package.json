@@ -7,7 +7,7 @@
   "packageManager": "pnpm@10.23.0",
   "scripts": {
     "build": "turbo run build",
-    "verify": "pnpm db:generate && pnpm db:validate && pnpm typecheck && pnpm test && pnpm test:wechat-public-key-probe-cli",
+    "verify": "pnpm db:generate && pnpm db:validate && pnpm typecheck && pnpm test && pnpm test:wechat-callback-proxy && pnpm test:wechat-public-key-probe-cli",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "dev:web": "pnpm --filter @delegate/dashboard dev",
@@ -60,7 +60,9 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:setup": "pnpm db:generate && pnpm db:deploy && pnpm db:seed",
     "wallet:reconcile": "node --import tsx scripts/wallet-reconcile.ts",
+    "wechat:callback-proxy": "node --import tsx scripts/wechat-pay-callback-proxy.ts",
     "wechat:public-key:probe": "node --env-file-if-exists=.env --import tsx scripts/wechat-pay-public-key-probe.ts",
+    "test:wechat-callback-proxy": "vitest run scripts/tests/wechat-pay-callback-proxy.test.ts scripts/tests/wechat-pay-private-bridge.test.ts",
     "test:wechat-public-key-probe-cli": "vitest run scripts/tests/wechat-pay-public-key-probe.test.ts",
     "test:wallet-reconcile-cli": "vitest run scripts/tests/wallet-reconcile-cli.test.ts",
     "auth:identity:preflight": "bash scripts/logto-account-identity-preflight.sh",

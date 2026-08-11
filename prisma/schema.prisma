@@ -1596,7 +1596,7 @@ model UserAgentWallet {
 model WalletTransaction {
   id               String                     @id @default(cuid())
   eventGroupId     String                     @unique
-  idempotencyKey   String
+  idempotencyKey   String                     @unique
   sourceType       String
   sourceId         String?
   eventType        WalletTransactionEventType

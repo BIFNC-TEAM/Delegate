@@ -28,8 +28,12 @@ export type WalletTransactionClient = {
    * this delegate, so every production wallet write records a header.
    */
   walletTransaction?: {
-    findUnique(args: unknown): Promise<WalletTransactionRecord | null>;
-    create(args: unknown): Promise<WalletTransactionRecord>;
+    findUnique(
+      args: Prisma.WalletTransactionFindUniqueArgs,
+    ): Promise<WalletTransactionRecord | null>;
+    create(
+      args: Prisma.WalletTransactionCreateArgs,
+    ): Promise<WalletTransactionRecord>;
   };
 };
 

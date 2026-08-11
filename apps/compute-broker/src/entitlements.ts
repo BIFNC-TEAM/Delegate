@@ -11,8 +11,6 @@ const ACTIVE_AUDIENCE_RUN_STATUSES = new Set([
   "PROCESSING",
   "WAITING_APPROVAL",
 ]);
-const PLAN_PRODUCT_CODES = new Set(["plan:pass", "plan:deep_help"]);
-const CONVERSATION_ENTITLEMENT_PREFIX = "conversation-entitlement:";
 
 type AudienceAuthorizationClient = Pick<
   typeof prisma,
@@ -35,7 +33,7 @@ export type AudienceGenerationRunAuthorization =
       hasPaidEntitlement: false;
     })
   | (AudienceGenerationRunAuthorizationBase & {
-      kind: "wallet" | "plan";
+      kind: "wallet";
       productCode: string;
       activePlanTier: "pass" | "deep_help";
       hasPaidEntitlement: true;
@@ -219,18 +217,7 @@ export async function requireAudienceGenerationRunAuthorization(
       hasPaidEntitlement: false,
     };
   }
-  if (billingMode !== null) throwAudienceAuthorizationDenied();
-
-  const planAuthorization = await verifyActivePlanReservation(
-    {
-      audienceIdentityId,
-      representativeId,
-      generationRunId,
-    },
-    client,
-  );
-  if (!planAuthorization) throwAudienceAuthorizationDenied();
-  return planAuthorization;
+  throwAudienceAuthorizationDenied();
 }
 
 export async function verifyRunScopedServiceCreditReservation(
@@ -300,150 +287,6 @@ export function readServerStoredServiceCreditReservation(snapshot: unknown): {
   };
 }
 
-async function verifyActivePlanReservation(
-  input: {
-    audienceIdentityId: string;
-    representativeId: string;
-    generationRunId: string;
-  },
-  client: AudienceAuthorizationClient,
-): Promise<AudienceGenerationRunAuthorization | null> {
-  const encodedRunId = encodeURIComponent(input.generationRunId);
-  const keyPrefix = `${CONVERSATION_ENTITLEMENT_PREFIX}${encodedRunId}:`;
-  const entries = await client.serviceEntitlementLedgerEntry.findMany({
-    where: {
-      generationRunId: input.generationRunId,
-      idempotencyKey: { startsWith: keyPrefix },
-    },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    include: {
-      entitlementAccount: {
-        select: {
-          id: true,
-          audienceIdentityId: true,
-          representativeId: true,
-          productCode: true,
-          status: true,
-          reservedUnits: true,
-          expiresAt: true,
-        },
-      },
-    },
-  });
-  if (entries.length === 0) return null;
-
-  const pattern = new RegExp(
-    `^${escapeRegExp(keyPrefix)}(\\d+):(reserve|consume|release)$`,
-  );
-  const attempts = new Map<
-    number,
-    {
-      reserve?: (typeof entries)[number];
-      consume?: (typeof entries)[number];
-      release?: (typeof entries)[number];
-    }
-  >();
-  for (const entry of entries) {
-    const match = pattern.exec(entry.idempotencyKey);
-    const attempt = match ? Number(match[1]) : 0;
-    const action = match?.[2] as "reserve" | "consume" | "release" | undefined;
-    const expectedKind =
-      action === "reserve"
-        ? "RESERVE"
-        : action === "consume"
-          ? "CONSUME"
-          : action === "release"
-            ? "RELEASE"
-            : null;
-    if (
-      !match
-      || !Number.isSafeInteger(attempt)
-      || attempt <= 0
-      || !action
-      || entry.kind !== expectedKind
-      || entry.units !== 1
-      || entry.generationRunId !== input.generationRunId
-    ) {
-      throwAudienceAuthorizationDenied();
-    }
-    const current = attempts.get(attempt) ?? {};
-    if (current[action]) throwAudienceAuthorizationDenied();
-    current[action] = entry;
-    attempts.set(attempt, current);
-  }
-
-  const orderedAttempts = [...attempts.entries()].sort(
-    ([left], [right]) => left - right,
-  );
-  for (let index = 0; index < orderedAttempts.length; index += 1) {
-    const [attempt, lifecycle] = orderedAttempts[index]!;
-    const reserveAccount = lifecycle.reserve?.entitlementAccount;
-    if (
-      attempt !== index + 1
-      || !lifecycle.reserve
-      || !reserveAccount
-      || reserveAccount.id !== lifecycle.reserve.entitlementAccountId
-      || reserveAccount.audienceIdentityId !== input.audienceIdentityId
-      || reserveAccount.representativeId !== input.representativeId
-      || !PLAN_PRODUCT_CODES.has(reserveAccount.productCode)
-      || (lifecycle.consume && lifecycle.release)
-      || (
-        index < orderedAttempts.length - 1
-        && (!lifecycle.release || lifecycle.consume)
-      )
-      || (
-        lifecycle.consume
-        && lifecycle.consume.entitlementAccountId
-          !== lifecycle.reserve.entitlementAccountId
-      )
-      || (
-        lifecycle.release
-        && lifecycle.release.entitlementAccountId
-          !== lifecycle.reserve.entitlementAccountId
-      )
-    ) {
-      throwAudienceAuthorizationDenied();
-    }
-  }
-
-  const activeAttempts = orderedAttempts.filter(
-    ([, lifecycle]) => !lifecycle.consume && !lifecycle.release,
-  );
-  const latest = orderedAttempts.at(-1);
-  if (
-    activeAttempts.length !== 1
-    || !latest
-    || activeAttempts[0]![0] !== latest[0]
-  ) {
-    return null;
-  }
-  const reserve = latest[1].reserve!;
-  const account = reserve.entitlementAccount;
-  if (
-    account.id !== reserve.entitlementAccountId
-    || account.audienceIdentityId !== input.audienceIdentityId
-    || account.representativeId !== input.representativeId
-    || !PLAN_PRODUCT_CODES.has(account.productCode)
-    || account.status !== "ACTIVE"
-    || account.reservedUnits < 1
-    || reserve.reservedAfter < 1
-    || isExpired(account.expiresAt)
-  ) {
-    return null;
-  }
-
-  return {
-    kind: "plan",
-    audienceIdentityId: input.audienceIdentityId,
-    generationRunId: input.generationRunId,
-    representativeId: input.representativeId,
-    productCode: account.productCode,
-    activePlanTier:
-      account.productCode === "plan:deep_help" ? "deep_help" : "pass",
-    hasPaidEntitlement: true,
-  };
-}
-
 function requireMatchingActiveAudienceIdentity(conversation: {
   audienceIdentityId: string | null;
   audienceIdentity: {
@@ -497,10 +340,6 @@ function readRuntimePolicySnapshot(
 
 function isExpired(expiresAt: Date | null) {
   return expiresAt !== null && expiresAt.getTime() <= Date.now();
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
 function throwAudienceAuthorizationDenied(): never {

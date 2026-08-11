@@ -49,6 +49,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("@delegate/web-data", () => ({
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE:
     "agent-wallet:service-credit:v1",
+  AGENT_WALLET_TIP_PRODUCT_CODE: "agent-wallet:tip:v1",
   AgentWalletReconciliationError: mocks.AgentWalletReconciliationError,
   RechargePaymentConflictError: mocks.RechargePaymentConflictError,
   WalletIdempotencyConflictError:
@@ -348,6 +349,26 @@ describe("public WeChat Pay status reconciliation route", () => {
       .toHaveBeenCalledWith("order-1");
   });
 
+  it("accepts a principal-owned tip order through the paid terminal state", async () => {
+    mocks.rechargeOrderFindUnique.mockResolvedValue(
+      ownedWeChatOrder({
+        productCode: "agent-wallet:tip:v1",
+        productKindSnapshot: "TIP",
+      }),
+    );
+    mocks.reconcileWeChatPayOrderIfDue.mockResolvedValue({
+      status: "paid",
+      queried: true,
+    });
+
+    const response = await reconcile();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ status: "paid" });
+    expect(mocks.reconcileWeChatPayOrderIfDue)
+      .toHaveBeenCalledWith("order-1");
+  });
+
   it.each(["closed", "refunded", "failed"] as const)(
     "persists a signed %s terminal state and removes its checkout URL",
     async (status) => {
@@ -466,6 +487,7 @@ function ownedWeChatOrder(
     status: "REQUIRES_PAYMENT",
     representativeId: "rep-1",
     productCode: "agent-wallet:service-credit:v1",
+    productKindSnapshot: null,
     amountCents: 2_000,
     currency: "CNY",
     checkoutUrl: "weixin://wxpay/bizpayurl?pr=safe-order-1",

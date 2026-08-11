@@ -376,20 +376,10 @@ describe("OpenViking document builders", () => {
         materials: [{ title: "Deck", summary: "Public deck", url: "https://example.com/deck" }],
         policies: [{ title: "Boundary", summary: "No private access." }],
       },
-      pricing: [
-        {
-          tier: "free",
-          name: "Free",
-          stars: 0,
-          summary: "Short answer",
-          includedReplies: 2,
-          includesPriorityHandoff: false,
-        },
-      ],
       handoffPrompt: "Please share fit, budget, and timing.",
     });
 
-    expect(docs).toHaveLength(5);
+    expect(docs).toHaveLength(4);
     expect(docs[0]?.uri).toContain("/versions/version_7/identity/");
     expect(docs[1]?.uri).toContain("/faq/");
   });

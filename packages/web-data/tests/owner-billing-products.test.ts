@@ -1,7 +1,10 @@
 import {
   BillingPriceVersionStatus,
+  BillingProductKind,
   BillingProductStatus,
   EventType,
+  RepresentativeAccessMode,
+  RepresentativeHandoffAccessMode,
   type PrismaClient,
 } from "@prisma/client";
 import { describe, expect, it } from "vitest";
@@ -12,6 +15,7 @@ import {
   createAndPublishOwnerBillingProduct,
   getOwnerRepresentativeBillingCatalog,
   publishOwnerBillingPriceVersion,
+  updateOwnerRepresentativeCommerceSettings,
   updateOwnerBillingProduct,
 } from "../src/owner-billing-products";
 
@@ -257,7 +261,7 @@ describe("owner billing products", () => {
     ]);
   });
 
-  it("fails closed for invalid package precision and cross-owner scope", async () => {
+  it("accepts arbitrary amount-to-credit ratios and fails closed for invalid units and scope", async () => {
     const client = new MemoryOwnerBillingClient();
 
     await expect(
@@ -282,7 +286,7 @@ describe("owner billing products", () => {
     await expect(
       createAndPublishOwnerBillingProduct(
         mutationInput({
-          idempotencyKey: "invalid-package",
+          idempotencyKey: "arbitrary-ratio-package",
           product: {
             ...packageInput(),
             price: {
@@ -293,8 +297,23 @@ describe("owner billing products", () => {
         }),
         client.asPrisma(),
       ),
+    ).resolves.toMatchObject({
+      activePriceVersion: { amountMinor: 1_000, entitlementUnits: 333 },
+    });
+
+    await expect(
+      createAndPublishOwnerBillingProduct(
+        mutationInput({
+          idempotencyKey: "invalid-package",
+          product: {
+            ...packageInput(),
+            price: { amountMinor: 1_000, entitlementUnits: 0 },
+          },
+        }),
+        client.asPrisma(),
+      ),
     ).rejects.toBeInstanceOf(OwnerBillingProductError);
-    expect(client.products).toHaveLength(0);
+    expect(client.products).toHaveLength(1);
 
     await expect(
       getOwnerRepresentativeBillingCatalog(
@@ -308,6 +327,273 @@ describe("owner billing products", () => {
       code: "billing_product_not_found",
       statusCode: 404,
     });
+  });
+
+  it("maps nested price validation failures to their exact editor fields", async () => {
+    const client = new MemoryOwnerBillingClient();
+    let failure: unknown;
+
+    try {
+      await createAndPublishOwnerBillingProduct(
+        mutationInput({
+          idempotencyKey: "invalid-nested-price-fields",
+          product: {
+            kind: "SERVICE_PACKAGE",
+            name: "Invalid package",
+            price: {
+              amountMinor: 1_000_001,
+              entitlementUnits: 10_000_001,
+              handoffAllowance: "LIMITED",
+              handoffUnits: 1_000_001,
+              handoffServiceLevel: "PRIORITY",
+              handoffValidityDays: 3_651,
+            },
+          },
+        }),
+        client.asPrisma(),
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(OwnerBillingProductError);
+    expect(failure).toMatchObject({
+      code: "billing_product_invalid",
+      statusCode: 400,
+      fieldErrors: {
+        amountMinor: [expect.any(String)],
+        entitlementUnits: [expect.any(String)],
+        handoffUnits: [expect.any(String)],
+        handoffValidityDays: [expect.any(String)],
+      },
+    });
+    expect((failure as OwnerBillingProductError).fieldErrors)
+      .not.toHaveProperty("price");
+    expect(client.products).toHaveLength(0);
+  });
+
+  it("refuses to sell paid handoff benefits unless package-required handoff is live", async () => {
+    const client = new MemoryOwnerBillingClient();
+
+    await expect(
+      createAndPublishOwnerBillingProduct(
+        mutationInput({
+          idempotencyKey: "handoff-not-live",
+          product: {
+            kind: "SERVICE_PACKAGE",
+            name: "Unfulfillable handoff",
+            price: {
+              amountMinor: 1_000,
+              entitlementUnits: 100,
+              handoffAllowance: "LIMITED",
+              handoffUnits: 1,
+              handoffServiceLevel: "PRIORITY",
+              handoffValidityDays: 30,
+            },
+          },
+        }),
+        client.asPrisma(),
+      ),
+    ).rejects.toMatchObject({
+      code: "billing_product_conflict",
+      statusCode: 409,
+    });
+    expect(client.products).toHaveLength(0);
+
+    Object.assign(client.representatives[0]!, {
+      humanInLoop: false,
+      handoffAccessMode:
+        RepresentativeHandoffAccessMode.PACKAGE_REQUIRED,
+    });
+    await expect(
+      createAndPublishOwnerBillingProduct(
+        mutationInput({
+          idempotencyKey: "handoff-human-disabled",
+          product: {
+            kind: "SERVICE_PACKAGE",
+            name: "Disabled human handoff",
+            price: {
+              amountMinor: 1_000,
+              entitlementUnits: 100,
+              handoffAllowance: "UNLIMITED",
+              handoffServiceLevel: "STANDARD",
+              handoffValidityDays: 30,
+            },
+          },
+        }),
+        client.asPrisma(),
+      ),
+    ).rejects.toMatchObject({ code: "billing_product_conflict" });
+    expect(client.products).toHaveLength(0);
+  });
+
+  it("configures commerce, validates handoff packages, and keeps tips non-entitling", async () => {
+    const client = new MemoryOwnerBillingClient();
+    await expect(
+      updateOwnerRepresentativeCommerceSettings(
+        {
+          ...metadata("enable-tips"),
+          settings: {
+            tipsEnabled: true,
+            handoffAccessMode: "PACKAGE_REQUIRED",
+          },
+        },
+        client.asPrisma(),
+      ),
+    ).resolves.toMatchObject({
+      tipsEnabled: true,
+      handoffAccessMode: "PACKAGE_REQUIRED",
+    });
+
+    const servicePackage = await createAndPublishOwnerBillingProduct(
+      mutationInput({
+        idempotencyKey: "create-handoff-package",
+        product: {
+          kind: "SERVICE_PACKAGE",
+          name: "优先转接包",
+          sortOrder: 2,
+          isRecommended: true,
+          price: {
+            amountMinor: 1_000,
+            entitlementUnits: 333,
+            handoffAllowance: "LIMITED",
+            handoffUnits: 2,
+            handoffServiceLevel: "PRIORITY",
+            handoffValidityDays: 30,
+          },
+        },
+      }),
+      client.asPrisma(),
+    );
+    expect(servicePackage).toMatchObject({
+      kind: "SERVICE_PACKAGE",
+      sortOrder: 2,
+      isRecommended: true,
+      activePriceVersion: {
+        handoffAllowance: "LIMITED",
+        handoffUnits: 2,
+        handoffServiceLevel: "PRIORITY",
+        handoffValidityDays: 30,
+      },
+    });
+
+    const tip = await createAndPublishOwnerBillingProduct(
+      mutationInput({
+        idempotencyKey: "create-tip",
+        product: {
+          kind: "TIP",
+          name: "支持一下",
+          price: { amountMinor: 100 },
+        },
+      }),
+      client.asPrisma(),
+    );
+    expect(tip).toMatchObject({
+      kind: "TIP",
+      activePriceVersion: {
+        unitName: "tip",
+        entitlementUnits: 0,
+        refundPolicy: "NON_REFUNDABLE",
+        handoffAllowance: "NONE",
+      },
+    });
+
+    await expect(
+      updateOwnerRepresentativeCommerceSettings(
+        { ...metadata("switch-free"), settings: { accessMode: "FREE" } },
+        client.asPrisma(),
+      ),
+    ).rejects.toMatchObject({ code: "billing_product_conflict" });
+    await expect(
+      updateOwnerRepresentativeCommerceSettings(
+        { ...metadata("disable-tips"), settings: { tipsEnabled: false } },
+        client.asPrisma(),
+      ),
+    ).rejects.toMatchObject({ code: "billing_product_conflict" });
+    await expect(
+      updateOwnerRepresentativeCommerceSettings(
+        {
+          ...metadata("disable-paid-handoff"),
+          settings: { handoffAccessMode: "FREE" },
+        },
+        client.asPrisma(),
+      ),
+    ).rejects.toMatchObject({ code: "billing_product_conflict" });
+    await expect(
+      updateOwnerRepresentativeCommerceSettings(
+        {
+          ...metadata("disable-human-with-paid-handoff"),
+          settings: { humanInLoop: false },
+        },
+        client.asPrisma(),
+      ),
+    ).rejects.toMatchObject({ code: "billing_product_conflict" });
+  });
+
+  it("protects sold handoff grants after the catalog stops selling that benefit", async () => {
+    const client = new MemoryOwnerBillingClient();
+    await updateOwnerRepresentativeCommerceSettings(
+      {
+        ...metadata("enable-package-handoff"),
+        settings: { handoffAccessMode: "PACKAGE_REQUIRED" },
+      },
+      client.asPrisma(),
+    );
+    const product = await createAndPublishOwnerBillingProduct(
+      mutationInput({
+        idempotencyKey: "create-expiring-handoff",
+        product: {
+          kind: "SERVICE_PACKAGE",
+          name: "Handoff bundle",
+          price: {
+            amountMinor: 1_000,
+            entitlementUnits: 100,
+            handoffAllowance: "LIMITED",
+            handoffUnits: 1,
+            handoffServiceLevel: "STANDARD",
+            handoffValidityDays: 30,
+          },
+        },
+      }),
+      client.asPrisma(),
+    );
+    const withoutHandoff = await publishOwnerBillingPriceVersion(
+      {
+        ...metadata("retire-handoff-benefit"),
+        productId: product.id,
+        priceVersion: {
+          expectedRevision: product.revision,
+          expectedActivePriceVersionId: product.activePriceVersion!.id,
+          price: { amountMinor: 1_000, entitlementUnits: 100 },
+        },
+      },
+      client.asPrisma(),
+    );
+    expect(withoutHandoff.activePriceVersion).toMatchObject({
+      handoffAllowance: "NONE",
+    });
+
+    client.activeHandoffGrantCount = 1;
+    await expect(
+      updateOwnerRepresentativeCommerceSettings(
+        {
+          ...metadata("disable-with-sold-grant"),
+          settings: { handoffAccessMode: "FREE" },
+        },
+        client.asPrisma(),
+      ),
+    ).rejects.toMatchObject({ code: "billing_product_conflict" });
+
+    client.activeHandoffGrantCount = 0;
+    await expect(
+      updateOwnerRepresentativeCommerceSettings(
+        {
+          ...metadata("disable-after-grant-settled"),
+          settings: { handoffAccessMode: "FREE" },
+        },
+        client.asPrisma(),
+      ),
+    ).resolves.toMatchObject({ handoffAccessMode: "FREE" });
   });
 });
 
@@ -347,6 +633,9 @@ type MemoryProduct = {
   code: string;
   name: string;
   description: string | null;
+  kind: BillingProductKind;
+  sortOrder: number;
+  isRecommended: boolean;
   status: BillingProductStatus;
   revision: number;
   createdAt: Date;
@@ -364,9 +653,13 @@ type MemoryPrice = {
   entitlementUnits: number;
   creatorRevenueShareBps: number;
   platformRevenueShareBps: number;
-  refundPolicy: "FULL_WHEN_UNUSED";
+  refundPolicy: "FULL_WHEN_UNUSED" | "NON_REFUNDABLE";
   expiryPolicy: "NEVER_EXPIRES";
   entitlementValidityDays: null;
+  handoffAllowance: "NONE" | "LIMITED" | "UNLIMITED";
+  handoffUnits: number | null;
+  handoffServiceLevel: "STANDARD" | "PRIORITY" | null;
+  handoffValidityDays: number | null;
   publishedAt: Date | null;
   retiredAt: Date | null;
   createdAt: Date;
@@ -388,6 +681,11 @@ class MemoryOwnerBillingClient {
       ownerId: "owner-1",
       slug: "delegate",
       displayName: "Delegate",
+      accessMode: RepresentativeAccessMode.TRIAL_THEN_CREDITS,
+      handoffAccessMode: RepresentativeHandoffAccessMode.FREE,
+      tipsEnabled: false,
+      freeReplyLimit: 4,
+      humanInLoop: true,
       agentWallet: {
         currency: "CNY",
         creatorRevenueShareBps: 2_000,
@@ -398,6 +696,11 @@ class MemoryOwnerBillingClient {
       ownerId: "owner-1",
       slug: "second-representative",
       displayName: "Second representative",
+      accessMode: RepresentativeAccessMode.TRIAL_THEN_CREDITS,
+      handoffAccessMode: RepresentativeHandoffAccessMode.FREE,
+      tipsEnabled: false,
+      freeReplyLimit: 4,
+      humanInLoop: true,
       agentWallet: {
         currency: "CNY",
         creatorRevenueShareBps: 2_000,
@@ -407,6 +710,8 @@ class MemoryOwnerBillingClient {
   readonly products: MemoryProduct[] = [];
   readonly prices: MemoryPrice[] = [];
   readonly audits: MemoryAudit[] = [];
+  activeHandoffGrantCount = 0;
+  activePaidHandoffRequestCount = 0;
   private sequence = 0;
   private readonly now = new Date("2026-07-29T08:00:00.000Z");
 
@@ -420,6 +725,13 @@ class MemoryOwnerBillingClient {
 
   $queryRaw = async (query: { values?: unknown[] }) => {
     const [productId, representativeId] = query.values ?? [];
+    if (representativeId === undefined) {
+      return this.representatives.some(
+        (representative) => representative.id === productId,
+      )
+        ? [{ id: productId }]
+        : [];
+    }
     return this.products.some(
       (product) =>
         product.id === productId
@@ -444,6 +756,12 @@ class MemoryOwnerBillingClient {
         return {
           id: representative.id,
           slug: representative.slug,
+          displayName: representative.displayName,
+          accessMode: representative.accessMode,
+          handoffAccessMode: representative.handoffAccessMode,
+          tipsEnabled: representative.tipsEnabled,
+          freeReplyLimit: representative.freeReplyLimit,
+          humanInLoop: representative.humanInLoop,
           agentWallet: representative.agentWallet,
         };
       }
@@ -451,6 +769,11 @@ class MemoryOwnerBillingClient {
         id: representative.id,
         slug: representative.slug,
         displayName: representative.displayName,
+        accessMode: representative.accessMode,
+        handoffAccessMode: representative.handoffAccessMode,
+        tipsEnabled: representative.tipsEnabled,
+        freeReplyLimit: representative.freeReplyLimit,
+        humanInLoop: representative.humanInLoop,
         agentWallet: representative.agentWallet,
         billingProducts: this.products
           .filter(
@@ -459,6 +782,22 @@ class MemoryOwnerBillingClient {
           )
           .map((product) => this.productRecord(product)),
       };
+    },
+    update: async (args: {
+      where: { id: string };
+      data: Partial<{
+        accessMode: RepresentativeAccessMode;
+        handoffAccessMode: RepresentativeHandoffAccessMode;
+        tipsEnabled: boolean;
+        freeReplyLimit: number;
+        humanInLoop: boolean;
+      }>;
+    }) => {
+      const representative = this.representatives.find(
+        (candidate) => candidate.id === args.where.id,
+      )!;
+      Object.assign(representative, args.data);
+      return representative;
     },
   };
 
@@ -526,6 +865,18 @@ class MemoryOwnerBillingClient {
       this.applyProductUpdate(product, args.data);
       return { count: 1 };
     },
+    count: async (args: {
+      where: {
+        representativeId: string;
+        kind: BillingProductKind;
+        status: BillingProductStatus;
+      };
+    }) => this.products.filter(
+      (product) =>
+        product.representativeId === args.where.representativeId
+        && product.kind === args.where.kind
+        && product.status === args.where.status,
+    ).length,
   };
 
   billingPriceVersion = {
@@ -574,6 +925,35 @@ class MemoryOwnerBillingClient {
       Object.assign(price, args.data);
       return { count: 1 };
     },
+    count: async (args: {
+      where: {
+        status: BillingPriceVersionStatus;
+        handoffAllowance: { not: "NONE" };
+        billingProduct: {
+          representativeId: string;
+          kind: BillingProductKind;
+          status: BillingProductStatus;
+        };
+      };
+    }) => this.prices.filter((price) => {
+      const product = this.products.find(
+        (candidate) => candidate.id === price.billingProductId,
+      );
+      return price.status === args.where.status
+        && price.handoffAllowance !== args.where.handoffAllowance.not
+        && product?.representativeId
+          === args.where.billingProduct.representativeId
+        && product.kind === args.where.billingProduct.kind
+        && product.status === args.where.billingProduct.status;
+    }).length,
+  };
+
+  handoffEntitlementGrant = {
+    count: async () => this.activeHandoffGrantCount,
+  };
+
+  handoffRequest = {
+    count: async () => this.activePaidHandoffRequestCount,
   };
 
   eventAudit = {
@@ -644,6 +1024,10 @@ class MemoryOwnerBillingClient {
     }
     if (typeof data.status === "string") {
       product.status = data.status as BillingProductStatus;
+    }
+    if (typeof data.sortOrder === "number") product.sortOrder = data.sortOrder;
+    if (typeof data.isRecommended === "boolean") {
+      product.isRecommended = data.isRecommended;
     }
     const revision = data.revision;
     if (

@@ -4,8 +4,6 @@ import { ChannelUnavailableError } from "@delegate/web-data";
 import { describe, expect, it } from "vitest";
 
 import {
-  assertTelegramPaidFlowUsesUnifiedRuntime,
-  isTelegramPaidFlowAvailable,
   resolveTelegramConversationPlatformMode,
   shouldFailClosedAfterConversationPlatformWrite,
 } from "../src/conversation-platform-mode";
@@ -60,24 +58,18 @@ describe("Telegram conversation platform mode", () => {
     );
   });
 
-  it("checks channel availability before starting paid invoices or compute work", () => {
+  it("removes new Stars invoices and still checks compute channel availability", () => {
     const source = readFileSync(
       new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
-    );
-    const invoiceSource = source.slice(
-      source.indexOf("async function sendPlanInvoice"),
-      source.indexOf("function stripBotMention"),
     );
     const computeSource = source.slice(
       source.indexOf("async function handleComputeRequest"),
       source.indexOf("function buildComputeReplyOptions"),
     );
 
-    expect(invoiceSource.indexOf("assertConversationChannelDeliveryAvailable")).toBeGreaterThan(-1);
-    expect(invoiceSource.indexOf("assertConversationChannelDeliveryAvailable")).toBeLessThan(
-      invoiceSource.indexOf("invoice = await createPlanInvoice"),
-    );
+    expect(source).not.toContain("async function sendPlanInvoice");
+    expect(source).not.toContain("createPlanInvoice");
     expect(computeSource.indexOf("assertConversationChannelDeliveryAvailable")).toBeGreaterThan(-1);
     expect(computeSource.indexOf("assertConversationChannelDeliveryAvailable")).toBeLessThan(
       computeSource.indexOf("const session = await createAudienceComputeSession"),
@@ -124,49 +116,4 @@ describe("Telegram conversation platform mode", () => {
     ).toThrow("Production Telegram traffic must use");
   });
 
-  it("allows new paid flows only in worker mode", () => {
-    const enabled = { TELEGRAM_STARS_LIVE_ENABLED: "true" };
-    expect(() =>
-      assertTelegramPaidFlowUsesUnifiedRuntime("worker", enabled),
-    ).not.toThrow();
-    expect(() =>
-      assertTelegramPaidFlowUsesUnifiedRuntime("legacy", enabled),
-    ).toThrow(
-      "Telegram purchases are disabled",
-    );
-    expect(() =>
-      assertTelegramPaidFlowUsesUnifiedRuntime("shadow", enabled),
-    ).toThrow(
-      "Telegram purchases are disabled",
-    );
-    expect(() =>
-      assertTelegramPaidFlowUsesUnifiedRuntime("worker", {}),
-    ).toThrow("disabled by the release gate");
-    expect(() =>
-      assertTelegramPaidFlowUsesUnifiedRuntime("worker", {
-        NODE_ENV: "production",
-        TELEGRAM_STARS_LIVE_ENABLED: "true",
-      }),
-    ).toThrow("durable webhook ingress");
-  });
-
-  it("exposes Stars purchase UX only when the complete release gate passes", () => {
-    expect(isTelegramPaidFlowAvailable("worker", {})).toBe(false);
-    expect(
-      isTelegramPaidFlowAvailable("worker", {
-        TELEGRAM_STARS_LIVE_ENABLED: "true",
-      }),
-    ).toBe(true);
-    expect(
-      isTelegramPaidFlowAvailable("legacy", {
-        TELEGRAM_STARS_LIVE_ENABLED: "true",
-      }),
-    ).toBe(false);
-    expect(
-      isTelegramPaidFlowAvailable("worker", {
-        NODE_ENV: "production",
-        TELEGRAM_STARS_LIVE_ENABLED: "true",
-      }),
-    ).toBe(false);
-  });
 });

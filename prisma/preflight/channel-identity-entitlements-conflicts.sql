@@ -471,15 +471,11 @@ invoice_reconciliation AS (
     contact."audienceIdentityId",
     conversation."passUnlockedAt",
     conversation."deepHelpUnlockedAt",
-    count(plan."id") AS pricing_match_count,
-    min(plan."includedReplies") AS included_replies
+    0::bigint AS pricing_match_count,
+    NULL::integer AS included_replies
   FROM "Invoice" AS invoice
   INNER JOIN "Contact" AS contact ON contact."id" = invoice."contactId"
   LEFT JOIN "Conversation" AS conversation ON conversation."id" = invoice."conversationId"
-  LEFT JOIN "PricingPlan" AS plan
-    ON plan."representativeId" = invoice."representativeId"
-   AND plan."type" = invoice."planType"
-   AND plan."starsAmount" = invoice."starsAmount"
   WHERE invoice."planType" <> 'SPONSOR'::"PricingPlanType"
     AND invoice."status" IN (
       'PAID'::"InvoiceStatus",
@@ -491,21 +487,6 @@ invoice_reconciliation AS (
       FROM "ServicePaymentOrder" AS payment_order
       WHERE payment_order."id" = 'service-payment:' || invoice."id"
     )
-  GROUP BY
-    invoice."id",
-    invoice."representativeId",
-    invoice."contactId",
-    invoice."conversationId",
-    invoice."planType",
-    invoice."title",
-    invoice."starsAmount",
-    invoice."status",
-    invoice."telegramPaymentChargeId",
-    invoice."paidAt",
-    invoice."refundedAt",
-    contact."audienceIdentityId",
-    conversation."passUnlockedAt",
-    conversation."deepHelpUnlockedAt"
 ),
 legacy_invoice_decisions AS (
   SELECT
@@ -514,9 +495,7 @@ legacy_invoice_decisions AS (
         THEN 'LEGACY_INVOICE_WITHOUT_AUDIENCE_IDENTITY'
       WHEN invoice."telegramPaymentChargeId" IS NULL OR invoice."paidAt" IS NULL
         THEN 'LEGACY_INVOICE_WITHOUT_PAYMENT_EVIDENCE'
-      WHEN invoice.pricing_match_count <> 1
-        THEN 'LEGACY_INVOICE_AMBIGUOUS_PRICE_SNAPSHOT'
-      ELSE 'LEGACY_INVOICE_ENTITLEMENT_DECISION_REQUIRED'
+      ELSE 'LEGACY_INVOICE_PRICE_CATALOG_RETIRED'
     END::text AS issue_code,
     'invoice'::text AS entity_type,
     invoice."id" AS entity_key,
@@ -537,7 +516,7 @@ legacy_invoice_decisions AS (
       'legacyPassUnlockedAt', invoice."passUnlockedAt",
       'legacyDeepHelpUnlockedAt', invoice."deepHelpUnlockedAt",
       'reason',
-        'Legacy unlocks were not metered; remaining entitlement units require an explicit product decision.'
+        'The mutable four-tier catalog is retired; use the immutable invoice facts for manual historical reconciliation.'
     ) AS details
   FROM invoice_reconciliation AS invoice
 ),

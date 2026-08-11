@@ -27,6 +27,11 @@ enum BillingProductStatus {
   ARCHIVED
 }
 
+enum BillingProductKind {
+  SERVICE_PACKAGE
+  TIP
+}
+
 enum BillingPriceVersionStatus {
   DRAFT
   ACTIVE
@@ -35,6 +40,29 @@ enum BillingPriceVersionStatus {
 
 enum BillingRefundPolicy {
   FULL_WHEN_UNUSED
+  NON_REFUNDABLE
+}
+
+enum BillingHandoffAllowance {
+  NONE
+  LIMITED
+  UNLIMITED
+}
+
+enum BillingHandoffServiceLevel {
+  STANDARD
+  PRIORITY
+}
+
+enum RepresentativeAccessMode {
+  FREE
+  TRIAL_THEN_CREDITS
+  CREDITS_ONLY
+}
+
+enum RepresentativeHandoffAccessMode {
+  FREE
+  PACKAGE_REQUIRED
 }
 
 enum BillingEntitlementExpiryPolicy {
@@ -209,6 +237,7 @@ enum EventType {
   BILLING_PRODUCT_UPDATED
   BILLING_PRICE_VERSION_PUBLISHED
   BILLING_PRODUCT_ARCHIVED
+  REPRESENTATIVE_COMMERCE_UPDATED
   WALLET_PAYOUT_PROFILE_SUBMITTED
   WALLET_PAYOUT_DESTINATION_CHANGED
   WALLET_PAYOUT_DESTINATION_VERIFIED
@@ -1189,6 +1218,36 @@ enum ServiceEntitlementLedgerKind {
   ADJUST
 }
 
+enum HandoffEntitlementGrantStatus {
+  ACTIVE
+  FROZEN
+  EXHAUSTED
+  EXPIRED
+  REFUNDED
+}
+
+enum HandoffEntitlementLedgerKind {
+  GRANT
+  RESERVE
+  CONSUME
+  RELEASE
+  REFUND
+  EXPIRE
+  ADJUST
+}
+
+enum HandoffEntitlementReservationState {
+  RESERVED
+  CONSUMED
+  RELEASED
+}
+
+enum TipContributionStatus {
+  COMPLETED
+  REFUNDED
+  REVERSED
+}
+
 enum ConversationEpisodeStatus {
   ACTIVE
   WAITING_USER
@@ -1342,35 +1401,38 @@ model Wallet {
 }
 
 model AudienceIdentity {
-  id                    String                        @id @default(cuid())
-  accountId             String?                       @unique
-  audienceKey           String                        @unique
-  status                AudienceIdentityStatus        @default(ANONYMOUS)
-  mergedIntoId          String?
-  createdAt             DateTime                      @default(now())
-  updatedAt             DateTime                      @updatedAt
-  lastSeenAt            DateTime                      @default(now())
-  account               Account?                      @relation(fields: [accountId], references: [id], onDelete: SetNull)
-  mergedInto            AudienceIdentity?             @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
-  mergedFrom            AudienceIdentity[]            @relation("AudienceIdentityMerge")
-  contacts              Contact[]
-  conversations         Conversation[]
-  userWallets           UserWallet[]
-  sandboxIdentities     SandboxIdentity[]
-  delegationTasks       DelegationTask[]
-  memoryRecords         OpenVikingMemoryRecord[]
-  identityLinks         IdentityLink[]
-  memoryCandidates      MemoryCandidate[]
-  governedMemories      GovernedMemory[]
-  memorySharingConsents ContactMemorySharingConsent[]
-  memorySharingChallenges ContactMemorySharingChallenge[]
+  id                             String                                 @id @default(cuid())
+  accountId                      String?                                @unique
+  audienceKey                    String                                 @unique
+  status                         AudienceIdentityStatus                 @default(ANONYMOUS)
+  mergedIntoId                   String?
+  createdAt                      DateTime                               @default(now())
+  updatedAt                      DateTime                               @updatedAt
+  lastSeenAt                     DateTime                               @default(now())
+  account                        Account?                               @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  mergedInto                     AudienceIdentity?                      @relation("AudienceIdentityMerge", fields: [mergedIntoId], references: [id], onDelete: SetNull)
+  mergedFrom                     AudienceIdentity[]                     @relation("AudienceIdentityMerge")
+  contacts                       Contact[]
+  conversations                  Conversation[]
+  userWallets                    UserWallet[]
+  sandboxIdentities              SandboxIdentity[]
+  delegationTasks                DelegationTask[]
+  memoryRecords                  OpenVikingMemoryRecord[]
+  identityLinks                  IdentityLink[]
+  memoryCandidates               MemoryCandidate[]
+  governedMemories               GovernedMemory[]
+  memorySharingConsents          ContactMemorySharingConsent[]
+  memorySharingChallenges        ContactMemorySharingChallenge[]
   memorySharingSourceEventClaims ContactMemorySharingSourceEventClaim[]
-  bindingChallenges     IdentityBindingChallenge[]
-  bridgeMappings        BridgeIdentityMapping[]
-  entitlementAccounts   ServiceEntitlementAccount[]
-  servicePaymentOrders  ServicePaymentOrder[]
-  tokenPurchases        AgentTokenPurchase[]
-  usageCharges          AgentUsageCharge[]
+  bindingChallenges              IdentityBindingChallenge[]
+  bridgeMappings                 BridgeIdentityMapping[]
+  entitlementAccounts            ServiceEntitlementAccount[]
+  servicePaymentOrders           ServicePaymentOrder[]
+  tokenPurchases                 AgentTokenPurchase[]
+  usageCharges                   AgentUsageCharge[]
+  handoffEntitlementGrants       HandoffEntitlementGrant[]
+  handoffRequests                HandoffRequest[]
+  tipContributions               TipContribution[]
 
   @@index([status, lastSeenAt])
   @@index([mergedIntoId])
@@ -1480,7 +1542,7 @@ model IdentityLinkConnectionProof {
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
   identityLink   IdentityLink           @relation(fields: [identityLinkId], references: [id], onDelete: Cascade)
-  sourceMessages Message[]               @relation("MessageSourceIdentityConnectionProof")
+  sourceMessages Message[]              @relation("MessageSourceIdentityConnectionProof")
 
   @@unique([identityLinkId, issuer, connectionId])
   @@index([issuer, connectionId, revokedAt])
@@ -1567,6 +1629,7 @@ model AgentWallet {
   tokenPurchases         AgentTokenPurchase[]
   usageCharges           AgentUsageCharge[]
   creatorEarnings        CreatorEarning[]
+  tipContributions       TipContribution[]
 
   @@index([currency, updatedAt])
 }
@@ -1683,8 +1746,13 @@ model RechargeOrder {
   billingProductId                String?
   billingPriceVersionId           String?
   productNameSnapshot             String?
+  productKindSnapshot             BillingProductKind?
   unitNameSnapshot                String?
   entitlementUnitsSnapshot        Int?
+  handoffAllowanceSnapshot        BillingHandoffAllowance?
+  handoffUnitsSnapshot            Int?
+  handoffServiceLevelSnapshot     BillingHandoffServiceLevel?
+  handoffValidityDaysSnapshot     Int?
   creatorRevenueShareBpsSnapshot  Int?
   platformRevenueShareBpsSnapshot Int?
   refundPolicySnapshot            BillingRefundPolicy?
@@ -1711,10 +1779,13 @@ model RechargeOrder {
   ledgerEntries                   WalletLedgerEntry[]
   tokenPurchases                  AgentTokenPurchase[]
   refunds                         RechargeRefund[]
+  tipContribution                 TipContribution?
+  handoffEntitlementGrant         HandoffEntitlementGrant?
 
   @@unique([provider, providerTransactionId])
   @@index([userWalletId, status, createdAt])
   @@index([representativeId, status, createdAt])
+  @@index([representativeId, productKindSnapshot, status, createdAt])
   @@index([billingProductId, status, createdAt])
   @@index([billingPriceVersionId, status, createdAt])
   @@index([provider, status, createdAt])
@@ -1993,6 +2064,55 @@ model ServiceEntitlementLedgerEntry {
   @@index([generationRunId, createdAt])
 }
 
+model HandoffEntitlementGrant {
+  id                    String                          @id @default(cuid())
+  rechargeOrderId       String                          @unique
+  audienceIdentityId    String
+  representativeId      String
+  billingPriceVersionId String
+  allowance             BillingHandoffAllowance
+  serviceLevel          BillingHandoffServiceLevel
+  grantedUses           Int?
+  remainingUses         Int?
+  reservedUses          Int                             @default(0)
+  consumedUses          Int                             @default(0)
+  status                HandoffEntitlementGrantStatus   @default(ACTIVE)
+  startsAt              DateTime                        @default(now())
+  expiresAt             DateTime?
+  createdAt             DateTime                        @default(now())
+  updatedAt             DateTime                        @updatedAt
+  rechargeOrder         RechargeOrder                   @relation(fields: [rechargeOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  audienceIdentity      AudienceIdentity                @relation(fields: [audienceIdentityId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  representative        Representative                  @relation(fields: [representativeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  billingPriceVersion   BillingPriceVersion             @relation(fields: [billingPriceVersionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  handoffRequests       HandoffRequest[]
+  ledgerEntries         HandoffEntitlementLedgerEntry[]
+
+  @@index([audienceIdentityId, representativeId, status, expiresAt])
+  @@index([representativeId, serviceLevel, status, createdAt])
+  @@index([billingPriceVersionId, createdAt])
+}
+
+model HandoffEntitlementLedgerEntry {
+  id               String                       @id @default(cuid())
+  grantId          String
+  handoffRequestId String?
+  kind             HandoffEntitlementLedgerKind
+  uses             Int
+  remainingAfter   Int?
+  reservedAfter    Int
+  consumedAfter    Int
+  idempotencyKey   String                       @unique
+  metadata         Json?
+  createdAt        DateTime                     @default(now())
+  grant            HandoffEntitlementGrant      @relation(fields: [grantId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  handoffRequest   HandoffRequest?              @relation(fields: [handoffRequestId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([grantId, createdAt])
+  @@index([handoffRequestId, createdAt])
+  @@index([kind, createdAt])
+}
+
 model AgentUsageAllocation {
   id                  String             @id @default(cuid())
   usageChargeId       String
@@ -2039,8 +2159,40 @@ model CreatorEarning {
   usageAllocations      AgentUsageAllocation[]
   withdrawalAllocations WithdrawalAllocation[]
   ledgerEntries         WalletLedgerEntry[]
+  tipContribution       TipContribution?
 
   @@index([ownerId, status, createdAt])
+  @@index([representativeId, status, createdAt])
+  @@index([agentWalletId, status, createdAt])
+}
+
+model TipContribution {
+  id                      String                @id @default(cuid())
+  rechargeOrderId         String                @unique
+  audienceIdentityId      String
+  representativeId        String
+  agentWalletId           String
+  creatorEarningId        String                @unique
+  amountMinor             Int
+  currency                String                @default("CNY")
+  creatorRevenueShareBps  Int
+  platformRevenueShareBps Int
+  creatorAmountMinor      Int
+  platformAmountMinor     Int
+  status                  TipContributionStatus @default(COMPLETED)
+  idempotencyKey          String                @unique
+  completedAt             DateTime              @default(now())
+  refundedAt              DateTime?
+  reversedAt              DateTime?
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  rechargeOrder           RechargeOrder         @relation(fields: [rechargeOrderId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  audienceIdentity        AudienceIdentity      @relation(fields: [audienceIdentityId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  representative          Representative        @relation(fields: [representativeId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  agentWallet             AgentWallet           @relation(fields: [agentWalletId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  creatorEarning          CreatorEarning        @relation(fields: [creatorEarningId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@index([audienceIdentityId, representativeId, createdAt])
   @@index([representativeId, status, createdAt])
   @@index([agentWalletId, status, createdAt])
 }
@@ -2147,130 +2299,134 @@ model CustomerAccount {
 }
 
 model Representative {
-  id                                   String                               @id @default(cuid())
-  ownerId                              String
-  slug                                 String                               @unique
-  displayName                          String
-  roleSummary                          String
-  tone                                 String
-  avatarUrl                            String?
-  publicMode                           Boolean                              @default(true)
-  claimStatus                          RepresentativeClaimStatus            @default(CLAIMED)
-  groupModeEnabled                     Boolean                              @default(false)
-  groupActivation                      GroupActivation                      @default(REPLY_OR_MENTION)
-  humanInLoop                          Boolean                              @default(true)
-  languages                            Json
-  freeReplyLimit                       Int                                  @default(4)
-  freeScope                            Json
-  paywalledIntents                     Json
-  handoffWindowHours                   Int                                  @default(24)
-  freeMonthlyCredit                    Int                                  @default(100)
-  handoffPrompt                        String
-  allowedSkills                        Json
-  actionGate                           Json
-  openvikingEnabled                    Boolean                              @default(false)
-  openvikingAgentId                    String?
-  openvikingAutoRecall                 Boolean                              @default(true)
-  openvikingAutoCapture                Boolean                              @default(false)
-  openvikingCaptureMode                String                               @default("semantic")
-  openvikingRecallLimit                Int                                  @default(6)
-  openvikingRecallScoreThreshold       Float                                @default(0.01)
-  openvikingTargetUri                  String?
-  openvikingLastSyncAt                 DateTime?
-  openvikingLastSyncStatus             String?
-  openvikingLastSyncError              String?
-  openvikingLastSyncItemCount          Int?
-  openvikingLastSyncJobId              String?
-  computeEnabled                       Boolean                              @default(false)
-  computeDefaultPolicyMode             PolicyDecision                       @default(ASK)
-  computeBaseImage                     String                               @default("debian:bookworm-slim")
-  computeMaxSessionMinutes             Int                                  @default(15)
-  computeAutoApproveBudgetCents        Int                                  @default(0)
-  computeArtifactRetentionDays         Int                                  @default(14)
-  computeNetworkMode                   ComputeNetworkMode                   @default(NO_NETWORK)
-  computeNetworkAllowlist              String[]                             @default([])
-  computeFilesystemMode                ComputeFilesystemMode                @default(WORKSPACE_ONLY)
-  delegationEnabled                    Boolean                              @default(true)
-  delegationNaturalLanguageEnabled     Boolean                              @default(true)
-  delegationExplicitComputeEnabled     Boolean                              @default(true)
-  delegationMaxSteps                   Int                                  @default(5)
-  delegationMaxCostCents               Int                                  @default(0)
-  delegationKnowledgeScope             DelegationKnowledgeScope             @default(USER_INPUT_ONLY)
-  lifecycleState                       RepresentativeLifecycleState         @default(DRAFT)
-  activeVersionId                      String?
-  createdAt                            DateTime                             @default(now())
-  updatedAt                            DateTime                             @updatedAt
-  owner                                Owner                                @relation(fields: [ownerId], references: [id])
-  activeVersion                        RepresentativeVersion?               @relation("RepresentativeActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
-  versions                             RepresentativeVersion[]              @relation("RepresentativeVersions")
-  runtimePolicyOverlays                RuntimePolicyOverlay[]
-  channelBindings                      RepresentativeChannelBinding[]
-  matrixVirtualUsers                   MatrixVirtualUserBinding[]
-  capabilityProfiles                   CapabilityPolicyProfile[]
-  computeSessions                      ComputeSession[]
-  sandboxIdentities                    SandboxIdentity[]
-  conversations                        Conversation[]
-  contextSyncJobs                      RepresentativeContextSync[]
-  contacts                             Contact[]
-  leads                                Lead[]
-  commitTraces                         ConversationCommitTrace[]
-  events                               EventAudit[]
-  handoffRequests                      HandoffRequest[]
-  artifacts                            Artifact[]
-  deliverables                         Deliverable[]
-  approvalRequests                     ApprovalRequest[]
-  intakeSubmissions                    IntakeSubmission[]
-  invoices                             Invoice[]
-  ledgerEntries                        LedgerEntry[]
-  browserSessions                      BrowserSession[]
-  browserNavigations                   BrowserNavigation[]
-  organizationCustomerAccounts         CustomerAccount[]
-  knowledgePack                        KnowledgePack?
-  memoryRecords                        OpenVikingMemoryRecord[]
-  pricingPlans                         PricingPlan[]
-  billingProducts                      BillingProduct[]
-  skillPackLinks                       RepresentativeSkillPack[]
-  mcpBindings                          RepresentativeMcpBinding[]
-  chatSessions                         ChatSession[]
-  workflowRuns                         WorkflowRun[]
-  delegationTasks                      DelegationTask[]
-  agentWallet                          AgentWallet?
-  tokenPurchases                       AgentTokenPurchase[]
-  usageCharges                         AgentUsageCharge[]
-  knowledgeAssetLinks                  KnowledgeAssetRepresentative[]
-  creatorEarnings                      CreatorEarning[]
-  withdrawRequests                     WithdrawRequest[]
-  walletTransactions                   WalletTransaction[]
-  walletLedgerEntries                  WalletLedgerEntry[]
-  rechargeOrders                       RechargeOrder[]
-  trainingSources                      CreatorTrainingSource[]
-  feedbackSignals                      CreatorFeedbackSignal[]
-  trainingSuggestions                  CreatorTrainingSuggestion[]
-  trainingVersions                     CreatorTrainingVersion[]
-  entitlementAccounts                  ServiceEntitlementAccount[]
-  servicePaymentOrders                 ServicePaymentOrder[]
-  walletExceptionCases                 WalletExceptionCase[]
-  memoryCandidates                     MemoryCandidate[]
-  governedMemories                     GovernedMemory[]
-  governedMemoryVersions               GovernedMemoryVersion[]
-  memoryReviewDecisions                MemoryReviewDecision[]
-  memoryPolicyDecisions                MemoryPolicyDecision[]
-  memoryPolicy                         RepresentativeMemoryPolicy?
-  contactChannelMemoryForgetBoundaries ContactChannelMemoryForgetBoundary[]
-  contactMemorySharingConsents         ContactMemorySharingConsent[]
-  contactMemorySharingChallenges       ContactMemorySharingChallenge[]
+  id                                    String                                 @id @default(cuid())
+  ownerId                               String
+  slug                                  String                                 @unique
+  displayName                           String
+  roleSummary                           String
+  tone                                  String
+  avatarUrl                             String?
+  publicMode                            Boolean                                @default(true)
+  claimStatus                           RepresentativeClaimStatus              @default(CLAIMED)
+  groupModeEnabled                      Boolean                                @default(false)
+  groupActivation                       GroupActivation                        @default(REPLY_OR_MENTION)
+  humanInLoop                           Boolean                                @default(true)
+  accessMode                            RepresentativeAccessMode               @default(TRIAL_THEN_CREDITS)
+  handoffAccessMode                     RepresentativeHandoffAccessMode        @default(FREE)
+  tipsEnabled                           Boolean                                @default(false)
+  languages                             Json
+  freeReplyLimit                        Int                                    @default(4)
+  freeScope                             Json
+  paywalledIntents                      Json
+  handoffWindowHours                    Int                                    @default(24)
+  freeMonthlyCredit                     Int                                    @default(100)
+  handoffPrompt                         String
+  allowedSkills                         Json
+  actionGate                            Json
+  openvikingEnabled                     Boolean                                @default(false)
+  openvikingAgentId                     String?
+  openvikingAutoRecall                  Boolean                                @default(true)
+  openvikingAutoCapture                 Boolean                                @default(false)
+  openvikingCaptureMode                 String                                 @default("semantic")
+  openvikingRecallLimit                 Int                                    @default(6)
+  openvikingRecallScoreThreshold        Float                                  @default(0.01)
+  openvikingTargetUri                   String?
+  openvikingLastSyncAt                  DateTime?
+  openvikingLastSyncStatus              String?
+  openvikingLastSyncError               String?
+  openvikingLastSyncItemCount           Int?
+  openvikingLastSyncJobId               String?
+  computeEnabled                        Boolean                                @default(false)
+  computeDefaultPolicyMode              PolicyDecision                         @default(ASK)
+  computeBaseImage                      String                                 @default("debian:bookworm-slim")
+  computeMaxSessionMinutes              Int                                    @default(15)
+  computeAutoApproveBudgetCents         Int                                    @default(0)
+  computeArtifactRetentionDays          Int                                    @default(14)
+  computeNetworkMode                    ComputeNetworkMode                     @default(NO_NETWORK)
+  computeNetworkAllowlist               String[]                               @default([])
+  computeFilesystemMode                 ComputeFilesystemMode                  @default(WORKSPACE_ONLY)
+  delegationEnabled                     Boolean                                @default(true)
+  delegationNaturalLanguageEnabled      Boolean                                @default(true)
+  delegationExplicitComputeEnabled      Boolean                                @default(true)
+  delegationMaxSteps                    Int                                    @default(5)
+  delegationMaxCostCents                Int                                    @default(0)
+  delegationKnowledgeScope              DelegationKnowledgeScope               @default(USER_INPUT_ONLY)
+  lifecycleState                        RepresentativeLifecycleState           @default(DRAFT)
+  activeVersionId                       String?
+  createdAt                             DateTime                               @default(now())
+  updatedAt                             DateTime                               @updatedAt
+  owner                                 Owner                                  @relation(fields: [ownerId], references: [id])
+  activeVersion                         RepresentativeVersion?                 @relation("RepresentativeActiveVersion", fields: [activeVersionId], references: [id], onDelete: SetNull)
+  versions                              RepresentativeVersion[]                @relation("RepresentativeVersions")
+  runtimePolicyOverlays                 RuntimePolicyOverlay[]
+  channelBindings                       RepresentativeChannelBinding[]
+  matrixVirtualUsers                    MatrixVirtualUserBinding[]
+  capabilityProfiles                    CapabilityPolicyProfile[]
+  computeSessions                       ComputeSession[]
+  sandboxIdentities                     SandboxIdentity[]
+  conversations                         Conversation[]
+  contextSyncJobs                       RepresentativeContextSync[]
+  contacts                              Contact[]
+  leads                                 Lead[]
+  commitTraces                          ConversationCommitTrace[]
+  events                                EventAudit[]
+  handoffRequests                       HandoffRequest[]
+  artifacts                             Artifact[]
+  deliverables                          Deliverable[]
+  approvalRequests                      ApprovalRequest[]
+  intakeSubmissions                     IntakeSubmission[]
+  invoices                              Invoice[]
+  ledgerEntries                         LedgerEntry[]
+  browserSessions                       BrowserSession[]
+  browserNavigations                    BrowserNavigation[]
+  organizationCustomerAccounts          CustomerAccount[]
+  knowledgePack                         KnowledgePack?
+  memoryRecords                         OpenVikingMemoryRecord[]
+  billingProducts                       BillingProduct[]
+  skillPackLinks                        RepresentativeSkillPack[]
+  mcpBindings                           RepresentativeMcpBinding[]
+  chatSessions                          ChatSession[]
+  workflowRuns                          WorkflowRun[]
+  delegationTasks                       DelegationTask[]
+  agentWallet                           AgentWallet?
+  tokenPurchases                        AgentTokenPurchase[]
+  usageCharges                          AgentUsageCharge[]
+  knowledgeAssetLinks                   KnowledgeAssetRepresentative[]
+  creatorEarnings                       CreatorEarning[]
+  withdrawRequests                      WithdrawRequest[]
+  walletTransactions                    WalletTransaction[]
+  walletLedgerEntries                   WalletLedgerEntry[]
+  rechargeOrders                        RechargeOrder[]
+  trainingSources                       CreatorTrainingSource[]
+  feedbackSignals                       CreatorFeedbackSignal[]
+  trainingSuggestions                   CreatorTrainingSuggestion[]
+  trainingVersions                      CreatorTrainingVersion[]
+  entitlementAccounts                   ServiceEntitlementAccount[]
+  servicePaymentOrders                  ServicePaymentOrder[]
+  walletExceptionCases                  WalletExceptionCase[]
+  handoffEntitlementGrants              HandoffEntitlementGrant[]
+  tipContributions                      TipContribution[]
+  memoryCandidates                      MemoryCandidate[]
+  governedMemories                      GovernedMemory[]
+  governedMemoryVersions                GovernedMemoryVersion[]
+  memoryReviewDecisions                 MemoryReviewDecision[]
+  memoryPolicyDecisions                 MemoryPolicyDecision[]
+  memoryPolicy                          RepresentativeMemoryPolicy?
+  contactChannelMemoryForgetBoundaries  ContactChannelMemoryForgetBoundary[]
+  contactMemorySharingConsents          ContactMemorySharingConsent[]
+  contactMemorySharingChallenges        ContactMemorySharingChallenge[]
   contactMemorySharingSourceEventClaims ContactMemorySharingSourceEventClaim[]
-  memoryChannelDisclosures             MemoryChannelDisclosureDelivery[]
-  memoryExtractionRuns                 MemoryExtractionRun[]
-  memoryProjectionItems                MemoryProjectionItem[]
-  representativeVersionResources       RepresentativeVersionResource[]
-  publicKnowledgeProjectionItems       PublicKnowledgeProjectionItem[]
-  memoryUseRuns                        MemoryUseRun[]
-  memoryUseItems                       MemoryUseItem[]
-  memoryDeletionProofs                 MemoryDeletionProof[]
-  memoryReconciliationRuns             MemoryReconciliationRun[]
-  memoryReconciliationItems            MemoryReconciliationItem[]
-  memoryReconciliationTargets          MemoryReconciliationTarget[]
+  memoryChannelDisclosures              MemoryChannelDisclosureDelivery[]
+  memoryExtractionRuns                  MemoryExtractionRun[]
+  memoryProjectionItems                 MemoryProjectionItem[]
+  representativeVersionResources        RepresentativeVersionResource[]
+  publicKnowledgeProjectionItems        PublicKnowledgeProjectionItem[]
+  memoryUseRuns                         MemoryUseRun[]
+  memoryUseItems                        MemoryUseItem[]
+  memoryDeletionProofs                  MemoryDeletionProof[]
+  memoryReconciliationRuns              MemoryReconciliationRun[]
+  memoryReconciliationItems             MemoryReconciliationItem[]
+  memoryReconciliationTargets           MemoryReconciliationTarget[]
 
   @@index([ownerId, lifecycleState, updatedAt])
   @@index([activeVersionId])
@@ -2436,26 +2592,15 @@ model KnowledgePack {
   representative   Representative @relation(fields: [representativeId], references: [id])
 }
 
-model PricingPlan {
-  id                      String          @id @default(cuid())
-  representativeId        String
-  type                    PricingPlanType
-  name                    String
-  starsAmount             Int
-  summary                 String
-  includedReplies         Int
-  includesPriorityHandoff Boolean         @default(false)
-  createdAt               DateTime        @default(now())
-  updatedAt               DateTime        @updatedAt
-  representative          Representative  @relation(fields: [representativeId], references: [id])
-}
-
 model BillingProduct {
   id               String                @id @default(cuid())
   representativeId String
   code             String
   name             String
   description      String?
+  kind             BillingProductKind    @default(SERVICE_PACKAGE)
+  sortOrder        Int                   @default(0)
+  isRecommended    Boolean               @default(false)
   status           BillingProductStatus  @default(DRAFT)
   revision         Int                   @default(0)
   createdAt        DateTime              @default(now())
@@ -2466,6 +2611,7 @@ model BillingProduct {
 
   @@unique([representativeId, code])
   @@index([representativeId, status, updatedAt])
+  @@index([representativeId, kind, status, sortOrder, updatedAt])
 }
 
 model CreatorPayoutProfile {
@@ -2528,24 +2674,29 @@ model PayoutDestination {
 /// Commercial fields on a price version are immutable after insertion.
 /// Publication is a forward-only DRAFT -> ACTIVE -> RETIRED lifecycle.
 model BillingPriceVersion {
-  id                      String                         @id @default(cuid())
-  billingProductId        String
-  version                 Int
-  status                  BillingPriceVersionStatus      @default(DRAFT)
-  currency                String                         @default("CNY")
-  amountMinor             Int
-  unitName                String                         @default("credit")
-  entitlementUnits        Int
-  creatorRevenueShareBps  Int                            @default(2000)
-  platformRevenueShareBps Int                            @default(8000)
-  refundPolicy            BillingRefundPolicy            @default(FULL_WHEN_UNUSED)
-  expiryPolicy            BillingEntitlementExpiryPolicy @default(NEVER_EXPIRES)
-  entitlementValidityDays Int?
-  publishedAt             DateTime?
-  retiredAt               DateTime?
-  createdAt               DateTime                       @default(now())
-  billingProduct          BillingProduct                 @relation(fields: [billingProductId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  rechargeOrders          RechargeOrder[]
+  id                       String                         @id @default(cuid())
+  billingProductId         String
+  version                  Int
+  status                   BillingPriceVersionStatus      @default(DRAFT)
+  currency                 String                         @default("CNY")
+  amountMinor              Int
+  unitName                 String                         @default("credit")
+  entitlementUnits         Int
+  creatorRevenueShareBps   Int                            @default(2000)
+  platformRevenueShareBps  Int                            @default(8000)
+  refundPolicy             BillingRefundPolicy            @default(FULL_WHEN_UNUSED)
+  expiryPolicy             BillingEntitlementExpiryPolicy @default(NEVER_EXPIRES)
+  entitlementValidityDays  Int?
+  handoffAllowance         BillingHandoffAllowance        @default(NONE)
+  handoffUnits             Int?
+  handoffServiceLevel      BillingHandoffServiceLevel?
+  handoffValidityDays      Int?
+  publishedAt              DateTime?
+  retiredAt                DateTime?
+  createdAt                DateTime                       @default(now())
+  billingProduct           BillingProduct                 @relation(fields: [billingProductId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  rechargeOrders           RechargeOrder[]
+  handoffEntitlementGrants HandoffEntitlementGrant[]
 
   @@unique([billingProductId, version])
   @@index([billingProductId, status, createdAt])
@@ -3487,28 +3638,40 @@ model IntakeSubmission {
 }
 
 model HandoffRequest {
-  id                     String               @id @default(cuid())
-  representativeId       String
-  contactId              String
-  conversationId         String?
-  episodeId              String?
-  intakeSubmissionId     String?
-  reason                 String
-  summary                String
-  recommendedPriority    Int                  @default(0)
-  recommendedOwnerAction String
-  status                 HandoffStatus        @default(OPEN)
-  createdAt              DateTime             @default(now())
-  updatedAt              DateTime             @updatedAt
-  representative         Representative       @relation(fields: [representativeId], references: [id])
-  contact                Contact              @relation(fields: [contactId], references: [id])
-  conversation           Conversation?        @relation(fields: [conversationId], references: [id])
-  episode                ConversationEpisode? @relation(fields: [episodeId], references: [id], onDelete: SetNull)
-  intakeSubmission       IntakeSubmission?    @relation(fields: [intakeSubmissionId], references: [id])
-  workflowRuns           WorkflowRun[]
-  leads                  Lead[]
+  id                          String                              @id @default(cuid())
+  representativeId            String
+  contactId                   String
+  audienceIdentityId          String?
+  conversationId              String?
+  episodeId                   String?
+  intakeSubmissionId          String?
+  handoffEntitlementGrantId   String?
+  reason                      String
+  summary                     String
+  recommendedPriority         Int                                 @default(0)
+  recommendedOwnerAction      String
+  status                      HandoffStatus                       @default(OPEN)
+  entitlementReservationState HandoffEntitlementReservationState?
+  serviceLevelSnapshot        BillingHandoffServiceLevel?
+  entitlementReservedAt       DateTime?
+  entitlementConsumedAt       DateTime?
+  entitlementReleasedAt       DateTime?
+  createdAt                   DateTime                            @default(now())
+  updatedAt                   DateTime                            @updatedAt
+  representative              Representative                      @relation(fields: [representativeId], references: [id])
+  contact                     Contact                             @relation(fields: [contactId], references: [id])
+  audienceIdentity            AudienceIdentity?                   @relation(fields: [audienceIdentityId], references: [id], onDelete: SetNull)
+  conversation                Conversation?                       @relation(fields: [conversationId], references: [id])
+  episode                     ConversationEpisode?                @relation(fields: [episodeId], references: [id], onDelete: SetNull)
+  intakeSubmission            IntakeSubmission?                   @relation(fields: [intakeSubmissionId], references: [id])
+  handoffEntitlementGrant     HandoffEntitlementGrant?            @relation(fields: [handoffEntitlementGrantId], references: [id], onDelete: Restrict)
+  entitlementLedgerEntries    HandoffEntitlementLedgerEntry[]
+  workflowRuns                WorkflowRun[]
+  leads                       Lead[]
 
   @@index([representativeId, status, createdAt])
+  @@index([audienceIdentityId, representativeId, status, createdAt])
+  @@index([handoffEntitlementGrantId, status, createdAt])
   @@index([conversationId, episodeId, status])
 }
 
@@ -4624,25 +4787,25 @@ model RepresentativeMemoryPolicy {
 }
 
 model ContactMemorySharingConsent {
-  id                        String                            @id @default(cuid())
+  id                        String                                @id @default(cuid())
   representativeId          String
   audienceIdentityId        String
-  status                    ContactMemorySharingConsentStatus @default(GRANTED)
+  status                    ContactMemorySharingConsentStatus     @default(GRANTED)
   grantedAt                 DateTime
   revokedAt                 DateTime?
   policyRevision            Int
-  consentVersion            Int                               @default(1)
+  consentVersion            Int                                   @default(1)
   disclosureContractVersion String
   sourceChannel             RepresentativeChannelKind
-  challengeId               String?                           @unique
+  challengeId               String?                               @unique
   sourceEvidenceHash        String?
-  confirmationEventHash     String?                           @unique
+  confirmationEventHash     String?                               @unique
   proofHash                 String
-  createdAt                 DateTime                          @default(now())
-  updatedAt                 DateTime                          @updatedAt
-  representative            Representative                    @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "ContactMemorySharingConsent_rep_fkey")
-  audienceIdentity          AudienceIdentity                  @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade, map: "ContactMemorySharingConsent_identity_fkey")
-  challenge                 ContactMemorySharingChallenge?    @relation(fields: [challengeId], references: [id], onDelete: Restrict, map: "ContactMemorySharingConsent_challenge_fkey")
+  createdAt                 DateTime                              @default(now())
+  updatedAt                 DateTime                              @updatedAt
+  representative            Representative                        @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "ContactMemorySharingConsent_rep_fkey")
+  audienceIdentity          AudienceIdentity                      @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade, map: "ContactMemorySharingConsent_identity_fkey")
+  challenge                 ContactMemorySharingChallenge?        @relation(fields: [challengeId], references: [id], onDelete: Restrict, map: "ContactMemorySharingConsent_challenge_fkey")
   sourceEventClaim          ContactMemorySharingSourceEventClaim?
 
   @@unique([representativeId, audienceIdentityId, policyRevision, consentVersion], map: "ContactMemorySharingConsent_rep_identity_revision_version_key")
@@ -4651,22 +4814,22 @@ model ContactMemorySharingConsent {
 }
 
 model ContactMemorySharingChallenge {
-  id                        String                       @id @default(cuid())
+  id                        String                                 @id @default(cuid())
   representativeId          String
   audienceIdentityId        String
   sourceChannel             RepresentativeChannelKind
   policyRevision            Int
   disclosureContractVersion String
-  tokenHash                 String                       @unique
+  tokenHash                 String                                 @unique
   sourceEvidenceHash        String
-  disclosureEventHash       String                       @unique
+  disclosureEventHash       String                                 @unique
   expiresAt                 DateTime
   consumedAt                DateTime?
   revokedAt                 DateTime?
-  createdAt                 DateTime                     @default(now())
-  updatedAt                 DateTime                     @updatedAt
-  representative            Representative               @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "ContactMemorySharingChallenge_rep_fkey")
-  audienceIdentity          AudienceIdentity             @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade, map: "ContactMemorySharingChallenge_identity_fkey")
+  createdAt                 DateTime                               @default(now())
+  updatedAt                 DateTime                               @updatedAt
+  representative            Representative                         @relation(fields: [representativeId], references: [id], onDelete: Cascade, map: "ContactMemorySharingChallenge_rep_fkey")
+  audienceIdentity          AudienceIdentity                       @relation(fields: [audienceIdentityId], references: [id], onDelete: Cascade, map: "ContactMemorySharingChallenge_identity_fkey")
   consent                   ContactMemorySharingConsent?
   sourceEventClaims         ContactMemorySharingSourceEventClaim[]
 
@@ -4677,7 +4840,7 @@ model ContactMemorySharingChallenge {
 model ContactMemorySharingSourceEventClaim {
   eventHash          String                              @id
   role               ContactMemorySharingSourceEventRole
-  representativeId  String
+  representativeId   String
   audienceIdentityId String
   sourceChannel      RepresentativeChannelKind
   challengeId        String

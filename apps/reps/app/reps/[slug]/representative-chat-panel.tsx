@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import type { PlanTier, PricingPlan } from "@delegate/domain";
 import type { PublicWebAnswerSourceDisclosure } from "@delegate/web-data";
 
 import {
@@ -15,7 +14,9 @@ import {
 } from "./public-chat";
 import {
   PUBLIC_WALLET_UPDATED_EVENT,
+  type PublicHandoffEntitlementSummary,
   type PublicWalletUpdatedDetail,
+  type PublicWalletStateSnapshot,
 } from "./public-wallet-client";
 import {
   getGovernedContextDisclosure,
@@ -42,19 +43,28 @@ type ChatMessage = {
   displayAck?: PublicMemoryDisplayAck;
   sourceDisclosure?: PublicWebAnswerSourceDisclosure;
 };
+type RepresentativeAccessMode =
+  | "FREE"
+  | "TRIAL_THEN_CREDITS"
+  | "CREDITS_ONLY";
+type RepresentativeHandoffAccessMode = "FREE" | "PACKAGE_REQUIRED";
+type PublicChatUsage = PublicChatResponse["usage"] & {
+  accessMode: RepresentativeAccessMode;
+  unlimitedFreeAccess: boolean;
+};
 type PublicChatHistory = {
   state: string;
   humanActive: boolean;
   messages: Array<ChatMessage & { senderType: string; createdAt: string }>;
-  usage: PublicChatResponse["usage"];
+  usage: PublicChatUsage;
 };
 type PublicChatAccepted = {
   status: "queued" | "waiting_human" | "completed";
   runId?: string;
   heldForOperator?: boolean;
   reply?: PublicChatResponse["reply"];
-  tier: PlanTier;
-  usage: PublicChatResponse["usage"];
+  tier: PublicChatResponse["tier"];
+  usage: PublicChatUsage;
   error?: string;
   code?: string;
   governedMemoryDisclosure?: GovernedMemoryDisclosure;
@@ -67,12 +77,15 @@ export function RepresentativeChatPanel(props: {
   representativeName: string;
   ownerName: string;
   humanInLoop: boolean;
-  pricing: PricingPlan[];
+  accessMode: RepresentativeAccessMode;
+  handoffAccessMode: RepresentativeHandoffAccessMode;
+  hasHandoffPackages: boolean;
+  hasServicePackages: boolean;
+  hasTips: boolean;
   locale: "zh" | "en";
   freeReplyLimit: number;
   computeEnabled: boolean;
   governedMemoryDisclosure: GovernedMemoryDisclosure;
-  serviceCreditPaymentMode: "mock" | "wechat";
   serviceCreditPurchaseEnabled: boolean;
 }) {
   const t = props.locale === "zh" ? zhCopy : enCopy;
@@ -93,8 +106,23 @@ export function RepresentativeChatPanel(props: {
   const displayAckRetryTimersRef = useRef(new Set<number>());
   const displayAckMountedRef = useRef(false);
   const previousReservedCreditsRef = useRef(0);
-  const [selectedTier, setSelectedTier] = useState<PlanTier>("free");
-  const [showPlans, setShowPlans] = useState(false);
+  const [showServices, setShowServices] = useState(
+    props.accessMode === "CREDITS_ONLY",
+  );
+  const [handoffEntitlement, setHandoffEntitlement] =
+    useState<PublicHandoffEntitlementSummary>({
+      hasUnlimited: false,
+      limitedRemainingUses: 0,
+      highestServiceLevel: null,
+      nextExpiryAt: null,
+    });
+  const [handoffEntitlementStatus, setHandoffEntitlementStatus] = useState<
+    "loading" | "ready" | "unavailable"
+  >(
+    props.humanInLoop && props.handoffAccessMode === "PACKAGE_REQUIRED"
+      ? "loading"
+      : "ready",
+  );
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
@@ -103,24 +131,20 @@ export function RepresentativeChatPanel(props: {
       text: t.welcome(props.representativeName, governedContextEnabled),
     },
   ]);
-  const [usage, setUsage] = useState<PublicChatResponse["usage"]>({
+  const [usage, setUsage] = useState<PublicChatUsage>({
     freeRepliesUsed: 0,
     freeRepliesRemaining: props.freeReplyLimit,
     serviceCreditsAvailable: 0,
     serviceCreditsReserved: 0,
     passUnlocked: false,
     deepHelpUnlocked: false,
+    accessMode: props.accessMode,
+    unlimitedFreeAccess: props.accessMode === "FREE",
   });
   const [humanActive, setHumanActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [hydrating, setHydrating] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const activePlan = props.pricing.find((plan) => plan.tier === selectedTier) ?? props.pricing[0];
-  const planAction = resolvePlanSelectionAction(
-    selectedTier,
-    props.serviceCreditPurchaseEnabled,
-    usage.passUnlocked,
-  );
   const computeAssist = getComputeAssist(input, props.locale, props.computeEnabled);
 
   useEffect(() => {
@@ -201,27 +225,54 @@ export function RepresentativeChatPanel(props: {
   }, []);
 
   useEffect(() => {
-    if (usage.freeRepliesRemaining > 0 || selectedTier !== "free") return;
-    if (usage.passUnlocked) {
-      setSelectedTier("pass");
-      setShowPlans(
-        usage.serviceCreditsAvailable === 0
-        && usage.serviceCreditsReserved > 0,
-      );
+    if (
+      usage.accessMode === "CREDITS_ONLY"
+      || (
+        usage.accessMode === "TRIAL_THEN_CREDITS"
+        && usage.freeRepliesRemaining === 0
+      )
+    ) {
+      setShowServices(true);
+    }
+  }, [usage.accessMode, usage.freeRepliesRemaining]);
+
+  useEffect(() => {
+    if (
+      !props.humanInLoop
+      || props.handoffAccessMode !== "PACKAGE_REQUIRED"
+    ) {
+      setHandoffEntitlementStatus("ready");
       return;
     }
-    const recommended = props.pricing.find((plan) => plan.tier === "pass");
-    if (recommended) {
-      setSelectedTier(recommended.tier);
-      setShowPlans(true);
-    }
+    const controller = new AbortController();
+    setHandoffEntitlementStatus("loading");
+    void fetch(`/reps/${props.representativeSlug}/recharge?currency=CNY`, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("handoff entitlement unavailable");
+        return (await response.json()) as PublicWalletStateSnapshot;
+      })
+      .then((snapshot) => {
+        if (controller.signal.aborted) return;
+        setHandoffEntitlement(snapshot.handoffEntitlement);
+        setHandoffEntitlementStatus("ready");
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          // Do not turn a failed read into a false "no entitlement" state.
+          // The submission route remains authoritative while the CTA stays
+          // unavailable, preventing an accidental duplicate purchase.
+          setHandoffEntitlementStatus("unavailable");
+        }
+      });
+    return () => controller.abort();
   }, [
-    props.pricing,
-    selectedTier,
-    usage.freeRepliesRemaining,
-    usage.passUnlocked,
-    usage.serviceCreditsAvailable,
-    usage.serviceCreditsReserved,
+    props.handoffAccessMode,
+    props.humanInLoop,
+    props.representativeSlug,
   ]);
 
   useEffect(() => {
@@ -233,18 +284,14 @@ export function RepresentativeChatPanel(props: {
     previousReservedCreditsRef.current = usage.serviceCreditsReserved;
     if (!transition) return;
 
-    const passPlan = props.pricing.find((plan) => plan.tier === "pass");
-    if (passPlan) setSelectedTier("pass");
-    setShowPlans(transition === "released");
+    setShowServices(transition === "released");
     setError((currentError) => {
       if (currentError !== t.serviceCreditPending) return currentError;
       if (transition === "available") return null;
       const nextStep = resolvePublicChatServiceCreditNextStep({
         serviceCreditsAvailable: usage.serviceCreditsAvailable,
         serviceCreditsReserved: usage.serviceCreditsReserved,
-        purchaseEnabled: Boolean(
-          passPlan && props.serviceCreditPurchaseEnabled,
-        ),
+        purchaseEnabled: props.serviceCreditPurchaseEnabled,
         humanInLoop: props.humanInLoop,
       });
       return nextStep === "purchase"
@@ -255,7 +302,6 @@ export function RepresentativeChatPanel(props: {
     });
   }, [
     props.humanInLoop,
-    props.pricing,
     props.serviceCreditPurchaseEnabled,
     t.serviceCreditPending,
     t.serviceCreditRequired,
@@ -279,13 +325,15 @@ export function RepresentativeChatPanel(props: {
           detail.serviceCreditsAvailable > 0
           || detail.serviceCreditsReserved > 0,
       }));
+      if (detail.handoffEntitlement) {
+        setHandoffEntitlement(detail.handoffEntitlement);
+        setHandoffEntitlementStatus("ready");
+      }
       if (detail.serviceCreditsAvailable > 0) {
-        setSelectedTier("pass");
-        setShowPlans(false);
+        setShowServices(false);
         setError(null);
       } else if (detail.serviceCreditsReserved > 0) {
-        setSelectedTier("pass");
-        setShowPlans(true);
+        setShowServices(true);
         setError(t.serviceCreditPending);
       }
     };
@@ -394,19 +442,13 @@ export function RepresentativeChatPanel(props: {
         }
         if (rejection === "service_credit_required" && payload.usage) {
           setUsage(payload.usage);
-          const passPlan = props.pricing.find((plan) => plan.tier === "pass");
           const nextStep = resolvePublicChatServiceCreditNextStep({
             serviceCreditsAvailable: payload.usage.serviceCreditsAvailable,
             serviceCreditsReserved: payload.usage.serviceCreditsReserved,
-            purchaseEnabled: Boolean(
-              passPlan && props.serviceCreditPurchaseEnabled,
-            ),
+            purchaseEnabled: props.serviceCreditPurchaseEnabled,
             humanInLoop: props.humanInLoop,
           });
-          if (passPlan) {
-            setSelectedTier("pass");
-            setShowPlans(true);
-          }
+          setShowServices(true);
           setMessages((current) => removeRejectedPublicChatOptimisticMessage(
             current,
             userMessage.id,
@@ -431,7 +473,6 @@ export function RepresentativeChatPanel(props: {
         throw new Error(payload.error || t.errorGeneric);
       }
       setUsage(payload.usage);
-      setSelectedTier(payload.tier);
       if (payload.reply) {
         appendAssistant({
           id: `assistant-${Date.now()}`,
@@ -536,6 +577,36 @@ export function RepresentativeChatPanel(props: {
   function appendAssistant(message: ChatMessage) {
     setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
   }
+
+  const accessMode = usage.accessMode ?? props.accessMode;
+  const hasPaidHandoff =
+    handoffEntitlement.hasUnlimited
+    || handoffEntitlement.limitedRemainingUses > 0;
+  const handoffDetail = !props.humanInLoop
+    ? t.handoffUnavailableDetail
+    : props.handoffAccessMode === "FREE"
+      ? t.handoffFreeDetail
+      : handoffEntitlementStatus === "loading"
+        ? t.handoffEntitlementLoading
+        : handoffEntitlementStatus === "unavailable"
+          ? t.handoffEntitlementUnavailable
+          : hasPaidHandoff
+            ? t.handoffEntitlementDetail(
+                handoffEntitlement.hasUnlimited,
+                handoffEntitlement.limitedRemainingUses,
+                handoffEntitlement.highestServiceLevel === "PRIORITY",
+                handoffEntitlement.nextExpiryAt,
+              )
+            : props.hasHandoffPackages
+              ? t.handoffPackageRequiredDetail
+              : t.handoffPackageUnavailableDetail;
+  const serviceAttentionRequired =
+    accessMode === "CREDITS_ONLY"
+    || (
+      accessMode === "TRIAL_THEN_CREDITS"
+      && usage.freeRepliesRemaining === 0
+    );
+  const serviceContentVisible = serviceAttentionRequired || showServices;
 
   return (
     <section className="representative-conversation-shell" id="chat">
@@ -648,46 +719,89 @@ export function RepresentativeChatPanel(props: {
           <section className="representative-session-card is-status">
             <span className="panel-title">{t.sessionLabel}</span>
             <div className="representative-session-row"><span>{t.currentResponder}</span><strong>{humanActive ? t.humanStatus : t.aiStatus}</strong></div>
-            <div className="representative-session-row"><span>{t.freeRepliesLabel}</span><strong>{usage.freeRepliesRemaining}/{props.freeReplyLimit}</strong></div>
+            <div className="representative-session-row">
+              <span>{t.accessModeLabel}</span>
+              <strong>
+                {accessMode === "FREE"
+                  ? t.unlimitedFreeAccess
+                  : accessMode === "CREDITS_ONLY"
+                    ? t.creditsOnlyAccess
+                    : t.trialAccess(
+                        usage.freeRepliesRemaining,
+                        props.freeReplyLimit,
+                      )}
+              </strong>
+            </div>
             <div className="representative-session-row"><span>{t.serviceCreditsLabel}</span><strong>{usage.serviceCreditsAvailable}</strong></div>
             <p>{humanActive ? t.humanActiveDetail : t.aiActiveDetail}</p>
           </section>
 
-          {props.humanInLoop ? (
-            <section className="representative-session-card">
-              <span className="panel-title">{t.handoffLabel}</span>
-              <strong>{t.handoffTitle(props.ownerName)}</strong>
-              <p>{t.handoffDetail}</p>
-              <a className="button-secondary" href="#handoff">{t.handoffAction}</a>
+          <section className={`representative-session-card${props.humanInLoop ? "" : " is-unavailable"}`}>
+            <span className="panel-title">{t.handoffLabel}</span>
+            <strong>
+              {props.humanInLoop
+                ? t.handoffTitle(props.ownerName)
+                : t.handoffUnavailableTitle}
+            </strong>
+            <p>{handoffDetail}</p>
+            {props.humanInLoop && (
+              props.handoffAccessMode === "FREE"
+              || (
+                handoffEntitlementStatus === "ready"
+                && (hasPaidHandoff || props.hasHandoffPackages)
+              )
+            ) ? (
+              <a
+                className="button-secondary"
+                href={props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
+                  ? "#recharge"
+                  : "#handoff"}
+              >
+                {props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
+                  ? t.handoffPackageAction
+                  : t.handoffAction}
+              </a>
+            ) : null}
+          </section>
+
+          {accessMode !== "FREE" && (
+            accessMode === "CREDITS_ONLY"
+            || props.hasServicePackages
+            || usage.serviceCreditsAvailable > 0
+          ) ? (
+            <section className="representative-session-card representative-service-disclosure">
+              {accessMode === "TRIAL_THEN_CREDITS" && !serviceAttentionRequired ? (
+                <button aria-expanded={showServices} className="representative-service-toggle" onClick={() => setShowServices((current) => !current)} type="button">
+                  <span><small>{t.servicesEyebrow}</small><strong>{t.servicesOptionalTitle}</strong></span>
+                  <b aria-hidden="true">{showServices ? "−" : "+"}</b>
+                </button>
+              ) : (
+                <div className="representative-service-static-heading">
+                  <small>{t.servicesEyebrow}</small>
+                  <strong>{t.servicesNeededTitle(props.humanInLoop)}</strong>
+                </div>
+              )}
+              {serviceContentVisible ? (
+                <div className="representative-service-options" aria-live="polite">
+                  <p>{t.creditPlanDetail(usage.serviceCreditsAvailable, usage.serviceCreditsReserved)}</p>
+                  {props.serviceCreditPurchaseEnabled ? (
+                    <a className="button-primary" href="#recharge">{t.openRecharge}</a>
+                  ) : usage.serviceCreditsAvailable === 0 ? (
+                    <p className="footer-note">{t.commerceUnavailableDetail(props.humanInLoop)}</p>
+                  ) : null}
+                </div>
+              ) : null}
             </section>
           ) : null}
 
-          <section className="representative-session-card representative-service-disclosure">
-            <button aria-expanded={showPlans} className="representative-service-toggle" onClick={() => setShowPlans((current) => !current)} type="button">
-              <span><small>{t.servicesEyebrow}</small><strong>{usage.freeRepliesRemaining > 0 ? t.servicesOptionalTitle : t.servicesNeededTitle(props.humanInLoop)}</strong></span>
-              <b aria-hidden="true">{showPlans ? "−" : "+"}</b>
-            </button>
-            {showPlans ? (
-              <div className="representative-service-options">
-                {activePlan ? (
-                  <div aria-live="polite" className={`representative-chat-plan-action is-${planAction}`} role="status">
-                    <span className="panel-title">{t.selectedPlan}</span><strong>{activePlan.name}</strong>
-                    <p>{planAction === "current" ? selectedTier === "free" ? t.currentPlanDetail(usage.freeRepliesRemaining, props.freeReplyLimit) : t.creditPlanDetail(usage.serviceCreditsAvailable, usage.serviceCreditsReserved) : planAction === "recharge" ? t.rechargeDetail(props.serviceCreditPaymentMode) : t.commerceUnavailableDetail(props.humanInLoop)}</p>
-                    {planAction === "recharge" ? <a className="button-primary" href="#recharge">{t.openRecharge(props.serviceCreditPaymentMode)}</a> : planAction === "unavailable" && props.humanInLoop ? <a className="button-secondary" href="#handoff">{t.contactOwner}</a> : null}
-                  </div>
-                ) : null}
-                <div className="representative-chat-tier-grid">
-                  {props.pricing.map((plan) => (
-                    <button aria-pressed={plan.tier === selectedTier} className={plan.tier === selectedTier ? "representative-chat-tier representative-chat-tier-active" : "representative-chat-tier"} key={plan.tier} onClick={() => setSelectedTier(plan.tier)} type="button">
-                      <div className="representative-chat-tier-header"><strong>{plan.name}</strong><span>{plan.stars} credits</span></div>
-                      <p>{plan.summary}</p>
-                      <div className="chip-row"><span className="chip">{t.repliesChip(plan.includedReplies)}</span>{plan.includesPriorityHandoff ? <span className="chip chip-safe">{t.priorityHandoff}</span> : null}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-          </section>
+          {accessMode === "FREE" ? (
+            <section className="representative-session-card is-free-access">
+              <span className="panel-title">{t.servicesEyebrow}</span>
+              <strong>{t.freeServiceTitle}</strong>
+              <p>{t.freeServiceDetail}</p>
+              {props.hasTips ? <a href="#recharge">{t.optionalSupportAction}</a> : null}
+            </section>
+          ) : null}
 
           <section className="representative-session-card is-privacy">
             <span className="panel-title">{t.privacyLabel}</span>
@@ -708,16 +822,6 @@ function getVisitorMessageStatus(status: string | undefined, locale: "zh" | "en"
   return labels[status as keyof typeof labels] ?? null;
 }
 
-export function resolvePlanSelectionAction(
-  tier: PlanTier,
-  serviceCreditPurchaseEnabled: boolean,
-  paidUnlocked = false,
-): "current" | "recharge" | "unavailable" {
-  if (tier === "free") return "current";
-  if (tier === "pass" && paidUnlocked) return "current";
-  return serviceCreditPurchaseEnabled ? "recharge" : "unavailable";
-}
-
 function createClientMessageId() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
@@ -729,6 +833,20 @@ function formatAttachmentBytes(value: number | undefined) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatHandoffExpiryDate(
+  value: string | null,
+  locale: "zh" | "en",
+) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  }).format(date);
 }
 
 function getComputeAssist(value: string, locale: "zh" | "en", enabled: boolean) {
@@ -775,20 +893,32 @@ const zhCopy = {
   sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", memoryPolicyChanged: "记忆策略刚刚更新。请阅读新的记忆说明后重新发送；上一条内容尚未提交。", serviceCreditPending: "服务额度正在处理中，请稍后重试；你的问题已保留在输入框中。", serviceCreditRequired: "免费回复已用完。请购买当前数字代表的服务额度后再发送；你的问题已保留在输入框中。", serviceCreditUnavailableWithHandoff: "免费回复已用完，当前数字代表暂无可购买的服务方案；可申请真人协助。你的问题已保留在输入框中。", serviceCreditUnavailable: "免费回复已用完，当前数字代表暂无可购买的服务方案。你的问题已保留在输入框中。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
   sessionLabel: "本次会话",
-  currentResponder: "当前接待", freeRepliesLabel: "免费回复", serviceCreditsLabel: "服务额度",
+  currentResponder: "当前接待", accessModeLabel: "访问方式", serviceCreditsLabel: "服务额度",
+  unlimitedFreeAccess: "永久免费",
+  creditsOnlyAccess: "使用服务额度",
+  trialAccess: (remaining: number, limit: number) => `免费剩余 ${remaining}/${limit}`,
   aiActiveDetail: "你正在与数字代表对话；需要真人判断时会明确提示。",
   humanActiveDetail: "真人已经接手，你仍可以继续补充背景和要求。",
-  handoffLabel: "需要真人？", handoffTitle: (ownerName: string) => `申请 ${ownerName} 查看`, handoffDetail: "先在对话中留下目标和关键背景，转接时会一起提交。", handoffAction: "了解转接方式",
+  handoffLabel: "人工接管", handoffTitle: (ownerName: string) => `申请 ${ownerName} 查看`, handoffAction: "了解转接方式",
+  handoffUnavailableTitle: "当前不可用",
+  handoffUnavailableDetail: "这位数字代表当前未启用人工接管，会继续由 AI 接待。",
+  handoffFreeDetail: "可直接在对话中提出人工请求；目标和关键背景会随会话一起提交。",
+  handoffEntitlementLoading: "正在确认当前账户的人工接管权益…",
+  handoffEntitlementUnavailable: "人工接管权益暂时无法确认。为避免重复购买，请稍后刷新后再试。",
+  handoffPackageRequiredDetail: "当前没有可用的人工接管权益。购买含人工权益的服务套餐后，可在有效期内申请。",
+  handoffPackageUnavailableDetail: "当前没有可用的人工接管权益，也没有上架包含人工接管的服务套餐。",
+  handoffEntitlementDetail: (unlimited: boolean, remaining: number, priority: boolean, expiresAt: string | null) => {
+    const expiry = formatHandoffExpiryDate(expiresAt, "zh");
+    return `${unlimited ? "不限次数" : `剩余 ${remaining} 次`}人工接管${priority ? " · 优先处理" : " · 标准处理"}${expiry ? ` · 下一份权益 ${expiry} 到期` : ""}。`;
+  },
+  handoffPackageAction: "查看人工权益套餐",
   servicesEyebrow: "服务选项", servicesOptionalTitle: "需要时再升级", servicesNeededTitle: (humanInLoop: boolean) => humanInLoop ? "继续对话或申请人工" : "继续对话需要服务额度",
-  selectedPlan: "已选择方案",
-  repliesChip: (count: number) => count > 0 ? `${count} 次回复` : "公共额度支持",
-  priorityHandoff: "优先人工评估",
-  currentPlanDetail: (remaining: number, limit: number) => `当前免费方案剩余 ${remaining}/${limit} 次回复，无需付款。`,
   creditPlanDetail: (available: number, reserved: number) => `当前还有 ${available} 个可用服务额度${reserved > 0 ? `，${reserved} 个正在处理中` : ""}；每次付费继续会先预留，再按实际完成结算。`,
-  rechargeDetail: (paymentMode: "mock" | "wechat") => paymentMode === "mock" ? "当前为本地演示支付：模拟支付后会自动购买仅限当前代表的服务额度，可用于验证付费继续；不会真实扣款。" : "购买后会获得仅限当前代表使用的服务额度；支付成功后即可继续对话。",
-  commerceUnavailableDetail: (humanInLoop: boolean) => humanInLoop ? "真实支付和套餐解锁尚未接入。当前选择不会扣费；你可以先申请真人确认后续服务。" : "真实支付和套餐解锁尚未接入。当前选择不会扣费。",
-  openRecharge: (paymentMode: "mock" | "wechat") => paymentMode === "mock" ? "前往演示充值" : "购买服务额度",
-  contactOwner: "申请真人协助",
+  commerceUnavailableDetail: (humanInLoop: boolean) => humanInLoop ? "当前没有可购买的服务套餐；你仍可在对话中了解人工接管方式。" : "当前没有可购买的服务套餐。",
+  openRecharge: "查看服务套餐",
+  freeServiceTitle: "当前对话永久免费",
+  freeServiceDetail: "不会销售继续对话所需的服务套餐；你可以直接使用数字代表。",
+  optionalSupportAction: "查看自愿支持方式",
   privacyLabel: "隐私提示", privacyDetail: "不会读取主人的私人文件、账号或工作区。重要承诺需要真人确认。", privacyAction: "查看完整说明",
   welcome: (name: string, governedContextEnabled: boolean) =>
     governedContextEnabled
@@ -813,20 +943,32 @@ const enCopy = {
   sending: "Working…", send: "Send", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "Reviewing published knowledge and permitted context…" : "Reviewing published knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", memoryPolicyChanged: "The memory policy just changed. Review the updated memory notice and send again; your previous message was not submitted.", serviceCreditPending: "Service credits are still being processed. Try again shortly; your message remains in the composer.", serviceCreditRequired: "Your free replies are used up. Buy service credits for this representative, then send again. Your message remains in the composer.", serviceCreditUnavailableWithHandoff: "Your free replies are used up, and this representative has no purchasable service plan right now. Request human help instead. Your message remains in the composer.", serviceCreditUnavailable: "Your free replies are used up, and this representative has no purchasable service plan right now. Your message remains in the composer.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
   humanQueueNotice: "This conversation is now in the human queue. You can keep adding context while the operator reviews the full thread.",
   sessionLabel: "This conversation",
-  currentResponder: "Current responder", freeRepliesLabel: "Free replies", serviceCreditsLabel: "Service credits",
+  currentResponder: "Current responder", accessModeLabel: "Access", serviceCreditsLabel: "Service credits",
+  unlimitedFreeAccess: "Always free",
+  creditsOnlyAccess: "Uses service credits",
+  trialAccess: (remaining: number, limit: number) => `${remaining}/${limit} free replies left`,
   aiActiveDetail: "You are talking to the digital representative. It will say when a human decision is needed.",
   humanActiveDetail: "A human has taken over. You can keep adding context and requirements.",
-  handoffLabel: "Need a human?", handoffTitle: (ownerName: string) => `Ask ${ownerName} to review`, handoffDetail: "Leave the goal and key context in the conversation so it can travel with the handoff.", handoffAction: "How handoff works",
+  handoffLabel: "Human takeover", handoffTitle: (ownerName: string) => `Ask ${ownerName} to review`, handoffAction: "How handoff works",
+  handoffUnavailableTitle: "Not available",
+  handoffUnavailableDetail: "Human takeover is disabled for this representative. The AI remains the responder.",
+  handoffFreeDetail: "Ask in the conversation at no additional charge. Your goal and key context travel with the request.",
+  handoffEntitlementLoading: "Checking this account's human-takeover entitlement…",
+  handoffEntitlementUnavailable: "Human-takeover entitlement cannot be confirmed right now. To avoid a duplicate purchase, refresh and try again later.",
+  handoffPackageRequiredDetail: "No human-takeover entitlement is currently available. Buy a service package that includes one, then request it during its validity period.",
+  handoffPackageUnavailableDetail: "No human-takeover entitlement or purchasable package with human help is currently available.",
+  handoffEntitlementDetail: (unlimited: boolean, remaining: number, priority: boolean, expiresAt: string | null) => {
+    const expiry = formatHandoffExpiryDate(expiresAt, "en");
+    return `${unlimited ? "Unlimited" : `${remaining} remaining`} human takeover${priority ? " · priority service" : " · standard service"}${expiry ? ` · next entitlement expires ${expiry}` : ""}.`;
+  },
+  handoffPackageAction: "View packages with human help",
   servicesEyebrow: "Service options", servicesOptionalTitle: "Upgrade only when needed", servicesNeededTitle: (humanInLoop: boolean) => humanInLoop ? "Continue or request human help" : "Service credits are required to continue",
-  selectedPlan: "Selected plan",
-  repliesChip: (count: number) => count > 0 ? `${count} replies` : "Supports the public pool",
-  priorityHandoff: "Priority human review",
-  currentPlanDetail: (remaining: number, limit: number) => `The free plan has ${remaining} of ${limit} replies left and requires no payment.`,
   creditPlanDetail: (available: number, reserved: number) => `${available} service credits remain${reserved > 0 ? `, with ${reserved} currently reserved` : ""}. Paid continuation reserves first and settles only after completion.`,
-  rechargeDetail: (paymentMode: "mock" | "wechat") => paymentMode === "mock" ? "This local demo automatically buys service credits scoped to this representative after simulated payment, so paid continuation can be verified without a real charge." : "A purchase adds service credits scoped only to this representative. You can continue the conversation after payment succeeds.",
-  commerceUnavailableDetail: (humanInLoop: boolean) => humanInLoop ? "Live payment and plan entitlement are not connected yet. Selecting this plan will not charge you; contact the representative owner for next steps." : "Live payment and plan entitlement are not connected yet. Selecting this plan will not charge you.",
-  openRecharge: (paymentMode: "mock" | "wechat") => paymentMode === "mock" ? "Open demo recharge" : "Buy service credits",
-  contactOwner: "Request human help",
+  commerceUnavailableDetail: (humanInLoop: boolean) => humanInLoop ? "No service package is currently available. You can still ask how human takeover works in the conversation." : "No service package is currently available.",
+  openRecharge: "View service packages",
+  freeServiceTitle: "This conversation is always free",
+  freeServiceDetail: "No service package is sold to keep chatting; use the digital representative directly.",
+  optionalSupportAction: "View voluntary support options",
   privacyLabel: "Privacy", privacyDetail: "This representative cannot read the owner's private files, accounts, or workspace. Important commitments require human confirmation.", privacyAction: "Read the full explanation",
   welcome: (name: string, governedContextEnabled: boolean) =>
     governedContextEnabled

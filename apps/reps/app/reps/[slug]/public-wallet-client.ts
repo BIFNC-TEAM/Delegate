@@ -4,7 +4,55 @@ export type PublicWalletUpdatedDetail = {
   representativeSlug: string;
   serviceCreditsAvailable: number;
   serviceCreditsReserved: number;
+  /** Present only when the balance came from a fresh authoritative read. */
+  handoffEntitlement?: PublicHandoffEntitlementSummary;
 };
+
+export type PublicHandoffEntitlementSummary = {
+  hasUnlimited: boolean;
+  limitedRemainingUses: number;
+  highestServiceLevel: "STANDARD" | "PRIORITY" | null;
+  nextExpiryAt: string | null;
+};
+
+type PublicCommerceProductBase = {
+  productId: string;
+  priceVersionId: string;
+  name: string;
+  description: string | null;
+  sortOrder: number;
+  isRecommended: boolean;
+  amountCents: number;
+  currency: "CNY";
+  expiryPolicy: "NEVER_EXPIRES";
+  entitlementValidityDays: null;
+};
+
+export type PublicServiceCommerceProduct = PublicCommerceProductBase & {
+  kind: "SERVICE_PACKAGE";
+  entitlementUnits: number;
+  unitName: "credit";
+  refundPolicy: "FULL_WHEN_UNUSED";
+  handoffAllowance: "NONE" | "LIMITED" | "UNLIMITED";
+  handoffUnits: number | null;
+  handoffServiceLevel: "STANDARD" | "PRIORITY" | null;
+  handoffValidityDays: number | null;
+};
+
+export type PublicTipCommerceProduct = PublicCommerceProductBase & {
+  kind: "TIP";
+  entitlementUnits: 0;
+  unitName: "tip";
+  refundPolicy: "NON_REFUNDABLE";
+  handoffAllowance: "NONE";
+  handoffUnits: null;
+  handoffServiceLevel: null;
+  handoffValidityDays: null;
+};
+
+export type PublicCommerceProduct =
+  | PublicServiceCommerceProduct
+  | PublicTipCommerceProduct;
 
 export type PublicRechargeOrderStatus =
   | "created"
@@ -30,8 +78,13 @@ export type PublicWalletOrder = {
   billingProductId: string | null;
   billingPriceVersionId: string | null;
   productName: string | null;
+  productKind: "SERVICE_PACKAGE" | "TIP" | null;
   entitlementUnits: number | null;
   unitName: string | null;
+  handoffAllowance: "NONE" | "LIMITED" | "UNLIMITED" | null;
+  handoffUnits: number | null;
+  handoffServiceLevel: "STANDARD" | "PRIORITY" | null;
+  handoffValidityDays: number | null;
   amountCents: number;
   currency: string;
   provider: string;
@@ -51,18 +104,14 @@ export type PublicWalletStateSnapshot = {
     serviceCreditsPurchased: number;
     serviceCreditsConsumed: number;
   };
-  servicePackages: Array<{
-    productId: string;
-    priceVersionId: string;
-    name: string;
-    description: string | null;
-    amountCents: number;
-    currency: string;
-    entitlementUnits: number;
-    unitName: string;
-    refundPolicy: string;
-    expiryPolicy: string;
-  }>;
+  commerceSettings: {
+    accessMode: "FREE" | "TRIAL_THEN_CREDITS" | "CREDITS_ONLY";
+    humanInLoop: boolean;
+    handoffAccessMode: "FREE" | "PACKAGE_REQUIRED";
+    tipsEnabled: boolean;
+  };
+  handoffEntitlement: PublicHandoffEntitlementSummary;
+  commerceProducts: PublicCommerceProduct[];
   orders: PublicWalletOrder[];
   purchases: Array<{
     id: string;
@@ -182,6 +231,21 @@ export function publishPublicWalletUpdate(
       { detail },
     ),
   );
+}
+
+export function buildPublicCommerceCompletionWalletUpdate(input: {
+  representativeSlug: string;
+  tokenPurchase: {
+    availableTokenAmount: number;
+    reservedTokenAmount: number;
+  } | null;
+}): PublicWalletUpdatedDetail | null {
+  if (!input.tokenPurchase) return null;
+  return {
+    representativeSlug: input.representativeSlug,
+    serviceCreditsAvailable: input.tokenPurchase.availableTokenAmount,
+    serviceCreditsReserved: input.tokenPurchase.reservedTokenAmount,
+  };
 }
 
 /**

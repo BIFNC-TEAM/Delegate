@@ -761,6 +761,112 @@ describe("memory use execution", () => {
     });
   });
 
+  it("keeps a completed Episode-pinned public answer deliverable while waiting for the user", async () => {
+    const run = runSnapshot({
+      status: MemoryUseRunStatus.COMPLETED,
+      outputMessageId: "output_message_public",
+      injectedCount: 1,
+      completedAt: occurredAt,
+    });
+    const contentHash = "7".repeat(64);
+    let episodeStatus: ConversationEpisodeStatus = ConversationEpisodeStatus.WAITING_USER;
+    const publicSource = {
+      id: "public_projection_1",
+      representativeId: run.representativeId,
+      publishedVersionId: run.representativeVersionId,
+      sourceKind: "REPRESENTATIVE_VERSION_RESOURCE",
+      resourceKey: "identity/profile.md",
+      knowledgeAssetId: null,
+      contentHash,
+      projectedAt: occurredAt,
+      publishedVersion: { status: "PUBLISHED" },
+      publishedResource: {
+        representativeId: run.representativeId,
+        sourceKind: "REPRESENTATIVE_VERSION_RESOURCE",
+        resourceKey: "identity/profile.md",
+        knowledgeAssetId: null,
+        contentHash,
+      },
+    };
+    const tx = asTransaction({
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      memoryUseRun: { findUnique: vi.fn().mockResolvedValue(run) },
+      memoryUseItem: {
+        findMany: vi.fn().mockResolvedValue([{
+          id: "memory_use_item_public",
+          sourceKind: MemoryUseSourceKind.PUBLIC_KNOWLEDGE,
+          safetyPassedAt: occurredAt,
+          injectedAt: occurredAt,
+          citedAt: null,
+          citationId: null,
+          rejectionReasonCode: null,
+          memoryVersionId: null,
+          projectionItemId: null,
+          publicKnowledgeProjectionId: publicSource.id,
+          publicKnowledgeProjection: {
+            publishedVersionId: run.representativeVersionId,
+            resourceKey: publicSource.resourceKey,
+            knowledgeAssetId: null,
+          },
+          contentHash,
+        }]),
+      },
+      representative: {
+        findUnique: vi.fn().mockResolvedValue({
+          activeVersionId: run.representativeVersionId,
+        }),
+      },
+      conversation: {
+        findUnique: vi.fn().mockResolvedValue({
+          representativeId: run.representativeId,
+          contactId: run.contactId,
+          sourceChannel: run.sourceChannel.toLowerCase(),
+          activeEpisodeId: "episode_1",
+        }),
+      },
+      generationRun: {
+        findUnique: vi.fn().mockImplementation(async () => ({
+          id: run.generationRunId,
+          conversationId: run.conversationId,
+          episodeId: "episode_1",
+          inputMessageId: run.inputMessageId,
+          representativeVersionId: run.representativeVersionId,
+          episode: {
+            id: "episode_1",
+            conversationId: run.conversationId,
+            representativeVersionId: run.representativeVersionId,
+            status: episodeStatus,
+          },
+        })),
+      },
+      publicKnowledgeProjectionItem: {
+        findMany: vi.fn().mockResolvedValue([publicSource]),
+      },
+    });
+    const input = {
+      generationRunId: run.generationRunId,
+      conversationId: run.conversationId,
+      outputMessageId: "output_message_public",
+    };
+
+    await expect(revalidateMemoryUseDeliverySourcesInTransaction(
+      tx,
+      input,
+      occurredAt,
+    )).resolves.toEqual({ authorized: true, checkedItemCount: 1 });
+
+    episodeStatus = ConversationEpisodeStatus.RESOLVED;
+    await expect(revalidateMemoryUseDeliverySourcesInTransaction(
+      tx,
+      input,
+      occurredAt,
+    )).resolves.toEqual({
+      authorized: false,
+      checkedItemCount: 1,
+      reasonCode: "memory_use_delivery_source_revoked",
+    });
+  });
+
   it("blocks provider delivery immediately after shared-memory consent is revoked", async () => {
     const run = runSnapshot({
       status: MemoryUseRunStatus.COMPLETED,

@@ -3,9 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockPrisma } = vi.hoisted(() => {
   const prismaMock = {
+    $executeRaw: vi.fn(),
     $transaction: vi.fn(),
     handoffRequest: {
       findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      findUniqueOrThrow: vi.fn(),
       update: vi.fn(),
     },
     workflowCommandOutbox: {
@@ -38,7 +41,14 @@ describe("owner dashboard handoff cancellation", () => {
       return (callback as (client: typeof mockPrisma) => unknown)(mockPrisma);
     });
     mockPrisma.handoffRequest.findFirst.mockResolvedValue(buildHandoff(HandoffStatus.OPEN));
+    mockPrisma.handoffRequest.findUnique.mockResolvedValue(
+      buildHandoff(HandoffStatus.OPEN),
+    );
+    mockPrisma.handoffRequest.findUniqueOrThrow.mockResolvedValue(
+      buildHandoff(HandoffStatus.CLOSED),
+    );
     mockPrisma.handoffRequest.update.mockResolvedValue(buildHandoff(HandoffStatus.CLOSED));
+    mockPrisma.$executeRaw.mockResolvedValue(0);
     mockPrisma.workflowRun.findMany.mockResolvedValue([
       {
         id: "workflow-handoff-1",
@@ -83,11 +93,30 @@ describe("owner dashboard handoff cancellation", () => {
       }),
     });
   });
+
+  it("rejects dashboard acceptance that would bypass canonical assignment", async () => {
+    const { setHandoffRequestStatus } = await import("../src/owner-dashboard");
+
+    await expect(setHandoffRequestStatus({
+      representativeSlug: "lin-founder-rep",
+      handoffId: "handoff-1",
+      status: "accepted",
+    })).rejects.toThrow("conversation assignment action");
+
+    expect(mockPrisma.handoffRequest.update).not.toHaveBeenCalled();
+    expect(mockPrisma.$transaction).not.toHaveBeenCalled();
+  });
 });
 
 function buildHandoff(status: HandoffStatus) {
   return {
     id: "handoff-1",
+    representativeId: "representative-1",
+    contactId: "contact-1",
+    audienceIdentityId: "audience-1",
+    conversationId: "conversation-1",
+    handoffEntitlementGrantId: null,
+    entitlementReservationState: null,
     summary: "Needs owner follow-up.",
     recommendedPriority: 80,
     recommendedOwnerAction: "Reply to the lead.",

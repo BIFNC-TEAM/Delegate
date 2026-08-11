@@ -8,6 +8,8 @@ import {
   PayoutDestinationStatus,
   PayoutSubjectType,
   RepresentativeClaimStatus,
+  RechargeRefundProviderStatus,
+  RechargeRefundReversalStatus,
   WalletTransactionEventType,
   WalletTransactionStatus,
   WithdrawRequestStatus,
@@ -212,6 +214,98 @@ describe("agent wallet withdrawals", () => {
       withdrawableCents: 500,
       frozenCents: 0,
     });
+  });
+
+  it("excludes tip earnings whose forced refund needs reconciliation", async () => {
+    const client = new FakeWithdrawalClient({
+      refundBlockedTipEarningIds: ["earning_1"],
+    });
+
+    await expect(createDefaultRequest(client)).rejects.toThrow(
+      "Tip earnings under refund reconciliation cannot be withdrawn.",
+    );
+    expect(client.withdrawRequests).toHaveLength(0);
+    expect(client.creatorEarnings[0]).toMatchObject({
+      withdrawableCents: 500,
+      frozenCents: 0,
+    });
+    expect(client.tipContributionQueries[0]).toMatchObject({
+      where: {
+        rechargeOrder: {
+          refunds: {
+            some: {
+              OR: expect.arrayContaining([
+                {
+                  providerStatus: {
+                    in: [
+                      RechargeRefundProviderStatus.PROCESSING,
+                      RechargeRefundProviderStatus.ABNORMAL,
+                    ],
+                  },
+                },
+                {
+                  providerStatus: RechargeRefundProviderStatus.SUCCEEDED,
+                  reversalStatus: {
+                    not: RechargeRefundReversalStatus.APPLIED,
+                  },
+                },
+              ]),
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("blocks approval and payout when an allocated tip is later refunded", async () => {
+    const approvalClient = new FakeWithdrawalClient();
+    const pending = await createDefaultRequest(approvalClient);
+    approvalClient.refundBlockedTipEarningIds.add("earning_1");
+    await expect(
+      approveWithdrawRequest(
+        {
+          ownerId: "owner_1",
+          withdrawRequestId: pending.id,
+          idempotencyKey: "blocked_tip_approve",
+        },
+        approvalClient,
+      ),
+    ).rejects.toThrow(
+      "Tip earnings under refund reconciliation cannot be approved or paid.",
+    );
+    expect(approvalClient.withdrawRequests[0]?.status).toBe(
+      WithdrawRequestStatus.PENDING_REVIEW,
+    );
+
+    const payoutClient = new FakeWithdrawalClient();
+    const payoutPending = await createDefaultRequest(payoutClient);
+    await approveWithdrawRequest(
+      {
+        ownerId: "owner_1",
+        withdrawRequestId: payoutPending.id,
+        idempotencyKey: "tip_approve_before_refund",
+      },
+      payoutClient,
+    );
+    payoutClient.refundBlockedTipEarningIds.add("earning_1");
+    await expect(
+      markWithdrawRequestPaid(
+        {
+          ownerId: "owner_1",
+          withdrawRequestId: payoutPending.id,
+          provider: PaymentProvider.WECHAT_PAY,
+          providerPayoutId: "tip_payout_must_not_send",
+          idempotencyKey: "blocked_tip_mark_paid",
+        },
+        payoutClient,
+      ),
+    ).rejects.toThrow(
+      "Tip earnings under refund reconciliation cannot be approved or paid.",
+    );
+    expect(payoutClient.withdrawRequests[0]?.status).toBe(
+      WithdrawRequestStatus.APPROVED,
+    );
+    expect(payoutClient.withdrawalAllocations[0]?.paidAt).toBeNull();
   });
 
   it("blocks withdrawal progression and cancellation but permits exact replay", async () => {
@@ -889,6 +983,8 @@ class FakeWithdrawalClient {
   failNextLedgerCreate = false;
   reconciliationStatus: WorkspaceWalletReconciliationStatus = "healthy";
   reconciliationChecks: WorkspaceWalletFundsWriteScope[] = [];
+  refundBlockedTipEarningIds: Set<string>;
+  tipContributionQueries: any[] = [];
 
   constructor(
     options: {
@@ -898,8 +994,12 @@ class FakeWithdrawalClient {
       withdrawableAmounts?: number[];
       reconciliationStatus?: WorkspaceWalletReconciliationStatus;
       hasVerifiedPayoutDestination?: boolean;
+      refundBlockedTipEarningIds?: string[];
     } = {},
   ) {
+    this.refundBlockedTipEarningIds = new Set(
+      options.refundBlockedTipEarningIds ?? [],
+    );
     this.reconciliationStatus = options.reconciliationStatus ?? "healthy";
     this.owners = [
       {
@@ -994,6 +1094,15 @@ class FakeWithdrawalClient {
           if (earning.currency !== args.where.currency) {
             return false;
           }
+          if (args.where.id?.notIn?.includes(earning.id)) {
+            return false;
+          }
+          if (
+            args.where.id?.in
+            && !args.where.id.in.includes(earning.id)
+          ) {
+            return false;
+          }
           return earning.withdrawableCents > args.where.withdrawableCents.gt;
         })
         .sort(
@@ -1018,6 +1127,18 @@ class FakeWithdrawalClient {
         earning.status = args.data.status;
       }
       return earning;
+    },
+  };
+
+  tipContribution = {
+    findMany: async (args: any) => {
+      this.tipContributionQueries.push(args);
+      const requestedIds = args.where.creatorEarningId?.in as
+        | string[]
+        | undefined;
+      return [...this.refundBlockedTipEarningIds]
+        .filter((id) => !requestedIds || requestedIds.includes(id))
+        .map((creatorEarningId) => ({ creatorEarningId }));
     },
   };
 

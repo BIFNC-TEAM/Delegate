@@ -411,7 +411,7 @@ function localizeReadiness(value: string, locale: Locale) {
 
 function localizeReadinessDetail(id: string, fallback: string, complete: boolean, locale: Locale) {
   if (locale === "en") return fallback;
-  const labels: Record<string, string> = { identity: "名称、角色说明与表达语气已配置。", knowledge: "至少包含一份已审核知识或知识包。", handoff: "人工介入路径和提示已经明确。", pricing: "免费、通行、深度帮助与赞助价格已配置。", skills: complete ? "已启用技能通过当前治理检查。" : "存在尚未满足治理或连接要求的技能绑定。", channel: "至少启用了一个公开或已连接渠道。" };
+  const labels: Record<string, string> = { identity: "名称、角色说明与表达语气已配置。", knowledge: "至少包含一份已审核知识或知识包。", handoff: "人工介入路径和提示已经明确。", skills: complete ? "已启用技能通过当前治理检查。" : "存在尚未满足治理或连接要求的技能绑定。", channel: "至少启用了一个公开或已连接渠道。" };
   return labels[id] || fallback;
 }
 

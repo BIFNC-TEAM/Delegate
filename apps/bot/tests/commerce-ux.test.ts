@@ -6,32 +6,12 @@ import {
   buildRepresentativeWebRechargeUrl,
   buildTelegramBotCommands,
   buildWebRechargeMessage,
-  formatTelegramPlans,
   resolveTelegramInlineKeyboardUrl,
 } from "../src/commerce-ux";
 
-const plans = [
-  {
-    tier: "free" as const,
-    name: "Free",
-    stars: 0,
-    summary: "Basic help.",
-    includedReplies: 4,
-    includesPriorityHandoff: false,
-  },
-  {
-    tier: "pass" as const,
-    name: "Pass",
-    stars: 180,
-    summary: "Continue the conversation.",
-    includedReplies: 12,
-    includesPriorityHandoff: false,
-  },
-];
-
 describe("Telegram commerce UX", () => {
   it("keeps a Web buy command while Telegram Stars purchases are unavailable", () => {
-    const commands = buildTelegramBotCommands(false);
+    const commands = buildTelegramBotCommands();
 
     expect(commands.map((command) => command.command)).toContain("buy");
     expect(commands.map((command) => command.command)).toContain("plans");
@@ -48,24 +28,13 @@ describe("Telegram commerce UX", () => {
     );
     expect(commands.find((command) => command.command === "buy")).toEqual({
       command: "buy",
-      description: "Continue Pass / Deep Help / Sponsor on Web",
-    });
-  });
-
-  it("keeps the buy command only for a gate-approved Stars environment", () => {
-    expect(
-      buildTelegramBotCommands(true).find(
-        (command) => command.command === "buy",
-      ),
-    ).toEqual({
-      command: "buy",
-      description: "Buy Pass / Deep Help / Sponsor in Telegram Stars",
+      description: "Open the current service catalog on Web",
     });
   });
 
   it("describes worker-owned compute as a Web continuation", () => {
     expect(
-      buildTelegramBotCommands(false, false).find(
+      buildTelegramBotCommands(false).find(
         (command) => command.command === "compute",
       ),
     ).toEqual({
@@ -161,15 +130,6 @@ describe("Telegram commerce UX", () => {
     }
   });
 
-  it("removes Stars pricing from plan copy when the release gate is closed", () => {
-    const webFirstCopy = formatTelegramPlans(plans, false);
-    const starsCopy = formatTelegramPlans(plans, true);
-
-    expect(webFirstCopy).not.toContain("Stars");
-    expect(webFirstCopy).toContain("Pass");
-    expect(starsCopy).toContain("180 Stars");
-  });
-
   it("gives typed /buy traffic an explicit Web continuation entry", () => {
     const message = buildWebRechargeMessage({
       representativeName: "Lin Representative",
@@ -187,7 +147,7 @@ describe("Telegram commerce UX", () => {
     expect(message).not.toContain("Stars");
   });
 
-  it("wires command registration and all generated buy buttons through the gate", () => {
+  it("routes every generated purchase entry to the Web catalog", () => {
     const source = readFileSync(
       new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
@@ -199,36 +159,21 @@ describe("Telegram commerce UX", () => {
       source.indexOf("function buildPlansKeyboard"),
       source.indexOf("function buildPlanKeyboardForConversation"),
     );
-    expect(plansKeyboard.indexOf("telegramStarsPurchasesEnabled")).toBeGreaterThan(
-      -1,
-    );
-    expect(plansKeyboard.indexOf("telegramStarsPurchasesEnabled")).toBeLessThan(
-      plansKeyboard.indexOf('.text("Buy Pass"'),
-    );
     expect(plansKeyboard).toContain("buildWebRechargeKeyboard(");
+    expect(plansKeyboard).not.toContain('text("Buy Pass"');
 
     const conversationKeyboard = source.slice(
       source.indexOf("function buildPlanKeyboardForConversation"),
       source.indexOf("function buildPlanReplyOptions"),
     );
-    expect(
-      conversationKeyboard.indexOf("!telegramStarsPurchasesEnabled"),
-    ).toBeGreaterThan(-1);
-    expect(
-      conversationKeyboard.indexOf("!telegramStarsPurchasesEnabled"),
-    ).toBeLessThan(conversationKeyboard.indexOf("`buy:${plan.suggestedPlan}`"));
     expect(conversationKeyboard).toContain("buildWebRechargeKeyboard(");
+    expect(conversationKeyboard).not.toContain("buy:${plan.suggestedPlan}");
 
     const computeKeyboard = source.slice(
       source.indexOf("function buildComputeReplyOptions"),
       source.indexOf("function formatComputeReply"),
     );
-    expect(
-      computeKeyboard.indexOf("!telegramStarsPurchasesEnabled"),
-    ).toBeGreaterThan(-1);
-    expect(
-      computeKeyboard.indexOf("!telegramStarsPurchasesEnabled"),
-    ).toBeLessThan(computeKeyboard.indexOf('"buy:deep_help"'));
     expect(computeKeyboard).toContain('.url(');
+    expect(computeKeyboard).not.toContain('"buy:deep_help"');
   });
 });

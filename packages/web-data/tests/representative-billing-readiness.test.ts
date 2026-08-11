@@ -13,7 +13,6 @@ const baseReadinessInput = {
   handoffPrompt: "Ask the owner to review.",
   knowledgeCount: 1,
   knowledgePackItemCount: 0,
-  pricingCount: 4,
   channelCount: 1,
   enabledSkillCount: 0,
   skillIssueCount: 0,
@@ -37,26 +36,36 @@ describe("representative billing readiness", () => {
     );
   });
 
-  it("keeps Telegram Stars pricing independent from CNY service packages", () => {
+  it("removes the retired four-tier catalog from publish readiness", () => {
     const readiness = buildRepresentativeReadiness({
       ...baseReadinessInput,
     });
 
-    expect(readiness.find((item) => item.id === "pricing")).toMatchObject({
-      complete: true,
-      detail:
-        "Free, pass, deep help, and sponsor tiers are configured independently from CNY service packages.",
-    });
+    expect(readiness.find((item) => item.id === "pricing")).toBeUndefined();
   });
 
-  it("still requires all four representative pricing tiers", () => {
-    const readiness = buildRepresentativeReadiness({
-      ...baseReadinessInput,
-      pricingCount: 3,
-    });
+  it("keeps live commerce access fields out of legacy setup writes", () => {
+    const source = readFileSync(
+      new URL("../src/representative-setup.ts", import.meta.url),
+      "utf8",
+    );
 
-    expect(readiness.find((item) => item.id === "pricing")).toMatchObject({
-      complete: false,
-    });
+    expect(source).toContain(
+      "humanInLoop and freeReplyLimit are live commerce settings",
+    );
+    expect(source).not.toContain("humanInLoop: input.humanInLoop");
+    expect(source).not.toContain(
+      "freeReplyLimit: input.contract.freeReplyLimit",
+    );
+    expect(source).toContain("!liveRepresentative.humanInLoop");
+    expect(source).not.toContain("pricingPlans");
+    expect(source).not.toContain("tx.pricingPlan");
+    expect(source).not.toContain("snapshot.pricing");
+  });
+
+  it("does not gate publication on the retired four-tier catalog", () => {
+    const readiness = buildRepresentativeReadiness(baseReadinessInput);
+
+    expect(readiness.find((item) => item.id === "pricing")).toBeUndefined();
   });
 });

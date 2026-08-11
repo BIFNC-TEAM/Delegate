@@ -1,6 +1,7 @@
 import {
   createAndPublishOwnerBillingProduct,
   getOwnerRepresentativeBillingCatalog,
+  updateOwnerRepresentativeCommerceSettings,
 } from "@delegate/web-data";
 
 import {
@@ -49,6 +50,31 @@ export async function POST(
       { product, requestId: requestMetadata.requestId },
       201,
     );
+  } catch (error) {
+    return dashboardBillingProductErrorResponse(error);
+  }
+}
+
+export async function PATCH(
+  request: Request,
+  { params }: { params: Promise<{ slug: string }> },
+) {
+  const { slug } = await params;
+  try {
+    const session =
+      await requireDashboardRepresentativeBillingAccess(slug);
+    const requestMetadata = resolveDashboardRequestMetadata(request);
+    const representative =
+      await updateOwnerRepresentativeCommerceSettings({
+        ownerId: session.ownerId,
+        representativeSlug: slug,
+        ...requestMetadata,
+        settings: await request.json().catch(() => null),
+      });
+    return privateBillingProductJson({
+      representative,
+      requestId: requestMetadata.requestId,
+    });
   } catch (error) {
     return dashboardBillingProductErrorResponse(error);
   }

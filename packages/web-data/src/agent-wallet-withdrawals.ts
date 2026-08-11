@@ -7,7 +7,10 @@ import {
   PaymentProvider,
   PayoutDestinationStatus,
   PayoutSubjectType,
+  Prisma,
   RepresentativeClaimStatus,
+  RechargeRefundProviderStatus,
+  RechargeRefundReversalStatus,
   WalletTransactionEventType,
   WalletTransactionStatus,
   WithdrawRequestStatus,
@@ -139,6 +142,9 @@ type WithdrawalClient = Omit<WalletLedgerClient, "$transaction"> & {
     findMany(args: unknown): Promise<CreatorEarningRecord[]>;
     findUnique?(args: unknown): Promise<CreatorEarningRecord | null>;
     update(args: unknown): Promise<CreatorEarningRecord>;
+  };
+  tipContribution: {
+    findMany(args: unknown): Promise<Array<{ creatorEarningId: string }>>;
   };
   withdrawRequest: {
     findUnique(args: unknown): Promise<WithdrawRequestRecord | null>;
@@ -347,7 +353,7 @@ export async function createWithdrawRequest(
       );
     }
 
-    const withdrawableEarnings = await tx.creatorEarning.findMany({
+    const candidateEarnings = await tx.creatorEarning.findMany({
       where: {
         ownerId: owner.id,
         representativeId: normalized.representativeId,
@@ -357,11 +363,39 @@ export async function createWithdrawRequest(
       },
       orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     });
+    await lockCreatorEarningRowsForWithdrawal(
+      tx,
+      candidateEarnings.map((earning) => earning.id),
+    );
+    const refundBlockedTipEarningIds =
+      await findRefundReconciliationTipEarningIds(
+        tx,
+        normalized.representativeId,
+      );
+    const withdrawableEarnings = await tx.creatorEarning.findMany({
+      where: {
+        ownerId: owner.id,
+        representativeId: normalized.representativeId,
+        status: CreatorEarningStatus.WITHDRAWABLE,
+        currency: normalized.currency,
+        withdrawableCents: { gt: 0 },
+        id: {
+          in: candidateEarnings.map((earning) => earning.id),
+          notIn: refundBlockedTipEarningIds,
+        },
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    });
     const availableCents = withdrawableEarnings.reduce(
       (sum, earning) => sum + earning.withdrawableCents,
       0,
     );
     if (availableCents < normalized.amountCents) {
+      if (refundBlockedTipEarningIds.length > 0) {
+        throw new Error(
+          "Tip earnings under refund reconciliation cannot be withdrawn.",
+        );
+      }
       throw new Error("Insufficient withdrawable creator balance.");
     }
 
@@ -542,6 +576,25 @@ export async function cancelWithdrawRequest(
   );
 }
 
+/**
+ * Internal risk-reducing transition used after a provider has already forced a
+ * refund. It may run while wallet reconciliation is open, but it can only
+ * cancel (never approve/pay) and therefore only releases frozen proceeds back
+ * to the earning that the refund path already holds FOR UPDATE.
+ */
+export async function cancelWithdrawRequestForForcedRefund(
+  input: CancelWithdrawRequestInput,
+  client: WithdrawalClient = prisma,
+): Promise<WithdrawRequestSnapshot> {
+  return transitionWithdrawRequest(
+    normalizeTransitionInput("cancel", input, {
+      reason: normalizeOptionalText(input.reason),
+    }),
+    client,
+    { allowDuringRefundReconciliation: true },
+  );
+}
+
 export async function markWithdrawRequestPaid(
   input: MarkWithdrawRequestPaidInput,
   client: WithdrawalClient = prisma,
@@ -647,6 +700,7 @@ function normalizeTransitionInput(
 async function transitionWithdrawRequest(
   input: NormalizedWithdrawalTransition,
   client: WithdrawalClient,
+  options: { allowDuringRefundReconciliation?: boolean } = {},
 ): Promise<WithdrawRequestSnapshot> {
   const run = async (tx: WithdrawalClient) => {
     const transactionClient = requireWalletTransactionClient(tx);
@@ -672,13 +726,39 @@ async function transitionWithdrawRequest(
     if (!request.representativeId) {
       throw new Error("Withdrawal request is missing a representative.");
     }
-    await assertWithdrawalFundsWriteAllowed(tx, {
-      ownerId: request.ownerId,
-      representativeId: request.representativeId,
-      currency: request.currency,
-    });
+    if (!options.allowDuringRefundReconciliation) {
+      await assertWithdrawalFundsWriteAllowed(tx, {
+        ownerId: request.ownerId,
+        representativeId: request.representativeId,
+        currency: request.currency,
+      });
+    } else if (input.operation !== "cancel") {
+      throw new Error(
+        "Only withdrawal cancellation is allowed during refund reconciliation.",
+      );
+    }
 
-    const allocations = await getRequiredWithdrawalAllocations(tx, request);
+    let allocations = await getRequiredWithdrawalAllocations(tx, request);
+    if (
+      input.operation === "approve"
+      || input.operation === "mark_paid"
+      || input.operation === "reject"
+      || input.operation === "cancel"
+      || (input.operation === "mark_failed" && input.permanent)
+    ) {
+      await lockCreatorEarningRowsForWithdrawal(
+        tx,
+        allocations.map((allocation) => allocation.creatorEarningId),
+      );
+      if (!options.allowDuringRefundReconciliation) {
+        await assertNoRefundReconciliationTipAllocations(
+          tx,
+          request,
+          allocations,
+        );
+      }
+      allocations = await getRequiredWithdrawalAllocations(tx, request);
+    }
     validateWithdrawalTransition(request, allocations, input);
     const now = new Date();
     const releasesFrozenFunds =
@@ -733,6 +813,90 @@ async function transitionWithdrawRequest(
   };
 
   return runWalletWriteTransaction(client, run);
+}
+
+async function lockCreatorEarningRowsForWithdrawal(
+  client: WithdrawalClient,
+  creatorEarningIds: string[],
+): Promise<void> {
+  const ids = Array.from(new Set(creatorEarningIds)).sort();
+  if (ids.length === 0) return;
+  const queryClient = client as WithdrawalClient & {
+    $queryRaw?: <T>(query: Prisma.Sql) => Promise<T>;
+  };
+  if (!queryClient.$queryRaw) return;
+  await queryClient.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT "id"
+    FROM "CreatorEarning"
+    WHERE "id" IN (${Prisma.join(ids)})
+    ORDER BY "id"
+    FOR UPDATE
+  `);
+}
+
+async function findRefundReconciliationTipEarningIds(
+  client: WithdrawalClient,
+  representativeId: string,
+  creatorEarningIds?: string[],
+): Promise<string[]> {
+  const contributions = await client.tipContribution.findMany({
+    where: {
+      representativeId,
+      ...(creatorEarningIds
+        ? { creatorEarningId: { in: creatorEarningIds } }
+        : {}),
+      rechargeOrder: {
+        refunds: {
+          some: {
+            OR: [
+              {
+                reversalStatus:
+                  RechargeRefundReversalStatus.RECONCILIATION_REQUIRED,
+              },
+              {
+                providerStatus: {
+                  in: [
+                    RechargeRefundProviderStatus.PROCESSING,
+                    RechargeRefundProviderStatus.ABNORMAL,
+                  ],
+                },
+              },
+              {
+                providerStatus: RechargeRefundProviderStatus.SUCCEEDED,
+                reversalStatus: {
+                  not: RechargeRefundReversalStatus.APPLIED,
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+    select: { creatorEarningId: true },
+  });
+  return Array.from(
+    new Set(contributions.map((row) => row.creatorEarningId)),
+  );
+}
+
+async function assertNoRefundReconciliationTipAllocations(
+  client: WithdrawalClient,
+  request: WithdrawRequestRecord,
+  allocations: WithdrawalAllocationRecord[],
+): Promise<void> {
+  if (!request.representativeId) {
+    throw new Error("Withdrawal request is missing a representative.");
+  }
+  const blocked = await findRefundReconciliationTipEarningIds(
+    client,
+    request.representativeId,
+    allocations.map((allocation) => allocation.creatorEarningId),
+  );
+  if (blocked.length > 0) {
+    throw new Error(
+      "Tip earnings under refund reconciliation cannot be approved or paid.",
+    );
+  }
 }
 
 async function assertWithdrawalFundsWriteAllowed(

@@ -306,14 +306,6 @@ async function createFixture() {
           policies: [],
         },
       },
-      pricingPlans: {
-        create: [
-          pricingPlan("FREE", "Free", 0),
-          pricingPlan("PASS", "Pass", 10),
-          pricingPlan("DEEP_HELP", "Deep help", 20),
-          pricingPlan("SPONSOR", "Sponsor", 30),
-        ],
-      },
     },
     select: { id: true, slug: true },
   });
@@ -351,21 +343,6 @@ async function createFixture() {
   };
 }
 
-function pricingPlan(
-  type: "FREE" | "PASS" | "DEEP_HELP" | "SPONSOR",
-  name: string,
-  starsAmount: number,
-) {
-  return {
-    type,
-    name,
-    starsAmount,
-    summary: `${name} plan`,
-    includedReplies: type === "FREE" ? 3 : 10,
-    includesPriorityHandoff: type !== "FREE",
-  };
-}
-
 async function deleteFixture(
   fixture: Awaited<ReturnType<typeof createFixture>>,
 ) {
@@ -398,9 +375,6 @@ async function deleteFixture(
     return;
   }
   await prisma.representativeChannelBinding.deleteMany({
-    where: { representativeId: fixture.representativeId },
-  });
-  await prisma.pricingPlan.deleteMany({
     where: { representativeId: fixture.representativeId },
   });
   await prisma.knowledgePack.deleteMany({

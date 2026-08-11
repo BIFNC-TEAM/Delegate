@@ -69,7 +69,6 @@ import {
   GenerationWorkLeaseLostError,
   markGenerationDeliveryComplete,
   renewGenerationWorkItemLease,
-  reserveGenerationConversationEntitlement,
 } from "../src/conversation-platform";
 
 const currentTime = new Date("2026-07-24T08:00:00.000Z");
@@ -286,22 +285,6 @@ describe("conversation generation work leases", () => {
         ),
       },
     });
-  });
-
-  it("rejects a stale lease before reserving a conversation entitlement", async () => {
-    mocks.tx.outboxEvent.updateMany.mockResolvedValueOnce({ count: 0 });
-
-    await expect(reserveGenerationConversationEntitlement({
-      runId: "run-stale",
-      outboxId: "outbox-stale",
-      leaseAttempt: 2,
-      audienceIdentityId: "audience-1",
-      representativeId: "representative-1",
-    })).rejects.toBeInstanceOf(GenerationWorkLeaseLostError);
-
-    expect(mocks.tx.serviceEntitlementLedgerEntry.findMany).not.toHaveBeenCalled();
-    expect(mocks.tx.serviceEntitlementLedgerEntry.create).not.toHaveBeenCalled();
-    expect(mocks.tx.serviceEntitlementAccount.updateMany).not.toHaveBeenCalled();
   });
 
   it("rejects stale attempt A's commit after B reclaims and accepts B", async () => {

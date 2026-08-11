@@ -40,20 +40,20 @@ describe("deriveConversationComputeEntitlements", () => {
     expect(result.activePlanTier).toBeUndefined();
   });
 
-  it("derives the policy tier only from a verified run authorization", async () => {
+  it("derives the policy tier only from a verified wallet authorization", async () => {
     const { deriveConversationComputeEntitlements } = await import("../src/entitlements");
     const result = deriveConversationComputeEntitlements({
-      kind: "plan",
+      kind: "wallet",
       audienceIdentityId: "audience-1",
       generationRunId: "run-1",
       representativeId: "rep-1",
-      productCode: "plan:deep_help",
-      activePlanTier: "deep_help",
+      productCode: "agent-wallet:service-credit:v1",
+      activePlanTier: "pass",
       hasPaidEntitlement: true,
     });
 
     expect(result.hasPaidEntitlement).toBe(true);
-    expect(result.activePlanTier).toBe("deep_help");
+    expect(result.activePlanTier).toBe("pass");
   });
 
   it("does not derive a run-scoped pass from an incomplete wallet snapshot", async () => {

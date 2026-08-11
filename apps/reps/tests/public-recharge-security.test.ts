@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   createMockRechargeOrder: vi.fn(),
   createWeChatPayApiV3PaymentProviderAdapter: vi.fn(),
   getPublicAgentWalletState: vi.fn(),
+  getPurchasedHandoffEntitlementSummary: vi.fn(),
   getPublicRepresentativeRuntime: vi.fn(),
   getUserAgentWalletBalance: vi.fn(),
   loadWeChatPayProcessingConfigFromEnv: vi.fn(),
@@ -34,7 +35,9 @@ const mocks = vi.hoisted(() => ({
   resolveRepresentativeTelegramBotConnectionId: vi.fn(),
   agentTokenPurchaseFindFirst: vi.fn(),
   rechargeOrderFindFirst: vi.fn(),
+  rechargeOrderFindMany: vi.fn(),
   rechargeOrderFindUnique: vi.fn(),
+  representativeFindUnique: vi.fn(),
   readWeChatPayCheckoutExpiresAt: vi.fn(),
   releasePaymentProviderOperation: vi.fn(),
   renewPaymentProviderOperationLease: vi.fn(),
@@ -50,6 +53,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@delegate/web-data", () => ({
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE:
     "agent-wallet:service-credit:v1",
+  AGENT_WALLET_TIP_PRODUCT_CODE: "agent-wallet:tip:v1",
   AgentWalletReconciliationError: class AgentWalletReconciliationError
     extends Error {},
   PaymentProviderOperationLeaseLostError:
@@ -72,11 +76,15 @@ vi.mock("@delegate/web-data", () => ({
   createWeChatPayApiV3PaymentProviderAdapter:
     mocks.createWeChatPayApiV3PaymentProviderAdapter,
   getPublicAgentWalletState: mocks.getPublicAgentWalletState,
+  getPurchasedHandoffEntitlementSummary:
+    mocks.getPurchasedHandoffEntitlementSummary,
   getPublicRepresentativeRuntime: mocks.getPublicRepresentativeRuntime,
   getUserAgentWalletBalance: mocks.getUserAgentWalletBalance,
   loadWeChatPayProcessingConfigFromEnv:
     mocks.loadWeChatPayProcessingConfigFromEnv,
   listPublicServicePackages: mocks.listPublicServicePackages,
+  listPublicCommerceProducts: (...args: unknown[]) =>
+    mocks.listPublicServicePackages(...args),
   lockPaymentProviderOperationLease:
     mocks.lockPaymentProviderOperationLease,
   isVerifiedPrivateChannelIdentityBinding:
@@ -90,6 +98,8 @@ vi.mock("@delegate/web-data", () => ({
   resolvePublicAudienceWalletExternalUserId:
     mocks.resolvePublicAudienceWalletExternalUserId,
   resolvePublicServicePackage: mocks.resolvePublicServicePackage,
+  resolvePublicCommerceProduct: (...args: unknown[]) =>
+    mocks.resolvePublicServicePackage(...args),
   resolveRepresentativeTelegramBotConnectionId:
     mocks.resolveRepresentativeTelegramBotConnectionId,
   resolveWeChatPayReleaseFlags:
@@ -100,7 +110,11 @@ vi.mock("@delegate/web-data", () => ({
     },
     rechargeOrder: {
       findFirst: mocks.rechargeOrderFindFirst,
+      findMany: mocks.rechargeOrderFindMany,
       findUnique: mocks.rechargeOrderFindUnique,
+    },
+    representative: {
+      findUnique: mocks.representativeFindUnique,
     },
   },
   readWeChatPayCheckoutExpiresAt:
@@ -164,7 +178,12 @@ describe("public mock recharge security", () => {
     );
     mocks.getPublicRepresentativeRuntime.mockResolvedValue({
       status: "available",
-      setup: { id: "rep-1", slug: "delegate" },
+      accessMode: "TRIAL_THEN_CREDITS",
+      setup: {
+        id: "rep-1",
+        slug: "delegate",
+        humanInLoop: true,
+      },
     });
     mocks.resolvePublicAudienceRequestPrincipal.mockResolvedValue({
       principal: {
@@ -196,12 +215,19 @@ describe("public mock recharge security", () => {
       {
         productId: "product-1",
         priceVersionId: "price-1",
+        kind: "SERVICE_PACKAGE",
+        sortOrder: 0,
+        isRecommended: false,
         name: "20 次服务包",
         description: null,
         amountCents: 2000,
         currency: "CNY",
         entitlementUnits: 2000,
         unitName: "credit",
+        handoffAllowance: "NONE",
+        handoffUnits: null,
+        handoffServiceLevel: null,
+        handoffValidityDays: null,
         refundPolicy: "FULL_WHEN_UNUSED",
         expiryPolicy: "NEVER_EXPIRES",
       },
@@ -209,12 +235,19 @@ describe("public mock recharge security", () => {
     mocks.resolvePublicServicePackage.mockResolvedValue({
       productId: "product-1",
       priceVersionId: "price-1",
+      kind: "SERVICE_PACKAGE",
+      sortOrder: 0,
+      isRecommended: false,
       name: "20 次服务包",
       description: null,
       amountCents: 2000,
       currency: "CNY",
       entitlementUnits: 2000,
       unitName: "credit",
+      handoffAllowance: "NONE",
+      handoffUnits: null,
+      handoffServiceLevel: null,
+      handoffValidityDays: null,
       creatorRevenueShareBps: 2000,
       platformRevenueShareBps: 8000,
       refundPolicy: "FULL_WHEN_UNUSED",
@@ -245,6 +278,34 @@ describe("public mock recharge security", () => {
     });
     mocks.rechargeOrderFindUnique.mockResolvedValue(null);
     mocks.rechargeOrderFindFirst.mockResolvedValue(null);
+    mocks.rechargeOrderFindMany.mockResolvedValue([]);
+    mocks.representativeFindUnique.mockResolvedValue({
+      handoffAccessMode: "PACKAGE_REQUIRED",
+      tipsEnabled: true,
+    });
+    mocks.getPurchasedHandoffEntitlementSummary.mockResolvedValue({
+      audienceIdentityId: "identity-1",
+      representativeId: "rep-1",
+      hasUnlimited: false,
+      limitedRemainingUses: 2,
+      highestServiceLevel: "PRIORITY",
+      activeGrants: [{
+        id: "grant-secret",
+        rechargeOrderId: "order-secret",
+        audienceIdentityId: "identity-1",
+        representativeId: "rep-1",
+        billingPriceVersionId: "price-1",
+        allowance: "LIMITED",
+        serviceLevel: "PRIORITY",
+        grantedUses: 3,
+        remainingUses: 2,
+        reservedUses: 0,
+        consumedUses: 1,
+        status: "ACTIVE",
+        startsAt: "2026-07-27T00:00:00.000Z",
+        expiresAt: "2026-08-27T00:00:00.000Z",
+      }],
+    });
     mocks.readWeChatPayCheckoutExpiresAt.mockImplementation(
       (value: unknown) => {
         const rawPayload =
@@ -291,17 +352,52 @@ describe("public mock recharge security", () => {
       refunds: [],
     });
     mocks.completeMockRechargeAndPurchaseAgentTokens.mockResolvedValue({
+      productKind: "SERVICE_PACKAGE",
       rechargeOrder: {
         id: "order-1",
         status: "paid",
         amountCents: 2000,
         currency: "CNY",
+        provider: "mock",
+        checkoutUrl: null,
+        checkoutExpiresAt: null,
+        billingProductId: "product-1",
+        billingPriceVersionId: "price-1",
+        productNameSnapshot: "Starter",
+        productKindSnapshot: "SERVICE_PACKAGE",
+        entitlementUnitsSnapshot: 2_000,
+        unitNameSnapshot: "credit",
+        handoffAllowanceSnapshot: "LIMITED",
+        handoffUnitsSnapshot: 2,
+        handoffServiceLevelSnapshot: "PRIORITY",
+        handoffValidityDaysSnapshot: 30,
+        userWalletId: "wallet-internal-1",
+        externalUserId: "web:delegate:aud_current_visitor",
+        representativeId: "rep-1",
+        creatorRevenueShareBpsSnapshot: 8_000,
+        platformRevenueShareBpsSnapshot: 2_000,
         cashBalanceCents: 0,
       },
       tokenPurchase: {
         id: "purchase-1",
+        userWalletId: "wallet-internal-1",
+        userAgentWalletId: "user-agent-wallet-internal-1",
+        agentWalletId: "agent-wallet-internal-1",
+        audienceIdentityId: "identity-1",
+        representativeId: "rep-1",
+        entitlementAccountId: "entitlement-internal-1",
+        creatorEarningId: "earning-internal-1",
+        tokenAmount: 2_000,
+        remainingTokenAmount: 2_000,
+        reservedTokenAmount: 0,
+        currency: "CNY",
         cashBalanceCents: 0,
         availableTokenAmount: 2000,
+      },
+      fulfillment: {
+        kind: "SERVICE_PACKAGE",
+        tokenPurchase: { id: "purchase-1" },
+        handoffEntitlement: { id: "grant-internal-1" },
       },
     });
     mocks.agentTokenPurchaseFindFirst.mockResolvedValue({
@@ -348,6 +444,28 @@ describe("public mock recharge security", () => {
 
   it("restores only the active principal's representative and currency state", async () => {
     restoreEnv("NODE_ENV", "production");
+    mocks.rechargeOrderFindMany.mockResolvedValue([{
+      id: "tip-order-public",
+      billingProductId: "tip-product-1",
+      billingPriceVersionId: "tip-price-1",
+      productNameSnapshot: "谢谢支持",
+      productKindSnapshot: "TIP",
+      entitlementUnitsSnapshot: 0,
+      unitNameSnapshot: "tip",
+      handoffAllowanceSnapshot: "NONE",
+      handoffUnitsSnapshot: null,
+      handoffServiceLevelSnapshot: null,
+      handoffValidityDaysSnapshot: null,
+      amountCents: 100,
+      currency: "CNY",
+      provider: "WECHAT_PAY",
+      status: "PAID",
+      checkoutUrl: null,
+      providerPayload: null,
+      paidAt: new Date("2026-07-27T02:00:00.000Z"),
+      refundedAt: null,
+      createdAt: new Date("2026-07-27T01:00:00.000Z"),
+    }]);
 
     const request = new Request(
       "http://localhost/reps/delegate/recharge?currency=cny",
@@ -379,12 +497,31 @@ describe("public mock recharge security", () => {
           currency: "CNY",
           serviceCreditsAvailable: 8,
         }),
-        servicePackages: [
+        commerceProducts: [
           expect.objectContaining({
+            kind: "SERVICE_PACKAGE",
             priceVersionId: "price-1",
             amountCents: 2000,
           }),
         ],
+        commerceSettings: {
+          accessMode: "TRIAL_THEN_CREDITS",
+          humanInLoop: true,
+          handoffAccessMode: "PACKAGE_REQUIRED",
+          tipsEnabled: true,
+        },
+        handoffEntitlement: {
+          hasUnlimited: false,
+          limitedRemainingUses: 2,
+          highestServiceLevel: "PRIORITY",
+          nextExpiryAt: "2026-08-27T00:00:00.000Z",
+        },
+        orders: [expect.objectContaining({
+          id: "tip-order-public",
+          productKind: "TIP",
+          handoffAllowance: "NONE",
+          status: "paid",
+        })],
       }));
     expect(
       body.summary as Record<string, unknown>,
@@ -393,6 +530,9 @@ describe("public mock recharge security", () => {
       representativeId: "rep-1",
       currency: "CNY",
     });
+    expect(JSON.stringify(body.handoffEntitlement)).not.toMatch(
+      /grant-secret|order-secret|identity-1|rep-1/u,
+    );
   });
 
   it("rejects an unsupported wallet currency without resolving wallet data", async () => {
@@ -927,7 +1067,7 @@ describe("public mock recharge security", () => {
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(response.headers.get("vary")).toBe("Cookie");
     await expect(response.json()).resolves.toEqual({
-      error: "服务包下单请求过于频繁，请稍后使用同一操作重试。",
+      error: "下单请求过于频繁，请稍后使用同一操作重试。",
       code: "payment_rate_limited",
     });
     expect(
@@ -1343,6 +1483,7 @@ describe("public mock recharge security", () => {
     mocks.rechargeOrderFindUnique.mockResolvedValue({
       representativeId: "rep-1",
       productCode: "agent-wallet:service-credit:v1",
+      productKindSnapshot: null,
       userWallet: {
         audienceIdentityId: "identity-1",
         externalUserId: "web:delegate:aud_current_visitor",
@@ -1364,18 +1505,120 @@ describe("public mock recharge security", () => {
       rechargeOrderId: "order-1",
       externalUserId: "web:delegate:aud_current_visitor",
       representativeId: "rep-1",
-      purchaseIdempotencyKey: "public_token_purchase:order-1",
+      purchaseIdempotencyKey: "public_commerce_fulfillment:order-1",
     });
-    await expect(response.json()).resolves.toEqual(
+    const payload = await response.json();
+    expect(payload).toEqual(
       expect.objectContaining({
         rechargeOrder: expect.objectContaining({
-          cashBalanceCents: 0,
+          id: "order-1",
+          productKind: "SERVICE_PACKAGE",
+          handoffAllowance: "LIMITED",
+          handoffUnits: 2,
+          handoffServiceLevel: "PRIORITY",
         }),
-        tokenPurchase: expect.objectContaining({
-          id: "purchase-1",
-          availableTokenAmount: 2000,
-        }),
+        tokenPurchase: {
+          tokenAmount: 2_000,
+          remainingTokenAmount: 2_000,
+          availableTokenAmount: 2_000,
+          reservedTokenAmount: 0,
+          currency: "CNY",
+        },
       }),
+    );
+    expect(payload).not.toHaveProperty("fulfillment");
+    expect(payload.rechargeOrder).not.toHaveProperty("cashBalanceCents");
+    expect(payload.rechargeOrder).not.toHaveProperty("externalUserId");
+    expect(payload.rechargeOrder).not.toHaveProperty("userWalletId");
+    expect(payload.rechargeOrder).not.toHaveProperty("representativeId");
+    expect(payload.tokenPurchase).not.toHaveProperty("id");
+    expect(payload.tokenPurchase).not.toHaveProperty("agentWalletId");
+    expect(payload.tokenPurchase).not.toHaveProperty("audienceIdentityId");
+    expect(JSON.stringify(payload)).not.toMatch(
+      /wallet-internal|identity-1|rep-1|grant-internal|earning-internal/,
+    );
+  });
+
+  it("completes a tip without inventing a token purchase", async () => {
+    mocks.rechargeOrderFindUnique.mockResolvedValue({
+      representativeId: "rep-1",
+      productCode: "agent-wallet:tip:v1",
+      productKindSnapshot: "TIP",
+      userWallet: {
+        audienceIdentityId: "identity-1",
+        externalUserId: "web:delegate:aud_current_visitor",
+      },
+    });
+    mocks.completeMockRechargeAndPurchaseAgentTokens.mockResolvedValueOnce({
+      productKind: "TIP",
+      rechargeOrder: {
+        id: "tip-order-1",
+        status: "paid",
+        productKindSnapshot: "TIP",
+        amountCents: 100,
+        currency: "CNY",
+        provider: "mock",
+        checkoutUrl: null,
+        checkoutExpiresAt: null,
+        billingProductId: "tip-product-1",
+        billingPriceVersionId: "tip-price-1",
+        productNameSnapshot: "支持一下",
+        entitlementUnitsSnapshot: 0,
+        unitNameSnapshot: "tip",
+        handoffAllowanceSnapshot: "NONE",
+        handoffUnitsSnapshot: null,
+        handoffServiceLevelSnapshot: null,
+        handoffValidityDaysSnapshot: null,
+        externalUserId: "must-not-leak",
+        userWalletId: "wallet-must-not-leak",
+        cashBalanceCents: 100,
+      },
+      tokenPurchase: null,
+      fulfillment: {
+        kind: "TIP",
+        tipContribution: {
+          status: "completed",
+          ownerId: "owner-must-not-leak",
+          agentWalletId: "agent-wallet-must-not-leak",
+          audienceIdentityId: "audience-must-not-leak",
+          creatorRevenueShareBps: 8_000,
+          platformRevenueShareBps: 2_000,
+        },
+        creatorEarning: { id: "earning-must-not-leak" },
+        cashBalanceCents: 100,
+      },
+    });
+
+    const response = await completeRecharge(
+      new Request(
+        "http://localhost/reps/delegate/recharge/tip-order-1/mock-success",
+        { method: "POST" },
+      ),
+      {
+        params: Promise.resolve({
+          slug: "delegate",
+          id: "tip-order-1",
+        }),
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload).toEqual(
+      expect.objectContaining({
+        rechargeOrder: expect.objectContaining({
+          productKind: "TIP",
+          productName: "支持一下",
+          handoffAllowance: "NONE",
+        }),
+        tokenPurchase: null,
+      }),
+    );
+    expect(payload).not.toHaveProperty("fulfillment");
+    expect(payload).not.toHaveProperty("tipContribution");
+    expect(payload.rechargeOrder).not.toHaveProperty("cashBalanceCents");
+    expect(JSON.stringify(payload)).not.toMatch(
+      /must-not-leak|ownerId|agentWalletId|audienceIdentityId|RevenueShareBps/,
     );
   });
 
@@ -1384,6 +1627,7 @@ describe("public mock recharge security", () => {
     mocks.rechargeOrderFindUnique.mockResolvedValue({
       representativeId: "rep-1",
       productCode: "agent-wallet:service-credit:v1",
+      productKindSnapshot: null,
       userWallet: {
         audienceIdentityId: "identity-1",
         externalUserId: "web:delegate:aud_current_visitor",
@@ -1466,6 +1710,7 @@ describe("public mock recharge security", () => {
     mocks.rechargeOrderFindUnique.mockResolvedValue({
       representativeId: "rep-1",
       productCode: "agent-wallet:service-credit:v1",
+      productKindSnapshot: null,
       userWallet: {
         audienceIdentityId: "identity-1",
         externalUserId: "web:delegate:aud_first_browser",

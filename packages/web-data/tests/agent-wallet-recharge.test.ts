@@ -1,6 +1,7 @@
 import {
   AmnLedgerEntryKind,
   AmnWalletAccountType,
+  CreatorEarningStatus,
   PaymentProvider,
   PaymentProviderEventType,
   RechargeOrderStatus,
@@ -11,6 +12,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   assertMockRechargeMutationsEnabled,
+  AGENT_WALLET_TIP_PRODUCT_CODE,
+  completeMockRechargeAndPurchaseAgentTokens,
   completeRechargeFromProviderWebhook,
   completeMockRechargeOrder,
   createRechargeOrder,
@@ -197,8 +200,13 @@ describe("agent wallet mock recharge", () => {
       billingProductId: "product_1",
       billingPriceVersionId: "price_v1",
       productNameSnapshot: "标准服务包",
+      productKindSnapshot: "SERVICE_PACKAGE" as const,
       unitNameSnapshot: "credit" as const,
-      entitlementUnitsSnapshot: 600,
+      entitlementUnitsSnapshot: 333,
+      handoffAllowanceSnapshot: "LIMITED" as const,
+      handoffUnitsSnapshot: 2,
+      handoffServiceLevelSnapshot: "PRIORITY" as const,
+      handoffValidityDaysSnapshot: 30,
       creatorRevenueShareBpsSnapshot: 2500,
       platformRevenueShareBpsSnapshot: 7500,
       refundPolicySnapshot: "FULL_WHEN_UNUSED" as const,
@@ -216,8 +224,13 @@ describe("agent wallet mock recharge", () => {
       billingProductId: "product_1",
       billingPriceVersionId: "price_v1",
       productNameSnapshot: "标准服务包",
+      productKindSnapshot: "SERVICE_PACKAGE",
       unitNameSnapshot: "credit",
-      entitlementUnitsSnapshot: 600,
+      entitlementUnitsSnapshot: 333,
+      handoffAllowanceSnapshot: "LIMITED",
+      handoffUnitsSnapshot: 2,
+      handoffServiceLevelSnapshot: "PRIORITY",
+      handoffValidityDaysSnapshot: 30,
       creatorRevenueShareBpsSnapshot: 2500,
       platformRevenueShareBpsSnapshot: 7500,
       refundPolicySnapshot: "FULL_WHEN_UNUSED",
@@ -233,6 +246,140 @@ describe("agent wallet mock recharge", () => {
         client,
       ),
     ).rejects.toThrow("different billing price version");
+  });
+
+  it("fulfills a paid tip exactly once without issuing service credits", async () => {
+    const client = new FakeRechargeClient();
+    const recharge = await createMockRechargeOrder(
+      {
+        externalUserId: "tip_payer",
+        audienceIdentityId: "audience_tip_payer",
+        representativeId: "rep_1",
+        productCode: AGENT_WALLET_TIP_PRODUCT_CODE,
+        billingProductId: "tip_product_1",
+        billingPriceVersionId: "tip_price_1",
+        productNameSnapshot: "感谢支持",
+        productKindSnapshot: "TIP",
+        unitNameSnapshot: "tip",
+        entitlementUnitsSnapshot: 0,
+        handoffAllowanceSnapshot: "NONE",
+        handoffUnitsSnapshot: null,
+        handoffServiceLevelSnapshot: null,
+        handoffValidityDaysSnapshot: null,
+        creatorRevenueShareBpsSnapshot: 2500,
+        platformRevenueShareBpsSnapshot: 7500,
+        refundPolicySnapshot: "NON_REFUNDABLE",
+        expiryPolicySnapshot: "NEVER_EXPIRES",
+        entitlementValidityDaysSnapshot: null,
+        amountCents: 101,
+        idempotencyKey: "tip_recharge_1",
+      },
+      client,
+    );
+
+    const first = await completeMockRechargeAndPurchaseAgentTokens(
+      {
+        rechargeOrderId: recharge.id,
+        externalUserId: "tip_payer",
+        representativeId: "rep_1",
+      },
+      client as never,
+    );
+    const replay = await completeMockRechargeAndPurchaseAgentTokens(
+      {
+        rechargeOrderId: recharge.id,
+        externalUserId: "tip_payer",
+        representativeId: "rep_1",
+      },
+      client as never,
+    );
+
+    expect(first).toMatchObject({
+      productKind: "TIP",
+      tokenPurchase: null,
+      rechargeOrder: { status: "paid", cashBalanceCents: 0 },
+      fulfillment: {
+        kind: "TIP",
+        tipContribution: {
+          amountMinor: 101,
+          creatorAmountMinor: 25,
+          platformAmountMinor: 76,
+          status: "completed",
+        },
+        creatorEarning: {
+          status: "withdrawable",
+          withdrawableCents: 25,
+        },
+        cashBalanceCents: 0,
+      },
+    });
+    expect(replay.fulfillment).toEqual(first.fulfillment);
+
+    const earning = client.creatorEarnings[0]!;
+    earning.status = CreatorEarningStatus.FROZEN;
+    earning.withdrawableCents = 0;
+    earning.frozenCents = 25;
+    const replayAfterFreeze = await completeMockRechargeAndPurchaseAgentTokens(
+      {
+        rechargeOrderId: recharge.id,
+        externalUserId: "tip_payer",
+        representativeId: "rep_1",
+      },
+      client as never,
+    );
+    expect(replayAfterFreeze.fulfillment).toMatchObject({
+      kind: "TIP",
+      creatorEarning: {
+        status: "frozen",
+        withdrawableCents: 0,
+        frozenCents: 25,
+      },
+    });
+
+    earning.status = CreatorEarningStatus.WITHDRAWN;
+    earning.frozenCents = 0;
+    earning.withdrawnCents = 25;
+    const replayAfterWithdrawal =
+      await completeMockRechargeAndPurchaseAgentTokens(
+        {
+          rechargeOrderId: recharge.id,
+          externalUserId: "tip_payer",
+          representativeId: "rep_1",
+        },
+        client as never,
+      );
+    expect(replayAfterWithdrawal.fulfillment).toMatchObject({
+      kind: "TIP",
+      creatorEarning: {
+        status: "withdrawn",
+        withdrawnCents: 25,
+      },
+    });
+
+    expect(client.tipContributions).toHaveLength(1);
+    expect(client.creatorEarnings).toHaveLength(1);
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(0);
+    const tipEntries = client.ledgerEntries.filter(
+      (entry) => entry.eventGroupId === "tip:tip_contribution_1",
+    );
+    expect(tipEntries).toHaveLength(3);
+    expect(sumLedgerAmount(tipEntries)).toBe(0);
+    expect(tipEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          accountType: AmnWalletAccountType.USER_CASH,
+          amountCents: -101,
+        }),
+        expect.objectContaining({
+          accountType: AmnWalletAccountType.CREATOR_WITHDRAWABLE,
+          amountCents: 25,
+        }),
+        expect.objectContaining({
+          accountType: AmnWalletAccountType.PLATFORM_EARNED_REVENUE,
+          amountCents: 76,
+        }),
+      ]),
+    );
   });
 
   it("does not collapse separate keyless same-amount recharge operations", async () => {
@@ -1055,8 +1202,13 @@ type RechargeOrderRow = {
   billingProductId?: string | null;
   billingPriceVersionId?: string | null;
   productNameSnapshot?: string | null;
+  productKindSnapshot?: string | null;
   unitNameSnapshot?: string | null;
   entitlementUnitsSnapshot?: number | null;
+  handoffAllowanceSnapshot?: string | null;
+  handoffUnitsSnapshot?: number | null;
+  handoffServiceLevelSnapshot?: string | null;
+  handoffValidityDaysSnapshot?: number | null;
   creatorRevenueShareBpsSnapshot?: number | null;
   platformRevenueShareBpsSnapshot?: number | null;
   refundPolicySnapshot?: string | null;
@@ -1113,6 +1265,40 @@ type IdentityLinkRow = {
   providerSubject: string;
 };
 
+type TipCreatorEarningRow = {
+  id: string;
+  ownerId: string;
+  representativeId: string;
+  agentWalletId: string;
+  status: CreatorEarningStatus;
+  pendingCents: number;
+  withdrawableCents: number;
+  frozenCents: number;
+  withdrawnCents: number;
+  currency: string;
+  revenueShareBps: number;
+  idempotencyKey: string;
+};
+
+type TipContributionRow = {
+  id: string;
+  rechargeOrderId: string;
+  audienceIdentityId: string;
+  representativeId: string;
+  agentWalletId: string;
+  creatorEarningId: string;
+  amountMinor: number;
+  currency: string;
+  creatorRevenueShareBps: number;
+  platformRevenueShareBps: number;
+  creatorAmountMinor: number;
+  platformAmountMinor: number;
+  status: string;
+  idempotencyKey: string;
+  completedAt: Date;
+  creatorEarning?: TipCreatorEarningRow;
+};
+
 class FakeRechargeClient {
   userWallets: UserWalletRow[] = [];
   rechargeOrders: RechargeOrderRow[] = [];
@@ -1122,6 +1308,8 @@ class FakeRechargeClient {
   identityLinks: IdentityLinkRow[] = [];
   walletTransactions: any[] = [];
   outboxEvents: any[] = [];
+  creatorEarnings: TipCreatorEarningRow[] = [];
+  tipContributions: TipContributionRow[] = [];
 
   outboxEvent = {
     upsert: async (args: any) => {
@@ -1152,6 +1340,15 @@ class FakeRechargeClient {
           (wallet) => wallet.audienceIdentityId === args.where.audienceIdentityId,
         ) ?? null
       );
+    },
+    findUnique: async (args: any) => {
+      const wallet =
+        this.userWallets.find((wallet) =>
+          typeof args.where.id === "string"
+            ? wallet.id === args.where.id
+            : wallet.externalUserId === args.where.externalUserId,
+        ) ?? null;
+      return wallet ? { ...wallet } : null;
     },
     upsert: async (args: any) => {
       const existing = this.userWallets.find(
@@ -1196,6 +1393,96 @@ class FakeRechargeClient {
       }
       return wallet;
     },
+    updateMany: async (args: any) => {
+      const wallet = this.userWallets.find((row) => row.id === args.where.id);
+      if (
+        !wallet ||
+        (args.where.currency && wallet.currency !== args.where.currency) ||
+        (typeof args.where.cashBalanceCents?.equals === "number" &&
+          wallet.cashBalanceCents !== args.where.cashBalanceCents.equals) ||
+        (typeof args.where.cashBalanceCents?.gte === "number" &&
+          wallet.cashBalanceCents < args.where.cashBalanceCents.gte)
+      ) {
+        return { count: 0 };
+      }
+      if (typeof args.data.cashBalanceCents?.decrement === "number") {
+        wallet.cashBalanceCents -= args.data.cashBalanceCents.decrement;
+      }
+      if (typeof args.data.cashBalanceCents?.increment === "number") {
+        wallet.cashBalanceCents += args.data.cashBalanceCents.increment;
+      }
+      return { count: 1 };
+    },
+  };
+
+  agentWallet = {
+    findUnique: async (args: any) => {
+      if (args.where.representativeId !== "rep_1") return null;
+      return {
+        id: "agent_wallet_1",
+        representativeId: "rep_1",
+        currency: "CNY",
+        representative: { ownerId: "owner_1" },
+      };
+    },
+  };
+
+  creatorEarning = {
+    findUnique: async (args: any) =>
+      this.creatorEarnings.find((row) => row.id === args.where.id) ?? null,
+    create: async (args: any) => {
+      const row: TipCreatorEarningRow = {
+        id: `tip_creator_earning_${this.creatorEarnings.length + 1}`,
+        ownerId: args.data.ownerId,
+        representativeId: args.data.representativeId,
+        agentWalletId: args.data.agentWalletId,
+        status: args.data.status,
+        pendingCents: args.data.pendingCents ?? 0,
+        withdrawableCents: args.data.withdrawableCents ?? 0,
+        frozenCents: args.data.frozenCents ?? 0,
+        withdrawnCents: args.data.withdrawnCents ?? 0,
+        currency: args.data.currency,
+        revenueShareBps: args.data.revenueShareBps,
+        idempotencyKey: args.data.idempotencyKey,
+      };
+      this.creatorEarnings.push(row);
+      return row;
+    },
+  };
+
+  tipContribution = {
+    findUnique: async (args: any) => {
+      const row = this.tipContributions.find(
+        (contribution) =>
+          contribution.rechargeOrderId === args.where.rechargeOrderId,
+      );
+      if (!row) return null;
+      const creatorEarning = this.creatorEarnings.find(
+        (earning) => earning.id === row.creatorEarningId,
+      );
+      return creatorEarning ? { ...row, creatorEarning } : row;
+    },
+    create: async (args: any) => {
+      const row: TipContributionRow = {
+        id: `tip_contribution_${this.tipContributions.length + 1}`,
+        rechargeOrderId: args.data.rechargeOrderId,
+        audienceIdentityId: args.data.audienceIdentityId,
+        representativeId: args.data.representativeId,
+        agentWalletId: args.data.agentWalletId,
+        creatorEarningId: args.data.creatorEarningId,
+        amountMinor: args.data.amountMinor,
+        currency: args.data.currency,
+        creatorRevenueShareBps: args.data.creatorRevenueShareBps,
+        platformRevenueShareBps: args.data.platformRevenueShareBps,
+        creatorAmountMinor: args.data.creatorAmountMinor,
+        platformAmountMinor: args.data.platformAmountMinor,
+        status: args.data.status,
+        idempotencyKey: args.data.idempotencyKey,
+        completedAt: args.data.completedAt,
+      };
+      this.tipContributions.push(row);
+      return row;
+    },
   };
 
   identityLink = {
@@ -1239,9 +1526,17 @@ class FakeRechargeClient {
         billingPriceVersionId:
           args.data.billingPriceVersionId ?? null,
         productNameSnapshot: args.data.productNameSnapshot ?? null,
+        productKindSnapshot: args.data.productKindSnapshot ?? null,
         unitNameSnapshot: args.data.unitNameSnapshot ?? null,
         entitlementUnitsSnapshot:
           args.data.entitlementUnitsSnapshot ?? null,
+        handoffAllowanceSnapshot:
+          args.data.handoffAllowanceSnapshot ?? null,
+        handoffUnitsSnapshot: args.data.handoffUnitsSnapshot ?? null,
+        handoffServiceLevelSnapshot:
+          args.data.handoffServiceLevelSnapshot ?? null,
+        handoffValidityDaysSnapshot:
+          args.data.handoffValidityDaysSnapshot ?? null,
         creatorRevenueShareBpsSnapshot:
           args.data.creatorRevenueShareBpsSnapshot ?? null,
         platformRevenueShareBpsSnapshot:
@@ -1369,6 +1664,13 @@ class FakeRechargeClient {
       this.walletTransactions.push(row);
       return row;
     },
+    updateMany: async (args: any) => {
+      const rows = this.walletTransactions.filter(
+        (row) => row.eventGroupId === args.where.eventGroupId,
+      );
+      for (const row of rows) Object.assign(row, args.data);
+      return { count: rows.length };
+    },
   };
 
   walletLedgerEntry = {
@@ -1411,6 +1713,8 @@ class FakeRechargeClient {
     const identityLinks = this.identityLinks.map((row) => ({ ...row }));
     const walletTransactions = this.walletTransactions.map((row) => ({ ...row }));
     const outboxEvents = this.outboxEvents.map((row) => ({ ...row }));
+    const creatorEarnings = this.creatorEarnings.map((row) => ({ ...row }));
+    const tipContributions = this.tipContributions.map((row) => ({ ...row }));
     try {
       return await fn(this);
     } catch (error) {
@@ -1422,6 +1726,8 @@ class FakeRechargeClient {
       this.identityLinks = identityLinks;
       this.walletTransactions = walletTransactions;
       this.outboxEvents = outboxEvents;
+      this.creatorEarnings = creatorEarnings;
+      this.tipContributions = tipContributions;
       throw error;
     }
   }

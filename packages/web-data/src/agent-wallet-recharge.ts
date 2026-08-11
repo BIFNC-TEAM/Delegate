@@ -1,6 +1,7 @@
 import {
   AmnLedgerEntryKind,
   AmnWalletAccountType,
+  CreatorEarningStatus,
   PaymentProvider,
   PaymentProviderEventType,
   RechargeOrderStatus,
@@ -36,8 +37,15 @@ import {
   purchaseAgentTokens,
   type AgentTokenPurchaseSnapshot,
 } from "./agent-wallet-token-purchase";
+import { calculateAgentWalletRevenueSplit } from "./agent-wallet-revenue-policy";
+import {
+  grantPurchasedHandoffEntitlement,
+  type PurchasedHandoffEntitlementSnapshot,
+} from "./handoff-entitlements";
 import { prisma } from "./prisma";
 import { AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE } from "./service-entitlements";
+
+export const AGENT_WALLET_TIP_PRODUCT_CODE = "agent-wallet:tip:v1";
 
 type UserWalletRecord = {
   id: string;
@@ -58,8 +66,13 @@ type RechargeOrderRecord = {
   billingProductId?: string | null;
   billingPriceVersionId?: string | null;
   productNameSnapshot?: string | null;
+  productKindSnapshot?: string | null;
   unitNameSnapshot?: string | null;
   entitlementUnitsSnapshot?: number | null;
+  handoffAllowanceSnapshot?: string | null;
+  handoffUnitsSnapshot?: number | null;
+  handoffServiceLevelSnapshot?: string | null;
+  handoffValidityDaysSnapshot?: number | null;
   creatorRevenueShareBpsSnapshot?: number | null;
   platformRevenueShareBpsSnapshot?: number | null;
   refundPolicySnapshot?: string | null;
@@ -92,12 +105,46 @@ type IdentityLinkRecord = {
   audienceIdentityId: string;
 };
 
+type TipCreatorEarningRecord = {
+  id: string;
+  ownerId: string;
+  representativeId: string;
+  agentWalletId: string;
+  status: CreatorEarningStatus;
+  pendingCents: number;
+  withdrawableCents: number;
+  frozenCents: number;
+  withdrawnCents: number;
+  currency: string;
+  revenueShareBps: number;
+};
+
+type TipContributionRecord = {
+  id: string;
+  rechargeOrderId: string;
+  audienceIdentityId: string;
+  representativeId: string;
+  agentWalletId: string;
+  creatorEarningId: string;
+  amountMinor: number;
+  currency: string;
+  creatorRevenueShareBps: number;
+  platformRevenueShareBps: number;
+  creatorAmountMinor: number;
+  platformAmountMinor: number;
+  status: string;
+  completedAt: Date;
+  creatorEarning?: TipCreatorEarningRecord;
+};
+
 type RechargeClient = Omit<WalletLedgerClient, "$transaction"> &
   WalletTransactionClient & {
   userWallet: {
     findFirst?(args: unknown): Promise<UserWalletRecord | null>;
+    findUnique?(args: unknown): Promise<UserWalletRecord | null>;
     upsert(args: unknown): Promise<UserWalletRecord>;
     update(args: unknown): Promise<UserWalletRecord>;
+    updateMany?(args: unknown): Promise<{ count: number }>;
   };
   identityLink?: {
     upsert(args: unknown): Promise<IdentityLinkRecord>;
@@ -114,6 +161,22 @@ type RechargeClient = Omit<WalletLedgerClient, "$transaction"> &
   paymentProviderEvent: {
     findUnique(args: unknown): Promise<PaymentProviderEventRecord | null>;
     upsert(args: unknown): Promise<PaymentProviderEventRecord>;
+  };
+  agentWallet?: {
+    findUnique(args: unknown): Promise<{
+      id: string;
+      representativeId: string;
+      currency: string;
+      representative?: { ownerId: string };
+    } | null>;
+  };
+  creatorEarning?: {
+    findUnique(args: unknown): Promise<TipCreatorEarningRecord | null>;
+    create(args: unknown): Promise<TipCreatorEarningRecord>;
+  };
+  tipContribution?: {
+    findUnique(args: unknown): Promise<TipContributionRecord | null>;
+    create(args: unknown): Promise<TipContributionRecord>;
   };
   $transaction?<T>(
     fn: (tx: RechargeClient) => Promise<T>,
@@ -139,11 +202,22 @@ export type RechargeOrderSnapshot = {
   checkoutExpiresAt: string | null;
   paidAt: string | null;
   cashBalanceCents: number;
+  representativeId: string | null;
   billingProductId: string | null;
   billingPriceVersionId: string | null;
   productNameSnapshot: string | null;
+  productKindSnapshot: "SERVICE_PACKAGE" | "TIP" | null;
   unitNameSnapshot: string | null;
   entitlementUnitsSnapshot: number | null;
+  handoffAllowanceSnapshot: "NONE" | "LIMITED" | "UNLIMITED" | null;
+  handoffUnitsSnapshot: number | null;
+  handoffServiceLevelSnapshot: "STANDARD" | "PRIORITY" | null;
+  handoffValidityDaysSnapshot: number | null;
+  creatorRevenueShareBpsSnapshot: number | null;
+  platformRevenueShareBpsSnapshot: number | null;
+  refundPolicySnapshot: "FULL_WHEN_UNUSED" | "NON_REFUNDABLE" | null;
+  expiryPolicySnapshot: "NEVER_EXPIRES" | null;
+  entitlementValidityDaysSnapshot: number | null;
 };
 
 export type CreateRechargeOrderInput = {
@@ -154,11 +228,16 @@ export type CreateRechargeOrderInput = {
   billingProductId?: string;
   billingPriceVersionId?: string;
   productNameSnapshot?: string;
-  unitNameSnapshot?: "credit";
+  productKindSnapshot?: "SERVICE_PACKAGE" | "TIP";
+  unitNameSnapshot?: "credit" | "tip";
   entitlementUnitsSnapshot?: number;
+  handoffAllowanceSnapshot?: "NONE" | "LIMITED" | "UNLIMITED";
+  handoffUnitsSnapshot?: number | null;
+  handoffServiceLevelSnapshot?: "STANDARD" | "PRIORITY" | null;
+  handoffValidityDaysSnapshot?: number | null;
   creatorRevenueShareBpsSnapshot?: number;
   platformRevenueShareBpsSnapshot?: number;
-  refundPolicySnapshot?: "FULL_WHEN_UNUSED";
+  refundPolicySnapshot?: "FULL_WHEN_UNUSED" | "NON_REFUNDABLE";
   expiryPolicySnapshot?: "NEVER_EXPIRES";
   entitlementValidityDaysSnapshot?: null;
   amountCents: number;
@@ -194,10 +273,67 @@ export type CompleteMockRechargeAndPurchaseInput = {
   purchaseIdempotencyKey?: string;
 };
 
+export type TipCreatorEarningSnapshot = {
+  id: string;
+  ownerId: string;
+  representativeId: string;
+  agentWalletId: string;
+  status: "pending" | "withdrawable" | "frozen" | "withdrawn" | "reversed";
+  pendingCents: number;
+  withdrawableCents: number;
+  frozenCents: number;
+  withdrawnCents: number;
+  currency: string;
+  revenueShareBps: number;
+};
+
+export type TipContributionSnapshot = {
+  id: string;
+  rechargeOrderId: string;
+  audienceIdentityId: string;
+  representativeId: string;
+  agentWalletId: string;
+  creatorEarningId: string;
+  amountMinor: number;
+  currency: string;
+  creatorRevenueShareBps: number;
+  platformRevenueShareBps: number;
+  creatorAmountMinor: number;
+  platformAmountMinor: number;
+  status: "completed";
+  completedAt: string;
+};
+
+export type ServicePackagePaidCommerceFulfillment = {
+  kind: "SERVICE_PACKAGE";
+  tokenPurchase: AgentTokenPurchaseSnapshot;
+  handoffEntitlement: PurchasedHandoffEntitlementSnapshot | null;
+};
+
+export type TipPaidCommerceFulfillment = {
+  kind: "TIP";
+  tipContribution: TipContributionSnapshot;
+  creatorEarning: TipCreatorEarningSnapshot;
+  cashBalanceCents: number;
+};
+
+export type PaidCommerceFulfillment =
+  | ServicePackagePaidCommerceFulfillment
+  | TipPaidCommerceFulfillment;
+
 export type CompleteMockRechargeAndPurchaseSnapshot = {
   rechargeOrder: RechargeOrderSnapshot;
-  tokenPurchase: AgentTokenPurchaseSnapshot;
-};
+  fulfillment: PaidCommerceFulfillment;
+} & (
+  | {
+      productKind: "SERVICE_PACKAGE";
+      tokenPurchase: AgentTokenPurchaseSnapshot;
+    }
+  | {
+      productKind: "TIP";
+      tokenPurchase: null;
+    }
+);
 
 export type CompleteRechargeFromProviderWebhookSnapshot =
   CompleteMockRechargeAndPurchaseSnapshot;
@@ -316,6 +452,9 @@ export async function createRechargeOrder(
         ...(normalized.productNameSnapshot
           ? { productNameSnapshot: normalized.productNameSnapshot }
           : {}),
+        ...(normalized.productKindSnapshot
+          ? { productKindSnapshot: normalized.productKindSnapshot }
+          : {}),
         ...(normalized.unitNameSnapshot
           ? { unitNameSnapshot: normalized.unitNameSnapshot }
           : {}),
@@ -323,6 +462,17 @@ export async function createRechargeOrder(
           ? {
               entitlementUnitsSnapshot:
                 normalized.entitlementUnitsSnapshot,
+            }
+          : {}),
+        ...(normalized.handoffAllowanceSnapshot
+          ? {
+              handoffAllowanceSnapshot:
+                normalized.handoffAllowanceSnapshot,
+              handoffUnitsSnapshot: normalized.handoffUnitsSnapshot,
+              handoffServiceLevelSnapshot:
+                normalized.handoffServiceLevelSnapshot,
+              handoffValidityDaysSnapshot:
+                normalized.handoffValidityDaysSnapshot,
             }
           : {}),
         ...(normalized.creatorRevenueShareBpsSnapshot !== undefined
@@ -869,16 +1019,16 @@ export async function completeMockRechargeAndPurchaseAgentTokens(
       select: {
         representativeId: true,
         productCode: true,
+        productKindSnapshot: true,
         billingPriceVersionId: true,
       },
     });
     if (
       purchaseIntent?.representativeId !== representativeId
-      || purchaseIntent.productCode !==
-        AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+      || !isSupportedCommerceIntent(purchaseIntent)
     ) {
       throw new RechargePaymentConflictError(
-        "Recharge order does not match the intended representative service product.",
+        "Recharge order does not match the intended representative commerce product.",
       );
     }
     const rechargeOrder = await completeMockRechargeOrder(
@@ -899,7 +1049,7 @@ export async function completeMockRechargeAndPurchaseAgentTokens(
       throw new Error("Recharge order does not belong to this external user.");
     }
 
-    const tokenPurchase = await purchaseRechargeServiceCredits(
+    const fulfillment = await fulfillPaidCommerceOrder(
       rechargeOrder,
       externalUserId,
       representativeId,
@@ -907,14 +1057,7 @@ export async function completeMockRechargeAndPurchaseAgentTokens(
         ?? `recharge_purchase:${rechargeOrder.id}:${representativeId}`,
       tx,
     );
-
-    return {
-      rechargeOrder: {
-        ...rechargeOrder,
-        cashBalanceCents: tokenPurchase.cashBalanceCents,
-      },
-      tokenPurchase,
-    };
+    return buildPaidCommerceCompletion(rechargeOrder, fulfillment);
   });
 }
 
@@ -959,6 +1102,7 @@ export async function completeRechargeAndPurchaseAgentTokensFromVerifiedProvider
       select: {
         representativeId: true,
         productCode: true,
+        productKindSnapshot: true,
         userWallet: {
           select: {
             externalUserId: true,
@@ -968,11 +1112,10 @@ export async function completeRechargeAndPurchaseAgentTokensFromVerifiedProvider
     });
     if (
       !purchaseIntent?.representativeId
-      || purchaseIntent.productCode !==
-        AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+      || !isSupportedCommerceIntent(purchaseIntent)
     ) {
       throw new Error(
-        "Recharge order does not match the intended representative service product.",
+        "Recharge order does not match the intended representative commerce product.",
       );
     }
 
@@ -988,22 +1131,444 @@ export async function completeRechargeAndPurchaseAgentTokensFromVerifiedProvider
         "Recharge order wallet identity changed unexpectedly.",
       );
     }
-    const tokenPurchase = await purchaseRechargeServiceCredits(
+    const fulfillment = await fulfillPaidCommerceOrder(
       rechargeOrder,
       purchaseIntent.userWallet.externalUserId,
       purchaseIntent.representativeId,
       `recharge_purchase:${rechargeOrder.id}:${purchaseIntent.representativeId}`,
       tx,
     );
+    return buildPaidCommerceCompletion(rechargeOrder, fulfillment);
+  });
+}
 
+function isSupportedCommerceIntent(intent: {
+  productCode: string | null;
+  productKindSnapshot?: string | null;
+}) {
+  return (
+    intent.productCode === AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+    && (intent.productKindSnapshot == null
+      || intent.productKindSnapshot === "SERVICE_PACKAGE")
+  ) || (
+    intent.productCode === AGENT_WALLET_TIP_PRODUCT_CODE
+    && intent.productKindSnapshot === "TIP"
+  );
+}
+
+async function fulfillPaidCommerceOrder(
+  rechargeOrder: RechargeOrderSnapshot,
+  externalUserId: string,
+  representativeId: string,
+  servicePurchaseIdempotencyKey: string,
+  transactionClient: unknown,
+): Promise<PaidCommerceFulfillment> {
+  if (
+    rechargeOrder.productKindSnapshot === "TIP"
+    && rechargeOrder.unitNameSnapshot === "tip"
+  ) {
+    return fulfillPaidTip(
+      rechargeOrder,
+      representativeId,
+      transactionClient as RechargeClient,
+    );
+  }
+  if (
+    rechargeOrder.productKindSnapshot !== null
+    && rechargeOrder.productKindSnapshot !== "SERVICE_PACKAGE"
+  ) {
+    throw new RechargePaymentConflictError(
+      "Paid order has an unsupported commerce product kind.",
+    );
+  }
+  const tokenPurchase = await purchaseRechargeServiceCredits(
+    rechargeOrder,
+    externalUserId,
+    representativeId,
+    servicePurchaseIdempotencyKey,
+    transactionClient,
+  );
+  const handoffEntitlement =
+    rechargeOrder.handoffAllowanceSnapshot
+      && rechargeOrder.handoffAllowanceSnapshot !== "NONE"
+      ? await grantPurchasedHandoffEntitlement(
+          { rechargeOrderId: rechargeOrder.id },
+          transactionClient as Parameters<
+            typeof grantPurchasedHandoffEntitlement
+          >[1],
+        )
+      : null;
+  return { kind: "SERVICE_PACKAGE", tokenPurchase, handoffEntitlement };
+}
+
+function buildPaidCommerceCompletion(
+  rechargeOrder: RechargeOrderSnapshot,
+  fulfillment: PaidCommerceFulfillment,
+): CompleteMockRechargeAndPurchaseSnapshot {
+  if (fulfillment.kind === "TIP") {
     return {
+      productKind: "TIP",
       rechargeOrder: {
         ...rechargeOrder,
-        cashBalanceCents: tokenPurchase.cashBalanceCents,
+        cashBalanceCents: fulfillment.cashBalanceCents,
       },
-      tokenPurchase,
+      tokenPurchase: null,
+      fulfillment,
     };
+  }
+  return {
+    productKind: "SERVICE_PACKAGE",
+    rechargeOrder: {
+      ...rechargeOrder,
+      cashBalanceCents: fulfillment.tokenPurchase.cashBalanceCents,
+    },
+    tokenPurchase: fulfillment.tokenPurchase,
+    fulfillment,
+  };
+}
+
+async function fulfillPaidTip(
+  rechargeOrder: RechargeOrderSnapshot,
+  representativeId: string,
+  tx: RechargeClient,
+): Promise<TipPaidCommerceFulfillment> {
+  if (
+    rechargeOrder.productKindSnapshot !== "TIP"
+    || rechargeOrder.unitNameSnapshot !== "tip"
+    || rechargeOrder.entitlementUnitsSnapshot !== 0
+    || rechargeOrder.refundPolicySnapshot !== "NON_REFUNDABLE"
+    || rechargeOrder.expiryPolicySnapshot !== "NEVER_EXPIRES"
+    || rechargeOrder.entitlementValidityDaysSnapshot !== null
+    || rechargeOrder.handoffAllowanceSnapshot !== "NONE"
+    || rechargeOrder.handoffUnitsSnapshot !== null
+    || rechargeOrder.handoffServiceLevelSnapshot !== null
+    || rechargeOrder.handoffValidityDaysSnapshot !== null
+    || !rechargeOrder.billingProductId
+    || !rechargeOrder.billingPriceVersionId
+    || rechargeOrder.creatorRevenueShareBpsSnapshot === null
+    || rechargeOrder.platformRevenueShareBpsSnapshot === null
+    || rechargeOrder.creatorRevenueShareBpsSnapshot
+      + rechargeOrder.platformRevenueShareBpsSnapshot !== 10_000
+  ) {
+    throw new RechargePaymentConflictError(
+      "Paid tip order has an incomplete or unsupported commercial snapshot.",
+    );
+  }
+  if (
+    !tx.tipContribution
+    || !tx.creatorEarning
+    || !tx.agentWallet
+    || !tx.userWallet.findUnique
+    || !tx.userWallet.updateMany
+  ) {
+    throw new Error("Tip fulfillment persistence is unavailable.");
+  }
+  const wallet = await tx.userWallet.findUnique({
+    where: { id: rechargeOrder.userWalletId },
   });
+  if (!wallet?.audienceIdentityId) {
+    throw new Error("Tip payer wallet must be linked to an audience identity.");
+  }
+  const existing = await tx.tipContribution.findUnique({
+    where: { rechargeOrderId: rechargeOrder.id },
+    include: { creatorEarning: true },
+  });
+  if (existing) {
+    assertExistingTipContributionMatches(existing, rechargeOrder, wallet);
+    if (!existing.creatorEarning) {
+      throw new Error("Tip contribution is missing its creator earning.");
+    }
+    return {
+      kind: "TIP",
+      tipContribution: serializeTipContribution(existing),
+      creatorEarning: serializeTipCreatorEarning(existing.creatorEarning),
+      cashBalanceCents: wallet.cashBalanceCents,
+    };
+  }
+  if (wallet.currency !== rechargeOrder.currency) {
+    throw new Error("Tip payer wallet currency does not match the order.");
+  }
+  if (wallet.cashBalanceCents < rechargeOrder.amountCents) {
+    throw new Error("Insufficient user wallet balance for tip fulfillment.");
+  }
+  const agentWallet = await tx.agentWallet.findUnique({
+    where: { representativeId },
+    include: { representative: true },
+  });
+  if (!agentWallet?.representative) {
+    throw new Error("Representative agent wallet was not found.");
+  }
+  if (agentWallet.currency !== rechargeOrder.currency) {
+    throw new Error("Representative wallet currency does not match the tip.");
+  }
+  const revenueSplit = calculateAgentWalletRevenueSplit({
+    grossAmountCents: rechargeOrder.amountCents,
+    creatorRevenueShareBps:
+      rechargeOrder.creatorRevenueShareBpsSnapshot,
+  });
+  if (
+    revenueSplit.platformGrossCents
+      !== rechargeOrder.amountCents - revenueSplit.creatorShareCents
+    || 10_000 - revenueSplit.creatorRevenueShareBps
+      !== rechargeOrder.platformRevenueShareBpsSnapshot
+  ) {
+    throw new Error("Tip revenue split does not match the order snapshot.");
+  }
+
+  const debit = await tx.userWallet.updateMany({
+    where: {
+      id: wallet.id,
+      currency: wallet.currency,
+      cashBalanceCents: {
+        equals: wallet.cashBalanceCents,
+        gte: rechargeOrder.amountCents,
+      },
+    },
+    data: {
+      cashBalanceCents: { decrement: rechargeOrder.amountCents },
+    },
+  });
+  if (debit.count !== 1) {
+    throw new Error("Tip wallet balance changed concurrently.");
+  }
+  const creatorEarning = await tx.creatorEarning.create({
+    data: {
+      ownerId: agentWallet.representative.ownerId,
+      representativeId,
+      agentWalletId: agentWallet.id,
+      status: CreatorEarningStatus.WITHDRAWABLE,
+      pendingCents: 0,
+      withdrawableCents: revenueSplit.creatorShareCents,
+      currency: rechargeOrder.currency,
+      revenueShareBps: revenueSplit.creatorRevenueShareBps,
+      idempotencyKey: `tip_creator_earning:${rechargeOrder.id}`,
+    },
+  });
+  const tipContribution = await tx.tipContribution.create({
+    data: {
+      rechargeOrderId: rechargeOrder.id,
+      audienceIdentityId: wallet.audienceIdentityId,
+      representativeId,
+      agentWalletId: agentWallet.id,
+      creatorEarningId: creatorEarning.id,
+      amountMinor: rechargeOrder.amountCents,
+      currency: rechargeOrder.currency,
+      creatorRevenueShareBps: revenueSplit.creatorRevenueShareBps,
+      platformRevenueShareBps:
+        10_000 - revenueSplit.creatorRevenueShareBps,
+      creatorAmountMinor: revenueSplit.creatorShareCents,
+      platformAmountMinor: revenueSplit.platformGrossCents,
+      status: "COMPLETED",
+      idempotencyKey: `tip:${rechargeOrder.id}`,
+      completedAt: rechargeOrder.paidAt
+        ? new Date(rechargeOrder.paidAt)
+        : new Date(),
+    },
+  });
+  const walletTransaction = await recordWalletTransaction(
+    {
+      eventGroupId: `tip:${tipContribution.id}`,
+      idempotencyKey: `tip:${rechargeOrder.id}:fulfilled`,
+      sourceType: "TipContribution",
+      sourceId: tipContribution.id,
+      eventType: WalletTransactionEventType.ADJUSTMENT,
+      currency: rechargeOrder.currency,
+      ownerId: agentWallet.representative.ownerId,
+      representativeId,
+      userWalletId: wallet.id,
+      metadata: {
+        rechargeOrderId: rechargeOrder.id,
+        amountCents: rechargeOrder.amountCents,
+        creatorAmountCents: revenueSplit.creatorShareCents,
+        platformAmountCents: revenueSplit.platformGrossCents,
+      },
+    },
+    tx,
+  );
+  await recordWalletLedgerTransaction(
+    {
+      eventGroupId: `tip:${tipContribution.id}`,
+      idempotencyKey: `tip:${rechargeOrder.id}:fulfilled`,
+      currency: rechargeOrder.currency,
+      requireBalancedAmount: true,
+      initialBalances: {
+        [`${AmnWalletAccountType.USER_CASH}:${wallet.id}`]: {
+          amountCents: wallet.cashBalanceCents,
+        },
+      },
+      movements: [
+        {
+          entryKey: "user_cash_debit",
+          accountType: AmnWalletAccountType.USER_CASH,
+          entryKind: AmnLedgerEntryKind.USER_CASH_DEBIT,
+          transactionId: walletTransaction?.id ?? null,
+          userWalletId: wallet.id,
+          representativeId,
+          rechargeOrderId: rechargeOrder.id,
+          amountCents: -rechargeOrder.amountCents,
+          notes: "tip_fulfillment",
+        },
+        {
+          entryKey: "creator_withdrawable_credit",
+          accountType: AmnWalletAccountType.CREATOR_WITHDRAWABLE,
+          entryKind: AmnLedgerEntryKind.CREATOR_WITHDRAWABLE_CREDIT,
+          transactionId: walletTransaction?.id ?? null,
+          ownerId: agentWallet.representative.ownerId,
+          representativeId,
+          agentWalletId: agentWallet.id,
+          creatorEarningId: creatorEarning.id,
+          rechargeOrderId: rechargeOrder.id,
+          amountCents: revenueSplit.creatorShareCents,
+          notes: "tip_fulfillment",
+        },
+        {
+          entryKey: "platform_earned_revenue_credit",
+          accountType: AmnWalletAccountType.PLATFORM_EARNED_REVENUE,
+          entryKind: AmnLedgerEntryKind.PLATFORM_EARNED_REVENUE_CREDIT,
+          transactionId: walletTransaction?.id ?? null,
+          representativeId,
+          agentWalletId: agentWallet.id,
+          rechargeOrderId: rechargeOrder.id,
+          amountCents: revenueSplit.platformGrossCents,
+          notes: "tip_fulfillment",
+        },
+      ],
+    },
+    tx,
+  );
+  await attributeRechargeToRepresentative(
+    rechargeOrder.id,
+    representativeId,
+    agentWallet.representative.ownerId,
+    tx,
+  );
+  const updatedWallet = await tx.userWallet.findUnique({
+    where: { id: wallet.id },
+  });
+  if (!updatedWallet) throw new Error("Tip payer wallet was not found after debit.");
+  return {
+    kind: "TIP",
+    tipContribution: serializeTipContribution(tipContribution),
+    creatorEarning: serializeTipCreatorEarning(creatorEarning),
+    cashBalanceCents: updatedWallet.cashBalanceCents,
+  };
+}
+
+function assertExistingTipContributionMatches(
+  contribution: TipContributionRecord,
+  order: RechargeOrderSnapshot,
+  wallet: UserWalletRecord,
+) {
+  const mismatches = [
+    contribution.rechargeOrderId !== order.id ? "recharge order" : null,
+    contribution.audienceIdentityId !== wallet.audienceIdentityId
+      ? "audience identity"
+      : null,
+    contribution.representativeId !== orderRepresentativeId(order)
+      ? "representative"
+      : null,
+    contribution.amountMinor !== order.amountCents ? "amount" : null,
+    contribution.currency !== order.currency ? "currency" : null,
+    contribution.creatorRevenueShareBps
+      !== order.creatorRevenueShareBpsSnapshot
+      ? "creator revenue share"
+      : null,
+    contribution.platformRevenueShareBps
+      !== order.platformRevenueShareBpsSnapshot
+      ? "platform revenue share"
+      : null,
+  ].filter((value): value is string => value !== null);
+  if (mismatches.length > 0) {
+    throw new RechargePaymentConflictError(
+      `Existing tip fulfillment differs in ${mismatches.join(", ")}.`,
+    );
+  }
+}
+
+function orderRepresentativeId(order: RechargeOrderSnapshot) {
+  return order.representativeId;
+}
+
+function serializeTipContribution(
+  contribution: TipContributionRecord,
+): TipContributionSnapshot {
+  return {
+    id: contribution.id,
+    rechargeOrderId: contribution.rechargeOrderId,
+    audienceIdentityId: contribution.audienceIdentityId,
+    representativeId: contribution.representativeId,
+    agentWalletId: contribution.agentWalletId,
+    creatorEarningId: contribution.creatorEarningId,
+    amountMinor: contribution.amountMinor,
+    currency: contribution.currency,
+    creatorRevenueShareBps: contribution.creatorRevenueShareBps,
+    platformRevenueShareBps: contribution.platformRevenueShareBps,
+    creatorAmountMinor: contribution.creatorAmountMinor,
+    platformAmountMinor: contribution.platformAmountMinor,
+    status: "completed",
+    completedAt: contribution.completedAt.toISOString(),
+  };
+}
+
+function serializeTipCreatorEarning(
+  earning: TipCreatorEarningRecord,
+): TipCreatorEarningSnapshot {
+  return {
+    id: earning.id,
+    ownerId: earning.ownerId,
+    representativeId: earning.representativeId,
+    agentWalletId: earning.agentWalletId,
+    status: serializeCreatorEarningStatus(earning.status),
+    pendingCents: earning.pendingCents,
+    withdrawableCents: earning.withdrawableCents,
+    frozenCents: earning.frozenCents,
+    withdrawnCents: earning.withdrawnCents,
+    currency: earning.currency,
+    revenueShareBps: earning.revenueShareBps,
+  };
+}
+
+function serializeCreatorEarningStatus(
+  status: CreatorEarningStatus,
+): TipCreatorEarningSnapshot["status"] {
+  switch (status) {
+    case CreatorEarningStatus.PENDING:
+      return "pending";
+    case CreatorEarningStatus.WITHDRAWABLE:
+      return "withdrawable";
+    case CreatorEarningStatus.FROZEN:
+      return "frozen";
+    case CreatorEarningStatus.WITHDRAWN:
+      return "withdrawn";
+    case CreatorEarningStatus.REVERSED:
+      return "reversed";
+  }
+}
+
+async function attributeRechargeToRepresentative(
+  rechargeOrderId: string,
+  representativeId: string,
+  ownerId: string,
+  transactionClient: unknown,
+) {
+  const attributionClient = transactionClient as {
+    walletTransaction?: {
+      updateMany(args: unknown): Promise<unknown>;
+    };
+    walletLedgerEntry: {
+      updateMany?(args: unknown): Promise<unknown>;
+    };
+  };
+  await Promise.all([
+    attributionClient.walletTransaction?.updateMany({
+      where: { eventGroupId: `recharge:${rechargeOrderId}` },
+      data: { ownerId, representativeId },
+    }) ?? Promise.resolve(),
+    attributionClient.walletLedgerEntry.updateMany?.({
+      where: { eventGroupId: `recharge:${rechargeOrderId}` },
+      data: { ownerId, representativeId },
+    }) ?? Promise.resolve(),
+  ]);
 }
 
 async function purchaseRechargeServiceCredits(
@@ -1038,30 +1603,12 @@ async function purchaseRechargeServiceCredits(
   if (!representative) {
     throw new Error("Representative not found.");
   }
-  const attributionClient = transactionClient as {
-    walletTransaction?: {
-      updateMany(args: unknown): Promise<unknown>;
-    };
-    walletLedgerEntry: {
-      updateMany?(args: unknown): Promise<unknown>;
-    };
-  };
-  await Promise.all([
-    attributionClient.walletTransaction?.updateMany({
-      where: { eventGroupId: `recharge:${rechargeOrder.id}` },
-      data: {
-        ownerId: representative.ownerId,
-        representativeId,
-      },
-    }) ?? Promise.resolve(),
-    attributionClient.walletLedgerEntry.updateMany?.({
-      where: { eventGroupId: `recharge:${rechargeOrder.id}` },
-      data: {
-        ownerId: representative.ownerId,
-        representativeId,
-      },
-    }) ?? Promise.resolve(),
-  ]);
+  await attributeRechargeToRepresentative(
+    rechargeOrder.id,
+    representativeId,
+    representative.ownerId,
+    transactionClient,
+  );
   return tokenPurchase;
 }
 
@@ -1077,8 +1624,13 @@ function normalizeCreateRechargeOrderInput(
     | "billingProductId"
     | "billingPriceVersionId"
     | "productNameSnapshot"
+    | "productKindSnapshot"
     | "unitNameSnapshot"
     | "entitlementUnitsSnapshot"
+    | "handoffAllowanceSnapshot"
+    | "handoffUnitsSnapshot"
+    | "handoffServiceLevelSnapshot"
+    | "handoffValidityDaysSnapshot"
     | "creatorRevenueShareBpsSnapshot"
     | "platformRevenueShareBpsSnapshot"
     | "refundPolicySnapshot"
@@ -1238,6 +1790,10 @@ function assertExistingRechargeOrderMatches(
       !== (normalized.productNameSnapshot ?? null)
       ? "product name snapshot"
       : null,
+    (order.productKindSnapshot ?? null)
+      !== (normalized.productKindSnapshot ?? null)
+      ? "product kind snapshot"
+      : null,
     (order.unitNameSnapshot ?? null)
       !== (normalized.unitNameSnapshot ?? null)
       ? "unit name snapshot"
@@ -1245,6 +1801,22 @@ function assertExistingRechargeOrderMatches(
     (order.entitlementUnitsSnapshot ?? null)
       !== (normalized.entitlementUnitsSnapshot ?? null)
       ? "entitlement units snapshot"
+      : null,
+    (order.handoffAllowanceSnapshot ?? null)
+      !== (normalized.handoffAllowanceSnapshot ?? null)
+      ? "handoff allowance snapshot"
+      : null,
+    (order.handoffUnitsSnapshot ?? null)
+      !== (normalized.handoffUnitsSnapshot ?? null)
+      ? "handoff units snapshot"
+      : null,
+    (order.handoffServiceLevelSnapshot ?? null)
+      !== (normalized.handoffServiceLevelSnapshot ?? null)
+      ? "handoff service level snapshot"
+      : null,
+    (order.handoffValidityDaysSnapshot ?? null)
+      !== (normalized.handoffValidityDaysSnapshot ?? null)
+      ? "handoff validity snapshot"
       : null,
     (order.creatorRevenueShareBpsSnapshot ?? null)
       !== (normalized.creatorRevenueShareBpsSnapshot ?? null)
@@ -1352,11 +1924,36 @@ function serializeRechargeOrder(order: RechargeOrderRecord): RechargeOrderSnapsh
         : null,
     paidAt: order.paidAt ? order.paidAt.toISOString() : null,
     cashBalanceCents: order.userWallet.cashBalanceCents,
+    representativeId: order.representativeId,
     billingProductId: order.billingProductId ?? null,
     billingPriceVersionId: order.billingPriceVersionId ?? null,
     productNameSnapshot: order.productNameSnapshot ?? null,
+    productKindSnapshot:
+      (order.productKindSnapshot as RechargeOrderSnapshot["productKindSnapshot"])
+      ?? null,
     unitNameSnapshot: order.unitNameSnapshot ?? null,
     entitlementUnitsSnapshot: order.entitlementUnitsSnapshot ?? null,
+    handoffAllowanceSnapshot:
+      (order.handoffAllowanceSnapshot as RechargeOrderSnapshot["handoffAllowanceSnapshot"])
+      ?? null,
+    handoffUnitsSnapshot: order.handoffUnitsSnapshot ?? null,
+    handoffServiceLevelSnapshot:
+      (order.handoffServiceLevelSnapshot as RechargeOrderSnapshot["handoffServiceLevelSnapshot"])
+      ?? null,
+    handoffValidityDaysSnapshot:
+      order.handoffValidityDaysSnapshot ?? null,
+    creatorRevenueShareBpsSnapshot:
+      order.creatorRevenueShareBpsSnapshot ?? null,
+    platformRevenueShareBpsSnapshot:
+      order.platformRevenueShareBpsSnapshot ?? null,
+    refundPolicySnapshot:
+      (order.refundPolicySnapshot as RechargeOrderSnapshot["refundPolicySnapshot"])
+      ?? null,
+    expiryPolicySnapshot:
+      (order.expiryPolicySnapshot as RechargeOrderSnapshot["expiryPolicySnapshot"])
+      ?? null,
+    entitlementValidityDaysSnapshot:
+      order.entitlementValidityDaysSnapshot ?? null,
   };
 }
 
@@ -1367,8 +1964,13 @@ function normalizeCommercialSnapshot(
   | "billingProductId"
   | "billingPriceVersionId"
   | "productNameSnapshot"
+  | "productKindSnapshot"
   | "unitNameSnapshot"
   | "entitlementUnitsSnapshot"
+  | "handoffAllowanceSnapshot"
+  | "handoffUnitsSnapshot"
+  | "handoffServiceLevelSnapshot"
+  | "handoffValidityDaysSnapshot"
   | "creatorRevenueShareBpsSnapshot"
   | "platformRevenueShareBpsSnapshot"
   | "refundPolicySnapshot"
@@ -1379,8 +1981,13 @@ function normalizeCommercialSnapshot(
     input.billingProductId,
     input.billingPriceVersionId,
     input.productNameSnapshot,
+    input.productKindSnapshot,
     input.unitNameSnapshot,
     input.entitlementUnitsSnapshot,
+    input.handoffAllowanceSnapshot,
+    input.handoffUnitsSnapshot,
+    input.handoffServiceLevelSnapshot,
+    input.handoffValidityDaysSnapshot,
     input.creatorRevenueShareBpsSnapshot,
     input.platformRevenueShareBpsSnapshot,
     input.refundPolicySnapshot,
@@ -1393,22 +2000,18 @@ function normalizeCommercialSnapshot(
   const billingProductId = input.billingProductId?.trim();
   const billingPriceVersionId = input.billingPriceVersionId?.trim();
   const productNameSnapshot = input.productNameSnapshot?.trim();
+  const productKindSnapshot = input.productKindSnapshot;
   const unitNameSnapshot = input.unitNameSnapshot?.trim();
   if (
     !billingProductId
     || !billingPriceVersionId
     || !productNameSnapshot
+    || !productKindSnapshot
     || !unitNameSnapshot
+    || !input.handoffAllowanceSnapshot
   ) {
     throw new Error("A billing order requires a complete commercial snapshot.");
   }
-  if (unitNameSnapshot !== "credit") {
-    throw new Error("V1 billing orders must use the credit unit.");
-  }
-  assertPositiveInteger(
-    input.entitlementUnitsSnapshot ?? 0,
-    "entitlementUnitsSnapshot",
-  );
   assertBasisPoints(
     input.creatorRevenueShareBpsSnapshot,
     "creatorRevenueShareBpsSnapshot",
@@ -1424,21 +2027,77 @@ function normalizeCommercialSnapshot(
   ) {
     throw new Error("Revenue share snapshots must total 10000 bps.");
   }
-  if (input.refundPolicySnapshot !== "FULL_WHEN_UNUSED") {
-    throw new Error("Unsupported recharge refund policy.");
-  }
   if (
     input.expiryPolicySnapshot !== "NEVER_EXPIRES"
     || input.entitlementValidityDaysSnapshot !== null
   ) {
     throw new Error("Expiring service packages are not supported in V1.");
   }
-  if (input.amountCents % input.entitlementUnitsSnapshot! !== 0) {
-    throw new Error(
-      "Recharge amount must divide evenly into entitlement units.",
-    );
+  const entitlementUnitsSnapshot = input.entitlementUnitsSnapshot;
+  if (
+    productKindSnapshot === "SERVICE_PACKAGE"
+    && (
+      input.productCode !== AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+      || unitNameSnapshot !== "credit"
+      || !Number.isSafeInteger(entitlementUnitsSnapshot)
+      || (entitlementUnitsSnapshot ?? 0) <= 0
+      || input.refundPolicySnapshot !== "FULL_WHEN_UNUSED"
+    )
+  ) {
+    throw new Error("Service-package recharge snapshot is invalid.");
   }
-  const entitlementUnitsSnapshot = input.entitlementUnitsSnapshot!;
+  if (
+    productKindSnapshot === "TIP"
+    && (
+      input.productCode !== AGENT_WALLET_TIP_PRODUCT_CODE
+      || unitNameSnapshot !== "tip"
+      || entitlementUnitsSnapshot !== 0
+      || input.refundPolicySnapshot !== "NON_REFUNDABLE"
+    )
+  ) {
+    throw new Error("Tip recharge snapshot is invalid.");
+  }
+  if (
+    productKindSnapshot !== "SERVICE_PACKAGE"
+    && productKindSnapshot !== "TIP"
+  ) {
+    throw new Error("Unsupported commerce product kind.");
+  }
+  const handoffAllowanceSnapshot = input.handoffAllowanceSnapshot;
+  if (productKindSnapshot === "TIP" && (
+    handoffAllowanceSnapshot !== "NONE"
+    || input.handoffUnitsSnapshot !== null
+    || input.handoffServiceLevelSnapshot !== null
+    || input.handoffValidityDaysSnapshot !== null
+  )) {
+    throw new Error("Tips cannot grant human-handoff access.");
+  }
+  if (productKindSnapshot === "SERVICE_PACKAGE") {
+    if (handoffAllowanceSnapshot === "NONE" && (
+      input.handoffUnitsSnapshot !== null
+      || input.handoffServiceLevelSnapshot !== null
+      || input.handoffValidityDaysSnapshot !== null
+    )) {
+      throw new Error("A no-handoff package cannot contain handoff terms.");
+    }
+    if (handoffAllowanceSnapshot === "LIMITED" && (
+      !Number.isSafeInteger(input.handoffUnitsSnapshot)
+      || (input.handoffUnitsSnapshot ?? 0) <= 0
+      || !input.handoffServiceLevelSnapshot
+      || !Number.isSafeInteger(input.handoffValidityDaysSnapshot)
+      || (input.handoffValidityDaysSnapshot ?? 0) <= 0
+    )) {
+      throw new Error("Limited handoff snapshot is invalid.");
+    }
+    if (handoffAllowanceSnapshot === "UNLIMITED" && (
+      input.handoffUnitsSnapshot !== null
+      || !input.handoffServiceLevelSnapshot
+      || !Number.isSafeInteger(input.handoffValidityDaysSnapshot)
+      || (input.handoffValidityDaysSnapshot ?? 0) <= 0
+    )) {
+      throw new Error("Unlimited handoff snapshot is invalid.");
+    }
+  }
   const creatorRevenueShareBpsSnapshot =
     input.creatorRevenueShareBpsSnapshot!;
   const platformRevenueShareBpsSnapshot =
@@ -1448,12 +2107,17 @@ function normalizeCommercialSnapshot(
     billingProductId,
     billingPriceVersionId,
     productNameSnapshot,
-    unitNameSnapshot,
-    entitlementUnitsSnapshot,
+    productKindSnapshot,
+    unitNameSnapshot: unitNameSnapshot as "credit" | "tip",
+    entitlementUnitsSnapshot: entitlementUnitsSnapshot!,
+    handoffAllowanceSnapshot,
+    handoffUnitsSnapshot: input.handoffUnitsSnapshot!,
+    handoffServiceLevelSnapshot: input.handoffServiceLevelSnapshot!,
+    handoffValidityDaysSnapshot: input.handoffValidityDaysSnapshot!,
     creatorRevenueShareBpsSnapshot,
     platformRevenueShareBpsSnapshot,
-    refundPolicySnapshot: input.refundPolicySnapshot,
-    expiryPolicySnapshot: input.expiryPolicySnapshot,
+    refundPolicySnapshot: input.refundPolicySnapshot!,
+    expiryPolicySnapshot: input.expiryPolicySnapshot!,
     entitlementValidityDaysSnapshot: null,
   };
 }

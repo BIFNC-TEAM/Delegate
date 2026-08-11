@@ -777,6 +777,8 @@ describe("conversation runtime version pin", () => {
       },
       runtimePolicySnapshot: {
         billingMode: "service_credit",
+        accessMode: "CREDITS_ONLY",
+        effectiveFreeReplyLimit: 0,
         walletReservation: {
           usageChargeId: "usage-reserved",
           tokenAmount: 1,
@@ -819,6 +821,8 @@ describe("conversation runtime version pin", () => {
 
     await expect(claimNextGenerationWorkItem()).resolves.toMatchObject({
       runId: "run-paid",
+      accessMode: "CREDITS_ONLY",
+      effectiveFreeReplyLimit: 0,
       walletReservation: {
         usageChargeId: "usage-reserved",
         tokenAmount: 1,

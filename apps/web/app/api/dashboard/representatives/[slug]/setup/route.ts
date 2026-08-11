@@ -143,29 +143,6 @@ export async function PATCH(
                 paywalledIntents: [],
                 handoffWindowHours: 0,
               },
-        pricing: Array.isArray(body.pricing)
-          ? body.pricing.map((plan) => {
-              const record = typeof plan === "object" && plan ? plan : {};
-              return {
-                tier:
-                  (record as { tier?: string }).tier === "free" ||
-                  (record as { tier?: string }).tier === "pass" ||
-                  (record as { tier?: string }).tier === "deep_help" ||
-                  (record as { tier?: string }).tier === "sponsor"
-                    ? (record as { tier: "free" | "pass" | "deep_help" | "sponsor" }).tier
-                    : "free",
-                name: String((record as { name?: string }).name ?? ""),
-                stars: Number((record as { stars?: number }).stars ?? 0),
-                summary: String((record as { summary?: string }).summary ?? ""),
-                includedReplies: Number(
-                  (record as { includedReplies?: number }).includedReplies ?? 0,
-                ),
-                includesPriorityHandoff: Boolean(
-                  (record as { includesPriorityHandoff?: boolean }).includesPriorityHandoff,
-                ),
-              };
-            })
-          : [],
         knowledgePack:
           typeof body.knowledgePack === "object" && body.knowledgePack
             ? {

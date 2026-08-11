@@ -2,7 +2,7 @@ import type { PlanTier } from "@delegate/domain";
 import type { ModelContextSegmentTrace } from "@delegate/lifecycle-hooks";
 import {
   assertConversationChannelDeliveryAvailable,
-  createServicePaymentOrder,
+  createOrReuseHandoffRequestInTransaction,
   fulfillServicePaymentOrder,
   resolveChannelAudienceIdentity,
 } from "@delegate/web-data";
@@ -74,12 +74,6 @@ export type ConversationContextRecord = {
   contactIsPaid: boolean;
   usage: ConversationUsage;
   collectorState: StructuredCollectorState | null;
-  plans: {
-    free?: StoredPlan;
-    pass?: StoredPlan;
-    deep_help?: StoredPlan;
-    sponsor?: StoredPlan;
-  };
   openviking: {
     autoRecall: boolean;
   };
@@ -105,15 +99,6 @@ type ConversationAuditScope = Pick<
 type TransactionClient = Prisma.TransactionClient;
 
 const workflowEngineConfig = getWorkflowEngineConfig(process.env);
-
-type StoredPlan = {
-  id: string;
-  tier: PlanTier;
-  name: string;
-  starsAmount: number;
-  includedReplies: number;
-  includesPriorityHandoff: boolean;
-};
 
 type SuccessfulPaymentInput = {
   invoicePayload: string;
@@ -255,9 +240,6 @@ export async function getConversationContext(
   const context = await prisma.$transaction(async (tx) => {
     const representative = await tx.representative.findUnique({
       where: { slug: representativeSlug },
-      include: {
-        pricingPlans: true,
-      },
     });
     if (!representative) {
       throw new Error(
@@ -451,17 +433,6 @@ export async function getConversationContext(
       deepHelpUnlocked: Boolean(conversation.deepHelpUnlockedAt),
     },
     collectorState: readStructuredCollectorState(conversation.collectorState),
-    plans: representative.pricingPlans.reduce<ConversationContextRecord["plans"]>((acc, plan) => {
-      acc[mapPricingPlanTypeFromDb(plan.type)] = {
-        id: plan.id,
-        tier: mapPricingPlanTypeFromDb(plan.type),
-        name: plan.name,
-        starsAmount: plan.starsAmount,
-        includedReplies: plan.includedReplies,
-        includesPriorityHandoff: plan.includesPriorityHandoff,
-      };
-      return acc;
-    }, {}),
     openviking: {
       autoRecall: representative.openvikingAutoRecall,
     },
@@ -1040,23 +1011,22 @@ export async function maybeCreateHandoffRequest(params: {
   }
 
   return prisma.$transaction(async (tx) => {
-    const existing = await tx.handoffRequest.findFirst({
-      where: {
-        representativeId: params.context.representativeId,
-        contactId: params.context.contactId,
-        conversationId: params.context.conversationId,
-        reason: params.plan.intent,
-        status: {
-          in: [HandoffStatus.OPEN, HandoffStatus.REVIEWING],
-        },
-      },
-      orderBy: [{ createdAt: "desc" }],
-    });
-
-    if (existing) {
+    const result = await createOrReuseHandoffRequestInTransaction({
+      representativeId: params.context.representativeId,
+      contactId: params.context.contactId,
+      conversationId: params.context.conversationId,
+      reason: params.plan.intent,
+      summary: params.prepared?.summary ?? summarizeText(params.text),
+      recommendedPriority:
+        params.prepared?.priority ?? calculatePriority(params.plan),
+      recommendedOwnerAction:
+        params.prepared?.ownerAction ?? buildOwnerAction(params.plan),
+    }, tx);
+    if (!result.request) return null;
+    if (result.outcome === "reused") {
       return {
-        id: existing.id,
-        status: existing.status,
+        id: result.request.id,
+        status: result.request.status,
       };
     }
 
@@ -1076,19 +1046,9 @@ export async function maybeCreateHandoffRequest(params: {
         recommendedNextStep: params.plan.nextStep === "ask_owner" ? "owner_approval" : "owner_review",
       },
     });
-
-    const handoff = await tx.handoffRequest.create({
-      data: {
-        representativeId: params.context.representativeId,
-        contactId: params.context.contactId,
-        conversationId: params.context.conversationId,
-        intakeSubmissionId: intake.id,
-        reason: params.plan.intent,
-        summary: params.prepared?.summary ?? summarizeText(params.text),
-        recommendedPriority: params.prepared?.priority ?? calculatePriority(params.plan),
-        recommendedOwnerAction: params.prepared?.ownerAction ?? buildOwnerAction(params.plan),
-        status: HandoffStatus.OPEN,
-      },
+    const handoff = await tx.handoffRequest.update({
+      where: { id: result.request.id },
+      data: { intakeSubmissionId: intake.id },
     });
 
     await tx.contact.update({
@@ -1196,7 +1156,13 @@ export async function submitStructuredCollector(params: {
   context: ConversationContextRecord;
   collectorState: StructuredCollectorState;
 }): Promise<{
-  handoffId: string;
+  handoffId: string | null;
+  handoffOutcome:
+    | "created"
+    | "reused"
+    | "handoff_disabled"
+    | "entitlement_required"
+    | "active_request_exists";
   summary: string;
   recommendedOwnerAction: string;
   priority: number;
@@ -1232,49 +1198,26 @@ export async function submitStructuredCollector(params: {
       },
     });
 
-    const existing = await tx.handoffRequest.findFirst({
-      where: {
-        representativeId: params.context.representativeId,
-        contactId: params.context.contactId,
-        conversationId: params.context.conversationId,
-        reason: params.collectorState.intent,
-        status: {
-          in: [HandoffStatus.OPEN, HandoffStatus.REVIEWING],
+    const handoffResult = await createOrReuseHandoffRequestInTransaction({
+      representativeId: params.context.representativeId,
+      contactId: params.context.contactId,
+      conversationId: params.context.conversationId,
+      intakeSubmissionId: intake.id,
+      reason: params.collectorState.intent,
+      summary: summary || "Structured intake completed.",
+      recommendedPriority: priority,
+      recommendedOwnerAction,
+    }, tx);
+    const handoff = handoffResult.request;
+
+    if (handoff) {
+      await tx.contact.update({
+        where: { id: params.context.contactId },
+        data: {
+          stage: ContactStage.WAITING_ON_OWNER,
         },
-      },
-      orderBy: [{ createdAt: "desc" }],
-    });
-
-    const handoff = existing
-      ? await tx.handoffRequest.update({
-          where: { id: existing.id },
-          data: {
-            intakeSubmissionId: intake.id,
-            summary: summary || existing.summary,
-            recommendedPriority: priority,
-            recommendedOwnerAction,
-          },
-        })
-      : await tx.handoffRequest.create({
-          data: {
-            representativeId: params.context.representativeId,
-            contactId: params.context.contactId,
-            conversationId: params.context.conversationId,
-            intakeSubmissionId: intake.id,
-            reason: params.collectorState.intent,
-            summary: summary || "Structured intake completed.",
-            recommendedPriority: priority,
-            recommendedOwnerAction,
-            status: HandoffStatus.OPEN,
-          },
-        });
-
-    await tx.contact.update({
-      where: { id: params.context.contactId },
-      data: {
-        stage: ContactStage.WAITING_ON_OWNER,
-      },
-    });
+      });
+    }
 
     await tx.conversation.update({
       where: { id: params.context.conversationId },
@@ -1292,7 +1235,8 @@ export async function submitStructuredCollector(params: {
         type: EventType.INTAKE_SUBMITTED,
         payload: {
           intakeSubmissionId: intake.id,
-          handoffId: handoff.id,
+          handoffId: handoff?.id ?? null,
+          handoffOutcome: handoffResult.outcome,
           collectorKind: params.collectorState.kind,
           summary,
           priority,
@@ -1300,7 +1244,7 @@ export async function submitStructuredCollector(params: {
       },
     });
 
-    if (!existing) {
+    if (handoff && handoffResult.outcome === "created") {
       await tx.eventAudit.create({
         data: {
           representativeId: params.context.representativeId,
@@ -1316,104 +1260,24 @@ export async function submitStructuredCollector(params: {
       });
     }
 
-    await enqueueHandoffFollowUpWorkflowTx(tx, {
-      representativeId: params.context.representativeId,
-      representativeSlug: params.context.representativeSlug,
-      contactId: params.context.contactId,
-      conversationId: params.context.conversationId,
-      handoffId: handoff.id,
-    });
+    if (handoff) {
+      await enqueueHandoffFollowUpWorkflowTx(tx, {
+        representativeId: params.context.representativeId,
+        representativeSlug: params.context.representativeSlug,
+        contactId: params.context.contactId,
+        conversationId: params.context.conversationId,
+        handoffId: handoff.id,
+      });
+    }
 
     return {
-      handoffId: handoff.id,
+      handoffId: handoff?.id ?? null,
+      handoffOutcome: handoffResult.outcome,
       summary: summary || "Structured intake completed.",
       recommendedOwnerAction,
       priority,
     };
   });
-}
-
-export async function createPlanInvoice(params: {
-  context: ConversationContextRecord;
-  tier: PlanTier;
-  providerAccountId: string;
-}): Promise<{
-  invoiceId: string;
-  payload: string;
-  title: string;
-  starsAmount: number;
-}> {
-  assertTelegramStarsLivePaymentEnabled();
-  const plan = params.context.plans[params.tier];
-  if (!plan) {
-    throw new Error(`Plan "${params.tier}" is not configured for this representative.`);
-  }
-
-  const invoiceId = `${params.context.conversationId}_${plan.tier}_${Date.now()}`;
-  const payload = buildInvoicePayload(invoiceId);
-
-  const invoice = await prisma.$transaction(async (tx) => {
-    const createdInvoice = await tx.invoice.create({
-      data: {
-        id: invoiceId,
-        representativeId: params.context.representativeId,
-        contactId: params.context.contactId,
-        conversationId: params.context.conversationId,
-        planType: mapPricingPlanTypeToDb(plan.tier),
-        title: plan.name,
-        payload,
-        starsAmount: plan.starsAmount,
-        status: InvoiceStatus.PENDING,
-      },
-    });
-
-    if (plan.tier !== "sponsor") {
-      await createServicePaymentOrder(
-        {
-          id: `service-payment:${createdInvoice.id}`,
-          payerAudienceIdentityId: params.context.audienceIdentityId,
-          representativeId: params.context.representativeId,
-          provider: PaymentProvider.TELEGRAM_STARS,
-          providerAccountId: params.providerAccountId,
-          providerOrderId: createdInvoice.payload,
-          productCode: `plan:${plan.tier}`,
-          amountMinor: plan.starsAmount,
-          currency: "XTR",
-          entitlementUnits: Math.max(1, plan.includedReplies),
-          priceSnapshot: {
-            source: "telegram_stars",
-            planId: plan.id,
-            planType: plan.tier,
-            title: plan.name,
-            includedReplies: plan.includedReplies,
-          },
-        },
-        tx as never,
-      );
-    }
-
-    await tx.eventAudit.create({
-      data: {
-        representativeId: params.context.representativeId,
-        contactId: params.context.contactId,
-        conversationId: params.context.conversationId,
-        type: EventType.PAYMENT_INVOICE_CREATED,
-        payload: {
-          invoiceId: createdInvoice.id,
-          planType: plan.tier,
-          starsAmount: plan.starsAmount,
-        },
-      },
-    });
-    return createdInvoice;
-  });
-
-  return {
-    invoiceId: invoice.id,
-    payload: invoice.payload,
-    title: invoice.title,
-    starsAmount: invoice.starsAmount,
-  };
 }
 
 async function enqueueHandoffFollowUpWorkflowTx(
@@ -1520,40 +1384,6 @@ async function enqueueHandoffFollowUpWorkflowTx(
   });
 
   return workflow.id;
-}
-
-export async function markInvoiceDeliveryUncertain(
-  invoiceId: string,
-  errorMessage?: string,
-): Promise<void> {
-  const invoice = await prisma.invoice.findUnique({
-    where: { id: invoiceId },
-    select: {
-      id: true,
-      representativeId: true,
-      contactId: true,
-      conversationId: true,
-      status: true,
-    },
-  });
-
-  if (!invoice || invoice.status !== InvoiceStatus.PENDING) {
-    return;
-  }
-
-  await prisma.eventAudit.create({
-    data: {
-      representativeId: invoice.representativeId,
-      contactId: invoice.contactId,
-      conversationId: invoice.conversationId,
-      type: EventType.PAYMENT_INVOICE_CREATED,
-      payload: {
-        invoiceId: invoice.id,
-        deliveryStatus: "UNCERTAIN",
-        ...(errorMessage ? { errorMessage: errorMessage.slice(0, 500) } : {}),
-      },
-    },
-  });
 }
 
 export async function validatePendingInvoice(
@@ -2063,10 +1893,6 @@ export async function confirmInvoicePayment(
   });
 }
 
-export function buildInvoicePayload(invoiceId: string): string {
-  return `delegate:invoice:${invoiceId}`;
-}
-
 function normalizeSuccessfulPaymentInput(
   input: SuccessfulPaymentInput,
 ): SuccessfulPaymentInput {
@@ -2239,19 +2065,5 @@ function mapPricingPlanTypeFromDb(value: PricingPlanType): PlanTier {
     case PricingPlanType.FREE:
     default:
       return "free";
-  }
-}
-
-function mapPricingPlanTypeToDb(value: PlanTier): PricingPlanType {
-  switch (value) {
-    case "pass":
-      return PricingPlanType.PASS;
-    case "deep_help":
-      return PricingPlanType.DEEP_HELP;
-    case "sponsor":
-      return PricingPlanType.SPONSOR;
-    case "free":
-    default:
-      return PricingPlanType.FREE;
   }
 }

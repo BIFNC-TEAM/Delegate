@@ -90,7 +90,7 @@ describe("conversation platform schema", () => {
     expect(schema).toContain("model ConversationReadState");
     expect(schema).toContain("@@unique([conversationId, operatorId])");
     expect(schema).toContain("model ConversationInternalNote");
-    expect(schema).toContain("episodeId              String?");
+    expect(schema).toMatch(/episodeId\s+String\?/);
   });
 
   it("stores Matrix virtual identities without source credentials", () => {

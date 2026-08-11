@@ -986,6 +986,125 @@ describe("web audience identity resolver", () => {
     expect(client.agentUsageCharges[0]?.audienceIdentityId).toBe(target.id);
   });
 
+  it("proof-gates grants and tips while transferring their bound handoff requests", async () => {
+    const client = new FakeWebAudienceClient();
+    const source = await resolveAnonymousAudienceIdentity({ audienceId: "aud_source" }, client);
+    const target = await resolveAnonymousAudienceIdentity({ audienceId: "aud_target" }, client);
+    registerIdentity(client, target.id);
+    client.handoffEntitlementGrants.push({
+      id: "grant-source",
+      audienceIdentityId: source.id,
+    });
+    client.handoffRequests.push({
+      id: "request-source",
+      audienceIdentityId: source.id,
+      representativeId: "rep-1",
+      status: "OPEN",
+    });
+    client.tipContributions.push({
+      id: "tip-source",
+      audienceIdentityId: source.id,
+      amountMinor: 88,
+      creatorEarningId: "earning-source",
+    });
+
+    await expect(
+      mergeAudienceIdentity(
+        {
+          sourceAudienceIdentityId: source.id,
+          targetAudienceIdentityId: target.id,
+        },
+        client,
+      ),
+    ).rejects.toThrow(/financial conflict/i);
+    expect(client.handoffEntitlementGrants[0]?.audienceIdentityId).toBe(source.id);
+    expect(client.handoffRequests[0]?.audienceIdentityId).toBe(source.id);
+    expect(client.tipContributions[0]).toMatchObject({
+      audienceIdentityId: source.id,
+      amountMinor: 88,
+      creatorEarningId: "earning-source",
+    });
+
+    await mergeAudienceIdentity(
+      {
+        sourceAudienceIdentityId: source.id,
+        targetAudienceIdentityId: target.id,
+        transferVerifiedProvisionalAssets: true,
+      },
+      client,
+    );
+    expect(client.handoffEntitlementGrants[0]?.audienceIdentityId).toBe(target.id);
+    expect(client.handoffRequests[0]?.audienceIdentityId).toBe(target.id);
+    expect(client.tipContributions[0]).toMatchObject({
+      audienceIdentityId: target.id,
+      amountMinor: 88,
+      creatorEarningId: "earning-source",
+    });
+  });
+
+  it("transfers a free handoff request without financial-transfer proof", async () => {
+    const client = new FakeWebAudienceClient();
+    const source = await resolveAnonymousAudienceIdentity({ audienceId: "aud_source" }, client);
+    const target = await resolveAnonymousAudienceIdentity({ audienceId: "aud_target" }, client);
+    registerIdentity(client, target.id);
+    client.handoffRequests.push({
+      id: "free-request-source",
+      audienceIdentityId: source.id,
+      representativeId: "rep-1",
+      status: "OPEN",
+    });
+
+    await mergeAudienceIdentity(
+      {
+        sourceAudienceIdentityId: source.id,
+        targetAudienceIdentityId: target.id,
+      },
+      client,
+    );
+
+    expect(client.handoffRequests[0]?.audienceIdentityId).toBe(target.id);
+    expect(client.audienceIdentities.find((identity) => identity.id === source.id))
+      .toMatchObject({ status: "MERGED", mergedIntoId: target.id });
+  });
+
+  it("fails before mutation when source and target have active handoffs for one representative", async () => {
+    const client = new FakeWebAudienceClient();
+    const source = await resolveAnonymousAudienceIdentity({ audienceId: "aud_source" }, client);
+    const target = await resolveAnonymousAudienceIdentity({ audienceId: "aud_target" }, client);
+    registerIdentity(client, target.id);
+    client.handoffRequests.push(
+      {
+        id: "request-source",
+        audienceIdentityId: source.id,
+        representativeId: "rep-1",
+        status: "REVIEWING",
+      },
+      {
+        id: "request-target",
+        audienceIdentityId: target.id,
+        representativeId: "rep-1",
+        status: "ACCEPTED",
+      },
+    );
+
+    await expect(
+      mergeAudienceIdentity(
+        {
+          sourceAudienceIdentityId: source.id,
+          targetAudienceIdentityId: target.id,
+          transferVerifiedProvisionalAssets: true,
+        },
+        client,
+      ),
+    ).rejects.toThrow(/handoff conflict/i);
+    expect(client.audienceIdentities.find((identity) => identity.id === source.id))
+      .toMatchObject({ status: "ANONYMOUS", mergedIntoId: null });
+    expect(client.handoffRequests.map((request) => request.audienceIdentityId)).toEqual([
+      source.id,
+      target.id,
+    ]);
+  });
+
   it("does not combine two entitlement balances during provisional identity binding", async () => {
     const client = new FakeWebAudienceClient();
     const source = await resolveAnonymousAudienceIdentity({ audienceId: "aud_source" }, client);
@@ -1294,6 +1413,22 @@ class FakeWebAudienceClient {
   servicePaymentOrders: Array<{ id: string; payerAudienceIdentityId: string }> = [];
   agentTokenPurchases: Array<{ id: string; audienceIdentityId: string | null }> = [];
   agentUsageCharges: Array<{ id: string; audienceIdentityId: string | null }> = [];
+  handoffEntitlementGrants: Array<{
+    id: string;
+    audienceIdentityId: string;
+  }> = [];
+  handoffRequests: Array<{
+    id: string;
+    audienceIdentityId: string;
+    representativeId: string;
+    status: "OPEN" | "REVIEWING" | "ACCEPTED" | "DECLINED" | "CLOSED";
+  }> = [];
+  tipContributions: Array<{
+    id: string;
+    audienceIdentityId: string;
+    amountMinor: number;
+    creatorEarningId: string;
+  }> = [];
 
   $transaction = async (callback: any, _options?: unknown) => callback(this);
 
@@ -1638,6 +1773,44 @@ class FakeWebAudienceClient {
         (charge) => charge.audienceIdentityId === args.where.audienceIdentityId,
       ).length,
     updateMany: async (args: any) => updateAudienceIdentityRows(this.agentUsageCharges, args),
+  };
+
+  handoffEntitlementGrant = {
+    count: async (args: any) =>
+      this.handoffEntitlementGrants.filter(
+        (grant) => grant.audienceIdentityId === args.where.audienceIdentityId,
+      ).length,
+    updateMany: async (args: any) =>
+      updateAudienceIdentityRows(this.handoffEntitlementGrants, args),
+  };
+
+  handoffRequest = {
+    count: async (args: any) =>
+      this.handoffRequests.filter(
+        (request) => request.audienceIdentityId === args.where.audienceIdentityId,
+      ).length,
+    findMany: async (args: any) =>
+      this.handoffRequests
+        .filter(
+          (request) =>
+            request.audienceIdentityId === args.where.audienceIdentityId
+            && args.where.status.in.includes(request.status),
+        )
+        .map((request) => ({
+          id: request.id,
+          representativeId: request.representativeId,
+        })),
+    updateMany: async (args: any) =>
+      updateAudienceIdentityRows(this.handoffRequests, args),
+  };
+
+  tipContribution = {
+    count: async (args: any) =>
+      this.tipContributions.filter(
+        (tip) => tip.audienceIdentityId === args.where.audienceIdentityId,
+      ).length,
+    updateMany: async (args: any) =>
+      updateAudienceIdentityRows(this.tipContributions, args),
   };
 
   conversationTurn = {

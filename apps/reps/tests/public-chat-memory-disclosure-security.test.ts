@@ -77,6 +77,7 @@ describe("public chat memory disclosure boundary", () => {
     mocks.cookies.mockResolvedValue({ get: vi.fn() });
     mocks.getPublicRepresentativeRuntime.mockResolvedValue({
       status: "available",
+      accessMode: "CREDITS_ONLY",
       setup: {
         id: "rep-1",
         contract: { freeReplyLimit: 5 },
@@ -170,6 +171,7 @@ describe("public chat memory disclosure boundary", () => {
     };
     mocks.getPublicRepresentativeRuntime.mockResolvedValue({
       status: "available",
+      accessMode: "CREDITS_ONLY",
       setup: {
         id: "rep-1",
         contract: { freeReplyLimit: 5 },
@@ -215,6 +217,10 @@ describe("public chat memory disclosure boundary", () => {
         representativeSlug: "delegate",
         conversationId: "conversation-1",
         text: "hello",
+        walletBilling: expect.objectContaining({
+          accessMode: "CREDITS_ONLY",
+          freeReplyLimit: 5,
+        }),
       }),
     );
   });

@@ -1,6 +1,5 @@
 import { isIP } from "node:net";
 
-import type { PricingPlan } from "@delegate/domain";
 
 export type TelegramBotCommand = {
   command: string;
@@ -8,7 +7,6 @@ export type TelegramBotCommand = {
 };
 
 export function buildTelegramBotCommands(
-  starsPurchasesEnabled: boolean,
   computeRunsInBot = true,
 ): TelegramBotCommand[] {
   return [
@@ -16,9 +14,7 @@ export function buildTelegramBotCommands(
     { command: "plans", description: "Show service plans and continuation options" },
     {
       command: "buy",
-      description: starsPurchasesEnabled
-        ? "Buy Pass / Deep Help / Sponsor in Telegram Stars"
-        : "Continue Pass / Deep Help / Sponsor on Web",
+      description: "Open the current service catalog on Web",
     },
     {
       command: "compute",
@@ -163,21 +159,6 @@ function isPublicIpv6(hostname: string): boolean {
     return false;
   }
   return (firstHextet & 0xe000) === 0x2000;
-}
-
-export function formatTelegramPlans(
-  plans: PricingPlan[],
-  starsPurchasesEnabled: boolean,
-): string {
-  return plans
-    .map((plan) => {
-      const price =
-        starsPurchasesEnabled
-          ? ` · ${plan.stars} Stars`
-          : "";
-      return `${plan.name}${price}\n${plan.summary}\nIncluded replies: ${plan.includedReplies}`;
-    })
-    .join("\n\n");
 }
 
 export function buildWebRechargeMessage(input: {

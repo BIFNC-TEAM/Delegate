@@ -68,6 +68,7 @@ export async function GET(
         externalUserId,
         freeRepliesUsed: history.freeRepliesUsed,
         freeReplyLimit: runtime.setup.contract.freeReplyLimit,
+        accessMode: runtime.accessMode,
       }),
     });
     response.headers.set("Cache-Control", "private, no-store");
@@ -154,6 +155,7 @@ export async function POST(
           walletBilling: {
             externalUserId,
             representativeId: runtime.setup.id,
+            accessMode: runtime.accessMode,
             freeReplyLimit: runtime.setup.contract.freeReplyLimit,
             tokenAmount: 1,
             idempotencyKey: `public_chat:${conversation.id}:${clientMessageId}:reserve`,
@@ -166,6 +168,7 @@ export async function POST(
             externalUserId,
             freeRepliesUsed: acceptError.effectiveFreeRepliesUsed,
             freeReplyLimit: runtime.setup.contract.freeReplyLimit,
+            accessMode: runtime.accessMode,
           });
           const response = privateJson(
             {
@@ -191,6 +194,7 @@ export async function POST(
         externalUserId,
         freeRepliesUsed: conversation.freeRepliesUsed,
         freeReplyLimit: runtime.setup.contract.freeReplyLimit,
+        accessMode: runtime.accessMode,
       });
       const response = NextResponse.json(
         {
@@ -277,6 +281,7 @@ async function derivePublicWalletUsage(input: {
   externalUserId: string;
   freeRepliesUsed: number;
   freeReplyLimit: number;
+  accessMode: "FREE" | "TRIAL_THEN_CREDITS" | "CREDITS_ONLY";
 }) {
   const balance = process.env.DATABASE_URL?.trim()
     ? await getUserAgentWalletBalance({
@@ -284,12 +289,17 @@ async function derivePublicWalletUsage(input: {
         representativeId: input.representativeId,
       })
     : null;
-  return deriveTierUsage({
-    freeRepliesUsed: input.freeRepliesUsed,
-    freeReplyLimit: input.freeReplyLimit,
-    serviceCreditsAvailable: balance?.availableTokenAmount ?? 0,
-    serviceCreditsReserved: balance?.reservedTokenAmount ?? 0,
-  });
+  return {
+    ...deriveTierUsage({
+      freeRepliesUsed: input.freeRepliesUsed,
+      freeReplyLimit:
+        input.accessMode === "CREDITS_ONLY" ? 0 : input.freeReplyLimit,
+      serviceCreditsAvailable: balance?.availableTokenAmount ?? 0,
+      serviceCreditsReserved: balance?.reservedTokenAmount ?? 0,
+    }),
+    accessMode: input.accessMode,
+    unlimitedFreeAccess: input.accessMode === "FREE",
+  };
 }
 
 async function resolvePublicWalletExternalUserId(input: {

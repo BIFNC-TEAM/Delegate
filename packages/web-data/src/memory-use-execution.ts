@@ -778,7 +778,13 @@ export async function revalidateMemoryUseDeliverySourcesInTransaction(
   }
 
   try {
-    await assertRunStillCurrent(tx, run);
+    await assertRunStillCurrent(tx, run, {
+      allowedEpisodeStatuses: [
+        ConversationEpisodeStatus.ACTIVE,
+        ConversationEpisodeStatus.WAITING_USER,
+        ConversationEpisodeStatus.NEEDS_HUMAN,
+      ],
+    });
     for (const item of deliveryItems) {
       await assertItemStillInjectable(
         tx,
@@ -1107,6 +1113,9 @@ function assertRunOpen(run: { status: MemoryUseRunStatus }) {
 async function assertRunStillCurrent(
   tx: MemoryUseTransaction,
   run: RunSnapshotRecord,
+  options: {
+    allowedEpisodeStatuses?: readonly ConversationEpisodeStatus[];
+  } = {},
 ) {
   const [representative, conversation, generation] = await Promise.all([
     tx.representative.findUnique({
@@ -1154,7 +1163,7 @@ async function assertRunStillCurrent(
         activeEpisodeId: conversation.activeEpisodeId,
         representative,
       },
-    }, run.representativeVersionId)
+    }, run.representativeVersionId, options.allowedEpisodeStatuses)
     || conversation.representativeId !== run.representativeId
     || conversation.contactId !== run.contactId
     || normalizeOptionalSourceChannel(conversation.sourceChannel)
@@ -1184,6 +1193,9 @@ function generationPinsRepresentativeVersion(
     } | null;
   },
   representativeVersionId: string,
+  allowedEpisodeStatuses: readonly ConversationEpisodeStatus[] = [
+    ConversationEpisodeStatus.ACTIVE,
+  ],
 ) {
   if (!generation.episodeId) {
     // Pre-Episode generation rows are allowed only while they still pin the
@@ -1197,7 +1209,7 @@ function generationPinsRepresentativeVersion(
     && generation.episode?.id === generation.episodeId
     && generation.episode.conversationId === generation.conversationId
     && generation.episode.representativeVersionId === representativeVersionId
-    && generation.episode.status === ConversationEpisodeStatus.ACTIVE;
+    && allowedEpisodeStatuses.includes(generation.episode.status);
 }
 
 async function loadGovernedProjectionSources(

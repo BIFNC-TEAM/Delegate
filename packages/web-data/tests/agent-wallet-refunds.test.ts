@@ -2,10 +2,13 @@ import {
   AgentTokenPurchaseStatus,
   AmnLedgerEntryKind,
   AmnWalletAccountType,
+  BillingProductKind,
+  BillingRefundPolicy,
   CreatorEarningStatus,
   PaymentProvider,
   PaymentProviderEventType,
   RechargeOrderStatus,
+  RechargeRefundProviderStatus,
   type Prisma,
 } from "@prisma/client";
 import { describe, expect, it } from "vitest";
@@ -56,6 +59,113 @@ describe("agent wallet refunds and reversals", () => {
     );
     expect(client.rechargeOrders[0]?.status).toBe(RechargeOrderStatus.PAID);
     expect(client.userWallets[0]?.cashBalanceCents).toBe(200);
+    expect(client.ledgerEntries).toHaveLength(0);
+  });
+
+  it("never turns a non-refundable tip into a local cash refund", async () => {
+    const client = new FakeRefundClient();
+    Object.assign(client.rechargeOrders[0]!, {
+      productKindSnapshot: BillingProductKind.TIP,
+      refundPolicySnapshot: BillingRefundPolicy.NON_REFUNDABLE,
+    });
+
+    await expect(
+      refundRechargeOrder("recharge_1", {}, client),
+    ).rejects.toThrow("non-refundable products cannot be refunded");
+    expect(client.rechargeOrders[0]?.status).toBe(
+      RechargeOrderStatus.PAID,
+    );
+    expect(client.userWallets[0]?.cashBalanceCents).toBe(1200);
+    expect(client.ledgerEntries).toHaveLength(0);
+  });
+
+  it("allows a non-refundable tip order to settle only from a verified full provider refund", async () => {
+    const client = new FakeRefundClient();
+    Object.assign(client.rechargeOrders[0]!, {
+      productKindSnapshot: BillingProductKind.TIP,
+      refundPolicySnapshot: BillingRefundPolicy.NON_REFUNDABLE,
+    });
+    (client as FakeRefundClient & { rechargeRefund: unknown }).rechargeRefund = {
+      findUnique: async () => ({
+        id: "forced_refund_1",
+        rechargeOrderId: "recharge_1",
+        provider: PaymentProvider.MOCK,
+        providerStatus: RechargeRefundProviderStatus.SUCCEEDED,
+        originalAmountCents: 1200,
+        refundAmountCents: 1200,
+        payerOriginalAmountCents: 1200,
+        payerRefundAmountCents: 1200,
+        currency: "CNY",
+      }),
+    };
+
+    await expect(
+      refundRechargeOrder(
+        "recharge_1",
+        { rechargeRefundId: "forced_refund_1" },
+        client,
+      ),
+    ).rejects.toThrow("non-refundable products cannot be refunded");
+    expect(client.ledgerEntries).toHaveLength(0);
+
+    (client as FakeRefundClient & { tipContribution: unknown }).tipContribution = {
+      findUnique: async () => ({
+        status: "REFUNDED",
+        refundedAt: new Date("2026-08-11T00:00:00.000Z"),
+        creatorEarning: {
+          status: CreatorEarningStatus.REVERSED,
+          pendingCents: 0,
+          withdrawableCents: 0,
+          frozenCents: 0,
+          withdrawnCents: 0,
+        },
+      }),
+    };
+
+    await expect(
+      refundRechargeOrder(
+        "recharge_1",
+        {
+          providerEventId: "forced_refund_event_1",
+          rechargeRefundId: "forced_refund_1",
+        },
+        client,
+      ),
+    ).resolves.toMatchObject({
+      status: "refunded",
+      cashBalanceCents: 0,
+    });
+    expect(client.ledgerEntries).toHaveLength(2);
+  });
+
+  it("keeps a non-refundable tip quarantined when the provider refund is not successful and full", async () => {
+    const client = new FakeRefundClient();
+    Object.assign(client.rechargeOrders[0]!, {
+      productKindSnapshot: BillingProductKind.TIP,
+      refundPolicySnapshot: BillingRefundPolicy.NON_REFUNDABLE,
+    });
+    (client as FakeRefundClient & { rechargeRefund: unknown }).rechargeRefund = {
+      findUnique: async () => ({
+        id: "forced_refund_1",
+        rechargeOrderId: "recharge_1",
+        provider: PaymentProvider.MOCK,
+        providerStatus: RechargeRefundProviderStatus.PROCESSING,
+        originalAmountCents: 1200,
+        refundAmountCents: 1200,
+        payerOriginalAmountCents: 1200,
+        payerRefundAmountCents: 1200,
+        currency: "CNY",
+      }),
+    };
+
+    await expect(
+      refundRechargeOrder(
+        "recharge_1",
+        { rechargeRefundId: "forced_refund_1" },
+        client,
+      ),
+    ).rejects.toThrow("non-refundable products cannot be refunded");
+    expect(client.rechargeOrders[0]?.status).toBe(RechargeOrderStatus.PAID);
     expect(client.ledgerEntries).toHaveLength(0);
   });
 
@@ -277,6 +387,7 @@ type ProviderEventRow = {
   providerEventId: string;
   eventType: PaymentProviderEventType;
   rechargeOrderId: string | null;
+  rechargeRefundId: string | null;
 };
 
 type TokenPurchaseRow = {
@@ -675,6 +786,7 @@ class FakeRefundClient {
         providerEventId: args.create.providerEventId,
         eventType: args.create.eventType,
         rechargeOrderId: args.create.rechargeOrderId ?? null,
+        rechargeRefundId: args.create.rechargeRefundId ?? null,
       };
       this.providerEvents.push(event);
       return event;

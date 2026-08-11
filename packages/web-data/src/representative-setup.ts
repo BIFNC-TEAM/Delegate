@@ -8,13 +8,11 @@ import {
   inquiryIntentSchema,
   knowledgeDocumentKindSchema,
   knowledgeDocumentSchema,
-  pricingPlanSchema,
   representativeSkillSchema,
   skillPackSchema,
   type GroupActivation as DomainGroupActivation,
   type InquiryIntent,
   type KnowledgeDocument,
-  type PricingPlan,
   type Representative,
 } from "@delegate/domain";
 import {
@@ -40,7 +38,7 @@ import {
   EventType,
   GroupActivation,
   PolicyDecision,
-  PricingPlanType,
+  RepresentativeAccessMode,
   RepresentativeLifecycleState,
   RepresentativeChannelKind,
   SkillPackSource,
@@ -87,7 +85,6 @@ const representativeSetupInclude = {
     },
   },
   knowledgePack: true,
-  pricingPlans: true,
   capabilityProfiles: {
     where: { isDefault: true, isManaged: false },
     orderBy: { createdAt: "asc" },
@@ -165,32 +162,6 @@ const representativeSetupUpdateSchema = z.object({
   actionGate: actionGateSchema.default(demoRepresentative.actionGate),
   contract: conversationContractSchema,
   handoffPrompt: z.string().trim().min(1),
-  pricing: z
-    .array(pricingPlanSchema)
-    .length(4)
-    .superRefine((pricing, ctx) => {
-      const seen = new Set<string>();
-      for (const plan of pricing) {
-        if (seen.has(plan.tier)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: `Duplicate pricing tier: ${plan.tier}`,
-          });
-          return;
-        }
-        seen.add(plan.tier);
-      }
-
-      for (const tier of ["free", "pass", "deep_help", "sponsor"] as const) {
-        if (!seen.has(tier)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: `Missing pricing tier: ${tier}`,
-          });
-          return;
-        }
-      }
-    }),
   knowledgePack: z.object({
     identitySummary: z.string().trim().min(1),
     faq: z.array(editableKnowledgeDocumentSchema),
@@ -246,7 +217,6 @@ export type RepresentativeSetupSnapshot = Pick<
   | "skillPacks"
   | "knowledgePack"
   | "contract"
-  | "pricing"
   | "handoffPrompt"
   | "actionGate"
 > & {
@@ -346,6 +316,7 @@ export type PublicRepresentativeRuntimeResult =
   | {
       status: "available";
       setup: RepresentativeSetupSnapshot;
+      accessMode: RepresentativeAccessMode;
       governedContextEnabled: boolean;
       governedMemoryDisclosure: PublicGovernedMemoryDisclosure;
     }
@@ -551,7 +522,6 @@ export function buildRepresentativeRuntimeProfile(
       paywalledIntents: [...setup.contract.paywalledIntents],
       handoffWindowHours: setup.contract.handoffWindowHours,
     },
-    pricing: setup.pricing.map((plan) => ({ ...plan })),
     handoffPrompt: setup.handoffPrompt,
     actionGate: { ...setup.actionGate },
   };
@@ -770,19 +740,6 @@ export async function createRepresentative(
           materials: template.knowledgePack.materials,
           policies: template.knowledgePack.policies,
         },
-      });
-
-      await tx.pricingPlan.createMany({
-        data: template.pricing.map((plan) => ({
-          id: `pricing_${representative.id}_${plan.tier}`,
-          representativeId: representative.id,
-          type: mapPricingPlanTypeToDb(plan.tier),
-          name: plan.name,
-          starsAmount: plan.stars,
-          summary: plan.summary,
-          includedReplies: plan.includedReplies,
-          includesPriorityHandoff: plan.includesPriorityHandoff,
-        })),
       });
 
       for (const pack of demoRepresentative.skillPacks) {
@@ -1126,6 +1083,7 @@ export async function getPublicRepresentativeRuntime(
       ? {
           status: "available",
           setup,
+          accessMode: RepresentativeAccessMode.TRIAL_THEN_CREDITS,
           governedContextEnabled: false,
           governedMemoryDisclosure: resolvePublicGovernedMemoryDisclosure({
             policy: null,
@@ -1139,6 +1097,7 @@ export async function getPublicRepresentativeRuntime(
   const representative = await prisma.representative.findUnique({
     where: { slug: representativeSlug },
     select: {
+      accessMode: true,
       lifecycleState: true,
       publicMode: true,
       activeVersionId: true,
@@ -1206,6 +1165,7 @@ export async function getPublicRepresentativeRuntime(
   return {
     status: "available",
     setup,
+    accessMode: representative.accessMode,
     governedContextEnabled: governedMemoryDisclosure.enabled,
     governedMemoryDisclosure,
   };
@@ -1256,7 +1216,7 @@ export async function updateRepresentativeSetup(
       if (currentKnowledgePackRevision !== input.knowledgePackRevision) {
         throw new RepresentativeSetupConflictError();
       }
-      await tx.representative.update({
+      const liveRepresentative = await tx.representative.update({
         where: { id: representative.id },
         data: {
           displayName: input.name,
@@ -1264,9 +1224,11 @@ export async function updateRepresentativeSetup(
           tone: input.tone,
           publicMode: input.publicMode,
           groupActivation: mapGroupActivationToDb(input.groupActivation),
-          humanInLoop: input.humanInLoop,
           languages: input.languages,
-          freeReplyLimit: input.contract.freeReplyLimit,
+          // humanInLoop and freeReplyLimit are live commerce settings. The
+          // legacy setup payload still carries compatibility snapshots, but
+          // saving another setup section must never overwrite the dedicated
+          // commerce controls.
           freeScope: input.contract.freeScope,
           paywalledIntents: input.contract.paywalledIntents,
           handoffWindowHours: input.contract.handoffWindowHours,
@@ -1288,6 +1250,7 @@ export async function updateRepresentativeSetup(
           delegationMaxCostCents: input.delegation.maxCostCents,
           delegationKnowledgeScope: mapDelegationKnowledgeScopeToDb(input.delegation.knowledgeScope),
         },
+        select: { humanInLoop: true },
       });
 
       await upsertDefaultCapabilityPolicyProfile(tx, representative.id, input.compute);
@@ -1322,23 +1285,6 @@ export async function updateRepresentativeSetup(
         },
       });
 
-      await tx.pricingPlan.deleteMany({
-        where: { representativeId: representative.id },
-      });
-
-      await tx.pricingPlan.createMany({
-        data: input.pricing.map((plan) => ({
-          id: `pricing_${representative.id}_${plan.tier}`,
-          representativeId: representative.id,
-          type: mapPricingPlanTypeToDb(plan.tier),
-          name: plan.name,
-          starsAmount: plan.stars,
-          summary: plan.summary,
-          includedReplies: plan.includedReplies,
-          includesPriorityHandoff: plan.includesPriorityHandoff,
-        })),
-      });
-
       const [linkedKnowledgeCount, channelCount] = await Promise.all([
         tx.knowledgeAssetRepresentative.count({
           where: { representativeId: representative.id, enabled: true },
@@ -1353,8 +1299,7 @@ export async function updateRepresentativeSetup(
         input.knowledgePack.policies.length;
       const isPublishReady =
         (linkedKnowledgeCount > 0 || knowledgeItemCount > 0) &&
-        (!input.humanInLoop || Boolean(input.handoffPrompt.trim())) &&
-        input.pricing.length === 4 &&
+        (!liveRepresentative.humanInLoop || Boolean(input.handoffPrompt.trim())) &&
         (channelCount > 0 || input.publicMode);
       if (
         representative.lifecycleState === RepresentativeLifecycleState.DRAFT ||
@@ -1581,7 +1526,6 @@ function serializeRepresentativeSetup(
       ),
       handoffWindowHours: representative.handoffWindowHours,
     },
-    pricing: mergePricingPlans(representative.pricingPlans),
     handoffPrompt: representative.handoffPrompt || demoRepresentative.handoffPrompt,
     actionGate: parseActionGate(representative.actionGate),
     compute: {
@@ -1620,7 +1564,6 @@ export function applyRepresentativeVersionSnapshot(
   const delegation = asJsonRecord(snapshot.delegation);
   const knowledge = asJsonRecord(snapshot.knowledge);
   const parsedContract = conversationContractSchema.safeParse(conversation);
-  const parsedPricing = parseSnapshotPricing(snapshot.pricing);
   const parsedGroupActivation = groupActivationSchema.safeParse(snapshot.groupActivation);
   const currentlyAllowedSkills = new Set(current.skills);
   const parsedSkills = Array.isArray(governance?.allowedSkills)
@@ -1669,8 +1612,9 @@ export function applyRepresentativeVersionSnapshot(
       : "mention_only",
     publicMode:
       typeof snapshot.publicMode === "boolean" ? snapshot.publicMode : current.publicMode,
-    humanInLoop:
-      typeof snapshot.humanInLoop === "boolean" ? snapshot.humanInLoop : current.humanInLoop,
+    // Commerce controls are live owner settings. They intentionally are not
+    // pinned to the published content version.
+    humanInLoop: current.humanInLoop,
     skills: Array.isArray(governance?.allowedSkills) ? parsedSkills : [],
     skillPacks: parsedSkillPacks,
     knowledgePack: knowledge
@@ -1691,8 +1635,12 @@ export function applyRepresentativeVersionSnapshot(
           ),
         }
       : current.knowledgePack,
-    contract: parsedContract.success ? parsedContract.data : current.contract,
-    pricing: parsedPricing.length === 4 ? parsedPricing : current.pricing,
+    contract: parsedContract.success
+      ? {
+          ...parsedContract.data,
+          freeReplyLimit: current.contract.freeReplyLimit,
+        }
+      : current.contract,
     handoffPrompt:
       readSnapshotString(conversation?.handoffPrompt) ?? current.handoffPrompt,
     actionGate: resolvePublishedActionGateCeiling(
@@ -2256,32 +2204,6 @@ function resolveEffectiveMcpDefaultToolName(params: {
     ?? null;
 }
 
-function parseSnapshotPricing(value: unknown): PricingPlan[] {
-  if (!Array.isArray(value)) return [];
-
-  return value.flatMap((rawPlan) => {
-    const canonical = pricingPlanSchema.safeParse(rawPlan);
-    if (canonical.success) return [canonical.data];
-
-    // Versions published before the canonical domain snapshot used Prisma's
-    // field names. Continue to honor those immutable historical versions.
-    const legacy = asJsonRecord(rawPlan);
-    const rawTier = readSnapshotString(legacy?.type)?.toLowerCase();
-    const tier = rawTier === "free" || rawTier === "pass" || rawTier === "deep_help" || rawTier === "sponsor"
-      ? rawTier
-      : undefined;
-    const parsedLegacy = pricingPlanSchema.safeParse({
-      tier,
-      name: legacy?.name,
-      stars: legacy?.starsAmount,
-      summary: legacy?.summary,
-      includedReplies: legacy?.includedReplies,
-      includesPriorityHandoff: legacy?.includesPriorityHandoff,
-    });
-    return parsedLegacy.success ? [parsedLegacy.data] : [];
-  });
-}
-
 function asJsonRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -2322,7 +2244,6 @@ function getOrCreateDemoFallbackSetupSnapshot(): RepresentativeSetupSnapshot {
         paywalledIntents: [...demoRepresentative.contract.paywalledIntents],
         handoffWindowHours: demoRepresentative.contract.handoffWindowHours,
       },
-      pricing: demoRepresentative.pricing.map((plan) => ({ ...plan })),
       handoffPrompt: demoRepresentative.handoffPrompt,
       actionGate: { ...demoRepresentative.actionGate },
       compute: cloneComputeSetup(defaultComputeSetup),
@@ -2349,16 +2270,16 @@ function updateDemoFallbackRepresentativeSetup(
   snapshot.languages = [...input.languages];
   snapshot.groupActivation = input.groupActivation;
   snapshot.publicMode = input.publicMode;
-  snapshot.humanInLoop = input.humanInLoop;
   snapshot.contract = {
-    freeReplyLimit: input.contract.freeReplyLimit,
+    // Match the database-backed setup path: commerce-owned fields remain
+    // unchanged when an unrelated legacy setup section is saved.
+    freeReplyLimit: snapshot.contract.freeReplyLimit,
     freeScope: [...input.contract.freeScope],
     paywalledIntents: [...input.contract.paywalledIntents],
     handoffWindowHours: input.contract.handoffWindowHours,
   };
   snapshot.handoffPrompt = input.handoffPrompt;
   snapshot.actionGate = { ...input.actionGate };
-  snapshot.pricing = input.pricing.map((plan) => ({ ...plan }));
   snapshot.knowledgePack = {
     identitySummary: input.knowledgePack.identitySummary,
     faq: normalizeKnowledgeDocuments(input.knowledgePack.faq, "faq"),
@@ -2397,7 +2318,6 @@ function cloneRepresentativeSetupSnapshot(
       paywalledIntents: [...snapshot.contract.paywalledIntents],
       handoffWindowHours: snapshot.contract.handoffWindowHours,
     },
-    pricing: snapshot.pricing.map((plan) => ({ ...plan })),
     actionGate: { ...snapshot.actionGate },
     compute: cloneComputeSetup(snapshot.compute),
     delegation: { ...snapshot.delegation },
@@ -2453,7 +2373,6 @@ function buildRepresentativeTemplate(params: {
       paywalledIntents: [...demoRepresentative.contract.paywalledIntents],
       handoffWindowHours: demoRepresentative.contract.handoffWindowHours,
     },
-    pricing: demoRepresentative.pricing.map((plan) => ({ ...plan })),
     handoffPrompt: `${safeOwnerName} 的真人评估入口已经开启。请留下你的身份、需求摘要、预算区间、目标时间，以及为什么需要真人接手。`,
     actionGate: { ...demoRepresentative.actionGate },
     compute: cloneComputeSetup(defaultComputeSetup),
@@ -2908,26 +2827,6 @@ function slugify(value: string): string {
   return normalized || "founder-representative";
 }
 
-function mergePricingPlans(plans: Array<RepresentativeSetupRecord["pricingPlans"][number]>): PricingPlan[] {
-  const plansByTier = new Map<PricingPlan["tier"], PricingPlan>();
-
-  for (const plan of plans) {
-    const tier = mapPricingPlanTypeFromDb(plan.type);
-    plansByTier.set(tier, {
-      tier,
-      name: plan.name,
-      stars: plan.starsAmount,
-      summary: plan.summary,
-      includedReplies: plan.includedReplies,
-      includesPriorityHandoff: plan.includesPriorityHandoff,
-    });
-  }
-
-  return (["free", "pass", "deep_help", "sponsor"] as const).map((tier) => {
-    return plansByTier.get(tier) ?? demoRepresentative.pricing.find((plan) => plan.tier === tier)!;
-  });
-}
-
 function parseKnowledgeDocuments(
   value: Prisma.JsonValue | null | undefined,
   fallback: KnowledgeDocument[],
@@ -3043,20 +2942,6 @@ function mapGroupActivationFromDb(value: GroupActivation): DomainGroupActivation
   }
 }
 
-function mapPricingPlanTypeToDb(value: PricingPlan["tier"]): PricingPlanType {
-  switch (value) {
-    case "pass":
-      return PricingPlanType.PASS;
-    case "deep_help":
-      return PricingPlanType.DEEP_HELP;
-    case "sponsor":
-      return PricingPlanType.SPONSOR;
-    case "free":
-    default:
-      return PricingPlanType.FREE;
-  }
-}
-
 function mapSkillPackSourceToDb(value: "builtin" | "owner_upload" | "clawhub"): SkillPackSource {
   switch (value) {
     case "clawhub":
@@ -3134,18 +3019,4 @@ function mapDelegationKnowledgeScopeFromDb(
   return value === DelegationKnowledgeScope.PUBLIC_KNOWLEDGE
     ? "public_knowledge"
     : "user_input_only";
-}
-
-function mapPricingPlanTypeFromDb(value: PricingPlanType): PricingPlan["tier"] {
-  switch (value) {
-    case PricingPlanType.PASS:
-      return "pass";
-    case PricingPlanType.DEEP_HELP:
-      return "deep_help";
-    case PricingPlanType.SPONSOR:
-      return "sponsor";
-    case PricingPlanType.FREE:
-    default:
-      return "free";
-  }
 }

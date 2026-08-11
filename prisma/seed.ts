@@ -370,23 +370,6 @@ export async function seedDatabase(
       },
     });
 
-    await tx.pricingPlan.deleteMany({
-      where: { representativeId: representative.id },
-    });
-
-    await tx.pricingPlan.createMany({
-      data: demoRepresentative.pricing.map((plan) => ({
-        id: `pricing_${representative.id}_${plan.tier}`,
-        representativeId: representative.id,
-        type: mapPricingPlanType(plan.tier),
-        name: plan.name,
-        starsAmount: plan.stars,
-        summary: plan.summary,
-        includedReplies: plan.includedReplies,
-        includesPriorityHandoff: plan.includesPriorityHandoff,
-      })),
-    });
-
     const skillPackIdsBySlug = new Map<string, string>();
 
     for (const pack of demoRepresentative.skillPacks) {
@@ -1334,14 +1317,6 @@ function buildSeedRepresentativeVersionSnapshot(): Prisma.InputJsonObject {
       materials: demoRepresentative.knowledgePack.materials.map((item) => ({ ...item })),
       policies: demoRepresentative.knowledgePack.policies.map((item) => ({ ...item })),
     },
-    pricing: demoRepresentative.pricing.map((plan) => ({
-      type: mapPricingPlanType(plan.tier),
-      name: plan.name,
-      starsAmount: plan.stars,
-      summary: plan.summary,
-      includedReplies: plan.includedReplies,
-      includesPriorityHandoff: plan.includesPriorityHandoff,
-    })),
     skills: demoRepresentative.skillPacks.map((pack) => ({
       slug: pack.slug,
       version: pack.version ?? null,
@@ -1749,20 +1724,6 @@ function mapGroupActivationToDb(value: (typeof demoRepresentative.groupActivatio
     case "reply_or_mention":
     default:
       return GroupActivation.REPLY_OR_MENTION;
-  }
-}
-
-function mapPricingPlanType(value: string): PricingPlanType {
-  switch (value) {
-    case "pass":
-      return PricingPlanType.PASS;
-    case "deep_help":
-      return PricingPlanType.DEEP_HELP;
-    case "sponsor":
-      return PricingPlanType.SPONSOR;
-    case "free":
-    default:
-      return PricingPlanType.FREE;
   }
 }
 

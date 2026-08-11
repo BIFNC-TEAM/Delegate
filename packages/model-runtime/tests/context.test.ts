@@ -66,7 +66,10 @@ describe("buildRepresentativeReplyPrompt", () => {
     );
     expect(prompt.input).not.toContain("score=0.91");
     expect(prompt.input).not.toContain("[L1");
-    expect(prompt.input).toContain("Paid plan offer for this turn: none");
+    expect(prompt.input).toContain("Paid continuation: none");
+    expect(prompt.input).toContain(
+      "Do not gate, upsell, or mention plan names or prices in this turn.",
+    );
     expect(prompt.input).not.toContain("Pass (180 Stars)");
     expect(prompt.input).toContain("Reply outline:");
     expect(prompt.input).toContain("Scoped subagent boundary:");

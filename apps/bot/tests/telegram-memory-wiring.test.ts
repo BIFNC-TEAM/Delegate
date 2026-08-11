@@ -15,7 +15,7 @@ describe("Telegram memory runtime wiring", () => {
     );
     expect(start.indexOf("deliverTelegramMemoryDisclosure")).toBeGreaterThan(-1);
     expect(start.indexOf("deliverTelegramMemoryDisclosure")).toBeLessThan(
-      start.indexOf("startPayload.purchaseTier"),
+      start.indexOf("const payloadNote"),
     );
   });
 

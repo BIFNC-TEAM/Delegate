@@ -172,11 +172,8 @@ function buildContractBlock(representative: Representative, plan: ConversationPl
     `- Free reply limit: ${representative.contract.freeReplyLimit}`,
     `- Free scope: ${representative.contract.freeScope.join(", ")}`,
     plan.suggestedPlan
-      ? `- Paid plan offer for this turn: ${representative.pricing
-          .filter((pricingPlan) => pricingPlan.tier === plan.suggestedPlan)
-          .map((pricingPlan) => `${pricingPlan.name} (${pricingPlan.stars} Stars)`)
-          .join(", ") || "none"}`
-      : "- Paid plan offer for this turn: none",
+      ? "- Paid continuation: direct the user to the current commerce catalog; never invent a tier name or price."
+      : "- Paid continuation: none",
     plan.suggestedPlan
       ? "- Only the exact offer above may be mentioned."
       : "- Do not gate, upsell, or mention plan names or prices in this turn.",

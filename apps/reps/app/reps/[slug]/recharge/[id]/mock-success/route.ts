@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  AGENT_WALLET_TIP_PRODUCT_CODE,
   AgentWalletReconciliationError,
   completeMockRechargeAndPurchaseAgentTokens,
   getPublicRepresentativeRuntime,
@@ -45,6 +46,7 @@ export async function POST(
       select: {
         representativeId: true,
         productCode: true,
+        productKindSnapshot: true,
         userWallet: {
           select: {
             audienceIdentityId: true,
@@ -58,8 +60,18 @@ export async function POST(
       === principal.audienceIdentityId;
     const matchesPurchaseIntent =
       rechargeOrder?.representativeId === runtime.setup.id
-      && rechargeOrder.productCode ===
-        AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE;
+      && (
+        (
+          rechargeOrder.productCode ===
+            AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+          && (rechargeOrder.productKindSnapshot === null
+            || rechargeOrder.productKindSnapshot === "SERVICE_PACKAGE")
+        )
+        || (
+          rechargeOrder.productCode === AGENT_WALLET_TIP_PRODUCT_CODE
+          && rechargeOrder.productKindSnapshot === "TIP"
+        )
+      );
     if (!ownedByPrincipal || !matchesPurchaseIntent || !rechargeOrder) {
       return privateJson({ error: "Recharge order not found." }, 404);
     }
@@ -75,10 +87,13 @@ export async function POST(
       ...(typeof body.providerEventId === "string" && body.providerEventId.trim()
         ? { providerEventId: body.providerEventId.trim() }
         : {}),
-      purchaseIdempotencyKey: `public_token_purchase:${id}`,
+      purchaseIdempotencyKey: `public_commerce_fulfillment:${id}`,
     });
 
-    const response = privateJson(result, 200);
+    const response = privateJson(
+      serializePublicMockCommerceCompletion(result),
+      200,
+    );
     setPublicAudienceSessionCookie(response, request, slug, sessionState);
     return response;
   } catch (error) {
@@ -110,6 +125,58 @@ export async function POST(
       400,
     );
   }
+}
+
+type MockCommerceCompletion = Awaited<
+  ReturnType<typeof completeMockRechargeAndPurchaseAgentTokens>
+>;
+
+/**
+ * Keep the browser response deliberately smaller than the finance-domain
+ * fulfillment result. The raw result contains wallet identities, revenue
+ * splits and ledger references that are server-only implementation details.
+ */
+function serializePublicMockCommerceCompletion(
+  result: MockCommerceCompletion,
+) {
+  const rechargeOrder = result.rechargeOrder;
+  const publicRechargeOrder = {
+    id: rechargeOrder.id,
+    billingProductId: rechargeOrder.billingProductId,
+    billingPriceVersionId: rechargeOrder.billingPriceVersionId,
+    productName: rechargeOrder.productNameSnapshot,
+    productKind: result.productKind,
+    entitlementUnits: rechargeOrder.entitlementUnitsSnapshot,
+    unitName: rechargeOrder.unitNameSnapshot,
+    handoffAllowance: rechargeOrder.handoffAllowanceSnapshot,
+    handoffUnits: rechargeOrder.handoffUnitsSnapshot,
+    handoffServiceLevel: rechargeOrder.handoffServiceLevelSnapshot,
+    handoffValidityDays: rechargeOrder.handoffValidityDaysSnapshot,
+    amountCents: rechargeOrder.amountCents,
+    currency: rechargeOrder.currency,
+    provider: rechargeOrder.provider,
+    status: rechargeOrder.status,
+    checkoutUrl: rechargeOrder.checkoutUrl,
+    checkoutExpiresAt: rechargeOrder.checkoutExpiresAt,
+  };
+
+  if (result.productKind === "TIP") {
+    return {
+      rechargeOrder: publicRechargeOrder,
+      tokenPurchase: null,
+    };
+  }
+
+  return {
+    rechargeOrder: publicRechargeOrder,
+    tokenPurchase: {
+      tokenAmount: result.tokenPurchase.tokenAmount,
+      remainingTokenAmount: result.tokenPurchase.remainingTokenAmount,
+      availableTokenAmount: result.tokenPurchase.availableTokenAmount,
+      reservedTokenAmount: result.tokenPurchase.reservedTokenAmount,
+      currency: result.tokenPurchase.currency,
+    },
+  };
 }
 
 function privateJson(body: unknown, status: number) {

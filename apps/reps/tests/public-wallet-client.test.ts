@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   PUBLIC_WALLET_UPDATED_EVENT,
+  buildPublicCommerceCompletionWalletUpdate,
   getCheckoutSecondsRemaining,
   getPublicRechargeStatusPresentation,
   getWeChatPaymentPollDelayMs,
@@ -28,12 +29,43 @@ describe("public wallet client updates", () => {
       representativeSlug: "delegate",
       serviceCreditsAvailable: 18,
       serviceCreditsReserved: 2,
+      handoffEntitlement: {
+        hasUnlimited: false,
+        limitedRemainingUses: 2,
+        highestServiceLevel: "PRIORITY",
+        nextExpiryAt: "2026-08-30T00:00:00.000Z",
+      },
     });
 
     expect(received).toEqual({
       representativeSlug: "delegate",
       serviceCreditsAvailable: 18,
       serviceCreditsReserved: 2,
+      handoffEntitlement: {
+        hasUnlimited: false,
+        limitedRemainingUses: 2,
+        highestServiceLevel: "PRIORITY",
+        nextExpiryAt: "2026-08-30T00:00:00.000Z",
+      },
+    });
+  });
+
+  it("does not create a credit update for a completed tip", () => {
+    expect(buildPublicCommerceCompletionWalletUpdate({
+      representativeSlug: "delegate",
+      tokenPurchase: null,
+    })).toBeNull();
+
+    expect(buildPublicCommerceCompletionWalletUpdate({
+      representativeSlug: "delegate",
+      tokenPurchase: {
+        availableTokenAmount: 12,
+        reservedTokenAmount: 1,
+      },
+    })).toEqual({
+      representativeSlug: "delegate",
+      serviceCreditsAvailable: 12,
+      serviceCreditsReserved: 1,
     });
   });
 
@@ -54,8 +86,13 @@ describe("public wallet client updates", () => {
       billingProductId: "product-basic",
       billingPriceVersionId: "price-basic-v1",
       productName: "基础服务包",
+      productKind: "SERVICE_PACKAGE",
       entitlementUnits: 5,
-      unitName: "服务额度",
+      unitName: "credit",
+      handoffAllowance: "NONE",
+      handoffUnits: null,
+      handoffServiceLevel: null,
+      handoffValidityDays: null,
       amountCents: 500,
       currency: "CNY",
       provider: "mock",
@@ -132,25 +169,50 @@ function walletStateFixture(): PublicWalletStateSnapshot {
       serviceCreditsPurchased: 12,
       serviceCreditsConsumed: 4,
     },
-    servicePackages: [{
+    commerceSettings: {
+      accessMode: "TRIAL_THEN_CREDITS",
+      humanInLoop: true,
+      handoffAccessMode: "PACKAGE_REQUIRED",
+      tipsEnabled: true,
+    },
+    handoffEntitlement: {
+      hasUnlimited: false,
+      limitedRemainingUses: 1,
+      highestServiceLevel: "PRIORITY",
+      nextExpiryAt: "2026-08-30T00:00:00.000Z",
+    },
+    commerceProducts: [{
       productId: "product-standard",
       priceVersionId: "price-standard-v1",
+      kind: "SERVICE_PACKAGE",
       name: "标准服务包",
       description: "适用于当前数字代表",
+      sortOrder: 0,
+      isRecommended: true,
       amountCents: 2000,
       currency: "CNY",
       entitlementUnits: 20,
-      unitName: "服务额度",
+      unitName: "credit",
       refundPolicy: "FULL_WHEN_UNUSED",
       expiryPolicy: "NEVER_EXPIRES",
+      entitlementValidityDays: null,
+      handoffAllowance: "LIMITED",
+      handoffUnits: 1,
+      handoffServiceLevel: "PRIORITY",
+      handoffValidityDays: 30,
     }],
     orders: [{
       id: "order-latest",
       billingProductId: "product-standard",
       billingPriceVersionId: "price-standard-v1",
       productName: "标准服务包",
+      productKind: "SERVICE_PACKAGE",
       entitlementUnits: 20,
-      unitName: "服务额度",
+      unitName: "credit",
+      handoffAllowance: "LIMITED",
+      handoffUnits: 1,
+      handoffServiceLevel: "PRIORITY",
+      handoffValidityDays: 30,
       amountCents: 2000,
       currency: "CNY",
       provider: "mock",

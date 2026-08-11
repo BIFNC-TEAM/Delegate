@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  listPublicCommerceProducts,
   listPublicServicePackages,
+  resolvePublicCommerceProduct,
   resolvePublicServicePackage,
 } from "../src/billing-products";
 
@@ -76,7 +78,7 @@ describe("public billing products", () => {
     });
   });
 
-  it("fails closed for commercial terms the current ledger cannot fulfill", async () => {
+  it("accepts arbitrary price ratios and fails closed for unsupported terms", async () => {
     const client = new FakeBillingProductClient([
       {
         ...activePriceVersion(),
@@ -93,8 +95,9 @@ describe("public billing products", () => {
         },
         client,
       ),
-    ).rejects.toMatchObject({
-      code: "SERVICE_PACKAGE_INVALID",
+    ).resolves.toMatchObject({
+      amountCents: 1_000,
+      entitlementUnits: 333,
     });
 
     const unsupportedUnit = new FakeBillingProductClient([
@@ -115,6 +118,86 @@ describe("public billing products", () => {
       code: "SERVICE_PACKAGE_INVALID",
     });
   });
+
+  it("returns a unified ordered catalog and enforces representative commerce settings", async () => {
+    const service = {
+      ...activePriceVersion(),
+      amountMinor: 1_000,
+      entitlementUnits: 333,
+      handoffAllowance: "LIMITED",
+      handoffUnits: 2,
+      handoffServiceLevel: "PRIORITY",
+      handoffValidityDays: 30,
+      billingProduct: {
+        ...activePriceVersion().billingProduct,
+        kind: "SERVICE_PACKAGE",
+        sortOrder: 2,
+        isRecommended: true,
+      },
+    };
+    const tip = {
+      ...activePriceVersion(),
+      id: "price-tip",
+      billingProductId: "product-tip",
+      amountMinor: 100,
+      unitName: "tip",
+      entitlementUnits: 0,
+      refundPolicy: "NON_REFUNDABLE",
+      handoffAllowance: "NONE",
+      billingProduct: {
+        ...activePriceVersion().billingProduct,
+        id: "product-tip",
+        name: "支持一下",
+        kind: "TIP",
+        sortOrder: 1,
+        isRecommended: false,
+      },
+    };
+    const client = new FakeBillingProductClient(
+      [service, tip] as ReturnType<typeof activePriceVersion>[],
+      { accessMode: "TRIAL_THEN_CREDITS", tipsEnabled: true },
+    );
+
+    await expect(
+      listPublicCommerceProducts({ representativeId: "rep-1" }, client),
+    ).resolves.toMatchObject([
+      { kind: "TIP", priceVersionId: "price-tip", sortOrder: 1 },
+      {
+        kind: "SERVICE_PACKAGE",
+        priceVersionId: "price-1",
+        sortOrder: 2,
+        isRecommended: true,
+        handoffAllowance: "LIMITED",
+        handoffUnits: 2,
+        handoffServiceLevel: "PRIORITY",
+        handoffValidityDays: 30,
+      },
+    ]);
+    await expect(
+      resolvePublicCommerceProduct(
+        { representativeId: "rep-1", billingPriceVersionId: "price-tip" },
+        client,
+      ),
+    ).resolves.toMatchObject({
+      kind: "TIP",
+      entitlementUnits: 0,
+      refundPolicy: "NON_REFUNDABLE",
+    });
+
+    const disabled = new FakeBillingProductClient(
+      [service, tip] as ReturnType<typeof activePriceVersion>[],
+      { accessMode: "FREE", tipsEnabled: false },
+    );
+    await expect(
+      listPublicCommerceProducts({ representativeId: "rep-1" }, disabled),
+    ).resolves.toEqual([]);
+    await expect(
+      resolvePublicCommerceProduct(
+        { representativeId: "rep-1", billingPriceVersionId: "price-tip" },
+        disabled,
+      ),
+    ).rejects.toMatchObject({ code: "COMMERCE_PRODUCT_UNAVAILABLE" });
+  });
 });
 
 function activePriceVersion() {
@@ -131,11 +214,18 @@ function activePriceVersion() {
     refundPolicy: "FULL_WHEN_UNUSED",
     expiryPolicy: "NEVER_EXPIRES",
     entitlementValidityDays: null,
+    handoffAllowance: "NONE",
+    handoffUnits: null,
+    handoffServiceLevel: null,
+    handoffValidityDays: null,
     billingProduct: {
       id: "product-1",
       representativeId: "rep-1",
       name: "标准服务包",
       description: "用于当前数字代表",
+      kind: "SERVICE_PACKAGE",
+      sortOrder: 0,
+      isRecommended: false,
       status: "ACTIVE",
     },
   };
@@ -144,6 +234,10 @@ function activePriceVersion() {
 class FakeBillingProductClient {
   constructor(
     private readonly versions: ReturnType<typeof activePriceVersion>[],
+    private readonly settings?: {
+      accessMode: "FREE" | "TRIAL_THEN_CREDITS" | "CREDITS_ONLY";
+      tipsEnabled: boolean;
+    },
   ) {}
 
   billingPriceVersion = {
@@ -153,6 +247,13 @@ class FakeBillingProductClient {
         args as { where: { id: string } }
       ).where.id;
       return this.versions.find((version) => version.id === id) ?? null;
+    },
+  };
+
+  representative = {
+    findUnique: async (_args: unknown) => this.settings ?? {
+      accessMode: "TRIAL_THEN_CREDITS" as const,
+      tipsEnabled: false,
     },
   };
 }

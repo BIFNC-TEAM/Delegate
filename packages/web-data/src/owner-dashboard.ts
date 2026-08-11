@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 
 import { prisma } from "./prisma";
+import { resolveHandoffRequestInTransaction } from "./handoff-entitlements";
 
 export type DashboardOverviewSnapshot = {
   representative: {
@@ -481,6 +482,11 @@ export async function setHandoffRequestStatus(params: {
   handoffId: string;
   status: "open" | "reviewing" | "accepted" | "declined" | "closed";
 }): Promise<DashboardOverviewSnapshot["handoffRequests"][number]> {
+  if (params.status === "accepted") {
+    throw new Error(
+      "Accept handoffs through the conversation assignment action so paid access is consumed atomically.",
+    );
+  }
   if (shouldUseStaticFallbackMode(params.representativeSlug)) {
     return setDemoFallbackHandoffStatus(params.handoffId, params.status);
   }
@@ -503,17 +509,33 @@ export async function setHandoffRequestStatus(params: {
     }
 
     const updated = await prisma.$transaction(async (tx) => {
-      const nextHandoff = await tx.handoffRequest.update({
+      if (params.status === "declined" || params.status === "closed") {
+        await resolveHandoffRequestInTransaction({
+          handoffRequestId: handoff.id,
+          status: params.status === "declined"
+            ? HandoffStatus.DECLINED
+            : HandoffStatus.CLOSED,
+          reason: `owner_dashboard_${params.status}`,
+        }, tx);
+      } else if (params.status === "reviewing") {
+        if (handoff.status === HandoffStatus.OPEN) {
+          await tx.handoffRequest.update({
+            where: { id: handoff.id },
+            data: { status: HandoffStatus.REVIEWING },
+          });
+        } else if (handoff.status !== HandoffStatus.REVIEWING) {
+          throw new Error("Only an open handoff can move to reviewing.");
+        }
+      } else if (handoff.status !== HandoffStatus.OPEN) {
+        throw new Error("A handoff cannot be reopened after review or resolution.");
+      }
+
+      const nextHandoff = await tx.handoffRequest.findUniqueOrThrow({
         where: { id: handoff.id },
-        data: {
-          status: mapHandoffStatusToDb(params.status),
-        },
-        include: {
-          contact: true,
-        },
+        include: { contact: true },
       });
 
-      if (params.status === "accepted" || params.status === "declined" || params.status === "closed") {
+      if (params.status === "declined" || params.status === "closed") {
         await cancelHandoffWorkflowsTx(tx, {
           handoffId: nextHandoff.id,
           resolvedAt: new Date(),
@@ -996,24 +1018,6 @@ function normalizeWorkflowEnginePhase(
     case "DISPATCH_PENDING":
     default:
       return "dispatch_pending";
-  }
-}
-
-function mapHandoffStatusToDb(
-  value: DashboardOverviewSnapshot["handoffRequests"][number]["status"],
-): HandoffStatus {
-  switch (value) {
-    case "reviewing":
-      return HandoffStatus.REVIEWING;
-    case "accepted":
-      return HandoffStatus.ACCEPTED;
-    case "declined":
-      return HandoffStatus.DECLINED;
-    case "closed":
-      return HandoffStatus.CLOSED;
-    case "open":
-    default:
-      return HandoffStatus.OPEN;
   }
 }
 

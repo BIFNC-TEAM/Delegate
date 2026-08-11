@@ -29,6 +29,7 @@ import {
   type WalletWriteTransactionOptions,
 } from "./agent-wallet-write";
 import { AgentWalletReconciliationError } from "./agent-wallet-usage-charge";
+import { projectCompatibilityUnitPrice } from "./commercial-ratio";
 import { prisma } from "./prisma";
 
 type UserWalletRecord = {
@@ -139,6 +140,7 @@ type TokenPurchaseClient = Omit<WalletLedgerClient, "$transaction"> &
       currency: string;
       amountCents: number;
       status: RechargeOrderStatus;
+      productKindSnapshot?: string | null;
       billingPriceVersionId?: string | null;
       unitNameSnapshot?: string | null;
       entitlementUnitsSnapshot?: number | null;
@@ -585,6 +587,7 @@ function resolveRechargeOrderPurchaseTerms(
   order: {
     productCode: string | null;
     amountCents: number;
+    productKindSnapshot?: string | null;
     billingPriceVersionId?: string | null;
     unitNameSnapshot?: string | null;
     entitlementUnitsSnapshot?: number | null;
@@ -606,6 +609,8 @@ function resolveRechargeOrderPurchaseTerms(
     order.platformRevenueShareBpsSnapshot;
   if (
     order.productCode !== AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+    || (order.productKindSnapshot != null
+      && order.productKindSnapshot !== "SERVICE_PACKAGE")
     || unitName !== "credit"
     || typeof entitlementUnits !== "number"
     || !Number.isSafeInteger(entitlementUnits)
@@ -622,7 +627,6 @@ function resolveRechargeOrderPurchaseTerms(
     || order.refundPolicySnapshot !== "FULL_WHEN_UNUSED"
     || order.expiryPolicySnapshot !== "NEVER_EXPIRES"
     || order.entitlementValidityDaysSnapshot !== null
-    || order.amountCents % entitlementUnits !== 0
   ) {
     throw new Error(
       "Recharge order has an incomplete or unsupported commercial snapshot.",
@@ -632,7 +636,10 @@ function resolveRechargeOrderPurchaseTerms(
     billingPriceVersionId: order.billingPriceVersionId,
     unitName,
     entitlementUnits,
-    tokenUnitPriceCents: order.amountCents / entitlementUnits,
+    tokenUnitPriceCents: projectCompatibilityUnitPrice({
+      totalAmount: order.amountCents,
+      totalUnits: entitlementUnits,
+    }),
     creatorRevenueShareBps,
   };
 }

@@ -3311,7 +3311,7 @@ button.skill-row:hover {
 .representative-chat-citations > strong {
   color: var(--marketing-green-strong);
   font-family: var(--font-mono), "SFMono-Regular", Consolas, monospace;
-  font-size: 0.7rem;
+  font-size: 0.75rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -4082,6 +4082,16 @@ button.skill-row:hover {
   background: #f9fafb;
 }
 
+.representative-session-card.is-unavailable {
+  background: #f9fafb;
+  box-shadow: none;
+}
+
+.representative-session-card.is-free-access {
+  border-color: rgba(13, 148, 136, 0.2);
+  background: var(--marketing-green-soft);
+}
+
 .representative-session-card > strong {
   color: var(--marketing-ink);
   font-size: 1rem;
@@ -4157,6 +4167,27 @@ button.skill-row:hover {
   gap: 10px;
   padding: 0 12px 12px;
   border-top: 1px solid var(--marketing-line);
+}
+
+.representative-service-static-heading {
+  display: grid;
+  gap: 3px;
+  padding: 14px 16px;
+}
+
+.representative-service-static-heading small {
+  color: var(--marketing-green-strong);
+  font-family: var(--font-mono), "SFMono-Regular", Consolas, monospace;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.representative-service-options > p {
+  margin: 10px 0 0;
+  color: var(--marketing-soft);
+  font-size: 0.84rem;
+  line-height: 1.58;
 }
 
 .representative-service-options .representative-chat-plan-action {
@@ -4240,11 +4271,120 @@ button.skill-row:hover {
   margin-top: 4px;
 }
 
-.representative-demo-commerce {
+.representative-commerce-section {
   padding: 22px;
-  border: 1px dashed rgba(217, 119, 6, 0.3);
+  border: 1px solid rgba(13, 148, 136, 0.18);
   border-radius: 12px;
-  background: #fffbeb;
+  background: linear-gradient(160deg, #ffffff, var(--marketing-green-soft));
+}
+
+.representative-commerce-group {
+  display: grid;
+  gap: 12px;
+}
+
+.representative-commerce-group + .representative-commerce-group {
+  padding-top: 20px;
+  border-top: 1px solid var(--marketing-line);
+}
+
+.representative-commerce-group-heading {
+  display: grid;
+  gap: 4px;
+}
+
+.representative-commerce-group-heading > strong {
+  color: var(--marketing-ink);
+  font-size: 1rem;
+}
+
+.representative-commerce-group-heading > span {
+  max-width: 72ch;
+  color: var(--marketing-soft);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.representative-commerce-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.representative-commerce-option {
+  display: grid;
+  min-height: 176px;
+  align-content: start;
+  gap: 9px;
+  padding: 16px;
+  border: 1px solid var(--marketing-line);
+  border-radius: 10px;
+  background: #ffffff;
+  color: var(--marketing-ink);
+  font: inherit;
+  text-align: left;
+  transition:
+    border-color 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.representative-commerce-option:not(:disabled):hover {
+  transform: translateY(-2px);
+  border-color: rgba(13, 148, 136, 0.34);
+  box-shadow: 0 14px 32px rgba(17, 24, 39, 0.08);
+}
+
+.representative-commerce-option:focus-visible {
+  outline: 3px solid rgba(99, 102, 241, 0.28);
+  outline-offset: 2px;
+}
+
+.representative-commerce-option.is-selected {
+  border-color: var(--marketing-green-strong);
+  box-shadow: 0 0 0 1px rgba(13, 148, 136, 0.16);
+}
+
+.representative-commerce-option-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.representative-commerce-option-heading small {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--marketing-green-soft);
+  color: var(--marketing-green-strong);
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.representative-commerce-option > b {
+  font-family: var(--font-mono), "SFMono-Regular", Consolas, monospace;
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.representative-commerce-option > span:not(.representative-commerce-option-heading, .chip-row),
+.representative-commerce-option > small {
+  color: var(--marketing-soft);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.representative-commerce-group.is-tip .representative-commerce-option.is-selected {
+  border-color: rgba(99, 102, 241, 0.62);
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.14);
+}
+
+.representative-tip-thanks {
+  padding: 12px;
+  border: 1px solid rgba(13, 148, 136, 0.2);
+  border-radius: 8px;
+  background: var(--marketing-green-soft);
+  color: var(--marketing-ink);
 }
 
 .representative-trust-section {
@@ -4328,7 +4468,8 @@ button.skill-row:hover {
   }
 
   .representative-capability-grid,
-  .representative-resource-grid {
+  .representative-resource-grid,
+  .representative-commerce-options {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -4400,8 +4541,13 @@ button.skill-row:hover {
 
   .representative-session-sidebar,
   .representative-capability-grid,
-  .representative-resource-grid {
+  .representative-resource-grid,
+  .representative-commerce-options {
     grid-template-columns: 1fr;
+  }
+
+  .representative-commerce-option {
+    min-height: 0;
   }
 
   .representative-service-disclosure {

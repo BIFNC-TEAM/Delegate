@@ -325,7 +325,7 @@ describe("durable OpenViking sync jobs", () => {
 
     expect(result).toEqual({ processed: true, status: "succeeded" });
     expect(mockPrisma.knowledgeAsset.findMany).not.toHaveBeenCalled();
-    expect(syncDocument).toHaveBeenCalledTimes(6);
+    expect(syncDocument).toHaveBeenCalledTimes(5);
     expect(mockPrisma.representativeVersionResource.createMany).toHaveBeenCalledWith({
       data: expect.arrayContaining([
         expect.objectContaining({
@@ -345,7 +345,7 @@ describe("durable OpenViking sync jobs", () => {
       ]),
       skipDuplicates: true,
     });
-    expect(mockPrisma.publicKnowledgeProjectionItem.create).toHaveBeenCalledTimes(6);
+    expect(mockPrisma.publicKnowledgeProjectionItem.create).toHaveBeenCalledTimes(5);
     expect(mockPrisma.publicKnowledgeProjectionItem.create.mock.calls.map(
       (call) => call[0].data.resourceKey,
     )).toEqual([
@@ -353,7 +353,6 @@ describe("durable OpenViking sync jobs", () => {
       "faq/index.md",
       "materials/index.md",
       "policies/index.md",
-      "pricing/index.md",
       "knowledge/asset-1.md",
     ]);
     expect(mockPrisma.publicKnowledgeProjectionItem.create).toHaveBeenCalledWith({

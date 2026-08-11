@@ -88,17 +88,10 @@ export const knowledgeDocumentSchema = z.object({
   url: z.string().url().optional(),
 });
 
-export const pricingPlanSchema = z.object({
-  tier: planTierSchema,
-  name: z.string(),
-  stars: z.number().int().nonnegative(),
-  summary: z.string(),
-  includedReplies: z.number().int().nonnegative(),
-  includesPriorityHandoff: z.boolean(),
-});
-
 export const conversationContractSchema = z.object({
-  freeReplyLimit: z.number().int().positive(),
+  // Zero is the explicit no-trial boundary used by CREDITS_ONLY and is also a
+  // valid trial configuration before an owner switches access modes.
+  freeReplyLimit: z.number().int().nonnegative(),
   freeScope: z.array(inquiryIntentSchema),
   paywalledIntents: z.array(inquiryIntentSchema),
   handoffWindowHours: z.number().int().positive(),
@@ -143,7 +136,6 @@ export const representativeSchema = z.object({
   skillPacks: z.array(skillPackSchema),
   knowledgePack: knowledgePackSchema,
   contract: conversationContractSchema,
-  pricing: z.array(pricingPlanSchema),
   handoffPrompt: z.string(),
   actionGate: actionGateSchema,
 });
@@ -158,7 +150,6 @@ export type PlanTier = z.infer<typeof planTierSchema>;
 export type GateMode = z.infer<typeof gateModeSchema>;
 export type ActionKey = z.infer<typeof actionKeySchema>;
 export type InquiryIntent = z.infer<typeof inquiryIntentSchema>;
-export type PricingPlan = z.infer<typeof pricingPlanSchema>;
 export type ConversationContract = z.infer<typeof conversationContractSchema>;
 export type KnowledgePack = z.infer<typeof knowledgePackSchema>;
 export type SkillPack = z.infer<typeof skillPackSchema>;

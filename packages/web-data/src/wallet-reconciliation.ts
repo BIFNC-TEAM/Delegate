@@ -13,6 +13,7 @@ import {
   verifyAgentUsageEntitlementTransferChain,
 } from "./agent-wallet-usage-charge";
 import type { WalletTransactionRecord } from "./agent-wallet-transactions";
+import { projectCompatibilityUnitPrice } from "./commercial-ratio";
 import { prisma } from "./prisma";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
@@ -1368,7 +1369,7 @@ function reconcilePurchases(
       && Number.isInteger(purchase.tokenAmount)
       && purchase.tokenAmount > 0
       && Number.isInteger(purchase.tokenUnitPriceCents)
-      && purchase.tokenUnitPriceCents > 0
+      && purchase.tokenUnitPriceCents >= 0
       && Number.isInteger(purchase.creatorRevenueShareBps)
       && purchase.creatorRevenueShareBps >= 0
       && purchase.creatorRevenueShareBps <= 10_000
@@ -1410,8 +1411,11 @@ function reconcilePurchases(
       domain: "purchase",
       representative,
       unit: "minor_currency",
-      expected: purchase.tokenAmount * purchase.tokenUnitPriceCents,
-      actual: purchase.amountCents,
+      expected: projectCompatibilityUnitPrice({
+        totalAmount: purchase.amountCents,
+        totalUnits: purchase.tokenAmount,
+      }),
+      actual: purchase.tokenUnitPriceCents,
       currency: context.currency,
       references,
     });

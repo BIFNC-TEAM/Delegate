@@ -67,6 +67,83 @@ describe("agent wallet lifecycle acceptance", () => {
     expect(client.userWallets[0]?.cashBalanceCents).toBe(0);
   });
 
+  it("fulfills service credits and limited handoff access from one paid package", async () => {
+    const client = new FakeAmnLifecycleClient();
+    const recharge = await createMockRechargeOrder(
+      {
+        externalUserId: "user_combined_package",
+        audienceIdentityId: "audience_canonical",
+        representativeId: "rep_1",
+        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        billingProductId: "combined_product_1",
+        billingPriceVersionId: "combined_price_1",
+        productNameSnapshot: "深度服务包",
+        productKindSnapshot: "SERVICE_PACKAGE",
+        unitNameSnapshot: "credit",
+        entitlementUnitsSnapshot: 333,
+        handoffAllowanceSnapshot: "LIMITED",
+        handoffUnitsSnapshot: 2,
+        handoffServiceLevelSnapshot: "PRIORITY",
+        handoffValidityDaysSnapshot: 30,
+        creatorRevenueShareBpsSnapshot: 2000,
+        platformRevenueShareBpsSnapshot: 8000,
+        refundPolicySnapshot: "FULL_WHEN_UNUSED",
+        expiryPolicySnapshot: "NEVER_EXPIRES",
+        entitlementValidityDaysSnapshot: null,
+        amountCents: 1200,
+        idempotencyKey: "combined_package_recharge",
+      },
+      client,
+    );
+
+    const first = await completeMockRechargeAndPurchaseAgentTokens(
+      {
+        rechargeOrderId: recharge.id,
+        externalUserId: "user_combined_package",
+        representativeId: "rep_1",
+        purchaseIdempotencyKey: "combined_package_purchase",
+      },
+      client as never,
+    );
+    const replay = await completeMockRechargeAndPurchaseAgentTokens(
+      {
+        rechargeOrderId: recharge.id,
+        externalUserId: "user_combined_package",
+        representativeId: "rep_1",
+        purchaseIdempotencyKey: "combined_package_purchase",
+      },
+      client as never,
+    );
+
+    expect(first).toMatchObject({
+      productKind: "SERVICE_PACKAGE",
+      rechargeOrder: { status: "paid", cashBalanceCents: 0 },
+      tokenPurchase: {
+        tokenAmount: 333,
+        amountCents: 1200,
+        tokenUnitPriceCents: 3,
+      },
+      fulfillment: {
+        kind: "SERVICE_PACKAGE",
+        handoffEntitlement: {
+          allowance: "LIMITED",
+          serviceLevel: "PRIORITY",
+          grantedUses: 2,
+          remainingUses: 2,
+          status: "ACTIVE",
+        },
+      },
+    });
+    expect(replay.fulfillment).toEqual(first.fulfillment);
+    expect(client.tokenPurchases).toHaveLength(1);
+    expect(client.handoffEntitlementGrants).toHaveLength(1);
+    expect(client.handoffEntitlementLedgerEntries).toHaveLength(1);
+    expect(client.entitlementAccounts[0]).toMatchObject({
+      grantedUnits: 333,
+      remainingUnits: 333,
+    });
+  });
+
   it("rejects completing a recharge against a different representative intent", async () => {
     const client = new FakeAmnLifecycleClient();
     const recharge = await createMockRechargeOrder(
@@ -91,7 +168,7 @@ describe("agent wallet lifecycle acceptance", () => {
         },
         client as never,
       ),
-    ).rejects.toThrow("intended representative service product");
+    ).rejects.toThrow("intended representative commerce product");
 
     expect(client.rechargeOrders[0]?.status).toBe(
       RechargeOrderStatus.REQUIRES_PAYMENT,
@@ -254,6 +331,21 @@ type RechargeOrderRow = {
   userWalletId: string;
   representativeId: string | null;
   productCode: string | null;
+  billingProductId?: string | null;
+  billingPriceVersionId?: string | null;
+  productNameSnapshot?: string | null;
+  productKindSnapshot?: string | null;
+  unitNameSnapshot?: string | null;
+  entitlementUnitsSnapshot?: number | null;
+  handoffAllowanceSnapshot?: string | null;
+  handoffUnitsSnapshot?: number | null;
+  handoffServiceLevelSnapshot?: string | null;
+  handoffValidityDaysSnapshot?: number | null;
+  creatorRevenueShareBpsSnapshot?: number | null;
+  platformRevenueShareBpsSnapshot?: number | null;
+  refundPolicySnapshot?: string | null;
+  expiryPolicySnapshot?: string | null;
+  entitlementValidityDaysSnapshot?: number | null;
   provider: PaymentProvider;
   providerOrderId: string | null;
   amountCents: number;
@@ -425,6 +517,35 @@ type EntitlementLedgerRow = {
   createdAt: Date;
 };
 
+type HandoffEntitlementGrantRow = {
+  id: string;
+  rechargeOrderId: string;
+  audienceIdentityId: string;
+  representativeId: string;
+  billingPriceVersionId: string;
+  allowance: "LIMITED" | "UNLIMITED";
+  serviceLevel: "STANDARD" | "PRIORITY";
+  grantedUses: number | null;
+  remainingUses: number | null;
+  reservedUses: number;
+  consumedUses: number;
+  status: "ACTIVE" | "FROZEN" | "EXHAUSTED" | "EXPIRED" | "REFUNDED";
+  startsAt: Date;
+  expiresAt: Date | null;
+};
+
+type HandoffEntitlementLedgerRow = {
+  id: string;
+  grantId: string;
+  kind: string;
+  uses: number;
+  remainingAfter: number | null;
+  reservedAfter: number;
+  consumedAfter: number;
+  idempotencyKey: string;
+  metadata: unknown;
+};
+
 class FakeAmnLifecycleClient {
   owners: OwnerRow[] = [
     { id: "owner_1", creatorVerificationStatus: CreatorVerificationStatus.VERIFIED },
@@ -463,6 +584,8 @@ class FakeAmnLifecycleClient {
   ];
   entitlementAccounts: EntitlementAccountRow[] = [];
   entitlementLedgerEntries: EntitlementLedgerRow[] = [];
+  handoffEntitlementGrants: HandoffEntitlementGrantRow[] = [];
+  handoffEntitlementLedgerEntries: HandoffEntitlementLedgerRow[] = [];
   private entitlementSequence = 0;
 
   walletFundsWriteGate = {
@@ -594,6 +717,33 @@ class FakeAmnLifecycleClient {
       };
       this.entitlementLedgerEntries.push(created);
       return created;
+    },
+  };
+
+  handoffEntitlementGrant = {
+    findUnique: async (args: any) =>
+      this.handoffEntitlementGrants.find(
+        (grant) => grant.rechargeOrderId === args.where.rechargeOrderId,
+      ) ?? null,
+    findMany: async () => this.handoffEntitlementGrants,
+    create: async (args: any) => {
+      const grant: HandoffEntitlementGrantRow = {
+        id: `handoff_grant_${this.handoffEntitlementGrants.length + 1}`,
+        ...args.data,
+      };
+      this.handoffEntitlementGrants.push(grant);
+      return grant;
+    },
+  };
+
+  handoffEntitlementLedgerEntry = {
+    create: async (args: any) => {
+      const entry: HandoffEntitlementLedgerRow = {
+        id: `handoff_ledger_${this.handoffEntitlementLedgerEntries.length + 1}`,
+        ...args.data,
+      };
+      this.handoffEntitlementLedgerEntries.push(entry);
+      return entry;
     },
   };
 
@@ -753,6 +903,28 @@ class FakeAmnLifecycleClient {
         userWalletId: args.data.userWalletId,
         representativeId: args.data.representativeId ?? null,
         productCode: args.data.productCode ?? null,
+        billingProductId: args.data.billingProductId ?? null,
+        billingPriceVersionId: args.data.billingPriceVersionId ?? null,
+        productNameSnapshot: args.data.productNameSnapshot ?? null,
+        productKindSnapshot: args.data.productKindSnapshot ?? null,
+        unitNameSnapshot: args.data.unitNameSnapshot ?? null,
+        entitlementUnitsSnapshot:
+          args.data.entitlementUnitsSnapshot ?? null,
+        handoffAllowanceSnapshot:
+          args.data.handoffAllowanceSnapshot ?? null,
+        handoffUnitsSnapshot: args.data.handoffUnitsSnapshot ?? null,
+        handoffServiceLevelSnapshot:
+          args.data.handoffServiceLevelSnapshot ?? null,
+        handoffValidityDaysSnapshot:
+          args.data.handoffValidityDaysSnapshot ?? null,
+        creatorRevenueShareBpsSnapshot:
+          args.data.creatorRevenueShareBpsSnapshot ?? null,
+        platformRevenueShareBpsSnapshot:
+          args.data.platformRevenueShareBpsSnapshot ?? null,
+        refundPolicySnapshot: args.data.refundPolicySnapshot ?? null,
+        expiryPolicySnapshot: args.data.expiryPolicySnapshot ?? null,
+        entitlementValidityDaysSnapshot:
+          args.data.entitlementValidityDaysSnapshot ?? null,
         provider: args.data.provider,
         providerOrderId: args.data.providerOrderId ?? null,
         amountCents: args.data.amountCents,
@@ -1047,6 +1219,19 @@ class FakeAmnLifecycleClient {
     },
   };
 
+  tipContribution = {
+    findUnique: async () => null,
+    create: async (args: any) => ({
+      id: "tip_contribution_not_used",
+      ...args.data,
+      refundedAt: null,
+      reversedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }),
+    findMany: async () => [],
+  };
+
   withdrawRequest = {
     findUnique: async (args: any) => {
       return this.withdrawRequests.find((request) => request.idempotencyKey === args.where.idempotencyKey) ?? null;
@@ -1156,6 +1341,11 @@ class FakeAmnLifecycleClient {
       entitlementLedgerEntries: this.entitlementLedgerEntries.map((row) => ({
         ...row,
       })),
+      handoffEntitlementGrants: this.handoffEntitlementGrants.map((row) => ({
+        ...row,
+      })),
+      handoffEntitlementLedgerEntries:
+        this.handoffEntitlementLedgerEntries.map((row) => ({ ...row })),
       entitlementSequence: this.entitlementSequence,
     };
   }

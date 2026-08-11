@@ -14,7 +14,6 @@ import {
 } from "@delegate/web-data";
 import {
   GroupActivation,
-  PricingPlanType,
   type Prisma,
 } from "@prisma/client";
 
@@ -23,7 +22,6 @@ import { prisma } from "./prisma";
 const representativeConfigInclude = {
   owner: true,
   knowledgePack: true,
-  pricingPlans: true,
 } as const;
 
 type RepresentativeConfigRecord = Prisma.RepresentativeGetPayload<{
@@ -100,30 +98,9 @@ function serializeRepresentative(representative: RepresentativeConfigRecord): Re
       ),
       handoffWindowHours: representative.handoffWindowHours,
     },
-    pricing: mergePricingPlans(representative.pricingPlans),
     handoffPrompt: representative.handoffPrompt || demoRepresentative.handoffPrompt,
     actionGate: parseActionGate(representative.actionGate),
   };
-}
-
-function mergePricingPlans(plans: Array<RepresentativeConfigRecord["pricingPlans"][number]>) {
-  const plansByTier = new Map<Representative["pricing"][number]["tier"], Representative["pricing"][number]>();
-
-  for (const plan of plans) {
-    const tier = mapPricingPlanTypeFromDb(plan.type);
-    plansByTier.set(tier, {
-      tier,
-      name: plan.name,
-      stars: plan.starsAmount,
-      summary: plan.summary,
-      includedReplies: plan.includedReplies,
-      includesPriorityHandoff: plan.includesPriorityHandoff,
-    });
-  }
-
-  return (["free", "pass", "deep_help", "sponsor"] as const).map((tier) => {
-    return plansByTier.get(tier) ?? demoRepresentative.pricing.find((plan) => plan.tier === tier)!;
-  });
 }
 
 function parseKnowledgeDocuments(
@@ -210,7 +187,6 @@ function cloneRepresentative(representative: Representative): Representative {
       paywalledIntents: [...representative.contract.paywalledIntents],
       handoffWindowHours: representative.contract.handoffWindowHours,
     },
-    pricing: representative.pricing.map((plan) => ({ ...plan })),
     actionGate: { ...representative.actionGate },
   };
 }
@@ -244,19 +220,5 @@ function mapGroupActivationFromDb(value: GroupActivation): Representative["group
     case GroupActivation.REPLY_OR_MENTION:
     default:
       return "reply_or_mention";
-  }
-}
-
-function mapPricingPlanTypeFromDb(value: PricingPlanType): Representative["pricing"][number]["tier"] {
-  switch (value) {
-    case PricingPlanType.PASS:
-      return "pass";
-    case PricingPlanType.DEEP_HELP:
-      return "deep_help";
-    case PricingPlanType.SPONSOR:
-      return "sponsor";
-    case PricingPlanType.FREE:
-    default:
-      return "free";
   }
 }

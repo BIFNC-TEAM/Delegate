@@ -48,15 +48,6 @@ type KnowledgeDocument = {
   url?: string | undefined;
 };
 
-type PricingPlan = {
-  tier: "free" | "pass" | "deep_help" | "sponsor";
-  name: string;
-  stars: number;
-  summary: string;
-  includedReplies: number;
-  includesPriorityHandoff: boolean;
-};
-
 type ComputePolicyMode = "allow" | "ask" | "deny";
 type ComputeNetworkMode = "no_network" | "allowlist" | "full";
 type ComputeFilesystemMode = "workspace_only" | "read_only_workspace" | "ephemeral_full";
@@ -99,7 +90,6 @@ type RepresentativeSetupSnapshot = {
     paywalledIntents: InquiryIntent[];
     handoffWindowHours: number;
   };
-  pricing: PricingPlan[];
   knowledgePack: {
     identitySummary: string;
     faq: KnowledgeDocument[];
@@ -205,24 +195,6 @@ function getMaterialKindOptions(locale: Locale): Array<{ value: KnowledgeDocumen
         { value: "calendar", label: "Calendar" },
         { value: "pricing", label: "Pricing" },
       ];
-}
-
-function getPricingTierLabels(locale: Locale): Record<PricingPlan["tier"], string> {
-  if (locale === "zh") {
-    return {
-      free: "Free",
-      pass: "Pass",
-      deep_help: "Deep Help",
-      sponsor: "Sponsor",
-    };
-  }
-
-  return {
-    free: "Free",
-    pass: "Pass",
-    deep_help: "Deep Help",
-    sponsor: "Sponsor",
-  };
 }
 
 function getComputePolicyModeLabels(locale: Locale): Record<ComputePolicyMode, string> {
@@ -359,8 +331,8 @@ const setupSections: Array<{
   {
     id: "pricing",
     step: "03",
-    label: "Pricing",
-    blurb: "把四档产品包和优先级讲清楚。",
+    label: "价格",
+    blurb: "配置访问方式、人工接管、服务套餐和打赏档位。",
   },
   {
     id: "knowledge",
@@ -404,7 +376,7 @@ const setupSectionsEn: Array<{
     id: "pricing",
     step: "03",
     label: "Pricing",
-    blurb: "Explain the four access layers and their escalation value.",
+    blurb: "Configure access, human handoff, service packages, and tips.",
   },
   {
     id: "knowledge",
@@ -444,7 +416,6 @@ export function DashboardRepresentativeSetup({
   const localizedActionGateLabels = getActionGateLabels(locale);
   const intentOptions = getIntentOptions(locale);
   const materialKindOptions = getMaterialKindOptions(locale);
-  const pricingTierLabels = getPricingTierLabels(locale);
   const [, setSnapshot] = useState<RepresentativeSetupSnapshot | null>(null);
   const [draft, setDraft] = useState<RepresentativeSetupSnapshot | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -605,15 +576,15 @@ export function DashboardRepresentativeSetup({
       tone: "accent" as const,
     },
     {
-      label: t.signalCards.freeRepliesLabel,
-      value: `${draft.contract.freeReplyLimit}`,
-      detail: t.signalCards.freeRepliesDetail,
+      label: t.signalCards.contractRulesLabel,
+      value: `${draft.contract.freeScope.length + draft.contract.paywalledIntents.length}`,
+      detail: t.signalCards.contractRulesDetail,
       tone: "safe" as const,
     },
     {
-      label: t.signalCards.pricingTiersLabel,
-      value: `${draft.pricing.length}`,
-      detail: t.signalCards.pricingTiersDetail,
+      label: t.signalCards.commerceLabel,
+      value: "CNY",
+      detail: t.signalCards.commerceDetail,
     },
     {
       label: t.signalCards.knowledgeItemsLabel,
@@ -747,7 +718,6 @@ export function DashboardRepresentativeSetup({
                   <div className="chip-row">
                     <span className="chip">{localizedGroupActivationLabels[draft.groupActivation]}</span>
                     <span className="chip">{draft.publicMode ? t.publicLabel : t.privateLabel}</span>
-                    <span className="chip">{draft.humanInLoop ? t.aiHumanLabel : t.aiOnlyLabel}</span>
                   </div>
                 }
                 title={t.basicsTitle}
@@ -849,19 +819,6 @@ export function DashboardRepresentativeSetup({
                     />
                     <span>{t.publicMode}</span>
                   </label>
-                  <label className="toggle-row">
-                    <input
-                      checked={draft.humanInLoop}
-                      onChange={(event) =>
-                        updateDraft((value) => ({
-                          ...value,
-                          humanInLoop: event.target.checked,
-                        }))
-                      }
-                      type="checkbox"
-                    />
-                    <span>{t.humanInLoop}</span>
-                  </label>
                 </div>
               </div>
 
@@ -886,25 +843,6 @@ export function DashboardRepresentativeSetup({
                 title={t.contractTitle}
               >
                 <div className="setup-grid">
-                  <label className="field-stack">
-                    <span>{t.freeReplyLimit}</span>
-                    <input
-                      className="text-input"
-                      min={1}
-                      onChange={(event) =>
-                        updateDraft((value) => ({
-                          ...value,
-                          contract: {
-                            ...value.contract,
-                            freeReplyLimit: Number(event.target.value || 0),
-                          },
-                        }))
-                      }
-                      type="number"
-                      value={draft.contract.freeReplyLimit}
-                    />
-                  </label>
-
               <label className="field-stack">
                 <span>{t.handoffWindow}</span>
                 <input
@@ -1012,122 +950,6 @@ export function DashboardRepresentativeSetup({
               </DashboardSurface>
             ) : null}
           </DashboardSurfaceGrid>
-        ) : null}
-
-        {activeSection === "pricing" ? (
-          <DashboardSurface
-            eyebrow={t.pricingEyebrow}
-            title={t.pricingTitle}
-          >
-            <div className="pricing-editor-grid">
-              {draft.pricing.map((plan) => (
-                <div className="panel setup-plan-card" key={plan.tier}>
-                  <div className="chip-row">
-                    <span className="chip chip-safe">{pricingTierLabels[plan.tier]}</span>
-                  </div>
-                  <div className="setup-grid compact-grid">
-                  <label className="field-stack">
-                    <span>{t.nameLabel}</span>
-                    <input
-                      className="text-input"
-                      onChange={(event) =>
-                        updateDraft((value) => ({
-                          ...value,
-                          pricing: value.pricing.map((entry) =>
-                            entry.tier === plan.tier
-                              ? { ...entry, name: event.target.value }
-                              : entry,
-                          ),
-                        }))
-                      }
-                      value={plan.name}
-                    />
-                  </label>
-
-                  <label className="field-stack">
-                    <span>{t.starsLabel}</span>
-                    <input
-                      className="text-input"
-                      min={0}
-                      onChange={(event) =>
-                        updateDraft((value) => ({
-                          ...value,
-                          pricing: value.pricing.map((entry) =>
-                            entry.tier === plan.tier
-                              ? { ...entry, stars: Number(event.target.value || 0) }
-                              : entry,
-                          ),
-                        }))
-                      }
-                      type="number"
-                      value={plan.stars}
-                    />
-                  </label>
-
-                  <label className="field-stack">
-                    <span>{t.repliesLabel}</span>
-                    <input
-                      className="text-input"
-                      min={0}
-                      onChange={(event) =>
-                        updateDraft((value) => ({
-                          ...value,
-                          pricing: value.pricing.map((entry) =>
-                            entry.tier === plan.tier
-                              ? { ...entry, includedReplies: Number(event.target.value || 0) }
-                              : entry,
-                          ),
-                        }))
-                      }
-                      type="number"
-                      value={plan.includedReplies}
-                    />
-                  </label>
-
-                  <label className="field-stack field-span-full">
-                    <span>{t.summaryLabel}</span>
-                    <textarea
-                      className="text-input textarea-input"
-                      onChange={(event) =>
-                        updateDraft((value) => ({
-                          ...value,
-                          pricing: value.pricing.map((entry) =>
-                            entry.tier === plan.tier
-                              ? { ...entry, summary: event.target.value }
-                              : entry,
-                          ),
-                        }))
-                      }
-                      rows={3}
-                      value={plan.summary}
-                    />
-                  </label>
-
-                    <label className="toggle-row">
-                      <input
-                        checked={plan.includesPriorityHandoff}
-                        onChange={(event) =>
-                          updateDraft((value) => ({
-                            ...value,
-                            pricing: value.pricing.map((entry) =>
-                              entry.tier === plan.tier
-                                ? {
-                                    ...entry,
-                                    includesPriorityHandoff: event.target.checked,
-                                  }
-                                : entry,
-                            ),
-                          }))
-                        }
-                        type="checkbox"
-                      />
-                      <span>{t.priorityHandoff}</span>
-                    </label>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </DashboardSurface>
         ) : null}
 
         {activeSection === "knowledge" ? (
@@ -1613,9 +1435,17 @@ export function DashboardRepresentativeSetup({
             <span className="muted">
               {t.stepCount(activeSectionIndex + 1, localizedSetupSections.length)}
             </span>
-            <button className="button-primary" disabled={isPending} type="submit">
-              {isPending ? t.saving : t.saveRepresentativeSetup}
-            </button>
+            {activeSection === "pricing" ? (
+              <span className="muted">
+                {locale === "zh"
+                  ? "价格设置与商品在下方独立保存"
+                  : "Pricing settings and products save independently below"}
+              </span>
+            ) : (
+              <button className="button-primary" disabled={isPending} type="submit">
+                {isPending ? t.saving : t.saveRepresentativeSetup}
+              </button>
+            )}
           </div>
         </div> : null}
       </form>
@@ -1630,18 +1460,30 @@ export function DashboardRepresentativeSetup({
 
         <aside className="representative-config-aside">
           <header>
-            <p>{activeSection === "memory" ? "MEMORY RUNTIME POLICY" : t.stepPreviewEyebrow}</p>
+            <p>
+              {activeSection === "memory"
+                ? "MEMORY RUNTIME POLICY"
+                : activeSection === "pricing"
+                  ? "PRICING RUNTIME POLICY"
+                  : t.stepPreviewEyebrow}
+            </p>
             <h3>
               {activeSection === "memory"
                 ? (locale === "zh" ? "实时策略，保存即生效" : "Live policy, effective when saved")
-                : t.stepPreviewTitle(currentSection.label)}
+                : activeSection === "pricing"
+                  ? (locale === "zh" ? "价格配置，独立保存并生效" : "Pricing controls save and apply independently")
+                  : t.stepPreviewTitle(currentSection.label)}
             </h3>
             <span>
               {activeSection === "memory"
                 ? (locale === "zh"
                     ? "记忆开关和渠道能力是当前代表的实时运行边界，不属于代表草稿或发布版本。"
                     : "Memory controls and channel capabilities are live runtime boundaries for this representative, not representative draft or release fields.")
-                : t.stepPreviewCopy}
+                : activeSection === "pricing"
+                  ? (locale === "zh"
+                      ? "访问方式、人工接管、打赏开关与 CNY 商品目录不属于代表发布草稿。"
+                      : "Access, human handoff, tips, and the CNY catalog are not part of the representative release draft.")
+                  : t.stepPreviewCopy}
             </span>
           </header>
           {activeSection === "memory" ? (
@@ -1653,6 +1495,26 @@ export function DashboardRepresentativeSetup({
                   : "After you select “Save memory settings,” the server applies the policy immediately. No additional release is required in Publish & operate."}
               </span>
             </div>
+          ) : activeSection === "pricing" ? (
+            <>
+              <div className="representative-config-checkpoints">
+                {currentStepCards.map((card) => (
+                  <div key={`${card.label}:${card.value}`}>
+                    <span>{card.label}</span>
+                    <strong>{card.value}</strong>
+                    <small>{card.detail}</small>
+                  </div>
+                ))}
+              </div>
+              <div className="representative-config-draft-note is-runtime-policy">
+                <strong>{locale === "zh" ? "唯一价格真相" : "Single source of price truth"}</strong>
+                <span>
+                  {locale === "zh"
+                    ? "公开销售与权益判断仅使用下方 Owner Billing Catalog；旧固定四档已退出运行时。"
+                    : "Public sales and entitlement checks use only the Owner Billing Catalog below; legacy fixed tiers are no longer part of runtime."}
+                </span>
+              </div>
+            </>
           ) : (
             <>
               <div className="representative-config-checkpoints">
@@ -1700,17 +1562,15 @@ const setupCopy = {
     signalCards: {
       languagesLabel: "Languages",
       languagesDetail: "代表当前对外声明支持的语言数。",
-      freeRepliesLabel: "Free replies",
-      freeRepliesDetail: "首次接触阶段的免费回复额度。",
-      pricingTiersLabel: "Pricing tiers",
-      pricingTiersDetail: "当前公开提供的访问深度层级。",
+      contractRulesLabel: "Contract rules",
+      contractRulesDetail: "草稿中已声明的免费与付费意图边界。",
+      commerceLabel: "价格",
+      commerceDetail: "CNY 商品目录与实时访问策略独立管理。",
       knowledgeItemsLabel: "Knowledge items",
       knowledgeItemsDetail: "已经可供 bot 使用的结构化公开知识条目。",
     },
     publicLabel: "public",
     privateLabel: "private",
-    aiHumanLabel: "ai + human",
-    aiOnlyLabel: "ai only",
     launchEyebrow: "Launch flow",
     launchTitle: "渐进式代表设置",
     currentStepLabel: "Current step",
@@ -1727,11 +1587,9 @@ const setupCopy = {
     groupActivation: "Group activation",
     mode: "Mode",
     publicMode: "Public mode",
-    humanInLoop: "Human in loop",
     handoffPrompt: "Handoff prompt",
     contractEyebrow: "Conversation Contract",
     contractTitle: "免费范围、付费边界和人工评估时窗。",
-    freeReplyLimit: "Free reply limit",
     handoffWindow: "Handoff window (hours)",
     freeScope: "Free scope",
     paywalledIntents: "Paywalled intents",
@@ -1740,13 +1598,6 @@ const setupCopy = {
     actionAskFirst: "先审批",
     actionDeny: "禁止",
     actionBoundaryHint: "这是对话和业务动作边界；Compute 的六类执行能力在 Compute 步骤单独配置。",
-    pricingEyebrow: "Pricing Plans",
-    pricingTitle: "坚持四档：Free / Pass / Deep Help / Sponsor。",
-    nameLabel: "Name",
-    starsLabel: "Stars",
-    repliesLabel: "Replies",
-    summaryLabel: "Summary",
-    priorityHandoff: "Includes priority handoff",
     knowledgeEyebrow: "Knowledge Pack",
     knowledgeTitle: "让公开知识先于自由发挥，回答和材料都从这里长出来。",
     identitySummary: "Identity summary",
@@ -1813,17 +1664,15 @@ const setupCopy = {
     signalCards: {
       languagesLabel: "Languages",
       languagesDetail: "How many languages this representative publicly declares.",
-      freeRepliesLabel: "Free replies",
-      freeRepliesDetail: "The free reply depth available in first-contact mode.",
-      pricingTiersLabel: "Pricing tiers",
-      pricingTiersDetail: "How many public access layers are currently offered.",
+      contractRulesLabel: "Contract rules",
+      contractRulesDetail: "Draft free and paid intent boundaries currently declared.",
+      commerceLabel: "Pricing",
+      commerceDetail: "CNY catalog and live access policy are managed independently.",
       knowledgeItemsLabel: "Knowledge items",
       knowledgeItemsDetail: "Structured public knowledge items available to the bot.",
     },
     publicLabel: "public",
     privateLabel: "private",
-    aiHumanLabel: "ai + human",
-    aiOnlyLabel: "ai only",
     launchEyebrow: "Launch flow",
     launchTitle: "Progressive representative setup",
     currentStepLabel: "Current step",
@@ -1840,11 +1689,9 @@ const setupCopy = {
     groupActivation: "Group activation",
     mode: "Mode",
     publicMode: "Public mode",
-    humanInLoop: "Human in loop",
     handoffPrompt: "Handoff prompt",
     contractEyebrow: "Conversation contract",
     contractTitle: "Free scope, paywalls, and the owner review window.",
-    freeReplyLimit: "Free reply limit",
     handoffWindow: "Handoff window (hours)",
     freeScope: "Free scope",
     paywalledIntents: "Paywalled intents",
@@ -1853,13 +1700,6 @@ const setupCopy = {
     actionAskFirst: "Ask first",
     actionDeny: "Deny",
     actionBoundaryHint: "These govern conversation and business actions. Configure the six execution capabilities separately in Compute.",
-    pricingEyebrow: "Pricing plans",
-    pricingTitle: "Keep the four access layers: Free / Pass / Deep Help / Sponsor.",
-    nameLabel: "Name",
-    starsLabel: "Stars",
-    repliesLabel: "Replies",
-    summaryLabel: "Summary",
-    priorityHandoff: "Includes priority handoff",
     knowledgeEyebrow: "Knowledge pack",
     knowledgeTitle: "Make structured public knowledge come before improvisation.",
     identitySummary: "Identity summary",
@@ -1931,7 +1771,7 @@ function buildSetupStepCards(
           { label: "Owner", value: draft.ownerName, detail: "Who this representative ultimately works for.", tone: "accent" },
           { label: "Mode", value: draft.publicMode ? "Public" : "Private", detail: "Whether it is publicly exposed.", },
           { label: "Group trigger", value: groupActivationLabels[draft.groupActivation], detail: "How conservatively the rep responds inside groups.", tone: "safe" },
-          { label: "Handoff", value: draft.humanInLoop ? "Ready" : "AI only", detail: "Whether high-value requests can escalate to a human.", },
+          { label: "Languages", value: `${draft.languages.length}`, detail: "Declared public response languages.", },
         ];
       }
       return [
@@ -1953,15 +1793,15 @@ function buildSetupStepCards(
           tone: "safe",
         },
         {
-          label: "Handoff",
-          value: draft.humanInLoop ? "Ready" : "AI only",
-          detail: "高价值请求是否允许升级到人工接手。",
+          label: "Languages",
+          value: `${draft.languages.length}`,
+          detail: "当前声明支持的公开回复语言。",
         },
       ];
     case "contract":
       if (locale === "en") {
         return [
-          { label: "Free limit", value: `${draft.contract.freeReplyLimit}`, detail: "Reply limit allowed in the free stage.", tone: "accent" },
+          { label: "Action gates", value: `${Object.keys(draft.actionGate).length}`, detail: "Deterministic business-action boundaries in this draft.", tone: "accent" },
           { label: "Free intents", value: `${draft.contract.freeScope.length}`, detail: "Intent types still covered for free.", },
           { label: "Paywalled", value: `${draft.contract.paywalledIntents.length}`, detail: "Intent types that require paid continuation.", tone: "safe" },
           { label: "Handoff SLA", value: `${draft.contract.handoffWindowHours}h`, detail: "Expected owner response window for handoff.", },
@@ -1969,9 +1809,9 @@ function buildSetupStepCards(
       }
       return [
         {
-          label: "Free limit",
-          value: `${draft.contract.freeReplyLimit}`,
-          detail: "免费阶段允许的回复上限。",
+          label: "Action gates",
+          value: `${Object.keys(draft.actionGate).length}`,
+          detail: "草稿中已声明的确定性业务动作边界。",
           tone: "accent",
         },
         {
@@ -1994,34 +1834,34 @@ function buildSetupStepCards(
     case "pricing":
       if (locale === "en") {
         return [
-          { label: "Plans", value: `${draft.pricing.length}`, detail: "Current public access layers.", tone: "accent" },
-          { label: "Paid tiers", value: `${draft.pricing.filter((plan) => plan.stars > 0).length}`, detail: "How many tiers actually trigger payment.", },
-          { label: "Priority handoff", value: `${draft.pricing.filter((plan) => plan.includesPriorityHandoff).length}`, detail: "Pricing tiers that include priority escalation.", tone: "safe" },
-          { label: "Highest tier", value: `${Math.max(...draft.pricing.map((plan) => plan.stars), 0)} Stars`, detail: "Telegram Stars price for the deepest service layer.", },
+          { label: "Access policy", value: "Live", detail: "Free, trial, or credits-only access is saved independently.", tone: "accent" },
+          { label: "Catalog", value: "CNY", detail: "Service packages and tips use the owner billing catalog." },
+          { label: "Price history", value: "Immutable", detail: "Every published price remains attached to historical orders.", tone: "safe" },
+          { label: "Handoff", value: "Explicit", detail: "Packages state standard, priority, limited, or unlimited access." },
         ];
       }
       return [
         {
-          label: "Plans",
-          value: `${draft.pricing.length}`,
-          detail: "当前对外公开的访问深度层级数。",
+          label: "访问策略",
+          value: "实时",
+          detail: "免费、试用后付费或仅额度模式独立保存。",
           tone: "accent",
         },
         {
-          label: "Paid tiers",
-          value: `${draft.pricing.filter((plan) => plan.stars > 0).length}`,
-          detail: "真正会触发付费动作的层级数量。",
+          label: "商品目录",
+          value: "CNY",
+          detail: "服务套餐与打赏档位统一使用 Owner Billing Catalog。",
         },
         {
-          label: "Priority handoff",
-          value: `${draft.pricing.filter((plan) => plan.includesPriorityHandoff).length}`,
-          detail: "包含优先人工升级的定价层级。",
+          label: "价格历史",
+          value: "不可变",
+          detail: "每个已发布价格版本永久绑定历史订单。",
           tone: "safe",
         },
         {
-          label: "Highest tier",
-          value: `${Math.max(...draft.pricing.map((plan) => plan.stars), 0)} Stars`,
-          detail: "当前最深服务层的 Telegram Stars 价格。",
+          label: "人工权益",
+          value: "显式",
+          detail: "套餐明确标准/优先、限次/不限次人工接管。",
         },
       ];
     case "knowledge":
@@ -2524,7 +2364,6 @@ function cloneSnapshot(snapshot: RepresentativeSetupSnapshot): RepresentativeSet
       paywalledIntents: [...snapshot.contract.paywalledIntents],
       handoffWindowHours: snapshot.contract.handoffWindowHours,
     },
-    pricing: snapshot.pricing.map((plan) => ({ ...plan })),
     actionGate: { ...snapshot.actionGate },
     knowledgePack: {
       identitySummary: snapshot.knowledgePack.identitySummary,

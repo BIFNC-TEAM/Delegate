@@ -2,10 +2,14 @@ import {
   AgentTokenPurchaseStatus,
   AmnLedgerEntryKind,
   AmnWalletAccountType,
+  BillingProductKind,
+  BillingRefundPolicy,
   CreatorEarningStatus,
   PaymentProvider,
   PaymentProviderEventType,
   RechargeOrderStatus,
+  RechargeRefundProviderStatus,
+  TipContributionStatus,
   WalletTransactionEventType,
 } from "@prisma/client";
 
@@ -24,6 +28,8 @@ import {
   runWalletWriteTransaction,
   type WalletWriteTransactionOptions,
 } from "./agent-wallet-write";
+import { calculateCumulativeRevenueAllocationDifference } from "./commercial-ratio";
+import { commercialRefundPolicyConflictReason } from "./commercial-refund-entitlements";
 import { prisma } from "./prisma";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
@@ -67,6 +73,8 @@ type RechargeOrderRecord = {
   amountCents: number;
   currency: string;
   status: RechargeOrderStatus;
+  productKindSnapshot?: BillingProductKind | null;
+  refundPolicySnapshot?: BillingRefundPolicy | null;
   refundedAt: Date | null;
   userWallet?: UserWalletRecord;
 };
@@ -123,6 +131,19 @@ type RechargeRefundClient = Omit<WalletLedgerClient, "$transaction"> &
   rechargeOrder: {
     findUnique(args: unknown): Promise<RechargeOrderRecord | null>;
     update(args: unknown): Promise<RechargeOrderRecord>;
+  };
+  rechargeRefund?: {
+    findUnique(args: unknown): Promise<{
+      id: string;
+      rechargeOrderId: string;
+      provider: PaymentProvider;
+      providerStatus: RechargeRefundProviderStatus | null;
+      originalAmountCents: number;
+      refundAmountCents: number;
+      payerOriginalAmountCents: number | null;
+      payerRefundAmountCents: number | null;
+      currency: string;
+    } | null>;
   };
   paymentProviderEvent: {
     upsert(args: unknown): Promise<PaymentProviderEventRecord>;
@@ -222,6 +243,62 @@ export async function refundRechargeOrder(
     }
     if (order.status !== RechargeOrderStatus.PAID) {
       throw new Error(`Recharge order cannot be refunded from status ${order.status}.`);
+    }
+    if (commercialRefundPolicyConflictReason(order)) {
+      const commercialClient = tx as RechargeRefundClient & {
+        tipContribution?: {
+          findUnique(args: unknown): Promise<{
+            status: TipContributionStatus;
+            refundedAt: Date | null;
+            creatorEarning: {
+              status: CreatorEarningStatus;
+              pendingCents: number;
+              withdrawableCents: number;
+              frozenCents: number;
+              withdrawnCents: number;
+            };
+          } | null>;
+        };
+      };
+      const forcedProviderRefund =
+        input.rechargeRefundId && tx.rechargeRefund
+          ? await tx.rechargeRefund.findUnique({
+              where: { id: input.rechargeRefundId },
+            })
+          : null;
+      const reversedTipReceipt =
+        order.productKindSnapshot === BillingProductKind.TIP
+        && commercialClient.tipContribution
+          ? await commercialClient.tipContribution.findUnique({
+              where: { rechargeOrderId: order.id },
+              include: { creatorEarning: true },
+            })
+          : null;
+      if (
+        !forcedProviderRefund
+        || forcedProviderRefund.rechargeOrderId !== order.id
+        || forcedProviderRefund.provider !== order.provider
+        || forcedProviderRefund.providerStatus
+          !== RechargeRefundProviderStatus.SUCCEEDED
+        || forcedProviderRefund.currency !== order.currency
+        || forcedProviderRefund.originalAmountCents !== order.amountCents
+        || forcedProviderRefund.refundAmountCents !== order.amountCents
+        || forcedProviderRefund.payerOriginalAmountCents !== order.amountCents
+        || forcedProviderRefund.payerRefundAmountCents !== order.amountCents
+        || !reversedTipReceipt
+        || reversedTipReceipt.status !== TipContributionStatus.REFUNDED
+        || reversedTipReceipt.refundedAt === null
+        || reversedTipReceipt.creatorEarning.status
+          !== CreatorEarningStatus.REVERSED
+        || reversedTipReceipt.creatorEarning.pendingCents !== 0
+        || reversedTipReceipt.creatorEarning.withdrawableCents !== 0
+        || reversedTipReceipt.creatorEarning.frozenCents !== 0
+        || reversedTipReceipt.creatorEarning.withdrawnCents !== 0
+      ) {
+        throw new Error(
+          "Tips and other non-refundable products cannot be refunded.",
+        );
+      }
     }
     if (order.userWallet.cashBalanceCents < order.amountCents) {
       throw new Error("Recharge refund requires unspent user wallet cash.");
@@ -486,34 +563,34 @@ export async function reverseAgentTokenPurchase(
       orderBy: { createdAt: "asc" },
     });
     const remainingAfter = purchase.remainingTokenAmount - tokenAmount;
-    const pendingBefore =
-      purchase.remainingTokenAmount === 0
-        ? 0
-        : purchase.creatorPendingCents -
-          Math.floor(
-            (purchase.creatorPendingCents *
-              (purchase.tokenAmount - purchase.remainingTokenAmount)) /
-              purchase.tokenAmount,
-          );
-    const pendingAfter =
-      remainingAfter === 0
-        ? 0
-        : purchase.creatorPendingCents -
-          Math.floor(
-            (purchase.creatorPendingCents *
-              (purchase.tokenAmount - remainingAfter)) /
-              purchase.tokenAmount,
-          );
+    const consumedOrReversedBefore =
+      purchase.tokenAmount - purchase.remainingTokenAmount;
+    const releasedBefore = calculateCumulativeRevenueAllocationDifference({
+      grossAmount: purchase.amountCents,
+      creatorAmount: purchase.creatorPendingCents,
+      totalUnits: purchase.tokenAmount,
+      unitsBefore: 0,
+      unitsDelta: consumedOrReversedBefore,
+    }).creatorAmount;
+    const reversalAllocation =
+      calculateCumulativeRevenueAllocationDifference({
+        grossAmount: purchase.amountCents,
+        creatorAmount: purchase.creatorPendingCents,
+        totalUnits: purchase.tokenAmount,
+        unitsBefore: consumedOrReversedBefore,
+        unitsDelta: tokenAmount,
+      });
+    const pendingBefore = purchase.creatorPendingCents - releasedBefore;
+    const pendingAfter = pendingBefore - reversalAllocation.creatorAmount;
     if (
       pendingBefore > 0 &&
       (!pendingEarning || pendingEarning.pendingCents !== pendingBefore)
     ) {
       throw new Error("Creator pending earning is inconsistent with purchase remainder.");
     }
-    const creatorReversedCents = pendingBefore - pendingAfter;
-    const reversedAmountCents = tokenAmount * purchase.tokenUnitPriceCents;
-    const platformReversedCents =
-      reversedAmountCents - creatorReversedCents;
+    const creatorReversedCents = reversalAllocation.creatorAmount;
+    const reversedAmountCents = reversalAllocation.grossAmount;
+    const platformReversedCents = reversalAllocation.platformAmount;
     const refundedAt = new Date();
 
     const entitlementRefund = await refundAgentWalletServiceCreditEntitlement(

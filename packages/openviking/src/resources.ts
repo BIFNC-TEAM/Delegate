@@ -4,7 +4,6 @@ import {
   buildRepresentativeIdentityUri,
   buildRepresentativeMaterialsUri,
   buildRepresentativePoliciesUri,
-  buildRepresentativePricingUri,
   buildRepresentativeVersionResourceRootUri,
 } from "./uris";
 import type { OpenVikingDocumentSpec } from "./types";
@@ -13,15 +12,6 @@ type KnowledgeDocument = {
   title: string;
   summary: string;
   url?: string;
-};
-
-type PricingPlan = {
-  tier: string;
-  name: string;
-  stars: number;
-  summary: string;
-  includedReplies: number;
-  includesPriorityHandoff: boolean;
 };
 
 type RepresentativeKnowledgeInput = {
@@ -46,7 +36,6 @@ type RepresentativeKnowledgeInput = {
     materials: KnowledgeDocument[];
     policies: KnowledgeDocument[];
   };
-  pricing: PricingPlan[];
   handoffPrompt: string;
 };
 
@@ -121,27 +110,6 @@ export function buildRepresentativeKnowledgeDocuments(
         `- Free scope: ${input.freeScope.join(", ")}`,
         `- Paywalled intents: ${input.paywalledIntents.join(", ")}`,
         `- Handoff window: ${input.handoffWindowHours} hours`,
-      ]),
-    },
-    {
-      uri: buildRepresentativePricingUri(input.slug, resourceRootUri),
-      filename: "pricing.md",
-      reason: "Representative public pricing and paid continuation plans",
-      contextType: "resource",
-      scope: "representative",
-      category: "pricing",
-      content: compactMarkdownLines([
-        `# Pricing`,
-        ``,
-        ...input.pricing.flatMap((plan) => [
-          `## ${plan.name}`,
-          `- Tier: ${plan.tier}`,
-          `- Stars: ${plan.stars}`,
-          `- Replies: ${plan.includedReplies}`,
-          `- Priority handoff: ${plan.includesPriorityHandoff ? "yes" : "no"}`,
-          plan.summary,
-          ``,
-        ]),
       ]),
     },
   ];

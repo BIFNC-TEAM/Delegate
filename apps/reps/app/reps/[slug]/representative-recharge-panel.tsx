@@ -11,11 +11,13 @@ import { QRCodeSVG } from "qrcode.react";
 import { pickCopy, type Locale } from "@delegate/web-ui";
 
 import {
+  buildPublicCommerceCompletionWalletUpdate,
   getCheckoutSecondsRemaining,
   getPublicRechargeStatusPresentation,
   getWeChatPaymentPollDelayMs,
   publishPublicWalletUpdate,
   selectCurrentPublicWalletActivity,
+  type PublicCommerceProduct,
   type PublicRechargeOrderStatus,
   type PublicRechargeStatusTone,
   type PublicWalletStateSnapshot,
@@ -26,8 +28,13 @@ type RechargeOrderSnapshot = {
   billingProductId: string | null;
   billingPriceVersionId: string | null;
   productName: string | null;
+  productKind: "SERVICE_PACKAGE" | "TIP" | null;
   entitlementUnits: number | null;
   unitName: string | null;
+  handoffAllowance: "NONE" | "LIMITED" | "UNLIMITED" | null;
+  handoffUnits: number | null;
+  handoffServiceLevel: "STANDARD" | "PRIORITY" | null;
+  handoffValidityDays: number | null;
   amountCents: number;
   currency: string;
   provider: string;
@@ -36,11 +43,38 @@ type RechargeOrderSnapshot = {
   checkoutExpiresAt: string | null;
 };
 
-type ServicePackageSnapshot =
-  PublicWalletStateSnapshot["servicePackages"][number];
+type CommerceCompletionOrderPayload = Omit<
+  RechargeOrderSnapshot,
+  | "productName"
+  | "productKind"
+  | "entitlementUnits"
+  | "unitName"
+  | "handoffAllowance"
+  | "handoffUnits"
+  | "handoffServiceLevel"
+  | "handoffValidityDays"
+> & Partial<Pick<
+  RechargeOrderSnapshot,
+  | "productName"
+  | "productKind"
+  | "entitlementUnits"
+  | "unitName"
+  | "handoffAllowance"
+  | "handoffUnits"
+  | "handoffServiceLevel"
+  | "handoffValidityDays"
+>> & {
+  productNameSnapshot?: string | null;
+  productKindSnapshot?: "SERVICE_PACKAGE" | "TIP" | null;
+  entitlementUnitsSnapshot?: number | null;
+  unitNameSnapshot?: string | null;
+  handoffAllowanceSnapshot?: "NONE" | "LIMITED" | "UNLIMITED" | null;
+  handoffUnitsSnapshot?: number | null;
+  handoffServiceLevelSnapshot?: "STANDARD" | "PRIORITY" | null;
+  handoffValidityDaysSnapshot?: number | null;
+};
 
 type TokenPurchaseSnapshot = {
-  id: string;
   tokenAmount: number;
   remainingTokenAmount: number;
   availableTokenAmount: number;
@@ -94,6 +128,7 @@ export function RepresentativeRechargePanel({
   audienceAuthenticated,
   collectionEnabled,
   continuationChannel,
+  initialCommerceProducts,
   loginHref,
   representativeSlug,
   locale,
@@ -102,51 +137,73 @@ export function RepresentativeRechargePanel({
   audienceAuthenticated: boolean;
   collectionEnabled: boolean;
   continuationChannel?: "telegram";
+  initialCommerceProducts: PublicCommerceProduct[];
   loginHref: string;
   representativeSlug: string;
   locale: Locale;
   paymentMode: "mock" | "wechat";
 }) {
   const t = pickCopy(locale, copy);
-  const [servicePackages, setServicePackages] = useState<
-    ServicePackageSnapshot[]
-  >([]);
+  const [commerceProducts, setCommerceProducts] = useState<
+    PublicCommerceProduct[]
+  >(initialCommerceProducts);
   const [selectedPriceVersionId, setSelectedPriceVersionId] =
-    useState<string | null>(null);
+    useState<string | null>(
+      pickDefaultCommerceProduct(initialCommerceProducts)?.priceVersionId
+        ?? null,
+    );
   const [order, setOrder] = useState<RechargeOrderSnapshot | null>(null);
   const [purchase, setPurchase] = useState<TokenPurchaseSnapshot | null>(null);
   const [reversal, setReversal] = useState<PurchaseReversalSnapshot | null>(null);
   const [walletState, setWalletState] =
     useState<PublicWalletStateSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [telegramBindingError, setTelegramBindingError] =
+    useState<string | null>(null);
   const [isRestoring, setIsRestoring] = useState(true);
   const [isCheckoutUrlCopied, setIsCheckoutUrlCopied] = useState(false);
   const [checkoutClockMs, setCheckoutClockMs] = useState(() => Date.now());
   const [paymentNotice, setPaymentNotice] =
     useState<PaymentNotice | null>(null);
+  const [tipCompleted, setTipCompleted] = useState(false);
   const [paymentStatusRetryNonce, setPaymentStatusRetryNonce] =
     useState(0);
   const [mutation, setMutation] = useState<RechargeMutation>(null);
   const mutationLockRef = useRef(false);
   const rechargeIntentRef = useRef<RechargeIntent | null>(null);
   const isMutating = mutation !== null;
+  const selectedProduct =
+    commerceProducts.find(
+      (product) => product.priceVersionId === selectedPriceVersionId,
+    ) ?? null;
+  const serviceProducts = commerceProducts.filter(
+    (product) => product.kind === "SERVICE_PACKAGE",
+  );
+  const tipProducts = commerceProducts.filter(
+    (product) => product.kind === "TIP",
+  );
+  const requiresTelegramBinding =
+    continuationChannel === "telegram"
+    && selectedProduct?.kind === "SERVICE_PACKAGE";
   const [telegramBindingStatus, setTelegramBindingStatus] = useState<
     "checking" | "required" | "ready"
   >(
-    continuationChannel === "telegram" && audienceAuthenticated
+    requiresTelegramBinding && audienceAuthenticated
       ? "checking"
-      : continuationChannel === "telegram"
+      : requiresTelegramBinding
         ? "required"
         : "ready",
   );
 
   const refreshTelegramBinding = useCallback(async () => {
-    if (continuationChannel !== "telegram" || !audienceAuthenticated) {
-      setTelegramBindingStatus("required");
+    if (!requiresTelegramBinding || !audienceAuthenticated) {
+      setTelegramBindingStatus(
+        requiresTelegramBinding ? "required" : "ready",
+      );
       return;
     }
     setTelegramBindingStatus("checking");
-    setError(null);
+    setTelegramBindingError(null);
     try {
       const response = await fetch(
         `/reps/${representativeSlug}/identity-bindings`,
@@ -163,7 +220,7 @@ export function RepresentativeRechargePanel({
       );
     } catch (nextError) {
       setTelegramBindingStatus("required");
-      setError(
+      setTelegramBindingError(
         nextError instanceof Error
           ? nextError.message
           : t.bindingCheckError,
@@ -171,25 +228,25 @@ export function RepresentativeRechargePanel({
     }
   }, [
     audienceAuthenticated,
-    continuationChannel,
     representativeSlug,
+    requiresTelegramBinding,
     t.bindingCheckError,
   ]);
 
   useEffect(() => {
-    if (continuationChannel === "telegram" && audienceAuthenticated) {
+    if (requiresTelegramBinding && audienceAuthenticated) {
       void refreshTelegramBinding();
     }
   }, [
     audienceAuthenticated,
-    continuationChannel,
     refreshTelegramBinding,
+    requiresTelegramBinding,
   ]);
 
   const rechargeReady =
     audienceAuthenticated
     && (
-      continuationChannel !== "telegram"
+      !requiresTelegramBinding
       || telegramBindingStatus === "ready"
     );
   const checkoutRemainingSeconds =
@@ -231,6 +288,10 @@ export function RepresentativeRechargePanel({
     hasActivePendingCheckout
     && !paymentResultConfirmed
     && !checkoutRequiresManualAction;
+  const weChatDisclosureKind =
+    hasActiveWeChatOrder || paymentResultConfirmed
+      ? order?.productKind ?? selectedProduct?.kind ?? null
+      : selectedProduct?.kind ?? order?.productKind ?? null;
 
   const applyWalletState = useCallback((
     snapshot: PublicWalletStateSnapshot,
@@ -243,8 +304,13 @@ export function RepresentativeRechargePanel({
           billingProductId: activity.order.billingProductId,
           billingPriceVersionId: activity.order.billingPriceVersionId,
           productName: activity.order.productName,
+          productKind: activity.order.productKind,
           entitlementUnits: activity.order.entitlementUnits,
           unitName: activity.order.unitName,
+          handoffAllowance: activity.order.handoffAllowance,
+          handoffUnits: activity.order.handoffUnits,
+          handoffServiceLevel: activity.order.handoffServiceLevel,
+          handoffValidityDays: activity.order.handoffValidityDays,
           amountCents: activity.order.amountCents,
           currency: activity.order.currency,
           provider: activity.order.provider,
@@ -253,27 +319,35 @@ export function RepresentativeRechargePanel({
           checkoutExpiresAt: activity.order.checkoutExpiresAt,
         }
       : null);
-    setServicePackages(snapshot.servicePackages);
+    setCommerceProducts(snapshot.commerceProducts);
+    setTipCompleted(
+      activity.order?.productKind === "TIP"
+      && activity.order.status === "paid",
+    );
     setSelectedPriceVersionId((current) => {
       if (
         current
-        && snapshot.servicePackages.some(
-          (servicePackage) => servicePackage.priceVersionId === current,
+        && snapshot.commerceProducts.some(
+          (product) => product.priceVersionId === current,
         )
       ) {
         return current;
       }
       if (
         activity.order
-        && snapshot.servicePackages.some(
-          (servicePackage) =>
-            servicePackage.priceVersionId
+        && snapshot.commerceProducts.some(
+          (product) =>
+            product.priceVersionId
             === activity.order?.billingPriceVersionId,
         )
       ) {
         return activity.order.billingPriceVersionId;
       }
-      return snapshot.servicePackages[0]?.priceVersionId ?? null;
+      const preferred = pickDefaultCommerceProduct(
+        snapshot.commerceProducts,
+        snapshot.commerceSettings.accessMode,
+      );
+      return preferred?.priceVersionId ?? null;
     });
     if (
       (
@@ -286,7 +360,6 @@ export function RepresentativeRechargePanel({
     }
     setPurchase(activity.purchase
       ? {
-          id: activity.purchase.id,
           tokenAmount: activity.purchase.tokenAmount,
           remainingTokenAmount: activity.purchase.remainingTokenAmount,
           availableTokenAmount: snapshot.summary.serviceCreditsAvailable,
@@ -305,11 +378,14 @@ export function RepresentativeRechargePanel({
           status: activity.refund.status,
         }
       : null);
-    publishPublicWalletUpdate({
-      representativeSlug,
-      serviceCreditsAvailable: snapshot.summary.serviceCreditsAvailable,
-      serviceCreditsReserved: snapshot.summary.serviceCreditsReserved,
-    });
+    if (activity.order?.productKind !== "TIP") {
+      publishPublicWalletUpdate({
+        representativeSlug,
+        serviceCreditsAvailable: snapshot.summary.serviceCreditsAvailable,
+        serviceCreditsReserved: snapshot.summary.serviceCreditsReserved,
+        handoffEntitlement: snapshot.handoffEntitlement,
+      });
+    }
   }, [representativeSlug]);
 
   const refreshWalletState = useCallback(async (
@@ -499,7 +575,7 @@ export function RepresentativeRechargePanel({
           clearTimer();
           setPaymentNotice({
             kind: "paid-refreshing",
-            message: t.wechatPaidRefreshing,
+            message: t.wechatPaidRefreshing(order.productKind),
             tone: "success",
           });
           walletRefreshController = new AbortController();
@@ -507,14 +583,14 @@ export function RepresentativeRechargePanel({
             await refreshWalletState(walletRefreshController.signal);
             setPaymentNotice({
               kind: "paid",
-              message: t.wechatPaid,
+              message: t.wechatPaid(order.productKind),
               tone: "success",
             });
           } catch (nextError) {
             if (!isAbortError(nextError)) {
               setPaymentNotice({
                 kind: "paid-refresh-failed",
-                message: t.wechatPaidRefreshFailed,
+                message: t.wechatPaidRefreshFailed(order.productKind),
                 tone: "warning",
               });
             }
@@ -663,6 +739,7 @@ export function RepresentativeRechargePanel({
     order?.checkoutExpiresAt,
     order?.checkoutUrl,
     order?.id,
+    order?.productKind,
     order?.status,
     paymentStatusRetryNonce,
     paymentMode,
@@ -757,6 +834,7 @@ export function RepresentativeRechargePanel({
             billingPriceVersionId: intent.priceVersionId,
             idempotencyKey: intent.idempotencyKey,
             ...(continuationChannel
+              && selectedProduct?.kind === "SERVICE_PACKAGE"
               ? { continuationChannel }
               : {}),
           }),
@@ -801,6 +879,7 @@ export function RepresentativeRechargePanel({
         setCheckoutClockMs(Date.now());
         setIsCheckoutUrlCopied(false);
         setPurchase(null);
+        setTipCompleted(false);
         setReversal(null);
         rechargeIntentRef.current = null;
         await restoreAfterMutation();
@@ -814,21 +893,21 @@ export function RepresentativeRechargePanel({
   function retryPaidWalletRefresh() {
     setPaymentNotice({
       kind: "paid-refreshing",
-      message: t.wechatPaidRefreshing,
+      message: t.wechatPaidRefreshing(order?.productKind ?? null),
       tone: "success",
     });
     void refreshWalletState()
       .then(() => {
         setPaymentNotice({
           kind: "paid",
-          message: t.wechatPaid,
+          message: t.wechatPaid(order?.productKind ?? null),
           tone: "success",
         });
       })
       .catch(() => {
         setPaymentNotice({
           kind: "paid-refresh-failed",
-          message: t.wechatPaidRefreshFailed,
+          message: t.wechatPaidRefreshFailed(order?.productKind ?? null),
           tone: "warning",
         });
       });
@@ -880,17 +959,21 @@ export function RepresentativeRechargePanel({
         }
 
         const payload = (await response.json()) as {
-          rechargeOrder: RechargeOrderSnapshot;
-          tokenPurchase: TokenPurchaseSnapshot;
+          rechargeOrder: CommerceCompletionOrderPayload;
+          tokenPurchase: TokenPurchaseSnapshot | null;
         };
-        setOrder(payload.rechargeOrder);
+        const completedOrder = normalizeCompletionOrder(payload.rechargeOrder);
+        setOrder(completedOrder);
         setPurchase(payload.tokenPurchase);
+        setTipCompleted(
+          completedOrder.productKind === "TIP",
+        );
         setReversal(null);
-        publishPublicWalletUpdate({
+        const walletUpdate = buildPublicCommerceCompletionWalletUpdate({
           representativeSlug,
-          serviceCreditsAvailable: payload.tokenPurchase.availableTokenAmount,
-          serviceCreditsReserved: payload.tokenPurchase.reservedTokenAmount,
+          tokenPurchase: payload.tokenPurchase,
         });
+        if (walletUpdate) publishPublicWalletUpdate(walletUpdate);
         await restoreAfterMutation();
       })()
       .catch((nextError: unknown) => {
@@ -974,11 +1057,16 @@ export function RepresentativeRechargePanel({
       : checkoutRequiresManualAction
         ? "error"
         : orderPresentation?.tone ?? "neutral";
-  const selectedServicePackage =
-    servicePackages.find(
-      (servicePackage) =>
-        servicePackage.priceVersionId === selectedPriceVersionId,
-    ) ?? null;
+  function selectCommerceProduct(product: PublicCommerceProduct) {
+    setSelectedPriceVersionId(product.priceVersionId);
+    setTipCompleted(false);
+    if (
+      rechargeIntentRef.current
+      && rechargeIntentRef.current.priceVersionId !== product.priceVersionId
+    ) {
+      rechargeIntentRef.current = null;
+    }
+  }
 
   return (
     <div className="setup-stack">
@@ -1001,7 +1089,7 @@ export function RepresentativeRechargePanel({
         </div>
       ) : null}
 
-      {continuationChannel === "telegram" && audienceAuthenticated ? (
+      {requiresTelegramBinding && audienceAuthenticated ? (
         <div
           className={
             telegramBindingStatus === "ready"
@@ -1036,6 +1124,11 @@ export function RepresentativeRechargePanel({
               </button>
             </div>
           ) : null}
+          {telegramBindingError ? (
+            <p className="feedback-error" role="alert">
+              {telegramBindingError}
+            </p>
+          ) : null}
         </div>
       ) : null}
 
@@ -1066,79 +1159,76 @@ export function RepresentativeRechargePanel({
         </div>
       ) : null}
 
-      {audienceAuthenticated && !isRestoring ? (
-        servicePackages.length > 0 ? (
-          <>
-            <strong>{t.servicePackagesTitle}</strong>
-            <div className="button-row button-row-stretch">
-              {servicePackages.map((servicePackage) => (
-                <button
-                  aria-pressed={
-                    selectedPriceVersionId === servicePackage.priceVersionId
-                  }
-                  className={
-                    selectedPriceVersionId === servicePackage.priceVersionId
-                      ? "button-primary"
-                      : "button-secondary"
-                  }
-                  disabled={
-                    isMutating
-                    || !rechargeReady
-                    || hasActiveWeChatOrder
-                    || paymentResultConfirmed
-                    || checkoutRequiresManualAction
-                  }
-                  key={servicePackage.priceVersionId}
-                  onClick={() => {
-                    setSelectedPriceVersionId(servicePackage.priceVersionId);
-                    if (
-                      rechargeIntentRef.current
-                      && rechargeIntentRef.current.priceVersionId
-                        !== servicePackage.priceVersionId
-                    ) {
-                      rechargeIntentRef.current = null;
-                    }
-                  }}
-                  type="button"
-                >
-                  <strong>{servicePackage.name}</strong>
-                  {" · "}
-                  {formatMoney(
-                    servicePackage.amountCents,
-                    servicePackage.currency,
-                  )}
-                  {" · "}
-                  {t.packageUnits(
-                    servicePackage.entitlementUnits,
-                    servicePackage.unitName,
-                  )}
-                </button>
-              ))}
-            </div>
-            {selectedServicePackage ? (
-              <p className="footer-note">
-                {selectedServicePackage.description
-                  ? `${selectedServicePackage.description} · `
-                  : ""}
-                {t.packagePolicy(
-                  selectedServicePackage.refundPolicy,
-                  selectedServicePackage.expiryPolicy,
-                )}
-                {" · "}
-                {t.creditsScope}
-              </p>
-            ) : null}
-          </>
-        ) : (
-          <div className="status-banner" role="status">
-            <strong>{t.noServicePackagesTitle}</strong>
-            <p>{t.noServicePackagesDetail}</p>
+      {(!audienceAuthenticated || !isRestoring) && serviceProducts.length > 0 ? (
+        <section className="representative-commerce-group" aria-labelledby="representative-service-products-title">
+          <div className="representative-commerce-group-heading">
+            <strong id="representative-service-products-title">{t.servicePackagesTitle}</strong>
+            <span>{t.servicePackagesDetail}</span>
           </div>
-        )
+          <div className="representative-commerce-options">
+            {serviceProducts.map((product) => (
+              <button
+                aria-pressed={selectedPriceVersionId === product.priceVersionId}
+                className={selectedPriceVersionId === product.priceVersionId
+                  ? "representative-commerce-option is-selected"
+                  : "representative-commerce-option"}
+                disabled={isMutating || hasActiveWeChatOrder || paymentResultConfirmed || checkoutRequiresManualAction}
+                key={product.priceVersionId}
+                onClick={() => selectCommerceProduct(product)}
+                type="button"
+              >
+                <span className="representative-commerce-option-heading">
+                  <strong>{product.name}</strong>
+                  {product.isRecommended ? <small>{t.recommended}</small> : null}
+                </span>
+                <b>{formatMoney(product.amountCents, product.currency)}</b>
+                {product.description ? <span>{product.description}</span> : null}
+                <span className="chip-row">
+                  <span className="chip">{t.packageUnits(product.entitlementUnits, product.unitName)}</span>
+                  {product.handoffAllowance !== "NONE" ? (
+                    <span className="chip chip-safe">{t.handoffBenefit(product)}</span>
+                  ) : null}
+                </span>
+                <small>{t.packagePolicy(product.refundPolicy, product.expiryPolicy)}</small>
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {(!audienceAuthenticated || !isRestoring) && tipProducts.length > 0 ? (
+        <section className="representative-commerce-group is-tip" aria-labelledby="representative-tip-products-title">
+          <div className="representative-commerce-group-heading">
+            <strong id="representative-tip-products-title">{t.tipProductsTitle}</strong>
+            <span>{t.tipProductsDetail}</span>
+          </div>
+          <div className="representative-commerce-options">
+            {tipProducts.map((product) => (
+              <button
+                aria-pressed={selectedPriceVersionId === product.priceVersionId}
+                className={selectedPriceVersionId === product.priceVersionId
+                  ? "representative-commerce-option is-selected"
+                  : "representative-commerce-option"}
+                disabled={isMutating || hasActiveWeChatOrder || paymentResultConfirmed || checkoutRequiresManualAction}
+                key={product.priceVersionId}
+                onClick={() => selectCommerceProduct(product)}
+                type="button"
+              >
+                <span className="representative-commerce-option-heading">
+                  <strong>{product.name}</strong>
+                  {product.isRecommended ? <small>{t.recommended}</small> : null}
+                </span>
+                <b>{formatMoney(product.amountCents, product.currency)}</b>
+                {product.description ? <span>{product.description}</span> : null}
+                <small>{t.tipPolicy}</small>
+              </button>
+            ))}
+          </div>
+        </section>
       ) : null}
 
       {audienceAuthenticated
-        && (servicePackages.length > 0 || hasActiveWeChatOrder) ? (
+        && (commerceProducts.length > 0 || hasActiveWeChatOrder) ? (
           <button
             className="button-primary button-block"
             disabled={
@@ -1167,8 +1257,12 @@ export function RepresentativeRechargePanel({
                   : hasActivePendingCheckout
                     ? t.wechatPendingAction
                     : paymentMode === "wechat"
-                      ? t.wechatCreateAction
-                      : t.createAction}
+                      ? selectedProduct?.kind === "TIP"
+                        ? t.wechatTipAction
+                        : t.wechatCreateAction
+                      : selectedProduct?.kind === "TIP"
+                        ? t.tipAction
+                        : t.createAction}
           </button>
         ) : null}
       {hasActiveWeChatOrder ? (
@@ -1187,7 +1281,7 @@ export function RepresentativeRechargePanel({
         >
           <strong>{t.latestOrder}</strong>
           <p>
-            {order.productName ?? t.legacyServicePackage}
+            {order.productName ?? t.legacyCommerceProduct}
             {" · "}
             {formatMoney(order.amountCents, order.currency)}
             {" · "}
@@ -1197,7 +1291,9 @@ export function RepresentativeRechargePanel({
                 : orderPresentation?.label}
             </span>
             {" · "}
-            {order.entitlementUnits && order.unitName
+            {order.productKind === "TIP"
+              ? t.tipOrderTerms
+              : order.entitlementUnits && order.unitName
               ? t.packageUnits(order.entitlementUnits, order.unitName)
               : t.legacyOrderTerms}
           </p>
@@ -1227,7 +1323,7 @@ export function RepresentativeRechargePanel({
                 />
                 <div>
                   <strong>{t.wechatQrTitle}</strong>
-                  <p>{t.wechatQrDetail}</p>
+                  <p>{t.wechatQrDetail(order.productKind)}</p>
                   {checkoutRemainingSeconds !== null ? (
                     <p
                       className="representative-wechat-countdown"
@@ -1263,6 +1359,12 @@ export function RepresentativeRechargePanel({
               {paymentNotice?.kind !== "expired"
                 ? t.wechatExpiredConfirming
                 : t.wechatExpiredDetail}
+            </p>
+          ) : null}
+          {order.productKind === "TIP" && (tipCompleted || order.status === "paid") ? (
+            <p className="representative-tip-thanks" role="status">
+              <strong>{t.tipThanksTitle}</strong>
+              {" "}{t.tipThanksDetail}
             </p>
           ) : null}
           {purchase ? (
@@ -1345,10 +1447,10 @@ export function RepresentativeRechargePanel({
         </div>
       ) : null}
 
-      {error ? <div className="status-banner status-error">{error}</div> : null}
+      {error ? <div className="status-banner status-error" role="alert">{error}</div> : null}
       <p className="footer-note">
         {paymentMode === "wechat"
-          ? t.wechatDisclaimer
+          ? t.wechatDisclaimer(weChatDisclosureKind)
           : t.disclaimer}
       </p>
     </div>
@@ -1358,6 +1460,47 @@ export function RepresentativeRechargePanel({
 async function extractError(response: Response): Promise<string> {
   const body = (await response.json().catch(() => null)) as { error?: string } | null;
   return body?.error ?? response.statusText;
+}
+
+function pickDefaultCommerceProduct(
+  products: PublicCommerceProduct[],
+  accessMode: PublicWalletStateSnapshot["commerceSettings"]["accessMode"] =
+    "TRIAL_THEN_CREDITS",
+) {
+  const serviceProducts = products.filter(
+    (product) => product.kind === "SERVICE_PACKAGE",
+  );
+  const tips = products.filter((product) => product.kind === "TIP");
+  const preferredProducts = accessMode === "FREE" ? tips : serviceProducts;
+  return preferredProducts.find((product) => product.isRecommended)
+    ?? preferredProducts[0]
+    ?? tips.find((product) => product.isRecommended)
+    ?? tips[0]
+    ?? null;
+}
+
+function normalizeCompletionOrder(
+  order: CommerceCompletionOrderPayload,
+): RechargeOrderSnapshot {
+  return {
+    ...order,
+    productName: order.productName ?? order.productNameSnapshot ?? null,
+    productKind: order.productKind ?? order.productKindSnapshot ?? null,
+    entitlementUnits:
+      order.entitlementUnits ?? order.entitlementUnitsSnapshot ?? null,
+    unitName: order.unitName ?? order.unitNameSnapshot ?? null,
+    handoffAllowance:
+      order.handoffAllowance ?? order.handoffAllowanceSnapshot ?? null,
+    handoffUnits: order.handoffUnits ?? order.handoffUnitsSnapshot ?? null,
+    handoffServiceLevel:
+      order.handoffServiceLevel
+      ?? order.handoffServiceLevelSnapshot
+      ?? null,
+    handoffValidityDays:
+      order.handoffValidityDays
+      ?? order.handoffValidityDaysSnapshot
+      ?? null,
+  };
 }
 
 function randomId(): string {
@@ -1396,18 +1539,18 @@ function isAbortError(error: unknown): boolean {
 
 const copy = {
   zh: {
-    identityNote: "购买后，服务额度会直接发放到当前已登录的 Delegate 账户，并且仅适用于当前数字代表；无需再用余额二次购买。绑定后 Web、Telegram 和 Matrix 可使用同一份当前代表权益。",
-    restoring: "正在读取当前代表的服务额度与服务包…",
-    loadError: "服务额度与服务包读取失败。",
+    identityNote: "服务套餐和自愿支持都会记入当前已登录的 Delegate 账户。套餐额度与人工权益仅适用于当前数字代表；打赏不赠送额度或人工权益。",
+    restoring: "正在读取当前代表的服务与支持选项…",
+    loadError: "服务与支持选项读取失败。",
     refreshError: "操作已完成，但最新服务额度暂时无法刷新，请重新加载页面。",
     walletSummaryTitle: "当前代表的服务额度",
     creditsAvailableLabel: "可用额度 ",
     creditsReservedLabel: "预留额度 ",
     creditsConsumedLabel: "已消费额度 ",
     recordSummary: (orders: number, purchases: number, refunds: number) =>
-      `最近记录：${orders} 笔服务包订单 · ${purchases} 次额度发放 · ${refunds} 笔退款`,
+      `最近记录：${orders} 笔订单 · ${purchases} 次额度发放 · ${refunds} 笔退款`,
     loginRequiredTitle: "请先登录 Delegate 账户",
-    loginRequiredDetail: "服务包购买和服务额度会记入已登录账户，不会记入临时浏览器身份。",
+    loginRequiredDetail: "服务与支持订单会记入已登录账户，不会记入临时浏览器身份；只有服务套餐会增加额度或人工权益。",
     loginAction: "登录 / 注册",
     telegramBindingRequiredTitle: "请先绑定当前 Telegram 账户",
     telegramBindingRequiredDetail: "在上方“跨渠道身份”生成 /bind 命令，发送给当前 Bot 后再回来检查。",
@@ -1418,14 +1561,25 @@ const copy = {
     checkingBinding: "检查中...",
     bindingCheckError: "Telegram 绑定状态检查失败。",
     servicePackagesTitle: "选择当前数字代表的服务包",
-    noServicePackagesTitle: "当前没有可购买的服务包",
-    noServicePackagesDetail: "数字代表主人尚未上架服务包，请稍后再来。",
+    servicePackagesDetail: "套餐会发放当前代表专属额度；标注的人工接管权益同时生效。",
+    tipProductsTitle: "自愿支持",
+    tipProductsDetail: "可选择不同金额表达支持；这不是购买服务，也不改变响应优先级。",
+    recommended: "推荐",
     packageUnits: (units: number, unitName: string) =>
       `${units} ${unitName === "credit" ? "服务额度" : unitName || "服务额度"}`,
     packagePolicy: (refundPolicy: string, expiryPolicy: string) =>
       `${refundPolicy === "FULL_WHEN_UNUSED" ? "完全未使用时可申请全额退款" : "按商品退款规则处理"} · ${expiryPolicy === "NEVER_EXPIRES" ? "长期有效" : "按商品有效期使用"}`,
+    handoffBenefit: (product: Extract<PublicCommerceProduct, { kind: "SERVICE_PACKAGE" }>) => {
+      const allowance = product.handoffAllowance === "UNLIMITED"
+        ? "不限次人工"
+        : `${product.handoffUnits ?? 0} 次人工`;
+      return `${allowance}${product.handoffServiceLevel === "PRIORITY" ? " · 优先" : " · 标准"}${product.handoffValidityDays ? ` · ${product.handoffValidityDays} 天` : ""}`;
+    },
+    tipPolicy: "自愿支持 · 不赠服务额度 · 不含人工接管 · 不可退款",
     createAction: "购买所选服务包",
+    tipAction: "确认自愿支持",
     wechatCreateAction: "使用微信购买所选服务包",
+    wechatTipAction: "使用微信自愿支持",
     wechatCollectionPausedTitle: "微信支付已暂停新收款",
     wechatCollectionPausedDetail: "当前不能生成新的支付二维码；已创建订单仍会继续查询和入账，请按现有二维码完成支付或等待结果确认。",
     wechatCollectionPausedAction: "新收款已暂停",
@@ -1437,14 +1591,17 @@ const copy = {
     wechatPendingPreventsDuplicate: "当前二维码仍在有效期内。为避免重复扣款，请先完成或等待该订单关闭。",
     wechatExpiredPreventsDuplicate: "当前二维码已过期，但旧订单尚未由微信确认关闭。系统会继续查询并安全关单；关闭前请勿创建第二笔订单。",
     creating: "处理中...",
-    createError: "创建服务包订单失败。",
+    createError: "创建商品订单失败。",
     payError: "模拟支付失败。",
-    latestOrder: "最近一笔服务包订单",
-    legacyServicePackage: "历史服务订单",
-    legacyOrderTerms: "历史订单未保存服务包快照",
+    latestOrder: "最近一笔订单",
+    legacyCommerceProduct: "历史服务订单",
+    legacyOrderTerms: "历史订单未保存商品快照",
+    tipOrderTerms: "自愿支持 · 不赠额度或人工权益 · 不可退款",
+    tipThanksTitle: "感谢你的支持。",
+    tipThanksDetail: "本次支持已确认，不会增加服务额度，也不会创建退款额度按钮。",
     mockPayAction: "模拟支付成功",
     wechatQrTitle: "微信扫码支付",
-    wechatQrDetail: "请使用微信扫描二维码。支付成功后，所选服务额度会直接发放给当前数字代表，无需二次购买。",
+    wechatQrDetail: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "请使用微信扫描二维码。支付成功后会记录本次自愿支持，不发放服务额度或人工权益。" : "请使用微信扫描二维码。支付成功后，所选服务额度和人工权益会直接发放给当前数字代表。",
     wechatCountdown: (time: string) => `二维码剩余有效时间 ${time}`,
     wechatAwaitingPayment: "正在等待微信支付确认。",
     wechatRecovering: "微信支付订单正在安全确认，二维码生成后会自动显示。",
@@ -1454,14 +1611,14 @@ const copy = {
     wechatExpiredUnconfirmed: "二维码已到期，但支付结果暂时无法确认。请勿重复支付；系统会继续查询。",
     retryPaymentStatusAction: "重新查询支付结果",
     wechatAuthExpired: "登录状态已失效，支付查询已停止。请重新登录后核对订单。",
-    wechatManualReview: "支付结果与服务包订单需要人工核对，自动查询已停止。",
+    wechatManualReview: "支付结果与当前订单需要人工核对，自动查询已停止。",
     wechatManualReviewAction: "请勿重复支付。联系数字代表主人并提供当前订单时间和金额进行核对。",
     wechatProviderRetry: "微信支付状态暂时不可用，本页会降低频率后自动重试。",
     wechatStatusRetry: "网络暂时不可用，本页会自动重试支付状态。",
     wechatOffline: "当前设备已离线；支付查询已暂停，恢复联网后会自动继续。",
-    wechatPaidRefreshing: "微信支付已确认，正在刷新当前代表的服务额度…",
-    wechatPaid: "微信支付已确认，当前代表的服务额度已发放。",
-    wechatPaidRefreshFailed: "微信支付已确认，但服务额度暂时无法刷新。请勿重复支付，可重新读取服务额度。",
+    wechatPaidRefreshing: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "微信支付已确认，正在刷新支持记录…" : "微信支付已确认，正在刷新当前代表的服务权益…",
+    wechatPaid: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "微信支付已确认，感谢你的自愿支持。" : "微信支付已确认，当前代表的服务权益已发放。",
+    wechatPaidRefreshFailed: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "微信支付已确认，但支持记录暂时无法刷新。请勿重复支付。" : "微信支付已确认，但服务权益暂时无法刷新。请勿重复支付，可重新读取。",
     wechatExistingCheckoutRestored: "已恢复仍在有效期内的待支付二维码。",
     paymentConfirmedStatus: "支付已确认",
     refreshWalletAction: "重新读取服务额度",
@@ -1481,22 +1638,22 @@ const copy = {
       amountCents: number,
       currency: string,
     ) => `${tokens} 额度 · ${formatMoney(amountCents, currency)}`,
-    disclaimer: "当前是仅限开发环境的演示支付入口：可以验证服务包下单、模拟支付、直接发放当前代表服务额度、付费继续和完全未使用额度的本地撤销；不会真实扣款，也不模拟渠道原路退款。Delegate 不处理银行卡号或支付密码。",
-    wechatDisclaimer: "当前使用微信 Native 支付。Delegate 只保存服务包订单和验签后的最小支付凭据，不接触微信支付密码；支付成功后会直接发放当前数字代表专属服务额度。退款按所购服务包规则处理。",
+    disclaimer: "当前是仅限开发环境的演示支付入口：可以验证服务套餐或自愿支持下单与模拟支付；只有服务套餐会发放额度或人工权益，完全未使用的套餐额度可在本地撤销，打赏不可退款。这里不会真实扣款，也不模拟渠道原路退款。Delegate 不处理银行卡号或支付密码。",
+    wechatDisclaimer: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "当前使用微信 Native 支付。Delegate 只保存订单和验签后的最小支付凭据，不接触微信支付密码；自愿支持不赠送服务权益，支付确认后不可退款。" : "当前使用微信 Native 支付。Delegate 只保存订单和验签后的最小支付凭据，不接触微信支付密码；支付成功后会发放当前数字代表专属服务权益，退款按所购套餐规则处理。",
   },
   en: {
-    identityNote: "After purchase, service credits are issued directly to the signed-in Delegate account for this Digital Representative only. There is no second wallet purchase. Linked Web, Telegram, and Matrix identities can use the same representative-scoped entitlement.",
-    restoring: "Loading service credits and packages for this representative…",
-    loadError: "Service credits and packages could not be loaded.",
+    identityNote: "Service packages and voluntary support are recorded on the signed-in Delegate account. Package credits and human-help entitlements apply only to this representative; tips include neither.",
+    restoring: "Loading services and support options for this representative…",
+    loadError: "Services and support options could not be loaded.",
     refreshError: "The operation completed, but the latest service credits could not be refreshed. Reload the page to try again.",
     walletSummaryTitle: "Credits for this representative",
     creditsAvailableLabel: "available credits ",
     creditsReservedLabel: "reserved credits ",
     creditsConsumedLabel: "consumed credits ",
     recordSummary: (orders: number, purchases: number, refunds: number) =>
-      `Recent records: ${orders} service-package orders · ${purchases} credit grants · ${refunds} refunds`,
+      `Recent records: ${orders} orders · ${purchases} credit grants · ${refunds} refunds`,
     loginRequiredTitle: "Sign in to your Delegate account",
-    loginRequiredDetail: "Service-package purchases and credits are attached to a signed-in account, never a temporary browser identity.",
+    loginRequiredDetail: "Services-and-support orders are attached to a signed-in account, never a temporary browser identity. Only service packages add credits or human-help entitlements.",
     loginAction: "Sign in / register",
     telegramBindingRequiredTitle: "Link this Telegram account first",
     telegramBindingRequiredDetail: "Create a /bind command in Cross-channel identity above, send it to this Bot, then check again.",
@@ -1507,8 +1664,10 @@ const copy = {
     checkingBinding: "Checking...",
     bindingCheckError: "Unable to check the Telegram identity link.",
     servicePackagesTitle: "Choose a service package for this representative",
-    noServicePackagesTitle: "No service package is available",
-    noServicePackagesDetail: "The representative owner has not published a service package yet.",
+    servicePackagesDetail: "Packages grant representative-scoped credits and any human-takeover entitlement shown below.",
+    tipProductsTitle: "Voluntary support",
+    tipProductsDetail: "Choose an amount to show support. This is not a service purchase and does not change response priority.",
+    recommended: "Recommended",
     packageUnits: (units: number, unitName: string) =>
       `${units} ${
         unitName === "credit"
@@ -1519,8 +1678,17 @@ const copy = {
       }`,
     packagePolicy: (refundPolicy: string, expiryPolicy: string) =>
       `${refundPolicy === "FULL_WHEN_UNUSED" ? "Full refund available while completely unused" : "Product refund policy applies"} · ${expiryPolicy === "NEVER_EXPIRES" ? "Does not expire" : "Product expiry policy applies"}`,
+    handoffBenefit: (product: Extract<PublicCommerceProduct, { kind: "SERVICE_PACKAGE" }>) => {
+      const allowance = product.handoffAllowance === "UNLIMITED"
+        ? "Unlimited human help"
+        : `${product.handoffUnits ?? 0} human takeover${product.handoffUnits === 1 ? "" : "s"}`;
+      return `${allowance}${product.handoffServiceLevel === "PRIORITY" ? " · priority" : " · standard"}${product.handoffValidityDays ? ` · ${product.handoffValidityDays} days` : ""}`;
+    },
+    tipPolicy: "Voluntary · no service credits · no human takeover · non-refundable",
     createAction: "Buy selected service package",
+    tipAction: "Confirm voluntary support",
     wechatCreateAction: "Buy selected package with WeChat Pay",
+    wechatTipAction: "Support with WeChat Pay",
     wechatCollectionPausedTitle: "New WeChat Pay collection is paused",
     wechatCollectionPausedDetail: "New QR codes cannot be created right now. Existing orders will still be checked and credited; complete the current checkout or wait for its result.",
     wechatCollectionPausedAction: "New collection paused",
@@ -1532,14 +1700,17 @@ const copy = {
     wechatPendingPreventsDuplicate: "This QR code is still valid. Complete it or wait for the order to close before creating another, avoiding a duplicate charge.",
     wechatExpiredPreventsDuplicate: "This QR code expired, but WeChat has not confirmed the old order closed. Checks and safe closure will continue; do not create a second order yet.",
     creating: "Working...",
-    createError: "Failed to create the service-package order.",
+    createError: "Failed to create the order.",
     payError: "Failed to simulate payment.",
-    latestOrder: "Latest service-package order",
-    legacyServicePackage: "Legacy service order",
-    legacyOrderTerms: "Package snapshot unavailable for this legacy order",
+    latestOrder: "Latest order",
+    legacyCommerceProduct: "Legacy service order",
+    legacyOrderTerms: "Product snapshot unavailable for this legacy order",
+    tipOrderTerms: "Voluntary support · no credits or human help · non-refundable",
+    tipThanksTitle: "Thank you for your support.",
+    tipThanksDetail: "This contribution is confirmed. It does not add service credits or create a return-credits action.",
     mockPayAction: "Simulate payment success",
     wechatQrTitle: "Scan with WeChat Pay",
-    wechatQrDetail: "Scan this QR code in WeChat. After payment, the selected service credits are issued directly for this Digital Representative with no second purchase.",
+    wechatQrDetail: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "Scan with WeChat. A successful payment records voluntary support without granting service credits or human help." : "Scan with WeChat. A successful payment directly grants the selected credits and human-help entitlement for this representative.",
     wechatCountdown: (time: string) => `QR code expires in ${time}`,
     wechatAwaitingPayment: "Waiting for WeChat Pay confirmation.",
     wechatRecovering: "The WeChat Pay order is being verified. Its QR code will appear automatically when ready.",
@@ -1549,14 +1720,14 @@ const copy = {
     wechatExpiredUnconfirmed: "The QR code expired, but its payment result is temporarily unavailable. Do not pay again; checks will continue.",
     retryPaymentStatusAction: "Retry payment status",
     wechatAuthExpired: "Your session expired, so payment checks stopped. Sign in again to verify this order.",
-    wechatManualReview: "The payment result and service-package order need manual review. Automatic checks have stopped.",
+    wechatManualReview: "The payment result and current order need manual review. Automatic checks have stopped.",
     wechatManualReviewAction: "Do not pay again. Contact the representative owner with the order time and amount for verification.",
     wechatProviderRetry: "WeChat Pay status is temporarily unavailable. This page will retry at a lower frequency.",
     wechatStatusRetry: "The network is temporarily unavailable. This page will retry the payment status.",
     wechatOffline: "This device is offline. Payment checks are paused and will resume when the connection returns.",
-    wechatPaidRefreshing: "WeChat Pay is confirmed. Refreshing this representative's service credits…",
-    wechatPaid: "WeChat Pay is confirmed. Service credits were issued for this representative.",
-    wechatPaidRefreshFailed: "WeChat Pay is confirmed, but service credits could not refresh yet. Do not pay again; retry the credit read.",
+    wechatPaidRefreshing: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "WeChat Pay is confirmed. Refreshing the support record…" : "WeChat Pay is confirmed. Refreshing this representative's service entitlements…",
+    wechatPaid: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "WeChat Pay is confirmed. Thank you for your voluntary support." : "WeChat Pay is confirmed. Service entitlements were issued for this representative.",
+    wechatPaidRefreshFailed: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "WeChat Pay is confirmed, but the support record could not refresh yet. Do not pay again." : "WeChat Pay is confirmed, but service entitlements could not refresh yet. Do not pay again; retry the read.",
     wechatExistingCheckoutRestored: "The still-valid pending checkout has been restored.",
     paymentConfirmedStatus: "Payment confirmed",
     refreshWalletAction: "Refresh service credits",
@@ -1576,7 +1747,7 @@ const copy = {
       amountCents: number,
       currency: string,
     ) => `${tokens} credits · ${formatMoney(amountCents, currency)}`,
-    disclaimer: "This development-only checkout validates service-package ordering, simulated payment, direct representative-scoped credit grants, paid continuation, and local reversal of completely unused demo credits. It creates no real charge and does not simulate a provider refund. Delegate does not handle card numbers or payment passwords.",
-    wechatDisclaimer: "This checkout uses WeChat Pay Native. Delegate stores only the service-package order and minimal verified payment evidence; it never handles a WeChat payment password. Successful payment directly grants credits for this Digital Representative. Refunds follow the purchased package policy.",
+    disclaimer: "This development-only checkout validates service-package or voluntary-support ordering and simulated payment. Only service packages grant credits or human-help entitlements; completely unused package credits can be reversed locally, while tips are non-refundable. It creates no real charge and does not simulate a provider refund. Delegate does not handle card numbers or payment passwords.",
+    wechatDisclaimer: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "This checkout uses WeChat Pay Native. Delegate stores only the order and minimal verified payment evidence; it never handles a WeChat payment password. Voluntary support grants no service entitlement and is non-refundable once confirmed." : "This checkout uses WeChat Pay Native. Delegate stores only the order and minimal verified payment evidence; it never handles a WeChat payment password. Successful payment grants entitlements for this Digital Representative, and refunds follow the purchased package policy.",
   },
 } as const;

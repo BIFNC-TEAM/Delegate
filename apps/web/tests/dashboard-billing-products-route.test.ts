@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => {
     requireDashboardRepresentativeBillingAccess: vi.fn(),
     resolveDashboardRequestMetadata: vi.fn(),
     updateOwnerBillingProduct: vi.fn(),
+    updateOwnerRepresentativeCommerceSettings: vi.fn(),
   };
 });
 
@@ -42,6 +43,8 @@ vi.mock("@delegate/web-data", () => ({
   publishOwnerBillingPriceVersion:
     mocks.publishOwnerBillingPriceVersion,
   updateOwnerBillingProduct: mocks.updateOwnerBillingProduct,
+  updateOwnerRepresentativeCommerceSettings:
+    mocks.updateOwnerRepresentativeCommerceSettings,
 }));
 
 vi.mock("../app/api/dashboard/auth", () => ({
@@ -57,6 +60,7 @@ vi.mock("../app/api/dashboard/request-metadata", () => ({
 
 import {
   GET as getProducts,
+  PATCH as updateCommerceSettings,
   POST as createProduct,
 } from "../app/api/dashboard/representatives/[slug]/billing-products/route";
 import { PATCH as updateProduct } from "../app/api/dashboard/representatives/[slug]/billing-products/[productId]/route";
@@ -95,6 +99,15 @@ describe("dashboard representative billing product routes", () => {
       activeProduct,
     );
     mocks.updateOwnerBillingProduct.mockResolvedValue(activeProduct);
+    mocks.updateOwnerRepresentativeCommerceSettings.mockResolvedValue({
+      id: "rep-1",
+      slug: "sktone",
+      accessMode: "TRIAL_THEN_CREDITS",
+      freeReplyLimit: 3,
+      humanInLoop: true,
+      handoffAccessMode: "PACKAGE_REQUIRED",
+      tipsEnabled: true,
+    });
     mocks.publishOwnerBillingPriceVersion.mockResolvedValue(
       activeProduct,
     );
@@ -161,6 +174,40 @@ describe("dashboard representative billing product routes", () => {
     await expect(response.json()).resolves.toMatchObject({
       requestId: "request-1",
       product: { id: "product-1" },
+    });
+  });
+
+  it("forwards only the submitted commerce settings patch with request metadata", async () => {
+    const settings = {
+      tipsEnabled: true,
+      handoffAccessMode: "PACKAGE_REQUIRED",
+    };
+    const response = await updateCommerceSettings(
+      jsonRequest(
+        "http://localhost/api/dashboard/representatives/sktone/billing-products",
+        "PATCH",
+        settings,
+      ),
+      { params: Promise.resolve({ slug: "sktone" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(mocks.updateOwnerRepresentativeCommerceSettings)
+      .toHaveBeenCalledWith({
+        ownerId: "owner-1",
+        representativeSlug: "sktone",
+        requestId: "request-1",
+        idempotencyKey: "idempotency-1",
+        settings,
+      });
+    await expect(response.json()).resolves.toMatchObject({
+      requestId: "request-1",
+      representative: {
+        id: "rep-1",
+        tipsEnabled: true,
+        handoffAccessMode: "PACKAGE_REQUIRED",
+      },
     });
   });
 

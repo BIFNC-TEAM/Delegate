@@ -24,30 +24,6 @@ export function resolveTelegramConversationPlatformMode(
   return configuredMode;
 }
 
-export function assertTelegramPaidFlowUsesUnifiedRuntime(
-  mode: TelegramConversationPlatformMode,
-  env: Record<string, string | undefined> = process.env,
-) {
-  if (mode !== "worker") {
-    throw new Error(
-      "Telegram purchases are disabled until the unified conversation worker owns this channel.",
-    );
-  }
-  assertTelegramStarsLivePaymentEnabled(env);
-}
-
-export function isTelegramPaidFlowAvailable(
-  mode: TelegramConversationPlatformMode,
-  env: Record<string, string | undefined> = process.env,
-): boolean {
-  try {
-    assertTelegramPaidFlowUsesUnifiedRuntime(mode, env);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function assertTelegramStarsLivePaymentEnabled(
   env: Record<string, string | undefined> = process.env,
 ) {

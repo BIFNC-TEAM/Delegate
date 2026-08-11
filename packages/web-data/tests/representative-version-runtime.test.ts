@@ -46,7 +46,6 @@ function currentDraft(): RepresentativeSetupSnapshot {
       freeScope: [...demoRepresentative.contract.freeScope],
       paywalledIntents: [...demoRepresentative.contract.paywalledIntents],
     },
-    pricing: demoRepresentative.pricing.map((plan) => ({ ...plan, stars: plan.stars + 999 })),
     handoffPrompt: "Unpublished draft handoff",
     actionGate: { ...demoRepresentative.actionGate },
     compute: {
@@ -79,7 +78,7 @@ function currentDraft(): RepresentativeSetupSnapshot {
   };
 }
 
-function publishedSnapshot(pricing: unknown[], skillPacks: unknown[] = []) {
+function publishedSnapshot(skillPacks: unknown[] = []) {
   return {
     identity: {
       displayName: "Published representative",
@@ -130,7 +129,6 @@ function publishedSnapshot(pricing: unknown[], skillPacks: unknown[] = []) {
       materials: [],
       policies: [],
     },
-    pricing,
     skills: skillPacks,
   };
 }
@@ -148,7 +146,6 @@ describe("representative published runtime snapshot", () => {
   it("keeps unpublished dashboard edits out of the public runtime", () => {
     const current = currentDraft();
     const snapshot = publishedSnapshot(
-      demoRepresentative.pricing.map((plan) => ({ ...plan })),
       [{
         ...demoRepresentative.skillPacks[0],
         capabilityTags: [...demoRepresentative.skillPacks[0]!.capabilityTags],
@@ -164,9 +161,23 @@ describe("representative published runtime snapshot", () => {
     expect(runtime.publicMode).toBe(true);
     expect(runtime.groupActivation).toBe("reply_or_mention");
     expect(runtime.knowledgePack.identitySummary).toBe("Published knowledge");
-    expect(runtime.pricing).toEqual(demoRepresentative.pricing);
     expect(runtime.handoffPrompt).toBe("Published handoff");
     expect(runtime.skillPacks).toEqual([demoRepresentative.skillPacks[0]]);
+  });
+
+  it("applies live commerce controls without exposing other unpublished setup", () => {
+    const current = currentDraft();
+    current.humanInLoop = false;
+    current.contract.freeReplyLimit = 0;
+    const snapshot = publishedSnapshot();
+
+    const runtime = applyRepresentativeVersionSnapshot(current, snapshot);
+
+    expect(runtime.humanInLoop).toBe(false);
+    expect(runtime.contract.freeReplyLimit).toBe(0);
+    expect(runtime.name).toBe("Published representative");
+    expect(runtime.name).not.toBe(current.name);
+    expect(runtime.knowledgePack.identitySummary).toBe("Published knowledge");
   });
 
   it("uses one strict public gate for page and APIs", () => {
@@ -353,21 +364,16 @@ describe("representative published runtime snapshot", () => {
     }
   });
 
-  it("reads legacy pricing fields and uses a conservative group trigger for old versions", () => {
-    const legacyPricing = demoRepresentative.pricing.map((plan) => ({
-      type: plan.tier.toUpperCase(),
-      name: plan.name,
-      starsAmount: plan.stars,
-      summary: plan.summary,
-      includedReplies: plan.includedReplies,
-      includesPriorityHandoff: plan.includesPriorityHandoff,
-    }));
+  it("ignores legacy pricing fields and uses a conservative group trigger for old versions", () => {
     const runtime = applyRepresentativeVersionSnapshot(
       currentDraft(),
-      publishedSnapshot(legacyPricing),
+      {
+        ...publishedSnapshot(),
+        pricing: [{ type: "PASS", name: "Legacy Pass", starsAmount: 180 }],
+      },
     );
 
-    expect(runtime.pricing).toEqual(demoRepresentative.pricing);
+    expect(runtime).not.toHaveProperty("pricing");
     expect(runtime.groupActivation).toBe("mention_only");
     expect(runtime.skillPacks).toEqual([]);
   });
@@ -375,7 +381,7 @@ describe("representative published runtime snapshot", () => {
   it("drops executable or malformed skill declarations from an immutable version", () => {
     const runtime = applyRepresentativeVersionSnapshot(
       currentDraft(),
-      publishedSnapshot(demoRepresentative.pricing, [
+      publishedSnapshot([
         { ...demoRepresentative.skillPacks[0], executesCode: true },
         { slug: "incomplete" },
       ]),
@@ -389,7 +395,7 @@ describe("representative published runtime snapshot", () => {
     current.skillPacks = current.skillPacks.slice(1);
     const runtime = applyRepresentativeVersionSnapshot(
       current,
-      publishedSnapshot(demoRepresentative.pricing, [{
+      publishedSnapshot([{
         ...demoRepresentative.skillPacks[0],
         capabilityTags: [...demoRepresentative.skillPacks[0]!.capabilityTags],
       }]),
@@ -410,10 +416,7 @@ describe("representative published runtime snapshot", () => {
       version: "2.0.0",
       displayName: "Workspace release v2",
     }];
-    const versionSnapshot = publishedSnapshot(
-      demoRepresentative.pricing,
-      [publishedV1],
-    );
+    const versionSnapshot = publishedSnapshot([publishedV1]);
 
     // Adopting v2 makes v1 SUPERSEDED, so the old representative version
     // cannot silently borrow the current workspace release.
@@ -436,7 +439,7 @@ describe("representative published runtime snapshot", () => {
   });
 
   it("does not fill an empty published allowed-skill grant from the mutable draft", () => {
-    const snapshot = publishedSnapshot(demoRepresentative.pricing);
+    const snapshot = publishedSnapshot();
     snapshot.governance.allowedSkills = [];
 
     expect(applyRepresentativeVersionSnapshot(currentDraft(), snapshot).skills).toEqual([]);
@@ -449,7 +452,7 @@ describe("representative published runtime snapshot", () => {
       answer_faq: "deny",
       run_local_command: "allow",
     };
-    const snapshot = publishedSnapshot(demoRepresentative.pricing);
+    const snapshot = publishedSnapshot();
     snapshot.governance.actionGate = {
       ...demoRepresentative.actionGate,
       answer_faq: "allow",
@@ -483,7 +486,7 @@ describe("representative published runtime snapshot", () => {
         mcp: "deny",
       },
     };
-    const snapshot = publishedSnapshot(demoRepresentative.pricing);
+    const snapshot = publishedSnapshot();
     snapshot.compute = {
       enabled: true,
       defaultPolicyMode: "allow",
@@ -530,11 +533,11 @@ describe("representative published runtime snapshot", () => {
   it("fails compute closed for legacy snapshots or an unreviewed base-image change", () => {
     const current = currentDraft();
     current.compute.enabled = true;
-    const legacy = publishedSnapshot(demoRepresentative.pricing);
+    const legacy = publishedSnapshot();
     delete (legacy as { compute?: unknown }).compute;
     expect(applyRepresentativeVersionSnapshot(current, legacy).compute.enabled).toBe(false);
 
-    const changedImage = publishedSnapshot(demoRepresentative.pricing);
+    const changedImage = publishedSnapshot();
     changedImage.compute = {
       ...changedImage.compute,
       enabled: true,
@@ -554,7 +557,7 @@ describe("representative published runtime snapshot", () => {
       maxCostCents: 25,
       knowledgeScope: "user_input_only",
     };
-    const snapshot = publishedSnapshot(demoRepresentative.pricing);
+    const snapshot = publishedSnapshot();
     snapshot.delegation = {
       enabled: true,
       naturalLanguageEnabled: true,
@@ -585,7 +588,7 @@ describe("representative published runtime snapshot", () => {
   });
 
   it("disables legacy delegation snapshots that do not pin a cost ceiling", () => {
-    const snapshot = publishedSnapshot(demoRepresentative.pricing);
+    const snapshot = publishedSnapshot();
     delete (snapshot.delegation as { maxCostCents?: number }).maxCostCents;
 
     const runtime = applyRepresentativeVersionSnapshot(currentDraft(), snapshot);

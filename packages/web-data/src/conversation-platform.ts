@@ -20,6 +20,7 @@ import {
   MessageDeliveryStatus,
   MessageSenderType,
   Prisma,
+  RepresentativeAccessMode,
   RepresentativeChannelKind,
   RepresentativeLifecycleState,
   WorkspaceSkillInstallStatus,
@@ -97,11 +98,16 @@ import {
   consumeConversationEntitlement,
   releaseConversationEntitlement,
   releaseConversationEntitlementByGenerationRunId,
-  reserveConversationEntitlement,
+  resolveServiceEntitlementAudienceIdentityId,
   transferConversationEntitlementByGenerationRunId,
   type ConversationEntitlementReservation,
   type ServiceEntitlementClient,
 } from "./service-entitlements";
+import {
+  acceptConversationHandoffInTransaction,
+  createOrReuseHandoffRequestInTransaction,
+  resolveHandoffRequestInTransaction,
+} from "./handoff-entitlements";
 import { buildWebConversationThreadId } from "./web-audience";
 
 export {
@@ -420,12 +426,69 @@ export type AcceptInboundMessageInput = {
   walletBilling?: {
     externalUserId: string;
     representativeId: string;
+    /**
+     * Server-resolved commerce policy. The transaction also reads the current
+     * representative value so callers cannot weaken billing authorization.
+     */
+    accessMode?: RepresentativeAccessMode;
     freeReplyLimit: number;
     tokenAmount: number;
     currency?: string;
     idempotencyKey: string;
   };
 };
+
+type GenerationAccessPolicySnapshot = {
+  accessMode: RepresentativeAccessMode;
+  /** `null` is the persisted representation of unlimited free access. */
+  effectiveFreeReplyLimit: number | null;
+};
+
+function readGenerationAccessPolicy(
+  snapshot: Prisma.JsonValue | null,
+): GenerationAccessPolicySnapshot | null {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return null;
+  }
+  const object = snapshot as Prisma.JsonObject;
+  const accessMode = object["accessMode"];
+  const effectiveFreeReplyLimit = object["effectiveFreeReplyLimit"];
+  if (
+    accessMode !== RepresentativeAccessMode.FREE
+    && accessMode !== RepresentativeAccessMode.TRIAL_THEN_CREDITS
+    && accessMode !== RepresentativeAccessMode.CREDITS_ONLY
+  ) {
+    return null;
+  }
+  if (accessMode === RepresentativeAccessMode.FREE) {
+    return effectiveFreeReplyLimit === null
+      ? { accessMode, effectiveFreeReplyLimit: null }
+      : null;
+  }
+  if (
+    typeof effectiveFreeReplyLimit !== "number"
+    || !Number.isSafeInteger(effectiveFreeReplyLimit)
+    || effectiveFreeReplyLimit < 0
+  ) {
+    return null;
+  }
+  if (
+    accessMode === RepresentativeAccessMode.CREDITS_ONLY
+    && effectiveFreeReplyLimit !== 0
+  ) {
+    return null;
+  }
+  return { accessMode, effectiveFreeReplyLimit };
+}
+
+function resolveEffectiveFreeReplyLimit(
+  accessMode: RepresentativeAccessMode,
+  configuredFreeReplyLimit: number,
+): number | null {
+  if (accessMode === RepresentativeAccessMode.FREE) return null;
+  if (accessMode === RepresentativeAccessMode.CREDITS_ONLY) return 0;
+  return configuredFreeReplyLimit;
+}
 
 export class ServiceCreditRequiredError extends Error {
   readonly code = "SERVICE_CREDIT_REQUIRED";
@@ -1055,7 +1118,6 @@ export async function getRepresentativeOperationsSnapshot(
           },
         },
         knowledgePack: true,
-        pricingPlans: true,
         _count: { select: { conversations: true, handoffRequests: true } },
       },
     });
@@ -1070,7 +1132,6 @@ export async function getRepresentativeOperationsSnapshot(
       handoffPrompt: representative.handoffPrompt,
       knowledgeCount: representative.knowledgeAssetLinks.length,
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
-      pricingCount: representative.pricingPlans.length,
       channelCount: representative.channelBindings.length,
       enabledSkillCount: representative.skillPackLinks.length,
       skillIssueCount: countRepresentativeSkillIssues(representative.skillPackLinks),
@@ -1140,6 +1201,8 @@ export async function acceptInboundConversationMessage(
         representative: {
           select: {
             id: true,
+            accessMode: true,
+            freeReplyLimit: true,
             activeVersionId: true,
             lifecycleState: true,
             publicMode: true,
@@ -1343,54 +1406,84 @@ export async function acceptInboundConversationMessage(
     }
 
     let billingMode: "free" | "service_credit" | null = null;
+    let accessPolicySnapshot: GenerationAccessPolicySnapshot | null = null;
     let effectiveFreeRepliesUsed = conversation.freeRepliesUsed;
-    if (shouldQueueAi && input.walletBilling) {
-      if (input.walletBilling.representativeId !== conversation.representative.id) {
-        throw new Error(
-          "Wallet billing representative does not match the conversation.",
-        );
-      }
-      const retryableFailedRunIds = (
-        await tx.outboxEvent.findMany({
-          where: {
-            conversationId: conversation.id,
-            aggregateType: "generation_run",
-            eventType: "generation.requested",
-            status: "FAILED",
-            attemptCount: { lt: 5 },
-          },
-          select: { aggregateId: true },
-        })
-      ).map((event) => event.aggregateId);
-      const freeInFlight = await tx.generationRun.count({
-        where: {
-          conversationId: conversation.id,
-          OR: [
-            {
-              status: {
-                in: [
-                  GenerationRunStatus.QUEUED,
-                  GenerationRunStatus.PROCESSING,
-                  GenerationRunStatus.WAITING_APPROVAL,
-                ],
+    if (shouldQueueAi) {
+      const accessMode = conversation.representative.accessMode
+        ?? input.walletBilling?.accessMode
+        ?? RepresentativeAccessMode.TRIAL_THEN_CREDITS;
+      const configuredFreeReplyLimit = Number.isSafeInteger(
+        conversation.representative.freeReplyLimit,
+      )
+        ? conversation.representative.freeReplyLimit
+        : input.walletBilling?.freeReplyLimit ?? 0;
+      const effectiveFreeReplyLimit = resolveEffectiveFreeReplyLimit(
+        accessMode,
+        configuredFreeReplyLimit,
+      );
+      accessPolicySnapshot = { accessMode, effectiveFreeReplyLimit };
+
+      // Telegram and Matrix do not carry web-wallet coordinates. Their worker
+      // still authorizes this pinned policy against canonical service
+      // entitlements, even though ingress cannot make a wallet reservation.
+      if (input.walletBilling) {
+        if (
+          input.walletBilling.representativeId
+          !== conversation.representative.id
+        ) {
+          throw new Error(
+            "Wallet billing representative does not match the conversation.",
+          );
+        }
+
+        if (accessMode === RepresentativeAccessMode.FREE) {
+          billingMode = "free";
+        } else if (accessMode === RepresentativeAccessMode.CREDITS_ONLY) {
+          billingMode = "service_credit";
+        } else {
+          const retryableFailedRunIds = (
+            await tx.outboxEvent.findMany({
+              where: {
+                conversationId: conversation.id,
+                aggregateType: "generation_run",
+                eventType: "generation.requested",
+                status: "FAILED",
+                attemptCount: { lt: 5 },
+              },
+              select: { aggregateId: true },
+            })
+          ).map((event) => event.aggregateId);
+          const freeInFlight = await tx.generationRun.count({
+            where: {
+              conversationId: conversation.id,
+              OR: [
+                {
+                  status: {
+                    in: [
+                      GenerationRunStatus.QUEUED,
+                      GenerationRunStatus.PROCESSING,
+                      GenerationRunStatus.WAITING_APPROVAL,
+                    ],
+                  },
+                },
+                {
+                  id: { in: retryableFailedRunIds },
+                  status: GenerationRunStatus.FAILED,
+                },
+              ],
+              runtimePolicySnapshot: {
+                path: ["billingMode"],
+                equals: "free",
               },
             },
-            {
-              id: { in: retryableFailedRunIds },
-              status: GenerationRunStatus.FAILED,
-            },
-          ],
-          runtimePolicySnapshot: {
-            path: ["billingMode"],
-            equals: "free",
-          },
-        },
-      });
-      effectiveFreeRepliesUsed = conversation.freeRepliesUsed + freeInFlight;
-      billingMode =
-        effectiveFreeRepliesUsed >= input.walletBilling.freeReplyLimit
-          ? "service_credit"
-          : "free";
+          });
+          effectiveFreeRepliesUsed = conversation.freeRepliesUsed + freeInFlight;
+          billingMode =
+            effectiveFreeRepliesUsed >= effectiveFreeReplyLimit!
+              ? "service_credit"
+              : "free";
+        }
+      }
     }
     const createdAt = inboundOccurredAt;
     const message = await tx.message.upsert({
@@ -1478,10 +1571,11 @@ export async function acceptInboundConversationMessage(
             representativeVersionId: episode.representativeVersionId,
             status: GenerationRunStatus.QUEUED,
             idempotencyKey: `reply:${conversation.id}:${input.clientMessageId}`,
-            ...(billingMode
+            ...(accessPolicySnapshot
               ? {
                   runtimePolicySnapshot: {
-                    billingMode,
+                    ...(billingMode ? { billingMode } : {}),
+                    ...accessPolicySnapshot,
                   },
                 }
               : {}),
@@ -1531,6 +1625,7 @@ export async function acceptInboundConversationMessage(
           data: {
             runtimePolicySnapshot: {
               billingMode,
+              ...accessPolicySnapshot,
               walletReservation: {
                 usageChargeId: reservedUsage.id,
                 tokenAmount: reservedUsage.reservedTokenAmount,
@@ -1794,7 +1889,27 @@ export async function authorizeGenerationRunFreeUsage(input: {
         `Generation billing mode ${billingMode} cannot be changed to free.`,
       );
     }
+    const accessPolicy = readGenerationAccessPolicy(snapshot);
+    if (accessPolicy?.accessMode === RepresentativeAccessMode.CREDITS_ONLY) {
+      return false;
+    }
     if (billingMode === "free") return true;
+
+    if (accessPolicy?.accessMode === RepresentativeAccessMode.FREE) {
+      await tx.generationRun.update({
+        where: { id: run.id },
+        data: {
+          runtimePolicySnapshot: {
+            ...snapshot,
+            billingMode: "free",
+          },
+        },
+      });
+      return true;
+    }
+
+    const effectiveFreeReplyLimit =
+      accessPolicy?.effectiveFreeReplyLimit ?? input.freeReplyLimit;
 
     const retryableFailedRunIds = (
       await tx.outboxEvent.findMany({
@@ -1835,7 +1950,7 @@ export async function authorizeGenerationRunFreeUsage(input: {
     });
     if (
       run.conversation.freeRepliesUsed + freeInFlight
-      >= input.freeReplyLimit
+      >= effectiveFreeReplyLimit
     ) {
       return false;
     }
@@ -2313,13 +2428,21 @@ export async function completeInlineGenerationRun(input: {
       where: { id: run.inputMessageId },
       data: { deliveryStatus: MessageDeliveryStatus.SENT },
     });
+    const handoffResult = input.humanHandoff
+      ? await ensureConversationLeadAndHandoffInTransaction(tx, {
+          conversationId: run.conversationId,
+          ...input.humanHandoff,
+          requestHandoff: true,
+        })
+      : null;
+    const handoffRequested = Boolean(handoffResult?.handoff);
     await tx.conversation.updateMany({
       where: {
         id: run.conversationId,
         state: { notIn: ["HUMAN_ACTIVE", "NEEDS_HUMAN"] },
       },
       data: {
-        state: input.humanHandoff
+        state: handoffRequested
           ? "NEEDS_HUMAN"
           : input.keepConversationQueued
             ? "AI_QUEUED"
@@ -2346,20 +2469,13 @@ export async function completeInlineGenerationRun(input: {
         },
       },
       data: {
-        status: input.humanHandoff
+        status: handoffRequested
           ? ConversationEpisodeStatus.NEEDS_HUMAN
           : input.keepConversationQueued
             ? ConversationEpisodeStatus.ACTIVE
             : ConversationEpisodeStatus.WAITING_USER,
       },
     });
-    if (input.humanHandoff) {
-      await ensureConversationLeadAndHandoffInTransaction(tx, {
-        conversationId: run.conversationId,
-        ...input.humanHandoff,
-        requestHandoff: true,
-      });
-    }
     if (input.completeOutbox !== false) {
       const completedOutbox = await tx.outboxEvent.updateMany({
         where: {
@@ -2608,6 +2724,10 @@ export type ClaimedGenerationWorkItem = {
       url: string;
     }>;
   };
+  /** Billing policy pinned when the inbound generation run was accepted. */
+  accessMode?: RepresentativeAccessMode;
+  /** `null` means the pinned FREE policy has no reply ceiling. */
+  effectiveFreeReplyLimit?: number | null;
   walletReservation?: GenerationWalletReservation;
   usage: {
     freeRepliesUsed: number;
@@ -2712,26 +2832,189 @@ export async function fenceGenerationWorkLease(
   }
 }
 
-export async function reserveGenerationConversationEntitlement(input: {
+/**
+ * Reserves one agent-wallet service credit for a claimed generation run whose
+ * ingress transport could not carry Web wallet coordinates (for example,
+ * Matrix or Telegram). Wallet ownership is resolved exclusively from the
+ * canonical audience identity already bound to the conversation.
+ *
+ * The generation advisory lock, outbox lease fence, dual-ledger reservation,
+ * and GenerationRun snapshot update share one serializable transaction. A
+ * replay therefore returns the persisted reservation without charging twice.
+ */
+export async function reserveGenerationConversationWalletUsage(input: {
   runId: string;
   outboxId: string;
   leaseAttempt: number;
   audienceIdentityId: string;
   representativeId: string;
-  productCodes?: string[];
-}) {
-  return runConversationWriteTransaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.runId}))`;
-    await fenceGenerationWorkLease(tx, input);
-    return reserveConversationEntitlement(
-      {
-        audienceIdentityId: input.audienceIdentityId,
-        representativeId: input.representativeId,
-        generationRunId: input.runId,
-        ...(input.productCodes ? { productCodes: input.productCodes } : {}),
-      },
-      tx as unknown as ServiceEntitlementClient,
+  tokenAmount?: number;
+}): Promise<GenerationWalletReservation | null> {
+  const runId = input.runId.trim();
+  const audienceIdentityId = input.audienceIdentityId.trim();
+  const representativeId = input.representativeId.trim();
+  const tokenAmount = input.tokenAmount ?? 1;
+  if (!runId || !audienceIdentityId || !representativeId) {
+    throw new Error(
+      "runId, audienceIdentityId, and representativeId are required for generation wallet reservation.",
     );
+  }
+  if (!Number.isSafeInteger(tokenAmount) || tokenAmount <= 0) {
+    throw new Error("Generation wallet tokenAmount must be a positive integer.");
+  }
+
+  return runConversationWriteTransaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${runId}))`;
+    await fenceGenerationWorkLease(tx, {
+      runId,
+      outboxId: input.outboxId,
+      leaseAttempt: input.leaseAttempt,
+    });
+
+    const run = await tx.generationRun.findUnique({
+      where: { id: runId },
+      select: {
+        conversationId: true,
+        runtimePolicySnapshot: true,
+        conversation: {
+          select: {
+            audienceIdentityId: true,
+            representativeId: true,
+          },
+        },
+      },
+    });
+    if (!run?.conversationId) {
+      throw new Error("Generation run was not found for wallet reservation.");
+    }
+    if (run.conversation.representativeId !== representativeId) {
+      throw new Error(
+        "Generation run representative does not match wallet reservation coordinates.",
+      );
+    }
+    if (!run.conversation.audienceIdentityId) {
+      throw new Error(
+        "Generation run conversation does not have a canonical audience identity.",
+      );
+    }
+
+    const serviceEntitlementClient =
+      tx as unknown as ServiceEntitlementClient;
+    const [canonicalAudienceIdentityId, canonicalRunAudienceIdentityId] =
+      await Promise.all([
+        resolveServiceEntitlementAudienceIdentityId(
+          audienceIdentityId,
+          serviceEntitlementClient,
+        ),
+        resolveServiceEntitlementAudienceIdentityId(
+          run.conversation.audienceIdentityId,
+          serviceEntitlementClient,
+        ),
+      ]);
+    if (canonicalRunAudienceIdentityId !== canonicalAudienceIdentityId) {
+      throw new Error(
+        "Generation run audience does not match wallet reservation coordinates.",
+      );
+    }
+
+    const existingReservation = readGenerationWalletReservation(
+      run.runtimePolicySnapshot,
+    );
+    if (existingReservation) {
+      if (existingReservation.tokenAmount !== tokenAmount) {
+        throw new Error(
+          "Generation run already owns a wallet reservation for a different token amount.",
+        );
+      }
+      return existingReservation;
+    }
+
+    // Serialize candidate selection for workers serving the same canonical
+    // audience and representative. Other wallet writers remain protected by
+    // the outer serializable transaction and its write-conflict retry.
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${`generation-wallet:${canonicalAudienceIdentityId}:${representativeId}`})
+      )
+    `;
+
+    // New package purchases are attached to the canonical audience wallet.
+    // Deliberately do not trust transport sender ids or caller-supplied wallet
+    // ids here: those coordinates are not stable across private channels.
+    const agentWallet = await tx.agentWallet.findUnique({
+      where: { representativeId },
+      select: { id: true, currency: true },
+    });
+    if (!agentWallet) return null;
+
+    const candidates = await tx.userAgentWallet.findMany({
+      where: {
+        agentWalletId: agentWallet.id,
+        currency: agentWallet.currency,
+        availableTokenAmount: { gte: tokenAmount },
+        userWallet: {
+          audienceIdentityId: canonicalAudienceIdentityId,
+          currency: agentWallet.currency,
+        },
+      },
+      // A merged identity may own more than one historical UserWallet. Prefer
+      // the oldest funded scoped wallet, with id as a stable tie-breaker.
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true },
+    });
+
+    let reserved:
+      | Awaited<ReturnType<typeof reserveConversationWalletUsage>>
+      | null = null;
+    for (const candidate of candidates) {
+      try {
+        reserved = await reserveConversationWalletUsage(
+          {
+            userAgentWalletId: candidate.id,
+            audienceIdentityId: canonicalAudienceIdentityId,
+            representativeId,
+            conversationId: run.conversationId,
+            generationRunId: runId,
+            tokenAmount,
+            currency: agentWallet.currency,
+            idempotencyKey: `generation:${runId}:wallet-reserve`,
+          },
+          tx as unknown as UsageChargeClient,
+        );
+        break;
+      } catch (error) {
+        // The candidate query is only a hint. Another run may consume that
+        // wallet before this reservation reaches its fenced write. The dual-
+        // ledger reserve fails before mutation when the balance is gone, so it
+        // is safe to try the next canonical wallet. Serializable retry handles
+        // a conflict discovered at transaction commit.
+        if (error instanceof InsufficientAgentUsageCreditsError) continue;
+        throw error;
+      }
+    }
+    if (!reserved) return null;
+
+    const walletReservation = {
+      usageChargeId: reserved.usageCharge.id,
+      tokenAmount: reserved.usageCharge.reservedTokenAmount,
+    };
+    const currentSnapshot =
+      run.runtimePolicySnapshot
+      && typeof run.runtimePolicySnapshot === "object"
+      && !Array.isArray(run.runtimePolicySnapshot)
+        ? run.runtimePolicySnapshot as Prisma.JsonObject
+        : {};
+    await tx.generationRun.update({
+      where: { id: runId },
+      data: {
+        runtimePolicySnapshot: {
+          ...currentSnapshot,
+          billingMode: "service_credit",
+          walletReservation,
+        },
+      },
+    });
+    return walletReservation;
   });
 }
 
@@ -3576,6 +3859,11 @@ export async function claimNextGenerationWorkItem(
     const walletReservation = readGenerationWalletReservation(
       run.runtimePolicySnapshot,
     );
+    // Never consult the representative's mutable commerce setting here. The
+    // ingress snapshot is the authority for the lifetime of this run.
+    const accessPolicy = readGenerationAccessPolicy(
+      run.runtimePolicySnapshot,
+    );
     const telegramConnectionId =
       channel === "telegram"
         ? activeBinding?.representativeBinding?.connectionId || null
@@ -3648,6 +3936,12 @@ export async function claimNextGenerationWorkItem(
         : {}),
       ...(delegationTerminalRecovery
         ? { delegationTerminalRecovery }
+        : {}),
+      ...(accessPolicy
+        ? {
+            accessMode: accessPolicy.accessMode,
+            effectiveFreeReplyLimit: accessPolicy.effectiveFreeReplyLimit,
+          }
         : {}),
       ...(walletReservation ? { walletReservation } : {}),
       usage: {
@@ -7395,40 +7689,20 @@ async function ensureConversationLeadAndHandoffInTransaction(
     }
     const priority = Math.max(0, Math.min(100, Math.round(input.priority || 50)));
     const shouldRequestHandoff = input.requestHandoff !== false;
-    const existingHandoff = shouldRequestHandoff
-      ? await tx.handoffRequest.findFirst({
-          where: {
-            conversationId: conversation.id,
-            status: { in: [HandoffStatus.OPEN, HandoffStatus.REVIEWING] },
-          },
-          orderBy: { createdAt: "desc" },
-        })
+    const handoffResult = shouldRequestHandoff
+      ? await createOrReuseHandoffRequestInTransaction({
+          representativeId: conversation.representativeId,
+          contactId: conversation.contactId,
+          conversationId: conversation.id,
+          ...(episode ? { episodeId: episode.id } : {}),
+          reason: input.reason,
+          summary: input.summary,
+          recommendedPriority: priority,
+          recommendedOwnerAction:
+            "Review the conversation and take over when appropriate.",
+        }, tx)
       : null;
-    const handoff = shouldRequestHandoff
-      ? existingHandoff
-        ? await tx.handoffRequest.update({
-            where: { id: existingHandoff.id },
-            data: {
-              reason: input.reason,
-              summary: input.summary,
-              recommendedPriority: priority,
-              recommendedOwnerAction: "Review the conversation and take over when appropriate.",
-              ...(episode ? { episodeId: episode.id } : {}),
-            },
-          })
-        : await tx.handoffRequest.create({
-            data: {
-              representativeId: conversation.representativeId,
-              contactId: conversation.contactId,
-              conversationId: conversation.id,
-              ...(episode ? { episodeId: episode.id } : {}),
-              reason: input.reason,
-              summary: input.summary,
-              recommendedPriority: priority,
-              recommendedOwnerAction: "Review the conversation and take over when appropriate.",
-            },
-          })
-      : null;
+    const handoff = handoffResult?.request ?? null;
 
     const existingLead = await tx.lead.findFirst({
       where: {
@@ -7468,13 +7742,13 @@ async function ensureConversationLeadAndHandoffInTransaction(
           },
         });
 
-    if (shouldRequestHandoff && episode) {
+    if (handoff && episode) {
       await tx.conversationEpisode.update({
         where: { id: episode.id },
         data: { status: ConversationEpisodeStatus.NEEDS_HUMAN },
       });
     }
-    if (shouldRequestHandoff) {
+    if (handoff) {
       await tx.conversation.update({
         where: { id: conversation.id },
         data: { state: "NEEDS_HUMAN" },
@@ -7484,7 +7758,13 @@ async function ensureConversationLeadAndHandoffInTransaction(
       where: { id: conversation.contactId },
       data: { stage: "QUALIFIED" },
     });
-    return { handoff, lead };
+    return {
+      handoff,
+      lead,
+      ...(shouldRequestHandoff && !handoff
+        ? { skipped: handoffResult?.outcome ?? "handoff_unavailable" }
+        : {}),
+    };
 }
 
 export async function assignConversationOperator(input: {
@@ -7505,6 +7785,10 @@ export async function assignConversationOperator(input: {
     const episode = conversation.episodes[0];
     if (!episode) throw new Error("Conversation has no active episode.");
     assertConversationEpisodeTransition(episodeStateMap[episode.status], "human_active");
+    await acceptConversationHandoffInTransaction({
+      conversationId: conversation.id,
+      representativeId: conversation.representativeId,
+    }, tx);
 
     const taskRows = await tx.delegationTask.findMany({
       where: {
@@ -7770,13 +8054,6 @@ export async function assignConversationOperator(input: {
       where: { id: conversation.id },
       data: { state: "HUMAN_ACTIVE", assignedOperatorId: input.operatorId },
     });
-    await tx.handoffRequest.updateMany({
-      where: {
-        conversationId: conversation.id,
-        status: { in: [HandoffStatus.OPEN, HandoffStatus.REVIEWING] },
-      },
-      data: { status: HandoffStatus.ACCEPTED },
-    });
     await tx.lead.updateMany({
       where: {
         conversationId: conversation.id,
@@ -7845,10 +8122,20 @@ export async function returnConversationToAi(input: {
       where: { id: conversation.id },
       data: { state: "ACTIVE", assignedOperatorId: null },
     });
-    await tx.handoffRequest.updateMany({
-      where: { conversationId: conversation.id, status: HandoffStatus.ACCEPTED },
-      data: { status: HandoffStatus.CLOSED },
+    const acceptedHandoff = await tx.handoffRequest.findFirst({
+      where: {
+        conversationId: conversation.id,
+        status: HandoffStatus.ACCEPTED,
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     });
+    if (acceptedHandoff) {
+      await resolveHandoffRequestInTransaction({
+        handoffRequestId: acceptedHandoff.id,
+        status: HandoffStatus.CLOSED,
+        reason: "operator_returned_to_ai",
+      }, tx);
+    }
     await tx.message.create({
       data: {
         conversationId: conversation.id,
@@ -7906,7 +8193,6 @@ export async function publishRepresentativeVersion(input: {
             },
           },
         },
-        pricingPlans: true,
         capabilityProfiles: {
           where: { isDefault: true, isManaged: false },
           orderBy: { createdAt: "desc" },
@@ -7945,7 +8231,6 @@ export async function publishRepresentativeVersion(input: {
       handoffPrompt: representative.handoffPrompt,
       knowledgeCount: representative.knowledgeAssetLinks.length,
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
-      pricingCount: representative.pricingPlans.length,
       channelCount: representative.channelBindings.length,
       enabledSkillCount: representative.skillPackLinks.filter((link) => link.enabled).length,
       skillIssueCount: countRepresentativeSkillIssues(representative.skillPackLinks.filter((link) => link.enabled)),
@@ -8206,7 +8491,6 @@ function buildRepresentativeSnapshot(representative: {
       processingVersion: number;
     };
   }>;
-  pricingPlans: Array<{ type: string; name: string; starsAmount: number; summary: string; includedReplies: number; includesPriorityHandoff: boolean }>;
   capabilityProfiles: Array<{
     defaultDecision: string;
     rules: Array<{
@@ -8374,14 +8658,6 @@ function buildRepresentativeSnapshot(representative: {
       assetId: link.assetId,
       checksum: link.asset.checksum,
       processingVersion: link.asset.processingVersion,
-    })),
-    pricing: representative.pricingPlans.map((plan) => ({
-      tier: plan.type.toLowerCase(),
-      name: plan.name,
-      stars: plan.starsAmount,
-      summary: plan.summary,
-      includedReplies: plan.includedReplies,
-      includesPriorityHandoff: plan.includesPriorityHandoff,
     })),
     skills: publishedSkillLinks.map((link) => link.snapshot),
     mcpBindings: representative.mcpBindings.flatMap((binding) => {
@@ -9665,7 +9941,6 @@ export function buildRepresentativeReadiness(input: {
   handoffPrompt: string;
   knowledgeCount: number;
   knowledgePackItemCount: number;
-  pricingCount: number;
   channelCount: number;
   enabledSkillCount: number;
   skillIssueCount: number;
@@ -9688,12 +9963,6 @@ export function buildRepresentativeReadiness(input: {
       label: "Human handoff",
       complete: !input.humanInLoop || Boolean(input.handoffPrompt.trim()),
       detail: "The owner intervention path is explicit.",
-    },
-    {
-      id: "pricing",
-      label: "Pricing and free scope",
-      complete: input.pricingCount === 4,
-      detail: "Free, pass, deep help, and sponsor tiers are configured independently from CNY service packages.",
     },
     {
       id: "skills",
@@ -9734,7 +10003,6 @@ function buildDemoRepresentativeOperations(representativeSlug: string): Represen
       handoffPrompt: "Offer a human introduction when intent is qualified.",
       knowledgeCount: 12,
       knowledgePackItemCount: 5,
-      pricingCount: 4,
       channelCount: 3,
       enabledSkillCount: 2,
       skillIssueCount: 0,

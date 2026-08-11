@@ -54,6 +54,10 @@ export type WebAudienceIdentityLinkProvider =
   | "PAYMENT_EXTERNAL_USER";
 
 export type WebAudienceClient = {
+  $queryRaw?: <T = unknown>(
+    query: TemplateStringsArray,
+    ...values: unknown[]
+  ) => Promise<T>;
   $transaction?: <T>(
     callback: (client: WebAudienceClient) => Promise<T>,
     options?: { isolationLevel: "Serializable" },
@@ -497,6 +501,48 @@ export type WebAudienceClient = {
     }): Promise<{ count: number }>;
   };
   agentUsageCharge?: {
+    count(args: {
+      where: { audienceIdentityId: string };
+    }): Promise<number>;
+    updateMany(args: {
+      where: { audienceIdentityId: string };
+      data: { audienceIdentityId: string };
+    }): Promise<{ count: number }>;
+  };
+  handoffEntitlementGrant?: {
+    count(args: {
+      where: { audienceIdentityId: string };
+    }): Promise<number>;
+    updateMany(args: {
+      where: { audienceIdentityId: string };
+      data: { audienceIdentityId: string };
+    }): Promise<{ count: number }>;
+  };
+  handoffRequest?: {
+    count(args: {
+      where: { audienceIdentityId: string };
+    }): Promise<number>;
+    findMany(args: {
+      where: {
+        audienceIdentityId: string;
+        status: {
+          in: Array<"OPEN" | "REVIEWING" | "ACCEPTED">;
+        };
+      };
+      select: {
+        id: true;
+        representativeId: true;
+      };
+    }): Promise<Array<{
+      id: string;
+      representativeId: string;
+    }>>;
+    updateMany(args: {
+      where: { audienceIdentityId: string };
+      data: { audienceIdentityId: string };
+    }): Promise<{ count: number }>;
+  };
+  tipContribution?: {
     count(args: {
       where: { audienceIdentityId: string };
     }): Promise<number>;
@@ -1117,16 +1163,33 @@ export async function mergeAudienceIdentity(
 
   const now = input.now ?? new Date();
   const run = async (tx: WebAudienceClient) => {
-    const sourceIdentity = await resolveCanonicalAudienceIdentity(
+    await lockAudienceIdentitiesForMerge(tx, [
+      sourceAudienceIdentityId,
+      targetAudienceIdentityId,
+    ]);
+    let sourceIdentity = await resolveCanonicalAudienceIdentity(
       {
         audienceIdentityId: sourceAudienceIdentityId,
       },
       tx,
     );
-    const targetIdentity = await resolveCanonicalAudienceIdentity(
+    let targetIdentity = await resolveCanonicalAudienceIdentity(
       {
         audienceIdentityId: targetAudienceIdentityId,
       },
+      tx,
+    );
+
+    await lockAudienceIdentitiesForMerge(tx, [
+      sourceIdentity.id,
+      targetIdentity.id,
+    ]);
+    sourceIdentity = await resolveCanonicalAudienceIdentity(
+      { audienceIdentityId: sourceAudienceIdentityId },
+      tx,
+    );
+    targetIdentity = await resolveCanonicalAudienceIdentity(
+      { audienceIdentityId: targetAudienceIdentityId },
       tx,
     );
 
@@ -1154,6 +1217,9 @@ export async function mergeAudienceIdentity(
       sourcePaymentOrderCount,
       sourceTokenPurchaseCount,
       sourceUsageChargeCount,
+      sourceHandoffGrantCount,
+      sourceHandoffRequestCount,
+      sourceTipContributionCount,
     ] = await Promise.all([
       tx.userWallet.count({
         where: { audienceIdentityId: sourceIdentity.id },
@@ -1173,6 +1239,15 @@ export async function mergeAudienceIdentity(
       tx.agentUsageCharge?.count({
         where: { audienceIdentityId: sourceIdentity.id },
       }) ?? Promise.resolve(0),
+      tx.handoffEntitlementGrant?.count({
+        where: { audienceIdentityId: sourceIdentity.id },
+      }) ?? Promise.resolve(0),
+      tx.handoffRequest?.count({
+        where: { audienceIdentityId: sourceIdentity.id },
+      }) ?? Promise.resolve(0),
+      tx.tipContribution?.count({
+        where: { audienceIdentityId: sourceIdentity.id },
+      }) ?? Promise.resolve(0),
     ]);
     if (sourceWalletCount > 0 && targetWalletCount > 0) {
       throw new Error(
@@ -1184,6 +1259,8 @@ export async function mergeAudienceIdentity(
       || sourcePaymentOrderCount > 0
       || sourceTokenPurchaseCount > 0
       || sourceUsageChargeCount > 0
+      || sourceHandoffGrantCount > 0
+      || sourceTipContributionCount > 0
     ) {
       if (!input.transferVerifiedProvisionalAssets) {
         throw new Error(
@@ -1197,6 +1274,12 @@ export async function mergeAudienceIdentity(
         tx,
       });
     }
+    await assertHandoffRequestTransferIsConflictFree({
+      sourceAudienceIdentityId: sourceIdentity.id,
+      targetAudienceIdentityId: targetIdentity.id,
+      sourceHandoffRequestCount,
+      tx,
+    });
 
     const claimed = await tx.audienceIdentity.updateMany({
       where: {
@@ -1227,6 +1310,16 @@ export async function mergeAudienceIdentity(
     await tx.userWallet.updateMany({
       where: { audienceIdentityId: sourceIdentity.id },
       data: { audienceIdentityId: targetIdentity.id },
+    });
+    await transferCommerceIdentityRecords({
+      sourceAudienceIdentityId: sourceIdentity.id,
+      targetAudienceIdentityId: targetIdentity.id,
+      sourceHandoffGrantCount,
+      sourceHandoffRequestCount,
+      sourceTipContributionCount,
+      transferVerifiedProvisionalAssets:
+        input.transferVerifiedProvisionalAssets === true,
+      tx,
     });
     if (input.transferVerifiedProvisionalAssets) {
       await transferProvisionalFinancialRecords({
@@ -1284,6 +1377,25 @@ export async function mergeAudienceIdentity(
     : run(client);
 }
 
+async function lockAudienceIdentitiesForMerge(
+  tx: WebAudienceClient,
+  audienceIdentityIds: string[],
+) {
+  if (!tx.$queryRaw) return;
+  const sortedIds = [...new Set(audienceIdentityIds)].sort();
+  for (const audienceIdentityId of sortedIds) {
+    const rows = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT "id"
+      FROM "AudienceIdentity"
+      WHERE "id" = ${audienceIdentityId}
+      FOR UPDATE
+    `;
+    if (rows.length !== 1) {
+      throw new Error(`Audience identity ${audienceIdentityId} was not found.`);
+    }
+  }
+}
+
 async function assertProvisionalFinancialTransferIsConflictFree(input: {
   sourceAudienceIdentityId: string;
   targetAudienceIdentityId: string;
@@ -1327,6 +1439,99 @@ async function assertProvisionalFinancialTransferIsConflictFree(input: {
   if (conflict) {
     throw new Error(
       `Audience identity entitlement conflict for representative ${conflict.representativeId} and product ${conflict.productCode}; explicit balance consolidation is required.`,
+    );
+  }
+}
+
+async function assertHandoffRequestTransferIsConflictFree(input: {
+  sourceAudienceIdentityId: string;
+  targetAudienceIdentityId: string;
+  sourceHandoffRequestCount: number;
+  tx: WebAudienceClient;
+}) {
+  if (input.sourceHandoffRequestCount === 0) return;
+  const requestClient = input.tx.handoffRequest;
+  if (!requestClient) {
+    throw new Error(
+      "Audience identity handoff transfer is unavailable for this persistence client.",
+    );
+  }
+  const activeStatuses = ["OPEN", "REVIEWING", "ACCEPTED"] as const;
+  const [sourceRequests, targetRequests] = await Promise.all([
+    requestClient.findMany({
+      where: {
+        audienceIdentityId: input.sourceAudienceIdentityId,
+        status: { in: [...activeStatuses] },
+      },
+      select: { id: true, representativeId: true },
+    }),
+    requestClient.findMany({
+      where: {
+        audienceIdentityId: input.targetAudienceIdentityId,
+        status: { in: [...activeStatuses] },
+      },
+      select: { id: true, representativeId: true },
+    }),
+  ]);
+  const targetRepresentativeIds = new Set(
+    targetRequests.map((request) => request.representativeId),
+  );
+  const conflict = sourceRequests.find((request) =>
+    targetRepresentativeIds.has(request.representativeId),
+  );
+  if (conflict) {
+    throw new Error(
+      `Audience identity handoff conflict for representative ${conflict.representativeId}; close or reconcile one active request before merging.`,
+    );
+  }
+}
+
+async function transferCommerceIdentityRecords(input: {
+  sourceAudienceIdentityId: string;
+  targetAudienceIdentityId: string;
+  sourceHandoffGrantCount: number;
+  sourceHandoffRequestCount: number;
+  sourceTipContributionCount: number;
+  transferVerifiedProvisionalAssets: boolean;
+  tx: WebAudienceClient;
+}) {
+  if (
+    input.transferVerifiedProvisionalAssets
+    && input.sourceHandoffGrantCount > 0
+  ) {
+    const result = await input.tx.handoffEntitlementGrant?.updateMany({
+      where: { audienceIdentityId: input.sourceAudienceIdentityId },
+      data: { audienceIdentityId: input.targetAudienceIdentityId },
+    });
+    assertTransferredCount(
+      "handoff entitlement grants",
+      result?.count,
+      input.sourceHandoffGrantCount,
+    );
+  }
+  if (input.sourceHandoffRequestCount > 0) {
+    const result = await input.tx.handoffRequest?.updateMany({
+      where: { audienceIdentityId: input.sourceAudienceIdentityId },
+      data: { audienceIdentityId: input.targetAudienceIdentityId },
+    });
+    assertTransferredCount(
+      "handoff requests",
+      result?.count,
+      input.sourceHandoffRequestCount,
+    );
+  }
+  if (
+    input.transferVerifiedProvisionalAssets
+    && input.sourceTipContributionCount > 0
+  ) {
+    const result = await input.tx.tipContribution?.updateMany({
+      where: { audienceIdentityId: input.sourceAudienceIdentityId },
+      data: { audienceIdentityId: input.targetAudienceIdentityId },
+    });
+    assertTransferredCount(
+      "tip contributions",
+      result?.count,
+      input.sourceTipContributionCount,
     );
   }
 }

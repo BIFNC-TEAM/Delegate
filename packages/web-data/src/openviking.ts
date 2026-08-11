@@ -145,14 +145,6 @@ const publishedRepresentativeSnapshotSchema = z.object({
     policies: z.array(publishedKnowledgeDocumentSchema),
   }).nullable(),
   knowledgeAssets: z.array(publishedKnowledgeAssetPinSchema).default([]),
-  pricing: z.array(z.object({
-    tier: z.string(),
-    name: z.string(),
-    stars: z.number().int().min(0),
-    summary: z.string(),
-    includedReplies: z.number().int().min(0),
-    includesPriorityHandoff: z.boolean(),
-  })),
 });
 
 export async function enqueueRepresentativeOpenVikingSync(params: {
@@ -401,7 +393,6 @@ const REPRESENTATIVE_AGGREGATE_RESOURCE_KEYS = {
   faq: "faq/index.md",
   materials: "materials/index.md",
   policies: "policies/index.md",
-  pricing: "pricing/index.md",
 } as const;
 
 async function buildPublishedResourceProjectionSpecs(params: {
@@ -578,7 +569,6 @@ function buildPublishedAggregateProjectionSpecs(params: {
       materials: normalizePublishedKnowledgeDocuments(knowledge.materials),
       policies: normalizePublishedKnowledgeDocuments(knowledge.policies),
     },
-    pricing: params.snapshot.pricing,
     handoffPrompt: params.snapshot.conversation.handoffPrompt,
   });
   const aggregateSpecs = aggregateDocuments.map((document) => {

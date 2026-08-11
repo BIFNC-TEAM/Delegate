@@ -27,6 +27,7 @@ import {
   runWalletWriteTransaction,
   type WalletWriteTransactionOptions,
 } from "./agent-wallet-write";
+import { calculateCumulativeRevenueAllocationDifference } from "./commercial-ratio";
 import { prisma } from "./prisma";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
@@ -3019,20 +3020,18 @@ function buildFifoAllocationPlans(
       continue;
     }
     const consumedBefore = purchase.tokenAmount - remaining;
-    const consumedAfter = consumedBefore + tokenAmount;
-    const creatorBefore = Math.floor(
-      (purchase.creatorPendingCents * consumedBefore) /
-        purchase.tokenAmount,
-    );
-    const creatorAfter = Math.floor(
-      (purchase.creatorPendingCents * consumedAfter) /
-        purchase.tokenAmount,
-    );
+    const allocation = calculateCumulativeRevenueAllocationDifference({
+      grossAmount: purchase.amountCents,
+      creatorAmount: purchase.creatorPendingCents,
+      totalUnits: purchase.tokenAmount,
+      unitsBefore: consumedBefore,
+      unitsDelta: tokenAmount,
+    });
     plans.push({
       purchase,
       tokenAmount,
-      valueCents: tokenAmount * purchase.tokenUnitPriceCents,
-      creatorReleaseCents: creatorAfter - creatorBefore,
+      valueCents: allocation.grossAmount,
+      creatorReleaseCents: allocation.creatorAmount,
     });
     left -= tokenAmount;
   }

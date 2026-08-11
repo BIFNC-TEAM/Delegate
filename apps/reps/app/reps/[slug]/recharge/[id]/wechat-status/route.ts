@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  AGENT_WALLET_TIP_PRODUCT_CODE,
   AgentWalletReconciliationError,
   RechargePaymentConflictError,
   WeChatPayConfigurationError,
@@ -70,6 +71,7 @@ export async function POST(
         providerPayload: true,
         representativeId: true,
         productCode: true,
+        productKindSnapshot: true,
         userWallet: {
           select: {
             audienceIdentityId: true,
@@ -86,8 +88,18 @@ export async function POST(
           === expectedExternalUserId;
     const matchesPurchaseIntent =
       rechargeOrder?.representativeId === runtime.setup.id
-      && rechargeOrder.productCode
-        === AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE;
+      && (
+        (
+          rechargeOrder.productCode
+            === AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE
+          && (rechargeOrder.productKindSnapshot === null
+            || rechargeOrder.productKindSnapshot === "SERVICE_PACKAGE")
+        )
+        || (
+          rechargeOrder.productCode === AGENT_WALLET_TIP_PRODUCT_CODE
+          && rechargeOrder.productKindSnapshot === "TIP"
+        )
+      );
     if (
       !rechargeOrder
       || !ownedByPrincipal

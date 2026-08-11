@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-import { demoRepresentative, type PlanTier } from "@delegate/domain";
+import { demoRepresentative } from "@delegate/domain";
 import { generateRepresentativeReply } from "@delegate/model-runtime";
 import { Channel } from "@prisma/client";
 import {
@@ -40,8 +40,6 @@ import { Bot, InlineKeyboard } from "grammy";
 
 import { botLifecycleHooks } from "./lifecycle-hooks";
 import {
-  assertTelegramPaidFlowUsesUnifiedRuntime,
-  isTelegramPaidFlowAvailable,
   resolveTelegramConversationPlatformMode,
   shouldFailClosedAfterConversationPlatformWrite,
 } from "./conversation-platform-mode";
@@ -49,19 +47,16 @@ import {
   buildRepresentativeWebRechargeUrl,
   buildTelegramBotCommands,
   buildWebRechargeMessage,
-  formatTelegramPlans,
   resolveTelegramInlineKeyboardUrl,
 } from "./commerce-ux";
 import {
   buildHandoffPreparation,
   clearStructuredCollectorState,
-  createPlanInvoice,
   findTelegramInboundMessageEditTarget,
   getActiveRepresentativeSlugForChat,
   getConversationContext,
   getDefaultRepresentativeSlugForTelegramBot,
   getRecentConversationTurns,
-  markInvoiceDeliveryUncertain,
   maybeCreateHandoffRequest,
   persistAndProcessTelegramSuccessfulPayment,
   recordModelUsage,
@@ -136,9 +131,6 @@ export async function createTelegramBotRuntime(
 ): Promise<TelegramBotRuntime> {
 const conversationPlatformMode = resolveTelegramConversationPlatformMode();
 const telegramRuntimeConfig = resolveTelegramRuntimeConfig();
-const telegramStarsPurchasesEnabled = isTelegramPaidFlowAvailable(
-  conversationPlatformMode,
-);
 const bot = new Bot(config.token, {
   client: {
     timeoutSeconds: telegramRuntimeConfig.apiTimeoutSeconds,
@@ -312,20 +304,6 @@ bot.command("start", async (ctx) => {
     }
   }
 
-  if (startPayload.purchaseTier && ctx.chat.type === "private") {
-    await ctx.reply(
-      telegramStarsPurchasesEnabled
-        ? `当前入口已切换到 ${representative.name}，正在为你打开 ${formatPlanName(startPayload.purchaseTier)}。`
-        : `当前入口已切换到 ${representative.name}，请在 Web 继续 ${formatPlanName(startPayload.purchaseTier)} 服务。`,
-    );
-    await sendPlanPurchaseEntry(
-      ctx,
-      startPayload.purchaseTier,
-      activeRepresentativeSlug,
-    );
-    return;
-  }
-
   const payloadNote =
     payload && activeRepresentativeSlug !== defaultRepresentativeSlug
       ? `当前正在和 ${representative.name} 对话。这个会话会继续沿用该代表的公开知识与收费规则。`
@@ -339,9 +317,7 @@ bot.command("start", async (ctx) => {
       payloadNote,
       `免费规则：前 ${representative.contract.freeReplyLimit} 条回复适合基础问答与资料领取。`,
       "我可以回答 FAQ、发资料、收集合作与报价信息，并在必要时发起人工转接。",
-      telegramStarsPurchasesEnabled
-        ? "你也可以随时用 /plans 或 /buy pass 来触发 Telegram Stars 续用。"
-        : "需要继续服务时，可用 /plans 查看方案并前往 Web 充值。",
+      "需要继续服务时，可用 /plans 查看当前方案并前往 Web 充值。",
     ].join("\n\n"),
     plansKeyboard ? { reply_markup: plansKeyboard } : {},
   );
@@ -357,65 +333,39 @@ bot.command("plans", async (ctx) => {
 });
 
 bot.command("buy", async (ctx) => {
-  const tier = parseTierToken(ctx.match?.trim());
-  if (!telegramStarsPurchasesEnabled) {
-    const representativeSlug = await resolveRepresentativeSlugForChat(
-      ctx.chat.type,
-      ctx.chat.id,
-    );
-    await sendWebRechargeEntry(ctx, representativeSlug, tier ?? undefined);
-    return;
-  }
-
-  if (!tier) {
-    await ctx.reply("用法：/buy pass 或 /buy deep_help 或 /buy sponsor");
-    return;
-  }
-
-  if (ctx.chat.type !== "private") {
-    await ctx.reply("Stars invoice 建议在 bot 私聊里完成。请先私聊我，再发送 /buy。");
-    return;
-  }
-
-  await sendPlanPurchaseEntry(ctx, tier);
+  const representativeSlug = await resolveRepresentativeSlugForChat(
+    ctx.chat.type,
+    ctx.chat.id,
+  );
+  await sendWebRechargeEntry(ctx, representativeSlug);
 });
 
 bot.command("paysupport", async (ctx) => {
-  if (!telegramStarsPurchasesEnabled) {
-    const representativeSlug = await resolveRepresentativeSlugForChat(
-      ctx.chat.type,
-      ctx.chat.id,
-    );
-    const representative = await getRepresentativeRuntimeConfig(
-      representativeSlug,
-    );
-    const rechargeUrl = buildRepresentativeWebRechargeUrl(
-      representative.slug,
-    );
-    const rechargeKeyboard = buildWebRechargeKeyboard(
-      "打开 Web 充值",
-      rechargeUrl,
-    );
-    await ctx.reply(
-      [
-        "当前新充值与付费统一在 Web 完成；订单或退款问题请通过代表页面联系所有者。",
-        "如果你有历史 Telegram 付款，请说明发票或付款背景，以便人工核对。",
-        rechargeUrl ? `Web 充值入口：${rechargeUrl}` : null,
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
-      rechargeKeyboard
-        ? { reply_markup: rechargeKeyboard }
-        : {},
-    );
-    return;
-  }
-
+  const representativeSlug = await resolveRepresentativeSlugForChat(
+    ctx.chat.type,
+    ctx.chat.id,
+  );
+  const representative = await getRepresentativeRuntimeConfig(
+    representativeSlug,
+  );
+  const rechargeUrl = buildRepresentativeWebRechargeUrl(
+    representative.slug,
+  );
+  const rechargeKeyboard = buildWebRechargeKeyboard(
+    "打开 Web 充值",
+    rechargeUrl,
+  );
   await ctx.reply(
     [
-      "Telegram Stars 支付完成后，我会自动把 invoice、解锁状态和 owner wallet 同步进系统。",
-      "如果你需要退款或人工协助，请直接说明发票背景，我会把请求送进 ask-first / owner inbox 流程。",
-    ].join("\n\n"),
+      "当前新充值与付费统一在 Web 完成；订单或退款问题请通过代表页面联系所有者。",
+      "如果你有历史 Telegram 付款，请说明发票或付款背景，以便人工核对。",
+      rechargeUrl ? `Web 充值入口：${rechargeUrl}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n\n"),
+    rechargeKeyboard
+      ? { reply_markup: rechargeKeyboard }
+      : {},
   );
 });
 
@@ -709,28 +659,6 @@ bot.command("compute", async (ctx) => {
     parsed,
     rawText: `/compute ${ctx.match?.trim() ?? ""}`.trim(),
   });
-});
-
-bot.callbackQuery(/^buy:(pass|deep_help|sponsor)$/i, async (ctx) => {
-  await ctx.answerCallbackQuery();
-
-  const tier = parseTierToken(ctx.match[1]);
-  if (!tier) {
-    await ctx.reply("无法识别要购买的计划。");
-    return;
-  }
-
-  if (!telegramStarsPurchasesEnabled) {
-    await sendPlanPurchaseEntry(ctx, tier);
-    return;
-  }
-
-  if (ctx.chat?.type !== "private") {
-    await ctx.reply("请先在 bot 私聊里完成支付。");
-    return;
-  }
-
-  await sendPlanPurchaseEntry(ctx, tier);
 });
 
 bot.callbackQuery("plans:show", async (ctx) => {
@@ -1098,18 +1026,26 @@ bot.on("message:text", async (ctx) => {
       advanced.state.kind === "scheduling"
         ? "预约意向已经整理完成。"
         : "报价 / 合作背景已经整理完成。";
-    const paidFollowup =
-      !conversationContext.contactIsPaid && advanced.state.suggestedPlan
-        ? telegramStarsPurchasesEnabled
-          ? `如果你希望我继续保留更长上下文并优先推进，可以继续解锁 ${formatPlanName(advanced.state.suggestedPlan)}。`
-          : `如果你希望我继续保留更长上下文并优先推进，请前往 ${representative.name} 的 Web 页面查看方案并充值。`
-        : "接下来主人会基于这份结构化摘要判断是否亲自接手。";
+    const paidFollowup = submitted.handoffId
+      ? !conversationContext.contactIsPaid && advanced.state.suggestedPlan
+        ? `如果你希望我继续保留更长上下文并优先推进，请前往 ${representative.name} 的 Web 页面查看当前方案并充值。`
+        : "接下来主人会基于这份结构化摘要判断是否亲自接手。"
+      : null;
+    const handoffStatusNote = submitted.handoffId
+      ? `已创建 owner inbox 收件项：${submitted.handoffId}`
+      : submitted.handoffOutcome === "entitlement_required"
+        ? "结构化摘要已保存；当前没有可用的人工转接权益，请先购买包含人工转接的服务套餐。"
+        : submitted.handoffOutcome === "handoff_disabled"
+          ? "结构化摘要已保存；该数字代表当前未启用人工转接。"
+          : submitted.handoffOutcome === "active_request_exists"
+            ? "结构化摘要已保存；你已有一条进行中的人工转接请求，本次未重复创建。"
+            : "结构化摘要已保存，但本次未创建人工转接请求。";
     const replyText = [
       representative.name,
       representative.tagline,
       completionNote,
       formatStructuredCollectorSummary(advanced.state),
-      `已创建 owner inbox 收件项：${submitted.handoffId}`,
+      handoffStatusNote,
       submitted.recommendedOwnerAction,
       paidFollowup,
     ]
@@ -1539,7 +1475,6 @@ async function initializeTelegramBot() {
       });
     await bot.api.setMyCommands(
       buildTelegramBotCommands(
-        telegramStarsPurchasesEnabled,
         conversationPlatformMode !== "worker",
       ),
     );
@@ -1568,44 +1503,17 @@ async function initializeTelegramBot() {
 async function sendPlansMessage(ctx: any, representative: Awaited<ReturnType<typeof getRepresentativeRuntimeConfig>>) {
   const replyMarkup = buildPlansKeyboard(representative.slug);
   await ctx.reply(
-    [
-      formatTelegramPlans(
-        representative.pricing,
-        telegramStarsPurchasesEnabled,
-      ),
-      telegramStarsPurchasesEnabled
-        ? null
-        : "当前充值与付费统一在 Web 完成。",
-    ]
-      .filter(Boolean)
-      .join("\n\n"),
+    buildWebRechargeMessage({
+      representativeName: representative.name,
+      rechargeUrl: buildRepresentativeWebRechargeUrl(representative.slug),
+    }),
     replyMarkup ? { reply_markup: replyMarkup } : {},
   );
-}
-
-async function sendPlanPurchaseEntry(
-  ctx: any,
-  tier: PlanTier,
-  preferredRepresentativeSlug?: string,
-) {
-  if (telegramStarsPurchasesEnabled) {
-    await sendPlanInvoice(ctx, tier, preferredRepresentativeSlug);
-    return;
-  }
-
-  const representativeSlug =
-    preferredRepresentativeSlug
-    ?? (await resolveRepresentativeSlugForChat(
-      ctx.chat?.type ?? "private",
-      ctx.chat?.id ?? ctx.from.id,
-    ));
-  await sendWebRechargeEntry(ctx, representativeSlug, tier);
 }
 
 async function sendWebRechargeEntry(
   ctx: any,
   representativeSlug: string,
-  tier?: PlanTier,
 ) {
   const representative = await getRepresentativeRuntimeConfig(
     representativeSlug,
@@ -1613,9 +1521,6 @@ async function sendWebRechargeEntry(
   const rechargeUrl = buildRepresentativeWebRechargeUrl(
     representative.slug,
   );
-  const selectedPlan = tier
-    ? representative.pricing.find((plan) => plan.tier === tier)
-    : undefined;
   const rechargeKeyboard = buildWebRechargeKeyboard(
     "打开 Web 充值",
     rechargeUrl,
@@ -1624,70 +1529,11 @@ async function sendWebRechargeEntry(
     buildWebRechargeMessage({
       representativeName: representative.name,
       rechargeUrl,
-      ...(selectedPlan ? { selectedPlanName: selectedPlan.name } : {}),
     }),
     rechargeKeyboard
       ? { reply_markup: rechargeKeyboard }
       : {},
   );
-}
-
-async function sendPlanInvoice(ctx: any, tier: PlanTier, preferredRepresentativeSlug?: string) {
-  let invoice:
-    | Awaited<ReturnType<typeof createPlanInvoice>>
-    | undefined;
-
-  try {
-    const representativeSlug =
-      preferredRepresentativeSlug ??
-      (await resolveRepresentativeSlugForChat(
-        ctx.chat?.type ?? "private",
-        ctx.chat?.id ?? ctx.from.id,
-      ));
-    const context = await getConversationContext(representativeSlug, {
-      telegramUserId: ctx.from.id,
-      ...(ctx.from.username ? { username: ctx.from.username } : {}),
-      ...buildDisplayName(ctx.from.first_name, ctx.from.last_name),
-      chatId: ctx.chat.id,
-      channel: Channel.PRIVATE_CHAT,
-    });
-    await assertConversationChannelDeliveryAvailable({
-      conversationId: context.conversationId,
-      channel: "telegram",
-    });
-    assertTelegramPaidFlowUsesUnifiedRuntime(conversationPlatformMode);
-
-    invoice = await createPlanInvoice({
-      context,
-      tier,
-      providerAccountId: String(me.id),
-    });
-
-    await ctx.replyWithInvoice(
-      invoice.title,
-      buildInvoiceDescription(tier),
-      invoice.payload,
-      "XTR",
-      [{ label: invoice.title, amount: invoice.starsAmount }],
-      {
-        start_parameter: buildStartPayloadForPurchase(representativeSlug, tier),
-        protect_content: true,
-      },
-    );
-  } catch (error) {
-    if (invoice?.invoiceId) {
-      await markInvoiceDeliveryUncertain(
-        invoice.invoiceId,
-        error instanceof Error ? error.message : "telegram_invoice_delivery_failed",
-      );
-    }
-
-    await ctx.reply(
-      error instanceof Error
-        ? error.message
-        : "当前无法创建 Stars invoice，请稍后重试。",
-    );
-  }
 }
 
 function stripBotMention(text: string, username: string | undefined): string {
@@ -1702,14 +1548,6 @@ function stripBotMention(text: string, username: string | undefined): string {
 function buildPlansKeyboard(
   representativeSlug: string,
 ): InlineKeyboard | undefined {
-  if (telegramStarsPurchasesEnabled) {
-    return new InlineKeyboard()
-      .text("Buy Pass", "buy:pass")
-      .text("Buy Deep Help", "buy:deep_help")
-      .row()
-      .text("Sponsor", "buy:sponsor");
-  }
-
   const rechargeUrl = buildRepresentativeWebRechargeUrl(
     representativeSlug,
   );
@@ -1720,25 +1558,11 @@ function buildPlanKeyboardForConversation(
   plan: ConversationPlan,
   representativeSlug: string,
 ): InlineKeyboard | undefined {
-  if (plan.suggestedPlan && !telegramStarsPurchasesEnabled) {
+  if (plan.suggestedPlan) {
     const rechargeUrl = buildRepresentativeWebRechargeUrl(
       representativeSlug,
     );
     return buildWebRechargeKeyboard("在 Web 继续服务", rechargeUrl);
-  }
-
-  if (plan.nextStep === "offer_paid_unlock" && plan.suggestedPlan) {
-    return new InlineKeyboard().text(
-      `Unlock ${formatPlanName(plan.suggestedPlan)}`,
-      `buy:${plan.suggestedPlan}`,
-    );
-  }
-
-  if (plan.suggestedPlan) {
-    return new InlineKeyboard()
-      .text(`Buy ${formatPlanName(plan.suggestedPlan)}`, `buy:${plan.suggestedPlan}`)
-      .row()
-      .text("See all plans", "plans:show");
   }
 
   return undefined;
@@ -1755,51 +1579,11 @@ function buildPlanReplyOptions(
   return replyMarkup ? { reply_markup: replyMarkup } : {};
 }
 
-function buildInvoiceDescription(tier: PlanTier): string {
-  switch (tier) {
-    case "deep_help":
-      return "Unlock longer context, richer intake, and priority human review where applicable.";
-    case "sponsor":
-      return "Fund the representative's public credit pool so more inbound users can get free help first.";
-    case "pass":
-    case "free":
-    default:
-      return "Unlock a longer paid follow-up conversation for intake, materials, and clearer next steps.";
-  }
-}
-
-function formatPlanName(tier: PlanTier): string {
-  switch (tier) {
-    case "deep_help":
-      return "Deep Help";
-    case "sponsor":
-      return "Sponsor";
-    case "pass":
-    case "free":
-    default:
-      return "Pass";
-  }
-}
-
-function parseTierToken(value: string | undefined): PlanTier | null {
-  if (!value) {
-    return null;
-  }
-
-  const normalized = value.trim().toLowerCase().replace(/-/g, "_");
-  if (normalized === "pass" || normalized === "deep_help" || normalized === "sponsor") {
-    return normalized;
-  }
-
-  return null;
-}
-
 function parseStartPayload(
   payload: string | undefined,
   defaultRepresentativeSlug: string,
 ): {
   representativeSlug: string;
-  purchaseTier?: PlanTier;
 } {
   if (!payload) {
     return {
@@ -1816,20 +1600,16 @@ function parseStartPayload(
   }
 
   if (normalized.startsWith("buy_")) {
-    const [representativeSlug, tierToken] = normalized.slice(4).split("__");
-    const purchaseTier = parseTierToken(tierToken);
+    const [representativeSlug] = normalized.slice(4).split("__");
 
     return {
       representativeSlug: representativeSlug || defaultRepresentativeSlug,
-      ...(purchaseTier ? { purchaseTier } : {}),
     };
   }
 
   if (normalized.startsWith("buy-")) {
-    const purchaseTier = parseTierToken(normalized.slice(4));
     return {
       representativeSlug: defaultRepresentativeSlug,
-      ...(purchaseTier ? { purchaseTier } : {}),
     };
   }
 
@@ -1917,10 +1697,6 @@ async function resolveRepresentativeSlugForChat(
     readActiveRepresentativeSlug: () =>
       getActiveRepresentativeSlugForChat(chatId),
   });
-}
-
-function buildStartPayloadForPurchase(representativeSlug: string, tier: PlanTier): string {
-  return `buy_${representativeSlug}__${tier}`;
 }
 
 async function handleComputeRequest(params: {
@@ -2041,12 +1817,9 @@ function buildComputeReplyOptions(
   representative: Awaited<ReturnType<typeof getRepresentativeRuntimeConfig>>,
 ) {
   if (
-    !telegramStarsPurchasesEnabled
-    && (
-      result.outcome === "blocked"
-      || result.outcome === "pending_approval"
-      || result.outcome === "failed"
-    )
+    result.outcome === "blocked"
+    || result.outcome === "pending_approval"
+    || result.outcome === "failed"
   ) {
     const rechargeUrl = buildRepresentativeWebRechargeUrl(
       representative.slug,
@@ -2058,22 +1831,6 @@ function buildComputeReplyOptions(
     return rechargeKeyboard
       ? { reply_markup: rechargeKeyboard }
       : {};
-  }
-
-  if (result.outcome === "blocked" || result.outcome === "pending_approval") {
-    return {
-      reply_markup:
-        new InlineKeyboard()
-          .text(`Buy ${formatPlanName("deep_help")}`, "buy:deep_help")
-          .row()
-          .text("See all plans", "plans:show"),
-    };
-  }
-
-  if (result.outcome === "failed" && representative.pricing.some((plan) => plan.tier === "deep_help")) {
-    return {
-      reply_markup: new InlineKeyboard().text("See all plans", "plans:show"),
-    };
   }
 
   return {};

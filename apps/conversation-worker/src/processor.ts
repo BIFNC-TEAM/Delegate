@@ -55,7 +55,7 @@ import {
   prepareGenerationMessageChannelDelivery,
   privateChannelSourceVerificationUnavailableStatement,
   readContactMemorySharingChallengeToken,
-  reserveGenerationConversationEntitlement,
+  reserveGenerationConversationWalletUsage,
   renderPrivateChannelGenerationDeliveryText,
   renewGenerationWorkItemLease,
   resolveDeterministicContactMemorySharingCommand,
@@ -482,6 +482,59 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     if (!setup) throw new Error(`Representative ${item.representativeSlug} was not found.`);
     const delegationConfig = resolveDelegationConfig(setup);
     const representative = buildRepresentativeRuntimeProfile(setup);
+    // Commerce policy is pinned on GenerationRun at ingress. Do not recompute
+    // it from the mutable representative setup after the worker lease begins.
+    const unlimitedFreeAccess = item.accessMode === "FREE";
+    const pinnedTrialLimit =
+      typeof item.effectiveFreeReplyLimit === "number"
+      && Number.isSafeInteger(item.effectiveFreeReplyLimit)
+      && item.effectiveFreeReplyLimit >= 0
+        ? item.effectiveFreeReplyLimit
+        : null;
+    const effectiveFreeReplyLimit = item.accessMode === "CREDITS_ONLY"
+      ? 0
+      : item.accessMode === "TRIAL_THEN_CREDITS"
+        && pinnedTrialLimit !== null
+        ? pinnedTrialLimit
+        : representative.contract.freeReplyLimit;
+    const policyPinnedRepresentative = item.accessMode === "FREE"
+      ? representative
+      : {
+          ...representative,
+          contract: {
+            ...representative.contract,
+            freeReplyLimit: effectiveFreeReplyLimit,
+          },
+        };
+    const requiresPaidContinuation = (freeRepliesUsed: number) =>
+      !unlimitedFreeAccess
+      && freeRepliesUsed >= effectiveFreeReplyLimit;
+    let walletReservation = item.walletReservation ?? null;
+    const reservePaidContinuation = async () => {
+      if (
+        !item.audienceIdentityId
+        || walletReservation
+        || entitlementReservation
+      ) {
+        return { walletReservation, entitlementReservation };
+      }
+
+      // Resolve the canonical audience wallet under the generation lease when
+      // ingress did not already pin one. Legacy fixed-tier entitlements are
+      // intentionally not consulted on any channel.
+      const nextWalletReservation =
+        await reserveGenerationConversationWalletUsage({
+          runId: item.runId,
+          ...workLease,
+          audienceIdentityId: item.audienceIdentityId,
+          representativeId: setup.id,
+          tokenAmount: 1,
+        });
+      return {
+        walletReservation: nextWalletReservation,
+        entitlementReservation,
+      };
+    };
 
     const persistedRequest = readPersistedDelegationStepRequest(
       item.contextSnapshot && typeof item.contextSnapshot === "object"
@@ -558,24 +611,21 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         )
       )
     ) {
-      const knownPaidContinuationRequired =
-        item.usage.freeRepliesUsed >= representative.contract.freeReplyLimit;
+      const knownPaidContinuationRequired = requiresPaidContinuation(
+        item.usage.freeRepliesUsed,
+      );
       if (
         knownPaidContinuationRequired
-        && !item.walletReservation
+        && !walletReservation
         && !entitlementReservation
         && item.audienceIdentityId
       ) {
-        entitlementReservation = await reserveGenerationConversationEntitlement({
-          runId: item.runId,
-          ...workLease,
-          audienceIdentityId: item.audienceIdentityId,
-          representativeId: setup.id,
-        });
+        ({ walletReservation, entitlementReservation } =
+          await reservePaidContinuation());
       }
       if (
         knownPaidContinuationRequired
-        && !item.walletReservation
+        && !walletReservation
         && !entitlementReservation
       ) {
         const completed = await completeInlineGenerationRun({
@@ -701,56 +751,67 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       );
     }
 
-    let paidContinuationRequired =
-      item.usage.freeRepliesUsed >= representative.contract.freeReplyLimit;
-    if (!item.walletReservation && !paidContinuationRequired) {
+    let paidContinuationRequired = requiresPaidContinuation(
+      item.usage.freeRepliesUsed,
+    );
+    if (
+      !unlimitedFreeAccess
+      && !walletReservation
+      && !paidContinuationRequired
+    ) {
       const freeAuthorized = await authorizeGenerationRunFreeUsage({
         runId: item.runId,
         ...workLease,
-        freeReplyLimit: representative.contract.freeReplyLimit,
+        freeReplyLimit: effectiveFreeReplyLimit,
       });
       paidContinuationRequired = !freeAuthorized;
     }
     if (
       item.audienceIdentityId
       && paidContinuationRequired
-      && !item.walletReservation
+      && !walletReservation
       && !entitlementReservation
     ) {
-      entitlementReservation = await reserveGenerationConversationEntitlement({
-        runId: item.runId,
-        ...workLease,
-        audienceIdentityId: item.audienceIdentityId,
-        representativeId: setup.id,
-      });
+      ({ walletReservation, entitlementReservation } =
+        await reservePaidContinuation());
     }
     const effectiveUsage = entitlementReservation
       ? {
           ...item.usage,
           passUnlocked: true,
-          deepHelpUnlocked:
-            item.usage.deepHelpUnlocked
-            || entitlementReservation.productCode === "plan:deep_help",
+          deepHelpUnlocked: item.usage.deepHelpUnlocked,
         }
-      : paidContinuationRequired && !item.walletReservation
+      : walletReservation
         ? {
             ...item.usage,
-            freeRepliesUsed: Math.max(
-              item.usage.freeRepliesUsed,
-              representative.contract.freeReplyLimit,
-            ),
-            passUnlocked: false,
-            deepHelpUnlocked: false,
+            passUnlocked: true,
           }
-        : item.usage;
+        : unlimitedFreeAccess
+          ? {
+              ...item.usage,
+              // The legacy planner understands unlimited access through an
+              // unlocked continuation flag; no service credit is consumed.
+              passUnlocked: true,
+            }
+          : paidContinuationRequired && !walletReservation
+            ? {
+                ...item.usage,
+                freeRepliesUsed: Math.max(
+                  item.usage.freeRepliesUsed,
+                  effectiveFreeReplyLimit,
+                ),
+                passUnlocked: false,
+                deepHelpUnlocked: false,
+              }
+            : item.usage;
     const continuationAuthorized =
       !paidContinuationRequired
-      || Boolean(item.walletReservation || entitlementReservation);
+      || Boolean(walletReservation || entitlementReservation);
 
     if (
       parsedRequests.length
       && paidContinuationRequired
-      && !item.walletReservation
+      && !walletReservation
       && !entitlementReservation
     ) {
       return completeTerminalDelegationFailure(
@@ -823,7 +884,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     const plan = createConversationPlan({
       text: item.userText,
       channel: "private_chat",
-      representative,
+      representative: policyPinnedRepresentative,
       usage: effectiveUsage,
     });
     const subagent = resolveConversationSubagent(plan);
@@ -843,9 +904,15 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       ? recalled.items
       : [];
 
-    let replyText = plan.nextStep === "answer"
-      ? renderFailClosedReplyPreview(representative, item.userText)
-      : renderReplyPreview(representative, plan);
+    let replyText =
+      plan.nextStep === "offer_paid_unlock"
+      && paidContinuationRequired
+      && !walletReservation
+      && !entitlementReservation
+        ? "当前可用服务额度不足，请前往这个数字代表的公开页面充值或购买服务套餐后再继续。"
+        : plan.nextStep === "answer"
+          ? renderFailClosedReplyPreview(policyPinnedRepresentative, item.userText)
+          : renderReplyPreview(policyPinnedRepresentative, plan);
     let runtime: { provider?: "openai" | "bailian" | "anthropic"; model?: string; inputTokens?: number; outputTokens?: number; costCents?: number } = {};
     let runtimeOutcome: GenerationRuntimeOutcome | undefined;
     let memoryUse:
@@ -862,7 +929,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       | undefined;
     if (plan.nextStep === "answer") {
       const generated = await generateRepresentativeReply({
-        representative,
+        representative: policyPinnedRepresentative,
         plan,
         subagent,
         userText: item.userText,

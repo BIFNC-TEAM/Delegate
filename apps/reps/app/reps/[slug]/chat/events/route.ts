@@ -124,14 +124,21 @@ export async function GET(
           }
           const snapshot = {
             ...history,
-            usage: deriveTierUsage({
-              freeRepliesUsed: history.freeRepliesUsed,
-              freeReplyLimit: runtime.setup.contract.freeReplyLimit,
-              serviceCreditsAvailable:
-                serviceBalance?.availableTokenAmount ?? 0,
-              serviceCreditsReserved:
-                serviceBalance?.reservedTokenAmount ?? 0,
-            }),
+            usage: {
+              ...deriveTierUsage({
+                freeRepliesUsed: history.freeRepliesUsed,
+                freeReplyLimit:
+                  runtime.accessMode === "CREDITS_ONLY"
+                    ? 0
+                    : runtime.setup.contract.freeReplyLimit,
+                serviceCreditsAvailable:
+                  serviceBalance?.availableTokenAmount ?? 0,
+                serviceCreditsReserved:
+                  serviceBalance?.reservedTokenAmount ?? 0,
+              }),
+              accessMode: runtime.accessMode,
+              unlimitedFreeAccess: runtime.accessMode === "FREE",
+            },
           };
           const serialized = JSON.stringify(snapshot);
           if (serialized !== previous) {

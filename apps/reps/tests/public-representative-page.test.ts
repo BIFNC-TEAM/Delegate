@@ -31,6 +31,13 @@ const rechargePanelSource = readFileSync(
   ),
   "utf8",
 );
+const mockSuccessRouteSource = readFileSync(
+  resolve(
+    __dirname,
+    "../app/reps/[slug]/recharge/[id]/mock-success/route.ts",
+  ),
+  "utf8",
+);
 
 describe("public representative visitor-first page", () => {
   it("places the conversation before supporting information", () => {
@@ -185,10 +192,7 @@ describe("public representative visitor-first page", () => {
       "collectionEnabled={collectionEnabled}",
     );
     expect(pageSource).toContain(
-      "serviceCreditPurchaseEnabled={showPublicPayment && collectionEnabled}",
-    );
-    expect(pageSource).toContain(
-      "serviceCreditPaymentMode={paymentMode}",
+      "serviceCreditPurchaseEnabled={hasServicePackages && collectionEnabled}",
     );
   });
 
@@ -217,10 +221,10 @@ describe("public representative visitor-first page", () => {
     );
   });
 
-  it("presents representative-scoped service packages without exposing wallet cash", () => {
-    expect(pageSource).toContain('rechargeNav: "服务包"');
-    expect(pageSource).toContain("购买当前数字代表的服务额度");
-    expect(rechargePanelSource).toContain("snapshot.servicePackages");
+  it("uses the unified live commerce catalog without exposing wallet cash", () => {
+    expect(pageSource).toContain('rechargeNav: "服务与支持"');
+    expect(pageSource).toContain("按需要继续服务或自愿支持");
+    expect(rechargePanelSource).toContain("snapshot.commerceProducts");
     expect(rechargePanelSource).toContain(
       "billingPriceVersionId: intent.priceVersionId",
     );
@@ -233,16 +237,22 @@ describe("public representative visitor-first page", () => {
       "选择当前数字代表的服务包",
     );
     expect(rechargePanelSource).toContain(
-      "无需再用余额二次购买",
+      "自愿支持",
     );
     expect(rechargePanelSource).toContain(
-      "仅适用于当前数字代表",
+      "不赠服务额度 · 不含人工接管 · 不可退款",
     );
+    expect(rechargePanelSource).toContain('product.kind === "SERVICE_PACKAGE"');
+    expect(rechargePanelSource).toContain('product.kind === "TIP"');
   });
 
   it("keeps pricing contextual and long citations collapsed", () => {
-    expect(chatSource).toContain("showPlans");
-    expect(chatSource).toContain("usage.freeRepliesRemaining > 0");
+    expect(chatSource).toContain("showServices");
+    expect(chatSource).toContain('accessMode === "TRIAL_THEN_CREDITS"');
+    expect(chatSource).toContain('accessMode === "FREE"');
+    expect(chatSource).toMatch(
+      /accessMode !== "FREE" && \(\s+accessMode === "CREDITS_ONLY"/,
+    );
     expect(chatSource).toContain(
       'rejection === "service_credit_required"',
     );
@@ -257,8 +267,73 @@ describe("public representative visitor-first page", () => {
     expect(chatSource).toContain("t.serviceCreditRequired");
     expect(chatSource).toContain("t.serviceCreditUnavailable");
     expect(chatSource).toContain("t.serviceCreditUnavailableWithHandoff");
+    expect(chatSource).not.toContain("PricingPlan");
+    expect(chatSource).not.toContain("props.pricing");
+    expect(chatSource).not.toContain("representative-chat-tier-grid");
     expect(chatSource).toContain("<details key=");
     expect(chatSource).toContain("representative-chat-starters");
+  });
+
+  it("treats tips as support with no synthetic credit completion", () => {
+    expect(rechargePanelSource).toContain(
+      "tokenPurchase: TokenPurchaseSnapshot | null",
+    );
+    expect(rechargePanelSource).toContain(
+      "buildPublicCommerceCompletionWalletUpdate({",
+    );
+    expect(rechargePanelSource).toContain(
+      "if (walletUpdate) publishPublicWalletUpdate(walletUpdate)",
+    );
+    expect(rechargePanelSource).toContain(
+      'completedOrder.productKind === "TIP"',
+    );
+    expect(rechargePanelSource).toContain(
+      'order.productKind === "TIP" && (tipCompleted || order.status === "paid")',
+    );
+    expect(rechargePanelSource).toContain(
+      'activity.order?.productKind !== "TIP"',
+    );
+    expect(rechargePanelSource).toContain(
+      'selectedProduct?.kind === "SERVICE_PACKAGE"',
+    );
+    expect(rechargePanelSource).toContain(
+      "const requiresTelegramBinding",
+    );
+    expect(chatSource).toContain("if (detail.handoffEntitlement)");
+    expect(rechargePanelSource).toContain(
+      "hasActiveWeChatOrder || paymentResultConfirmed",
+    );
+    expect(rechargePanelSource).toContain(
+      "selectedProduct?.kind ?? order?.productKind ?? null",
+    );
+    expect(mockSuccessRouteSource).toContain(
+      "serializePublicMockCommerceCompletion(result)",
+    );
+    expect(mockSuccessRouteSource).not.toContain("privateJson(result");
+    expect(mockSuccessRouteSource).not.toContain(
+      "rechargeOrder.cashBalanceCents",
+    );
+    expect(mockSuccessRouteSource).not.toContain("result.fulfillment");
+  });
+
+  it("keeps FREE access free and hides empty commerce sections", () => {
+    expect(pageSource).toContain(
+      "visibleCommerceProducts.length > 0 || hasRestorableCommerceActivity",
+    );
+    expect(pageSource).toContain(
+      "hasRestorablePublicCommerceActivity({",
+    );
+    expect(pageSource).toContain("{hasPublicCommerce ? (");
+    expect(chatSource).toContain('accessMode !== "FREE"');
+    expect(chatSource).toContain("当前对话永久免费");
+    expect(chatSource).toContain(
+      "不会销售继续对话所需的服务套餐",
+    );
+    expect(pageSource).toContain("const hasHandoffPackages");
+    expect(chatSource).toContain("props.hasHandoffPackages");
+    expect(chatSource).toContain(
+      "当前没有可用的人工接管权益，也没有上架包含人工接管的服务套餐",
+    );
   });
 
   it("shows a localized general-model source note only from the server marker", () => {

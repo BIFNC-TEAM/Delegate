@@ -1,5 +1,7 @@
 import {
   AgentTokenPurchaseStatus,
+  BillingProductKind,
+  BillingRefundPolicy,
   CreatorEarningStatus,
   PaymentProvider,
   PaymentProviderEventType,
@@ -11,6 +13,15 @@ import {
   ServiceEntitlementStatus,
 } from "@prisma/client";
 
+import {
+  commercialRefundPolicyConflictReason,
+  freezeHandoffGrantForRefund,
+  handoffGrantRefundConflictReason,
+  lockTipCreatorEarningForRefund,
+  reverseForcedTipContributionRefund,
+  refundHandoffGrant,
+  restoreHandoffGrantAfterFailedRefund,
+} from "./commercial-refund-entitlements";
 import {
   refundRechargeOrder,
   reverseAgentTokenPurchase,
@@ -128,6 +139,7 @@ export async function persistVerifiedWeChatPayRefund(
     const order = await tx.rechargeOrder.findUnique({
       where: { id: result.outTradeNo },
       include: {
+        handoffEntitlementGrant: true,
         tokenPurchases: {
           include: {
             userAgentWallet: true,
@@ -191,6 +203,11 @@ export async function persistVerifiedWeChatPayRefund(
         processingError,
       };
     }
+
+    await lockTipCreatorEarningForRefund(
+      tx as unknown as Prisma.TransactionClient,
+      order.id,
+    );
 
     const matchingPurchase =
       order.tokenPurchases.length === 1
@@ -528,6 +545,15 @@ export async function persistVerifiedWeChatPayRefund(
         where: { id: { in: entitlementAccountIds } },
         data: { status: ServiceEntitlementStatus.FROZEN },
       });
+      if (
+        refund.reversalStatus
+        !== RechargeRefundReversalStatus.RECONCILIATION_REQUIRED
+      ) {
+        await freezeHandoffGrantForRefund(
+          tx as unknown as Prisma.TransactionClient,
+          order.id,
+        );
+      }
     } else if (
       refund.providerStatus
         === RechargeRefundProviderStatus.CLOSED
@@ -538,6 +564,11 @@ export async function persistVerifiedWeChatPayRefund(
         tx as unknown as Prisma.TransactionClient,
         refund.id,
         entitlementAccountIds,
+        result.verifiedAt,
+      );
+      await restoreHandoffGrantAfterFailedRefund(
+        tx as unknown as Prisma.TransactionClient,
+        refund.id,
         result.verifiedAt,
       );
     }
@@ -583,6 +614,7 @@ export async function persistVerifiedWeChatPayRefundApiResult(
     const order = await tx.rechargeOrder.findUnique({
       where: { id: result.outTradeNo },
       include: {
+        handoffEntitlementGrant: true,
         tokenPurchases: {
           include: {
             userAgentWallet: true,
@@ -598,6 +630,10 @@ export async function persistVerifiedWeChatPayRefundApiResult(
         "recharge order identity",
       );
     }
+    await lockTipCreatorEarningForRefund(
+      tx as unknown as Prisma.TransactionClient,
+      order.id,
+    );
     const [byProviderId, byMerchantId] = await Promise.all([
       tx.rechargeRefund.findUnique({
         where: {
@@ -793,6 +829,15 @@ export async function persistVerifiedWeChatPayRefundApiResult(
         where: { id: { in: entitlementAccountIds } },
         data: { status: ServiceEntitlementStatus.FROZEN },
       });
+      if (
+        reversalStatus
+        !== RechargeRefundReversalStatus.RECONCILIATION_REQUIRED
+      ) {
+        await freezeHandoffGrantForRefund(
+          tx as unknown as Prisma.TransactionClient,
+          order.id,
+        );
+      }
     } else if (
       effectiveProviderStatus
       === RechargeRefundProviderStatus.CLOSED
@@ -803,6 +848,11 @@ export async function persistVerifiedWeChatPayRefundApiResult(
         tx as unknown as Prisma.TransactionClient,
         updated.id,
         entitlementAccountIds,
+        result.verifiedAt,
+      );
+      await restoreHandoffGrantAfterFailedRefund(
+        tx as unknown as Prisma.TransactionClient,
+        updated.id,
         result.verifiedAt,
       );
     }
@@ -861,10 +911,18 @@ export async function applyVerifiedWeChatPayRefund(
   }
 
   return runWalletWriteTransaction(client, async (tx) => {
+    await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT "id"
+      FROM "RechargeRefund"
+      WHERE "id" = ${rechargeRefundId}
+      FOR UPDATE
+    `);
     const refund = await tx.rechargeRefund.findUnique({
       where: { id: rechargeRefundId },
       include: {
-        rechargeOrder: true,
+        rechargeOrder: {
+          include: { handoffEntitlementGrant: true },
+        },
         tokenPurchase: {
           include: {
             userAgentWallet: true,
@@ -887,13 +945,19 @@ export async function applyVerifiedWeChatPayRefund(
             === PaymentProviderEventType.REFUND_SUCCEEDED,
       )?.providerEventId
       ?? `wechat_refund_${refund.providerRefundId}`;
+    const forcedTipRefund = isForcedTipRefundOrder(
+      refund.rechargeOrder,
+    );
     if (
       refund.reversalStatus
       === RechargeRefundReversalStatus.APPLIED
       || refund.reversalStatus
         === RechargeRefundReversalStatus.NOT_REQUIRED
-      || refund.reversalStatus
-        === RechargeRefundReversalStatus.RECONCILIATION_REQUIRED
+      || (
+        refund.reversalStatus
+          === RechargeRefundReversalStatus.RECONCILIATION_REQUIRED
+        && !forcedTipRefund
+      )
     ) {
       return serializeRefund(refund, providerEventId);
     }
@@ -942,19 +1006,60 @@ export async function applyVerifiedWeChatPayRefund(
       return serializeRefund(quarantined, providerEventId);
     }
 
-    const purchase = refund.tokenPurchase!;
-    await reverseAgentTokenPurchase(
-      purchase.id,
-      {
-        tokenAmount: purchase.tokenAmount,
-        idempotencyKey:
-          `wechat_refund:${refund.providerRefundId}:purchase`,
-        reason: "wechat_pay_external_refund",
-      },
-      tx as unknown as NonNullable<
-        Parameters<typeof reverseAgentTokenPurchase>[2]
-      >,
-    );
+    const purchase = refund.tokenPurchase;
+    if (forcedTipRefund) {
+      const reversal = await reverseForcedTipContributionRefund(
+        tx as unknown as Prisma.TransactionClient,
+        {
+          rechargeRefundId: refund.id,
+          rechargeOrderId: refund.rechargeOrderId,
+          paymentProviderEventId:
+            refund.providerEvents.find(
+              (event) =>
+                event.eventType
+                  === PaymentProviderEventType.REFUND_SUCCEEDED,
+            )?.id ?? null,
+          reversedAt: refund.providerSucceededAt ?? new Date(),
+        },
+      );
+      if (!reversal.reversed) {
+        const processingError =
+          reversal.processingError
+          ?? "wechat_refund_tip_reversal_required";
+        const quarantined = await tx.rechargeRefund.update({
+          where: { id: refund.id },
+          data: {
+            reversalStatus:
+              RechargeRefundReversalStatus.RECONCILIATION_REQUIRED,
+            processingError,
+          },
+        });
+        await tx.paymentProviderEvent.updateMany({
+          where: { rechargeRefundId: refund.id },
+          data: { processingError },
+        });
+        return serializeRefund(quarantined, providerEventId);
+      }
+    } else {
+      const servicePurchase = purchase!;
+      await reverseAgentTokenPurchase(
+        servicePurchase.id,
+        {
+          tokenAmount: servicePurchase.tokenAmount,
+          idempotencyKey:
+            `wechat_refund:${refund.providerRefundId}:purchase`,
+          reason: "wechat_pay_external_refund",
+        },
+        tx as unknown as NonNullable<
+          Parameters<typeof reverseAgentTokenPurchase>[2]
+        >,
+      );
+      await refundHandoffGrant(
+        tx as unknown as Prisma.TransactionClient,
+        refund.rechargeOrderId,
+        refund.id,
+      );
+    }
     await refundRechargeOrder(
       refund.rechargeOrderId,
       {
@@ -985,7 +1090,7 @@ export async function applyVerifiedWeChatPayRefund(
       },
     });
 
-    if (purchase.entitlementAccountId) {
+    if (purchase?.entitlementAccountId) {
       const unresolved = await tx.rechargeRefund.count({
         where: {
           id: { not: refund.id },
@@ -1858,11 +1963,16 @@ function relatedRefundStatusCanBind(
 function refundReconciliationReason(input: {
   order: {
     id: string;
+    productKindSnapshot: BillingProductKind | null;
+    refundPolicySnapshot: BillingRefundPolicy | null;
     provider: PaymentProvider;
     providerTransactionId: string | null;
     amountCents: number;
     currency: string;
     status: RechargeOrderStatus;
+    handoffEntitlementGrant: Parameters<
+      typeof handoffGrantRefundConflictReason
+    >[0];
   };
   purchase: {
     rechargeOrderId: string | null;
@@ -1919,6 +2029,23 @@ function refundReconciliationReason(input: {
   ) {
     return "wechat_refund_partial_or_discounted_not_supported";
   }
+  const policyConflict = commercialRefundPolicyConflictReason(order);
+  if (policyConflict && !isForcedTipRefundOrder(order)) {
+    return policyConflict;
+  }
+  if (isForcedTipRefundOrder(order)) {
+    if (order.handoffEntitlementGrant) {
+      return "wechat_refund_tip_unexpected_handoff_entitlement";
+    }
+    if (purchase) {
+      return "wechat_refund_tip_unexpected_token_purchase";
+    }
+    return null;
+  }
+  const handoffConflict = handoffGrantRefundConflictReason(
+    order.handoffEntitlementGrant,
+  );
+  if (handoffConflict) return handoffConflict;
   if (!purchase) {
     return "wechat_refund_purchase_missing_or_ambiguous";
   }
@@ -1961,6 +2088,16 @@ function refundReconciliationReason(input: {
     return "wechat_refund_creator_earning_mismatch";
   }
   return null;
+}
+
+function isForcedTipRefundOrder(order: {
+  productKindSnapshot: BillingProductKind | null;
+  refundPolicySnapshot: BillingRefundPolicy | null;
+}): boolean {
+  return (
+    order.productKindSnapshot === BillingProductKind.TIP
+    && order.refundPolicySnapshot === BillingRefundPolicy.NON_REFUNDABLE
+  );
 }
 
 function assertPersistedRefundMatches(

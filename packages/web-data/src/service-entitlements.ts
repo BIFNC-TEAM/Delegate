@@ -620,7 +620,7 @@ export async function reserveConversationEntitlement(
     audienceIdentityId: string;
     representativeId: string;
     generationRunId: string;
-    productCodes?: string[];
+    productCodes: string[];
   },
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ): Promise<ConversationEntitlementReservation | null> {
@@ -721,7 +721,7 @@ export async function hasUnifiedConversationEntitlement(
   input: {
     audienceIdentityId: string;
     representativeId: string;
-    productCodes?: string[];
+    productCodes: string[];
   },
   client: ServiceEntitlementClient = prisma as unknown as ServiceEntitlementClient,
 ) {
@@ -2033,10 +2033,10 @@ type ConversationEntitlementAttempt = {
   release?: EntitlementLedgerRecord;
 };
 
-function normalizeConversationProductCodes(productCodes?: string[]) {
+function normalizeConversationProductCodes(productCodes: string[]) {
   const normalized = Array.from(
     new Set(
-      (productCodes ?? ["plan:deep_help", "plan:pass"]).map((productCode) =>
+      productCodes.map((productCode) =>
         requiredText(productCode, "productCode"),
       ),
     ),

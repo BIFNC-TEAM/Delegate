@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   shouldConsiderNaturalLanguageCompute: vi.fn(),
   buildComputeRequestsFromDelegationPlan: vi.fn(),
   readPersistedDelegationStepRequest: vi.fn(),
+  resolveDeterministicContactMemorySharingCommand: vi.fn(),
   createAudienceComputeSession: vi.fn(),
   createComputeDelegationTask: vi.fn(),
   createClarifyingDelegationTask: vi.fn(),
@@ -41,7 +42,7 @@ const mocks = vi.hoisted(() => ({
   waitGenerationRunForComputeApproval: vi.fn(),
   assertConversationChannelDeliveryAvailable: vi.fn(),
   authorizeGenerationRunFreeUsage: vi.fn(),
-  reserveGenerationConversationEntitlement: vi.fn(),
+  reserveGenerationConversationWalletUsage: vi.fn(),
   renderPrivateChannelGenerationDeliveryText: vi.fn(),
   releaseConversationEntitlement: vi.fn(),
   retryOperatorMessageDelivery: vi.fn(),
@@ -111,8 +112,11 @@ vi.mock("@delegate/web-data", () => ({
   privateChannelSourceVerificationUnavailableStatement:
     mocks.privateChannelSourceVerificationUnavailableStatement,
   recallRepresentativeContext: mocks.recallRepresentativeContext,
+  resolveDeterministicContactMemorySharingCommand:
+    mocks.resolveDeterministicContactMemorySharingCommand,
   releaseConversationEntitlement: mocks.releaseConversationEntitlement,
-  reserveGenerationConversationEntitlement: mocks.reserveGenerationConversationEntitlement,
+  reserveGenerationConversationWalletUsage:
+    mocks.reserveGenerationConversationWalletUsage,
   renderPrivateChannelGenerationDeliveryText:
     mocks.renderPrivateChannelGenerationDeliveryText,
   renewGenerationWorkItemLease: mocks.renewGenerationWorkItemLease,
@@ -150,12 +154,14 @@ describe("conversation worker knowledge recall", () => {
     mocks.parseComputeDirective.mockReturnValue({ kind: "none" });
     mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(false);
     mocks.readPersistedDelegationStepRequest.mockReturnValue(null);
+    mocks.resolveDeterministicContactMemorySharingCommand.mockReturnValue(null);
     mocks.findConversationClarifyingDelegationTask.mockResolvedValue(null);
     mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: null, source: "model" });
     mocks.finalizeComputeDelegationTask.mockResolvedValue({ hasMoreSteps: false });
     mocks.assertConversationChannelDeliveryAvailable.mockResolvedValue(undefined);
     mocks.authorizeGenerationRunFreeUsage.mockResolvedValue(true);
-    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(null);
+    mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(null);
+    mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(null);
     mocks.renderPrivateChannelGenerationDeliveryText.mockImplementation(
       async ({ text }: { text: string }) => text,
     );
@@ -364,7 +370,6 @@ describe("conversation worker knowledge recall", () => {
       expect(mocks.recallRepresentativeContext).not.toHaveBeenCalled();
       expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
       expect(mocks.authorizeGenerationRunFreeUsage).not.toHaveBeenCalled();
-      expect(mocks.reserveGenerationConversationEntitlement).not.toHaveBeenCalled();
       expect(mocks.renderPrivateChannelGenerationDeliveryText).not.toHaveBeenCalled();
 
       if (fixture.channel === "matrix") {
@@ -1557,15 +1562,329 @@ describe("conversation worker knowledge recall", () => {
     vi.unstubAllGlobals();
   });
 
-  it("reserves and atomically consumes a shared entitlement after free replies are exhausted", async () => {
-    const reservation = {
-      audienceIdentityId: "audience-1",
+  it("honors a pinned FREE run even if the mutable setup limit is exhausted", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-free-policy",
+      leaseAttempt: 1,
+      runId: "run-free-policy",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-free-policy",
+      contactId: "contact-free-policy",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-free-policy",
+      userText: "继续免费回答",
+      channel: "web",
+      accessMode: "FREE",
+      effectiveFreeReplyLimit: null,
+      usage: {
+        freeRepliesUsed: 40,
+        passUnlocked: false,
+        deepHelpUnlocked: false,
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 1 },
+    });
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.authorizeGenerationRunFreeUsage).not.toHaveBeenCalled();
+    expect(mocks.createConversationPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usage: {
+          freeRepliesUsed: 40,
+          passUnlocked: true,
+          deepHelpUnlocked: false,
+        },
+      }),
+    );
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({ countUsage: true }),
+    );
+  });
+
+  it("uses the pinned CREDITS_ONLY policy after setup changes", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-credits-policy",
+      leaseAttempt: 1,
+      runId: "run-credits-policy",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-credits-policy",
+      contactId: "contact-credits-policy",
+      audienceIdentityId: "audience-credits-policy",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-credits-policy",
+      userText: "第一条也需要额度",
+      channel: "web",
+      accessMode: "CREDITS_ONLY",
+      effectiveFreeReplyLimit: 0,
+      usage: {
+        freeRepliesUsed: 0,
+        passUnlocked: false,
+        deepHelpUnlocked: false,
+      },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      contract: { freeReplyLimit: 100 },
+    });
+    mocks.createConversationPlan.mockImplementation((input: {
+      representative: { contract: { freeReplyLimit: number } };
+      usage: {
+        freeRepliesUsed: number;
+        passUnlocked: boolean;
+        deepHelpUnlocked: boolean;
+      };
+    }) => ({
+      intent: "faq",
+      nextStep:
+        input.usage.freeRepliesUsed
+          >= input.representative.contract.freeReplyLimit
+        && !input.usage.passUnlocked
+          ? "offer_paid_unlock"
+          : "answer",
+    }));
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.authorizeGenerationRunFreeUsage).not.toHaveBeenCalled();
+    expect(mocks.reserveGenerationConversationWalletUsage).toHaveBeenCalledWith({
+      runId: "run-credits-policy",
+      outboxId: "outbox-credits-policy",
+      leaseAttempt: 1,
+      audienceIdentityId: "audience-credits-policy",
       representativeId: "rep-1",
-      productCode: "plan:pass",
-      generationRunId: "run-1",
-      operationKey: "generation:run-1:attempt:1",
-      accountId: "entitlement-1",
-      attempt: 1,
+      tokenAmount: 1,
+    });
+    expect(mocks.createConversationPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        representative: expect.objectContaining({
+          contract: { freeReplyLimit: 0 },
+        }),
+        usage: {
+          freeRepliesUsed: 0,
+          passUnlocked: false,
+          deepHelpUnlocked: false,
+        },
+      }),
+    );
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({ countUsage: false }),
+    );
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      channel: "matrix" as const,
+      externalConversationId: "!paid-room:example.test",
+      matrixSenderUserId: "@delegate:example.test",
+      matrixEndpointLifecycleRevision: 4,
+    },
+    {
+      channel: "telegram" as const,
+      externalConversationId: "987654321",
+      telegramConnectionId: "111111111",
+    },
+  ])(
+    "reserves a current service-package credit for $channel",
+    async (fixture) => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ ok: true, result: { message_id: 731 } }),
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      if (fixture.channel === "telegram") {
+        mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+          connectionId: "111111111",
+          botId: "111111111",
+          username: "paid_bot",
+          displayName: "Paid Bot",
+          token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+          credentialRevision: 1,
+        });
+      }
+      mocks.claimNextGenerationWorkItem.mockResolvedValue({
+        outboxId: `outbox-package-${fixture.channel}`,
+        leaseAttempt: 1,
+        runId: `run-package-${fixture.channel}`,
+        representativeVersionId: "version-1",
+        representativeSlug: "sktone",
+        representativeName: "SKTone",
+        conversationId: `conversation-package-${fixture.channel}`,
+        contactId: `contact-package-${fixture.channel}`,
+        audienceIdentityId: "audience-package-1",
+        controlState: "AI_ACTIVE",
+        inputMessageId: `message-package-${fixture.channel}`,
+        userText: "使用我购买的服务套餐继续回答",
+        channel: fixture.channel,
+        accessMode: "CREDITS_ONLY",
+        effectiveFreeReplyLimit: 0,
+        externalConversationId: fixture.externalConversationId,
+        ...(fixture.channel === "matrix"
+          ? {
+              matrixSenderUserId: fixture.matrixSenderUserId,
+              matrixEndpointLifecycleRevision:
+                fixture.matrixEndpointLifecycleRevision,
+            }
+          : { telegramConnectionId: fixture.telegramConnectionId }),
+        usage: {
+          freeRepliesUsed: 0,
+          passUnlocked: false,
+          deepHelpUnlocked: false,
+        },
+      });
+      mocks.reserveGenerationConversationWalletUsage.mockResolvedValueOnce({
+        usageChargeId: `usage-package-${fixture.channel}`,
+        tokenAmount: 1,
+      });
+
+      const result = await processNextConversationWork({
+        port: 4040,
+        pollMs: 500,
+        telegramConversationPlatformMode: "worker",
+        matrixHomeserverUrl: "https://matrix.example.test",
+        matrixApplicationServiceToken: "as-token",
+      });
+      expect(result).toEqual({
+        processed: true,
+        runId: `run-package-${fixture.channel}`,
+        status: "completed",
+      });
+
+      expect(
+        mocks.reserveGenerationConversationWalletUsage,
+      ).toHaveBeenCalledWith({
+        runId: `run-package-${fixture.channel}`,
+        outboxId: `outbox-package-${fixture.channel}`,
+        leaseAttempt: 1,
+        audienceIdentityId: "audience-package-1",
+        representativeId: "rep-1",
+        tokenAmount: 1,
+      });
+      expect(mocks.createConversationPlan).toHaveBeenCalledWith(
+        expect.objectContaining({
+          usage: expect.objectContaining({ passUnlocked: true }),
+        }),
+      );
+      expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+        expect.objectContaining({ countUsage: true }),
+      );
+    },
+  );
+
+  it.each([
+    {
+      channel: "matrix" as const,
+      externalConversationId: "!empty-room:example.test",
+      matrixSenderUserId: "@delegate:example.test",
+      matrixEndpointLifecycleRevision: 5,
+    },
+    {
+      channel: "telegram" as const,
+      externalConversationId: "123123123",
+      telegramConnectionId: "111111111",
+    },
+  ])(
+    "sends a current service-package payment prompt when $channel has no balance",
+    async (fixture) => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ ok: true, result: { message_id: 732 } }),
+      }));
+      if (fixture.channel === "telegram") {
+        mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+          connectionId: "111111111",
+          botId: "111111111",
+          token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+        });
+      }
+      mocks.claimNextGenerationWorkItem.mockResolvedValue({
+        outboxId: `outbox-empty-${fixture.channel}`,
+        leaseAttempt: 1,
+        runId: `run-empty-${fixture.channel}`,
+        representativeVersionId: "version-1",
+        representativeSlug: "sktone",
+        representativeName: "SKTone",
+        conversationId: `conversation-empty-${fixture.channel}`,
+        contactId: `contact-empty-${fixture.channel}`,
+        audienceIdentityId: "audience-empty-1",
+        controlState: "AI_ACTIVE",
+        inputMessageId: `message-empty-${fixture.channel}`,
+        userText: "继续回答",
+        channel: fixture.channel,
+        accessMode: "CREDITS_ONLY",
+        effectiveFreeReplyLimit: 0,
+        externalConversationId: fixture.externalConversationId,
+        ...(fixture.channel === "matrix"
+          ? {
+              matrixSenderUserId: fixture.matrixSenderUserId,
+              matrixEndpointLifecycleRevision:
+                fixture.matrixEndpointLifecycleRevision,
+            }
+          : { telegramConnectionId: fixture.telegramConnectionId }),
+        usage: {
+          freeRepliesUsed: 0,
+          passUnlocked: false,
+          deepHelpUnlocked: false,
+        },
+      });
+      mocks.createConversationPlan.mockReturnValue({
+        intent: "faq",
+        nextStep: "offer_paid_unlock",
+      });
+
+      await expect(processNextConversationWork({
+        port: 4040,
+        pollMs: 500,
+        telegramConversationPlatformMode: "worker",
+        matrixHomeserverUrl: "https://matrix.example.test",
+        matrixApplicationServiceToken: "as-token",
+      })).resolves.toMatchObject({
+        processed: true,
+        status: "completed",
+      });
+
+      expect(
+        mocks.reserveGenerationConversationWalletUsage,
+      ).toHaveBeenCalledTimes(1);
+      expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+      expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          replyText: expect.stringContaining("充值或购买服务套餐"),
+          countUsage: false,
+        }),
+      );
+    },
+  );
+
+  it("reserves and atomically consumes a service-package credit after free replies are exhausted", async () => {
+    const reservation = {
+      usageChargeId: "usage-charge-1",
+      tokenAmount: 1,
     };
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-1",
@@ -1595,7 +1914,7 @@ describe("conversation worker knowledge recall", () => {
       id: "rep-1",
       contract: { freeReplyLimit: 4 },
     });
-    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(reservation);
+    mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(reservation);
 
     await expect(
       processNextConversationWork({ port: 4040, pollMs: 500 }),
@@ -1604,30 +1923,25 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
 
-    expect(mocks.reserveGenerationConversationEntitlement).toHaveBeenCalledWith({
+    expect(mocks.reserveGenerationConversationWalletUsage).toHaveBeenCalledWith({
       runId: "run-1",
       outboxId: "outbox-1",
       leaseAttempt: 1,
       audienceIdentityId: "audience-1",
       representativeId: "rep-1",
+      tokenAmount: 1,
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        entitlementReservation: reservation,
+        countUsage: true,
       }),
     );
-    expect(mocks.releaseConversationEntitlement).not.toHaveBeenCalled();
   });
 
-  it("falls back to a paid reservation when another channel run claims the last free slot", async () => {
+  it("reserves a service-package credit when another channel run claims the last free slot", async () => {
     const reservation = {
-      audienceIdentityId: "audience-1",
-      representativeId: "rep-1",
-      productCode: "plan:pass",
-      generationRunId: "run-1",
-      operationKey: "generation:run-1:attempt:1",
-      accountId: "entitlement-1",
-      attempt: 1,
+      usageChargeId: "usage-charge-free-race",
+      tokenAmount: 1,
     };
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-1",
@@ -1654,7 +1968,7 @@ describe("conversation worker knowledge recall", () => {
       contract: { freeReplyLimit: 4 },
     });
     mocks.authorizeGenerationRunFreeUsage.mockResolvedValue(false);
-    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(
+    mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(
       reservation,
     );
 
@@ -1671,15 +1985,16 @@ describe("conversation worker knowledge recall", () => {
       leaseAttempt: 1,
       freeReplyLimit: 4,
     });
-    expect(mocks.reserveGenerationConversationEntitlement).toHaveBeenCalledWith(
+    expect(mocks.reserveGenerationConversationWalletUsage).toHaveBeenCalledWith(
       expect.objectContaining({
         runId: "run-1",
         audienceIdentityId: "audience-1",
+        tokenAmount: 1,
       }),
     );
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        entitlementReservation: reservation,
+        countUsage: true,
       }),
     );
   });
@@ -1710,7 +2025,7 @@ describe("conversation worker knowledge recall", () => {
       contract: { freeReplyLimit: 4 },
     });
     mocks.authorizeGenerationRunFreeUsage.mockResolvedValue(false);
-    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(null);
+    mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(null);
     mocks.createConversationPlan.mockImplementation((input: {
       usage: {
         freeRepliesUsed: number;
@@ -1788,7 +2103,6 @@ describe("conversation worker knowledge recall", () => {
       contract: { freeReplyLimit: 4 },
     });
     mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
-    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(null);
 
     await expect(
       processNextConversationWork({ port: 4040, pollMs: 500 }),
@@ -1797,12 +2111,13 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
 
-    expect(mocks.reserveGenerationConversationEntitlement).toHaveBeenCalledWith({
+    expect(mocks.reserveGenerationConversationWalletUsage).toHaveBeenCalledWith({
       runId: "run-over-limit-planner",
       outboxId: "outbox-over-limit-planner",
       leaseAttempt: 1,
       audienceIdentityId: "audience-over-limit-planner",
       representativeId: "rep-1",
+      tokenAmount: 1,
     });
     expect(mocks.planNaturalLanguageComputeRequest).not.toHaveBeenCalled();
     expect(mocks.createClarifyingDelegationTask).not.toHaveBeenCalled();
@@ -1816,7 +2131,7 @@ describe("conversation worker knowledge recall", () => {
     );
   });
 
-  it("stops before generation when fenced entitlement reservation loses its lease", async () => {
+  it("stops before generation when fenced service-credit reservation loses its lease", async () => {
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-stale-reserve",
       leaseAttempt: 1,
@@ -1845,7 +2160,7 @@ describe("conversation worker knowledge recall", () => {
       id: "rep-1",
       contract: { freeReplyLimit: 4 },
     });
-    mocks.reserveGenerationConversationEntitlement.mockRejectedValue(
+    mocks.reserveGenerationConversationWalletUsage.mockRejectedValue(
       new GenerationWorkLeaseLostError("outbox-stale-reserve", 1),
     );
 
@@ -1857,27 +2172,23 @@ describe("conversation worker knowledge recall", () => {
       status: "lease_lost",
     });
 
-    expect(mocks.reserveGenerationConversationEntitlement).toHaveBeenCalledWith({
+    expect(mocks.reserveGenerationConversationWalletUsage).toHaveBeenCalledWith({
       runId: "run-stale-reserve",
       outboxId: "outbox-stale-reserve",
       leaseAttempt: 1,
       audienceIdentityId: "audience-stale-reserve",
       representativeId: "rep-1",
+      tokenAmount: 1,
     });
     expect(mocks.completeInlineGenerationRun).not.toHaveBeenCalled();
     expect(mocks.failGenerationRun).not.toHaveBeenCalled();
     expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
   });
 
-  it("leaves a reserved entitlement for fenced terminal cleanup when generation fails", async () => {
+  it("leaves a reserved service credit for fenced terminal cleanup when generation fails", async () => {
     const reservation = {
-      audienceIdentityId: "audience-terminal-1",
-      representativeId: "rep-1",
-      productCode: "plan:pass",
-      generationRunId: "run-terminal-entitlement",
-      operationKey: "generation:run-terminal-entitlement:attempt:1",
-      accountId: "entitlement-terminal-1",
-      attempt: 1,
+      usageChargeId: "usage-terminal-1",
+      tokenAmount: 1,
     };
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-terminal-entitlement",
@@ -1888,7 +2199,7 @@ describe("conversation worker knowledge recall", () => {
       representativeName: "SKTone",
       conversationId: "conversation-terminal-entitlement",
       contactId: "contact-terminal-entitlement",
-      audienceIdentityId: reservation.audienceIdentityId,
+      audienceIdentityId: "audience-terminal-1",
       controlState: "AI_ACTIVE",
       inputMessageId: "message-terminal-entitlement",
       userText: "继续回答",
@@ -1907,21 +2218,21 @@ describe("conversation worker knowledge recall", () => {
       id: "rep-1",
       contract: { freeReplyLimit: 4 },
     });
-    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(reservation);
+    mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(reservation);
     mocks.generateRepresentativeReply.mockRejectedValue(new Error("model upstream unavailable"));
 
     await expect(
       processNextConversationWork({ port: 4040, pollMs: 500 }),
     ).resolves.toMatchObject({
       processed: true,
-      runId: reservation.generationRunId,
+      runId: "run-terminal-entitlement",
       status: "failed",
     });
 
     expect(mocks.releaseConversationEntitlement).not.toHaveBeenCalled();
     expect(mocks.failGenerationRun).toHaveBeenCalledWith({
       conversationId: "conversation-terminal-entitlement",
-      runId: reservation.generationRunId,
+      runId: "run-terminal-entitlement",
       outboxId: "outbox-terminal-entitlement",
       leaseAttempt: 1,
       errorCode: "conversation_worker_failed",
@@ -1930,15 +2241,10 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.completeInlineGenerationRun).not.toHaveBeenCalled();
   });
 
-  it("passes a reserved entitlement through a countUsage=false terminal reply", async () => {
+  it("preserves a persisted service-credit reservation through a countUsage=false terminal reply", async () => {
     const reservation = {
-      audienceIdentityId: "audience-correctable-1",
-      representativeId: "rep-1",
-      productCode: "plan:pass",
-      generationRunId: "run-correctable-entitlement",
-      operationKey: "generation:run-correctable-entitlement:attempt:1",
-      accountId: "entitlement-correctable-1",
-      attempt: 1,
+      usageChargeId: "usage-correctable-1",
+      tokenAmount: 1,
     };
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-correctable-entitlement",
@@ -1949,7 +2255,7 @@ describe("conversation worker knowledge recall", () => {
       representativeName: "SKTone",
       conversationId: "conversation-correctable-entitlement",
       contactId: "contact-correctable-entitlement",
-      audienceIdentityId: reservation.audienceIdentityId,
+      audienceIdentityId: "audience-correctable-1",
       controlState: "AI_ACTIVE",
       inputMessageId: "message-correctable-entitlement",
       userText: "继续回答",
@@ -1968,7 +2274,7 @@ describe("conversation worker knowledge recall", () => {
       id: "rep-1",
       contract: { freeReplyLimit: 4 },
     });
-    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(reservation);
+    mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(reservation);
     mocks.generateRepresentativeReply.mockRejectedValue(
       new Error("path_outside_allowed_workspace"),
     );
@@ -1980,16 +2286,15 @@ describe("conversation worker knowledge recall", () => {
       processNextConversationWork({ port: 4040, pollMs: 500 }),
     ).resolves.toMatchObject({
       processed: true,
-      runId: reservation.generationRunId,
+      runId: "run-correctable-entitlement",
       status: "completed",
     });
 
     expect(mocks.releaseConversationEntitlement).not.toHaveBeenCalled();
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
       expect.objectContaining({
-        runId: reservation.generationRunId,
+        runId: "run-correctable-entitlement",
         countUsage: false,
-        entitlementReservation: reservation,
       }),
     );
     expect(mocks.failGenerationRun).not.toHaveBeenCalled();
@@ -2036,7 +2341,6 @@ describe("conversation worker knowledge recall", () => {
       status: "completed",
     });
 
-    expect(mocks.reserveGenerationConversationEntitlement).not.toHaveBeenCalled();
     expect(mocks.createConversationPlan).toHaveBeenCalledWith(
       expect.objectContaining({
         usage: expect.objectContaining({ passUnlocked: true }),
@@ -2823,15 +3127,10 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
     const clarificationReservation = {
-      audienceIdentityId: "audience-clarify",
-      representativeId: "rep-1",
-      productCode: "plan:pass",
-      generationRunId: "run-clarify",
-      operationKey: "generation:run-clarify:attempt:1",
-      accountId: "entitlement-clarify",
-      attempt: 1,
+      usageChargeId: "usage-clarify",
+      tokenAmount: 1,
     };
-    mocks.reserveGenerationConversationEntitlement.mockResolvedValue(
+    mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(
       clarificationReservation,
     );
     mocks.planNaturalLanguageComputeRequest.mockResolvedValue({
@@ -2858,7 +3157,6 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
       expect.objectContaining({
         countUsage: false,
-        entitlementReservation: clarificationReservation,
       }),
     );
     expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();

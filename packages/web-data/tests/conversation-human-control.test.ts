@@ -4,6 +4,7 @@ const mocks = vi.hoisted(() => {
   const tx = {
     $executeRaw: vi.fn(),
     conversation: {
+      findUnique: vi.fn(),
       findFirst: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
@@ -20,6 +21,7 @@ const mocks = vi.hoisted(() => {
       create: vi.fn(),
     },
     handoffRequest: {
+      findFirst: vi.fn(),
       updateMany: vi.fn(),
     },
     lead: {
@@ -135,6 +137,16 @@ describe("conversation human control and message-edit fencing", () => {
       ) => callback(mocks.tx),
     );
     mocks.tx.$executeRaw.mockResolvedValue(0);
+    mocks.tx.conversation.findUnique.mockResolvedValue({
+      id: conversationId,
+      representativeId: "representative-1",
+      contactId: "contact-1",
+      audienceIdentityId: null,
+      representative: {
+        humanInLoop: true,
+        handoffAccessMode: "FREE",
+      },
+    });
     mocks.tx.conversation.update.mockResolvedValue({ id: conversationId });
     mocks.tx.conversation.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.conversationAssignment.updateMany.mockResolvedValue({ count: 0 });
@@ -151,6 +163,7 @@ describe("conversation human control and message-edit fencing", () => {
       id: "transition-1",
     });
     mocks.tx.handoffRequest.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.handoffRequest.findFirst.mockResolvedValue(null);
     mocks.tx.lead.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.message.create.mockResolvedValue({ id: "system-message-1" });
     mocks.tx.message.update.mockResolvedValue({ id: inputMessageId });
@@ -548,6 +561,41 @@ describe("conversation human control and message-edit fencing", () => {
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.tx.generationRun.updateMany).not.toHaveBeenCalled();
     expect(mocks.tx.outboxEvent.updateMany).not.toHaveBeenCalled();
+    expect(mocks.tx.conversationAssignment.create).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass package-required handoff access during direct takeover", async () => {
+    mocks.tx.conversation.findFirst.mockResolvedValue({
+      id: conversationId,
+      state: "NEEDS_HUMAN",
+      representativeId: "representative-1",
+      contactId: "contact-1",
+      episodes: [{
+        id: episodeId,
+        sequence: 1,
+        status: "NEEDS_HUMAN",
+      }],
+    });
+    mocks.tx.conversation.findUnique.mockResolvedValue({
+      id: conversationId,
+      representativeId: "representative-1",
+      contactId: "contact-1",
+      audienceIdentityId: "audience-1",
+      representative: {
+        humanInLoop: true,
+        handoffAccessMode: "PACKAGE_REQUIRED",
+      },
+    });
+    mocks.tx.handoffRequest.findFirst.mockResolvedValue(null);
+
+    await expect(assignConversationOperator({
+      representativeSlug: "representative",
+      conversationId,
+      operatorId: "operator-1",
+      operatorName: "Operator",
+    })).rejects.toMatchObject({ code: "HANDOFF_ENTITLEMENT_REQUIRED" });
+
+    expect(mocks.tx.generationRun.findMany).not.toHaveBeenCalled();
     expect(mocks.tx.conversationAssignment.create).not.toHaveBeenCalled();
   });
 

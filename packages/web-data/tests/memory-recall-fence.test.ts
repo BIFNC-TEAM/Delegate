@@ -1558,7 +1558,6 @@ function publicIdentityDocument() {
       materials: [],
       policies: [],
     },
-    pricing: [],
     handoffPrompt: "Escalate",
   })[0]!;
 }

@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import {
   AgentTokenPurchaseStatus,
+  BillingProductKind,
+  BillingRefundPolicy,
   CreatorEarningStatus,
   PaymentProvider,
   Prisma,
@@ -12,6 +14,12 @@ import {
   ServiceEntitlementStatus,
 } from "@prisma/client";
 
+import {
+  commercialRefundPolicyConflictReason,
+  freezeHandoffGrantForRefund,
+  handoffGrantRefundConflictReason,
+  restoreHandoffGrantAfterFailedRefund,
+} from "./commercial-refund-entitlements";
 import {
   persistVerifiedWeChatPayRefundApiResult,
 } from "./agent-wallet-wechat-refunds";
@@ -232,6 +240,7 @@ export async function createWeChatRefundIntent(
         refunds: {
           orderBy: { createdAt: "desc" },
         },
+        handoffEntitlementGrant: true,
       },
     });
     if (!order) {
@@ -277,10 +286,38 @@ export async function createWeChatRefundIntent(
         refundNotifyUrl,
       },
     });
-    await tx.serviceEntitlementAccount.update({
-      where: { id: purchase.entitlementAccountId! },
+    const account = purchase.entitlementAccount!;
+    const frozenAccount = await tx.serviceEntitlementAccount.updateMany({
+      where: {
+        id: account.id,
+        status: {
+          in: [
+            ServiceEntitlementStatus.ACTIVE,
+            ServiceEntitlementStatus.EXPIRED,
+          ],
+        },
+        remainingUnits: account.remainingUnits,
+        reservedUnits: 0,
+      },
       data: { status: ServiceEntitlementStatus.FROZEN },
     });
+    if (frozenAccount.count !== 1) {
+      throw new WeChatRefundIntentConflictError(
+        "Recharge credits changed while the refund was being created.",
+      );
+    }
+    try {
+      await freezeHandoffGrantForRefund(
+        tx as unknown as Prisma.TransactionClient,
+        order.id,
+      );
+    } catch (error) {
+      throw new WeChatRefundIntentConflictError(
+        error instanceof Error
+          ? error.message
+          : "Recharge handoff entitlement is no longer refundable.",
+      );
+    }
     await tx.outboxEvent.create({
       data: {
         aggregateType:
@@ -1008,59 +1045,68 @@ async function restoreRefundEntitlementWithinTransaction(
     },
   });
   const account = refund?.tokenPurchase?.entitlementAccount;
-  if (!account) return;
-  const unresolved = await tx.rechargeRefund.count({
-    where: {
-      id: { not: rechargeRefundId },
-      tokenPurchase: {
-        entitlementAccountId: account.id,
+  if (account) {
+    const unresolved = await tx.rechargeRefund.count({
+      where: {
+        id: { not: rechargeRefundId },
+        tokenPurchase: {
+          entitlementAccountId: account.id,
+        },
+        OR: [
+          {
+            submissionStatus: {
+              in: [
+                RechargeRefundSubmissionStatus.QUEUED,
+                RechargeRefundSubmissionStatus.UNKNOWN,
+              ],
+            },
+          },
+          {
+            providerStatus: {
+              in: [
+                RechargeRefundProviderStatus.PROCESSING,
+                RechargeRefundProviderStatus.ABNORMAL,
+                RechargeRefundProviderStatus.SUCCEEDED,
+              ],
+            },
+            reversalStatus: {
+              in: [
+                RechargeRefundReversalStatus.PENDING,
+                RechargeRefundReversalStatus.RECONCILIATION_REQUIRED,
+              ],
+            },
+          },
+        ],
       },
-      OR: [
-        {
-          submissionStatus: {
-            in: [
-              RechargeRefundSubmissionStatus.QUEUED,
-              RechargeRefundSubmissionStatus.UNKNOWN,
-            ],
-          },
+    });
+    if (unresolved === 0) {
+      const expired =
+        account.expiresAt !== null
+        && account.expiresAt.getTime() <= now.getTime();
+      await tx.serviceEntitlementAccount.update({
+        where: { id: account.id },
+        data: {
+          status: expired
+            ? ServiceEntitlementStatus.EXPIRED
+            : account.remainingUnits === 0
+                && account.reservedUnits === 0
+              ? ServiceEntitlementStatus.EXHAUSTED
+              : ServiceEntitlementStatus.ACTIVE,
         },
-        {
-          providerStatus: {
-            in: [
-              RechargeRefundProviderStatus.PROCESSING,
-              RechargeRefundProviderStatus.ABNORMAL,
-              RechargeRefundProviderStatus.SUCCEEDED,
-            ],
-          },
-          reversalStatus: {
-            in: [
-              RechargeRefundReversalStatus.PENDING,
-              RechargeRefundReversalStatus.RECONCILIATION_REQUIRED,
-            ],
-          },
-        },
-      ],
-    },
-  });
-  if (unresolved !== 0) return;
-  const expired =
-    account.expiresAt !== null
-    && account.expiresAt.getTime() <= now.getTime();
-  await tx.serviceEntitlementAccount.update({
-    where: { id: account.id },
-    data: {
-      status: expired
-        ? ServiceEntitlementStatus.EXPIRED
-        : account.remainingUnits === 0
-            && account.reservedUnits === 0
-          ? ServiceEntitlementStatus.EXHAUSTED
-          : ServiceEntitlementStatus.ACTIVE,
-    },
-  });
+      });
+    }
+  }
+  await restoreHandoffGrantAfterFailedRefund(
+    tx,
+    rechargeRefundId,
+    now,
+  );
 }
 
 function assertRefundableOrder(order: {
   id: string;
+  productKindSnapshot: BillingProductKind | null;
+  refundPolicySnapshot: BillingRefundPolicy | null;
   provider: PaymentProvider;
   providerTransactionId: string | null;
   amountCents: number;
@@ -1080,6 +1126,8 @@ function assertRefundableOrder(order: {
     } | null;
     entitlementAccount: {
       status: ServiceEntitlementStatus;
+      remainingUnits: number;
+      reservedUnits: number;
     } | null;
     creatorEarnings: Array<{
       status: CreatorEarningStatus;
@@ -1087,6 +1135,9 @@ function assertRefundableOrder(order: {
       withdrawableCents: number;
     }>;
   }>;
+  handoffEntitlementGrant: Parameters<
+    typeof handoffGrantRefundConflictReason
+  >[0];
 }): void {
   if (
     order.provider !== PaymentProvider.WECHAT_PAY
@@ -1097,6 +1148,15 @@ function assertRefundableOrder(order: {
   ) {
     throw new WeChatRefundIntentConflictError(
       "Recharge order is not an eligible paid WeChat order.",
+    );
+  }
+  const policyConflict = commercialRefundPolicyConflictReason(order);
+  if (policyConflict) {
+    throw new WeChatRefundIntentConflictError(
+      policyConflict
+        === "wechat_refund_tip_non_refundable_manual_reversal_required"
+        ? "Tips and other non-refundable products cannot be actively refunded."
+        : "Recharge order is not a refundable service package.",
     );
   }
   if (order.tokenPurchases.length !== 1) {
@@ -1119,8 +1179,13 @@ function assertRefundableOrder(order: {
     || purchase.userAgentWallet.reservedTokenAmount !== 0
     || !purchase.entitlementAccountId
     || !purchase.entitlementAccount
-    || purchase.entitlementAccount.status
-      !== ServiceEntitlementStatus.ACTIVE
+    || (
+      purchase.entitlementAccount.status
+        !== ServiceEntitlementStatus.ACTIVE
+      && purchase.entitlementAccount.status
+        !== ServiceEntitlementStatus.EXPIRED
+    )
+    || purchase.entitlementAccount.reservedUnits !== 0
     || purchase.creatorEarnings.some(
       (earning) =>
         earning.status !== CreatorEarningStatus.PENDING
@@ -1131,6 +1196,12 @@ function assertRefundableOrder(order: {
     throw new WeChatRefundIntentConflictError(
       "Recharge credits are consumed, reserved, ambiguous, or no longer safely refundable.",
     );
+  }
+  const handoffConflict = handoffGrantRefundConflictReason(
+    order.handoffEntitlementGrant,
+  );
+  if (handoffConflict) {
+    throw new WeChatRefundIntentConflictError(handoffConflict);
   }
 }
 

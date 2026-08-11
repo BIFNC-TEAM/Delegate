@@ -20,7 +20,7 @@ import {
   refundGrantedServiceEntitlement,
   refundServiceEntitlement,
   releaseServiceEntitlement,
-  reserveConversationEntitlement,
+  reserveConversationEntitlement as reserveConversationEntitlementImpl,
   reserveServiceEntitlement,
   serviceEntitlementOperationKey,
   servicePaymentProviderOrderKey,
@@ -40,6 +40,21 @@ const coordinates = {
   representativeId: "representative_1",
   productCode: "delegate_chat_credit",
 };
+
+function reserveConversationEntitlement(
+  input: Omit<Parameters<typeof reserveConversationEntitlementImpl>[0], "productCodes"> & {
+    productCodes?: string[];
+  },
+  client?: Parameters<typeof reserveConversationEntitlementImpl>[1],
+) {
+  return reserveConversationEntitlementImpl(
+    {
+      ...input,
+      productCodes: input.productCodes ?? ["plan:deep_help", "plan:pass"],
+    },
+    client,
+  );
+}
 
 describe("service entitlements", () => {
   it("fails closed when public unit mutation APIs target the wallet product", async () => {

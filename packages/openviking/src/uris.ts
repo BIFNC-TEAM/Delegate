@@ -399,13 +399,6 @@ export function buildRepresentativePoliciesUri(
   return `${normalizeRootUri(resourceRootUri)}policies/index.md`;
 }
 
-export function buildRepresentativePricingUri(
-  representativeSlug: string,
-  resourceRootUri = buildRepresentativeResourceRootUri(representativeSlug),
-): string {
-  return `${normalizeRootUri(resourceRootUri)}pricing/index.md`;
-}
-
 export function sanitizeVikingSegment(value: string): string {
   return sanitizeSegment(value);
 }

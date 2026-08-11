@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  AGENT_WALLET_TIP_PRODUCT_CODE,
   PaymentProviderOperationLeaseLostError,
   PublicServicePackageError,
   WeChatPayConfigurationError,
@@ -15,10 +16,11 @@ import {
   createMockRechargeOrder,
   createWeChatPayApiV3PaymentProviderAdapter,
   getPublicAgentWalletState,
+  getPurchasedHandoffEntitlementSummary,
   getPublicRepresentativeRuntime,
   isVerifiedPrivateChannelIdentityBinding,
   listActivePrivateChannelIdentityBindings,
-  listPublicServicePackages,
+  listPublicCommerceProducts,
   loadWeChatPayProcessingConfigFromEnv,
   lockPaymentProviderOperationLease,
   privateChannelIdentityProviders,
@@ -27,7 +29,7 @@ import {
   releasePaymentProviderOperation,
   renewPaymentProviderOperationLease,
   resolvePublicAudienceWalletExternalUserId,
-  resolvePublicServicePackage,
+  resolvePublicCommerceProduct,
   resolveRepresentativeTelegramBotConnectionId,
   resolveWeChatPayReleaseFlags,
   resolveWebAudienceContact,
@@ -69,23 +71,45 @@ export async function GET(
       cookieStore,
     });
     await requestPrincipal.revalidate();
-    const [state, servicePackages] = await Promise.all([
+    const [state, commerceProducts, commerceSettings, handoffEntitlement] =
+      await Promise.all([
       getPublicAgentWalletState({
         audienceIdentityId: requestPrincipal.principal.audienceIdentityId,
         representativeId: runtime.setup.id,
         currency,
       }),
       currency === "CNY"
-        ? listPublicServicePackages({
+        ? listPublicCommerceProducts({
             representativeId: runtime.setup.id,
             currency: "CNY",
           })
         : Promise.resolve([]),
+      prisma.representative.findUnique({
+        where: { id: runtime.setup.id },
+        select: {
+          handoffAccessMode: true,
+          tipsEnabled: true,
+        },
+      }),
+      getPurchasedHandoffEntitlementSummary({
+        audienceIdentityId: requestPrincipal.principal.audienceIdentityId,
+        representativeId: runtime.setup.id,
+      }),
     ]);
+    const orders = await listPublicCommerceOrders({
+      audienceIdentityId: requestPrincipal.principal.audienceIdentityId,
+      representativeId: runtime.setup.id,
+      currency,
+    });
+    const activeGrantExpiries = handoffEntitlement.activeGrants
+      .map((grant) => grant.expiresAt)
+      .filter((value): value is string => Boolean(value))
+      .sort();
 
     const response = privateJson(
       {
         ...state,
+        orders,
         summary: {
           currency: state.summary.currency,
           serviceCreditsAvailable:
@@ -97,7 +121,22 @@ export async function GET(
           serviceCreditsConsumed:
             state.summary.serviceCreditsConsumed,
         },
-        servicePackages,
+        commerceSettings: {
+          accessMode: runtime.accessMode,
+          humanInLoop: runtime.setup.humanInLoop,
+          handoffAccessMode:
+            commerceSettings?.handoffAccessMode ?? "PACKAGE_REQUIRED",
+          tipsEnabled: commerceSettings?.tipsEnabled ?? false,
+        },
+        handoffEntitlement: {
+          hasUnlimited: handoffEntitlement.hasUnlimited,
+          limitedRemainingUses:
+            handoffEntitlement.limitedRemainingUses,
+          highestServiceLevel:
+            handoffEntitlement.highestServiceLevel,
+          nextExpiryAt: activeGrantExpiries[0] ?? null,
+        },
+        commerceProducts,
       },
       200,
     );
@@ -126,6 +165,78 @@ export async function GET(
       500,
     );
   }
+}
+
+async function listPublicCommerceOrders(input: {
+  audienceIdentityId: string;
+  representativeId: string;
+  currency: string;
+}) {
+  const orders = await prisma.rechargeOrder.findMany({
+    where: {
+      representativeId: input.representativeId,
+      currency: input.currency,
+      productCode: {
+        in: [
+          AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          AGENT_WALLET_TIP_PRODUCT_CODE,
+        ],
+      },
+      userWallet: {
+        audienceIdentityId: input.audienceIdentityId,
+      },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: 20,
+    select: {
+      id: true,
+      billingProductId: true,
+      billingPriceVersionId: true,
+      productNameSnapshot: true,
+      productKindSnapshot: true,
+      entitlementUnitsSnapshot: true,
+      unitNameSnapshot: true,
+      handoffAllowanceSnapshot: true,
+      handoffUnitsSnapshot: true,
+      handoffServiceLevelSnapshot: true,
+      handoffValidityDaysSnapshot: true,
+      amountCents: true,
+      currency: true,
+      provider: true,
+      status: true,
+      checkoutUrl: true,
+      providerPayload: true,
+      paidAt: true,
+      refundedAt: true,
+      createdAt: true,
+    },
+  });
+  return orders.map((order) => ({
+    id: order.id,
+    billingProductId: order.billingProductId,
+    billingPriceVersionId: order.billingPriceVersionId,
+    productName: order.productNameSnapshot,
+    productKind: order.productKindSnapshot,
+    entitlementUnits: order.entitlementUnitsSnapshot,
+    unitName: order.unitNameSnapshot,
+    handoffAllowance: order.handoffAllowanceSnapshot,
+    handoffUnits: order.handoffUnitsSnapshot,
+    handoffServiceLevel: order.handoffServiceLevelSnapshot,
+    handoffValidityDays: order.handoffValidityDaysSnapshot,
+    amountCents: order.amountCents,
+    currency: order.currency,
+    provider: order.provider.toLowerCase(),
+    status: order.status.toLowerCase(),
+    checkoutUrl: order.checkoutUrl,
+    checkoutExpiresAt:
+      order.provider === "WECHAT_PAY"
+      && order.status === "REQUIRES_PAYMENT"
+        ? readWeChatPayCheckoutExpiresAt(order.providerPayload)
+        : null,
+    paidAt: order.paidAt?.toISOString() ?? null,
+    refundedAt: order.refundedAt?.toISOString() ?? null,
+    createdAt: order.createdAt.toISOString(),
+  }));
 }
 
 export async function POST(
@@ -180,7 +291,7 @@ export async function POST(
         : "";
     if (!billingPriceVersionId || billingPriceVersionId.length > 191) {
       return privateJson(
-        { error: "请选择有效的服务包。" },
+        { error: "请选择有效的服务或支持选项。" },
         400,
       );
     }
@@ -190,7 +301,7 @@ export async function POST(
         : "";
     if (continuationChannel && continuationChannel !== "telegram") {
       return privateJson(
-        { error: "Unsupported service-package continuation channel." },
+        { error: "Unsupported continuation channel." },
         400,
       );
     }
@@ -282,12 +393,12 @@ export async function POST(
       );
       return response;
     }
-    const servicePackage = await resolvePublicServicePackage({
+    const commerceProduct = await resolvePublicCommerceProduct({
       representativeId: representative.id,
       billingPriceVersionId,
       currency: "CNY",
     });
-    const amountCents = servicePackage.amountCents;
+    const amountCents = commerceProduct.amountCents;
     const requestedIdempotencyKey =
       request.headers.get("idempotency-key")?.trim()
       || (typeof body.idempotencyKey === "string" ? body.idempotencyKey.trim() : "");
@@ -336,7 +447,7 @@ export async function POST(
           if (!racedOrder || racedOrder.status === "CREATED") {
             const response = privateJson(
               {
-                error: "服务包下单请求过于频繁，请稍后使用同一操作重试。",
+                error: "下单请求过于频繁，请稍后使用同一操作重试。",
                 code: "payment_rate_limited",
               },
               429,
@@ -386,20 +497,27 @@ export async function POST(
         externalUserId,
         audienceIdentityId: principal.audienceIdentityId,
         representativeId: representative.id,
-        productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
-        billingProductId: servicePackage.productId,
-        billingPriceVersionId: servicePackage.priceVersionId,
-        productNameSnapshot: servicePackage.name,
-        unitNameSnapshot: servicePackage.unitName,
-        entitlementUnitsSnapshot: servicePackage.entitlementUnits,
+        productCode: commerceProduct.kind === "TIP"
+          ? AGENT_WALLET_TIP_PRODUCT_CODE
+          : AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+        billingProductId: commerceProduct.productId,
+        billingPriceVersionId: commerceProduct.priceVersionId,
+        productNameSnapshot: commerceProduct.name,
+        productKindSnapshot: commerceProduct.kind,
+        unitNameSnapshot: commerceProduct.unitName,
+        entitlementUnitsSnapshot: commerceProduct.entitlementUnits,
+        handoffAllowanceSnapshot: commerceProduct.handoffAllowance,
+        handoffUnitsSnapshot: commerceProduct.handoffUnits,
+        handoffServiceLevelSnapshot: commerceProduct.handoffServiceLevel,
+        handoffValidityDaysSnapshot: commerceProduct.handoffValidityDays,
         creatorRevenueShareBpsSnapshot:
-          servicePackage.creatorRevenueShareBps,
+          commerceProduct.creatorRevenueShareBps,
         platformRevenueShareBpsSnapshot:
-          servicePackage.platformRevenueShareBps,
-        refundPolicySnapshot: servicePackage.refundPolicy,
-        expiryPolicySnapshot: servicePackage.expiryPolicy,
+          commerceProduct.platformRevenueShareBps,
+        refundPolicySnapshot: commerceProduct.refundPolicy,
+        expiryPolicySnapshot: commerceProduct.expiryPolicy,
         entitlementValidityDaysSnapshot:
-          servicePackage.entitlementValidityDays,
+          commerceProduct.entitlementValidityDays,
         displayName: typeof body.displayName === "string"
           ? body.displayName
           : contact.displayName ?? externalUserId,
@@ -468,21 +586,22 @@ export async function POST(
     if (error instanceof WalletIdempotencyConflictError) {
       return privateJson(
         {
-          error: "本次服务包购买与已有订单不一致，请重新发起。",
+          error: "本次购买与已有订单不一致，请重新发起。",
           code: "idempotency_conflict",
         },
         409,
       );
     }
     if (error instanceof PublicServicePackageError) {
+      const invalid = error.code.endsWith("INVALID");
       return privateJson(
         {
-          error: error.code === "SERVICE_PACKAGE_INVALID"
-            ? "该服务包配置暂不可用，请联系代表主人检查商品设置。"
-            : "所选服务包已下架或不属于当前数字代表，请重新选择。",
+          error: invalid
+            ? "该商品配置暂不可用，请联系代表主人检查商品设置。"
+            : "所选商品已下架或不属于当前数字代表，请重新选择。",
           code: error.code.toLowerCase(),
         },
-        error.code === "SERVICE_PACKAGE_INVALID" ? 503 : 400,
+        invalid ? 503 : 400,
       );
     }
     const principalErrorStatus = publicAudiencePrincipalErrorStatus(error);
@@ -498,7 +617,7 @@ export async function POST(
     }
     return privateJson(
       {
-        error: "服务包订单创建失败，请稍后重试；如果问题持续，请联系代表主人检查支付配置。",
+        error: "订单创建失败，请稍后重试；如果问题持续，请联系代表主人检查支付配置。",
       },
       400,
     );
@@ -520,8 +639,13 @@ function serializePublicCheckoutOrder(
     billingProductId: order.billingProductId,
     billingPriceVersionId: order.billingPriceVersionId,
     productName: order.productNameSnapshot,
+    productKind: order.productKindSnapshot,
     entitlementUnits: order.entitlementUnitsSnapshot,
     unitName: order.unitNameSnapshot,
+    handoffAllowance: order.handoffAllowanceSnapshot,
+    handoffUnits: order.handoffUnitsSnapshot,
+    handoffServiceLevel: order.handoffServiceLevelSnapshot,
+    handoffValidityDays: order.handoffValidityDaysSnapshot,
   };
 }
 
@@ -532,7 +656,12 @@ async function findActiveWeChatRechargeOrder(input: {
   const order = await prisma.rechargeOrder.findFirst({
     where: {
       representativeId: input.representativeId,
-      productCode: AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+      productCode: {
+        in: [
+          AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+          AGENT_WALLET_TIP_PRODUCT_CODE,
+        ],
+      },
       provider: "WECHAT_PAY",
       status: {
         in: ["CREATED", "REQUIRES_PAYMENT"],
@@ -555,8 +684,13 @@ async function findActiveWeChatRechargeOrder(input: {
       billingProductId: true,
       billingPriceVersionId: true,
       productNameSnapshot: true,
+      productKindSnapshot: true,
       entitlementUnitsSnapshot: true,
       unitNameSnapshot: true,
+      handoffAllowanceSnapshot: true,
+      handoffUnitsSnapshot: true,
+      handoffServiceLevelSnapshot: true,
+      handoffValidityDaysSnapshot: true,
     },
   });
   if (!order) {
@@ -587,8 +721,13 @@ function serializePersistedPublicCheckoutOrder(
     billingProductId: order.billingProductId,
     billingPriceVersionId: order.billingPriceVersionId,
     productName: order.productNameSnapshot,
+    productKind: order.productKindSnapshot,
     entitlementUnits: order.entitlementUnitsSnapshot,
     unitName: order.unitNameSnapshot,
+    handoffAllowance: order.handoffAllowanceSnapshot,
+    handoffUnits: order.handoffUnitsSnapshot,
+    handoffServiceLevel: order.handoffServiceLevelSnapshot,
+    handoffValidityDays: order.handoffValidityDaysSnapshot,
   };
 }
 

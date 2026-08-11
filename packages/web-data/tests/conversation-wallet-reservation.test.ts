@@ -52,6 +52,15 @@ const mocks = vi.hoisted(() => {
       findUnique: vi.fn(),
       updateMany: vi.fn(),
     },
+    agentWallet: {
+      findUnique: vi.fn(),
+    },
+    userAgentWallet: {
+      findMany: vi.fn(),
+    },
+    audienceIdentity: {
+      findUnique: vi.fn(),
+    },
   };
   return {
     tx,
@@ -86,6 +95,7 @@ import {
   editConversationMessage,
   failGenerationRun,
   redactConversationMessage,
+  reserveGenerationConversationWalletUsage,
   ServiceCreditRequiredError,
 } from "../src/conversation-platform";
 import { InsufficientAgentUsageCreditsError } from "../src/agent-wallet-usage-charge";
@@ -117,6 +127,8 @@ const reservedRun = {
 
 const availableRepresentative = {
   id: "representative-1",
+  accessMode: "TRIAL_THEN_CREDITS",
+  freeReplyLimit: 3,
   activeVersionId: "version-1",
   lifecycleState: "PUBLISHED",
   publicMode: true,
@@ -190,6 +202,15 @@ describe("generation wallet reservation lifecycle", () => {
     });
     mocks.tx.serviceEntitlementAccount.findUnique.mockResolvedValue(null);
     mocks.tx.serviceEntitlementAccount.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.agentWallet.findUnique.mockResolvedValue(null);
+    mocks.tx.userAgentWallet.findMany.mockResolvedValue([]);
+    mocks.tx.audienceIdentity.findUnique.mockImplementation(
+      async ({ where }: { where: { id: string } }) => ({
+        id: where.id,
+        status: "VERIFIED",
+        mergedIntoId: null,
+      }),
+    );
     mocks.reserveConversationWalletUsage.mockResolvedValue({
       usageCharge: {
         id: "usage-reserved",
@@ -354,6 +375,207 @@ describe("generation wallet reservation lifecycle", () => {
       }),
     ).resolves.toBe(false);
     expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
+  });
+
+  it("skips an earlier empty identity wallet, reserves the funded scoped wallet, and replays once", async () => {
+    let runtimePolicySnapshot: Record<string, unknown> = {
+      accessMode: "CREDITS_ONLY",
+      effectiveFreeReplyLimit: 0,
+    };
+    mocks.tx.generationRun.findUnique.mockImplementation(async () => ({
+      ...reservedRun,
+      conversation: {
+        ...reservedRun.conversation,
+        audienceIdentityId: "audience-alias",
+      },
+      runtimePolicySnapshot,
+    }));
+    mocks.tx.audienceIdentity.findUnique.mockImplementation(
+      async ({ where }: { where: { id: string } }) =>
+        where.id === "audience-alias"
+          ? {
+              id: "audience-alias",
+              status: "MERGED",
+              mergedIntoId: "audience-1",
+            }
+          : {
+              id: where.id,
+              status: "VERIFIED",
+              mergedIntoId: null,
+            },
+    );
+    mocks.tx.generationRun.update.mockImplementation(async ({ data }) => {
+      if (data.runtimePolicySnapshot) {
+        runtimePolicySnapshot = data.runtimePolicySnapshot as Record<string, unknown>;
+      }
+      return { ...reservedRun, ...data };
+    });
+    mocks.tx.agentWallet.findUnique.mockResolvedValue({
+      id: "agent-wallet-1",
+      currency: "CNY",
+    });
+    // The canonical identity's first UserWallet has no usable scoped wallet;
+    // the relation-filtered query returns only the second funded wallet.
+    mocks.tx.userAgentWallet.findMany.mockResolvedValue([{
+      id: "user-agent-wallet-second-funded",
+    }]);
+
+    const input = {
+      runId: reservedRun.id,
+      outboxId: "outbox-private-channel-paid",
+      leaseAttempt: 1,
+      audienceIdentityId: "audience-alias",
+      representativeId: "representative-1",
+      tokenAmount: 1,
+    };
+    const first = await reserveGenerationConversationWalletUsage(input);
+    const replay = await reserveGenerationConversationWalletUsage(input);
+
+    expect(first).toEqual({
+      usageChargeId: "usage-reserved",
+      tokenAmount: 1,
+    });
+    expect(replay).toEqual(first);
+    expect(mocks.reserveConversationWalletUsage).toHaveBeenCalledTimes(1);
+    expect(mocks.reserveConversationWalletUsage).toHaveBeenCalledWith(
+      {
+        userAgentWalletId: "user-agent-wallet-second-funded",
+        audienceIdentityId: "audience-1",
+        representativeId: "representative-1",
+        conversationId: "conversation-1",
+        generationRunId: "run-paid",
+        tokenAmount: 1,
+        currency: "CNY",
+        idempotencyKey: "generation:run-paid:wallet-reserve",
+      },
+      mocks.tx,
+    );
+    expect(mocks.tx.userAgentWallet.findMany).toHaveBeenCalledWith({
+      where: {
+        agentWalletId: "agent-wallet-1",
+        currency: "CNY",
+        availableTokenAmount: { gte: 1 },
+        userWallet: {
+          audienceIdentityId: "audience-1",
+          currency: "CNY",
+        },
+      },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true },
+    });
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledTimes(1);
+    expect(runtimePolicySnapshot).toEqual({
+      accessMode: "CREDITS_ONLY",
+      effectiveFreeReplyLimit: 0,
+      billingMode: "service_credit",
+      walletReservation: {
+        usageChargeId: "usage-reserved",
+        tokenAmount: 1,
+      },
+    });
+    expect(mocks.tx.outboxEvent.updateMany).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns no worker wallet reservation when the canonical audience has no balance", async () => {
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      ...reservedRun,
+      runtimePolicySnapshot: {
+        accessMode: "CREDITS_ONLY",
+        effectiveFreeReplyLimit: 0,
+      },
+    });
+    mocks.tx.agentWallet.findUnique.mockResolvedValue({
+      id: "agent-wallet-1",
+      currency: "CNY",
+    });
+    mocks.tx.userAgentWallet.findMany.mockResolvedValue([]);
+
+    await expect(reserveGenerationConversationWalletUsage({
+      runId: reservedRun.id,
+      outboxId: "outbox-private-channel-empty",
+      leaseAttempt: 1,
+      audienceIdentityId: "audience-1",
+      representativeId: "representative-1",
+    })).resolves.toBeNull();
+
+    expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
+    expect(mocks.reserveConversationWalletUsage).not.toHaveBeenCalled();
+  });
+
+  it("tries the next canonical wallet when a selected candidate is concurrently exhausted", async () => {
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      ...reservedRun,
+      runtimePolicySnapshot: {
+        accessMode: "CREDITS_ONLY",
+        effectiveFreeReplyLimit: 0,
+      },
+    });
+    mocks.tx.agentWallet.findUnique.mockResolvedValue({
+      id: "agent-wallet-1",
+      currency: "CNY",
+    });
+    mocks.tx.userAgentWallet.findMany.mockResolvedValue([
+      { id: "user-agent-wallet-depleted" },
+      { id: "user-agent-wallet-still-funded" },
+    ]);
+    mocks.reserveConversationWalletUsage
+      .mockRejectedValueOnce(new InsufficientAgentUsageCreditsError())
+      .mockResolvedValueOnce({
+        usageCharge: {
+          id: "usage-second-candidate",
+          reservedTokenAmount: 1,
+        },
+        entitlement: {
+          consumed: null,
+          released: null,
+          current: { accountId: "wallet-entitlement-account-1" },
+        },
+      });
+
+    await expect(reserveGenerationConversationWalletUsage({
+      runId: reservedRun.id,
+      outboxId: "outbox-private-channel-race",
+      leaseAttempt: 1,
+      audienceIdentityId: "audience-1",
+      representativeId: "representative-1",
+    })).resolves.toEqual({
+      usageChargeId: "usage-second-candidate",
+      tokenAmount: 1,
+    });
+
+    expect(mocks.reserveConversationWalletUsage).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        userAgentWalletId: "user-agent-wallet-depleted",
+        audienceIdentityId: "audience-1",
+      }),
+      mocks.tx,
+    );
+    expect(mocks.reserveConversationWalletUsage).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        userAgentWalletId: "user-agent-wallet-still-funded",
+        audienceIdentityId: "audience-1",
+      }),
+      mocks.tx,
+    );
+  });
+
+  it("does not resolve or reserve a private-channel wallet after the run lease is lost", async () => {
+    mocks.tx.outboxEvent.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    await expect(reserveGenerationConversationWalletUsage({
+      runId: reservedRun.id,
+      outboxId: "outbox-stale-private-channel",
+      leaseAttempt: 2,
+      audienceIdentityId: "audience-1",
+      representativeId: "representative-1",
+    })).rejects.toMatchObject({
+      code: "generation_work_lease_lost",
+    });
+
+    expect(mocks.tx.generationRun.findUnique).not.toHaveBeenCalled();
+    expect(mocks.reserveConversationWalletUsage).not.toHaveBeenCalled();
   });
 
   it("transfers a paid reservation when editing replaces an active run", async () => {
@@ -637,10 +859,214 @@ describe("generation wallet reservation lifecycle", () => {
         create: expect.objectContaining({
           runtimePolicySnapshot: {
             billingMode: "free",
+            accessMode: "TRIAL_THEN_CREDITS",
+            effectiveFreeReplyLimit: 3,
           },
         }),
       }),
     );
+  });
+
+  it("pins FREE access and never reserves service credits", async () => {
+    mocks.tx.conversation.findFirst.mockResolvedValue({
+      id: "conversation-1",
+      audienceIdentityId: "audience-1",
+      freeRepliesUsed: 99,
+      representative: {
+        ...availableRepresentative,
+        accessMode: "FREE",
+      },
+      episodes: [{
+        id: "episode-1",
+        sequence: 1,
+        status: "ACTIVE",
+        representativeVersionId: "version-1",
+      }],
+      channelBindings: connectedWebChannelBindings,
+    });
+    mocks.tx.generationRun.findUnique.mockResolvedValue(null);
+
+    await acceptInboundConversationMessage({
+      representativeSlug: "representative",
+      conversationId: "conversation-1",
+      text: "always free request",
+      clientMessageId: "client-always-free",
+      walletBilling: {
+        externalUserId: "web:representative:audience",
+        representativeId: "representative-1",
+        accessMode: "TRIAL_THEN_CREDITS",
+        freeReplyLimit: 3,
+        tokenAmount: 1,
+        idempotencyKey: "reserve:client-always-free",
+      },
+    });
+
+    expect(mocks.tx.outboxEvent.findMany).not.toHaveBeenCalled();
+    expect(mocks.tx.generationRun.count).not.toHaveBeenCalled();
+    expect(mocks.reserveConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.tx.generationRun.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          runtimePolicySnapshot: {
+            billingMode: "free",
+            accessMode: "FREE",
+            effectiveFreeReplyLimit: null,
+          },
+        }),
+      }),
+    );
+  });
+
+  it("pins CREDITS_ONLY and reserves from the first reply", async () => {
+    mocks.tx.conversation.findFirst.mockResolvedValue({
+      id: "conversation-1",
+      audienceIdentityId: "audience-1",
+      freeRepliesUsed: 0,
+      representative: {
+        ...availableRepresentative,
+        accessMode: "CREDITS_ONLY",
+      },
+      episodes: [{
+        id: "episode-1",
+        sequence: 1,
+        status: "ACTIVE",
+        representativeVersionId: "version-1",
+      }],
+      channelBindings: connectedWebChannelBindings,
+    });
+    mocks.tx.generationRun.findUnique.mockResolvedValue(null);
+
+    await acceptInboundConversationMessage({
+      representativeSlug: "representative",
+      conversationId: "conversation-1",
+      text: "paid from reply one",
+      clientMessageId: "client-credits-only",
+      walletBilling: {
+        externalUserId: "web:representative:audience",
+        representativeId: "representative-1",
+        accessMode: "FREE",
+        freeReplyLimit: 100,
+        tokenAmount: 1,
+        idempotencyKey: "reserve:client-credits-only",
+      },
+    });
+
+    expect(mocks.tx.outboxEvent.findMany).not.toHaveBeenCalled();
+    expect(mocks.tx.generationRun.count).not.toHaveBeenCalled();
+    expect(mocks.reserveConversationWalletUsage).toHaveBeenCalledTimes(1);
+    expect(mocks.tx.generationRun.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          runtimePolicySnapshot: {
+            billingMode: "service_credit",
+            accessMode: "CREDITS_ONLY",
+            effectiveFreeReplyLimit: 0,
+          },
+        }),
+      }),
+    );
+  });
+
+  it("pins FREE for an ingress channel without web-wallet coordinates", async () => {
+    mocks.tx.conversation.findFirst.mockResolvedValue({
+      id: "conversation-1",
+      audienceIdentityId: "audience-1",
+      freeRepliesUsed: 99,
+      representative: {
+        ...availableRepresentative,
+        accessMode: "FREE",
+      },
+      episodes: [{
+        id: "episode-1",
+        sequence: 1,
+        status: "ACTIVE",
+        representativeVersionId: "version-1",
+      }],
+      channelBindings: connectedWebChannelBindings,
+    });
+    mocks.tx.generationRun.findUnique.mockResolvedValue(null);
+
+    await acceptInboundConversationMessage({
+      representativeSlug: "representative",
+      conversationId: "conversation-1",
+      text: "transport-neutral free request",
+      clientMessageId: "client-no-wallet-free",
+    });
+
+    expect(mocks.reserveConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.tx.generationRun.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          runtimePolicySnapshot: {
+            accessMode: "FREE",
+            effectiveFreeReplyLimit: null,
+          },
+        }),
+      }),
+    );
+  });
+
+  it("pins CREDITS_ONLY for worker entitlement authorization without wallet coordinates", async () => {
+    mocks.tx.conversation.findFirst.mockResolvedValue({
+      id: "conversation-1",
+      audienceIdentityId: "audience-1",
+      freeRepliesUsed: 0,
+      representative: {
+        ...availableRepresentative,
+        accessMode: "CREDITS_ONLY",
+      },
+      episodes: [{
+        id: "episode-1",
+        sequence: 1,
+        status: "ACTIVE",
+        representativeVersionId: "version-1",
+      }],
+      channelBindings: connectedWebChannelBindings,
+    });
+    mocks.tx.generationRun.findUnique.mockResolvedValue(null);
+
+    await acceptInboundConversationMessage({
+      representativeSlug: "representative",
+      conversationId: "conversation-1",
+      text: "transport-neutral paid request",
+      clientMessageId: "client-no-wallet-paid",
+    });
+
+    expect(mocks.reserveConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.tx.generationRun.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          runtimePolicySnapshot: {
+            accessMode: "CREDITS_ONLY",
+            effectiveFreeReplyLimit: 0,
+          },
+        }),
+      }),
+    );
+  });
+
+  it("uses the pinned trial limit instead of a later mutable limit", async () => {
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      id: "run-pinned-trial",
+      conversationId: "conversation-1",
+      runtimePolicySnapshot: {
+        accessMode: "TRIAL_THEN_CREDITS",
+        effectiveFreeReplyLimit: 1,
+      },
+      conversation: { freeRepliesUsed: 1 },
+    });
+    mocks.tx.generationRun.count.mockResolvedValue(0);
+
+    await expect(
+      authorizeGenerationRunFreeUsage({
+        runId: "run-pinned-trial",
+        outboxId: "outbox-pinned-trial",
+        leaseAttempt: 1,
+        freeReplyLimit: 100,
+      }),
+    ).resolves.toBe(false);
+
+    expect(mocks.tx.generationRun.update).not.toHaveBeenCalled();
   });
 
   it("reserves paid credit atomically when an earlier free run is in flight", async () => {
@@ -691,6 +1117,8 @@ describe("generation wallet reservation lifecycle", () => {
         create: expect.objectContaining({
           runtimePolicySnapshot: {
             billingMode: "service_credit",
+            accessMode: "TRIAL_THEN_CREDITS",
+            effectiveFreeReplyLimit: 3,
           },
         }),
       }),
@@ -700,6 +1128,8 @@ describe("generation wallet reservation lifecycle", () => {
       data: {
         runtimePolicySnapshot: {
           billingMode: "service_credit",
+          accessMode: "TRIAL_THEN_CREDITS",
+          effectiveFreeReplyLimit: 3,
           walletReservation: {
             usageChargeId: "usage-reserved",
             tokenAmount: 1,
@@ -829,6 +1259,8 @@ describe("generation wallet reservation lifecycle", () => {
         create: expect.objectContaining({
           runtimePolicySnapshot: {
             billingMode: "free",
+            accessMode: "TRIAL_THEN_CREDITS",
+            effectiveFreeReplyLimit: 3,
           },
         }),
       }),

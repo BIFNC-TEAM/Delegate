@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockPrisma } = vi.hoisted(() => {
   const prismaMock = {
+    $executeRaw: vi.fn(),
     $transaction: vi.fn(),
     contact: {
+      findUnique: vi.fn(),
       update: vi.fn(),
     },
     eventAudit: {
@@ -13,6 +15,10 @@ const { mockPrisma } = vi.hoisted(() => {
     handoffRequest: {
       create: vi.fn(),
       findFirst: vi.fn(),
+      update: vi.fn(),
+    },
+    handoffEntitlementGrant: {
+      findMany: vi.fn(),
     },
     intakeSubmission: {
       create: vi.fn(),
@@ -47,8 +53,19 @@ describe("handoff workflow enqueue", () => {
       return (callback as (client: typeof mockPrisma) => unknown)(mockPrisma);
     });
     mockPrisma.handoffRequest.findFirst.mockResolvedValue(null);
+    mockPrisma.handoffEntitlementGrant.findMany.mockResolvedValue([]);
+    mockPrisma.$executeRaw.mockResolvedValue(0);
+    mockPrisma.contact.findUnique.mockResolvedValue({
+      representativeId: "rep-1",
+      audienceIdentityId: "audience-1",
+    });
     mockPrisma.intakeSubmission.create.mockResolvedValue({ id: "intake-1" });
     mockPrisma.handoffRequest.create.mockResolvedValue({
+      id: "handoff-1",
+      status: HandoffStatus.OPEN,
+      recommendedPriority: 80,
+    });
+    mockPrisma.handoffRequest.update.mockResolvedValue({
       id: "handoff-1",
       status: HandoffStatus.OPEN,
       recommendedPriority: 80,
@@ -57,6 +74,8 @@ describe("handoff workflow enqueue", () => {
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
     mockPrisma.workflowRun.findUnique.mockResolvedValue(null);
     mockPrisma.representative.findUnique.mockResolvedValue({
+      humanInLoop: true,
+      handoffAccessMode: "FREE",
       handoffWindowHours: 24,
     });
     mockPrisma.workflowRun.create.mockResolvedValue({ id: "workflow-1" });
@@ -160,12 +179,33 @@ describe("handoff workflow enqueue", () => {
 
     expect(mockPrisma.workflowRun.create).not.toHaveBeenCalled();
   });
+
+  it("does not create a placeholder handoff when package access is missing", async () => {
+    mockPrisma.representative.findUnique.mockResolvedValue({
+      humanInLoop: true,
+      handoffAccessMode: "PACKAGE_REQUIRED",
+      handoffWindowHours: 24,
+    });
+    const { maybeCreateHandoffRequest } = await import("../src/runtime-store");
+
+    const result = await maybeCreateHandoffRequest({
+      context: buildConversationContext(),
+      plan: buildHandoffPlan(),
+      text: "Please have the owner follow up.",
+    });
+
+    expect(result).toBeNull();
+    expect(mockPrisma.handoffRequest.create).not.toHaveBeenCalled();
+    expect(mockPrisma.intakeSubmission.create).not.toHaveBeenCalled();
+    expect(mockPrisma.workflowRun.create).not.toHaveBeenCalled();
+  });
 });
 
 function buildConversationContext() {
   return {
     representativeId: "rep-1",
     representativeSlug: "lin-founder-rep",
+    audienceIdentityId: "audience-1",
     contactId: "contact-1",
     conversationId: "conversation-1",
   } as never;

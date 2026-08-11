@@ -4,10 +4,14 @@ import type { Metadata } from "next";
 
 import type { Representative } from "@delegate/domain";
 import {
+  AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+  AGENT_WALLET_TIP_PRODUCT_CODE,
   DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
   LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   getRepresentativePublicDeliverables,
   getPublicRepresentativeRuntime,
+  listPublicCommerceProducts,
+  prisma,
   readAccountSessionMode,
   readDelegateAuthSessionSecret,
   resolveWeChatPayReleaseFlags,
@@ -90,9 +94,11 @@ export default async function RepresentativePage({
     notFound();
   }
 
-  const deliverableSnapshot = await getRepresentativePublicDeliverables(slug);
-
   const representative = runtime.setup;
+  const [deliverableSnapshot, commercePresentation] = await Promise.all([
+    getRepresentativePublicDeliverables(slug),
+    readPublicCommercePresentation(representative.id),
+  ]);
   const governedContextDisclosure = getGovernedContextDisclosure(
     locale,
     runtime.governedMemoryDisclosure,
@@ -113,16 +119,19 @@ export default async function RepresentativePage({
     && authSession.audienceId
       ? authSession
       : null;
+  let audiencePrincipalIdentityId: string | null = null;
   if (audienceSession) {
     const audienceId = audienceSession.audienceId;
     if (!audienceId) {
       audienceSession = null;
     } else {
       try {
-        await resolvePublicAudiencePrincipal({
+        const audiencePrincipal = await resolvePublicAudiencePrincipal({
           audienceId,
           verifiedAuthSession: audienceSession,
         });
+        audiencePrincipalIdentityId =
+          audiencePrincipal.audienceIdentityId;
       } catch {
         audienceSession = null;
       }
@@ -166,9 +175,31 @@ export default async function RepresentativePage({
     paymentMode === "mock"
       ? true
       : weChatPayReleaseFlags?.collectionEnabled === true;
+  const visibleCommerceProducts = showPublicPayment
+    ? commercePresentation.products
+    : [];
+  const hasServicePackages = visibleCommerceProducts.some(
+    (product) => product.kind === "SERVICE_PACKAGE",
+  );
+  const hasHandoffPackages = visibleCommerceProducts.some(
+    (product) => product.kind === "SERVICE_PACKAGE"
+      && product.handoffAllowance !== "NONE",
+  );
+  const hasTips = commercePresentation.tipsEnabled
+    && visibleCommerceProducts.some((product) => product.kind === "TIP");
+  const hasRestorableCommerceActivity =
+    showPublicPayment && audiencePrincipalIdentityId
+      ? await hasRestorablePublicCommerceActivity({
+          audienceIdentityId: audiencePrincipalIdentityId,
+          representativeId: representative.id,
+        })
+      : false;
+  const hasPublicCommerce =
+    visibleCommerceProducts.length > 0 || hasRestorableCommerceActivity;
+  const hasSellableCommerce = visibleCommerceProducts.length > 0;
   const menu = [
     { href: "#chat", label: t.chatNav },
-    ...(showPublicPayment
+    ...(hasPublicCommerce
       ? [{ href: "#recharge", label: t.rechargeNav }]
       : []),
     { href: "#about", label: t.aboutNav },
@@ -204,7 +235,7 @@ export default async function RepresentativePage({
               {
                 locale: "zh",
                 href: buildLocalizedHref(
-                  telegramRechargeSource
+                  telegramRechargeSource && hasPublicCommerce
                     ? `/reps/${representative.slug}?source=telegram#recharge`
                     : `/reps/${representative.slug}`,
                   "zh",
@@ -215,7 +246,7 @@ export default async function RepresentativePage({
               {
                 locale: "en",
                 href: buildLocalizedHref(
-                  telegramRechargeSource
+                  telegramRechargeSource && hasPublicCommerce
                     ? `/reps/${representative.slug}?source=telegram#recharge`
                     : `/reps/${representative.slug}`,
                   "en",
@@ -272,16 +303,19 @@ export default async function RepresentativePage({
 
       <RepresentativeChatPanel
         computeEnabled={representative.compute.enabled}
+        accessMode={runtime.accessMode}
         freeReplyLimit={representative.contract.freeReplyLimit}
         governedMemoryDisclosure={runtime.governedMemoryDisclosure}
+        handoffAccessMode={commercePresentation.handoffAccessMode}
+        hasHandoffPackages={hasHandoffPackages}
+        hasServicePackages={hasServicePackages}
+        hasTips={hasTips}
         humanInLoop={representative.humanInLoop}
         locale={locale}
         ownerName={representative.ownerName}
-        pricing={representative.pricing}
         representativeName={representative.name}
         representativeSlug={representative.slug}
-        serviceCreditPaymentMode={paymentMode}
-        serviceCreditPurchaseEnabled={showPublicPayment && collectionEnabled}
+        serviceCreditPurchaseEnabled={hasServicePackages && collectionEnabled}
       />
 
       {audienceSession ? (
@@ -363,23 +397,19 @@ export default async function RepresentativePage({
         </section>
       ) : null}
 
-      {showPublicPayment ? (
-        <section className="representative-visitor-section representative-demo-commerce" id="recharge">
+      {hasPublicCommerce ? (
+        <section className="representative-visitor-section representative-commerce-section" id="recharge">
           <div className="representative-visitor-section-heading">
-            <p className="eyebrow">
-              {paymentMode === "wechat"
-                ? t.rechargeEyebrow
-                : t.demoEyebrow}
-            </p>
+            <p className="eyebrow">{t.rechargeEyebrow}</p>
             <h2>
-              {paymentMode === "wechat"
+              {hasSellableCommerce
                 ? t.rechargeTitle
-                : t.demoTitle}
+                : t.commerceHistoryTitle}
             </h2>
             <p>
-              {paymentMode === "wechat"
+              {hasSellableCommerce
                 ? t.rechargeSummary(representative.name)
-                : t.demoSummary}
+                : t.commerceHistorySummary}
             </p>
           </div>
           <RepresentativeRechargePanel
@@ -391,6 +421,7 @@ export default async function RepresentativePage({
             locale={locale}
             loginHref={audienceLoginHref}
             paymentMode={paymentMode}
+            initialCommerceProducts={visibleCommerceProducts}
             representativeSlug={representative.slug}
           />
         </section>
@@ -407,9 +438,35 @@ export default async function RepresentativePage({
         </article>
         <article className="representative-handoff-card" id="handoff">
           <p className="eyebrow">{t.handoffEyebrow}</p>
-          <h2>{t.handoffVisitorTitle(representative.ownerName)}</h2>
-          <p>{representative.handoffPrompt}</p>
-          <a className="button-primary" href="#chat">{t.addHandoffContext}</a>
+          <h2>
+            {representative.humanInLoop
+              ? t.handoffVisitorTitle(representative.ownerName)
+              : t.handoffUnavailableTitle}
+          </h2>
+          <p>
+            {!representative.humanInLoop
+              ? t.handoffUnavailableDetail
+              : commercePresentation.handoffAccessMode === "FREE"
+                ? representative.handoffPrompt
+                : hasHandoffPackages
+                  ? t.handoffPackageDetail
+                  : t.handoffPackageUnavailableDetail}
+          </p>
+          {representative.humanInLoop && (
+            commercePresentation.handoffAccessMode === "FREE"
+            || hasHandoffPackages
+          ) ? (
+            <a
+              className="button-primary"
+              href={commercePresentation.handoffAccessMode === "PACKAGE_REQUIRED"
+                ? "#recharge"
+                : "#chat"}
+            >
+              {commercePresentation.handoffAccessMode === "PACKAGE_REQUIRED"
+                ? t.openHandoffPackages
+                : t.addHandoffContext}
+            </a>
+          ) : null}
         </article>
       </section>
 
@@ -419,6 +476,63 @@ export default async function RepresentativePage({
       </footer>
     </main>
   );
+}
+
+async function readPublicCommercePresentation(representativeId: string) {
+  const unavailable = {
+    products: [] as Awaited<ReturnType<typeof listPublicCommerceProducts>>,
+    handoffAccessMode: "PACKAGE_REQUIRED" as const,
+    tipsEnabled: false,
+  };
+  if (!process.env.DATABASE_URL?.trim()) return unavailable;
+  try {
+    const [products, settings] = await Promise.all([
+      listPublicCommerceProducts({ representativeId, currency: "CNY" }),
+      prisma.representative.findUnique({
+        where: { id: representativeId },
+        select: { handoffAccessMode: true, tipsEnabled: true },
+      }),
+    ]);
+    if (!settings) return unavailable;
+    return {
+      products,
+      handoffAccessMode: settings.handoffAccessMode,
+      tipsEnabled: settings.tipsEnabled,
+    };
+  } catch {
+    // Commerce is secondary to the public conversation. Fail closed without
+    // rendering stale prices when its server truth cannot be read.
+    return unavailable;
+  }
+}
+
+async function hasRestorablePublicCommerceActivity(input: {
+  audienceIdentityId: string;
+  representativeId: string;
+}) {
+  try {
+    const order = await prisma.rechargeOrder.findFirst({
+      where: {
+        representativeId: input.representativeId,
+        productCode: {
+          in: [
+            AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
+            AGENT_WALLET_TIP_PRODUCT_CODE,
+          ],
+        },
+        userWallet: {
+          audienceIdentityId: input.audienceIdentityId,
+        },
+      },
+      select: { id: true },
+    });
+    return Boolean(order);
+  } catch {
+    // Catalog visibility must not become an oracle for order ownership. If the
+    // history check fails, the authenticated recharge API remains the source
+    // of truth and the public page keeps the secondary commerce area closed.
+    return false;
+  }
 }
 
 function PausedRepresentativePage({ locale, siteBaseUrl }: { locale: Locale; siteBaseUrl: string }) {
@@ -503,7 +617,7 @@ function buildDeliverableSourceLabels(locale: Locale) {
 const copy = {
   zh: {
     chatNav: "开始对话",
-    rechargeNav: "服务包",
+    rechargeNav: "服务与支持",
     aboutNav: "能帮什么",
     resourcesNav: "公开资料",
     trustNav: "隐私与真人",
@@ -524,9 +638,6 @@ const copy = {
     resourcesEyebrow: "公开资料",
     resourcesTitle: "你可以直接查看和使用的内容",
     resourcesSummary: "回答会优先引用这些公开信息；与当前问题相关的来源也会显示在消息下方。",
-    demoEyebrow: "本地演示",
-    demoTitle: "验证服务包购买流程",
-    demoSummary: "这里只用于开发测试，不会产生真实扣款；模拟支付后会直接发放当前代表的演示服务额度。",
     trustItems: (governedContextEnabled: boolean) => [
       "这是 AI 数字代表，AI 和真人消息会明确区分。",
       governedContextEnabled
@@ -535,22 +646,17 @@ const copy = {
       "不会读取主人的私人文件、账号或工作区；报价、承诺和日程需要真人确认。",
     ],
     handoffVisitorTitle: (ownerName: string) => `需要 ${ownerName} 本人判断？`,
+    handoffUnavailableTitle: "当前不提供人工接管",
+    handoffUnavailableDetail: "你仍可继续与数字代表对话；当前会话不会进入真人队列。",
+    handoffPackageDetail: "人工接管由已购买的服务套餐权益提供；可用次数、优先级与有效期会在当前会话中显示。",
+    handoffPackageUnavailableDetail: "人工接管需要有效的套餐权益；当前暂无包含人工接管的可购买套餐。",
+    openHandoffPackages: "查看含人工权益的服务套餐",
     addHandoffContext: "回到对话并补充需求",
     footerDisclosure: (name: string) => `${name} 是由 Delegate 提供支持的公开数字代表。`,
     brandTagline: "Web-first 公开代表档案",
     menuAriaLabel: "代表页分区",
     languageAriaLabel: "语言切换",
     language: { zh: "中文", en: "English" },
-    menu: [
-      { href: "#overview", label: "概览" },
-      { href: "#recharge", label: "服务包" },
-      { href: "#chat", label: "对话" },
-      { href: "#trust", label: "边界" },
-      { href: "#skills", label: "技能" },
-      { href: "#knowledge", label: "知识" },
-      { href: "#plans", label: "方案" },
-      { href: "#handoff", label: "转接" },
-    ],
     homeLabel: "官网",
     dashboardLabel: "Dashboard",
     loginRegisterLabel: "登录 / 注册",
@@ -573,10 +679,12 @@ const copy = {
       { label: "Ask", title: "需要拍板的先请示", body: "敏感动作和高价值判断会进入审批或待处理请求，而不是自动越权。" },
       { label: "Human", title: "需要人时再转接", body: "真正需要真人的请求会带着上下文进入人工转接流程。" },
     ],
-    rechargeEyebrow: "当前代表服务包",
-    rechargeTitle: "购买当前数字代表的服务额度",
+    rechargeEyebrow: "服务与支持",
+    rechargeTitle: "按需要继续服务或自愿支持",
     rechargeSummary: (name: string) =>
-      `选择 ${name} 已上架的服务包；支付成功后会直接发放当前代表专属额度，无需再用余额二次购买。`,
+      `这里仅展示 ${name} 当前真实上架的服务套餐与打赏档位；套餐权益和自愿支持会明确分开。`,
+    commerceHistoryTitle: "查看服务与支持记录",
+    commerceHistorySummary: "当前没有可购买选项；这里保留你的最近订单状态、支付结果和已获得的服务权益。",
     agentWalletEyebrow: "额度范围",
     agentWalletTitle: "服务额度只适用于当前数字代表",
     agentWalletCopy: (name: string) =>
@@ -665,13 +773,6 @@ const copy = {
     publicDeliverableChip: "公开交付件",
     policiesEyebrow: "Policies",
     policiesTitle: "合作边界与响应规则",
-    plansEyebrow: "Plans",
-    plansSummary: "用户不该理解原始模型成本，只需要理解还能继续聊多深、能做哪些动作。",
-    plansTitle: "四档服务深度，而不是技术计费",
-    accessLayerEyebrow: "服务深度",
-    repliesChip: (count: number) => `${count} 次回复`,
-    priorityHandoffChip: "优先转人工",
-    paidPlanHint: "可在服务包区选择",
     startWebChat: "开始网页试聊",
     previewRecharge: "查看服务包",
     handoffEyebrow: "人工转接",
@@ -686,7 +787,7 @@ const copy = {
   },
   en: {
     chatNav: "Start chatting",
-    rechargeNav: "Service packages",
+    rechargeNav: "Services & support",
     aboutNav: "What I can do",
     resourcesNav: "Public resources",
     trustNav: "Privacy & human help",
@@ -707,9 +808,6 @@ const copy = {
     resourcesEyebrow: "Public resources",
     resourcesTitle: "Information you can review and use directly",
     resourcesSummary: "Replies prioritize these public sources, and relevant references appear below the answer that used them.",
-    demoEyebrow: "Local demo",
-    demoTitle: "Verify the service-package purchase flow",
-    demoSummary: "This is for development testing only and does not create a real charge. Simulated payment directly grants demo credits for this representative.",
     trustItems: (governedContextEnabled: boolean) => [
       "This is an AI representative. AI and human messages are always labeled separately.",
       governedContextEnabled
@@ -718,22 +816,17 @@ const copy = {
       "It cannot read the owner's private files, accounts, or workspace. Quotes, commitments, and calendars require human confirmation.",
     ],
     handoffVisitorTitle: (ownerName: string) => `Need ${ownerName} to make the call?`,
+    handoffUnavailableTitle: "Human takeover is not available",
+    handoffUnavailableDetail: "You can keep chatting with the digital representative, but this conversation will not enter a human queue.",
+    handoffPackageDetail: "Human takeover comes from a purchased service package. Remaining uses, priority, and validity are shown in the current conversation.",
+    handoffPackageUnavailableDetail: "Human takeover requires an active package entitlement, and no package with human help is currently available.",
+    openHandoffPackages: "View packages with human help",
     addHandoffContext: "Return to chat and add context",
     footerDisclosure: (name: string) => `${name} is a public digital representative powered by Delegate.`,
     brandTagline: "Web-first public representative profile",
     menuAriaLabel: "Representative sections",
     languageAriaLabel: "Language switcher",
     language: { zh: "Chinese", en: "English" },
-    menu: [
-      { href: "#overview", label: "Overview" },
-      { href: "#recharge", label: "Service packages" },
-      { href: "#chat", label: "Chat" },
-      { href: "#trust", label: "Trust" },
-      { href: "#skills", label: "Skills" },
-      { href: "#knowledge", label: "Knowledge" },
-      { href: "#plans", label: "Plans" },
-      { href: "#handoff", label: "Handoff" },
-    ],
     homeLabel: "Home",
     dashboardLabel: "Dashboard",
     loginRegisterLabel: "Log in / Sign up",
@@ -756,10 +849,12 @@ const copy = {
       { label: "Ask", title: "Ask for approval", body: "Sensitive actions and high-value judgment go through approval or a follow-up queue instead of silent overreach." },
       { label: "Human", title: "Bring in a person", body: "Requests that truly need a human arrive with context through the follow-up flow." },
     ],
-    rechargeEyebrow: "Service packages for this representative",
-    rechargeTitle: "Buy service credits for this Digital Representative",
+    rechargeEyebrow: "Services & support",
+    rechargeTitle: "Continue the service or offer voluntary support",
     rechargeSummary: (name: string) =>
-      `Choose a package published by ${name}. Successful payment directly grants representative-scoped credits with no second wallet purchase.`,
+      `Only live service packages and support amounts published by ${name} appear here. Package entitlements and voluntary support stay clearly separate.`,
+    commerceHistoryTitle: "Review services & support history",
+    commerceHistorySummary: "Nothing is currently available to buy. Your latest order status, payment result, and granted service entitlements remain available here.",
     agentWalletEyebrow: "Credit scope",
     agentWalletTitle: "Service credits apply only to this Digital Representative",
     agentWalletCopy: (name: string) =>
@@ -848,13 +943,6 @@ const copy = {
     publicDeliverableChip: "Public deliverable",
     policiesEyebrow: "Policies",
     policiesTitle: "Boundary and response rules",
-    plansEyebrow: "Plans",
-    plansSummary: "Users should understand how deep they can go and what actions unlock next, not the raw model cost underneath.",
-    plansTitle: "Four service depths instead of technical pricing",
-    accessLayerEyebrow: "Service depth",
-    repliesChip: (count: number) => `${count} replies`,
-    priorityHandoffChip: "priority human follow-up",
-    paidPlanHint: "Choose in service packages",
     startWebChat: "Start web chat",
     previewRecharge: "View service packages",
     handoffEyebrow: "Human follow-up",

@@ -2,11 +2,16 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   BillingEntitlementExpiryPolicy,
+  BillingHandoffAllowance,
+  BillingHandoffServiceLevel,
   BillingPriceVersionStatus,
+  BillingProductKind,
   BillingProductStatus,
   BillingRefundPolicy,
   EventType,
   Prisma,
+  RepresentativeAccessMode,
+  RepresentativeHandoffAccessMode,
   type PrismaClient,
 } from "@prisma/client";
 import { z } from "zod";
@@ -22,22 +27,28 @@ const maximumRequestTokenLength = 191;
 const priceInputSchema = z
   .object({
     amountMinor: z.number().int().min(1).max(1_000_000),
-    entitlementUnits: z.number().int().min(1).max(10_000_000),
+    entitlementUnits: z.number().int().min(0).max(10_000_000).optional(),
+    handoffAllowance: z
+      .enum(["NONE", "LIMITED", "UNLIMITED"])
+      .optional(),
+    handoffUnits: z.number().int().min(1).max(1_000_000).nullable().optional(),
+    handoffServiceLevel: z
+      .enum(["STANDARD", "PRIORITY"])
+      .nullable()
+      .optional(),
+    handoffValidityDays: z
+      .number()
+      .int()
+      .min(1)
+      .max(3_650)
+      .nullable()
+      .optional(),
   })
-  .strict()
-  .superRefine((price, context) => {
-    if (price.amountMinor % price.entitlementUnits !== 0) {
-      context.addIssue({
-        code: "custom",
-        path: ["entitlementUnits"],
-        message:
-          "The CNY amount must divide evenly into the included service credits.",
-      });
-    }
-  });
+  .strict();
 
 const createProductInputSchema = z
   .object({
+    kind: z.enum(["SERVICE_PACKAGE", "TIP"]).optional(),
     name: z.string().trim().min(1).max(maximumProductNameLength),
     description: z
       .string()
@@ -45,12 +56,17 @@ const createProductInputSchema = z
       .max(maximumProductDescriptionLength)
       .nullable()
       .optional(),
+    sortOrder: z.number().int().min(0).max(1_000_000).optional(),
+    isRecommended: z.boolean().optional(),
     price: priceInputSchema,
   })
   .strict()
   .transform((input) => ({
     ...input,
+    kind: input.kind ?? "SERVICE_PACKAGE" as const,
     description: input.description?.trim() || null,
+    sortOrder: input.sortOrder ?? 0,
+    isRecommended: input.isRecommended ?? false,
   }));
 
 const updateProductInputSchema = z
@@ -63,6 +79,8 @@ const updateProductInputSchema = z
       .max(maximumProductDescriptionLength)
       .nullable()
       .optional(),
+    sortOrder: z.number().int().min(0).max(1_000_000).optional(),
+    isRecommended: z.boolean().optional(),
   })
   .strict()
   .transform((input) => ({
@@ -88,6 +106,19 @@ const archiveProductInputSchema = z
   })
   .strict();
 
+const commerceSettingsInputSchema = z
+  .object({
+    accessMode: z.enum(["FREE", "TRIAL_THEN_CREDITS", "CREDITS_ONLY"]).optional(),
+    handoffAccessMode: z.enum(["FREE", "PACKAGE_REQUIRED"]).optional(),
+    tipsEnabled: z.boolean().optional(),
+    freeReplyLimit: z.number().int().min(0).max(1_000_000).optional(),
+    humanInLoop: z.boolean().optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, {
+    message: "At least one commerce setting is required.",
+  });
+
 const billingPriceVersionSelect = {
   id: true,
   version: true,
@@ -101,6 +132,10 @@ const billingPriceVersionSelect = {
   refundPolicy: true,
   expiryPolicy: true,
   entitlementValidityDays: true,
+  handoffAllowance: true,
+  handoffUnits: true,
+  handoffServiceLevel: true,
+  handoffValidityDays: true,
   publishedAt: true,
   retiredAt: true,
   createdAt: true,
@@ -112,6 +147,9 @@ const billingProductSelect = {
   code: true,
   name: true,
   description: true,
+  kind: true,
+  sortOrder: true,
+  isRecommended: true,
   status: true,
   revision: true,
   createdAt: true,
@@ -137,13 +175,17 @@ export type OwnerBillingPriceVersion = {
   status: "DRAFT" | "ACTIVE" | "RETIRED";
   currency: "CNY";
   amountMinor: number;
-  unitName: "credit";
+  unitName: "credit" | "tip";
   entitlementUnits: number;
   creatorRevenueShareBps: number;
   platformRevenueShareBps: number;
-  refundPolicy: "FULL_WHEN_UNUSED";
+  refundPolicy: "FULL_WHEN_UNUSED" | "NON_REFUNDABLE";
   expiryPolicy: "NEVER_EXPIRES";
   entitlementValidityDays: null;
+  handoffAllowance: "NONE" | "LIMITED" | "UNLIMITED";
+  handoffUnits: number | null;
+  handoffServiceLevel: "STANDARD" | "PRIORITY" | null;
+  handoffValidityDays: number | null;
   publishedAt: string | null;
   retiredAt: string | null;
   createdAt: string;
@@ -155,6 +197,9 @@ export type OwnerBillingProduct = {
   code: string;
   name: string;
   description: string | null;
+  kind: "SERVICE_PACKAGE" | "TIP";
+  sortOrder: number;
+  isRecommended: boolean;
   status: "DRAFT" | "ACTIVE" | "ARCHIVED";
   revision: number;
   activePriceVersion: OwnerBillingPriceVersion | null;
@@ -168,6 +213,11 @@ export type OwnerBillingCatalog = {
     id: string;
     slug: string;
     name: string;
+    accessMode: "FREE" | "TRIAL_THEN_CREDITS" | "CREDITS_ONLY";
+    handoffAccessMode: "FREE" | "PACKAGE_REQUIRED";
+    tipsEnabled: boolean;
+    freeReplyLimit: number;
+    humanInLoop: boolean;
   };
   revenueSharePolicy: {
     currency: "CNY";
@@ -176,6 +226,9 @@ export type OwnerBillingCatalog = {
   } | null;
   products: OwnerBillingProduct[];
 };
+
+export type OwnerRepresentativeCommerceSettings =
+  OwnerBillingCatalog["representative"];
 
 export type OwnerBillingMutationMetadata = {
   ownerId: string;
@@ -230,6 +283,11 @@ export async function getOwnerRepresentativeBillingCatalog(
       id: true,
       slug: true,
       displayName: true,
+      accessMode: true,
+      handoffAccessMode: true,
+      tipsEnabled: true,
+      freeReplyLimit: true,
+      humanInLoop: true,
       agentWallet: {
         select: {
           currency: true,
@@ -240,6 +298,7 @@ export async function getOwnerRepresentativeBillingCatalog(
         select: billingProductSelect,
         orderBy: [
           { status: "asc" },
+          { sortOrder: "asc" },
           { updatedAt: "desc" },
           { id: "asc" },
         ],
@@ -255,6 +314,11 @@ export async function getOwnerRepresentativeBillingCatalog(
       id: representative.id,
       slug: representative.slug,
       name: representative.displayName,
+      accessMode: representative.accessMode,
+      handoffAccessMode: representative.handoffAccessMode,
+      tipsEnabled: representative.tipsEnabled,
+      freeReplyLimit: representative.freeReplyLimit,
+      humanInLoop: representative.humanInLoop,
     },
     revenueSharePolicy: serializeRepresentativeRevenueSharePolicy(
       representative,
@@ -297,13 +361,26 @@ export async function createAndPublishOwnerBillingProduct(
       }
 
       const representative = await findScopedRepresentative(tx, metadata);
+      const commercialTerms = commercialPriceData(
+        product.kind,
+        product.price,
+        resolveRepresentativeRevenueShareBps(representative),
+      );
+      assertProductCanBePublished(
+        representative,
+        product.kind,
+        commercialTerms.handoffAllowance,
+      );
       const now = new Date();
       const createdProduct = await tx.billingProduct.create({
         data: {
           representativeId: representative.id,
-          code: `service-package-${randomUUID()}`,
+          code: `${product.kind === "TIP" ? "tip" : "service-package"}-${randomUUID()}`,
           name: product.name,
           description: product.description,
+          kind: product.kind,
+          sortOrder: product.sortOrder,
+          isRecommended: product.isRecommended,
           status: BillingProductStatus.DRAFT,
           revision: 0,
         },
@@ -314,10 +391,7 @@ export async function createAndPublishOwnerBillingProduct(
           billingProductId: createdProduct.id,
           version: 1,
           status: BillingPriceVersionStatus.DRAFT,
-          ...commercialPriceData(
-            product.price,
-            resolveRepresentativeRevenueShareBps(representative),
-          ),
+          ...commercialTerms,
         },
         select: { id: true },
       });
@@ -344,6 +418,7 @@ export async function createAndPublishOwnerBillingProduct(
         payload: {
           operation: "create_and_publish",
           productId: createdProduct.id,
+          productKind: product.kind,
           priceVersionId: createdPrice.id,
           version: 1,
           status: "ACTIVE",
@@ -409,13 +484,21 @@ export async function updateOwnerBillingProduct(
       assertExpectedRevision(current, product.expectedRevision);
       if (current.status === BillingProductStatus.ARCHIVED) {
         throw billingProductConflict(
-          "Archived service packages cannot be edited.",
+          "Archived commerce products cannot be edited.",
         );
       }
+
+      const nextSortOrder = product.sortOrder ?? current.sortOrder;
+      const nextIsRecommended =
+        product.isRecommended ?? current.isRecommended;
 
       const changedFields = [
         current.name !== product.name ? "name" : null,
         current.description !== product.description ? "description" : null,
+        current.sortOrder !== nextSortOrder ? "sortOrder" : null,
+        current.isRecommended !== nextIsRecommended
+          ? "isRecommended"
+          : null,
       ].filter((value): value is string => Boolean(value));
       const resultingRevision = changedFields.length
         ? current.revision + 1
@@ -430,6 +513,8 @@ export async function updateOwnerBillingProduct(
           data: {
             name: product.name,
             description: product.description,
+            sortOrder: nextSortOrder,
+            isRecommended: nextIsRecommended,
             revision: { increment: 1 },
           },
         });
@@ -508,7 +593,7 @@ export async function publishOwnerBillingPriceVersion(
       assertExpectedRevision(current, priceVersion.expectedRevision);
       if (current.status !== BillingProductStatus.ACTIVE) {
         throw billingProductConflict(
-          "Only active service packages can publish a new price.",
+          "Only active commerce products can publish a new price.",
         );
       }
       const activePrice = current.priceVersions.find(
@@ -527,15 +612,22 @@ export async function publishOwnerBillingPriceVersion(
         Math.max(0, ...current.priceVersions.map((version) => version.version))
         + 1;
       const now = new Date();
+      const commercialTerms = commercialPriceData(
+        current.kind,
+        priceVersion.price,
+        resolveRepresentativeRevenueShareBps(representative),
+      );
+      assertProductCanBePublished(
+        representative,
+        current.kind,
+        commercialTerms.handoffAllowance,
+      );
       const nextPrice = await tx.billingPriceVersion.create({
         data: {
           billingProductId: productId,
           version: nextVersion,
           status: BillingPriceVersionStatus.DRAFT,
-          ...commercialPriceData(
-            priceVersion.price,
-            resolveRepresentativeRevenueShareBps(representative),
-          ),
+          ...commercialTerms,
         },
         select: { id: true },
       });
@@ -583,6 +675,7 @@ export async function publishOwnerBillingPriceVersion(
         payload: {
           operation: "publish_price_version",
           productId,
+          productKind: current.kind,
           previousPriceVersionId: activePrice.id,
           priceVersionId: nextPrice.id,
           version: nextVersion,
@@ -645,7 +738,7 @@ export async function archiveOwnerBillingProduct(
       assertExpectedRevision(current, archive.expectedRevision);
       if (current.status === BillingProductStatus.ARCHIVED) {
         throw billingProductConflict(
-          "This service package is already archived.",
+          "This commerce product is already archived.",
         );
       }
 
@@ -706,21 +799,328 @@ export async function archiveOwnerBillingProduct(
   });
 }
 
+export async function updateOwnerRepresentativeCommerceSettings(
+  input: OwnerBillingMutationMetadata & {
+    settings: unknown;
+  },
+  client: PrismaClient = prisma,
+): Promise<OwnerRepresentativeCommerceSettings> {
+  const metadata = normalizeMutationMetadata(input);
+  const settings = parseMutation(
+    commerceSettingsInputSchema,
+    input.settings,
+  );
+  const requestHash = hashBillingRequest("update_commerce_settings", {
+    representativeSlug: metadata.representativeSlug,
+    settings,
+  });
+
+  const operation = async (tx: Prisma.TransactionClient) => {
+    const replay = await tx.eventAudit.findUnique({
+      where: {
+        ownerId_idempotencyKey: {
+          ownerId: metadata.ownerId,
+          idempotencyKey: metadata.idempotencyKey,
+        },
+      },
+      select: {
+        type: true,
+        requestHash: true,
+        representativeId: true,
+      },
+    });
+    if (replay) {
+      if (
+        replay.type !== EventType.REPRESENTATIVE_COMMERCE_UPDATED
+        || replay.requestHash !== requestHash
+        || !replay.representativeId
+      ) {
+        throw billingProductIdempotencyConflict();
+      }
+      return loadOwnerCommerceSettings(
+        tx,
+        metadata.ownerId,
+        metadata.representativeSlug,
+      );
+    }
+
+    const representative = await findScopedRepresentative(tx, metadata);
+    await lockScopedRepresentative(tx, representative.id);
+    const current = await findScopedRepresentative(tx, metadata);
+    const nextAccessMode = settings.accessMode ?? current.accessMode;
+    const nextTipsEnabled = settings.tipsEnabled ?? current.tipsEnabled;
+    const nextSettings = {
+      accessMode: nextAccessMode,
+      handoffAccessMode:
+        settings.handoffAccessMode ?? current.handoffAccessMode,
+      tipsEnabled: nextTipsEnabled,
+      freeReplyLimit: settings.freeReplyLimit ?? current.freeReplyLimit,
+      humanInLoop: settings.humanInLoop ?? current.humanInLoop,
+    };
+
+    if (
+      settings.accessMode === RepresentativeAccessMode.FREE
+      && current.accessMode !== RepresentativeAccessMode.FREE
+    ) {
+      const activeServicePackages = await tx.billingProduct.count({
+        where: {
+          representativeId: current.id,
+          kind: BillingProductKind.SERVICE_PACKAGE,
+          status: BillingProductStatus.ACTIVE,
+        },
+      });
+      if (activeServicePackages > 0) {
+        throw billingProductConflict(
+          "Archive every active service package before switching to free access.",
+        );
+      }
+    }
+    if (settings.tipsEnabled === false && current.tipsEnabled) {
+      const activeTips = await tx.billingProduct.count({
+        where: {
+          representativeId: current.id,
+          kind: BillingProductKind.TIP,
+          status: BillingProductStatus.ACTIVE,
+        },
+      });
+      if (activeTips > 0) {
+        throw billingProductConflict(
+          "Archive every active tip option before disabling tips.",
+        );
+      }
+    }
+    const currentlyHonorsPaidHandoff =
+      current.humanInLoop
+      && current.handoffAccessMode
+        === RepresentativeHandoffAccessMode.PACKAGE_REQUIRED;
+    const willHonorPaidHandoff =
+      nextSettings.humanInLoop
+      && nextSettings.handoffAccessMode
+        === RepresentativeHandoffAccessMode.PACKAGE_REQUIRED;
+    if (currentlyHonorsPaidHandoff && !willHonorPaidHandoff) {
+      const now = new Date();
+      const [activeHandoffPrices, outstandingGrants, activePaidRequests] =
+        await Promise.all([
+          tx.billingPriceVersion.count({
+            where: {
+              status: BillingPriceVersionStatus.ACTIVE,
+              handoffAllowance: { not: BillingHandoffAllowance.NONE },
+              billingProduct: {
+                representativeId: current.id,
+                kind: BillingProductKind.SERVICE_PACKAGE,
+                status: BillingProductStatus.ACTIVE,
+              },
+            },
+          }),
+          tx.handoffEntitlementGrant.count({
+            where: {
+              representativeId: current.id,
+              status: {
+                in: [
+                  "ACTIVE",
+                  "FROZEN",
+                ],
+              },
+              OR: [
+                { expiresAt: { gt: now } },
+                { reservedUses: { gt: 0 } },
+              ],
+            },
+          }),
+          tx.handoffRequest.count({
+            where: {
+              representativeId: current.id,
+              handoffEntitlementGrantId: { not: null },
+              status: { in: ["OPEN", "REVIEWING", "ACCEPTED"] },
+            },
+          }),
+        ]);
+      if (
+        activeHandoffPrices > 0
+        || outstandingGrants > 0
+        || activePaidRequests > 0
+      ) {
+        throw billingProductConflict(
+          "Paid handoff cannot be disabled while a handoff package is on sale or purchased handoff obligations remain active.",
+        );
+      }
+    }
+    const changedFields = Object.entries(nextSettings)
+      .filter(([field, value]) => current[field as keyof typeof nextSettings] !== value)
+      .map(([field]) => field);
+
+    if (changedFields.length > 0) {
+      await tx.representative.update({
+        where: { id: current.id },
+        data: nextSettings,
+      });
+    }
+    await createBillingAudit(tx, {
+      metadata,
+      representativeId: current.id,
+      type: EventType.REPRESENTATIVE_COMMERCE_UPDATED,
+      requestHash,
+      payload: {
+        operation: "update_commerce_settings",
+        changedFields,
+        outcome: changedFields.length > 0 ? "updated" : "no_change",
+        settings: nextSettings,
+      },
+    });
+    return loadOwnerCommerceSettings(
+      tx,
+      metadata.ownerId,
+      metadata.representativeSlug,
+    );
+  };
+
+  try {
+    return await runSerializableBillingTransaction(client, operation);
+  } catch (error) {
+    if (error instanceof OwnerBillingProductError) throw error;
+    if (prismaErrorCode(error) !== "P2002") throw error;
+    const replay = await client.eventAudit.findUnique({
+      where: {
+        ownerId_idempotencyKey: {
+          ownerId: metadata.ownerId,
+          idempotencyKey: metadata.idempotencyKey,
+        },
+      },
+      select: { type: true, requestHash: true, representativeId: true },
+    });
+    if (
+      replay?.type === EventType.REPRESENTATIVE_COMMERCE_UPDATED
+      && replay.requestHash === requestHash
+      && replay.representativeId
+    ) {
+      return loadOwnerCommerceSettings(
+        client,
+        metadata.ownerId,
+        metadata.representativeSlug,
+      );
+    }
+    throw billingProductIdempotencyConflict();
+  }
+}
+
 function commercialPriceData(
+  kind: "SERVICE_PACKAGE" | "TIP",
   price: z.infer<typeof priceInputSchema>,
   creatorRevenueShareBps: number,
 ) {
-  return {
-    currency: "CNY",
+  const shared = {
+    currency: "CNY" as const,
     amountMinor: price.amountMinor,
-    unitName: "credit",
-    entitlementUnits: price.entitlementUnits,
     creatorRevenueShareBps,
     platformRevenueShareBps: 10_000 - creatorRevenueShareBps,
-    refundPolicy: BillingRefundPolicy.FULL_WHEN_UNUSED,
     expiryPolicy: BillingEntitlementExpiryPolicy.NEVER_EXPIRES,
     entitlementValidityDays: null,
-  } as const;
+  };
+  if (kind === "TIP") {
+    if (
+      price.entitlementUnits !== undefined
+      && price.entitlementUnits !== 0
+    ) {
+      throw invalidCommercialTerms(
+        "Tips cannot grant service credits.",
+        "entitlementUnits",
+      );
+    }
+    if (
+      (price.handoffAllowance ?? "NONE") !== "NONE"
+      || price.handoffUnits != null
+      || price.handoffServiceLevel != null
+      || price.handoffValidityDays != null
+    ) {
+      throw invalidCommercialTerms(
+        "Tips cannot grant human-handoff access.",
+        "handoffAllowance",
+      );
+    }
+    return {
+      ...shared,
+      unitName: "tip" as const,
+      entitlementUnits: 0,
+      refundPolicy: BillingRefundPolicy.NON_REFUNDABLE,
+      handoffAllowance: BillingHandoffAllowance.NONE,
+      handoffUnits: null,
+      handoffServiceLevel: null,
+      handoffValidityDays: null,
+    };
+  }
+
+  if (!price.entitlementUnits || price.entitlementUnits <= 0) {
+    throw invalidCommercialTerms(
+      "Service packages must grant at least one service credit.",
+      "entitlementUnits",
+    );
+  }
+  const allowance = price.handoffAllowance ?? "NONE";
+  if (allowance === "NONE") {
+    if (
+      price.handoffUnits != null
+      || price.handoffServiceLevel != null
+      || price.handoffValidityDays != null
+    ) {
+      throw invalidCommercialTerms(
+        "A package without handoff access cannot include handoff terms.",
+        "handoffAllowance",
+      );
+    }
+    return {
+      ...shared,
+      unitName: "credit" as const,
+      entitlementUnits: price.entitlementUnits,
+      refundPolicy: BillingRefundPolicy.FULL_WHEN_UNUSED,
+      handoffAllowance: BillingHandoffAllowance.NONE,
+      handoffUnits: null,
+      handoffServiceLevel: null,
+      handoffValidityDays: null,
+    };
+  }
+  if (!price.handoffServiceLevel || !price.handoffValidityDays) {
+    throw invalidCommercialTerms(
+      "Handoff packages require a service level and validity period.",
+      "handoffServiceLevel",
+    );
+  }
+  if (allowance === "LIMITED" && !price.handoffUnits) {
+    throw invalidCommercialTerms(
+      "Limited handoff packages require at least one handoff use.",
+      "handoffUnits",
+    );
+  }
+  if (allowance === "UNLIMITED" && price.handoffUnits != null) {
+    throw invalidCommercialTerms(
+      "Unlimited handoff packages cannot set a handoff-use count.",
+      "handoffUnits",
+    );
+  }
+  return {
+    ...shared,
+    unitName: "credit" as const,
+    entitlementUnits: price.entitlementUnits,
+    refundPolicy: BillingRefundPolicy.FULL_WHEN_UNUSED,
+    handoffAllowance:
+      allowance === "LIMITED"
+        ? BillingHandoffAllowance.LIMITED
+        : BillingHandoffAllowance.UNLIMITED,
+    handoffUnits: allowance === "LIMITED" ? price.handoffUnits! : null,
+    handoffServiceLevel:
+      price.handoffServiceLevel === "PRIORITY"
+        ? BillingHandoffServiceLevel.PRIORITY
+        : BillingHandoffServiceLevel.STANDARD,
+    handoffValidityDays: price.handoffValidityDays,
+  };
+}
+
+function invalidCommercialTerms(message: string, field: string) {
+  return new OwnerBillingProductError(
+    "billing_product_invalid",
+    message,
+    400,
+    { [field]: [message] },
+  );
 }
 
 async function executeBillingMutation(input: {
@@ -816,6 +1216,11 @@ async function findScopedRepresentative(
     select: {
       id: true,
       slug: true,
+      accessMode: true,
+      handoffAccessMode: true,
+      tipsEnabled: true,
+      freeReplyLimit: true,
+      humanInLoop: true,
       agentWallet: {
         select: {
           currency: true,
@@ -826,6 +1231,88 @@ async function findScopedRepresentative(
   });
   if (!representative) throw billingProductNotFound();
   return representative;
+}
+
+async function loadOwnerCommerceSettings(
+  client: Pick<Prisma.TransactionClient, "representative">,
+  ownerId: string,
+  representativeSlug: string,
+): Promise<OwnerRepresentativeCommerceSettings> {
+  const representative = await client.representative.findFirst({
+    where: { ownerId, slug: representativeSlug },
+    select: {
+      id: true,
+      slug: true,
+      displayName: true,
+      accessMode: true,
+      handoffAccessMode: true,
+      tipsEnabled: true,
+      freeReplyLimit: true,
+      humanInLoop: true,
+    },
+  });
+  if (!representative) throw billingProductNotFound();
+  return {
+    id: representative.id,
+    slug: representative.slug,
+    name: representative.displayName,
+    accessMode: representative.accessMode,
+    handoffAccessMode: representative.handoffAccessMode,
+    tipsEnabled: representative.tipsEnabled,
+    freeReplyLimit: representative.freeReplyLimit,
+    humanInLoop: representative.humanInLoop,
+  };
+}
+
+async function lockScopedRepresentative(
+  tx: Prisma.TransactionClient,
+  representativeId: string,
+) {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    SELECT "id"
+    FROM "Representative"
+    WHERE "id" = ${representativeId}
+    FOR UPDATE
+  `);
+  if (rows.length !== 1) throw billingProductNotFound();
+}
+
+function assertProductCanBePublished(
+  representative: {
+    accessMode: RepresentativeAccessMode;
+    tipsEnabled: boolean;
+    humanInLoop: boolean;
+    handoffAccessMode: RepresentativeHandoffAccessMode;
+  },
+  kind: BillingProductKind,
+  handoffAllowance: BillingHandoffAllowance,
+) {
+  if (
+    kind === BillingProductKind.SERVICE_PACKAGE
+    && representative.accessMode === RepresentativeAccessMode.FREE
+  ) {
+    throw billingProductConflict(
+      "Free representatives cannot publish an active service package.",
+    );
+  }
+  if (kind === BillingProductKind.TIP && !representative.tipsEnabled) {
+    throw billingProductConflict(
+      "Enable tips before publishing an active tip option.",
+    );
+  }
+  if (
+    kind === BillingProductKind.SERVICE_PACKAGE
+    && handoffAllowance !== BillingHandoffAllowance.NONE
+    && (
+      !representative.humanInLoop
+      || representative.handoffAccessMode
+        !== RepresentativeHandoffAccessMode.PACKAGE_REQUIRED
+    )
+  ) {
+    throw billingProductConflict(
+      "Enable package-required human handoff before publishing paid handoff uses or priority.",
+    );
+  }
 }
 
 function resolveRepresentativeRevenueShareBps(
@@ -983,7 +1470,7 @@ async function createBillingAudit(
         actorId: input.metadata.ownerId,
         requestId: input.metadata.requestId,
         representativeSlug: input.metadata.representativeSlug,
-        resourceId: input.payload.productId,
+        resourceId: input.payload.productId ?? input.representativeId,
         ...input.payload,
       } as Prisma.InputJsonValue,
     },
@@ -1002,6 +1489,9 @@ function serializeBillingProduct(
     code: product.code,
     name: product.name,
     description: product.description,
+    kind: product.kind ?? "SERVICE_PACKAGE",
+    sortOrder: product.sortOrder ?? 0,
+    isRecommended: product.isRecommended ?? false,
     status: product.status,
     revision: product.revision,
     activePriceVersion:
@@ -1021,13 +1511,17 @@ function serializeBillingPriceVersion(
     status: version.status,
     currency: "CNY",
     amountMinor: version.amountMinor,
-    unitName: "credit",
+    unitName: version.unitName as "credit" | "tip",
     entitlementUnits: version.entitlementUnits,
     creatorRevenueShareBps: version.creatorRevenueShareBps,
     platformRevenueShareBps: version.platformRevenueShareBps,
-    refundPolicy: "FULL_WHEN_UNUSED",
+    refundPolicy: version.refundPolicy,
     expiryPolicy: "NEVER_EXPIRES",
     entitlementValidityDays: null,
+    handoffAllowance: version.handoffAllowance ?? "NONE",
+    handoffUnits: version.handoffUnits ?? null,
+    handoffServiceLevel: version.handoffServiceLevel ?? null,
+    handoffValidityDays: version.handoffValidityDays ?? null,
     publishedAt: version.publishedAt?.toISOString() ?? null,
     retiredAt: version.retiredAt?.toISOString() ?? null,
     createdAt: version.createdAt.toISOString(),
@@ -1083,14 +1577,15 @@ function parseMutation<T>(
 ): T {
   const parsed = schema.safeParse(value);
   if (parsed.success) return parsed.data;
-  const flattenedFieldErrors = z.flattenError(parsed.error).fieldErrors;
   const fieldErrors: Record<string, string[]> = {};
-  for (
-    const [field, messages] of Object.entries(flattenedFieldErrors) as Array<
-      [string, string[] | undefined]
-    >
-  ) {
-    if (messages) fieldErrors[field] = messages;
+  for (const issue of parsed.error.issues) {
+    const field = [...issue.path]
+      .reverse()
+      .find((segment): segment is string => typeof segment === "string");
+    if (!field) continue;
+    const messages = fieldErrors[field] ?? [];
+    if (!messages.includes(issue.message)) messages.push(issue.message);
+    fieldErrors[field] = messages;
   }
   throw new OwnerBillingProductError(
     "billing_product_invalid",

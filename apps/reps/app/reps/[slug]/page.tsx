@@ -237,12 +237,8 @@ export default async function RepresentativePage({
             <img className="marketing-brand-mark" src="/D_logo.svg" alt="" />
           </a>
           <div className="representative-topbar-identity">
-            <strong>
-              <span className="representative-topbar-product">Delegate</span>
-              <span aria-hidden="true" className="representative-topbar-separator"> · </span>
-              {representative.name}
-            </strong>
-            <div className="muted">{t.representing(representative.ownerName)}</div>
+            <strong>Delegate</strong>
+            <div className="muted">{t.publicRepresentative}</div>
           </div>
         </div>
 
@@ -316,10 +312,6 @@ export default async function RepresentativePage({
             <h1 id="representative-profile-title">{representative.name}</h1>
             <p className="representative-profile-owner">{t.representing(representative.ownerName)}</p>
             <p className="representative-profile-summary">{representative.tagline}</p>
-            <div className="chip-row">
-              <span className="chip chip-safe">{t.aiDisclosure}</span>
-              {representative.humanInLoop ? <span className="chip">{t.humanAvailable}</span> : null}
-            </div>
           </div>
         </div>
       </section>
@@ -576,8 +568,6 @@ const copy = {
     trustNav: "隐私与真人",
     representing: (ownerName: string) => `${ownerName} 的数字代表`,
     publicRepresentative: "公开数字代表",
-    aiDisclosure: "由 AI 回复",
-    humanAvailable: "必要时可转真人",
     startEyebrow: "从这里开始",
     startTitle: "直接说说你想解决什么",
     startSummary: (name: string, governedContextEnabled: boolean) =>
@@ -757,8 +747,6 @@ const copy = {
     trustNav: "Privacy & human help",
     representing: (ownerName: string) => `Digital representative for ${ownerName}`,
     publicRepresentative: "Public digital representative",
-    aiDisclosure: "Replies with AI",
-    humanAvailable: "Human help when needed",
     startEyebrow: "Start here",
     startTitle: "Tell me what you want to solve",
     startSummary: (name: string, governedContextEnabled: boolean) =>

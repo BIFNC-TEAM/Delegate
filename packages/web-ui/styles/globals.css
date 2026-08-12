@@ -4644,17 +4644,13 @@ button.skill-row:hover {
   display: block;
   overflow: hidden;
   color: var(--marketing-ink);
-  font-size: 0.9rem;
-  font-weight: 800;
+  font-family: var(--marketing-display);
+  font-size: 1rem;
+  font-variation-settings: "wght" 820, "wdth" 108;
+  font-weight: 820;
   line-height: 1.3;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.representative-profile-page .representative-topbar-product,
-.representative-profile-page .representative-topbar-separator {
-  color: var(--marketing-soft);
-  font-weight: 650;
 }
 
 .representative-profile-page .representative-topbar-identity .muted {
@@ -4712,9 +4708,9 @@ button.skill-row:hover {
 .representative-profile-stage {
   position: relative;
   isolation: isolate;
-  min-height: 152px;
+  min-height: 0;
   overflow: hidden;
-  padding: 24px 28px;
+  padding: 22px 26px;
   border: 1px solid rgba(13, 148, 136, 0.18);
   border-radius: 16px;
   background: #ffffff;
@@ -4736,7 +4732,7 @@ button.skill-row:hover {
 }
 
 .representative-profile-stage-grid {
-  inset: 0 0 0 44%;
+  inset: 0 0 0 50%;
   background-image:
     linear-gradient(rgba(13, 148, 136, 0.08) 1px, transparent 1px),
     linear-gradient(90deg, rgba(13, 148, 136, 0.08) 1px, transparent 1px);
@@ -4746,7 +4742,7 @@ button.skill-row:hover {
 
 .representative-profile-stage-accent {
   top: 0;
-  right: 8%;
+  right: 7%;
   bottom: 0;
   width: 4px;
   background: linear-gradient(180deg, transparent 0, #16a394 28%, #16a394 72%, transparent 100%);
@@ -4754,17 +4750,17 @@ button.skill-row:hover {
 }
 
 .representative-profile-intro {
-  display: flex;
-  max-width: 880px;
+  display: grid;
+  max-width: 940px;
   align-items: center;
-  gap: 20px;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 22px;
 }
 
 .representative-profile-stage .representative-profile-avatar {
   display: grid;
-  flex: 0 0 72px;
-  width: 72px;
-  height: 72px;
+  width: 76px;
+  height: 76px;
   place-items: center;
   border: 1px solid rgba(13, 148, 136, 0.24);
   border-radius: 14px;
@@ -4781,15 +4777,15 @@ button.skill-row:hover {
 }
 
 .representative-profile-copy .eyebrow {
-  margin: 0 0 3px;
-  font-size: 0.7rem;
+  margin: 0 0 4px;
+  font-size: 0.75rem;
 }
 
 .representative-profile-copy h1 {
   margin: 0;
   color: var(--marketing-ink);
   font-family: var(--marketing-display);
-  font-size: clamp(1.9rem, 3vw, 2.6rem);
+  font-size: clamp(1.85rem, 2.8vw, 2.45rem);
   font-variation-settings: "wght" 880, "wdth" 114;
   font-weight: 880;
   line-height: 1.06;
@@ -4797,22 +4793,18 @@ button.skill-row:hover {
 }
 
 .representative-profile-owner {
-  margin: 5px 0 0;
+  margin: 6px 0 0;
   color: var(--marketing-green-strong);
   font-size: 0.84rem;
   font-weight: 800;
 }
 
 .representative-profile-stage .representative-profile-summary {
-  max-width: 70ch;
-  margin: 7px 0 0;
+  max-width: 68ch;
+  margin: 8px 0 0;
   color: var(--marketing-soft);
   font-size: 0.92rem;
   line-height: 1.55;
-}
-
-.representative-profile-stage .chip-row {
-  margin-top: 12px;
 }
 
 .representative-profile-workspace {
@@ -6336,6 +6328,7 @@ button.skill-row:hover {
 
   .representative-profile-intro {
     align-items: flex-start;
+    grid-template-columns: 58px minmax(0, 1fr);
     gap: 14px;
   }
 
@@ -6415,9 +6408,7 @@ button.skill-row:hover {
 }
 
 @media (max-width: 640px) {
-  .representative-profile-page .representative-topbar-identity .muted,
-  .representative-profile-page .representative-topbar-product,
-  .representative-profile-page .representative-topbar-separator,
+  .representative-profile-page .representative-topbar-identity,
   .representative-profile-page .representative-profile-info-link > span:last-child {
     display: none;
   }
@@ -6466,16 +6457,6 @@ button.skill-row:hover {
 
   .representative-profile-stage .representative-profile-summary {
     font-size: 0.84rem;
-  }
-
-  .representative-profile-stage .chip-row {
-    gap: 5px;
-  }
-
-  .representative-profile-stage .chip {
-    min-height: 26px;
-    padding: 4px 7px;
-    font-size: 0.64rem;
   }
 
   .representative-profile-page .representative-chat-surface {
@@ -8524,8 +8505,7 @@ button.skill-row:hover {
 
 /* Public Profile readability and sticky-stack guardrails. */
 .representative-shell.representative-profile-page .representative-conversation-status-avatar,
-.representative-shell.representative-profile-page .representative-message-avatar,
-.representative-shell.representative-profile-page .representative-profile-stage .chip {
+.representative-shell.representative-profile-page .representative-message-avatar {
   font-size: 0.75rem;
 }
 

@@ -12,9 +12,9 @@ import {
   getPublicRepresentativeRuntime,
   listPublicCommerceProducts,
   prisma,
+  preflightWeChatPayRuntime,
   readAccountSessionMode,
   readDelegateAuthSessionSecret,
-  resolveWeChatPayReleaseFlags,
   resolvePublicAudiencePrincipal,
   verifyDelegateAuthSession,
   usesLegacyAccountSessionAuthority,
@@ -152,32 +152,15 @@ export default async function RepresentativePage({
   const visitorCapabilities = buildVisitorCapabilities(locale);
   const deliverableKindLabels = buildDeliverableKindLabels(locale);
   const deliverableSourceLabels = buildDeliverableSourceLabels(locale);
-  const showPublicDemoTools =
-    process.env.NODE_ENV !== "production" &&
-    process.env.NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS === "true";
-  let weChatPayReleaseFlags:
-    | ReturnType<typeof resolveWeChatPayReleaseFlags>
-    | null = null;
-  try {
-    weChatPayReleaseFlags = resolveWeChatPayReleaseFlags();
-  } catch {
-    // Runtime readiness exposes the operator-facing configuration failure.
-    // The public page fails closed instead of falling back to demo payments.
-  }
-  const weChatPayProcessingEnabled =
-    weChatPayReleaseFlags?.processingEnabled === true;
-  const showPublicPayment =
-    weChatPayProcessingEnabled
-    || (weChatPayReleaseFlags !== null && showPublicDemoTools);
-  const paymentMode: "mock" | "wechat" =
-    weChatPayProcessingEnabled ? "wechat" : "mock";
-  const collectionEnabled =
-    paymentMode === "mock"
-      ? true
-      : weChatPayReleaseFlags?.collectionEnabled === true;
-  const visibleCommerceProducts = showPublicPayment
-    ? commercePresentation.products
-    : [];
+  const weChatPayPreflight = preflightWeChatPayRuntime();
+  const paymentAvailability =
+    weChatPayPreflight.status !== "ready"
+      ? "unavailable" as const
+      : weChatPayPreflight.collectionEnabled
+        ? "ready" as const
+        : "collection_paused" as const;
+  const collectionEnabled = paymentAvailability === "ready";
+  const visibleCommerceProducts = commercePresentation.products;
   const hasServicePackages = visibleCommerceProducts.some(
     (product) => product.kind === "SERVICE_PACKAGE",
   );
@@ -188,7 +171,7 @@ export default async function RepresentativePage({
   const hasTips = commercePresentation.tipsEnabled
     && visibleCommerceProducts.some((product) => product.kind === "TIP");
   const hasRestorableCommerceActivity =
-    showPublicPayment && audiencePrincipalIdentityId
+    audiencePrincipalIdentityId
       ? await hasRestorablePublicCommerceActivity({
           audienceIdentityId: audiencePrincipalIdentityId,
           representativeId: representative.id,
@@ -197,6 +180,27 @@ export default async function RepresentativePage({
   const hasPublicCommerce =
     visibleCommerceProducts.length > 0 || hasRestorableCommerceActivity;
   const hasSellableCommerce = visibleCommerceProducts.length > 0;
+  const localizedRepresentativePath = telegramRechargeSource && hasPublicCommerce
+    ? `/reps/${representative.slug}?source=telegram#recharge`
+    : `/reps/${representative.slug}`;
+  const languageItems = [
+    {
+      locale: "zh" as const,
+      href: buildLocalizedHref(localizedRepresentativePath, "zh"),
+      label: t.language.zh,
+      shortLabel: "ZH",
+    },
+    {
+      locale: "en" as const,
+      href: buildLocalizedHref(localizedRepresentativePath, "en"),
+      label: t.language.en,
+      shortLabel: "EN",
+    },
+  ];
+  const audienceAccountLabel = maskAudienceAccountLabel(
+    audienceSession?.email,
+    t.accountLabel,
+  );
   const menu = [
     { href: "#chat", label: t.chatNav },
     ...(hasPublicCommerce
@@ -204,7 +208,6 @@ export default async function RepresentativePage({
       : []),
     { href: "#about", label: t.aboutNav },
     ...(publicResourceCount > 0 ? [{ href: "#resources", label: t.resourcesNav }] : []),
-    { href: "#trust", label: t.trustNav },
   ];
 
   return (
@@ -212,7 +215,13 @@ export default async function RepresentativePage({
       <HashScrollRestorer />
       <header className="marketing-topbar representative-topbar">
         <div className="marketing-brand">
-          <img className="marketing-brand-mark" src="/D_logo.svg" alt="Delegate logo" />
+          <a
+            aria-label={t.homeAriaLabel}
+            className="representative-brand-home"
+            href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}
+          >
+            <img className="marketing-brand-mark" src="/D_logo.svg" alt="" />
+          </a>
           <div>
             <strong>{representative.name}</strong>
             <div className="muted">{t.representing(representative.ownerName)}</div>
@@ -227,47 +236,48 @@ export default async function RepresentativePage({
           ))}
         </nav>
 
-        <div className="marketing-nav-actions">
+        <div className={`marketing-nav-actions${audienceSession ? " is-authenticated" : ""}`}>
           <LanguageSwitcher
             activeLocale={locale}
             ariaLabel={t.languageAriaLabel}
-            items={[
-              {
-                locale: "zh",
-                href: buildLocalizedHref(
-                  telegramRechargeSource && hasPublicCommerce
-                    ? `/reps/${representative.slug}?source=telegram#recharge`
-                    : `/reps/${representative.slug}`,
-                  "zh",
-                ),
-                label: t.language.zh,
-                shortLabel: "ZH",
-              },
-              {
-                locale: "en",
-                href: buildLocalizedHref(
-                  telegramRechargeSource && hasPublicCommerce
-                    ? `/reps/${representative.slug}?source=telegram#recharge`
-                    : `/reps/${representative.slug}`,
-                  "en",
-                ),
-                label: t.language.en,
-                shortLabel: "EN",
-              },
-            ]}
+            items={languageItems}
           />
-          <a className="marketing-nav-link representative-site-link" href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>
-            {t.homeLabel}
-          </a>
           {audienceSession ? (
-            <>
-              <span className="marketing-nav-link dashboard-nav-link-status">
-                {t.signedInLabel}
-              </span>
-              <a className="marketing-nav-link" href={audienceLogoutHref}>
-                {t.logoutLabel}
-              </a>
-            </>
+            <details className="representative-account-menu">
+              <summary aria-label={t.accountMenuAriaLabel}>
+                <span aria-hidden="true" className="representative-account-avatar">
+                  {getAudienceAccountInitial(audienceSession.email, locale)}
+                </span>
+                <span className="representative-account-summary-label">
+                  {audienceAccountLabel}
+                </span>
+                <span aria-hidden="true" className="representative-account-chevron">⌄</span>
+              </summary>
+              <div className="representative-account-popover">
+                <div className="representative-account-identity">
+                  <strong>{t.accountLabel}</strong>
+                  <span>{audienceAccountLabel}</span>
+                </div>
+                {hasPublicCommerce ? (
+                  <a href="#recharge">{t.accountCommerceLabel}</a>
+                ) : null}
+                <a href="#identity-bindings">{t.accountBindingsLabel}</a>
+                <a href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>
+                  {t.homeLabel}
+                </a>
+                <div className="representative-account-language">
+                  <span>{t.languageMenuLabel}</span>
+                  <LanguageSwitcher
+                    activeLocale={locale}
+                    ariaLabel={t.languageAriaLabel}
+                    items={languageItems}
+                  />
+                </div>
+                <a className="representative-account-logout" href={audienceLogoutHref}>
+                  {t.logoutLabel}
+                </a>
+              </div>
+            </details>
           ) : (
             <a className="marketing-button-primary dashboard-account-login" href={audienceLoginHref}>
               {t.loginRegisterLabel}
@@ -289,7 +299,6 @@ export default async function RepresentativePage({
             <div className="chip-row">
               <span className="chip chip-safe">{t.aiDisclosure}</span>
               {representative.humanInLoop ? <span className="chip">{t.humanAvailable}</span> : null}
-              {representative.languages.map((language) => <span className="chip" key={language}>{language}</span>)}
             </div>
           </div>
         </div>
@@ -420,7 +429,7 @@ export default async function RepresentativePage({
               : {})}
             locale={locale}
             loginHref={audienceLoginHref}
-            paymentMode={paymentMode}
+            paymentAvailability={paymentAvailability}
             initialCommerceProducts={visibleCommerceProducts}
             representativeSlug={representative.slug}
           />
@@ -433,7 +442,10 @@ export default async function RepresentativePage({
           <h2>{t.trustTitle}</h2>
           <div className="representative-trust-list">
             {t.trustItems(runtime.governedContextEnabled).map((item) => <p key={item}>{item}</p>)}
-            <p>{governedContextDisclosure}</p>
+            <details className="representative-trust-disclosure">
+              <summary>{t.memoryDisclosureTitle(runtime.governedContextEnabled)}</summary>
+              <p>{governedContextDisclosure}</p>
+            </details>
           </div>
         </article>
         <article className="representative-handoff-card" id="handoff">
@@ -582,6 +594,25 @@ function buildVisitorCapabilities(
   };
 }
 
+function maskAudienceAccountLabel(
+  email: string | null | undefined,
+  fallback: string,
+) {
+  if (!email) return fallback;
+  const [localPart, domain] = email.split("@");
+  if (!localPart || !domain) return fallback;
+  const visible = localPart.slice(0, Math.min(2, localPart.length));
+  return `${visible}${localPart.length > visible.length ? "***" : ""}@${domain}`;
+}
+
+function getAudienceAccountInitial(
+  email: string | null | undefined,
+  locale: Locale,
+) {
+  const initial = email?.trim().slice(0, 1);
+  return initial ? initial.toUpperCase() : locale === "zh" ? "我" : "ME";
+}
+
 function buildDeliverableKindLabels(locale: Locale) {
   return locale === "zh"
     ? {
@@ -657,10 +688,15 @@ const copy = {
     menuAriaLabel: "代表页分区",
     languageAriaLabel: "语言切换",
     language: { zh: "中文", en: "English" },
+    languageMenuLabel: "界面语言",
+    homeAriaLabel: "返回 Delegate 官网",
     homeLabel: "官网",
     dashboardLabel: "Dashboard",
     loginRegisterLabel: "登录 / 注册",
-    signedInLabel: "已登录",
+    accountLabel: "我的账户",
+    accountMenuAriaLabel: "打开账户菜单",
+    accountCommerceLabel: "我的服务与订单",
+    accountBindingsLabel: "账号与渠道绑定",
     logoutLabel: "退出",
     profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
@@ -729,6 +765,9 @@ const copy = {
     trustEyebrow: "隐私与边界",
     trustSummary: "公开能力、拒绝范围、升级路径和计费方式都不应该藏在对话里。",
     trustTitle: "你在对话前应该知道这些",
+    memoryDisclosureTitle: (enabled: boolean) => enabled
+      ? "记忆与隐私说明"
+      : "隐私与上下文说明",
     allowedEyebrow: "Allowed",
     allowedTitle: "代表会做什么",
     allowList: ["回答 FAQ", "收集合作/报价/预约信息", "发公开资料", "发起人工转接", "提示网页服务升级"],
@@ -827,10 +866,15 @@ const copy = {
     menuAriaLabel: "Representative sections",
     languageAriaLabel: "Language switcher",
     language: { zh: "Chinese", en: "English" },
+    languageMenuLabel: "Interface language",
+    homeAriaLabel: "Back to Delegate home",
     homeLabel: "Home",
     dashboardLabel: "Dashboard",
     loginRegisterLabel: "Log in / Sign up",
-    signedInLabel: "Signed in",
+    accountLabel: "My account",
+    accountMenuAriaLabel: "Open account menu",
+    accountCommerceLabel: "My services & orders",
+    accountBindingsLabel: "Accounts & channel links",
     logoutLabel: "Log out",
     profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
@@ -899,6 +943,9 @@ const copy = {
     trustEyebrow: "Privacy and boundaries",
     trustSummary: "Capabilities, refusals, escalation, and pricing should be visible before the conversation goes deep.",
     trustTitle: "What you should know before chatting",
+    memoryDisclosureTitle: (enabled: boolean) => enabled
+      ? "Memory and privacy details"
+      : "Privacy and context details",
     allowedEyebrow: "Allowed",
     allowedTitle: "What this representative will do",
     allowList: ["Answer FAQs", "Collect collaboration, quote, and scheduling details", "Deliver public materials", "Create safe follow-up requests", "Offer web service upgrades"],

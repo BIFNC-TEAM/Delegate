@@ -183,10 +183,10 @@ describe("public representative visitor-first page", () => {
 
   it("keeps existing WeChat orders visible when new collection is paused", () => {
     expect(pageSource).toContain(
-      "weChatPayReleaseFlags?.processingEnabled === true",
+      "preflightWeChatPayRuntime()",
     );
     expect(pageSource).toContain(
-      "weChatPayReleaseFlags?.collectionEnabled === true",
+      '"collection_paused" as const',
     );
     expect(pageSource).toContain(
       "collectionEnabled={collectionEnabled}",
@@ -274,19 +274,11 @@ describe("public representative visitor-first page", () => {
     expect(chatSource).toContain("representative-chat-starters");
   });
 
-  it("treats tips as support with no synthetic credit completion", () => {
-    expect(rechargePanelSource).toContain(
-      "tokenPurchase: TokenPurchaseSnapshot | null",
-    );
-    expect(rechargePanelSource).toContain(
-      "buildPublicCommerceCompletionWalletUpdate({",
-    );
-    expect(rechargePanelSource).toContain(
-      "if (walletUpdate) publishPublicWalletUpdate(walletUpdate)",
-    );
-    expect(rechargePanelSource).toContain(
-      'completedOrder.productKind === "TIP"',
-    );
+  it("treats tips as support without exposing mock payment controls", () => {
+    expect(rechargePanelSource).not.toContain("mock-success");
+    expect(rechargePanelSource).not.toContain("mock-reversal");
+    expect(rechargePanelSource).not.toContain("模拟支付成功");
+    expect(rechargePanelSource).not.toContain("Simulate payment success");
     expect(rechargePanelSource).toContain(
       'order.productKind === "TIP" && (tipCompleted || order.status === "paid")',
     );

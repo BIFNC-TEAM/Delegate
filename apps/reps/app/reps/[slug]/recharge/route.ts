@@ -13,7 +13,6 @@ import {
   claimPaymentProviderOperation,
   createPaymentProviderOperationScopeKey,
   createRechargeOrder,
-  createMockRechargeOrder,
   createWeChatPayApiV3PaymentProviderAdapter,
   getPublicAgentWalletState,
   getPurchasedHandoffEntitlementSummary,
@@ -176,6 +175,10 @@ async function listPublicCommerceOrders(input: {
     where: {
       representativeId: input.representativeId,
       currency: input.currency,
+      // The public checkout surface is real-payment only. Historical MOCK
+      // rows remain available to internal audit tooling, but must never be
+      // restored as a payable order or rendered as a WeChat QR code.
+      provider: "WECHAT_PAY",
       productCode: {
         in: [
           AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
@@ -257,16 +260,10 @@ export async function POST(
   }
   const useWeChatPay = releaseFlags.processingEnabled;
   const collectionEnabled = releaseFlags.collectionEnabled;
-  const mockEnabled =
-    !useWeChatPay
-    && (
-      process.env.NODE_ENV === "development"
-      || process.env.NODE_ENV === "test"
-    );
-  if (!useWeChatPay && !mockEnabled) {
+  if (!useWeChatPay) {
     return privateJson(
       {
-        error: "微信支付暂未配置，请稍后再试。",
+        error: "微信支付暂不可用，当前不会创建模拟订单。",
         code: "payment_provider_unavailable",
       },
       503,
@@ -532,14 +529,12 @@ export async function POST(
             }
           : {}),
       };
-      const rechargeOrder = useWeChatPay
-        ? await createRechargeOrder(
-            orderInput,
-            createWeChatPayApiV3PaymentProviderAdapter(
-              loadWeChatPayProcessingConfigFromEnv(),
-            ),
-          )
-        : await createMockRechargeOrder(orderInput);
+      const rechargeOrder = await createRechargeOrder(
+        orderInput,
+        createWeChatPayApiV3PaymentProviderAdapter(
+          loadWeChatPayProcessingConfigFromEnv(),
+        ),
+      );
 
       const response = privateJson(
         { rechargeOrder: serializePublicCheckoutOrder(rechargeOrder) },

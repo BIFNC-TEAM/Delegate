@@ -79,7 +79,7 @@ describe("public wallet client updates", () => {
     });
   });
 
-  it("does not combine a newer unpaid order with an older purchase chain", () => {
+  it("ignores historical mock orders on the real-payment public surface", () => {
     const snapshot = walletStateFixture();
     snapshot.orders.unshift({
       id: "order-new-unpaid",
@@ -105,9 +105,9 @@ describe("public wallet client updates", () => {
     });
 
     expect(selectCurrentPublicWalletActivity(snapshot)).toEqual({
-      order: expect.objectContaining({ id: "order-new-unpaid" }),
-      purchase: null,
-      refund: null,
+      order: expect.objectContaining({ id: "order-latest" }),
+      purchase: expect.objectContaining({ id: "purchase-latest" }),
+      refund: expect.objectContaining({ id: "refund-latest" }),
     });
   });
 
@@ -215,7 +215,7 @@ function walletStateFixture(): PublicWalletStateSnapshot {
       handoffValidityDays: 30,
       amountCents: 2000,
       currency: "CNY",
-      provider: "mock",
+      provider: "wechat_pay",
       status: "paid",
       checkoutUrl: null,
       checkoutExpiresAt: null,

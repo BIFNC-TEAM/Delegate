@@ -11,7 +11,6 @@ import { QRCodeSVG } from "qrcode.react";
 import { pickCopy, type Locale } from "@delegate/web-ui";
 
 import {
-  buildPublicCommerceCompletionWalletUpdate,
   getCheckoutSecondsRemaining,
   getPublicRechargeStatusPresentation,
   getWeChatPaymentPollDelayMs,
@@ -43,37 +42,6 @@ type RechargeOrderSnapshot = {
   checkoutExpiresAt: string | null;
 };
 
-type CommerceCompletionOrderPayload = Omit<
-  RechargeOrderSnapshot,
-  | "productName"
-  | "productKind"
-  | "entitlementUnits"
-  | "unitName"
-  | "handoffAllowance"
-  | "handoffUnits"
-  | "handoffServiceLevel"
-  | "handoffValidityDays"
-> & Partial<Pick<
-  RechargeOrderSnapshot,
-  | "productName"
-  | "productKind"
-  | "entitlementUnits"
-  | "unitName"
-  | "handoffAllowance"
-  | "handoffUnits"
-  | "handoffServiceLevel"
-  | "handoffValidityDays"
->> & {
-  productNameSnapshot?: string | null;
-  productKindSnapshot?: "SERVICE_PACKAGE" | "TIP" | null;
-  entitlementUnitsSnapshot?: number | null;
-  unitNameSnapshot?: string | null;
-  handoffAllowanceSnapshot?: "NONE" | "LIMITED" | "UNLIMITED" | null;
-  handoffUnitsSnapshot?: number | null;
-  handoffServiceLevelSnapshot?: "STANDARD" | "PRIORITY" | null;
-  handoffValidityDaysSnapshot?: number | null;
-};
-
 type TokenPurchaseSnapshot = {
   tokenAmount: number;
   remainingTokenAmount: number;
@@ -89,11 +57,6 @@ type PurchaseReversalSnapshot = {
   reversedAmountCents: number;
   currency: string;
   status: string;
-};
-
-type UserAgentWalletBalance = {
-  availableTokenAmount: number;
-  reservedTokenAmount: number;
 };
 
 type WeChatPaymentStatus = {
@@ -117,7 +80,7 @@ type PaymentNotice =
   | { kind: "paid-refresh-failed"; message: string; tone: "warning" }
   | { kind: "paid"; message: string; tone: "success" };
 
-type RechargeMutation = "create" | "mock-pay" | "return" | null;
+type RechargeMutation = "create" | null;
 
 type RechargeIntent = {
   priceVersionId: string;
@@ -132,7 +95,7 @@ export function RepresentativeRechargePanel({
   loginHref,
   representativeSlug,
   locale,
-  paymentMode,
+  paymentAvailability,
 }: {
   audienceAuthenticated: boolean;
   collectionEnabled: boolean;
@@ -141,7 +104,7 @@ export function RepresentativeRechargePanel({
   loginHref: string;
   representativeSlug: string;
   locale: Locale;
-  paymentMode: "mock" | "wechat";
+  paymentAvailability: "ready" | "collection_paused" | "unavailable";
 }) {
   const t = pickCopy(locale, copy);
   const [commerceProducts, setCommerceProducts] = useState<
@@ -250,13 +213,14 @@ export function RepresentativeRechargePanel({
       || telegramBindingStatus === "ready"
     );
   const checkoutRemainingSeconds =
-    paymentMode === "wechat"
-    && order?.status === "requires_payment"
+    order?.status === "requires_payment"
       ? getCheckoutSecondsRemaining(
           order.checkoutExpiresAt,
           checkoutClockMs,
         )
       : null;
+  const isWeChatOrder =
+    order?.provider.toLowerCase() === "wechat_pay";
   const checkoutExpired = checkoutRemainingSeconds === 0;
   const paymentResultConfirmed =
     paymentNotice?.kind === "paid-refreshing"
@@ -272,16 +236,14 @@ export function RepresentativeRechargePanel({
       && paymentNotice?.kind !== "expired"
     );
   const hasActivePendingCheckout =
-    paymentMode === "wechat"
+    isWeChatOrder
     && order?.status === "requires_payment"
-    && Boolean(order.checkoutUrl)
+    && order.checkoutUrl?.startsWith("weixin://wxpay/") === true
     && !checkoutExpired;
   const hasPendingWeChatOrder =
-    paymentMode === "wechat"
-    && order?.status === "requires_payment";
+    isWeChatOrder && order?.status === "requires_payment";
   const hasRecoveringWeChatOrder =
-    paymentMode === "wechat"
-    && order?.status === "created";
+    isWeChatOrder && order?.status === "created";
   const hasActiveWeChatOrder =
     hasRecoveringWeChatOrder || hasPendingWeChatOrder;
   const showWeChatCheckout =
@@ -434,8 +396,9 @@ export function RepresentativeRechargePanel({
 
   useEffect(() => {
     if (
-      paymentMode !== "wechat"
+      paymentAvailability === "unavailable"
       || !order?.id
+      || order.provider.toLowerCase() !== "wechat_pay"
       || (
         order.status !== "created"
         && order.status !== "requires_payment"
@@ -740,9 +703,10 @@ export function RepresentativeRechargePanel({
     order?.checkoutUrl,
     order?.id,
     order?.productKind,
+    order?.provider,
     order?.status,
     paymentStatusRetryNonce,
-    paymentMode,
+    paymentAvailability,
     refreshWalletState,
     representativeSlug,
     t.wechatAuthExpired,
@@ -763,8 +727,7 @@ export function RepresentativeRechargePanel({
 
   useEffect(() => {
     if (
-      paymentMode !== "wechat"
-      || order?.status !== "requires_payment"
+      order?.status !== "requires_payment"
       || !order.checkoutExpiresAt
     ) {
       return;
@@ -790,7 +753,6 @@ export function RepresentativeRechargePanel({
   }, [
     order?.checkoutExpiresAt,
     order?.status,
-    paymentMode,
   ]);
 
   async function restoreAfterMutation() {
@@ -935,101 +897,6 @@ export function RepresentativeRechargePanel({
       .catch(() => setError(t.copyError));
   }
 
-  function completeMockPayment() {
-    if (!order || !beginMutation("mock-pay")) {
-      return;
-    }
-    setError(null);
-    void (async () => {
-        const response = await fetch(
-          `/reps/${representativeSlug}/recharge/${order.id}/mock-success`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              amountCents: order.amountCents,
-            }),
-          },
-        );
-
-        if (!response.ok) {
-          throw new Error(await extractError(response));
-        }
-
-        const payload = (await response.json()) as {
-          rechargeOrder: CommerceCompletionOrderPayload;
-          tokenPurchase: TokenPurchaseSnapshot | null;
-        };
-        const completedOrder = normalizeCompletionOrder(payload.rechargeOrder);
-        setOrder(completedOrder);
-        setPurchase(payload.tokenPurchase);
-        setTipCompleted(
-          completedOrder.productKind === "TIP",
-        );
-        setReversal(null);
-        const walletUpdate = buildPublicCommerceCompletionWalletUpdate({
-          representativeSlug,
-          tokenPurchase: payload.tokenPurchase,
-        });
-        if (walletUpdate) publishPublicWalletUpdate(walletUpdate);
-        await restoreAfterMutation();
-      })()
-      .catch((nextError: unknown) => {
-        setError(nextError instanceof Error ? nextError.message : t.payError);
-      })
-      .finally(endMutation);
-  }
-
-  function returnUnusedCredits() {
-    if (
-      !order
-      || !purchase
-      || purchase.remainingTokenAmount <= 0
-      || !beginMutation("return")
-    ) {
-      return;
-    }
-    setError(null);
-    void (async () => {
-        const response = await fetch(
-          `/reps/${representativeSlug}/recharge/${order.id}/mock-reversal`,
-          { method: "POST" },
-        );
-        if (!response.ok) {
-          throw new Error(await extractError(response));
-        }
-        const payload = (await response.json()) as {
-          reversal: PurchaseReversalSnapshot;
-          walletBalance: UserAgentWalletBalance | null;
-        };
-        const availableTokenAmount =
-          payload.walletBalance?.availableTokenAmount ?? 0;
-        const reservedTokenAmount =
-          payload.walletBalance?.reservedTokenAmount ?? 0;
-        setReversal(payload.reversal);
-        setPurchase((current) => current
-          ? {
-              ...current,
-              remainingTokenAmount: payload.reversal.remainingTokenAmount,
-              availableTokenAmount,
-              reservedTokenAmount,
-            }
-          : current);
-        publishPublicWalletUpdate({
-          representativeSlug,
-          serviceCreditsAvailable: availableTokenAmount,
-          serviceCreditsReserved: reservedTokenAmount,
-        });
-        await restoreAfterMutation();
-      })()
-      .catch((nextError: unknown) => {
-        setError(nextError instanceof Error ? nextError.message : t.returnError);
-      })
-      .finally(endMutation);
-  }
-
   function beginMutation(nextMutation: Exclude<RechargeMutation, null>) {
     if (mutationLockRef.current) {
       return false;
@@ -1072,10 +939,18 @@ export function RepresentativeRechargePanel({
     <div className="setup-stack">
       <p className="footer-note">{t.identityNote}</p>
 
-      {paymentMode === "wechat" && !collectionEnabled ? (
+      {paymentAvailability !== "ready" ? (
         <div className="status-banner status-warning" role="status">
-          <strong>{t.wechatCollectionPausedTitle}</strong>
-          <p>{t.wechatCollectionPausedDetail}</p>
+          <strong>
+            {paymentAvailability === "unavailable"
+              ? t.wechatUnavailableTitle
+              : t.wechatCollectionPausedTitle}
+          </strong>
+          <p>
+            {paymentAvailability === "unavailable"
+              ? t.wechatUnavailableDetail
+              : t.wechatCollectionPausedDetail}
+          </p>
         </div>
       ) : null}
 
@@ -1246,8 +1121,10 @@ export function RepresentativeRechargePanel({
           >
             {mutation === "create"
               ? t.creating
-              : paymentMode === "wechat" && !collectionEnabled
-                ? t.wechatCollectionPausedAction
+              : paymentAvailability === "unavailable"
+                ? t.wechatUnavailableAction
+                : !collectionEnabled
+                  ? t.wechatCollectionPausedAction
                 : checkoutExpired
                   ? checkoutRequiresManualAction
                     ? t.wechatExpiryConfirmationAction
@@ -1256,13 +1133,9 @@ export function RepresentativeRechargePanel({
                     ? t.wechatRecoveringAction
                   : hasActivePendingCheckout
                     ? t.wechatPendingAction
-                    : paymentMode === "wechat"
-                      ? selectedProduct?.kind === "TIP"
-                        ? t.wechatTipAction
-                        : t.wechatCreateAction
-                      : selectedProduct?.kind === "TIP"
-                        ? t.tipAction
-                        : t.createAction}
+                    : selectedProduct?.kind === "TIP"
+                      ? t.wechatTipAction
+                      : t.wechatCreateAction}
           </button>
         ) : null}
       {hasActiveWeChatOrder ? (
@@ -1297,18 +1170,7 @@ export function RepresentativeRechargePanel({
               ? t.packageUnits(order.entitlementUnits, order.unitName)
               : t.legacyOrderTerms}
           </p>
-          {order.status === "requires_payment" && paymentMode === "mock" ? (
-            <button
-              className="button-secondary"
-              disabled={isMutating || isRestoring}
-              onClick={completeMockPayment}
-              type="button"
-            >
-              {t.mockPayAction}
-            </button>
-          ) : null}
           {order.status === "requires_payment"
-            && paymentMode === "wechat"
             && showWeChatCheckout
             && order.checkoutUrl ? (
               <div className="representative-wechat-checkout">
@@ -1375,23 +1237,6 @@ export function RepresentativeRechargePanel({
                 {" · "}
                 {t.creditsScope}
               </p>
-              {purchase.remainingTokenAmount > 0
-                && paymentMode === "mock" ? (
-                  <button
-                    className="button-secondary"
-                    disabled={
-                      isMutating
-                      || isRestoring
-                      || purchase.reservedTokenAmount > 0
-                    }
-                    onClick={returnUnusedCredits}
-                    type="button"
-                  >
-                    {mutation === "return"
-                      ? t.returning
-                      : t.returnUnusedAction}
-                  </button>
-                ) : null}
               {purchase.reservedTokenAmount > 0 ? (
                 <p className="footer-note">{t.reservedReturnHint}</p>
               ) : null}
@@ -1449,9 +1294,7 @@ export function RepresentativeRechargePanel({
 
       {error ? <div className="status-banner status-error" role="alert">{error}</div> : null}
       <p className="footer-note">
-        {paymentMode === "wechat"
-          ? t.wechatDisclaimer(weChatDisclosureKind)
-          : t.disclaimer}
+        {t.wechatDisclaimer(weChatDisclosureKind)}
       </p>
     </div>
   );
@@ -1477,30 +1320,6 @@ function pickDefaultCommerceProduct(
     ?? tips.find((product) => product.isRecommended)
     ?? tips[0]
     ?? null;
-}
-
-function normalizeCompletionOrder(
-  order: CommerceCompletionOrderPayload,
-): RechargeOrderSnapshot {
-  return {
-    ...order,
-    productName: order.productName ?? order.productNameSnapshot ?? null,
-    productKind: order.productKind ?? order.productKindSnapshot ?? null,
-    entitlementUnits:
-      order.entitlementUnits ?? order.entitlementUnitsSnapshot ?? null,
-    unitName: order.unitName ?? order.unitNameSnapshot ?? null,
-    handoffAllowance:
-      order.handoffAllowance ?? order.handoffAllowanceSnapshot ?? null,
-    handoffUnits: order.handoffUnits ?? order.handoffUnitsSnapshot ?? null,
-    handoffServiceLevel:
-      order.handoffServiceLevel
-      ?? order.handoffServiceLevelSnapshot
-      ?? null,
-    handoffValidityDays:
-      order.handoffValidityDays
-      ?? order.handoffValidityDaysSnapshot
-      ?? null,
-  };
 }
 
 function randomId(): string {
@@ -1576,10 +1395,11 @@ const copy = {
       return `${allowance}${product.handoffServiceLevel === "PRIORITY" ? " · 优先" : " · 标准"}${product.handoffValidityDays ? ` · ${product.handoffValidityDays} 天` : ""}`;
     },
     tipPolicy: "自愿支持 · 不赠服务额度 · 不含人工接管 · 不可退款",
-    createAction: "购买所选服务包",
-    tipAction: "确认自愿支持",
     wechatCreateAction: "使用微信购买所选服务包",
     wechatTipAction: "使用微信自愿支持",
+    wechatUnavailableTitle: "微信支付暂不可用",
+    wechatUnavailableDetail: "支付配置尚未就绪，当前不会创建订单或切换到模拟支付。请稍后再试。",
+    wechatUnavailableAction: "支付暂不可用",
     wechatCollectionPausedTitle: "微信支付已暂停新收款",
     wechatCollectionPausedDetail: "当前不能生成新的支付二维码；已创建订单仍会继续查询和入账，请按现有二维码完成支付或等待结果确认。",
     wechatCollectionPausedAction: "新收款已暂停",
@@ -1592,14 +1412,12 @@ const copy = {
     wechatExpiredPreventsDuplicate: "当前二维码已过期，但旧订单尚未由微信确认关闭。系统会继续查询并安全关单；关闭前请勿创建第二笔订单。",
     creating: "处理中...",
     createError: "创建商品订单失败。",
-    payError: "模拟支付失败。",
     latestOrder: "最近一笔订单",
     legacyCommerceProduct: "历史服务订单",
     legacyOrderTerms: "历史订单未保存商品快照",
     tipOrderTerms: "自愿支持 · 不赠额度或人工权益 · 不可退款",
     tipThanksTitle: "感谢你的支持。",
     tipThanksDetail: "本次支持已确认，不会增加服务额度，也不会创建退款额度按钮。",
-    mockPayAction: "模拟支付成功",
     wechatQrTitle: "微信扫码支付",
     wechatQrDetail: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "请使用微信扫描二维码。支付成功后会记录本次自愿支持，不发放服务额度或人工权益。" : "请使用微信扫描二维码。支付成功后，所选服务额度和人工权益会直接发放给当前数字代表。",
     wechatCountdown: (time: string) => `二维码剩余有效时间 ${time}`,
@@ -1628,17 +1446,13 @@ const copy = {
     copyError: "支付链接复制失败，请直接扫描二维码。",
     creditsLabel: "当前代表可用服务额度 ",
     creditsScope: "仅限当前数字代表",
-    returnUnusedAction: "退回本次未使用额度",
-    returning: "退回中...",
-    returnError: "未使用额度退回失败。",
     reservedReturnHint: "有额度正在服务请求中，结算或释放后才能退回。",
-    returnedTitle: "未使用的演示额度已撤销",
+    returnedTitle: "退款已处理",
     returnedDetail: (
       tokens: number,
       amountCents: number,
       currency: string,
     ) => `${tokens} 额度 · ${formatMoney(amountCents, currency)}`,
-    disclaimer: "当前是仅限开发环境的演示支付入口：可以验证服务套餐或自愿支持下单与模拟支付；只有服务套餐会发放额度或人工权益，完全未使用的套餐额度可在本地撤销，打赏不可退款。这里不会真实扣款，也不模拟渠道原路退款。Delegate 不处理银行卡号或支付密码。",
     wechatDisclaimer: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "当前使用微信 Native 支付。Delegate 只保存订单和验签后的最小支付凭据，不接触微信支付密码；自愿支持不赠送服务权益，支付确认后不可退款。" : "当前使用微信 Native 支付。Delegate 只保存订单和验签后的最小支付凭据，不接触微信支付密码；支付成功后会发放当前数字代表专属服务权益，退款按所购套餐规则处理。",
   },
   en: {
@@ -1685,10 +1499,11 @@ const copy = {
       return `${allowance}${product.handoffServiceLevel === "PRIORITY" ? " · priority" : " · standard"}${product.handoffValidityDays ? ` · ${product.handoffValidityDays} days` : ""}`;
     },
     tipPolicy: "Voluntary · no service credits · no human takeover · non-refundable",
-    createAction: "Buy selected service package",
-    tipAction: "Confirm voluntary support",
     wechatCreateAction: "Buy selected package with WeChat Pay",
     wechatTipAction: "Support with WeChat Pay",
+    wechatUnavailableTitle: "WeChat Pay is temporarily unavailable",
+    wechatUnavailableDetail: "Payment configuration is not ready. No order will be created and checkout will not fall back to a simulated payment. Try again later.",
+    wechatUnavailableAction: "Payment unavailable",
     wechatCollectionPausedTitle: "New WeChat Pay collection is paused",
     wechatCollectionPausedDetail: "New QR codes cannot be created right now. Existing orders will still be checked and credited; complete the current checkout or wait for its result.",
     wechatCollectionPausedAction: "New collection paused",
@@ -1701,14 +1516,12 @@ const copy = {
     wechatExpiredPreventsDuplicate: "This QR code expired, but WeChat has not confirmed the old order closed. Checks and safe closure will continue; do not create a second order yet.",
     creating: "Working...",
     createError: "Failed to create the order.",
-    payError: "Failed to simulate payment.",
     latestOrder: "Latest order",
     legacyCommerceProduct: "Legacy service order",
     legacyOrderTerms: "Product snapshot unavailable for this legacy order",
     tipOrderTerms: "Voluntary support · no credits or human help · non-refundable",
     tipThanksTitle: "Thank you for your support.",
     tipThanksDetail: "This contribution is confirmed. It does not add service credits or create a return-credits action.",
-    mockPayAction: "Simulate payment success",
     wechatQrTitle: "Scan with WeChat Pay",
     wechatQrDetail: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "Scan with WeChat. A successful payment records voluntary support without granting service credits or human help." : "Scan with WeChat. A successful payment directly grants the selected credits and human-help entitlement for this representative.",
     wechatCountdown: (time: string) => `QR code expires in ${time}`,
@@ -1737,17 +1550,13 @@ const copy = {
     copyError: "The payment link could not be copied. Please scan the QR code.",
     creditsLabel: "Service credits available for this representative ",
     creditsScope: "scoped to this Digital Representative",
-    returnUnusedAction: "Return unused credits",
-    returning: "Returning...",
-    returnError: "Failed to return unused credits.",
     reservedReturnHint: "Credits reserved by an active service request can be returned after settlement or release.",
-    returnedTitle: "Unused demo credits reversed",
+    returnedTitle: "Refund processed",
     returnedDetail: (
       tokens: number,
       amountCents: number,
       currency: string,
     ) => `${tokens} credits · ${formatMoney(amountCents, currency)}`,
-    disclaimer: "This development-only checkout validates service-package or voluntary-support ordering and simulated payment. Only service packages grant credits or human-help entitlements; completely unused package credits can be reversed locally, while tips are non-refundable. It creates no real charge and does not simulate a provider refund. Delegate does not handle card numbers or payment passwords.",
     wechatDisclaimer: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "This checkout uses WeChat Pay Native. Delegate stores only the order and minimal verified payment evidence; it never handles a WeChat payment password. Voluntary support grants no service entitlement and is non-refundable once confirmed." : "This checkout uses WeChat Pay Native. Delegate stores only the order and minimal verified payment evidence; it never handles a WeChat payment password. Successful payment grants entitlements for this Digital Representative, and refunds follow the purchased package policy.",
   },
 } as const;

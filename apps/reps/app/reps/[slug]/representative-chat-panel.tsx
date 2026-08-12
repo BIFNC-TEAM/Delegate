@@ -18,10 +18,7 @@ import {
   type PublicWalletUpdatedDetail,
   type PublicWalletStateSnapshot,
 } from "./public-wallet-client";
-import {
-  getGovernedContextDisclosure,
-  type GovernedMemoryDisclosure,
-} from "./governed-context-disclosure";
+import type { GovernedMemoryDisclosure } from "./governed-context-disclosure";
 import {
   collectPendingMemoryDisplayAcks,
   memoryDisplayAckKey,
@@ -93,10 +90,6 @@ export function RepresentativeChatPanel(props: {
     props.governedMemoryDisclosure,
   );
   const governedContextEnabled = governedMemoryDisclosure.enabled;
-  const governedContextDisclosure = getGovernedContextDisclosure(
-    props.locale,
-    governedMemoryDisclosure,
-  );
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
   const keepChatPinnedRef = useRef(true);
@@ -607,6 +600,33 @@ export function RepresentativeChatPanel(props: {
       && usage.freeRepliesRemaining === 0
     );
   const serviceContentVisible = serviceAttentionRequired || showServices;
+  const supportsPaidContinuation = accessMode !== "FREE" && (
+    accessMode === "CREDITS_ONLY"
+    || props.hasServicePackages
+    || usage.serviceCreditsAvailable > 0
+  );
+  const continuationBlocked =
+    supportsPaidContinuation
+    && serviceContentVisible
+    && usage.serviceCreditsAvailable === 0;
+  const serviceCreditsPending =
+    continuationBlocked && usage.serviceCreditsReserved > 0;
+  const servicePurchaseRequired =
+    continuationBlocked && usage.serviceCreditsReserved === 0;
+  const lastFreeReply =
+    accessMode === "TRIAL_THEN_CREDITS"
+    && usage.freeRepliesRemaining === 1
+    && usage.serviceCreditsAvailable === 0
+    && props.serviceCreditPurchaseEnabled;
+  const serviceGateCoversError = Boolean(
+    serviceAttentionRequired
+    && error
+    && [
+      t.serviceCreditRequired,
+      t.serviceCreditUnavailable,
+      t.serviceCreditUnavailableWithHandoff,
+    ].includes(error),
+  );
 
   return (
     <section className="representative-conversation-shell" id="chat">
@@ -707,18 +727,53 @@ export function RepresentativeChatPanel(props: {
                 ) : null}
               </div>
             ) : null}
-            <p className="footer-note representative-chat-memory-note">
-              {governedContextDisclosure}
-            </p>
+            {serviceCreditsPending ? (
+              <div className="representative-chat-continuation is-pending" role="status">
+                <div>
+                  <span className="panel-title">{t.continuationEyebrow}</span>
+                  <strong>{t.servicePendingTitle}</strong>
+                  <p>{t.servicePendingDetail}</p>
+                </div>
+              </div>
+            ) : servicePurchaseRequired ? (
+              <div className="representative-chat-continuation" role="status">
+                <div>
+                  <span className="panel-title">{t.continuationEyebrow}</span>
+                  <strong>{t.serviceGateTitle(accessMode)}</strong>
+                  <p>
+                    {props.serviceCreditPurchaseEnabled
+                      ? t.serviceGateDetail
+                      : props.humanInLoop
+                        ? t.serviceGateHandoffDetail
+                        : t.commerceUnavailableDetail(false)}
+                  </p>
+                </div>
+                {props.serviceCreditPurchaseEnabled ? (
+                  <a className="button-primary" href="#recharge">{t.openRecharge}</a>
+                ) : props.humanInLoop ? (
+                  <a className="button-secondary" href="#handoff">{t.handoffAction}</a>
+                ) : null}
+              </div>
+            ) : lastFreeReply ? (
+              <div className="representative-chat-usage-note" role="status">
+                <span>{t.lastFreeReplyDetail}</span>
+                <a href="#recharge">{t.previewServices}</a>
+              </div>
+            ) : null}
+            <div className="representative-chat-trust-note">
+              <span>{t.composerTrustNote(governedContextEnabled)}</span>
+              <a href="#trust">{t.privacyAction}</a>
+            </div>
             <div className="dashboard-form-footer"><p className="footer-note">{t.footnote}</p><div className="button-row"><button className="button-primary" disabled={busy || hydrating || !input.trim()} type="submit">{hydrating ? t.loadingHistory : busy ? t.sending : t.send}</button></div></div>
           </form>
-          {error ? <p className="feedback-error" role="alert">{error}</p> : null}
+          {error && !serviceGateCoversError ? <p className="feedback-error" role="alert">{error}</p> : null}
         </div>
 
         <aside className="representative-session-sidebar" aria-label={t.sessionLabel}>
-          <section className="representative-session-card is-status">
-            <span className="panel-title">{t.sessionLabel}</span>
-            <div className="representative-session-row"><span>{t.currentResponder}</span><strong>{humanActive ? t.humanStatus : t.aiStatus}</strong></div>
+          <section className="representative-session-panel">
+            <header>
+              <span className="panel-title">{t.sessionLabel}</span>
+            </header>
             <div className="representative-session-row">
               <span>{t.accessModeLabel}</span>
               <strong>
@@ -733,80 +788,40 @@ export function RepresentativeChatPanel(props: {
               </strong>
             </div>
             <div className="representative-session-row"><span>{t.serviceCreditsLabel}</span><strong>{usage.serviceCreditsAvailable}</strong></div>
-            <p>{humanActive ? t.humanActiveDetail : t.aiActiveDetail}</p>
-          </section>
-
-          <section className={`representative-session-card${props.humanInLoop ? "" : " is-unavailable"}`}>
-            <span className="panel-title">{t.handoffLabel}</span>
-            <strong>
-              {props.humanInLoop
-                ? t.handoffTitle(props.ownerName)
-                : t.handoffUnavailableTitle}
-            </strong>
-            <p>{handoffDetail}</p>
-            {props.humanInLoop && (
-              props.handoffAccessMode === "FREE"
-              || (
-                handoffEntitlementStatus === "ready"
-                && (hasPaidHandoff || props.hasHandoffPackages)
-              )
-            ) ? (
-              <a
-                className="button-secondary"
-                href={props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
+            <p className="representative-session-summary">
+              {humanActive ? t.humanActiveDetail : t.aiActiveDetail}
+            </p>
+            <div className={`representative-session-handoff${props.humanInLoop ? "" : " is-unavailable"}`}>
+              <span className="panel-title">{t.handoffLabel}</span>
+              <strong>
+                {props.humanInLoop
+                  ? t.handoffTitle(props.ownerName)
+                  : t.handoffUnavailableTitle}
+              </strong>
+              <p>{handoffDetail}</p>
+            </div>
+            <footer>
+              {props.humanInLoop && (
+                props.handoffAccessMode === "FREE"
+                || (
+                  handoffEntitlementStatus === "ready"
+                  && (hasPaidHandoff || props.hasHandoffPackages)
+                )
+              ) ? (
+                <a href={props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
                   ? "#recharge"
                   : "#handoff"}
-              >
-                {props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
-                  ? t.handoffPackageAction
-                  : t.handoffAction}
-              </a>
-            ) : null}
-          </section>
-
-          {accessMode !== "FREE" && (
-            accessMode === "CREDITS_ONLY"
-            || props.hasServicePackages
-            || usage.serviceCreditsAvailable > 0
-          ) ? (
-            <section className="representative-session-card representative-service-disclosure">
-              {accessMode === "TRIAL_THEN_CREDITS" && !serviceAttentionRequired ? (
-                <button aria-expanded={showServices} className="representative-service-toggle" onClick={() => setShowServices((current) => !current)} type="button">
-                  <span><small>{t.servicesEyebrow}</small><strong>{t.servicesOptionalTitle}</strong></span>
-                  <b aria-hidden="true">{showServices ? "−" : "+"}</b>
-                </button>
-              ) : (
-                <div className="representative-service-static-heading">
-                  <small>{t.servicesEyebrow}</small>
-                  <strong>{t.servicesNeededTitle(props.humanInLoop)}</strong>
-                </div>
-              )}
-              {serviceContentVisible ? (
-                <div className="representative-service-options" aria-live="polite">
-                  <p>{t.creditPlanDetail(usage.serviceCreditsAvailable, usage.serviceCreditsReserved)}</p>
-                  {props.serviceCreditPurchaseEnabled ? (
-                    <a className="button-primary" href="#recharge">{t.openRecharge}</a>
-                  ) : usage.serviceCreditsAvailable === 0 ? (
-                    <p className="footer-note">{t.commerceUnavailableDetail(props.humanInLoop)}</p>
-                  ) : null}
-                </div>
+                >
+                  {props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
+                    ? t.handoffPackageAction
+                    : t.handoffAction}
+                </a>
               ) : null}
-            </section>
-          ) : null}
-
-          {accessMode === "FREE" ? (
-            <section className="representative-session-card is-free-access">
-              <span className="panel-title">{t.servicesEyebrow}</span>
-              <strong>{t.freeServiceTitle}</strong>
-              <p>{t.freeServiceDetail}</p>
-              {props.hasTips ? <a href="#recharge">{t.optionalSupportAction}</a> : null}
-            </section>
-          ) : null}
-
-          <section className="representative-session-card is-privacy">
-            <span className="panel-title">{t.privacyLabel}</span>
-            <p>{t.privacyDetail}</p>
-            <a href="#trust">{t.privacyAction}</a>
+              {accessMode === "FREE" && props.hasTips ? (
+                <a href="#recharge">{t.optionalSupportAction}</a>
+              ) : null}
+              <a href="#trust">{t.privacyAction}</a>
+            </footer>
           </section>
         </aside>
       </div>
@@ -890,6 +905,19 @@ const zhCopy = {
   startersLabel: "你可以这样开始",
   starters: ["我想了解你们提供什么服务", "我有一个合作需求", "帮我整理报价所需信息", "我希望联系本人"],
   inputLabel: "想解决什么？", placeholder: "描述你的问题、背景和期望结果…", footnote: "请勿发送密码、密钥或不应公开的敏感信息。",
+  continuationEyebrow: "继续对话",
+  serviceGateTitle: (accessMode: RepresentativeAccessMode) => accessMode === "CREDITS_ONLY"
+    ? "使用服务额度后继续"
+    : "免费试用已结束",
+  serviceGateDetail: "你的问题已保留在输入框中。购买服务包后，可以直接继续这段对话。",
+  serviceGateHandoffDetail: "你的问题已保留在输入框中；当前没有可购买的服务包，可以改为申请真人协助。",
+  servicePendingTitle: "服务额度正在到账",
+  servicePendingDetail: "无需重复购买。额度确认后即可继续发送，输入内容会一直保留。",
+  lastFreeReplyDetail: "还剩 1 次免费回复。你可以继续提问，也可以提前了解后续服务方案。",
+  previewServices: "查看服务方案",
+  composerTrustNote: (enabled: boolean) => enabled
+    ? "可使用公开资料与仅限你和当前代表的受保护历史摘要。"
+    : "回答使用公开资料；重要承诺仍需真人确认。",
   sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", memoryPolicyChanged: "记忆策略刚刚更新。请阅读新的记忆说明后重新发送；上一条内容尚未提交。", serviceCreditPending: "服务额度正在处理中，请稍后重试；你的问题已保留在输入框中。", serviceCreditRequired: "免费回复已用完。请购买当前数字代表的服务额度后再发送；你的问题已保留在输入框中。", serviceCreditUnavailableWithHandoff: "免费回复已用完，当前数字代表暂无可购买的服务方案；可申请真人协助。你的问题已保留在输入框中。", serviceCreditUnavailable: "免费回复已用完，当前数字代表暂无可购买的服务方案。你的问题已保留在输入框中。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
   sessionLabel: "本次会话",
@@ -940,6 +968,19 @@ const enCopy = {
   startersLabel: "Try one of these",
   starters: ["What services do you offer?", "I have a partnership request", "Help me prepare a quote request", "I want to contact the owner"],
   inputLabel: "What do you need?", placeholder: "Describe the problem, context, and outcome you want…", footnote: "Do not send passwords, API keys, or sensitive information that should not be public.",
+  continuationEyebrow: "Continue the conversation",
+  serviceGateTitle: (accessMode: RepresentativeAccessMode) => accessMode === "CREDITS_ONLY"
+    ? "Use service credits to continue"
+    : "Your free trial is complete",
+  serviceGateDetail: "Your message is saved in the composer. Buy a service package, then continue this conversation directly.",
+  serviceGateHandoffDetail: "Your message is saved in the composer. No service package is available, but you can request human help instead.",
+  servicePendingTitle: "Service credits are being confirmed",
+  servicePendingDetail: "Do not buy again. You can send as soon as the credits arrive, and your draft will stay here.",
+  lastFreeReplyDetail: "You have 1 free reply left. Keep asking, or review the service options available afterward.",
+  previewServices: "View service options",
+  composerTrustNote: (enabled: boolean) => enabled
+    ? "May use public information and protected history scoped only to you and this representative."
+    : "Uses public information; important commitments still require human confirmation.",
   sending: "Working…", send: "Send", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "Reviewing published knowledge and permitted context…" : "Reviewing published knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", memoryPolicyChanged: "The memory policy just changed. Review the updated memory notice and send again; your previous message was not submitted.", serviceCreditPending: "Service credits are still being processed. Try again shortly; your message remains in the composer.", serviceCreditRequired: "Your free replies are used up. Buy service credits for this representative, then send again. Your message remains in the composer.", serviceCreditUnavailableWithHandoff: "Your free replies are used up, and this representative has no purchasable service plan right now. Request human help instead. Your message remains in the composer.", serviceCreditUnavailable: "Your free replies are used up, and this representative has no purchasable service plan right now. Your message remains in the composer.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
   humanQueueNotice: "This conversation is now in the human queue. You can keep adding context while the operator reviews the full thread.",
   sessionLabel: "This conversation",

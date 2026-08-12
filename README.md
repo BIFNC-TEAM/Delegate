@@ -226,6 +226,13 @@ pnpm install
 cp .env.example .env
 ```
 
+Local Compose commands read `.env` first and, when present,
+`.env.wechat.local` second. Keep live WeChat collection flags and local HTTPS
+callback overrides in the ignored `.env.wechat.local` file; the second file
+overrides matching base values without being copied into the repository. If
+the WeChat configuration is absent or invalid, the public checkout remains
+visible but paused and never falls back to a simulated payment.
+
 Bootstrap the local test stack once, or again after changing `package.json`, the
 lockfile, or a Dockerfile. The local override runs Dashboard and Representatives
 with `next dev --turbopack` and read-only source mounts, while keeping the

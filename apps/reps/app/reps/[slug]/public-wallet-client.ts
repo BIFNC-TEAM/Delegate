@@ -256,7 +256,12 @@ export function buildPublicCommerceCompletionWalletUpdate(input: {
 export function selectCurrentPublicWalletActivity(
   snapshot: PublicWalletStateSnapshot,
 ): CurrentPublicWalletActivity {
-  const order = snapshot.orders[0] ?? null;
+  // Public commerce no longer exposes simulated checkout. Keep this client
+  // boundary defensive so a stale response containing a historical MOCK row
+  // cannot be mistaken for an active WeChat Pay order.
+  const order = snapshot.orders.find(
+    (candidate) => candidate.provider.toLowerCase() === "wechat_pay",
+  ) ?? null;
   if (!order) {
     return { order: null, purchase: null, refund: null };
   }

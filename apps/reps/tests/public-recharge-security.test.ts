@@ -150,11 +150,11 @@ import { POST as reverseRechargePurchase } from "../app/reps/[slug]/recharge/[id
 
 const originalNodeEnv = process.env["NODE_ENV"];
 
-describe("public mock recharge security", () => {
+describe("public commerce security", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     restoreEnv("NODE_ENV", "development");
-    disableWeChatPay();
+    enableWeChatPay();
     mocks.loadWeChatPayProcessingConfigFromEnv.mockReturnValue({
       appId: "wx_app",
     });
@@ -530,6 +530,13 @@ describe("public mock recharge security", () => {
       representativeId: "rep-1",
       currency: "CNY",
     });
+    expect(mocks.rechargeOrderFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          provider: "WECHAT_PAY",
+        }),
+      }),
+    );
     expect(JSON.stringify(body.handoffEntitlement)).not.toMatch(
       /grant-secret|order-secret|identity-1|rep-1/u,
     );
@@ -585,8 +592,11 @@ describe("public mock recharge security", () => {
     expect(body).not.toContain("private-host");
   });
 
-  it("fails closed without exposing mock recharge creation in production", async () => {
-    restoreEnv("NODE_ENV", "production");
+  it.each(["development", "production"])(
+    "fails closed without exposing mock recharge creation in %s",
+    async (nodeEnv) => {
+    restoreEnv("NODE_ENV", nodeEnv);
+    disableWeChatPay();
 
     const response = await createRecharge(
       new Request("http://localhost/reps/delegate/recharge", {
@@ -605,7 +615,8 @@ describe("public mock recharge security", () => {
     expect(mocks.getPublicRepresentativeRuntime).not.toHaveBeenCalled();
     expect(mocks.createMockRechargeOrder).not.toHaveBeenCalled();
     expect(mocks.createRechargeOrder).not.toHaveBeenCalled();
-  });
+    },
+  );
 
   it("ignores client price tampering and uses only server-authored package terms", async () => {
     restoreEnv("NODE_ENV", "production");
@@ -1866,7 +1877,7 @@ describe("public mock recharge security", () => {
 
     expect(response.status).toBe(201);
     expect(response.headers.get("cache-control")).toBe("private, no-store");
-    expect(mocks.createMockRechargeOrder).toHaveBeenCalledWith(
+    expect(mocks.createRechargeOrder).toHaveBeenCalledWith(
       expect.objectContaining({
         externalUserId: "web:delegate:aud_current_visitor",
         representativeId: "rep-1",
@@ -1874,6 +1885,7 @@ describe("public mock recharge security", () => {
         idempotencyKey:
           "public_recharge:delegate:audience:identity-1:checkout-click-1",
       }),
+      expect.objectContaining({ provider: "WECHAT_PAY" }),
     );
   });
 
@@ -1894,8 +1906,8 @@ describe("public mock recharge security", () => {
       params: Promise.resolve({ slug: "delegate" }),
     });
 
-    const firstKey = mocks.createMockRechargeOrder.mock.calls[0]?.[0]?.idempotencyKey;
-    const secondKey = mocks.createMockRechargeOrder.mock.calls[1]?.[0]?.idempotencyKey;
+    const firstKey = mocks.createRechargeOrder.mock.calls[0]?.[0]?.idempotencyKey;
+    const secondKey = mocks.createRechargeOrder.mock.calls[1]?.[0]?.idempotencyKey;
     expect(firstKey).toMatch(
       /^public_recharge:delegate:audience:identity-1:[0-9a-f-]{36}$/,
     );

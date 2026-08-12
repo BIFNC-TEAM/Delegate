@@ -21,6 +21,7 @@ import {
   type PublicRechargeStatusTone,
   type PublicWalletStateSnapshot,
 } from "./public-wallet-client";
+import { REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT } from "./representative-profile-rail-events";
 
 type RechargeOrderSnapshot = {
   id: string;
@@ -984,9 +985,16 @@ export function RepresentativeRechargePanel({
           </p>
           {telegramBindingStatus !== "ready" ? (
             <div className="button-row">
-              <a className="button-secondary" href="#identity-bindings">
+              <button
+                className="button-secondary"
+                onClick={(event) => window.dispatchEvent(new CustomEvent(
+                  REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT,
+                  { detail: { opener: event.currentTarget, section: "bindings" } },
+                ))}
+                type="button"
+              >
                 {t.openBindingsAction}
-              </a>
+              </button>
               <button
                 className="button-secondary"
                 disabled={telegramBindingStatus === "checking"}

@@ -9,7 +9,7 @@ export function buildPublicAudienceReturnTo(
 ): string {
   return buildLocalizedHref(
     target === "telegram-recharge"
-      ? `/reps/${representativeSlug}?source=telegram#recharge`
+      ? `/reps/${representativeSlug}?source=telegram`
       : `/reps/${representativeSlug}#chat`,
     locale,
   );

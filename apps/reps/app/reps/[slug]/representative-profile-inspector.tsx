@@ -1,11 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import {
   PUBLIC_WALLET_UPDATED_EVENT,
   type PublicWalletStateSnapshot,
 } from "./public-wallet-client";
+import {
+  REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT,
+  type RepresentativeProfileSection,
+} from "./representative-profile-rail-events";
 
 type ProfileResource = {
   id: string;
@@ -57,12 +62,16 @@ type RecentOrderState =
 
 export function RepresentativeProfileInspector(props: {
   audienceAuthenticated: boolean;
+  bindingManagement?: ReactNode;
+  capabilities: Array<{ title: string; detail: string }>;
+  commerceManagement?: ReactNode;
   faq: Array<{ id: string; title: string; summary: string }>;
   hasPublicCommerce: boolean;
   humanInLoop: boolean;
-  identityBindingsHref: string;
+  initialSection?: RepresentativeProfileSection;
   locale: "zh" | "en";
   loginHref: string;
+  memoryDisclosure: string;
   ownerName: string;
   packagePreview: ProfilePackage | null;
   representativeName: string;
@@ -75,13 +84,15 @@ export function RepresentativeProfileInspector(props: {
   const [bindingState, setBindingState] = useState<BindingState>(
     props.audienceAuthenticated ? { status: "loading" } : { status: "signed_out" },
   );
-  const [showBindingHelp, setShowBindingHelp] = useState(false);
+  const [activeModal, setActiveModal] = useState<
+    RepresentativeProfileSection | "binding-help" | null
+  >(props.initialSection ?? null);
   const [recentOrderState, setRecentOrderState] = useState<RecentOrderState>(
     props.audienceAuthenticated && props.hasPublicCommerce
       ? { status: "loading" }
       : { status: "signed_out" },
   );
-  const bindingHelpTriggerRef = useRef<HTMLButtonElement>(null);
+  const modalTriggerRef = useRef<HTMLElement | null>(null);
   const closeHelpRef = useRef<HTMLButtonElement>(null);
   const modalCardRef = useRef<HTMLDivElement>(null);
 
@@ -170,11 +181,30 @@ export function RepresentativeProfileInspector(props: {
   }, [props.audienceAuthenticated, props.hasPublicCommerce, props.representativeSlug]);
 
   useEffect(() => {
-    if (!showBindingHelp) return;
+    const openSection = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        opener?: HTMLElement;
+        section?: RepresentativeProfileSection;
+      }>).detail;
+      if (!detail?.section) return;
+      modalTriggerRef.current = detail.opener?.isConnected ? detail.opener : null;
+      setActiveModal(detail.section);
+    };
+    window.addEventListener(REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT, openSection);
+    return () => window.removeEventListener(
+      REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT,
+      openSection,
+    );
+  }, []);
+
+  useEffect(() => {
+    if (!activeModal) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     closeHelpRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setShowBindingHelp(false);
+        setActiveModal(null);
         return;
       }
       if (event.key !== "Tab") return;
@@ -182,7 +212,7 @@ export function RepresentativeProfileInspector(props: {
         modalCardRef.current?.querySelectorAll<HTMLElement>(
           'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
         ) ?? [],
-      );
+      ).filter((element) => element.getClientRects().length > 0);
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -196,14 +226,19 @@ export function RepresentativeProfileInspector(props: {
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => {
+      document.body.style.overflow = previousOverflow;
       document.removeEventListener("keydown", handleKeyDown);
-      bindingHelpTriggerRef.current?.focus();
+      modalTriggerRef.current?.focus();
     };
-  }, [showBindingHelp]);
+  }, [activeModal]);
 
-  const bindingActionHref = props.audienceAuthenticated
-    ? props.identityBindingsHref
-    : props.loginHref;
+  function openModal(
+    modal: RepresentativeProfileSection | "binding-help",
+    opener: HTMLElement,
+  ) {
+    modalTriggerRef.current = opener;
+    setActiveModal(modal);
+  }
 
   return (
     <section className="representative-profile-inspector" aria-label={t.profileLabel}>
@@ -228,7 +263,23 @@ export function RepresentativeProfileInspector(props: {
         </div>
       </details>
 
-      <details className="representative-inspector-section">
+      {props.capabilities.length > 0 ? (
+        <details className="representative-inspector-section">
+          <summary>{t.capabilitiesLabel}</summary>
+          <div className="representative-inspector-section-body">
+            <ul className="representative-profile-capabilities">
+              {props.capabilities.map((capability) => (
+                <li key={capability.title}>
+                  <strong>{capability.title}</strong>
+                  <span>{capability.detail}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </details>
+      ) : null}
+
+      <details className="representative-inspector-section" id="profile-channels">
         <summary>
           <span>{t.channelLabel}</span>
           <BindingSummary state={bindingState} t={t} />
@@ -246,14 +297,21 @@ export function RepresentativeProfileInspector(props: {
             <p className="representative-inspector-note is-warning" role="status">{t.bindingsUnavailable}</p>
           ) : null}
           <div className="representative-inspector-actions">
-            <a className="button-secondary" href={bindingActionHref}>
-              {props.audienceAuthenticated ? t.manageBindings : t.loginToBind}
-            </a>
+            {props.audienceAuthenticated ? (
+              <button
+                className="button-secondary"
+                onClick={(event) => openModal("bindings", event.currentTarget)}
+                type="button"
+              >
+                {t.manageBindings}
+              </button>
+            ) : (
+              <a className="button-secondary" href={props.loginHref}>{t.loginToBind}</a>
+            )}
             <button
               aria-haspopup="dialog"
               className="representative-inspector-help"
-              onClick={() => setShowBindingHelp(true)}
-              ref={bindingHelpTriggerRef}
+              onClick={(event) => openModal("binding-help", event.currentTarget)}
               type="button"
             >
               <InfoIcon />
@@ -264,7 +322,7 @@ export function RepresentativeProfileInspector(props: {
       </details>
 
       {props.faq.length > 0 || props.resources.length > 0 ? (
-        <details className="representative-inspector-section">
+        <details className="representative-inspector-section" id="profile-knowledge">
           <summary>{t.resourcesLabel}</summary>
           <div className="representative-inspector-section-body">
             {props.faq.slice(0, 2).map((item) => (
@@ -313,24 +371,36 @@ export function RepresentativeProfileInspector(props: {
               <p>{t.orderHistoryAvailable}</p>
             )}
             <RecentOrder state={recentOrderState} locale={props.locale} t={t} />
-            <a className="button-primary" href="#recharge">{t.openServices}</a>
+            <button
+              className="button-primary"
+              onClick={(event) => openModal("services", event.currentTarget)}
+              type="button"
+            >
+              {t.openServices}
+            </button>
           </div>
         </details>
       ) : null}
 
-      <details className="representative-inspector-section">
+      <details className="representative-inspector-section" id="profile-privacy">
         <summary>{t.privacyLabel}</summary>
         <div className="representative-inspector-section-body">
           <ul className="representative-profile-boundaries">
             {props.trustItems.slice(0, 3).map((item) => <li key={item}>{item}</li>)}
           </ul>
-          <a href="#trust">{t.fullPrivacy}</a>
+          <button
+            className="representative-inspector-text-action"
+            onClick={(event) => openModal("privacy", event.currentTarget)}
+            type="button"
+          >
+            {t.fullPrivacy}
+          </button>
         </div>
       </details>
 
-      {showBindingHelp ? (
+      {activeModal ? (
         <div
-          aria-label={t.bindingHelpTitle}
+          aria-label={getModalTitle(activeModal, t)}
           aria-modal="true"
           className="representative-profile-modal"
           role="dialog"
@@ -338,31 +408,62 @@ export function RepresentativeProfileInspector(props: {
           <button
             aria-label={t.close}
             className="representative-profile-modal-backdrop"
-            onClick={() => setShowBindingHelp(false)}
+            onClick={() => setActiveModal(null)}
             type="button"
           />
-          <div className="representative-profile-modal-card" ref={modalCardRef}>
+          <div
+            className={`representative-profile-modal-card${activeModal === "bindings" || activeModal === "services" ? " is-workspace" : ""}`}
+            ref={modalCardRef}
+          >
             <header>
               <div>
-                <span className="panel-title">{t.channelLabel}</span>
-                <h2>{t.bindingHelpTitle}</h2>
+                <span className="panel-title">{getModalEyebrow(activeModal, t)}</span>
+                <h2>{getModalTitle(activeModal, t)}</h2>
               </div>
               <button
                 aria-label={t.close}
                 className="representative-profile-modal-close"
-                onClick={() => setShowBindingHelp(false)}
+                onClick={() => setActiveModal(null)}
                 ref={closeHelpRef}
                 type="button"
               >
                 ×
               </button>
             </header>
-            <div className="representative-profile-modal-copy">
-              {t.bindingHelpItems.map((item) => <p key={item}>{item}</p>)}
-            </div>
-            <a className="button-primary" href={bindingActionHref}>
-              {props.audienceAuthenticated ? t.manageBindings : t.loginToBind}
-            </a>
+            {activeModal === "binding-help" ? (
+              <>
+                <div className="representative-profile-modal-copy">
+                  {t.bindingHelpItems.map((item) => <p key={item}>{item}</p>)}
+                </div>
+                {props.audienceAuthenticated ? (
+                  <button
+                    className="button-primary"
+                    onClick={() => setActiveModal("bindings")}
+                    type="button"
+                  >
+                    {t.manageBindings}
+                  </button>
+                ) : <a className="button-primary" href={props.loginHref}>{t.loginToBind}</a>}
+              </>
+            ) : activeModal === "bindings" ? (
+              <div className="representative-profile-modal-workspace">
+                {props.bindingManagement}
+              </div>
+            ) : activeModal === "services" ? (
+              <div className="representative-profile-modal-workspace">
+                {props.commerceManagement}
+              </div>
+            ) : (
+              <div className="representative-profile-privacy-detail">
+                <ul className="representative-profile-boundaries">
+                  {props.trustItems.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+                <details open>
+                  <summary>{t.memoryLabel}</summary>
+                  <p>{props.memoryDisclosure}</p>
+                </details>
+              </div>
+            )}
           </div>
         </div>
       ) : null}
@@ -376,6 +477,25 @@ function BindingSummary({ state, t }: { state: BindingState; t: typeof zhCopy | 
   if (state.status === "signed_out") return <small>{t.notCheckedShort}</small>;
   const count = [state.telegram, state.matrix].filter((item) => item === "linked").length;
   return <small>{count > 0 ? t.linkedCount(count) : t.notLinkedShort}</small>;
+}
+
+function getModalTitle(
+  modal: RepresentativeProfileSection | "binding-help",
+  t: typeof zhCopy | typeof enCopy,
+) {
+  if (modal === "bindings") return t.bindingManagementTitle;
+  if (modal === "services") return t.servicesManagementTitle;
+  if (modal === "privacy") return t.privacyManagementTitle;
+  return t.bindingHelpTitle;
+}
+
+function getModalEyebrow(
+  modal: RepresentativeProfileSection | "binding-help",
+  t: typeof zhCopy | typeof enCopy,
+) {
+  if (modal === "services") return t.servicesLabel;
+  if (modal === "privacy") return t.privacyLabel;
+  return t.channelLabel;
 }
 
 function ChannelStatus({
@@ -463,6 +583,7 @@ const zhCopy = {
   profileEyebrow: "数字代表",
   representing: (owner: string) => `代表 ${owner} 接待`,
   aboutLabel: "简介",
+  capabilitiesLabel: "能帮什么",
   aiHumanSupport: "AI 先接待，需要判断时可转真人。",
   aiOnlySupport: "当前由 AI 提供公开接待。",
   channelLabel: "渠道连续性",
@@ -473,6 +594,7 @@ const zhCopy = {
   loginToBind: "登录后绑定渠道",
   bindingHelp: "绑定说明",
   bindingHelpTitle: "渠道绑定会带来什么？",
+  bindingManagementTitle: "管理私聊渠道",
   bindingHelpItems: [
     "绑定只用于确认不同渠道属于同一个 Delegate 用户，不会合并或公开各渠道的原始聊天记录。",
     "代表专属服务额度与人工权益可以在已验证渠道间保持一致。",
@@ -484,6 +606,7 @@ const zhCopy = {
   deliverableLabel: "可下载文件",
   pendingResource: "暂未提供公开下载",
   servicesLabel: "服务与订单",
+  servicesManagementTitle: "购买服务与查看订单",
   recommendedPackage: "推荐服务包",
   credits: (value: number) => `${value} 服务额度`,
   includesHandoff: "包含人工接管权益",
@@ -504,6 +627,8 @@ const zhCopy = {
     refunded: "已退款",
   },
   privacyLabel: "隐私与边界",
+  privacyManagementTitle: "完整隐私与记忆说明",
+  memoryLabel: "记忆使用范围",
   fullPrivacy: "查看完整说明",
   loadingShort: "读取中",
   unavailableShort: "暂不可用",
@@ -520,6 +645,7 @@ const enCopy = {
   profileEyebrow: "Digital representative",
   representing: (owner: string) => `Front desk for ${owner}`,
   aboutLabel: "About",
+  capabilitiesLabel: "What I can help with",
   aiHumanSupport: "AI responds first, with human help when judgment is needed.",
   aiOnlySupport: "Public requests are currently handled by AI.",
   channelLabel: "Channel continuity",
@@ -530,6 +656,7 @@ const enCopy = {
   loginToBind: "Log in to link channels",
   bindingHelp: "How linking works",
   bindingHelpTitle: "What does channel linking do?",
+  bindingManagementTitle: "Manage private channels",
   bindingHelpItems: [
     "Linking only proves that accounts on different channels belong to the same Delegate user. It does not merge or expose raw chat histories.",
     "Representative-scoped service credits and human-help entitlements can stay consistent across verified channels.",
@@ -541,6 +668,7 @@ const enCopy = {
   deliverableLabel: "Download",
   pendingResource: "No public download yet",
   servicesLabel: "Services and orders",
+  servicesManagementTitle: "Buy services and review orders",
   recommendedPackage: "Recommended service",
   credits: (value: number) => `${value} service credits`,
   includesHandoff: "Includes human-takeover entitlement",
@@ -561,6 +689,8 @@ const enCopy = {
     refunded: "Refunded",
   },
   privacyLabel: "Privacy and boundaries",
+  privacyManagementTitle: "Full privacy and memory explanation",
+  memoryLabel: "How memory is used",
   fullPrivacy: "Read the full explanation",
   loadingShort: "Loading",
   unavailableShort: "Unavailable",

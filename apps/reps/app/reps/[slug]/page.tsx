@@ -34,7 +34,6 @@ import { RepresentativeChatPanel } from "./representative-chat-panel";
 import { RepresentativeIdentityBindingPanel } from "./representative-identity-binding-panel";
 import { RepresentativeMemorySharingPanel } from "./representative-memory-sharing-panel";
 import { getUsablePublicUrl } from "./public-materials";
-import { RepresentativeMaterialPreview } from "./representative-material-preview";
 import { RepresentativeProfileInspector } from "./representative-profile-inspector";
 import { RepresentativeProfileRailLink } from "./representative-profile-rail-link";
 import { RepresentativeRechargePanel } from "./representative-recharge-panel";
@@ -146,14 +145,7 @@ export default async function RepresentativePage({
   );
   const audienceLogoutHref = buildPublicAudienceLogoutHref(representative.slug, locale);
   const publicDeliverables = deliverableSnapshot?.deliverables ?? [];
-  const publicResourceCount =
-    representative.knowledgePack.faq.length +
-    representative.knowledgePack.materials.length +
-    representative.knowledgePack.policies.length +
-    publicDeliverables.length;
   const visitorCapabilities = buildVisitorCapabilities(locale);
-  const deliverableKindLabels = buildDeliverableKindLabels(locale);
-  const deliverableSourceLabels = buildDeliverableSourceLabels(locale);
   const weChatPayPreflight = preflightWeChatPayRuntime();
   const paymentAvailability =
     weChatPayPreflight.status !== "ready"
@@ -181,7 +173,6 @@ export default async function RepresentativePage({
       : false;
   const hasPublicCommerce =
     visibleCommerceProducts.length > 0 || hasRestorableCommerceActivity;
-  const hasSellableCommerce = visibleCommerceProducts.length > 0;
   const profilePackageProduct = visibleCommerceProducts.find(
     (product) => product.kind === "SERVICE_PACKAGE" && product.isRecommended,
   ) ?? visibleCommerceProducts.find(
@@ -212,7 +203,7 @@ export default async function RepresentativePage({
     })),
   ];
   const localizedRepresentativePath = telegramRechargeSource && hasPublicCommerce
-    ? `/reps/${representative.slug}?source=telegram#recharge`
+    ? `/reps/${representative.slug}?source=telegram`
     : `/reps/${representative.slug}`;
   const languageItems = [
     {
@@ -283,10 +274,6 @@ export default async function RepresentativePage({
                   <strong>{t.accountLabel}</strong>
                   <span>{audienceAccountLabel}</span>
                 </div>
-                {hasPublicCommerce ? (
-                  <a href="#recharge">{t.accountCommerceLabel}</a>
-                ) : null}
-                <a href="#identity-bindings">{t.accountBindingsLabel}</a>
                 <a href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>
                   {t.homeLabel}
                 </a>
@@ -352,6 +339,9 @@ export default async function RepresentativePage({
           hasServicePackages={hasServicePackages}
           hasTips={hasTips}
           humanInLoop={representative.humanInLoop}
+          {...(telegramRechargeSource
+            ? { initialProfileSection: "services" as const }
+            : {})}
           locale={locale}
           ownerName={representative.ownerName}
           representativeName={representative.name}
@@ -360,6 +350,35 @@ export default async function RepresentativePage({
           profilePanel={(
             <RepresentativeProfileInspector
               audienceAuthenticated={Boolean(audienceSession)}
+              bindingManagement={audienceSession ? (
+                <div className="representative-profile-management-stack">
+                  <RepresentativeIdentityBindingPanel
+                    locale={locale}
+                    representativeSlug={representative.slug}
+                  />
+                  <RepresentativeMemorySharingPanel
+                    locale={locale}
+                    representativeSlug={representative.slug}
+                  />
+                </div>
+              ) : undefined}
+              capabilities={representative.skills
+                .filter((skill) => !["human_handoff", "paid_unlock"].includes(skill))
+                .map((skill) => visitorCapabilities[skill])}
+              commerceManagement={hasPublicCommerce ? (
+                <RepresentativeRechargePanel
+                  audienceAuthenticated={Boolean(audienceSession)}
+                  collectionEnabled={collectionEnabled}
+                  {...(telegramRechargeSource
+                    ? { continuationChannel: "telegram" as const }
+                    : {})}
+                  locale={locale}
+                  loginHref={audienceLoginHref}
+                  paymentAvailability={paymentAvailability}
+                  initialCommerceProducts={visibleCommerceProducts}
+                  representativeSlug={representative.slug}
+                />
+              ) : undefined}
               faq={representative.knowledgePack.faq.map((item) => ({
                 id: item.id,
                 title: item.title,
@@ -367,9 +386,12 @@ export default async function RepresentativePage({
               }))}
               hasPublicCommerce={hasPublicCommerce}
               humanInLoop={representative.humanInLoop}
-              identityBindingsHref="#identity-bindings"
+              {...(telegramRechargeSource
+                ? { initialSection: "services" as const }
+                : {})}
               locale={locale}
               loginHref={audienceLoginHref}
+              memoryDisclosure={governedContextDisclosure}
               ownerName={representative.ownerName}
               packagePreview={profilePackagePreview}
               representativeName={representative.name}
@@ -381,161 +403,6 @@ export default async function RepresentativePage({
           )}
         />
       </div>
-
-      {audienceSession ? (
-        <section className="representative-visitor-section" id="identity-bindings">
-          <div className="representative-visitor-section-heading">
-            <p className="eyebrow">{locale === "zh" ? "跨渠道身份" : "CROSS-CHANNEL IDENTITY"}</p>
-            <h2>{locale === "zh" ? "绑定你的私聊账户" : "Link your private-channel accounts"}</h2>
-            <p>
-              {locale === "zh"
-                ? "绑定后，当前已开放的私聊渠道会对应到同一个 Delegate 用户与服务权益；各渠道的原始会话记录仍然分开。"
-                : "Once linked, the available private-chat channels resolve to the same Delegate user and service entitlements while each channel keeps its own conversation timeline."}
-            </p>
-          </div>
-          <RepresentativeIdentityBindingPanel
-            locale={locale}
-            representativeSlug={representative.slug}
-          />
-          <RepresentativeMemorySharingPanel
-            locale={locale}
-            representativeSlug={representative.slug}
-          />
-        </section>
-      ) : null}
-
-      <section className="representative-visitor-section" id="about">
-        <div className="representative-visitor-section-heading">
-          <p className="eyebrow">{t.capabilitiesEyebrow}</p>
-          <h2>{t.capabilitiesTitle}</h2>
-          <p>{t.capabilitiesSummary(representative.ownerName)}</p>
-        </div>
-        <div className="representative-capability-grid">
-          {representative.skills.filter((skill) => !["human_handoff", "paid_unlock"].includes(skill)).map((skill) => (
-            <article className="representative-capability-card" key={skill}>
-              <strong>{visitorCapabilities[skill].title}</strong>
-              <p>{visitorCapabilities[skill].detail}</p>
-            </article>
-          ))}
-        </div>
-      </section>
-
-      {publicResourceCount > 0 ? (
-        <section className="representative-visitor-section" id="resources">
-          <div className="representative-visitor-section-heading">
-            <p className="eyebrow">{t.resourcesEyebrow}</p>
-            <h2>{t.resourcesTitle}</h2>
-            <p>{t.resourcesSummary}</p>
-          </div>
-          <div className="representative-resource-grid">
-            {representative.knowledgePack.faq.map((item) => (
-              <article className="representative-resource-card" key={item.id}>
-                <span className="panel-title">FAQ</span><strong>{item.title}</strong><p>{item.summary}</p>
-              </article>
-            ))}
-            {representative.knowledgePack.materials.map((item) => (
-              <article className="representative-resource-card" key={item.id}>
-                <span className="panel-title">{t.materialsEyebrow}</span><strong>{item.title}</strong><p>{item.summary}</p>
-                <RepresentativeMaterialPreview copy={t.materialPreview} downloadUrl={getUsablePublicUrl(item.url)} kind={item.kind} summary={item.summary} title={item.title} />
-              </article>
-            ))}
-            {representative.knowledgePack.policies.map((item) => (
-              <article className="representative-resource-card" key={item.id}>
-                <span className="panel-title">{t.policiesEyebrow}</span><strong>{item.title}</strong><p>{item.summary}</p>
-              </article>
-            ))}
-            {publicDeliverables.map((deliverable) => {
-              const externalUrl = getUsablePublicUrl(deliverable.externalUrl);
-              return (
-                <article className="representative-resource-card" key={deliverable.id}>
-                  <span className="panel-title">{t.publicDeliverableChip}</span>
-                  <strong>{deliverable.title}</strong><p>{deliverable.summary}</p>
-                  <div className="chip-row"><span className="chip">{deliverableKindLabels[deliverable.kind]}</span><span className="chip">{deliverableSourceLabels[deliverable.sourceKind]}</span></div>
-                  {deliverable.sourceKind === "external_link" ? (
-                    externalUrl ? <a className="button-secondary" href={externalUrl} rel="noreferrer" target="_blank">{t.openMaterial}</a> : <span className="chip">{t.materialPendingChip}</span>
-                  ) : <a className="button-secondary" href={`/reps/${representative.slug}/deliverables/${deliverable.id}/download`}>{t.downloadDeliverable}</a>}
-                </article>
-              );
-            })}
-          </div>
-        </section>
-      ) : null}
-
-      {hasPublicCommerce ? (
-        <section className="representative-visitor-section representative-commerce-section" id="recharge">
-          <div className="representative-visitor-section-heading">
-            <p className="eyebrow">{t.rechargeEyebrow}</p>
-            <h2>
-              {hasSellableCommerce
-                ? t.rechargeTitle
-                : t.commerceHistoryTitle}
-            </h2>
-            <p>
-              {hasSellableCommerce
-                ? t.rechargeSummary(representative.name)
-                : t.commerceHistorySummary}
-            </p>
-          </div>
-          <RepresentativeRechargePanel
-            audienceAuthenticated={Boolean(audienceSession)}
-            collectionEnabled={collectionEnabled}
-            {...(telegramRechargeSource
-              ? { continuationChannel: "telegram" as const }
-              : {})}
-            locale={locale}
-            loginHref={audienceLoginHref}
-            paymentAvailability={paymentAvailability}
-            initialCommerceProducts={visibleCommerceProducts}
-            representativeSlug={representative.slug}
-          />
-        </section>
-      ) : null}
-
-      <section className="representative-trust-section" id="trust">
-        <article className="representative-trust-primary">
-          <p className="eyebrow">{t.trustEyebrow}</p>
-          <h2>{t.trustTitle}</h2>
-          <div className="representative-trust-list">
-            {t.trustItems(runtime.governedContextEnabled).map((item) => <p key={item}>{item}</p>)}
-            <details className="representative-trust-disclosure">
-              <summary>{t.memoryDisclosureTitle(runtime.governedContextEnabled)}</summary>
-              <p>{governedContextDisclosure}</p>
-            </details>
-          </div>
-        </article>
-        <article className="representative-handoff-card" id="handoff">
-          <p className="eyebrow">{t.handoffEyebrow}</p>
-          <h2>
-            {representative.humanInLoop
-              ? t.handoffVisitorTitle(representative.ownerName)
-              : t.handoffUnavailableTitle}
-          </h2>
-          <p>
-            {!representative.humanInLoop
-              ? t.handoffUnavailableDetail
-              : commercePresentation.handoffAccessMode === "FREE"
-                ? representative.handoffPrompt
-                : hasHandoffPackages
-                  ? t.handoffPackageDetail
-                  : t.handoffPackageUnavailableDetail}
-          </p>
-          {representative.humanInLoop && (
-            commercePresentation.handoffAccessMode === "FREE"
-            || hasHandoffPackages
-          ) ? (
-            <a
-              className="button-primary"
-              href={commercePresentation.handoffAccessMode === "PACKAGE_REQUIRED"
-                ? "#recharge"
-                : "#chat"}
-            >
-              {commercePresentation.handoffAccessMode === "PACKAGE_REQUIRED"
-                ? t.openHandoffPackages
-                : t.addHandoffContext}
-            </a>
-          ) : null}
-        </article>
-      </section>
 
       <footer className="representative-visitor-footer">
         <span>{t.footerDisclosure(representative.name)}</span>

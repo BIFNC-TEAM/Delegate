@@ -24,7 +24,7 @@ describe("public representative auth links", () => {
         "telegram-recharge",
       ),
     ).toBe(
-      "/reps/lin-founder-rep/auth/login?returnTo=%2Freps%2Flin-founder-rep%3Fsource%3Dtelegram%26lang%3Dzh%23recharge",
+      "/reps/lin-founder-rep/auth/login?returnTo=%2Freps%2Flin-founder-rep%3Fsource%3Dtelegram%26lang%3Dzh",
     );
     expect(buildPublicAudienceLogoutHref("lin-founder-rep", "en")).toBe(
       "/reps/lin-founder-rep/auth/logout?returnTo=%2Freps%2Flin-founder-rep%3Flang%3Den",

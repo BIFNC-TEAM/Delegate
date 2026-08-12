@@ -17,14 +17,14 @@ const globalStyles = readFileSync(
 );
 
 describe("public representative product shell", () => {
-  it("keeps secondary account, language, and session actions in the top-right account menu", () => {
+  it("keeps only account, language, and logout actions in the top-right menu", () => {
     expect(pageSource).toContain('className="representative-account-menu"');
-    expect(pageSource).toContain("t.accountCommerceLabel");
-    expect(pageSource).toContain("t.accountBindingsLabel");
     expect(pageSource).toContain("t.logoutLabel");
     expect(pageSource).toContain('className="representative-account-language"');
     expect(globalStyles).toContain(".representative-account-popover");
     expect(globalStyles).toContain(".representative-account-avatar");
+    expect(pageSource).not.toContain("t.accountCommerceLabel");
+    expect(pageSource).not.toContain("t.accountBindingsLabel");
     expect(pageSource).not.toContain("representative.languages.map");
   });
 
@@ -41,14 +41,15 @@ describe("public representative product shell", () => {
   it("surfaces a contextual service-package action when continuation requires credits", () => {
     expect(chatSource).toContain("servicePurchaseRequired");
     expect(chatSource).toContain('className="representative-chat-continuation"');
-    expect(chatSource).toContain('<a className="button-primary" href="#recharge">');
+    expect(chatSource).toContain('openProfileSection("services"');
+    expect(chatSource).toContain("REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT");
     expect(chatSource).toContain("t.serviceGateTitle");
     expect(chatSource).toContain("t.lastFreeReplyDetail");
   });
 
-  it("collapses the detailed memory policy behind a visitor-friendly disclosure", () => {
-    expect(pageSource).toContain('className="representative-trust-disclosure"');
-    expect(pageSource).toContain("t.memoryDisclosureTitle");
-    expect(pageSource).toContain("<p>{governedContextDisclosure}</p>");
+  it("moves the detailed memory policy into the right-rail privacy workspace", () => {
+    expect(pageSource).toContain("memoryDisclosure={governedContextDisclosure}");
+    expect(pageSource).toContain("trustItems={t.trustItems(runtime.governedContextEnabled)}");
+    expect(pageSource).not.toContain('className="representative-trust-disclosure"');
   });
 });

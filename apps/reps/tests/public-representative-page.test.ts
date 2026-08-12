@@ -40,11 +40,14 @@ const mockSuccessRouteSource = readFileSync(
 );
 
 describe("public representative visitor-first page", () => {
-  it("places the conversation before supporting information", () => {
+  it("keeps supporting information inside the contextual rail instead of below the chat", () => {
     expect(pageSource.indexOf("<RepresentativeChatPanel")).toBeGreaterThan(-1);
-    expect(pageSource.indexOf('id="about"')).toBeGreaterThan(
-      pageSource.indexOf("<RepresentativeChatPanel"),
-    );
+    expect(pageSource).toContain("profilePanel={(" );
+    expect(pageSource).toContain("<RepresentativeProfileInspector");
+    expect(pageSource).not.toContain('id="identity-bindings"');
+    expect(pageSource).not.toContain('id="about"');
+    expect(pageSource).not.toContain('id="recharge"');
+    expect(pageSource).not.toContain('id="trust"');
   });
 
   it("does not render owner-facing runtime metrics or skill-pack sections", () => {

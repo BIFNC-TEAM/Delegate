@@ -57,12 +57,18 @@ describe("public representative profile inspector", () => {
     expect(inspectorSource).toContain('aria-modal="true"');
     expect(inspectorSource).toContain('event.key === "Escape"');
     expect(inspectorSource).toContain('event.key !== "Tab"');
-    expect(inspectorSource).toContain("bindingHelpTriggerRef.current?.focus()");
+    expect(inspectorSource).toContain("modalTriggerRef.current?.focus()");
+    expect(inspectorSource).toContain("REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT");
+    expect(inspectorSource).toContain('activeModal === "bindings"');
+    expect(inspectorSource).toContain('activeModal === "services"');
+    expect(inspectorSource).toContain('openModal("privacy"');
   });
 
   it("passes only public profile, catalog, resource, and trust projections", () => {
     expect(pageSource).toContain("<RepresentativeProfileInspector");
     expect(pageSource).toContain("packagePreview={profilePackagePreview}");
+    expect(pageSource).toContain("bindingManagement={audienceSession ? (");
+    expect(pageSource).toContain("commerceManagement={hasPublicCommerce ? (");
     expect(pageSource).toContain("resources={profileResources}");
     expect(pageSource).toContain("trustItems={t.trustItems(runtime.governedContextEnabled)}");
     expect(pageSource).not.toContain("providerTransactionId");

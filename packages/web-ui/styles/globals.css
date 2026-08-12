@@ -5854,6 +5854,34 @@ button.skill-row:hover {
   min-height: 44px;
 }
 
+.representative-profile-capabilities {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.representative-profile-capabilities li {
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--marketing-line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.representative-profile-capabilities strong {
+  color: var(--marketing-ink);
+  font-size: 0.78rem;
+}
+
+.representative-profile-capabilities span {
+  color: var(--marketing-soft);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
 .representative-inspector-help {
   display: inline-flex;
   align-items: center;
@@ -6009,6 +6037,26 @@ button.skill-row:hover {
   background: #0d9488;
 }
 
+.representative-inspector-text-action {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--marketing-green-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.representative-inspector-text-action:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .representative-profile-modal {
   position: fixed;
   inset: 0;
@@ -6044,6 +6092,77 @@ button.skill-row:hover {
   background: #ffffff;
   box-shadow: 0 28px 80px rgba(17, 24, 39, 0.24);
   animation: representative-profile-modal-enter 220ms cubic-bezier(0.18, 0.89, 0.32, 1.1) both;
+}
+
+.representative-profile-modal-card.is-workspace {
+  width: min(1120px, 100%);
+  max-height: min(820px, calc(100dvh - 40px));
+}
+
+.representative-profile-modal-workspace {
+  min-width: 0;
+  overflow: auto;
+  padding: 2px;
+}
+
+.representative-profile-management-stack {
+  display: grid;
+  gap: 20px;
+}
+
+.representative-profile-modal-workspace > .setup-stack,
+.representative-profile-management-stack > .setup-stack,
+.representative-profile-management-stack > .representative-capability-card {
+  margin: 0;
+}
+
+.representative-profile-privacy-detail {
+  display: grid;
+  gap: 18px;
+}
+
+.representative-profile-privacy-detail > details {
+  padding: 12px 14px;
+  border: 1px solid var(--marketing-line);
+  border-radius: 9px;
+  background: #f9fafb;
+}
+
+.representative-profile-privacy-detail summary {
+  color: var(--marketing-ink);
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.representative-profile-privacy-detail p {
+  margin: 10px 0 0;
+  color: var(--marketing-soft);
+  font-size: 0.8rem;
+  line-height: 1.65;
+}
+
+.representative-session-panel-body > footer button,
+.representative-chat-usage-note button,
+.representative-chat-trust-note button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--marketing-green-strong);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.representative-session-panel-body > footer button:hover,
+.representative-chat-usage-note button:hover,
+.representative-chat-trust-note button:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 @keyframes representative-profile-modal-enter {

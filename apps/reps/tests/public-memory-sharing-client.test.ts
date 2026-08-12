@@ -20,13 +20,14 @@ const routeSource = readFileSync(
 );
 
 describe("public cross-channel memory consent panel", () => {
-  it("is visible only inside the authenticated cross-channel identity section", () => {
+  it("is visible only inside the authenticated channel-management workspace", () => {
     expect(pageSource).toContain(
       'import { RepresentativeMemorySharingPanel } from "./representative-memory-sharing-panel"',
     );
     expect(pageSource).toMatch(
-      /\{audienceSession \? \([\s\S]*?id="identity-bindings"[\s\S]*?<RepresentativeIdentityBindingPanel[\s\S]*?<RepresentativeMemorySharingPanel[\s\S]*?\) : null\}/u,
+      /bindingManagement=\{audienceSession \? \([\s\S]*?<RepresentativeIdentityBindingPanel[\s\S]*?<RepresentativeMemorySharingPanel[\s\S]*?\) : undefined\}/u,
     );
+    expect(pageSource).not.toContain('id="identity-bindings"');
   });
 
   it("states scope, exclusions, isolation, and immediate withdrawal behavior", () => {

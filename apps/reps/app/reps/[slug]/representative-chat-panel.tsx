@@ -23,6 +23,8 @@ import type { GovernedMemoryDisclosure } from "./governed-context-disclosure";
 import {
   REPRESENTATIVE_PROFILE_RAIL_OPEN_EVENT,
   REPRESENTATIVE_PROFILE_RAIL_STATE_EVENT,
+  REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT,
+  type RepresentativeProfileSection,
 } from "./representative-profile-rail-events";
 import {
   collectPendingMemoryDisplayAcks,
@@ -99,6 +101,7 @@ export function RepresentativeChatPanel(props: {
   freeReplyLimit: number;
   computeEnabled: boolean;
   governedMemoryDisclosure: GovernedMemoryDisclosure;
+  initialProfileSection?: RepresentativeProfileSection;
   serviceCreditPurchaseEnabled: boolean;
   profilePanel?: ReactNode;
 }) {
@@ -186,6 +189,8 @@ export function RepresentativeChatPanel(props: {
       setProfileRailOpen(
         nestedModalOpen
           ? true
+          : props.initialProfileSection
+            ? true
           : storedValue === null
             ? !compact
             : storedValue === "open",
@@ -198,7 +203,7 @@ export function RepresentativeChatPanel(props: {
     applyViewportMode(compactViewport.matches);
     compactViewport.addEventListener("change", handleViewportChange);
     return () => compactViewport.removeEventListener("change", handleViewportChange);
-  }, [props.representativeSlug]);
+  }, [props.initialProfileSection, props.representativeSlug]);
 
   useEffect(() => {
     const openProfileRail = (event: Event) => {
@@ -592,6 +597,22 @@ export function RepresentativeChatPanel(props: {
         else profileRailToggleRef.current?.focus();
       });
     }
+  }
+
+  function openProfileSection(
+    section: RepresentativeProfileSection,
+    opener: HTMLElement,
+  ) {
+    profileRailOpenerRef.current = opener;
+    setProfileRailVisibility(true);
+    window.dispatchEvent(new CustomEvent(REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT, {
+      detail: { opener, section },
+    }));
+  }
+
+  function revealProfileRail(opener: HTMLElement) {
+    profileRailOpenerRef.current = opener;
+    setProfileRailVisibility(true);
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -1178,20 +1199,36 @@ export function RepresentativeChatPanel(props: {
                   </p>
                 </div>
                 {props.serviceCreditPurchaseEnabled ? (
-                  <a className="button-primary" href="#recharge">{t.openRecharge}</a>
+                  <button
+                    className="button-primary"
+                    onClick={(event) => openProfileSection("services", event.currentTarget)}
+                    type="button"
+                  >
+                    {t.openRecharge}
+                  </button>
                 ) : props.humanInLoop ? (
-                  <a className="button-secondary" href="#handoff">{t.handoffAction}</a>
+                  <button
+                    className="button-secondary"
+                    onClick={(event) => revealProfileRail(event.currentTarget)}
+                    type="button"
+                  >
+                    {t.handoffAction}
+                  </button>
                 ) : null}
               </div>
             ) : lastFreeReply ? (
               <div className="representative-chat-usage-note" role="status">
                 <span>{t.lastFreeReplyDetail}</span>
-                <a href="#recharge">{t.previewServices}</a>
+                <button onClick={(event) => openProfileSection("services", event.currentTarget)} type="button">
+                  {t.previewServices}
+                </button>
               </div>
             ) : null}
             <div className="representative-chat-trust-note">
               <span>{t.composerTrustNote(governedContextEnabled)}</span>
-              <a href="#trust">{t.privacyAction}</a>
+              <button onClick={(event) => openProfileSection("privacy", event.currentTarget)} type="button">
+                {t.privacyAction}
+              </button>
             </div>
             <footer className="dashboard-form-footer representative-chat-composer-actions">
               <p className="footer-note" id="representative-composer-guidance">
@@ -1273,26 +1310,26 @@ export function RepresentativeChatPanel(props: {
                 <p>{handoffDetail}</p>
               </div>
               <footer>
-                {props.humanInLoop && (
-                  props.handoffAccessMode === "FREE"
-                  || (
-                    handoffEntitlementStatus === "ready"
-                    && (hasPaidHandoff || props.hasHandoffPackages)
-                  )
-                ) ? (
-                  <a href={props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
-                    ? "#recharge"
-                    : "#handoff"}
+                {props.humanInLoop
+                && props.handoffAccessMode === "PACKAGE_REQUIRED"
+                && handoffEntitlementStatus === "ready"
+                && !hasPaidHandoff
+                && props.hasHandoffPackages ? (
+                  <button
+                    onClick={(event) => openProfileSection("services", event.currentTarget)}
+                    type="button"
                   >
-                    {props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
-                      ? t.handoffPackageAction
-                      : t.handoffAction}
-                  </a>
+                    {t.handoffPackageAction}
+                  </button>
                 ) : null}
                 {accessMode === "FREE" && props.hasTips ? (
-                  <a href="#recharge">{t.optionalSupportAction}</a>
+                  <button onClick={(event) => openProfileSection("services", event.currentTarget)} type="button">
+                    {t.optionalSupportAction}
+                  </button>
                 ) : null}
-                <a href="#trust">{t.privacyAction}</a>
+                <button onClick={(event) => openProfileSection("privacy", event.currentTarget)} type="button">
+                  {t.privacyAction}
+                </button>
               </footer>
             </div>
           </details>

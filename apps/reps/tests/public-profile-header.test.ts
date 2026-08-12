@@ -32,4 +32,10 @@ describe("public representative profile header", () => {
       /@media \(max-width: 640px\)[\s\S]*?\.representative-profile-page \.representative-topbar-identity \{[\s\S]*?display: none;/,
     );
   });
+
+  it("keeps the account popover visible outside the compact utility bar", () => {
+    expect(stylesSource).toMatch(
+      /\.representative-shell\.representative-profile-page \.representative-topbar \{[\s\S]*?overflow: visible;/,
+    );
+  });
 });

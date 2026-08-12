@@ -8131,6 +8131,7 @@ button.skill-row:hover {
 /* Public Profile cascade boundary: keep the chat-first treatment after shared shell rules. */
 .representative-shell.representative-profile-page .representative-topbar {
   grid-template-columns: minmax(0, auto) 1fr auto;
+  overflow: visible;
   width: min(1280px, calc(100vw - 32px));
   min-height: 58px;
   margin: 0 auto 14px;

@@ -17,9 +17,9 @@ const profileSectionEnd = styles.indexOf(
 const profileStyles = styles.slice(profileSectionStart, profileSectionEnd);
 
 describe("public representative profile styling", () => {
-  it("defines the profile stage, dominant conversation, and continuous inspector rail", () => {
+  it("defines the dominant conversation and continuous inspector rail", () => {
     expect(profileSectionStart).toBeGreaterThan(-1);
-    expect(profileStyles).toContain(".representative-profile-stage");
+    expect(profileStyles).not.toContain(".representative-profile-stage");
     expect(profileStyles).toContain(".representative-chat-first-grid");
     expect(profileStyles).toContain(".representative-profile-rail");
     expect(profileStyles).toContain(".representative-profile-inspector");
@@ -44,7 +44,7 @@ describe("public representative profile styling", () => {
     expect(profileStyles).toContain("@media (max-width: 640px)");
     expect(profileStyles).toContain("@media (prefers-reduced-motion: reduce)");
     expect(styles).toContain("height: calc(100svh - 128px)");
-    expect(styles).toContain(".marketing-nav-actions:not(.is-authenticated) > .language-switcher");
+    expect(styles).toContain(".representative-account-language");
     expect(styles).toContain("top: 56px");
     expect(profileStyles).not.toContain("transition: all");
   });

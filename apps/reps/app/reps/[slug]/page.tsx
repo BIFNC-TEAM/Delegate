@@ -35,7 +35,6 @@ import { RepresentativeIdentityBindingPanel } from "./representative-identity-bi
 import { RepresentativeMemorySharingPanel } from "./representative-memory-sharing-panel";
 import { getUsablePublicUrl } from "./public-materials";
 import { RepresentativeProfileInspector } from "./representative-profile-inspector";
-import { RepresentativeProfileRailLink } from "./representative-profile-rail-link";
 import { RepresentativeRechargePanel } from "./representative-recharge-panel";
 import {
   buildPublicAudienceLoginHref,
@@ -245,15 +244,6 @@ export default async function RepresentativePage({
         <span aria-hidden="true" className="representative-topbar-spacer" />
 
         <div className={`marketing-nav-actions${audienceSession ? " is-authenticated" : ""}`}>
-          <RepresentativeProfileRailLink
-            ariaLabel={t.profileInfoAriaLabel}
-            label={t.profileInfoLabel}
-          />
-          <LanguageSwitcher
-            activeLocale={locale}
-            ariaLabel={t.languageAriaLabel}
-            items={languageItems}
-          />
           {audienceSession ? (
             <details className="representative-account-menu">
               <summary aria-label={t.accountMenuAriaLabel}>
@@ -270,9 +260,6 @@ export default async function RepresentativePage({
                   <strong>{t.accountLabel}</strong>
                   <span>{audienceAccountLabel}</span>
                 </div>
-                <a href={buildLocalizedHref(`${siteBaseUrl}/`, locale)}>
-                  {t.homeLabel}
-                </a>
                 <div className="representative-account-language">
                   <span>{t.languageMenuLabel}</span>
                   <LanguageSwitcher
@@ -287,34 +274,33 @@ export default async function RepresentativePage({
               </div>
             </details>
           ) : (
-            <a className="marketing-button-primary dashboard-account-login" href={audienceLoginHref}>
-              {t.loginRegisterLabel}
-            </a>
+            <details className="representative-account-menu representative-guest-menu">
+              <summary aria-label={t.accountMenuAriaLabel}>
+                <span aria-hidden="true" className="representative-account-avatar">
+                  {locale === "zh" ? "访" : "G"}
+                </span>
+                <span className="representative-account-summary-label">
+                  {t.loginRegisterLabel}
+                </span>
+                <span aria-hidden="true" className="representative-account-chevron">⌄</span>
+              </summary>
+              <div className="representative-account-popover">
+                <div className="representative-account-language">
+                  <span>{t.languageMenuLabel}</span>
+                  <LanguageSwitcher
+                    activeLocale={locale}
+                    ariaLabel={t.languageAriaLabel}
+                    items={languageItems}
+                  />
+                </div>
+                <a className="representative-account-login" href={audienceLoginHref}>
+                  {t.loginRegisterLabel}
+                </a>
+              </div>
+            </details>
           )}
         </div>
       </header>
-
-      <section
-        aria-labelledby="representative-profile-title"
-        className="representative-profile-stage"
-        id="overview"
-      >
-        <div aria-hidden="true" className="representative-profile-stage-backdrop">
-          <span className="representative-profile-stage-grid" />
-          <span className="representative-profile-stage-accent" />
-        </div>
-        <div className="representative-profile-intro">
-          <div aria-hidden="true" className="representative-profile-avatar">
-            {representative.name.slice(0, 1).toUpperCase()}
-          </div>
-          <div className="representative-profile-copy">
-            <p className="eyebrow">{t.profileEyebrow}</p>
-            <h1 id="representative-profile-title">{representative.name}</h1>
-            <p className="representative-profile-owner">{t.representing(representative.ownerName)}</p>
-            <p className="representative-profile-summary">{representative.tagline}</p>
-          </div>
-        </div>
-      </section>
 
       <div
         aria-label={t.conversationWorkspaceAriaLabel}
@@ -566,7 +552,6 @@ const copy = {
     aboutNav: "能帮什么",
     resourcesNav: "公开资料",
     trustNav: "隐私与真人",
-    representing: (ownerName: string) => `${ownerName} 的数字代表`,
     publicRepresentative: "公开数字代表",
     startEyebrow: "从这里开始",
     startTitle: "直接说说你想解决什么",
@@ -602,7 +587,6 @@ const copy = {
     language: { zh: "中文", en: "English" },
     languageMenuLabel: "界面语言",
     homeAriaLabel: "返回 Delegate 官网",
-    homeLabel: "官网",
     dashboardLabel: "Dashboard",
     loginRegisterLabel: "登录 / 注册",
     accountLabel: "我的账户",
@@ -610,10 +594,7 @@ const copy = {
     accountCommerceLabel: "我的服务与订单",
     accountBindingsLabel: "账号与渠道绑定",
     logoutLabel: "退出",
-    profileInfoLabel: "信息",
-    profileInfoAriaLabel: "查看代表信息",
     conversationWorkspaceAriaLabel: "与数字代表对话",
-    profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",
     worksForLabel: "Who this representative works for",
@@ -745,7 +726,6 @@ const copy = {
     aboutNav: "What I can do",
     resourcesNav: "Public resources",
     trustNav: "Privacy & human help",
-    representing: (ownerName: string) => `Digital representative for ${ownerName}`,
     publicRepresentative: "Public digital representative",
     startEyebrow: "Start here",
     startTitle: "Tell me what you want to solve",
@@ -781,7 +761,6 @@ const copy = {
     language: { zh: "Chinese", en: "English" },
     languageMenuLabel: "Interface language",
     homeAriaLabel: "Back to Delegate home",
-    homeLabel: "Home",
     dashboardLabel: "Dashboard",
     loginRegisterLabel: "Log in / Sign up",
     accountLabel: "My account",
@@ -789,10 +768,7 @@ const copy = {
     accountCommerceLabel: "My services & orders",
     accountBindingsLabel: "Accounts & channel links",
     logoutLabel: "Log out",
-    profileInfoLabel: "Profile",
-    profileInfoAriaLabel: "View representative profile",
     conversationWorkspaceAriaLabel: "Conversation with the digital representative",
-    profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",
     worksForLabel: "Who this representative works for",

@@ -234,7 +234,6 @@ export function RepresentativeChatPanel(props: {
     const previousOverflow = document.body.style.overflow;
     const backgroundElements = Array.from(document.querySelectorAll<HTMLElement>([
       ".representative-profile-page > .representative-topbar",
-      ".representative-profile-page > .representative-profile-stage",
       ".representative-profile-page .representative-chat-surface",
       ".representative-profile-page > .representative-visitor-section",
       ".representative-profile-page > .representative-trust-section",

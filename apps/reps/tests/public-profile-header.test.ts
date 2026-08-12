@@ -13,24 +13,23 @@ const stylesSource = readFileSync(
 );
 
 describe("public representative profile header", () => {
-  it("keeps the utility bar global and the representative identity in the profile stage", () => {
+  it("keeps only global brand and account controls in the utility bar", () => {
     const topbarStart = pageSource.indexOf('<header className="marketing-topbar representative-topbar">');
     const topbarEnd = pageSource.indexOf("</header>", topbarStart);
     const topbarSource = pageSource.slice(topbarStart, topbarEnd);
-    const stageStart = pageSource.indexOf('className="representative-profile-stage"');
-    const stageEnd = pageSource.indexOf("</section>", stageStart);
-    const stageSource = pageSource.slice(stageStart, stageEnd);
 
     expect(topbarSource).toContain("<strong>Delegate</strong>");
     expect(topbarSource).toContain("{t.publicRepresentative}");
     expect(topbarSource).not.toContain("{representative.name}");
-    expect(stageSource).toContain("{representative.name}");
-    expect(stageSource).not.toContain('className="chip-row"');
+    expect(topbarSource).not.toContain("<RepresentativeProfileRailLink");
+    expect(topbarSource.match(/<LanguageSwitcher/g)).toHaveLength(2);
+    expect(topbarSource.match(/className="representative-account-language"/g)).toHaveLength(2);
+    expect(pageSource).not.toContain('className="representative-profile-stage"');
   });
 
   it("collapses the wordmark copy instead of truncating it on narrow screens", () => {
     expect(stylesSource).toMatch(
-      /@media \(max-width: 640px\)[\s\S]*?\.representative-profile-page \.representative-topbar-identity,[\s\S]*?display: none;/,
+      /@media \(max-width: 640px\)[\s\S]*?\.representative-profile-page \.representative-topbar-identity \{[\s\S]*?display: none;/,
     );
   });
 });

@@ -26,6 +26,9 @@ describe("public representative product shell", () => {
     expect(pageSource).not.toContain("t.accountCommerceLabel");
     expect(pageSource).not.toContain("t.accountBindingsLabel");
     expect(pageSource).not.toContain("representative.languages.map");
+    expect(pageSource).not.toContain("t.homeLabel");
+    expect(pageSource).not.toContain("RepresentativeProfileRailLink");
+    expect(pageSource).toContain('className="representative-account-menu representative-guest-menu"');
   });
 
   it("uses one compact session panel instead of stacked operational cards", () => {

@@ -35,6 +35,8 @@ import { RepresentativeIdentityBindingPanel } from "./representative-identity-bi
 import { RepresentativeMemorySharingPanel } from "./representative-memory-sharing-panel";
 import { getUsablePublicUrl } from "./public-materials";
 import { RepresentativeMaterialPreview } from "./representative-material-preview";
+import { RepresentativeProfileInspector } from "./representative-profile-inspector";
+import { RepresentativeProfileRailLink } from "./representative-profile-rail-link";
 import { RepresentativeRechargePanel } from "./representative-recharge-panel";
 import {
   buildPublicAudienceLoginHref,
@@ -180,6 +182,35 @@ export default async function RepresentativePage({
   const hasPublicCommerce =
     visibleCommerceProducts.length > 0 || hasRestorableCommerceActivity;
   const hasSellableCommerce = visibleCommerceProducts.length > 0;
+  const profilePackageProduct = visibleCommerceProducts.find(
+    (product) => product.kind === "SERVICE_PACKAGE" && product.isRecommended,
+  ) ?? visibleCommerceProducts.find(
+    (product) => product.kind === "SERVICE_PACKAGE",
+  ) ?? null;
+  const profilePackagePreview = profilePackageProduct?.kind === "SERVICE_PACKAGE"
+    ? {
+        name: profilePackageProduct.name,
+        amountCents: profilePackageProduct.amountCents,
+        entitlementUnits: profilePackageProduct.entitlementUnits,
+        includesHumanHandoff: profilePackageProduct.handoffAllowance !== "NONE",
+      }
+    : null;
+  const profileResources = [
+    ...representative.knowledgePack.materials.map((item) => ({
+      id: item.id,
+      title: item.title,
+      kind: "material" as const,
+      href: getUsablePublicUrl(item.url),
+    })),
+    ...publicDeliverables.map((deliverable) => ({
+      id: deliverable.id,
+      title: deliverable.title,
+      kind: "deliverable" as const,
+      href: deliverable.sourceKind === "external_link"
+        ? getUsablePublicUrl(deliverable.externalUrl)
+        : `/reps/${representative.slug}/deliverables/${deliverable.id}/download`,
+    })),
+  ];
   const localizedRepresentativePath = telegramRechargeSource && hasPublicCommerce
     ? `/reps/${representative.slug}?source=telegram#recharge`
     : `/reps/${representative.slug}`;
@@ -201,17 +232,9 @@ export default async function RepresentativePage({
     audienceSession?.email,
     t.accountLabel,
   );
-  const menu = [
-    { href: "#chat", label: t.chatNav },
-    ...(hasPublicCommerce
-      ? [{ href: "#recharge", label: t.rechargeNav }]
-      : []),
-    { href: "#about", label: t.aboutNav },
-    ...(publicResourceCount > 0 ? [{ href: "#resources", label: t.resourcesNav }] : []),
-  ];
 
   return (
-    <main className="marketing-shell representative-shell localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
+    <main className="marketing-shell representative-shell representative-profile-page localized-shell" data-locale={locale} lang={locale === "zh" ? "zh-CN" : "en"}>
       <HashScrollRestorer />
       <header className="marketing-topbar representative-topbar">
         <div className="marketing-brand">
@@ -222,21 +245,23 @@ export default async function RepresentativePage({
           >
             <img className="marketing-brand-mark" src="/D_logo.svg" alt="" />
           </a>
-          <div>
-            <strong>{representative.name}</strong>
+          <div className="representative-topbar-identity">
+            <strong>
+              <span className="representative-topbar-product">Delegate</span>
+              <span aria-hidden="true" className="representative-topbar-separator"> · </span>
+              {representative.name}
+            </strong>
             <div className="muted">{t.representing(representative.ownerName)}</div>
           </div>
         </div>
 
-        <nav aria-label={t.menuAriaLabel} className="marketing-menu-tabs representative-menu-tabs">
-          {menu.map((item) => (
-            <a className="marketing-menu-tab" href={item.href} key={item.href}>
-              {item.label}
-            </a>
-          ))}
-        </nav>
+        <span aria-hidden="true" className="representative-topbar-spacer" />
 
         <div className={`marketing-nav-actions${audienceSession ? " is-authenticated" : ""}`}>
+          <RepresentativeProfileRailLink
+            ariaLabel={t.profileInfoAriaLabel}
+            label={t.profileInfoLabel}
+          />
           <LanguageSwitcher
             activeLocale={locale}
             ariaLabel={t.languageAriaLabel}
@@ -286,46 +311,76 @@ export default async function RepresentativePage({
         </div>
       </header>
 
-      <section className="representative-visitor-hero" id="overview">
-        <div className="representative-visitor-identity">
-          <div aria-hidden="true" className="representative-visitor-avatar">
+      <section
+        aria-labelledby="representative-profile-title"
+        className="representative-profile-stage"
+        id="overview"
+      >
+        <div aria-hidden="true" className="representative-profile-stage-backdrop">
+          <span className="representative-profile-stage-grid" />
+          <span className="representative-profile-stage-accent" />
+        </div>
+        <div className="representative-profile-intro">
+          <div aria-hidden="true" className="representative-profile-avatar">
             {representative.name.slice(0, 1).toUpperCase()}
           </div>
-          <div className="representative-visitor-copy">
-            <p className="eyebrow">{t.publicRepresentative}</p>
-            <h1>{representative.name}</h1>
-            <p className="representative-owner-line">{t.representing(representative.ownerName)}</p>
-            <p className="marketing-lead">{representative.tagline}</p>
+          <div className="representative-profile-copy">
+            <p className="eyebrow">{t.profileEyebrow}</p>
+            <h1 id="representative-profile-title">{representative.name}</h1>
+            <p className="representative-profile-owner">{t.representing(representative.ownerName)}</p>
+            <p className="representative-profile-summary">{representative.tagline}</p>
             <div className="chip-row">
               <span className="chip chip-safe">{t.aiDisclosure}</span>
               {representative.humanInLoop ? <span className="chip">{t.humanAvailable}</span> : null}
             </div>
           </div>
         </div>
-        <div className="representative-visitor-start">
-          <span className="panel-title">{t.startEyebrow}</span>
-          <h2>{t.startTitle}</h2>
-          <p>{t.startSummary(representative.name, runtime.governedContextEnabled)}</p>
-          <a className="button-primary" href="#chat">{t.startChat}</a>
-        </div>
       </section>
 
-      <RepresentativeChatPanel
-        computeEnabled={representative.compute.enabled}
-        accessMode={runtime.accessMode}
-        freeReplyLimit={representative.contract.freeReplyLimit}
-        governedMemoryDisclosure={runtime.governedMemoryDisclosure}
-        handoffAccessMode={commercePresentation.handoffAccessMode}
-        hasHandoffPackages={hasHandoffPackages}
-        hasServicePackages={hasServicePackages}
-        hasTips={hasTips}
-        humanInLoop={representative.humanInLoop}
-        locale={locale}
-        ownerName={representative.ownerName}
-        representativeName={representative.name}
-        representativeSlug={representative.slug}
-        serviceCreditPurchaseEnabled={hasServicePackages && collectionEnabled}
-      />
+      <div
+        aria-label={t.conversationWorkspaceAriaLabel}
+        className="representative-profile-workspace"
+        role="region"
+      >
+        <RepresentativeChatPanel
+          computeEnabled={representative.compute.enabled}
+          accessMode={runtime.accessMode}
+          freeReplyLimit={representative.contract.freeReplyLimit}
+          governedMemoryDisclosure={runtime.governedMemoryDisclosure}
+          handoffAccessMode={commercePresentation.handoffAccessMode}
+          hasHandoffPackages={hasHandoffPackages}
+          hasServicePackages={hasServicePackages}
+          hasTips={hasTips}
+          humanInLoop={representative.humanInLoop}
+          locale={locale}
+          ownerName={representative.ownerName}
+          representativeName={representative.name}
+          representativeSlug={representative.slug}
+          serviceCreditPurchaseEnabled={hasServicePackages && collectionEnabled}
+          profilePanel={(
+            <RepresentativeProfileInspector
+              audienceAuthenticated={Boolean(audienceSession)}
+              faq={representative.knowledgePack.faq.map((item) => ({
+                id: item.id,
+                title: item.title,
+                summary: item.summary,
+              }))}
+              hasPublicCommerce={hasPublicCommerce}
+              humanInLoop={representative.humanInLoop}
+              identityBindingsHref="#identity-bindings"
+              locale={locale}
+              loginHref={audienceLoginHref}
+              ownerName={representative.ownerName}
+              packagePreview={profilePackagePreview}
+              representativeName={representative.name}
+              representativeSlug={representative.slug}
+              resources={profileResources}
+              tagline={representative.tagline}
+              trustItems={t.trustItems(runtime.governedContextEnabled)}
+            />
+          )}
+        />
+      </div>
 
       {audienceSession ? (
         <section className="representative-visitor-section" id="identity-bindings">
@@ -698,6 +753,9 @@ const copy = {
     accountCommerceLabel: "我的服务与订单",
     accountBindingsLabel: "账号与渠道绑定",
     logoutLabel: "退出",
+    profileInfoLabel: "信息",
+    profileInfoAriaLabel: "查看代表信息",
+    conversationWorkspaceAriaLabel: "与数字代表对话",
     profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",
@@ -876,6 +934,9 @@ const copy = {
     accountCommerceLabel: "My services & orders",
     accountBindingsLabel: "Accounts & channel links",
     logoutLabel: "Log out",
+    profileInfoLabel: "Profile",
+    profileInfoAriaLabel: "View representative profile",
+    conversationWorkspaceAriaLabel: "Conversation with the digital representative",
     profileEyebrow: "Representative Profile",
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",

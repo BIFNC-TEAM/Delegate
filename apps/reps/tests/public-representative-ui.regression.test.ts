@@ -29,7 +29,10 @@ describe("public representative product shell", () => {
   });
 
   it("uses one compact session panel instead of stacked operational cards", () => {
-    expect(chatSource).toContain('className="representative-session-panel"');
+    expect(chatSource).toContain(
+      'className="representative-session-panel representative-session-details"',
+    );
+    expect(chatSource).toContain('className="representative-session-panel-body"');
     expect(chatSource).not.toContain("representative-session-state");
     expect(chatSource).not.toContain("representative-chat-memory-note");
     expect(chatSource).toContain('className="representative-chat-trust-note"');

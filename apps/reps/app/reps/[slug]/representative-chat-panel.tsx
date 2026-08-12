@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import type { PublicWebAnswerSourceDisclosure } from "@delegate/web-data";
 
@@ -20,6 +21,10 @@ import {
 } from "./public-wallet-client";
 import type { GovernedMemoryDisclosure } from "./governed-context-disclosure";
 import {
+  REPRESENTATIVE_PROFILE_RAIL_OPEN_EVENT,
+  REPRESENTATIVE_PROFILE_RAIL_STATE_EVENT,
+} from "./representative-profile-rail-events";
+import {
   collectPendingMemoryDisplayAcks,
   memoryDisplayAckKey,
   sendPublicMemoryDisplayAck,
@@ -32,6 +37,7 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  createdAt?: string;
   status?: string;
   citations?: Citation[];
   attachments?: ChatAttachment[];
@@ -68,6 +74,16 @@ type PublicChatAccepted = {
 };
 
 const RUN_SUBSCRIPTION_DEADLINE_MS = 150_000;
+const PROFILE_RAIL_COMPACT_QUERY = "(max-width: 1180px)";
+const PROFILE_RAIL_FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "summary",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
 
 export function RepresentativeChatPanel(props: {
   representativeSlug: string;
@@ -84,6 +100,7 @@ export function RepresentativeChatPanel(props: {
   computeEnabled: boolean;
   governedMemoryDisclosure: GovernedMemoryDisclosure;
   serviceCreditPurchaseEnabled: boolean;
+  profilePanel?: ReactNode;
 }) {
   const t = props.locale === "zh" ? zhCopy : enCopy;
   const [governedMemoryDisclosure, setGovernedMemoryDisclosure] = useState(
@@ -98,6 +115,11 @@ export function RepresentativeChatPanel(props: {
   const acknowledgedDisplayKeysRef = useRef(new Set<string>());
   const displayAckRetryTimersRef = useRef(new Set<number>());
   const displayAckMountedRef = useRef(false);
+  const copyFeedbackTimerRef = useRef<number | null>(null);
+  const profileRailToggleRef = useRef<HTMLButtonElement>(null);
+  const profileRailRef = useRef<HTMLElement>(null);
+  const profileRailCloseRef = useRef<HTMLButtonElement>(null);
+  const profileRailOpenerRef = useRef<HTMLElement | null>(null);
   const previousReservedCreditsRef = useRef(0);
   const [showServices, setShowServices] = useState(
     props.accessMode === "CREDITS_ONLY",
@@ -135,10 +157,141 @@ export function RepresentativeChatPanel(props: {
     unlimitedFreeAccess: props.accessMode === "FREE",
   });
   const [humanActive, setHumanActive] = useState(false);
+  const [conversationState, setConversationState] = useState("new");
   const [busy, setBusy] = useState(false);
   const [hydrating, setHydrating] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [copyFailedMessageId, setCopyFailedMessageId] = useState<string | null>(null);
+  const [profileRailOpen, setProfileRailOpen] = useState(false);
+  const [profileRailReady, setProfileRailReady] = useState(false);
+  const [profileRailCompact, setProfileRailCompact] = useState(false);
   const computeAssist = getComputeAssist(input, props.locale, props.computeEnabled);
+
+  useEffect(() => {
+    const compactViewport = window.matchMedia(PROFILE_RAIL_COMPACT_QUERY);
+    const applyViewportMode = (compact: boolean) => {
+      const storageKey = `delegate:representative-profile-rail:${props.representativeSlug}:${compact ? "compact" : "wide"}`;
+      let storedValue: string | null = null;
+      try {
+        storedValue = window.localStorage.getItem(storageKey);
+      } catch {
+        // A browser privacy policy can deny storage. The viewport default still
+        // leaves the disclosure control usable for this visit.
+      }
+      const nestedModalOpen = Boolean(document.querySelector(
+        ".representative-profile-modal",
+      ));
+      setProfileRailCompact(compact);
+      setProfileRailOpen(
+        nestedModalOpen
+          ? true
+          : storedValue === null
+            ? !compact
+            : storedValue === "open",
+      );
+      setProfileRailReady(true);
+    };
+    const handleViewportChange = (event: MediaQueryListEvent) => {
+      applyViewportMode(event.matches);
+    };
+    applyViewportMode(compactViewport.matches);
+    compactViewport.addEventListener("change", handleViewportChange);
+    return () => compactViewport.removeEventListener("change", handleViewportChange);
+  }, [props.representativeSlug]);
+
+  useEffect(() => {
+    const openProfileRail = (event: Event) => {
+      const opener = (event as CustomEvent<{ opener?: HTMLElement }>).detail?.opener;
+      profileRailOpenerRef.current = opener?.isConnected
+        ? opener
+        : document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      setProfileRailVisibility(true);
+    };
+    window.addEventListener(REPRESENTATIVE_PROFILE_RAIL_OPEN_EVENT, openProfileRail);
+    return () => window.removeEventListener(
+      REPRESENTATIVE_PROFILE_RAIL_OPEN_EVENT,
+      openProfileRail,
+    );
+  }, [profileRailCompact]);
+
+  useEffect(() => {
+    if (!profileRailReady) return;
+    window.dispatchEvent(new CustomEvent(REPRESENTATIVE_PROFILE_RAIL_STATE_EVENT, {
+      detail: { open: profileRailOpen },
+    }));
+  }, [profileRailOpen, profileRailReady]);
+
+  useEffect(() => {
+    if (!profileRailOpen || !profileRailCompact) return;
+    const previousOverflow = document.body.style.overflow;
+    const backgroundElements = Array.from(document.querySelectorAll<HTMLElement>([
+      ".representative-profile-page > .representative-topbar",
+      ".representative-profile-page > .representative-profile-stage",
+      ".representative-profile-page .representative-chat-surface",
+      ".representative-profile-page > .representative-visitor-section",
+      ".representative-profile-page > .representative-trust-section",
+      ".representative-profile-page > .representative-visitor-footer",
+    ].join(",")));
+    const backgroundState = backgroundElements.map((element) => ({
+      ariaHidden: element.getAttribute("aria-hidden"),
+      element,
+      inert: element.inert,
+    }));
+    if (!document.querySelector(".representative-profile-modal")) {
+      profileRailCloseRef.current?.focus();
+    }
+    document.body.style.overflow = "hidden";
+    for (const { element } of backgroundState) {
+      element.inert = true;
+      element.setAttribute("aria-hidden", "true");
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (document.querySelector(".representative-profile-modal")) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setProfileRailVisibility(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const rail = profileRailRef.current;
+      if (!rail) return;
+      const focusable = Array.from(
+        rail.querySelectorAll<HTMLElement>(PROFILE_RAIL_FOCUSABLE_SELECTOR),
+      ).filter((element) => (
+        !element.hidden
+        && !element.closest("[inert]")
+        && element.getAttribute("aria-hidden") !== "true"
+        && element.getClientRects().length > 0
+      ));
+      if (!focusable.length) {
+        event.preventDefault();
+        rail.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      for (const { ariaHidden, element, inert } of backgroundState) {
+        element.inert = inert;
+        if (ariaHidden === null) element.removeAttribute("aria-hidden");
+        else element.setAttribute("aria-hidden", ariaHidden);
+      }
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [profileRailCompact, profileRailOpen]);
 
   useEffect(() => {
     let cancelled = false;
@@ -152,6 +305,7 @@ export function RepresentativeChatPanel(props: {
             id: message.id,
             role: message.role,
             text: message.text,
+            createdAt: message.createdAt,
             senderType: message.senderType,
             ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
             ...(message.status ? { status: message.status } : {}),
@@ -161,11 +315,15 @@ export function RepresentativeChatPanel(props: {
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
           })));
         }
+        setConversationState(payload.state);
         setHumanActive(payload.humanActive);
         setUsage(payload.usage);
       })
       .catch((historyError) => {
-        if (!cancelled) setError(historyError instanceof Error ? historyError.message : t.errorGeneric);
+        if (!cancelled) {
+          setConversationState("unavailable");
+          setError(historyError instanceof Error ? historyError.message : t.errorGeneric);
+        }
       })
       .finally(() => {
         if (!cancelled) setHydrating(false);
@@ -184,6 +342,7 @@ export function RepresentativeChatPanel(props: {
             id: message.id,
             role: message.role,
             text: message.text,
+            createdAt: message.createdAt,
             senderType: message.senderType,
             ...(message.senderDisplayName ? { senderDisplayName: message.senderDisplayName } : {}),
             ...(message.status ? { status: message.status } : {}),
@@ -193,6 +352,7 @@ export function RepresentativeChatPanel(props: {
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
           })));
         }
+        setConversationState(payload.state);
         setHumanActive(payload.humanActive);
         setUsage(payload.usage);
       } catch {
@@ -209,6 +369,9 @@ export function RepresentativeChatPanel(props: {
       activeRunSourceRef.current?.close();
       if (activeRunTimeoutRef.current !== null) {
         window.clearTimeout(activeRunTimeoutRef.current);
+      }
+      if (copyFeedbackTimerRef.current !== null) {
+        window.clearTimeout(copyFeedbackTimerRef.current);
       }
       for (const timer of displayAckRetryTimersRef.current) {
         window.clearTimeout(timer);
@@ -337,7 +500,7 @@ export function RepresentativeChatPanel(props: {
   }, [props.representativeSlug, t.serviceCreditPending]);
 
   useEffect(() => {
-    if (!keepChatPinnedRef.current) return;
+    if (!keepChatPinnedRef.current || messages.length <= 1) return;
     const frame = window.requestAnimationFrame(() => {
       const chatLog = chatLogRef.current;
       if (chatLog) chatLog.scrollTop = chatLog.scrollHeight;
@@ -386,12 +549,64 @@ export function RepresentativeChatPanel(props: {
     requestAnimationFrame(() => inputRef.current?.focus());
   }
 
+  async function handleCopyMessage(message: ChatMessage) {
+    try {
+      await copyTextToClipboard(message.text);
+      setCopiedMessageId(message.id);
+      setCopyFailedMessageId(null);
+      if (copyFeedbackTimerRef.current !== null) {
+        window.clearTimeout(copyFeedbackTimerRef.current);
+      }
+      copyFeedbackTimerRef.current = window.setTimeout(() => {
+        setCopiedMessageId((current) => current === message.id ? null : current);
+        setCopyFailedMessageId((current) => current === message.id ? null : current);
+        copyFeedbackTimerRef.current = null;
+      }, 1_800);
+    } catch {
+      setCopiedMessageId(null);
+      setCopyFailedMessageId(message.id);
+      if (copyFeedbackTimerRef.current !== null) {
+        window.clearTimeout(copyFeedbackTimerRef.current);
+      }
+      copyFeedbackTimerRef.current = window.setTimeout(() => {
+        setCopyFailedMessageId((current) => current === message.id ? null : current);
+        copyFeedbackTimerRef.current = null;
+      }, 1_800);
+    }
+  }
+
+  function setProfileRailVisibility(nextOpen: boolean) {
+    setProfileRailOpen(nextOpen);
+    try {
+      window.localStorage.setItem(
+        `delegate:representative-profile-rail:${props.representativeSlug}:${profileRailCompact ? "compact" : "wide"}`,
+        nextOpen ? "open" : "closed",
+      );
+    } catch {
+      // The control remains functional for this visit when storage is denied.
+    }
+    if (!nextOpen) {
+      const opener = profileRailOpenerRef.current;
+      requestAnimationFrame(() => {
+        if (opener?.isConnected) opener.focus();
+        else profileRailToggleRef.current?.focus();
+      });
+    }
+  }
+
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = input.trim();
-    if (!text || busy) return;
+    if (!text || busy || hydrating) return;
     keepChatPinnedRef.current = true;
-    const userMessage = { id: createClientMessageId(), role: "user" as const, text, status: "accepted" };
+    const userMessage = {
+      id: createClientMessageId(),
+      role: "user" as const,
+      text,
+      status: "accepted",
+      senderType: "audience",
+      createdAt: new Date().toISOString(),
+    };
     setMessages((current) => [...current, userMessage]);
     setInput("");
     setBusy(true);
@@ -471,15 +686,29 @@ export function RepresentativeChatPanel(props: {
           id: `assistant-${Date.now()}`,
           role: "assistant",
           text: payload.reply.text,
+          senderType: "representative",
+          createdAt: new Date().toISOString(),
           status: "completed",
           ...(payload.reply.sourceDisclosure
             ? { sourceDisclosure: payload.reply.sourceDisclosure }
             : {}),
         });
         setBusy(false);
+        setConversationState("active");
       } else if (payload.heldForOperator || payload.status === "waiting_human") {
-        setHumanActive(true);
-        appendAssistant({ id: `handoff-${Date.now()}`, role: "assistant", text: t.humanQueueNotice, status: "waiting_human" });
+        // The acceptance response proves that AI generation was held, but it
+        // cannot distinguish an existing human assignment from a new queue
+        // request. Preserve the last authoritative assignment flag until the
+        // conversation stream supplies the exact state.
+        setConversationState(payload.status);
+        appendAssistant({
+          id: `handoff-${Date.now()}`,
+          role: "assistant",
+          text: t.humanQueueNotice,
+          senderType: "system",
+          createdAt: new Date().toISOString(),
+          status: "waiting_human",
+        });
         setBusy(false);
       } else if (payload.runId) {
         subscribeToRun(payload.runId);
@@ -531,6 +760,7 @@ export function RepresentativeChatPanel(props: {
             id: string;
             text: string;
             status: string;
+            createdAt?: string;
             citations: Citation[];
             attachments?: ChatAttachment[];
             displayAck?: PublicMemoryDisplayAck;
@@ -542,6 +772,8 @@ export function RepresentativeChatPanel(props: {
             id: snapshot.message.id,
             role: "assistant",
             text: snapshot.message.text,
+            senderType: "representative",
+            createdAt: snapshot.message.createdAt || new Date().toISOString(),
             status: snapshot.message.status,
             citations: snapshot.message.citations,
             ...(snapshot.message.attachments?.length ? { attachments: snapshot.message.attachments } : {}),
@@ -550,6 +782,7 @@ export function RepresentativeChatPanel(props: {
               ? { sourceDisclosure: snapshot.message.sourceDisclosure }
               : {}),
           });
+          setConversationState("active");
           finish();
         } else if (["failed", "canceled"].includes(snapshot.status)) {
           setError(snapshot.errorMessage || t.errorGeneric);
@@ -572,6 +805,11 @@ export function RepresentativeChatPanel(props: {
   }
 
   const accessMode = usage.accessMode ?? props.accessMode;
+  const accessPresentation = accessMode === "FREE"
+    ? t.unlimitedFreeAccess
+    : accessMode === "CREDITS_ONLY"
+      ? t.creditsOnlyAccess
+      : t.trialAccess(usage.freeRepliesRemaining, props.freeReplyLimit);
   const hasPaidHandoff =
     handoffEntitlement.hasUnlimited
     || handoffEntitlement.limitedRemainingUses > 0;
@@ -627,25 +865,61 @@ export function RepresentativeChatPanel(props: {
       t.serviceCreditUnavailableWithHandoff,
     ].includes(error),
   );
+  const responder = resolveResponderPresentation({
+    busy,
+    conversationState,
+    humanActive,
+    hydrating,
+    locale: props.locale,
+  });
+  const composerDescription = [
+    computeAssist ? "representative-compute-assist" : null,
+    "representative-composer-guidance",
+  ].filter(Boolean).join(" ");
 
   return (
     <section className="representative-conversation-shell" id="chat">
-      <header className="representative-conversation-heading">
-        <div>
-          <p className="eyebrow">{t.eyebrow}</p>
-          <h2>{t.title(props.representativeName)}</h2>
-          <p>{t.summary(governedContextEnabled)}</p>
-        </div>
-        <span className={humanActive ? "representative-responder-pill is-human" : "representative-responder-pill"}>
-          <i aria-hidden="true" />{humanActive ? t.humanStatus : t.aiStatus}
-        </span>
-      </header>
-
-      <div className="representative-chat-first-grid">
+      <div className={`representative-chat-first-grid${profileRailOpen ? " is-profile-open" : " is-profile-collapsed"}${profileRailReady ? "" : " is-profile-pending"}`}>
         <div className={messages.length <= 1 ? "representative-chat-surface is-empty" : "representative-chat-surface"}>
+          <header className="representative-conversation-heading representative-chat-header">
+            <div>
+              <p className="eyebrow">{t.eyebrow}</p>
+              <h2>{t.title(props.representativeName)}</h2>
+              <p>{t.summary(governedContextEnabled)}</p>
+            </div>
+            <div className="representative-conversation-controls">
+              <div className={`representative-conversation-status is-${responder.kind}`} aria-live="polite">
+                <span className="representative-conversation-status-avatar" aria-hidden="true">
+                  {humanActive ? t.humanStatusAvatar : getAvatarInitials(props.representativeName)}
+                </span>
+                <span>
+                  <small>{t.currentResponder}</small>
+                  <strong className={`representative-responder-pill is-${responder.kind}`}>
+                    <i aria-hidden="true" />{responder.label}
+                  </strong>
+                </span>
+              </div>
+              <button
+                aria-controls="representative-profile-rail"
+                aria-expanded={profileRailOpen}
+                aria-haspopup={profileRailCompact ? "dialog" : undefined}
+                className="representative-profile-rail-toggle"
+                onClick={(event) => {
+                  profileRailOpenerRef.current = event.currentTarget;
+                  setProfileRailVisibility(!profileRailOpen);
+                }}
+                ref={profileRailToggleRef}
+                type="button"
+              >
+                <ProfilePanelIcon />
+                <span>{profileRailOpen ? t.hideProfilePanel : t.showProfilePanel}</span>
+              </button>
+            </div>
+          </header>
           <div
             ref={chatLogRef}
             className="representative-chat-log"
+            aria-busy={busy}
             aria-live="polite"
             onScroll={(event) => {
               const chatLog = event.currentTarget;
@@ -656,16 +930,109 @@ export function RepresentativeChatPanel(props: {
             {messages.map((message) => {
               const visibleStatus = getVisitorMessageStatus(message.status, props.locale);
               const isOperator = message.senderType === "operator";
+              const isSystem = message.senderType === "system" || message.senderType === "tool";
+              const isCopied = copiedMessageId === message.id;
+              const isCopyFailed = copyFailedMessageId === message.id;
+              const senderName = message.role === "user"
+                ? t.youLabel
+                : isOperator
+                  ? message.senderDisplayName || props.ownerName
+                  : isSystem
+                    ? message.senderType === "tool" ? t.taskUpdateLabel : t.systemLabel
+                    : props.representativeName;
+              const senderRole = message.role === "user"
+                ? t.visitorLabel
+                : isOperator
+                  ? t.humanLabel
+                  : isSystem
+                    ? t.systemRoleLabel
+                    : t.aiLabel;
+              const displayTime = formatMessageTime(message.createdAt, props.locale, t.justNow);
+              const displayDateTime = formatMessageDateTime(message.createdAt, props.locale);
+
+              if (isSystem) {
+                return (
+                  <article className={`representative-system-message${message.senderType === "tool" ? " is-task-update" : ""}`} key={message.id}>
+                    <span className="representative-system-message-icon" aria-hidden="true">i</span>
+                    <div className="representative-system-message-content">
+                      <header>
+                        <strong>{senderName}</strong>
+                        <time dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>
+                      </header>
+                      <p>{message.text}</p>
+                      {message.citations?.length ? (
+                        <div className="representative-chat-citations">
+                          <strong>{t.citationsLabel}</strong>
+                          {message.citations.map((citation) => (
+                            <details key={`${message.id}:${citation.title}`}>
+                              <summary>{citation.title}</summary>
+                              {citation.excerpt ? <small>{citation.excerpt}</small> : null}
+                              {citation.uri ? <a href={citation.uri} rel="noreferrer" target="_blank">{t.openSource}</a> : null}
+                            </details>
+                          ))}
+                        </div>
+                      ) : null}
+                      {message.attachments?.length ? (
+                        <div className="representative-chat-artifacts">
+                          <strong>{t.artifactsLabel}</strong>
+                          {message.attachments.map((attachment) => (
+                            <div className="representative-chat-artifact" key={attachment.id}>
+                              {attachment.mimeType?.startsWith("image/") && attachment.url ? (
+                                <img alt={attachment.fileName} src={`${attachment.url}?inline=1`} />
+                              ) : null}
+                              <div>
+                                <span>{attachment.fileName}</span>
+                                <small>{[attachment.mimeType, formatAttachmentBytes(attachment.sizeBytes)].filter(Boolean).join(" · ")}</small>
+                              </div>
+                              {attachment.url ? <a href={attachment.url}>{t.downloadArtifact}</a> : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                      <footer>
+                        {visibleStatus ? <span className="representative-message-status">{visibleStatus}</span> : null}
+                        <button
+                          aria-label={isCopied
+                            ? t.copiedAction
+                            : isCopyFailed
+                              ? t.copyFailedAction
+                              : t.copyMessageAction(senderName)}
+                          className={`representative-message-copy${isCopied ? " is-copied" : ""}${isCopyFailed ? " is-failed" : ""}`}
+                          onClick={() => void handleCopyMessage(message)}
+                          title={isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
+                          type="button"
+                        >
+                          <CopyIcon />
+                          <span aria-live="polite">
+                            {isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
+                          </span>
+                        </button>
+                      </footer>
+                    </div>
+                  </article>
+                );
+              }
+
               return (
                 <article className={`representative-chat-message representative-chat-message-${message.role}${isOperator ? " is-operator" : ""}`} key={message.id}>
-                  <span className="panel-title">{
-                    message.role === "user"
-                      ? t.youLabel
-                      : isOperator
-                        ? `${message.senderDisplayName || props.ownerName} · ${t.humanLabel}`
-                        : `${props.representativeName} · ${t.aiLabel}`
-                  }</span>
-                  <p>{message.text}</p>
+                  <div
+                    aria-label={message.role === "user" ? t.visitorAvatarLabel : isOperator ? t.humanAvatarLabel(senderName) : t.aiAvatarLabel(senderName)}
+                    className={`representative-message-avatar${message.role === "user" ? " is-visitor" : isOperator ? " is-operator" : " is-ai"}`}
+                    role="img"
+                  >
+                    <span aria-hidden="true">{getAvatarInitials(senderName)}</span>
+                    {!isOperator && message.role === "assistant" ? (
+                      <b aria-label={t.aiAvatarBadgeLabel}>AI</b>
+                    ) : null}
+                  </div>
+                  <div className="representative-message-content">
+                    <header className="representative-message-meta">
+                      <strong>{senderName}</strong>
+                      <span>{senderRole}</span>
+                      <time dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>
+                    </header>
+                    <div className="representative-message-bubble">
+                      <p>{message.text}</p>
                   {message.role === "assistant"
                     && message.sourceDisclosure === "general_model"
                     && !isOperator ? (
@@ -673,7 +1040,6 @@ export function RepresentativeChatPanel(props: {
                       {t.generalModelSourceDisclosure}
                     </small>
                   ) : null}
-                  {visibleStatus ? <span className="representative-message-status">{visibleStatus}</span> : null}
                   {message.citations?.length ? (
                     <div className="representative-chat-citations">
                       <strong>{t.citationsLabel}</strong>
@@ -703,10 +1069,44 @@ export function RepresentativeChatPanel(props: {
                       ))}
                     </div>
                   ) : null}
+                    </div>
+                    <footer className="representative-message-actions">
+                      {visibleStatus ? <span className="representative-message-status">{visibleStatus}</span> : null}
+                      <button
+                        aria-label={isCopied
+                          ? t.copiedAction
+                          : isCopyFailed
+                            ? t.copyFailedAction
+                            : t.copyMessageAction(senderName)}
+                        className={`representative-message-copy${isCopied ? " is-copied" : ""}${isCopyFailed ? " is-failed" : ""}`}
+                        onClick={() => void handleCopyMessage(message)}
+                        title={isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
+                        type="button"
+                      >
+                        <CopyIcon />
+                        <span aria-live="polite">
+                          {isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
+                        </span>
+                      </button>
+                    </footer>
+                  </div>
                 </article>
               );
             })}
-            {busy ? <article className="representative-chat-message representative-chat-message-assistant is-pending"><span className="panel-title">{props.representativeName} · {t.aiLabel}</span><p>{t.thinking(governedContextEnabled)}</p></article> : null}
+            {busy && responder.kind === "ai" ? (
+              <article className="representative-chat-message representative-chat-message-assistant is-pending">
+                <div aria-label={t.aiAvatarLabel(props.representativeName)} className="representative-message-avatar is-ai" role="img">
+                  <span aria-hidden="true">{getAvatarInitials(props.representativeName)}</span>
+                  <b aria-label={t.aiAvatarBadgeLabel}>AI</b>
+                </div>
+                <div className="representative-message-content">
+                  <header className="representative-message-meta">
+                    <strong>{props.representativeName}</strong><span>{t.aiLabel}</span><time>{t.justNow}</time>
+                  </header>
+                  <div className="representative-message-bubble"><p>{t.thinking(governedContextEnabled)}</p></div>
+                </div>
+              </article>
+            ) : null}
           </div>
 
           {messages.length <= 1 ? (
@@ -716,9 +1116,38 @@ export function RepresentativeChatPanel(props: {
             </div>
           ) : null}
 
-          <form className="representative-chat-form" onSubmit={handleSubmit}>
-            <label className="panel-title" htmlFor="representative-chat-input">{t.inputLabel}</label>
-            <textarea aria-describedby={computeAssist ? "representative-compute-assist" : undefined} className="dashboard-textarea representative-chat-textarea" id="representative-chat-input" onChange={(event) => setInput(event.target.value)} placeholder={t.placeholder} ref={inputRef} rows={3} value={input} />
+          <form className="representative-chat-form representative-chat-composer" onSubmit={handleSubmit}>
+            <header className="representative-chat-composer-header">
+              <label className="panel-title" htmlFor="representative-chat-input">{t.inputLabel}</label>
+              <span>{responder.kind === "human"
+                ? t.humanComposerContext
+                : responder.kind === "waiting"
+                  ? t.waitingComposerContext
+                  : t.aiComposerContext}</span>
+            </header>
+            <div className="representative-chat-composer-body">
+              <textarea
+                aria-describedby={composerDescription}
+                className="dashboard-textarea representative-chat-textarea"
+                id="representative-chat-input"
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (
+                    event.key !== "Enter"
+                    || event.shiftKey
+                    || event.nativeEvent.isComposing
+                    || hydrating
+                    || busy
+                  ) return;
+                  event.preventDefault();
+                  event.currentTarget.form?.requestSubmit();
+                }}
+                placeholder={t.placeholder}
+                ref={inputRef}
+                rows={3}
+                value={input}
+              />
+            </div>
             {computeAssist ? (
               <div className="representative-compute-assist" id="representative-compute-assist" role="status">
                 <div><strong>{computeAssist.title}</strong><span>{computeAssist.detail}</span></div>
@@ -764,65 +1193,110 @@ export function RepresentativeChatPanel(props: {
               <span>{t.composerTrustNote(governedContextEnabled)}</span>
               <a href="#trust">{t.privacyAction}</a>
             </div>
-            <div className="dashboard-form-footer"><p className="footer-note">{t.footnote}</p><div className="button-row"><button className="button-primary" disabled={busy || hydrating || !input.trim()} type="submit">{hydrating ? t.loadingHistory : busy ? t.sending : t.send}</button></div></div>
+            <footer className="dashboard-form-footer representative-chat-composer-actions">
+              <p className="footer-note" id="representative-composer-guidance">
+                <span>{t.footnote}</span>
+                <kbd>{t.keyboardHint}</kbd>
+              </p>
+              <div className="button-row">
+                <button
+                  aria-label={hydrating ? t.loadingHistory : busy ? t.sending : t.sendMessageAction}
+                  className="button-primary representative-chat-send"
+                  disabled={busy || hydrating || !input.trim()}
+                  type="submit"
+                >
+                  <span>{hydrating ? t.loadingHistory : busy ? t.sending : t.send}</span>
+                  <span aria-hidden="true">&#8593;</span>
+                </button>
+              </div>
+            </footer>
           </form>
           {error && !serviceGateCoversError ? <p className="feedback-error" role="alert">{error}</p> : null}
         </div>
 
-        <aside className="representative-session-sidebar" aria-label={t.sessionLabel}>
-          <section className="representative-session-panel">
-            <header>
-              <span className="panel-title">{t.sessionLabel}</span>
-            </header>
-            <div className="representative-session-row">
-              <span>{t.accessModeLabel}</span>
-              <strong>
-                {accessMode === "FREE"
-                  ? t.unlimitedFreeAccess
-                  : accessMode === "CREDITS_ONLY"
-                    ? t.creditsOnlyAccess
-                    : t.trialAccess(
-                        usage.freeRepliesRemaining,
-                        props.freeReplyLimit,
-                      )}
-              </strong>
+        <button
+          aria-label={t.closeProfilePanel}
+          className={`representative-profile-rail-backdrop${profileRailOpen ? " is-open" : ""}`}
+          onClick={() => setProfileRailVisibility(false)}
+          tabIndex={profileRailOpen ? 0 : -1}
+          type="button"
+        />
+        <aside
+          aria-label={t.profilePanelLabel}
+          aria-modal={profileRailCompact ? true : undefined}
+          className={`representative-session-sidebar representative-profile-rail${profileRailOpen ? " is-open" : " is-collapsed"}`}
+          id="representative-profile-rail"
+          ref={profileRailRef}
+          role={profileRailCompact ? "dialog" : undefined}
+          tabIndex={profileRailCompact ? -1 : undefined}
+        >
+          <header className="representative-profile-rail-header">
+            <strong>{t.profilePanelLabel}</strong>
+            <button
+              aria-label={t.closeProfilePanel}
+              onClick={() => setProfileRailVisibility(false)}
+              ref={profileRailCloseRef}
+              type="button"
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+          </header>
+          <details className="representative-session-panel representative-session-details" open>
+            <summary>
+              <span>{t.sessionLabel}</span>
+              <small>{accessPresentation}</small>
+            </summary>
+            <div className="representative-session-panel-body">
+              <div className="representative-session-row">
+                <span>{t.accessModeLabel}</span>
+                <strong>{accessPresentation}</strong>
+              </div>
+              <div className="representative-session-row"><span>{t.serviceCreditsLabel}</span><strong>{usage.serviceCreditsAvailable}</strong></div>
+              <p className="representative-session-summary">
+                {responder.kind === "human"
+                  ? t.humanActiveDetail
+                  : responder.kind === "waiting"
+                    ? t.humanWaitingDetail
+                    : responder.kind === "offline"
+                      ? t.connectionInterruptedDetail
+                      : responder.kind === "error"
+                        ? t.failedReplyDetail
+                      : t.aiActiveDetail}
+              </p>
+              <div className={`representative-session-handoff${props.humanInLoop ? "" : " is-unavailable"}`}>
+                <span className="panel-title">{t.handoffLabel}</span>
+                <strong>
+                  {props.humanInLoop
+                    ? t.handoffTitle(props.ownerName)
+                    : t.handoffUnavailableTitle}
+                </strong>
+                <p>{handoffDetail}</p>
+              </div>
+              <footer>
+                {props.humanInLoop && (
+                  props.handoffAccessMode === "FREE"
+                  || (
+                    handoffEntitlementStatus === "ready"
+                    && (hasPaidHandoff || props.hasHandoffPackages)
+                  )
+                ) ? (
+                  <a href={props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
+                    ? "#recharge"
+                    : "#handoff"}
+                  >
+                    {props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
+                      ? t.handoffPackageAction
+                      : t.handoffAction}
+                  </a>
+                ) : null}
+                {accessMode === "FREE" && props.hasTips ? (
+                  <a href="#recharge">{t.optionalSupportAction}</a>
+                ) : null}
+                <a href="#trust">{t.privacyAction}</a>
+              </footer>
             </div>
-            <div className="representative-session-row"><span>{t.serviceCreditsLabel}</span><strong>{usage.serviceCreditsAvailable}</strong></div>
-            <p className="representative-session-summary">
-              {humanActive ? t.humanActiveDetail : t.aiActiveDetail}
-            </p>
-            <div className={`representative-session-handoff${props.humanInLoop ? "" : " is-unavailable"}`}>
-              <span className="panel-title">{t.handoffLabel}</span>
-              <strong>
-                {props.humanInLoop
-                  ? t.handoffTitle(props.ownerName)
-                  : t.handoffUnavailableTitle}
-              </strong>
-              <p>{handoffDetail}</p>
-            </div>
-            <footer>
-              {props.humanInLoop && (
-                props.handoffAccessMode === "FREE"
-                || (
-                  handoffEntitlementStatus === "ready"
-                  && (hasPaidHandoff || props.hasHandoffPackages)
-                )
-              ) ? (
-                <a href={props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
-                  ? "#recharge"
-                  : "#handoff"}
-                >
-                  {props.handoffAccessMode === "PACKAGE_REQUIRED" && !hasPaidHandoff
-                    ? t.handoffPackageAction
-                    : t.handoffAction}
-                </a>
-              ) : null}
-              {accessMode === "FREE" && props.hasTips ? (
-                <a href="#recharge">{t.optionalSupportAction}</a>
-              ) : null}
-              <a href="#trust">{t.privacyAction}</a>
-            </footer>
-          </section>
+          </details>
+          {props.profilePanel}
         </aside>
       </div>
     </section>
@@ -835,6 +1309,120 @@ function getVisitorMessageStatus(status: string | undefined, locale: "zh" | "en"
     ? { accepted: "已发送", queued: "等待发送", waiting_human: "等待真人", failed: "发送失败" }
     : { accepted: "Sent", queued: "Queued", waiting_human: "Waiting for a human", failed: "Failed" };
   return labels[status as keyof typeof labels] ?? null;
+}
+
+function resolveResponderPresentation(input: {
+  busy: boolean;
+  conversationState: string;
+  humanActive: boolean;
+  hydrating: boolean;
+  locale: "zh" | "en";
+}) {
+  const zh = input.locale === "zh";
+  const state = input.conversationState.trim().toLowerCase();
+  if (input.hydrating) {
+    return { kind: "loading", label: zh ? "正在连接会话" : "Connecting" };
+  }
+  if (input.humanActive || state === "human_active") {
+    return { kind: "human", label: zh ? "真人正在接待" : "Human is responding" };
+  }
+  if (["needs_human", "waiting_human"].includes(state)) {
+    return { kind: "waiting", label: zh ? "等待真人接入" : "Waiting for a human" };
+  }
+  if (state === "unavailable") {
+    return { kind: "offline", label: zh ? "连接暂时中断" : "Connection interrupted" };
+  }
+  if (input.busy) {
+    return { kind: "ai", label: zh ? "AI 正在回复" : "AI is replying" };
+  }
+  if (state === "failed") {
+    return { kind: "error", label: zh ? "上次回复失败" : "Last reply failed" };
+  }
+  return { kind: "ai", label: zh ? "AI 正在接待" : "AI is responding" };
+}
+
+function getAvatarInitials(value: string) {
+  const normalized = value.trim();
+  if (!normalized) return "D";
+  const words = normalized.split(/\s+/u).filter(Boolean);
+  if (words.length > 1) {
+    return words.slice(0, 2).map((word) => Array.from(word)[0]).join("").toUpperCase();
+  }
+  return Array.from(normalized).slice(0, 2).join("").toUpperCase();
+}
+
+function formatMessageTime(
+  value: string | undefined,
+  locale: "zh" | "en",
+  fallback: string,
+) {
+  if (!value) return fallback;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return fallback;
+  const now = new Date();
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", {
+    ...(sameDay ? {} : { day: "numeric" as const, month: "short" as const }),
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function formatMessageDateTime(
+  value: string | undefined,
+  locale: "zh" | "en",
+) {
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return undefined;
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+async function copyTextToClipboard(value: string) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return;
+    } catch {
+      // Some embedded browsers expose Clipboard but reject writes. Continue
+      // through the explicit selection fallback before reporting failure.
+    }
+  }
+
+  const fallback = document.createElement("textarea");
+  fallback.value = value;
+  fallback.setAttribute("readonly", "");
+  fallback.style.position = "fixed";
+  fallback.style.opacity = "0";
+  document.body.appendChild(fallback);
+  fallback.select();
+  const copied = document.execCommand("copy");
+  fallback.remove();
+  if (!copied) throw new Error("copy_failed");
+}
+
+function CopyIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="14" viewBox="0 0 16 16" width="14">
+      <rect height="9" rx="1.5" stroke="currentColor" width="9" x="5.5" y="5.5" />
+      <path d="M3 10.5H2.5a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1V3" stroke="currentColor" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ProfilePanelIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" height="18" viewBox="0 0 20 20" width="18">
+      <rect height="15" rx="2" stroke="currentColor" width="16" x="2" y="2.5" />
+      <path d="M12.5 2.5v15" stroke="currentColor" />
+      <path d="M14.75 7h1.75M14.75 10h1.75M14.75 13h1.75" stroke="currentColor" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 function createClientMessageId() {
@@ -899,12 +1487,24 @@ const zhCopy = {
       ? "直接描述你的问题；回答以已发布资料为基础，也可能使用仅限你与当前代表的受治理历史摘要。"
       : "直接描述你的问题；回答以已发布资料为基础，并在使用公开来源时标明依据。",
   aiStatus: "AI 正在接待", humanStatus: "真人正在接待",
-  aiLabel: "AI", humanLabel: "真人", youLabel: "你", citationsLabel: "回答依据", openSource: "打开公开来源",
+  humanStatusAvatar: "人",
+  aiLabel: "AI", humanLabel: "真人", youLabel: "你", visitorLabel: "访客",
+  systemLabel: "会话通知", taskUpdateLabel: "任务进展", systemRoleLabel: "系统消息",
+  justNow: "刚刚", copyAction: "复制", copiedAction: "已复制",
+  copyMessageAction: (senderName: string) => `复制 ${senderName} 的消息`,
+  copyFailedAction: "复制失败，请重试",
+  visitorAvatarLabel: "你的头像",
+  aiAvatarLabel: (name: string) => `${name} 的数字代表头像`,
+  humanAvatarLabel: (name: string) => `${name} 的真人头像`,
+  aiAvatarBadgeLabel: "AI 数字代表",
+  citationsLabel: "回答依据", openSource: "打开公开来源",
   generalModelSourceDisclosure: "来源说明：本回答未引用已授权知识或记忆，内容由通用模型生成。",
   artifactsLabel: "任务结果", downloadArtifact: "下载",
   startersLabel: "你可以这样开始",
   starters: ["我想了解你们提供什么服务", "我有一个合作需求", "帮我整理报价所需信息", "我希望联系本人"],
   inputLabel: "想解决什么？", placeholder: "描述你的问题、背景和期望结果…", footnote: "请勿发送密码、密钥或不应公开的敏感信息。",
+  aiComposerContext: "发送给数字代表", humanComposerContext: "发送给当前接待人员", waitingComposerContext: "补充给人工接待队列",
+  keyboardHint: "Enter 发送 · Shift + Enter 换行", sendMessageAction: "发送消息",
   continuationEyebrow: "继续对话",
   serviceGateTitle: (accessMode: RepresentativeAccessMode) => accessMode === "CREDITS_ONLY"
     ? "使用服务额度后继续"
@@ -922,11 +1522,18 @@ const zhCopy = {
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
   sessionLabel: "本次会话",
   currentResponder: "当前接待", accessModeLabel: "访问方式", serviceCreditsLabel: "服务额度",
+  profilePanelLabel: "代表资料与本次会话",
+  showProfilePanel: "显示资料",
+  hideProfilePanel: "隐藏资料",
+  closeProfilePanel: "关闭代表资料",
   unlimitedFreeAccess: "永久免费",
   creditsOnlyAccess: "使用服务额度",
   trialAccess: (remaining: number, limit: number) => `免费剩余 ${remaining}/${limit}`,
   aiActiveDetail: "你正在与数字代表对话；需要真人判断时会明确提示。",
   humanActiveDetail: "真人已经接手，你仍可以继续补充背景和要求。",
+  humanWaitingDetail: "人工请求已进入队列，你可以继续补充背景，暂不表示真人已经接手。",
+  connectionInterruptedDetail: "会话状态暂时无法确认，请稍后刷新重试。",
+  failedReplyDetail: "上一条回复未完成。你的对话仍然保留，可以重新发送或继续补充。",
   handoffLabel: "人工接管", handoffTitle: (ownerName: string) => `申请 ${ownerName} 查看`, handoffAction: "了解转接方式",
   handoffUnavailableTitle: "当前不可用",
   handoffUnavailableDetail: "这位数字代表当前未启用人工接管，会继续由 AI 接待。",
@@ -962,12 +1569,24 @@ const enCopy = {
       ? "Describe what you need. Replies are grounded in published information and may also use governed history scoped only to you and this representative."
       : "Describe what you need. Replies are grounded in published information and show the public sources they use.",
   aiStatus: "AI is responding", humanStatus: "Human is responding",
-  aiLabel: "AI", humanLabel: "Human", youLabel: "You", citationsLabel: "Context used", openSource: "Open public source",
+  humanStatusAvatar: "H",
+  aiLabel: "AI", humanLabel: "Human", youLabel: "You", visitorLabel: "Visitor",
+  systemLabel: "Conversation update", taskUpdateLabel: "Task update", systemRoleLabel: "System message",
+  justNow: "Just now", copyAction: "Copy", copiedAction: "Copied",
+  copyMessageAction: (senderName: string) => `Copy ${senderName}'s message`,
+  copyFailedAction: "Copy failed. Try again",
+  visitorAvatarLabel: "Your avatar",
+  aiAvatarLabel: (name: string) => `${name}'s digital representative avatar`,
+  humanAvatarLabel: (name: string) => `${name}'s human avatar`,
+  aiAvatarBadgeLabel: "AI digital representative",
+  citationsLabel: "Context used", openSource: "Open public source",
   generalModelSourceDisclosure: "Source note: This answer did not cite authorized knowledge or memory; it was generated by a general-purpose model.",
   artifactsLabel: "Task results", downloadArtifact: "Download",
   startersLabel: "Try one of these",
   starters: ["What services do you offer?", "I have a partnership request", "Help me prepare a quote request", "I want to contact the owner"],
   inputLabel: "What do you need?", placeholder: "Describe the problem, context, and outcome you want…", footnote: "Do not send passwords, API keys, or sensitive information that should not be public.",
+  aiComposerContext: "Send to the digital representative", humanComposerContext: "Send to the current operator", waitingComposerContext: "Add context for the human queue",
+  keyboardHint: "Enter to send · Shift + Enter for a new line", sendMessageAction: "Send message",
   continuationEyebrow: "Continue the conversation",
   serviceGateTitle: (accessMode: RepresentativeAccessMode) => accessMode === "CREDITS_ONLY"
     ? "Use service credits to continue"
@@ -985,11 +1604,18 @@ const enCopy = {
   humanQueueNotice: "This conversation is now in the human queue. You can keep adding context while the operator reviews the full thread.",
   sessionLabel: "This conversation",
   currentResponder: "Current responder", accessModeLabel: "Access", serviceCreditsLabel: "Service credits",
+  profilePanelLabel: "Profile and this conversation",
+  showProfilePanel: "Show profile",
+  hideProfilePanel: "Hide profile",
+  closeProfilePanel: "Close profile",
   unlimitedFreeAccess: "Always free",
   creditsOnlyAccess: "Uses service credits",
   trialAccess: (remaining: number, limit: number) => `${remaining}/${limit} free replies left`,
   aiActiveDetail: "You are talking to the digital representative. It will say when a human decision is needed.",
   humanActiveDetail: "A human has taken over. You can keep adding context and requirements.",
+  humanWaitingDetail: "The request is in the human queue. You can add context, but a human has not taken over yet.",
+  connectionInterruptedDetail: "The conversation state cannot be confirmed right now. Refresh and try again shortly.",
+  failedReplyDetail: "The last reply did not complete. Your conversation is still saved, so you can retry or add context.",
   handoffLabel: "Human takeover", handoffTitle: (ownerName: string) => `Ask ${ownerName} to review`, handoffAction: "How handoff works",
   handoffUnavailableTitle: "Not available",
   handoffUnavailableDetail: "Human takeover is disabled for this representative. The AI remains the responder.",

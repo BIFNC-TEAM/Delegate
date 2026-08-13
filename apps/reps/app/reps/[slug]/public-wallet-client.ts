@@ -4,6 +4,7 @@ export type PublicWalletUpdatedDetail = {
   representativeSlug: string;
   serviceCreditsAvailable: number;
   serviceCreditsReserved: number;
+  serviceCreditsPurchased: number;
   /** Present only when the balance came from a fresh authoritative read. */
   handoffEntitlement?: PublicHandoffEntitlementSummary;
 };
@@ -238,6 +239,7 @@ export function buildPublicCommerceCompletionWalletUpdate(input: {
   tokenPurchase: {
     availableTokenAmount: number;
     reservedTokenAmount: number;
+    totalPurchasedTokenAmount: number;
   } | null;
 }): PublicWalletUpdatedDetail | null {
   if (!input.tokenPurchase) return null;
@@ -245,6 +247,7 @@ export function buildPublicCommerceCompletionWalletUpdate(input: {
     representativeSlug: input.representativeSlug,
     serviceCreditsAvailable: input.tokenPurchase.availableTokenAmount,
     serviceCreditsReserved: input.tokenPurchase.reservedTokenAmount,
+    serviceCreditsPurchased: input.tokenPurchase.totalPurchasedTokenAmount,
   };
 }
 

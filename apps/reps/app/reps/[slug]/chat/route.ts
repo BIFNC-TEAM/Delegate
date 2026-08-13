@@ -296,6 +296,7 @@ async function derivePublicWalletUsage(input: {
         input.accessMode === "CREDITS_ONLY" ? 0 : input.freeReplyLimit,
       serviceCreditsAvailable: balance?.availableTokenAmount ?? 0,
       serviceCreditsReserved: balance?.reservedTokenAmount ?? 0,
+      serviceCreditsPurchased: balance?.totalPurchasedTokenAmount ?? 0,
     }),
     accessMode: input.accessMode,
     unlimitedFreeAccess: input.accessMode === "FREE",

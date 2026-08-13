@@ -135,6 +135,8 @@ export async function GET(
                   serviceBalance?.availableTokenAmount ?? 0,
                 serviceCreditsReserved:
                   serviceBalance?.reservedTokenAmount ?? 0,
+                serviceCreditsPurchased:
+                  serviceBalance?.totalPurchasedTokenAmount ?? 0,
               }),
               accessMode: runtime.accessMode,
               unlimitedFreeAccess: runtime.accessMode === "FREE",

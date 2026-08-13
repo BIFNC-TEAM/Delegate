@@ -2,7 +2,6 @@ import { cookies, headers } from "next/headers";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 
-import type { Representative } from "@delegate/domain";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   AGENT_WALLET_TIP_PRODUCT_CODE,
@@ -41,8 +40,6 @@ import {
   buildPublicAudienceLogoutHref,
 } from "./public-auth";
 import { getGovernedContextDisclosure } from "./governed-context-disclosure";
-
-type RepresentativeSkill = Representative["skills"][number];
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
   const { slug } = await params;
@@ -144,7 +141,6 @@ export default async function RepresentativePage({
   );
   const audienceLogoutHref = buildPublicAudienceLogoutHref(representative.slug, locale);
   const publicDeliverables = deliverableSnapshot?.deliverables ?? [];
-  const visitorCapabilities = buildVisitorCapabilities(locale);
   const weChatPayPreflight = preflightWeChatPayRuntime();
   const paymentAvailability =
     weChatPayPreflight.status !== "ready"
@@ -157,12 +153,6 @@ export default async function RepresentativePage({
   const hasServicePackages = visibleCommerceProducts.some(
     (product) => product.kind === "SERVICE_PACKAGE",
   );
-  const hasHandoffPackages = visibleCommerceProducts.some(
-    (product) => product.kind === "SERVICE_PACKAGE"
-      && product.handoffAllowance !== "NONE",
-  );
-  const hasTips = commercePresentation.tipsEnabled
-    && visibleCommerceProducts.some((product) => product.kind === "TIP");
   const hasRestorableCommerceActivity =
     audiencePrincipalIdentityId
       ? await hasRestorablePublicCommerceActivity({
@@ -172,19 +162,6 @@ export default async function RepresentativePage({
       : false;
   const hasPublicCommerce =
     visibleCommerceProducts.length > 0 || hasRestorableCommerceActivity;
-  const profilePackageProduct = visibleCommerceProducts.find(
-    (product) => product.kind === "SERVICE_PACKAGE" && product.isRecommended,
-  ) ?? visibleCommerceProducts.find(
-    (product) => product.kind === "SERVICE_PACKAGE",
-  ) ?? null;
-  const profilePackagePreview = profilePackageProduct?.kind === "SERVICE_PACKAGE"
-    ? {
-        name: profilePackageProduct.name,
-        amountCents: profilePackageProduct.amountCents,
-        entitlementUnits: profilePackageProduct.entitlementUnits,
-        includesHumanHandoff: profilePackageProduct.handoffAllowance !== "NONE",
-      }
-    : null;
   const profileResources = [
     ...representative.knowledgePack.materials.map((item) => ({
       id: item.id,
@@ -310,12 +287,11 @@ export default async function RepresentativePage({
         <RepresentativeChatPanel
           computeEnabled={representative.compute.enabled}
           accessMode={runtime.accessMode}
+          faqQuestions={representative.knowledgePack.faq.map((item) => item.title)}
           freeReplyLimit={representative.contract.freeReplyLimit}
           governedMemoryDisclosure={runtime.governedMemoryDisclosure}
-          handoffAccessMode={commercePresentation.handoffAccessMode}
-          hasHandoffPackages={hasHandoffPackages}
+          hasPublicCommerce={hasPublicCommerce}
           hasServicePackages={hasServicePackages}
-          hasTips={hasTips}
           humanInLoop={representative.humanInLoop}
           {...(telegramRechargeSource
             ? { initialProfileSection: "services" as const }
@@ -340,9 +316,6 @@ export default async function RepresentativePage({
                   />
                 </div>
               ) : undefined}
-              capabilities={representative.skills
-                .filter((skill) => !["human_handoff", "paid_unlock"].includes(skill))
-                .map((skill) => visitorCapabilities[skill])}
               commerceManagement={hasPublicCommerce ? (
                 <RepresentativeRechargePanel
                   audienceAuthenticated={Boolean(audienceSession)}
@@ -357,13 +330,6 @@ export default async function RepresentativePage({
                   representativeSlug={representative.slug}
                 />
               ) : undefined}
-              faq={representative.knowledgePack.faq.map((item) => ({
-                id: item.id,
-                title: item.title,
-                summary: item.summary,
-              }))}
-              hasPublicCommerce={hasPublicCommerce}
-              humanInLoop={representative.humanInLoop}
               {...(telegramRechargeSource
                 ? { initialSection: "services" as const }
                 : {})}
@@ -371,7 +337,6 @@ export default async function RepresentativePage({
               loginHref={audienceLoginHref}
               memoryDisclosure={governedContextDisclosure}
               ownerName={representative.ownerName}
-              packagePreview={profilePackagePreview}
               representativeName={representative.name}
               representativeSlug={representative.slug}
               resources={profileResources}
@@ -466,34 +431,6 @@ function PausedRepresentativePage({ locale, siteBaseUrl }: { locale: Locale; sit
   );
 }
 
-function buildVisitorCapabilities(
-  locale: Locale,
-): Record<RepresentativeSkill, { title: string; detail: string }> {
-  if (locale === "zh") {
-    return {
-      faq_reply: { title: "回答常见问题", detail: "根据已发布资料解释产品、服务和合作方式。" },
-      lead_qualify: { title: "了解合作是否合适", detail: "通过几个关键问题，帮你判断下一步该怎么走。" },
-      intake_collect: { title: "整理你的需求", detail: "收集目标、背景和限制，形成清晰的沟通摘要。" },
-      quote_request_collect: { title: "准备报价信息", detail: "先补齐范围、预算和时间要求，再交给真人确认。" },
-      material_delivery: { title: "查找公开资料", detail: "提供与你的问题相关的公开文档和可下载内容。" },
-      scheduling_request: { title: "提交预约意向", detail: "记录希望沟通的主题和时间，不擅自修改真人日程。" },
-      human_handoff: { title: "申请真人接手", detail: "需要判断或承诺时，带着当前上下文转给真人。" },
-      paid_unlock: { title: "继续深入沟通", detail: "基础交流后，可按需要选择更长对话或人工评估。" },
-    };
-  }
-
-  return {
-    faq_reply: { title: "Answer common questions", detail: "Explain products, services, and ways to work together using published information." },
-    lead_qualify: { title: "Check whether there is a fit", detail: "Ask a few focused questions and suggest the clearest next step." },
-    intake_collect: { title: "Organize your request", detail: "Capture goals, context, and constraints in a useful summary." },
-    quote_request_collect: { title: "Prepare a quote request", detail: "Collect scope, budget, and timing before a human confirms anything." },
-    material_delivery: { title: "Find public resources", detail: "Surface public documents and downloads that match your question." },
-    scheduling_request: { title: "Request a meeting", detail: "Record the topic and preferred timing without changing anyone's calendar." },
-    human_handoff: { title: "Ask for a human", detail: "Carry the conversation context to a human when judgment or commitment is needed." },
-    paid_unlock: { title: "Continue with deeper help", detail: "Move from basic questions to a longer conversation or human review when needed." },
-  };
-}
-
 function maskAudienceAccountLabel(
   email: string | null | undefined,
   fallback: string,
@@ -549,7 +486,6 @@ const copy = {
   zh: {
     chatNav: "开始对话",
     rechargeNav: "服务与支持",
-    aboutNav: "能帮什么",
     resourcesNav: "公开资料",
     trustNav: "隐私与真人",
     publicRepresentative: "公开数字代表",
@@ -560,7 +496,6 @@ const copy = {
         ? `${name} 会先理解问题，以已发布资料为基础，并在需要时使用仅限你与当前代表的受治理历史摘要。`
         : `${name} 会先理解问题，再根据已发布资料回答或帮你找到下一步。`,
     startChat: "开始提问",
-    capabilitiesEyebrow: "我可以帮你",
     capabilitiesTitle: "把问题推进到清楚的下一步",
     capabilitiesSummary: (ownerName: string) => `先处理适合公开回答和标准化收集的事项；需要 ${ownerName} 判断或承诺时，再转交真人。`,
     resourcesEyebrow: "公开资料",
@@ -723,7 +658,6 @@ const copy = {
   en: {
     chatNav: "Start chatting",
     rechargeNav: "Services & support",
-    aboutNav: "What I can do",
     resourcesNav: "Public resources",
     trustNav: "Privacy & human help",
     publicRepresentative: "Public digital representative",
@@ -734,7 +668,6 @@ const copy = {
         ? `${name} will understand the request, use published information as the foundation, and when useful apply governed history scoped only to you and this representative.`
         : `${name} will understand the request, answer from published information, and help you find the next step.`,
     startChat: "Ask a question",
-    capabilitiesEyebrow: "How I can help",
     capabilitiesTitle: "Move your request toward a clear next step",
     capabilitiesSummary: (ownerName: string) => `I handle public questions and structured intake first, then involve ${ownerName} when judgment or commitment is required.`,
     resourcesEyebrow: "Public resources",

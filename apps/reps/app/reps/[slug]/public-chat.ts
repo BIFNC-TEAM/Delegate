@@ -40,6 +40,7 @@ export type PublicChatResponse = {
     freeRepliesRemaining: number;
     serviceCreditsAvailable: number;
     serviceCreditsReserved: number;
+    serviceCreditsPurchased: number;
     passUnlocked: boolean;
     deepHelpUnlocked: boolean;
   };
@@ -215,6 +216,7 @@ export function deriveTierUsage(params: {
   freeReplyLimit: number;
   serviceCreditsAvailable?: number;
   serviceCreditsReserved?: number;
+  serviceCreditsPurchased?: number;
 }) {
   const serviceCreditsAvailable = Math.max(
     0,
@@ -224,6 +226,10 @@ export function deriveTierUsage(params: {
     0,
     Math.trunc(params.serviceCreditsReserved ?? 0),
   );
+  const serviceCreditsPurchased = Math.max(
+    serviceCreditsAvailable + serviceCreditsReserved,
+    Math.trunc(params.serviceCreditsPurchased ?? 0),
+  );
   return {
     freeRepliesUsed: params.freeRepliesUsed,
     freeRepliesRemaining: Math.max(
@@ -232,6 +238,7 @@ export function deriveTierUsage(params: {
     ),
     serviceCreditsAvailable,
     serviceCreditsReserved,
+    serviceCreditsPurchased,
     passUnlocked: serviceCreditsAvailable > 0 || serviceCreditsReserved > 0,
     deepHelpUnlocked: false,
   };

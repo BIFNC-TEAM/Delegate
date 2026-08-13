@@ -81,8 +81,6 @@ export function RepresentativeIdentityBindingPanel({
     telegram: BindingSnapshot[];
     matrix: BindingSnapshot[];
   }>({ telegram: [], matrix: [] });
-  const [readiness, setReadiness] =
-    useState<BindingCapabilities>({ telegram: false, matrix: false });
   const [telegramBot, setTelegramBot] =
     useState<TelegramBotEndpoint | null>(null);
   const [matrixEndpoint, setMatrixEndpoint] =
@@ -126,7 +124,6 @@ export function RepresentativeIdentityBindingPanel({
     setBindingLoadError(null);
     setCapabilities(null);
     setCurrentBindings({ telegram: [], matrix: [] });
-    setReadiness({ telegram: false, matrix: false });
     setTelegramBot(null);
     setMatrixEndpoint(null);
     void fetchBindingState(representativeSlug)
@@ -134,7 +131,6 @@ export function RepresentativeIdentityBindingPanel({
         if (active) {
           setBindings(payload.bindings);
           setCurrentBindings(payload.currentBindings);
-          setReadiness(payload.readiness);
           setCapabilities(payload.capabilities);
           setTelegramBot(payload.telegramBot);
           setMatrixEndpoint(payload.matrixEndpoint);
@@ -212,7 +208,6 @@ export function RepresentativeIdentityBindingPanel({
         if (!active) return;
         setBindings(payload.bindings);
         setCurrentBindings(payload.currentBindings);
-        setReadiness(payload.readiness);
         setCapabilities(payload.capabilities);
         setTelegramBot(payload.telegramBot);
         setMatrixEndpoint(payload.matrixEndpoint);
@@ -468,7 +463,6 @@ export function RepresentativeIdentityBindingPanel({
         if (operationGenerationRef.current !== operationGeneration) return;
         setBindings(payload.bindings);
         setCurrentBindings(payload.currentBindings);
-        setReadiness(payload.readiness);
         setCapabilities(payload.capabilities);
         setTelegramBot(payload.telegramBot);
         setMatrixEndpoint(payload.matrixEndpoint);
@@ -604,8 +598,11 @@ export function RepresentativeIdentityBindingPanel({
         </p>
       )}
 
-      <div className="setup-grid">
-        {capabilities?.telegram ? (
+      {capabilities
+      && ((capabilities.telegram && currentBindings.telegram.length === 0)
+        || (capabilities.matrix && currentBindings.matrix.length === 0)) ? (
+        <div className="setup-grid">
+        {capabilities.telegram && currentBindings.telegram.length === 0 ? (
           <article className="representative-capability-card">
           <strong>Telegram</strong>
           <p>
@@ -617,20 +614,7 @@ export function RepresentativeIdentityBindingPanel({
             <span className="field-hint">
               {zh ? "当前代表下已绑定的 Telegram 账号" : "Telegram account linked for this representative"}
             </span>
-            <strong>
-              {currentBindings.telegram.length
-                ? currentBindings.telegram
-                    .map((binding) => binding.providerSubject)
-                    .join(zh ? "、" : ", ")
-                : zh
-                  ? "尚未绑定"
-                  : "Not linked"}
-            </strong>
-            {readiness.telegram ? (
-              <span className="footer-note">
-                {zh ? "已验证，可共享该代表的 Web 服务额度。" : "Verified and sharing this representative's Web service credits."}
-              </span>
-            ) : null}
+            <strong>{zh ? "尚未绑定" : "Not linked"}</strong>
           </div>
           <button
             className="button-secondary"
@@ -643,17 +627,13 @@ export function RepresentativeIdentityBindingPanel({
                 ? "生成中…"
                 : "Creating…"
               : zh
-                ? currentBindings.telegram.length
-                  ? "绑定另一个或重新验证 Telegram 账号"
-                  : "绑定我的 Telegram 账号"
-                : currentBindings.telegram.length
-                  ? "Link another or reverify a Telegram account"
-                  : "Link my Telegram account"}
+                ? "绑定我的 Telegram 账号"
+                : "Link my Telegram account"}
           </button>
           </article>
         ) : null}
 
-        {capabilities?.matrix ? (
+        {capabilities.matrix && currentBindings.matrix.length === 0 ? (
           <article className="representative-capability-card">
           <strong>Matrix</strong>
           <p>
@@ -691,29 +671,9 @@ export function RepresentativeIdentityBindingPanel({
               </span>
             </div>
           ) : null}
-          {currentBindings.matrix.length ? (
-            <div className="field-stack">
-              <span className="field-hint">
-                {zh
-                  ? "当前代表连接下已绑定的 Matrix 账号"
-                  : "Matrix accounts linked on this representative connection"}
-              </span>
-              <strong>
-                {currentBindings.matrix
-                  .map((binding) => binding.providerSubject)
-                  .join(zh ? "、" : ", ")}
-              </strong>
-            </div>
-          ) : null}
           <label className="field-stack">
             <span className="field-hint">
-              {zh
-                ? currentBindings.matrix.length
-                  ? "当前绑定的 Matrix MXID（可输入新账号替换）"
-                  : "你自己的 Matrix MXID"
-                : currentBindings.matrix.length
-                  ? "Current Matrix MXID (enter a new account to replace it)"
-                  : "Your Matrix MXID"}
+              {zh ? "你自己的 Matrix MXID" : "Your Matrix MXID"}
             </span>
             <input
               autoComplete="username"
@@ -723,17 +683,6 @@ export function RepresentativeIdentityBindingPanel({
               spellCheck={false}
               value={matrixUserId}
             />
-            {currentBindings.matrix.length > 1 ? (
-              <span className="footer-note">
-                {zh
-                  ? `检测到 ${currentBindings.matrix.length} 个旧版有效账号；新 MXID 验证成功后，它们只会在当前 Matrix 连接下失效。`
-                  : `${currentBindings.matrix.length} legacy active accounts were found. After the new MXID is verified, they are revoked only for this Matrix connection.`}
-              </span>
-            ) : readiness.matrix ? (
-              <span className="footer-note">
-                {zh ? "已验证，可共享该代表的 Web 服务额度。" : "Verified and sharing this representative's Web service credits."}
-              </span>
-            ) : null}
           </label>
           <button
             className="button-secondary"
@@ -750,16 +699,13 @@ export function RepresentativeIdentityBindingPanel({
                 ? "生成中…"
                 : "Creating…"
               : zh
-                ? currentBindings.matrix.length
-                  ? "生成 Matrix 替换命令"
-                  : "为这个 Matrix 账号生成绑定命令"
-                : currentBindings.matrix.length
-                  ? "Create Matrix replacement command"
-                  : "Create command for this Matrix account"}
+                ? "为这个 Matrix 账号生成绑定命令"
+                : "Create command for this Matrix account"}
           </button>
           </article>
         ) : null}
-      </div>
+        </div>
+      ) : null}
 
       {capabilities
       && !capabilities.telegram

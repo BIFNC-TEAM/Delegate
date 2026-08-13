@@ -15,9 +15,7 @@ import {
 } from "./public-chat";
 import {
   PUBLIC_WALLET_UPDATED_EVENT,
-  type PublicHandoffEntitlementSummary,
   type PublicWalletUpdatedDetail,
-  type PublicWalletStateSnapshot,
 } from "./public-wallet-client";
 import type { GovernedMemoryDisclosure } from "./governed-context-disclosure";
 import {
@@ -52,7 +50,6 @@ type RepresentativeAccessMode =
   | "FREE"
   | "TRIAL_THEN_CREDITS"
   | "CREDITS_ONLY";
-type RepresentativeHandoffAccessMode = "FREE" | "PACKAGE_REQUIRED";
 type PublicChatUsage = PublicChatResponse["usage"] & {
   accessMode: RepresentativeAccessMode;
   unlimitedFreeAccess: boolean;
@@ -93,10 +90,9 @@ export function RepresentativeChatPanel(props: {
   ownerName: string;
   humanInLoop: boolean;
   accessMode: RepresentativeAccessMode;
-  handoffAccessMode: RepresentativeHandoffAccessMode;
-  hasHandoffPackages: boolean;
+  faqQuestions: string[];
+  hasPublicCommerce: boolean;
   hasServicePackages: boolean;
-  hasTips: boolean;
   locale: "zh" | "en";
   freeReplyLimit: number;
   computeEnabled: boolean;
@@ -127,33 +123,14 @@ export function RepresentativeChatPanel(props: {
   const [showServices, setShowServices] = useState(
     props.accessMode === "CREDITS_ONLY",
   );
-  const [handoffEntitlement, setHandoffEntitlement] =
-    useState<PublicHandoffEntitlementSummary>({
-      hasUnlimited: false,
-      limitedRemainingUses: 0,
-      highestServiceLevel: null,
-      nextExpiryAt: null,
-    });
-  const [handoffEntitlementStatus, setHandoffEntitlementStatus] = useState<
-    "loading" | "ready" | "unavailable"
-  >(
-    props.humanInLoop && props.handoffAccessMode === "PACKAGE_REQUIRED"
-      ? "loading"
-      : "ready",
-  );
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      text: t.welcome(props.representativeName, governedContextEnabled),
-    },
-  ]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [usage, setUsage] = useState<PublicChatUsage>({
     freeRepliesUsed: 0,
     freeRepliesRemaining: props.freeReplyLimit,
     serviceCreditsAvailable: 0,
     serviceCreditsReserved: 0,
+    serviceCreditsPurchased: 0,
     passUnlocked: false,
     deepHelpUnlocked: false,
     accessMode: props.accessMode,
@@ -170,6 +147,9 @@ export function RepresentativeChatPanel(props: {
   const [profileRailReady, setProfileRailReady] = useState(false);
   const [profileRailCompact, setProfileRailCompact] = useState(false);
   const computeAssist = getComputeAssist(input, props.locale, props.computeEnabled);
+  const faqQuestions = [...new Set(
+    props.faqQuestions.map((question) => question.trim()).filter(Boolean),
+  )].slice(0, 3);
 
   useEffect(() => {
     const compactViewport = window.matchMedia(PROFILE_RAIL_COMPACT_QUERY);
@@ -318,6 +298,17 @@ export function RepresentativeChatPanel(props: {
             ...(message.displayAck ? { displayAck: message.displayAck } : {}),
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
           })));
+        } else if (payload.state === "new") {
+          setMessages([{
+            id: "welcome",
+            role: "assistant",
+            text: t.welcome(props.representativeName, governedContextEnabled),
+            createdAt: new Date().toISOString(),
+            senderType: "representative",
+            status: "completed",
+          }]);
+        } else {
+          setMessages([]);
         }
         setConversationState(payload.state);
         setHumanActive(payload.humanActive);
@@ -397,45 +388,6 @@ export function RepresentativeChatPanel(props: {
   }, [usage.accessMode, usage.freeRepliesRemaining]);
 
   useEffect(() => {
-    if (
-      !props.humanInLoop
-      || props.handoffAccessMode !== "PACKAGE_REQUIRED"
-    ) {
-      setHandoffEntitlementStatus("ready");
-      return;
-    }
-    const controller = new AbortController();
-    setHandoffEntitlementStatus("loading");
-    void fetch(`/reps/${props.representativeSlug}/recharge?currency=CNY`, {
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error("handoff entitlement unavailable");
-        return (await response.json()) as PublicWalletStateSnapshot;
-      })
-      .then((snapshot) => {
-        if (controller.signal.aborted) return;
-        setHandoffEntitlement(snapshot.handoffEntitlement);
-        setHandoffEntitlementStatus("ready");
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          // Do not turn a failed read into a false "no entitlement" state.
-          // The submission route remains authoritative while the CTA stays
-          // unavailable, preventing an accidental duplicate purchase.
-          setHandoffEntitlementStatus("unavailable");
-        }
-      });
-    return () => controller.abort();
-  }, [
-    props.handoffAccessMode,
-    props.humanInLoop,
-    props.representativeSlug,
-  ]);
-
-  useEffect(() => {
     const transition = resolvePublicChatServiceCreditPendingTransition({
       previousReserved: previousReservedCreditsRef.current,
       serviceCreditsAvailable: usage.serviceCreditsAvailable,
@@ -481,14 +433,11 @@ export function RepresentativeChatPanel(props: {
         ...current,
         serviceCreditsAvailable: detail.serviceCreditsAvailable,
         serviceCreditsReserved: detail.serviceCreditsReserved,
+        serviceCreditsPurchased: detail.serviceCreditsPurchased,
         passUnlocked:
           detail.serviceCreditsAvailable > 0
           || detail.serviceCreditsReserved > 0,
       }));
-      if (detail.handoffEntitlement) {
-        setHandoffEntitlement(detail.handoffEntitlement);
-        setHandoffEntitlementStatus("ready");
-      }
       if (detail.serviceCreditsAvailable > 0) {
         setShowServices(false);
         setError(null);
@@ -548,9 +497,13 @@ export function RepresentativeChatPanel(props: {
     }
   }, [messages, props.representativeSlug]);
 
-  function chooseStarter(starter: string) {
-    setInput(starter);
+  function chooseStarter(value: string) {
+    setInput(value);
     requestAnimationFrame(() => inputRef.current?.focus());
+  }
+
+  function sendFaqQuestion(question: string) {
+    void submitMessage(question);
   }
 
   async function handleCopyMessage(message: ChatMessage) {
@@ -614,9 +567,13 @@ export function RepresentativeChatPanel(props: {
     setProfileRailVisibility(true);
   }
 
-  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const text = input.trim();
+    void submitMessage(input);
+  }
+
+  async function submitMessage(value: string) {
+    const text = value.trim();
     if (!text || busy || hydrating) return;
     keepChatPinnedRef.current = true;
     const userMessage = {
@@ -826,31 +783,31 @@ export function RepresentativeChatPanel(props: {
 
   const accessMode = usage.accessMode ?? props.accessMode;
   const accessPresentation = accessMode === "FREE"
-    ? t.unlimitedFreeAccess
+    ? { label: t.unlimitedFreeAccess, value: t.unlimitedAccessValue }
     : accessMode === "CREDITS_ONLY"
-      ? t.creditsOnlyAccess
-      : t.trialAccess(usage.freeRepliesRemaining, props.freeReplyLimit);
-  const hasPaidHandoff =
-    handoffEntitlement.hasUnlimited
-    || handoffEntitlement.limitedRemainingUses > 0;
-  const handoffDetail = !props.humanInLoop
-    ? t.handoffUnavailableDetail
-    : props.handoffAccessMode === "FREE"
-      ? t.handoffFreeDetail
-      : handoffEntitlementStatus === "loading"
-        ? t.handoffEntitlementLoading
-        : handoffEntitlementStatus === "unavailable"
-          ? t.handoffEntitlementUnavailable
-          : hasPaidHandoff
-            ? t.handoffEntitlementDetail(
-                handoffEntitlement.hasUnlimited,
-                handoffEntitlement.limitedRemainingUses,
-                handoffEntitlement.highestServiceLevel === "PRIORITY",
-                handoffEntitlement.nextExpiryAt,
-              )
-            : props.hasHandoffPackages
-              ? t.handoffPackageRequiredDetail
-              : t.handoffPackageUnavailableDetail;
+      ? { label: t.creditsOnlyAccess, value: null }
+      : {
+          label: t.freeAllowanceLabel,
+          value: t.allowanceValue(
+            usage.freeRepliesRemaining,
+            props.freeReplyLimit,
+          ),
+        };
+  const totalCredits = Math.max(
+    usage.serviceCreditsAvailable + usage.serviceCreditsReserved,
+    usage.serviceCreditsPurchased,
+  );
+  const remainingPurchasedCredits = usage.serviceCreditsAvailable
+    + usage.serviceCreditsReserved;
+  const totalAllowance = (
+    accessMode === "CREDITS_ONLY" ? 0 : props.freeReplyLimit
+  ) + totalCredits;
+  const remainingAllowance = usage.freeRepliesRemaining
+    + usage.serviceCreditsAvailable
+    + usage.serviceCreditsReserved;
+  const allowancePresentation = accessMode === "FREE"
+    ? t.unlimitedRemaining
+    : t.remainingAllowance(remainingAllowance, totalAllowance);
   const serviceAttentionRequired =
     accessMode === "CREDITS_ONLY"
     || (
@@ -901,11 +858,15 @@ export function RepresentativeChatPanel(props: {
     <section className="representative-conversation-shell" id="chat">
       <div className={`representative-chat-first-grid${profileRailOpen ? " is-profile-open" : " is-profile-collapsed"}${profileRailReady ? "" : " is-profile-pending"}`}>
         <div className={messages.length <= 1 ? "representative-chat-surface is-empty" : "representative-chat-surface"}>
-          <header className="representative-conversation-heading representative-chat-header">
-            <div>
-              <p className="eyebrow">{t.eyebrow}</p>
-              <h2>{t.title(props.representativeName)}</h2>
-              <p>{t.summary(governedContextEnabled)}</p>
+          <header aria-label={t.sessionLabel} className="representative-conversation-heading representative-chat-header">
+            <div className="representative-chat-identity">
+              <span aria-hidden="true" className="representative-chat-identity-avatar">
+                {getAvatarInitials(props.representativeName)}
+              </span>
+              <span>
+                <small>{t.digitalRepresentativeLabel}</small>
+                <strong>{props.representativeName}</strong>
+              </span>
             </div>
             <div className="representative-conversation-controls">
               <div className={`representative-conversation-status is-${responder.kind}`} aria-live="polite">
@@ -960,13 +921,6 @@ export function RepresentativeChatPanel(props: {
                   : isSystem
                     ? message.senderType === "tool" ? t.taskUpdateLabel : t.systemLabel
                     : props.representativeName;
-              const senderRole = message.role === "user"
-                ? t.visitorLabel
-                : isOperator
-                  ? t.humanLabel
-                  : isSystem
-                    ? t.systemRoleLabel
-                    : t.aiLabel;
               const displayTime = formatMessageTime(message.createdAt, props.locale, t.justNow);
               const displayDateTime = formatMessageDateTime(message.createdAt, props.locale);
 
@@ -977,21 +931,8 @@ export function RepresentativeChatPanel(props: {
                     <div className="representative-system-message-content">
                       <header>
                         <strong>{senderName}</strong>
-                        <time dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>
                       </header>
                       <p>{message.text}</p>
-                      {message.citations?.length ? (
-                        <div className="representative-chat-citations">
-                          <strong>{t.citationsLabel}</strong>
-                          {message.citations.map((citation) => (
-                            <details key={`${message.id}:${citation.title}`}>
-                              <summary>{citation.title}</summary>
-                              {citation.excerpt ? <small>{citation.excerpt}</small> : null}
-                              {citation.uri ? <a href={citation.uri} rel="noreferrer" target="_blank">{t.openSource}</a> : null}
-                            </details>
-                          ))}
-                        </div>
-                      ) : null}
                       {message.attachments?.length ? (
                         <div className="representative-chat-artifacts">
                           <strong>{t.artifactsLabel}</strong>
@@ -1011,22 +952,25 @@ export function RepresentativeChatPanel(props: {
                       ) : null}
                       <footer>
                         {visibleStatus ? <span className="representative-message-status">{visibleStatus}</span> : null}
-                        <button
-                          aria-label={isCopied
-                            ? t.copiedAction
-                            : isCopyFailed
-                              ? t.copyFailedAction
-                              : t.copyMessageAction(senderName)}
-                          className={`representative-message-copy${isCopied ? " is-copied" : ""}${isCopyFailed ? " is-failed" : ""}`}
-                          onClick={() => void handleCopyMessage(message)}
-                          title={isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
-                          type="button"
-                        >
-                          <CopyIcon />
-                          <span aria-live="polite">
-                            {isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
-                          </span>
-                        </button>
+                        <span className="representative-message-actions-tools">
+                          <time className="representative-message-time" dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>
+                          <button
+                            aria-label={isCopied
+                              ? t.copiedAction
+                              : isCopyFailed
+                                ? t.copyFailedAction
+                                : t.copyMessageAction(senderName)}
+                            className={`representative-message-copy${isCopied ? " is-copied" : ""}${isCopyFailed ? " is-failed" : ""}`}
+                            onClick={() => void handleCopyMessage(message)}
+                            title={isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
+                            type="button"
+                          >
+                            <CopyIcon />
+                            <span aria-live="polite">
+                              {isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
+                            </span>
+                          </button>
+                        </span>
                       </footer>
                     </div>
                   </article>
@@ -1046,11 +990,6 @@ export function RepresentativeChatPanel(props: {
                     ) : null}
                   </div>
                   <div className="representative-message-content">
-                    <header className="representative-message-meta">
-                      <strong>{senderName}</strong>
-                      <span>{senderRole}</span>
-                      <time dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>
-                    </header>
                     <div className="representative-message-bubble">
                       <p>{message.text}</p>
                   {message.role === "assistant"
@@ -1059,18 +998,6 @@ export function RepresentativeChatPanel(props: {
                     <small className="representative-answer-source-disclosure">
                       {t.generalModelSourceDisclosure}
                     </small>
-                  ) : null}
-                  {message.citations?.length ? (
-                    <div className="representative-chat-citations">
-                      <strong>{t.citationsLabel}</strong>
-                      {message.citations.map((citation) => (
-                        <details key={`${message.id}:${citation.title}`}>
-                          <summary>{citation.title}</summary>
-                          {citation.excerpt ? <small>{citation.excerpt}</small> : null}
-                          {citation.uri ? <a href={citation.uri} rel="noreferrer" target="_blank">{t.openSource}</a> : null}
-                        </details>
-                      ))}
-                    </div>
                   ) : null}
                   {message.attachments?.length ? (
                     <div className="representative-chat-artifacts">
@@ -1092,22 +1019,25 @@ export function RepresentativeChatPanel(props: {
                     </div>
                     <footer className="representative-message-actions">
                       {visibleStatus ? <span className="representative-message-status">{visibleStatus}</span> : null}
-                      <button
-                        aria-label={isCopied
-                          ? t.copiedAction
-                          : isCopyFailed
-                            ? t.copyFailedAction
-                            : t.copyMessageAction(senderName)}
-                        className={`representative-message-copy${isCopied ? " is-copied" : ""}${isCopyFailed ? " is-failed" : ""}`}
-                        onClick={() => void handleCopyMessage(message)}
-                        title={isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
-                        type="button"
-                      >
-                        <CopyIcon />
-                        <span aria-live="polite">
-                          {isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
-                        </span>
-                      </button>
+                      <span className="representative-message-actions-tools">
+                        <time className="representative-message-time" dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>
+                        <button
+                          aria-label={isCopied
+                            ? t.copiedAction
+                            : isCopyFailed
+                              ? t.copyFailedAction
+                              : t.copyMessageAction(senderName)}
+                          className={`representative-message-copy${isCopied ? " is-copied" : ""}${isCopyFailed ? " is-failed" : ""}`}
+                          onClick={() => void handleCopyMessage(message)}
+                          title={isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
+                          type="button"
+                        >
+                          <CopyIcon />
+                          <span aria-live="polite">
+                            {isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
+                          </span>
+                        </button>
+                      </span>
                     </footer>
                   </div>
                 </article>
@@ -1120,19 +1050,25 @@ export function RepresentativeChatPanel(props: {
                   <b aria-label={t.aiAvatarBadgeLabel}>AI</b>
                 </div>
                 <div className="representative-message-content">
-                  <header className="representative-message-meta">
-                    <strong>{props.representativeName}</strong><span>{t.aiLabel}</span><time>{t.justNow}</time>
-                  </header>
                   <div className="representative-message-bubble"><p>{t.thinking(governedContextEnabled)}</p></div>
                 </div>
               </article>
             ) : null}
           </div>
 
-          {messages.length <= 1 ? (
-            <div className="representative-chat-starters" aria-label={t.startersLabel}>
-              <span>{t.startersLabel}</span>
-              <div>{t.starters.map((starter) => <button key={starter} onClick={() => chooseStarter(starter)} type="button">{starter}</button>)}</div>
+          {messages.length === 1 && messages[0]?.id === "welcome" && faqQuestions.length > 0 ? (
+            <div className="representative-chat-starters" aria-label={t.faqSuggestionsLabel}>
+              <span>{t.faqSuggestionsLabel}</span>
+              <div>{faqQuestions.map((question) => (
+                <button
+                  disabled={busy || hydrating}
+                  key={question}
+                  onClick={() => sendFaqQuestion(question)}
+                  type="button"
+                >
+                  {question}
+                </button>
+              ))}</div>
             </div>
           ) : null}
 
@@ -1225,9 +1161,6 @@ export function RepresentativeChatPanel(props: {
             ) : null}
             <div className="representative-chat-trust-note">
               <span>{t.composerTrustNote(governedContextEnabled)}</span>
-              <button onClick={(event) => openProfileSection("privacy", event.currentTarget)} type="button">
-                {t.privacyAction}
-              </button>
             </div>
             <footer className="dashboard-form-footer representative-chat-composer-actions">
               <p className="footer-note" id="representative-composer-guidance">
@@ -1280,56 +1213,42 @@ export function RepresentativeChatPanel(props: {
           <details className="representative-session-panel representative-session-details" open>
             <summary>
               <span>{t.sessionLabel}</span>
-              <small>{accessPresentation}</small>
+              <small>{allowancePresentation}</small>
             </summary>
             <div className="representative-session-panel-body">
               <div className="representative-session-row">
-                <span>{t.accessModeLabel}</span>
-                <strong>{accessPresentation}</strong>
+                <span>{accessPresentation.label}</span>
+                {accessPresentation.value ? <strong>{accessPresentation.value}</strong> : null}
               </div>
-              <div className="representative-session-row"><span>{t.serviceCreditsLabel}</span><strong>{usage.serviceCreditsAvailable}</strong></div>
-              <p className="representative-session-summary">
-                {responder.kind === "human"
-                  ? t.humanActiveDetail
-                  : responder.kind === "waiting"
-                    ? t.humanWaitingDetail
+              <div className="representative-session-row is-purchased-credits">
+                <span>{t.purchasedServiceCreditsLabel}</span>
+                <strong>{t.purchasedServiceCredits(
+                  remainingPurchasedCredits,
+                  totalCredits,
+                )}</strong>
+              </div>
+              {props.hasPublicCommerce ? (
+                <div className="representative-session-actions">
+                  <button
+                    className="button-secondary"
+                    onClick={(event) => openProfileSection("services", event.currentTarget)}
+                    type="button"
+                  >
+                    {t.openServices}
+                  </button>
+                </div>
+              ) : null}
+              {responder.kind !== "waiting" ? (
+                <p className="representative-session-summary">
+                  {responder.kind === "human"
+                    ? t.humanActiveDetail
                     : responder.kind === "offline"
                       ? t.connectionInterruptedDetail
                       : responder.kind === "error"
                         ? t.failedReplyDetail
-                      : t.aiActiveDetail}
-              </p>
-              <div className={`representative-session-handoff${props.humanInLoop ? "" : " is-unavailable"}`}>
-                <span className="panel-title">{t.handoffLabel}</span>
-                <strong>
-                  {props.humanInLoop
-                    ? t.handoffTitle(props.ownerName)
-                    : t.handoffUnavailableTitle}
-                </strong>
-                <p>{handoffDetail}</p>
-              </div>
-              <footer>
-                {props.humanInLoop
-                && props.handoffAccessMode === "PACKAGE_REQUIRED"
-                && handoffEntitlementStatus === "ready"
-                && !hasPaidHandoff
-                && props.hasHandoffPackages ? (
-                  <button
-                    onClick={(event) => openProfileSection("services", event.currentTarget)}
-                    type="button"
-                  >
-                    {t.handoffPackageAction}
-                  </button>
-                ) : null}
-                {accessMode === "FREE" && props.hasTips ? (
-                  <button onClick={(event) => openProfileSection("services", event.currentTarget)} type="button">
-                    {t.optionalSupportAction}
-                  </button>
-                ) : null}
-                <button onClick={(event) => openProfileSection("privacy", event.currentTarget)} type="button">
-                  {t.privacyAction}
-                </button>
-              </footer>
+                        : t.aiActiveDetail}
+                </p>
+              ) : null}
             </div>
           </details>
           {props.profilePanel}
@@ -1474,20 +1393,6 @@ function formatAttachmentBytes(value: number | undefined) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function formatHandoffExpiryDate(
-  value: string | null,
-  locale: "zh" | "en",
-) {
-  if (!value) return null;
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return null;
-  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  }).format(date);
-}
-
 function getComputeAssist(value: string, locale: "zh" | "en", enabled: boolean) {
   const normalized = value.trim();
   if (!/^\/compute(?:\s|$)/i.test(normalized)) return null;
@@ -1516,16 +1421,10 @@ function getComputeAssist(value: string, locale: "zh" | "en", enabled: boolean) 
 }
 
 const zhCopy = {
-  eyebrow: "与数字代表对话",
-  title: (name: string) => `向 ${name} 提问`,
-  summary: (governedContextEnabled: boolean) =>
-    governedContextEnabled
-      ? "直接描述你的问题；回答以已发布资料为基础，也可能使用仅限你与当前代表的受治理历史摘要。"
-      : "直接描述你的问题；回答以已发布资料为基础，并在使用公开来源时标明依据。",
+  digitalRepresentativeLabel: "数字代表",
   aiStatus: "AI 正在接待", humanStatus: "真人正在接待",
   humanStatusAvatar: "人",
-  aiLabel: "AI", humanLabel: "真人", youLabel: "你", visitorLabel: "访客",
-  systemLabel: "会话通知", taskUpdateLabel: "任务进展", systemRoleLabel: "系统消息",
+  youLabel: "你", systemLabel: "会话通知", taskUpdateLabel: "任务进展",
   justNow: "刚刚", copyAction: "复制", copiedAction: "已复制",
   copyMessageAction: (senderName: string) => `复制 ${senderName} 的消息`,
   copyFailedAction: "复制失败，请重试",
@@ -1533,11 +1432,9 @@ const zhCopy = {
   aiAvatarLabel: (name: string) => `${name} 的数字代表头像`,
   humanAvatarLabel: (name: string) => `${name} 的真人头像`,
   aiAvatarBadgeLabel: "AI 数字代表",
-  citationsLabel: "回答依据", openSource: "打开公开来源",
-  generalModelSourceDisclosure: "来源说明：本回答未引用已授权知识或记忆，内容由通用模型生成。",
+  generalModelSourceDisclosure: "来源说明：本回答未引用已授权知识或记忆。",
   artifactsLabel: "任务结果", downloadArtifact: "下载",
-  startersLabel: "你可以这样开始",
-  starters: ["我想了解你们提供什么服务", "我有一个合作需求", "帮我整理报价所需信息", "我希望联系本人"],
+  faqSuggestionsLabel: "你可以这样问我",
   inputLabel: "想解决什么？", placeholder: "描述你的问题、背景和期望结果…", footnote: "请勿发送密码、密钥或不应公开的敏感信息。",
   aiComposerContext: "发送给数字代表", humanComposerContext: "发送给当前接待人员", waitingComposerContext: "补充给人工接待队列",
   keyboardHint: "Enter 发送 · Shift + Enter 换行", sendMessageAction: "发送消息",
@@ -1556,41 +1453,33 @@ const zhCopy = {
     : "回答使用公开资料；重要承诺仍需真人确认。",
   sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", memoryPolicyChanged: "记忆策略刚刚更新。请阅读新的记忆说明后重新发送；上一条内容尚未提交。", serviceCreditPending: "服务额度正在处理中，请稍后重试；你的问题已保留在输入框中。", serviceCreditRequired: "免费回复已用完。请购买当前数字代表的服务额度后再发送；你的问题已保留在输入框中。", serviceCreditUnavailableWithHandoff: "免费回复已用完，当前数字代表暂无可购买的服务方案；可申请真人协助。你的问题已保留在输入框中。", serviceCreditUnavailable: "免费回复已用完，当前数字代表暂无可购买的服务方案。你的问题已保留在输入框中。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
-  sessionLabel: "本次会话",
-  currentResponder: "当前接待", accessModeLabel: "访问方式", serviceCreditsLabel: "服务额度",
+  sessionLabel: "服务和订单",
+  currentResponder: "当前接待", purchasedServiceCreditsLabel: "已购服务额度",
   profilePanelLabel: "代表资料与本次会话",
   showProfilePanel: "显示资料",
   hideProfilePanel: "隐藏资料",
   closeProfilePanel: "关闭代表资料",
   unlimitedFreeAccess: "永久免费",
+  unlimitedAccessValue: "不限",
+  unlimitedRemaining: "剩余额度 不限",
   creditsOnlyAccess: "使用服务额度",
-  trialAccess: (remaining: number, limit: number) => `免费剩余 ${remaining}/${limit}`,
+  freeAllowanceLabel: "免费剩余额度",
+  allowanceValue: (remaining: number, limit: number) => `${remaining}/${limit}`,
+  trialAccess: (remaining: number, limit: number) => `免费剩余额度 ${remaining}/${limit}`,
+  remainingAllowance: (remaining: number, total: number) => `剩余额度 ${remaining}/${total}`,
+  purchasedServiceCredits: (remaining: number, total: number) => `${remaining}/${total}`,
+  openServices: "查看服务与订单",
   aiActiveDetail: "你正在与数字代表对话；需要真人判断时会明确提示。",
   humanActiveDetail: "真人已经接手，你仍可以继续补充背景和要求。",
-  humanWaitingDetail: "人工请求已进入队列，你可以继续补充背景，暂不表示真人已经接手。",
   connectionInterruptedDetail: "会话状态暂时无法确认，请稍后刷新重试。",
   failedReplyDetail: "上一条回复未完成。你的对话仍然保留，可以重新发送或继续补充。",
-  handoffLabel: "人工接管", handoffTitle: (ownerName: string) => `申请 ${ownerName} 查看`, handoffAction: "了解转接方式",
-  handoffUnavailableTitle: "当前不可用",
-  handoffUnavailableDetail: "这位数字代表当前未启用人工接管，会继续由 AI 接待。",
-  handoffFreeDetail: "可直接在对话中提出人工请求；目标和关键背景会随会话一起提交。",
-  handoffEntitlementLoading: "正在确认当前账户的人工接管权益…",
-  handoffEntitlementUnavailable: "人工接管权益暂时无法确认。为避免重复购买，请稍后刷新后再试。",
-  handoffPackageRequiredDetail: "当前没有可用的人工接管权益。购买含人工权益的服务套餐后，可在有效期内申请。",
-  handoffPackageUnavailableDetail: "当前没有可用的人工接管权益，也没有上架包含人工接管的服务套餐。",
-  handoffEntitlementDetail: (unlimited: boolean, remaining: number, priority: boolean, expiresAt: string | null) => {
-    const expiry = formatHandoffExpiryDate(expiresAt, "zh");
-    return `${unlimited ? "不限次数" : `剩余 ${remaining} 次`}人工接管${priority ? " · 优先处理" : " · 标准处理"}${expiry ? ` · 下一份权益 ${expiry} 到期` : ""}。`;
-  },
-  handoffPackageAction: "查看人工权益套餐",
+  handoffAction: "了解转接方式",
   servicesEyebrow: "服务选项", servicesOptionalTitle: "需要时再升级", servicesNeededTitle: (humanInLoop: boolean) => humanInLoop ? "继续对话或申请人工" : "继续对话需要服务额度",
   creditPlanDetail: (available: number, reserved: number) => `当前还有 ${available} 个可用服务额度${reserved > 0 ? `，${reserved} 个正在处理中` : ""}；每次付费继续会先预留，再按实际完成结算。`,
   commerceUnavailableDetail: (humanInLoop: boolean) => humanInLoop ? "当前没有可购买的服务套餐；你仍可在对话中了解人工接管方式。" : "当前没有可购买的服务套餐。",
   openRecharge: "查看服务套餐",
   freeServiceTitle: "当前对话永久免费",
   freeServiceDetail: "不会销售继续对话所需的服务套餐；你可以直接使用数字代表。",
-  optionalSupportAction: "查看自愿支持方式",
-  privacyLabel: "隐私提示", privacyDetail: "不会读取主人的私人文件、账号或工作区。重要承诺需要真人确认。", privacyAction: "查看完整说明",
   welcome: (name: string, governedContextEnabled: boolean) =>
     governedContextEnabled
       ? `你好，我是 ${name}，你可以直接告诉我想了解什么。我会以已发布资料为基础，并可能使用仅限你与当前代表的受治理历史摘要；需要本人判断时，我会说明并帮你转交。`
@@ -1598,16 +1487,10 @@ const zhCopy = {
 };
 
 const enCopy = {
-  eyebrow: "Talk to the digital representative",
-  title: (name: string) => `Ask ${name}`,
-  summary: (governedContextEnabled: boolean) =>
-    governedContextEnabled
-      ? "Describe what you need. Replies are grounded in published information and may also use governed history scoped only to you and this representative."
-      : "Describe what you need. Replies are grounded in published information and show the public sources they use.",
+  digitalRepresentativeLabel: "Digital representative",
   aiStatus: "AI is responding", humanStatus: "Human is responding",
   humanStatusAvatar: "H",
-  aiLabel: "AI", humanLabel: "Human", youLabel: "You", visitorLabel: "Visitor",
-  systemLabel: "Conversation update", taskUpdateLabel: "Task update", systemRoleLabel: "System message",
+  youLabel: "You", systemLabel: "Conversation update", taskUpdateLabel: "Task update",
   justNow: "Just now", copyAction: "Copy", copiedAction: "Copied",
   copyMessageAction: (senderName: string) => `Copy ${senderName}'s message`,
   copyFailedAction: "Copy failed. Try again",
@@ -1615,11 +1498,9 @@ const enCopy = {
   aiAvatarLabel: (name: string) => `${name}'s digital representative avatar`,
   humanAvatarLabel: (name: string) => `${name}'s human avatar`,
   aiAvatarBadgeLabel: "AI digital representative",
-  citationsLabel: "Context used", openSource: "Open public source",
-  generalModelSourceDisclosure: "Source note: This answer did not cite authorized knowledge or memory; it was generated by a general-purpose model.",
+  generalModelSourceDisclosure: "Source note: This answer did not cite authorized knowledge or memory.",
   artifactsLabel: "Task results", downloadArtifact: "Download",
-  startersLabel: "Try one of these",
-  starters: ["What services do you offer?", "I have a partnership request", "Help me prepare a quote request", "I want to contact the owner"],
+  faqSuggestionsLabel: "You can ask me",
   inputLabel: "What do you need?", placeholder: "Describe the problem, context, and outcome you want…", footnote: "Do not send passwords, API keys, or sensitive information that should not be public.",
   aiComposerContext: "Send to the digital representative", humanComposerContext: "Send to the current operator", waitingComposerContext: "Add context for the human queue",
   keyboardHint: "Enter to send · Shift + Enter for a new line", sendMessageAction: "Send message",
@@ -1638,41 +1519,33 @@ const enCopy = {
     : "Uses public information; important commitments still require human confirmation.",
   sending: "Working…", send: "Send", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "Reviewing published knowledge and permitted context…" : "Reviewing published knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", memoryPolicyChanged: "The memory policy just changed. Review the updated memory notice and send again; your previous message was not submitted.", serviceCreditPending: "Service credits are still being processed. Try again shortly; your message remains in the composer.", serviceCreditRequired: "Your free replies are used up. Buy service credits for this representative, then send again. Your message remains in the composer.", serviceCreditUnavailableWithHandoff: "Your free replies are used up, and this representative has no purchasable service plan right now. Request human help instead. Your message remains in the composer.", serviceCreditUnavailable: "Your free replies are used up, and this representative has no purchasable service plan right now. Your message remains in the composer.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
   humanQueueNotice: "This conversation is now in the human queue. You can keep adding context while the operator reviews the full thread.",
-  sessionLabel: "This conversation",
-  currentResponder: "Current responder", accessModeLabel: "Access", serviceCreditsLabel: "Service credits",
+  sessionLabel: "Services and orders",
+  currentResponder: "Current responder", purchasedServiceCreditsLabel: "Purchased service credits",
   profilePanelLabel: "Profile and this conversation",
   showProfilePanel: "Show profile",
   hideProfilePanel: "Hide profile",
   closeProfilePanel: "Close profile",
   unlimitedFreeAccess: "Always free",
+  unlimitedAccessValue: "Unlimited",
+  unlimitedRemaining: "Unlimited remaining",
   creditsOnlyAccess: "Uses service credits",
-  trialAccess: (remaining: number, limit: number) => `${remaining}/${limit} free replies left`,
+  freeAllowanceLabel: "Free allowance remaining",
+  allowanceValue: (remaining: number, limit: number) => `${remaining}/${limit}`,
+  trialAccess: (remaining: number, limit: number) => `${remaining}/${limit} free allowance remaining`,
+  remainingAllowance: (remaining: number, total: number) => `${remaining}/${total} remaining`,
+  purchasedServiceCredits: (remaining: number, total: number) => `${remaining}/${total}`,
+  openServices: "View services and orders",
   aiActiveDetail: "You are talking to the digital representative. It will say when a human decision is needed.",
   humanActiveDetail: "A human has taken over. You can keep adding context and requirements.",
-  humanWaitingDetail: "The request is in the human queue. You can add context, but a human has not taken over yet.",
   connectionInterruptedDetail: "The conversation state cannot be confirmed right now. Refresh and try again shortly.",
   failedReplyDetail: "The last reply did not complete. Your conversation is still saved, so you can retry or add context.",
-  handoffLabel: "Human takeover", handoffTitle: (ownerName: string) => `Ask ${ownerName} to review`, handoffAction: "How handoff works",
-  handoffUnavailableTitle: "Not available",
-  handoffUnavailableDetail: "Human takeover is disabled for this representative. The AI remains the responder.",
-  handoffFreeDetail: "Ask in the conversation at no additional charge. Your goal and key context travel with the request.",
-  handoffEntitlementLoading: "Checking this account's human-takeover entitlement…",
-  handoffEntitlementUnavailable: "Human-takeover entitlement cannot be confirmed right now. To avoid a duplicate purchase, refresh and try again later.",
-  handoffPackageRequiredDetail: "No human-takeover entitlement is currently available. Buy a service package that includes one, then request it during its validity period.",
-  handoffPackageUnavailableDetail: "No human-takeover entitlement or purchasable package with human help is currently available.",
-  handoffEntitlementDetail: (unlimited: boolean, remaining: number, priority: boolean, expiresAt: string | null) => {
-    const expiry = formatHandoffExpiryDate(expiresAt, "en");
-    return `${unlimited ? "Unlimited" : `${remaining} remaining`} human takeover${priority ? " · priority service" : " · standard service"}${expiry ? ` · next entitlement expires ${expiry}` : ""}.`;
-  },
-  handoffPackageAction: "View packages with human help",
+  handoffAction: "How handoff works",
   servicesEyebrow: "Service options", servicesOptionalTitle: "Upgrade only when needed", servicesNeededTitle: (humanInLoop: boolean) => humanInLoop ? "Continue or request human help" : "Service credits are required to continue",
   creditPlanDetail: (available: number, reserved: number) => `${available} service credits remain${reserved > 0 ? `, with ${reserved} currently reserved` : ""}. Paid continuation reserves first and settles only after completion.`,
   commerceUnavailableDetail: (humanInLoop: boolean) => humanInLoop ? "No service package is currently available. You can still ask how human takeover works in the conversation." : "No service package is currently available.",
   openRecharge: "View service packages",
   freeServiceTitle: "This conversation is always free",
   freeServiceDetail: "No service package is sold to keep chatting; use the digital representative directly.",
-  optionalSupportAction: "View voluntary support options",
-  privacyLabel: "Privacy", privacyDetail: "This representative cannot read the owner's private files, accounts, or workspace. Important commitments require human confirmation.", privacyAction: "Read the full explanation",
   welcome: (name: string, governedContextEnabled: boolean) =>
     governedContextEnabled
       ? `Hi, I’m ${name}. Tell me what you want to understand. I use published information and may use governed history scoped only to you and this representative; I will offer a handoff when the owner needs to decide.`

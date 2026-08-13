@@ -157,6 +157,7 @@ describe("public chat audience identity cookie", () => {
       freeReplyLimit: 3,
       serviceCreditsAvailable: 4,
       serviceCreditsReserved: 1,
+      serviceCreditsPurchased: 12,
     });
 
     expect(free).toMatchObject({
@@ -170,6 +171,7 @@ describe("public chat audience identity cookie", () => {
       freeRepliesRemaining: 0,
       serviceCreditsAvailable: 4,
       serviceCreditsReserved: 1,
+      serviceCreditsPurchased: 12,
       passUnlocked: true,
     });
     expect(resolvePublicChatTier(paid)).toBe("pass");

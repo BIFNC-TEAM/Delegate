@@ -346,6 +346,7 @@ export function RepresentativeRechargePanel({
         representativeSlug,
         serviceCreditsAvailable: snapshot.summary.serviceCreditsAvailable,
         serviceCreditsReserved: snapshot.summary.serviceCreditsReserved,
+        serviceCreditsPurchased: snapshot.summary.serviceCreditsPurchased,
         handoffEntitlement: snapshot.handoffEntitlement,
       });
     }

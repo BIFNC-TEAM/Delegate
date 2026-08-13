@@ -29,6 +29,7 @@ describe("public wallet client updates", () => {
       representativeSlug: "delegate",
       serviceCreditsAvailable: 18,
       serviceCreditsReserved: 2,
+      serviceCreditsPurchased: 30,
       handoffEntitlement: {
         hasUnlimited: false,
         limitedRemainingUses: 2,
@@ -41,6 +42,7 @@ describe("public wallet client updates", () => {
       representativeSlug: "delegate",
       serviceCreditsAvailable: 18,
       serviceCreditsReserved: 2,
+      serviceCreditsPurchased: 30,
       handoffEntitlement: {
         hasUnlimited: false,
         limitedRemainingUses: 2,
@@ -61,11 +63,13 @@ describe("public wallet client updates", () => {
       tokenPurchase: {
         availableTokenAmount: 12,
         reservedTokenAmount: 1,
+        totalPurchasedTokenAmount: 20,
       },
     })).toEqual({
       representativeSlug: "delegate",
       serviceCreditsAvailable: 12,
       serviceCreditsReserved: 1,
+      serviceCreditsPurchased: 20,
     });
   });
 

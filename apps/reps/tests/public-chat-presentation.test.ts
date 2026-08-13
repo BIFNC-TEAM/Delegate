@@ -18,25 +18,60 @@ describe("public chat presentation", () => {
     expect(panelSource).toContain('["needs_human", "waiting_human"]');
     expect(panelSource).toContain('state === "failed"');
     expect(panelSource).toContain('kind: "error"');
-    expect(panelSource).toContain("t.humanWaitingDetail");
+    expect(panelSource).not.toContain("t.humanWaitingDetail");
     expect(panelSource).toContain(
       'className="representative-conversation-heading representative-chat-header"',
     );
+    expect(panelSource).toContain('className="representative-chat-identity"');
+    expect(panelSource).toContain('className="representative-chat-identity-avatar"');
+    expect(panelSource).toContain("{props.representativeName}");
+    expect(panelSource).toContain("t.digitalRepresentativeLabel");
+    expect(panelSource).not.toContain("{t.eyebrow}");
+    expect(panelSource).not.toContain("{t.title(props.representativeName)}");
+    expect(panelSource).not.toContain("{t.summary(governedContextEnabled)}");
     expect(panelSource.indexOf("representative-chat-header")).toBeGreaterThan(
       panelSource.indexOf("representative-chat-surface"),
     );
   });
 
-  it("distinguishes visitor, AI, operator, and system messages", () => {
+  it("summarizes free and purchased allowance from authoritative totals", () => {
+    expect(panelSource).toContain("usage.serviceCreditsPurchased");
+    expect(panelSource).toContain("usage.freeRepliesRemaining");
+    expect(panelSource).toContain("usage.serviceCreditsReserved");
+    expect(panelSource).toContain("t.remainingAllowance(remainingAllowance, totalAllowance)");
+    expect(panelSource).toContain('purchasedServiceCreditsLabel: "已购服务额度"');
+    expect(panelSource).toContain('freeAllowanceLabel: "免费剩余额度"');
+    expect(panelSource).toContain("value: t.allowanceValue(");
+    expect(panelSource).not.toContain('accessModeLabel: "访问方式"');
+    expect(panelSource).toContain("remainingPurchasedCredits,");
+    expect(panelSource).toContain("t.purchasedServiceCredits(");
+    expect(panelSource).toContain('sessionLabel: "服务和订单"');
+    expect(panelSource).toContain('openServices: "查看服务与订单"');
+    expect(panelSource).toContain('openProfileSection("services", event.currentTarget)');
+    expect(panelSource).toContain('className="representative-session-row is-purchased-credits"');
+    expect(panelSource).toContain('className="representative-session-actions"');
+    expect(panelSource).toContain("免费剩余额度 ${remaining}/${limit}");
+    expect(panelSource).not.toContain('className={`representative-session-handoff');
+    expect(panelSource).not.toContain("t.privacyAction");
+  });
+
+  it("distinguishes visitor, AI, operator, and system messages without noisy author labels", () => {
     expect(panelSource).toContain('className={`representative-message-avatar');
     expect(panelSource).toContain('aria-label={t.aiAvatarBadgeLabel}>AI</b>');
     expect(panelSource).toContain('className={`representative-system-message');
     expect(panelSource).toContain('message.senderType === "operator"');
     expect(panelSource).toContain('message.senderType === "system"');
-    expect(panelSource).toContain('className="representative-message-meta"');
+    expect(panelSource).not.toContain('className="representative-message-meta"');
     expect(panelSource).toContain("formatMessageTime(message.createdAt");
-    expect(panelSource.match(/className="representative-chat-citations"/gu)).toHaveLength(2);
+    expect(panelSource).not.toContain('className="representative-chat-citations"');
+    expect(panelSource).not.toContain("const senderRole =");
+    expect(panelSource).not.toContain("<span>{senderRole}</span>");
     expect(panelSource.match(/className="representative-chat-artifacts"/gu)).toHaveLength(2);
+  });
+
+  it("reveals timestamps and copy controls only on precise-pointer hover or focus", () => {
+    expect(panelSource).toContain('className="representative-message-time" dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>');
+    expect(panelSource).toContain('className="representative-message-actions-tools"');
   });
 
   it("offers accessible copy feedback without adding a dependency", () => {
@@ -86,5 +121,29 @@ describe("public chat presentation", () => {
     expect(panelSource).toContain(
       "if (!keepChatPinnedRef.current || messages.length <= 1) return",
     );
+  });
+
+  it("waits for authoritative channel history before showing the first welcome", () => {
+    expect(panelSource).toContain(
+      "const [messages, setMessages] = useState<ChatMessage[]>([])",
+    );
+    expect(panelSource).toContain('else if (payload.state === "new")');
+    expect(panelSource).toContain('id: "welcome"');
+    expect(panelSource).toContain('senderType: "representative"');
+    expect(panelSource).toContain('status: "completed"');
+    expect(panelSource.indexOf('if (payload.messages.length)')).toBeLessThan(
+      panelSource.indexOf('else if (payload.state === "new")'),
+    );
+  });
+
+  it("offers at most three published FAQ questions and sends one immediately", () => {
+    expect(panelSource).toContain("props.faqQuestions.map((question) => question.trim()).filter(Boolean)");
+    expect(panelSource).toContain(")].slice(0, 3)");
+    expect(panelSource).toContain('messages[0]?.id === "welcome"');
+    expect(panelSource).toContain("faqQuestions.length > 0");
+    expect(panelSource).toContain("onClick={() => sendFaqQuestion(question)}");
+    expect(panelSource).toContain("void submitMessage(question)");
+    expect(panelSource).toContain("void submitMessage(input)");
+    expect(panelSource).not.toContain('starters: [');
   });
 });

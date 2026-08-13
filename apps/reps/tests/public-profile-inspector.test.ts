@@ -81,6 +81,7 @@ describe("public representative profile inspector", () => {
     expect(inspectorSource).toContain('activeModal === "bindings"');
     expect(inspectorSource).toContain('activeModal === "services"');
     expect(inspectorSource).toContain("representative-binding-modal-explanation");
+    expect(inspectorSource).toContain("representative-profile-modal-card is-${activeModal}");
     expect(inspectorSource).toContain("t.bindingHelpItems.map");
     expect(inspectorSource).not.toContain('openModal("binding-help"');
     expect(inspectorSource).not.toContain("representative-inspector-help");

@@ -5952,12 +5952,28 @@ button.skill-row:hover {
 }
 
 .representative-profile-modal {
+  --ink: #111827;
+  --ink-soft: #6b7280;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --line-strong: #d1d5db;
+  --accent: #16a394;
+  --accent-ink: #0d9488;
+  --marketing-ink: #111827;
+  --marketing-soft: #6b7280;
+  --marketing-muted: #9ca3af;
+  --marketing-line: #e5e7eb;
+  --marketing-green: #16a394;
+  --marketing-green-strong: #0d9488;
+  --marketing-green-soft: #f0fdfa;
   position: fixed;
   inset: 0;
   z-index: 100;
   display: grid;
   place-items: center;
   padding: 20px;
+  color: var(--marketing-ink);
+  font-family: "Avenir Next", "SF Pro Display", "PingFang SC", "Hiragino Sans GB", sans-serif;
 }
 
 .representative-profile-modal-backdrop {
@@ -5968,35 +5984,49 @@ button.skill-row:hover {
   padding: 0;
   border: 0;
   border-radius: 0;
-  background: rgba(17, 24, 39, 0.54);
+  background: rgba(17, 24, 39, 0.5);
+  backdrop-filter: blur(6px);
   cursor: default;
 }
 
 .representative-profile-modal-card {
   position: relative;
   z-index: 1;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   width: min(520px, 100%);
   max-height: min(680px, calc(100dvh - 40px));
-  overflow: auto;
-  gap: 18px;
-  padding: 22px;
+  overflow: hidden;
+  gap: 0;
+  padding: 0;
   border: 1px solid var(--marketing-line);
-  border-radius: 14px;
+  border-radius: 12px;
   background: #ffffff;
-  box-shadow: 0 28px 80px rgba(17, 24, 39, 0.24);
+  box-shadow: 0 28px 80px rgba(17, 24, 39, 0.22);
   animation: representative-profile-modal-enter 220ms cubic-bezier(0.18, 0.89, 0.32, 1.1) both;
 }
 
 .representative-profile-modal-card.is-workspace {
-  width: min(1120px, 100%);
+  width: min(1040px, 100%);
   max-height: min(820px, calc(100dvh - 40px));
 }
 
+.representative-profile-modal-card.is-bindings {
+  width: min(960px, 100%);
+}
+
 .representative-profile-modal-workspace {
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   overflow: auto;
-  padding: 2px;
+  overscroll-behavior: contain;
+  padding: 18px 20px 22px;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+.representative-profile-modal-card.is-bindings .representative-profile-modal-workspace {
+  padding-top: 14px;
 }
 
 .representative-profile-management-stack {
@@ -6010,9 +6040,142 @@ button.skill-row:hover {
   margin: 0;
 }
 
+.representative-profile-modal .setup-stack,
+.representative-profile-modal .representative-profile-management-stack {
+  gap: 14px;
+}
+
+.representative-profile-modal .setup-grid {
+  gap: 12px;
+}
+
+.representative-profile-modal .footer-note {
+  max-width: none;
+  margin: 0;
+  color: var(--marketing-soft);
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.representative-profile-modal .status-banner {
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--marketing-line);
+  border-radius: 9px;
+  background: #f9fafb;
+  color: var(--marketing-ink);
+  box-shadow: none;
+}
+
+.representative-profile-modal .status-banner > :first-child {
+  margin-top: 0;
+}
+
+.representative-profile-modal .status-banner > :last-child {
+  margin-bottom: 0;
+}
+
+.representative-profile-modal .status-success {
+  border-color: rgba(13, 148, 136, 0.2);
+  background: var(--marketing-green-soft);
+}
+
+.representative-profile-modal .status-warning {
+  border-color: rgba(217, 119, 6, 0.22);
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.representative-profile-modal .status-error {
+  border-color: rgba(220, 38, 38, 0.2);
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.representative-profile-modal .button-primary,
+.representative-profile-modal .button-secondary,
+.representative-profile-modal .identity-binding-unlink {
+  min-height: 40px;
+  padding: 0 13px;
+  border-radius: 7px;
+  box-shadow: none;
+  font-size: 0.86rem;
+  font-weight: 750;
+}
+
+.representative-profile-modal .button-primary {
+  border: 1px solid var(--marketing-green);
+  background: var(--marketing-green);
+  color: #ffffff;
+}
+
+.representative-profile-modal .button-primary:not(:disabled):hover {
+  background: var(--marketing-green-strong);
+  border-color: var(--marketing-green-strong);
+  transform: translateY(-1px);
+}
+
+.representative-profile-modal .button-secondary,
+.representative-profile-modal .identity-binding-unlink {
+  border: 1px solid var(--marketing-line);
+  background: #ffffff;
+  color: var(--marketing-ink);
+}
+
+.representative-profile-modal .button-secondary:not(:disabled):hover,
+.representative-profile-modal .identity-binding-unlink:not(:disabled):hover {
+  border-color: rgba(13, 148, 136, 0.32);
+  background: var(--marketing-green-soft);
+  color: var(--marketing-green-strong);
+  transform: translateY(-1px);
+}
+
+.representative-profile-modal .text-input {
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--marketing-line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--marketing-ink);
+}
+
+.representative-profile-modal .text-input:focus {
+  outline: 2px solid rgba(13, 148, 136, 0.18);
+  outline-offset: 2px;
+  border-color: rgba(13, 148, 136, 0.36);
+}
+
+.representative-profile-modal .representative-capability-card,
+.representative-profile-modal .representative-commerce-option {
+  border-color: var(--marketing-line);
+  border-radius: 9px;
+  box-shadow: none;
+}
+
+.representative-profile-modal .representative-capability-card {
+  padding: 16px;
+}
+
+.representative-profile-modal .chip {
+  border-color: var(--marketing-line);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--marketing-soft);
+}
+
+.representative-profile-modal .chip-safe {
+  border-color: rgba(13, 148, 136, 0.2);
+  background: var(--marketing-green-soft);
+  color: var(--marketing-green-strong);
+}
+
 .representative-profile-privacy-detail {
   display: grid;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
   gap: 18px;
+  padding: 18px 20px 22px;
 }
 
 .representative-profile-privacy-detail > details {
@@ -6071,16 +6234,32 @@ button.skill-row:hover {
 
 .representative-profile-modal-card > header {
   display: flex;
+  flex: 0 0 auto;
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  min-height: 72px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--marketing-line);
+  background: #ffffff;
+}
+
+.representative-profile-modal-card > header .panel-title {
+  color: var(--marketing-green-strong);
+  font-family: var(--font-mono), "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .representative-profile-modal-card h2 {
   margin: 3px 0 0;
   color: var(--marketing-ink);
-  font-size: 1.35rem;
-  letter-spacing: -0.03em;
+  font-size: 1.25rem;
+  font-weight: 850;
+  line-height: 1.25;
+  letter-spacing: -0.025em;
 }
 
 .representative-profile-modal-close {
@@ -6100,14 +6279,15 @@ button.skill-row:hover {
 }
 
 .representative-profile-modal-close:hover {
-  border-color: rgba(220, 38, 38, 0.24);
-  background: #fef2f2;
-  color: #b91c1c;
+  border-color: rgba(13, 148, 136, 0.3);
+  background: var(--marketing-green-soft);
+  color: var(--marketing-green-strong);
 }
 
 .representative-binding-modal-explanation {
   display: grid;
   gap: 8px;
+  margin: 18px 20px 0;
   padding: 14px 16px;
   border: 1px solid rgba(13, 148, 136, 0.18);
   border-radius: 10px;
@@ -6442,7 +6622,7 @@ button.skill-row:hover {
   .representative-profile-modal-card {
     width: 100%;
     max-height: 86dvh;
-    padding: 18px 16px max(18px, env(safe-area-inset-bottom));
+    padding: 0;
     border-right: 0;
     border-bottom: 0;
     border-left: 0;
@@ -6452,6 +6632,22 @@ button.skill-row:hover {
 
   .representative-profile-modal-card > .button-primary {
     width: 100%;
+  }
+
+  .representative-profile-modal-card > header {
+    padding: 14px 16px;
+  }
+
+  .representative-profile-modal-workspace {
+    padding: 16px 16px max(20px, env(safe-area-inset-bottom));
+  }
+
+  .representative-profile-privacy-detail {
+    padding: 16px 16px max(20px, env(safe-area-inset-bottom));
+  }
+
+  .representative-binding-modal-explanation {
+    margin: 16px 16px 0;
   }
 
   .representative-shell.representative-profile-page > .representative-visitor-footer {

@@ -260,7 +260,7 @@ export function RepresentativeProfileInspector(props: {
             type="button"
           />
           <div
-            className={`representative-profile-modal-card${activeModal === "bindings" || activeModal === "services" ? " is-workspace" : ""}`}
+            className={`representative-profile-modal-card is-${activeModal}${activeModal === "bindings" || activeModal === "services" ? " is-workspace" : ""}`}
             ref={modalCardRef}
           >
             <header>

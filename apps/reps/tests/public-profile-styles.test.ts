@@ -25,6 +25,11 @@ describe("public representative profile styling", () => {
     expect(profileStyles).toContain(".representative-profile-inspector");
     expect(profileStyles).toContain(".representative-profile-rail.is-collapsed");
     expect(profileStyles).toContain(".representative-profile-rail.is-open");
+    expect(profileStyles).toContain(".representative-profile-modal .button-primary");
+    expect(profileStyles).toContain(".representative-profile-modal .status-banner");
+    expect(profileStyles).toContain(".representative-profile-modal-card.is-bindings");
+    expect(profileStyles).toMatch(/\.representative-profile-modal \{[\s\S]*?--accent:\s*#16a394;[\s\S]*?--marketing-green:\s*#16a394;/);
+    expect(profileStyles).toMatch(/\.representative-profile-modal-card > header \{[\s\S]*?padding:\s*16px 20px;[\s\S]*?border-bottom:/);
     expect(profileStyles).toMatch(/\.representative-profile-page \.representative-profile-rail \{[\s\S]*?gap:\s*0;/);
   });
 

@@ -6,6 +6,13 @@ const setupSource = readFileSync(
   new URL("../app/dashboard/dashboard-representative-setup.tsx", import.meta.url),
   "utf8",
 );
+const billingProductsSource = readFileSync(
+  new URL(
+    "../app/dashboard/dashboard-representative-billing-products.tsx",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const routeSource = readFileSync(
   new URL("../app/api/dashboard/representatives/[slug]/setup/route.ts", import.meta.url),
   "utf8",
@@ -17,7 +24,10 @@ describe("representative intake", () => {
     expect(setupSource).not.toContain("需求采集字段");
     expect(setupSource).not.toContain("Reception policy");
     expect(setupSource).toContain('activeSection === "pricing"');
-    expect(setupSource).toContain("具体联系人、预算和时间由真人接手后再询问");
+    expect(setupSource).not.toContain("representative-handoff-status");
+    expect(billingProductsSource).toContain("联系人、预算和时间由真人接手后再确认");
+    expect(billingProductsSource).toContain("人工接手提示语");
+    expect(billingProductsSource).toContain("人工评估时窗（小时）");
   });
 
   it("does not send a configurable reception policy through the setup API", () => {

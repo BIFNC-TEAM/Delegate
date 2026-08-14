@@ -1422,14 +1422,6 @@
 .representative-config-workspace .dashboard-surface-header { padding-bottom: 13px; border-bottom: 1px solid var(--v2-line); }
 .representative-config-workspace .dashboard-surface-header .panel-title { color: var(--v2-teal-strong); font-family: var(--font-mono), monospace; font-size: .55rem; letter-spacing: .08em; }
 .representative-config-workspace .dashboard-surface-header h3 { color: var(--v2-ink); font-size: .9rem; }
-.representative-handoff-status {
-  display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 14px;
-  border: 1px solid #ccfbf1; border-radius: 10px; background: var(--v2-teal-soft);
-}
-.representative-handoff-status > div { display: grid; gap: 3px; }
-.representative-handoff-status span { color: var(--v2-teal-strong); font-size: .58rem; font-weight: 800; }
-.representative-handoff-status strong { color: var(--v2-ink); font-size: .72rem; }
-.representative-handoff-status small { color: var(--v2-muted); font-size: .57rem; line-height: 1.45; }
 .representative-config-workspace .dashboard-form-footer {
   position: static; padding: 12px 14px; border: 1px solid var(--v2-line); border-radius: 12px;
   background: rgba(255,255,255,.96); box-shadow: 0 10px 28px rgba(17,24,39,.08); backdrop-filter: blur(12px);
@@ -1847,6 +1839,25 @@
   border-radius: 9px;
   background: #f9fafb;
 }
+.representative-commerce-handoff {
+  grid-column: 1 / -1;
+}
+.representative-commerce-handoff-copy,
+.representative-commerce-handoff-window {
+  display: grid;
+  gap: 6px;
+}
+.representative-commerce-handoff-copy > span,
+.representative-commerce-handoff-window > span {
+  color: var(--v2-copy);
+  font-size: .75rem;
+  font-weight: 800;
+}
+.representative-commerce-handoff-copy > small {
+  color: var(--v2-muted);
+  font-size: .75rem;
+  line-height: 1.5;
+}
 .representative-commerce-field > span,
 .representative-commerce-field legend {
   padding: 0;
@@ -1860,6 +1871,7 @@
   line-height: 1.5;
 }
 .representative-commerce-field input[type="number"],
+.representative-commerce-field textarea,
 .representative-commerce-field select,
 .representative-billing-editor-grid select {
   width: 100%;
@@ -1871,7 +1883,12 @@
   background: #fff;
   font: 650 .875rem var(--font-sans),sans-serif;
 }
+.representative-commerce-field textarea {
+  min-height: 96px;
+  resize: vertical;
+}
 .representative-commerce-field input:focus,
+.representative-commerce-field textarea:focus,
 .representative-commerce-field select:focus,
 .representative-billing-editor-grid select:focus {
   border-color: var(--v2-teal);
@@ -2243,7 +2260,6 @@
   .representative-config-form .toggle-grid,
   .representative-config-form .checkbox-grid { grid-template-columns: 1fr; }
   .representative-config-form .field-span-full { grid-column: auto; }
-  .representative-handoff-status { align-items: stretch; flex-direction: column; }
   .representative-config-workspace .dashboard-form-footer {
     position: static; align-items: stretch; flex-direction: column; padding: 11px; box-shadow: none;
   }

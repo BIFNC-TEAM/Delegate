@@ -36,7 +36,7 @@ describe("representative commerce management", () => {
     expect(setupSource).toContain('label: "价格"');
     expect(setupSource).toContain('label: "Pricing"');
     expect(setupSource).toContain("唯一价格真相");
-    expect(setupSource).toContain("价格设置与商品在下方独立保存");
+    expect(setupSource).toContain("handoffConfiguration={{");
     expect(setupFormEnd).toBeGreaterThan(-1);
     expect(commerceMount).toBeGreaterThan(setupFormEnd);
     expect(billingProductsSource).not.toContain("<form");
@@ -68,7 +68,9 @@ describe("representative commerce management", () => {
     expect(billingProductsSource).toContain("humanInLoop");
     expect(billingProductsSource).toContain("handoffAccessMode");
     expect(billingProductsSource).toContain("tipsEnabled");
-    expect(billingProductsSource).toContain("Save pricing settings");
+    expect(billingProductsSource).toContain("Save access and handoff");
+    expect(billingProductsSource).toContain("Handoff prompt");
+    expect(billingProductsSource).toContain("Human review window (hours)");
     expect(billingProductsSource).toContain("Archive every active service package");
     expect(billingProductsSource).toContain("Archive every active tip option");
   });

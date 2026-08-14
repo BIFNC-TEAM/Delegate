@@ -34,11 +34,25 @@ type CommerceNotice = {
 
 type CatalogCategory = ProductKind | "ARCHIVED";
 
+type HandoffConfiguration = {
+  prompt: string;
+  reviewWindowHours: number;
+  savedPrompt: string;
+  savedReviewWindowHours: number;
+  isPending: boolean;
+  onChange: (value: { prompt: string; reviewWindowHours: number }) => void;
+  onSave: () => Promise<boolean>;
+};
+
 export function DashboardRepresentativeBillingProducts({
+  handoffConfiguration,
   locale,
+  onCommerceSettingsSaved,
   representativeSlug,
 }: {
+  handoffConfiguration: HandoffConfiguration;
   locale: Locale;
+  onCommerceSettingsSaved: (settings: CommerceSettings) => void;
   representativeSlug: string;
 }) {
   const zh = locale === "zh";
@@ -109,6 +123,10 @@ export function DashboardRepresentativeBillingProducts({
     && settings
     && commerceSettingsChanged(catalog.representative, settings),
   );
+  const handoffConfigurationDirty =
+    handoffConfiguration.prompt !== handoffConfiguration.savedPrompt
+    || handoffConfiguration.reviewWindowHours
+      !== handoffConfiguration.savedReviewWindowHours;
 
   const productsByCategory = useMemo(() => ({
     SERVICE_PACKAGE: sortProducts(
@@ -163,6 +181,7 @@ export function DashboardRepresentativeBillingProducts({
         ? { ...current, representative: payload.representative }
         : current);
       setSettings(payload.representative);
+      onCommerceSettingsSaved(payload.representative);
       if (!options.preserveEditor) setEditor(null);
       setNotice({
         kind: "success",
@@ -182,6 +201,30 @@ export function DashboardRepresentativeBillingProducts({
         setIsSettingsPending(false);
       }
     }
+  }
+
+  async function saveAccessAndHandoffSettings() {
+    const commerceWasDirty = settingsDirty;
+    const handoffWasDirty = handoffConfigurationDirty;
+    if (!commerceWasDirty && !handoffWasDirty) return;
+
+    if (handoffWasDirty && !await handoffConfiguration.onSave()) {
+      return;
+    }
+    if (commerceWasDirty) {
+      await saveSettings(settings, {
+        successMessage: zh
+          ? "访问与人工接管设置已保存。"
+          : "Access and human handoff settings are saved.",
+      });
+      return;
+    }
+    setNotice({
+      kind: "success",
+      message: zh
+        ? "人工接管提示语与评估时窗已保存。"
+        : "Human handoff copy and review window are saved.",
+    });
   }
 
   async function enablePackageRequiredHandoff() {
@@ -463,8 +506,8 @@ export function DashboardRepresentativeBillingProducts({
             <div className="representative-config-notification-copy">
               <strong>
                 {notice.kind === "error"
-                  ? zh ? "价格操作失败" : "Pricing request failed"
-                  : zh ? "价格设置已更新" : "Pricing updated"}
+                  ? zh ? "设置操作失败" : "Settings request failed"
+                  : zh ? "设置已更新" : "Settings updated"}
               </strong>
               <p>{notice.message}</p>
             </div>
@@ -496,8 +539,13 @@ export function DashboardRepresentativeBillingProducts({
       {catalog && settings ? (
         <CommerceSettingsPanel
           error={settingsError}
-          isDirty={settingsDirty}
-          isPending={isSettingsPending || isProductPending}
+          handoffConfiguration={handoffConfiguration}
+          isDirty={settingsDirty || handoffConfigurationDirty}
+          isPending={
+            isSettingsPending
+            || isProductPending
+            || handoffConfiguration.isPending
+          }
           locale={locale}
           onChange={(next) => {
             setSettings(next);
@@ -506,10 +554,14 @@ export function DashboardRepresentativeBillingProducts({
           }}
           onDiscard={() => {
             setSettings(catalog.representative);
+            handoffConfiguration.onChange({
+              prompt: handoffConfiguration.savedPrompt,
+              reviewWindowHours: handoffConfiguration.savedReviewWindowHours,
+            });
             setSettingsError(null);
             setNotice(null);
           }}
-          onSave={() => void saveSettings()}
+          onSave={() => void saveAccessAndHandoffSettings()}
           settings={settings}
         />
       ) : null}
@@ -570,7 +622,12 @@ export function DashboardRepresentativeBillingProducts({
                 : catalog.representative.accessMode === "FREE"
                   ? (zh ? "免费模式不能创建或发布服务套餐；先保存其他 AI 访问模式。" : "Free access cannot publish service packages. Save another AI access mode first.")
                   : (zh ? "服务额度可叠加人工接管次数、优先级与有效期。" : "Credits can include handoff uses, priority, and a validity window.")}
-            isPending={isProductPending || isSettingsPending || settingsDirty}
+            isPending={
+              isProductPending
+              || isSettingsPending
+              || settingsDirty
+              || handoffConfigurationDirty
+            }
             locale={locale}
             onArchive={archiveProduct}
             onCreate={catalogCategory === "ARCHIVED" ? undefined : () => openCreate(catalogCategory)}
@@ -590,7 +647,11 @@ export function DashboardRepresentativeBillingProducts({
         <BillingProductEditorModal
           editor={editor}
           fieldErrors={productError?.fieldErrors ?? {}}
-          isPending={isProductPending || isSettingsPending}
+          isPending={
+            isProductPending
+            || isSettingsPending
+            || handoffConfiguration.isPending
+          }
           locale={locale}
           managedProduct={managedProduct}
           handoffPolicyBlocked={editorRequiresPackageHandoff(editor)
@@ -631,6 +692,7 @@ export function DashboardRepresentativeBillingProducts({
 
 function CommerceSettingsPanel({
   error,
+  handoffConfiguration,
   isDirty,
   isPending,
   locale,
@@ -640,6 +702,7 @@ function CommerceSettingsPanel({
   settings,
 }: {
   error: RequestFailure | null;
+  handoffConfiguration: HandoffConfiguration;
   isDirty: boolean;
   isPending: boolean;
   locale: Locale;
@@ -754,6 +817,38 @@ function CommerceSettingsPanel({
           </select>
           <small>{zh ? "套餐权益的次数与优先级在每个服务套餐中配置。" : "Configure handoff uses and priority on each service package."}</small>
           <FieldError id={fieldErrorId("settings-handoff-access-mode")} message={errors.handoffAccessMode} />
+
+          <label className="representative-commerce-handoff-copy">
+            <span>{zh ? "人工接手提示语" : "Handoff prompt"}</span>
+            <textarea
+              disabled={isPending}
+              onChange={(event) => handoffConfiguration.onChange({
+                prompt: event.target.value,
+                reviewWindowHours: handoffConfiguration.reviewWindowHours,
+              })}
+              rows={3}
+              value={handoffConfiguration.prompt}
+            />
+            <small>
+              {zh
+                ? "只说明如何提交和预期处理方式；联系人、预算和时间由真人接手后再确认。"
+                : "Explain submission and next steps; contact, budget, and timing are confirmed after takeover."}
+            </small>
+          </label>
+
+          <label className="representative-commerce-handoff-window">
+            <span>{zh ? "人工评估时窗（小时）" : "Human review window (hours)"}</span>
+            <input
+              disabled={isPending}
+              min={1}
+              onChange={(event) => handoffConfiguration.onChange({
+                prompt: handoffConfiguration.prompt,
+                reviewWindowHours: Number(event.target.value || 0),
+              })}
+              type="number"
+              value={handoffConfiguration.reviewWindowHours}
+            />
+          </label>
         </fieldset>
 
         <fieldset className="representative-commerce-field">
@@ -775,13 +870,17 @@ function CommerceSettingsPanel({
       </div>
 
       <footer>
-        <span>{zh ? "保存后立即影响新会话与公开购买。" : "Saving immediately affects new conversations and public purchases."}</span>
+        <span>
+          {zh
+            ? "访问策略保存后立即生效；提示语和评估时窗保存到代表草稿，发布后生效。"
+            : "Access policy applies immediately; handoff copy and the review window save to the representative draft and apply after publishing."}
+        </span>
         <div>
           <button disabled={isPending || !isDirty} onClick={onDiscard} type="button">
             {zh ? "放弃更改" : "Discard"}
           </button>
           <button className="button-primary" disabled={isPending || !isDirty} onClick={onSave} type="button">
-            {isPending ? (zh ? "保存中…" : "Saving…") : (zh ? "保存价格设置" : "Save pricing settings")}
+            {isPending ? (zh ? "保存中…" : "Saving…") : (zh ? "保存访问与人工设置" : "Save access and handoff")}
           </button>
         </div>
       </footer>

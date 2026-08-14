@@ -315,7 +315,7 @@ export function DashboardRepresentativeSetup({
   const localizedComputeFilesystemModeLabels = getComputeFilesystemModeLabels(locale);
   const localizedComputeCapabilityLabels = getComputeCapabilityLabels(locale);
   const materialKindOptions = getMaterialKindOptions(locale);
-  const [, setSnapshot] = useState<RepresentativeSetupSnapshot | null>(null);
+  const [snapshot, setSnapshot] = useState<RepresentativeSetupSnapshot | null>(null);
   const [draft, setDraft] = useState<RepresentativeSetupSnapshot | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -364,6 +364,78 @@ export function DashboardRepresentativeSetup({
     setDraft((current) => (current ? mutator(cloneSnapshot(current)) : current));
   }
 
+  async function persistRepresentativeSetup(showSuccess = true): Promise<boolean> {
+    if (!draft) {
+      return false;
+    }
+
+    setMessage(null);
+    setError(null);
+    try {
+      const bindingChanged = !sameStringSet(knowledgeAssetIds, savedKnowledgeAssetIds);
+      const { setupResponse: response, bindingResponse, bindingError } =
+        await saveRepresentativeSetupRequests({
+          representativeSlug,
+          setup: draft,
+          knowledgeAssetIds,
+          bindingChanged,
+        });
+
+      if (!response.ok) {
+        const failure = await extractErrorPayload(response);
+        if (
+          response.status === 409
+          && failure.code === "KNOWLEDGE_PACK_CONFLICT"
+        ) {
+          const refreshed = await refreshSetupAfterConflict(
+            representativeSlug,
+            setSnapshot,
+            setDraft,
+          );
+          if (!refreshed) {
+            throw new Error(t.setupConflictReloadError);
+          }
+          setError(t.setupConflictMessage);
+          return false;
+        }
+        throw new Error(failure.error);
+      }
+
+      // The setup CAS has already committed at this point. Adopt its new
+      // revision before reporting a later binding failure, otherwise the
+      // next save would retry with a stale revision and always conflict.
+      const nextSnapshot = (await response.json()) as RepresentativeSetupSnapshot;
+      setSnapshot(nextSnapshot);
+      setDraft(cloneSnapshot(nextSnapshot));
+
+      if (bindingError) {
+        throw bindingError;
+      }
+      if (bindingResponse && !bindingResponse.ok) {
+        throw new Error(await extractError(bindingResponse));
+      }
+
+      if (bindingResponse) {
+        const bindingResult = (await bindingResponse.json()) as {
+          assets: RepresentativeKnowledgeAsset[];
+          selectedAssetIds: string[];
+        };
+        setKnowledgeAssets(bindingResult.assets);
+        setKnowledgeAssetIds(bindingResult.selectedAssetIds);
+        setSavedKnowledgeAssetIds(bindingResult.selectedAssetIds);
+      }
+      if (showSuccess) setMessage(t.savedMessage);
+      return true;
+    } catch (nextError) {
+      setError(
+        nextError instanceof Error
+          ? nextError.message
+          : t.saveError,
+      );
+      return false;
+    }
+  }
+
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -371,75 +443,8 @@ export function DashboardRepresentativeSetup({
       return;
     }
 
-    if (!draft) {
-      return;
-    }
-
-    setMessage(null);
-    setError(null);
-
     startTransition(() => {
-      void (async () => {
-        const bindingChanged = !sameStringSet(knowledgeAssetIds, savedKnowledgeAssetIds);
-        const { setupResponse: response, bindingResponse, bindingError } =
-          await saveRepresentativeSetupRequests({
-            representativeSlug,
-            setup: draft,
-            knowledgeAssetIds,
-            bindingChanged,
-          });
-
-        if (!response.ok) {
-          const failure = await extractErrorPayload(response);
-          if (
-            response.status === 409
-            && failure.code === "KNOWLEDGE_PACK_CONFLICT"
-          ) {
-            const refreshed = await refreshSetupAfterConflict(
-              representativeSlug,
-              setSnapshot,
-              setDraft,
-            );
-            if (!refreshed) {
-              throw new Error(t.setupConflictReloadError);
-            }
-            setError(t.setupConflictMessage);
-            return;
-          }
-          throw new Error(failure.error);
-        }
-
-        // The setup CAS has already committed at this point. Adopt its new
-        // revision before reporting a later binding failure, otherwise the
-        // next save would retry with a stale revision and always conflict.
-        const nextSnapshot = (await response.json()) as RepresentativeSetupSnapshot;
-        setSnapshot(nextSnapshot);
-        setDraft(cloneSnapshot(nextSnapshot));
-
-        if (bindingError) {
-          throw bindingError;
-        }
-        if (bindingResponse && !bindingResponse.ok) {
-          throw new Error(await extractError(bindingResponse));
-        }
-
-        if (bindingResponse) {
-          const bindingResult = (await bindingResponse.json()) as {
-            assets: RepresentativeKnowledgeAsset[];
-            selectedAssetIds: string[];
-          };
-          setKnowledgeAssets(bindingResult.assets);
-          setKnowledgeAssetIds(bindingResult.selectedAssetIds);
-          setSavedKnowledgeAssetIds(bindingResult.selectedAssetIds);
-        }
-        setMessage(t.savedMessage);
-      })().catch((nextError: unknown) => {
-        setError(
-          nextError instanceof Error
-            ? nextError.message
-            : t.saveError,
-        );
-      });
+      void persistRepresentativeSetup();
     });
   }
 
@@ -1168,63 +1173,6 @@ export function DashboardRepresentativeSetup({
           </DashboardSurface>
         ) : null}
 
-        {activeSection === "pricing" ? (
-          <DashboardSurface
-            eyebrow={t.contractEyebrow}
-            title={locale === "zh"
-              ? "说明人工接手方式；具体联系人、预算和时间由真人接手后再询问。"
-              : "Explain human handoff; contact, budget, and timing are collected after takeover."}
-          >
-            <div className="representative-handoff-status">
-              <div>
-                <span>{locale === "zh" ? "当前人工接管" : "Current human handoff"}</span>
-                <strong>{draft.humanInLoop ? (locale === "zh" ? "已开放" : "Available") : (locale === "zh" ? "未开放" : "Unavailable")}</strong>
-                <small>
-                  {draft.handoffAccessMode === "PACKAGE_REQUIRED"
-                    ? (locale === "zh" ? "访客需要套餐权益；可在下方价格设置中调整。" : "A service package is required; change this in pricing below.")
-                    : (locale === "zh" ? "所有访客都可以提出人工接手请求。" : "All visitors may request human handoff.")}
-                </small>
-              </div>
-            </div>
-
-            <div className="setup-grid">
-              <label className="field-stack field-span-full">
-                <span>{t.handoffPrompt}</span>
-                <textarea
-                  className="text-input textarea-input"
-                  onChange={(event) =>
-                    updateDraft((value) => ({ ...value, handoffPrompt: event.target.value }))
-                  }
-                  rows={4}
-                  value={draft.handoffPrompt}
-                />
-                <small>{locale === "zh"
-                  ? "只说明如何提交和预期处理方式，不要求访客预先填写联系人、预算或时间。"
-                  : "Explain submission and next steps without asking for contact, budget, or timing up front."}</small>
-              </label>
-
-              <label className="field-stack">
-                <span>{t.handoffWindow}</span>
-                <input
-                  className="text-input"
-                  min={1}
-                  onChange={(event) =>
-                    updateDraft((value) => ({
-                      ...value,
-                      contract: {
-                        ...value.contract,
-                        handoffWindowHours: Number(event.target.value || 0),
-                      },
-                    }))
-                  }
-                  type="number"
-                  value={draft.contract.handoffWindowHours}
-                />
-              </label>
-            </div>
-          </DashboardSurface>
-        ) : null}
-
         {activeSection === "memory" ? (
           <DashboardRepresentativeMemorySettings
             key={representativeSlug}
@@ -1233,7 +1181,7 @@ export function DashboardRepresentativeSetup({
           />
         ) : null}
 
-        {activeSection !== "memory" ? <div className="dashboard-form-footer">
+        {activeSection !== "memory" && activeSection !== "pricing" ? <div className="dashboard-form-footer">
           <div className="button-row">
             <button
               className="button-secondary"
@@ -1267,13 +1215,6 @@ export function DashboardRepresentativeSetup({
             <span className="muted">
               {t.stepCount(activeSectionIndex + 1, localizedSetupSections.length)}
             </span>
-            {activeSection === "pricing" ? (
-              <span className="muted">
-                {locale === "zh"
-                  ? "人工接手说明保存为代表草稿；价格设置与商品在下方独立保存"
-                  : "Handoff copy saves to the representative draft; pricing and products save independently below"}
-              </span>
-            ) : null}
             <button className="button-primary" disabled={isPending} type="submit">
               {isPending ? t.saving : t.saveRepresentativeSetup}
             </button>
@@ -1282,10 +1223,85 @@ export function DashboardRepresentativeSetup({
       </form>
 
         {activeSection === "pricing" ? (
-          <DashboardRepresentativeBillingProducts
-            locale={locale}
-            representativeSlug={representativeSlug}
-          />
+          <>
+            <DashboardRepresentativeBillingProducts
+              handoffConfiguration={{
+                prompt: draft.handoffPrompt,
+                reviewWindowHours: draft.contract.handoffWindowHours,
+                savedPrompt: snapshot?.handoffPrompt ?? draft.handoffPrompt,
+                savedReviewWindowHours:
+                  snapshot?.contract.handoffWindowHours
+                  ?? draft.contract.handoffWindowHours,
+                isPending,
+                onChange: ({ prompt, reviewWindowHours }) =>
+                  updateDraft((value) => ({
+                    ...value,
+                    handoffPrompt: prompt,
+                    contract: {
+                      ...value.contract,
+                      handoffWindowHours: reviewWindowHours,
+                    },
+                  })),
+                onSave: () => new Promise((resolve) => {
+                  startTransition(() => {
+                    void persistRepresentativeSetup(false).then(resolve);
+                  });
+                }),
+              }}
+              locale={locale}
+              onCommerceSettingsSaved={(settings) => {
+                const synchronizeLiveSettings = (
+                  value: RepresentativeSetupSnapshot | null,
+                ) => value
+                  ? {
+                      ...value,
+                      humanInLoop: settings.humanInLoop,
+                      handoffAccessMode: settings.handoffAccessMode,
+                      contract: {
+                        ...value.contract,
+                        freeReplyLimit: settings.freeReplyLimit,
+                      },
+                    }
+                  : value;
+                setSnapshot(synchronizeLiveSettings);
+                setDraft(synchronizeLiveSettings);
+              }}
+              representativeSlug={representativeSlug}
+            />
+            <div className="dashboard-form-footer">
+              <div className="button-row">
+                <button
+                  className="button-secondary"
+                  disabled={activeSectionIndex <= 0}
+                  onClick={() =>
+                    setActiveSection(
+                      localizedSetupSections[Math.max(0, activeSectionIndex - 1)]?.id ?? "basics",
+                    )
+                  }
+                  type="button"
+                >
+                  {t.previousStep}
+                </button>
+                <button
+                  className="button-secondary"
+                  disabled={activeSectionIndex >= localizedSetupSections.length - 1}
+                  onClick={() =>
+                    setActiveSection(
+                      localizedSetupSections[
+                        Math.min(localizedSetupSections.length - 1, activeSectionIndex + 1)
+                      ]?.id ?? "memory",
+                    )
+                  }
+                  type="button"
+                >
+                  {t.nextStep}
+                </button>
+              </div>
+              <span className="muted">
+                {t.stepCount(activeSectionIndex + 1, localizedSetupSections.length)}
+              </span>
+            </div>
+          </>
         ) : null}
       </div>
 
@@ -1312,8 +1328,8 @@ export function DashboardRepresentativeSetup({
                     : "Memory controls and channel capabilities are live runtime boundaries for this representative, not representative draft or release fields.")
                 : activeSection === "pricing"
                   ? (locale === "zh"
-                      ? "访问方式、人工接管、打赏开关与 CNY 商品目录不属于代表发布草稿。"
-                      : "Access, human handoff, tips, and the CNY catalog are not part of the representative release draft.")
+                      ? "访问方式、人工接管权限与打赏实时生效；提示语和评估时窗随代表草稿发布。"
+                      : "Access, handoff entitlement, and tips apply live; handoff copy and the review window publish with the representative draft.")
                   : t.stepPreviewCopy}
             </span>
           </header>
@@ -1417,10 +1433,6 @@ const setupCopy = {
     groupActivation: "Group activation",
     mode: "Mode",
     publicMode: "Public mode",
-    handoffPrompt: "人工接手提示语",
-    contractEyebrow: "HUMAN HANDOFF",
-    contractTitle: "配置人工接手体验。",
-    handoffWindow: "人工评估时窗（小时）",
     knowledgeEyebrow: "Knowledge Pack",
     knowledgeTitle: "让公开知识先于自由发挥，回答和材料都从这里长出来。",
     identitySummary: "Identity summary",
@@ -1511,10 +1523,6 @@ const setupCopy = {
     groupActivation: "Group activation",
     mode: "Mode",
     publicMode: "Public mode",
-    handoffPrompt: "Handoff prompt",
-    contractEyebrow: "HUMAN HANDOFF",
-    contractTitle: "Configure the human handoff experience.",
-    handoffWindow: "Human review window (hours)",
     knowledgeEyebrow: "Knowledge pack",
     knowledgeTitle: "Make structured public knowledge come before improvisation.",
     identitySummary: "Identity summary",

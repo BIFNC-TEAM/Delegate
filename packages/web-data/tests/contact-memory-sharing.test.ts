@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   contactMemorySharingConsentContractVersion,
   createContactMemorySharingChallenge,
+  getContactMemorySharingState,
   grantContactMemorySharingConsent,
   readContactMemorySharingChallengeToken,
   resolveDeterministicContactMemorySharingCommand,
@@ -27,6 +28,45 @@ const webEvidence = {
 };
 
 describe("contact memory sharing consent", () => {
+  it("treats the user's latest revocation as authoritative across policy revisions", async () => {
+    const consentFindFirst = vi.fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        status: ContactMemorySharingConsentStatus.REVOKED,
+        revokedAt: new Date("2026-08-08T00:00:00.000Z"),
+      });
+    const client = {
+      representative: {
+        findUnique: vi.fn(async () => ({ id: "rep-1", slug: "delegate" })),
+      },
+      representativeMemoryPolicy: {
+        findUnique: vi.fn(async () => ({
+          revision: 9,
+          longTermMemoryEnabled: true,
+          contactMemoryEnabled: true,
+          contactMemoryCrossChannelEnabled: false,
+        })),
+      },
+      audienceIdentity: {
+        findUnique: vi.fn(async () => ({
+          id: "identity-1",
+          status: AudienceIdentityStatus.REGISTERED,
+          mergedIntoId: null,
+        })),
+      },
+      contactMemorySharingConsent: { findFirst: consentFindFirst },
+    };
+
+    await expect(getContactMemorySharingState({
+      representativeSlug: "delegate",
+      audienceIdentityId: "identity-1",
+    }, { client: client as never })).resolves.toMatchObject({
+      policyEnabled: true,
+      active: false,
+      blockedReason: "user_disabled",
+    });
+  });
+
   it("requires an exact one-time token for Matrix confirmation commands", () => {
     expect(resolveDeterministicContactMemorySharingCommand("!memory_share"))
       .toBe("DISCLOSE");

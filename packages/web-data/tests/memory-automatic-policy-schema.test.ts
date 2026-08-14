@@ -90,6 +90,13 @@ const sharingForwardSecurityMigration = readFileSync(
   ),
   "utf8",
 );
+const userOwnedCrossChannelMigration = readFileSync(
+  new URL(
+    "../../../prisma/migrations/20260813154500_user_owned_cross_channel_memory/migration.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const extraction = readFileSync(
   new URL("../src/memory-extraction.ts", import.meta.url),
   "utf8",
@@ -100,17 +107,23 @@ const governance = readFileSync(
 );
 
 describe("automatic memory policy foundation", () => {
-  it("adds automatic policy settings without changing existing behavior defaults", () => {
+  it("keeps cross-channel capability on while leaving consent to the user", () => {
     const policy = modelBlock("RepresentativeMemoryPolicy");
     expect(policy).toContain("shortTermMemoryEnabled");
     expect(policy).toContain("@default(true)");
     expect(policy).toContain("contactMemoryCrossChannelEnabled");
-    expect(policy).toContain("@default(false)");
+    expect(policy).toContain("contactMemoryCrossChannelEnabled Boolean            @default(true)");
     expect(migration).toContain(
       '"shortTermMemoryEnabled" BOOLEAN NOT NULL DEFAULT true',
     );
     expect(migration).toContain(
       '"contactMemoryCrossChannelEnabled" BOOLEAN NOT NULL DEFAULT false',
+    );
+    expect(userOwnedCrossChannelMigration).toContain(
+      'ALTER COLUMN "contactMemoryCrossChannelEnabled" SET DEFAULT true',
+    );
+    expect(userOwnedCrossChannelMigration).toContain(
+      'AND "contactMemoryCrossChannelEnabled" = false',
     );
   });
 

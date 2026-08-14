@@ -46,6 +46,7 @@ export function RepresentativeProfileInspector(props: {
   audienceAuthenticated: boolean;
   bindingManagement?: ReactNode;
   commerceManagement?: ReactNode;
+  tipManagement?: ReactNode;
   initialSection?: RepresentativeProfileSection;
   locale: "zh" | "en";
   loginHref: string;
@@ -125,6 +126,9 @@ export function RepresentativeProfileInspector(props: {
     document.body.style.overflow = "hidden";
     closeHelpRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (document.querySelector(".representative-memory-confirmation-modal")) {
+        return;
+      }
       if (event.key === "Escape") {
         setActiveModal(null);
         return;
@@ -246,6 +250,30 @@ export function RepresentativeProfileInspector(props: {
         </details>
       </section>
 
+      {props.tipManagement ? (
+        <section
+          aria-labelledby="representative-tip-entry-title"
+          className="representative-tip-entry"
+        >
+          <div aria-hidden="true" className="representative-tip-entry-icon">
+            <TipIcon />
+          </div>
+          <div className="representative-tip-entry-copy">
+            <span>{t.tipEyebrow}</span>
+            <strong id="representative-tip-entry-title">{t.tipTitle}</strong>
+            <p>{t.tipDetail}</p>
+          </div>
+          <button
+            aria-haspopup="dialog"
+            className="button-secondary"
+            onClick={(event) => openModal("tips", event.currentTarget)}
+            type="button"
+          >
+            {t.openTips}
+          </button>
+        </section>
+      ) : null}
+
       {portalReady && activeModal ? createPortal((
         <div
           aria-label={getModalTitle(activeModal, t)}
@@ -295,6 +323,10 @@ export function RepresentativeProfileInspector(props: {
               <div className="representative-profile-modal-workspace">
                 {props.commerceManagement}
               </div>
+            ) : activeModal === "tips" ? (
+              <div className="representative-profile-modal-workspace representative-tip-modal-workspace">
+                {props.tipManagement}
+              </div>
             ) : (
               <div className="representative-profile-privacy-detail">
                 <ul className="representative-profile-boundaries">
@@ -327,6 +359,7 @@ function getModalTitle(
 ) {
   if (modal === "bindings") return t.bindingManagementTitle;
   if (modal === "services") return t.servicesManagementTitle;
+  if (modal === "tips") return t.tipManagementTitle;
   if (modal === "privacy") return t.privacyManagementTitle;
   return t.privacyManagementTitle;
 }
@@ -336,8 +369,17 @@ function getModalEyebrow(
   t: typeof zhCopy | typeof enCopy,
 ) {
   if (modal === "services") return t.servicesLabel;
+  if (modal === "tips") return t.tipEyebrow;
   if (modal === "privacy") return t.privacyLabel;
   return t.channelLabel;
+}
+
+function TipIcon() {
+  return (
+    <svg aria-hidden="true" fill="none" viewBox="0 0 24 24">
+      <path d="M12 20s-7-4.35-7-10a4 4 0 0 1 7-2.42A4 4 0 0 1 19 10c0 5.65-7 10-7 10Z" />
+    </svg>
+  );
 }
 
 function ChannelStatus({
@@ -383,6 +425,11 @@ const zhCopy = {
   pendingResource: "暂未提供公开下载",
   servicesLabel: "服务与订单",
   servicesManagementTitle: "购买服务与查看订单",
+  tipEyebrow: "自愿支持",
+  tipTitle: "打赏这位代表",
+  tipDetail: "表达支持，不增加服务额度、响应优先级或人工权益。",
+  openTips: "选择打赏金额",
+  tipManagementTitle: "自愿支持这位代表",
   privacyLabel: "隐私与边界",
   privacyManagementTitle: "完整隐私与记忆说明",
   memoryLabel: "记忆使用范围",
@@ -421,6 +468,11 @@ const enCopy = {
   pendingResource: "No public download yet",
   servicesLabel: "Services and orders",
   servicesManagementTitle: "Buy services and review orders",
+  tipEyebrow: "Voluntary support",
+  tipTitle: "Tip this representative",
+  tipDetail: "Show support without adding service credits, response priority, or human-help entitlements.",
+  openTips: "Choose an amount",
+  tipManagementTitle: "Support this representative",
   privacyLabel: "Privacy and boundaries",
   privacyManagementTitle: "Full privacy and memory explanation",
   memoryLabel: "How memory is used",

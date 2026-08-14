@@ -44,7 +44,8 @@ export type ContactMemorySharingBlockedReason =
   | "policy_disabled"
   | "identity_ineligible"
   | "consent_missing"
-  | "consent_stale";
+  | "consent_stale"
+  | "user_disabled";
 
 export type DeterministicContactMemorySharingCommand =
   | "DISCLOSE"
@@ -130,7 +131,6 @@ export async function getContactMemorySharingState(
         revision: true,
         longTermMemoryEnabled: true,
         contactMemoryEnabled: true,
-        contactMemoryCrossChannelEnabled: true,
       },
     }),
     client.audienceIdentity.findUnique({
@@ -140,8 +140,7 @@ export async function getContactMemorySharingState(
   ]);
   const policyEnabled = Boolean(
     policy?.longTermMemoryEnabled
-    && policy.contactMemoryEnabled
-    && policy.contactMemoryCrossChannelEnabled,
+    && policy.contactMemoryEnabled,
   );
   if (identity?.status !== AudienceIdentityStatus.REGISTERED) {
     return sharingState({
@@ -155,68 +154,91 @@ export async function getContactMemorySharingState(
       blockedReason: "policy_disabled",
     });
   }
-  const consent = await client.contactMemorySharingConsent.findFirst({
-    where: {
-      representativeId: coordinates.representativeId,
-      audienceIdentityId: coordinates.audienceIdentityId,
-      policyRevision: policy.revision,
-    },
-    orderBy: [{ consentVersion: "desc" }, { createdAt: "desc" }],
-    select: {
-      id: true,
-      status: true,
-      grantedAt: true,
-      revokedAt: true,
-      consentVersion: true,
-      disclosureContractVersion: true,
-      sourceChannel: true,
-      challengeId: true,
-      sourceEvidenceHash: true,
-      confirmationEventHash: true,
-      proofHash: true,
-      sourceEventClaim: {
-        select: {
-          eventHash: true,
-          role: true,
-          representativeId: true,
-          audienceIdentityId: true,
-          sourceChannel: true,
-          challengeId: true,
-          consentId: true,
-        },
+  const [consent, latestPreference] = await Promise.all([
+    client.contactMemorySharingConsent.findFirst({
+      where: {
+        representativeId: coordinates.representativeId,
+        audienceIdentityId: coordinates.audienceIdentityId,
+        policyRevision: policy.revision,
       },
-      challenge: {
-        select: {
-          id: true,
-          representativeId: true,
-          audienceIdentityId: true,
-          sourceChannel: true,
-          policyRevision: true,
-          disclosureContractVersion: true,
-          sourceEvidenceHash: true,
-          disclosureEventHash: true,
-          createdAt: true,
-          expiresAt: true,
-          consumedAt: true,
-          revokedAt: true,
-          sourceEventClaims: {
-            where: {
-              role: ContactMemorySharingSourceEventRole.DISCLOSURE,
-            },
-            select: {
-              eventHash: true,
-              role: true,
-              representativeId: true,
-              audienceIdentityId: true,
-              sourceChannel: true,
-              challengeId: true,
-              consentId: true,
+      orderBy: [{ consentVersion: "desc" }, { createdAt: "desc" }],
+      select: {
+        id: true,
+        status: true,
+        grantedAt: true,
+        revokedAt: true,
+        consentVersion: true,
+        disclosureContractVersion: true,
+        sourceChannel: true,
+        challengeId: true,
+        sourceEvidenceHash: true,
+        confirmationEventHash: true,
+        proofHash: true,
+        sourceEventClaim: {
+          select: {
+            eventHash: true,
+            role: true,
+            representativeId: true,
+            audienceIdentityId: true,
+            sourceChannel: true,
+            challengeId: true,
+            consentId: true,
+          },
+        },
+        challenge: {
+          select: {
+            id: true,
+            representativeId: true,
+            audienceIdentityId: true,
+            sourceChannel: true,
+            policyRevision: true,
+            disclosureContractVersion: true,
+            sourceEvidenceHash: true,
+            disclosureEventHash: true,
+            createdAt: true,
+            expiresAt: true,
+            consumedAt: true,
+            revokedAt: true,
+            sourceEventClaims: {
+              where: {
+                role: ContactMemorySharingSourceEventRole.DISCLOSURE,
+              },
+              select: {
+                eventHash: true,
+                role: true,
+                representativeId: true,
+                audienceIdentityId: true,
+                sourceChannel: true,
+                challengeId: true,
+                consentId: true,
+              },
             },
           },
         },
       },
-    },
-  });
+    }),
+    client.contactMemorySharingConsent.findFirst({
+      where: {
+        representativeId: coordinates.representativeId,
+        audienceIdentityId: coordinates.audienceIdentityId,
+      },
+      orderBy: [
+        { updatedAt: "desc" },
+        { createdAt: "desc" },
+        { consentVersion: "desc" },
+      ],
+      select: { status: true, revokedAt: true },
+    }),
+  ]);
+  if (
+    latestPreference?.status === ContactMemorySharingConsentStatus.REVOKED
+    || latestPreference?.revokedAt
+  ) {
+    return sharingState({
+      policyEnabled: true,
+      blockedReason: "user_disabled",
+    });
+  }
   if (!consent) {
     return sharingState({ policyEnabled: true, blockedReason: "consent_missing" });
   }
@@ -339,7 +361,6 @@ export async function createContactMemorySharingChallengeInTransaction(
         revision: true,
         longTermMemoryEnabled: true,
         contactMemoryEnabled: true,
-        contactMemoryCrossChannelEnabled: true,
       },
     }),
     tx.audienceIdentity.findUnique({
@@ -460,7 +481,6 @@ export async function grantContactMemorySharingConsentInTransaction(
         revision: true,
         longTermMemoryEnabled: true,
         contactMemoryEnabled: true,
-        contactMemoryCrossChannelEnabled: true,
       },
     }),
     tx.audienceIdentity.findUnique({
@@ -974,14 +994,12 @@ function assertSharingPolicyAndIdentity(
     revision: number;
     longTermMemoryEnabled: boolean;
     contactMemoryEnabled: boolean;
-    contactMemoryCrossChannelEnabled: boolean;
   } | null,
   identity: { status: AudienceIdentityStatus } | null,
 ): asserts policy is NonNullable<typeof policy> {
   if (
     !policy?.longTermMemoryEnabled
     || !policy.contactMemoryEnabled
-    || !policy.contactMemoryCrossChannelEnabled
   ) {
     throw new ContactMemorySharingError(
       "contact_memory_sharing_policy_disabled",

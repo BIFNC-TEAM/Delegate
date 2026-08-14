@@ -97,6 +97,7 @@ export function RepresentativeRechargePanel({
   representativeSlug,
   locale,
   paymentAvailability,
+  productKindFilter,
 }: {
   audienceAuthenticated: boolean;
   collectionEnabled: boolean;
@@ -106,14 +107,19 @@ export function RepresentativeRechargePanel({
   representativeSlug: string;
   locale: Locale;
   paymentAvailability: "ready" | "collection_paused" | "unavailable";
+  productKindFilter?: PublicCommerceProduct["kind"];
 }) {
   const t = pickCopy(locale, copy);
+  const initialVisibleProducts = filterCommerceProductsByKind(
+    initialCommerceProducts,
+    productKindFilter,
+  );
   const [commerceProducts, setCommerceProducts] = useState<
     PublicCommerceProduct[]
-  >(initialCommerceProducts);
+  >(initialVisibleProducts);
   const [selectedPriceVersionId, setSelectedPriceVersionId] =
     useState<string | null>(
-      pickDefaultCommerceProduct(initialCommerceProducts)?.priceVersionId
+      pickDefaultCommerceProduct(initialVisibleProducts)?.priceVersionId
         ?? null,
     );
   const [order, setOrder] = useState<RechargeOrderSnapshot | null>(null);
@@ -282,7 +288,11 @@ export function RepresentativeRechargePanel({
           checkoutExpiresAt: activity.order.checkoutExpiresAt,
         }
       : null);
-    setCommerceProducts(snapshot.commerceProducts);
+    const visibleProducts = filterCommerceProductsByKind(
+      snapshot.commerceProducts,
+      productKindFilter,
+    );
+    setCommerceProducts(visibleProducts);
     setTipCompleted(
       activity.order?.productKind === "TIP"
       && activity.order.status === "paid",
@@ -290,7 +300,7 @@ export function RepresentativeRechargePanel({
     setSelectedPriceVersionId((current) => {
       if (
         current
-        && snapshot.commerceProducts.some(
+        && visibleProducts.some(
           (product) => product.priceVersionId === current,
         )
       ) {
@@ -298,7 +308,7 @@ export function RepresentativeRechargePanel({
       }
       if (
         activity.order
-        && snapshot.commerceProducts.some(
+        && visibleProducts.some(
           (product) =>
             product.priceVersionId
             === activity.order?.billingPriceVersionId,
@@ -307,7 +317,7 @@ export function RepresentativeRechargePanel({
         return activity.order.billingPriceVersionId;
       }
       const preferred = pickDefaultCommerceProduct(
-        snapshot.commerceProducts,
+        visibleProducts,
         snapshot.commerceSettings.accessMode,
       );
       return preferred?.priceVersionId ?? null;
@@ -350,7 +360,7 @@ export function RepresentativeRechargePanel({
         handoffEntitlement: snapshot.handoffEntitlement,
       });
     }
-  }, [representativeSlug]);
+  }, [productKindFilter, representativeSlug]);
 
   const refreshWalletState = useCallback(async (
     signal?: AbortSignal,
@@ -939,7 +949,9 @@ export function RepresentativeRechargePanel({
 
   return (
     <div className="setup-stack">
-      <p className="footer-note">{t.identityNote}</p>
+      <p className="footer-note">
+        {productKindFilter === "TIP" ? t.tipIdentityNote : t.identityNote}
+      </p>
 
       {paymentAvailability !== "ready" ? (
         <div className="status-banner status-warning" role="status">
@@ -1019,6 +1031,13 @@ export function RepresentativeRechargePanel({
       {audienceAuthenticated && isRestoring ? (
         <div className="status-banner" role="status">
           <strong>{t.restoring}</strong>
+        </div>
+      ) : audienceAuthenticated && walletState && productKindFilter === "TIP" ? (
+        <div className="status-banner" role="status">
+          <strong>{t.tipRecordTitle}</strong>
+          <p>{t.tipRecordSummary(
+            walletState.orders.filter((item) => item.productKind === "TIP").length,
+          )}</p>
         </div>
       ) : audienceAuthenticated && walletState ? (
         <div className="status-banner" role="status">
@@ -1331,6 +1350,13 @@ function pickDefaultCommerceProduct(
     ?? null;
 }
 
+function filterCommerceProductsByKind(
+  products: PublicCommerceProduct[],
+  kind: PublicCommerceProduct["kind"] | undefined,
+) {
+  return kind ? products.filter((product) => product.kind === kind) : products;
+}
+
 function randomId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
@@ -1368,6 +1394,9 @@ function isAbortError(error: unknown): boolean {
 const copy = {
   zh: {
     identityNote: "服务套餐和自愿支持都会记入当前已登录的 Delegate 账户。套餐额度与人工权益仅适用于当前数字代表；打赏不赠送额度或人工权益。",
+    tipIdentityNote: "打赏会记入当前已登录的 Delegate 账户，仅用于表达自愿支持；不赠送服务额度、响应优先级或人工权益，支付确认后不可退款。",
+    tipRecordTitle: "支持记录",
+    tipRecordSummary: (count: number) => `当前账户已有 ${count} 笔打赏记录。`,
     restoring: "正在读取当前代表的服务与支持选项…",
     loadError: "服务与支持选项读取失败。",
     refreshError: "操作已完成，但最新服务额度暂时无法刷新，请重新加载页面。",
@@ -1466,6 +1495,9 @@ const copy = {
   },
   en: {
     identityNote: "Service packages and voluntary support are recorded on the signed-in Delegate account. Package credits and human-help entitlements apply only to this representative; tips include neither.",
+    tipIdentityNote: "Tips are recorded on the signed-in Delegate account as voluntary support only. They add no service credits, response priority, or human-help entitlements and are non-refundable once confirmed.",
+    tipRecordTitle: "Support history",
+    tipRecordSummary: (count: number) => `${count} tip ${count === 1 ? "record" : "records"} on this account.`,
     restoring: "Loading services and support options for this representative…",
     loadError: "Services and support options could not be loaded.",
     refreshError: "The operation completed, but the latest service credits could not be refreshed. Reload the page to try again.",

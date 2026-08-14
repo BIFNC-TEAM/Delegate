@@ -35,8 +35,9 @@ const copy = {
     shortTermDetail: "仅使用当前会话最近消息作为上下文，不写入 OpenViking，也不跨会话保留。",
     contactMemory: "启用联系人记忆",
     contactDetail: "默认仅限当前联系人、当前代表和来源渠道；支付、凭据、私密备注与原始聊天不得进入。",
-    crossChannel: "允许联系人记忆跨渠道共享",
-    crossChannelDetail: "此开关只允许共享，不会自动合并联系人。仅当各渠道解析为同一已验证身份，并且联系人已独立授权时才会共享；匿名、未验证或已撤回授权的联系人仍保持渠道隔离。",
+    crossChannel: "跨渠道连续性",
+    crossChannelMode: "用户授权控制",
+    crossChannelDetail: "Dashboard 不提供开关。Owner 只配置联系人记忆和各渠道能力；已验证用户默认开启跨渠道联系人记忆，并可在公开代表页随时关闭。匿名、未验证或已关闭的用户始终保持渠道隔离。",
     requiresLongTerm: "前置条件：请先启用长期记忆。",
     requiresContactMemory: "前置条件：请先启用联系人记忆。",
     requiresMemoryType: "前置条件：请先启用联系人记忆或代表经验。",
@@ -45,7 +46,7 @@ const copy = {
     representativeExperience: "启用代表经验",
     representativeDetail: "只沉淀去标识化、可复用的服务模式；联系人事实、原始会话与交易事实不会成为代表经验。",
     channelsTitle: "渠道能力",
-    channelsDetail: "Web、Matrix 和 Telegram 均支持记忆召回与提取，可分别开关。跨渠道共享另受上方策略、统一身份验证与联系人授权约束。",
+    channelsDetail: "配置 Web、Matrix 和 Telegram 是否支持记忆召回与提取。用户是否允许跨渠道延续联系人记忆不在 Dashboard 中配置。",
     channel: "渠道",
     recall: "召回",
     extraction: "提取",
@@ -122,8 +123,9 @@ const copy = {
     shortTermDetail: "Uses recent messages from the current conversation only. It is not written to OpenViking or retained across conversations.",
     contactMemory: "Enable Contact Memory",
     contactDetail: "Isolated to the current contact, representative, and source channel by default. Payments, credentials, private notes, and raw chats are excluded.",
-    crossChannel: "Allow Contact Memory sharing across channels",
-    crossChannelDetail: "This switch permits sharing; it never merges contacts automatically. Memory is shared only when channels resolve to the same verified identity and the contact has separately consented. Anonymous, unverified, or withdrawn identities remain channel-isolated.",
+    crossChannel: "Cross-channel continuity",
+    crossChannelMode: "User-controlled consent",
+    crossChannelDetail: "Dashboard does not provide a switch. Owners configure Contact Memory and channel capability only. Cross-channel Contact Memory defaults on for verified users, who can turn it off at any time from the public representative page. Anonymous, unverified, or opted-out users remain isolated.",
     requiresLongTerm: "Prerequisite: enable long-term memory first.",
     requiresContactMemory: "Prerequisite: enable Contact Memory first.",
     requiresMemoryType: "Prerequisite: enable Contact Memory or Representative Experience first.",
@@ -132,7 +134,7 @@ const copy = {
     representativeExperience: "Enable Representative Experience",
     representativeDetail: "Keeps only de-identified, reusable service patterns. Contact facts, raw conversations, and transaction truth never become representative experience.",
     channelsTitle: "Channel capability",
-    channelsDetail: "Web, Matrix, and Telegram support memory recall and extraction with independent controls. Cross-channel sharing is separately gated by the policy above, verified identity, and contact consent.",
+    channelsDetail: "Configure whether Web, Matrix, and Telegram support memory recall and extraction. A user's permission to continue Contact Memory across channels is not configured in Dashboard.",
     channel: "Channel",
     recall: "Recall",
     extraction: "Extraction",
@@ -271,6 +273,9 @@ export function DashboardRepresentativeMemorySettings({
           }
         }
       }
+      if (key === "contactMemoryEnabled" && enabled) {
+        next.basic.contactMemoryCrossChannelEnabled = true;
+      }
       if (
         (key === "contactMemoryEnabled" || key === "representativeExperienceEnabled")
         && !next.basic.contactMemoryEnabled
@@ -360,13 +365,6 @@ export function DashboardRepresentativeMemorySettings({
   const extractionDisabledReason = memoryTypeDisabledReason
     ?? (!draft.basic.autoExtract ? t.requiresAutoExtract : undefined);
   const crossChannelSupported = snapshot.basic.contactMemoryCrossChannelSupported === true;
-  const crossChannelDisabledReason = !crossChannelSupported
-    ? t.crossChannelUnavailable
-    : !draft.basic.longTermMemoryEnabled
-      ? t.requiresLongTerm
-      : !draft.basic.contactMemoryEnabled
-        ? t.requiresContactMemory
-        : undefined;
   const sync = snapshot.advanced.sync;
   const syncPresentation = resolveOpenVikingSyncPresentation(sync);
   const knowledgeHref = `/dashboard?${new URLSearchParams({
@@ -391,7 +389,6 @@ export function DashboardRepresentativeMemorySettings({
           <div className="representative-memory-settings-toggle-list">
             <PolicyToggle checked={draft.basic.autoExtract} detail={t.autoExtractDetail} disabled={Boolean(memoryTypeDisabledReason)} disabledReason={memoryTypeDisabledReason} label={t.autoExtract} onChange={(checked) => updateBasic("autoExtract", checked)} />
             <PolicyToggle checked={draft.basic.contactMemoryEnabled} detail={t.contactDetail} disabled={Boolean(longTermDisabledReason)} disabledReason={longTermDisabledReason} label={t.contactMemory} onChange={(checked) => updateBasic("contactMemoryEnabled", checked)} />
-            <PolicyToggle checked={draft.basic.contactMemoryCrossChannelEnabled} detail={t.crossChannelDetail} disabled={Boolean(crossChannelDisabledReason)} disabledReason={crossChannelDisabledReason} label={t.crossChannel} onChange={(checked) => updateBasic("contactMemoryCrossChannelEnabled", checked)} />
             <PolicyToggle checked={draft.basic.representativeExperienceEnabled} detail={t.representativeDetail} disabled={Boolean(longTermDisabledReason)} disabledReason={longTermDisabledReason} label={t.representativeExperience} onChange={(checked) => updateBasic("representativeExperienceEnabled", checked)} />
             <PolicyToggle checked={draft.basic.longTermMemoryEnabled} detail={t.longTermDetail} label={t.longTerm} onChange={(checked) => updateBasic("longTermMemoryEnabled", checked)} />
             <PolicyToggle checked={draft.basic.shortTermMemoryEnabled} detail={t.shortTermDetail} label={t.shortTerm} onChange={(checked) => updateBasic("shortTermMemoryEnabled", checked)} />
@@ -399,6 +396,13 @@ export function DashboardRepresentativeMemorySettings({
         </SettingsGroup>
 
         <SettingsGroup detail={t.channelsDetail} title={t.channelsTitle}>
+          <aside className="representative-memory-settings-consent-note">
+            <div>
+              <strong>{t.crossChannel}</strong>
+              <span className="chip chip-safe">{t.crossChannelMode}</span>
+            </div>
+            <p>{crossChannelSupported ? t.crossChannelDetail : t.crossChannelUnavailable}</p>
+          </aside>
           <div className="representative-memory-settings-channel-table">
             <div className="is-heading"><span>{t.channel}</span><span>{t.recall}</span><span>{t.extraction}</span></div>
             {memoryChannelKeys.map((channel) => {
@@ -553,8 +557,7 @@ export function policyFromSettings(settings: MemorySettings): MemorySettingsPoli
       shortTermMemoryEnabled: Boolean(settings.basic.shortTermMemoryEnabled),
       contactMemoryEnabled,
       contactMemoryCrossChannelEnabled: contactMemoryEnabled
-        && settings.basic.contactMemoryCrossChannelSupported === true
-        && settings.basic.contactMemoryCrossChannelEnabled,
+        && settings.basic.contactMemoryCrossChannelSupported === true,
       representativeExperienceEnabled,
       autoExtract,
     },
@@ -614,6 +617,8 @@ function normalizePolicy(policy: MemorySettingsPolicy): MemorySettingsPolicy {
   }
   if (!next.basic.contactMemoryEnabled) {
     next.basic.contactMemoryCrossChannelEnabled = false;
+  } else {
+    next.basic.contactMemoryCrossChannelEnabled = true;
   }
   if (!next.basic.contactMemoryEnabled && !next.basic.representativeExperienceEnabled) {
     next.basic.autoExtract = false;

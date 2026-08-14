@@ -1522,10 +1522,13 @@ export async function acceptInboundConversationMessage(
               }
             : {}
         ),
-        deliveryStatus:
-          input.queueGeneration === false
-            ? MessageDeliveryStatus.SENT
-            : MessageDeliveryStatus.QUEUED,
+        // QUEUED describes work that a generation worker still needs to
+        // claim. When a human already owns the episode there is no generation
+        // run to claim: the inbound message is durably saved for the operator
+        // and is therefore already SENT.
+        deliveryStatus: shouldQueueAi
+          ? MessageDeliveryStatus.QUEUED
+          : MessageDeliveryStatus.SENT,
         retentionExpiresAt: buildMessageRetentionExpiry(createdAt),
         createdAt,
       },

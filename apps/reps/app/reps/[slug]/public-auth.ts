@@ -1,6 +1,6 @@
 import { buildLocalizedHref, type Locale } from "@delegate/web-ui";
 
-export type PublicAudienceLoginTarget = "chat" | "telegram-recharge";
+export type PublicAudienceLoginTarget = "chat" | "settings" | "telegram-recharge";
 
 export function buildPublicAudienceReturnTo(
   representativeSlug: string,
@@ -10,7 +10,9 @@ export function buildPublicAudienceReturnTo(
   return buildLocalizedHref(
     target === "telegram-recharge"
       ? `/reps/${representativeSlug}?source=telegram`
-      : `/reps/${representativeSlug}#chat`,
+      : target === "settings"
+        ? `/reps/${representativeSlug}/settings`
+        : `/reps/${representativeSlug}#chat`,
     locale,
   );
 }
@@ -50,7 +52,11 @@ export function sanitizePublicAudienceReturnTo(
 
   try {
     const url = new URL(normalized, "http://delegate.local");
-    if (url.origin !== "http://delegate.local" || url.pathname !== `/reps/${representativeSlug}`) {
+    const allowedPathnames = new Set([
+      `/reps/${representativeSlug}`,
+      `/reps/${representativeSlug}/settings`,
+    ]);
+    if (url.origin !== "http://delegate.local" || !allowedPathnames.has(url.pathname)) {
       return fallback;
     }
     return `${url.pathname}${url.search}${url.hash}`;

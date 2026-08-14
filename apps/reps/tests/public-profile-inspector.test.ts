@@ -13,6 +13,10 @@ const inspectorSource = readFileSync(
   resolve(__dirname, "../app/reps/[slug]/representative-profile-inspector.tsx"),
   "utf8",
 );
+const memorySharingSource = readFileSync(
+  resolve(__dirname, "../app/reps/[slug]/representative-memory-sharing-panel.tsx"),
+  "utf8",
+);
 const pageSource = readFileSync(
   resolve(__dirname, "../app/reps/[slug]/page.tsx"),
   "utf8",
@@ -52,6 +56,14 @@ describe("public representative profile inspector", () => {
     expect(inspectorSource).not.toContain("audienceIdentityId");
   });
 
+  it("keeps cross-channel Contact Memory under the signed-in user's switch", () => {
+    expect(memorySharingSource).toContain('role="switch"');
+    expect(memorySharingSource).toContain("开关仅由你控制，默认开启");
+    expect(memorySharingSource).toContain('state.blockedReason === "user_disabled"');
+    expect(memorySharingSource).not.toContain("代表未启用");
+    expect(memorySharingSource).not.toContain("我已阅读并明确同意");
+  });
+
   it("counts account-level Telegram and Matrix bindings independently of runtime endpoint readiness", () => {
     expect(resolveProfileBindingChannels({
       bindings: [{ provider: "TELEGRAM" }, { provider: "MATRIX" }],
@@ -80,6 +92,9 @@ describe("public representative profile inspector", () => {
     expect(inspectorSource).toContain("REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT");
     expect(inspectorSource).toContain('activeModal === "bindings"');
     expect(inspectorSource).toContain('activeModal === "services"');
+    expect(inspectorSource).toContain('activeModal === "tips"');
+    expect(inspectorSource).toContain('openModal("tips"');
+    expect(inspectorSource).toContain("representative-tip-entry");
     expect(inspectorSource).toContain("representative-binding-modal-explanation");
     expect(inspectorSource).toContain("representative-profile-modal-card is-${activeModal}");
     expect(inspectorSource).toContain("t.bindingHelpItems.map");
@@ -95,6 +110,9 @@ describe("public representative profile inspector", () => {
     expect(pageSource).not.toContain("packagePreview={profilePackagePreview}");
     expect(pageSource).toContain("bindingManagement={audienceSession ? (");
     expect(pageSource).toContain("commerceManagement={hasPublicCommerce ? (");
+    expect(pageSource).toContain("tipManagement={hasPublicTips ? (");
+    expect(pageSource).toContain('productKindFilter="TIP"');
+    expect(pageSource).toContain("commercePresentation.tipsEnabled");
     expect(pageSource).toContain("resources={profileResources}");
     expect(pageSource).toContain("trustItems={t.trustItems(runtime.governedContextEnabled)}");
     expect(pageSource).not.toContain("buildVisitorCapabilities");

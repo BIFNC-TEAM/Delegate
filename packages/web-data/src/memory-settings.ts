@@ -36,7 +36,7 @@ const memorySettingsPolicyShape = z.object({
     longTermMemoryEnabled: z.boolean(),
     shortTermMemoryEnabled: z.boolean().default(true),
     contactMemoryEnabled: z.boolean(),
-    contactMemoryCrossChannelEnabled: z.boolean().default(false),
+    contactMemoryCrossChannelEnabled: z.boolean().default(true),
     representativeExperienceEnabled: z.boolean(),
     autoExtract: z.boolean(),
   }).strict(),
@@ -76,7 +76,6 @@ export const representativeMemorySettingsUpdateSchema = z.object({
   // from the durable-memory switch and is therefore deliberately excluded.
   if (!basic.longTermMemoryEnabled && (
     anyLongTermType
-    || basic.contactMemoryCrossChannelEnabled
     || basic.autoExtract
     || anyRecall
     || anyExtract
@@ -85,13 +84,6 @@ export const representativeMemorySettingsUpdateSchema = z.object({
       code: "custom",
       path: ["policy", "basic", "longTermMemoryEnabled"],
       message: "Long-term memory must be enabled before durable-memory capabilities.",
-    });
-  }
-  if (basic.contactMemoryCrossChannelEnabled && !basic.contactMemoryEnabled) {
-    context.addIssue({
-      code: "custom",
-      path: ["policy", "basic", "contactMemoryCrossChannelEnabled"],
-      message: "Cross-channel sharing requires Contact Memory.",
     });
   }
   if (basic.autoExtract && !anyLongTermType) {
@@ -239,7 +231,11 @@ export async function updateRepresentativeMemorySettings(
   },
   options: RepresentativeMemorySettingsOptions = {},
 ) {
-  const parsed = representativeMemorySettingsUpdateSchema.parse(input.update);
+  const parsedInput = representativeMemorySettingsUpdateSchema.parse(input.update);
+  const parsed = {
+    ...parsedInput,
+    policy: withSystemManagedCrossChannelCapability(parsedInput.policy),
+  };
   const requestId = identifier.parse(input.requestId);
   const idempotencyKey = identifier.parse(input.idempotencyKey);
   const client = options.client ?? prisma;
@@ -518,13 +514,27 @@ function assertMemorySettingsActor(actor: MemorySettingsActor) {
   }
 }
 
+function withSystemManagedCrossChannelCapability(
+  policy: z.infer<typeof memorySettingsPolicyShape>,
+) {
+  return {
+    ...policy,
+    basic: {
+      ...policy.basic,
+      contactMemoryCrossChannelEnabled:
+        policy.basic.longTermMemoryEnabled
+        && policy.basic.contactMemoryEnabled,
+    },
+  };
+}
+
 function policyUpdateData(policy: z.infer<typeof memorySettingsPolicyShape>) {
   return {
     longTermMemoryEnabled: policy.basic.longTermMemoryEnabled,
     shortTermMemoryEnabled: policy.basic.shortTermMemoryEnabled,
     contactMemoryEnabled: policy.basic.contactMemoryEnabled,
     contactMemoryCrossChannelEnabled:
-      policy.basic.contactMemoryCrossChannelEnabled,
+      policy.basic.longTermMemoryEnabled && policy.basic.contactMemoryEnabled,
     representativeExperienceEnabled:
       policy.basic.representativeExperienceEnabled,
     autoExtract: policy.basic.autoExtract,
@@ -787,8 +797,7 @@ function serializeMemorySettingsContract(input: {
   const shortTermMemoryEnabled = policy.basic.shortTermMemoryEnabled;
   const contactMemoryEnabled = longTermMemoryEnabled
     && policy.basic.contactMemoryEnabled;
-  const contactMemoryCrossChannelEnabled = contactMemoryEnabled
-    && policy.basic.contactMemoryCrossChannelEnabled;
+  const contactMemoryCrossChannelEnabled = contactMemoryEnabled;
   const representativeExperienceEnabled = longTermMemoryEnabled
     && policy.basic.representativeExperienceEnabled;
   const autoExtract = longTermMemoryEnabled

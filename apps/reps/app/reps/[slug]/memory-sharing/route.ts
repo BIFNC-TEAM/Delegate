@@ -46,6 +46,21 @@ export async function GET(
       sourceChannel: "WEB",
       ...evidence,
     });
+    if (state.blockedReason === "consent_missing") {
+      await grantContactMemorySharingConsent({
+        representativeSlug: slug,
+        audienceIdentityId: principal.audienceIdentityId,
+        sourceChannel: "WEB",
+        challengeToken: challenge.challengeToken,
+        sourceEventKey: `web-default-confirmation:${randomUUID()}`,
+        ...evidence,
+      });
+      const enabledState = await getContactMemorySharingState({
+        representativeSlug: slug,
+        audienceIdentityId: principal.audienceIdentityId,
+      });
+      return noStoreJson(toPublicMemorySharingState(enabledState));
+    }
     return noStoreJson(toPublicMemorySharingState(state, challenge));
   } catch (error) {
     return memorySharingError(error);
@@ -236,6 +251,7 @@ const publicBlockedReasons = new Set([
   "identity_ineligible",
   "consent_missing",
   "consent_stale",
+  "user_disabled",
   "contact_memory_disabled",
   "cross_channel_disabled",
   "identity_not_registered",

@@ -139,6 +139,44 @@ describe("public cross-channel memory consent security", () => {
       issuer: "https://issuer.example",
       connectionId: "logto-connection-1",
     });
+    expect(mocks.grantContactMemorySharingConsent).toHaveBeenCalledWith({
+      representativeSlug: "delegate",
+      audienceIdentityId: "canonical-identity",
+      sourceChannel: "WEB",
+      challengeToken: "A".repeat(43),
+      sourceEventKey: expect.stringMatching(/^web-default-confirmation:/u),
+      sourceIdentityLinkId: "logto-link-1",
+      providerSubject: "logto-subject-1",
+      issuer: "https://issuer.example",
+      connectionId: "logto-connection-1",
+    });
+    expect(mocks.getContactMemorySharingState).toHaveBeenCalledTimes(2);
+  });
+
+  it("defaults on once but preserves a user's explicit opt-out", async () => {
+    mocks.getContactMemorySharingState.mockResolvedValueOnce({
+      supported: true,
+      policyEnabled: true,
+      active: false,
+      contractVersion: "cross-channel-contact-memory-v1",
+      grantedAt: null,
+      sourceChannel: null,
+      blockedReason: "user_disabled",
+    });
+
+    const response = await getMemorySharing(
+      new Request("http://localhost/reps/delegate/memory-sharing"),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.createContactMemorySharingChallenge).toHaveBeenCalledOnce();
+    expect(mocks.grantContactMemorySharingConsent).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toMatchObject({
+      active: false,
+      blockedReason: "user_disabled",
+      challengeToken: "A".repeat(43),
+    });
   });
 
   it("whitelists public state and never returns internal identity or retrieval diagnostics", async () => {

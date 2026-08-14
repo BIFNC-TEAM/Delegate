@@ -38,11 +38,16 @@ describe("public representative profile styling", () => {
     expect(profileStyles).toContain(".representative-message-avatar.is-operator");
     expect(profileStyles).toContain(".representative-message-avatar.is-visitor");
     expect(profileStyles).toContain(".representative-system-message.is-task-update");
+    expect(profileStyles).toMatch(/\.representative-system-message \{[\s\S]*?width:\s*min\(64%, 540px\);[\s\S]*?border:\s*1px dashed #cbd5e1;/);
+    expect(profileStyles).toContain(".representative-system-message-header");
+    expect(profileStyles).not.toContain(".representative-system-message-footer");
+    expect(profileStyles).not.toContain(".representative-system-message-icon");
     expect(profileStyles).toContain(".representative-message-copy.is-copied");
     expect(profileStyles).toContain(".representative-message-copy.is-failed");
     expect(profileStyles).toContain("@media (hover: hover) and (pointer: fine)");
-    expect(profileStyles).toContain(".representative-chat-message:hover .representative-message-time");
-    expect(profileStyles).toContain(".representative-chat-message:hover .representative-message-copy");
+    expect(profileStyles).toContain(".representative-chat-message:hover .representative-message-actions-tools");
+    expect(profileStyles).toMatch(/\.representative-chat-message-user \.representative-message-status \{[\s\S]*?margin-left:\s*auto;/);
+    expect(profileStyles).toMatch(/\.representative-message-actions-tools \{[\s\S]*?width:\s*0;[\s\S]*?opacity:\s*0;/);
     expect(profileStyles).toContain(".representative-chat-composer-body:focus-within");
   });
 
@@ -61,7 +66,7 @@ describe("public representative profile styling", () => {
     expect(styles).toContain("overflow-y: auto");
     expect(styles).toMatch(/@media \(max-width: 1180px\)[\s\S]*?grid-template-rows:\s*auto minmax\(0, 1fr\) auto;[\s\S]*?height:\s*100dvh;/);
     expect(styles).toMatch(/@media \(max-width: 1180px\)[\s\S]*?\.representative-chat-surface \{[\s\S]*?height:\s*100%;[\s\S]*?overflow:\s*hidden;/);
-    expect(styles).toContain(".representative-account-language");
+    expect(styles).toContain(".representative-settings-language-control");
     expect(styles).toMatch(/\.representative-shell\.representative-profile-page \.representative-chat-message-user \{[\s\S]*?display: inline-flex;[\s\S]*?width: fit-content;/);
     expect(styles).toMatch(/\.representative-chat-message-user \.representative-message-content \{[\s\S]*?width: fit-content;/);
     expect(styles).toMatch(/\.representative-chat-message-user \.representative-message-bubble \{[\s\S]*?width: fit-content;[\s\S]*?max-width: 100%;[\s\S]*?justify-self: end;/);

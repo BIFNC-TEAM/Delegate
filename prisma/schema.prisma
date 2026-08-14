@@ -4762,7 +4762,7 @@ model RepresentativeMemoryPolicy {
   longTermMemoryEnabled            Boolean            @default(false)
   shortTermMemoryEnabled           Boolean            @default(true)
   contactMemoryEnabled             Boolean            @default(false)
-  contactMemoryCrossChannelEnabled Boolean            @default(false)
+  contactMemoryCrossChannelEnabled Boolean            @default(true)
   representativeExperienceEnabled  Boolean            @default(false)
   autoExtract                      Boolean            @default(false)
   webRecallEnabled                 Boolean            @default(false)

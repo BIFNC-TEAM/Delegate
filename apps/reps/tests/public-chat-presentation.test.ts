@@ -59,6 +59,10 @@ describe("public chat presentation", () => {
     expect(panelSource).toContain('className={`representative-message-avatar');
     expect(panelSource).toContain('aria-label={t.aiAvatarBadgeLabel}>AI</b>');
     expect(panelSource).toContain('className={`representative-system-message');
+    expect(panelSource).toContain('className="representative-system-message-header"');
+    expect(panelSource).not.toContain('className="representative-system-message-footer"');
+    expect(panelSource).not.toContain("systemEventRecorded");
+    expect(panelSource).not.toContain('className="representative-system-message-icon"');
     expect(panelSource).toContain('message.senderType === "operator"');
     expect(panelSource).toContain('message.senderType === "system"');
     expect(panelSource).not.toContain('className="representative-message-meta"');
@@ -67,11 +71,16 @@ describe("public chat presentation", () => {
     expect(panelSource).not.toContain("const senderRole =");
     expect(panelSource).not.toContain("<span>{senderRole}</span>");
     expect(panelSource.match(/className="representative-chat-artifacts"/gu)).toHaveLength(2);
+    expect(panelSource).toContain("localizeSystemMessage(message.text, message.senderType, props.locale)");
+    expect(panelSource).toContain("真人接待 ${operatorJoined[1]} 已加入会话。");
+    expect(panelSource).toContain("真人已结束接待，数字代表将继续回复。");
   });
 
   it("reveals timestamps and copy controls only on precise-pointer hover or focus", () => {
     expect(panelSource).toContain('className="representative-message-time" dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>');
     expect(panelSource).toContain('className="representative-message-actions-tools"');
+    expect(panelSource).toContain('queued: "已发送"');
+    expect(panelSource).not.toContain('queued: "等待发送"');
   });
 
   it("offers accessible copy feedback without adding a dependency", () => {
@@ -93,8 +102,11 @@ describe("public chat presentation", () => {
     expect(panelSource).toContain("if (!text || busy || hydrating) return");
     expect(panelSource).toContain("|| hydrating");
     expect(panelSource).toContain("event.currentTarget.form?.requestSubmit()");
-    expect(panelSource).toContain('id="representative-composer-guidance"');
-    expect(panelSource).toContain("t.keyboardHint");
+    expect(panelSource).toContain("aria-label={t.inputLabel}");
+    expect(panelSource).toContain('className="representative-chat-composer-recipient"');
+    expect(panelSource).not.toContain('id="representative-composer-guidance"');
+    expect(panelSource).not.toContain("t.keyboardHint");
+    expect(panelSource).not.toContain('className="representative-chat-trust-note"');
   });
 
   it("keeps human-controlled submissions from inventing an AI typing author", () => {

@@ -20,7 +20,6 @@ import {
 } from "@delegate/web-data";
 import {
   HashScrollRestorer,
-  LanguageSwitcher,
   buildLocalizedHref,
   extractCountryHint,
   pickCopy,
@@ -29,6 +28,7 @@ import {
   type Locale,
 } from "@delegate/web-ui";
 
+import { RepresentativeAccountMenu } from "./representative-account-menu";
 import { RepresentativeChatPanel } from "./representative-chat-panel";
 import { RepresentativeIdentityBindingPanel } from "./representative-identity-binding-panel";
 import { RepresentativeMemorySharingPanel } from "./representative-memory-sharing-panel";
@@ -150,6 +150,11 @@ export default async function RepresentativePage({
         : "collection_paused" as const;
   const collectionEnabled = paymentAvailability === "ready";
   const visibleCommerceProducts = commercePresentation.products;
+  const visibleTipProducts = visibleCommerceProducts.filter(
+    (product) => product.kind === "TIP",
+  );
+  const hasPublicTips =
+    commercePresentation.tipsEnabled && visibleTipProducts.length > 0;
   const hasServicePackages = visibleCommerceProducts.some(
     (product) => product.kind === "SERVICE_PACKAGE",
   );
@@ -181,6 +186,9 @@ export default async function RepresentativePage({
   const localizedRepresentativePath = telegramRechargeSource && hasPublicCommerce
     ? `/reps/${representative.slug}?source=telegram`
     : `/reps/${representative.slug}`;
+  const accountSettingsPath = telegramRechargeSource && hasPublicCommerce
+    ? `/reps/${representative.slug}/settings?source=telegram`
+    : `/reps/${representative.slug}/settings`;
   const languageItems = [
     {
       locale: "zh" as const,
@@ -221,61 +229,21 @@ export default async function RepresentativePage({
         <span aria-hidden="true" className="representative-topbar-spacer" />
 
         <div className={`marketing-nav-actions${audienceSession ? " is-authenticated" : ""}`}>
-          {audienceSession ? (
-            <details className="representative-account-menu">
-              <summary aria-label={t.accountMenuAriaLabel}>
-                <span aria-hidden="true" className="representative-account-avatar">
-                  {getAudienceAccountInitial(audienceSession.email, locale)}
-                </span>
-                <span className="representative-account-summary-label">
-                  {audienceAccountLabel}
-                </span>
-                <span aria-hidden="true" className="representative-account-chevron">⌄</span>
-              </summary>
-              <div className="representative-account-popover">
-                <div className="representative-account-identity">
-                  <strong>{t.accountLabel}</strong>
-                  <span>{audienceAccountLabel}</span>
-                </div>
-                <div className="representative-account-language">
-                  <span>{t.languageMenuLabel}</span>
-                  <LanguageSwitcher
-                    activeLocale={locale}
-                    ariaLabel={t.languageAriaLabel}
-                    items={languageItems}
-                  />
-                </div>
-                <a className="representative-account-logout" href={audienceLogoutHref}>
-                  {t.logoutLabel}
-                </a>
-              </div>
-            </details>
-          ) : (
-            <details className="representative-account-menu representative-guest-menu">
-              <summary aria-label={t.accountMenuAriaLabel}>
-                <span aria-hidden="true" className="representative-account-avatar">
-                  {locale === "zh" ? "访" : "G"}
-                </span>
-                <span className="representative-account-summary-label">
-                  {t.loginRegisterLabel}
-                </span>
-                <span aria-hidden="true" className="representative-account-chevron">⌄</span>
-              </summary>
-              <div className="representative-account-popover">
-                <div className="representative-account-language">
-                  <span>{t.languageMenuLabel}</span>
-                  <LanguageSwitcher
-                    activeLocale={locale}
-                    ariaLabel={t.languageAriaLabel}
-                    items={languageItems}
-                  />
-                </div>
-                <a className="representative-account-login" href={audienceLoginHref}>
-                  {t.loginRegisterLabel}
-                </a>
-              </div>
-            </details>
-          )}
+          <RepresentativeAccountMenu
+            accountInitial={audienceSession
+              ? getAudienceAccountInitial(audienceSession.email, locale)
+              : locale === "zh" ? "访" : "G"}
+            accountLabel={audienceSession ? audienceAccountLabel : t.loginRegisterLabel}
+            accountMenuAriaLabel={t.accountMenuAriaLabel}
+            authenticated={Boolean(audienceSession)}
+            loginHref={audienceLoginHref}
+            loginLabel={t.loginRegisterLabel}
+            logoutHref={audienceLogoutHref}
+            logoutLabel={t.logoutLabel}
+            myAccountLabel={t.accountLabel}
+            settingsHref={buildLocalizedHref(accountSettingsPath, locale)}
+            settingsLabel={t.settingsLabel}
+          />
         </div>
       </header>
 
@@ -327,6 +295,18 @@ export default async function RepresentativePage({
                   loginHref={audienceLoginHref}
                   paymentAvailability={paymentAvailability}
                   initialCommerceProducts={visibleCommerceProducts}
+                  representativeSlug={representative.slug}
+                />
+              ) : undefined}
+              tipManagement={hasPublicTips ? (
+                <RepresentativeRechargePanel
+                  audienceAuthenticated={Boolean(audienceSession)}
+                  collectionEnabled={collectionEnabled}
+                  locale={locale}
+                  loginHref={audienceLoginHref}
+                  paymentAvailability={paymentAvailability}
+                  initialCommerceProducts={visibleTipProducts}
+                  productKindFilter="TIP"
                   representativeSlug={representative.slug}
                 />
               ) : undefined}
@@ -526,6 +506,7 @@ const copy = {
     loginRegisterLabel: "登录 / 注册",
     accountLabel: "我的账户",
     accountMenuAriaLabel: "打开账户菜单",
+    settingsLabel: "设置",
     accountCommerceLabel: "我的服务与订单",
     accountBindingsLabel: "账号与渠道绑定",
     logoutLabel: "退出",
@@ -698,6 +679,7 @@ const copy = {
     loginRegisterLabel: "Log in / Sign up",
     accountLabel: "My account",
     accountMenuAriaLabel: "Open account menu",
+    settingsLabel: "Settings",
     accountCommerceLabel: "My services & orders",
     accountBindingsLabel: "Accounts & channel links",
     logoutLabel: "Log out",

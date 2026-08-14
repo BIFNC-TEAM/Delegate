@@ -26,6 +26,9 @@ describe("public representative auth links", () => {
     ).toBe(
       "/reps/lin-founder-rep/auth/login?returnTo=%2Freps%2Flin-founder-rep%3Fsource%3Dtelegram%26lang%3Dzh",
     );
+    expect(buildPublicAudienceLoginHref("lin-founder-rep", "en", "settings")).toBe(
+      "/reps/lin-founder-rep/auth/login?returnTo=%2Freps%2Flin-founder-rep%2Fsettings%3Flang%3Den",
+    );
     expect(buildPublicAudienceLogoutHref("lin-founder-rep", "en")).toBe(
       "/reps/lin-founder-rep/auth/logout?returnTo=%2Freps%2Flin-founder-rep%3Flang%3Den",
     );
@@ -35,6 +38,12 @@ describe("public representative auth links", () => {
     expect(
       sanitizePublicAudienceReturnTo("/reps/lin-founder-rep?lang=zh#chat", "lin-founder-rep"),
     ).toBe("/reps/lin-founder-rep?lang=zh#chat");
+    expect(
+      sanitizePublicAudienceReturnTo(
+        "/reps/lin-founder-rep/settings?lang=en",
+        "lin-founder-rep",
+      ),
+    ).toBe("/reps/lin-founder-rep/settings?lang=en");
     expect(sanitizePublicAudienceReturnTo("/reps/other-rep", "lin-founder-rep")).toBe(
       "/reps/lin-founder-rep#chat",
     );

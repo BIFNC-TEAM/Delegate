@@ -30,8 +30,9 @@ describe("representative-scoped memory settings", () => {
     expect(setup).toContain('label: "Memory"');
     expect(settings).toContain("draft.basic.autoExtract");
     expect(settings).toContain("draft.basic.contactMemoryEnabled");
-    expect(settings).toContain("draft.basic.contactMemoryCrossChannelEnabled");
     expect(settings).toContain("snapshot.basic.contactMemoryCrossChannelSupported === true");
+    expect(settings).toContain("跨渠道连续性");
+    expect(settings).toContain("Dashboard 不提供开关");
     expect(settings).toContain("draft.basic.representativeExperienceEnabled");
     expect(settings).toContain("draft.basic.longTermMemoryEnabled");
     expect(settings).toContain("draft.basic.shortTermMemoryEnabled");
@@ -85,15 +86,18 @@ describe("representative-scoped memory settings", () => {
     expect(setup).not.toContain('value: "策略自动应用"');
   });
 
-  it("enables supported sharing with verified-identity and consent boundaries", () => {
-    expect(settings).toContain("同一已验证身份");
-    expect(settings).toContain("联系人已独立授权");
-    expect(settings).toContain("same verified identity");
-    expect(settings).toContain("separately consented");
-    expect(settings).toContain("统一身份验证与联系人授权约束");
-    expect(settings).toContain("verified identity, and contact consent");
-    expect(settings).toContain("disabledReason={crossChannelDisabledReason}");
-    expect(settings).toContain('onChange={(checked) => updateBasic("contactMemoryCrossChannelEnabled", checked)}');
+  it("leaves cross-channel sharing under verified-user control", () => {
+    expect(settings).toContain("跨渠道连续性");
+    expect(settings).toContain("Cross-channel continuity");
+    expect(settings).toContain("用户授权控制");
+    expect(settings).toContain("User-controlled consent");
+    expect(settings).toContain("Dashboard 不提供开关");
+    expect(settings).toContain("Dashboard does not provide a switch");
+    expect(settings).toContain("已验证用户默认开启");
+    expect(settings).toContain("defaults on for verified users");
+    expect(settings).toContain("representative-memory-settings-consent-note");
+    expect(settings).not.toContain("crossChannelDisabledReason");
+    expect(settings).not.toContain('updateBasic("contactMemoryCrossChannelEnabled"');
     expect(settings).toContain("disabledReason={memoryTypeDisabledReason}");
     expect(settings).toContain("recallDisabledReason={memoryTypeDisabledReason}");
     expect(settings).toContain("extractDisabledReason={extractionDisabledReason}");

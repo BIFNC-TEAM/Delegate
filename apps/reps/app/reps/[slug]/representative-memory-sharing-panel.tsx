@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import type { Locale } from "@delegate/web-ui";
 
@@ -28,18 +29,22 @@ export function RepresentativeMemorySharingPanel({
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [confirmed, setConfirmed] = useState(false);
   const [confirmingRevocation, setConfirmingRevocation] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const operationGenerationRef = useRef(0);
+  const revocationDialogRef = useRef<HTMLDivElement>(null);
+  const revocationCancelRef = useRef<HTMLButtonElement>(null);
+  const sharingToggleRef = useRef<HTMLInputElement>(null);
+  const savingRef = useRef(saving);
+
+  savingRef.current = saving;
 
   useEffect(() => {
     const operationGeneration = operationGenerationRef.current + 1;
     operationGenerationRef.current = operationGeneration;
     setLoading(true);
     setState(null);
-    setConfirmed(false);
     setConfirmingRevocation(false);
     setNotice(null);
     setError(null);
@@ -65,10 +70,51 @@ export function RepresentativeMemorySharingPanel({
       });
   }, [loadAttempt, representativeSlug, zh]);
 
+  useEffect(() => {
+    if (!confirmingRevocation) return;
+    const parentModal = sharingToggleRef.current?.closest<HTMLElement>(
+      ".representative-profile-modal",
+    );
+    const parentWasInert = parentModal?.hasAttribute("inert") ?? false;
+    parentModal?.setAttribute("inert", "");
+    revocationCancelRef.current?.focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!savingRef.current) setConfirmingRevocation(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        revocationDialogRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((element) => element.getClientRects().length > 0);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      if (!parentWasInert) parentModal?.removeAttribute("inert");
+      sharingToggleRef.current?.focus();
+    };
+  }, [confirmingRevocation]);
+
   function grantConsent() {
     if (
       saving
-      || !confirmed
       || !state?.supported
       || !state.policyEnabled
       || state.active
@@ -90,11 +136,10 @@ export function RepresentativeMemorySharingPanel({
       .then((payload) => {
         if (operationGenerationRef.current !== operationGeneration) return;
         setState(payload);
-        setConfirmed(false);
         setNotice(
           zh
-            ? "跨渠道联系人记忆已启用，只会在当前数字代表下、同一已验证身份的已绑定渠道间共享。"
-            : "Cross-channel contact memory is on only for this representative and channels linked to the same verified identity.",
+            ? "跨渠道联系人记忆已开启。"
+            : "Cross-channel Contact Memory is on.",
         );
       })
       .catch((nextError: unknown) => {
@@ -121,14 +166,15 @@ export function RepresentativeMemorySharingPanel({
     setNotice(null);
     setError(null);
     void mutateMemorySharingState(representativeSlug, { method: "DELETE" })
+      .then(() => fetchMemorySharingState(representativeSlug))
       .then((payload) => {
         if (operationGenerationRef.current !== operationGeneration) return;
         setState(payload);
         setConfirmingRevocation(false);
         setNotice(
           zh
-            ? "共享召回已立即停止；已有共享记忆正在异步清理。账号绑定、历史消息、订单与权益不会删除。"
-            : "Shared recall stopped immediately and existing shared memory is being removed asynchronously. Account links, message history, orders, and entitlements are unchanged.",
+            ? "已关闭，共享记忆正在清理。"
+            : "Turned off. Shared memory is being removed.",
         );
       })
       .catch((nextError: unknown) => {
@@ -156,37 +202,68 @@ export function RepresentativeMemorySharingPanel({
             <strong>
               {zh ? "跨渠道联系人记忆" : "Cross-channel contact memory"}
             </strong>
-            {state ? (
-              <span className={`chip${state.active ? " chip-safe" : ""}`}>
-                {memorySharingStatus(state, zh)}
+            {state && !state.active ? (
+              <span className="chip">
+                {memorySharingInactiveStatus(state, zh)}
               </span>
             ) : null}
           </div>
           <p>
             {zh
-              ? "启用后，这个数字代表可以在已验证且绑定到同一 Delegate 身份的 Web、Matrix 与 Telegram 私聊中延续与你有关的安全、最小化联系人记忆。未验证账号、其他联系人和其他数字代表始终隔离。"
-              : "When enabled, this representative may continue safe, minimized contact memory across Web, Matrix, and Telegram private chats linked to the same verified Delegate identity. Unverified accounts, other contacts, and other representatives remain isolated."}
+              ? "仅在绑定至同一已验证 Delegate 身份的 Web、Matrix 和 Telegram 私聊间使用。未验证账号、其他联系人及其他数字代表保持隔离。开关仅由你控制，默认开启。"
+              : "Used only across Web, Matrix, and Telegram private chats linked to the same verified Delegate identity. Unverified accounts, other contacts, and other representatives remain isolated. Only you control this switch; it defaults on."}
           </p>
         </div>
+
+        <label className="toggle-row">
+          <input
+            checked={state ? state.active : true}
+            disabled={
+              loading
+              || saving
+              || !state?.supported
+              || !state.policyEnabled
+              || (
+                !state.active
+                && (
+                  state.contractVersion === "unavailable"
+                  || !state.challengeToken
+                )
+              )
+            }
+            onChange={(event) => {
+              if (event.target.checked) grantConsent();
+              else setConfirmingRevocation(true);
+            }}
+            ref={sharingToggleRef}
+            role="switch"
+            type="checkbox"
+          />
+          <span>
+            {zh
+              ? "跨已验证渠道使用联系人记忆"
+              : "Use Contact Memory across verified channels"}
+          </span>
+        </label>
 
         <div className="status-banner">
           <strong>{zh ? "记住什么" : "What may be remembered"}</strong>
           <p>
             {zh
-              ? "仅限通过安全策略的偏好、目标、约束和完成服务所需的必要背景。共享范围只覆盖当前数字代表。"
-              : "Only preferences, goals, constraints, and necessary service context that pass safety policy. Sharing is limited to this representative."}
+              ? "偏好、目标、约束及完成服务所需的必要背景，仅供当前数字代表使用。"
+              : "Preferences, goals, constraints, and necessary service context, for this representative only."}
           </p>
           <strong>{zh ? "永远不共享什么" : "What is never shared"}</strong>
           <p>
             {zh
-              ? "原始聊天全文、Owner 私有备注、Compute 原始产物、凭据，以及付款、余额、退款和权益事实不会进入跨渠道记忆。"
-              : "Raw chat transcripts, Owner private notes, raw Compute outputs, credentials, and payment, balance, refund, or entitlement facts never enter cross-channel memory."}
+              ? "原始聊天、Owner 私有备注、Compute 原始产物、凭据，以及付款、余额、退款和权益信息。"
+              : "Raw chats, Owner private notes, raw Compute outputs, credentials, and payment, balance, refund, or entitlement information."}
           </p>
           <strong>{zh ? "如何撤回" : "How withdrawal works"}</strong>
           <p>
             {zh
-              ? "你可以随时撤回。系统会立即停止共享召回，并异步删除已投影的共享记忆；各渠道历史消息、账号绑定、订单和权益不受影响。"
-              : "You can withdraw at any time. Shared recall stops immediately and projected shared memory is removed asynchronously; channel history, account links, orders, and entitlements are not affected."}
+              ? "关闭后立即停止共享召回，并异步清理共享记忆；历史消息、账号绑定、订单和权益不受影响。"
+              : "Turning it off stops shared recall immediately and removes shared memory asynchronously; history, account links, orders, and entitlements are unaffected."}
           </p>
         </div>
 
@@ -217,102 +294,20 @@ export function RepresentativeMemorySharingPanel({
                   )}`
                 : ""}
             </p>
-            {confirmingRevocation ? (
-              <div className="status-banner" role="alert">
-                <strong>
-                  {zh
-                    ? "确认停止并删除跨渠道联系人记忆？"
-                    : "Stop and remove cross-channel contact memory?"}
-                </strong>
-                <p>
-                  {zh
-                    ? "确认后共享召回会立即停止，远端投影将异步清理。此操作不会删除聊天记录或账户绑定。"
-                    : "Shared recall will stop immediately and remote projections will be removed asynchronously. Chat history and account links will remain."}
-                </p>
-                <div className="chip-row">
-                  <button
-                    className="button-secondary"
-                    disabled={saving}
-                    onClick={() => setConfirmingRevocation(false)}
-                    type="button"
-                  >
-                    {zh ? "取消" : "Cancel"}
-                  </button>
-                  <button
-                    className="button-primary"
-                    disabled={saving}
-                    onClick={revokeConsent}
-                    type="button"
-                  >
-                    {saving
-                      ? zh
-                        ? "正在停止…"
-                        : "Stopping…"
-                      : zh
-                        ? "确认停止并删除"
-                        : "Confirm stop and remove"}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="chip-row">
-                <button
-                  className="button-secondary"
-                  disabled={saving}
-                  onClick={() => setConfirmingRevocation(true)}
-                  type="button"
-                >
-                  {zh
-                    ? "停止并删除跨渠道记忆"
-                    : "Stop and remove cross-channel memory"}
-                </button>
-              </div>
-            )}
           </div>
         ) : state?.supported && state.policyEnabled ? (
           <div className="setup-stack">
-            <label className="toggle-row">
-              <input
-                checked={confirmed}
-                disabled={
-                  saving
-                  || state.contractVersion === "unavailable"
-                  || !state.challengeToken
-                }
-                onChange={(event) => setConfirmed(event.target.checked)}
-                type="checkbox"
-              />
-              <span>
-                {zh
-                  ? "我已阅读并明确同意上述跨渠道共享范围与删除方式。"
-                  : "I have read and explicitly agree to the sharing scope and deletion behavior above."}
-              </span>
-            </label>
             <p className="footer-note">
-              {zh ? "授权条款版本：" : "Consent terms version: "}
+              {state.blockedReason === "user_disabled"
+                ? zh
+                  ? "已关闭，可随时重新开启。"
+                  : "Off. You can turn it on again at any time."
+                : zh
+                  ? "需要重新确认当前授权条款。"
+                  : "The current consent terms need to be confirmed again."}
+              {" "}{zh ? "条款版本：" : "Terms version: "}
               <span className="chip">{state.contractVersion}</span>
             </p>
-            <div className="chip-row">
-              <button
-                className="button-primary"
-                disabled={
-                  saving
-                  || !confirmed
-                  || state.contractVersion === "unavailable"
-                  || !state.challengeToken
-                }
-                onClick={grantConsent}
-                type="button"
-              >
-                {saving
-                  ? zh
-                    ? "正在启用…"
-                    : "Enabling…"
-                  : zh
-                    ? "允许跨渠道联系人记忆"
-                    : "Allow cross-channel contact memory"}
-              </button>
-            </div>
           </div>
         ) : state ? (
           <div className="status-banner" role="status">
@@ -336,14 +331,82 @@ export function RepresentativeMemorySharingPanel({
           </div>
         ) : null}
       </div>
+
+      {confirmingRevocation && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              aria-describedby="memory-revocation-dialog-description"
+              aria-labelledby="memory-revocation-dialog-title"
+              aria-modal="true"
+              className="representative-memory-confirmation-modal"
+              role="alertdialog"
+            >
+              <button
+                aria-label={zh ? "取消并关闭确认弹窗" : "Cancel and close confirmation"}
+                className="representative-memory-confirmation-backdrop"
+                disabled={saving}
+                onClick={() => setConfirmingRevocation(false)}
+                tabIndex={-1}
+                type="button"
+              />
+              <div
+                className="representative-memory-confirmation-card"
+                ref={revocationDialogRef}
+              >
+                <span className="representative-memory-confirmation-eyebrow">
+                  {zh ? "联系人记忆授权" : "CONTACT MEMORY CONSENT"}
+                </span>
+                <h2 id="memory-revocation-dialog-title">
+                  {zh
+                    ? "停止并删除跨渠道联系人记忆？"
+                    : "Stop and remove cross-channel Contact Memory?"}
+                </h2>
+                <p id="memory-revocation-dialog-description">
+                  {zh
+                    ? "共享召回会立即停止，已投影的共享记忆将异步清理。聊天记录、账号绑定、订单和权益不会被删除。"
+                    : "Shared recall will stop immediately and projected shared memory will be removed asynchronously. Chat history, account links, orders, and entitlements will not be deleted."}
+                </p>
+                <div className="representative-memory-confirmation-actions">
+                  <button
+                    className="button-secondary"
+                    disabled={saving}
+                    onClick={() => setConfirmingRevocation(false)}
+                    ref={revocationCancelRef}
+                    type="button"
+                  >
+                    {zh ? "取消" : "Cancel"}
+                  </button>
+                  <button
+                    className="button-primary"
+                    disabled={saving}
+                    onClick={revokeConsent}
+                    type="button"
+                  >
+                    {saving
+                      ? zh
+                        ? "正在停止…"
+                        : "Stopping…"
+                      : zh
+                        ? "确认停止并删除"
+                        : "Confirm stop and remove"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </article>
   );
 }
 
-function memorySharingStatus(state: MemorySharingState, zh: boolean): string {
-  if (state.active) return zh ? "已启用" : "Enabled";
+function memorySharingInactiveStatus(
+  state: MemorySharingState,
+  zh: boolean,
+): string {
   if (!state.supported) return zh ? "暂不支持" : "Unsupported";
-  if (!state.policyEnabled) return zh ? "代表未启用" : "Not enabled by representative";
+  if (!state.policyEnabled) return zh ? "当前不可用" : "Currently unavailable";
+  if (state.blockedReason === "user_disabled") return zh ? "你已关闭" : "Turned off by you";
   return zh ? "等待你的同意" : "Your consent is required";
 }
 
@@ -353,8 +416,8 @@ function memorySharingBlockedCopy(
 ): string {
   const copy: Record<string, { zh: string; en: string }> = {
     policy_disabled: {
-      zh: "这个数字代表当前未启用长期记忆。",
-      en: "This representative has not enabled long-term memory.",
+      zh: "当前暂不提供联系人长期记忆能力，因此无法跨渠道使用。",
+      en: "Contact long-term memory is currently unavailable, so it cannot be used across channels.",
     },
     identity_ineligible: {
       zh: "需要先登录并验证当前 Delegate 身份，再绑定需要共享的私聊账户。",
@@ -368,13 +431,17 @@ function memorySharingBlockedCopy(
       zh: "以前的授权已失效，请查看当前条款并重新确认。",
       en: "Previous consent is no longer current. Review and confirm the current terms.",
     },
+    user_disabled: {
+      zh: "已关闭，可随时重新开启。",
+      en: "Off. You can turn it on again at any time.",
+    },
     contact_memory_disabled: {
-      zh: "这个数字代表当前未启用联系人记忆。",
-      en: "This representative has not enabled contact memory.",
+      zh: "当前暂不提供联系人记忆能力。",
+      en: "Contact Memory is currently unavailable.",
     },
     cross_channel_disabled: {
-      zh: "这个数字代表当前未开放联系人记忆跨渠道共享。",
-      en: "This representative has not enabled cross-channel contact memory.",
+      zh: "当前运行环境暂不支持跨渠道联系人记忆。",
+      en: "Cross-channel Contact Memory is not supported in the current runtime.",
     },
     identity_not_registered: {
       zh: "需要先登录并使用已注册的 Delegate 身份。",

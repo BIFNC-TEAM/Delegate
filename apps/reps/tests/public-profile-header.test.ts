@@ -7,6 +7,14 @@ const pageSource = readFileSync(
   resolve(__dirname, "../app/reps/[slug]/page.tsx"),
   "utf8",
 );
+const accountMenuSource = readFileSync(
+  resolve(__dirname, "../app/reps/[slug]/representative-account-menu.tsx"),
+  "utf8",
+);
+const accountSettingsPageSource = readFileSync(
+  resolve(__dirname, "../app/reps/[slug]/settings/page.tsx"),
+  "utf8",
+);
 const stylesSource = readFileSync(
   resolve(__dirname, "../../../packages/web-ui/styles/globals.css"),
   "utf8",
@@ -22,8 +30,10 @@ describe("public representative profile header", () => {
     expect(topbarSource).toContain("{t.publicRepresentative}");
     expect(topbarSource).not.toContain("{representative.name}");
     expect(topbarSource).not.toContain("<RepresentativeProfileRailLink");
-    expect(topbarSource.match(/<LanguageSwitcher/g)).toHaveLength(2);
-    expect(topbarSource.match(/className="representative-account-language"/g)).toHaveLength(2);
+    expect(topbarSource).toContain("<RepresentativeAccountMenu");
+    expect(topbarSource).not.toContain("<LanguageSwitcher");
+    expect(accountMenuSource).not.toContain("<LanguageSwitcher");
+    expect(accountSettingsPageSource.match(/<LanguageSwitcher/g)).toHaveLength(1);
     expect(pageSource).not.toContain('className="representative-profile-stage"');
   });
 

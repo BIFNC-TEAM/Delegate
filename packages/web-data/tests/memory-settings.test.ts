@@ -60,8 +60,8 @@ describe("representative memory settings", () => {
     }).success).toBe(true);
   });
 
-  it("allows channel-local Matrix and Telegram policy plus guarded cross-channel sharing", () => {
-    const missingContact = representativeMemorySettingsUpdateSchema.safeParse({
+  it("accepts legacy cross-channel input without treating it as Owner authority", () => {
+    const ownerCannotEnableWithoutContact = representativeMemorySettingsUpdateSchema.safeParse({
       expectedRevision: 0,
       policy: {
         ...basePolicy,
@@ -69,17 +69,16 @@ describe("representative memory settings", () => {
           ...basePolicy.basic,
           contactMemoryEnabled: false,
           contactMemoryCrossChannelEnabled: true,
+          autoExtract: false,
+        },
+        channels: {
+          web: { recallEnabled: false, extractEnabled: false },
+          matrix: { recallEnabled: false, extractEnabled: false },
+          telegram: { recallEnabled: false, extractEnabled: false },
         },
       },
     });
-    expect(missingContact.success).toBe(false);
-    if (!missingContact.success) {
-      expect(missingContact.error.issues).toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          path: ["policy", "basic", "contactMemoryCrossChannelEnabled"],
-        }),
-      ]));
-    }
+    expect(ownerCannotEnableWithoutContact.success).toBe(true);
 
     const channelLocal = representativeMemorySettingsUpdateSchema.safeParse({
       expectedRevision: 0,
@@ -349,7 +348,7 @@ describe("representative memory settings", () => {
     expect(create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         shortTermMemoryEnabled: false,
-        contactMemoryCrossChannelEnabled: false,
+        contactMemoryCrossChannelEnabled: true,
         matrixRecallEnabled: true,
         matrixExtractEnabled: true,
         telegramRecallEnabled: true,
@@ -366,7 +365,7 @@ describe("representative memory settings", () => {
     });
     expect(result.settings.basic).toMatchObject({
       shortTermMemoryEnabled: false,
-      contactMemoryCrossChannelEnabled: false,
+      contactMemoryCrossChannelEnabled: true,
       automaticPolicyEnabled: true,
     });
   });
@@ -587,7 +586,7 @@ async function runExistingPolicyUpdate(
     shortTermMemoryEnabled: policy.basic.shortTermMemoryEnabled,
     contactMemoryEnabled: policy.basic.contactMemoryEnabled,
     contactMemoryCrossChannelEnabled:
-      policy.basic.contactMemoryCrossChannelEnabled,
+      policy.basic.longTermMemoryEnabled && policy.basic.contactMemoryEnabled,
     representativeExperienceEnabled:
       policy.basic.representativeExperienceEnabled,
     autoExtract: policy.basic.autoExtract,

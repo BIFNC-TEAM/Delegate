@@ -849,10 +849,16 @@ export function RepresentativeChatPanel(props: {
     hydrating,
     locale: props.locale,
   });
-  const composerDescription = [
-    computeAssist ? "representative-compute-assist" : null,
-    "representative-composer-guidance",
-  ].filter(Boolean).join(" ");
+  const composerDescription = computeAssist
+    ? "representative-compute-assist"
+    : undefined;
+  const sessionSummary = responder.kind === "human"
+    ? t.humanActiveDetail
+    : responder.kind === "offline"
+      ? t.connectionInterruptedDetail
+      : responder.kind === "error"
+        ? t.failedReplyDetail
+        : null;
 
   return (
     <section className="representative-conversation-shell" id="chat">
@@ -870,17 +876,12 @@ export function RepresentativeChatPanel(props: {
             </div>
             <div className="representative-conversation-controls">
               <div className={`representative-conversation-status is-${responder.kind}`} aria-live="polite">
-                <span className="representative-conversation-status-avatar" aria-hidden="true">
-                  {humanActive ? t.humanStatusAvatar : getAvatarInitials(props.representativeName)}
-                </span>
-                <span>
-                  <small>{t.currentResponder}</small>
-                  <strong className={`representative-responder-pill is-${responder.kind}`}>
-                    <i aria-hidden="true" />{responder.label}
-                  </strong>
-                </span>
+                <strong className={`representative-responder-pill is-${responder.kind}`}>
+                  <i aria-hidden="true" />{responder.label}
+                </strong>
               </div>
               <button
+                aria-label={profileRailOpen ? t.hideProfilePanel : t.showProfilePanel}
                 aria-controls="representative-profile-rail"
                 aria-expanded={profileRailOpen}
                 aria-haspopup={profileRailCompact ? "dialog" : undefined}
@@ -890,10 +891,10 @@ export function RepresentativeChatPanel(props: {
                   setProfileRailVisibility(!profileRailOpen);
                 }}
                 ref={profileRailToggleRef}
+                title={profileRailOpen ? t.hideProfilePanel : t.showProfilePanel}
                 type="button"
               >
                 <ProfilePanelIcon />
-                <span>{profileRailOpen ? t.hideProfilePanel : t.showProfilePanel}</span>
               </button>
             </div>
           </header>
@@ -921,58 +922,35 @@ export function RepresentativeChatPanel(props: {
                   : isSystem
                     ? message.senderType === "tool" ? t.taskUpdateLabel : t.systemLabel
                     : props.representativeName;
+              const displayText = localizeSystemMessage(message.text, message.senderType, props.locale);
               const displayTime = formatMessageTime(message.createdAt, props.locale, t.justNow);
               const displayDateTime = formatMessageDateTime(message.createdAt, props.locale);
 
               if (isSystem) {
                 return (
                   <article className={`representative-system-message${message.senderType === "tool" ? " is-task-update" : ""}`} key={message.id}>
-                    <span className="representative-system-message-icon" aria-hidden="true">i</span>
-                    <div className="representative-system-message-content">
-                      <header>
-                        <strong>{senderName}</strong>
-                      </header>
-                      <p>{message.text}</p>
-                      {message.attachments?.length ? (
-                        <div className="representative-chat-artifacts">
-                          <strong>{t.artifactsLabel}</strong>
-                          {message.attachments.map((attachment) => (
-                            <div className="representative-chat-artifact" key={attachment.id}>
-                              {attachment.mimeType?.startsWith("image/") && attachment.url ? (
-                                <img alt={attachment.fileName} src={`${attachment.url}?inline=1`} />
-                              ) : null}
-                              <div>
-                                <span>{attachment.fileName}</span>
-                                <small>{[attachment.mimeType, formatAttachmentBytes(attachment.sizeBytes)].filter(Boolean).join(" · ")}</small>
-                              </div>
-                              {attachment.url ? <a href={attachment.url}>{t.downloadArtifact}</a> : null}
+                    <header className="representative-system-message-header">
+                      <strong>{senderName}</strong>
+                      <time dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>
+                    </header>
+                    <p>{displayText}</p>
+                    {message.attachments?.length ? (
+                      <div className="representative-chat-artifacts">
+                        <strong>{t.artifactsLabel}</strong>
+                        {message.attachments.map((attachment) => (
+                          <div className="representative-chat-artifact" key={attachment.id}>
+                            {attachment.mimeType?.startsWith("image/") && attachment.url ? (
+                              <img alt={attachment.fileName} src={`${attachment.url}?inline=1`} />
+                            ) : null}
+                            <div>
+                              <span>{attachment.fileName}</span>
+                              <small>{[attachment.mimeType, formatAttachmentBytes(attachment.sizeBytes)].filter(Boolean).join(" · ")}</small>
                             </div>
-                          ))}
-                        </div>
-                      ) : null}
-                      <footer>
-                        {visibleStatus ? <span className="representative-message-status">{visibleStatus}</span> : null}
-                        <span className="representative-message-actions-tools">
-                          <time className="representative-message-time" dateTime={message.createdAt} title={displayDateTime}>{displayTime}</time>
-                          <button
-                            aria-label={isCopied
-                              ? t.copiedAction
-                              : isCopyFailed
-                                ? t.copyFailedAction
-                                : t.copyMessageAction(senderName)}
-                            className={`representative-message-copy${isCopied ? " is-copied" : ""}${isCopyFailed ? " is-failed" : ""}`}
-                            onClick={() => void handleCopyMessage(message)}
-                            title={isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
-                            type="button"
-                          >
-                            <CopyIcon />
-                            <span aria-live="polite">
-                              {isCopied ? t.copiedAction : isCopyFailed ? t.copyFailedAction : t.copyAction}
-                            </span>
-                          </button>
-                        </span>
-                      </footer>
-                    </div>
+                            {attachment.url ? <a href={attachment.url}>{t.downloadArtifact}</a> : null}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                   </article>
                 );
               }
@@ -1074,8 +1052,7 @@ export function RepresentativeChatPanel(props: {
 
           <form className="representative-chat-form representative-chat-composer" onSubmit={handleSubmit}>
             <header className="representative-chat-composer-header">
-              <label className="panel-title" htmlFor="representative-chat-input">{t.inputLabel}</label>
-              <span>{responder.kind === "human"
+              <span className="representative-chat-composer-recipient">{responder.kind === "human"
                 ? t.humanComposerContext
                 : responder.kind === "waiting"
                   ? t.waitingComposerContext
@@ -1084,6 +1061,7 @@ export function RepresentativeChatPanel(props: {
             <div className="representative-chat-composer-body">
               <textarea
                 aria-describedby={composerDescription}
+                aria-label={t.inputLabel}
                 className="dashboard-textarea representative-chat-textarea"
                 id="representative-chat-input"
                 onChange={(event) => setInput(event.target.value)}
@@ -1159,14 +1137,7 @@ export function RepresentativeChatPanel(props: {
                 </button>
               </div>
             ) : null}
-            <div className="representative-chat-trust-note">
-              <span>{t.composerTrustNote(governedContextEnabled)}</span>
-            </div>
             <footer className="dashboard-form-footer representative-chat-composer-actions">
-              <p className="footer-note" id="representative-composer-guidance">
-                <span>{t.footnote}</span>
-                <kbd>{t.keyboardHint}</kbd>
-              </p>
               <div className="button-row">
                 <button
                   aria-label={hydrating ? t.loadingHistory : busy ? t.sending : t.sendMessageAction}
@@ -1238,15 +1209,9 @@ export function RepresentativeChatPanel(props: {
                   </button>
                 </div>
               ) : null}
-              {responder.kind !== "waiting" ? (
+              {sessionSummary ? (
                 <p className="representative-session-summary">
-                  {responder.kind === "human"
-                    ? t.humanActiveDetail
-                    : responder.kind === "offline"
-                      ? t.connectionInterruptedDetail
-                      : responder.kind === "error"
-                        ? t.failedReplyDetail
-                        : t.aiActiveDetail}
+                  {sessionSummary}
                 </p>
               ) : null}
             </div>
@@ -1261,8 +1226,8 @@ export function RepresentativeChatPanel(props: {
 function getVisitorMessageStatus(status: string | undefined, locale: "zh" | "en") {
   if (!status || ["sent", "completed"].includes(status)) return null;
   const labels = locale === "zh"
-    ? { accepted: "已发送", queued: "等待发送", waiting_human: "等待真人", failed: "发送失败" }
-    : { accepted: "Sent", queued: "Queued", waiting_human: "Waiting for a human", failed: "Failed" };
+    ? { accepted: "已发送", queued: "已发送", waiting_human: "等待真人", failed: "发送失败" }
+    : { accepted: "Sent", queued: "Sent", waiting_human: "Waiting for a human", failed: "Failed" };
   return labels[status as keyof typeof labels] ?? null;
 }
 
@@ -1323,6 +1288,29 @@ function formatMessageTime(
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function localizeSystemMessage(
+  text: string,
+  senderType: ChatMessage["senderType"],
+  locale: "zh" | "en",
+) {
+  if (senderType !== "system") return text;
+
+  const operatorJoined = /^Human operator (.+) joined the conversation\.$/u.exec(text);
+  if (operatorJoined) {
+    return locale === "zh"
+      ? `真人接待 ${operatorJoined[1]} 已加入会话。`
+      : text;
+  }
+
+  if (text === "The human operator returned this conversation to the digital representative.") {
+    return locale === "zh"
+      ? "真人已结束接待，数字代表将继续回复。"
+      : text;
+  }
+
+  return text;
 }
 
 function formatMessageDateTime(
@@ -1423,8 +1411,7 @@ function getComputeAssist(value: string, locale: "zh" | "en", enabled: boolean) 
 const zhCopy = {
   digitalRepresentativeLabel: "数字代表",
   aiStatus: "AI 正在接待", humanStatus: "真人正在接待",
-  humanStatusAvatar: "人",
-  youLabel: "你", systemLabel: "会话通知", taskUpdateLabel: "任务进展",
+  youLabel: "你", systemLabel: "系统", taskUpdateLabel: "任务进展",
   justNow: "刚刚", copyAction: "复制", copiedAction: "已复制",
   copyMessageAction: (senderName: string) => `复制 ${senderName} 的消息`,
   copyFailedAction: "复制失败，请重试",
@@ -1435,9 +1422,9 @@ const zhCopy = {
   generalModelSourceDisclosure: "来源说明：本回答未引用已授权知识或记忆。",
   artifactsLabel: "任务结果", downloadArtifact: "下载",
   faqSuggestionsLabel: "你可以这样问我",
-  inputLabel: "想解决什么？", placeholder: "描述你的问题、背景和期望结果…", footnote: "请勿发送密码、密钥或不应公开的敏感信息。",
-  aiComposerContext: "发送给数字代表", humanComposerContext: "发送给当前接待人员", waitingComposerContext: "补充给人工接待队列",
-  keyboardHint: "Enter 发送 · Shift + Enter 换行", sendMessageAction: "发送消息",
+  inputLabel: "输入对话内容", placeholder: "描述你的问题、背景和期望结果…",
+  aiComposerContext: "发送给数字代表", humanComposerContext: "发送给当前接待人员", waitingComposerContext: "等待真人回复，可继续补充",
+  sendMessageAction: "发送消息",
   continuationEyebrow: "继续对话",
   serviceGateTitle: (accessMode: RepresentativeAccessMode) => accessMode === "CREDITS_ONLY"
     ? "使用服务额度后继续"
@@ -1448,13 +1435,10 @@ const zhCopy = {
   servicePendingDetail: "无需重复购买。额度确认后即可继续发送，输入内容会一直保留。",
   lastFreeReplyDetail: "还剩 1 次免费回复。你可以继续提问，也可以提前了解后续服务方案。",
   previewServices: "查看服务方案",
-  composerTrustNote: (enabled: boolean) => enabled
-    ? "可使用公开资料与仅限你和当前代表的受保护历史摘要。"
-    : "回答使用公开资料；重要承诺仍需真人确认。",
   sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", memoryPolicyChanged: "记忆策略刚刚更新。请阅读新的记忆说明后重新发送；上一条内容尚未提交。", serviceCreditPending: "服务额度正在处理中，请稍后重试；你的问题已保留在输入框中。", serviceCreditRequired: "免费回复已用完。请购买当前数字代表的服务额度后再发送；你的问题已保留在输入框中。", serviceCreditUnavailableWithHandoff: "免费回复已用完，当前数字代表暂无可购买的服务方案；可申请真人协助。你的问题已保留在输入框中。", serviceCreditUnavailable: "免费回复已用完，当前数字代表暂无可购买的服务方案。你的问题已保留在输入框中。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
   sessionLabel: "服务和订单",
-  currentResponder: "当前接待", purchasedServiceCreditsLabel: "已购服务额度",
+  purchasedServiceCreditsLabel: "已购服务额度",
   profilePanelLabel: "代表资料与本次会话",
   showProfilePanel: "显示资料",
   hideProfilePanel: "隐藏资料",
@@ -1469,7 +1453,6 @@ const zhCopy = {
   remainingAllowance: (remaining: number, total: number) => `剩余额度 ${remaining}/${total}`,
   purchasedServiceCredits: (remaining: number, total: number) => `${remaining}/${total}`,
   openServices: "查看服务与订单",
-  aiActiveDetail: "你正在与数字代表对话；需要真人判断时会明确提示。",
   humanActiveDetail: "真人已经接手，你仍可以继续补充背景和要求。",
   connectionInterruptedDetail: "会话状态暂时无法确认，请稍后刷新重试。",
   failedReplyDetail: "上一条回复未完成。你的对话仍然保留，可以重新发送或继续补充。",
@@ -1489,8 +1472,7 @@ const zhCopy = {
 const enCopy = {
   digitalRepresentativeLabel: "Digital representative",
   aiStatus: "AI is responding", humanStatus: "Human is responding",
-  humanStatusAvatar: "H",
-  youLabel: "You", systemLabel: "Conversation update", taskUpdateLabel: "Task update",
+  youLabel: "You", systemLabel: "System", taskUpdateLabel: "Task update",
   justNow: "Just now", copyAction: "Copy", copiedAction: "Copied",
   copyMessageAction: (senderName: string) => `Copy ${senderName}'s message`,
   copyFailedAction: "Copy failed. Try again",
@@ -1501,9 +1483,9 @@ const enCopy = {
   generalModelSourceDisclosure: "Source note: This answer did not cite authorized knowledge or memory.",
   artifactsLabel: "Task results", downloadArtifact: "Download",
   faqSuggestionsLabel: "You can ask me",
-  inputLabel: "What do you need?", placeholder: "Describe the problem, context, and outcome you want…", footnote: "Do not send passwords, API keys, or sensitive information that should not be public.",
-  aiComposerContext: "Send to the digital representative", humanComposerContext: "Send to the current operator", waitingComposerContext: "Add context for the human queue",
-  keyboardHint: "Enter to send · Shift + Enter for a new line", sendMessageAction: "Send message",
+  inputLabel: "Conversation message", placeholder: "Describe the problem, context, and outcome you want…",
+  aiComposerContext: "Send to the digital representative", humanComposerContext: "Send to the current operator", waitingComposerContext: "Waiting for a human reply; you can keep adding details",
+  sendMessageAction: "Send message",
   continuationEyebrow: "Continue the conversation",
   serviceGateTitle: (accessMode: RepresentativeAccessMode) => accessMode === "CREDITS_ONLY"
     ? "Use service credits to continue"
@@ -1514,13 +1496,10 @@ const enCopy = {
   servicePendingDetail: "Do not buy again. You can send as soon as the credits arrive, and your draft will stay here.",
   lastFreeReplyDetail: "You have 1 free reply left. Keep asking, or review the service options available afterward.",
   previewServices: "View service options",
-  composerTrustNote: (enabled: boolean) => enabled
-    ? "May use public information and protected history scoped only to you and this representative."
-    : "Uses public information; important commitments still require human confirmation.",
   sending: "Working…", send: "Send", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "Reviewing published knowledge and permitted context…" : "Reviewing published knowledge and preparing a reply…", loadingHistory: "Restoring conversation…", errorGeneric: "The chat request failed. Please try again shortly.", memoryPolicyChanged: "The memory policy just changed. Review the updated memory notice and send again; your previous message was not submitted.", serviceCreditPending: "Service credits are still being processed. Try again shortly; your message remains in the composer.", serviceCreditRequired: "Your free replies are used up. Buy service credits for this representative, then send again. Your message remains in the composer.", serviceCreditUnavailableWithHandoff: "Your free replies are used up, and this representative has no purchasable service plan right now. Request human help instead. Your message remains in the composer.", serviceCreditUnavailable: "Your free replies are used up, and this representative has no purchasable service plan right now. Your message remains in the composer.", replyTimeout: "The reply took too long. Please send it again; your message is still saved in this conversation.",
   humanQueueNotice: "This conversation is now in the human queue. You can keep adding context while the operator reviews the full thread.",
   sessionLabel: "Services and orders",
-  currentResponder: "Current responder", purchasedServiceCreditsLabel: "Purchased service credits",
+  purchasedServiceCreditsLabel: "Purchased service credits",
   profilePanelLabel: "Profile and this conversation",
   showProfilePanel: "Show profile",
   hideProfilePanel: "Hide profile",
@@ -1535,7 +1514,6 @@ const enCopy = {
   remainingAllowance: (remaining: number, total: number) => `${remaining}/${total} remaining`,
   purchasedServiceCredits: (remaining: number, total: number) => `${remaining}/${total}`,
   openServices: "View services and orders",
-  aiActiveDetail: "You are talking to the digital representative. It will say when a human decision is needed.",
   humanActiveDetail: "A human has taken over. You can keep adding context and requirements.",
   connectionInterruptedDetail: "The conversation state cannot be confirmed right now. Refresh and try again shortly.",
   failedReplyDetail: "The last reply did not complete. Your conversation is still saved, so you can retry or add context.",

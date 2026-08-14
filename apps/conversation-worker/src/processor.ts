@@ -1929,7 +1929,7 @@ function renderContactMemorySharingFailure(
   code: ContactMemorySharingError["code"],
 ) {
   if (code === "contact_memory_sharing_policy_disabled") {
-    return "当前数字代表尚未开启跨渠道联系人记忆，授权未生效。";
+    return "当前暂不提供联系人长期记忆能力，因此跨渠道授权未生效。";
   }
   if (code === "contact_memory_sharing_contract_mismatch") {
     return `${renderContactMemorySharingDisclosure()}\n\n披露内容已经更新，请重新获取一次性确认令牌。`;

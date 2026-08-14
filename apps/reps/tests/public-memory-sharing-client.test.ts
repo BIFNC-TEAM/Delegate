@@ -31,29 +31,32 @@ describe("public cross-channel memory consent panel", () => {
   });
 
   it("states scope, exclusions, isolation, and immediate withdrawal behavior", () => {
-    expect(panelSource).toContain("同一 Delegate 身份");
-    expect(panelSource).toContain("未验证账号、其他联系人和其他数字代表始终隔离");
-    expect(panelSource).toContain("原始聊天全文");
+    expect(panelSource).toContain("同一已验证 Delegate 身份");
+    expect(panelSource).toContain("未验证账号、其他联系人及其他数字代表保持隔离");
+    expect(panelSource).toContain("原始聊天");
     expect(panelSource).toContain("Owner 私有备注");
     expect(panelSource).toContain("Compute 原始产物");
-    expect(panelSource).toContain("付款、余额、退款和权益事实");
+    expect(panelSource).toContain("付款、余额、退款和权益信息");
     expect(panelSource).toContain("立即停止共享召回");
-    expect(panelSource).toContain("异步删除已投影的共享记忆");
+    expect(panelSource).toContain("异步清理共享记忆");
     expect(panelSource).toContain("历史消息、账号绑定、订单和权益不受影响");
-    expect(panelSource).toContain("Raw chat transcripts");
+    expect(panelSource).toContain("Raw chats");
     expect(panelSource).toContain("other contacts");
-    expect(panelSource).toContain("stops immediately");
+    expect(panelSource).toContain("stops shared recall immediately");
   });
 
-  it("requires explicit current-contract confirmation and a server challenge before granting", () => {
+  it("defaults on under user control and keeps server-challenge proof for re-enabling", () => {
     expect(panelSource).toContain('type="checkbox"');
-    expect(panelSource).toContain("!confirmed");
+    expect(panelSource).toContain('role="switch"');
+    expect(panelSource).toContain("state && !state.active");
+    expect(panelSource).not.toContain('return zh ? "已启用" : "Enabled"');
+    expect(panelSource).toContain("开关仅由你控制，默认开启");
     expect(panelSource).toContain(
       "challengeToken: state.challengeToken",
     );
-    expect(panelSource).toContain("我已阅读并明确同意");
-    expect(panelSource).toContain("允许跨渠道联系人记忆");
     expect(panelSource).toContain('method: "POST"');
+    expect(routeSource).toContain('state.blockedReason === "consent_missing"');
+    expect(routeSource).toContain("web-default-confirmation:");
     expect(routeSource).toContain(
       "/^[A-Za-z0-9_-]{43}$/u.test(challengeToken)",
     );
@@ -61,7 +64,12 @@ describe("public cross-channel memory consent panel", () => {
 
   it("uses a two-step destructive confirmation for withdrawal", () => {
     expect(panelSource).toContain("confirmingRevocation");
-    expect(panelSource).toContain("确认停止并删除跨渠道联系人记忆？");
+    expect(panelSource).toContain("representative-memory-confirmation-modal");
+    expect(panelSource).toContain('aria-modal="true"');
+    expect(panelSource).toContain('role="alertdialog"');
+    expect(panelSource).toContain("createPortal(");
+    expect(panelSource).toContain('setAttribute("inert", "")');
+    expect(panelSource).toContain("停止并删除跨渠道联系人记忆？");
     expect(panelSource).toContain("确认停止并删除");
     expect(panelSource).toContain('method: "DELETE"');
     expect(panelSource).not.toContain("window.confirm");

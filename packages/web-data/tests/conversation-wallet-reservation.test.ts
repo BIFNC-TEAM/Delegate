@@ -917,6 +917,44 @@ describe("generation wallet reservation lifecycle", () => {
     );
   });
 
+  it("marks an inbound message sent when the human queue already owns the episode", async () => {
+    mocks.tx.conversation.findFirst.mockResolvedValue({
+      id: "conversation-1",
+      audienceIdentityId: "audience-1",
+      freeRepliesUsed: 0,
+      representative: availableRepresentative,
+      episodes: [{
+        id: "episode-1",
+        sequence: 1,
+        status: "NEEDS_HUMAN",
+        representativeVersionId: "version-1",
+      }],
+      channelBindings: connectedWebChannelBindings,
+    });
+    mocks.tx.generationRun.findUnique.mockResolvedValue(null);
+
+    const accepted = await acceptInboundConversationMessage({
+      representativeSlug: "representative",
+      conversationId: "conversation-1",
+      text: "additional context for the operator",
+      clientMessageId: "client-human-queue",
+    });
+
+    expect(accepted).toMatchObject({
+      heldForOperator: true,
+      run: null,
+    });
+    expect(mocks.tx.message.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          deliveryStatus: "SENT",
+        }),
+      }),
+    );
+    expect(mocks.tx.generationRun.upsert).not.toHaveBeenCalled();
+    expect(mocks.tx.outboxEvent.upsert).not.toHaveBeenCalled();
+  });
+
   it("pins CREDITS_ONLY and reserves from the first reply", async () => {
     mocks.tx.conversation.findFirst.mockResolvedValue({
       id: "conversation-1",

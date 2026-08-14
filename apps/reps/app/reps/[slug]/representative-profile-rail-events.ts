@@ -7,4 +7,8 @@ export const REPRESENTATIVE_PROFILE_RAIL_STATE_EVENT =
 export const REPRESENTATIVE_PROFILE_SECTION_OPEN_EVENT =
   "delegate:representative-profile-section-open";
 
-export type RepresentativeProfileSection = "bindings" | "services" | "privacy";
+export type RepresentativeProfileSection =
+  | "bindings"
+  | "services"
+  | "tips"
+  | "privacy";

@@ -88,77 +88,104 @@ export async function createConversationServiceRequest(input: {
 }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
-    const conversation = await tx.conversation.findUnique({
-      where: { id: input.conversationId },
-      select: {
-        representativeId: true,
-        contactId: true,
-        audienceIdentityId: true,
-        state: true,
-      },
-    });
-    if (
-      !conversation
-      || conversation.representativeId !== input.representativeId
-      || conversation.contactId !== input.contactId
-    ) {
-      throw new Error("Service request context does not match the conversation.");
-    }
-    if (conversation.state === "HUMAN_ACTIVE") {
-      return { task: null, skipped: "human_active" as const };
-    }
-
-    const idempotencyKey = `service-request:${input.inputMessageId}`;
-    const existing = await tx.delegationTask.findUnique({ where: { idempotencyKey } });
-    if (existing) return { task: existing, skipped: "existing" as const };
-
-    const task = await tx.delegationTask.create({
-      data: {
-        representativeId: input.representativeId,
-        representativeVersionId: input.representativeVersionId ?? null,
-        contactId: input.contactId,
-        audienceIdentityId: conversation.audienceIdentityId,
-        originConversationId: input.conversationId,
-        originEpisodeId: input.episodeId ?? null,
-        kind: "SERVICE_REQUEST",
-        initiatorType: "AUDIENCE",
-        initiatorId: input.contactId,
-        title: truncate(`${input.intent}: ${input.objective}`, 160),
-        objective: truncate(input.objective, 4_000),
-        desiredOutcome: truncate(input.desiredOutcome, 1_000),
-        status: DelegationTaskStatus.WAITING_FOR_OWNER,
-        nextActionBy: DelegationTaskNextActor.OWNER,
-        priority: Math.max(0, Math.min(100, Math.round(input.priority ?? 50))),
-        idempotencyKey,
-        planSummary: "需求已完成基础采集；尚未授权工具调用、外部副作用或任何业务承诺。",
-        contextSnapshot: {
-          source: "conversation_intake",
-          intent: input.intent,
-          inputMessageId: input.inputMessageId,
-        },
-        inputs: {
-          create: {
-            kind: "MESSAGE",
-            referenceType: "Message",
-            referenceId: input.inputMessageId,
-            label: truncate(input.objective, 240),
-            providedByType: "AUDIENCE",
-            providedById: input.contactId,
-            authorizationRequired: false,
-          },
-        },
-      },
-    });
-    await appendTaskEvent(tx, {
-      taskId: task.id,
-      eventType: "service_request.created",
-      actorType: DelegationTaskActorType.AUDIENCE,
-      actorId: input.contactId,
-      toStatus: DelegationTaskStatus.WAITING_FOR_OWNER,
-      payload: { intent: input.intent, inputMessageId: input.inputMessageId },
-    });
-    return { task, skipped: null };
+    return createConversationServiceRequestInTransaction(tx, input);
   });
+}
+
+export async function createConversationServiceRequestInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    representativeId: string;
+    representativeVersionId?: string | null;
+    contactId: string;
+    conversationId: string;
+    episodeId?: string | null;
+    inputMessageId: string;
+    intent: string;
+    objective: string;
+    desiredOutcome: string;
+    priority?: number;
+  },
+) {
+  const conversation = await tx.conversation.findUnique({
+    where: { id: input.conversationId },
+    select: {
+      representativeId: true,
+      contactId: true,
+      audienceIdentityId: true,
+      state: true,
+    },
+  });
+  if (
+    !conversation
+    || conversation.representativeId !== input.representativeId
+    || conversation.contactId !== input.contactId
+  ) {
+    throw new Error("Service request context does not match the conversation.");
+  }
+  if (conversation.state === "HUMAN_ACTIVE" || conversation.state === "NEEDS_HUMAN") {
+    return { task: null, skipped: "human_active" as const };
+  }
+
+  const idempotencyKey = `service-request:${input.inputMessageId}`;
+  const existing = await tx.delegationTask.findUnique({ where: { idempotencyKey } });
+  if (existing) {
+    if (
+      existing.representativeId !== input.representativeId
+      || existing.contactId !== input.contactId
+      || existing.originConversationId !== input.conversationId
+    ) {
+      throw new Error("Service request idempotency key belongs to another conversation.");
+    }
+    return { task: existing, skipped: "existing" as const };
+  }
+
+  const task = await tx.delegationTask.create({
+    data: {
+      representativeId: input.representativeId,
+      representativeVersionId: input.representativeVersionId ?? null,
+      contactId: input.contactId,
+      audienceIdentityId: conversation.audienceIdentityId,
+      originConversationId: input.conversationId,
+      originEpisodeId: input.episodeId ?? null,
+      kind: "SERVICE_REQUEST",
+      initiatorType: "AUDIENCE",
+      initiatorId: input.contactId,
+      title: truncate(`${input.intent}: ${input.objective}`, 160),
+      objective: truncate(input.objective, 4_000),
+      desiredOutcome: truncate(input.desiredOutcome, 1_000),
+      status: DelegationTaskStatus.WAITING_FOR_OWNER,
+      nextActionBy: DelegationTaskNextActor.OWNER,
+      priority: Math.max(0, Math.min(100, Math.round(input.priority ?? 50))),
+      idempotencyKey,
+      planSummary: "需求已完成基础采集；尚未授权工具调用、外部副作用或任何业务承诺。",
+      contextSnapshot: {
+        source: "conversation_intake",
+        intent: input.intent,
+        inputMessageId: input.inputMessageId,
+      },
+      inputs: {
+        create: {
+          kind: "MESSAGE",
+          referenceType: "Message",
+          referenceId: input.inputMessageId,
+          label: truncate(input.objective, 240),
+          providedByType: "AUDIENCE",
+          providedById: input.contactId,
+          authorizationRequired: false,
+        },
+      },
+    },
+  });
+  await appendTaskEvent(tx, {
+    taskId: task.id,
+    eventType: "service_request.created",
+    actorType: DelegationTaskActorType.AUDIENCE,
+    actorId: input.contactId,
+    toStatus: DelegationTaskStatus.WAITING_FOR_OWNER,
+    payload: { intent: input.intent, inputMessageId: input.inputMessageId },
+  });
+  return { task, skipped: null };
 }
 
 export type DelegationTaskDetailSnapshot = NonNullable<Awaited<ReturnType<typeof getRepresentativeDelegationTaskDetail>>>;
@@ -1987,6 +2014,7 @@ export async function applyRepresentativeDelegationTaskAction(input: {
   taskId: string;
   action: DelegationTaskOwnerAction;
   actorId: string;
+  actorType?: "owner" | "audience";
 }) {
   await prisma.$transaction(async (tx) => {
     await lockDelegationConversation(tx, input.taskId);
@@ -2027,6 +2055,7 @@ export async function applyRepresentativeDelegationTaskAction(input: {
     }
 
     if (input.action === "cancel") {
+      const canceledByAudience = input.actorType === "audience";
       if (task.approvalRequests.length) {
         throw new DelegationTaskActionError("Pending approval must be rejected through the approval workflow.");
       }
@@ -2062,7 +2091,9 @@ export async function applyRepresentativeDelegationTaskAction(input: {
         data: {
           status: DelegationTaskStatus.CANCELED,
           nextActionBy: DelegationTaskNextActor.NONE,
-          blockingReason: "代表所有者已取消任务",
+          blockingReason: canceledByAudience
+            ? "用户已取消任务"
+            : "代表所有者已取消任务",
           canceledAt: now,
           version: { increment: 1 },
         },
@@ -2086,13 +2117,19 @@ export async function applyRepresentativeDelegationTaskAction(input: {
         conversationId: task.originConversationId,
         episodeId: task.originEpisodeId,
         clientMessageId: `delegation-task-canceled:${task.id}:${task.version + 1}`,
-        text: "委托任务已由代表所有者取消。",
+        text: canceledByAudience
+          ? "委托任务已由用户取消。"
+          : "委托任务已由代表所有者取消。",
       });
       await settleConversationAfterTaskAction(tx, task.originConversationId, task.originEpisodeId);
       await appendTaskEvent(tx, {
         taskId: task.id,
-        eventType: "task.canceled_by_owner",
-        actorType: DelegationTaskActorType.OWNER,
+        eventType: canceledByAudience
+          ? "task.canceled_by_audience"
+          : "task.canceled_by_owner",
+        actorType: canceledByAudience
+          ? DelegationTaskActorType.AUDIENCE
+          : DelegationTaskActorType.OWNER,
         actorId: input.actorId,
         fromStatus: task.status,
         toStatus: DelegationTaskStatus.CANCELED,
@@ -2255,6 +2292,73 @@ export async function applyRepresentativeDelegationTaskAction(input: {
   });
 
   return getRepresentativeDelegationTaskDetail(input.representativeSlug, input.taskId);
+}
+
+export async function findConversationCancelableDelegationTask(input: {
+  representativeId: string;
+  conversationId: string;
+  contactId: string;
+  audienceIdentityId?: string;
+}): Promise<
+  | { status: "none" }
+  | { status: "already_canceled"; taskId: string }
+  | { status: "in_flight"; taskId: string }
+  | { status: "cancelable"; taskId: string; pendingApprovalId: string | null }
+> {
+  const scope = {
+    representativeId: input.representativeId,
+    originConversationId: input.conversationId,
+    contactId: input.contactId,
+    ...(input.audienceIdentityId
+      ? { audienceIdentityId: input.audienceIdentityId }
+      : {}),
+  };
+  const task = await prisma.delegationTask.findFirst({
+    where: {
+      ...scope,
+      status: {
+        in: [
+          DelegationTaskStatus.DRAFT,
+          DelegationTaskStatus.CLARIFYING,
+          DelegationTaskStatus.READY,
+          DelegationTaskStatus.AWAITING_APPROVAL,
+          DelegationTaskStatus.QUEUED,
+          DelegationTaskStatus.RUNNING,
+          DelegationTaskStatus.WAITING_FOR_USER,
+          DelegationTaskStatus.WAITING_FOR_OWNER,
+        ],
+      },
+    },
+    orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+    select: {
+      id: true,
+      status: true,
+      approvalRequests: {
+        where: { status: "PENDING" },
+        orderBy: [{ requestedAt: "desc" }, { id: "desc" }],
+        take: 1,
+        select: { id: true },
+      },
+    },
+  });
+  if (task) {
+    if (task.status === DelegationTaskStatus.RUNNING) {
+      return { status: "in_flight", taskId: task.id };
+    }
+    return {
+      status: "cancelable",
+      taskId: task.id,
+      pendingApprovalId: task.approvalRequests[0]?.id ?? null,
+    };
+  }
+  const canceled = await prisma.delegationTask.findFirst({
+    where: { ...scope, status: DelegationTaskStatus.CANCELED },
+    orderBy: [{ canceledAt: "desc" }, { id: "desc" }],
+    select: { id: true },
+  });
+  return canceled
+    ? { status: "already_canceled", taskId: canceled.id }
+    : { status: "none" };
 }
 
 type OwnerExternalEffectResolution =

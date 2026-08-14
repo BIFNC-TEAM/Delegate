@@ -928,25 +928,6 @@ bot.on("message:text", async (ctx) => {
   });
   const planSubagent = resolveConversationSubagent(plan);
 
-  const recalled = conversationContext
-    ? await recallOpenVikingContext({
-        context: conversationContext,
-        queryText: normalizedText,
-      })
-    : [];
-
-  if (inlineComputeRequest && conversationContext) {
-    await handleComputeRequest({
-      ctx,
-      representativeSlug,
-      parsed: inlineComputeRequest,
-      rawText: normalizedText,
-      representative,
-      conversationContext,
-    });
-    return;
-  }
-
   if (conversationContext?.collectorState) {
     const collectorPlan = buildCollectorConversationPlan(conversationContext.collectorState);
     const collectorSubagent = resolveCollectorSubagent(conversationContext.collectorState);
@@ -1022,12 +1003,7 @@ bot.on("message:text", async (ctx) => {
       collectorState: advanced.state,
     });
 
-    const completionNote =
-      advanced.state.kind === "scheduling"
-        ? "预约意向已经整理完成。"
-        : advanced.state.kind === "quote"
-          ? "报价 / 合作背景已经整理完成。"
-          : "联系人和需求已经整理完成。";
+    const completionNote = "需求描述已经整理完成。";
     const requestStatusNote = submitted.serviceRequestId
       ? `已创建服务请求：${submitted.serviceRequestId}`
       : "结构化摘要已保存；本次未重复创建服务请求。";
@@ -1037,6 +1013,7 @@ bot.on("message:text", async (ctx) => {
       completionNote,
       formatStructuredCollectorSummary(advanced.state),
       requestStatusNote,
+      "联系人、预算、时间等补充信息由真人接手后继续询问。",
       submitted.recommendedOwnerAction,
     ]
       .filter(Boolean)
@@ -1054,6 +1031,25 @@ bot.on("message:text", async (ctx) => {
     });
     return;
   }
+
+  if (inlineComputeRequest && conversationContext) {
+    await handleComputeRequest({
+      ctx,
+      representativeSlug,
+      parsed: inlineComputeRequest,
+      rawText: normalizedText,
+      representative,
+      conversationContext,
+    });
+    return;
+  }
+
+  const recalled = conversationContext
+    ? await recallOpenVikingContext({
+        context: conversationContext,
+        queryText: normalizedText,
+      })
+    : [];
 
   if (conversationContext) {
     await recordInboundTurn({
@@ -1662,8 +1658,8 @@ function buildCollectorConversationPlan(
     disposition: "collect",
     actions: [
       {
-        id: `collect_contact_and_requirements:${collectorState.intent}`,
-        kind: "collect_contact_and_requirements",
+        id: `collect_request_description:${collectorState.intent}`,
+        kind: "collect_request_description",
         status: "planned",
         sideEffect: "internal_record",
       },

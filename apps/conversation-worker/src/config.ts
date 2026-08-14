@@ -101,6 +101,14 @@ export function resolveConversationWorkerConfig(
       "Production Telegram traffic must use TELEGRAM_CONVERSATION_PLATFORM_MODE=worker.",
     );
   }
+  if (
+    telegramConversationPlatformMode !== "worker"
+    && env.TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED?.trim().toLowerCase() !== "true"
+  ) {
+    throw new Error(
+      "Telegram legacy/shadow modes require TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED=true and are diagnostics-only.",
+    );
+  }
 
   return configSchema.parse({
     port: Number(env.CONVERSATION_WORKER_PORT || 4040),

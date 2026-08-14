@@ -29,11 +29,62 @@ export type ConversationDisposition =
   | "handoff"
   | "refuse";
 
+export type ConversationIntentResult = {
+  primaryGoal: ConversationGoal;
+  primaryIntent: InquiryIntent;
+  businessLabels: string[];
+  requestedOutcomes: string[];
+  entities: Record<string, string>;
+  missingFields: string[];
+  confidence: number;
+  safetySignals: string[];
+};
+
+export type ConversationBillingDecision = {
+  decision: "no_charge" | "allow_free" | "allow_entitlement" | "payment_required";
+  billable: boolean;
+  reason: string;
+};
+
+export type ConversationAuthorizationDecision =
+  | { decision: "allow"; reason: string }
+  | { decision: "ask"; reason: string }
+  | { decision: "deny"; reason: string };
+
+export type ConversationActionExecutionResult = {
+  actionId: string;
+  status: "completed" | "waiting_input" | "waiting_approval" | "deferred" | "denied" | "failed";
+  summary: string;
+  output?: Record<string, unknown>;
+};
+
+export type ConversationTurnTrace = {
+  version: 1;
+  plan: {
+    goal: ConversationGoal;
+    intent: InquiryIntent;
+    businessLabels: string[];
+    requestedOutcomes: string[];
+    disposition: ConversationDisposition;
+    replyGoal: string;
+    reasons: string[];
+  };
+  billing: ConversationBillingDecision;
+  actions: Array<{
+    id: string;
+    kind: ConversationActionKind;
+    authorization: ConversationAuthorizationDecision;
+    execution: ConversationActionExecutionResult;
+  }>;
+};
+
 export type ConversationActionKind =
   | "answer_public_information"
-  | "collect_contact_and_requirements"
+  | "collect_request_description"
   | "deliver_public_material"
   | "create_service_request"
+  | "execute_tool"
+  | "cancel_pending_action"
   | "request_human_handoff"
   | "refuse_unsafe_request";
 
@@ -42,6 +93,14 @@ export type PlannedConversationAction = {
   kind: ConversationActionKind;
   status: "planned";
   sideEffect: "none" | "internal_record" | "human_queue";
+  target?: string;
+  /** Optional only while replaying plans persisted before protocol version 1. */
+  input?: Record<string, unknown>;
+  /** Optional only while replaying plans persisted before protocol version 1. */
+  requiredCapabilities?: string[];
+  /** Optional only while replaying plans persisted before protocol version 1. */
+  externalSideEffect?: boolean;
+  estimatedCost?: number;
 };
 
 export type ConversationPlan = {
@@ -49,10 +108,30 @@ export type ConversationPlan = {
   intent: InquiryIntent;
   audienceRole: AudienceRole;
   disposition: ConversationDisposition;
+  /** Optional only while replaying plans persisted before protocol version 1. */
+  intentResult?: ConversationIntentResult;
+  /** Optional only while replaying plans persisted before protocol version 1. */
+  billingDecision?: ConversationBillingDecision;
+  /** Optional only while replaying plans persisted before protocol version 1. */
+  replyGoal?: string;
   actions: PlannedConversationAction[];
   suggestedPlan?: PlanTier;
   reasons: string[];
   responseOutline: string[];
+};
+
+/** Protocol-v1 plan emitted by the current planner. */
+export type CurrentPlannedConversationAction = PlannedConversationAction & {
+  input: Record<string, unknown>;
+  requiredCapabilities: string[];
+  externalSideEffect: boolean;
+};
+
+export type CurrentConversationPlan = ConversationPlan & {
+  intentResult: ConversationIntentResult;
+  billingDecision: ConversationBillingDecision;
+  replyGoal: string;
+  actions: CurrentPlannedConversationAction[];
 };
 
 type PlanInput = {
@@ -60,6 +139,12 @@ type PlanInput = {
   channel: Channel;
   representative: Representative;
   usage: ConversationUsage;
+  proposedAction?: {
+    target: string;
+    input: Record<string, unknown>;
+    requiredCapabilities: string[];
+    estimatedCost?: number;
+  };
 };
 
 const keywords = {
@@ -76,6 +161,13 @@ const keywords = {
 } as const;
 
 export function classifyInquiry(text: string): InquiryIntent {
+  return recognizeConversationIntent(text).primaryIntent;
+}
+
+export function recognizeConversationIntent(
+  text: string,
+  representative?: Pick<Representative, "skillPacks">,
+): ConversationIntentResult {
   const normalized = text.toLowerCase();
   const ordered: Array<[InquiryIntent, readonly string[]]> = [
     ["restricted", keywords.restricted], ["refund", keywords.refund], ["discount", keywords.discount],
@@ -83,9 +175,43 @@ export function classifyInquiry(text: string): InquiryIntent {
     ["scheduling", keywords.scheduling], ["materials", keywords.materials], ["candidate", keywords.candidate],
     ["media", keywords.media],
   ];
-  for (const [intent, values] of ordered) if (matchesAny(normalized, values)) return intent;
-  if (["help", "支持", "问题", "做什么", "是什么", "who are you"].some((value) => normalized.includes(value))) return "faq";
-  return "unknown";
+  const matched = ordered
+    .filter(([, values]) => matchesAny(normalized, values))
+    .map(([intent]) => intent);
+  const faqMatched = ["help", "支持", "问题", "做什么", "是什么", "who are you"]
+    .some((value) => normalized.includes(value));
+  const primaryIntent = matched[0] ?? (faqMatched ? "faq" : "unknown");
+  const dynamicLabels = representative?.skillPacks
+    .filter((pack) => pack.enabled)
+    .filter((pack) => {
+      const tokens = [pack.slug, pack.displayName, ...pack.capabilityTags]
+        .map((value) => value.trim().toLowerCase())
+        .filter((value) => value.length >= 2);
+      return tokens.some((token) => normalized.includes(token));
+    })
+    .flatMap((pack) => [pack.slug, ...pack.capabilityTags]) ?? [];
+  const businessLabels = [...new Set([...matched, ...dynamicLabels])];
+  const requestedOutcomes = [...new Set(businessLabels.flatMap(outcomesForLabel))];
+  const safetySignals = primaryIntent === "restricted"
+    ? keywords.restricted.filter((value) => normalized.includes(value)).map((value) => `restricted:${value}`)
+    : looksLikePromptInjection(normalized)
+      ? ["prompt_injection_suspected"]
+      : [];
+  const primaryGoal = safetySignals.length > 0
+    ? "unsafe_request"
+    : goalForIntent(primaryIntent);
+  return {
+    primaryGoal,
+    primaryIntent,
+    businessLabels,
+    requestedOutcomes,
+    entities: {},
+    missingFields: primaryGoal === "create_request" || primaryGoal === "perform_action"
+      ? ["description"]
+      : [],
+    confidence: primaryIntent === "unknown" ? 0.25 : matched.length || faqMatched ? 0.9 : 0.5,
+    safetySignals,
+  };
 }
 
 export function detectAudienceRole(text: string): AudienceRole {
@@ -98,21 +224,72 @@ export function detectAudienceRole(text: string): AudienceRole {
   return "other";
 }
 
-export function createConversationPlan(input: PlanInput): ConversationPlan {
-  const intent = classifyInquiry(input.text);
+export function createConversationPlan(input: PlanInput): CurrentConversationPlan {
+  let intentResult = recognizeConversationIntent(input.text, input.representative);
+  const intent = intentResult.primaryIntent;
   const audienceRole = detectAudienceRole(input.text);
-  const goal = goalForIntent(intent);
-  const reasons = [`Goal detected: ${goal}.`, `Business label detected: ${intent}.`];
-  const makeAction = (kind: ConversationActionKind, sideEffect: PlannedConversationAction["sideEffect"] = "none"): PlannedConversationAction => ({
+  const matchedExecutableSkill = findMatchedExecutableSkill(
+    input.text,
+    input.representative,
+  );
+  const proposedAction = input.proposedAction ?? (matchedExecutableSkill
+    ? {
+        target: `skill:${matchedExecutableSkill.slug}`,
+        input: {
+          source: "current_user_message",
+          skillPackId: matchedExecutableSkill.id,
+          skillPackSlug: matchedExecutableSkill.slug,
+        },
+        requiredCapabilities: [
+          "compute.execute",
+          ...matchedExecutableSkill.capabilityTags,
+        ],
+      }
+    : undefined);
+  const goal = intentResult.primaryGoal === "unsafe_request"
+    ? "unsafe_request"
+    : proposedAction
+      ? "perform_action"
+      : intentResult.primaryGoal;
+  if (proposedAction && intentResult.primaryGoal !== "unsafe_request") {
+    intentResult = {
+      ...intentResult,
+      primaryGoal: "perform_action",
+      requestedOutcomes: [
+        ...new Set([...intentResult.requestedOutcomes, "execute_governed_tool"]),
+      ],
+      missingFields: [],
+    };
+  }
+  const reasons = [
+    `Goal detected: ${goal}.`,
+    `Business labels detected: ${intentResult.businessLabels.join(", ") || intent}.`,
+  ];
+  const makeAction = (
+    kind: ConversationActionKind,
+    sideEffect: PlannedConversationAction["sideEffect"] = "none",
+    target?: string,
+  ): CurrentPlannedConversationAction => ({
     id: `${kind}:${intent}`,
     kind,
     status: "planned",
     sideEffect,
+    ...(target ? { target } : {}),
+    input: { source: "current_user_message" },
+    requiredCapabilities: requiredCapabilitiesForAction(kind),
+    externalSideEffect: kind === "execute_tool",
   });
 
-  if (intent === "restricted") {
+  const billingDecision = resolveConversationBillingDecision({
+    intentResult,
+    usage: input.usage,
+    freeReplyLimit: input.representative.contract.freeReplyLimit,
+  });
+
+  if (goal === "unsafe_request") {
     return {
       goal, intent, audienceRole, disposition: "refuse",
+      intentResult, billingDecision, replyGoal: "拒绝越权请求并提供安全替代方案。",
       actions: [makeAction("refuse_unsafe_request")], reasons,
       responseOutline: ["拒绝访问私有系统、凭据或未授权数据。", "提供公开信息或人工接手等安全替代方案。"],
     };
@@ -121,33 +298,110 @@ export function createConversationPlan(input: PlanInput): ConversationPlan {
   if (intent === "handoff" || intent === "support") {
     return {
       goal, intent, audienceRole, disposition: "handoff",
-      actions: [makeAction("collect_contact_and_requirements", "internal_record"), makeAction("request_human_handoff", "human_queue")],
+      intentResult, billingDecision, replyGoal: "确认人工接手请求并收集最少必要描述。",
+      actions: [makeAction("collect_request_description", "internal_record"), makeAction("request_human_handoff", "human_queue")],
       ...(input.usage.deepHelpUnlocked ? {} : { suggestedPlan: "deep_help" as const }), reasons,
-      responseOutline: ["确认可提交人工接手请求。", "收集身份、目标、背景、时限和联系方式。", "只承诺进入队列，不承诺即时回复。"],
+      responseOutline: ["确认可提交人工接手请求。", "只请用户描述需求。", "只承诺进入队列，不承诺即时回复；其余信息由真人接手后确认。"],
     };
   }
 
-  const freeRepliesExhausted = input.usage.freeRepliesUsed >= input.representative.contract.freeReplyLimit && !input.usage.passUnlocked && !input.usage.deepHelpUnlocked;
-  if (freeRepliesExhausted) {
+  if (isConversationCancellationRequest(input.text)) {
+    return {
+      goal: "perform_action",
+      intent,
+      audienceRole,
+      disposition: "answer",
+      intentResult: {
+        ...intentResult,
+        primaryGoal: "perform_action",
+        requestedOutcomes: [
+          ...new Set([...intentResult.requestedOutcomes, "cancel_pending_action"]),
+        ],
+        missingFields: [],
+      },
+      billingDecision: {
+        decision: "no_charge",
+        billable: false,
+        reason: "Canceling pending work never consumes conversation usage.",
+      },
+      replyGoal: "取消当前会话中仍可安全撤销的待处理任务。",
+      actions: [makeAction("cancel_pending_action", "internal_record")],
+      reasons: [...reasons, "The user explicitly requested cancellation."],
+      responseOutline: [
+        "只处理当前代表、当前联系人和当前会话中的任务。",
+        "撤销待审批动作并释放未消费额度。",
+        "已经开始产生外部副作用的任务不得伪装成已取消。",
+      ],
+    };
+  }
+
+  if (billingDecision.decision === "payment_required") {
     return {
       goal, intent, audienceRole, disposition: "payment_required", actions: [],
+      intentResult, billingDecision, replyGoal: "说明额度不足并提供当前可用的继续方式。",
       suggestedPlan: suggestPlan(intent), reasons: [...reasons, "The configured free reply allowance is exhausted."],
       responseOutline: ["说明当前免费额度已用完。", "展示当前价格目录中最小可用的继续方式。"],
     };
   }
 
-  if (intent === "materials") {
+  if (proposedAction) {
+    return {
+      goal,
+      intent,
+      audienceRole,
+      disposition: "answer",
+      intentResult,
+      billingDecision,
+      replyGoal: "执行受治理的工具任务并返回可审计结果。",
+      actions: [{
+        id: `execute_tool:${proposedAction.target}`,
+        kind: "execute_tool",
+        status: "planned",
+        sideEffect: "none",
+        target: proposedAction.target,
+        input: proposedAction.input,
+        requiredCapabilities: [
+          ...new Set(["compute.execute", ...proposedAction.requiredCapabilities]),
+        ],
+        externalSideEffect: true,
+        ...(proposedAction.estimatedCost !== undefined
+          ? { estimatedCost: proposedAction.estimatedCost }
+          : {}),
+      }],
+      reasons: [
+        ...reasons,
+        "The turn requests a governed tool capability and must not be answered as ordinary text.",
+      ],
+      responseOutline: [
+        "先检查能力、计费和动作权限。",
+        "需要审批时创建审批，不得提前执行。",
+        "执行完成后只返回可公开的结果和审计引用。",
+      ],
+    };
+  }
+
+  const labels = new Set(intentResult.businessLabels);
+  if (labels.has("materials") && !hasRequestCollectionLabel(labels)) {
     return {
       goal, intent, audienceRole, disposition: "answer",
-      actions: [makeAction("answer_public_information"), makeAction("deliver_public_material")], reasons,
+      intentResult, billingDecision, replyGoal: "回答资料请求并交付匹配的已发布公开资料。",
+      actions: [makeAction("answer_public_information"), makeAction("deliver_public_material", "none", "public_material")], reasons,
       responseOutline: ["从已授权公开资料中匹配内容。", "仅发送已发布的公开链接或附件。", "无法匹配时说明缺少资料。"],
     };
   }
 
-  if (["collaboration", "pricing", "scheduling", "refund", "discount", "candidate", "media"].includes(intent)) {
+  if (hasRequestCollectionLabel(labels)) {
+    const actions = [
+      ...(labels.has("materials")
+        ? [makeAction("deliver_public_material", "none", "public_material")]
+        : []),
+      makeAction("collect_request_description", "internal_record"),
+      makeAction("create_service_request", "internal_record"),
+    ];
     return {
       goal, intent, audienceRole, disposition: "collect",
-      actions: [makeAction("collect_contact_and_requirements", "internal_record"), makeAction("create_service_request", "internal_record")],
+      intentResult, billingDecision, replyGoal: "收集一段需求描述并创建可跟踪的服务请求。",
+      actions,
       reasons: [...reasons, "The request needs structured context before any commitment or external action."],
       responseOutline: buildIntakeOutline(intent, input.channel),
     };
@@ -155,8 +409,63 @@ export function createConversationPlan(input: PlanInput): ConversationPlan {
 
   return {
     goal, intent, audienceRole, disposition: "answer",
+    intentResult, billingDecision, replyGoal: "根据已授权公开信息直接回答用户问题。",
     actions: [makeAction("answer_public_information")], reasons,
     responseOutline: ["仅根据经过授权的公开知识回答。", "缺少依据时明确说明。", "给出一个安全、具体的下一步。"],
+  };
+}
+
+export function resolveConversationBillingDecision(input: {
+  intentResult: ConversationIntentResult;
+  usage: ConversationUsage;
+  freeReplyLimit: number;
+}): ConversationBillingDecision {
+  if (
+    input.intentResult.primaryGoal === "unsafe_request"
+    || input.intentResult.primaryGoal === "request_human"
+  ) {
+    return {
+      decision: "no_charge",
+      billable: false,
+      reason: "Safety refusals and human-handoff requests do not consume conversation usage.",
+    };
+  }
+  if (input.usage.passUnlocked || input.usage.deepHelpUnlocked) {
+    return {
+      decision: "allow_entitlement",
+      billable: true,
+      reason: "A current conversation entitlement authorizes this turn.",
+    };
+  }
+  if (input.usage.freeRepliesUsed >= input.freeReplyLimit) {
+    return {
+      decision: "payment_required",
+      billable: false,
+      reason: "The configured free reply allowance is exhausted.",
+    };
+  }
+  return {
+    decision: "allow_free",
+    billable: true,
+    reason: "An available free reply authorizes this turn.",
+  };
+}
+
+export function authorizeConversationAction(
+  action: PlannedConversationAction,
+): ConversationAuthorizationDecision {
+  if (action.kind === "execute_tool" || action.externalSideEffect) {
+    return {
+      decision: "ask",
+      reason: "Tool calls and external side effects require the governed Compute authorization flow.",
+    };
+  }
+  if (action.kind === "refuse_unsafe_request") {
+    return { decision: "allow", reason: "Fail-closed safety responses are always allowed." };
+  }
+  return {
+    decision: "allow",
+    reason: "This built-in action is limited to public data or an internal conversation record.",
   };
 }
 
@@ -165,8 +474,8 @@ export function renderReplyPreview(representative: Representative, plan: Convers
   switch (plan.disposition) {
     case "refuse": return [header, "我不能访问私有文件、账号、凭据或未授权环境。", "我可以继续提供已公开资料，或帮你整理人工接手请求。"].join("\n\n");
     case "payment_required": return [header, `当前免费额度已用完。可选择 ${formatPlanName(plan.suggestedPlan)} 继续。`, "具体价格与权益以当前服务目录为准。"].join("\n\n");
-    case "collect": return [header, "我会先整理必要信息，再创建可跟踪的服务请求。", plan.responseOutline.map((line, index) => `${index + 1}. ${line}`).join("\n")].join("\n\n");
-    case "handoff": return [header, "我可以提交人工接手请求，但不会承诺立即回复。", "请发送：你的身份与联系方式、目标、背景、期望时间，以及需要真人处理的原因。"].join("\n\n");
+    case "collect": return [header, "请描述你的需求，我会据此创建可跟踪的服务请求。", plan.responseOutline.map((line, index) => `${index + 1}. ${line}`).join("\n")].join("\n\n");
+    case "handoff": return [header, "我可以提交人工接手请求，但不会承诺立即回复。", "请简要描述你的需求；联系人、预算和时间等必要信息由真人接手后确认。"].join("\n\n");
     case "answer":
     default: {
       const knowledge = selectPreviewKnowledge(representative, plan);
@@ -198,12 +507,9 @@ function selectPreviewKnowledge(representative: Representative, plan: Conversati
 }
 
 function buildIntakeOutline(intent: InquiryIntent, channel: Channel): string[] {
-  const privacy = channel === "private_chat" ? [] : ["请转到私聊发送联系方式和敏感背景。"];
-  const shared = ["你的身份与可联系信息是什么？", "希望达成什么结果，当前背景是什么？", "有哪些约束、预算或时间要求？", "怎样算处理完成？"];
-  if (intent === "scheduling") return [...privacy, "希望沟通的主题和产出是什么？", "请提供时区和 2-3 个候选时间。", "是否有现有订单或服务请求？", "请留下联系人信息。"];
-  if (intent === "refund") return [...privacy, "请提供订单标识和联系人信息。", "退款原因及期望结果是什么？", "请勿发送支付凭据或完整敏感信息。"];
-  if (intent === "discount") return [...privacy, "请说明目标服务、使用规模和预算约束。", "请留下联系人信息和期望时间。"];
-  return [...privacy, ...shared];
+  void intent;
+  void channel;
+  return ["请用一段话描述希望解决的问题或获得的结果。", "联系人、预算、时间等必要信息由真人接手后确认。"];
 }
 
 function suggestPlan(intent: InquiryIntent): PlanTier {
@@ -214,6 +520,138 @@ function formatPlanName(plan: PlanTier | undefined): string {
   return plan === "deep_help" ? "Deep Help" : plan === "sponsor" ? "Sponsor" : "Pass";
 }
 
+function requiredCapabilitiesForAction(kind: ConversationActionKind): string[] {
+  switch (kind) {
+    case "answer_public_information":
+      return ["public_knowledge.read"];
+    case "deliver_public_material":
+      return ["public_material.read"];
+    case "collect_request_description":
+      return ["conversation_intake.write"];
+    case "create_service_request":
+      return ["service_request.write"];
+    case "execute_tool":
+      return ["compute.execute"];
+    case "cancel_pending_action":
+      return ["delegation.cancel"];
+    case "request_human_handoff":
+      return ["handoff.request"];
+    case "refuse_unsafe_request":
+      return [];
+  }
+}
+
+function outcomesForLabel(label: string): string[] {
+  switch (label) {
+    case "materials": return ["receive_public_material"];
+    case "scheduling": return ["create_scheduling_request"];
+    case "pricing": return ["request_pricing_review"];
+    case "refund": return ["request_refund_review"];
+    case "discount": return ["request_discount_review"];
+    case "handoff":
+    case "support": return ["request_human_follow_up"];
+    case "restricted": return ["access_restricted_resource"];
+    case "collaboration":
+    case "candidate":
+    case "media": return ["create_service_request"];
+    default: return [`request:${label}`];
+  }
+}
+
+function hasRequestCollectionLabel(labels: ReadonlySet<string>): boolean {
+  return [
+    "collaboration",
+    "pricing",
+    "scheduling",
+    "refund",
+    "discount",
+    "candidate",
+    "media",
+  ].some((label) => labels.has(label));
+}
+
+function looksLikePromptInjection(text: string): boolean {
+  return [
+    "ignore previous instructions",
+    "ignore all instructions",
+    "system prompt",
+    "developer message",
+    "忽略之前的指令",
+    "忽略所有指令",
+    "系统提示词",
+  ].some((token) => text.includes(token));
+}
+
 function matchesAny(text: string, values: readonly string[]): boolean {
   return values.some((value) => text.includes(value));
+}
+
+export function isConversationCancellationRequest(text: string) {
+  return [
+    "/cancel",
+    "cancel",
+    "cancel current task",
+    "取消",
+    "取消任务",
+    "取消当前任务",
+    "停止当前任务",
+  ].includes(text.trim().toLowerCase());
+}
+
+function findMatchedExecutableSkill(
+  text: string,
+  representative: Pick<Representative, "skillPacks">,
+) {
+  const normalized = text.toLowerCase();
+  if (!looksLikeExplicitActionRequest(normalized)) return undefined;
+  return representative.skillPacks
+    .filter((pack) => pack.enabled && pack.executesCode)
+    .find((pack) => [pack.slug, pack.displayName, ...pack.capabilityTags]
+      .map((value) => value.trim().toLowerCase())
+      .filter((value) => value.length >= 2)
+      .some((value) => normalized.includes(value)));
+}
+
+function looksLikeExplicitActionRequest(text: string) {
+  return [
+    "请使用",
+    "帮我",
+    "替我",
+    "执行",
+    "运行",
+    "调用",
+    "创建",
+    "发送",
+    "更新",
+    "同步",
+    "导出",
+    "生成",
+    "查询",
+    "查一下",
+    "安排",
+    "预订",
+    "please ",
+    "run ",
+    "execute ",
+    "use ",
+    "call ",
+    "create ",
+    "send ",
+    "update ",
+    "sync ",
+    "export ",
+    "generate ",
+    "look up ",
+    "lookup ",
+    "fetch ",
+    "schedule ",
+    "book ",
+  ].some((token) => text.includes(token));
+}
+
+export function hasMatchedExecutableSkill(
+  text: string,
+  representative: Pick<Representative, "skillPacks">,
+) {
+  return Boolean(findMatchedExecutableSkill(text, representative));
 }

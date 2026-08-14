@@ -10,84 +10,27 @@ import { z } from "zod";
 
 import type { ConversationPlan } from "./inquiry-routing";
 
-const quoteCollectorFields = [
-  {
-    field: "identity",
-    label: "身份",
-    prompt: "请介绍一下你是谁、来自哪里，最好带上项目、公司或角色。",
-  },
-  {
-    field: "goal",
-    label: "目标",
-    prompt: "你想解决的核心问题是什么？如果有背景，也可以一起说明。",
-  },
-  {
-    field: "budget",
-    label: "预算",
-    prompt: "预算区间大概是多少？如果还不确定，也请直接说明当前阶段。",
-  },
-  {
-    field: "timeline",
-    label: "时间",
-    prompt: "你希望多久内推进？有没有明确的 deadline 或上线时间？",
-  },
-  {
-    field: "handoffPreference",
-    label: "人工需求",
-    prompt: "你是想先拿初步判断，还是希望进入真人沟通 / 报价评估？",
-  },
-] as const;
+const requestDescriptionCollectorField = {
+  field: "description",
+  label: "需求描述",
+  prompt: "请用一段话描述你希望解决的问题或获得的结果。其他信息可在真人接手后再补充。",
+} as const;
 
-const schedulingCollectorFields = [
-  {
-    field: "meetingType",
-    label: "沟通类型",
-    prompt: "你想约的是什么类型的沟通？例如咨询、合作讨论、面试、媒体采访。",
-  },
-  {
-    field: "agenda",
-    label: "议题",
-    prompt: "这次沟通最想覆盖的主题是什么？希望产出什么结果？",
-  },
-  {
-    field: "timezone",
-    label: "时区",
-    prompt: "你的时区是什么？如果方便，也可以直接给城市或 UTC offset。",
-  },
-  {
-    field: "timeWindows",
-    label: "可约时间",
-    prompt: "你偏好的时间段是什么？请给 2-3 个候选窗口，越具体越好。",
-  },
-  {
-    field: "paidContext",
-    label: "付费背景",
-    prompt: "这次沟通是否已付费、属于现有客户，或需要先走付费咨询？",
-  },
-] as const;
-
-const serviceRequestCollectorFields = [
-  {
-    field: "contact",
-    label: "联系人",
-    prompt: "请留下称呼和可联系信息；不需要发送密码、支付凭据或其他敏感信息。",
-  },
-  {
-    field: "goal",
-    label: "目标",
-    prompt: "你希望最终解决什么问题，或获得什么结果？",
-  },
-  {
-    field: "context",
-    label: "背景与约束",
-    prompt: "请补充当前背景、已经尝试过的方式，以及预算、范围或其他约束。",
-  },
-  {
-    field: "timeline",
-    label: "时间与完成标准",
-    prompt: "希望何时完成？什么结果可以视为本次请求已处理？",
-  },
-] as const;
+const collectorQuestionFieldSchema = z.enum([
+  "identity",
+  "goal",
+  "budget",
+  "timeline",
+  "handoffPreference",
+  "meetingType",
+  "agenda",
+  "timezone",
+  "timeWindows",
+  "paidContext",
+  "contact",
+  "context",
+  "description",
+]);
 
 export const structuredCollectorStateSchema = z.object({
   kind: z.enum(["quote", "scheduling", "service_request"]),
@@ -97,12 +40,13 @@ export const structuredCollectorStateSchema = z.object({
   suggestedPlan: planTierSchema.optional(),
   startedAt: z.string(),
   answers: z.record(z.string(), z.string()),
+  questionFields: z.array(collectorQuestionFieldSchema).min(1).max(5).optional(),
 });
 
 export type StructuredCollectorState = z.infer<typeof structuredCollectorStateSchema>;
 
 type StructuredCollectorQuestion = {
-  field: string;
+  field: z.infer<typeof collectorQuestionFieldSchema>;
   label: string;
   prompt: string;
 };
@@ -115,24 +59,37 @@ export function beginStructuredCollector(params: {
   plan: ConversationPlan;
   channel: Channel;
 }): StructuredCollectorState {
+  const kind = params.plan.intent === "scheduling"
+    ? "scheduling"
+    : params.plan.intent === "pricing" || params.plan.intent === "collaboration"
+      ? "quote"
+      : "service_request";
   return {
-    kind: params.plan.intent === "scheduling"
-      ? "scheduling"
-      : params.plan.intent === "pricing" || params.plan.intent === "collaboration"
-        ? "quote"
-        : "service_request",
+    kind,
     intent: params.plan.intent,
     stepIndex: 0,
     sourceChannel: params.channel,
     ...(params.plan.suggestedPlan ? { suggestedPlan: params.plan.suggestedPlan } : {}),
     startedAt: new Date().toISOString(),
     answers: {},
+    questionFields: [requestDescriptionCollectorField.field],
   };
 }
 
 export function readStructuredCollectorState(value: unknown): StructuredCollectorState | null {
   const parsed = structuredCollectorStateSchema.safeParse(value);
-  return parsed.success ? parsed.data : null;
+  if (!parsed.success) return null;
+  if (
+    parsed.data.questionFields?.length === 1
+    && parsed.data.questionFields[0] === requestDescriptionCollectorField.field
+  ) {
+    return parsed.data;
+  }
+  return {
+    ...parsed.data,
+    stepIndex: 0,
+    questionFields: [requestDescriptionCollectorField.field],
+  };
 }
 
 export function getStructuredCollectorQuestion(
@@ -199,12 +156,7 @@ export function formatStructuredCollectorPrompt(state: StructuredCollectorState)
     return formatStructuredCollectorSummary(state);
   }
 
-  const intro =
-    state.kind === "quote"
-      ? "我会用 5 个问题整理你的报价 / 合作背景，方便后续评估。"
-      : state.kind === "scheduling"
-        ? "我会用 5 个问题整理你的预约意向，方便后续给出候选时间。"
-        : "我会用 4 个问题整理联系人和需求，完成后创建可跟踪的服务请求。";
+  const intro = "请先描述需求；完成后我会创建可跟踪的服务请求。需要补充的信息由真人接手后继续询问。";
 
   return [
     intro,
@@ -226,6 +178,10 @@ export function formatStructuredCollectorSummary(state: StructuredCollectorState
 export function buildStructuredCollectorHandoffSummary(
   state: StructuredCollectorState,
 ): string {
+  const description = state.answers.description?.trim();
+  if (description) {
+    return description.length > 180 ? `${description.slice(0, 177)}...` : description;
+  }
   const firstKey = state.kind === "scheduling" ? "agenda" : "goal";
   const firstValue = state.answers[firstKey] ?? "";
   const timeline = state.answers[state.kind === "scheduling" ? "timeWindows" : "timeline"] ?? "";
@@ -242,14 +198,14 @@ export function buildStructuredCollectorOwnerAction(
   state: StructuredCollectorState,
 ): string {
   if (state.kind === "scheduling") {
-    return "Review agenda, timezone, and preferred windows before deciding whether to share candidate slots.";
+    return "Review the request, take over when appropriate, then collect timezone and candidate windows.";
   }
 
   if (state.kind === "service_request") {
-    return "Review the request, decide the next owner response, and create a separately governed task before any tool or external action.";
+    return "Review the request, take over when appropriate, and collect any missing details before creating a governed task.";
   }
 
-  return "Review fit, budget, and timeline before deciding whether to quote, invite a paid consult, or decline.";
+  return "Review the request, then collect scope, budget, and timing before quoting, offering a paid service, or declining.";
 }
 
 export function calculateStructuredCollectorPriority(
@@ -286,11 +242,7 @@ function orderedQuestions(state: StructuredCollectorState): readonly StructuredC
 }
 
 function getQuestionsForState(
-  state: StructuredCollectorState,
+  _state: StructuredCollectorState,
 ): readonly StructuredCollectorQuestion[] {
-  return state.kind === "scheduling"
-    ? schedulingCollectorFields
-    : state.kind === "quote"
-      ? quoteCollectorFields
-      : serviceRequestCollectorFields;
+  return [requestDescriptionCollectorField];
 }

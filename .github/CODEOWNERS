@@ -1,0 +1,3 @@
+# CI workflows execute repository code and may gain additional credentials over
+# time. Require review from the only team with push access to this repository.
+/.github/workflows/ @BIFNC-TEAM/bangbang-llm

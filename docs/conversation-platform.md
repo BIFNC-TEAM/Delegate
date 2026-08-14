@@ -238,7 +238,10 @@ reject `legacy` or `shadow` when `NODE_ENV=production`, and new Stars invoices
 are disabled outside `worker` even in development. This prevents the legacy
 conversation unlock flags from bypassing the shared, finite entitlement
 ledger. `legacy` and `shadow` remain local migration/rollback diagnostics for
-unpaid traffic only; they are not valid paid production modes.
+unpaid traffic only; they are not valid paid production modes. Even outside
+production these compatibility modes require the explicit
+`TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED=true` gate, so a stale local
+environment cannot accidentally restore a second business-logic owner.
 
 Stars invoice creation is separately default-off behind
 `TELEGRAM_STARS_LIVE_ENABLED`. The current long-polling bot cannot guarantee

@@ -80,6 +80,14 @@ export async function planNaturalLanguageComputeRequest(params: {
 export async function generateRepresentativeReply(
   params: RepresentativeReplyInput,
 ): Promise<RepresentativeReplyResult> {
+  if (params.plan.actions.some((action) => action.kind === "execute_tool")) {
+    return {
+      ok: false,
+      reason: "Governed tool actions must be handled by the Compute execution path.",
+      state: "invalid_subagent_route",
+      citedMemoryUseItemIds: [],
+    };
+  }
   if (!params.subagent.allowedConversationDispositions.includes(params.plan.disposition)) {
     return {
       ok: false,

@@ -25,6 +25,9 @@ const mocks = vi.hoisted(() => {
       update: vi.fn(),
       updateMany: vi.fn(),
     },
+    eventAudit: {
+      upsert: vi.fn(),
+    },
     matrixVirtualUserBinding: {
       findFirst: vi.fn(),
     },
@@ -74,6 +77,7 @@ import {
 const currentTime = new Date("2026-07-24T08:00:00.000Z");
 const validRun = {
   id: "run-stale",
+  outputMessageId: "message-attempt-b",
   status: "PROCESSING",
   representativeVersionId: "version-1",
   episodeId: "episode-1",
@@ -332,6 +336,20 @@ describe("conversation generation work leases", () => {
         lastError: null,
       },
     });
+  });
+
+  it("rejects delivery completion for a message outside the generation run", async () => {
+    mocks.tx.outboxEvent.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    await expect(markGenerationDeliveryComplete({
+      runId: "run-stale",
+      outboxId: "outbox-stale",
+      leaseAttempt: 3,
+      outputMessageId: "message-from-another-run",
+    })).rejects.toThrow("does not belong to the generation run");
+
+    expect(mocks.tx.message.update).not.toHaveBeenCalled();
+    expect(mocks.tx.eventAudit.upsert).not.toHaveBeenCalled();
   });
 
   it("does not let stale attempt A fail reclaimed attempt B's run", async () => {

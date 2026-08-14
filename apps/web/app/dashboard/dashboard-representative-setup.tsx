@@ -50,6 +50,7 @@ type RepresentativeSetupSnapshot = {
   groupActivation: GroupActivation;
   publicMode: boolean;
   humanInLoop: boolean;
+  handoffAccessMode: "FREE" | "PACKAGE_REQUIRED";
   contract: {
     freeReplyLimit: number;
     handoffWindowHours: number;
@@ -217,7 +218,6 @@ function getComputeFilesystemModeLabels(locale: Locale): Record<ComputeFilesyste
 
 export type RepresentativeSetupSectionId =
   | "basics"
-  | "contract"
   | "pricing"
   | "knowledge"
   | "compute"
@@ -236,32 +236,26 @@ const setupSections: Array<{
     blurb: "先定义代表身份、语气和群组触发规则。",
   },
   {
-    id: "contract",
-    step: "02",
-    label: "接待与人工",
-    blurb: "统一对话处理边界，并设置人工评估时窗。",
-  },
-  {
     id: "pricing",
-    step: "03",
+    step: "02",
     label: "价格",
-    blurb: "配置访问方式、人工接管、服务套餐和打赏档位。",
+    blurb: "配置人工接管说明、访问方式、服务套餐和打赏档位。",
   },
   {
     id: "knowledge",
-    step: "04",
+    step: "03",
     label: "Knowledge",
     blurb: "整理 FAQ、资料和政策，让 bot 先读结构化公开知识。",
   },
   {
     id: "compute",
-    step: "05",
+    step: "04",
     label: "Compute",
     blurb: "配置隔离 compute plane 的预算、镜像和执行边界。",
   },
   {
     id: "memory",
-    step: "06",
+    step: "05",
     label: "记忆",
     blurb: "配置自动提取、联系人记忆、代表经验、短期上下文与同步边界。",
   },
@@ -280,32 +274,26 @@ const setupSectionsEn: Array<{
     blurb: "Define identity, voice, and group activation rules first.",
   },
   {
-    id: "contract",
-    step: "02",
-    label: "Reception & human",
-    blurb: "Define the unified conversation boundary and human review window.",
-  },
-  {
     id: "pricing",
-    step: "03",
+    step: "02",
     label: "Pricing",
-    blurb: "Configure access, human handoff, service packages, and tips.",
+    blurb: "Configure the human handoff message, access, service packages, and tips.",
   },
   {
     id: "knowledge",
-    step: "04",
+    step: "03",
     label: "Knowledge",
     blurb: "Organize FAQ, materials, and policy before the bot improvises.",
   },
   {
     id: "compute",
-    step: "05",
+    step: "04",
     label: "Compute",
     blurb: "Set the budget, image, and execution boundary for the isolated compute plane.",
   },
   {
     id: "memory",
-    step: "06",
+    step: "05",
     label: "Memory",
     blurb: "Configure automatic extraction, Contact Memory, Representative Experience, short-term context, and synchronization boundaries.",
   },
@@ -461,7 +449,6 @@ export function DashboardRepresentativeSetup({
         <div className="section-heading">
           <div>
             <p className="eyebrow">Representative Setup</p>
-            <h2>{t.loadingHeadline}</h2>
           </div>
           <p className="section-copy">{t.loadingCopy}</p>
         </div>
@@ -620,7 +607,7 @@ export function DashboardRepresentativeSetup({
       <div className="representative-config-layout">
       <div className="representative-config-main">
       <form className="setup-stack representative-config-form" onSubmit={handleSubmit}>
-        {activeSection === "basics" || activeSection === "contract" ? (
+        {activeSection === "basics" ? (
           <DashboardSurfaceGrid columns={1}>
             {activeSection === "basics" ? (
               <DashboardSurface
@@ -733,56 +720,10 @@ export function DashboardRepresentativeSetup({
                 </div>
               </div>
 
-                  <label className="field-stack field-span-full">
-                    <span>{t.handoffPrompt}</span>
-                    <textarea
-                      className="text-input textarea-input"
-                      onChange={(event) =>
-                        updateDraft((value) => ({ ...value, handoffPrompt: event.target.value }))
-                      }
-                      rows={4}
-                      value={draft.handoffPrompt}
-                    />
-                  </label>
                 </div>
               </DashboardSurface>
             ) : null}
 
-            {activeSection === "contract" ? (
-              <DashboardSurface
-                eyebrow={t.contractEyebrow}
-                title={t.contractTitle}
-              >
-                <div className="setup-grid">
-              <label className="field-stack">
-                <span>{t.handoffWindow}</span>
-                <input
-                  className="text-input"
-                  min={1}
-                  onChange={(event) =>
-                    updateDraft((value) => ({
-                      ...value,
-                      contract: {
-                        ...value.contract,
-                        handoffWindowHours: Number(event.target.value || 0),
-                      },
-                    }))
-                  }
-                  type="number"
-                  value={draft.contract.handoffWindowHours}
-                />
-              </label>
-                  <div className="field-stack field-span-full">
-                    <span>{locale === "zh" ? "运行边界" : "Runtime boundary"}</span>
-                    <small className="field-hint">
-                      {locale === "zh"
-                        ? "公开回答、资料发送和需求采集由统一对话流程处理；涉及工具或外部副作用的操作，统一在 Compute 中检查权限、审批与预算。"
-                        : "Public answers, material delivery, and intake use the unified conversation flow. Tools and external side effects are governed by Compute permissions, approvals, and budgets."}
-                    </small>
-                  </div>
-                </div>
-              </DashboardSurface>
-            ) : null}
           </DashboardSurfaceGrid>
         ) : null}
 
@@ -1227,6 +1168,63 @@ export function DashboardRepresentativeSetup({
           </DashboardSurface>
         ) : null}
 
+        {activeSection === "pricing" ? (
+          <DashboardSurface
+            eyebrow={t.contractEyebrow}
+            title={locale === "zh"
+              ? "说明人工接手方式；具体联系人、预算和时间由真人接手后再询问。"
+              : "Explain human handoff; contact, budget, and timing are collected after takeover."}
+          >
+            <div className="representative-handoff-status">
+              <div>
+                <span>{locale === "zh" ? "当前人工接管" : "Current human handoff"}</span>
+                <strong>{draft.humanInLoop ? (locale === "zh" ? "已开放" : "Available") : (locale === "zh" ? "未开放" : "Unavailable")}</strong>
+                <small>
+                  {draft.handoffAccessMode === "PACKAGE_REQUIRED"
+                    ? (locale === "zh" ? "访客需要套餐权益；可在下方价格设置中调整。" : "A service package is required; change this in pricing below.")
+                    : (locale === "zh" ? "所有访客都可以提出人工接手请求。" : "All visitors may request human handoff.")}
+                </small>
+              </div>
+            </div>
+
+            <div className="setup-grid">
+              <label className="field-stack field-span-full">
+                <span>{t.handoffPrompt}</span>
+                <textarea
+                  className="text-input textarea-input"
+                  onChange={(event) =>
+                    updateDraft((value) => ({ ...value, handoffPrompt: event.target.value }))
+                  }
+                  rows={4}
+                  value={draft.handoffPrompt}
+                />
+                <small>{locale === "zh"
+                  ? "只说明如何提交和预期处理方式，不要求访客预先填写联系人、预算或时间。"
+                  : "Explain submission and next steps without asking for contact, budget, or timing up front."}</small>
+              </label>
+
+              <label className="field-stack">
+                <span>{t.handoffWindow}</span>
+                <input
+                  className="text-input"
+                  min={1}
+                  onChange={(event) =>
+                    updateDraft((value) => ({
+                      ...value,
+                      contract: {
+                        ...value.contract,
+                        handoffWindowHours: Number(event.target.value || 0),
+                      },
+                    }))
+                  }
+                  type="number"
+                  value={draft.contract.handoffWindowHours}
+                />
+              </label>
+            </div>
+          </DashboardSurface>
+        ) : null}
+
         {activeSection === "memory" ? (
           <DashboardRepresentativeMemorySettings
             key={representativeSlug}
@@ -1272,14 +1270,13 @@ export function DashboardRepresentativeSetup({
             {activeSection === "pricing" ? (
               <span className="muted">
                 {locale === "zh"
-                  ? "价格设置与商品在下方独立保存"
-                  : "Pricing settings and products save independently below"}
+                  ? "人工接手说明保存为代表草稿；价格设置与商品在下方独立保存"
+                  : "Handoff copy saves to the representative draft; pricing and products save independently below"}
               </span>
-            ) : (
-              <button className="button-primary" disabled={isPending} type="submit">
-                {isPending ? t.saving : t.saveRepresentativeSetup}
-              </button>
-            )}
+            ) : null}
+            <button className="button-primary" disabled={isPending} type="submit">
+              {isPending ? t.saving : t.saveRepresentativeSetup}
+            </button>
           </div>
         </div> : null}
       </form>
@@ -1387,7 +1384,6 @@ const setupCopy = {
     successNotificationTitle: "保存成功",
     errorNotificationTitle: "操作失败",
     dismissNotification: "关闭通知",
-    loadingHeadline: "把 demo 配置变成真的 owner 配置",
     loadingCopy: "正在加载当前代表配置。",
     panelEyebrow: "Representative Setup",
     panelSummary: (name: string) => `当前编辑的是 ${name}，保存后公开页和运行时都应该使用这份配置。`,
@@ -1396,8 +1392,8 @@ const setupCopy = {
     signalCards: {
       languagesLabel: "Languages",
       languagesDetail: "代表当前对外声明支持的语言数。",
-      contractRulesLabel: "Contract rules",
-      contractRulesDetail: "人工评估时窗；免费与收费统一由价格策略决定。",
+      contractRulesLabel: "人工评估时窗",
+      contractRulesDetail: "人工接手提示语随代表版本发布；人工权益由价格策略决定。",
       commerceLabel: "价格",
       commerceDetail: "CNY 商品目录与实时访问策略独立管理。",
       knowledgeItemsLabel: "Knowledge items",
@@ -1421,9 +1417,9 @@ const setupCopy = {
     groupActivation: "Group activation",
     mode: "Mode",
     publicMode: "Public mode",
-    handoffPrompt: "Handoff prompt",
-    contractEyebrow: "Reception & Human",
-    contractTitle: "统一对话处理流程，并明确人工评估时窗。",
+    handoffPrompt: "人工接手提示语",
+    contractEyebrow: "HUMAN HANDOFF",
+    contractTitle: "配置人工接手体验。",
     handoffWindow: "人工评估时窗（小时）",
     knowledgeEyebrow: "Knowledge Pack",
     knowledgeTitle: "让公开知识先于自由发挥，回答和材料都从这里长出来。",
@@ -1482,7 +1478,6 @@ const setupCopy = {
     successNotificationTitle: "Saved successfully",
     errorNotificationTitle: "Action failed",
     dismissNotification: "Dismiss notification",
-    loadingHeadline: "Turn the demo configuration into a real owner configuration",
     loadingCopy: "Loading the current representative setup.",
     panelEyebrow: "Representative Setup",
     panelSummary: (name: string) => `You are editing ${name}. After saving, the public page and runtime should both read from this configuration.`,
@@ -1491,8 +1486,8 @@ const setupCopy = {
     signalCards: {
       languagesLabel: "Languages",
       languagesDetail: "How many languages this representative publicly declares.",
-      contractRulesLabel: "Contract rules",
-      contractRulesDetail: "Human review window; pricing policy owns free and paid access.",
+      contractRulesLabel: "Review window",
+      contractRulesDetail: "Handoff copy is versioned; pricing owns handoff access.",
       commerceLabel: "Pricing",
       commerceDetail: "CNY catalog and live access policy are managed independently.",
       knowledgeItemsLabel: "Knowledge items",
@@ -1517,8 +1512,8 @@ const setupCopy = {
     mode: "Mode",
     publicMode: "Public mode",
     handoffPrompt: "Handoff prompt",
-    contractEyebrow: "Reception & human",
-    contractTitle: "Use one conversation flow and define the human review window.",
+    contractEyebrow: "HUMAN HANDOFF",
+    contractTitle: "Configure the human handoff experience.",
     handoffWindow: "Human review window (hours)",
     knowledgeEyebrow: "Knowledge pack",
     knowledgeTitle: "Make structured public knowledge come before improvisation.",
@@ -1618,54 +1613,27 @@ function buildSetupStepCards(
           detail: "当前声明支持的公开回复语言。",
         },
       ];
-    case "contract":
+    case "pricing":
       if (locale === "en") {
         return [
-          { label: "Conversation flow", value: "Unified", detail: "Answers, intake, materials, and service requests share one runtime.", tone: "accent" },
-          { label: "Action policy", value: "Compute", detail: "Tools and side effects use deterministic capability policy.", tone: "safe" },
-          { label: "Human handoff", value: draft.humanInLoop ? "Available" : "Paused", detail: "Live commerce controls whether a human queue may be created." },
-          { label: "Review window", value: `${draft.contract.handoffWindowHours}h`, detail: "Expected owner review window after handoff." },
+          { label: "Human handoff", value: draft.humanInLoop ? "Available" : "Paused", detail: "Live pricing controls whether a human queue may be created.", tone: "accent" },
+          { label: "Review window", value: `${draft.contract.handoffWindowHours}h`, detail: "Expected owner review window after handoff.", tone: "safe" },
+          { label: "Catalog", value: "CNY", detail: "Service packages and tips use the owner billing catalog." },
+          { label: "Access policy", value: "Live", detail: "Free, trial, or credits-only access is saved independently." },
         ];
       }
       return [
         {
-          label: "对话流程",
-          value: "统一",
-          detail: "公开回答、资料、需求采集和服务请求共用同一运行流程。",
-          tone: "accent",
-        },
-        {
-          label: "动作策略",
-          value: "Compute",
-          detail: "工具和外部副作用统一走确定性能力策略。",
-          tone: "safe",
-        },
-        {
           label: "人工接手",
           value: draft.humanInLoop ? "可用" : "暂停",
-          detail: "是否允许进入人工队列由实时服务策略控制。",
+          detail: "是否允许进入人工队列由实时价格策略控制。",
+          tone: "accent",
         },
         {
           label: "评估时窗",
           value: `${draft.contract.handoffWindowHours}h`,
           detail: "提交人工接手后的预期评估窗口。",
-        },
-      ];
-    case "pricing":
-      if (locale === "en") {
-        return [
-          { label: "Access policy", value: "Live", detail: "Free, trial, or credits-only access is saved independently.", tone: "accent" },
-          { label: "Catalog", value: "CNY", detail: "Service packages and tips use the owner billing catalog." },
-          { label: "Price history", value: "Immutable", detail: "Every published price remains attached to historical orders.", tone: "safe" },
-          { label: "Handoff", value: "Explicit", detail: "Packages state standard, priority, limited, or unlimited access." },
-        ];
-      }
-      return [
-        {
-          label: "访问策略",
-          value: "实时",
-          detail: "免费、试用后付费或仅额度模式独立保存。",
-          tone: "accent",
+          tone: "safe",
         },
         {
           label: "商品目录",
@@ -1673,15 +1641,9 @@ function buildSetupStepCards(
           detail: "服务套餐与打赏档位统一使用 Owner Billing Catalog。",
         },
         {
-          label: "价格历史",
-          value: "不可变",
-          detail: "每个已发布价格版本永久绑定历史订单。",
-          tone: "safe",
-        },
-        {
-          label: "人工权益",
-          value: "显式",
-          detail: "套餐明确标准/优先、限次/不限次人工接管。",
+          label: "访问策略",
+          value: "实时",
+          detail: "免费、试用后付费或仅额度模式独立保存。",
         },
       ];
     case "knowledge":

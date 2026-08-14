@@ -4,6 +4,8 @@ const mocks = vi.hoisted(() => ({
   privateChannelSourceVerificationUnavailableStatement:
     "来源说明：暂时无法核验本次回答是否引用了已授权知识或记忆。为避免发送未经核验的内容，本次回答已被隐藏，请稍后重新提问。",
   generateRepresentativeReply: vi.fn(),
+  hasMatchedExecutableSkill: vi.fn(),
+  isConversationCancellationRequest: vi.fn(),
   hasPersistedTelegramBotConnections: vi.fn(),
   isDeterministicContactMemoryDeleteCommand: vi.fn(),
   planNaturalLanguageComputeRequest: vi.fn(),
@@ -22,11 +24,11 @@ const mocks = vi.hoisted(() => ({
   getRepresentativeRuntimeSetupSnapshot: vi.fn(),
   buildRepresentativeRuntimeProfile: vi.fn(),
   loadGenerationRecentTurns: vi.fn(),
+  loadConversationOperationalContext: vi.fn(),
   recallRepresentativeContext: vi.fn(),
   markGenerationDeliveryComplete: vi.fn(),
   prepareGenerationMessageChannelDelivery: vi.fn(),
-  ensureConversationLeadAndHandoff: vi.fn(),
-  createConversationServiceRequest: vi.fn(),
+  completeConversationIntake: vi.fn(),
   setConversationCollectorState: vi.fn(),
   clearConversationCollectorState: vi.fn(),
   parseComputeDirective: vi.fn(),
@@ -34,8 +36,12 @@ const mocks = vi.hoisted(() => ({
   buildComputeRequestsFromDelegationPlan: vi.fn(),
   readPersistedDelegationStepRequest: vi.fn(),
   resolveDeterministicContactMemorySharingCommand: vi.fn(),
+  resolveGovernedPublicMaterialDeliveries: vi.fn(),
   createAudienceComputeSession: vi.fn(),
   createComputeDelegationTask: vi.fn(),
+  findConversationCancelableDelegationTask: vi.fn(),
+  applyRepresentativeDelegationTaskAction: vi.fn(),
+  resolveRepresentativeComputeApproval: vi.fn(),
   createClarifyingDelegationTask: vi.fn(),
   continueClarifyingDelegationTask: vi.fn(),
   completeOperatorMessageDelivery: vi.fn(),
@@ -69,12 +75,18 @@ vi.mock("@delegate/model-runtime", () => ({
 }));
 
 vi.mock("@delegate/runtime", () => ({
+  authorizeConversationAction: () => ({
+    decision: "allow",
+    reason: "Built-in conversation action is allowed in the worker test fixture.",
+  }),
   buildComputeRequestsFromDelegationPlan: mocks.buildComputeRequestsFromDelegationPlan,
   advanceStructuredCollector: mocks.advanceStructuredCollector,
   beginStructuredCollector: mocks.beginStructuredCollector,
   createConversationPlan: mocks.createConversationPlan,
   formatStructuredCollectorPrompt: mocks.formatStructuredCollectorPrompt,
   formatStructuredCollectorSummary: mocks.formatStructuredCollectorSummary,
+  hasMatchedExecutableSkill: mocks.hasMatchedExecutableSkill,
+  isConversationCancellationRequest: mocks.isConversationCancellationRequest,
   parseComputeDirective: mocks.parseComputeDirective,
   renderFailClosedReplyPreview: mocks.renderFailClosedReplyPreview,
   renderReplyPreview: () => "fallback",
@@ -93,15 +105,20 @@ vi.mock("@delegate/web-data", () => ({
   claimNextOperatorMessageWorkItem: mocks.claimNextOperatorMessageWorkItem,
   claimNextGenerationWorkItem: mocks.claimNextGenerationWorkItem,
   completeOperatorMessageDelivery: mocks.completeOperatorMessageDelivery,
+  completeConversationIntake: mocks.completeConversationIntake,
   completeInlineGenerationRun: mocks.completeInlineGenerationRun,
   createAudienceComputeSession: mocks.createAudienceComputeSession,
   createComputeDelegationTask: mocks.createComputeDelegationTask,
-  createConversationServiceRequest: mocks.createConversationServiceRequest,
+  findConversationCancelableDelegationTask:
+    mocks.findConversationCancelableDelegationTask,
+  applyRepresentativeDelegationTaskAction:
+    mocks.applyRepresentativeDelegationTaskAction,
+  resolveRepresentativeComputeApproval:
+    mocks.resolveRepresentativeComputeApproval,
   createClarifyingDelegationTask: mocks.createClarifyingDelegationTask,
   continueClarifyingDelegationTask: mocks.continueClarifyingDelegationTask,
   deferGenerationRunForHuman: vi.fn(),
   deferOperatorMessageDelivery: mocks.deferOperatorMessageDelivery,
-  ensureConversationLeadAndHandoff: mocks.ensureConversationLeadAndHandoff,
   setConversationCollectorState: mocks.setConversationCollectorState,
   clearConversationCollectorState: mocks.clearConversationCollectorState,
   executeAudienceTool: mocks.executeAudienceTool,
@@ -122,6 +139,7 @@ vi.mock("@delegate/web-data", () => ({
   isDeterministicContactMemoryDeleteCommand:
     mocks.isDeterministicContactMemoryDeleteCommand,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
+  loadConversationOperationalContext: mocks.loadConversationOperationalContext,
   markGenerationDeliveryComplete: mocks.markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval: mocks.markDelegationTaskAwaitingApproval,
   markDelegationTaskRunning: mocks.markDelegationTaskRunning,
@@ -132,6 +150,8 @@ vi.mock("@delegate/web-data", () => ({
   recallRepresentativeContext: mocks.recallRepresentativeContext,
   resolveDeterministicContactMemorySharingCommand:
     mocks.resolveDeterministicContactMemorySharingCommand,
+  resolveGovernedPublicMaterialDeliveries:
+    mocks.resolveGovernedPublicMaterialDeliveries,
   releaseConversationEntitlement: mocks.releaseConversationEntitlement,
   reserveGenerationConversationWalletUsage:
     mocks.reserveGenerationConversationWalletUsage,
@@ -170,12 +190,17 @@ describe("conversation worker knowledge recall", () => {
     vi.clearAllMocks();
     mocks.claimNextOperatorMessageWorkItem.mockResolvedValue(null);
     mocks.parseComputeDirective.mockReturnValue({ kind: "none" });
+    mocks.hasMatchedExecutableSkill.mockReturnValue(false);
+    mocks.resolveGovernedPublicMaterialDeliveries.mockResolvedValue([]);
+    mocks.isConversationCancellationRequest.mockReturnValue(false);
     mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(false);
     mocks.readPersistedDelegationStepRequest.mockReturnValue(null);
     mocks.readStructuredCollectorState.mockReturnValue(null);
+    mocks.loadConversationOperationalContext.mockResolvedValue(null);
     mocks.shouldStartStructuredCollector.mockReturnValue(false);
     mocks.resolveDeterministicContactMemorySharingCommand.mockReturnValue(null);
     mocks.findConversationClarifyingDelegationTask.mockResolvedValue(null);
+    mocks.findConversationCancelableDelegationTask.mockResolvedValue({ status: "none" });
     mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: null, source: "model" });
     mocks.finalizeComputeDelegationTask.mockResolvedValue({ hasMoreSteps: false });
     mocks.assertConversationChannelDeliveryAvailable.mockResolvedValue(undefined);
@@ -222,7 +247,12 @@ describe("conversation worker knowledge recall", () => {
       task: { id: "task-1" },
       step: { id: "task-step-1" },
     });
-    mocks.createConversationServiceRequest.mockResolvedValue({ task: { id: "service-request-1" }, skipped: null });
+    mocks.completeConversationIntake.mockResolvedValue({
+      serviceRequestId: "service-request-1",
+      intakeSubmissionId: "intake-1",
+      leadId: "lead-1",
+      skipped: null,
+    });
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-1",
       leaseAttempt: 1,
@@ -295,6 +325,49 @@ describe("conversation worker knowledge recall", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("answers an exact status command deterministically without billing or model generation", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-status",
+      leaseAttempt: 1,
+      runId: "run-status",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-status",
+      contactId: "contact-status",
+      audienceIdentityId: "audience-status",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-status",
+      userText: "/status",
+      channel: "web",
+      usage: { freeRepliesUsed: 99, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.loadConversationOperationalContext.mockResolvedValueOnce({
+      conversationState: "WAITING_APPROVAL",
+      latestTask: {
+        kind: "COMPUTE",
+        status: "AWAITING_APPROVAL",
+        nextActionBy: "OWNER",
+      },
+      pendingApproval: { requestedActionSummary: "发送邮件" },
+      serviceEntitlement: { available: true, remainingUnits: 2 },
+    });
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-status",
+      status: "completed",
+    });
+
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      intent: "conversation_status",
+      countUsage: false,
+      replyText: expect.stringContaining("待审批动作：发送邮件"),
+    }));
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+    expect(mocks.authorizeGenerationRunFreeUsage).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -453,6 +526,258 @@ describe("conversation worker knowledge recall", () => {
         mode: "model",
       },
     }));
+  });
+
+  it("revalidates public materials at send time and emits only governed links", async () => {
+    mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
+      id: "rep-1",
+      slug: "sktone",
+      contract: { freeReplyLimit: 4 },
+      knowledgePack: {
+        materials: [{
+          id: "legacy-material",
+          title: "旧资料",
+          summary: "配置快照中的旧链接不得直接发送。",
+          kind: "download",
+          url: "https://legacy.example.test/old.pdf",
+        }],
+      },
+    });
+    mocks.createConversationPlan.mockReturnValue({
+      goal: "provide_information",
+      intent: "public_material",
+      audienceRole: "other",
+      disposition: "answer",
+      actions: [
+        { id: "answer_public_information:material", kind: "answer_public_information", status: "planned", sideEffect: "none" },
+        { id: "deliver_public_material:material", kind: "deliver_public_material", status: "planned", sideEffect: "none" },
+      ],
+      reasons: ["The user requested a published material."],
+      responseOutline: ["Answer and provide the governed material."],
+    });
+    mocks.resolveGovernedPublicMaterialDeliveries.mockResolvedValue([{
+      id: "asset-1",
+      title: "公开指南",
+      summary: "已发布版本",
+      processingVersion: 9,
+      url: "/reps/sktone/materials/asset-1/download?token=signed",
+    }]);
+
+    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.resolveGovernedPublicMaterialDeliveries).toHaveBeenCalledWith({
+      representativeId: "rep-1",
+      representativeSlug: "sktone",
+      queryText: "佩奇当老师时发生了什么？",
+      businessLabels: [],
+      requestedOutcomes: [],
+      legacyMaterials: [expect.objectContaining({ id: "legacy-material" })],
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
+      replyText: expect.stringContaining(
+        "/reps/sktone/materials/asset-1/download?token=signed",
+      ),
+      turnTrace: expect.objectContaining({
+        actions: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "deliver_public_material",
+            execution: expect.objectContaining({ status: "completed" }),
+          }),
+        ]),
+      }),
+    }));
+    const completionInput = mocks.completeInlineGenerationRun.mock.calls.at(-1)?.[0];
+    expect(completionInput.replyText).not.toContain("legacy.example.test");
+  });
+
+  it("finishes an active collector with one atomic intake completion", async () => {
+    const completedCollector = {
+      kind: "service_request",
+      intent: "refund",
+      stepIndex: 4,
+      sourceChannel: "private_chat",
+      startedAt: "2026-08-14T00:00:00.000Z",
+      answers: {
+        contact: "Ada · ada@example.test",
+        goal: "Request a refund review",
+        context: "Order order-1",
+        timeline: "This week",
+      },
+    };
+    mocks.readStructuredCollectorState.mockReturnValue({
+      ...completedCollector,
+      stepIndex: 3,
+      answers: {
+        contact: completedCollector.answers.contact,
+        goal: completedCollector.answers.goal,
+        context: completedCollector.answers.context,
+      },
+    });
+    mocks.advanceStructuredCollector.mockReturnValue({
+      completed: true,
+      state: completedCollector,
+    });
+    mocks.formatStructuredCollectorSummary.mockReturnValue(
+      "联系人：Ada · ada@example.test\n目标：Request a refund review",
+    );
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.completeConversationIntake).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-1",
+        inputMessageId: "message-1",
+        intent: "refund",
+        collectorKind: "service_request",
+      }),
+    );
+    expect(mocks.clearConversationCollectorState).not.toHaveBeenCalled();
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+    expect(mocks.recallRepresentativeContext).not.toHaveBeenCalled();
+  });
+
+  it("persists the next collector step without creating a service request", async () => {
+    const nextCollector = {
+      kind: "service_request",
+      intent: "refund",
+      stepIndex: 2,
+      sourceChannel: "private_chat",
+      startedAt: "2026-08-14T00:00:00.000Z",
+      answers: { contact: "Ada", goal: "Refund review" },
+    };
+    mocks.readStructuredCollectorState.mockReturnValue({
+      ...nextCollector,
+      stepIndex: 1,
+      answers: { contact: "Ada" },
+    });
+    mocks.advanceStructuredCollector.mockReturnValue({
+      completed: false,
+      state: nextCollector,
+    });
+    mocks.formatStructuredCollectorPrompt.mockReturnValue("第 3/4 步 · 背景与约束");
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      status: "waiting_input",
+    });
+
+    expect(mocks.setConversationCollectorState).toHaveBeenCalledWith({
+      conversationId: "conversation-1",
+      collectorState: nextCollector,
+    });
+    expect(mocks.completeConversationIntake).not.toHaveBeenCalled();
+    expect(mocks.clearConversationCollectorState).not.toHaveBeenCalled();
+  });
+
+  it("completes the generation run when the user cancels an active collector", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-cancel",
+      leaseAttempt: 1,
+      runId: "run-cancel",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-cancel",
+      contactId: "contact-1",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-cancel",
+      userText: "取消",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.readStructuredCollectorState.mockReturnValue({
+      kind: "service_request",
+      intent: "refund",
+      stepIndex: 2,
+      sourceChannel: "private_chat",
+      startedAt: "2026-08-14T00:00:00.000Z",
+      answers: { contact: "Ada", goal: "Refund review" },
+    });
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      runId: "run-cancel",
+      status: "completed",
+    });
+
+    expect(mocks.clearConversationCollectorState).toHaveBeenCalledWith({
+      conversationId: "conversation-cancel",
+    });
+    expect(mocks.advanceStructuredCollector).not.toHaveBeenCalled();
+    expect(mocks.completeConversationIntake).not.toHaveBeenCalled();
+  });
+
+  it("lets the audience reject its pending approval with an idempotent cancel command", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-cancel-task",
+      leaseAttempt: 1,
+      runId: "run-cancel-task",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-cancel-task",
+      contactId: "contact-1",
+      audienceIdentityId: "audience-1",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-cancel-task",
+      userText: "取消当前任务",
+      channel: "web",
+      usage: { freeRepliesUsed: 4, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.isConversationCancellationRequest.mockReturnValue(true);
+    mocks.findConversationCancelableDelegationTask.mockResolvedValue({
+      status: "cancelable",
+      taskId: "task-1",
+      pendingApprovalId: "approval-1",
+    });
+    mocks.createConversationPlan.mockReturnValue({
+      goal: "perform_action",
+      intent: "unknown",
+      disposition: "answer",
+      actions: [{
+        id: "cancel_pending_action:unknown",
+        kind: "cancel_pending_action",
+        status: "planned",
+        sideEffect: "internal_record",
+      }],
+      reasons: ["Cancellation requested."],
+      responseOutline: [],
+    });
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      runId: "run-cancel-task",
+      status: "completed",
+    });
+
+    expect(mocks.resolveRepresentativeComputeApproval).toHaveBeenCalledWith({
+      representativeSlug: "sktone",
+      approvalId: "approval-1",
+      resolution: "rejected",
+      resolvedBy: "audience-1",
+      decisionNote: expect.stringContaining("audience canceled"),
+    });
+    expect(mocks.applyRepresentativeDelegationTaskAction).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        countUsage: false,
+        replyText: expect.stringContaining("已取消当前待处理任务"),
+      }),
+    );
   });
 
   it("records only the ledger item actually injected and cited by the model", async () => {
@@ -2421,7 +2746,9 @@ describe("conversation worker knowledge recall", () => {
     );
   });
 
-  it("moves an explicit web compute request into the approval waiting state", async () => {
+  it.each(["web", "matrix", "telegram"] as const)(
+    "moves an explicit %s compute request into the approval waiting state",
+    async (channel) => {
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-2",
       leaseAttempt: 1,
@@ -2434,7 +2761,7 @@ describe("conversation worker knowledge recall", () => {
       controlState: "AI_ACTIVE",
       inputMessageId: "message-2",
       userText: "/compute write notes/demo.txt ::: hello",
-      channel: "web",
+      channel,
       usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
     });
     mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
@@ -2510,7 +2837,8 @@ describe("conversation worker knowledge recall", () => {
       approvalId: "approval-1",
       replyText: expect.stringContaining("操作：写入文件：demo.txt"),
     }));
-  });
+    },
+  );
 
   it("keeps a system-managed document path out of the public approval message", async () => {
     mocks.claimNextGenerationWorkItem.mockResolvedValue({

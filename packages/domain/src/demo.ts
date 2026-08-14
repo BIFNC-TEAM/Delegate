@@ -106,5 +106,5 @@ export const demoRepresentative: Representative = {
     handoffWindowHours: 24,
   },
   handoffPrompt:
-    "请留下你的身份、需求摘要、预算区间、目标时间，以及为什么需要真人接手。我会先整理成收件项再转给主人。",
+    "请简要描述你的需求。我会创建服务请求；真人接手后会再确认联系人、预算和时间等必要信息。",
 };

@@ -335,7 +335,7 @@ export function DashboardRepresentativeOperations({
 const readinessSetupSection: Record<string, RepresentativeSetupSectionId> = {
   identity: "basics",
   knowledge: "knowledge",
-  handoff: "contract",
+  handoff: "pricing",
   pricing: "pricing",
   skills: "compute",
 };
@@ -347,7 +347,8 @@ function parseRepresentativeSection(value: string | null): RepresentativeSection
 }
 
 function parseSetupSection(value: string | null): RepresentativeSetupSectionId {
-  return value === "contract" || value === "pricing" || value === "knowledge" || value === "compute" || value === "memory"
+  if (value === "contract") return "pricing";
+  return value === "pricing" || value === "knowledge" || value === "compute" || value === "memory"
     ? value
     : "basics";
 }
@@ -359,8 +360,7 @@ function configurationLinks(locale: Locale): Array<{ label: string; section: Rep
     { label: zh ? "知识" : "Knowledge", section: "knowledge" },
     { label: zh ? "记忆" : "Memory", section: "memory" },
     { label: zh ? "技能与工具" : "Skills & tools", section: "compute" },
-    { label: zh ? "人工接管" : "Human handoff", section: "contract" },
-    { label: zh ? "价格与权益" : "Pricing & entitlements", section: "pricing" },
+    { label: zh ? "价格、权益与人工接管" : "Pricing, entitlements & handoff", section: "pricing" },
   ];
 }
 

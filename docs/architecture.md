@@ -74,12 +74,12 @@ For the next-phase target architecture, including the planned isolated compute p
 
 1. A web, Matrix, or Telegram message enters through its channel adapter.
 2. Runtime resolves the audience identity, representative, long-lived channel conversation, and active episode.
-3. Inquiry is classified into a narrow intent such as FAQ, pricing, materials, scheduling, or handoff.
+3. Inquiry is classified into a channel-neutral disposition such as answer, send public material, collect a request description, create a service request, or hand off.
 4. `Action Gate` checks whether the next action is allowed, ask-first, or denied.
-5. Conversation contract decides whether the message stays in free mode, should collect structured intake, or should trigger a paid unlock.
+5. Pricing and entitlement state decide whether the message stays in free mode, asks once for a request description, or offers paid continuation.
 6. Runtime returns one of four next steps:
    - answer directly
-   - collect intake
+   - collect a request description
    - offer paid continuation
    - create human handoff
 7. Runtime can recall representative-scoped resources, contact-scoped public-safe memories, and representative agent patterns from OpenViking before composing the next answer.

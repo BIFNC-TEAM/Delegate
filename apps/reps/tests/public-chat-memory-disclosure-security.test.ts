@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   buildWebAudienceExternalUserId: vi.fn(),
   cookies: vi.fn(),
   createConversationPlan: vi.fn(),
+  enforcePublicChatNetworkAdmission: vi.fn(),
+  enforcePublicChatPrincipalAdmission: vi.fn(),
   generateRepresentativeReply: vi.fn(),
   getPublicRepresentativeRuntime: vi.fn(),
   getUserAgentWalletBalance: vi.fn(),
@@ -16,6 +18,14 @@ const mocks = vi.hoisted(() => ({
   resolveWebAudienceContact: vi.fn(),
   resolveWebAudienceConversation: vi.fn(),
   setPublicAudienceSessionCookie: vi.fn(),
+  PublicChatRateLimitError: class PublicChatRateLimitError extends Error {
+    constructor(
+      readonly scope: "network_minute" | "audience_minute" | "representative_day",
+      readonly retryAfterSeconds: number,
+    ) {
+      super("rate limited");
+    }
+  },
 }));
 
 vi.mock("next/headers", () => ({
@@ -37,9 +47,12 @@ vi.mock("@delegate/web-data", () => ({
   AgentWalletReconciliationError: class AgentWalletReconciliationError extends Error {},
   buildRepresentativeRuntimeProfile: mocks.buildRepresentativeRuntimeProfile,
   buildWebAudienceExternalUserId: mocks.buildWebAudienceExternalUserId,
+  enforcePublicChatNetworkAdmission: mocks.enforcePublicChatNetworkAdmission,
+  enforcePublicChatPrincipalAdmission: mocks.enforcePublicChatPrincipalAdmission,
   getPublicConversationHistory: vi.fn(),
   getPublicRepresentativeRuntime: mocks.getPublicRepresentativeRuntime,
   getUserAgentWalletBalance: mocks.getUserAgentWalletBalance,
+  PublicChatRateLimitError: mocks.PublicChatRateLimitError,
   resolvePublicAudienceWalletExternalUserId:
     mocks.resolvePublicAudienceWalletExternalUserId,
   resolveWebAudienceContact: mocks.resolveWebAudienceContact,
@@ -55,7 +68,10 @@ vi.mock("../app/reps/[slug]/public-principal", () => ({
   setPublicAudienceSessionCookie: mocks.setPublicAudienceSessionCookie,
 }));
 
-import { POST as postPublicChat } from "../app/reps/[slug]/chat/route";
+import {
+  POST as postPublicChat,
+  resolvePublicChatClientAddress,
+} from "../app/reps/[slug]/chat/route";
 
 const currentDisclosure = {
   enabled: true,
@@ -74,6 +90,8 @@ describe("public chat memory disclosure boundary", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.stubEnv("DATABASE_URL", "");
+    mocks.enforcePublicChatNetworkAdmission.mockReset().mockResolvedValue(undefined);
+    mocks.enforcePublicChatPrincipalAdmission.mockReset().mockResolvedValue(undefined);
     mocks.cookies.mockResolvedValue({ get: vi.fn() });
     mocks.getPublicRepresentativeRuntime.mockResolvedValue({
       status: "available",
@@ -223,6 +241,66 @@ describe("public chat memory disclosure boundary", () => {
         }),
       }),
     );
+  });
+
+  it("rejects a network burst before minting an anonymous principal", async () => {
+    vi.stubEnv("DATABASE_URL", "postgresql://delegate.test/delegate");
+    mocks.enforcePublicChatNetworkAdmission.mockRejectedValue(
+      new mocks.PublicChatRateLimitError("network_minute", 17),
+    );
+
+    const response = await postPublicChat(
+      publicChatRequest({
+        policyRevision: currentDisclosure.policyRevision,
+        fingerprint: currentDisclosure.fingerprint,
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("17");
+    expect(await response.json()).toEqual(expect.objectContaining({
+      code: "public_chat_rate_limited",
+      scope: "network_minute",
+    }));
+    expect(mocks.getPublicRepresentativeRuntime).not.toHaveBeenCalled();
+    expect(mocks.resolvePublicAudienceRequestPrincipal).not.toHaveBeenCalled();
+    expect(mocks.acceptInboundConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects an audience burst before resolving chat resources", async () => {
+    vi.stubEnv("DATABASE_URL", "postgresql://delegate.test/delegate");
+    mocks.enforcePublicChatPrincipalAdmission.mockRejectedValue(
+      new mocks.PublicChatRateLimitError("audience_minute", 9),
+    );
+
+    const response = await postPublicChat(
+      publicChatRequest({
+        policyRevision: currentDisclosure.policyRevision,
+        fingerprint: currentDisclosure.fingerprint,
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(429);
+    expect(mocks.resolvePublicAudienceRequestPrincipal).toHaveBeenCalledTimes(1);
+    expect(mocks.resolveWebAudienceContact).not.toHaveBeenCalled();
+    expect(mocks.acceptInboundConversationMessage).not.toHaveBeenCalled();
+  });
+
+  it("only accepts an explicitly trusted client-address header", () => {
+    const defaultRequest = new Request("https://delegate.test/chat", {
+      headers: {
+        "x-forwarded-for": "198.51.100.2, 10.0.0.1",
+        "x-real-ip": "203.0.113.7",
+      },
+    });
+    expect(resolvePublicChatClientAddress(defaultRequest)).toBe("203.0.113.7");
+
+    vi.stubEnv("PUBLIC_CHAT_CLIENT_IP_HEADER", "x-forwarded-for");
+    expect(resolvePublicChatClientAddress(defaultRequest)).toBe("198.51.100.2");
+    expect(resolvePublicChatClientAddress(new Request("https://delegate.test/chat")))
+      .toBe("unresolved");
   });
 });
 

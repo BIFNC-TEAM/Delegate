@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { normalizeRepresentativeHandoffPrompt } from "@delegate/domain";
+
 import {
   ChannelDesiredState,
   ChannelHealthStatus,
@@ -31,9 +33,11 @@ import {
   assertConversationEpisodeTransition,
   buildMessageRetentionExpiry,
   buildRedactionPurgeAt,
+  readStructuredCollectorState,
   resolveInboundEpisodeAction,
   resolveMessageEditAction,
   type ConversationEpisodeState,
+  type ConversationTurnTrace,
   type GenerationRunState,
 } from "@delegate/runtime";
 
@@ -187,6 +191,26 @@ function mergeGenerationRuntimeOutcome(
   return {
     ...current,
     runtimeOutcome,
+  };
+}
+
+function mergeGenerationCompletionContext(
+  snapshot: Prisma.JsonValue | null,
+  input: {
+    runtimeOutcome?: GenerationRuntimeOutcome;
+    turnTrace?: ConversationTurnTrace;
+  },
+): Prisma.InputJsonObject {
+  const withRuntime = input.runtimeOutcome
+    ? mergeGenerationRuntimeOutcome(snapshot, input.runtimeOutcome)
+    : snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+      ? { ...(snapshot as Prisma.JsonObject) }
+      : {};
+  return {
+    ...withRuntime,
+    ...(input.turnTrace
+      ? { turnTrace: input.turnTrace as unknown as Prisma.InputJsonObject }
+      : {}),
   };
 }
 
@@ -420,6 +444,14 @@ export type AcceptInboundMessageInput = {
   clientMessageId: string;
   channel?: "web" | "matrix" | "telegram";
   externalMessageId?: string;
+  attachments?: Array<{
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+    objectKey?: string;
+    externalUrl?: string;
+    checksum?: string;
+  }>;
   /** Trusted provider event time. Web callers must not set this value. */
   occurredAt?: Date;
   queueGeneration?: boolean;
@@ -546,6 +578,17 @@ export class ConversationAiDeliveryControlError extends Error {
       "AI delivery was canceled because the conversation is waiting for, or controlled by, a human operator.",
     );
     this.name = "ConversationAiDeliveryControlError";
+  }
+}
+
+export class ConversationIngressValidationError extends Error {
+  readonly code = "CONVERSATION_INGRESS_INVALID";
+  readonly statusCode: number;
+
+  constructor(message: string, statusCode = 422) {
+    super(message);
+    this.name = "ConversationIngressValidationError";
+    this.statusCode = statusCode;
   }
 }
 
@@ -1129,7 +1172,7 @@ export async function getRepresentativeOperationsSnapshot(
       tone: representative.tone,
       publicMode: representative.publicMode,
       humanInLoop: representative.humanInLoop,
-      handoffPrompt: representative.handoffPrompt,
+      handoffPrompt: normalizeRepresentativeHandoffPrompt(representative.handoffPrompt),
       knowledgeCount: representative.knowledgeAssetLinks.length,
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
       channelCount: representative.channelBindings.length,
@@ -1189,8 +1232,7 @@ export async function acceptInboundConversationMessage(
   existingTransaction?: Prisma.TransactionClient,
 ) {
   const text = input.text.trim();
-  if (!text) throw new Error("Message text is required.");
-  if (!input.clientMessageId.trim()) throw new Error("clientMessageId is required.");
+  const attachments = validateInboundConversationPayload({ ...input, text });
   const inboundOccurredAt = resolveInboundMessageOccurredAt(input);
 
   const accept = async (tx: Prisma.TransactionClient) => {
@@ -1531,6 +1573,13 @@ export async function acceptInboundConversationMessage(
           : MessageDeliveryStatus.SENT,
         retentionExpiresAt: buildMessageRetentionExpiry(createdAt),
         createdAt,
+        ...(attachments.length
+          ? {
+              attachments: {
+                create: attachments,
+              },
+            }
+          : {}),
       },
       update: {},
     });
@@ -1984,6 +2033,7 @@ export async function completeInlineGenerationRun(input: {
   outputTokens?: number;
   costCents?: number;
   runtimeOutcome?: GenerationRuntimeOutcome;
+  turnTrace?: ConversationTurnTrace;
   completeOutbox?: boolean;
   countUsage: boolean;
   keepConversationQueued?: boolean;
@@ -2398,11 +2448,14 @@ export async function completeInlineGenerationRun(input: {
         ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
         ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
         ...(input.costCents !== undefined ? { costCents: input.costCents } : {}),
-        ...(input.runtimeOutcome
+        ...(input.runtimeOutcome || input.turnTrace
           ? {
-              contextSnapshot: mergeGenerationRuntimeOutcome(
+              contextSnapshot: mergeGenerationCompletionContext(
                 run.contextSnapshot,
-                input.runtimeOutcome,
+                {
+                  ...(input.runtimeOutcome ? { runtimeOutcome: input.runtimeOutcome } : {}),
+                  ...(input.turnTrace ? { turnTrace: input.turnTrace } : {}),
+                },
               ),
             }
           : {}),
@@ -2438,6 +2491,23 @@ export async function completeInlineGenerationRun(input: {
           requestHandoff: true,
         })
       : null;
+    if (input.turnTrace) {
+      await tx.eventAudit.upsert({
+        where: { id: deterministicConversationAuditId("turn", run.id) },
+        update: {},
+        create: {
+          id: deterministicConversationAuditId("turn", run.id),
+          representativeId: run.conversation.representativeId,
+          conversationId: run.conversationId,
+          type: "MODEL_REPLY_COMPLETED",
+          payload: {
+            generationRunId: run.id,
+            outputMessageId: message.id,
+            trace: input.turnTrace as unknown as Prisma.InputJsonObject,
+          },
+        },
+      });
+    }
     const handoffRequested = Boolean(handoffResult?.handoff);
     await tx.conversation.updateMany({
       where: {
@@ -2568,6 +2638,7 @@ export async function waitGenerationRunForComputeApproval(input: {
   approvalId: string;
   replyText: string;
   senderDisplayName: string;
+  turnTrace?: ConversationTurnTrace;
 }) {
   const replyText = input.replyText.trim();
   if (!replyText) throw new Error("Approval waiting reply text is required.");
@@ -2641,6 +2712,14 @@ export async function waitGenerationRunForComputeApproval(input: {
         completedAt: null,
         errorCode: null,
         errorMessage: null,
+        ...(input.turnTrace
+          ? {
+              contextSnapshot: mergeGenerationCompletionContext(
+                run.contextSnapshot,
+                { turnTrace: input.turnTrace },
+              ),
+            }
+          : {}),
       },
     });
     await tx.approvalRequest.update({
@@ -4468,6 +4547,133 @@ export async function loadGenerationRecentTurns(input: {
   }));
 }
 
+/**
+ * Loads only the audience-visible state required to continue a conversation.
+ * Raw task input, approval payloads, private notes, and internal identifiers
+ * never cross this boundary into the model runtime.
+ */
+export async function loadConversationOperationalContext(input: {
+  representativeId: string;
+  conversationId: string;
+  audienceIdentityId?: string;
+}) {
+  const now = new Date();
+  const [conversation, latestTask, pendingApproval, activeHandoff, entitlementAccounts] =
+    await Promise.all([
+      prisma.conversation.findFirst({
+        where: {
+          id: input.conversationId,
+          representativeId: input.representativeId,
+        },
+        select: { state: true, collectorState: true },
+      }),
+      prisma.delegationTask.findFirst({
+        where: {
+          originConversationId: input.conversationId,
+          representativeId: input.representativeId,
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+        select: {
+          kind: true,
+          status: true,
+          nextActionBy: true,
+        },
+      }),
+      prisma.approvalRequest.findFirst({
+        where: {
+          conversationId: input.conversationId,
+          representativeId: input.representativeId,
+          status: "PENDING",
+          OR: [
+            { expiresAt: null },
+            { expiresAt: { gt: now } },
+          ],
+        },
+        orderBy: [{ requestedAt: "desc" }, { id: "desc" }],
+        select: { requestedActionSummary: true, expiresAt: true },
+      }),
+      prisma.handoffRequest.findFirst({
+        where: {
+          conversationId: input.conversationId,
+          representativeId: input.representativeId,
+          status: {
+            in: [
+              HandoffStatus.OPEN,
+              HandoffStatus.REVIEWING,
+              HandoffStatus.ACCEPTED,
+            ],
+          },
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+        select: { status: true },
+      }),
+      input.audienceIdentityId
+        ? prisma.serviceEntitlementAccount.findMany({
+            where: {
+              audienceIdentityId: input.audienceIdentityId,
+              representativeId: input.representativeId,
+              status: "ACTIVE",
+              OR: [
+                { expiresAt: null },
+                { expiresAt: { gt: now } },
+              ],
+            },
+            select: { remainingUnits: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+  if (!conversation) return null;
+  const collector = readStructuredCollectorState(conversation.collectorState);
+  const remainingUnits = entitlementAccounts.reduce(
+    (total, account) => total + Math.max(0, account.remainingUnits),
+    0,
+  );
+
+  return {
+    conversationState: conversation.state,
+    ...(collector
+      ? {
+          activeCollector: {
+            kind: collector.kind,
+            intent: collector.intent,
+            stepIndex: collector.stepIndex,
+          },
+        }
+      : {}),
+    ...(latestTask
+      ? {
+          latestTask: {
+            kind: latestTask.kind,
+            status: latestTask.status,
+            nextActionBy: latestTask.nextActionBy,
+          },
+        }
+      : {}),
+    ...(pendingApproval
+      ? {
+          pendingApproval: {
+            requestedActionSummary: pendingApproval.requestedActionSummary,
+            ...(pendingApproval.expiresAt
+              ? { expiresAt: pendingApproval.expiresAt.toISOString() }
+              : {}),
+          },
+        }
+      : {}),
+    ...(activeHandoff
+      ? { activeHandoff: { status: activeHandoff.status } }
+      : {}),
+    ...(input.audienceIdentityId
+      ? {
+          serviceEntitlement: {
+            available: remainingUnits > 0,
+            remainingUnits,
+          },
+        }
+      : {}),
+  };
+}
+
 export async function deferGenerationRunForHuman(input: {
   runId: string;
   outboxId: string;
@@ -4560,6 +4766,22 @@ export async function markGenerationDeliveryComplete(input: {
 }) {
   await runConversationWriteTransaction(async (tx) => {
     await fenceGenerationWorkLease(tx, input);
+    const run = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      select: {
+        id: true,
+        conversationId: true,
+        outputMessageId: true,
+        contextSnapshot: true,
+        conversation: {
+          select: { representativeId: true, contactId: true },
+        },
+      },
+    });
+    if (!run) throw new Error("Generation run not found during delivery completion.");
+    if (run.outputMessageId !== input.outputMessageId) {
+      throw new Error("Output message does not belong to the generation run.");
+    }
     await tx.message.update({
       where: { id: input.outputMessageId },
       data: {
@@ -4583,6 +4805,53 @@ export async function markGenerationDeliveryComplete(input: {
         input.outboxId,
         input.leaseAttempt,
       );
+    }
+    await tx.eventAudit.upsert({
+      where: { id: deterministicConversationAuditId("delivery", input.runId) },
+      update: {},
+      create: {
+        id: deterministicConversationAuditId("delivery", input.runId),
+        representativeId: run.conversation.representativeId,
+        contactId: run.conversation.contactId,
+        conversationId: run.conversationId,
+        type: "MESSAGE_ANSWERED",
+        payload: {
+          generationRunId: input.runId,
+          outputMessageId: input.outputMessageId,
+          deliveryStatus: "sent",
+          ...(input.externalMessageId
+            ? { externalMessageId: input.externalMessageId }
+            : {}),
+        },
+      },
+    });
+    for (const material of readDeliveredMaterialsFromTurnTrace(run.contextSnapshot)) {
+      await tx.eventAudit.upsert({
+        where: {
+          id: deterministicConversationAuditId(
+            "material",
+            `${input.runId}:${material.id}`,
+          ),
+        },
+        update: {},
+        create: {
+          id: deterministicConversationAuditId(
+            "material",
+            `${input.runId}:${material.id}`,
+          ),
+          representativeId: run.conversation.representativeId,
+          contactId: run.conversation.contactId,
+          conversationId: run.conversationId,
+          type: "MATERIAL_SENT",
+          payload: {
+            generationRunId: input.runId,
+            outputMessageId: input.outputMessageId,
+            materialId: material.id,
+            title: material.title,
+            url: material.url,
+          },
+        },
+      });
     }
   });
 }
@@ -7672,6 +7941,14 @@ export async function setConversationCollectorState(input: {
 }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
+    const conversation = await tx.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { state: true },
+    });
+    if (!conversation) throw new Error("Conversation not found.");
+    if (conversation.state === "HUMAN_ACTIVE" || conversation.state === "NEEDS_HUMAN") {
+      throw new ConversationAiDeliveryControlError();
+    }
     return tx.conversation.update({
       where: { id: input.conversationId },
       data: { collectorState: input.collectorState, state: "COLLECTING" },
@@ -7684,9 +7961,21 @@ export async function clearConversationCollectorState(input: {
 }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
+    const conversation = await tx.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { state: true },
+    });
+    if (!conversation) throw new Error("Conversation not found.");
     return tx.conversation.update({
       where: { id: input.conversationId },
-      data: { collectorState: Prisma.JsonNull, state: "ACTIVE" },
+      data: {
+        collectorState: Prisma.JsonNull,
+        ...(
+          conversation.state === "HUMAN_ACTIVE" || conversation.state === "NEEDS_HUMAN"
+            ? {}
+            : { state: "ACTIVE" }
+        ),
+      },
     });
   });
 }
@@ -8260,7 +8549,7 @@ export async function publishRepresentativeVersion(input: {
       tone: representative.tone,
       publicMode: representative.publicMode,
       humanInLoop: representative.humanInLoop,
-      handoffPrompt: representative.handoffPrompt,
+      handoffPrompt: normalizeRepresentativeHandoffPrompt(representative.handoffPrompt),
       knowledgeCount: representative.knowledgeAssetLinks.length,
       knowledgePackItemCount: countKnowledgePackItems(representative.knowledgePack),
       channelCount: representative.channelBindings.length,
@@ -8632,7 +8921,6 @@ function buildRepresentativeSnapshot(representative: {
   const capabilityModes = resolveSnapshotCapabilityModes(
     representative.capabilityProfiles[0],
   );
-
   return {
     identity: {
       displayName: representative.displayName,
@@ -8647,7 +8935,7 @@ function buildRepresentativeSnapshot(representative: {
     conversation: {
       freeReplyLimit: representative.freeReplyLimit,
       handoffWindowHours: representative.handoffWindowHours,
-      handoffPrompt: representative.handoffPrompt,
+      handoffPrompt: normalizeRepresentativeHandoffPrompt(representative.handoffPrompt),
     },
     governance: {
       allowedSkills: representative.allowedSkills,
@@ -8855,6 +9143,115 @@ function mapChannelKind(value: AcceptInboundMessageInput["channel"]): Representa
   if (value === "matrix") return RepresentativeChannelKind.MATRIX;
   if (value === "telegram") return RepresentativeChannelKind.TELEGRAM;
   return RepresentativeChannelKind.WEB;
+}
+
+const acceptedConversationAttachmentMimeTypes = new Set([
+  "application/json",
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "text/csv",
+  "text/markdown",
+  "text/plain",
+]);
+
+export function validateInboundConversationPayload(
+  input: AcceptInboundMessageInput & { text: string },
+) {
+  if (!input.text) {
+    throw new ConversationIngressValidationError("Message text is required.");
+  }
+  if (input.text.length > 12_000) {
+    throw new ConversationIngressValidationError(
+      "Message text exceeds the 12,000 character limit.",
+      413,
+    );
+  }
+  if (/\u0000/u.test(input.text)) {
+    throw new ConversationIngressValidationError(
+      "Message text contains an unsupported control character.",
+    );
+  }
+  if (!input.clientMessageId.trim() || input.clientMessageId.length > 512) {
+    throw new ConversationIngressValidationError(
+      "clientMessageId is required and must not exceed 512 characters.",
+    );
+  }
+  const attachments = input.attachments ?? [];
+  if (attachments.length > 5) {
+    throw new ConversationIngressValidationError(
+      "A conversation message may contain at most five attachments.",
+      413,
+    );
+  }
+  let totalBytes = 0;
+  return attachments.map((attachment) => {
+    const fileName = attachment.fileName.trim().split(/[\\/]/u).pop()?.slice(0, 180) ?? "";
+    const mimeType = attachment.mimeType.trim().toLowerCase();
+    if (!fileName) {
+      throw new ConversationIngressValidationError(
+        "Every attachment must have a file name.",
+      );
+    }
+    if (!acceptedConversationAttachmentMimeTypes.has(mimeType)) {
+      throw new ConversationIngressValidationError(
+        `Attachment type ${mimeType || "unknown"} is not allowed.`,
+      );
+    }
+    if (
+      !Number.isSafeInteger(attachment.sizeBytes)
+      || attachment.sizeBytes <= 0
+      || attachment.sizeBytes > 10 * 1024 * 1024
+    ) {
+      throw new ConversationIngressValidationError(
+        "Each attachment must be between 1 byte and 10 MB.",
+        413,
+      );
+    }
+    if (!attachment.objectKey?.trim() && !attachment.externalUrl?.trim()) {
+      throw new ConversationIngressValidationError(
+        "Every attachment must have a trusted object key or external URL.",
+      );
+    }
+    const externalUrl = attachment.externalUrl?.trim();
+    if (externalUrl) {
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(externalUrl);
+      } catch {
+        throw new ConversationIngressValidationError(
+          "Attachment external URLs must be valid HTTP or HTTPS URLs.",
+        );
+      }
+      if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
+        throw new ConversationIngressValidationError(
+          "Attachment external URLs must use HTTP or HTTPS.",
+        );
+      }
+    }
+    totalBytes += attachment.sizeBytes;
+    if (totalBytes > 20 * 1024 * 1024) {
+      throw new ConversationIngressValidationError(
+        "Conversation attachments exceed the 20 MB total limit.",
+        413,
+      );
+    }
+    return {
+      fileName,
+      mimeType,
+      sizeBytes: attachment.sizeBytes,
+      ...(attachment.objectKey?.trim()
+        ? { objectKey: attachment.objectKey.trim() }
+        : {}),
+      ...(externalUrl
+        ? { externalUrl }
+        : {}),
+      ...(attachment.checksum?.trim()
+        ? { checksum: attachment.checksum.trim() }
+        : {}),
+    };
+  });
 }
 
 function resolveInboundMessageOccurredAt(input: AcceptInboundMessageInput) {
@@ -9731,6 +10128,42 @@ export function readConversationGenerationRuntimeOutcome(
 
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function deterministicConversationAuditId(prefix: string, source: string) {
+  const digest = createHash("sha256")
+    .update(`${prefix}:${source}`, "utf8")
+    .digest("hex")
+    .slice(0, 32);
+  return `audit_${prefix}_${digest}`;
+}
+
+function readDeliveredMaterialsFromTurnTrace(value: unknown): Array<{
+  id: string;
+  title: string;
+  url: string;
+}> {
+  if (!isJsonRecord(value) || !isJsonRecord(value.turnTrace)) return [];
+  const actions = value.turnTrace.actions;
+  if (!Array.isArray(actions)) return [];
+  const materials = actions.flatMap((action) => {
+    if (!isJsonRecord(action) || action.kind !== "deliver_public_material") return [];
+    const execution = isJsonRecord(action.execution) ? action.execution : null;
+    const output = execution && isJsonRecord(execution.output) ? execution.output : null;
+    const candidates = output && Array.isArray(output.materials) ? output.materials : [];
+    return candidates.flatMap((candidate) => {
+      if (
+        !isJsonRecord(candidate)
+        || typeof candidate.id !== "string"
+        || typeof candidate.title !== "string"
+        || typeof candidate.url !== "string"
+      ) {
+        return [];
+      }
+      return [{ id: candidate.id, title: candidate.title, url: candidate.url }];
+    });
+  });
+  return [...new Map(materials.map((material) => [material.id, material])).values()];
 }
 
 function isTerminalDelegationTaskStepStatus(

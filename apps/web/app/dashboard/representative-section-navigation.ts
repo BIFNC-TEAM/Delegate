@@ -3,7 +3,6 @@ export type RepresentativeSection = "directory" | "operations" | "setup";
 export type RepresentativeSetupSection =
   | "basics"
   | "compute"
-  | "contract"
   | "knowledge"
   | "memory"
   | "pricing";

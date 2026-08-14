@@ -76,6 +76,36 @@ export type ModelRuntimeRecentTurn = {
   summary?: string | null;
 };
 
+/**
+ * Minimal, audience-safe operational state available to the reply model.
+ * Identifiers, private notes, raw approval payloads, and tool arguments are
+ * deliberately excluded from this boundary.
+ */
+export type ConversationOperationalContext = {
+  conversationState: string;
+  activeCollector?: {
+    kind: string;
+    intent: string;
+    stepIndex: number;
+  };
+  latestTask?: {
+    kind: string;
+    status: string;
+    nextActionBy: string;
+  };
+  pendingApproval?: {
+    requestedActionSummary: string;
+    expiresAt?: string;
+  };
+  activeHandoff?: {
+    status: string;
+  };
+  serviceEntitlement?: {
+    available: boolean;
+    remainingUnits: number;
+  };
+};
+
 export type RepresentativeReplyInput = {
   representative: Representative;
   plan: ConversationPlan;
@@ -84,6 +114,7 @@ export type RepresentativeReplyInput = {
   recalled: RepresentativeRecallItem[];
   recentTurns: ModelRuntimeRecentTurn[];
   collectorState?: StructuredCollectorState | null;
+  operationalContext?: ConversationOperationalContext | null;
 };
 
 export type RepresentativeReplyPrompt = {

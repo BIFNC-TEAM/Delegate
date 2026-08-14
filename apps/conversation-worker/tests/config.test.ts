@@ -88,6 +88,15 @@ describe("conversation worker config", () => {
     ).toThrow("Production Telegram traffic must use");
     expect(() =>
       resolveConversationWorkerConfig({
+        TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
+      })
+    ).toThrow("diagnostics-only");
+    expect(resolveConversationWorkerConfig({
+      TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
+      TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED: "true",
+    })).toMatchObject({ telegramConversationPlatformMode: "shadow" });
+    expect(() =>
+      resolveConversationWorkerConfig({
         TELEGRAM_REQUEST_TIMEOUT_MS: "500",
       })
     ).toThrow();

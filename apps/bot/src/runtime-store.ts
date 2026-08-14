@@ -2,7 +2,8 @@ import type { PlanTier } from "@delegate/domain";
 import type { ModelContextSegmentTrace } from "@delegate/lifecycle-hooks";
 import {
   assertConversationChannelDeliveryAvailable,
-  createConversationServiceRequest,
+  completeConversationIntake,
+  ConversationAiDeliveryControlError,
   createOrReuseHandoffRequestInTransaction,
   fulfillServicePaymentOrder,
   resolveChannelAudienceIdentity,
@@ -645,6 +646,15 @@ export async function setStructuredCollectorState(params: {
   collectorState: StructuredCollectorState;
 }): Promise<void> {
   await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${params.context.conversationId}))`;
+    const conversation = await tx.conversation.findUnique({
+      where: { id: params.context.conversationId },
+      select: { state: true },
+    });
+    if (!conversation) throw new Error("Conversation not found.");
+    if (conversation.state === "HUMAN_ACTIVE" || conversation.state === "NEEDS_HUMAN") {
+      throw new ConversationAiDeliveryControlError();
+    }
     await tx.conversation.update({
       where: { id: params.context.conversationId },
       data: {
@@ -673,12 +683,23 @@ export async function updateStructuredCollectorState(params: {
   context: ConversationContextRecord;
   collectorState: StructuredCollectorState;
 }): Promise<void> {
-  await prisma.conversation.update({
-    where: { id: params.context.conversationId },
-    data: {
-      collectorState: params.collectorState,
-      state: "COLLECTING",
-    },
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${params.context.conversationId}))`;
+    const conversation = await tx.conversation.findUnique({
+      where: { id: params.context.conversationId },
+      select: { state: true },
+    });
+    if (!conversation) throw new Error("Conversation not found.");
+    if (conversation.state === "HUMAN_ACTIVE" || conversation.state === "NEEDS_HUMAN") {
+      throw new ConversationAiDeliveryControlError();
+    }
+    await tx.conversation.update({
+      where: { id: params.context.conversationId },
+      data: {
+        collectorState: params.collectorState,
+        state: "COLLECTING",
+      },
+    });
   });
 }
 
@@ -1135,12 +1156,24 @@ export async function recordHandoffPrepared(params: {
 }
 
 export async function clearStructuredCollectorState(context: ConversationContextRecord): Promise<void> {
-  await prisma.conversation.update({
-    where: { id: context.conversationId },
-    data: {
-      collectorState: Prisma.JsonNull,
-      state: "ACTIVE",
-    },
+  await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${context.conversationId}))`;
+    const conversation = await tx.conversation.findUnique({
+      where: { id: context.conversationId },
+      select: { state: true },
+    });
+    if (!conversation) throw new Error("Conversation not found.");
+    await tx.conversation.update({
+      where: { id: context.conversationId },
+      data: {
+        collectorState: Prisma.JsonNull,
+        ...(
+          conversation.state === "HUMAN_ACTIVE" || conversation.state === "NEEDS_HUMAN"
+            ? {}
+            : { state: "ACTIVE" }
+        ),
+      },
+    });
   });
 }
 
@@ -1173,82 +1206,40 @@ export async function submitStructuredCollector(params: {
     params.context.contactIsPaid,
   );
 
-  const stored = await prisma.$transaction(async (tx) => {
-    const intake = await tx.intakeSubmission.create({
-      data: {
-        representativeId: params.context.representativeId,
-        contactId: params.context.contactId,
-        conversationId: params.context.conversationId,
-        requestType: params.collectorState.intent,
-        payload: {
-          collectorKind: params.collectorState.kind,
-          sourceChannel: params.collectorState.sourceChannel,
-          suggestedPlan: params.collectorState.suggestedPlan ?? null,
-          startedAt: params.collectorState.startedAt,
-          completedAt: new Date().toISOString(),
-          answers: params.collectorState.answers,
-          summary: formatStructuredCollectorSummary(params.collectorState),
-        },
-        priorityScore: priority,
-        recommendedNextStep:
-          params.collectorState.kind === "scheduling"
-            ? "owner_schedule_review"
-            : params.collectorState.kind === "quote"
-              ? "owner_quote_review"
-              : "owner_service_request_review",
-      },
-    });
-    await tx.contact.update({
-      where: { id: params.context.contactId },
-      data: { stage: ContactStage.QUALIFIED },
-    });
-
-    await tx.conversation.update({
-      where: { id: params.context.conversationId },
-      data: {
-        collectorState: Prisma.JsonNull,
-        state: "ACTIVE",
-      },
-    });
-
-    await tx.eventAudit.create({
-      data: {
-        representativeId: params.context.representativeId,
-        contactId: params.context.contactId,
-        conversationId: params.context.conversationId,
-        type: EventType.INTAKE_SUBMITTED,
-        payload: {
-          intakeSubmissionId: intake.id,
-          collectorKind: params.collectorState.kind,
-          summary,
-          priority,
-        },
-      },
-    });
-
-    return {
-      intakeId: intake.id,
-      summary: summary || "Structured intake completed.",
-      recommendedOwnerAction,
-      priority,
-    };
-  });
-
-  const serviceRequest = await createConversationServiceRequest({
+  const completed = await completeConversationIntake({
     representativeId: params.context.representativeId,
     contactId: params.context.contactId,
     conversationId: params.context.conversationId,
-    inputMessageId: `telegram-intake:${stored.intakeId}`,
+    inputMessageId: `telegram-intake:${params.context.conversationId}:${params.collectorState.startedAt}`,
     intent: params.collectorState.intent,
-    objective: stored.summary,
-    desiredOutcome: stored.recommendedOwnerAction,
-    priority: stored.priority,
+    collectorKind: params.collectorState.kind,
+    sourceChannel: params.collectorState.sourceChannel,
+    summary: summary || "Structured intake completed.",
+    objective: summary || "Structured intake completed.",
+    desiredOutcome: recommendedOwnerAction,
+    priority,
+    recommendedNextStep:
+      params.collectorState.kind === "scheduling"
+        ? "owner_schedule_review"
+        : params.collectorState.kind === "quote"
+          ? "owner_quote_review"
+          : "owner_service_request_review",
+    payload: {
+      collectorKind: params.collectorState.kind,
+      sourceChannel: params.collectorState.sourceChannel,
+      suggestedPlan: params.collectorState.suggestedPlan ?? null,
+      startedAt: params.collectorState.startedAt,
+      completedAt: new Date().toISOString(),
+      answers: params.collectorState.answers,
+      summary: formatStructuredCollectorSummary(params.collectorState),
+    },
   });
+
   return {
-    serviceRequestId: serviceRequest.task?.id ?? null,
-    summary: stored.summary,
-    recommendedOwnerAction: stored.recommendedOwnerAction,
-    priority: stored.priority,
+    serviceRequestId: completed.serviceRequestId,
+    summary: summary || "Structured intake completed.",
+    recommendedOwnerAction,
+    priority,
   };
 }
 

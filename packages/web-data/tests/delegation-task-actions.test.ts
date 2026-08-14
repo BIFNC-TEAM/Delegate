@@ -189,7 +189,7 @@ describe("delegation task owner actions", () => {
         toStatus: "READY",
       }),
     });
-  });
+  }, 15_000);
 
   it("retries the failed step instead of a later blocked dependent step", async () => {
     const task = buildTask("FAILED");

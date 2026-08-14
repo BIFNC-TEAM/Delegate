@@ -9,6 +9,7 @@ import type {
 
 import type {
   ModelRuntimeRecentTurn,
+  ConversationOperationalContext,
   RepresentativeRecallItem,
   RepresentativeReplyInput,
   RepresentativeReplyContextTrace,
@@ -206,6 +207,33 @@ function buildCollectorStateBlock(collectorState: StructuredCollectorState | nul
     .join("\n");
 }
 
+function buildOperationalContextBlock(
+  context: ConversationOperationalContext | null | undefined,
+): string | null {
+  if (!context) return null;
+
+  return [
+    "Current operational status (server-derived; use only to continue the current workflow):",
+    `- Conversation state: ${context.conversationState}`,
+    context.activeCollector
+      ? `- Active intake: ${context.activeCollector.kind}/${context.activeCollector.intent}, step ${context.activeCollector.stepIndex}`
+      : "- Active intake: none",
+    context.latestTask
+      ? `- Latest task: ${context.latestTask.kind}/${context.latestTask.status}; next=${context.latestTask.nextActionBy}`
+      : "- Latest task: none",
+    context.pendingApproval
+      ? `- Pending approval: ${context.pendingApproval.requestedActionSummary}${context.pendingApproval.expiresAt ? `; expires=${context.pendingApproval.expiresAt}` : ""}`
+      : "- Pending approval: none",
+    context.activeHandoff
+      ? `- Human handoff: ${context.activeHandoff.status}`
+      : "- Human handoff: none",
+    context.serviceEntitlement
+      ? `- Service entitlement: ${context.serviceEntitlement.available ? "available" : "unavailable"}; remaining_units=${context.serviceEntitlement.remainingUnits}`
+      : "- Service entitlement: unknown",
+    "Do not claim that a task, approval, payment, or handoff changed state unless the reply outline explicitly confirms that transition.",
+  ].join("\n");
+}
+
 function buildRecentTurnsBlock(turns: ModelRuntimeRecentTurn[], limit: number): string | null {
   const trimmed = turns.slice(-limit);
   if (!trimmed.length) {
@@ -318,6 +346,19 @@ function buildPromptSegments(params: RepresentativeReplyInput): PromptSegment[] 
       text: collectorStateBlock,
       priority: 98,
       itemCount: Object.keys(params.collectorState?.answers ?? {}).length,
+      required: true,
+    });
+  }
+
+
+  const operationalContextBlock = scopeAllows(params.subagent, "operational_status")
+    ? buildOperationalContextBlock(params.operationalContext)
+    : null;
+  if (operationalContextBlock) {
+    segments.push({
+      kind: "operational_status",
+      text: operationalContextBlock,
+      priority: 99,
       required: true,
     });
   }

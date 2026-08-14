@@ -65,7 +65,10 @@ export const knowledgeDocumentSchema = z.object({
   title: z.string(),
   kind: knowledgeDocumentKindSchema,
   summary: z.string(),
-  url: z.string().url().optional(),
+  url: z.string().url().refine((value) => {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  }, "Public knowledge URLs must use HTTP or HTTPS.").optional(),
 });
 
 export const conversationContractSchema = z.object({

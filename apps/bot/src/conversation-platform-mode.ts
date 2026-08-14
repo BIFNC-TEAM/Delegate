@@ -21,6 +21,14 @@ export function resolveTelegramConversationPlatformMode(
       "Production Telegram traffic must use TELEGRAM_CONVERSATION_PLATFORM_MODE=worker.",
     );
   }
+  if (
+    configuredMode !== "worker"
+    && env.TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED?.trim().toLowerCase() !== "true"
+  ) {
+    throw new Error(
+      "Telegram legacy/shadow modes require TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED=true and are diagnostics-only.",
+    );
+  }
   return configuredMode;
 }
 

@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 
-import { demoRepresentative } from "@delegate/domain";
+import {
+  demoRepresentative,
+  normalizeRepresentativeHandoffPrompt,
+} from "@delegate/domain";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -29,6 +32,7 @@ function currentDraft(): RepresentativeSetupSnapshot {
     groupActivation: "always",
     publicMode: false,
     humanInLoop: false,
+    handoffAccessMode: "FREE",
     skills: [...demoRepresentative.skills],
     skillPacks: demoRepresentative.skillPacks.map((pack) => ({
       ...pack,
@@ -130,6 +134,17 @@ function publishedSnapshot(skillPacks: unknown[] = []) {
 }
 
 describe("representative published runtime snapshot", () => {
+  it("upgrades the retired multi-field handoff prompt without changing custom copy", () => {
+    expect(normalizeRepresentativeHandoffPrompt(
+      "阿江 的真人评估入口已经开启。请留下你的身份、需求摘要、预算区间、目标时间，以及为什么需要真人接手。",
+    )).toBe(
+      "阿江 的真人评估入口已经开启。请简要描述你的需求；真人接手后会再确认联系人、预算和时间等必要信息。",
+    );
+    expect(normalizeRepresentativeHandoffPrompt("请说明需要人工处理的问题。")).toBe(
+      "请说明需要人工处理的问题。",
+    );
+  });
+
   it("does not replace an explicitly missing runtime version with the active version", async () => {
     await expect(
       getRepresentativeRuntimeSetupSnapshot("representative", null),

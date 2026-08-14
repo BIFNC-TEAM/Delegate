@@ -16,6 +16,44 @@ import {
 } from "../src/index";
 
 describe("buildRepresentativeReplyPrompt", () => {
+  it("includes only the audience-safe operational workflow snapshot", () => {
+    const prompt = buildRepresentativeReplyPrompt({
+      representative: demoRepresentative,
+      plan: {
+        intent: "faq",
+        audienceRole: "other",
+        goal: "get_information",
+        disposition: "answer",
+        actions: [{ id: "answer_public_information:faq", kind: "answer_public_information", status: "planned", sideEffect: "none" }],
+        reasons: ["Public answer allowed."],
+        responseOutline: ["Answer the user directly."],
+      },
+      subagent: getScopedSubagent("triage-agent"),
+      userText: "我的请求现在怎么样？",
+      recentTurns: [],
+      recalled: [],
+      operationalContext: {
+        conversationState: "WAITING_APPROVAL",
+        latestTask: {
+          kind: "SERVICE_REQUEST",
+          status: "AWAITING_APPROVAL",
+          nextActionBy: "OWNER",
+        },
+        pendingApproval: {
+          requestedActionSummary: "发送公开邮件",
+          expiresAt: "2026-08-15T00:00:00.000Z",
+        },
+        serviceEntitlement: { available: true, remainingUnits: 3 },
+      },
+    });
+
+    expect(prompt.input).toContain("Current operational status");
+    expect(prompt.input).toContain("AWAITING_APPROVAL");
+    expect(prompt.input).toContain("remaining_units=3");
+    expect(prompt.input).not.toContain("approvalId");
+    expect(prompt.input).not.toContain("requestPayload");
+  });
+
   it("includes the public trust boundary and recalled context", () => {
     const prompt = buildRepresentativeReplyPrompt({
       representative: demoRepresentative,

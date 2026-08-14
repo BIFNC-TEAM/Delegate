@@ -329,6 +329,8 @@ pnpm docker:up:temporal
 - `DELEGATE_CLAWHUB_URL` 指定不含凭据的 HTTPS Registry origin，`DELEGATE_CLAWHUB_ALLOWED_HOSTS` 限制允许的主机名，`DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` 限制 exact-version 验证的新鲜度（默认 24 小时），且客户端拒绝重定向。采纳或回滚前会重新获取精确发布者/版本的 manifest 与 verdict，拒绝过期或发生漂移的证据，并使用当前受信公钥集合重验签后才改变 release 状态。
 - 当前 Telegram long-poll runtime 只要求 `TELEGRAM_BOT_TOKEN`。`TELEGRAM_BOT_ID` 可选，未填写时会从 token 的数字前缀推导；`getMe` 成功后，Bot 会把验证过的 ID 和 username 写入已配置的 Telegram 渠道绑定，Web 因此无需拿到 token 也能生成限定当前连接的 `/bind` 挑战。建议填写 `TELEGRAM_BOT_USERNAME` 以获得可读的渠道标识，但它不影响 polling 启动。`TELEGRAM_WEBHOOK_SECRET` 不会被 long-poll 读取，也不是 long-poll 必需项；它仍可供独立 webhook、签名或 fallback 逻辑使用，但不应只为启动 polling 而配置。
 - `REP_PUBLIC_CHAT_SESSION_SECRET` 可以覆盖 public-chat cookie 签名 secret。如果没有设置，reps app 会依次回退到 `TELEGRAM_WEBHOOK_SECRET` 和本地开发 secret。
+- `PUBLIC_CHAT_RATE_LIMIT_SECRET` 会先对网络、用户和数字代表限流键做 HMAC，再写入 Postgres；未配置时回退到 `REP_PUBLIC_CHAT_SESSION_SECRET`。三个 `PUBLIC_CHAT_*_REQUESTS_*` 变量用于调整分布式准入限额。只有受信反向代理会覆盖指定请求头时才设置 `PUBLIC_CHAT_CLIENT_IP_HEADER`，否则保持为空。
+- `PUBLIC_MATERIAL_LINK_SECRET` 用于签发十分钟有效、绑定数字代表、资料校验和与处理版本的公开资料链接。下载时会重新检查当前发布和审批状态，因此资料归档、停用、替换或取消公开后，已签发链接也会失效。
 - `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_OPENAI_MODEL` 和 `DELEGATE_ANTHROPIC_MODEL` 控制 model-backed representative replies。
 - `OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 或 `ARK_API_KEY` 启用真实 provider 调用。
 - `OPENVIKING_*` 控制 public memory sync、recall 和 commit 行为。

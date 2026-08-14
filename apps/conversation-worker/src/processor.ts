@@ -7,9 +7,12 @@ import {
   buildComputeRequestsFromDelegationPlan,
   advanceStructuredCollector,
   beginStructuredCollector,
+  authorizeConversationAction,
   createConversationPlan,
   formatStructuredCollectorPrompt,
   formatStructuredCollectorSummary,
+  hasMatchedExecutableSkill,
+  isConversationCancellationRequest,
   parseComputeDirective,
   renderFailClosedReplyPreview,
   renderReplyPreview,
@@ -20,6 +23,11 @@ import {
   shouldStartStructuredCollector,
   shouldConsiderNaturalLanguageCompute,
   type ParsedComputeRequest,
+  type ConversationActionExecutionResult,
+  type ConversationPlan,
+  type ConversationTurnTrace,
+  type PlannedConversationAction,
+  type StructuredCollectorState,
 } from "@delegate/runtime";
 import {
   buildRepresentativeRuntimeProfile,
@@ -28,11 +36,11 @@ import {
   claimNextOperatorMessageWorkItem,
   claimNextGenerationWorkItem,
   completeOperatorMessageDelivery,
+  completeConversationIntake,
   completeInlineGenerationRun,
   contactMemorySharingConsentContractVersion,
   ContactMemorySharingError,
   createComputeDelegationTask,
-  createConversationServiceRequest,
   createClarifyingDelegationTask,
   createAudienceComputeSession,
   clearConversationCollectorState,
@@ -40,7 +48,6 @@ import {
   deferOperatorMessageDelivery,
   deferGenerationRunForHuman,
   executeAudienceTool,
-  ensureConversationLeadAndHandoff,
   failGenerationRun,
   getRepresentativeRuntimeSetupSnapshot,
   grantContactMemorySharingConsent,
@@ -48,6 +55,7 @@ import {
   isDeterministicContactMemoryDeleteCommand,
   matrixServerNameFromUserId,
   loadGenerationRecentTurns,
+  loadConversationOperationalContext,
   markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval,
   markDelegationTaskRunning,
@@ -55,18 +63,22 @@ import {
   GenerationMemoryDeliveryBlockedError,
   GenerationWorkLeaseLostError,
   finalizeComputeDelegationTask,
+  findConversationCancelableDelegationTask,
   findConversationClarifyingDelegationTask,
   isGenerationMemoryDeliveryBlockedError,
   isGenerationWorkLeaseLostError,
   continueClarifyingDelegationTask,
   recallRepresentativeContext,
+  applyRepresentativeDelegationTaskAction,
   prepareGenerationMessageChannelDelivery,
   privateChannelSourceVerificationUnavailableStatement,
   readContactMemorySharingChallengeToken,
+  resolveGovernedPublicMaterialDeliveries,
   reserveGenerationConversationWalletUsage,
   renderPrivateChannelGenerationDeliveryText,
   renewGenerationWorkItemLease,
   resolveDeterministicContactMemorySharingCommand,
+  resolveRepresentativeComputeApproval,
   revokeContactMemorySharingConsent,
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
@@ -106,6 +118,215 @@ function resolveFallbackReason(
 function isCollectorCancelMessage(text: string): boolean {
   const normalized = text.trim().toLowerCase();
   return normalized === "取消" || normalized === "cancel" || normalized === "stop";
+}
+
+function isConversationStatusCommand(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/gu, " ").toLowerCase();
+  return normalized === "/status"
+    || normalized === "!status"
+    || normalized === "查询当前状态"
+    || normalized === "查看当前状态";
+}
+
+function renderConversationOperationalStatus(
+  context: Awaited<ReturnType<typeof loadConversationOperationalContext>>,
+): string {
+  if (!context) return "当前无法读取会话状态，请稍后重试。";
+  const lines = [`会话状态：${context.conversationState}`];
+  if (context.activeCollector) {
+    lines.push("需求采集：等待你继续描述需求；发送“取消”可以结束本次采集。");
+  }
+  if (context.latestTask) {
+    lines.push(
+      `最近任务：${context.latestTask.status}（下一步：${context.latestTask.nextActionBy}）`,
+    );
+  }
+  if (context.pendingApproval) {
+    lines.push(`待审批动作：${context.pendingApproval.requestedActionSummary}`);
+  }
+  if (context.activeHandoff) {
+    lines.push(`人工接手：${context.activeHandoff.status}`);
+  }
+  if (context.serviceEntitlement) {
+    lines.push(`可用服务额度：${context.serviceEntitlement.remainingUnits}`);
+  }
+  if (lines.length === 1) lines.push("当前没有进行中的需求、审批或人工接手。");
+  return lines.join("\n");
+}
+
+type PublicMaterialDelivery = {
+  id: string;
+  title: string;
+  summary: string;
+  url: string;
+  processingVersion: number;
+};
+
+function buildConversationTurnTrace(
+  plan: ConversationPlan,
+  resolveExecution: (
+    action: PlannedConversationAction,
+  ) => ConversationActionExecutionResult,
+  resolveAuthorization: (
+    action: PlannedConversationAction,
+  ) => ConversationTurnTrace["actions"][number]["authorization"] =
+    authorizeConversationAction,
+): ConversationTurnTrace {
+  const intentResult = plan.intentResult ?? {
+    primaryGoal: plan.goal,
+    primaryIntent: plan.intent,
+    businessLabels: [plan.intent],
+    requestedOutcomes: [],
+    entities: {},
+    missingFields: [],
+    confidence: 1,
+    safetySignals: [],
+  };
+  const billingDecision = plan.billingDecision ?? {
+    decision: plan.disposition === "payment_required"
+      ? "payment_required" as const
+      : plan.disposition === "handoff" || plan.disposition === "refuse"
+        ? "no_charge" as const
+        : "allow_free" as const,
+    billable: !["payment_required", "handoff", "refuse"].includes(plan.disposition),
+    reason: "Compatibility decision for a pre-protocol conversation plan.",
+  };
+  return {
+    version: 1,
+    plan: {
+      goal: plan.goal,
+      intent: plan.intent,
+      businessLabels: intentResult.businessLabels,
+      requestedOutcomes: intentResult.requestedOutcomes,
+      disposition: plan.disposition,
+      replyGoal: plan.replyGoal ?? "Produce the policy-selected conversation result.",
+      reasons: plan.reasons ?? [],
+    },
+    billing: billingDecision,
+    actions: (plan.actions ?? []).map((action) => ({
+      id: action.id,
+      kind: action.kind,
+      authorization: resolveAuthorization(action),
+      execution: resolveExecution(action),
+    })),
+  };
+}
+
+function isConversationPlanBillable(plan: ConversationPlan): boolean {
+  return plan.billingDecision?.billable
+    ?? !["payment_required", "handoff", "refuse"].includes(plan.disposition);
+}
+
+function buildCollectorTurnTrace(input: {
+  state: StructuredCollectorState;
+  continuationAuthorized: boolean;
+  canceled: boolean;
+  completed: boolean;
+  serviceRequestId?: string | null;
+}): ConversationTurnTrace {
+  const billing = !input.continuationAuthorized || input.canceled
+    ? {
+        decision: "no_charge" as const,
+        billable: false,
+        reason: input.canceled
+          ? "Canceled intake does not consume conversation usage."
+          : "The intake is paused until service entitlement is available.",
+      }
+    : {
+        decision: "allow_entitlement" as const,
+        billable: true,
+        reason: "The current conversation authorization permits intake continuation.",
+      };
+  const collectStatus: ConversationActionExecutionResult["status"] = input.canceled
+    ? "denied"
+    : input.completed
+      ? "completed"
+      : "waiting_input";
+  const serviceStatus: ConversationActionExecutionResult["status"] = input.canceled
+    ? "denied"
+    : input.completed && input.serviceRequestId
+      ? "completed"
+      : "deferred";
+  return {
+    version: 1,
+    plan: {
+      goal: "provide_information",
+      intent: input.state.intent,
+      businessLabels: [input.state.intent],
+      requestedOutcomes: ["create_service_request"],
+      disposition: "collect",
+      replyGoal: "继续收集一段需求描述并在完成后创建服务请求。",
+      reasons: ["An existing request-description intake is active."],
+    },
+    billing,
+    actions: [
+      {
+        id: `collect_request_description:${input.state.intent}`,
+        kind: "collect_request_description",
+        authorization: {
+          decision: "allow",
+          reason: "The user is continuing an existing request-description intake.",
+        },
+        execution: {
+          actionId: `collect_request_description:${input.state.intent}`,
+          status: collectStatus,
+          summary: input.canceled
+            ? "The user canceled request collection."
+            : input.completed
+              ? "The request description was collected."
+              : "The intake is waiting for the request description.",
+        },
+      },
+      {
+        id: `create_service_request:${input.state.intent}`,
+        kind: "create_service_request",
+        authorization: {
+          decision: "allow",
+          reason: "Creating an internal service request grants no external authority.",
+        },
+        execution: {
+          actionId: `create_service_request:${input.state.intent}`,
+          status: serviceStatus,
+          summary: input.serviceRequestId
+            ? "The internal service request was created."
+            : "Service-request creation remains deferred.",
+          ...(input.serviceRequestId
+            ? { output: { serviceRequestId: input.serviceRequestId } }
+            : {}),
+        },
+      },
+    ],
+  };
+}
+
+async function selectPublicMaterialDeliveries(
+  representative: ReturnType<typeof buildRepresentativeRuntimeProfile>,
+  plan: ConversationPlan,
+  userText: string,
+): Promise<PublicMaterialDelivery[]> {
+  if (!(plan.actions ?? []).some((action) => action.kind === "deliver_public_material")) {
+    return [];
+  }
+  return resolveGovernedPublicMaterialDeliveries({
+    representativeId: representative.id,
+    representativeSlug: representative.slug,
+    queryText: userText,
+    businessLabels: plan.intentResult?.businessLabels ?? [],
+    requestedOutcomes: plan.intentResult?.requestedOutcomes ?? [],
+    legacyMaterials: representative.knowledgePack.materials,
+  });
+}
+
+function renderPublicMaterialDeliveries(materials: PublicMaterialDelivery[]): string {
+  if (!materials.length) {
+    return "当前发布版本没有可直接发送的公开资料链接。";
+  }
+  return [
+    "公开资料",
+    ...materials.map((material) =>
+      `${material.title}\n${material.summary}\n${material.url}`
+    ),
+  ].join("\n\n");
 }
 
 export async function processNextConversationWork(config: ConversationWorkerConfig) {
@@ -494,6 +715,30 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     );
     leaseGuard.assertOwned();
     if (!setup) throw new Error(`Representative ${item.representativeSlug} was not found.`);
+    if (isConversationStatusCommand(item.userText)) {
+      const operationalContext = await loadConversationOperationalContext({
+        representativeId: setup.id,
+        conversationId: item.conversationId,
+        ...(item.audienceIdentityId
+          ? { audienceIdentityId: item.audienceIdentityId }
+          : {}),
+      });
+      const replyText = renderConversationOperationalStatus(operationalContext);
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText,
+        senderDisplayName: item.representativeName,
+        intent: "conversation_status",
+        countUsage: false,
+        completeOutbox: false,
+      });
+      outputMessageId = completed.message.id;
+      await deliverGenerationOutput({ config, item, text: replyText, outputMessageId });
+      leaseGuard.assertOwned();
+      return { processed: true as const, runId: item.runId, status: "completed" as const };
+    }
     const delegationConfig = resolveDelegationConfig(setup);
     const representative = buildRepresentativeRuntimeProfile(setup);
     // Commerce policy is pinned on GenerationRun at ingress. Do not recompute
@@ -520,6 +765,10 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             freeReplyLimit: effectiveFreeReplyLimit,
           },
         };
+    const matchedExecutableSkill = hasMatchedExecutableSkill(
+      item.userText,
+      policyPinnedRepresentative,
+    );
     const requiresPaidContinuation = (freeRepliesUsed: number) =>
       !unlimitedFreeAccess
       && freeRepliesUsed >= effectiveFreeReplyLimit;
@@ -556,14 +805,90 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         : null,
     );
     const activeCollector = readStructuredCollectorState(item.collectorState);
-    const clarifyingTask = !persistedRequest && !activeCollector && item.channel === "web"
+    if (isConversationCancellationRequest(item.userText) && !activeCollector) {
+      const cancelPlan = createConversationPlan({
+        text: item.userText,
+        channel: "private_chat",
+        representative: policyPinnedRepresentative,
+        usage: item.usage,
+      });
+      const candidate = await findConversationCancelableDelegationTask({
+        representativeId: setup.id,
+        conversationId: item.conversationId,
+        contactId: item.contactId,
+        ...(item.audienceIdentityId
+          ? { audienceIdentityId: item.audienceIdentityId }
+          : {}),
+      });
+      let replyText: string;
+      let executionStatus: ConversationActionExecutionResult["status"];
+      let executionSummary: string;
+      if (candidate.status === "cancelable") {
+        if (candidate.pendingApprovalId) {
+          await resolveRepresentativeComputeApproval({
+            representativeSlug: item.representativeSlug,
+            approvalId: candidate.pendingApprovalId,
+            resolution: "rejected",
+            resolvedBy: item.audienceIdentityId || item.contactId,
+            decisionNote: "The audience canceled the pending action from its originating conversation.",
+          });
+        } else {
+          await applyRepresentativeDelegationTaskAction({
+            representativeSlug: item.representativeSlug,
+            taskId: candidate.taskId,
+            action: "cancel",
+            actorId: item.audienceIdentityId || item.contactId,
+            actorType: "audience",
+          });
+        }
+        replyText = "已取消当前待处理任务；尚未消费的服务额度会按原支付边界释放。审批和审计记录会保留。";
+        executionStatus = "completed";
+        executionSummary = "The audience canceled the scoped pending task.";
+      } else if (candidate.status === "already_canceled") {
+        replyText = "当前任务已经取消，无需重复操作。";
+        executionStatus = "completed";
+        executionSummary = "The scoped task was already canceled; the command was idempotent.";
+      } else if (candidate.status === "in_flight") {
+        replyText = "当前任务已经开始执行，无法安全地声明为已取消。系统不会启动新的步骤；如已产生外部结果，将按审计记录处理。";
+        executionStatus = "denied";
+        executionSummary = "The task was already running and could not be safely canceled.";
+      } else {
+        replyText = "当前会话没有可取消的待处理任务。";
+        executionStatus = "completed";
+        executionSummary = "No scoped pending task was found.";
+      }
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText,
+        senderDisplayName: item.representativeName,
+        intent: "delegation_cancel",
+        turnTrace: buildConversationTurnTrace(cancelPlan, (action) => ({
+          actionId: action.id,
+          status: executionStatus,
+          summary: executionSummary,
+          ...(candidate.status === "none"
+            ? {}
+            : { output: { taskId: candidate.taskId } }),
+        })),
+        countUsage: false,
+        completeOutbox: false,
+        ...(entitlementReservation ? { entitlementReservation } : {}),
+      });
+      outputMessageId = completed.message.id;
+      await deliverGenerationOutput({ config, item, text: replyText, outputMessageId });
+      leaseGuard.assertOwned();
+      return { processed: true as const, runId: item.runId, status: "completed" as const };
+    }
+    const clarifyingTask = !persistedRequest && !activeCollector
       ? await findConversationClarifyingDelegationTask({
           representativeId: setup.id,
           contactId: item.contactId,
           conversationId: item.conversationId,
         })
       : null;
-    const computeDirective = item.channel === "web" && !persistedRequest && !clarifyingTask && !activeCollector
+    const computeDirective = !persistedRequest && !clarifyingTask && !activeCollector
       ? parseComputeDirective(item.userText)
       : { kind: "none" as const };
     if (
@@ -615,14 +940,16 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         : undefined;
     if (
       !parsedRequests.length &&
-      item.channel === "web" &&
       setup.compute.enabled &&
       delegationConfig.enabled &&
       (
         Boolean(clarifyingTask) ||
         (
           delegationConfig.naturalLanguageEnabled &&
-          shouldConsiderNaturalLanguageCompute(item.userText)
+          (
+            matchedExecutableSkill
+            || shouldConsiderNaturalLanguageCompute(item.userText)
+          )
         )
       )
     ) {
@@ -682,6 +1009,26 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       leaseGuard.assertOwned();
       if (planned.ok && planned.plan) {
         if (planned.plan.kind === "clarification") {
+          const clarificationPlan = createConversationPlan({
+            text: item.userText,
+            channel: "private_chat",
+            representative: policyPinnedRepresentative,
+            usage: { ...item.usage, passUnlocked: true },
+            proposedAction: {
+              target: "compute:clarification",
+              input: {
+                source: "current_user_message",
+                question: planned.plan.question,
+                missingFields: planned.plan.missingFields,
+              },
+              requiredCapabilities: ["compute.plan"],
+            },
+          });
+          clarificationPlan.billingDecision = {
+            decision: "no_charge",
+            billable: false,
+            reason: "A planner clarification does not execute or complete a service step.",
+          };
           if (clarifyingTask) {
             await continueClarifyingDelegationTask({
               taskId: clarifyingTask.id,
@@ -718,6 +1065,18 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             replyText: planned.plan.question,
             senderDisplayName: item.representativeName,
             intent: "delegation_clarification",
+            turnTrace: buildConversationTurnTrace(
+              clarificationPlan,
+              (action) => ({
+                actionId: action.id,
+                status: "waiting_input",
+                summary: "The governed Compute request is waiting for required input.",
+              }),
+              () => ({
+                decision: "allow",
+                reason: "Clarifying the requested tool input has no external side effect.",
+              }),
+            ),
             countUsage: false,
             completeOutbox: false,
             ...(entitlementReservation ? { entitlementReservation } : {}),
@@ -828,6 +1187,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       let replyText: string;
       let completedCollector = false;
       let completedState = activeCollector;
+      let completedServiceRequestId: string | null = null;
 
       if (!continuationAuthorized) {
         replyText = "当前可用服务额度不足。补充额度后可以从当前采集步骤继续，不需要重新开始。";
@@ -839,18 +1199,8 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         completedState = advanced.state ?? activeCollector;
         completedCollector = advanced.completed;
         if (advanced.completed) {
-          await clearConversationCollectorState({ conversationId: item.conversationId });
           const summary = formatStructuredCollectorSummary(completedState);
-          await ensureConversationLeadAndHandoff({
-            conversationId: item.conversationId,
-            reason: "Structured intake completed",
-            summary,
-            kind: completedState.intent,
-            priority: 60,
-            source: item.channel,
-            requestHandoff: false,
-          });
-          await createConversationServiceRequest({
+          const completedIntake = await completeConversationIntake({
             representativeId: setup.id,
             representativeVersionId: item.representativeVersionId,
             contactId: item.contactId,
@@ -858,11 +1208,32 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             ...(item.episodeId ? { episodeId: item.episodeId } : {}),
             inputMessageId: item.inputMessageId,
             intent: completedState.intent,
+            collectorKind: completedState.kind,
+            sourceChannel: item.channel,
+            summary,
             objective: summary,
             desiredOutcome: "Owner review and a clear next-step response.",
             priority: 60,
+            recommendedNextStep:
+              completedState.kind === "scheduling"
+                ? "owner_schedule_review"
+                : completedState.kind === "quote"
+                  ? "owner_quote_review"
+                  : "owner_service_request_review",
+            payload: {
+              collectorKind: completedState.kind,
+              sourceChannel: completedState.sourceChannel,
+              suggestedPlan: completedState.suggestedPlan ?? null,
+              startedAt: completedState.startedAt,
+              completedAt: new Date().toISOString(),
+              answers: completedState.answers,
+              summary,
+            },
           });
-          replyText = `需求已整理并创建服务请求。\n\n${summary}\n\n后续如需工具调用、外部操作或人工接手，系统会分别检查权限与状态。`;
+          completedServiceRequestId = completedIntake.serviceRequestId;
+          replyText = completedIntake.serviceRequestId
+            ? `需求已整理并创建服务请求。\n\n${summary}\n\n如需补充联系人、预算或时间等信息，真人接手后会继续询问。后续工具调用和外部操作仍会分别检查权限。`
+            : `需求已整理。\n\n${summary}\n\n当前会话已进入人工处理状态，因此没有重复创建服务请求。`;
         } else {
           await setConversationCollectorState({
             conversationId: item.conversationId,
@@ -879,6 +1250,13 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         replyText,
         senderDisplayName: item.representativeName,
         intent: completedCollector ? "intake_completed" : canceled ? "intake_canceled" : "intake_collecting",
+        turnTrace: buildCollectorTurnTrace({
+          state: completedState,
+          continuationAuthorized,
+          canceled,
+          completed: completedCollector,
+          serviceRequestId: completedServiceRequestId,
+        }),
         completeOutbox: false,
         countUsage: continuationAuthorized && !canceled,
         ...(entitlementReservation ? { entitlementReservation } : {}),
@@ -886,8 +1264,38 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       outputMessageId = completed.message.id;
       await deliverGenerationOutput({ config, item, text: replyText, outputMessageId });
       leaseGuard.assertOwned();
-      return { processed: true as const, runId: item.runId, status: completedCollector ? "completed" as const : "waiting_input" as const };
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: completedCollector || canceled
+          ? "completed" as const
+          : "waiting_input" as const,
+      };
     }
+
+    const primaryComputeRequest = parsedRequests[0];
+    const plan = createConversationPlan({
+      text: item.userText,
+      channel: "private_chat",
+      representative: policyPinnedRepresentative,
+      usage: effectiveUsage,
+      ...(primaryComputeRequest
+        ? {
+            proposedAction: {
+              target: `compute:${primaryComputeRequest.capability}`,
+              input: {
+                source: "current_user_message",
+                capability: primaryComputeRequest.capability,
+                displayTarget: primaryComputeRequest.displayTarget,
+              },
+              requiredCapabilities: [primaryComputeRequest.capability],
+              ...(primaryComputeRequest.estimatedCostCents !== undefined
+                ? { estimatedCost: primaryComputeRequest.estimatedCostCents }
+                : {}),
+            },
+          }
+        : {}),
+    });
 
     if (
       parsedRequests.length
@@ -902,7 +1310,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     }
 
     if (parsedRequests.length) {
-      const computeReply = await processPublicWebComputeRequest({
+      const computeReply = await processConversationComputeRequest({
         item,
         setup,
         leaseGuard,
@@ -921,6 +1329,26 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           approvalId: computeReply.approvalId,
           replyText: computeReply.text,
           senderDisplayName: item.representativeName,
+          turnTrace: buildConversationTurnTrace(
+            {
+              ...plan,
+              billingDecision: {
+                decision: "no_charge",
+                billable: false,
+                reason: "Waiting for approval does not consume conversation usage.",
+              },
+            },
+            (action) => ({
+              actionId: action.id,
+              status: "waiting_approval",
+              summary: "The tool action is blocked pending Owner approval.",
+              output: { approvalId: computeReply.approvalId! },
+            }),
+            () => ({
+              decision: "ask",
+              reason: "The Compute policy requires Owner approval before execution.",
+            }),
+          ),
         });
         return {
           processed: true as const,
@@ -938,6 +1366,36 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         replyText: computeReply.text,
         senderDisplayName: item.representativeName,
         intent: "compute",
+        turnTrace: buildConversationTurnTrace(
+          {
+            ...plan,
+            billingDecision: computeReply.billable && !persistedRequest
+              ? {
+                  decision: "allow_entitlement",
+                  billable: true,
+                  reason: "A governed Compute service step completed successfully.",
+                }
+              : {
+                  decision: "no_charge",
+                  billable: false,
+                  reason: "The Compute step did not produce a newly billable completion.",
+                },
+          },
+          (action) => ({
+            actionId: action.id,
+            status: computeReply.billable ? "completed" : "failed",
+            summary: computeReply.billable
+              ? "The governed Compute action completed."
+              : "The governed Compute action did not complete a billable service step.",
+            ...(computeReply.attachments?.length
+              ? { output: { attachments: computeReply.attachments } }
+              : {}),
+          }),
+          () => ({
+            decision: "allow",
+            reason: "The Compute broker authorized the executed capability.",
+          }),
+        ),
         ...(computeReply.attachments?.length ? { attachments: computeReply.attachments } : {}),
         completeOutbox: false,
         countUsage: computeReply.billable && !persistedRequest,
@@ -957,25 +1415,75 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       };
     }
 
-    const recentTurns = await loadGenerationRecentTurns({
-      representativeId: setup.id,
-      conversationId: item.conversationId,
-      beforeMessageId: item.inputMessageId,
-    });
-    const plan = createConversationPlan({
-      text: item.userText,
-      channel: "private_chat",
-      representative: policyPinnedRepresentative,
-      usage: effectiveUsage,
-    });
+    if ((plan.actions ?? []).some((action) => action.kind === "execute_tool")) {
+      const replyText = "当前请求匹配到执行能力，但系统无法形成完整且安全的执行计划，因此没有调用工具。请补充希望完成的结果和必要输入后重试。";
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText,
+        senderDisplayName: item.representativeName,
+        intent: "compute_planning_failed",
+        turnTrace: buildConversationTurnTrace(plan, (action) => ({
+          actionId: action.id,
+          status: "failed",
+          summary: "No complete governed execution plan was produced; no tool was called.",
+        })),
+        countUsage: false,
+        completeOutbox: false,
+        ...(entitlementReservation ? { entitlementReservation } : {}),
+      });
+      outputMessageId = completed.message.id;
+      await deliverGenerationOutput({ config, item, text: replyText, outputMessageId });
+      leaseGuard.assertOwned();
+      return { processed: true as const, runId: item.runId, status: "completed" as const };
+    }
+
     const subagent = resolveConversationSubagent(plan);
     if (plan.disposition === "collect" && shouldStartStructuredCollector(plan)) {
-      const collector = beginStructuredCollector({ plan, channel: "private_chat" });
+      const publicMaterials = await selectPublicMaterialDeliveries(
+        policyPinnedRepresentative,
+        plan,
+        item.userText,
+      );
+      const collector = beginStructuredCollector({
+        plan,
+        channel: "private_chat",
+      });
       await setConversationCollectorState({
         conversationId: item.conversationId,
         collectorState: collector,
       });
-      const replyText = `${formatStructuredCollectorPrompt(collector)}\n\n如需中止，请发送“取消”。`;
+      const replyText = [
+        publicMaterials.length || (plan.actions ?? []).some((action) => action.kind === "deliver_public_material")
+          ? renderPublicMaterialDeliveries(publicMaterials)
+          : null,
+        formatStructuredCollectorPrompt(collector),
+        "如需中止，请发送“取消”。",
+      ].filter(Boolean).join("\n\n");
+      const turnTrace = buildConversationTurnTrace(plan, (action) => {
+        if (action.kind === "deliver_public_material") {
+          return {
+            actionId: action.id,
+            status: publicMaterials.length ? "completed" : "deferred",
+            summary: publicMaterials.length
+              ? "Published public-material links were added to the reply."
+              : "No published public-material URL was available.",
+            ...(publicMaterials.length
+              ? { output: { materials: publicMaterials } }
+              : {}),
+          };
+        }
+        return {
+          actionId: action.id,
+          status: action.kind === "collect_request_description"
+            ? "waiting_input"
+            : "deferred",
+          summary: action.kind === "collect_request_description"
+            ? "The conversation is waiting for one request description."
+            : "Service-request creation is deferred until intake completes.",
+        };
+      });
       const completed = await completeInlineGenerationRun({
         conversationId: item.conversationId,
         runId: item.runId,
@@ -983,8 +1491,9 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         replyText,
         senderDisplayName: item.representativeName,
         intent: plan.intent,
+        turnTrace,
         completeOutbox: false,
-        countUsage: continuationAuthorized,
+        countUsage: isConversationPlanBillable(plan) && continuationAuthorized,
         ...(entitlementReservation ? { entitlementReservation } : {}),
       });
       outputMessageId = completed.message.id;
@@ -992,6 +1501,20 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       leaseGuard.assertOwned();
       return { processed: true as const, runId: item.runId, status: "waiting_input" as const };
     }
+    const operationalContext = plan.disposition === "answer"
+      ? await loadConversationOperationalContext({
+          representativeId: setup.id,
+          conversationId: item.conversationId,
+          ...(item.audienceIdentityId
+            ? { audienceIdentityId: item.audienceIdentityId }
+            : {}),
+        })
+      : null;
+    const recentTurns = await loadGenerationRecentTurns({
+      representativeId: setup.id,
+      conversationId: item.conversationId,
+      beforeMessageId: item.inputMessageId,
+    });
     const recalled = plan.disposition === "answer"
       ? await recallRepresentativeContext({
           representativeSlug: item.representativeSlug,
@@ -1040,6 +1563,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         recalled: ledgerBackedRecalledItems,
         recentTurns,
         collectorState: null,
+        operationalContext,
       });
       leaseGuard.assertOwned();
       if (generated.ok) {
@@ -1076,6 +1600,74 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       }
     }
 
+    const publicMaterials = await selectPublicMaterialDeliveries(
+      policyPinnedRepresentative,
+      plan,
+      item.userText,
+    );
+    if ((plan.actions ?? []).some((action) => action.kind === "deliver_public_material")) {
+      replyText = [
+        replyText,
+        renderPublicMaterialDeliveries(publicMaterials),
+      ].filter(Boolean).join("\n\n");
+    }
+    const turnTrace = buildConversationTurnTrace(plan, (action) => {
+      const authorization = authorizeConversationAction(action);
+      if (authorization.decision === "deny") {
+        return {
+          actionId: action.id,
+          status: "denied",
+          summary: authorization.reason,
+        };
+      }
+      if (authorization.decision === "ask") {
+        return {
+          actionId: action.id,
+          status: "waiting_approval",
+          summary: authorization.reason,
+        };
+      }
+      if (action.kind === "deliver_public_material") {
+        return {
+          actionId: action.id,
+          status: publicMaterials.length ? "completed" : "deferred",
+          summary: publicMaterials.length
+            ? "Published public-material links were added to the reply."
+            : "No published public-material URL was available.",
+          ...(publicMaterials.length
+            ? { output: { materials: publicMaterials } }
+            : {}),
+        };
+      }
+      if (action.kind === "answer_public_information") {
+        return {
+          actionId: action.id,
+          status: "completed",
+          summary: runtimeOutcome?.mode === "fallback"
+            ? "A fail-closed answer was produced without unsupported factual claims."
+            : "A grounded public answer was produced.",
+        };
+      }
+      if (action.kind === "request_human_handoff") {
+        return {
+          actionId: action.id,
+          status: "completed",
+          summary: "A human-handoff request will be created atomically with the reply.",
+        };
+      }
+      if (action.kind === "refuse_unsafe_request") {
+        return {
+          actionId: action.id,
+          status: "completed",
+          summary: "The unsafe request was refused with a safe alternative.",
+        };
+      }
+      return {
+        actionId: action.id,
+        status: "deferred",
+        summary: "The action was not eligible for inline execution.",
+      };
+    });
     const requestHandoff = plan.disposition === "handoff";
     const completed = await completeInlineGenerationRun({
       conversationId: item.conversationId,
@@ -1084,8 +1676,9 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       replyText,
       senderDisplayName: item.representativeName,
       intent: plan.intent,
+      turnTrace,
       completeOutbox: false,
-      countUsage: continuationAuthorized,
+      countUsage: isConversationPlanBillable(plan) && continuationAuthorized,
       ...(requestHandoff
         ? {
             humanHandoff: {
@@ -1103,32 +1696,6 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       ...runtime,
     });
     outputMessageId = completed.message.id;
-
-    if (plan.disposition === "collect") {
-      leaseGuard.assertOwned();
-      await ensureConversationLeadAndHandoff({
-        conversationId: item.conversationId,
-        reason: "Qualified conversation intent",
-        summary: item.userText.slice(0, 600),
-        kind: plan.intent,
-        priority: 50,
-        source: item.channel,
-        requestHandoff: false,
-      });
-      await createConversationServiceRequest({
-        representativeId: setup.id,
-        representativeVersionId: item.representativeVersionId,
-        contactId: item.contactId,
-        conversationId: item.conversationId,
-        ...(item.episodeId ? { episodeId: item.episodeId } : {}),
-        inputMessageId: item.inputMessageId,
-        intent: plan.intent,
-        objective: item.userText,
-        desiredOutcome: plan.responseOutline.join(" "),
-        priority: 50,
-      });
-      leaseGuard.assertOwned();
-    }
 
     leaseGuard.assertOwned();
     await deliverGenerationOutput({
@@ -1455,7 +2022,7 @@ function renderUserCorrectableDelegationFailure(errorMessage: string) {
   return null;
 }
 
-async function processPublicWebComputeRequest(input: {
+async function processConversationComputeRequest(input: {
   item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
   setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>;
   leaseGuard: ReturnType<typeof startGenerationLeaseHeartbeat>;
@@ -1588,7 +2155,7 @@ async function processPublicWebComputeRequest(input: {
       delegationTaskStepId: delegation.step.id,
       subagentId: subagent.id,
       requestedCapabilities: [input.parsed.capability],
-      reason: `web:${input.parsed.capability}`,
+      reason: `${input.item.channel}:${input.parsed.capability}`,
       requestedBaseImage: input.setup.compute.baseImage,
     });
     input.leaseGuard.assertOwned();

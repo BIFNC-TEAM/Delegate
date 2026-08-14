@@ -58,6 +58,34 @@ describe("Telegram conversation platform mode", () => {
     );
   });
 
+  it("keeps an active structured collector ahead of inline compute parsing", () => {
+    const source = readFileSync(
+      new URL("../src/telegram-bot-runtime.ts", import.meta.url),
+      "utf8",
+    );
+    const handlerSource = source.slice(source.indexOf('bot.on("message:text"'));
+
+    expect(handlerSource.indexOf("conversationContext?.collectorState")).toBeGreaterThan(-1);
+    expect(handlerSource.indexOf("conversationContext?.collectorState")).toBeLessThan(
+      handlerSource.indexOf("inlineComputeRequest && conversationContext"),
+    );
+  });
+
+  it("completes Telegram intake through the shared atomic transaction", () => {
+    const source = readFileSync(
+      new URL("../src/runtime-store.ts", import.meta.url),
+      "utf8",
+    );
+    const submissionSource = source.slice(
+      source.indexOf("export async function submitStructuredCollector"),
+      source.indexOf("async function enqueueHandoffFollowUpWorkflowTx"),
+    );
+
+    expect(submissionSource).toContain("completeConversationIntake");
+    expect(submissionSource).not.toContain("intakeSubmission.create");
+    expect(submissionSource).not.toContain("prisma.$transaction");
+  });
+
   it("removes new Stars invoices and still checks compute channel availability", () => {
     const source = readFileSync(
       new URL("../src/telegram-bot-runtime.ts", import.meta.url),
@@ -114,6 +142,15 @@ describe("Telegram conversation platform mode", () => {
         TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
       }),
     ).toThrow("Production Telegram traffic must use");
+    expect(() =>
+      resolveTelegramConversationPlatformMode({
+        TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
+      }),
+    ).toThrow("diagnostics-only");
+    expect(resolveTelegramConversationPlatformMode({
+      TELEGRAM_CONVERSATION_PLATFORM_MODE: "shadow",
+      TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED: "true",
+    })).toBe("shadow");
   });
 
 });

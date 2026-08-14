@@ -23,7 +23,7 @@ Implement the following end to end:
 
 1. Dashboard setup editor
 - representative basics: display name, owner name, tagline, tone, languages, group activation, public / human-in-loop toggles
-- conversation contract: free reply limit, free scope, paywalled intents, handoff window
+- pricing and handoff: free reply limit, service products, handoff prompt, and review window
 - handoff prompt
 - pricing plans for `Free / Pass / Deep Help / Sponsor`
 - knowledge pack editing for identity summary, FAQ, materials, and policies

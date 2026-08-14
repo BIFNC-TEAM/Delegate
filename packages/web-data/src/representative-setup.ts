@@ -8,6 +8,7 @@ import {
   knowledgeDocumentSchema,
   representativeSkillSchema,
   skillPackSchema,
+  normalizeRepresentativeHandoffPrompt,
   type GroupActivation as DomainGroupActivation,
   type KnowledgeDocument,
   type Representative,
@@ -143,7 +144,10 @@ const editableKnowledgeDocumentSchema = z.object({
   title: z.string().trim().min(1),
   kind: knowledgeDocumentKindSchema,
   summary: z.string().trim().min(1),
-  url: z.string().url().optional(),
+  url: z.string().url().refine((value) => {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  }, "Public knowledge URLs must use HTTP or HTTPS.").optional(),
 });
 
 const representativeSetupUpdateSchema = z.object({
@@ -218,6 +222,7 @@ export type RepresentativeSetupSnapshot = Pick<
   knowledgePackRevision: number;
   publicMode: boolean;
   humanInLoop: boolean;
+  handoffAccessMode: "FREE" | "PACKAGE_REQUIRED";
   compute: {
     enabled: boolean;
     defaultPolicyMode: "allow" | "ask" | "deny";
@@ -1454,6 +1459,7 @@ function serializeRepresentativeSetup(
     groupActivation: mapGroupActivationFromDb(representative.groupActivation),
     publicMode: representative.publicMode,
     humanInLoop: representative.humanInLoop,
+    handoffAccessMode: representative.handoffAccessMode,
     skills: parseRepresentativeSkills(representative.allowedSkills),
     skillPacks: representative.skillPackLinks.flatMap((link) => {
       const install = link.workspaceInstall;
@@ -1489,7 +1495,7 @@ function serializeRepresentativeSetup(
           ? { verificationTier: release.verificationTier }
           : {}),
         capabilityTags: parseStringArray(release.capabilityTags, []),
-        executesCode: false,
+        executesCode: release.executesCode,
         enabled: true,
         installStatus: "installed",
       });
@@ -1513,7 +1519,9 @@ function serializeRepresentativeSetup(
       freeReplyLimit: representative.freeReplyLimit,
       handoffWindowHours: representative.handoffWindowHours,
     },
-    handoffPrompt: representative.handoffPrompt || demoRepresentative.handoffPrompt,
+    handoffPrompt: normalizeRepresentativeHandoffPrompt(
+      representative.handoffPrompt || demoRepresentative.handoffPrompt,
+    ),
     compute: {
       enabled: representative.computeEnabled,
       defaultPolicyMode: mapPolicyDecisionFromDb(representative.computeDefaultPolicyMode),
@@ -1601,6 +1609,7 @@ export function applyRepresentativeVersionSnapshot(
     // Commerce controls are live owner settings. They intentionally are not
     // pinned to the published content version.
     humanInLoop: current.humanInLoop,
+    handoffAccessMode: current.handoffAccessMode,
     skills: Array.isArray(governance?.allowedSkills) ? parsedSkills : [],
     skillPacks: parsedSkillPacks,
     knowledgePack: knowledge
@@ -1627,8 +1636,9 @@ export function applyRepresentativeVersionSnapshot(
           freeReplyLimit: current.contract.freeReplyLimit,
         }
       : current.contract,
-    handoffPrompt:
+    handoffPrompt: normalizeRepresentativeHandoffPrompt(
       readSnapshotString(conversation?.handoffPrompt) ?? current.handoffPrompt,
+    ),
     compute: effectiveCompute,
     delegation: effectiveDelegation,
   };
@@ -2190,6 +2200,7 @@ function getOrCreateDemoFallbackSetupSnapshot(): RepresentativeSetupSnapshot {
       groupActivation: demoRepresentative.groupActivation,
       publicMode: true,
       humanInLoop: true,
+      handoffAccessMode: "FREE",
       skills: [...demoRepresentative.skills],
       skillPacks: demoRepresentative.skillPacks
         .filter((pack) => pack.enabled && !pack.executesCode)
@@ -2310,6 +2321,7 @@ function buildRepresentativeTemplate(params: {
     groupActivation: demoRepresentative.groupActivation,
     publicMode: false,
     humanInLoop: true,
+    handoffAccessMode: "FREE",
     skills: [...demoRepresentative.skills],
     skillPacks: demoRepresentative.skillPacks
       .filter((pack) => pack.enabled && !pack.executesCode)
@@ -2324,7 +2336,7 @@ function buildRepresentativeTemplate(params: {
       freeReplyLimit: demoRepresentative.contract.freeReplyLimit,
       handoffWindowHours: demoRepresentative.contract.handoffWindowHours,
     },
-    handoffPrompt: `${safeOwnerName} 的真人评估入口已经开启。请留下你的身份、需求摘要、预算区间、目标时间，以及为什么需要真人接手。`,
+    handoffPrompt: `${safeOwnerName} 的真人评估入口已经开启。请简要描述你的需求；真人接手后会再确认联系人、预算和时间等必要信息。`,
     compute: cloneComputeSetup(defaultComputeSetup),
     delegation: { ...defaultDelegationSetup },
   };

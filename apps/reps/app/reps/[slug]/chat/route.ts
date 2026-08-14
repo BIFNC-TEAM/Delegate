@@ -13,6 +13,9 @@ import {
   getPublicConversationHistory,
   getPublicRepresentativeRuntime,
   resolvePublicAudienceWalletExternalUserId,
+  enforcePublicChatNetworkAdmission,
+  enforcePublicChatPrincipalAdmission,
+  PublicChatRateLimitError,
   resolveWebAudienceContact,
   resolveWebAudienceConversation,
   ServiceCreditRequiredError,
@@ -89,6 +92,11 @@ export async function POST(
 ) {
   const { slug } = await params;
   try {
+    if (process.env.DATABASE_URL?.trim()) {
+      await enforcePublicChatNetworkAdmission({
+        clientAddress: resolvePublicChatClientAddress(request),
+      });
+    }
     const runtime = await getPublicRepresentativeRuntime(slug);
     if (runtime.status !== "available") return publicRuntimeError(runtime.status);
     const body = normalizePublicChatRequest(await request.json());
@@ -112,6 +120,13 @@ export async function POST(
       representativeSlug: slug,
       cookieStore: await cookies(),
     });
+
+    if (process.env.DATABASE_URL?.trim()) {
+      await enforcePublicChatPrincipalAdmission({
+        representativeId: runtime.setup.id,
+        audienceIdentityId: principal.audienceIdentityId,
+      });
+    }
 
     try {
       const contact = await resolveWebAudienceContact({
@@ -261,6 +276,18 @@ export async function POST(
     setPublicAudienceSessionCookie(response, request, slug, sessionState);
     return response;
   } catch (error) {
+    if (error instanceof PublicChatRateLimitError) {
+      const response = privateJson(
+        {
+          error: "Too many chat requests. Please try again later.",
+          code: "public_chat_rate_limited",
+          scope: error.scope,
+        },
+        429,
+      );
+      response.headers.set("Retry-After", String(error.retryAfterSeconds));
+      return response;
+    }
     const principalError = publicPrincipalErrorResponse(error);
     if (principalError) return principalError;
     const reconciliationError = walletReconciliationErrorResponse(error);
@@ -274,6 +301,22 @@ export async function POST(
       },
     );
   }
+}
+
+export function resolvePublicChatClientAddress(request: Request) {
+  const configuredHeader = process.env.PUBLIC_CHAT_CLIENT_IP_HEADER
+    ?.trim()
+    .toLowerCase();
+  const candidates = configuredHeader
+    ? [configuredHeader]
+    : ["cf-connecting-ip", "x-real-ip"];
+  for (const header of candidates) {
+    const raw = request.headers.get(header)?.split(",", 1)[0]?.trim();
+    if (raw && raw.length <= 128 && /^[0-9a-f:.]+$/i.test(raw)) return raw;
+  }
+  // Fail closed to one shared bucket when the deployment has not configured a
+  // trusted proxy header. Never trust arbitrary X-Forwarded-For by default.
+  return "unresolved";
 }
 
 async function derivePublicWalletUsage(input: {

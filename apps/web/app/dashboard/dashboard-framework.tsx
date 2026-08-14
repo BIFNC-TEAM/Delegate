@@ -458,8 +458,8 @@ function DashboardRepresentativeOnboarding({
           </h3>
           <p>
             {zh
-              ? "创建后会直接进入六步草稿配置；在你完成发布前，不会生成公开页面。"
-              : "Creation opens the six-step draft setup. Nothing becomes public until you publish it."}
+              ? "创建后会直接进入五步草稿配置；在你完成发布前，不会生成公开页面。"
+              : "Creation opens the five-step draft setup. Nothing becomes public until you publish it."}
           </p>
           <div className="dashboard-v2-page-actions">
             <Link

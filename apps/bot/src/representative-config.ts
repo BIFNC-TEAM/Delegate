@@ -1,6 +1,7 @@
 import {
   demoRepresentative,
   knowledgeDocumentSchema,
+  normalizeRepresentativeHandoffPrompt,
   representativeSkillSchema,
   type KnowledgeDocument,
   type Representative,
@@ -90,7 +91,9 @@ function serializeRepresentative(representative: RepresentativeConfigRecord): Re
       freeReplyLimit: representative.freeReplyLimit,
       handoffWindowHours: representative.handoffWindowHours,
     },
-    handoffPrompt: representative.handoffPrompt || demoRepresentative.handoffPrompt,
+    handoffPrompt: normalizeRepresentativeHandoffPrompt(
+      representative.handoffPrompt || demoRepresentative.handoffPrompt,
+    ),
   };
 }
 

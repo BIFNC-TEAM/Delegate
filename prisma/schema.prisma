@@ -1914,6 +1914,17 @@ model PaymentProviderOperationGate {
   @@index([nextAllowedAt])
 }
 
+model PublicChatRateLimitBucket {
+  scopeKey       String   @id @db.VarChar(64)
+  count          Int      @default(0)
+  windowStartsAt DateTime
+  windowEndsAt   DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([windowEndsAt])
+}
+
 model AgentUsageCharge {
   id                   String                     @id @default(cuid())
   userAgentWalletId    String?

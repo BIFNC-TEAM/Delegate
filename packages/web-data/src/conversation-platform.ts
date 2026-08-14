@@ -2703,6 +2703,7 @@ export type ClaimedGenerationWorkItem = {
   contactId: string;
   audienceIdentityId?: string;
   controlState: string;
+  collectorState?: unknown;
   episodeId?: string;
   inputMessageId: string;
   userText: string;
@@ -3903,6 +3904,9 @@ export async function claimNextGenerationWorkItem(
         ? { audienceIdentityId: run.conversation.audienceIdentityId }
         : {}),
       controlState: run.conversation.state,
+      ...(run.conversation.collectorState !== null
+        ? { collectorState: run.conversation.collectorState }
+        : {}),
       ...(run.episodeId ? { episodeId: run.episodeId } : {}),
       inputMessageId: run.inputMessageId,
       userText: run.inputMessage.text || "",
@@ -7662,6 +7666,31 @@ export async function ensureConversationLeadAndHandoff(input: {
   });
 }
 
+export async function setConversationCollectorState(input: {
+  conversationId: string;
+  collectorState: Prisma.InputJsonValue;
+}) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
+    return tx.conversation.update({
+      where: { id: input.conversationId },
+      data: { collectorState: input.collectorState, state: "COLLECTING" },
+    });
+  });
+}
+
+export async function clearConversationCollectorState(input: {
+  conversationId: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
+    return tx.conversation.update({
+      where: { id: input.conversationId },
+      data: { collectorState: Prisma.JsonNull, state: "ACTIVE" },
+    });
+  });
+}
+
 async function ensureConversationLeadAndHandoffInTransaction(
   tx: Prisma.TransactionClient,
   input: {
@@ -8465,12 +8494,9 @@ function buildRepresentativeSnapshot(representative: {
   groupActivation: string;
   languages: Prisma.JsonValue;
   freeReplyLimit: number;
-  freeScope: Prisma.JsonValue;
-  paywalledIntents: Prisma.JsonValue;
   handoffWindowHours: number;
   handoffPrompt: string;
   allowedSkills: Prisma.JsonValue;
-  actionGate: Prisma.JsonValue;
   computeEnabled: boolean;
   computeDefaultPolicyMode: string;
   computeBaseImage: string;
@@ -8620,14 +8646,11 @@ function buildRepresentativeSnapshot(representative: {
     groupActivation: representative.groupActivation.toLowerCase(),
     conversation: {
       freeReplyLimit: representative.freeReplyLimit,
-      freeScope: representative.freeScope,
-      paywalledIntents: representative.paywalledIntents,
       handoffWindowHours: representative.handoffWindowHours,
       handoffPrompt: representative.handoffPrompt,
     },
     governance: {
       allowedSkills: representative.allowedSkills,
-      actionGate: representative.actionGate,
     },
     compute: {
       enabled: representative.computeEnabled,

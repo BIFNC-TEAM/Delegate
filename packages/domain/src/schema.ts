@@ -44,26 +44,6 @@ export const groupActivationSchema = z.enum(["mention_only", "reply_or_mention",
 
 export const planTierSchema = z.enum(["free", "pass", "deep_help", "sponsor"]);
 
-export const gateModeSchema = z.enum(["allow", "ask_first", "deny"]);
-
-export const actionKeySchema = z.enum([
-  "answer_faq",
-  "collect_lead",
-  "collect_quote_request",
-  "collect_scheduling_request",
-  "deliver_material",
-  "request_handoff",
-  "charge_stars",
-  "issue_refund",
-  "offer_discount",
-  "send_sensitive_material",
-  "modify_owner_calendar",
-  "run_local_command",
-  "access_private_memory",
-  "access_private_files",
-  "send_outbound_campaign",
-]);
-
 export const inquiryIntentSchema = z.enum([
   "faq",
   "collaboration",
@@ -92,8 +72,6 @@ export const conversationContractSchema = z.object({
   // Zero is the explicit no-trial boundary used by CREDITS_ONLY and is also a
   // valid trial configuration before an owner switches access modes.
   freeReplyLimit: z.number().int().nonnegative(),
-  freeScope: z.array(inquiryIntentSchema),
-  paywalledIntents: z.array(inquiryIntentSchema),
   handoffWindowHours: z.number().int().positive(),
 });
 
@@ -103,8 +81,6 @@ export const knowledgePackSchema = z.object({
   materials: z.array(knowledgeDocumentSchema),
   policies: z.array(knowledgeDocumentSchema),
 });
-
-export const actionGateSchema = z.record(actionKeySchema, gateModeSchema);
 
 export const skillPackSchema = z.object({
   id: z.string(),
@@ -137,7 +113,6 @@ export const representativeSchema = z.object({
   knowledgePack: knowledgePackSchema,
   contract: conversationContractSchema,
   handoffPrompt: z.string(),
-  actionGate: actionGateSchema,
 });
 
 export type Channel = z.infer<typeof channelSchema>;
@@ -147,8 +122,6 @@ export type RepresentativeSkill = z.infer<typeof representativeSkillSchema>;
 export type SkillPackSource = z.infer<typeof skillPackSourceSchema>;
 export type GroupActivation = z.infer<typeof groupActivationSchema>;
 export type PlanTier = z.infer<typeof planTierSchema>;
-export type GateMode = z.infer<typeof gateModeSchema>;
-export type ActionKey = z.infer<typeof actionKeySchema>;
 export type InquiryIntent = z.infer<typeof inquiryIntentSchema>;
 export type ConversationContract = z.infer<typeof conversationContractSchema>;
 export type KnowledgePack = z.infer<typeof knowledgePackSchema>;

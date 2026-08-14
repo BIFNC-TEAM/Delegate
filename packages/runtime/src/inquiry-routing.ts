@@ -1,5 +1,4 @@
 import type {
-  ActionKey,
   AudienceRole,
   Channel,
   InquiryIntent,
@@ -7,27 +6,50 @@ import type {
   Representative,
 } from "@delegate/domain";
 
-import { evaluateActionGate } from "./action-gate";
-
 export type ConversationUsage = {
   freeRepliesUsed: number;
   passUnlocked: boolean;
   deepHelpUnlocked: boolean;
 };
 
-export type ConversationStep =
+export type ConversationGoal =
+  | "get_information"
+  | "get_material"
+  | "provide_information"
+  | "create_request"
+  | "perform_action"
+  | "request_human"
+  | "unsafe_request"
+  | "unknown";
+
+export type ConversationDisposition =
   | "answer"
-  | "collect_intake"
-  | "offer_paid_unlock"
+  | "collect"
+  | "payment_required"
   | "handoff"
-  | "deny"
-  | "ask_owner";
+  | "refuse";
+
+export type ConversationActionKind =
+  | "answer_public_information"
+  | "collect_contact_and_requirements"
+  | "deliver_public_material"
+  | "create_service_request"
+  | "request_human_handoff"
+  | "refuse_unsafe_request";
+
+export type PlannedConversationAction = {
+  id: string;
+  kind: ConversationActionKind;
+  status: "planned";
+  sideEffect: "none" | "internal_record" | "human_queue";
+};
 
 export type ConversationPlan = {
+  goal: ConversationGoal;
   intent: InquiryIntent;
   audienceRole: AudienceRole;
-  action: ActionKey;
-  nextStep: ConversationStep;
+  disposition: ConversationDisposition;
+  actions: PlannedConversationAction[];
   suggestedPlan?: PlanTier;
   reasons: string[];
   responseOutline: string[];
@@ -40,499 +62,158 @@ type PlanInput = {
   usage: ConversationUsage;
 };
 
-const collaborationKeywords = [
-  "合作",
-  "cooperate",
-  "partnership",
-  "partner",
-  "bd",
-  "collab",
-  "业务合作",
-  "agency",
-];
-
-const pricingKeywords = [
-  "价格",
-  "报价",
-  "多少钱",
-  "quote",
-  "pricing",
-  "budget",
-  "费用",
-];
-
-const materialsKeywords = [
-  "资料",
-  "案例",
-  "材料",
-  "介绍",
-  "deck",
-  "case study",
-  "portfolio",
-  "demo",
-];
-
-const schedulingKeywords = [
-  "预约",
-  "时间",
-  "schedule",
-  "calendar",
-  "meeting",
-  "call",
-  "book",
-];
-
-const handoffKeywords = [
-  "真人",
-  "本人",
-  "founder",
-  "owner",
-  "升级",
-  "转接",
-  "speak to",
-  "talk to",
-];
-
-const refundKeywords = ["退款", "refund", "chargeback"];
-
-const discountKeywords = ["折扣", "优惠", "discount", "deal"];
-
-const candidateKeywords = [
-  "招聘",
-  "求职",
-  "简历",
-  "candidate",
-  "job",
-  "hire",
-  "resume",
-];
-
-const mediaKeywords = [
-  "采访",
-  "媒体",
-  "podcast",
-  "press",
-  "记者",
-  "newsletter",
-];
-
-const restrictedKeywords = [
-  "密码",
-  "token",
-  "ssh",
-  "服务器",
-  "本地文件",
-  "private memory",
-  "登录",
-  "账号密码",
-];
-
-const intentToAction: Record<InquiryIntent, ActionKey> = {
-  faq: "answer_faq",
-  collaboration: "collect_lead",
-  pricing: "collect_quote_request",
-  materials: "deliver_material",
-  scheduling: "collect_scheduling_request",
-  handoff: "request_handoff",
-  refund: "issue_refund",
-  discount: "offer_discount",
-  candidate: "collect_lead",
-  media: "collect_lead",
-  support: "request_handoff",
-  restricted: "access_private_files",
-  unknown: "answer_faq",
-};
+const keywords = {
+  collaboration: ["合作", "cooperate", "partnership", "partner", "bd", "collab", "业务合作", "agency"],
+  pricing: ["价格", "报价", "多少钱", "quote", "pricing", "budget", "费用"],
+  materials: ["资料", "案例", "材料", "介绍", "deck", "case study", "portfolio", "demo"],
+  scheduling: ["预约", "时间", "schedule", "calendar", "meeting", "call", "book"],
+  handoff: ["真人", "本人", "founder", "owner", "升级", "转接", "speak to", "talk to"],
+  refund: ["退款", "refund", "chargeback"],
+  discount: ["折扣", "优惠", "discount", "deal"],
+  candidate: ["招聘", "求职", "简历", "candidate", "job", "hire", "resume"],
+  media: ["采访", "媒体", "podcast", "press", "记者", "newsletter"],
+  restricted: ["密码", "token", "ssh", "服务器", "本地文件", "private memory", "登录", "账号密码"],
+} as const;
 
 export function classifyInquiry(text: string): InquiryIntent {
   const normalized = text.toLowerCase();
-
-  if (matchesAny(normalized, restrictedKeywords)) {
-    return "restricted";
-  }
-
-  if (matchesAny(normalized, refundKeywords)) {
-    return "refund";
-  }
-
-  if (matchesAny(normalized, discountKeywords)) {
-    return "discount";
-  }
-
-  if (matchesAny(normalized, handoffKeywords)) {
-    return "handoff";
-  }
-
-  if (matchesAny(normalized, pricingKeywords)) {
-    return "pricing";
-  }
-
-  if (matchesAny(normalized, collaborationKeywords)) {
-    return "collaboration";
-  }
-
-  if (matchesAny(normalized, schedulingKeywords)) {
-    return "scheduling";
-  }
-
-  if (matchesAny(normalized, materialsKeywords)) {
-    return "materials";
-  }
-
-  if (matchesAny(normalized, candidateKeywords)) {
-    return "candidate";
-  }
-
-  if (matchesAny(normalized, mediaKeywords)) {
-    return "media";
-  }
-
-  if (
-    normalized.includes("help") ||
-    normalized.includes("支持") ||
-    normalized.includes("问题") ||
-    normalized.includes("做什么") ||
-    normalized.includes("是什么") ||
-    normalized.includes("who are you")
-  ) {
-    return "faq";
-  }
-
+  const ordered: Array<[InquiryIntent, readonly string[]]> = [
+    ["restricted", keywords.restricted], ["refund", keywords.refund], ["discount", keywords.discount],
+    ["handoff", keywords.handoff], ["pricing", keywords.pricing], ["collaboration", keywords.collaboration],
+    ["scheduling", keywords.scheduling], ["materials", keywords.materials], ["candidate", keywords.candidate],
+    ["media", keywords.media],
+  ];
+  for (const [intent, values] of ordered) if (matchesAny(normalized, values)) return intent;
+  if (["help", "支持", "问题", "做什么", "是什么", "who are you"].some((value) => normalized.includes(value))) return "faq";
   return "unknown";
 }
 
 export function detectAudienceRole(text: string): AudienceRole {
   const normalized = text.toLowerCase();
-
-  if (matchesAny(normalized, candidateKeywords)) {
-    return "candidate";
-  }
-
-  if (matchesAny(normalized, mediaKeywords)) {
-    return "media";
-  }
-
-  if (matchesAny(normalized, collaborationKeywords) || matchesAny(normalized, pricingKeywords)) {
-    return "lead";
-  }
-
-  if (normalized.includes("community") || normalized.includes("群")) {
-    return "community";
-  }
-
-  if (normalized.includes("partner")) {
-    return "partner";
-  }
-
+  if (matchesAny(normalized, keywords.candidate)) return "candidate";
+  if (matchesAny(normalized, keywords.media)) return "media";
+  if (matchesAny(normalized, keywords.collaboration) || matchesAny(normalized, keywords.pricing)) return "lead";
+  if (normalized.includes("community") || normalized.includes("群")) return "community";
+  if (normalized.includes("partner")) return "partner";
   return "other";
 }
 
 export function createConversationPlan(input: PlanInput): ConversationPlan {
   const intent = classifyInquiry(input.text);
   const audienceRole = detectAudienceRole(input.text);
-  const action = intentToAction[intent];
-  const gate = evaluateActionGate(input.representative, action);
-  const reasons = [`Intent detected: ${intent}.`, gate.reason];
+  const goal = goalForIntent(intent);
+  const reasons = [`Goal detected: ${goal}.`, `Business label detected: ${intent}.`];
+  const makeAction = (kind: ConversationActionKind, sideEffect: PlannedConversationAction["sideEffect"] = "none"): PlannedConversationAction => ({
+    id: `${kind}:${intent}`,
+    kind,
+    status: "planned",
+    sideEffect,
+  });
 
-  if (gate.mode === "deny" || intent === "restricted") {
+  if (intent === "restricted") {
     return {
-      intent,
-      audienceRole,
-      action,
-      nextStep: "deny",
-      reasons,
-      responseOutline: [
-        "Explain that the representative only operates on public knowledge and safe workflows.",
-        "Refuse the request without implying private access is possible later.",
-        "Offer a safe alternative such as public materials or structured handoff.",
-      ],
+      goal, intent, audienceRole, disposition: "refuse",
+      actions: [makeAction("refuse_unsafe_request")], reasons,
+      responseOutline: ["拒绝访问私有系统、凭据或未授权数据。", "提供公开信息或人工接手等安全替代方案。"],
     };
   }
-
-  if (gate.mode === "ask_first") {
-    return {
-      intent,
-      audienceRole,
-      action,
-      nextStep: "ask_owner",
-      reasons,
-      suggestedPlan: "deep_help",
-      responseOutline: [
-        "Acknowledge the request.",
-        "Explain that this requires owner approval.",
-        "Collect the context needed for manual review.",
-      ],
-    };
-  }
-
-  const freeRepliesExhausted =
-    input.usage.freeRepliesUsed >= input.representative.contract.freeReplyLimit &&
-    !input.usage.passUnlocked &&
-    !input.usage.deepHelpUnlocked;
 
   if (intent === "handoff" || intent === "support") {
     return {
-      intent,
-      audienceRole,
-      action,
-      nextStep: "handoff",
-      ...(input.usage.deepHelpUnlocked ? {} : { suggestedPlan: "deep_help" as const }),
-      reasons: [...reasons, "Human review is explicitly allowed for this request type."],
-      responseOutline: [
-        "Confirm that a human handoff can be requested.",
-        "Collect identity, need, budget, and timing.",
-        "Promise only an inbox submission and a review window, not an immediate reply.",
-      ],
+      goal, intent, audienceRole, disposition: "handoff",
+      actions: [makeAction("collect_contact_and_requirements", "internal_record"), makeAction("request_human_handoff", "human_queue")],
+      ...(input.usage.deepHelpUnlocked ? {} : { suggestedPlan: "deep_help" as const }), reasons,
+      responseOutline: ["确认可提交人工接手请求。", "收集身份、目标、背景、时限和联系方式。", "只承诺进入队列，不承诺即时回复。"],
     };
   }
 
+  const freeRepliesExhausted = input.usage.freeRepliesUsed >= input.representative.contract.freeReplyLimit && !input.usage.passUnlocked && !input.usage.deepHelpUnlocked;
   if (freeRepliesExhausted) {
     return {
-      intent,
-      audienceRole,
-      action,
-      nextStep: "offer_paid_unlock",
-      suggestedPlan: suggestPlan(intent),
-      reasons: [...reasons, "Free quota is exhausted for this conversation."],
-      responseOutline: [
-        "State that the free conversation window has been used up.",
-        "Offer the smallest fitting paid plan.",
-        "Explain what additional depth unlocks.",
-      ],
+      goal, intent, audienceRole, disposition: "payment_required", actions: [],
+      suggestedPlan: suggestPlan(intent), reasons: [...reasons, "The configured free reply allowance is exhausted."],
+      responseOutline: ["说明当前免费额度已用完。", "展示当前价格目录中最小可用的继续方式。"],
     };
   }
 
-  if (
-    intent === "collaboration" ||
-    intent === "pricing" ||
-    intent === "scheduling" ||
-    intent === "refund" ||
-    intent === "discount" ||
-    intent === "candidate" ||
-    intent === "media"
-  ) {
+  if (intent === "materials") {
     return {
-      intent,
-      audienceRole,
-      action,
-      nextStep: "collect_intake",
-      ...(input.representative.contract.paywalledIntents.includes(intent)
-        ? { suggestedPlan: "pass" as const }
-        : {}),
-      reasons: [...reasons, "This request is best handled through structured intake."],
+      goal, intent, audienceRole, disposition: "answer",
+      actions: [makeAction("answer_public_information"), makeAction("deliver_public_material")], reasons,
+      responseOutline: ["从已授权公开资料中匹配内容。", "仅发送已发布的公开链接或附件。", "无法匹配时说明缺少资料。"],
+    };
+  }
+
+  if (["collaboration", "pricing", "scheduling", "refund", "discount", "candidate", "media"].includes(intent)) {
+    return {
+      goal, intent, audienceRole, disposition: "collect",
+      actions: [makeAction("collect_contact_and_requirements", "internal_record"), makeAction("create_service_request", "internal_record")],
+      reasons: [...reasons, "The request needs structured context before any commitment or external action."],
       responseOutline: buildIntakeOutline(intent, input.channel),
     };
   }
 
   return {
-    intent,
-    audienceRole,
-    action,
-    nextStep: "answer",
-    reasons,
-    responseOutline: [
-      "Answer from the public knowledge pack.",
-      "Stay within explicit scope and boundary wording.",
-      "Offer one concrete next action.",
-    ],
+    goal, intent, audienceRole, disposition: "answer",
+    actions: [makeAction("answer_public_information")], reasons,
+    responseOutline: ["仅根据经过授权的公开知识回答。", "缺少依据时明确说明。", "给出一个安全、具体的下一步。"],
   };
 }
 
-export function renderReplyPreview(
-  representative: Representative,
-  plan: ConversationPlan,
-): string {
+export function renderReplyPreview(representative: Representative, plan: ConversationPlan): string {
   const header = `${representative.name}\n${representative.tagline}`;
-
-  switch (plan.nextStep) {
-    case "deny":
-      return [
-        header,
-        "我只能使用公开知识和安全流程工作，不能访问私有文件、私有记忆、账号或本地环境。",
-        "如果你愿意，我可以继续提供公开资料，或帮你整理一份可人工评估的请求。",
-      ].join("\n\n");
-
-    case "ask_owner":
-      return [
-        header,
-        "这个请求触及折扣、退款、敏感材料或其他需要主人明确批准的事项。",
-        "请发送你的身份、具体诉求、背景和时间要求，我会整理成收件项提交人工评估。",
-      ].join("\n\n");
-
-    case "offer_paid_unlock":
-      return [
-        header,
-        `当前免费额度已用完。更适合你的下一步是 ${formatPlanName(plan.suggestedPlan)}。`,
-        "解锁后我可以继续深入追问、完成需求采集，并把上下文保留在同一段会话里。",
-      ].join("\n\n");
-
-    case "collect_intake":
-      return [
-        header,
-        "为了给你更准确的下一步，我需要先做一个简短 intake。",
-        plan.responseOutline
-          .map((line, index) => `${index + 1}. ${line}`)
-          .join("\n"),
-      ].join("\n\n");
-
-    case "handoff":
-      return [
-        header,
-        "我可以为你发起人工转接，但不会承诺立即得到本人回复。",
-        "请发送：你是谁、想解决什么、预算区间、希望何时推进、为什么需要真人接手。",
-      ].join("\n\n");
-
+  switch (plan.disposition) {
+    case "refuse": return [header, "我不能访问私有文件、账号、凭据或未授权环境。", "我可以继续提供已公开资料，或帮你整理人工接手请求。"].join("\n\n");
+    case "payment_required": return [header, `当前免费额度已用完。可选择 ${formatPlanName(plan.suggestedPlan)} 继续。`, "具体价格与权益以当前服务目录为准。"].join("\n\n");
+    case "collect": return [header, "我会先整理必要信息，再创建可跟踪的服务请求。", plan.responseOutline.map((line, index) => `${index + 1}. ${line}`).join("\n")].join("\n\n");
+    case "handoff": return [header, "我可以提交人工接手请求，但不会承诺立即回复。", "请发送：你的身份与联系方式、目标、背景、期望时间，以及需要真人处理的原因。"].join("\n\n");
     case "answer":
-    default:
-      {
-        const matchedKnowledge = selectPreviewKnowledge(representative, plan);
-        if (matchedKnowledge) {
-          return [
-            header,
-            representative.knowledgePack.identitySummary,
-            `我能根据公开资料回答：${matchedKnowledge.title}`,
-            matchedKnowledge.summary,
-            matchedKnowledge.url ? `相关链接：${matchedKnowledge.url}` : null,
-            "如果你需要更具体的合作判断、报价采集或预约意向，我也可以继续帮你做结构化 intake。",
-          ]
-            .filter(Boolean)
-            .join("\n\n");
-        }
-      }
-      return [
-        header,
-        representative.knowledgePack.identitySummary,
-        "如果你需要更具体的合作判断、报价采集或预约意向，我也可以继续帮你做结构化 intake。",
-      ].join("\n\n");
+    default: {
+      const knowledge = selectPreviewKnowledge(representative, plan);
+      return [header, representative.knowledgePack.identitySummary, knowledge ? `${knowledge.title}\n${knowledge.summary}${knowledge.url ? `\n${knowledge.url}` : ""}` : null, "还需要办理事项时，我可以继续收集需求并创建服务请求。"].filter(Boolean).join("\n\n");
+    }
   }
 }
 
-/**
- * Model-failure fallback for factual answer turns.
- *
- * This intentionally reads neither the Representative knowledge pack nor any
- * recalled context. Those sources may affect an answer only through their
- * governed execution paths, so an unavailable model must fail closed instead
- * of silently turning a snapshot preview into an unledgered factual reply.
- */
-export function renderFailClosedReplyPreview(
-  representative: Pick<Representative, "name">,
-  userText: string,
-): string {
-  const chinese = /\p{Script=Han}/u.test(userText);
-  return chinese
-    ? [
-        representative.name,
-        "当前无法完成基于已授权资料的回答，请稍后重试，或请求人工接管。",
-      ].join("\n\n")
-    : [
-        representative.name,
-        "I cannot complete an answer from authorized sources right now. Please try again later or request human support.",
-      ].join("\n\n");
+export function renderFailClosedReplyPreview(representative: Pick<Representative, "name">, userText: string): string {
+  return /\p{Script=Han}/u.test(userText)
+    ? `${representative.name}\n\n当前无法完成基于已授权资料的回答，请稍后重试，或请求人工接管。`
+    : `${representative.name}\n\nI cannot complete an answer from authorized sources right now. Please try again later or request human support.`;
 }
 
-function selectPreviewKnowledge(
-  representative: Representative,
-  plan: ConversationPlan,
-) {
-  const allKnowledge = [
-    ...representative.knowledgePack.faq,
-    ...representative.knowledgePack.materials,
-    ...representative.knowledgePack.policies,
-  ];
-  if (!allKnowledge.length) {
-    return null;
-  }
+function goalForIntent(intent: InquiryIntent): ConversationGoal {
+  if (intent === "restricted") return "unsafe_request";
+  if (intent === "handoff" || intent === "support") return "request_human";
+  if (intent === "materials") return "get_material";
+  if (intent === "refund" || intent === "discount") return "perform_action";
+  if (["collaboration", "pricing", "scheduling", "candidate", "media"].includes(intent)) return "create_request";
+  if (intent === "faq") return "get_information";
+  return "unknown";
+}
 
-  if (plan.intent === "materials") {
-    return (
-      allKnowledge.find((item) => item.kind === "deck" || item.kind === "download" || item.kind === "case_study") ??
-      allKnowledge[0]!
-    );
-  }
-  if (plan.intent === "faq" || plan.intent === "unknown") {
-    return allKnowledge.find((item) => item.kind === "faq") ?? allKnowledge[0]!;
-  }
-
-  return allKnowledge[0]!;
+function selectPreviewKnowledge(representative: Representative, plan: ConversationPlan) {
+  const all = [...representative.knowledgePack.faq, ...representative.knowledgePack.materials, ...representative.knowledgePack.policies];
+  if (plan.intent === "materials") return all.find((item) => ["deck", "download", "case_study"].includes(item.kind)) ?? all[0] ?? null;
+  return all.find((item) => item.kind === "faq") ?? all[0] ?? null;
 }
 
 function buildIntakeOutline(intent: InquiryIntent, channel: Channel): string[] {
-  const moveToPrivateNote =
-    channel === "private_chat"
-      ? []
-      : ["为了保护上下文和联系方式，后续细节建议转到 bot 私聊里继续。"];
-
-  switch (intent) {
-    case "pricing":
-      return [
-        ...moveToPrivateNote,
-        "你是谁，来自哪里？",
-        "想解决的核心问题是什么？",
-        "预算区间大概是多少？",
-        "希望多久内推进？",
-        "是否希望进入真人评估？",
-      ];
-    case "scheduling":
-      return [
-        ...moveToPrivateNote,
-        "你希望约什么类型的沟通？",
-        "你的目标主题是什么？",
-        "你偏好的时间段和时区是什么？",
-        "这次沟通是否已经付费或属于付费用户？",
-      ];
-    case "candidate":
-      return [
-        ...moveToPrivateNote,
-        "你申请的是哪一类角色？",
-        "请发一段背景介绍或作品链接。",
-        "你最擅长解决什么问题？",
-        "可开始时间是什么时候？",
-      ];
-    case "media":
-      return [
-        ...moveToPrivateNote,
-        "媒体或节目的名称是什么？",
-        "希望讨论的主题是什么？",
-        "预计发布时间和截稿时间是什么？",
-        "是否需要主理人本人参与？",
-      ];
-    case "collaboration":
-    default:
-      return [
-        ...moveToPrivateNote,
-        "你是谁，来自哪里？",
-        "你想合作的具体方向是什么？",
-        "这件事对你来说为什么现在重要？",
-        "预算、资源或流量基础大概如何？",
-        "你是否需要真人进一步沟通？",
-      ];
-  }
+  const privacy = channel === "private_chat" ? [] : ["请转到私聊发送联系方式和敏感背景。"];
+  const shared = ["你的身份与可联系信息是什么？", "希望达成什么结果，当前背景是什么？", "有哪些约束、预算或时间要求？", "怎样算处理完成？"];
+  if (intent === "scheduling") return [...privacy, "希望沟通的主题和产出是什么？", "请提供时区和 2-3 个候选时间。", "是否有现有订单或服务请求？", "请留下联系人信息。"];
+  if (intent === "refund") return [...privacy, "请提供订单标识和联系人信息。", "退款原因及期望结果是什么？", "请勿发送支付凭据或完整敏感信息。"];
+  if (intent === "discount") return [...privacy, "请说明目标服务、使用规模和预算约束。", "请留下联系人信息和期望时间。"];
+  return [...privacy, ...shared];
 }
 
 function suggestPlan(intent: InquiryIntent): PlanTier {
-  if (intent === "handoff" || intent === "support") {
-    return "deep_help";
-  }
-
-  if (intent === "pricing" || intent === "collaboration" || intent === "scheduling") {
-    return "pass";
-  }
-
-  return "pass";
+  return intent === "handoff" || intent === "support" ? "deep_help" : "pass";
 }
 
 function formatPlanName(plan: PlanTier | undefined): string {
-  switch (plan) {
-    case "deep_help":
-      return "Deep Help";
-    case "sponsor":
-      return "Sponsor";
-    case "pass":
-    default:
-      return "Pass";
-  }
+  return plan === "deep_help" ? "Deep Help" : plan === "sponsor" ? "Sponsor" : "Pass";
 }
 
-function matchesAny(text: string, keywords: string[]): boolean {
-  return keywords.some((keyword) => text.includes(keyword));
+function matchesAny(text: string, values: readonly string[]): boolean {
+  return values.some((value) => text.includes(value));
 }

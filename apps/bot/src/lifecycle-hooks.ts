@@ -48,7 +48,7 @@ export const botLifecycleHooks = createLifecycleHookBus(
               context: buildBotContext(event.scope),
               ...(event.subagentId ? { subagentId: event.subagentId } : {}),
               intent: event.intent,
-              nextStep: event.nextStep,
+              disposition: event.disposition,
               summary: event.summary,
               ownerAction: event.ownerAction,
               priority: event.priority,

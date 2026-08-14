@@ -232,7 +232,7 @@ export async function POST(
     const subagent = resolveConversationSubagent(plan);
     let replyText = renderReplyPreview(representative, plan);
     let sourceDisclosure: "general_model" | undefined;
-    if (plan.nextStep === "answer") {
+    if (plan.disposition === "answer") {
       const generated = await generateRepresentativeReply({
         representative,
         plan,

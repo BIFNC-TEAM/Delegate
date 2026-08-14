@@ -1,22 +1,4 @@
-import type { ActionKey, GateMode, Representative } from "./schema";
-
-const defaultActionGate: Record<ActionKey, GateMode> = {
-  answer_faq: "allow",
-  collect_lead: "allow",
-  collect_quote_request: "allow",
-  collect_scheduling_request: "allow",
-  deliver_material: "allow",
-  request_handoff: "allow",
-  charge_stars: "allow",
-  issue_refund: "ask_first",
-  offer_discount: "ask_first",
-  send_sensitive_material: "ask_first",
-  modify_owner_calendar: "deny",
-  run_local_command: "deny",
-  access_private_memory: "deny",
-  access_private_files: "deny",
-  send_outbound_campaign: "deny",
-};
+import type { Representative } from "./schema";
 
 export const demoRepresentative: Representative = {
   id: "rep_lin_founder",
@@ -121,11 +103,8 @@ export const demoRepresentative: Representative = {
   },
   contract: {
     freeReplyLimit: 4,
-    freeScope: ["faq", "materials", "unknown"],
-    paywalledIntents: ["pricing", "collaboration", "scheduling"],
     handoffWindowHours: 24,
   },
   handoffPrompt:
     "请留下你的身份、需求摘要、预算区间、目标时间，以及为什么需要真人接手。我会先整理成收件项再转给主人。",
-  actionGate: defaultActionGate,
 };

@@ -5,7 +5,6 @@ import {
   advanceStructuredCollector,
   beginStructuredCollector,
   createConversationPlan,
-  evaluateActionGate,
   formatStructuredCollectorPrompt,
   resolveCollectorSubagent,
   resolveComputeSubagent,
@@ -15,22 +14,6 @@ import {
   renderReplyPreview,
   shouldStartStructuredCollector,
 } from "../src/index";
-
-describe("action gate", () => {
-  it("denies private file access", () => {
-    const decision = evaluateActionGate(demoRepresentative, "access_private_files");
-
-    expect(decision.mode).toBe("deny");
-    expect(decision.allowed).toBe(false);
-  });
-
-  it("requires owner approval for discounts", () => {
-    const decision = evaluateActionGate(demoRepresentative, "offer_discount");
-
-    expect(decision.mode).toBe("ask_first");
-    expect(decision.requiresOwnerApproval).toBe(true);
-  });
-});
 
 describe("conversation planning", () => {
   it("answers a free FAQ request directly", () => {
@@ -46,7 +29,8 @@ describe("conversation planning", () => {
     });
 
     expect(plan.intent).toBe("faq");
-    expect(plan.nextStep).toBe("answer");
+    expect(plan.disposition).toBe("answer");
+    expect(plan.actions.map((action) => action.kind)).toEqual(["answer_public_information"]);
   });
 
   it("switches pricing conversations to paid continuation when free quota is exhausted", () => {
@@ -62,7 +46,7 @@ describe("conversation planning", () => {
     });
 
     expect(plan.intent).toBe("pricing");
-    expect(plan.nextStep).toBe("offer_paid_unlock");
+    expect(plan.disposition).toBe("payment_required");
     expect(plan.suggestedPlan).toBe("pass");
   });
 
@@ -79,7 +63,7 @@ describe("conversation planning", () => {
     });
 
     expect(plan.intent).toBe("pricing");
-    expect(plan.nextStep).toBe("collect_intake");
+    expect(plan.disposition).toBe("collect");
   });
 
   it("creates structured intake for collaboration requests", () => {
@@ -95,7 +79,7 @@ describe("conversation planning", () => {
     });
 
     expect(plan.intent).toBe("collaboration");
-    expect(plan.nextStep).toBe("collect_intake");
+    expect(plan.disposition).toBe("collect");
     expect(plan.responseOutline[0]).toContain("私聊");
   });
 
@@ -112,11 +96,11 @@ describe("conversation planning", () => {
     });
 
     expect(plan.intent).toBe("handoff");
-    expect(plan.nextStep).toBe("handoff");
-    expect(renderReplyPreview(demoRepresentative, plan)).toContain("人工转接");
+    expect(plan.disposition).toBe("handoff");
+    expect(renderReplyPreview(demoRepresentative, plan)).toContain("人工接手");
   });
 
-  it("routes refunds into ask-owner flow instead of denying them", () => {
+  it("collects refunds as service requests without inventing owner approval", () => {
     const plan = createConversationPlan({
       text: "我想申请退款",
       channel: "private_chat",
@@ -129,7 +113,8 @@ describe("conversation planning", () => {
     });
 
     expect(plan.intent).toBe("refund");
-    expect(plan.nextStep).toBe("ask_owner");
+    expect(plan.disposition).toBe("collect");
+    expect(plan.actions.map((action) => action.kind)).toContain("create_service_request");
   });
 
   it("fails closed without Representative snapshot knowledge when factual generation is unavailable", () => {
@@ -243,6 +228,35 @@ describe("structured collectors", () => {
     expect(completed.state?.answers.timeWindows).toContain("周三下午");
     expect(completed.state?.answers.paidContext).toContain("付费咨询");
   });
+
+  it("uses the generic service-request collector for non-vertical business labels", () => {
+    const plan = createConversationPlan({
+      text: "我想申请退款",
+      channel: "private_chat",
+      representative: demoRepresentative,
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    const collector = beginStructuredCollector({ plan, channel: "private_chat" });
+
+    expect(collector.kind).toBe("service_request");
+    expect(formatStructuredCollectorPrompt(collector)).toContain("第 1/4 步");
+    expect(plan.actions.map((action) => action.kind)).toEqual([
+      "collect_contact_and_requirements",
+      "create_service_request",
+    ]);
+  });
+
+  it("plans public material delivery as a separate action", () => {
+    const plan = createConversationPlan({
+      text: "请发我公开介绍资料",
+      channel: "private_chat",
+      representative: demoRepresentative,
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+
+    expect(plan.disposition).toBe("answer");
+    expect(plan.actions.map((action) => action.kind)).toContain("deliver_public_material");
+  });
 });
 
 describe("scoped subagents", () => {
@@ -261,7 +275,7 @@ describe("scoped subagents", () => {
     const subagent = resolveConversationSubagent(plan);
 
     expect(subagent.id).toBe("triage-agent");
-    expect(subagent.allowedCapabilities).toContain("answer_faq");
+    expect(subagent.allowedCapabilities).toContain("answer_public_information");
   });
 
   it("routes intake collectors to the quote agent", () => {

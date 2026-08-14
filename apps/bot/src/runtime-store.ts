@@ -2,6 +2,7 @@ import type { PlanTier } from "@delegate/domain";
 import type { ModelContextSegmentTrace } from "@delegate/lifecycle-hooks";
 import {
   assertConversationChannelDeliveryAvailable,
+  createConversationServiceRequest,
   createOrReuseHandoffRequestInTransaction,
   fulfillServicePaymentOrder,
   resolveChannelAudienceIdentity,
@@ -706,7 +707,9 @@ export async function recordInboundTurn(params: {
         type: EventType.MESSAGE_RECEIVED,
         payload: {
           intent: params.plan.intent,
-          nextStep: params.plan.nextStep,
+          goal: params.plan.goal,
+          disposition: params.plan.disposition,
+          actions: params.plan.actions.map((action) => action.kind),
           subagentId: params.subagentId ?? null,
         },
       },
@@ -772,7 +775,9 @@ export async function recordOutboundReply(params: {
         type: EventType.MESSAGE_ANSWERED,
         payload: {
           intent: params.plan.intent,
-          nextStep: params.plan.nextStep,
+          goal: params.plan.goal,
+          disposition: params.plan.disposition,
+          actions: params.plan.actions.map((action) => action.kind),
           suggestedPlan: params.plan.suggestedPlan ?? null,
           subagentId: params.subagentId ?? null,
         },
@@ -782,7 +787,7 @@ export async function recordOutboundReply(params: {
     if (
       !params.context.usage.passUnlocked &&
       !params.context.usage.deepHelpUnlocked &&
-      params.plan.nextStep !== "offer_paid_unlock"
+      params.plan.disposition !== "payment_required"
     ) {
       await tx.conversation.update({
         where: { id: params.context.conversationId },
@@ -1006,7 +1011,7 @@ export async function maybeCreateHandoffRequest(params: {
   id: string;
   status: HandoffStatus;
 } | null> {
-  if (params.plan.nextStep !== "handoff" && params.plan.nextStep !== "ask_owner") {
+  if (params.plan.disposition !== "handoff") {
     return null;
   }
 
@@ -1043,7 +1048,7 @@ export async function maybeCreateHandoffRequest(params: {
           reasons: params.plan.reasons,
         },
         priorityScore: params.prepared?.priority ?? calculatePriority(params.plan),
-        recommendedNextStep: params.plan.nextStep === "ask_owner" ? "owner_approval" : "owner_review",
+        recommendedNextStep: "owner_review",
       },
     });
     const handoff = await tx.handoffRequest.update({
@@ -1106,7 +1111,7 @@ export async function recordHandoffPrepared(params: {
   context: ConversationAuditScope;
   subagentId?: string;
   intent: string;
-  nextStep: string;
+  disposition: string;
   summary: string;
   ownerAction: string;
   priority: number;
@@ -1120,7 +1125,7 @@ export async function recordHandoffPrepared(params: {
       payload: {
         subagentId: params.subagentId ?? null,
         intent: params.intent,
-        nextStep: params.nextStep,
+        disposition: params.disposition,
         summary: params.summary,
         ownerAction: params.ownerAction,
         priority: params.priority,
@@ -1156,13 +1161,7 @@ export async function submitStructuredCollector(params: {
   context: ConversationContextRecord;
   collectorState: StructuredCollectorState;
 }): Promise<{
-  handoffId: string | null;
-  handoffOutcome:
-    | "created"
-    | "reused"
-    | "handoff_disabled"
-    | "entitlement_required"
-    | "active_request_exists";
+  serviceRequestId: string | null;
   summary: string;
   recommendedOwnerAction: string;
   priority: number;
@@ -1174,7 +1173,7 @@ export async function submitStructuredCollector(params: {
     params.context.contactIsPaid,
   );
 
-  return prisma.$transaction(async (tx) => {
+  const stored = await prisma.$transaction(async (tx) => {
     const intake = await tx.intakeSubmission.create({
       data: {
         representativeId: params.context.representativeId,
@@ -1194,30 +1193,15 @@ export async function submitStructuredCollector(params: {
         recommendedNextStep:
           params.collectorState.kind === "scheduling"
             ? "owner_schedule_review"
-            : "owner_quote_review",
+            : params.collectorState.kind === "quote"
+              ? "owner_quote_review"
+              : "owner_service_request_review",
       },
     });
-
-    const handoffResult = await createOrReuseHandoffRequestInTransaction({
-      representativeId: params.context.representativeId,
-      contactId: params.context.contactId,
-      conversationId: params.context.conversationId,
-      intakeSubmissionId: intake.id,
-      reason: params.collectorState.intent,
-      summary: summary || "Structured intake completed.",
-      recommendedPriority: priority,
-      recommendedOwnerAction,
-    }, tx);
-    const handoff = handoffResult.request;
-
-    if (handoff) {
-      await tx.contact.update({
-        where: { id: params.context.contactId },
-        data: {
-          stage: ContactStage.WAITING_ON_OWNER,
-        },
-      });
-    }
+    await tx.contact.update({
+      where: { id: params.context.contactId },
+      data: { stage: ContactStage.QUALIFIED },
+    });
 
     await tx.conversation.update({
       where: { id: params.context.conversationId },
@@ -1235,8 +1219,6 @@ export async function submitStructuredCollector(params: {
         type: EventType.INTAKE_SUBMITTED,
         payload: {
           intakeSubmissionId: intake.id,
-          handoffId: handoff?.id ?? null,
-          handoffOutcome: handoffResult.outcome,
           collectorKind: params.collectorState.kind,
           summary,
           priority,
@@ -1244,40 +1226,30 @@ export async function submitStructuredCollector(params: {
       },
     });
 
-    if (handoff && handoffResult.outcome === "created") {
-      await tx.eventAudit.create({
-        data: {
-          representativeId: params.context.representativeId,
-          contactId: params.context.contactId,
-          conversationId: params.context.conversationId,
-          type: EventType.HANDOFF_REQUESTED,
-          payload: {
-            handoffId: handoff.id,
-            priority,
-            intent: params.collectorState.intent,
-          },
-        },
-      });
-    }
-
-    if (handoff) {
-      await enqueueHandoffFollowUpWorkflowTx(tx, {
-        representativeId: params.context.representativeId,
-        representativeSlug: params.context.representativeSlug,
-        contactId: params.context.contactId,
-        conversationId: params.context.conversationId,
-        handoffId: handoff.id,
-      });
-    }
-
     return {
-      handoffId: handoff?.id ?? null,
-      handoffOutcome: handoffResult.outcome,
+      intakeId: intake.id,
       summary: summary || "Structured intake completed.",
       recommendedOwnerAction,
       priority,
     };
   });
+
+  const serviceRequest = await createConversationServiceRequest({
+    representativeId: params.context.representativeId,
+    contactId: params.context.contactId,
+    conversationId: params.context.conversationId,
+    inputMessageId: `telegram-intake:${stored.intakeId}`,
+    intent: params.collectorState.intent,
+    objective: stored.summary,
+    desiredOutcome: stored.recommendedOwnerAction,
+    priority: stored.priority,
+  });
+  return {
+    serviceRequestId: serviceRequest.task?.id ?? null,
+    summary: stored.summary,
+    recommendedOwnerAction: stored.recommendedOwnerAction,
+    priority: stored.priority,
+  };
 }
 
 async function enqueueHandoffFollowUpWorkflowTx(

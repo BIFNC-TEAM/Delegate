@@ -81,7 +81,6 @@ export async function PATCH(
             : "reply_or_mention",
         publicMode: Boolean(body.publicMode),
         humanInLoop: Boolean(body.humanInLoop),
-        actionGate: normalizeActionGate(body.actionGate),
         handoffPrompt: String(body.handoffPrompt ?? ""),
         contract:
           typeof body.contract === "object" && body.contract
@@ -89,58 +88,12 @@ export async function PATCH(
                 freeReplyLimit: Number(
                   (body.contract as { freeReplyLimit?: number }).freeReplyLimit ?? 0,
                 ),
-                freeScope: Array.isArray((body.contract as { freeScope?: unknown[] }).freeScope)
-                  ? (body.contract as { freeScope: unknown[] }).freeScope.filter(
-                      (
-                        entry,
-                      ): entry is
-                        | "faq"
-                        | "collaboration"
-                        | "pricing"
-                        | "materials"
-                        | "scheduling"
-                        | "handoff"
-                        | "refund"
-                        | "discount"
-                        | "candidate"
-                        | "media"
-                        | "support"
-                        | "restricted"
-                        | "unknown" =>
-                        typeof entry === "string",
-                    )
-                  : [],
-                paywalledIntents: Array.isArray(
-                  (body.contract as { paywalledIntents?: unknown[] }).paywalledIntents,
-                )
-                  ? (body.contract as { paywalledIntents: unknown[] }).paywalledIntents.filter(
-                      (
-                        entry,
-                      ): entry is
-                        | "faq"
-                        | "collaboration"
-                        | "pricing"
-                        | "materials"
-                        | "scheduling"
-                        | "handoff"
-                        | "refund"
-                        | "discount"
-                        | "candidate"
-                        | "media"
-                        | "support"
-                        | "restricted"
-                        | "unknown" =>
-                        typeof entry === "string",
-                    )
-                  : [],
                 handoffWindowHours: Number(
                   (body.contract as { handoffWindowHours?: number }).handoffWindowHours ?? 0,
                 ),
               }
             : {
                 freeReplyLimit: 0,
-                freeScope: [],
-                paywalledIntents: [],
                 handoffWindowHours: 0,
               },
         knowledgePack:
@@ -267,32 +220,6 @@ export async function PATCH(
       { status: 400 },
     );
   }
-}
-
-const actionGateKeys = [
-  "answer_faq",
-  "collect_lead",
-  "collect_quote_request",
-  "collect_scheduling_request",
-  "deliver_material",
-  "request_handoff",
-  "charge_stars",
-  "issue_refund",
-  "offer_discount",
-  "send_sensitive_material",
-  "modify_owner_calendar",
-  "run_local_command",
-  "access_private_memory",
-  "access_private_files",
-  "send_outbound_campaign",
-] as const;
-
-function normalizeActionGate(value: unknown) {
-  const record = typeof value === "object" && value ? value as Record<string, unknown> : {};
-  return Object.fromEntries(actionGateKeys.map((key) => {
-    const mode = record[key];
-    return [key, mode === "allow" || mode === "ask_first" || mode === "deny" ? mode : "deny"];
-  })) as Record<(typeof actionGateKeys)[number], "allow" | "ask_first" | "deny">;
 }
 
 function normalizeCapabilityModes(value: unknown) {

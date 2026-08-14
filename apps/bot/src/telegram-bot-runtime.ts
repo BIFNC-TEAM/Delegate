@@ -1025,29 +1025,19 @@ bot.on("message:text", async (ctx) => {
     const completionNote =
       advanced.state.kind === "scheduling"
         ? "预约意向已经整理完成。"
-        : "报价 / 合作背景已经整理完成。";
-    const paidFollowup = submitted.handoffId
-      ? !conversationContext.contactIsPaid && advanced.state.suggestedPlan
-        ? `如果你希望我继续保留更长上下文并优先推进，请前往 ${representative.name} 的 Web 页面查看当前方案并充值。`
-        : "接下来主人会基于这份结构化摘要判断是否亲自接手。"
-      : null;
-    const handoffStatusNote = submitted.handoffId
-      ? `已创建 owner inbox 收件项：${submitted.handoffId}`
-      : submitted.handoffOutcome === "entitlement_required"
-        ? "结构化摘要已保存；当前没有可用的人工转接权益，请先购买包含人工转接的服务套餐。"
-        : submitted.handoffOutcome === "handoff_disabled"
-          ? "结构化摘要已保存；该数字代表当前未启用人工转接。"
-          : submitted.handoffOutcome === "active_request_exists"
-            ? "结构化摘要已保存；你已有一条进行中的人工转接请求，本次未重复创建。"
-            : "结构化摘要已保存，但本次未创建人工转接请求。";
+        : advanced.state.kind === "quote"
+          ? "报价 / 合作背景已经整理完成。"
+          : "联系人和需求已经整理完成。";
+    const requestStatusNote = submitted.serviceRequestId
+      ? `已创建服务请求：${submitted.serviceRequestId}`
+      : "结构化摘要已保存；本次未重复创建服务请求。";
     const replyText = [
       representative.name,
       representative.tagline,
       completionNote,
       formatStructuredCollectorSummary(advanced.state),
-      handoffStatusNote,
+      requestStatusNote,
       submitted.recommendedOwnerAction,
-      paidFollowup,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -1112,7 +1102,7 @@ bot.on("message:text", async (ctx) => {
   const handoff = conversationContext
     ? await (async () => {
         const prepared =
-          plan.nextStep === "handoff" || plan.nextStep === "ask_owner"
+          plan.disposition === "handoff"
             ? buildHandoffPreparation({
                 plan,
                 text: normalizedText,
@@ -1130,7 +1120,7 @@ bot.on("message:text", async (ctx) => {
             },
             subagentId: planSubagent.id,
             intent: plan.intent,
-            nextStep: plan.nextStep,
+            disposition: plan.disposition,
             priority: prepared.priority,
             summary: prepared.summary,
             ownerAction: prepared.ownerAction,
@@ -1153,7 +1143,7 @@ bot.on("message:text", async (ctx) => {
     .filter(Boolean)
     .join("\n\n");
   let replyText = fallbackReplyText;
-  if (plan.nextStep === "answer") {
+  if (plan.disposition === "answer") {
     const recentTurns = conversationContext
       ? await getRecentConversationTurns({
           conversationId: conversationContext.conversationId,
@@ -1666,13 +1656,24 @@ function buildCollectorConversationPlan(
   collectorState: StructuredCollectorState,
 ): ConversationPlan {
   return {
+    goal: "create_request",
     intent: collectorState.intent,
     audienceRole: "lead",
-    action:
-      collectorState.kind === "scheduling"
-        ? "collect_scheduling_request"
-        : "collect_quote_request",
-    nextStep: "collect_intake",
+    disposition: "collect",
+    actions: [
+      {
+        id: `collect_contact_and_requirements:${collectorState.intent}`,
+        kind: "collect_contact_and_requirements",
+        status: "planned",
+        sideEffect: "internal_record",
+      },
+      {
+        id: `create_service_request:${collectorState.intent}`,
+        kind: "create_service_request",
+        status: "planned",
+        sideEffect: "internal_record",
+      },
+    ],
     ...(collectorState.suggestedPlan ? { suggestedPlan: collectorState.suggestedPlan } : {}),
     reasons: ["Active structured collector in progress."],
     responseOutline: [formatStructuredCollectorPrompt(collectorState)],

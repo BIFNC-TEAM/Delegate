@@ -66,8 +66,31 @@ const schedulingCollectorFields = [
   },
 ] as const;
 
+const serviceRequestCollectorFields = [
+  {
+    field: "contact",
+    label: "联系人",
+    prompt: "请留下称呼和可联系信息；不需要发送密码、支付凭据或其他敏感信息。",
+  },
+  {
+    field: "goal",
+    label: "目标",
+    prompt: "你希望最终解决什么问题，或获得什么结果？",
+  },
+  {
+    field: "context",
+    label: "背景与约束",
+    prompt: "请补充当前背景、已经尝试过的方式，以及预算、范围或其他约束。",
+  },
+  {
+    field: "timeline",
+    label: "时间与完成标准",
+    prompt: "希望何时完成？什么结果可以视为本次请求已处理？",
+  },
+] as const;
+
 export const structuredCollectorStateSchema = z.object({
-  kind: z.enum(["quote", "scheduling"]),
+  kind: z.enum(["quote", "scheduling", "service_request"]),
   intent: inquiryIntentSchema,
   stepIndex: z.number().int().min(0),
   sourceChannel: channelSchema,
@@ -85,12 +108,7 @@ type StructuredCollectorQuestion = {
 };
 
 export function shouldStartStructuredCollector(plan: ConversationPlan): boolean {
-  return (
-    plan.nextStep === "collect_intake" &&
-    (plan.intent === "pricing" ||
-      plan.intent === "collaboration" ||
-      plan.intent === "scheduling")
-  );
+  return plan.disposition === "collect";
 }
 
 export function beginStructuredCollector(params: {
@@ -98,7 +116,11 @@ export function beginStructuredCollector(params: {
   channel: Channel;
 }): StructuredCollectorState {
   return {
-    kind: params.plan.intent === "scheduling" ? "scheduling" : "quote",
+    kind: params.plan.intent === "scheduling"
+      ? "scheduling"
+      : params.plan.intent === "pricing" || params.plan.intent === "collaboration"
+        ? "quote"
+        : "service_request",
     intent: params.plan.intent,
     stepIndex: 0,
     sourceChannel: params.channel,
@@ -180,7 +202,9 @@ export function formatStructuredCollectorPrompt(state: StructuredCollectorState)
   const intro =
     state.kind === "quote"
       ? "我会用 5 个问题整理你的报价 / 合作背景，方便后续评估。"
-      : "我会用 5 个问题整理你的预约意向，方便后续给出候选时间。";
+      : state.kind === "scheduling"
+        ? "我会用 5 个问题整理你的预约意向，方便后续给出候选时间。"
+        : "我会用 4 个问题整理联系人和需求，完成后创建可跟踪的服务请求。";
 
   return [
     intro,
@@ -202,11 +226,10 @@ export function formatStructuredCollectorSummary(state: StructuredCollectorState
 export function buildStructuredCollectorHandoffSummary(
   state: StructuredCollectorState,
 ): string {
-  const firstKey =
-    state.kind === "quote" ? "goal" : "agenda";
+  const firstKey = state.kind === "scheduling" ? "agenda" : "goal";
   const firstValue = state.answers[firstKey] ?? "";
-  const timeline = state.answers[state.kind === "quote" ? "timeline" : "timeWindows"] ?? "";
-  const identity = state.answers.identity ?? state.answers.meetingType ?? "";
+  const timeline = state.answers[state.kind === "scheduling" ? "timeWindows" : "timeline"] ?? "";
+  const identity = state.answers.identity ?? state.answers.contact ?? state.answers.meetingType ?? "";
   const normalized = [identity, firstValue, timeline]
     .map((value) => value.trim())
     .filter(Boolean)
@@ -222,6 +245,10 @@ export function buildStructuredCollectorOwnerAction(
     return "Review agenda, timezone, and preferred windows before deciding whether to share candidate slots.";
   }
 
+  if (state.kind === "service_request") {
+    return "Review the request, decide the next owner response, and create a separately governed task before any tool or external action.";
+  }
+
   return "Review fit, budget, and timeline before deciding whether to quote, invite a paid consult, or decline.";
 }
 
@@ -235,6 +262,10 @@ export function calculateStructuredCollectorPriority(
 
   if (state.kind === "scheduling") {
     return 82;
+  }
+
+  if (state.kind === "service_request") {
+    return 72;
   }
 
   const budget = (state.answers.budget ?? "").toLowerCase();
@@ -259,5 +290,7 @@ function getQuestionsForState(
 ): readonly StructuredCollectorQuestion[] {
   return state.kind === "scheduling"
     ? schedulingCollectorFields
-    : quoteCollectorFields;
+    : state.kind === "quote"
+      ? quoteCollectorFields
+      : serviceRequestCollectorFields;
 }

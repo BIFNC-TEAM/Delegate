@@ -213,10 +213,18 @@ function buildConversationContext() {
 
 function buildHandoffPlan() {
   return {
-    intent: "partnership",
-    nextStep: "handoff",
-    audienceRole: "PARTNER",
+    goal: "request_human",
+    intent: "handoff",
+    disposition: "handoff",
+    actions: [{
+      id: "request_human_handoff:handoff",
+      kind: "request_human_handoff",
+      status: "planned",
+      sideEffect: "human_queue",
+    }],
+    audienceRole: "partner",
     suggestedPlan: "pass",
     reasons: ["Owner review is appropriate."],
+    responseOutline: ["Create an explicit human handoff."],
   } as never;
 }

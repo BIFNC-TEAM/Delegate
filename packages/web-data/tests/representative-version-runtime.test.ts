@@ -43,11 +43,8 @@ function currentDraft(): RepresentativeSetupSnapshot {
     },
     contract: {
       ...demoRepresentative.contract,
-      freeScope: [...demoRepresentative.contract.freeScope],
-      paywalledIntents: [...demoRepresentative.contract.paywalledIntents],
     },
     handoffPrompt: "Unpublished draft handoff",
-    actionGate: { ...demoRepresentative.actionGate },
     compute: {
       enabled: false,
       defaultPolicyMode: "ask",
@@ -94,7 +91,6 @@ function publishedSnapshot(skillPacks: unknown[] = []) {
     },
     governance: {
       allowedSkills: demoRepresentative.skills,
-      actionGate: demoRepresentative.actionGate,
     },
     compute: {
       enabled: false,
@@ -443,26 +439,6 @@ describe("representative published runtime snapshot", () => {
     snapshot.governance.allowedSkills = [];
 
     expect(applyRepresentativeVersionSnapshot(currentDraft(), snapshot).skills).toEqual([]);
-  });
-
-  it("lets the current action gate tighten but never loosen the published gate", () => {
-    const current = currentDraft();
-    current.actionGate = {
-      ...current.actionGate,
-      answer_faq: "deny",
-      run_local_command: "allow",
-    };
-    const snapshot = publishedSnapshot();
-    snapshot.governance.actionGate = {
-      ...demoRepresentative.actionGate,
-      answer_faq: "allow",
-      run_local_command: "deny",
-    };
-
-    const runtime = applyRepresentativeVersionSnapshot(current, snapshot);
-
-    expect(runtime.actionGate.answer_faq).toBe("deny");
-    expect(runtime.actionGate.run_local_command).toBe("deny");
   });
 
   it("uses the published compute grant as a ceiling and lets current state tighten it", () => {

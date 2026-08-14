@@ -80,10 +80,10 @@ export async function planNaturalLanguageComputeRequest(params: {
 export async function generateRepresentativeReply(
   params: RepresentativeReplyInput,
 ): Promise<RepresentativeReplyResult> {
-  if (!params.subagent.allowedConversationSteps.includes(params.plan.nextStep)) {
+  if (!params.subagent.allowedConversationDispositions.includes(params.plan.disposition)) {
     return {
       ok: false,
-      reason: `Subagent ${params.subagent.id} cannot handle conversation step ${params.plan.nextStep}.`,
+      reason: `Subagent ${params.subagent.id} cannot handle conversation disposition ${params.plan.disposition}.`,
       state: "invalid_subagent_route",
       citedMemoryUseItemIds: [],
     };
@@ -193,7 +193,7 @@ export function detectRepresentativeReplyPolicyViolation(
   replyText: string,
   plan: RepresentativeReplyInput["plan"],
 ) {
-  if (plan.nextStep !== "answer") return null;
+  if (plan.disposition !== "answer") return null;
   if (
     /(?:任务|请求).{0,24}(?:已提交|已经提交|自动提交)|(?:已|正在)?等待.{0,12}审批|approval.{0,20}(?:submitted|pending)/i.test(replyText)
   ) {

@@ -68,6 +68,99 @@ export class DelegationTaskActionError extends Error {
   }
 }
 
+/**
+ * Creates the durable, owner-visible record for a conversation request that
+ * has finished intake but does not yet authorize any tool or external effect.
+ * A later owner action may resolve it manually or turn it into a separately
+ * governed Compute/MCP task.
+ */
+export async function createConversationServiceRequest(input: {
+  representativeId: string;
+  representativeVersionId?: string | null;
+  contactId: string;
+  conversationId: string;
+  episodeId?: string | null;
+  inputMessageId: string;
+  intent: string;
+  objective: string;
+  desiredOutcome: string;
+  priority?: number;
+}) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
+    const conversation = await tx.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: {
+        representativeId: true,
+        contactId: true,
+        audienceIdentityId: true,
+        state: true,
+      },
+    });
+    if (
+      !conversation
+      || conversation.representativeId !== input.representativeId
+      || conversation.contactId !== input.contactId
+    ) {
+      throw new Error("Service request context does not match the conversation.");
+    }
+    if (conversation.state === "HUMAN_ACTIVE") {
+      return { task: null, skipped: "human_active" as const };
+    }
+
+    const idempotencyKey = `service-request:${input.inputMessageId}`;
+    const existing = await tx.delegationTask.findUnique({ where: { idempotencyKey } });
+    if (existing) return { task: existing, skipped: "existing" as const };
+
+    const task = await tx.delegationTask.create({
+      data: {
+        representativeId: input.representativeId,
+        representativeVersionId: input.representativeVersionId ?? null,
+        contactId: input.contactId,
+        audienceIdentityId: conversation.audienceIdentityId,
+        originConversationId: input.conversationId,
+        originEpisodeId: input.episodeId ?? null,
+        kind: "SERVICE_REQUEST",
+        initiatorType: "AUDIENCE",
+        initiatorId: input.contactId,
+        title: truncate(`${input.intent}: ${input.objective}`, 160),
+        objective: truncate(input.objective, 4_000),
+        desiredOutcome: truncate(input.desiredOutcome, 1_000),
+        status: DelegationTaskStatus.WAITING_FOR_OWNER,
+        nextActionBy: DelegationTaskNextActor.OWNER,
+        priority: Math.max(0, Math.min(100, Math.round(input.priority ?? 50))),
+        idempotencyKey,
+        planSummary: "需求已完成基础采集；尚未授权工具调用、外部副作用或任何业务承诺。",
+        contextSnapshot: {
+          source: "conversation_intake",
+          intent: input.intent,
+          inputMessageId: input.inputMessageId,
+        },
+        inputs: {
+          create: {
+            kind: "MESSAGE",
+            referenceType: "Message",
+            referenceId: input.inputMessageId,
+            label: truncate(input.objective, 240),
+            providedByType: "AUDIENCE",
+            providedById: input.contactId,
+            authorizationRequired: false,
+          },
+        },
+      },
+    });
+    await appendTaskEvent(tx, {
+      taskId: task.id,
+      eventType: "service_request.created",
+      actorType: DelegationTaskActorType.AUDIENCE,
+      actorId: input.contactId,
+      toStatus: DelegationTaskStatus.WAITING_FOR_OWNER,
+      payload: { intent: input.intent, inputMessageId: input.inputMessageId },
+    });
+    return { task, skipped: null };
+  });
+}
+
 export type DelegationTaskDetailSnapshot = NonNullable<Awaited<ReturnType<typeof getRepresentativeDelegationTaskDetail>>>;
 
 export async function createComputeDelegationTask(input: {

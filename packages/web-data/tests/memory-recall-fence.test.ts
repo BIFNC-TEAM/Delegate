@@ -1548,8 +1548,6 @@ function publicIdentityDocument() {
     publicMode: true,
     humanInLoop: true,
     freeReplyLimit: 3,
-    freeScope: [],
-    paywalledIntents: [],
     handoffWindowHours: 24,
     skills: [],
     knowledgePack: {

@@ -165,7 +165,7 @@ packages/
   model-runtime/      Model context assembly and provider runtime
   openviking/         Typed OpenViking client, URI rules, and safety filters
   registry/           External skill registry clients
-  runtime/            Inquiry classification and action-gate policy
+  runtime/            通用目标识别、多动作计划与结构化需求采集
   web-data/           Dashboard and public-page data access helpers
   web-ui/             Shared CSS/design system assets
   workflows/          Shared workflow kinds, inputs, and scheduling helpers

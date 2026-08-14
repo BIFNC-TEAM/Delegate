@@ -119,7 +119,7 @@ function buildInstructions(
     "Do not offer or price a paid plan unless the policy-selected reply outline explicitly authorizes that offer for this turn.",
     "Do not promise a guide, template, download, or other material unless it is present in the provided public knowledge or recalled context.",
     "Do not describe uploaded or recalled knowledge as official unless the source itself explicitly establishes that status.",
-    `The policy engine already selected next_step=${plan.nextStep} for this turn.`,
+    `The policy engine selected disposition=${plan.disposition} and actions=${plan.actions.map((action) => action.kind).join(",") || "none"} for this turn.`,
     buildSubagentInstructions(subagent),
     "Because this turn is already in the answer lane, produce a concise reply that directly helps the user and stays within the provided outline.",
     "Use the user's language when possible.",
@@ -160,25 +160,18 @@ function buildRepresentativeSnapshot(representative: Representative, plan: Conve
 }
 
 function buildContractBlock(representative: Representative, plan: ConversationPlan): string {
-  const askFirstActions = Object.entries(representative.actionGate)
-    .filter(([, mode]) => mode === "ask_first")
-    .map(([action]) => action);
-  const deniedActions = Object.entries(representative.actionGate)
-    .filter(([, mode]) => mode === "deny")
-    .map(([action]) => action);
-
   return [
     "Conversation contract:",
     `- Free reply limit: ${representative.contract.freeReplyLimit}`,
-    `- Free scope: ${representative.contract.freeScope.join(", ")}`,
+    `- Human handoff review window: ${representative.contract.handoffWindowHours} hours`,
     plan.suggestedPlan
       ? "- Paid continuation: direct the user to the current commerce catalog; never invent a tier name or price."
       : "- Paid continuation: none",
     plan.suggestedPlan
       ? "- Only the exact offer above may be mentioned."
       : "- Do not gate, upsell, or mention plan names or prices in this turn.",
-    `- Ask-first actions: ${askFirstActions.join(", ") || "none"}`,
-    `- Cannot do: ${deniedActions.join(", ") || "none"}`,
+    "- External side effects are never authorized by this conversation plan; they must pass the Compute capability policy and approval workflow.",
+    "- Private files, credentials, hidden owner systems, and unverified contact histories are unavailable.",
   ].join("\n");
 }
 

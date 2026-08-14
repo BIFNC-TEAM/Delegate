@@ -13,6 +13,12 @@ const mocks = vi.hoisted(() => ({
   claimNextGenerationWorkItem: vi.fn(),
   completeInlineGenerationRun: vi.fn(),
   createConversationPlan: vi.fn(),
+  readStructuredCollectorState: vi.fn(),
+  shouldStartStructuredCollector: vi.fn(),
+  beginStructuredCollector: vi.fn(),
+  advanceStructuredCollector: vi.fn(),
+  formatStructuredCollectorPrompt: vi.fn(),
+  formatStructuredCollectorSummary: vi.fn(),
   getRepresentativeRuntimeSetupSnapshot: vi.fn(),
   buildRepresentativeRuntimeProfile: vi.fn(),
   loadGenerationRecentTurns: vi.fn(),
@@ -20,6 +26,9 @@ const mocks = vi.hoisted(() => ({
   markGenerationDeliveryComplete: vi.fn(),
   prepareGenerationMessageChannelDelivery: vi.fn(),
   ensureConversationLeadAndHandoff: vi.fn(),
+  createConversationServiceRequest: vi.fn(),
+  setConversationCollectorState: vi.fn(),
+  clearConversationCollectorState: vi.fn(),
   parseComputeDirective: vi.fn(),
   shouldConsiderNaturalLanguageCompute: vi.fn(),
   buildComputeRequestsFromDelegationPlan: vi.fn(),
@@ -61,13 +70,19 @@ vi.mock("@delegate/model-runtime", () => ({
 
 vi.mock("@delegate/runtime", () => ({
   buildComputeRequestsFromDelegationPlan: mocks.buildComputeRequestsFromDelegationPlan,
+  advanceStructuredCollector: mocks.advanceStructuredCollector,
+  beginStructuredCollector: mocks.beginStructuredCollector,
   createConversationPlan: mocks.createConversationPlan,
+  formatStructuredCollectorPrompt: mocks.formatStructuredCollectorPrompt,
+  formatStructuredCollectorSummary: mocks.formatStructuredCollectorSummary,
   parseComputeDirective: mocks.parseComputeDirective,
   renderFailClosedReplyPreview: mocks.renderFailClosedReplyPreview,
   renderReplyPreview: () => "fallback",
   readPersistedDelegationStepRequest: mocks.readPersistedDelegationStepRequest,
+  readStructuredCollectorState: mocks.readStructuredCollectorState,
   resolveComputeSubagent: () => ({ id: "compute-agent" }),
-  resolveConversationSubagent: () => ({ id: "public", allowedConversationSteps: ["answer"] }),
+  resolveConversationSubagent: () => ({ id: "public", allowedConversationDispositions: ["answer"] }),
+  shouldStartStructuredCollector: mocks.shouldStartStructuredCollector,
   shouldConsiderNaturalLanguageCompute: mocks.shouldConsiderNaturalLanguageCompute,
 }));
 
@@ -81,11 +96,14 @@ vi.mock("@delegate/web-data", () => ({
   completeInlineGenerationRun: mocks.completeInlineGenerationRun,
   createAudienceComputeSession: mocks.createAudienceComputeSession,
   createComputeDelegationTask: mocks.createComputeDelegationTask,
+  createConversationServiceRequest: mocks.createConversationServiceRequest,
   createClarifyingDelegationTask: mocks.createClarifyingDelegationTask,
   continueClarifyingDelegationTask: mocks.continueClarifyingDelegationTask,
   deferGenerationRunForHuman: vi.fn(),
   deferOperatorMessageDelivery: mocks.deferOperatorMessageDelivery,
   ensureConversationLeadAndHandoff: mocks.ensureConversationLeadAndHandoff,
+  setConversationCollectorState: mocks.setConversationCollectorState,
+  clearConversationCollectorState: mocks.clearConversationCollectorState,
   executeAudienceTool: mocks.executeAudienceTool,
   finalizeComputeDelegationTask: mocks.finalizeComputeDelegationTask,
   findConversationClarifyingDelegationTask: mocks.findConversationClarifyingDelegationTask,
@@ -154,6 +172,8 @@ describe("conversation worker knowledge recall", () => {
     mocks.parseComputeDirective.mockReturnValue({ kind: "none" });
     mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(false);
     mocks.readPersistedDelegationStepRequest.mockReturnValue(null);
+    mocks.readStructuredCollectorState.mockReturnValue(null);
+    mocks.shouldStartStructuredCollector.mockReturnValue(false);
     mocks.resolveDeterministicContactMemorySharingCommand.mockReturnValue(null);
     mocks.findConversationClarifyingDelegationTask.mockResolvedValue(null);
     mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: null, source: "model" });
@@ -202,6 +222,7 @@ describe("conversation worker knowledge recall", () => {
       task: { id: "task-1" },
       step: { id: "task-step-1" },
     });
+    mocks.createConversationServiceRequest.mockResolvedValue({ task: { id: "service-request-1" }, skipped: null });
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-1",
       leaseAttempt: 1,
@@ -226,8 +247,13 @@ describe("conversation worker knowledge recall", () => {
       contract: { freeReplyLimit: 4 },
     });
     mocks.createConversationPlan.mockReturnValue({
+      goal: "get_information",
       intent: "faq",
-      nextStep: "answer",
+      audienceRole: "other",
+      disposition: "answer",
+      actions: [{ id: "answer_public_information:faq", kind: "answer_public_information", status: "planned", sideEffect: "none" }],
+      reasons: ["Public answer."],
+      responseOutline: ["Answer from authorized public information."],
     });
     mocks.renderFailClosedReplyPreview.mockReturnValue("SAFE FAIL-CLOSED REPLY");
     mocks.loadGenerationRecentTurns.mockResolvedValue([]);
@@ -1655,11 +1681,11 @@ describe("conversation worker knowledge recall", () => {
       };
     }) => ({
       intent: "faq",
-      nextStep:
+      disposition:
         input.usage.freeRepliesUsed
           >= input.representative.contract.freeReplyLimit
         && !input.usage.passUnlocked
-          ? "offer_paid_unlock"
+          ? "payment_required"
           : "answer",
     }));
 
@@ -1854,7 +1880,7 @@ describe("conversation worker knowledge recall", () => {
       });
       mocks.createConversationPlan.mockReturnValue({
         intent: "faq",
-        nextStep: "offer_paid_unlock",
+        disposition: "payment_required",
       });
 
       await expect(processNextConversationWork({
@@ -2034,11 +2060,11 @@ describe("conversation worker knowledge recall", () => {
       };
     }) => ({
       intent: "faq",
-      nextStep:
+      disposition:
         input.usage.freeRepliesUsed >= 4
         && !input.usage.passUnlocked
         && !input.usage.deepHelpUnlocked
-          ? "offer_paid_unlock"
+          ? "payment_required"
           : "answer",
     }));
 

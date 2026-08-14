@@ -46,7 +46,7 @@ export type HandoffPreparedEvent = {
   scope: LifecycleScope;
   subagentId?: string;
   intent: string;
-  nextStep: string;
+  disposition: string;
   priority: number;
   summary: string;
   ownerAction: string;

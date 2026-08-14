@@ -14,21 +14,6 @@ import { DashboardRepresentativeBillingProducts } from "./dashboard-representati
 import { DashboardRepresentativeMemorySettings } from "./dashboard-representative-memory-settings";
 import { saveRepresentativeSetupRequests } from "./representative-setup-save";
 
-type InquiryIntent =
-  | "faq"
-  | "collaboration"
-  | "pricing"
-  | "materials"
-  | "scheduling"
-  | "handoff"
-  | "refund"
-  | "discount"
-  | "candidate"
-  | "media"
-  | "support"
-  | "restricted"
-  | "unknown";
-
 type GroupActivation = "mention_only" | "reply_or_mention" | "always";
 type KnowledgeDocumentKind =
   | "bio"
@@ -53,24 +38,6 @@ type ComputeNetworkMode = "no_network" | "allowlist" | "full";
 type ComputeFilesystemMode = "workspace_only" | "read_only_workspace" | "ephemeral_full";
 type ComputeCapability = "exec" | "read" | "write" | "process" | "browser" | "mcp";
 type DelegationKnowledgeScope = "user_input_only" | "public_knowledge";
-type ActionGateMode = "allow" | "ask_first" | "deny";
-type ActionGateKey =
-  | "answer_faq"
-  | "collect_lead"
-  | "collect_quote_request"
-  | "collect_scheduling_request"
-  | "deliver_material"
-  | "request_handoff"
-  | "charge_stars"
-  | "issue_refund"
-  | "offer_discount"
-  | "send_sensitive_material"
-  | "modify_owner_calendar"
-  | "run_local_command"
-  | "access_private_memory"
-  | "access_private_files"
-  | "send_outbound_campaign";
-
 type RepresentativeSetupSnapshot = {
   id: string;
   slug: string;
@@ -83,11 +50,8 @@ type RepresentativeSetupSnapshot = {
   groupActivation: GroupActivation;
   publicMode: boolean;
   humanInLoop: boolean;
-  actionGate: Record<ActionGateKey, ActionGateMode>;
   contract: {
     freeReplyLimit: number;
-    freeScope: InquiryIntent[];
-    paywalledIntents: InquiryIntent[];
     handoffWindowHours: number;
   };
   knowledgePack: {
@@ -151,34 +115,6 @@ function getGroupActivationLabels(locale: Locale): Record<GroupActivation, strin
       };
 }
 
-function getIntentOptions(locale: Locale): Array<{ value: InquiryIntent; label: string }> {
-  return locale === "zh"
-    ? [
-        { value: "faq", label: "FAQ" },
-        { value: "materials", label: "资料" },
-        { value: "pricing", label: "报价" },
-        { value: "collaboration", label: "合作" },
-        { value: "scheduling", label: "预约" },
-        { value: "handoff", label: "人工转接" },
-        { value: "candidate", label: "招聘" },
-        { value: "media", label: "媒体" },
-        { value: "support", label: "支持" },
-        { value: "unknown", label: "未知问题" },
-      ]
-    : [
-        { value: "faq", label: "FAQ" },
-        { value: "materials", label: "Materials" },
-        { value: "pricing", label: "Pricing" },
-        { value: "collaboration", label: "Collaboration" },
-        { value: "scheduling", label: "Scheduling" },
-        { value: "handoff", label: "Human handoff" },
-        { value: "candidate", label: "Candidate" },
-        { value: "media", label: "Media" },
-        { value: "support", label: "Support" },
-        { value: "unknown", label: "Unknown" },
-      ];
-}
-
 function getMaterialKindOptions(locale: Locale): Array<{ value: KnowledgeDocumentKind; label: string }> {
   return locale === "zh"
     ? [
@@ -229,29 +165,6 @@ function getComputeCapabilityLabels(locale: Locale): Record<ComputeCapability, s
         browser: "Browse public web",
         mcp: "External MCP tool",
       };
-}
-
-function getActionGateLabels(locale: Locale): Record<ActionGateKey, string> {
-  const labels: Record<ActionGateKey, [string, string]> = {
-    answer_faq: ["回答 FAQ", "Answer FAQ"],
-    collect_lead: ["收集线索", "Collect lead"],
-    collect_quote_request: ["收集报价请求", "Collect quote request"],
-    collect_scheduling_request: ["收集预约请求", "Collect scheduling request"],
-    deliver_material: ["发送公开材料", "Deliver public material"],
-    request_handoff: ["请求人工接手", "Request human handoff"],
-    charge_stars: ["发起 Stars 付费", "Charge Stars"],
-    issue_refund: ["发起退款", "Issue refund"],
-    offer_discount: ["提供折扣", "Offer discount"],
-    send_sensitive_material: ["发送敏感材料", "Send sensitive material"],
-    modify_owner_calendar: ["修改 Owner 日历", "Modify Owner calendar"],
-    run_local_command: ["运行本地命令", "Run local command"],
-    access_private_memory: ["访问私有记忆", "Access private memory"],
-    access_private_files: ["访问私有文件", "Access private files"],
-    send_outbound_campaign: ["发送外呼活动", "Send outbound campaign"],
-  };
-  return Object.fromEntries(
-    Object.entries(labels).map(([key, value]) => [key, value[locale === "zh" ? 0 : 1]]),
-  ) as Record<ActionGateKey, string>;
 }
 
 function getComputeNetworkModeLabels(locale: Locale): Record<ComputeNetworkMode, string> {
@@ -325,8 +238,8 @@ const setupSections: Array<{
   {
     id: "contract",
     step: "02",
-    label: "Contract",
-    blurb: "明确免费范围、付费边界和人工介入时窗。",
+    label: "接待与人工",
+    blurb: "统一对话处理边界，并设置人工评估时窗。",
   },
   {
     id: "pricing",
@@ -369,8 +282,8 @@ const setupSectionsEn: Array<{
   {
     id: "contract",
     step: "02",
-    label: "Contract",
-    blurb: "Make the free scope, paywalls, and review window explicit.",
+    label: "Reception & human",
+    blurb: "Define the unified conversation boundary and human review window.",
   },
   {
     id: "pricing",
@@ -413,8 +326,6 @@ export function DashboardRepresentativeSetup({
   const localizedComputeNetworkModeLabels = getComputeNetworkModeLabels(locale);
   const localizedComputeFilesystemModeLabels = getComputeFilesystemModeLabels(locale);
   const localizedComputeCapabilityLabels = getComputeCapabilityLabels(locale);
-  const localizedActionGateLabels = getActionGateLabels(locale);
-  const intentOptions = getIntentOptions(locale);
   const materialKindOptions = getMaterialKindOptions(locale);
   const [, setSnapshot] = useState<RepresentativeSetupSnapshot | null>(null);
   const [draft, setDraft] = useState<RepresentativeSetupSnapshot | null>(null);
@@ -577,7 +488,7 @@ export function DashboardRepresentativeSetup({
     },
     {
       label: t.signalCards.contractRulesLabel,
-      value: `${draft.contract.freeScope.length + draft.contract.paywalledIntents.length}`,
+      value: `${draft.contract.handoffWindowHours}h`,
       detail: t.signalCards.contractRulesDetail,
       tone: "safe" as const,
     },
@@ -861,90 +772,13 @@ export function DashboardRepresentativeSetup({
                   value={draft.contract.handoffWindowHours}
                 />
               </label>
-
-              <div className="field-stack field-span-full">
-                <span>{t.freeScope}</span>
-                <div className="checkbox-grid">
-                  {intentOptions.map((intent) => (
-                    <label className="toggle-row" key={`free-${intent.value}`}>
-                      <input
-                        checked={draft.contract.freeScope.includes(intent.value)}
-                        onChange={(event) =>
-                          updateDraft((value) => ({
-                            ...value,
-                            contract: {
-                              ...value.contract,
-                              freeScope: toggleIntent(
-                                value.contract.freeScope,
-                                intent.value,
-                                event.target.checked,
-                              ),
-                            },
-                          }))
-                        }
-                        type="checkbox"
-                      />
-                      <span>{intent.label}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
                   <div className="field-stack field-span-full">
-                    <span>{t.paywalledIntents}</span>
-                    <div className="checkbox-grid">
-                      {intentOptions.map((intent) => (
-                        <label className="toggle-row" key={`paid-${intent.value}`}>
-                          <input
-                            checked={draft.contract.paywalledIntents.includes(intent.value)}
-                            onChange={(event) =>
-                              updateDraft((value) => ({
-                                ...value,
-                                contract: {
-                                  ...value.contract,
-                                  paywalledIntents: toggleIntent(
-                                    value.contract.paywalledIntents,
-                                    intent.value,
-                                    event.target.checked,
-                                  ),
-                                },
-                              }))
-                            }
-                            type="checkbox"
-                          />
-                          <span>{intent.label}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="field-stack field-span-full">
-                    <span>{t.actionBoundaries}</span>
-                    <div className="setup-grid">
-                      {(Object.keys(localizedActionGateLabels) as ActionGateKey[]).map((action) => (
-                        <label className="field-stack" key={action}>
-                          <span>{localizedActionGateLabels[action]}</span>
-                          <select
-                            className="text-input"
-                            onChange={(event) =>
-                              updateDraft((value) => ({
-                                ...value,
-                                actionGate: {
-                                  ...value.actionGate,
-                                  [action]: event.target.value as ActionGateMode,
-                                },
-                              }))
-                            }
-                            value={draft.actionGate[action]}
-                          >
-                            <option value="allow">{t.actionAllow}</option>
-                            <option value="ask_first">{t.actionAskFirst}</option>
-                            <option value="deny">{t.actionDeny}</option>
-                          </select>
-                        </label>
-                      ))}
-                    </div>
-                    <small className="field-hint">{t.actionBoundaryHint}</small>
+                    <span>{locale === "zh" ? "运行边界" : "Runtime boundary"}</span>
+                    <small className="field-hint">
+                      {locale === "zh"
+                        ? "公开回答、资料发送和需求采集由统一对话流程处理；涉及工具或外部副作用的操作，统一在 Compute 中检查权限、审批与预算。"
+                        : "Public answers, material delivery, and intake use the unified conversation flow. Tools and external side effects are governed by Compute permissions, approvals, and budgets."}
+                    </small>
                   </div>
                 </div>
               </DashboardSurface>
@@ -1563,7 +1397,7 @@ const setupCopy = {
       languagesLabel: "Languages",
       languagesDetail: "代表当前对外声明支持的语言数。",
       contractRulesLabel: "Contract rules",
-      contractRulesDetail: "草稿中已声明的免费与付费意图边界。",
+      contractRulesDetail: "人工评估时窗；免费与收费统一由价格策略决定。",
       commerceLabel: "价格",
       commerceDetail: "CNY 商品目录与实时访问策略独立管理。",
       knowledgeItemsLabel: "Knowledge items",
@@ -1588,16 +1422,9 @@ const setupCopy = {
     mode: "Mode",
     publicMode: "Public mode",
     handoffPrompt: "Handoff prompt",
-    contractEyebrow: "Conversation Contract",
-    contractTitle: "免费范围、付费边界和人工评估时窗。",
-    handoffWindow: "Handoff window (hours)",
-    freeScope: "Free scope",
-    paywalledIntents: "Paywalled intents",
-    actionBoundaries: "动作边界",
-    actionAllow: "允许",
-    actionAskFirst: "先审批",
-    actionDeny: "禁止",
-    actionBoundaryHint: "这是对话和业务动作边界；Compute 的六类执行能力在 Compute 步骤单独配置。",
+    contractEyebrow: "Reception & Human",
+    contractTitle: "统一对话处理流程，并明确人工评估时窗。",
+    handoffWindow: "人工评估时窗（小时）",
     knowledgeEyebrow: "Knowledge Pack",
     knowledgeTitle: "让公开知识先于自由发挥，回答和材料都从这里长出来。",
     identitySummary: "Identity summary",
@@ -1665,7 +1492,7 @@ const setupCopy = {
       languagesLabel: "Languages",
       languagesDetail: "How many languages this representative publicly declares.",
       contractRulesLabel: "Contract rules",
-      contractRulesDetail: "Draft free and paid intent boundaries currently declared.",
+      contractRulesDetail: "Human review window; pricing policy owns free and paid access.",
       commerceLabel: "Pricing",
       commerceDetail: "CNY catalog and live access policy are managed independently.",
       knowledgeItemsLabel: "Knowledge items",
@@ -1690,16 +1517,9 @@ const setupCopy = {
     mode: "Mode",
     publicMode: "Public mode",
     handoffPrompt: "Handoff prompt",
-    contractEyebrow: "Conversation contract",
-    contractTitle: "Free scope, paywalls, and the owner review window.",
-    handoffWindow: "Handoff window (hours)",
-    freeScope: "Free scope",
-    paywalledIntents: "Paywalled intents",
-    actionBoundaries: "Action boundaries",
-    actionAllow: "Allow",
-    actionAskFirst: "Ask first",
-    actionDeny: "Deny",
-    actionBoundaryHint: "These govern conversation and business actions. Configure the six execution capabilities separately in Compute.",
+    contractEyebrow: "Reception & human",
+    contractTitle: "Use one conversation flow and define the human review window.",
+    handoffWindow: "Human review window (hours)",
     knowledgeEyebrow: "Knowledge pack",
     knowledgeTitle: "Make structured public knowledge come before improvisation.",
     identitySummary: "Identity summary",
@@ -1801,34 +1621,34 @@ function buildSetupStepCards(
     case "contract":
       if (locale === "en") {
         return [
-          { label: "Action gates", value: `${Object.keys(draft.actionGate).length}`, detail: "Deterministic business-action boundaries in this draft.", tone: "accent" },
-          { label: "Free intents", value: `${draft.contract.freeScope.length}`, detail: "Intent types still covered for free.", },
-          { label: "Paywalled", value: `${draft.contract.paywalledIntents.length}`, detail: "Intent types that require paid continuation.", tone: "safe" },
-          { label: "Handoff SLA", value: `${draft.contract.handoffWindowHours}h`, detail: "Expected owner response window for handoff.", },
+          { label: "Conversation flow", value: "Unified", detail: "Answers, intake, materials, and service requests share one runtime.", tone: "accent" },
+          { label: "Action policy", value: "Compute", detail: "Tools and side effects use deterministic capability policy.", tone: "safe" },
+          { label: "Human handoff", value: draft.humanInLoop ? "Available" : "Paused", detail: "Live commerce controls whether a human queue may be created." },
+          { label: "Review window", value: `${draft.contract.handoffWindowHours}h`, detail: "Expected owner review window after handoff." },
         ];
       }
       return [
         {
-          label: "Action gates",
-          value: `${Object.keys(draft.actionGate).length}`,
-          detail: "草稿中已声明的确定性业务动作边界。",
+          label: "对话流程",
+          value: "统一",
+          detail: "公开回答、资料、需求采集和服务请求共用同一运行流程。",
           tone: "accent",
         },
         {
-          label: "Free intents",
-          value: `${draft.contract.freeScope.length}`,
-          detail: "当前被纳入免费范围的意图类型。",
-        },
-        {
-          label: "Paywalled",
-          value: `${draft.contract.paywalledIntents.length}`,
-          detail: "需要付费续用才能继续深入的问题类型。",
+          label: "动作策略",
+          value: "Compute",
+          detail: "工具和外部副作用统一走确定性能力策略。",
           tone: "safe",
         },
         {
-          label: "Handoff SLA",
+          label: "人工接手",
+          value: draft.humanInLoop ? "可用" : "暂停",
+          detail: "是否允许进入人工队列由实时服务策略控制。",
+        },
+        {
+          label: "评估时窗",
           value: `${draft.contract.handoffWindowHours}h`,
-          detail: "人工升级预期的响应窗口。",
+          detail: "提交人工接手后的预期评估窗口。",
         },
       ];
     case "pricing":
@@ -2360,11 +2180,8 @@ function cloneSnapshot(snapshot: RepresentativeSetupSnapshot): RepresentativeSet
     languages: [...snapshot.languages],
     contract: {
       freeReplyLimit: snapshot.contract.freeReplyLimit,
-      freeScope: [...snapshot.contract.freeScope],
-      paywalledIntents: [...snapshot.contract.paywalledIntents],
       handoffWindowHours: snapshot.contract.handoffWindowHours,
     },
-    actionGate: { ...snapshot.actionGate },
     knowledgePack: {
       identitySummary: snapshot.knowledgePack.identitySummary,
       faq: snapshot.knowledgePack.faq.map((item) => ({ ...item })),
@@ -2385,18 +2202,6 @@ function parseCommaSeparatedList(value: string): string[] {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
-}
-
-function toggleIntent(
-  current: InquiryIntent[],
-  value: InquiryIntent,
-  checked: boolean,
-): InquiryIntent[] {
-  if (checked) {
-    return current.includes(value) ? current : [...current, value];
-  }
-
-  return current.filter((entry) => entry !== value);
 }
 
 async function extractError(response: Response): Promise<string> {

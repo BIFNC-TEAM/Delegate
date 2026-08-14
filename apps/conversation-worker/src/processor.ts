@@ -5,13 +5,19 @@ import {
 } from "@delegate/model-runtime";
 import {
   buildComputeRequestsFromDelegationPlan,
+  advanceStructuredCollector,
+  beginStructuredCollector,
   createConversationPlan,
+  formatStructuredCollectorPrompt,
+  formatStructuredCollectorSummary,
   parseComputeDirective,
   renderFailClosedReplyPreview,
   renderReplyPreview,
+  readStructuredCollectorState,
   readPersistedDelegationStepRequest,
   resolveComputeSubagent,
   resolveConversationSubagent,
+  shouldStartStructuredCollector,
   shouldConsiderNaturalLanguageCompute,
   type ParsedComputeRequest,
 } from "@delegate/runtime";
@@ -26,8 +32,10 @@ import {
   contactMemorySharingConsentContractVersion,
   ContactMemorySharingError,
   createComputeDelegationTask,
+  createConversationServiceRequest,
   createClarifyingDelegationTask,
   createAudienceComputeSession,
+  clearConversationCollectorState,
   createContactMemorySharingChallenge,
   deferOperatorMessageDelivery,
   deferGenerationRunForHuman,
@@ -62,6 +70,7 @@ import {
   revokeContactMemorySharingConsent,
   retryGenerationDelivery,
   retryOperatorMessageDelivery,
+  setConversationCollectorState,
   resolveTelegramBotRuntimeCredential,
   withActiveTelegramRepresentativeChannelFence,
   withGenerationMessageProviderDeliveryFence,
@@ -92,6 +101,11 @@ function resolveFallbackReason(
     return "policy_fallback";
   }
   return "provider_failed";
+}
+
+function isCollectorCancelMessage(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return normalized === "取消" || normalized === "cancel" || normalized === "stop";
 }
 
 export async function processNextConversationWork(config: ConversationWorkerConfig) {
@@ -541,14 +555,15 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         ? (item.contextSnapshot as Record<string, unknown>).request
         : null,
     );
-    const clarifyingTask = !persistedRequest && item.channel === "web"
+    const activeCollector = readStructuredCollectorState(item.collectorState);
+    const clarifyingTask = !persistedRequest && !activeCollector && item.channel === "web"
       ? await findConversationClarifyingDelegationTask({
           representativeId: setup.id,
           contactId: item.contactId,
           conversationId: item.conversationId,
         })
       : null;
-    const computeDirective = item.channel === "web" && !persistedRequest && !clarifyingTask
+    const computeDirective = item.channel === "web" && !persistedRequest && !clarifyingTask && !activeCollector
       ? parseComputeDirective(item.userText)
       : { kind: "none" as const };
     if (
@@ -808,6 +823,72 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       !paidContinuationRequired
       || Boolean(walletReservation || entitlementReservation);
 
+    if (activeCollector) {
+      const canceled = isCollectorCancelMessage(item.userText);
+      let replyText: string;
+      let completedCollector = false;
+      let completedState = activeCollector;
+
+      if (!continuationAuthorized) {
+        replyText = "当前可用服务额度不足。补充额度后可以从当前采集步骤继续，不需要重新开始。";
+      } else if (canceled) {
+        await clearConversationCollectorState({ conversationId: item.conversationId });
+        replyText = "已取消本次需求采集，没有创建服务请求。";
+      } else {
+        const advanced = advanceStructuredCollector(activeCollector, item.userText);
+        completedState = advanced.state ?? activeCollector;
+        completedCollector = advanced.completed;
+        if (advanced.completed) {
+          await clearConversationCollectorState({ conversationId: item.conversationId });
+          const summary = formatStructuredCollectorSummary(completedState);
+          await ensureConversationLeadAndHandoff({
+            conversationId: item.conversationId,
+            reason: "Structured intake completed",
+            summary,
+            kind: completedState.intent,
+            priority: 60,
+            source: item.channel,
+            requestHandoff: false,
+          });
+          await createConversationServiceRequest({
+            representativeId: setup.id,
+            representativeVersionId: item.representativeVersionId,
+            contactId: item.contactId,
+            conversationId: item.conversationId,
+            ...(item.episodeId ? { episodeId: item.episodeId } : {}),
+            inputMessageId: item.inputMessageId,
+            intent: completedState.intent,
+            objective: summary,
+            desiredOutcome: "Owner review and a clear next-step response.",
+            priority: 60,
+          });
+          replyText = `需求已整理并创建服务请求。\n\n${summary}\n\n后续如需工具调用、外部操作或人工接手，系统会分别检查权限与状态。`;
+        } else {
+          await setConversationCollectorState({
+            conversationId: item.conversationId,
+            collectorState: completedState,
+          });
+          replyText = formatStructuredCollectorPrompt(completedState);
+        }
+      }
+
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText,
+        senderDisplayName: item.representativeName,
+        intent: completedCollector ? "intake_completed" : canceled ? "intake_canceled" : "intake_collecting",
+        completeOutbox: false,
+        countUsage: continuationAuthorized && !canceled,
+        ...(entitlementReservation ? { entitlementReservation } : {}),
+      });
+      outputMessageId = completed.message.id;
+      await deliverGenerationOutput({ config, item, text: replyText, outputMessageId });
+      leaseGuard.assertOwned();
+      return { processed: true as const, runId: item.runId, status: completedCollector ? "completed" as const : "waiting_input" as const };
+    }
+
     if (
       parsedRequests.length
       && paidContinuationRequired
@@ -888,7 +969,30 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       usage: effectiveUsage,
     });
     const subagent = resolveConversationSubagent(plan);
-    const recalled = plan.nextStep === "answer"
+    if (plan.disposition === "collect" && shouldStartStructuredCollector(plan)) {
+      const collector = beginStructuredCollector({ plan, channel: "private_chat" });
+      await setConversationCollectorState({
+        conversationId: item.conversationId,
+        collectorState: collector,
+      });
+      const replyText = `${formatStructuredCollectorPrompt(collector)}\n\n如需中止，请发送“取消”。`;
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText,
+        senderDisplayName: item.representativeName,
+        intent: plan.intent,
+        completeOutbox: false,
+        countUsage: continuationAuthorized,
+        ...(entitlementReservation ? { entitlementReservation } : {}),
+      });
+      outputMessageId = completed.message.id;
+      await deliverGenerationOutput({ config, item, text: replyText, outputMessageId });
+      leaseGuard.assertOwned();
+      return { processed: true as const, runId: item.runId, status: "waiting_input" as const };
+    }
+    const recalled = plan.disposition === "answer"
       ? await recallRepresentativeContext({
           representativeSlug: item.representativeSlug,
           conversationId: item.conversationId,
@@ -905,12 +1009,12 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       : [];
 
     let replyText =
-      plan.nextStep === "offer_paid_unlock"
+      plan.disposition === "payment_required"
       && paidContinuationRequired
       && !walletReservation
       && !entitlementReservation
         ? "当前可用服务额度不足，请前往这个数字代表的公开页面充值或购买服务套餐后再继续。"
-        : plan.nextStep === "answer"
+        : plan.disposition === "answer"
           ? renderFailClosedReplyPreview(policyPinnedRepresentative, item.userText)
           : renderReplyPreview(policyPinnedRepresentative, plan);
     let runtime: { provider?: "openai" | "bailian" | "anthropic"; model?: string; inputTokens?: number; outputTokens?: number; costCents?: number } = {};
@@ -927,7 +1031,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           outcome: "generation_failed";
         }
       | undefined;
-    if (plan.nextStep === "answer") {
+    if (plan.disposition === "answer") {
       const generated = await generateRepresentativeReply({
         representative: policyPinnedRepresentative,
         plan,
@@ -972,8 +1076,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       }
     }
 
-    const requestHandoff =
-      plan.nextStep === "handoff" || plan.nextStep === "ask_owner";
+    const requestHandoff = plan.disposition === "handoff";
     const completed = await completeInlineGenerationRun({
       conversationId: item.conversationId,
       runId: item.runId,
@@ -1001,7 +1104,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     });
     outputMessageId = completed.message.id;
 
-    if (plan.nextStep === "collect_intake") {
+    if (plan.disposition === "collect") {
       leaseGuard.assertOwned();
       await ensureConversationLeadAndHandoff({
         conversationId: item.conversationId,
@@ -1011,6 +1114,18 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         priority: 50,
         source: item.channel,
         requestHandoff: false,
+      });
+      await createConversationServiceRequest({
+        representativeId: setup.id,
+        representativeVersionId: item.representativeVersionId,
+        contactId: item.contactId,
+        conversationId: item.conversationId,
+        ...(item.episodeId ? { episodeId: item.episodeId } : {}),
+        inputMessageId: item.inputMessageId,
+        intent: plan.intent,
+        objective: item.userText,
+        desiredOutcome: plan.responseOutline.join(" "),
+        priority: 50,
       });
       leaseGuard.assertOwned();
     }

@@ -1,17 +1,14 @@
 import { createHash } from "node:crypto";
 
 import {
-  actionGateSchema,
   conversationContractSchema,
   demoRepresentative,
   groupActivationSchema,
-  inquiryIntentSchema,
   knowledgeDocumentKindSchema,
   knowledgeDocumentSchema,
   representativeSkillSchema,
   skillPackSchema,
   type GroupActivation as DomainGroupActivation,
-  type InquiryIntent,
   type KnowledgeDocument,
   type Representative,
 } from "@delegate/domain";
@@ -159,7 +156,6 @@ const representativeSetupUpdateSchema = z.object({
   groupActivation: groupActivationSchema,
   publicMode: z.boolean(),
   humanInLoop: z.boolean(),
-  actionGate: actionGateSchema.default(demoRepresentative.actionGate),
   contract: conversationContractSchema,
   handoffPrompt: z.string().trim().min(1),
   knowledgePack: z.object({
@@ -218,7 +214,6 @@ export type RepresentativeSetupSnapshot = Pick<
   | "knowledgePack"
   | "contract"
   | "handoffPrompt"
-  | "actionGate"
 > & {
   knowledgePackRevision: number;
   publicMode: boolean;
@@ -518,12 +513,9 @@ export function buildRepresentativeRuntimeProfile(
     },
     contract: {
       freeReplyLimit: setup.contract.freeReplyLimit,
-      freeScope: [...setup.contract.freeScope],
-      paywalledIntents: [...setup.contract.paywalledIntents],
       handoffWindowHours: setup.contract.handoffWindowHours,
     },
     handoffPrompt: setup.handoffPrompt,
-    actionGate: { ...setup.actionGate },
   };
 }
 
@@ -649,14 +641,17 @@ export async function createRepresentative(
           groupActivation: mapGroupActivationToDb(template.groupActivation),
           humanInLoop: true,
           languages: template.languages,
+          // Legacy columns remain populated until the non-destructive data
+          // migration has been deployed everywhere. They are no longer read
+          // by setup, publication, or conversation runtime code.
+          freeScope: [],
+          paywalledIntents: [],
           freeReplyLimit: template.contract.freeReplyLimit,
-          freeScope: template.contract.freeScope,
-          paywalledIntents: template.contract.paywalledIntents,
           handoffWindowHours: template.contract.handoffWindowHours,
           freeMonthlyCredit: 100,
           handoffPrompt: template.handoffPrompt,
           allowedSkills: template.skills,
-          actionGate: template.actionGate,
+          actionGate: {},
           openvikingEnabled: false,
           openvikingAgentId: buildOpenVikingAgentId(slug, openVikingEnv),
           openvikingAutoRecall: openVikingEnv.autoRecallDefault,
@@ -1229,11 +1224,8 @@ export async function updateRepresentativeSetup(
           // legacy setup payload still carries compatibility snapshots, but
           // saving another setup section must never overwrite the dedicated
           // commerce controls.
-          freeScope: input.contract.freeScope,
-          paywalledIntents: input.contract.paywalledIntents,
           handoffWindowHours: input.contract.handoffWindowHours,
           handoffPrompt: input.handoffPrompt,
-          actionGate: input.actionGate,
           computeEnabled: input.compute.enabled,
           computeDefaultPolicyMode: mapPolicyDecisionToDb(input.compute.defaultPolicyMode),
           computeBaseImage: input.compute.baseImage,
@@ -1519,15 +1511,9 @@ function serializeRepresentativeSetup(
     },
     contract: {
       freeReplyLimit: representative.freeReplyLimit,
-      freeScope: parseInquiryIntents(representative.freeScope, demoRepresentative.contract.freeScope),
-      paywalledIntents: parseInquiryIntents(
-        representative.paywalledIntents,
-        demoRepresentative.contract.paywalledIntents,
-      ),
       handoffWindowHours: representative.handoffWindowHours,
     },
     handoffPrompt: representative.handoffPrompt || demoRepresentative.handoffPrompt,
-    actionGate: parseActionGate(representative.actionGate),
     compute: {
       enabled: representative.computeEnabled,
       defaultPolicyMode: mapPolicyDecisionFromDb(representative.computeDefaultPolicyMode),
@@ -1643,10 +1629,6 @@ export function applyRepresentativeVersionSnapshot(
       : current.contract,
     handoffPrompt:
       readSnapshotString(conversation?.handoffPrompt) ?? current.handoffPrompt,
-    actionGate: resolvePublishedActionGateCeiling(
-      current.actionGate,
-      governance?.actionGate,
-    ),
     compute: effectiveCompute,
     delegation: effectiveDelegation,
   };
@@ -1661,26 +1643,6 @@ function buildSkillPackAvailabilityKey(
     pack.slug,
     pack.version?.trim() || "",
   ].join("\u0000");
-}
-
-function resolvePublishedActionGateCeiling(
-  current: RepresentativeSetupSnapshot["actionGate"],
-  publishedValue: unknown,
-): RepresentativeSetupSnapshot["actionGate"] {
-  const published = actionGateSchema.safeParse(publishedValue);
-  const rank = { allow: 0, ask_first: 1, deny: 2 } as const;
-
-  return Object.fromEntries(
-    Object.keys(current).map((action) => {
-      const key = action as keyof typeof current;
-      const currentMode = current[key];
-      const publishedMode = published.success ? published.data[key] : "deny";
-      return [
-        key,
-        rank[currentMode] >= rank[publishedMode] ? currentMode : publishedMode,
-      ];
-    }),
-  ) as RepresentativeSetupSnapshot["actionGate"];
 }
 
 export function resolvePublishedComputeCeiling(
@@ -2240,12 +2202,9 @@ function getOrCreateDemoFallbackSetupSnapshot(): RepresentativeSetupSnapshot {
       },
       contract: {
         freeReplyLimit: demoRepresentative.contract.freeReplyLimit,
-        freeScope: [...demoRepresentative.contract.freeScope],
-        paywalledIntents: [...demoRepresentative.contract.paywalledIntents],
         handoffWindowHours: demoRepresentative.contract.handoffWindowHours,
       },
       handoffPrompt: demoRepresentative.handoffPrompt,
-      actionGate: { ...demoRepresentative.actionGate },
       compute: cloneComputeSetup(defaultComputeSetup),
       delegation: { ...defaultDelegationSetup },
     };
@@ -2274,12 +2233,9 @@ function updateDemoFallbackRepresentativeSetup(
     // Match the database-backed setup path: commerce-owned fields remain
     // unchanged when an unrelated legacy setup section is saved.
     freeReplyLimit: snapshot.contract.freeReplyLimit,
-    freeScope: [...input.contract.freeScope],
-    paywalledIntents: [...input.contract.paywalledIntents],
     handoffWindowHours: input.contract.handoffWindowHours,
   };
   snapshot.handoffPrompt = input.handoffPrompt;
-  snapshot.actionGate = { ...input.actionGate };
   snapshot.knowledgePack = {
     identitySummary: input.knowledgePack.identitySummary,
     faq: normalizeKnowledgeDocuments(input.knowledgePack.faq, "faq"),
@@ -2314,11 +2270,8 @@ function cloneRepresentativeSetupSnapshot(
     },
     contract: {
       freeReplyLimit: snapshot.contract.freeReplyLimit,
-      freeScope: [...snapshot.contract.freeScope],
-      paywalledIntents: [...snapshot.contract.paywalledIntents],
       handoffWindowHours: snapshot.contract.handoffWindowHours,
     },
-    actionGate: { ...snapshot.actionGate },
     compute: cloneComputeSetup(snapshot.compute),
     delegation: { ...snapshot.delegation },
   };
@@ -2369,12 +2322,9 @@ function buildRepresentativeTemplate(params: {
     },
     contract: {
       freeReplyLimit: demoRepresentative.contract.freeReplyLimit,
-      freeScope: [...demoRepresentative.contract.freeScope],
-      paywalledIntents: [...demoRepresentative.contract.paywalledIntents],
       handoffWindowHours: demoRepresentative.contract.handoffWindowHours,
     },
     handoffPrompt: `${safeOwnerName} 的真人评估入口已经开启。请留下你的身份、需求摘要、预算区间、目标时间，以及为什么需要真人接手。`,
-    actionGate: { ...demoRepresentative.actionGate },
     compute: cloneComputeSetup(defaultComputeSetup),
     delegation: { ...defaultDelegationSetup },
   };
@@ -2851,22 +2801,6 @@ async function findLocalDashboardOwnerId(): Promise<string | undefined> {
   return owner?.id;
 }
 
-function parseInquiryIntents(
-  value: Prisma.JsonValue,
-  fallback: InquiryIntent[],
-): InquiryIntent[] {
-  if (!Array.isArray(value)) {
-    return [...fallback];
-  }
-
-  const parsed = value
-    .map((entry) => inquiryIntentSchema.safeParse(entry))
-    .filter((entry): entry is { success: true; data: InquiryIntent } => entry.success)
-    .map((entry) => entry.data);
-
-  return parsed.length > 0 ? parsed : [...fallback];
-}
-
 function parseRepresentativeSkills(value: Prisma.JsonValue): Representative["skills"] {
   if (!Array.isArray(value)) {
     return [...demoRepresentative.skills];
@@ -2891,11 +2825,6 @@ function parseStringArray(value: Prisma.JsonValue, fallback: string[]): string[]
     .filter(Boolean);
 
   return parsed.length > 0 ? parsed : [...fallback];
-}
-
-function parseActionGate(value: Prisma.JsonValue): Representative["actionGate"] {
-  const parsed = actionGateSchema.safeParse(value);
-  return parsed.success ? parsed.data : { ...demoRepresentative.actionGate };
 }
 
 function shouldUseDemoFallback(error: unknown, representativeSlug: string): boolean {

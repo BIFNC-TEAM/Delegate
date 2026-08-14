@@ -130,8 +130,6 @@ const publishedRepresentativeSnapshotSchema = z.object({
   groupActivation: z.string().trim().min(1),
   conversation: z.object({
     freeReplyLimit: z.number().int().min(0),
-    freeScope: z.array(z.string()),
-    paywalledIntents: z.array(z.string()),
     handoffWindowHours: z.number().int().min(0),
     handoffPrompt: z.string(),
   }),
@@ -559,8 +557,6 @@ function buildPublishedAggregateProjectionSpecs(params: {
     publicMode: params.snapshot.publicMode,
     humanInLoop: params.snapshot.humanInLoop,
     freeReplyLimit: params.snapshot.conversation.freeReplyLimit,
-    freeScope: params.snapshot.conversation.freeScope,
-    paywalledIntents: params.snapshot.conversation.paywalledIntents,
     handoffWindowHours: params.snapshot.conversation.handoffWindowHours,
     skills: params.snapshot.governance.allowedSkills,
     knowledgePack: {

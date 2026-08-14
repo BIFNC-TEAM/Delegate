@@ -1,10 +1,7 @@
 import {
-  actionGateSchema,
   demoRepresentative,
-  inquiryIntentSchema,
   knowledgeDocumentSchema,
   representativeSkillSchema,
-  type InquiryIntent,
   type KnowledgeDocument,
   type Representative,
 } from "@delegate/domain";
@@ -91,15 +88,9 @@ function serializeRepresentative(representative: RepresentativeConfigRecord): Re
     },
     contract: {
       freeReplyLimit: representative.freeReplyLimit,
-      freeScope: parseInquiryIntents(representative.freeScope, demoRepresentative.contract.freeScope),
-      paywalledIntents: parseInquiryIntents(
-        representative.paywalledIntents,
-        demoRepresentative.contract.paywalledIntents,
-      ),
       handoffWindowHours: representative.handoffWindowHours,
     },
     handoffPrompt: representative.handoffPrompt || demoRepresentative.handoffPrompt,
-    actionGate: parseActionGate(representative.actionGate),
   };
 }
 
@@ -117,22 +108,6 @@ function parseKnowledgeDocuments(
     .map((entry) => entry.data);
 
   return parsed.length > 0 ? parsed : fallback.map((item) => ({ ...item }));
-}
-
-function parseInquiryIntents(
-  value: Prisma.JsonValue,
-  fallback: InquiryIntent[],
-): InquiryIntent[] {
-  if (!Array.isArray(value)) {
-    return [...fallback];
-  }
-
-  const parsed = value
-    .map((entry) => inquiryIntentSchema.safeParse(entry))
-    .filter((entry): entry is { success: true; data: InquiryIntent } => entry.success)
-    .map((entry) => entry.data);
-
-  return parsed.length > 0 ? parsed : [...fallback];
 }
 
 function parseRepresentativeSkills(value: Prisma.JsonValue): Representative["skills"] {
@@ -161,11 +136,6 @@ function parseStringArray(value: Prisma.JsonValue, fallback: string[]): string[]
   return parsed.length > 0 ? parsed : [...fallback];
 }
 
-function parseActionGate(value: Prisma.JsonValue): Representative["actionGate"] {
-  const parsed = actionGateSchema.safeParse(value);
-  return parsed.success ? parsed.data : { ...demoRepresentative.actionGate };
-}
-
 function cloneRepresentative(representative: Representative): Representative {
   return {
     ...representative,
@@ -183,11 +153,8 @@ function cloneRepresentative(representative: Representative): Representative {
     },
     contract: {
       freeReplyLimit: representative.contract.freeReplyLimit,
-      freeScope: [...representative.contract.freeScope],
-      paywalledIntents: [...representative.contract.paywalledIntents],
       handoffWindowHours: representative.contract.handoffWindowHours,
     },
-    actionGate: { ...representative.actionGate },
   };
 }
 

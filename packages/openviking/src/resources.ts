@@ -26,8 +26,6 @@ type RepresentativeKnowledgeInput = {
   publicMode: boolean;
   humanInLoop: boolean;
   freeReplyLimit: number;
-  freeScope: string[];
-  paywalledIntents: string[];
   handoffWindowHours: number;
   skills: string[];
   knowledgePack: {
@@ -107,9 +105,8 @@ export function buildRepresentativeKnowledgeDocuments(
         ``,
         `## Conversation contract`,
         `- Free reply limit: ${input.freeReplyLimit}`,
-        `- Free scope: ${input.freeScope.join(", ")}`,
-        `- Paywalled intents: ${input.paywalledIntents.join(", ")}`,
         `- Handoff window: ${input.handoffWindowHours} hours`,
+        `- Tools and external side effects require capability-policy evaluation.`,
       ]),
     },
   ];

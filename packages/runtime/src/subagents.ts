@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { ConversationPlan, ConversationStep } from "./inquiry-routing";
+import type { ConversationDisposition, ConversationPlan } from "./inquiry-routing";
 import type { StructuredCollectorState } from "./structured-collector";
 
 export const subagentIdSchema = z.enum([
@@ -36,7 +36,7 @@ export type ResolvedSubagentRoute = {
   id: SubagentId;
   displayName: string;
   purpose: string;
-  allowedConversationSteps: ConversationStep[];
+  allowedConversationDispositions: ConversationDisposition[];
   allowedCapabilities: string[];
   contextScopes: SubagentContextScope[];
   budgetHints: SubagentBudgetHints;
@@ -51,8 +51,8 @@ const scopedSubagents: Record<SubagentId, ResolvedSubagentRoute> = {
     id: "triage-agent",
     displayName: "Triage Agent",
     purpose: "Handle safe public answers, materials, and paywall nudges without leaving the FAQ lane.",
-    allowedConversationSteps: ["answer", "offer_paid_unlock", "deny"],
-    allowedCapabilities: ["answer_faq", "deliver_material", "offer_paid_unlock"],
+    allowedConversationDispositions: ["answer", "payment_required", "refuse"],
+    allowedCapabilities: ["answer_public_information", "deliver_public_material", "payment_required"],
     contextScopes: [
       "conversation_contract",
       "representative_snapshot",
@@ -73,11 +73,10 @@ const scopedSubagents: Record<SubagentId, ResolvedSubagentRoute> = {
     id: "quote-agent",
     displayName: "Quote Agent",
     purpose: "Collect structured business context for pricing, collaboration, and scheduling flows.",
-    allowedConversationSteps: ["collect_intake", "offer_paid_unlock"],
+    allowedConversationDispositions: ["collect", "payment_required"],
     allowedCapabilities: [
-      "collect_lead",
-      "collect_quote_request",
-      "collect_scheduling_request",
+      "collect_contact_and_requirements",
+      "create_service_request",
     ],
     contextScopes: [
       "conversation_contract",
@@ -100,8 +99,8 @@ const scopedSubagents: Record<SubagentId, ResolvedSubagentRoute> = {
     id: "handoff-agent",
     displayName: "Handoff Agent",
     purpose: "Package owner-ready escalation context without promising actions outside the handoff policy.",
-    allowedConversationSteps: ["handoff", "ask_owner"],
-    allowedCapabilities: ["request_handoff", "ask_owner"],
+    allowedConversationDispositions: ["handoff"],
+    allowedCapabilities: ["request_human_handoff"],
     contextScopes: [
       "conversation_contract",
       "representative_snapshot",
@@ -121,7 +120,7 @@ const scopedSubagents: Record<SubagentId, ResolvedSubagentRoute> = {
     id: "compute-agent",
     displayName: "Compute Agent",
     purpose: "Route governed compute requests into the isolated sandbox for non-browser capabilities.",
-    allowedConversationSteps: ["answer"],
+    allowedConversationDispositions: ["answer"],
     allowedCapabilities: ["exec", "read", "write", "process", "mcp"],
     contextScopes: [
       "conversation_contract",
@@ -141,7 +140,7 @@ const scopedSubagents: Record<SubagentId, ResolvedSubagentRoute> = {
     id: "browser-agent",
     displayName: "Browser Agent",
     purpose: "Route governed browser work into the retained Playwright session and approval flow.",
-    allowedConversationSteps: ["answer"],
+    allowedConversationDispositions: ["answer"],
     allowedCapabilities: ["browser"],
     contextScopes: [
       "conversation_contract",
@@ -168,11 +167,11 @@ export function getScopedSubagent(id: SubagentId): ResolvedSubagentRoute {
 }
 
 export function resolveConversationSubagent(plan: ConversationPlan): ResolvedSubagentRoute {
-  if (plan.nextStep === "collect_intake") {
+  if (plan.disposition === "collect") {
     return getScopedSubagent("quote-agent");
   }
 
-  if (plan.nextStep === "handoff" || plan.nextStep === "ask_owner") {
+  if (plan.disposition === "handoff") {
     return getScopedSubagent("handoff-agent");
   }
 

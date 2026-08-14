@@ -366,8 +366,6 @@ describe("OpenViking document builders", () => {
       publicMode: true,
       humanInLoop: true,
       freeReplyLimit: 4,
-      freeScope: ["faq", "materials"],
-      paywalledIntents: ["pricing", "scheduling"],
       handoffWindowHours: 24,
       skills: ["faq_reply", "human_handoff"],
       knowledgePack: {

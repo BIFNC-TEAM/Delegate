@@ -38,6 +38,10 @@ export async function recoverInterruptedApprovedExecutions() {
     where: {
       status: "RUNNING",
       approvalRequestId: { not: null },
+      // V3 attempts are reconciled by their phase-aware runtime invariant
+      // worker; this legacy recovery cannot distinguish pre-call from an
+      // unknown external result safely.
+      planActionId: null,
       AND: [
         {
           OR: [
@@ -75,7 +79,7 @@ export async function recoverInterruptedApprovedExecutions() {
         executionLeaseToken: null,
       },
     });
-    if (failed.count === 1) {
+    if (failed.count === 1 && execution.sessionId) {
       await prisma.computeSession.updateMany({
         where: { id: execution.sessionId },
         data: {
@@ -88,7 +92,7 @@ export async function recoverInterruptedApprovedExecutions() {
   }
 }
 
-async function reconcileApprovalConversationResults() {
+export async function reconcileApprovalConversationResults() {
   const approvals = await prisma.approvalRequest.findMany({
     where: {
       status: { in: ["APPROVED", "REJECTED", "EXPIRED"] },
@@ -111,7 +115,14 @@ async function reconcileApprovalConversationResults() {
     const execution = await prisma.toolExecution.findUnique({
       where: { id: approval.toolExecutionId },
       select: {
+        planActionId: true,
         status: true,
+        actionResult: {
+          select: {
+            semanticOutcome: true,
+            failure: true,
+          },
+        },
         requestedPath: true,
         session: { select: { failureReason: true } },
         artifacts: {
@@ -127,16 +138,27 @@ async function reconcileApprovalConversationResults() {
       },
     });
     if (!execution || !["SUCCEEDED", "FAILED", "CANCELED"].includes(execution.status)) continue;
+    const v3Outcome = execution.planActionId
+      ? resolveVerifiedV3ApprovalOutcome(execution)
+      : null;
+    if (execution.planActionId && !v3Outcome) {
+      // A terminal-looking attempt without its atomic ActionResult is an
+      // interrupted pre-verification state. Never publish completion.
+      continue;
+    }
     await finalizeComputeApprovalConversation({
       approvalId: approval.id,
-      outcome:
-        execution.status === "SUCCEEDED"
+      outcome: v3Outcome?.outcome
+        ?? (execution.status === "SUCCEEDED"
           ? "completed"
           : execution.status === "CANCELED"
             ? "policy_denied"
-            : "failed",
-      ...(execution.session.failureReason
-        ? { failureReason: execution.session.failureReason }
+            : "failed"),
+      ...(v3Outcome?.failureReason || execution.session?.failureReason
+        ? {
+            failureReason:
+              v3Outcome?.failureReason ?? execution.session?.failureReason!,
+          }
         : {}),
       ...(execution.artifacts.length
         ? {
@@ -155,4 +177,39 @@ async function reconcileApprovalConversationResults() {
         : {}),
     });
   }
+}
+
+function resolveVerifiedV3ApprovalOutcome(execution: {
+  status: string;
+  actionResult: {
+    semanticOutcome: string;
+    failure: unknown;
+  } | null;
+}) {
+  const result = execution.actionResult;
+  if (!result) return null;
+  if (result.semanticOutcome === "succeeded") {
+    // The ActionResult transaction must converge both records. Treat an
+    // inconsistent aggregate as unfinished instead of guessing success.
+    return execution.status === "SUCCEEDED"
+      ? { outcome: "completed" as const }
+      : null;
+  }
+  const failureCode = readActionResultFailureCode(result.failure);
+  return {
+    outcome: "failed" as const,
+    failureReason: result.semanticOutcome === "unknown"
+      ? failureCode === "success_contract_missing"
+        ? "external_tool_success_contract_missing"
+        : "external_tool_semantic_outcome_unknown"
+      : result.semanticOutcome === "partial"
+        ? "external_tool_semantic_outcome_partial"
+        : failureCode ?? "external_tool_semantic_failure",
+  };
+}
+
+function readActionResultFailureCode(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const code = (value as Record<string, unknown>)["code"];
+  return typeof code === "string" && code.trim() ? code.trim() : null;
 }

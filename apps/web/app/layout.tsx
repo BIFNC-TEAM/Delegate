@@ -23,7 +23,11 @@ export default async function RootLayout({
     getCookieLocale(cookieStore.get(localeCookieName)?.value) ?? "zh";
 
   return (
-    <html data-scroll-behavior="smooth" lang={formatHtmlLang(locale)}>
+    <html
+      data-scroll-behavior="smooth"
+      lang={formatHtmlLang(locale)}
+      suppressHydrationWarning
+    >
       <body>
         <DashboardHistoryTracker />
         {children}

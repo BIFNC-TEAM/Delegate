@@ -1,14 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { executeWorkflowRunActivity, sleep } = vi.hoisted(() => ({
+const { executeWorkflowRunActivity, executeDelegationExecutionTransitionActivity, sleep } = vi.hoisted(() => ({
   executeWorkflowRunActivity: vi.fn(),
+  executeDelegationExecutionTransitionActivity: vi.fn(),
   sleep: vi.fn(),
 }));
 
 vi.mock("@temporalio/workflow", () => ({
   proxyActivities: () => ({
     executeWorkflowRunActivity,
+    executeDelegationExecutionTransitionActivity,
   }),
+  condition: vi.fn(),
+  defineSignal: (name: string) => name,
+  setHandler: vi.fn(),
   sleep,
 }));
 

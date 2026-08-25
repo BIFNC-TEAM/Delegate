@@ -45,6 +45,12 @@ const DEMO_AGENT_WALLET_ID = "agent_wallet_lin_demo";
 const DEMO_OWNER_TELEGRAM_ID = "demo-owner-lin";
 const DEMO_REPRESENTATIVE_ID = demoRepresentative.id;
 const KNOWLEDGE_PACK_ID = "knowledge_lin_founder";
+const DEMO_WEATHER_MCP_BINDING_ID = "mcp_binding_lin_open_meteo";
+const DEMO_WEATHER_MCP_ENDPOINT = "https://open-meteo.caseyjhand.com/mcp";
+const DEMO_WEATHER_MCP_TOOLS = [
+  "openmeteo_search_locations",
+  "openmeteo_get_forecast",
+] as const;
 
 const CONTACTS = [
   {
@@ -237,13 +243,9 @@ export async function seedDatabase(
       create: {
         id: DEMO_WALLET_ID,
         ownerId: DEMO_OWNER_ID,
-        balanceCredits: 240,
-        sponsorPoolCredit: 1200,
         starsBalance: 2060,
       },
       update: {
-        balanceCredits: 240,
-        sponsorPoolCredit: 1200,
         starsBalance: 2060,
       },
     });
@@ -487,6 +489,33 @@ export async function seedDatabase(
         },
       });
     }
+
+    await tx.representativeMcpBinding.upsert({
+      where: {
+        representativeId_slug: {
+          representativeId: representative.id,
+          slug: "open-meteo",
+        },
+      },
+      create: {
+        id: DEMO_WEATHER_MCP_BINDING_ID,
+        representativeId: representative.id,
+        slug: "open-meteo",
+        displayName: "Open-Meteo Weather",
+        description:
+          "Development/demo weather lookup through the public Open-Meteo MCP endpoint. Hosted free use is non-commercial and has no SLA.",
+        serverUrl: DEMO_WEATHER_MCP_ENDPOINT,
+        transportKind: "STREAMABLE_HTTP",
+        allowedToolNames: [...DEMO_WEATHER_MCP_TOOLS],
+        defaultToolName: "openmeteo_search_locations",
+        enabled: true,
+        approvalRequired: false,
+        estimatedTokensPerCall: 4_000,
+        maxRetries: 0,
+        retryBackoffMs: 1_000,
+      },
+      update: {},
+    });
 
     await tx.representativeChannelBinding.upsert({
       where: {
@@ -1322,6 +1351,20 @@ function buildSeedRepresentativeVersionSnapshot(): Prisma.InputJsonObject {
       version: pack.version ?? null,
       enabled: pack.enabled,
     })),
+    mcpBindings: [{
+      id: DEMO_WEATHER_MCP_BINDING_ID,
+      slug: "open-meteo",
+      serverUrl: DEMO_WEATHER_MCP_ENDPOINT,
+      transportKind: "streamable_http",
+      allowedToolNames: [...DEMO_WEATHER_MCP_TOOLS],
+      defaultToolName: "openmeteo_search_locations",
+      enabled: true,
+      approvalRequired: false,
+      estimatedTokensPerCall: 4_000,
+      maxRetries: 0,
+      retryBackoffMs: 1_000,
+      skillReleasePin: null,
+    }],
     channels: [
       { kind: "WEB", status: "CONNECTED", externalUserId: `/reps/${demoRepresentative.slug}` },
       { kind: "TELEGRAM", status: "CONNECTED", externalUserId: `telegram:${demoRepresentative.slug}` },

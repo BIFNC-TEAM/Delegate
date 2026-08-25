@@ -24,7 +24,7 @@
     "docker:build:local": "bash scripts/docker-compose-local.sh build migrate openviking",
     "docker:bootstrap:local": "bash scripts/docker-compose-local.sh build migrate openviking && bash scripts/docker-compose-local.sh up -d openviking site dashboard reps bot compute-broker workflow-runner conversation-worker",
     "docker:migrate:local": "bash scripts/docker-compose-local.sh run --rm migrate",
-    "docker:up:local": "bash scripts/docker-compose-local.sh up -d openviking site dashboard reps bot compute-broker workflow-runner conversation-worker",
+    "docker:up:local": "pnpm docker:migrate:local && bash scripts/docker-compose-local.sh up -d openviking site dashboard reps bot compute-broker workflow-runner conversation-worker",
     "docker:up:matrix": "bash deploy/matrix/compose.sh up -d --build",
     "docker:up:temporal": "WORKFLOW_ENGINE=temporal WORKFLOW_TEMPORAL_ADDRESS=temporal:7233 WORKFLOW_TEMPORAL_NAMESPACE=delegate WORKFLOW_TEMPORAL_TASK_QUEUE=delegate-public-runtime docker compose --profile temporal up -d --build temporal-db-init temporal temporal-ui temporal-namespace-init workflow-runner",
     "docker:up:db": "docker compose up -d postgres",

@@ -1,4 +1,9 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { artifactStoreConfigSchema } from "@delegate/artifacts";
 
 const artifactStoreConfig = artifactStoreConfigSchema.parse({
@@ -65,6 +70,15 @@ export async function writeArtifactObject(params: {
       Key: params.objectKey,
       Body: params.body,
       ContentType: params.contentType,
+    }),
+  );
+}
+
+export async function deleteArtifactObject(objectKey: string) {
+  await artifactClient.send(
+    new DeleteObjectCommand({
+      Bucket: artifactStoreConfig.bucket,
+      Key: objectKey,
     }),
   );
 }

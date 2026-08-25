@@ -5,6 +5,9 @@ import { prisma } from "./prisma";
 export const generalModelAnswerSourceStatement =
   "来源说明：本回答未引用已授权知识或记忆，内容由通用模型生成。";
 
+export const unverifiedToolFallbackAnswerSourceStatement =
+  "来源说明：外部工具本轮未执行，以下内容由通用模型根据已有知识概括；未核验相关项目或仓库的最新内容，也未引用已授权知识或记忆。";
+
 export const privateChannelSourceVerificationUnavailableStatement =
   "来源说明：暂时无法核验本次回答是否引用了已授权知识或记忆。为避免发送未经核验的内容，本次回答已被隐藏，请稍后重新提问。";
 
@@ -43,6 +46,7 @@ export async function renderPrivateChannelGenerationDeliveryText(input: {
           select: {
             id: true,
             text: true,
+            content: true,
             citations: {
               orderBy: [{ createdAt: "asc" }, { id: "asc" }],
               select: {
@@ -82,6 +86,10 @@ export async function renderPrivateChannelGenerationDeliveryText(input: {
           citation.memoryUseItem?.citedAt
           && citation.memoryUseItem.useRun.generationRunId === run.id,
       ),
+      unverifiedToolFallback:
+        isRecord(run.outputMessage.content)
+        && run.outputMessage.content.intent
+          === "turn_plan_v3_stable_general_fallback",
     });
   } catch {
     return privateChannelSourceVerificationUnavailableStatement;
@@ -91,6 +99,7 @@ export async function renderPrivateChannelGenerationDeliveryText(input: {
 export function renderPrivateChannelAnswerSourceFooter(input: {
   text: string;
   modelGenerated: boolean;
+  unverifiedToolFallback?: boolean;
   citations: PrivateChannelCitationFact[];
 }) {
   const sources = uniqueStable(
@@ -116,7 +125,9 @@ export function renderPrivateChannelAnswerSourceFooter(input: {
     return `${input.text}\n\n——\n来源：${sources.join("；")}`;
   }
   if (input.modelGenerated) {
-    return `${input.text}\n\n——\n${generalModelAnswerSourceStatement}`;
+    return `${input.text}\n\n——\n${input.unverifiedToolFallback
+      ? unverifiedToolFallbackAnswerSourceStatement
+      : generalModelAnswerSourceStatement}`;
   }
   return input.text;
 }

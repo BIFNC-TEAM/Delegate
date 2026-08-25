@@ -36,8 +36,31 @@ const {
       update: vi.fn(),
       updateMany: vi.fn(),
     },
-    message: { update: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() },
-    outboxEvent: { create: vi.fn(), findFirst: vi.fn(), updateMany: vi.fn() },
+    message: {
+      findUnique: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
+      upsert: vi.fn(),
+    },
+    messageDeliveryAttempt: {
+      upsert: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    outboxEvent: {
+      create: vi.fn(),
+      findFirst: vi.fn(),
+      updateMany: vi.fn(),
+      upsert: vi.fn(),
+    },
+    workflowRun: {
+      findUnique: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+    },
+    workflowCommandOutbox: { upsert: vi.fn() },
+    conversationTurnPlan: { findFirst: vi.fn() },
+    conversationPlanAction: { findMany: vi.fn(), findUnique: vi.fn() },
+    eventAudit: { create: vi.fn() },
   };
   return {
     mockPrisma: {
@@ -93,11 +116,31 @@ describe("delegation task owner actions", () => {
     mockPrisma.generationRun.updateMany.mockResolvedValue({ count: 1 });
     mockPrisma.outboxEvent.findFirst.mockResolvedValue(null);
     mockPrisma.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.workflowRun.findUnique.mockResolvedValue(null);
+    mockPrisma.conversationTurnPlan.findFirst.mockResolvedValue(null);
+    mockPrisma.conversationPlanAction.findMany.mockResolvedValue([]);
     mockPrisma.delegationTaskExternalEffect.findMany.mockResolvedValue([]);
     mockPrisma.delegationTaskOutput.count.mockResolvedValue(0);
     mockPrisma.delegationTaskOutput.findMany.mockResolvedValue([]);
-    mockPrisma.conversation.findUnique.mockResolvedValue({ state: "AI_QUEUED" });
+    mockPrisma.conversation.findUnique.mockResolvedValue({
+      state: "AI_QUEUED",
+      sourceChannel: "web",
+      channelBindings: [],
+    });
     mockPrisma.conversation.updateMany.mockResolvedValue({ count: 1 });
+    mockPrisma.message.upsert.mockResolvedValue({
+      id: "task-system-message-1",
+    });
+    mockPrisma.message.findUnique.mockResolvedValue({
+      id: "task-system-message-1",
+      conversationId: "conversation-1",
+      senderType: "SYSTEM",
+      deliveryStatus: "QUEUED",
+      externalMessageId: null,
+    });
+    mockPrisma.outboxEvent.upsert.mockResolvedValue({
+      id: "conversation-message-outbox-1",
+    });
     mockPrisma.agentUsageCharge.findUnique.mockResolvedValue({
       status: "RESERVED",
     });
@@ -568,7 +611,6 @@ describe("delegation task owner actions", () => {
       outboxId: "outbox-run-1",
       leaseAttempt: 3,
       outcome: "completed",
-      actualCredits: 4,
     });
 
     expect(mockPrisma.outboxEvent.updateMany).toHaveBeenCalledWith({
@@ -804,6 +846,224 @@ describe("delegation task owner actions", () => {
     expect(mockPrisma.delegationTask.update).toHaveBeenCalledWith({
       where: { id: "task-1" },
       data: expect.objectContaining({ status: "READY", nextActionBy: "SYSTEM" }),
+    });
+  });
+
+  it("activates only a pre-planned V3 fallback whose failure code matches", async () => {
+    mockPrisma.generationRun.create.mockResolvedValueOnce({ id: "run-fallback" });
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-1",
+      status: "RUNNING",
+      representativeId: "representative-1",
+      representativeVersionId: "rep-version-1",
+      steps: [
+        {
+          id: "step-primary",
+          kind: "MCP",
+          sequence: 1,
+          status: "RUNNING",
+          dependsOnStepIds: [],
+          inputSnapshot: {},
+        },
+        {
+          id: "step-fallback",
+          kind: "MCP",
+          sequence: 2,
+          status: "DRAFT",
+          dependsOnStepIds: ["step-primary"],
+          inputSnapshot: {
+            request: {
+              capability: "mcp",
+              bindingId: "binding-fallback",
+              toolName: "lookup_backup",
+              toolArguments: { id: "123" },
+              displayTarget: "fallback lookup",
+              hasPaidEntitlement: false,
+              browserMode: "deterministic",
+              maxSteps: 1,
+              allowMutations: false,
+            },
+          },
+        },
+      ],
+      generationRuns: [{
+        id: "run-primary",
+        delegationTaskStepId: "step-primary",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+      }],
+    });
+    mockPrisma.conversationPlanAction.findMany.mockResolvedValueOnce([
+      {
+        id: "action-primary",
+        delegationTaskStepId: "step-primary",
+        status: "FAILED",
+        failurePolicy: {
+          strategy: "try_planned_alternatives",
+          alternativeActionIds: ["action-fallback"],
+        },
+        activationPolicy: { mode: "primary" },
+        actionResults: [{ failure: { code: "primary_unavailable" } }],
+      },
+      {
+        id: "action-fallback",
+        delegationTaskStepId: "step-fallback",
+        status: "PLANNED",
+        failurePolicy: { strategy: "stop" },
+        activationPolicy: {
+          mode: "on_failure",
+          sourceActionId: "action-primary",
+          allowedFailureCodes: ["primary_unavailable"],
+          priority: 1,
+        },
+        actionResults: [],
+      },
+    ]);
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    const result = await finalizeComputeDelegationTask({
+      taskId: "task-1",
+      stepId: "step-primary",
+      generationRunId: "run-primary",
+      outcome: "failed",
+      failureReason: "primary_unavailable",
+    });
+
+    expect(result).toMatchObject({
+      status: "READY",
+      hasMoreSteps: true,
+      nextGenerationRunId: "run-fallback",
+    });
+    expect(mockPrisma.generationRun.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        delegationTaskStepId: "step-fallback",
+        idempotencyKey: "delegation-step:task-1:step-fallback",
+      }),
+    });
+    expect(mockPrisma.delegationTaskEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "task.fallback_activated",
+        payload: expect.objectContaining({ activation: "on_failure" }),
+      }),
+    });
+  });
+
+  it("continues a three-candidate V3 fallback group after the current fallback fails", async () => {
+    mockPrisma.generationRun.create.mockResolvedValueOnce({ id: "run-fallback-3" });
+    const fallbackRequest = (toolName: string) => ({
+      request: {
+        capability: "mcp",
+        bindingId: "binding-fallback",
+        toolName,
+        toolArguments: { id: "123" },
+        displayTarget: toolName,
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+      },
+    });
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-1",
+      status: "RUNNING",
+      representativeId: "representative-1",
+      representativeVersionId: "rep-version-1",
+      steps: [
+        {
+          id: "step-primary",
+          kind: "MCP",
+          sequence: 1,
+          status: "FAILED",
+          dependsOnStepIds: [],
+          inputSnapshot: {},
+        },
+        {
+          id: "step-fallback-1",
+          kind: "MCP",
+          sequence: 2,
+          status: "FAILED",
+          dependsOnStepIds: ["step-primary"],
+          inputSnapshot: fallbackRequest("lookup_backup_1"),
+        },
+        {
+          id: "step-fallback-2",
+          kind: "MCP",
+          sequence: 3,
+          status: "RUNNING",
+          dependsOnStepIds: ["step-primary"],
+          inputSnapshot: fallbackRequest("lookup_backup_2"),
+        },
+        {
+          id: "step-fallback-3",
+          kind: "MCP",
+          sequence: 4,
+          status: "DRAFT",
+          dependsOnStepIds: ["step-primary"],
+          inputSnapshot: fallbackRequest("lookup_backup_3"),
+        },
+      ],
+      generationRuns: [{
+        id: "run-fallback-2",
+        delegationTaskStepId: "step-fallback-2",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+      }],
+    });
+    mockPrisma.conversationPlanAction.findMany.mockResolvedValueOnce([
+      {
+        id: "action-primary",
+        delegationTaskStepId: "step-primary",
+        status: "FAILED",
+        failurePolicy: {
+          strategy: "try_planned_alternatives",
+          alternativeActionIds: [
+            "action-fallback-1",
+            "action-fallback-2",
+            "action-fallback-3",
+          ],
+        },
+        activationPolicy: { mode: "primary" },
+        actionResults: [{ failure: { code: "primary_unavailable" } }],
+      },
+      ...[1, 2, 3].map((priority) => ({
+        id: `action-fallback-${priority}`,
+        delegationTaskStepId: `step-fallback-${priority}`,
+        status: priority < 3 ? "FAILED" : "PLANNED",
+        failurePolicy: { strategy: "stop" },
+        activationPolicy: {
+          mode: "on_failure",
+          sourceActionId: "action-primary",
+          allowedFailureCodes: ["primary_unavailable"],
+          fallbackGroupKey: "repository-read",
+          priority,
+        },
+        actionResults: priority === 2
+          ? [{ failure: { code: "fallback_failed" } }]
+          : [],
+      })),
+    ]);
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    const result = await finalizeComputeDelegationTask({
+      taskId: "task-1",
+      stepId: "step-fallback-2",
+      generationRunId: "run-fallback-2",
+      outcome: "failed",
+      failureReason: "fallback_failed",
+    });
+
+    expect(result).toMatchObject({
+      status: "READY",
+      hasMoreSteps: true,
+      nextGenerationRunId: "run-fallback-3",
+    });
+    expect(mockPrisma.generationRun.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        delegationTaskStepId: "step-fallback-3",
+        idempotencyKey: "delegation-step:task-1:step-fallback-3",
+      }),
     });
   });
 
@@ -1555,14 +1815,33 @@ describe("delegation task owner actions", () => {
         conversationId: "conversation-1",
         delegationTaskId: "task-1",
         senderType: "SYSTEM",
-        deliveryStatus: "SENT",
+        deliveryStatus: "QUEUED",
         text: expect.stringContaining("确认外部操作成功"),
       }),
       update: {},
     });
     expect(mockPrisma.outboxEvent.create).not.toHaveBeenCalled();
+    expect(mockPrisma.outboxEvent.upsert).toHaveBeenCalledWith({
+      where: {
+        idempotencyKey:
+          "conversation.message.requested:task-system-message-1",
+      },
+      create: expect.objectContaining({
+        aggregateType: "conversation_message",
+        aggregateId: "task-system-message-1",
+        eventType: "conversation.message.requested",
+        payload: expect.objectContaining({
+          deliveryKind: "delegation_task_status",
+          messageId: "task-system-message-1",
+        }),
+      }),
+      update: {},
+    });
     expect(mockPrisma.conversation.updateMany).not.toHaveBeenCalled();
-    expect(mockPrisma.message.update).not.toHaveBeenCalled();
+    expect(mockPrisma.message.update).toHaveBeenCalledWith({
+      where: { id: "task-system-message-1" },
+      data: expect.objectContaining({ deliveryStatus: "QUEUED" }),
+    });
   });
 
   it("reuses an existing pending terminal recovery outbox idempotently", async () => {

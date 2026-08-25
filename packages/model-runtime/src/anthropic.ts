@@ -1,7 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 
 import { calculateModelUsageCost } from "./pricing";
-import type { ModelRuntimeEnv, ModelUsageSnapshot, RepresentativeReplyPrompt } from "./types";
+import type {
+  ModelRuntimeEnv,
+  ModelTextCompletion,
+  ModelUsageSnapshot,
+  RepresentativeReplyPrompt,
+} from "./types";
 
 export async function generateAnthropicResponse(params: {
   env: ModelRuntimeEnv;
@@ -9,7 +14,11 @@ export async function generateAnthropicResponse(params: {
 }): Promise<{
   replyText: string;
   usage?: ModelUsageSnapshot;
+  completion: ModelTextCompletion;
 }> {
+  if (params.prompt.strictJsonSchema) {
+    throw new Error("Anthropic adapter does not support Delegate strict JSON Schema planning.");
+  }
   if (params.env.state !== "ready" || !params.env.anthropic.apiKey) {
     throw new Error(`Anthropic runtime is not ready: ${params.env.state}.`);
   }
@@ -66,6 +75,10 @@ export async function generateAnthropicResponse(params: {
 
   return {
     replyText,
+    completion: response.stop_reason === "end_turn"
+      || response.stop_reason === "stop_sequence"
+      ? { status: "complete" }
+      : { status: "incomplete", reason: response.stop_reason ?? "unknown" },
     usage: {
       ...usageBase,
       totalTokens,

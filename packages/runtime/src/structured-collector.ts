@@ -59,13 +59,8 @@ export function beginStructuredCollector(params: {
   plan: ConversationPlan;
   channel: Channel;
 }): StructuredCollectorState {
-  const kind = params.plan.intent === "scheduling"
-    ? "scheduling"
-    : params.plan.intent === "pricing" || params.plan.intent === "collaboration"
-      ? "quote"
-      : "service_request";
   return {
-    kind,
+    kind: "service_request",
     intent: params.plan.intent,
     stepIndex: 0,
     sourceChannel: params.channel,
@@ -195,17 +190,9 @@ export function buildStructuredCollectorHandoffSummary(
 }
 
 export function buildStructuredCollectorOwnerAction(
-  state: StructuredCollectorState,
+  _state: StructuredCollectorState,
 ): string {
-  if (state.kind === "scheduling") {
-    return "Review the request, take over when appropriate, then collect timezone and candidate windows.";
-  }
-
-  if (state.kind === "service_request") {
-    return "Review the request, take over when appropriate, and collect any missing details before creating a governed task.";
-  }
-
-  return "Review the request, then collect scope, budget, and timing before quoting, offering a paid service, or declining.";
+  return "Review the request, take over when appropriate, and collect any missing details before creating a governed task.";
 }
 
 export function calculateStructuredCollectorPriority(
@@ -216,25 +203,7 @@ export function calculateStructuredCollectorPriority(
     return 90;
   }
 
-  if (state.kind === "scheduling") {
-    return 82;
-  }
-
-  if (state.kind === "service_request") {
-    return 72;
-  }
-
-  const budget = (state.answers.budget ?? "").toLowerCase();
-  if (
-    budget.includes("k") ||
-    budget.includes("万") ||
-    budget.includes("budget") ||
-    budget.includes("usd")
-  ) {
-    return 84;
-  }
-
-  return 76;
+  return 72;
 }
 
 function orderedQuestions(state: StructuredCollectorState): readonly StructuredCollectorQuestion[] {

@@ -4,6 +4,7 @@ import { upsertMcpBindingRequestSchema } from "@delegate/compute-protocol";
 import {
   assertSafePublicMcpUrl,
   createPublicOnlyMcpFetch,
+  isAllowedDockerDesktopMcpProxyResolution,
   isNonPublicAddress,
 } from "../src/public-endpoint";
 
@@ -12,6 +13,7 @@ describe("public MCP endpoint boundary", () => {
     expect(isNonPublicAddress("127.0.0.1")).toBe(true);
     expect(isNonPublicAddress("10.0.0.1")).toBe(true);
     expect(isNonPublicAddress("169.254.169.254")).toBe(true);
+    expect(isNonPublicAddress("198.18.0.52")).toBe(true);
     expect(isNonPublicAddress("::1")).toBe(true);
     expect(isNonPublicAddress("fc00::1")).toBe(true);
     expect(isNonPublicAddress("::ffff:192.168.1.10")).toBe(true);
@@ -22,6 +24,45 @@ describe("public MCP endpoint boundary", () => {
     expect(isNonPublicAddress("1.1.1.1")).toBe(false);
     expect(isNonPublicAddress("::ffff:808:808")).toBe(false);
     expect(isNonPublicAddress("2606:4700:4700::1111")).toBe(false);
+  });
+
+  it("allows Docker Desktop's synthetic public-DNS proxy only behind the local opt-in", () => {
+    const previous = process.env.DELEGATE_ALLOW_DOCKER_DESKTOP_MCP_DNS_PROXY;
+    try {
+      delete process.env.DELEGATE_ALLOW_DOCKER_DESKTOP_MCP_DNS_PROXY;
+      expect(
+        isAllowedDockerDesktopMcpProxyResolution(
+          "mcp.deepwiki.com",
+          "198.18.0.52",
+        ),
+      ).toBe(false);
+
+      process.env.DELEGATE_ALLOW_DOCKER_DESKTOP_MCP_DNS_PROXY = "true";
+      expect(
+        isAllowedDockerDesktopMcpProxyResolution(
+          "mcp.deepwiki.com",
+          "198.18.0.52",
+        ),
+      ).toBe(true);
+      expect(
+        isAllowedDockerDesktopMcpProxyResolution(
+          "198.18.0.52",
+          "198.18.0.52",
+        ),
+      ).toBe(false);
+      expect(
+        isAllowedDockerDesktopMcpProxyResolution(
+          "internal.example",
+          "10.0.0.2",
+        ),
+      ).toBe(false);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DELEGATE_ALLOW_DOCKER_DESKTOP_MCP_DNS_PROXY;
+      } else {
+        process.env.DELEGATE_ALLOW_DOCKER_DESKTOP_MCP_DNS_PROXY = previous;
+      }
+    }
   });
 
   it("rejects non-globally-routable IANA and documentation ranges without blocking public unicast", () => {
@@ -105,7 +146,7 @@ describe("public MCP endpoint boundary", () => {
       allowedToolNames: ["read_contact"],
       enabled: true,
       approvalRequired: true,
-      estimatedCostCentsPerCall: 0,
+      estimatedTokensPerCall: 0,
       maxRetries: 2,
       retryBackoffMs: 1000,
     };

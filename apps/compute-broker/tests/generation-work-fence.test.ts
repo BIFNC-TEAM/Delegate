@@ -1,9 +1,84 @@
 import type { Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
-import { claimDelegatedGenerationExecution } from "../src/generation-work-fence";
+import {
+  assertFallbackGroupAdmissionInTransaction,
+  claimDelegatedGenerationExecution,
+} from "../src/generation-work-fence";
 
 describe("delegated generation execution fence", () => {
+  it("allows only the next eligible Action in a fallback group", async () => {
+    const earlier = {
+      id: "fallback-1",
+      status: "FAILED",
+      activationPolicy: {
+        mode: "on_failure",
+        sourceActionId: "primary-1",
+        allowedFailureCodes: ["remote_failed"],
+        fallbackGroupKey: "remote-read",
+        priority: 10,
+      },
+    };
+    const current = {
+      id: "fallback-2",
+      turnPlanId: "plan-1",
+      status: "READY",
+      activationPolicy: {
+        mode: "on_failure",
+        sourceActionId: "primary-1",
+        allowedFailureCodes: ["remote_failed"],
+        fallbackGroupKey: "remote-read",
+        priority: 20,
+      },
+    };
+    const later = {
+      id: "fallback-3",
+      turnPlanId: "plan-1",
+      status: "PLANNED",
+      activationPolicy: {
+        mode: "on_failure",
+        sourceActionId: "primary-1",
+        allowedFailureCodes: ["remote_failed"],
+        fallbackGroupKey: "remote-read",
+        priority: 30,
+      },
+    };
+    const findMany = vi.fn().mockResolvedValue([earlier, current, later]);
+    const tx = {
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      conversationPlanAction: {
+        findMany,
+      },
+    } as unknown as Prisma.TransactionClient;
+
+    await expect(assertFallbackGroupAdmissionInTransaction(tx, current))
+      .resolves.toBeUndefined();
+
+    findMany.mockResolvedValueOnce([
+      { ...earlier, status: "EXECUTING" },
+      current,
+      later,
+    ]);
+    await expect(assertFallbackGroupAdmissionInTransaction(tx, current))
+      .rejects.toThrow("plan_action_fallback_group_already_claimed");
+
+    findMany.mockResolvedValueOnce([
+      earlier,
+      { ...current, status: "QUEUED" },
+      later,
+    ]);
+    await expect(assertFallbackGroupAdmissionInTransaction(tx, later))
+      .rejects.toThrow("plan_action_fallback_group_already_claimed");
+
+    findMany.mockResolvedValueOnce([
+      earlier,
+      { ...current, status: "FAILED" },
+      later,
+    ]);
+    await expect(assertFallbackGroupAdmissionInTransaction(tx, later))
+      .resolves.toBeUndefined();
+  });
+
   it("lets attempt B observe attempt A's durable claim and rejects stale A on resume", async () => {
     let currentAttempt = 1;
     let persistedExecution: Record<string, unknown> | null = null;
@@ -56,6 +131,7 @@ describe("delegated generation execution fence", () => {
           steps: [{ id: "step-1", status: "RUNNING" }],
         }),
       },
+      conversation: { findUnique: vi.fn().mockResolvedValue({ state: "AI_QUEUED" }) },
       toolExecution: {
         findUnique: vi.fn(async () => persistedExecution),
         findFirst: vi.fn().mockResolvedValue(null),
@@ -143,6 +219,7 @@ describe("delegated generation execution fence", () => {
           steps: [{ id: "step-1", status: "RUNNING" }],
         }),
       },
+      conversation: { findUnique: vi.fn().mockResolvedValue({ state: "AI_QUEUED" }) },
       toolExecution: {
         findUnique: vi.fn().mockResolvedValue({
           id: "execution-1",
@@ -172,5 +249,132 @@ describe("delegated generation execution fence", () => {
         },
       }),
     ).rejects.toThrow("generation_execution_request_mismatch");
+  });
+
+  it("atomically admits a current V3 action before an external call", async () => {
+    const actionState: Record<string, unknown> = {
+      id: "action-db-1",
+      argumentsHash: "a".repeat(64),
+      status: "PLANNED",
+      authorizationPhase: null,
+      effectiveDecision: null,
+      authorizationVersion: 0,
+    };
+    let latestAuthorization: Record<string, unknown> | null = null;
+    const executionCreate = vi.fn(async ({ data }) => ({ id: "execution-v3", ...data }));
+    const outboxCreate = vi.fn().mockResolvedValue({ id: "execution-outbox-1" });
+    const tx = {
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      computeSession: { findUnique: vi.fn().mockResolvedValue({
+        id: "session-1",
+        conversationId: "conversation-1",
+        generationRunId: "run-1",
+        generationOutboxId: "generation-outbox-1",
+        delegationTaskId: "task-1",
+        delegationTaskStepId: "step-1",
+      }) },
+      generationRun: { findUnique: vi.fn().mockResolvedValue({
+        status: "PROCESSING",
+        delegationTaskId: "task-1",
+        delegationTaskStepId: "step-1",
+      }) },
+      delegationTask: { findUnique: vi.fn().mockResolvedValue({
+        status: "RUNNING",
+        steps: [{ id: "step-1", status: "RUNNING" }],
+      }) },
+      conversation: { findUnique: vi.fn().mockResolvedValue({ state: "AI_QUEUED" }) },
+      conversationPlanAction: {
+        findMany: vi.fn().mockResolvedValue([{
+          ...actionState,
+          capabilityKey: "mcp.crm.lookup",
+          turnPlan: {
+            id: "plan-1",
+            conversationId: "conversation-1",
+            generationRunId: "run-1",
+            revision: 2,
+            executionEpoch: 7,
+            activeExecutionFence: {
+              activePlanId: "plan-1",
+              activeRevision: 2,
+              executionEpoch: 7,
+            },
+          },
+          externalEffects: [{ id: "effect-1" }],
+        }]),
+        findUnique: vi.fn(async () => ({ ...actionState })),
+        updateMany: vi.fn(async ({ data }) => {
+          if (data.authorizationVersion?.increment) {
+            actionState.authorizationVersion = Number(actionState.authorizationVersion) + 1;
+            actionState.authorizationPhase = data.authorizationPhase;
+            actionState.effectiveDecision = data.effectiveDecision;
+          }
+          return { count: 1 };
+        }),
+        update: vi.fn(async ({ data }) => {
+          Object.assign(actionState, data);
+          return { ...actionState };
+        }),
+      },
+      actionAuthorizationDecision: {
+        findFirst: vi.fn(async () => latestAuthorization),
+        create: vi.fn(async ({ data }) => {
+          latestAuthorization = data;
+          return data;
+        }),
+      },
+      toolExecution: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: executionCreate,
+      },
+      outboxEvent: { create: outboxCreate },
+      conversationTurnPlan: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      delegationTaskExternalEffect: { update: vi.fn().mockResolvedValue({}) },
+    } as unknown as Prisma.TransactionClient;
+
+    const admitted = await claimDelegatedGenerationExecution(tx, {
+      sessionId: "session-1",
+      conversationId: "conversation-1",
+      generationRunId: "run-1",
+      delegationTaskId: "task-1",
+      delegationTaskStepId: "step-1",
+      outboxId: "generation-outbox-1",
+      leaseAttempt: 1,
+      requestPayloadHash: "request-hash",
+      authorization: {
+        decision: "allow",
+        reason: "policy allowed",
+        policyVersion: "policy-1",
+      },
+      execution: {
+        capability: "MCP",
+        status: "RUNNING",
+        executionLeaseToken: "execution-lease-1",
+      },
+    });
+
+    expect(admitted.claimed).toBe(true);
+    expect(outboxCreate).toHaveBeenCalledOnce();
+    expect(executionCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        planActionId: "action-db-1",
+        planRevision: 2,
+        executionEpoch: 7,
+        attemptPhase: "CALL_PREPARED",
+        executionOutboxId: "execution-outbox-1",
+        externalEffectId: "effect-1",
+        billingAdmission: {
+          decision: "not_billable",
+          reasonCode: "generation_run_owns_conversation_billing",
+        },
+        executionLeaseToken: "execution-lease-1",
+      }),
+    });
+    expect(latestAuthorization).toMatchObject({
+      phase: "PRE_EXECUTION",
+      decision: "ALLOW",
+      sequence: 2,
+    });
+    expect(actionState.status).toBe("EXECUTING");
   });
 });

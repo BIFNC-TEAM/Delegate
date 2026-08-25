@@ -7,7 +7,7 @@ export type TelegramBotCommand = {
 };
 
 export function buildTelegramBotCommands(
-  computeRunsInBot = true,
+  _computeRunsInBot = true,
 ): TelegramBotCommand[] {
   return [
     { command: "start", description: "Introduce the representative" },
@@ -18,9 +18,7 @@ export function buildTelegramBotCommands(
     },
     {
       command: "compute",
-      description: computeRunsInBot
-        ? "Run a governed compute request in the sandbox"
-        : "Continue governed compute requests on Web",
+      description: "Run a governed compute request in the sandbox",
     },
     { command: "bind", description: "Bind this Telegram account to your Delegate account" },
     { command: "memory_share", description: "Review and allow cross-channel Contact Memory" },

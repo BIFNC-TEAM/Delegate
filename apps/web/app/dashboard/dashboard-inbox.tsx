@@ -490,6 +490,36 @@ export function DashboardInbox({
                       <time>{formatMessageTime(message.createdAt, locale, timeZone)}</time>
                     </div>
                     <p>{message.text}</p>
+                    {message.attachments.length ? (
+                      <div className="inbox-message-attachments">
+                        <small>{zh ? "访客附件" : "Attachments"}</small>
+                        {message.attachments.map((attachment) => (
+                          <div key={attachment.id}>
+                            {attachment.mimeType?.startsWith("image/")
+                              && attachment.downloadUrl ? (
+                                <img
+                                  alt={attachment.fileName}
+                                  src={`${attachment.downloadUrl}?inline=1`}
+                                />
+                              ) : null}
+                            <div>
+                              <strong>{attachment.fileName}</strong>
+                              <span>{[
+                                attachment.mimeType,
+                                formatInboxAttachmentBytes(attachment.sizeBytes),
+                              ].filter(Boolean).join(" · ")}</span>
+                            </div>
+                            {attachment.downloadUrl ? (
+                              <a href={attachment.downloadUrl}>
+                                {zh ? "下载" : "Download"}
+                              </a>
+                            ) : (
+                              <em>{zh ? "文件不可用" : "Unavailable"}</em>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                     {message.citations.length ? (
                       <div className="inbox-citations">
                         <small>{zh ? "引用知识" : "Knowledge used"}</small>
@@ -606,6 +636,13 @@ export function DashboardInbox({
   );
 }
 
+function formatInboxAttachmentBytes(value: number | undefined) {
+  if (typeof value !== "number") return "";
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function DelegationTaskDrawer({
   busy,
   detail,
@@ -650,7 +687,7 @@ function DelegationTaskDrawer({
           <div><dt>{zh ? "下一责任方" : "Next actor"}</dt><dd>{task.nextActionBy}</dd></div>
           <div><dt>{zh ? "任务版本" : "Task version"}</dt><dd>v{task.version}</dd></div>
           <div><dt>{zh ? "代表版本" : "Rep version"}</dt><dd>{task.representativeVersion ? `v${task.representativeVersion.versionNumber}` : "—"}</dd></div>
-          <div><dt>{zh ? "资源消耗" : "Usage"}</dt><dd>{detail.usage.creditsUsed} credits · {detail.usage.costCents} cents</dd></div>
+          <div><dt>{zh ? "内部成本" : "Internal cost"}</dt><dd>{detail.usage.costCents} cents</dd></div>
         </dl>
 
         <TaskSection eyebrow={zh ? "执行计划" : "Execution plan"} title={detail.plan.summary}>

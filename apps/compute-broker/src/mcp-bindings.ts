@@ -63,7 +63,7 @@ export function applyRepresentativeMcpBindingGrant<
     allowedToolNames: unknown;
     defaultToolName: string | null;
     approvalRequired: boolean;
-    estimatedCostCentsPerCall: number;
+    estimatedTokensPerCall: number;
     maxRetries: number;
     retryBackoffMs: number;
   },
@@ -74,7 +74,7 @@ export function applyRepresentativeMcpBindingGrant<
   allowedToolNames: string[];
   defaultToolName: string | null;
   approvalRequired: boolean;
-  estimatedCostCentsPerCall: number;
+  estimatedTokensPerCall: number;
   maxRetries: number;
   retryBackoffMs: number;
 } {
@@ -112,9 +112,9 @@ export function applyRepresentativeMcpBindingGrant<
     allowedToolNames,
     defaultToolName,
     approvalRequired: binding.approvalRequired || grant.approvalRequired,
-    estimatedCostCentsPerCall: Math.max(
-      binding.estimatedCostCentsPerCall,
-      grant.estimatedCostCentsPerCall,
+    estimatedTokensPerCall: Math.max(
+      binding.estimatedTokensPerCall,
+      grant.estimatedTokensPerCall,
     ),
     maxRetries: Math.min(binding.maxRetries, grant.maxRetries),
     retryBackoffMs: Math.max(binding.retryBackoffMs, grant.retryBackoffMs),

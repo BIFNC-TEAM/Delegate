@@ -42,7 +42,7 @@ describe("Telegram conversation platform mode", () => {
     expect(groupGate).toBeLessThan(legacyPlan);
   });
 
-  it("blocks the legacy direct-compute path when worker owns Telegram", () => {
+  it("routes explicit compute commands through the worker-owned conversation platform", () => {
     const source = readFileSync(
       new URL("../src/telegram-bot-runtime.ts", import.meta.url),
       "utf8",
@@ -56,6 +56,9 @@ describe("Telegram conversation platform mode", () => {
     expect(commandSource.indexOf('conversationPlatformMode === "worker"')).toBeLessThan(
       commandSource.indexOf("await handleComputeRequest"),
     );
+    expect(commandSource).toContain("await acceptInboundConversationMessage");
+    expect(commandSource).toContain("queueGeneration: true");
+    expect(commandSource).not.toContain("请从 Web 发起受控计算任务");
   });
 
   it("keeps an active structured collector ahead of inline compute parsing", () => {

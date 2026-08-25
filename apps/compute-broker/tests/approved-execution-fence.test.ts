@@ -273,13 +273,10 @@ function buildEvaluatedRequest(decision: "allow" | "deny") {
         representative: {
           owner: {
             wallet: {
-              balanceCredits: 100,
-              sponsorPoolCredit: 0,
             },
           },
         },
         conversation: {
-          computeBudgetRemainingCredits: 100,
         },
       },
       profile: {
@@ -289,7 +286,7 @@ function buildEvaluatedRequest(decision: "allow" | "deny") {
       },
       runtimeAuthority: {
         compute: {
-          autoApproveBudgetCents: 100,
+          autoApproveTokenLimit: 100,
         },
       },
     },

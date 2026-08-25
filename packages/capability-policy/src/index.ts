@@ -17,7 +17,7 @@ export type EvaluateCapabilityRequest = {
   resourceScope?: PolicyResourceScope | undefined;
   channel?: PolicyChannel | undefined;
   activePlanTier?: CapabilityPlanTier | undefined;
-  estimatedCostCents?: number | undefined;
+  estimatedTokens?: number | undefined;
   hasPaidEntitlement?: boolean | undefined;
   contactTrustTier?: ContactComputeTrustTier | undefined;
   customerAccountId?: string | undefined;
@@ -127,13 +127,13 @@ function evaluateCapabilityPolicyRules(
     }
 
     if (
-      typeof rule.maxCostCents === "number" &&
-      typeof request.estimatedCostCents === "number" &&
-      request.estimatedCostCents > rule.maxCostCents
+      typeof rule.maxEstimatedTokens === "number" &&
+      typeof request.estimatedTokens === "number" &&
+      request.estimatedTokens > rule.maxEstimatedTokens
     ) {
       return {
         decision: "ask",
-        reason: "cost_above_rule_limit",
+        reason: "tokens_above_rule_limit",
         matchedRuleId: rule.id,
       };
     }

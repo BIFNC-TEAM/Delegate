@@ -51,6 +51,10 @@ flowchart TD
     TG["Telegram Adapter"] --> IN
     BR["Optional Telegram to Matrix Bridge"] -. "transport only" .-> MX
     IN --> RT["Conversation Platform + Worker"]
+    RT --> PLAN["Agent Runtime V3: Proposal -> Validated Plan"]
+    PLAN --> BROKER["Capability Compiler + Compute Broker"]
+    BROKER --> ART["Verified Result + Artifact CAS"]
+    BROKER --> WF["Temporal / Workflow Outbox"]
     RT --> DB["PostgreSQL Business Truth"]
     RT --> KG["Public Knowledge + Skill Layer"]
     RT --> MEM["OpenViking Context Layer"]
@@ -68,24 +72,20 @@ flowchart TD
 
 Delegate also ships a separate marketing `Site` service, but it sits outside the runtime loop and acts as the top-of-funnel surface that links into the dashboard and representative app.
 
-For the next-phase target architecture, including the planned isolated compute plane and Claude-inspired capability decisions, see [docs/delegate-architecture-decisions.md](./delegate-architecture-decisions.md).
+The active planning and capability-execution contract is documented in [Agent Runtime V3](./agent-runtime-v3.md). Broader tradeoffs remain in [docs/delegate-architecture-decisions.md](./delegate-architecture-decisions.md).
 
 ## Core runtime loop
 
 1. A web, Matrix, or Telegram message enters through its channel adapter.
 2. Runtime resolves the audience identity, representative, long-lived channel conversation, and active episode.
-3. Inquiry is classified into a channel-neutral disposition such as answer, send public material, collect a request description, create a service request, or hand off.
-4. `Action Gate` checks whether the next action is allowed, ask-first, or denied.
-5. Pricing and entitlement state decide whether the message stays in free mode, asks once for a request description, or offers paid continuation.
-6. Runtime returns one of four next steps:
-   - answer directly
-   - collect a request description
-   - offer paid continuation
-   - create human handoff
-7. Runtime can recall representative-scoped resources, contact-scoped public-safe memories, and representative agent patterns from OpenViking before composing the next answer.
-8. Runtime can commit safe session context after useful turns, collector completions, paid unlocks, and handoff outcomes.
-9. The inbound message, generation run, and outbox event are written transactionally with channel idempotency keys.
-10. Every step emits an audit event for analytics and future owner review.
+3. The server normalizes message-scoped `TurnConstraints`, embeds them in the `TurnEnvelope`, fixes the Capability Catalog, hard-filters by Definition/Availability, probes the same pinned authorized Knowledge manifest used by execution, and creates a compact hashed Candidate Snapshot before one strict V3 Planner call. Small catalogs are supplied completely; large catalogs use bounded hybrid semantic/schema/discovery retrieval, and truncated low-confidence sets can only clarify. A generic server requirement signal pins explicit named-external verification to compatible published capabilities. Constraints never carry into the next message.
+4. The model's Proposal stores Goals and capability selections as untrusted audit input. The server monotonically normalizes inconsistent Goal/Selection fields against immutable capability semantics, then the Action Materializer owns required argument binding, provenance, Action ids, Composer dependencies, and Deliverables before raising evidence requirements, pinning hashes/schemas, and validating the complete DAG.
+5. One immutable TurnPlan V3 becomes execution truth. Policy, approval, entitlement, human-control, and availability checks remain server-owned.
+6. Knowledge/Builtin Actions use the same leased `CALL_STARTED` Attempt/Result lifecycle as typed MCP/Compute Actions. Stable questions try authorized knowledge first; stable-general fallback additionally requires an explicit turn-level source instruction, a verified miss/unavailable result, and a server-approved non-Owner authority boundary. Self-description uses `representative.describe_self` to combine the published Owner profile, authorized knowledge, currently executable user-facing outcomes, and server-owned human-confirmation/handoff boundaries. Mixed Knowledge + MCP/Compute Goals remain one DAG. External calls require atomic admission, an execution Outbox, lease, BillingAdmission, and ExternalEffect.
+7. Raw outputs are bounded, schema-checked, redacted, and semantically evaluated before becoming Verified ActionResults or Artifacts.
+8. `response.compose` produces claim-level evidence bindings. Plan completion means result-ready; Message delivery and Provider acceptance remain separate.
+9. Temporal owns durable waiting and signal delivery while every activity re-reads Postgres business truth.
+10. Every planning, authorization, approval, execution, citation, delivery, billing, and reconciliation transition remains auditable.
 
 The channel-neutral message, episode, version, Matrix, and human-control design is documented in [conversation-platform.md](./conversation-platform.md).
 
@@ -171,14 +171,15 @@ The boundary is a first-class product feature, not a prompt convention.
 - answer FAQ
 - collect lead and quote intake
 - deliver documents and links
+- run explicitly published read/write Compute or MCP capabilities behind policy and approval
 - offer paid continuation
 - request human handoff
 
 ### Cannot do
 
 - access private memory
-- read local files
-- execute commands
+- read files outside the granted isolated workspace
+- execute commands without a published capability, policy admission, and current lease
 - log into owner accounts
 - change the owner's real calendar
 - make irreversible commercial commitments
@@ -205,6 +206,8 @@ The boundary is a first-class product feature, not a prompt convention.
 - Matrix Application Service APIs for native Matrix ingress and delivery
 - `Prisma + Postgres` for persisted conversations, leads, handoffs, and billing state
 - shared `zod` schemas for the boundary between runtime, UI, and future APIs
+- Temporal plus transactional Outboxes for durable waiting and resume, with Postgres as domain truth
+- a discriminated Capability Compiler Registry rather than a monolithic Agent framework
 - `ClawHub` as a discovery source for non-privileged representative skill packs
 
 ## Telegram-specific product choices

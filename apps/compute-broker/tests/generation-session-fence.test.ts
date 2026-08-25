@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockLoadComputeRuntimeAuthority, mockPrisma, state } = vi.hoisted(() => {
   const state = {
@@ -78,6 +78,8 @@ process.env.COMPUTE_BROKER_INTERNAL_TOKEN ??= "test-internal-token";
 describe("delegated compute session generation fence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-24T08:00:00.000Z"));
     state.currentAttempt = 1;
     state.session = null;
     mockPrisma.representative.findUnique.mockResolvedValue({
@@ -101,7 +103,10 @@ describe("delegated compute session generation fence", () => {
         status: "PROCESSING",
         delegationTaskStepId: "step-1",
       }],
-      resourcePolicy: { allowedCapabilities: ["WRITE"] },
+      resourcePolicy: {
+        allowedCapabilities: ["WRITE"],
+        maxDurationMinutes: 2,
+      },
       steps: [{ id: "step-1", capability: "WRITE", status: "RUNNING" }],
     });
     mockPrisma.generationRun.findUnique.mockResolvedValue({
@@ -142,6 +147,10 @@ describe("delegated compute session generation fence", () => {
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("reuses one session for attempt B and rejects attempt A after takeover", async () => {
     const { createComputeSession } = await import("../src/sessions");
     const request = {
@@ -163,6 +172,12 @@ describe("delegated compute session generation fence", () => {
 
     const attemptA = await createComputeSession(request);
     expect(attemptA.session.id).toBe("session-1");
+    expect(attemptA.session.expiresAt).toBe("2026-07-24T08:02:00.000Z");
+    expect(mockPrisma.computeSession.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        expiresAt: new Date("2026-07-24T08:02:00.000Z"),
+      }),
+    });
 
     state.currentAttempt = 2;
     const attemptB = await createComputeSession({

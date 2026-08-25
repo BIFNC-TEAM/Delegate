@@ -183,7 +183,6 @@ function createSource(): GovernedActionSource {
         id: "ledger_compute",
         kind: "compute_minutes",
         costCents: 120,
-        creditDelta: 0,
         quantity: 1,
         unit: "minute",
         createdAt: "2026-03-26T08:09:10.000Z",
@@ -198,7 +197,6 @@ function createSource(): GovernedActionSource {
         id: "ledger_browser",
         kind: "browser_minutes",
         costCents: 40,
-        creditDelta: 0,
         quantity: 1,
         unit: "minute",
         createdAt: "2026-03-26T08:09:11.000Z",
@@ -210,25 +208,9 @@ function createSource(): GovernedActionSource {
         subagentId: "browser-agent",
       },
       {
-        id: "ledger_debit",
-        kind: "plan_debit",
-        costCents: 0,
-        creditDelta: -12,
-        quantity: 12,
-        unit: "credit",
-        createdAt: "2026-03-26T08:09:12.000Z",
-        notes: "owner_wallet_debit",
-        sessionId: "session_browser",
-        toolExecutionId: "execution_browser",
-        customerAccount: acme,
-        primaryLayer: "customer_account",
-        subagentId: "browser-agent",
-      },
-      {
         id: "ledger_package_download",
         kind: "artifact_egress",
         costCents: 8,
-        creditDelta: 0,
         quantity: 524288,
         unit: "byte",
         createdAt: "2026-03-26T09:10:01.000Z",
@@ -256,7 +238,6 @@ describe("buildRepresentativeGovernedActionSnapshot", () => {
       policyOutcome: "ask",
       approvalStatus: "approved",
       totalCostCents: 160,
-      totalCreditDelta: -12,
       customerAccount: {
         key: "acct_acme",
       },
@@ -295,12 +276,41 @@ describe("buildRepresentativeGovernedActionSnapshot", () => {
   it("does not fabricate approval semantics out of raw billing rows", () => {
     const snapshot = buildRepresentativeGovernedActionSnapshot(createSource());
 
-    const billingAction = snapshot.recentActions.find((action) => action.id === "billing_debit:ledger_debit");
+    const billingAction = snapshot.recentActions.find((action) => action.id === "billing_debit:ledger_compute");
     expect(billingAction).toMatchObject({
       actionKind: "billing_debit",
       approvalStatus: null,
       outcome: "completed",
     });
+  });
+
+  it("does not report approved queued or running executions as completed", () => {
+    const source = createSource();
+    source.executions[0] = {
+      ...source.executions[0]!,
+      status: "queued",
+      finishedAt: null,
+    };
+
+    let snapshot = buildRepresentativeGovernedActionSnapshot(source);
+    expect(snapshot.recentActions.find(
+      (action) => action.id === "compute_execution:execution_browser",
+    )?.outcome).toBe("approved_waiting_execution");
+
+    source.executions[0] = {
+      ...source.executions[0]!,
+      status: "running",
+    };
+    snapshot = buildRepresentativeGovernedActionSnapshot(source);
+    expect(snapshot.recentActions.find(
+      (action) => action.id === "compute_execution:execution_browser",
+    )?.outcome).toBe("running");
+  });
+
+  it("counts each internal ledger cost once", () => {
+    const snapshot = buildRepresentativeGovernedActionSnapshot(createSource());
+
+    expect(snapshot.billingImpact.totalInternalCostCents).toBe(168);
   });
 
   it("returns a stable default structure when governance is empty", () => {

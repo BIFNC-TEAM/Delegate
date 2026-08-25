@@ -10,6 +10,7 @@ import {
 import { afterAll, describe, expect, it } from "vitest";
 
 import {
+  admitGenerationMessageProviderDelivery,
   markGenerationDeliveryComplete,
   prepareGenerationMessageChannelDelivery,
   withGenerationMessageProviderDeliveryFence,
@@ -66,6 +67,7 @@ describePostgres("private-channel extraction and final provider delivery lock or
         outboxId: fixture.outboxId,
         leaseAttempt: 1,
         outputMessageId: fixture.outputMessageId,
+        deliveryAdmission: fixture.deliveryAdmission,
       };
 
       const providerDelivery = channel === "matrix"
@@ -461,12 +463,20 @@ async function createPrivateChannelFixture(
       availableAt: new Date(Date.now() + 60_000),
     },
   });
-  await prepareGenerationMessageChannelDelivery({
+  const preparation = await prepareGenerationMessageChannelDelivery({
     conversationId: conversation.id,
     runId: generationRun.id,
     outboxId: outbox.id,
     leaseAttempt: 1,
     outputMessageId: outputMessage.id,
+  });
+  await admitGenerationMessageProviderDelivery({
+    conversationId: conversation.id,
+    runId: generationRun.id,
+    outboxId: outbox.id,
+    leaseAttempt: 1,
+    outputMessageId: outputMessage.id,
+    deliveryAdmission: preparation.deliveryAdmission,
   });
 
   return {
@@ -477,6 +487,7 @@ async function createPrivateChannelFixture(
     generationRunId: generationRun.id,
     outputMessageId: outputMessage.id,
     outboxId: outbox.id,
+    deliveryAdmission: preparation.deliveryAdmission,
     connectionId,
     representativeMatrixUserId,
   };

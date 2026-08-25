@@ -630,18 +630,65 @@ bot.command("forget", handleContactMemoryDeleteCommand);
 bot.command("delete_memory", handleContactMemoryDeleteCommand);
 
 bot.command("compute", async (ctx) => {
-  if (ctx.chat.type !== "private" || !ctx.from) {
+  if (ctx.chat.type !== "private" || !ctx.from || !ctx.message) {
     await ctx.reply("Compute 请求目前只在 bot 私聊里开放。");
     return;
   }
+  const rawText = `/compute ${ctx.match?.trim() ?? ""}`.trim();
   if (conversationPlatformMode === "worker") {
-    await ctx.reply(
-      "Telegram 统一会话暂未开放直接 Compute；请从 Web 发起受控计算任务。",
+    const representativeSlug = await resolveRepresentativeSlugForChat(
+      ctx.chat.type,
+      ctx.chat.id,
     );
+    const conversationContext = await getConversationContext(
+      representativeSlug,
+      {
+        telegramUserId: ctx.from.id,
+        ...(ctx.from.username ? { username: ctx.from.username } : {}),
+        ...buildDisplayName(ctx.from.first_name, ctx.from.last_name),
+        chatId: ctx.chat.id,
+        channel: Channel.PRIVATE_CHAT,
+      },
+    );
+    await assertConversationChannelDeliveryAvailable({
+      conversationId: conversationContext.conversationId,
+      channel: "telegram",
+    });
+    try {
+      await deliverTelegramMemoryDisclosure(
+        ctx,
+        conversationContext.conversationId,
+        String(ctx.message.message_id),
+      );
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          event: "telegram_memory_disclosure_compute_failed",
+          updateId: ctx.update.update_id,
+          error: sanitizeTelegramError(error),
+        }),
+      );
+    }
+    await acceptInboundConversationMessage({
+      representativeSlug,
+      conversationId: conversationContext.conversationId,
+      text: rawText,
+      senderId: String(ctx.from.id),
+      senderDisplayName:
+        [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ")
+        || ctx.from.username
+        || String(ctx.from.id),
+      clientMessageId:
+        `telegram:${me.id}:${ctx.chat.id}:${ctx.message.message_id}`,
+      channel: "telegram",
+      externalMessageId: String(ctx.message.message_id),
+      queueGeneration: true,
+      occurredAt: resolveTelegramProviderOccurredAt(ctx.message.date),
+    });
     return;
   }
 
-  const parsed = parseComputeRequest(`/compute ${ctx.match?.trim() ?? ""}`);
+  const parsed = parseComputeRequest(rawText);
   if (!parsed) {
     await ctx.reply(
       [
@@ -657,7 +704,7 @@ bot.command("compute", async (ctx) => {
     ctx,
     representativeSlug,
     parsed,
-    rawText: `/compute ${ctx.match?.trim() ?? ""}`.trim(),
+    rawText,
   });
 });
 
@@ -1850,8 +1897,6 @@ function formatComputeReply(params: {
   result: Awaited<ReturnType<typeof executeAudienceTool>>;
 }) {
   const header = [params.representativeName, params.representativeTagline].join("\n\n");
-  const billingLine = formatComputeBilling(params.result);
-
   if (params.result.outcome === "pending_approval") {
     return [
       header,
@@ -1859,7 +1904,6 @@ function formatComputeReply(params: {
       params.result.approvalRequest
         ? `审批项：${params.result.approvalRequest.requestedActionSummary}\n风险：${params.result.approvalRequest.riskSummary}`
         : "命令已被策略挡住，等待人工确认后才会继续执行。",
-      billingLine,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -1869,8 +1913,7 @@ function formatComputeReply(params: {
     return [
       header,
       "这次 compute 请求被当前策略直接挡住了，没有进入执行。",
-      explainBlockedBudget(params.result),
-      billingLine,
+      "如需继续，请调整能力策略或请求 owner 协助。",
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -1888,7 +1931,6 @@ function formatComputeReply(params: {
       header,
       `这次 ${params.parsed.capability} 已经执行，但返回了失败状态。`,
       artifactSummary,
-      billingLine,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -1898,41 +1940,9 @@ function formatComputeReply(params: {
     header,
     `这次 ${params.parsed.capability} 已经在隔离 compute plane 里跑完。`,
     artifactSummary,
-    billingLine,
   ]
     .filter(Boolean)
     .join("\n\n");
 }
 
-function formatComputeBilling(result: Awaited<ReturnType<typeof executeAudienceTool>>) {
-  if (!result.billing) {
-    return null;
-  }
-
-  const fragments = [];
-  if (typeof result.billing.actualCredits === "number") {
-    fragments.push(`实际消耗 ${result.billing.actualCredits} credits`);
-  } else if (typeof result.billing.estimatedCredits === "number") {
-    fragments.push(`预计消耗 ${result.billing.estimatedCredits} credits`);
-  }
-  if (typeof result.billing.conversationBudgetRemainingCredits === "number") {
-    fragments.push(`当前会话剩余 ${result.billing.conversationBudgetRemainingCredits} credits`);
-  }
-  if (typeof result.billing.ownerBalanceCredits === "number") {
-    fragments.push(`owner wallet ${result.billing.ownerBalanceCredits}`);
-  }
-  if (typeof result.billing.sponsorPoolCredit === "number") {
-    fragments.push(`sponsor pool ${result.billing.sponsorPoolCredit}`);
-  }
-
-  return fragments.length ? fragments.join(" · ") : null;
-}
-
-function explainBlockedBudget(result: Awaited<ReturnType<typeof executeAudienceTool>>) {
-  if (typeof result.billing?.conversationBudgetRemainingCredits === "number") {
-    return `当前会话只有 ${result.billing.conversationBudgetRemainingCredits} compute credits，先解锁付费计划或等待 owner 补充预算后再试。`;
-  }
-
-  return "如果你要继续这类请求，可以先购买 Deep Help，或等待 owner 给予人工批准。";
-}
 }

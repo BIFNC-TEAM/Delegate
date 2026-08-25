@@ -100,7 +100,7 @@ export type PlannedConversationAction = {
   requiredCapabilities?: string[];
   /** Optional only while replaying plans persisted before protocol version 1. */
   externalSideEffect?: boolean;
-  estimatedCost?: number;
+  estimatedTokens?: number;
 };
 
 export type ConversationPlan = {
@@ -143,7 +143,7 @@ type PlanInput = {
     target: string;
     input: Record<string, unknown>;
     requiredCapabilities: string[];
-    estimatedCost?: number;
+    estimatedTokens?: number;
   };
 };
 
@@ -190,8 +190,14 @@ export function recognizeConversationIntent(
       return tokens.some((token) => normalized.includes(token));
     })
     .flatMap((pack) => [pack.slug, ...pack.capabilityTags]) ?? [];
-  const businessLabels = [...new Set([...matched, ...dynamicLabels])];
-  const requestedOutcomes = [...new Set(businessLabels.flatMap(outcomesForLabel))];
+  // Fixed vertical names remain only as a compatibility intent signal. Runtime
+  // routing is driven by generic requested outcomes, while business labels are
+  // limited to capabilities actually configured on this representative.
+  const businessLabels = [...new Set(dynamicLabels)];
+  const requestedOutcomes = detectRequestedOutcomes(
+    normalized,
+    primaryIntent,
+  );
   const safetySignals = primaryIntent === "restricted"
     ? keywords.restricted.filter((value) => normalized.includes(value)).map((value) => `restricted:${value}`)
     : looksLikePromptInjection(normalized)
@@ -199,14 +205,22 @@ export function recognizeConversationIntent(
       : [];
   const primaryGoal = safetySignals.length > 0
     ? "unsafe_request"
-    : goalForIntent(primaryIntent);
+    : requestedOutcomes.includes("request_human_follow_up")
+      ? "request_human"
+      : requestedOutcomes.includes("create_service_request")
+        ? "create_request"
+        : requestedOutcomes.includes("receive_public_material")
+          ? "get_material"
+          : primaryIntent === "faq"
+            ? "get_information"
+            : "unknown";
   return {
     primaryGoal,
     primaryIntent,
     businessLabels,
     requestedOutcomes,
     entities: {},
-    missingFields: primaryGoal === "create_request" || primaryGoal === "perform_action"
+    missingFields: primaryGoal === "create_request"
       ? ["description"]
       : [],
     confidence: primaryIntent === "unknown" ? 0.25 : matched.length || faqMatched ? 0.9 : 0.5,
@@ -263,7 +277,7 @@ export function createConversationPlan(input: PlanInput): CurrentConversationPla
   }
   const reasons = [
     `Goal detected: ${goal}.`,
-    `Business labels detected: ${intentResult.businessLabels.join(", ") || intent}.`,
+    `Configured capability labels detected: ${intentResult.businessLabels.join(", ") || "none"}.`,
   ];
   const makeAction = (
     kind: ConversationActionKind,
@@ -295,7 +309,7 @@ export function createConversationPlan(input: PlanInput): CurrentConversationPla
     };
   }
 
-  if (intent === "handoff" || intent === "support") {
+  if (goal === "request_human") {
     return {
       goal, intent, audienceRole, disposition: "handoff",
       intentResult, billingDecision, replyGoal: "确认人工接手请求并收集最少必要描述。",
@@ -364,8 +378,8 @@ export function createConversationPlan(input: PlanInput): CurrentConversationPla
           ...new Set(["compute.execute", ...proposedAction.requiredCapabilities]),
         ],
         externalSideEffect: true,
-        ...(proposedAction.estimatedCost !== undefined
-          ? { estimatedCost: proposedAction.estimatedCost }
+        ...(proposedAction.estimatedTokens !== undefined
+          ? { estimatedTokens: proposedAction.estimatedTokens }
           : {}),
       }],
       reasons: [
@@ -380,8 +394,11 @@ export function createConversationPlan(input: PlanInput): CurrentConversationPla
     };
   }
 
-  const labels = new Set(intentResult.businessLabels);
-  if (labels.has("materials") && !hasRequestCollectionLabel(labels)) {
+  const requestedOutcomes = new Set(intentResult.requestedOutcomes);
+  if (
+    requestedOutcomes.has("receive_public_material")
+    && !requestedOutcomes.has("create_service_request")
+  ) {
     return {
       goal, intent, audienceRole, disposition: "answer",
       intentResult, billingDecision, replyGoal: "回答资料请求并交付匹配的已发布公开资料。",
@@ -390,9 +407,9 @@ export function createConversationPlan(input: PlanInput): CurrentConversationPla
     };
   }
 
-  if (hasRequestCollectionLabel(labels)) {
+  if (requestedOutcomes.has("create_service_request")) {
     const actions = [
-      ...(labels.has("materials")
+      ...(requestedOutcomes.has("receive_public_material")
         ? [makeAction("deliver_public_material", "none", "public_material")]
         : []),
       makeAction("collect_request_description", "internal_record"),
@@ -502,7 +519,9 @@ function goalForIntent(intent: InquiryIntent): ConversationGoal {
 
 function selectPreviewKnowledge(representative: Representative, plan: ConversationPlan) {
   const all = [...representative.knowledgePack.faq, ...representative.knowledgePack.materials, ...representative.knowledgePack.policies];
-  if (plan.intent === "materials") return all.find((item) => ["deck", "download", "case_study"].includes(item.kind)) ?? all[0] ?? null;
+  if (plan.intentResult?.requestedOutcomes.includes("receive_public_material")) {
+    return all.find((item) => ["deck", "download", "case_study"].includes(item.kind)) ?? all[0] ?? null;
+  }
   return all.find((item) => item.kind === "faq") ?? all[0] ?? null;
 }
 
@@ -541,33 +560,34 @@ function requiredCapabilitiesForAction(kind: ConversationActionKind): string[] {
   }
 }
 
-function outcomesForLabel(label: string): string[] {
-  switch (label) {
-    case "materials": return ["receive_public_material"];
-    case "scheduling": return ["create_scheduling_request"];
-    case "pricing": return ["request_pricing_review"];
-    case "refund": return ["request_refund_review"];
-    case "discount": return ["request_discount_review"];
-    case "handoff":
-    case "support": return ["request_human_follow_up"];
-    case "restricted": return ["access_restricted_resource"];
-    case "collaboration":
-    case "candidate":
-    case "media": return ["create_service_request"];
-    default: return [`request:${label}`];
+function detectRequestedOutcomes(
+  normalizedText: string,
+  compatibilityIntent: InquiryIntent,
+): string[] {
+  const outcomes: string[] = [];
+  if (matchesAny(normalizedText, keywords.materials)) {
+    outcomes.push("receive_public_material");
   }
+  if (matchesAny(normalizedText, keywords.handoff)) {
+    outcomes.push("request_human_follow_up");
+  }
+  if (compatibilityIntent === "restricted") {
+    outcomes.push("access_restricted_resource");
+  }
+  if (looksLikeServiceRequest(normalizedText)) {
+    outcomes.push("create_service_request");
+  }
+  return [...new Set(outcomes)];
 }
 
-function hasRequestCollectionLabel(labels: ReadonlySet<string>): boolean {
-  return [
-    "collaboration",
-    "pricing",
-    "scheduling",
-    "refund",
-    "discount",
-    "candidate",
-    "media",
-  ].some((label) => labels.has(label));
+function looksLikeServiceRequest(text: string) {
+  const requestCues = [
+    "申请", "提交", "安排", "预约", "请联系", "希望合作", "想合作", "想聊",
+    "需要报价", "申请退款", "申请折扣", "帮我联系", "帮我安排",
+    "apply ", "submit ", "book ", "schedule ", "request a quote",
+    "request a refund", "contact me", "work with", "collaborate",
+  ];
+  return requestCues.some((token) => text.includes(token));
 }
 
 function looksLikePromptInjection(text: string): boolean {

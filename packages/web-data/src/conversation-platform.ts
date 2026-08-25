@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { normalizeRepresentativeHandoffPrompt } from "@delegate/domain";
 
@@ -13,15 +13,19 @@ import {
   DelegationTaskNextActor,
   DelegationTaskStatus,
   DelegationTaskStepStatus,
+  EventType,
   GenerationRunStatus,
   HandoffStatus,
   KnowledgeAssetReviewStatus,
   KnowledgeAssetStatus,
   LeadStatus,
   MessageContentType,
+  MessageDeliveryAttemptPhase,
+  MessageDeliveryAttemptStatus,
   MessageDeliveryStatus,
   MessageSenderType,
   Prisma,
+  ReliableEventStatus,
   RepresentativeAccessMode,
   RepresentativeChannelKind,
   RepresentativeLifecycleState,
@@ -99,6 +103,7 @@ import {
   withActiveMatrixRepresentativeChannelFence,
 } from "./matrix-room-security";
 import {
+  consumeConversationEntitlementByGenerationRunId,
   consumeConversationEntitlement,
   releaseConversationEntitlement,
   releaseConversationEntitlementByGenerationRunId,
@@ -112,6 +117,7 @@ import {
   createOrReuseHandoffRequestInTransaction,
   resolveHandoffRequestInTransaction,
 } from "./handoff-entitlements";
+import { readArtifactObject } from "./artifact-store";
 import { buildWebConversationThreadId } from "./web-audience";
 
 export {
@@ -147,7 +153,10 @@ export type GenerationRuntimeOutcome =
         | "policy_fallback";
     };
 
-export type PublicWebAnswerSourceDisclosure = "general_model";
+export type PublicWebAnswerSourceDisclosure =
+  | "general_model"
+  | "unverified_tool_fallback"
+  | "same_conversation";
 
 /**
  * Classify the visitor-facing source disclosure from authoritative generation
@@ -158,7 +167,11 @@ export type PublicWebAnswerSourceDisclosure = "general_model";
 export function resolvePublicWebAnswerSourceDisclosure(input: {
   modelGenerated: boolean;
   hasAuthorizedCitation: boolean;
+  sameConversationRecall?: boolean;
+  unverifiedToolFallback?: boolean;
 }): PublicWebAnswerSourceDisclosure | null {
+  if (input.sameConversationRecall) return "same_conversation";
+  if (input.unverifiedToolFallback) return "unverified_tool_fallback";
   if (!input.modelGenerated || input.hasAuthorizedCitation) {
     return null;
   }
@@ -199,6 +212,7 @@ function mergeGenerationCompletionContext(
   input: {
     runtimeOutcome?: GenerationRuntimeOutcome;
     turnTrace?: ConversationTurnTrace;
+    deliveryBillingPending?: boolean;
   },
 ): Prisma.InputJsonObject {
   const withRuntime = input.runtimeOutcome
@@ -211,7 +225,227 @@ function mergeGenerationCompletionContext(
     ...(input.turnTrace
       ? { turnTrace: input.turnTrace as unknown as Prisma.InputJsonObject }
       : {}),
+    ...(input.deliveryBillingPending
+      ? {
+          deliveryBilling: {
+            version: 1,
+            status: "pending",
+          },
+        }
+      : {}),
   };
+}
+
+function mergeGenerationTurnExecutionProgress(
+  snapshot: Prisma.JsonValue | null,
+  input: {
+    stage: GenerationTurnExecutionStage;
+    part?: number;
+    maxParts?: number;
+    updatedAt: Date;
+  },
+): Prisma.InputJsonObject {
+  const current =
+    snapshot
+    && typeof snapshot === "object"
+    && !Array.isArray(snapshot)
+      ? snapshot as Prisma.JsonObject
+      : {};
+  return {
+    ...current,
+    turnExecutionProgress: {
+      version: 1,
+      stage: input.stage,
+      updatedAt: input.updatedAt.toISOString(),
+      ...(typeof input.part === "number" ? { part: input.part } : {}),
+      ...(typeof input.maxParts === "number"
+        ? { maxParts: input.maxParts }
+        : {}),
+    },
+  };
+}
+
+function hasPendingGenerationDeliveryBilling(
+  snapshot: Prisma.JsonValue | null,
+) {
+  if (!isJsonRecord(snapshot)) return false;
+  const value = snapshot["deliveryBilling"];
+  return isJsonRecord(value)
+    && value["version"] === 1
+    && value["status"] === "pending";
+}
+
+function markGenerationDeliveryBillingFinalized(
+  snapshot: Prisma.JsonValue | null,
+  now: Date,
+): Prisma.InputJsonObject {
+  const current = isJsonRecord(snapshot) ? snapshot : {};
+  return {
+    ...current,
+    deliveryBilling: {
+      version: 1,
+      status: "settled",
+      finalizedAt: now.toISOString(),
+    },
+  } as Prisma.InputJsonObject;
+}
+
+function markGenerationDeliveryBillingReleased(
+  snapshot: Prisma.JsonValue | null,
+  now: Date,
+  reason: string,
+): Prisma.InputJsonObject {
+  const current = isJsonRecord(snapshot) ? snapshot : {};
+  return {
+    ...current,
+    deliveryBilling: {
+      version: 1,
+      status: "released",
+      finalizedAt: now.toISOString(),
+      reason,
+    },
+  } as Prisma.InputJsonObject;
+}
+
+async function releasePendingGenerationDeliveryBillingInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    generationRunId: string;
+    reason: string;
+    releasedAt: Date;
+  },
+) {
+  const run = await tx.generationRun.findUnique({
+    where: { id: input.generationRunId },
+    select: {
+      id: true,
+      delegationTaskId: true,
+      contextSnapshot: true,
+      runtimePolicySnapshot: true,
+    },
+  });
+  if (
+    !run
+    || run.delegationTaskId
+    || !hasPendingGenerationDeliveryBilling(run.contextSnapshot)
+  ) {
+    return false;
+  }
+  await releaseConversationEntitlementByGenerationRunId(
+    {
+      generationRunId: run.id,
+      reason: input.reason,
+    },
+    tx as unknown as ServiceEntitlementClient,
+  );
+  const walletReservation = readGenerationWalletReservation(
+    run.runtimePolicySnapshot,
+  );
+  let releasedWalletSnapshot: Prisma.InputJsonObject | null = null;
+  if (walletReservation) {
+    await releaseConversationWalletUsage(
+      {
+        usageChargeId: walletReservation.usageChargeId,
+        expectedGenerationRunId: run.id,
+        failed: true,
+        reason: input.reason,
+        idempotencyKey: `generation:${run.id}:release`,
+      },
+      tx as unknown as UsageChargeClient,
+    );
+    releasedWalletSnapshot = markGenerationWalletReleased(
+      run.runtimePolicySnapshot,
+      input.releasedAt,
+    );
+  }
+  await tx.generationRun.update({
+    where: { id: run.id },
+    data: {
+      contextSnapshot: markGenerationDeliveryBillingReleased(
+        run.contextSnapshot,
+        input.releasedAt,
+        input.reason,
+      ),
+      ...(releasedWalletSnapshot
+        ? { runtimePolicySnapshot: releasedWalletSnapshot }
+        : {}),
+    },
+  });
+  return true;
+}
+
+async function settlePendingGenerationDeliveryBillingInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    generationRunId: string;
+    deliveredAt: Date;
+  },
+) {
+  const run = await tx.generationRun.findUnique({
+    where: { id: input.generationRunId },
+    select: {
+      id: true,
+      conversationId: true,
+      delegationTaskId: true,
+      contextSnapshot: true,
+      runtimePolicySnapshot: true,
+      provider: true,
+      costCents: true,
+    },
+  });
+  if (
+    !run
+    || run.delegationTaskId
+    || !hasPendingGenerationDeliveryBilling(run.contextSnapshot)
+  ) {
+    return false;
+  }
+  const consumedEntitlement =
+    await consumeConversationEntitlementByGenerationRunId(
+      { generationRunId: run.id },
+      tx as unknown as ServiceEntitlementClient,
+    );
+  const walletReservation = readGenerationWalletReservation(
+    run.runtimePolicySnapshot,
+  );
+  let settledWalletSnapshot: Prisma.InputJsonObject | null = null;
+  if (walletReservation) {
+    await settleConversationWalletUsage(
+      {
+        usageChargeId: walletReservation.usageChargeId,
+        expectedGenerationRunId: run.id,
+        settledTokenAmount: walletReservation.tokenAmount,
+        ...(run.costCents !== null
+          ? { providerCostCents: run.costCents }
+          : {}),
+        ...(run.provider ? { provider: run.provider } : {}),
+        idempotencyKey: `generation:${run.id}:settle`,
+      },
+      tx as unknown as UsageChargeClient,
+    );
+    settledWalletSnapshot = markGenerationWalletSettled(
+      run.runtimePolicySnapshot,
+      input.deliveredAt,
+    );
+  } else if (!consumedEntitlement) {
+    await tx.conversation.update({
+      where: { id: run.conversationId },
+      data: { freeRepliesUsed: { increment: 1 } },
+    });
+  }
+  await tx.generationRun.update({
+    where: { id: run.id },
+    data: {
+      contextSnapshot: markGenerationDeliveryBillingFinalized(
+        run.contextSnapshot,
+        input.deliveredAt,
+      ),
+      ...(settledWalletSnapshot
+        ? { runtimePolicySnapshot: settledWalletSnapshot }
+        : {}),
+    },
+  });
+  return true;
 }
 
 export function readGenerationWalletReservation(
@@ -329,6 +563,50 @@ export type ConversationGenerationRuntimeOutcome = {
   fallbackReason?: "model_unavailable" | "provider_failed" | "policy_fallback";
 };
 
+export type PublicConversationTaskProgress = {
+  id: string;
+  title: string;
+  status: string;
+  nextActionBy: string;
+  updatedAt: string;
+  steps: Array<{
+    id: string;
+    sequence: number;
+    title: string;
+    status: string;
+    startedAt?: string;
+    completedAt?: string;
+    failedAt?: string;
+    updatedAt: string;
+  }>;
+};
+
+export type GenerationTurnExecutionStage =
+  | "planning"
+  | "authorizing"
+  | "generating"
+  | "validating"
+  | "saving"
+  | "delivering";
+
+export type PublicTurnExecutionProgress = {
+  id: string;
+  objective: string;
+  status: "running" | "completed" | "failed";
+  stage: GenerationTurnExecutionStage | "completed" | "failed";
+  startedAt: string;
+  updatedAt: string;
+  goals: Array<{ id: string; description: string }>;
+  deliverables: Array<{ id: string; kind: string; format?: string }>;
+  steps: Array<{
+    id: string;
+    sequence: number;
+    stage: GenerationTurnExecutionStage;
+    status: "queued" | "running" | "completed" | "failed" | "skipped";
+    detail?: string;
+  }>;
+};
+
 export type ConversationDetailSnapshot = {
   id: string;
   contact: {
@@ -365,6 +643,13 @@ export type ConversationDetailSnapshot = {
     redactedAt?: string;
     createdAt: string;
     citations: Array<{ title: string; excerpt?: string }>;
+    attachments: Array<{
+      id: string;
+      fileName: string;
+      mimeType?: string;
+      sizeBytes?: number;
+      downloadUrl?: string;
+    }>;
   }>;
   runs: Array<{
     id: string;
@@ -592,6 +877,18 @@ export class ConversationIngressValidationError extends Error {
   }
 }
 
+export class PublicAudienceHandoffControlError extends Error {
+  readonly code: string;
+  readonly statusCode: number;
+
+  constructor(code: string, message: string, statusCode = 409) {
+    super(message);
+    this.name = "PublicAudienceHandoffControlError";
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
 export class ConversationWorkInFlightControlError extends Error {
   readonly code = "CONVERSATION_WORK_IN_FLIGHT";
   readonly statusCode = 409;
@@ -730,6 +1027,24 @@ function markGenerationWalletReleased(
   return {
     ...rest,
     billingMode: "service_credit_released",
+    billingFinalizedAt: now.toISOString(),
+  } as Prisma.InputJsonObject;
+}
+
+function markGenerationWalletSettled(
+  snapshot: Prisma.JsonValue | null,
+  now: Date,
+): Prisma.InputJsonObject | null {
+  if (!isJsonRecord(snapshot) || !readGenerationWalletReservation(snapshot)) {
+    return null;
+  }
+  const {
+    walletReservation: _walletReservation,
+    ...rest
+  } = snapshot;
+  return {
+    ...rest,
+    billingMode: "service_credit_settled",
     billingFinalizedAt: now.toISOString(),
   } as Prisma.InputJsonObject;
 }
@@ -987,7 +1302,19 @@ export async function getConversationDetailSnapshot(
           take: 1,
         },
         messages: {
-          include: { citations: true },
+          include: {
+            citations: true,
+            attachments: {
+              select: {
+                id: true,
+                fileName: true,
+                mimeType: true,
+                sizeBytes: true,
+                objectKey: true,
+                externalUrl: true,
+              },
+            },
+          },
           orderBy: [{ createdAt: "asc" }, { id: "asc" }],
           take: 200,
         },
@@ -1031,6 +1358,28 @@ export async function getConversationDetailSnapshot(
             title: citation.title,
             ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
           })),
+          attachments: message.redactedAt
+            ? []
+            : message.attachments.map((attachment) => ({
+                id: attachment.id,
+                fileName: attachment.fileName,
+                ...(attachment.mimeType
+                  ? { mimeType: attachment.mimeType }
+                  : {}),
+                ...(typeof attachment.sizeBytes === "number"
+                  ? { sizeBytes: attachment.sizeBytes }
+                  : {}),
+                ...(attachment.objectKey
+                  ? {
+                      downloadUrl:
+                        `/api/dashboard/representatives/${encodeURIComponent(representativeSlug)}`
+                        + `/conversations/${encodeURIComponent(conversation.id)}`
+                        + `/attachments/${encodeURIComponent(attachment.id)}`,
+                    }
+                  : attachment.externalUrl?.startsWith("/")
+                    ? { downloadUrl: attachment.externalUrl }
+                    : {}),
+              })),
         }))
       : conversation.turns.map((turn) => ({
           id: turn.id,
@@ -1039,6 +1388,7 @@ export async function getConversationDetailSnapshot(
           status: "sent",
           createdAt: turn.createdAt.toISOString(),
           citations: [],
+          attachments: [],
         }));
 
     return {
@@ -1113,6 +1463,68 @@ export async function getConversationDetailSnapshot(
     }
     throw error;
   }
+}
+
+export async function getOwnerConversationAttachmentDownload(input: {
+  representativeSlug: string;
+  conversationId: string;
+  attachmentId: string;
+  ownerId?: string | null;
+}) {
+  const ownerId = input.ownerId?.trim();
+  const attachment = await prisma.messageAttachment.findFirst({
+    where: {
+      id: input.attachmentId,
+      objectKey: { not: null },
+      message: {
+        conversationId: input.conversationId,
+        redactedAt: null,
+        conversation: {
+          representative: {
+            slug: input.representativeSlug,
+            ...(ownerId ? { ownerId } : {}),
+          },
+        },
+      },
+    },
+    select: {
+      fileName: true,
+      mimeType: true,
+      sizeBytes: true,
+      objectKey: true,
+      checksum: true,
+    },
+  });
+  if (!attachment?.objectKey) return null;
+  const stored = await readArtifactObject(attachment.objectKey);
+  if (
+    typeof attachment.sizeBytes === "number"
+    && stored.buffer.byteLength !== attachment.sizeBytes
+  ) {
+    throw new Error("Conversation attachment size verification failed.");
+  }
+  if (attachment.checksum) {
+    const checksum = createHash("sha256").update(stored.buffer).digest("hex");
+    if (checksum !== attachment.checksum) {
+      throw new Error("Conversation attachment checksum verification failed.");
+    }
+  }
+  return {
+    buffer: stored.buffer,
+    fileName: sanitizeDownloadFileName(attachment.fileName),
+    mimeType:
+      attachment.mimeType
+      || stored.contentType
+      || "application/octet-stream",
+  };
+}
+
+function sanitizeDownloadFileName(value: string) {
+  const normalized = value.trim().split(/[\\/]/u).pop() || "attachment";
+  return normalized
+    .replace(/[\r\n"\\]/gu, "_")
+    .slice(0, 180)
+    || "attachment";
 }
 
 export async function getRepresentativeOperationsSnapshot(
@@ -1424,8 +1836,33 @@ export async function acceptInboundConversationMessage(
     const shouldQueueAi =
       action !== "hold_for_operator" && input.queueGeneration !== false;
     let episode = latestEpisode;
+    const shouldAdvancePublishedVersion = Boolean(
+      episode
+      && latestState === "waiting_user"
+      && conversation.representative.activeVersionId
+      && episode.representativeVersionId
+        !== conversation.representative.activeVersionId,
+    );
 
-    if (!episode || action === "start_new_episode") {
+    if (episode && shouldAdvancePublishedVersion) {
+      assertConversationEpisodeTransition(latestState, "resolved");
+      await tx.conversationEpisode.update({
+        where: { id: episode.id },
+        data: {
+          status: ConversationEpisodeStatus.RESOLVED,
+          endedAt: inboundOccurredAt,
+          resolutionReason: "representative_version_updated",
+        },
+      });
+      episode = await tx.conversationEpisode.create({
+        data: {
+          conversationId: conversation.id,
+          representativeVersionId: conversation.representative.activeVersionId,
+          sequence: episode.sequence + 1,
+          status: ConversationEpisodeStatus.ACTIVE,
+        },
+      });
+    } else if (!episode || action === "start_new_episode") {
       episode = await tx.conversationEpisode.create({
         data: {
           conversationId: conversation.id,
@@ -1758,7 +2195,7 @@ export async function acceptInboundConversationMessage(
 export async function assertConversationChannelDeliveryAvailable(input: {
   conversationId: string;
   channel: "web" | "matrix" | "telegram";
-  senderMode?: "ai" | "operator";
+  senderMode?: "ai" | "operator" | "system";
   allowNeedsHumanDelivery?: boolean;
 }) {
   const kind = mapChannelKind(input.channel);
@@ -2063,12 +2500,24 @@ export async function completeInlineGenerationRun(input: {
         runId: string;
         outcome: "generation_failed";
       };
+  /** Platform-authored failure text with no dependency on recalled evidence. */
+  evidenceIndependentSystemFailure?: {
+    failureCode: string;
+  };
 }) {
   const replyText = input.replyText.trim();
   if (!replyText) throw new Error("Reply text is required.");
   if (input.keepConversationQueued && input.humanHandoff) {
     throw new Error(
       "A generation run cannot queue another AI step while requesting human handoff.",
+    );
+  }
+  if (
+    input.evidenceIndependentSystemFailure
+    && (input.countUsage || input.memoryUse?.outcome === "completed")
+  ) {
+    throw new Error(
+      "An evidence-independent system failure cannot consume usage or cite recalled evidence.",
     );
   }
 
@@ -2127,6 +2576,10 @@ export async function completeInlineGenerationRun(input: {
     }
     const delegationTaskOwnsBilling =
       delegationTaskOwnsGenerationBilling(run);
+    const deferUsageFinalization =
+      input.completeOutbox === false
+      && input.countUsage
+      && !delegationTaskOwnsBilling;
     if (
       run.conversation.state === "HUMAN_ACTIVE"
       || run.conversation.state === "NEEDS_HUMAN"
@@ -2352,7 +2805,11 @@ export async function completeInlineGenerationRun(input: {
       );
       return { channelUnavailableCode: failureCode };
     }
-    if (!delegationTaskOwnsBilling && input.entitlementReservation) {
+    if (
+      !deferUsageFinalization
+      && !delegationTaskOwnsBilling
+      && input.entitlementReservation
+    ) {
       const reservation = input.entitlementReservation;
       if (
         reservation.generationRunId !== run.id
@@ -2393,23 +2850,65 @@ export async function completeInlineGenerationRun(input: {
       run.runtimePolicySnapshot,
     );
     const now = new Date();
+    const handoffResult = input.humanHandoff
+      ? await ensureConversationLeadAndHandoffInTransaction(tx, {
+          conversationId: run.conversationId,
+          ...input.humanHandoff,
+          requestHandoff: true,
+        })
+      : null;
+    const resolvedTurnTrace = resolveHumanHandoffTurnTrace(
+      input.turnTrace,
+      handoffResult,
+    );
+    const resolvedReplyText = resolveHumanHandoffReplyText(
+      replyText,
+      handoffResult,
+    );
+    if (input.evidenceIndependentSystemFailure) {
+      const startedMemoryUse = await tx.memoryUseRun.findFirst({
+        where: { generationRunId: run.id, status: "STARTED" },
+        select: { id: true },
+      });
+      if (startedMemoryUse) {
+        await failMemoryUseRunInTransaction(
+          tx,
+          startedMemoryUse.id,
+          "memory_generation_failed",
+          now,
+        );
+      }
+    }
     const message = await tx.message.create({
       data: {
         conversationId: run.conversationId,
         episodeId: run.episodeId,
-        senderType: MessageSenderType.REPRESENTATIVE,
-        senderDisplayName: input.senderDisplayName,
+        senderType: input.evidenceIndependentSystemFailure
+          ? MessageSenderType.SYSTEM
+          : MessageSenderType.REPRESENTATIVE,
+        senderDisplayName: input.evidenceIndependentSystemFailure
+          ? "Delegate"
+          : input.senderDisplayName,
         delegationTaskId: run.delegationTaskId,
-        contentType: MessageContentType.TEXT,
-        text: replyText,
-        ...(input.intent || input.humanHandoff
+        contentType: input.evidenceIndependentSystemFailure
+          ? MessageContentType.SYSTEM
+          : MessageContentType.TEXT,
+        text: resolvedReplyText,
+        ...(input.intent || input.humanHandoff || input.evidenceIndependentSystemFailure
           ? {
               content: {
                 ...(input.intent ? { intent: input.intent } : {}),
-                ...(input.humanHandoff
+                ...(input.humanHandoff || input.evidenceIndependentSystemFailure
                   ? {
                       deliveryControl: {
-                        allowNeedsHuman: true,
+                        ...(input.humanHandoff ? { allowNeedsHuman: true } : {}),
+                        ...(input.evidenceIndependentSystemFailure
+                          ? {
+                              evidenceIndependentSystemFailure: true,
+                              failureCode:
+                                input.evidenceIndependentSystemFailure.failureCode,
+                            }
+                          : {}),
                         generationRunId: run.id,
                       },
                     }
@@ -2448,13 +2947,16 @@ export async function completeInlineGenerationRun(input: {
         ...(input.inputTokens !== undefined ? { inputTokens: input.inputTokens } : {}),
         ...(input.outputTokens !== undefined ? { outputTokens: input.outputTokens } : {}),
         ...(input.costCents !== undefined ? { costCents: input.costCents } : {}),
-        ...(input.runtimeOutcome || input.turnTrace
+        ...(input.runtimeOutcome || resolvedTurnTrace || deferUsageFinalization
           ? {
               contextSnapshot: mergeGenerationCompletionContext(
                 run.contextSnapshot,
                 {
                   ...(input.runtimeOutcome ? { runtimeOutcome: input.runtimeOutcome } : {}),
-                  ...(input.turnTrace ? { turnTrace: input.turnTrace } : {}),
+                  ...(resolvedTurnTrace ? { turnTrace: resolvedTurnTrace } : {}),
+                  ...(deferUsageFinalization
+                    ? { deliveryBillingPending: true }
+                    : {}),
                 },
               ),
             }
@@ -2480,18 +2982,18 @@ export async function completeInlineGenerationRun(input: {
         now,
       );
     }
+    if (input.evidenceIndependentSystemFailure) {
+      await enqueueConversationMessageDeliveryInTransaction(tx, {
+        conversationId: run.conversationId,
+        messageId: message.id,
+        deliveryKind: "system_notification",
+      });
+    }
     await tx.message.update({
       where: { id: run.inputMessageId },
       data: { deliveryStatus: MessageDeliveryStatus.SENT },
     });
-    const handoffResult = input.humanHandoff
-      ? await ensureConversationLeadAndHandoffInTransaction(tx, {
-          conversationId: run.conversationId,
-          ...input.humanHandoff,
-          requestHandoff: true,
-        })
-      : null;
-    if (input.turnTrace) {
+    if (resolvedTurnTrace) {
       await tx.eventAudit.upsert({
         where: { id: deterministicConversationAuditId("turn", run.id) },
         update: {},
@@ -2503,7 +3005,7 @@ export async function completeInlineGenerationRun(input: {
           payload: {
             generationRunId: run.id,
             outputMessageId: message.id,
-            trace: input.turnTrace as unknown as Prisma.InputJsonObject,
+            trace: resolvedTurnTrace as unknown as Prisma.InputJsonObject,
           },
         },
       });
@@ -2526,7 +3028,10 @@ export async function completeInlineGenerationRun(input: {
       where: { id: run.conversationId },
       data: {
         lastMessageAt: now,
-        ...(!input.countUsage || walletReservation || delegationTaskOwnsBilling
+        ...(!input.countUsage
+          || walletReservation
+          || delegationTaskOwnsBilling
+          || deferUsageFinalization
           ? {}
           : { freeRepliesUsed: { increment: 1 } }),
       },
@@ -2549,7 +3054,10 @@ export async function completeInlineGenerationRun(input: {
             : ConversationEpisodeStatus.WAITING_USER,
       },
     });
-    if (input.completeOutbox !== false) {
+    if (
+      input.completeOutbox !== false
+      || input.evidenceIndependentSystemFailure
+    ) {
       const completedOutbox = await tx.outboxEvent.updateMany({
         where: {
           id: input.outboxId,
@@ -2568,7 +3076,11 @@ export async function completeInlineGenerationRun(input: {
         );
       }
     }
-    if (walletReservation && !delegationTaskOwnsBilling) {
+    if (
+      walletReservation
+      && !delegationTaskOwnsBilling
+      && !deferUsageFinalization
+    ) {
       if (!input.countUsage) {
         await releaseConversationWalletUsage(
           {
@@ -2606,6 +3118,80 @@ export async function completeInlineGenerationRun(input: {
     throw new ConversationAiDeliveryControlError();
   }
   return completedResult;
+}
+
+type InlineHandoffResult = {
+  handoff: { id: string } | null;
+  lead: { id: string } | null;
+  skipped?: string;
+} | null;
+
+function resolveHumanHandoffReplyText(
+  replyText: string,
+  result: InlineHandoffResult,
+) {
+  if (!result || result.handoff) return replyText;
+  switch (result.skipped) {
+    case "human_active":
+      return "真人已经在接待当前会话，无需重复提交接管请求。";
+    case "handoff_disabled":
+      return "当前数字代表未开放人工接管。你可以继续与数字代表对话。";
+    case "entitlement_required":
+      return "当前服务不包含人工接管权益。请先在服务与订单中购买包含人工接管的服务套餐。";
+    case "active_request_exists":
+      return "你已经有一个等待处理的人工接管请求，请先等待当前请求处理。";
+    default:
+      return "当前无法创建人工接管请求。系统没有将请求标记为已提交，请稍后重试。";
+  }
+}
+
+function resolveHumanHandoffTurnTrace(
+  trace: ConversationTurnTrace | undefined,
+  result: InlineHandoffResult,
+): ConversationTurnTrace | undefined {
+  if (!trace || !result) return trace;
+  const completed = Boolean(result.handoff) || result.skipped === "human_active";
+  const summary = result.handoff
+    ? "Human-handoff access was verified and the request was created or reused."
+    : result.skipped === "human_active"
+      ? "A human operator already controls the conversation."
+      : result.skipped === "handoff_disabled"
+        ? "Human handoff is disabled for this representative."
+        : result.skipped === "entitlement_required"
+          ? "The audience does not have the required human-handoff entitlement."
+          : result.skipped === "active_request_exists"
+            ? "Another active human-handoff request already covers this audience and representative."
+            : "No human-handoff request was created.";
+  return {
+    ...trace,
+    actions: trace.actions.map((action) => action.kind === "request_human_handoff"
+      ? {
+          ...action,
+          authorization: completed
+            ? {
+                decision: "allow" as const,
+                reason: "Human-handoff access was verified by the authoritative transaction.",
+              }
+            : {
+                decision: "deny" as const,
+                reason: summary,
+              },
+          execution: {
+            actionId: action.id,
+            status: completed ? "completed" as const : "denied" as const,
+            summary,
+            ...(result.handoff
+              ? {
+                  output: {
+                    handoffRequestId: result.handoff.id,
+                    ...(result.lead ? { leadId: result.lead.id } : {}),
+                  },
+                }
+              : {}),
+          },
+        }
+      : action),
+  };
 }
 
 async function cancelStartedMemoryUseForGeneration(
@@ -2698,7 +3284,7 @@ export async function waitGenerationRunForComputeApproval(input: {
         text: replyText,
         content: { kind: "compute_approval_pending", approvalId: input.approvalId },
         clientMessageId: `compute-approval-pending:${input.approvalId}`,
-        deliveryStatus: MessageDeliveryStatus.SENT,
+        deliveryStatus: MessageDeliveryStatus.QUEUED,
         retentionExpiresAt: buildMessageRetentionExpiry(now),
         createdAt: now,
       },
@@ -2742,23 +3328,9 @@ export async function waitGenerationRunForComputeApproval(input: {
       where: { id: run.episodeId || "__no_episode__" },
       data: { status: ConversationEpisodeStatus.WAITING_APPROVAL },
     });
-    const completedOutbox = await tx.outboxEvent.updateMany({
-      where: {
-        id: input.outboxId,
-        aggregateType: "generation_run",
-        aggregateId: run.id,
-        eventType: "generation.requested",
-        status: "PROCESSING",
-        attemptCount: input.leaseAttempt,
-      },
-      data: { status: "PROCESSED", processedAt: now },
-    });
-    if (completedOutbox.count !== 1) {
-      throw new GenerationWorkLeaseLostError(
-        input.outboxId,
-        input.leaseAttempt,
-      );
-    }
+    // The worker still owns this outbox lease until the audience-visible
+    // approval notice has passed the channel adapter. Matrix and Telegram must
+    // never be marked delivered merely because the waiting state was stored.
     return { run: waitingRun, message };
   });
 }
@@ -2786,6 +3358,12 @@ export type ClaimedGenerationWorkItem = {
   episodeId?: string;
   inputMessageId: string;
   userText: string;
+  inputAttachments: Array<{
+    id: string;
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+  }>;
   sourceSenderId?: string;
   privateChannelConnectionId?: string;
   channel: "web" | "matrix" | "telegram";
@@ -2796,6 +3374,7 @@ export type ClaimedGenerationWorkItem = {
   deliveryOnly?: boolean;
   outputMessageId?: string;
   outputText?: string;
+  deliveryPlanActionId?: string;
   delegationTerminalRecovery?: {
     taskStatus: string;
     stepStatus: string;
@@ -2826,12 +3405,23 @@ const GENERATION_WORK_LEASE_EXHAUSTED_ERROR = "generation_work_lease_exhausted";
 const GENERATION_WORK_LEASE_LOST_ERROR = "generation_work_lease_lost";
 const GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR =
   "generation_memory_delivery_source_revoked";
+const GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR =
+  "turn_plan_superseded_before_delivery";
 const DELEGATION_EXTERNAL_EFFECT_LEASE_LOST_ERROR =
   "delegation_external_effect_lease_lost";
 
 export type GenerationWorkLease = {
   outboxId: string;
   leaseAttempt: number;
+};
+
+export type GenerationMessageDeliveryAdmission = {
+  attemptNumber: number;
+  leaseToken: string;
+  planId?: string;
+  planRevision?: number;
+  executionEpoch?: number;
+  planActionId?: string;
 };
 
 export class GenerationWorkLeaseLostError extends Error {
@@ -2876,6 +3466,28 @@ export function isGenerationMemoryDeliveryBlockedError(
     );
 }
 
+export class GenerationPlanDeliverySupersededError extends Error {
+  readonly code = GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR;
+
+  constructor() {
+    super(
+      "Generation delivery was canceled because its TurnPlan revision is no longer current.",
+    );
+    this.name = "GenerationPlanDeliverySupersededError";
+  }
+}
+
+export function isGenerationPlanDeliverySupersededError(
+  error: unknown,
+): error is GenerationPlanDeliverySupersededError {
+  return error instanceof GenerationPlanDeliverySupersededError
+    || (
+      error instanceof Error
+      && "code" in error
+      && error.code === GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR
+    );
+}
+
 export async function fenceGenerationWorkLease(
   tx: Prisma.TransactionClient,
   input: GenerationWorkLease & { runId: string },
@@ -2913,6 +3525,47 @@ export async function fenceGenerationWorkLease(
       input.leaseAttempt,
     );
   }
+}
+
+export async function updateGenerationTurnExecutionProgress(input: {
+  runId: string;
+  outboxId: string;
+  leaseAttempt: number;
+  stage: GenerationTurnExecutionStage;
+  part?: number;
+  maxParts?: number;
+}) {
+  const now = new Date();
+  return runConversationWriteTransaction(async (tx) => {
+    await fenceGenerationWorkLease(tx, input);
+    const run = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      select: { contextSnapshot: true },
+    });
+    if (!run) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+    return tx.generationRun.update({
+      where: { id: input.runId },
+      data: {
+        contextSnapshot: mergeGenerationTurnExecutionProgress(
+          run.contextSnapshot,
+          {
+            stage: input.stage,
+            updatedAt: now,
+            ...(typeof input.part === "number" ? { part: input.part } : {}),
+            ...(typeof input.maxParts === "number"
+              ? { maxParts: input.maxParts }
+              : {}),
+          },
+        ),
+      },
+      select: { id: true, contextSnapshot: true },
+    });
+  });
 }
 
 /**
@@ -3171,12 +3824,18 @@ export async function claimNextGenerationWorkItem(
       aggregateId: string;
       status: string;
       attemptCount: number;
+      runStatus: string | null;
+      conversationId: string | null;
+      outputMessageId: string | null;
     }>>`
       SELECT
         outbox."id",
         outbox."aggregateId",
         outbox."status",
-        outbox."attemptCount"
+        outbox."attemptCount",
+        run."status" AS "runStatus",
+        run."conversationId" AS "conversationId",
+        run."outputMessageId" AS "outputMessageId"
       FROM "OutboxEvent" AS outbox
       LEFT JOIN "GenerationRun" AS run
         ON run."id" = outbox."aggregateId"
@@ -3198,6 +3857,89 @@ export async function claimNextGenerationWorkItem(
     `;
     const candidate = lockedCandidates[0];
     if (!candidate) return null;
+
+    if (candidate.status === "PROCESSING" && candidate.attemptCount > 0) {
+      if (
+        candidate.runStatus === GenerationRunStatus.COMPLETED
+        && candidate.outputMessageId
+        && candidate.conversationId
+      ) {
+        const uncertainAttempt = await tx.messageDeliveryAttempt.findUnique({
+          where: {
+            messageId_attemptNumber: {
+              messageId: candidate.outputMessageId,
+              attemptNumber: candidate.attemptCount,
+            },
+          },
+          select: { status: true, attemptPhase: true },
+        });
+        if (
+          uncertainAttempt?.status === MessageDeliveryAttemptStatus.PROCESSING
+          && ([
+            MessageDeliveryAttemptPhase.CALL_STARTED,
+            MessageDeliveryAttemptPhase.RESPONSE_RECEIVED,
+            MessageDeliveryAttemptPhase.OUTCOME_UNKNOWN,
+            MessageDeliveryAttemptPhase.RECONCILIATION_REQUIRED,
+          ] as MessageDeliveryAttemptPhase[]).includes(
+            uncertainAttempt.attemptPhase,
+          )
+        ) {
+          await terminalizeGenerationMessageDeliveryInTransaction(tx, {
+            outboxId: candidate.id,
+            attemptNumber: candidate.attemptCount,
+            runId: candidate.aggregateId,
+            messageId: candidate.outputMessageId,
+            conversationId: candidate.conversationId,
+            messageStatus: MessageDeliveryStatus.FAILED,
+            attemptStatus:
+              MessageDeliveryAttemptStatus.RECONCILIATION_REQUIRED,
+            failureCode: "provider_outcome_unknown_after_lease_expiry",
+            failureReason:
+              "Delivery lease expired after provider execution may have started; automatic retry is disabled.",
+          });
+          return null;
+        }
+        if (
+          uncertainAttempt?.status === MessageDeliveryAttemptStatus.PROCESSING
+          && ([
+            MessageDeliveryAttemptPhase.CREATED,
+            MessageDeliveryAttemptPhase.CLAIMED,
+            MessageDeliveryAttemptPhase.CALL_PREPARED,
+          ] as MessageDeliveryAttemptPhase[]).includes(
+            uncertainAttempt.attemptPhase,
+          )
+        ) {
+          const leaseExpiredAt = new Date();
+          await transitionMessageDeliveryAttemptInTransaction(tx, {
+            messageId: candidate.outputMessageId,
+            conversationId: candidate.conversationId,
+            attemptNumber: candidate.attemptCount,
+            idempotencyKey:
+              `generation-message:${candidate.outputMessageId}:attempt:${candidate.attemptCount}`,
+            expectedStatuses: [MessageDeliveryAttemptStatus.PROCESSING],
+            status: MessageDeliveryAttemptStatus.FAILED,
+            attemptPhase: MessageDeliveryAttemptPhase.LEASE_EXPIRED,
+            leaseToken: null,
+            failureCode: "delivery_lease_expired_before_provider_call",
+            failureReason:
+              "The delivery lease expired before provider execution; a new fenced attempt may retry.",
+            completedAt: leaseExpiredAt,
+          });
+          await tx.message.updateMany({
+            where: {
+              id: candidate.outputMessageId,
+              deliveryStatus: MessageDeliveryStatus.PROCESSING,
+            },
+            data: {
+              deliveryStatus: MessageDeliveryStatus.FAILED,
+              failureCode: "delivery_lease_expired_before_provider_call",
+              failureReason:
+                "The delivery lease expired before provider execution and is safe to retry.",
+            },
+          });
+        }
+      }
+    }
 
     if (
       candidate.status === "PROCESSING"
@@ -3232,6 +3974,14 @@ export async function claimNextGenerationWorkItem(
       include: {
         inputMessage: {
           include: {
+            attachments: {
+              select: {
+                id: true,
+                fileName: true,
+                mimeType: true,
+                sizeBytes: true,
+              },
+            },
             channelBinding: {
               include: {
                 representativeBinding: {
@@ -3656,29 +4406,51 @@ export async function claimNextGenerationWorkItem(
           run,
           failureReason,
         );
-        await releaseConversationEntitlementByGenerationRunId(
-          {
-            generationRunId: run.id,
-            reason: failureCode,
-          },
-          tx as unknown as ServiceEntitlementClient,
-        );
+        if (run.status !== GenerationRunStatus.COMPLETED) {
+          await releaseConversationEntitlementByGenerationRunId(
+            {
+              generationRunId: run.id,
+              reason: failureCode,
+            },
+            tx as unknown as ServiceEntitlementClient,
+          );
+        }
         if (run.status === GenerationRunStatus.COMPLETED) {
           if (run.outputMessage) {
-            await tx.message.update({
-              where: { id: run.outputMessage.id },
+            await terminalizeGenerationMessageDeliveryInTransaction(tx, {
+              outboxId: outbox.id,
+              attemptNumber: outbox.attemptCount,
+              runId: run.id,
+              messageId: run.outputMessage.id,
+              conversationId: run.conversationId,
+              messageStatus: MessageDeliveryStatus.CANCELED,
+              attemptStatus: MessageDeliveryAttemptStatus.CANCELED,
+              failureCode,
+              failureReason:
+                matrixEndpointAvailability?.available === false
+                  ? "Matrix delivery was canceled because this room belongs to a previously assigned representative identity."
+                  : !matrixBindingSafe
+                  ? "Matrix delivery was canceled because the room is no longer a verified private conversation."
+                  : "Matrix delivery was canceled because it belongs to an earlier channel activation.",
+            });
+          } else {
+            const deadLettered = await tx.outboxEvent.updateMany({
+              where: {
+                id: outbox.id,
+                status: "PROCESSING",
+                attemptCount: outbox.attemptCount,
+              },
               data: {
-                deliveryStatus: MessageDeliveryStatus.CANCELED,
-                failureCode,
-                failureReason:
-                  matrixEndpointAvailability?.available === false
-                    ? "Matrix delivery was canceled because this room belongs to a previously assigned representative identity."
-                    : !matrixBindingSafe
-                    ? "Matrix delivery was canceled because the room is no longer a verified private conversation."
-                    : "Matrix delivery was canceled because it belongs to an earlier channel activation.",
+                status: "DEAD_LETTER",
+                processedAt: new Date(),
+                lastError: failureCode,
               },
             });
+            if (deadLettered.count !== 1) {
+              throw new Error("Generation delivery lost its missing-output outbox fence.");
+            }
           }
+          return null;
         } else {
           const walletReservation = readGenerationWalletReservation(
             run.runtimePolicySnapshot,
@@ -3722,41 +4494,116 @@ export async function claimNextGenerationWorkItem(
             },
           });
         }
-        await tx.outboxEvent.update({
-          where: { id: outbox.id },
+        const canceledOutbox = await tx.outboxEvent.updateMany({
+          where: {
+            id: outbox.id,
+            status: "PROCESSING",
+            attemptCount: outbox.attemptCount,
+          },
           data: { status: "DEAD_LETTER", lastError: failureCode },
         });
+        if (canceledOutbox.count !== 1) {
+          throw new Error("Canceled generation lost its outbox fence.");
+        }
         return null;
       }
     }
 
     if (run.status === GenerationRunStatus.COMPLETED) {
       if (!run.outputMessage?.text) {
-        await tx.outboxEvent.update({
-          where: { id: outbox.id },
-          data: {
-            status: "DEAD_LETTER",
-            lastError: "completed_generation_output_missing",
-          },
-        });
+        if (run.outputMessage) {
+          await terminalizeGenerationMessageDeliveryInTransaction(tx, {
+            outboxId: outbox.id,
+            attemptNumber: outbox.attemptCount,
+            runId: run.id,
+            messageId: run.outputMessage.id,
+            conversationId: run.conversationId,
+            messageStatus: MessageDeliveryStatus.FAILED,
+            attemptStatus: MessageDeliveryAttemptStatus.DEAD_LETTER,
+            failureCode: "completed_generation_output_missing",
+            failureReason: "Completed generation has no deliverable output text.",
+          });
+        } else {
+          const missingOutputOutbox = await tx.outboxEvent.updateMany({
+            where: {
+              id: outbox.id,
+              status: "PROCESSING",
+              attemptCount: outbox.attemptCount,
+            },
+            data: {
+              status: "DEAD_LETTER",
+              processedAt: new Date(),
+              lastError: "completed_generation_output_missing",
+            },
+          });
+          if (missingOutputOutbox.count !== 1) {
+            throw new Error("Missing generation output lost its outbox fence.");
+          }
+          await releasePendingGenerationDeliveryBillingInTransaction(tx, {
+            generationRunId: run.id,
+            reason: "completed_generation_output_missing",
+            releasedAt: new Date(),
+          });
+        }
         return null;
       }
-      if (channel === "web" || run.outputMessage.externalMessageId) {
-        await tx.message.update({
-          where: { id: run.outputMessage.id },
+      if (run.outputMessage.externalMessageId) {
+        const acceptedAt = new Date();
+        const acceptedMessage = await tx.message.updateMany({
+          where: {
+            id: run.outputMessage.id,
+            deliveryStatus: {
+              in: [
+                MessageDeliveryStatus.QUEUED,
+                MessageDeliveryStatus.PROCESSING,
+                MessageDeliveryStatus.FAILED,
+                MessageDeliveryStatus.SENT,
+              ],
+            },
+          },
           data: {
             deliveryStatus: MessageDeliveryStatus.SENT,
             failureCode: null,
             failureReason: null,
           },
         });
-        await tx.outboxEvent.update({
-          where: { id: outbox.id },
+        if (acceptedMessage.count !== 1) {
+          throw new Error("Accepted generation output lost its message fence.");
+        }
+        const acceptedOutbox = await tx.outboxEvent.updateMany({
+          where: {
+            id: outbox.id,
+            status: "PROCESSING",
+            attemptCount: outbox.attemptCount,
+          },
           data: {
             status: "PROCESSED",
-            processedAt: new Date(),
+            processedAt: acceptedAt,
             lastError: null,
           },
+        });
+        if (acceptedOutbox.count !== 1) {
+          throw new Error("Accepted generation output lost its outbox fence.");
+        }
+        await transitionMessageDeliveryAttemptInTransaction(tx, {
+          messageId: run.outputMessage.id,
+          conversationId: run.conversationId,
+          attemptNumber: outbox.attemptCount,
+          idempotencyKey:
+            `generation-message:${run.outputMessage.id}:attempt:${outbox.attemptCount}`,
+          expectedStatuses: [
+            MessageDeliveryAttemptStatus.QUEUED,
+            MessageDeliveryAttemptStatus.PROCESSING,
+            MessageDeliveryAttemptStatus.FAILED,
+          ],
+          status: MessageDeliveryAttemptStatus.CONFIRMED,
+          attemptPhase: MessageDeliveryAttemptPhase.COMPLETED,
+          externalMessageId: run.outputMessage.externalMessageId ?? null,
+          completedAt: acceptedAt,
+        });
+        await settlePendingGenerationDeliveryBillingInTransaction(tx, {
+          generationRunId: run.id,
+          deliveredAt: acceptedAt,
         });
         return null;
       }
@@ -3832,25 +4679,37 @@ export async function claimNextGenerationWorkItem(
           const identityReassigned =
             availability.code === "matrix_identity_reassigned";
           if (run.outputMessage) {
-            await tx.message.update({
-              where: { id: run.outputMessage.id },
+            await terminalizeGenerationMessageDeliveryInTransaction(tx, {
+              outboxId: outbox.id,
+              attemptNumber: outbox.attemptCount,
+              runId: run.id,
+              messageId: run.outputMessage.id,
+              conversationId: run.conversationId,
+              messageStatus: MessageDeliveryStatus.CANCELED,
+              attemptStatus: MessageDeliveryAttemptStatus.CANCELED,
+              failureCode: availability.code,
+              failureReason:
+                identityReassigned
+                  ? "Matrix delivery was canceled because this room belongs to a previously assigned representative identity."
+                  : "Telegram delivery was canceled because this conversation belongs to a previously assigned Bot.",
+            });
+          } else {
+            const canceledOutbox = await tx.outboxEvent.updateMany({
+              where: {
+                id: outbox.id,
+                status: "PROCESSING",
+                attemptCount: outbox.attemptCount,
+              },
               data: {
-                deliveryStatus: MessageDeliveryStatus.CANCELED,
-                failureCode: availability.code,
-                failureReason:
-                  identityReassigned
-                    ? "Matrix delivery was canceled because this room belongs to a previously assigned representative identity."
-                    : "Telegram delivery was canceled because this conversation belongs to a previously assigned Bot.",
+                status: "DEAD_LETTER",
+                processedAt: new Date(),
+                lastError: availability.code,
               },
             });
+            if (canceledOutbox.count !== 1) {
+              throw new Error("Canceled generation output lost its outbox fence.");
+            }
           }
-          await tx.outboxEvent.update({
-            where: { id: outbox.id },
-            data: {
-              status: "DEAD_LETTER",
-              lastError: availability.code,
-            },
-          });
           return null;
         }
         await tx.outboxEvent.update({
@@ -3951,6 +4810,27 @@ export async function claimNextGenerationWorkItem(
       channel === "telegram"
         ? activeBinding?.representativeBinding?.connectionId || null
         : null;
+    const completedDeliveryPlan =
+      run.status === GenerationRunStatus.COMPLETED && run.completedAt
+        ? await tx.conversationTurnPlan.findFirst({
+            where: {
+              generationRunId: run.id,
+              protocolVersion: 3,
+              shadowMode: false,
+              status: "COMPLETED",
+              completedAt: { lte: run.completedAt },
+            },
+            orderBy: [{ completedAt: "desc" }, { revision: "desc" }],
+            select: {
+              actions: {
+                where: { capabilityKey: "response.compose" },
+                orderBy: { sequence: "desc" },
+                take: 1,
+                select: { id: true },
+              },
+            },
+          })
+        : null;
 
     if (run.status !== GenerationRunStatus.COMPLETED) {
       await tx.generationRun.update({
@@ -3989,6 +4869,12 @@ export async function claimNextGenerationWorkItem(
       ...(run.episodeId ? { episodeId: run.episodeId } : {}),
       inputMessageId: run.inputMessageId,
       userText: run.inputMessage.text || "",
+      inputAttachments: (run.inputMessage.attachments ?? []).map((attachment) => ({
+        id: attachment.id,
+        fileName: attachment.fileName,
+        mimeType: attachment.mimeType || "application/octet-stream",
+        sizeBytes: attachment.sizeBytes || 0,
+      })),
       ...(run.inputMessage.senderId
         ? { sourceSenderId: run.inputMessage.senderId }
         : {}),
@@ -4018,6 +4904,12 @@ export async function claimNextGenerationWorkItem(
             deliveryOnly: true,
             outputMessageId: run.outputMessage.id,
             outputText: run.outputMessage.text!,
+            ...(completedDeliveryPlan?.actions[0]?.id
+              ? {
+                  deliveryPlanActionId:
+                    completedDeliveryPlan.actions[0].id,
+                }
+              : {}),
           }
         : {}),
       ...(delegationTerminalRecovery
@@ -4135,6 +5027,7 @@ async function terminalizeExpiredGenerationLease(
       delegationTaskId: true,
       delegationTaskStepId: true,
       runtimePolicySnapshot: true,
+      contextSnapshot: true,
     },
   });
   if (!run) {
@@ -4148,8 +5041,20 @@ async function terminalizeExpiredGenerationLease(
     return;
   }
   if (run.status === GenerationRunStatus.COMPLETED) {
+    const deliveryOutbox = await tx.outboxEvent.findUnique({
+      where: { id: outboxId },
+      select: { attemptCount: true, status: true },
+    });
+    if (!deliveryOutbox) {
+      throw new Error("Expired generation delivery has no outbox.");
+    }
+    await releasePendingGenerationDeliveryBillingInTransaction(tx, {
+      generationRunId: run.id,
+      reason: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+      releasedAt: now,
+    });
     if (run.outputMessageId) {
-      await tx.message.updateMany({
+      const failedMessage = await tx.message.updateMany({
         where: {
           id: run.outputMessageId,
           deliveryStatus: {
@@ -4167,14 +5072,42 @@ async function terminalizeExpiredGenerationLease(
             "The channel delivery worker exhausted all retry attempts.",
         },
       });
+      if (failedMessage.count !== 1) {
+        throw new Error("Expired generation delivery lost its message fence.");
+      }
+      await transitionMessageDeliveryAttemptInTransaction(tx, {
+        messageId: run.outputMessageId,
+        conversationId: run.conversationId,
+        attemptNumber: deliveryOutbox.attemptCount,
+        idempotencyKey:
+          `generation-message:${run.outputMessageId}:attempt:${deliveryOutbox.attemptCount}`,
+        expectedStatuses: [
+          MessageDeliveryAttemptStatus.QUEUED,
+          MessageDeliveryAttemptStatus.PROCESSING,
+          MessageDeliveryAttemptStatus.FAILED,
+        ],
+        status: MessageDeliveryAttemptStatus.DEAD_LETTER,
+        failureCode: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
+        failureReason:
+          "The channel delivery worker exhausted all retry attempts.",
+        completedAt: now,
+      });
     }
-    await tx.outboxEvent.update({
-      where: { id: outboxId },
+    const deadLetteredOutbox = await tx.outboxEvent.updateMany({
+      where: {
+        id: outboxId,
+        status: deliveryOutbox.status,
+        attemptCount: deliveryOutbox.attemptCount,
+      },
       data: {
         status: "DEAD_LETTER",
+        processedAt: now,
         lastError: GENERATION_WORK_LEASE_EXHAUSTED_ERROR,
       },
     });
+    if (deadLetteredOutbox.count !== 1) {
+      throw new Error("Expired generation delivery lost its outbox fence.");
+    }
     return;
   }
   if (run.status === GenerationRunStatus.CANCELED) {
@@ -4296,7 +5229,7 @@ async function terminalizeExpiredGenerationLease(
     && inFlightExecution.delegationTaskId === run.delegationTaskId
     && inFlightExecution.delegationTaskStepId
       === run.delegationTaskStepId
-    && inFlightExecution.session.generationRunId === run.id,
+    && inFlightExecution.session?.generationRunId === run.id,
   );
   if (
     inFlightExecution
@@ -4329,7 +5262,10 @@ async function terminalizeExpiredGenerationLease(
           },
         })
       : { count: 0 };
-  if (fencedInFlightExecution.count === 1 && inFlightExecution) {
+  if (
+    fencedInFlightExecution.count === 1
+    && inFlightExecution?.sessionId
+  ) {
     await tx.computeSession.updateMany({
       where: { id: inFlightExecution.sessionId },
       data: {
@@ -4539,11 +5475,13 @@ export async function loadGenerationRecentTurns(input: {
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: input.limit || 10,
-    select: { senderType: true, text: true },
+    select: { id: true, senderType: true, text: true, createdAt: true },
   });
-  return rows.reverse().map((message) => ({
+  return rows.reverse().map((message, index) => ({
+    id: message.id ?? `recent-${index + 1}`,
     direction: "inbound" as const,
     messageText: message.text || "",
+    createdAt: message.createdAt?.toISOString() ?? new Date(0).toISOString(),
   }));
 }
 
@@ -4762,10 +5700,20 @@ export async function markGenerationDeliveryComplete(input: {
   outboxId: string;
   leaseAttempt: number;
   outputMessageId: string;
+  deliveryAdmission: GenerationMessageDeliveryAdmission;
   externalMessageId?: string;
 }) {
-  await runConversationWriteTransaction(async (tx) => {
-    await fenceGenerationWorkLease(tx, input);
+  const outcome = await runConversationWriteTransaction(async (tx) => {
+    const deliveryConversationId = await resolveMessageConversationId(
+      tx,
+      input.outputMessageId,
+    );
+    const currentDelivery =
+      await validateGenerationMessageDeliveryCompletionInTransaction(
+        tx,
+        { ...input, conversationId: deliveryConversationId },
+      );
+    if (!currentDelivery) return false;
     const run = await tx.generationRun.findUnique({
       where: { id: input.runId },
       select: {
@@ -4773,6 +5721,11 @@ export async function markGenerationDeliveryComplete(input: {
         conversationId: true,
         outputMessageId: true,
         contextSnapshot: true,
+        runtimePolicySnapshot: true,
+        provider: true,
+        costCents: true,
+        delegationTaskId: true,
+        delegationTaskStep: { select: { kind: true } },
         conversation: {
           select: { representativeId: true, contactId: true },
         },
@@ -4782,12 +5735,47 @@ export async function markGenerationDeliveryComplete(input: {
     if (run.outputMessageId !== input.outputMessageId) {
       throw new Error("Output message does not belong to the generation run.");
     }
-    await tx.message.update({
-      where: { id: input.outputMessageId },
+    if (run.conversationId !== deliveryConversationId) {
+      throw new Error("Output message does not belong to the generation conversation.");
+    }
+    const deliveredAt = new Date();
+    await settlePendingGenerationDeliveryBillingInTransaction(tx, {
+      generationRunId: run.id,
+      deliveredAt,
+    });
+    const deliveredMessage = await tx.message.updateMany({
+      where: {
+        id: input.outputMessageId,
+        deliveryStatus: MessageDeliveryStatus.PROCESSING,
+      },
       data: {
         deliveryStatus: MessageDeliveryStatus.SENT,
         ...(input.externalMessageId ? { externalMessageId: input.externalMessageId } : {}),
+        failureCode: null,
+        failureReason: null,
       },
+    });
+    if (deliveredMessage.count !== 1) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: input.outputMessageId,
+      conversationId: run.conversationId,
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `generation-message:${input.outputMessageId}:attempt:${input.leaseAttempt}`,
+      expectedStatuses: [
+        MessageDeliveryAttemptStatus.PROCESSING,
+        MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED,
+      ],
+      status: MessageDeliveryAttemptStatus.CONFIRMED,
+      attemptPhase: MessageDeliveryAttemptPhase.COMPLETED,
+      leaseToken: null,
+      externalMessageId: input.externalMessageId ?? null,
+      completedAt: deliveredAt,
     });
     const completedOutbox = await tx.outboxEvent.updateMany({
       where: {
@@ -4798,7 +5786,7 @@ export async function markGenerationDeliveryComplete(input: {
         status: "PROCESSING",
         attemptCount: input.leaseAttempt,
       },
-      data: { status: "PROCESSED", processedAt: new Date(), lastError: null },
+      data: { status: "PROCESSED", processedAt: deliveredAt, lastError: null },
     });
     if (completedOutbox.count !== 1) {
       throw new GenerationWorkLeaseLostError(
@@ -4853,10 +5841,12 @@ export async function markGenerationDeliveryComplete(input: {
         },
       });
     }
+    return true;
   });
+  if (!outcome) throw new GenerationPlanDeliverySupersededError();
 }
 
-export type GenerationMessageDeliveryFenceInput = {
+type GenerationMessageDeliveryCoordinates = {
   conversationId: string;
   runId: string;
   outboxId: string;
@@ -4864,9 +5854,583 @@ export type GenerationMessageDeliveryFenceInput = {
   outputMessageId: string;
 };
 
-async function revalidateGenerationMessageMemoryDeliveryInTransaction(
+export type GenerationMessageDeliveryFenceInput =
+  GenerationMessageDeliveryCoordinates & {
+    deliveryAdmission: GenerationMessageDeliveryAdmission;
+  };
+
+type FrozenGenerationDeliveryPlan = {
+  planId: string;
+  planRevision: number;
+  executionEpoch: number;
+  planActionId: string;
+  scopeKey: string;
+};
+
+async function resolveFrozenGenerationDeliveryPlanInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    runId: string;
+    planActionId?: string;
+  },
+): Promise<FrozenGenerationDeliveryPlan | null> {
+  if (!input.planActionId) return null;
+  const action = await tx.conversationPlanAction.findUnique({
+    where: { id: input.planActionId },
+    select: {
+      id: true,
+      turnPlan: {
+        select: {
+          id: true,
+          generationRunId: true,
+          protocolVersion: true,
+          revision: true,
+          executionEpoch: true,
+          scopeKey: true,
+          shadowMode: true,
+          status: true,
+        },
+      },
+    },
+  });
+  const plan = action?.turnPlan;
+  if (
+    !action
+    || !plan
+    || plan.protocolVersion !== 3
+    || plan.shadowMode
+    || plan.generationRunId !== input.runId
+    || !plan.scopeKey
+    || plan.executionEpoch < 1
+    || !["EXECUTING", "COMPLETED"].includes(plan.status)
+  ) {
+    throw new Error(
+      "Generation delivery action is not owned by a current executable TurnPlan V3 revision.",
+    );
+  }
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtext(${plan.scopeKey}))
+  `;
+  const fence = await tx.planExecutionFence.findUnique({
+    where: { scopeKey: plan.scopeKey },
+    select: {
+      activePlanId: true,
+      activeRevision: true,
+      executionEpoch: true,
+    },
+  });
+  if (
+    !fence
+    || fence.activePlanId !== plan.id
+    || fence.activeRevision !== plan.revision
+    || fence.executionEpoch !== plan.executionEpoch
+  ) {
+    throw new GenerationPlanDeliverySupersededError();
+  }
+  return {
+    planId: plan.id,
+    planRevision: plan.revision,
+    executionEpoch: plan.executionEpoch,
+    planActionId: action.id,
+    scopeKey: plan.scopeKey,
+  };
+}
+
+async function closeSupersededGenerationDeliveryBeforeCallInTransaction(
   tx: Prisma.TransactionClient,
   input: GenerationMessageDeliveryFenceInput,
+) {
+  const canceledAt = new Date();
+  const canceledAttempt = await tx.messageDeliveryAttempt.updateMany({
+    where: {
+      messageId: input.outputMessageId,
+      attemptNumber: input.deliveryAdmission.attemptNumber,
+      leaseToken: input.deliveryAdmission.leaseToken,
+      status: MessageDeliveryAttemptStatus.PROCESSING,
+      attemptPhase: {
+        in: [
+          MessageDeliveryAttemptPhase.CREATED,
+          MessageDeliveryAttemptPhase.CLAIMED,
+          MessageDeliveryAttemptPhase.CALL_PREPARED,
+        ],
+      },
+    },
+    data: {
+      status: MessageDeliveryAttemptStatus.CANCELED,
+      attemptPhase: MessageDeliveryAttemptPhase.CANCELED_BEFORE_START,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      failureCode: GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR,
+      failureReason:
+        "Delivery was canceled before provider execution because its TurnPlan revision was superseded.",
+      completedAt: canceledAt,
+    },
+  });
+  if (canceledAttempt.count === 0) return false;
+  const [canceledMessage, canceledOutbox] = await Promise.all([
+    tx.message.updateMany({
+      where: {
+        id: input.outputMessageId,
+        conversationId: input.conversationId,
+        deliveryStatus: {
+          in: [
+            MessageDeliveryStatus.QUEUED,
+            MessageDeliveryStatus.PROCESSING,
+            MessageDeliveryStatus.FAILED,
+          ],
+        },
+      },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.CANCELED,
+        failureCode: GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR,
+        failureReason:
+          "Delivery was canceled because its TurnPlan revision was superseded.",
+      },
+    }),
+    tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "generation_run",
+        aggregateId: input.runId,
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
+      data: {
+        status: "DEAD_LETTER",
+        processedAt: canceledAt,
+        lastError: GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR,
+      },
+    }),
+  ]);
+  if (canceledMessage.count !== 1 || canceledOutbox.count !== 1) {
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+  await releasePendingGenerationDeliveryBillingInTransaction(tx, {
+    generationRunId: input.runId,
+    reason: GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR,
+    releasedAt: canceledAt,
+  });
+  return true;
+}
+
+async function admitGenerationMessageProviderCallInTransaction(
+  tx: Prisma.TransactionClient,
+  input: GenerationMessageDeliveryFenceInput,
+) {
+  const attempt = await tx.messageDeliveryAttempt.findUnique({
+    where: {
+      messageId_attemptNumber: {
+        messageId: input.outputMessageId,
+        attemptNumber: input.deliveryAdmission.attemptNumber,
+      },
+    },
+    select: {
+      status: true,
+      attemptPhase: true,
+      leaseToken: true,
+      leaseExpiresAt: true,
+      deliveryOutboxId: true,
+      deliveryLeaseAttempt: true,
+      planId: true,
+      planRevision: true,
+      executionEpoch: true,
+      planActionId: true,
+      failureCode: true,
+      plan: { select: { scopeKey: true } },
+    },
+  });
+  if (
+    attempt?.status === MessageDeliveryAttemptStatus.CANCELED
+    && attempt.attemptPhase
+      === MessageDeliveryAttemptPhase.CANCELED_BEFORE_START
+    && attempt.failureCode === GENERATION_PLAN_DELIVERY_SUPERSEDED_ERROR
+  ) {
+    return false;
+  }
+  if (
+    !attempt
+    || attempt.leaseToken !== input.deliveryAdmission.leaseToken
+    || attempt.deliveryOutboxId !== input.outboxId
+    || attempt.deliveryLeaseAttempt !== input.leaseAttempt
+    || attempt.leaseExpiresAt === null
+    || attempt.leaseExpiresAt.getTime() <= Date.now()
+    || attempt.status !== MessageDeliveryAttemptStatus.PROCESSING
+    || attempt.attemptPhase !== MessageDeliveryAttemptPhase.CALL_PREPARED
+    || attempt.planId !== (input.deliveryAdmission.planId ?? null)
+    || attempt.planRevision !== (input.deliveryAdmission.planRevision ?? null)
+    || attempt.executionEpoch !== (input.deliveryAdmission.executionEpoch ?? null)
+    || attempt.planActionId !== (input.deliveryAdmission.planActionId ?? null)
+  ) {
+    if (
+      attempt?.status === MessageDeliveryAttemptStatus.CANCELED
+      || attempt?.status
+        === MessageDeliveryAttemptStatus.RECONCILIATION_REQUIRED
+    ) {
+      return false;
+    }
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+
+  if (attempt.planId) {
+    if (!attempt.plan?.scopeKey) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+    // The scope lock is deliberately acquired before the Generation Outbox
+    // row lock. Plan supersession holds the same lock while closing old
+    // delivery rights, so exactly one side can win the pre-call boundary.
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${attempt.plan.scopeKey}))
+    `;
+    const fence = await tx.planExecutionFence.findUnique({
+      where: { scopeKey: attempt.plan.scopeKey },
+      select: {
+        activePlanId: true,
+        activeRevision: true,
+        executionEpoch: true,
+      },
+    });
+    if (
+      !fence
+      || fence.activePlanId !== attempt.planId
+      || fence.activeRevision !== attempt.planRevision
+      || fence.executionEpoch !== attempt.executionEpoch
+    ) {
+      await closeSupersededGenerationDeliveryBeforeCallInTransaction(
+        tx,
+        input,
+      );
+      return false;
+    }
+  }
+
+  await fenceGenerationWorkLease(tx, input);
+  const callStartedAt = new Date();
+  const admitted = await tx.messageDeliveryAttempt.updateMany({
+    where: {
+      messageId: input.outputMessageId,
+      attemptNumber: input.deliveryAdmission.attemptNumber,
+      leaseToken: input.deliveryAdmission.leaseToken,
+      deliveryOutboxId: input.outboxId,
+      deliveryLeaseAttempt: input.leaseAttempt,
+      status: MessageDeliveryAttemptStatus.PROCESSING,
+      attemptPhase: MessageDeliveryAttemptPhase.CALL_PREPARED,
+    },
+    data: {
+      attemptPhase: MessageDeliveryAttemptPhase.CALL_STARTED,
+      providerCallStartedAt: callStartedAt,
+    },
+  });
+  if (admitted.count !== 1) {
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+  return true;
+}
+
+export async function admitGenerationMessageProviderDelivery(
+  input: GenerationMessageDeliveryFenceInput,
+) {
+  const admitted = await runConversationWriteTransaction((tx) =>
+    admitGenerationMessageProviderCallInTransaction(tx, input));
+  if (!admitted) throw new GenerationPlanDeliverySupersededError();
+  return true;
+}
+
+async function reconcileGenerationDeliveryAfterCallAdmissionInTransaction(
+  tx: Prisma.TransactionClient,
+  input: GenerationMessageDeliveryFenceInput,
+) {
+  const reconciledAt = new Date();
+  const reconciled = await tx.messageDeliveryAttempt.updateMany({
+    where: {
+      messageId: input.outputMessageId,
+      attemptNumber: input.deliveryAdmission.attemptNumber,
+      leaseToken: input.deliveryAdmission.leaseToken,
+      status: MessageDeliveryAttemptStatus.PROCESSING,
+      attemptPhase: {
+        in: [
+          MessageDeliveryAttemptPhase.CALL_STARTED,
+          MessageDeliveryAttemptPhase.RESPONSE_RECEIVED,
+        ],
+      },
+    },
+    data: {
+      status: MessageDeliveryAttemptStatus.RECONCILIATION_REQUIRED,
+      attemptPhase: MessageDeliveryAttemptPhase.OUTCOME_UNKNOWN,
+      leaseExpiresAt: null,
+      failureCode: "turn_plan_delivery_reconciliation_required",
+      failureReason:
+        "The provider call was admitted before TurnPlan supersession; automatic resend is disabled.",
+    },
+  });
+  if (reconciled.count === 0) return false;
+  await Promise.all([
+    tx.message.updateMany({
+      where: {
+        id: input.outputMessageId,
+        conversationId: input.conversationId,
+        deliveryStatus: {
+          in: [
+            MessageDeliveryStatus.QUEUED,
+            MessageDeliveryStatus.PROCESSING,
+            MessageDeliveryStatus.FAILED,
+          ],
+        },
+      },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.FAILED,
+        failureCode: "turn_plan_delivery_reconciliation_required",
+        failureReason:
+          "Provider outcome requires reconciliation after TurnPlan supersession; automatic resend is disabled.",
+      },
+    }),
+    tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "generation_run",
+        aggregateId: input.runId,
+        eventType: "generation.requested",
+        status: { in: ["PENDING", "PROCESSING", "FAILED"] },
+        attemptCount: input.leaseAttempt,
+      },
+      data: {
+        status: "DEAD_LETTER",
+        processedAt: reconciledAt,
+        lastError: "turn_plan_delivery_reconciliation_required",
+      },
+    }),
+  ]);
+  return true;
+}
+
+async function validateGenerationMessageProviderAdmissionInTransaction(
+  tx: Prisma.TransactionClient,
+  input: GenerationMessageDeliveryFenceInput,
+) {
+  const attempt = await tx.messageDeliveryAttempt.findUnique({
+    where: {
+      messageId_attemptNumber: {
+        messageId: input.outputMessageId,
+        attemptNumber: input.deliveryAdmission.attemptNumber,
+      },
+    },
+    select: {
+      status: true,
+      attemptPhase: true,
+      leaseToken: true,
+      deliveryOutboxId: true,
+      deliveryLeaseAttempt: true,
+      planId: true,
+      planRevision: true,
+      executionEpoch: true,
+      planActionId: true,
+      plan: { select: { scopeKey: true } },
+    },
+  });
+  if (
+    !attempt
+    || attempt.leaseToken !== input.deliveryAdmission.leaseToken
+    || attempt.deliveryOutboxId !== input.outboxId
+    || attempt.deliveryLeaseAttempt !== input.leaseAttempt
+    || attempt.planId !== (input.deliveryAdmission.planId ?? null)
+    || attempt.planRevision !== (input.deliveryAdmission.planRevision ?? null)
+    || attempt.executionEpoch !== (input.deliveryAdmission.executionEpoch ?? null)
+    || attempt.planActionId !== (input.deliveryAdmission.planActionId ?? null)
+  ) {
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+  if (
+    attempt.status === MessageDeliveryAttemptStatus.CANCELED
+    || attempt.status === MessageDeliveryAttemptStatus.RECONCILIATION_REQUIRED
+  ) return false;
+  if (
+    attempt.status !== MessageDeliveryAttemptStatus.PROCESSING
+    || attempt.attemptPhase !== MessageDeliveryAttemptPhase.CALL_STARTED
+  ) {
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+  if (attempt.planId) {
+    if (!attempt.plan?.scopeKey) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${attempt.plan.scopeKey}))
+    `;
+    const fence = await tx.planExecutionFence.findUnique({
+      where: { scopeKey: attempt.plan.scopeKey },
+      select: {
+        activePlanId: true,
+        activeRevision: true,
+        executionEpoch: true,
+      },
+    });
+    if (
+      !fence
+      || fence.activePlanId !== attempt.planId
+      || fence.activeRevision !== attempt.planRevision
+      || fence.executionEpoch !== attempt.executionEpoch
+    ) {
+      await reconcileGenerationDeliveryAfterCallAdmissionInTransaction(
+        tx,
+        input,
+      );
+      return false;
+    }
+  }
+  await fenceGenerationWorkLease(tx, input);
+  return true;
+}
+
+async function markGenerationMessageProviderResponseReceivedInTransaction(
+  tx: Prisma.TransactionClient,
+  input: GenerationMessageDeliveryFenceInput,
+) {
+  const receivedAt = new Date();
+  const received = await tx.messageDeliveryAttempt.updateMany({
+    where: {
+      messageId: input.outputMessageId,
+      attemptNumber: input.deliveryAdmission.attemptNumber,
+      leaseToken: input.deliveryAdmission.leaseToken,
+      status: MessageDeliveryAttemptStatus.PROCESSING,
+      attemptPhase: MessageDeliveryAttemptPhase.CALL_STARTED,
+    },
+    data: {
+      attemptPhase: MessageDeliveryAttemptPhase.RESPONSE_RECEIVED,
+      responseReceivedAt: receivedAt,
+    },
+  });
+  if (received.count !== 1) {
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+}
+
+async function validateGenerationMessageDeliveryCompletionInTransaction(
+  tx: Prisma.TransactionClient,
+  input: GenerationMessageDeliveryFenceInput,
+) {
+  const attempt = await tx.messageDeliveryAttempt.findUnique({
+    where: {
+      messageId_attemptNumber: {
+        messageId: input.outputMessageId,
+        attemptNumber: input.deliveryAdmission.attemptNumber,
+      },
+    },
+    select: {
+      status: true,
+      attemptPhase: true,
+      leaseToken: true,
+      deliveryOutboxId: true,
+      deliveryLeaseAttempt: true,
+      planId: true,
+      planRevision: true,
+      executionEpoch: true,
+      planActionId: true,
+      plan: { select: { scopeKey: true } },
+    },
+  });
+  if (
+    !attempt
+    || attempt.leaseToken !== input.deliveryAdmission.leaseToken
+    || attempt.deliveryOutboxId !== input.outboxId
+    || attempt.deliveryLeaseAttempt !== input.leaseAttempt
+    || attempt.planId !== (input.deliveryAdmission.planId ?? null)
+    || attempt.planRevision !== (input.deliveryAdmission.planRevision ?? null)
+    || attempt.executionEpoch !== (input.deliveryAdmission.executionEpoch ?? null)
+    || attempt.planActionId !== (input.deliveryAdmission.planActionId ?? null)
+  ) {
+    throw new GenerationWorkLeaseLostError(
+      input.outboxId,
+      input.leaseAttempt,
+    );
+  }
+  if (attempt.planId) {
+    if (!attempt.plan?.scopeKey) {
+      throw new GenerationWorkLeaseLostError(
+        input.outboxId,
+        input.leaseAttempt,
+      );
+    }
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${attempt.plan.scopeKey}))
+    `;
+    const fence = await tx.planExecutionFence.findUnique({
+      where: { scopeKey: attempt.plan.scopeKey },
+      select: {
+        activePlanId: true,
+        activeRevision: true,
+        executionEpoch: true,
+      },
+    });
+    if (
+      !fence
+      || fence.activePlanId !== attempt.planId
+      || fence.activeRevision !== attempt.planRevision
+      || fence.executionEpoch !== attempt.executionEpoch
+    ) {
+      if (
+        attempt.status === MessageDeliveryAttemptStatus.PROCESSING
+        && attempt.attemptPhase
+          === MessageDeliveryAttemptPhase.CALL_PREPARED
+      ) {
+        await closeSupersededGenerationDeliveryBeforeCallInTransaction(
+          tx,
+          input,
+        );
+      }
+      return false;
+    }
+  }
+  if (
+    attempt.status === MessageDeliveryAttemptStatus.PROCESSING
+    && attempt.attemptPhase === MessageDeliveryAttemptPhase.CALL_PREPARED
+  ) {
+    const admitted = await admitGenerationMessageProviderCallInTransaction(
+      tx,
+      input,
+    );
+    if (!admitted) return false;
+    await markGenerationMessageProviderResponseReceivedInTransaction(tx, input);
+    return true;
+  }
+  await fenceGenerationWorkLease(tx, input);
+  return (
+    attempt.status === MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED
+    && attempt.attemptPhase
+      === MessageDeliveryAttemptPhase.PROVIDER_ACCEPTED
+  ) || (
+    attempt.status === MessageDeliveryAttemptStatus.PROCESSING
+    && attempt.attemptPhase
+      === MessageDeliveryAttemptPhase.RESPONSE_RECEIVED
+  );
+}
+
+async function revalidateGenerationMessageMemoryDeliveryInTransaction(
+  tx: Prisma.TransactionClient,
+  input: GenerationMessageDeliveryCoordinates,
 ) {
   const memoryDelivery = await revalidateMemoryUseDeliverySourcesInTransaction(
     tx,
@@ -4920,6 +6484,27 @@ async function revalidateGenerationMessageMemoryDeliveryInTransaction(
       input.leaseAttempt,
     );
   }
+  await transitionMessageDeliveryAttemptInTransaction(tx, {
+    messageId: input.outputMessageId,
+    conversationId: input.conversationId,
+    attemptNumber: input.leaseAttempt,
+    idempotencyKey:
+      `generation-message:${input.outputMessageId}:attempt:${input.leaseAttempt}`,
+    expectedStatuses: [
+      MessageDeliveryAttemptStatus.QUEUED,
+      MessageDeliveryAttemptStatus.PROCESSING,
+    ],
+    status: MessageDeliveryAttemptStatus.CANCELED,
+    failureCode: GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR,
+    failureReason:
+      "Delivery canceled because an injected source is no longer authorized.",
+    completedAt: canceledAt,
+  });
+  await releasePendingGenerationDeliveryBillingInTransaction(tx, {
+    generationRunId: input.runId,
+    reason: GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR,
+    releasedAt: canceledAt,
+  });
   return false;
 }
 
@@ -4935,9 +6520,23 @@ export async function withGenerationMessageProviderDeliveryFence<T>(
   operation: () => Promise<T>,
 ): Promise<
   | { executed: true; value: T }
-  | { executed: false; reason: "memory_delivery_source_revoked" }
+  | {
+      executed: false;
+      reason:
+        | "memory_delivery_source_revoked"
+        | "turn_plan_superseded_before_delivery";
+    }
 > {
-  await fenceGenerationWorkLease(tx, input);
+  const admitted = await validateGenerationMessageProviderAdmissionInTransaction(
+    tx,
+    input,
+  );
+  if (!admitted) {
+    return {
+      executed: false,
+      reason: "turn_plan_superseded_before_delivery",
+    };
+  }
   const authorized =
     await revalidateGenerationMessageMemoryDeliveryInTransaction(tx, input);
   if (!authorized) {
@@ -4946,7 +6545,9 @@ export async function withGenerationMessageProviderDeliveryFence<T>(
       reason: "memory_delivery_source_revoked",
     };
   }
-  return { executed: true, value: await operation() };
+  const value = await operation();
+  await markGenerationMessageProviderResponseReceivedInTransaction(tx, input);
+  return { executed: true, value };
 }
 
 export async function prepareGenerationMessageChannelDelivery(input: {
@@ -4955,6 +6556,7 @@ export async function prepareGenerationMessageChannelDelivery(input: {
   outboxId: string;
   leaseAttempt: number;
   outputMessageId: string;
+  planActionId?: string;
 }) {
   const outcome = await runConversationWriteTransaction(async (tx) => {
     await tx.$executeRaw`
@@ -4989,6 +6591,15 @@ export async function prepareGenerationMessageChannelDelivery(input: {
         input.leaseAttempt,
       );
     }
+    const frozenPlan = await resolveFrozenGenerationDeliveryPlanInTransaction(
+      tx,
+      {
+        runId: input.runId,
+        ...(input.planActionId
+          ? { planActionId: input.planActionId }
+          : {}),
+      },
+    );
     const memoryDeliveryAuthorized =
       await revalidateGenerationMessageMemoryDeliveryInTransaction(tx, input);
     if (!memoryDeliveryAuthorized) {
@@ -5031,6 +6642,35 @@ export async function prepareGenerationMessageChannelDelivery(input: {
         input.leaseAttempt,
       );
     }
+    const deliveryLeaseToken = randomUUID();
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: input.outputMessageId,
+      conversationId: input.conversationId,
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `generation-message:${input.outputMessageId}:attempt:${input.leaseAttempt}`,
+      deliveryOutboxId: input.outboxId,
+      deliveryLeaseAttempt: input.leaseAttempt,
+      leaseToken: deliveryLeaseToken,
+      ...(frozenPlan
+        ? {
+            planId: frozenPlan.planId,
+            planRevision: frozenPlan.planRevision,
+            executionEpoch: frozenPlan.executionEpoch,
+            planActionId: frozenPlan.planActionId,
+          }
+        : {}),
+      expectedStatuses: [
+        MessageDeliveryAttemptStatus.QUEUED,
+        MessageDeliveryAttemptStatus.FAILED,
+        MessageDeliveryAttemptStatus.PROCESSING,
+      ],
+      status: MessageDeliveryAttemptStatus.PROCESSING,
+      attemptPhase: MessageDeliveryAttemptPhase.CALL_PREPARED,
+      leaseExpiresAt: new Date(
+        Date.now() + GENERATION_WORK_LEASE_DURATION_MS,
+      ),
+    });
     const renewed = await tx.outboxEvent.updateMany({
       where: {
         id: input.outboxId,
@@ -5057,6 +6697,18 @@ export async function prepareGenerationMessageChannelDelivery(input: {
         leaseExpiresAt: new Date(
           Date.now() + GENERATION_WORK_LEASE_DURATION_MS,
         ),
+        deliveryAdmission: {
+          attemptNumber: input.leaseAttempt,
+          leaseToken: deliveryLeaseToken,
+          ...(frozenPlan
+            ? {
+                planId: frozenPlan.planId,
+                planRevision: frozenPlan.planRevision,
+                executionEpoch: frozenPlan.executionEpoch,
+                planActionId: frozenPlan.planActionId,
+              }
+            : {}),
+        } satisfies GenerationMessageDeliveryAdmission,
       },
     };
   });
@@ -5074,18 +6726,70 @@ export async function retryGenerationDelivery(input: {
   leaseAttempt: number;
   outputMessageId?: string;
   errorMessage: string;
+  providerOutcomeUnknown?: boolean;
+  providerOutcomeCode?:
+    | "telegram_provider_outcome_unknown"
+    | "matrix_provider_outcome_unknown";
 }) {
-  const deadLetter = input.leaseAttempt >= GENERATION_WORK_MAX_ATTEMPTS;
+  const deadLetter =
+    input.providerOutcomeUnknown === true
+    || input.leaseAttempt >= GENERATION_WORK_MAX_ATTEMPTS;
+  const failureCode = input.providerOutcomeUnknown
+    ? input.providerOutcomeCode ?? "telegram_provider_outcome_unknown"
+    : deadLetter
+      ? "generation_delivery_attempts_exhausted"
+      : "channel_delivery_failed";
   await runConversationWriteTransaction(async (tx) => {
+    const failedAt = new Date();
     await fenceGenerationWorkLease(tx, input);
     if (input.outputMessageId) {
-      await tx.message.update({
-        where: { id: input.outputMessageId },
+      const failedMessage = await tx.message.updateMany({
+        where: {
+          id: input.outputMessageId,
+          deliveryStatus: {
+            in: [
+              MessageDeliveryStatus.QUEUED,
+              MessageDeliveryStatus.PROCESSING,
+              MessageDeliveryStatus.FAILED,
+            ],
+          },
+        },
         data: {
           deliveryStatus: MessageDeliveryStatus.FAILED,
-          failureCode: "channel_delivery_failed",
+          failureCode,
           failureReason: input.errorMessage,
         },
+      });
+      if (failedMessage.count !== 1) {
+        throw new GenerationWorkLeaseLostError(
+          input.outboxId,
+          input.leaseAttempt,
+        );
+      }
+      await transitionMessageDeliveryAttemptInTransaction(tx, {
+        messageId: input.outputMessageId,
+        conversationId: await resolveMessageConversationId(
+          tx,
+          input.outputMessageId,
+        ),
+        attemptNumber: input.leaseAttempt,
+        idempotencyKey:
+          `generation-message:${input.outputMessageId}:attempt:${input.leaseAttempt}`,
+        expectedStatuses: [
+          MessageDeliveryAttemptStatus.QUEUED,
+          MessageDeliveryAttemptStatus.PROCESSING,
+          MessageDeliveryAttemptStatus.FAILED,
+        ],
+        status: input.providerOutcomeUnknown
+          ? MessageDeliveryAttemptStatus.RECONCILIATION_REQUIRED
+          : deadLetter
+            ? MessageDeliveryAttemptStatus.DEAD_LETTER
+            : MessageDeliveryAttemptStatus.FAILED,
+        attemptPhase: input.providerOutcomeUnknown
+          ? MessageDeliveryAttemptPhase.OUTCOME_UNKNOWN
+          : MessageDeliveryAttemptPhase.FAILED_CONFIRMED,
+        failureCode,
+        failureReason: input.errorMessage,
       });
     }
     const failedOutbox = await tx.outboxEvent.updateMany({
@@ -5099,7 +6803,8 @@ export async function retryGenerationDelivery(input: {
       },
       data: {
         status: deadLetter ? "DEAD_LETTER" : "FAILED",
-        lastError: input.errorMessage,
+        processedAt: deadLetter ? failedAt : null,
+        lastError: failureCode,
         availableAt: new Date(Date.now() + Math.min(60_000, 2 ** input.leaseAttempt * 1000)),
       },
     });
@@ -5109,11 +6814,1323 @@ export async function retryGenerationDelivery(input: {
         input.leaseAttempt,
       );
     }
+    if (deadLetter) {
+      await releasePendingGenerationDeliveryBillingInTransaction(tx, {
+        generationRunId: input.runId,
+        reason: failureCode,
+        releasedAt: failedAt,
+      });
+    }
+  });
+}
+
+export type ConversationMessageDeliveryKind =
+  | "delegation_task_status"
+  | "system_notification"
+  | "representative_result";
+
+async function transitionMessageDeliveryAttemptInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    messageId: string;
+    conversationId: string;
+    attemptNumber: number;
+    idempotencyKey: string;
+    expectedStatuses: MessageDeliveryAttemptStatus[];
+    status: MessageDeliveryAttemptStatus;
+    attemptPhase?: MessageDeliveryAttemptPhase;
+    channelBindingId?: string | null;
+    transport?: ChannelTransport | null;
+    sourceProvider?: ChannelSourceProvider | null;
+    connectionId?: string | null;
+    leaseExpiresAt?: Date | null;
+    availableAt?: Date;
+    externalMessageId?: string | null;
+    failureCode?: string | null;
+    failureReason?: string | null;
+    completedAt?: Date | null;
+    planId?: string | null;
+    planActionId?: string | null;
+    planRevision?: number | null;
+    executionEpoch?: number | null;
+    deliveryOutboxId?: string | null;
+    deliveryLeaseAttempt?: number | null;
+    leaseToken?: string | null;
+  },
+) {
+  const now = new Date();
+  await tx.messageDeliveryAttempt.upsert({
+    where: { idempotencyKey: input.idempotencyKey },
+    create: {
+      messageId: input.messageId,
+      conversationId: input.conversationId,
+      channelBindingId: input.channelBindingId ?? null,
+      planId: input.planId ?? null,
+      attemptNumber: input.attemptNumber,
+      status: MessageDeliveryAttemptStatus.QUEUED,
+      attemptPhase: MessageDeliveryAttemptPhase.CREATED,
+      transport: input.transport ?? null,
+      sourceProvider: input.sourceProvider ?? null,
+      connectionId: input.connectionId ?? null,
+      planActionId: input.planActionId ?? null,
+      planRevision: input.planRevision ?? null,
+      executionEpoch: input.executionEpoch ?? null,
+      deliveryOutboxId: input.deliveryOutboxId ?? null,
+      deliveryLeaseAttempt: input.deliveryLeaseAttempt ?? null,
+      leaseToken: input.leaseToken ?? null,
+      idempotencyKey: input.idempotencyKey,
+      availableAt: input.availableAt ?? now,
+    },
+    update: {},
+  });
+  const transitioned = await tx.messageDeliveryAttempt.updateMany({
+    where: {
+      messageId: input.messageId,
+      attemptNumber: input.attemptNumber,
+      status: { in: input.expectedStatuses },
+    },
+    data: {
+      status: input.status,
+      attemptPhase: input.attemptPhase ?? resolveMessageDeliveryAttemptPhase(
+        input.status,
+      ),
+      ...(input.channelBindingId !== undefined
+        ? { channelBindingId: input.channelBindingId }
+        : {}),
+      ...(input.transport !== undefined ? { transport: input.transport } : {}),
+      ...(input.sourceProvider !== undefined
+        ? { sourceProvider: input.sourceProvider }
+        : {}),
+      ...(input.connectionId !== undefined
+        ? { connectionId: input.connectionId }
+        : {}),
+      ...(input.planActionId !== undefined
+        ? { planActionId: input.planActionId }
+        : {}),
+      ...(input.planId !== undefined ? { planId: input.planId } : {}),
+      ...(input.planRevision !== undefined
+        ? { planRevision: input.planRevision }
+        : {}),
+      ...(input.executionEpoch !== undefined
+        ? { executionEpoch: input.executionEpoch }
+        : {}),
+      ...(input.deliveryOutboxId !== undefined
+        ? { deliveryOutboxId: input.deliveryOutboxId }
+        : {}),
+      ...(input.deliveryLeaseAttempt !== undefined
+        ? { deliveryLeaseAttempt: input.deliveryLeaseAttempt }
+        : {}),
+      ...(input.leaseToken !== undefined
+        ? { leaseToken: input.leaseToken }
+        : {}),
+      leaseExpiresAt: input.leaseExpiresAt ?? null,
+      ...(input.availableAt ? { availableAt: input.availableAt } : {}),
+      ...(input.externalMessageId !== undefined
+        ? { externalMessageId: input.externalMessageId }
+        : {}),
+      failureCode: input.failureCode ?? null,
+      failureReason: input.failureReason ?? null,
+      ...(input.status === MessageDeliveryAttemptStatus.PROCESSING
+        ? { startedAt: now, completedAt: null }
+        : input.status === MessageDeliveryAttemptStatus.QUEUED
+          ? { completedAt: null }
+          : { completedAt: input.completedAt ?? now }),
+    },
+  });
+  if (transitioned.count !== 1) {
+    throw new Error("Message delivery attempt lost its state transition fence.");
+  }
+}
+
+function resolveMessageDeliveryAttemptPhase(
+  status: MessageDeliveryAttemptStatus,
+): MessageDeliveryAttemptPhase {
+  switch (status) {
+    case MessageDeliveryAttemptStatus.QUEUED:
+      return MessageDeliveryAttemptPhase.CLAIMED;
+    case MessageDeliveryAttemptStatus.PROCESSING:
+      return MessageDeliveryAttemptPhase.CALL_PREPARED;
+    case MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED:
+      return MessageDeliveryAttemptPhase.PROVIDER_ACCEPTED;
+    case MessageDeliveryAttemptStatus.CONFIRMED:
+      return MessageDeliveryAttemptPhase.COMPLETED;
+    case MessageDeliveryAttemptStatus.FAILED:
+    case MessageDeliveryAttemptStatus.DEAD_LETTER:
+      return MessageDeliveryAttemptPhase.FAILED_CONFIRMED;
+    case MessageDeliveryAttemptStatus.CANCELED:
+      return MessageDeliveryAttemptPhase.CANCELED_BEFORE_START;
+    case MessageDeliveryAttemptStatus.RECONCILIATION_REQUIRED:
+      return MessageDeliveryAttemptPhase.RECONCILIATION_REQUIRED;
+  }
+}
+
+async function recordProviderAcceptanceInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    messageId: string;
+    conversationId: string;
+    attemptNumber: number;
+    idempotencyKey: string;
+    externalMessageId: string;
+    deliveryAdmission?: GenerationMessageDeliveryAdmission;
+  },
+) {
+  await tx.messageDeliveryAttempt.upsert({
+    where: { idempotencyKey: input.idempotencyKey },
+    create: {
+      messageId: input.messageId,
+      conversationId: input.conversationId,
+      attemptNumber: input.attemptNumber,
+      status: MessageDeliveryAttemptStatus.QUEUED,
+      idempotencyKey: input.idempotencyKey,
+    },
+    update: {},
+  });
+  const acceptedAt = new Date();
+  const acceptedAttempt = await tx.messageDeliveryAttempt.updateMany({
+    where: {
+      messageId: input.messageId,
+      attemptNumber: input.attemptNumber,
+      ...(input.deliveryAdmission
+        ? {
+            leaseToken: input.deliveryAdmission.leaseToken,
+            planId: input.deliveryAdmission.planId ?? null,
+            planRevision: input.deliveryAdmission.planRevision ?? null,
+            executionEpoch: input.deliveryAdmission.executionEpoch ?? null,
+            planActionId: input.deliveryAdmission.planActionId ?? null,
+          }
+        : {}),
+      ...(input.deliveryAdmission
+        ? {
+            status: {
+              in: [
+                MessageDeliveryAttemptStatus.PROCESSING,
+                MessageDeliveryAttemptStatus.RECONCILIATION_REQUIRED,
+              ],
+            },
+            attemptPhase: {
+              in: [
+                MessageDeliveryAttemptPhase.CALL_STARTED,
+                MessageDeliveryAttemptPhase.RESPONSE_RECEIVED,
+                MessageDeliveryAttemptPhase.OUTCOME_UNKNOWN,
+                MessageDeliveryAttemptPhase.RECONCILIATION_REQUIRED,
+              ],
+            },
+          }
+        : { status: MessageDeliveryAttemptStatus.PROCESSING }),
+    },
+    data: {
+      status: MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED,
+      attemptPhase: MessageDeliveryAttemptPhase.PROVIDER_ACCEPTED,
+      externalMessageId: input.externalMessageId,
+      leaseExpiresAt: null,
+      completedAt: acceptedAt,
+      failureCode: null,
+      failureReason: null,
+    },
+  });
+  if (acceptedAttempt.count !== 1) {
+    const existing = await tx.messageDeliveryAttempt.findUnique({
+      where: {
+        messageId_attemptNumber: {
+          messageId: input.messageId,
+          attemptNumber: input.attemptNumber,
+        },
+      },
+      select: { status: true, externalMessageId: true },
+    });
+    if (
+      !existing
+      || (
+        existing.status !== MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED
+        && existing.status !== MessageDeliveryAttemptStatus.CONFIRMED
+      )
+      || existing.externalMessageId !== input.externalMessageId
+    ) {
+      throw new Error("Provider acceptance conflicts with the delivery attempt state.");
+    }
+  }
+  const acceptedMessage = await tx.message.updateMany({
+    where: {
+      id: input.messageId,
+      conversationId: input.conversationId,
+      OR: [
+        { externalMessageId: null },
+        { externalMessageId: input.externalMessageId },
+      ],
+    },
+    data: {
+      externalMessageId: input.externalMessageId,
+      failureCode: null,
+      failureReason: null,
+    },
+  });
+  if (acceptedMessage.count !== 1) {
+    throw new Error("Provider acceptance conflicts with the persisted message evidence.");
+  }
+  return true;
+}
+
+export async function recordGenerationMessageProviderAcceptance(input: {
+  runId: string;
+  outboxId: string;
+  leaseAttempt: number;
+  outputMessageId: string;
+  externalMessageId: string;
+  deliveryAdmission: GenerationMessageDeliveryAdmission;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const [outbox, run] = await Promise.all([
+      tx.outboxEvent.findUnique({
+        where: { id: input.outboxId },
+        select: { aggregateType: true, aggregateId: true, eventType: true },
+      }),
+      tx.generationRun.findUnique({
+        where: { id: input.runId },
+        select: { conversationId: true, outputMessageId: true },
+      }),
+    ]);
+    if (
+      !outbox
+      || outbox.aggregateType !== "generation_run"
+      || outbox.aggregateId !== input.runId
+      || outbox.eventType !== "generation.requested"
+      || !run
+      || run.outputMessageId !== input.outputMessageId
+    ) {
+      throw new Error("Generation provider acceptance does not match its delivery context.");
+    }
+    return recordProviderAcceptanceInTransaction(tx, {
+      messageId: input.outputMessageId,
+      conversationId: run.conversationId,
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `generation-message:${input.outputMessageId}:attempt:${input.leaseAttempt}`,
+      externalMessageId: input.externalMessageId,
+      deliveryAdmission: input.deliveryAdmission,
+    });
+  });
+}
+
+export async function recordConversationMessageProviderAcceptance(input: {
+  outboxId: string;
+  leaseAttempt: number;
+  messageId: string;
+  externalMessageId: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const outbox = await tx.outboxEvent.findUnique({
+      where: { id: input.outboxId },
+      select: {
+        aggregateType: true,
+        aggregateId: true,
+        eventType: true,
+        conversationId: true,
+      },
+    });
+    if (
+      !outbox?.conversationId
+      || outbox.aggregateType !== "conversation_message"
+      || outbox.aggregateId !== input.messageId
+      || outbox.eventType !== "conversation.message.requested"
+    ) {
+      throw new Error("Conversation provider acceptance does not match its delivery context.");
+    }
+    return recordProviderAcceptanceInTransaction(tx, {
+      messageId: input.messageId,
+      conversationId: outbox.conversationId,
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `conversation-message:${input.messageId}:attempt:${input.leaseAttempt}`,
+      externalMessageId: input.externalMessageId,
+    });
+  });
+}
+
+export async function recordOperatorMessageProviderAcceptance(input: {
+  outboxId: string;
+  leaseAttempt: number;
+  messageId: string;
+  externalMessageId: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const outbox = await tx.outboxEvent.findUnique({
+      where: { id: input.outboxId },
+      select: {
+        aggregateType: true,
+        aggregateId: true,
+        eventType: true,
+        conversationId: true,
+      },
+    });
+    if (
+      !outbox?.conversationId
+      || outbox.aggregateType !== "operator_message"
+      || outbox.aggregateId !== input.messageId
+      || outbox.eventType !== "operator.message.requested"
+    ) {
+      throw new Error("Operator provider acceptance does not match its delivery context.");
+    }
+    return recordProviderAcceptanceInTransaction(tx, {
+      messageId: input.messageId,
+      conversationId: outbox.conversationId,
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `operator-message:${input.messageId}:attempt:${input.leaseAttempt}`,
+      externalMessageId: input.externalMessageId,
+    });
+  });
+}
+
+async function resolveMessageConversationId(
+  tx: Prisma.TransactionClient,
+  messageId: string,
+) {
+  const message = await tx.message.findUnique({
+    where: { id: messageId },
+    select: { conversationId: true },
+  });
+  if (!message) throw new Error("Message delivery attempt has no message.");
+  return message.conversationId;
+}
+
+async function terminalizeConversationMessageDeliveryInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    outboxId: string;
+    attemptNumber: number;
+    messageId: string;
+    outboxStatuses: ReliableEventStatus[];
+    messageStatus: MessageDeliveryStatus;
+    attemptStatus:
+      | typeof MessageDeliveryAttemptStatus.CANCELED
+      | typeof MessageDeliveryAttemptStatus.DEAD_LETTER;
+    failureCode: string;
+    failureReason: string;
+  },
+) {
+  const terminalAt = new Date();
+  const terminalOutbox = await tx.outboxEvent.updateMany({
+    where: {
+      id: input.outboxId,
+      aggregateType: "conversation_message",
+      aggregateId: input.messageId,
+      eventType: "conversation.message.requested",
+      status: { in: input.outboxStatuses },
+      attemptCount: input.attemptNumber,
+    },
+    data: {
+      status: "DEAD_LETTER",
+      processedAt: terminalAt,
+      lastError: input.failureCode,
+    },
+  });
+  if (terminalOutbox.count !== 1) {
+    throw new Error("Conversation message delivery lost its outbox terminal fence.");
+  }
+  const terminalMessage = await tx.message.updateMany({
+    where: {
+      id: input.messageId,
+      deliveryStatus: {
+        in: [
+          MessageDeliveryStatus.QUEUED,
+          MessageDeliveryStatus.PROCESSING,
+          MessageDeliveryStatus.FAILED,
+        ],
+      },
+    },
+    data: {
+      deliveryStatus: input.messageStatus,
+      failureCode: input.failureCode,
+      failureReason: input.failureReason,
+    },
+  });
+  if (terminalMessage.count !== 1) {
+    throw new Error("Conversation message delivery lost its message terminal fence.");
+  }
+  await transitionMessageDeliveryAttemptInTransaction(tx, {
+    messageId: input.messageId,
+    conversationId: await resolveMessageConversationId(tx, input.messageId),
+    attemptNumber: input.attemptNumber,
+    idempotencyKey:
+      `conversation-message:${input.messageId}:attempt:${input.attemptNumber}`,
+    expectedStatuses: [
+      MessageDeliveryAttemptStatus.QUEUED,
+      MessageDeliveryAttemptStatus.PROCESSING,
+      MessageDeliveryAttemptStatus.FAILED,
+    ],
+    status: input.attemptStatus,
+    failureCode: input.failureCode,
+    failureReason: input.failureReason,
+    completedAt: terminalAt,
+  });
+}
+
+async function terminalizeGenerationMessageDeliveryInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    outboxId: string;
+    attemptNumber: number;
+    runId: string;
+    messageId: string;
+    conversationId: string;
+    messageStatus: MessageDeliveryStatus;
+    attemptStatus:
+      | typeof MessageDeliveryAttemptStatus.CANCELED
+      | typeof MessageDeliveryAttemptStatus.DEAD_LETTER
+      | typeof MessageDeliveryAttemptStatus.RECONCILIATION_REQUIRED;
+    failureCode: string;
+    failureReason: string;
+  },
+) {
+  const terminalAt = new Date();
+  const terminalOutbox = await tx.outboxEvent.updateMany({
+    where: {
+      id: input.outboxId,
+      aggregateType: "generation_run",
+      aggregateId: input.runId,
+      eventType: "generation.requested",
+      status: "PROCESSING",
+      attemptCount: input.attemptNumber,
+    },
+    data: {
+      status: "DEAD_LETTER",
+      processedAt: terminalAt,
+      lastError: input.failureCode,
+    },
+  });
+  if (terminalOutbox.count !== 1) {
+    throw new Error("Generation delivery lost its outbox terminal fence.");
+  }
+  const terminalMessage = await tx.message.updateMany({
+    where: {
+      id: input.messageId,
+      deliveryStatus: {
+        in: [
+          MessageDeliveryStatus.QUEUED,
+          MessageDeliveryStatus.PROCESSING,
+          MessageDeliveryStatus.FAILED,
+        ],
+      },
+    },
+    data: {
+      deliveryStatus: input.messageStatus,
+      failureCode: input.failureCode,
+      failureReason: input.failureReason,
+    },
+  });
+  if (terminalMessage.count !== 1) {
+    throw new Error("Generation delivery lost its message terminal fence.");
+  }
+  await transitionMessageDeliveryAttemptInTransaction(tx, {
+    messageId: input.messageId,
+    conversationId: input.conversationId,
+    attemptNumber: input.attemptNumber,
+    idempotencyKey:
+      `generation-message:${input.messageId}:attempt:${input.attemptNumber}`,
+    expectedStatuses: [
+      MessageDeliveryAttemptStatus.QUEUED,
+      MessageDeliveryAttemptStatus.PROCESSING,
+      MessageDeliveryAttemptStatus.FAILED,
+    ],
+    status: input.attemptStatus,
+    failureCode: input.failureCode,
+    failureReason: input.failureReason,
+    completedAt: terminalAt,
+  });
+  await releasePendingGenerationDeliveryBillingInTransaction(tx, {
+    generationRunId: input.runId,
+    reason: input.failureCode,
+    releasedAt: terminalAt,
+  });
+}
+
+async function terminalizeOperatorMessageDeliveryInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    outboxId: string;
+    attemptNumber: number;
+    messageId: string;
+    messageStatus: MessageDeliveryStatus;
+    attemptStatus:
+      | typeof MessageDeliveryAttemptStatus.CANCELED
+      | typeof MessageDeliveryAttemptStatus.DEAD_LETTER;
+    failureCode: string;
+    failureReason: string;
+  },
+) {
+  const terminalAt = new Date();
+  const terminalOutbox = await tx.outboxEvent.updateMany({
+    where: {
+      id: input.outboxId,
+      aggregateType: "operator_message",
+      aggregateId: input.messageId,
+      eventType: "operator.message.requested",
+      status: "PROCESSING",
+      attemptCount: input.attemptNumber,
+    },
+    data: {
+      status: "DEAD_LETTER",
+      processedAt: terminalAt,
+      lastError: input.failureCode,
+    },
+  });
+  if (terminalOutbox.count !== 1) {
+    throw new Error("Operator delivery lost its outbox terminal fence.");
+  }
+  const terminalMessage = await tx.message.updateMany({
+    where: {
+      id: input.messageId,
+      deliveryStatus: {
+        in: [
+          MessageDeliveryStatus.QUEUED,
+          MessageDeliveryStatus.PROCESSING,
+          MessageDeliveryStatus.FAILED,
+        ],
+      },
+    },
+    data: {
+      deliveryStatus: input.messageStatus,
+      failureCode: input.failureCode,
+      failureReason: input.failureReason,
+    },
+  });
+  if (terminalMessage.count !== 1) {
+    throw new Error("Operator delivery lost its message terminal fence.");
+  }
+  await transitionMessageDeliveryAttemptInTransaction(tx, {
+    messageId: input.messageId,
+    conversationId: await resolveMessageConversationId(tx, input.messageId),
+    attemptNumber: input.attemptNumber,
+    idempotencyKey:
+      `operator-message:${input.messageId}:attempt:${input.attemptNumber}`,
+    expectedStatuses: [
+      MessageDeliveryAttemptStatus.QUEUED,
+      MessageDeliveryAttemptStatus.PROCESSING,
+      MessageDeliveryAttemptStatus.FAILED,
+    ],
+    status: input.attemptStatus,
+    failureCode: input.failureCode,
+    failureReason: input.failureReason,
+    completedAt: terminalAt,
+  });
+}
+
+export async function enqueueConversationMessageDeliveryInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    conversationId: string;
+    messageId: string;
+    deliveryKind: ConversationMessageDeliveryKind;
+  },
+) {
+  const message = await tx.message.findUnique({
+    where: { id: input.messageId },
+    select: {
+      id: true,
+      conversationId: true,
+      senderType: true,
+      deliveryStatus: true,
+      externalMessageId: true,
+    },
+  });
+  if (!message || message.conversationId !== input.conversationId) {
+    throw new Error("Conversation delivery message does not belong to its conversation.");
+  }
+  if (
+    message.deliveryStatus === MessageDeliveryStatus.SENT
+    || message.externalMessageId
+  ) {
+    return null;
+  }
+  const conversation = await tx.conversation.findUnique({
+    where: { id: input.conversationId },
+    select: {
+      sourceChannel: true,
+      channelBindings: {
+        include: {
+          representativeBinding: {
+            select: { endpointLifecycleRevision: true },
+          },
+        },
+      },
+    },
+  });
+  if (!conversation) throw new Error("Conversation not found for message delivery.");
+
+  const channel = normalizeChannel(conversation.sourceChannel);
+  const preferredKind = mapChannelKind(channel);
+  const binding = conversation.channelBindings.find(
+    (candidate) => candidate.kind === preferredKind,
+  ) ?? conversation.channelBindings[0] ?? null;
+  if (channel !== "web" && !binding) {
+    throw new Error("Private-channel conversation has no delivery binding.");
+  }
+  await tx.message.update({
+    where: { id: message.id },
+    data: {
+      ...(binding ? { channelBindingId: binding.id } : {}),
+      ...(
+        binding
+        && binding.kind !== RepresentativeChannelKind.WEB
+        && binding.representativeBinding
+        && binding.representativeBinding.endpointLifecycleRevision > 0
+          ? {
+              channelLifecycleRevision:
+                binding.representativeBinding.endpointLifecycleRevision,
+            }
+          : {}
+      ),
+      deliveryStatus: MessageDeliveryStatus.QUEUED,
+      failureCode: null,
+      failureReason: null,
+    },
+  });
+  const outbox = await tx.outboxEvent.upsert({
+    where: {
+      idempotencyKey: `conversation.message.requested:${message.id}`,
+    },
+    create: {
+      conversationId: input.conversationId,
+      aggregateType: "conversation_message",
+      aggregateId: message.id,
+      eventType: "conversation.message.requested",
+      ...(binding?.transport ? { transport: binding.transport } : {}),
+      ...(binding?.sourceProvider
+        ? { sourceProvider: binding.sourceProvider }
+        : {}),
+      ...(binding?.connectionId ? { connectionId: binding.connectionId } : {}),
+      payload: {
+        version: 1,
+        messageId: message.id,
+        conversationId: input.conversationId,
+        channel,
+        senderType: message.senderType,
+        deliveryKind: input.deliveryKind,
+      },
+      idempotencyKey: `conversation.message.requested:${message.id}`,
+    },
+    update: {},
+  });
+  await tx.messageDeliveryAttempt.upsert({
+    where: {
+      idempotencyKey: `conversation-message:${message.id}:attempt:1`,
+    },
+    create: {
+      messageId: message.id,
+      conversationId: input.conversationId,
+      channelBindingId: binding?.id ?? null,
+      attemptNumber: 1,
+      status: MessageDeliveryAttemptStatus.QUEUED,
+      transport: binding?.transport ?? null,
+      sourceProvider: binding?.sourceProvider ?? null,
+      connectionId: binding?.connectionId ?? null,
+      idempotencyKey: `conversation-message:${message.id}:attempt:1`,
+    },
+    update: {},
+  });
+  return outbox;
+}
+
+export type ClaimedConversationMessageDeliveryWorkItem = {
+  outboxId: string;
+  leaseAttempt: number;
+  messageId: string;
+  conversationId: string;
+  text: string;
+  senderType: string;
+  senderName: string;
+  deliveryKind: ConversationMessageDeliveryKind;
+  channel: "web" | "matrix" | "telegram";
+  externalConversationId?: string;
+  telegramConnectionId?: string;
+  matrixSenderUserId?: string;
+  matrixEndpointLifecycleRevision?: number;
+};
+
+export async function claimNextConversationMessageDeliveryWorkItem(
+  options: {
+    telegramWorkerEnabled?: boolean;
+    processingLeaseMs?: number;
+  } = {},
+): Promise<ClaimedConversationMessageDeliveryWorkItem | null> {
+  return prisma.$transaction(async (tx) => {
+    const candidates = await tx.$queryRaw<Array<{
+      id: string;
+      aggregateId: string;
+      status: string;
+      attemptCount: number;
+    }>>`
+      SELECT "id", "aggregateId", "status", "attemptCount"
+      FROM "OutboxEvent"
+      WHERE "status" IN ('PENDING', 'FAILED', 'PROCESSING')
+        AND "eventType" = 'conversation.message.requested'
+        AND "availableAt" <= NOW()
+      ORDER BY "createdAt" ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    `;
+    const candidate = candidates[0];
+    if (!candidate) return null;
+    if (candidate.status === "PROCESSING" && candidate.attemptCount > 0) {
+      const uncertainAttempt = await tx.messageDeliveryAttempt.findUnique({
+        where: {
+          messageId_attemptNumber: {
+            messageId: candidate.aggregateId,
+            attemptNumber: candidate.attemptCount,
+          },
+        },
+        select: { status: true },
+      });
+      if (uncertainAttempt?.status === MessageDeliveryAttemptStatus.PROCESSING) {
+        await terminalizeConversationMessageDeliveryInTransaction(tx, {
+          outboxId: candidate.id,
+          attemptNumber: candidate.attemptCount,
+          messageId: candidate.aggregateId,
+          outboxStatuses: ["PROCESSING"],
+          messageStatus: MessageDeliveryStatus.FAILED,
+          attemptStatus: MessageDeliveryAttemptStatus.DEAD_LETTER,
+          failureCode: "provider_outcome_unknown_after_lease_expiry",
+          failureReason:
+            "Delivery lease expired after provider execution may have started; automatic retry is disabled.",
+        });
+        return null;
+      }
+    }
+    if ((candidate.attemptCount ?? 0) >= 5) {
+      await terminalizeConversationMessageDeliveryInTransaction(tx, {
+        outboxId: candidate.id,
+        attemptNumber: candidate.attemptCount,
+        messageId: candidate.aggregateId,
+        outboxStatuses: ["PENDING", "FAILED", "PROCESSING"],
+        messageStatus: MessageDeliveryStatus.FAILED,
+        attemptStatus: MessageDeliveryAttemptStatus.DEAD_LETTER,
+        failureCode: "conversation_message_delivery_attempts_exhausted",
+        failureReason:
+          "Conversation message delivery exhausted its retry budget.",
+      });
+      return null;
+    }
+    const outbox = await tx.outboxEvent.update({
+      where: { id: candidate.id },
+      data: {
+        status: "PROCESSING",
+        attemptCount: { increment: 1 },
+        availableAt: new Date(
+          Date.now()
+          + Math.max(
+            conversationOutboxProcessingLeaseMs,
+            options.processingLeaseMs ?? conversationOutboxProcessingLeaseMs,
+          ),
+        ),
+        processedAt: null,
+        lastError: null,
+      },
+    });
+    const payload = isJsonRecord(outbox.payload) ? outbox.payload : {};
+    const deliveryKindValue = payload["deliveryKind"];
+    const deliveryKind: ConversationMessageDeliveryKind =
+      deliveryKindValue === "system_notification"
+      || deliveryKindValue === "representative_result"
+        ? deliveryKindValue
+        : "delegation_task_status";
+    const message = await tx.message.findUnique({
+      where: { id: outbox.aggregateId },
+      include: {
+        channelBinding: {
+          include: {
+            representativeBinding: {
+              select: {
+                connectionId: true,
+                externalUserId: true,
+                telegramBotConnectionId: true,
+                endpointAssignmentRevision: true,
+                endpointLifecycleRevision: true,
+                telegramBotConnection: {
+                  select: { id: true, botId: true, status: true },
+                },
+              },
+            },
+          },
+        },
+        conversation: {
+          include: {
+            representative: { select: { id: true } },
+          },
+        },
+      },
+    });
+    if (!message) {
+      const missingMessageOutbox = await tx.outboxEvent.updateMany({
+        where: {
+          id: outbox.id,
+          aggregateType: "conversation_message",
+          aggregateId: outbox.aggregateId,
+          eventType: "conversation.message.requested",
+          status: "PROCESSING",
+          attemptCount: outbox.attemptCount,
+        },
+        data: {
+          status: "DEAD_LETTER",
+          processedAt: new Date(),
+          lastError: "conversation_message_missing",
+        },
+      });
+      if (missingMessageOutbox.count !== 1) {
+        throw new Error("Missing conversation message lost its outbox terminal fence.");
+      }
+      return null;
+    }
+    if (!message.text) {
+      await terminalizeConversationMessageDeliveryInTransaction(tx, {
+        outboxId: outbox.id,
+        attemptNumber: outbox.attemptCount,
+        messageId: message.id,
+        outboxStatuses: ["PROCESSING"],
+        messageStatus: MessageDeliveryStatus.FAILED,
+        attemptStatus: MessageDeliveryAttemptStatus.DEAD_LETTER,
+        failureCode: "conversation_message_text_missing",
+        failureReason: "Conversation message has no deliverable text.",
+      });
+      return null;
+    }
+    if (
+      message.deliveryStatus === MessageDeliveryStatus.SENT
+      || message.externalMessageId
+    ) {
+      const replayedMessage = await tx.message.updateMany({
+        where: {
+          id: message.id,
+          deliveryStatus: {
+            in: [
+              MessageDeliveryStatus.QUEUED,
+              MessageDeliveryStatus.PROCESSING,
+              MessageDeliveryStatus.FAILED,
+              MessageDeliveryStatus.SENT,
+            ],
+          },
+        },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.SENT,
+          failureCode: null,
+          failureReason: null,
+        },
+      });
+      if (replayedMessage.count !== 1) {
+        throw new Error("Delivered conversation message lost its replay fence.");
+      }
+      const replayedOutbox = await tx.outboxEvent.updateMany({
+        where: {
+          id: outbox.id,
+          aggregateType: "conversation_message",
+          aggregateId: message.id,
+          eventType: "conversation.message.requested",
+          status: "PROCESSING",
+          attemptCount: outbox.attemptCount,
+        },
+        data: {
+          status: "PROCESSED",
+          processedAt: new Date(),
+          lastError: null,
+        },
+      });
+      if (replayedOutbox.count !== 1) {
+        throw new Error("Delivered conversation message lost its outbox replay fence.");
+      }
+      await transitionMessageDeliveryAttemptInTransaction(tx, {
+        messageId: message.id,
+        conversationId: message.conversationId,
+        attemptNumber: outbox.attemptCount,
+        idempotencyKey:
+          `conversation-message:${message.id}:attempt:${outbox.attemptCount}`,
+        expectedStatuses: [
+          MessageDeliveryAttemptStatus.QUEUED,
+          MessageDeliveryAttemptStatus.PROCESSING,
+          MessageDeliveryAttemptStatus.FAILED,
+        ],
+        status: MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED,
+        externalMessageId: message.externalMessageId ?? null,
+      });
+      return null;
+    }
+    const binding = message.channelBinding;
+    const channel = binding
+      ? binding.kind === RepresentativeChannelKind.MATRIX
+        ? "matrix"
+        : binding.kind === RepresentativeChannelKind.TELEGRAM
+          ? "telegram"
+          : "web"
+      : normalizeChannel(message.conversation.sourceChannel);
+    if (channel !== "web" && !binding) {
+      await terminalizeConversationMessageDeliveryInTransaction(tx, {
+        outboxId: outbox.id,
+        attemptNumber: outbox.attemptCount,
+        messageId: message.id,
+        outboxStatuses: ["PROCESSING"],
+        messageStatus: MessageDeliveryStatus.FAILED,
+        attemptStatus: MessageDeliveryAttemptStatus.DEAD_LETTER,
+        failureCode: "conversation_message_channel_missing",
+        failureReason: "Conversation message has no private-channel binding.",
+      });
+      return null;
+    }
+    if (channel === "telegram" && binding) {
+      const availability = resolveTelegramDeliveryEndpointAvailability({
+        conversationConnectionId: binding.connectionId,
+        representativeConnectionId:
+          binding.representativeBinding?.connectionId,
+        conversationRepresentativeAssignmentRevision:
+          binding.representativeAssignmentRevision,
+        representativeAssignmentRevision:
+          binding.representativeBinding?.endpointAssignmentRevision,
+        ...(outbox.connectionId?.trim()
+          ? { expectedConnectionId: outbox.connectionId }
+          : {}),
+        representativeTelegramBotConnectionId:
+          binding.representativeBinding?.telegramBotConnectionId,
+        representativeTelegramBot:
+          binding.representativeBinding?.telegramBotConnection,
+      });
+      if (!availability.available) {
+        await terminalizeConversationMessageDeliveryInTransaction(tx, {
+          outboxId: outbox.id,
+          attemptNumber: outbox.attemptCount,
+          messageId: message.id,
+          outboxStatuses: ["PROCESSING"],
+          messageStatus: MessageDeliveryStatus.CANCELED,
+          attemptStatus: MessageDeliveryAttemptStatus.CANCELED,
+          failureCode: availability.code,
+          failureReason:
+            "Telegram delivery was canceled because this conversation belongs to a previously assigned Bot.",
+        });
+        return null;
+      }
+      if (options.telegramWorkerEnabled === false) {
+        await tx.outboxEvent.update({
+          where: { id: outbox.id },
+          data: {
+            status: "PENDING",
+            attemptCount: { decrement: 1 },
+            availableAt: new Date(Date.now() + telegramWorkerOwnershipRetryMs),
+            lastError: "telegram_worker_not_delivery_owner",
+          },
+        });
+        return null;
+      }
+    }
+    if (channel === "matrix" && binding) {
+      const availability = resolveMatrixDeliveryEndpointAvailability({
+        conversationRepresentativeMatrixUserId:
+          readMatrixRepresentativeUserId(binding.metadata),
+        representativeMatrixUserId:
+          binding.representativeBinding?.externalUserId,
+        conversationRepresentativeAssignmentRevision:
+          binding.representativeAssignmentRevision,
+        representativeAssignmentRevision:
+          binding.representativeBinding?.endpointAssignmentRevision,
+      });
+      const currentLifecycleRevision =
+        binding.representativeBinding?.endpointLifecycleRevision;
+      const lifecycleCurrent =
+        Number.isSafeInteger(message.channelLifecycleRevision)
+        && (message.channelLifecycleRevision ?? 0) > 0
+        && Number.isSafeInteger(currentLifecycleRevision)
+        && (currentLifecycleRevision ?? 0) > 0
+        && message.channelLifecycleRevision === currentLifecycleRevision;
+      if (!availability.available || !lifecycleCurrent) {
+        const failureCode = availability.available
+          ? "matrix_channel_lifecycle_reactivated"
+          : availability.code;
+        await terminalizeConversationMessageDeliveryInTransaction(tx, {
+          outboxId: outbox.id,
+          attemptNumber: outbox.attemptCount,
+          messageId: message.id,
+          outboxStatuses: ["PROCESSING"],
+          messageStatus: MessageDeliveryStatus.CANCELED,
+          attemptStatus: MessageDeliveryAttemptStatus.CANCELED,
+          failureCode,
+          failureReason:
+            "Matrix delivery was canceled because its identity or lifecycle binding changed.",
+        });
+        return null;
+      }
+    }
+    const matrixTransportUser = channel === "matrix"
+      ? await tx.matrixVirtualUserBinding.findFirst({
+          where: {
+            representativeId: message.conversation.representative.id,
+            kind: "REPRESENTATIVE",
+            enabled: true,
+          },
+          select: { matrixUserId: true },
+        })
+      : null;
+    const prepared = await tx.message.updateMany({
+      where: {
+        id: message.id,
+        deliveryStatus: {
+          in: [
+            MessageDeliveryStatus.QUEUED,
+            MessageDeliveryStatus.FAILED,
+            MessageDeliveryStatus.PROCESSING,
+          ],
+        },
+      },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.PROCESSING,
+        failureCode: null,
+        failureReason: null,
+      },
+    });
+    if (prepared.count !== 1) {
+      await tx.outboxEvent.update({
+        where: { id: outbox.id },
+        data: {
+          status: "PENDING",
+          attemptCount: { decrement: 1 },
+          availableAt: new Date(),
+          lastError: "conversation_message_delivery_not_claimable",
+        },
+      });
+      return null;
+    }
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: message.id,
+      conversationId: message.conversationId,
+      attemptNumber: outbox.attemptCount,
+      idempotencyKey:
+        `conversation-message:${message.id}:attempt:${outbox.attemptCount}`,
+      expectedStatuses: [
+        MessageDeliveryAttemptStatus.QUEUED,
+        MessageDeliveryAttemptStatus.FAILED,
+        MessageDeliveryAttemptStatus.PROCESSING,
+      ],
+      status: MessageDeliveryAttemptStatus.PROCESSING,
+      channelBindingId: binding?.id ?? null,
+      transport: outbox.transport ?? null,
+      sourceProvider: outbox.sourceProvider ?? null,
+      connectionId: outbox.connectionId ?? null,
+      leaseExpiresAt: outbox.availableAt,
+    });
+    return {
+      outboxId: outbox.id,
+      leaseAttempt: outbox.attemptCount,
+      messageId: message.id,
+      conversationId: message.conversationId,
+      text: message.text,
+      senderType: message.senderType,
+      senderName: message.senderDisplayName || "Delegate",
+      deliveryKind,
+      channel,
+      ...(binding && channel !== "web"
+        ? { externalConversationId: binding.externalConversationId }
+        : {}),
+      ...(channel === "telegram" && binding?.representativeBinding?.connectionId
+        ? { telegramConnectionId: binding.representativeBinding.connectionId }
+        : {}),
+      ...(matrixTransportUser
+        ? {
+            matrixSenderUserId: matrixTransportUser.matrixUserId,
+            matrixEndpointLifecycleRevision: message.channelLifecycleRevision!,
+          }
+        : {}),
+    };
+  });
+}
+
+export async function completeConversationMessageDelivery(input: {
+  outboxId: string;
+  leaseAttempt: number;
+  messageId: string;
+  externalMessageId?: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const deliveredAt = new Date();
+    const completedOutbox = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "conversation_message",
+        aggregateId: input.messageId,
+        eventType: "conversation.message.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
+      data: {
+        status: "PROCESSED",
+        processedAt: deliveredAt,
+        lastError: null,
+      },
+    });
+    if (completedOutbox.count !== 1) return false;
+    const completedMessage = await tx.message.updateMany({
+      where: {
+        id: input.messageId,
+        deliveryStatus: MessageDeliveryStatus.PROCESSING,
+      },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.SENT,
+        ...(input.externalMessageId
+          ? { externalMessageId: input.externalMessageId }
+          : {}),
+        failureCode: null,
+        failureReason: null,
+      },
+    });
+    if (completedMessage.count !== 1) {
+      throw new Error("Conversation message delivery lost its message fence.");
+    }
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: input.messageId,
+      conversationId: await resolveMessageConversationId(tx, input.messageId),
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `conversation-message:${input.messageId}:attempt:${input.leaseAttempt}`,
+      expectedStatuses: [
+        MessageDeliveryAttemptStatus.PROCESSING,
+        MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED,
+      ],
+      status: MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED,
+      externalMessageId: input.externalMessageId ?? null,
+      completedAt: deliveredAt,
+    });
+    return true;
+  });
+}
+
+export async function deferConversationMessageDelivery(input: {
+  outboxId: string;
+  leaseAttempt: number;
+  messageId: string;
+  reason: string;
+  retryAfterMs?: number;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const availableAt = new Date(
+      Date.now()
+      + Math.max(
+        telegramWorkerOwnershipRetryMs,
+        input.retryAfterMs ?? telegramWorkerOwnershipRetryMs,
+      ),
+    );
+    const deferred = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "conversation_message",
+        aggregateId: input.messageId,
+        eventType: "conversation.message.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
+      data: {
+        status: "PENDING",
+        attemptCount: { decrement: 1 },
+        availableAt,
+        processedAt: null,
+        lastError: input.reason,
+      },
+    });
+    if (deferred.count !== 1) return false;
+    const deferredMessage = await tx.message.updateMany({
+      where: {
+        id: input.messageId,
+        deliveryStatus: MessageDeliveryStatus.PROCESSING,
+      },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.QUEUED,
+        failureCode: null,
+        failureReason: null,
+      },
+    });
+    if (deferredMessage.count !== 1) {
+      throw new Error("Conversation message delivery lost its defer fence.");
+    }
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: input.messageId,
+      conversationId: await resolveMessageConversationId(tx, input.messageId),
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `conversation-message:${input.messageId}:attempt:${input.leaseAttempt}`,
+      expectedStatuses: [MessageDeliveryAttemptStatus.PROCESSING],
+      status: MessageDeliveryAttemptStatus.QUEUED,
+      availableAt,
+      failureCode: input.reason,
+      failureReason: input.reason,
+    });
+    return true;
+  });
+}
+
+export async function retryConversationMessageDelivery(input: {
+  outboxId: string;
+  leaseAttempt: number;
+  messageId: string;
+  errorMessage: string;
+  providerOutcomeUnknown?: boolean;
+  providerOutcomeCode?:
+    | "telegram_provider_outcome_unknown"
+    | "matrix_provider_outcome_unknown";
+}) {
+  return prisma.$transaction(async (tx) => {
+    const deadLetter = input.providerOutcomeUnknown === true || input.leaseAttempt >= 5;
+    const failureCode = input.providerOutcomeUnknown
+      ? input.providerOutcomeCode ?? "telegram_provider_outcome_unknown"
+      : deadLetter
+        ? "conversation_message_delivery_attempts_exhausted"
+        : "conversation_message_delivery_failed";
+    const failedAt = new Date();
+    const failedOutbox = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "conversation_message",
+        aggregateId: input.messageId,
+        eventType: "conversation.message.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
+      data: {
+        status: deadLetter ? "DEAD_LETTER" : "FAILED",
+        processedAt: deadLetter ? failedAt : null,
+        lastError: failureCode,
+        availableAt: new Date(
+          Date.now() + Math.min(60_000, 2 ** input.leaseAttempt * 1_000),
+        ),
+      },
+    });
+    if (failedOutbox.count !== 1) return false;
+    const failedMessage = await tx.message.updateMany({
+      where: {
+        id: input.messageId,
+        deliveryStatus: MessageDeliveryStatus.PROCESSING,
+      },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.FAILED,
+        failureCode,
+        failureReason: input.errorMessage,
+      },
+    });
+    if (failedMessage.count !== 1) {
+      throw new Error("Conversation message delivery lost its retry fence.");
+    }
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: input.messageId,
+      conversationId: await resolveMessageConversationId(tx, input.messageId),
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `conversation-message:${input.messageId}:attempt:${input.leaseAttempt}`,
+      expectedStatuses: [MessageDeliveryAttemptStatus.PROCESSING],
+      status: deadLetter
+        ? MessageDeliveryAttemptStatus.DEAD_LETTER
+        : MessageDeliveryAttemptStatus.FAILED,
+      failureCode,
+      failureReason: input.errorMessage,
+    });
+    return true;
   });
 }
 
 export type ClaimedOperatorMessageWorkItem = {
   outboxId: string;
+  leaseAttempt: number;
   messageId: string;
   conversationId: string;
   text: string;
@@ -5135,9 +8152,10 @@ export async function claimNextOperatorMessageWorkItem(
     const candidates = await tx.$queryRaw<Array<{
       id: string;
       aggregateId: string;
+      status: string;
       attemptCount: number;
     }>>`
-      SELECT "id", "aggregateId", "attemptCount"
+      SELECT "id", "aggregateId", "status", "attemptCount"
       FROM "OutboxEvent"
       WHERE "status" IN ('PENDING', 'FAILED', 'PROCESSING')
         AND "eventType" = 'operator.message.requested'
@@ -5149,6 +8167,30 @@ export async function claimNextOperatorMessageWorkItem(
     const candidate = candidates[0];
     const outboxId = candidate?.id;
     if (!outboxId) return null;
+    if (candidate.status === "PROCESSING" && candidate.attemptCount > 0) {
+      const uncertainAttempt = await tx.messageDeliveryAttempt.findUnique({
+        where: {
+          messageId_attemptNumber: {
+            messageId: candidate.aggregateId,
+            attemptNumber: candidate.attemptCount,
+          },
+        },
+        select: { status: true },
+      });
+      if (uncertainAttempt?.status === MessageDeliveryAttemptStatus.PROCESSING) {
+        await terminalizeOperatorMessageDeliveryInTransaction(tx, {
+          outboxId,
+          attemptNumber: candidate.attemptCount,
+          messageId: candidate.aggregateId,
+          messageStatus: MessageDeliveryStatus.FAILED,
+          attemptStatus: MessageDeliveryAttemptStatus.DEAD_LETTER,
+          failureCode: "provider_outcome_unknown_after_lease_expiry",
+          failureReason:
+            "Delivery lease expired after provider execution may have started; automatic retry is disabled.",
+        });
+        return null;
+      }
+    }
     if ((candidate.attemptCount ?? 0) >= 5) {
       await tx.message.updateMany({
         where: { id: candidate.aggregateId },
@@ -5226,21 +8268,60 @@ export async function claimNextOperatorMessageWorkItem(
       return null;
     }
     if (message.externalMessageId) {
-      await tx.message.update({
-        where: { id: message.id },
+      const acceptedAt = new Date();
+      const acceptedMessage = await tx.message.updateMany({
+        where: {
+          id: message.id,
+          deliveryStatus: {
+            in: [
+              MessageDeliveryStatus.QUEUED,
+              MessageDeliveryStatus.PROCESSING,
+              MessageDeliveryStatus.FAILED,
+              MessageDeliveryStatus.SENT,
+            ],
+          },
+        },
         data: {
           deliveryStatus: MessageDeliveryStatus.SENT,
           failureCode: null,
           failureReason: null,
         },
       });
-      await tx.outboxEvent.update({
-        where: { id: outbox.id },
+      if (acceptedMessage.count !== 1) {
+        throw new Error("Accepted operator message lost its message fence.");
+      }
+      const acceptedOutbox = await tx.outboxEvent.updateMany({
+        where: {
+          id: outbox.id,
+          aggregateType: "operator_message",
+          aggregateId: message.id,
+          eventType: "operator.message.requested",
+          status: "PROCESSING",
+          attemptCount: outbox.attemptCount,
+        },
         data: {
           status: "PROCESSED",
-          processedAt: new Date(),
+          processedAt: acceptedAt,
           lastError: null,
         },
+      });
+      if (acceptedOutbox.count !== 1) {
+        throw new Error("Accepted operator message lost its outbox fence.");
+      }
+      await transitionMessageDeliveryAttemptInTransaction(tx, {
+        messageId: message.id,
+        conversationId: message.conversationId,
+        attemptNumber: outbox.attemptCount,
+        idempotencyKey:
+          `operator-message:${message.id}:attempt:${outbox.attemptCount}`,
+        expectedStatuses: [
+          MessageDeliveryAttemptStatus.QUEUED,
+          MessageDeliveryAttemptStatus.PROCESSING,
+          MessageDeliveryAttemptStatus.FAILED,
+        ],
+        status: MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED,
+        externalMessageId: message.externalMessageId,
+        completedAt: acceptedAt,
       });
       return null;
     }
@@ -5389,8 +8470,27 @@ export async function claimNextOperatorMessageWorkItem(
       channel === "telegram"
         ? message.channelBinding.representativeBinding?.connectionId || null
         : null;
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: message.id,
+      conversationId: message.conversationId,
+      attemptNumber: outbox.attemptCount,
+      idempotencyKey:
+        `operator-message:${message.id}:attempt:${outbox.attemptCount}`,
+      expectedStatuses: [
+        MessageDeliveryAttemptStatus.QUEUED,
+        MessageDeliveryAttemptStatus.FAILED,
+        MessageDeliveryAttemptStatus.PROCESSING,
+      ],
+      status: MessageDeliveryAttemptStatus.PROCESSING,
+      channelBindingId: message.channelBinding.id,
+      transport: outbox.transport ?? null,
+      sourceProvider: outbox.sourceProvider ?? null,
+      connectionId: outbox.connectionId ?? null,
+      leaseExpiresAt: outbox.availableAt,
+    });
     return {
       outboxId: outbox.id,
+      leaseAttempt: outbox.attemptCount,
       messageId: message.id,
       conversationId: message.conversationId,
       text: message.text,
@@ -5413,28 +8513,64 @@ export async function claimNextOperatorMessageWorkItem(
 
 export async function completeOperatorMessageDelivery(input: {
   outboxId: string;
+  leaseAttempt: number;
   messageId: string;
   externalMessageId?: string;
 }) {
-  await prisma.$transaction([
-    prisma.message.update({
-      where: { id: input.messageId },
+  return prisma.$transaction(async (tx) => {
+    const completedAt = new Date();
+    const completedOutbox = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "operator_message",
+        aggregateId: input.messageId,
+        eventType: "operator.message.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
+      },
+      data: {
+        status: "PROCESSED",
+        processedAt: completedAt,
+        lastError: null,
+      },
+    });
+    if (completedOutbox.count !== 1) return false;
+    const completedMessage = await tx.message.updateMany({
+      where: {
+        id: input.messageId,
+        deliveryStatus: MessageDeliveryStatus.PROCESSING,
+      },
       data: {
         deliveryStatus: MessageDeliveryStatus.SENT,
         ...(input.externalMessageId ? { externalMessageId: input.externalMessageId } : {}),
         failureCode: null,
         failureReason: null,
       },
-    }),
-    prisma.outboxEvent.update({
-      where: { id: input.outboxId },
-      data: { status: "PROCESSED", processedAt: new Date(), lastError: null },
-    }),
-  ]);
+    });
+    if (completedMessage.count !== 1) {
+      throw new Error("Operator message lost its completion fence.");
+    }
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: input.messageId,
+      conversationId: await resolveMessageConversationId(tx, input.messageId),
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `operator-message:${input.messageId}:attempt:${input.leaseAttempt}`,
+      expectedStatuses: [
+        MessageDeliveryAttemptStatus.PROCESSING,
+        MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED,
+      ],
+      status: MessageDeliveryAttemptStatus.PROVIDER_ACCEPTED,
+      externalMessageId: input.externalMessageId ?? null,
+      completedAt,
+    });
+    return true;
+  });
 }
 
 export async function deferOperatorMessageDelivery(input: {
   outboxId: string;
+  leaseAttempt: number;
   messageId: string;
   reason: string;
   retryAfterMs?: number;
@@ -5448,7 +8584,7 @@ export async function deferOperatorMessageDelivery(input: {
       where: {
         id: input.outboxId,
         status: "PROCESSING",
-        attemptCount: { gt: 0 },
+        attemptCount: input.leaseAttempt,
       },
       data: {
         status: "PENDING",
@@ -5459,13 +8595,31 @@ export async function deferOperatorMessageDelivery(input: {
       },
     });
     if (deferred.count === 0) return false;
-    await tx.message.update({
-      where: { id: input.messageId },
+    const deferredMessage = await tx.message.updateMany({
+      where: {
+        id: input.messageId,
+        deliveryStatus: MessageDeliveryStatus.PROCESSING,
+      },
       data: {
         deliveryStatus: MessageDeliveryStatus.QUEUED,
         failureCode: null,
         failureReason: null,
       },
+    });
+    if (deferredMessage.count !== 1) {
+      throw new Error("Operator message lost its defer fence.");
+    }
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: input.messageId,
+      conversationId: await resolveMessageConversationId(tx, input.messageId),
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `operator-message:${input.messageId}:attempt:${input.leaseAttempt}`,
+      expectedStatuses: [MessageDeliveryAttemptStatus.PROCESSING],
+      status: MessageDeliveryAttemptStatus.QUEUED,
+      availableAt: new Date(Date.now() + retryAfterMs),
+      failureCode: input.reason,
+      failureReason: input.reason,
     });
     return true;
   });
@@ -5473,32 +8627,71 @@ export async function deferOperatorMessageDelivery(input: {
 
 export async function retryOperatorMessageDelivery(input: {
   outboxId: string;
+  leaseAttempt: number;
   messageId: string;
   errorMessage: string;
+  providerOutcomeUnknown?: boolean;
+  providerOutcomeCode?:
+    | "telegram_provider_outcome_unknown"
+    | "matrix_provider_outcome_unknown";
 }) {
-  const outbox = await prisma.outboxEvent.findUnique({
-    where: { id: input.outboxId },
-    select: { attemptCount: true },
-  });
-  const deadLetter = (outbox?.attemptCount || 0) >= 5;
-  await prisma.$transaction([
-    prisma.message.update({
-      where: { id: input.messageId },
-      data: {
-        deliveryStatus: MessageDeliveryStatus.FAILED,
-        failureCode: "operator_channel_delivery_failed",
-        failureReason: input.errorMessage,
+  return prisma.$transaction(async (tx) => {
+    const deadLetter = input.providerOutcomeUnknown === true || input.leaseAttempt >= 5;
+    const failureCode = input.providerOutcomeUnknown
+      ? input.providerOutcomeCode ?? "telegram_provider_outcome_unknown"
+      : deadLetter
+        ? "operator_channel_delivery_attempts_exhausted"
+        : "operator_channel_delivery_failed";
+    const failedAt = new Date();
+    const failedOutbox = await tx.outboxEvent.updateMany({
+      where: {
+        id: input.outboxId,
+        aggregateType: "operator_message",
+        aggregateId: input.messageId,
+        eventType: "operator.message.requested",
+        status: "PROCESSING",
+        attemptCount: input.leaseAttempt,
       },
-    }),
-    prisma.outboxEvent.update({
-      where: { id: input.outboxId },
       data: {
         status: deadLetter ? "DEAD_LETTER" : "FAILED",
-        lastError: input.errorMessage,
-        availableAt: new Date(Date.now() + Math.min(60_000, 2 ** (outbox?.attemptCount || 1) * 1_000)),
+        processedAt: deadLetter ? failedAt : null,
+        lastError: failureCode,
+        availableAt: new Date(
+          Date.now() + Math.min(60_000, 2 ** input.leaseAttempt * 1_000),
+        ),
       },
-    }),
-  ]);
+    });
+    if (failedOutbox.count !== 1) return false;
+    const failedMessage = await tx.message.updateMany({
+      where: {
+        id: input.messageId,
+        deliveryStatus: MessageDeliveryStatus.PROCESSING,
+      },
+      data: {
+        deliveryStatus: MessageDeliveryStatus.FAILED,
+        failureCode,
+        failureReason: input.errorMessage,
+      },
+    });
+    if (failedMessage.count !== 1) {
+      throw new Error("Operator message lost its retry fence.");
+    }
+    await transitionMessageDeliveryAttemptInTransaction(tx, {
+      messageId: input.messageId,
+      conversationId: await resolveMessageConversationId(tx, input.messageId),
+      attemptNumber: input.leaseAttempt,
+      idempotencyKey:
+        `operator-message:${input.messageId}:attempt:${input.leaseAttempt}`,
+      expectedStatuses: [MessageDeliveryAttemptStatus.PROCESSING],
+      status: deadLetter
+        ? MessageDeliveryAttemptStatus.DEAD_LETTER
+        : MessageDeliveryAttemptStatus.FAILED,
+      failureCode,
+      failureReason: input.errorMessage,
+      completedAt: failedAt,
+    });
+    return true;
+  });
 }
 
 export async function failGenerationRun(input: {
@@ -5619,6 +8812,187 @@ export async function failGenerationRun(input: {
   });
 }
 
+function serializePublicTaskProgress(task: {
+  id: string;
+  title: string;
+  status: string;
+  nextActionBy: string;
+  updatedAt: Date;
+  steps: Array<{
+    id: string;
+    sequence: number;
+    title: string;
+    status: string;
+    startedAt: Date | null;
+    completedAt: Date | null;
+    failedAt: Date | null;
+    updatedAt: Date;
+  }>;
+}): PublicConversationTaskProgress {
+  return {
+    id: task.id,
+    title: task.title,
+    status: task.status.toLowerCase(),
+    nextActionBy: task.nextActionBy.toLowerCase(),
+    updatedAt: task.updatedAt.toISOString(),
+    steps: task.steps.map((step) => ({
+      id: step.id,
+      sequence: step.sequence,
+      title: step.title,
+      status: step.status.toLowerCase(),
+      ...(step.startedAt ? { startedAt: step.startedAt.toISOString() } : {}),
+      ...(step.completedAt ? { completedAt: step.completedAt.toISOString() } : {}),
+      ...(step.failedAt ? { failedAt: step.failedAt.toISOString() } : {}),
+      updatedAt: step.updatedAt.toISOString(),
+    })),
+  };
+}
+
+const publicTurnExecutionStages: GenerationTurnExecutionStage[] = [
+  "planning",
+  "authorizing",
+  "generating",
+  "validating",
+  "saving",
+  "delivering",
+];
+
+function serializePublicTurnExecutionProgress(input: {
+  runId: string;
+  runStatus: string;
+  runStartedAt: Date | null;
+  contextSnapshot: unknown;
+  plan: {
+    id: string;
+    status: string;
+    objective: string;
+    planSnapshot: unknown;
+    createdAt: Date;
+    updatedAt: Date;
+    actions: Array<{ status: string }>;
+  };
+}): PublicTurnExecutionProgress {
+  const persisted = readTurnExecutionProgress(input.contextSnapshot);
+  const actionStatus = input.plan.actions[0]?.status;
+  const failed = input.plan.status === "FAILED" || input.runStatus === "FAILED";
+  const completed = input.plan.status === "COMPLETED" && !failed;
+  const currentStage: GenerationTurnExecutionStage = persisted?.stage
+    ?? (actionStatus === "EXECUTING" ? "generating" : "planning");
+  const stage: PublicTurnExecutionProgress["stage"] = failed
+    ? "failed"
+    : completed
+      ? "completed"
+      : currentStage;
+  const activeStageIndex = publicTurnExecutionStages.indexOf(
+    completed ? "delivering" : currentStage,
+  );
+  const steps = publicTurnExecutionStages.map((candidate, index) => {
+    const status: PublicTurnExecutionProgress["steps"][number]["status"] =
+      completed
+        ? "completed"
+        : failed
+          ? index < activeStageIndex
+            ? "completed"
+            : index === activeStageIndex
+              ? "failed"
+              : "skipped"
+          : index < activeStageIndex
+            ? "completed"
+            : index === activeStageIndex
+              ? "running"
+              : "queued";
+    return {
+      id: `${input.plan.id}:${candidate}`,
+      sequence: index + 1,
+      stage: candidate,
+      status,
+      ...(candidate === "generating" && persisted?.part
+        ? {
+            detail: `${persisted.part}/${persisted.maxParts ?? persisted.part}`,
+          }
+        : {}),
+    };
+  });
+  const planSnapshot = isJsonRecord(input.plan.planSnapshot)
+    ? input.plan.planSnapshot
+    : {};
+  const goals = Array.isArray(planSnapshot.goals)
+    ? planSnapshot.goals.flatMap((goal) => {
+        if (!isJsonRecord(goal)) return [];
+        const id = typeof goal.id === "string" ? goal.id : "";
+        const description = typeof goal.description === "string"
+          ? goal.description.trim().slice(0, 240)
+          : "";
+        return id && description ? [{ id, description }] : [];
+      }).slice(0, 8)
+    : [];
+  const deliverables = Array.isArray(planSnapshot.deliverables)
+    ? planSnapshot.deliverables.flatMap((deliverable) => {
+        if (!isJsonRecord(deliverable)) return [];
+        const id = typeof deliverable.id === "string" ? deliverable.id : "";
+        const kind = typeof deliverable.kind === "string"
+          ? deliverable.kind
+          : "";
+        const format = typeof deliverable.format === "string"
+          ? deliverable.format
+          : undefined;
+        return id && kind
+          ? [{ id, kind, ...(format ? { format } : {}) }]
+          : [];
+      }).slice(0, 8)
+    : [];
+  return {
+    id: input.plan.id,
+    objective: input.plan.objective.trim().slice(0, 500),
+    status: failed ? "failed" : completed ? "completed" : "running",
+    stage,
+    startedAt: (input.runStartedAt ?? input.plan.createdAt).toISOString(),
+    updatedAt: persisted?.updatedAt
+      ?? input.plan.updatedAt.toISOString(),
+    goals,
+    deliverables,
+    steps,
+  };
+}
+
+function readTurnExecutionProgress(value: unknown): {
+  stage: GenerationTurnExecutionStage;
+  updatedAt: string;
+  part?: number;
+  maxParts?: number;
+} | null {
+  if (!isJsonRecord(value) || !isJsonRecord(value.turnExecutionProgress)) {
+    return null;
+  }
+  const progress = value.turnExecutionProgress;
+  if (
+    progress.version !== 1
+    || typeof progress.stage !== "string"
+    || !publicTurnExecutionStages.includes(
+      progress.stage as GenerationTurnExecutionStage,
+    )
+    || typeof progress.updatedAt !== "string"
+  ) {
+    return null;
+  }
+  const part = typeof progress.part === "number"
+    && Number.isSafeInteger(progress.part)
+    && progress.part > 0
+      ? progress.part
+      : undefined;
+  const maxParts = typeof progress.maxParts === "number"
+    && Number.isSafeInteger(progress.maxParts)
+    && progress.maxParts > 0
+      ? progress.maxParts
+      : undefined;
+  return {
+    stage: progress.stage as GenerationTurnExecutionStage,
+    updatedAt: progress.updatedAt,
+    ...(part ? { part } : {}),
+    ...(maxParts ? { maxParts } : {}),
+  };
+}
+
 export async function getPublicGenerationRunSnapshot(input: {
   representativeSlug: string;
   runId: string;
@@ -5656,50 +9030,154 @@ export async function getPublicGenerationRunSnapshot(input: {
           },
         },
       },
+      delegationTask: {
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          nextActionBy: true,
+          updatedAt: true,
+          steps: {
+            orderBy: { sequence: "asc" },
+            select: {
+              id: true,
+              sequence: true,
+              title: true,
+              status: true,
+              startedAt: true,
+              completedAt: true,
+              failedAt: true,
+              updatedAt: true,
+            },
+          },
+          generationRuns: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: {
+              id: true,
+              status: true,
+              errorCode: true,
+              errorMessage: true,
+              contextSnapshot: true,
+              outputMessage: {
+                select: {
+                  id: true,
+                  text: true,
+                  content: true,
+                  deliveryStatus: true,
+                  failureCode: true,
+                  createdAt: true,
+                  citations: {
+                    select: {
+                      title: true,
+                      excerpt: true,
+                      memoryUseItem: { select: { id: true } },
+                    },
+                  },
+                  attachments: {
+                    select: {
+                      id: true,
+                      fileName: true,
+                      mimeType: true,
+                      sizeBytes: true,
+                      externalUrl: true,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      turnPlans: {
+        where: { shadowMode: false },
+        orderBy: { revision: "desc" },
+        take: 1,
+        select: {
+          id: true,
+          status: true,
+          objective: true,
+          planSnapshot: true,
+          createdAt: true,
+          updatedAt: true,
+          actions: {
+            orderBy: { sequence: "asc" },
+            select: { status: true },
+          },
+        },
+      },
     },
   });
   if (!run) return null;
 
+  const latestTaskRun = run.delegationTask?.generationRuns[0];
+  const presentationRun = latestTaskRun ?? run;
+  const outputMessage = presentationRun.outputMessage;
   const memoryDeliveryBlocked =
-    run.outputMessage?.failureCode === GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR;
+    outputMessage?.failureCode === GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR;
 
-  const sourceDisclosure = run.outputMessage && !memoryDeliveryBlocked
+  const sourceDisclosure = outputMessage && !memoryDeliveryBlocked
     ? resolvePublicWebAnswerSourceDisclosure({
         modelGenerated:
-          readConversationGenerationRuntimeOutcome(run.contextSnapshot)?.mode
+          readConversationGenerationRuntimeOutcome(presentationRun.contextSnapshot)?.mode
           === "model",
-        hasAuthorizedCitation: run.outputMessage.citations.length > 0,
+        hasAuthorizedCitation: outputMessage.citations.length > 0,
+        sameConversationRecall: isSameConversationRecallMessage(
+          outputMessage.content,
+        ),
+        unverifiedToolFallback: isUnverifiedToolFallbackMessage(
+          outputMessage.content,
+          outputMessage.text,
+        ),
+      })
+    : null;
+  const activeTurnPlan = run.turnPlans?.[0];
+  const turnProgress = activeTurnPlan
+    ? serializePublicTurnExecutionProgress({
+        runId: run.id,
+        runStatus: run.status,
+        runStartedAt: run.startedAt,
+        contextSnapshot: run.contextSnapshot,
+        plan: activeTurnPlan,
       })
     : null;
 
   return {
     id: run.id,
-    status: memoryDeliveryBlocked ? "canceled" : run.status.toLowerCase(),
-    ...(!memoryDeliveryBlocked && run.errorCode ? { errorCode: run.errorCode } : {}),
-    ...(!memoryDeliveryBlocked && run.errorMessage ? { errorMessage: run.errorMessage } : {}),
-    ...(run.outputMessage && !memoryDeliveryBlocked
+    status: memoryDeliveryBlocked ? "canceled" : presentationRun.status.toLowerCase(),
+    ...(!memoryDeliveryBlocked && presentationRun.errorCode
+      ? { errorCode: presentationRun.errorCode }
+      : {}),
+    ...(!memoryDeliveryBlocked && presentationRun.errorMessage
+      ? { errorMessage: presentationRun.errorMessage }
+      : {}),
+    ...(run.delegationTask
+      ? { taskProgress: serializePublicTaskProgress(run.delegationTask) }
+      : {}),
+    ...(turnProgress ? { turnProgress } : {}),
+    ...(outputMessage && !memoryDeliveryBlocked
       ? {
           message: {
-            id: run.outputMessage.id,
-            text: renderPublicConversationMessageText(run.outputMessage),
-            status: run.outputMessage.deliveryStatus.toLowerCase(),
-            createdAt: run.outputMessage.createdAt.toISOString(),
+            id: outputMessage.id,
+            text: renderPublicConversationMessageText(outputMessage),
+            status: outputMessage.deliveryStatus.toLowerCase(),
+            createdAt: outputMessage.createdAt.toISOString(),
             ...(sourceDisclosure ? { sourceDisclosure } : {}),
-            citations: run.outputMessage.citations.map((citation) => ({
+            citations: outputMessage.citations.map((citation) => ({
               title: citation.title,
               ...(citation.excerpt ? { excerpt: citation.excerpt } : {}),
             })),
-            ...(run.outputMessage.citations.some(
+            ...(outputMessage.citations.some(
               (citation) => Boolean(citation.memoryUseItem),
             )
               ? {
                   displayAck: {
-                    runId: run.id,
-                    outputMessageId: run.outputMessage.id,
+                    runId: presentationRun.id,
+                    outputMessageId: outputMessage.id,
                   },
                 }
               : {}),
-            attachments: run.outputMessage.attachments.map((attachment) => ({
+            attachments: outputMessage.attachments.map((attachment) => ({
               id: attachment.id,
               fileName: attachment.fileName,
               ...(attachment.mimeType ? { mimeType: attachment.mimeType } : {}),
@@ -5758,12 +9236,19 @@ export async function getPublicConversationHistory(input: {
             where: { status: GenerationRunStatus.COMPLETED },
             select: {
               contextSnapshot: true,
+              inputMessage: {
+                select: { clientMessageId: true },
+              },
             },
             orderBy: { completedAt: "desc" },
             take: 1,
           },
         },
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        // Fetch the newest window. Ordering ascending before `take` returns
+        // the oldest messages forever once a long-lived conversation crosses
+        // the history limit, which makes newly accepted messages disappear
+        // from the visitor page while remaining visible to the Owner Inbox.
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: Math.max(1, Math.min(200, input.limit || 100)),
       },
       assignments: {
@@ -5772,17 +9257,98 @@ export async function getPublicConversationHistory(input: {
         take: 1,
       },
       episodes: { orderBy: { sequence: "desc" }, take: 1 },
+      delegationTasks: {
+        where: {
+          status: {
+            in: [
+              DelegationTaskStatus.DRAFT,
+              DelegationTaskStatus.CLARIFYING,
+              DelegationTaskStatus.READY,
+              DelegationTaskStatus.AWAITING_APPROVAL,
+              DelegationTaskStatus.QUEUED,
+              DelegationTaskStatus.RUNNING,
+              DelegationTaskStatus.WAITING_FOR_USER,
+              DelegationTaskStatus.WAITING_FOR_OWNER,
+            ],
+          },
+        },
+        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+        take: 1,
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          nextActionBy: true,
+          updatedAt: true,
+          steps: {
+            orderBy: { sequence: "asc" },
+            select: {
+              id: true,
+              sequence: true,
+              title: true,
+              status: true,
+              startedAt: true,
+              completedAt: true,
+              failedAt: true,
+              updatedAt: true,
+            },
+          },
+        },
+      },
+      generationRuns: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        include: {
+          turnPlans: {
+            where: { shadowMode: false },
+            orderBy: { revision: "desc" },
+            take: 1,
+            select: {
+              id: true,
+              status: true,
+              objective: true,
+              planSnapshot: true,
+              createdAt: true,
+              updatedAt: true,
+              actions: {
+                orderBy: { sequence: "asc" },
+                select: { status: true },
+              },
+            },
+          },
+        },
+      },
     },
     orderBy: { lastMessageAt: "desc" },
   });
   if (!conversation) {
-    return { state: "new", humanActive: false, freeRepliesUsed: 0, messages: [] };
+    return {
+      state: "new",
+      humanActive: false,
+      freeRepliesUsed: 0,
+      taskProgress: null,
+      turnProgress: null,
+      messages: [],
+    };
   }
   return {
     state: conversation.state.toLowerCase(),
     humanActive: Boolean(conversation.assignments[0]),
     freeRepliesUsed: conversation.freeRepliesUsed,
-    messages: conversation.messages
+    taskProgress: conversation.delegationTasks[0]
+      ? serializePublicTaskProgress(conversation.delegationTasks[0])
+      : null,
+    turnProgress: conversation.generationRuns?.[0]?.turnPlans?.[0]
+      ? serializePublicTurnExecutionProgress({
+          runId: conversation.generationRuns[0].id,
+          runStatus: conversation.generationRuns[0].status,
+          runStartedAt: conversation.generationRuns[0].startedAt,
+          contextSnapshot: conversation.generationRuns[0].contextSnapshot,
+          plan: conversation.generationRuns[0].turnPlans[0],
+        })
+      : null,
+    messages: [...conversation.messages]
+      .reverse()
       .filter((message) => !(
         message.senderType === MessageSenderType.REPRESENTATIVE
         && message.failureCode === GENERATION_MEMORY_DELIVERY_BLOCKED_ERROR
@@ -5798,8 +9364,15 @@ export async function getPublicConversationHistory(input: {
               readConversationGenerationRuntimeOutcome(
                 generation?.contextSnapshot,
               )?.mode === "model",
-            hasAuthorizedCitation: message.citations.length > 0,
-          })
+          hasAuthorizedCitation: message.citations.length > 0,
+          sameConversationRecall: isSameConversationRecallMessage(
+            message.content,
+          ),
+          unverifiedToolFallback: isUnverifiedToolFallbackMessage(
+            message.content,
+            message.text,
+          ),
+        })
         : null;
       return {
         id: message.id,
@@ -5809,6 +9382,12 @@ export async function getPublicConversationHistory(input: {
         text: renderPublicConversationMessageText(message),
         status: message.deliveryStatus.toLowerCase(),
         createdAt: message.createdAt.toISOString(),
+        ...(generation?.inputMessage.clientMessageId
+          ? {
+              generationInputClientMessageId:
+                generation.inputMessage.clientMessageId,
+            }
+          : {}),
         ...(sourceDisclosure ? { sourceDisclosure } : {}),
         citations: message.citations.map((citation) => ({
           title: citation.title,
@@ -5839,34 +9418,37 @@ export function renderPublicConversationMessageText(message: {
   content?: unknown;
   attachments?: Array<{ fileName: string }>;
 }) {
-  const text = message.text || "";
+  const text = stripLegacyUnverifiedToolFallbackPrefix(message.text || "");
+  const publicText = text
+    .replace(
+      /\n{1,2}(?:(?:实际|预计)?消耗|actual credits?|estimated credits?)\s*[：:]?\s*\d+\s*credits?\b/giu,
+      "",
+    )
+    .trim();
   const content = message.content && typeof message.content === "object" && !Array.isArray(message.content)
     ? message.content as Record<string, unknown>
     : null;
-  const hasInternalPath = /\/(?:workspace|tmp)(?:\/|\b)/i.test(text);
-  if (!hasInternalPath) return text;
+  const hasInternalPath = /\/(?:workspace|tmp)(?:\/|\b)/i.test(publicText);
+  if (!hasInternalPath) return publicText;
 
   const attachmentLines = message.attachments?.length
     ? message.attachments.map((attachment) => `已生成文件：${attachment.fileName.split("/").pop() || "result.txt"}`).join("\n")
     : "没有生成可展示的结果文件。";
-  const credits = typeof content?.actualCredits === "number"
-    ? `\n\n消耗：${content.actualCredits} credits`
-    : "";
   if (content?.kind === "compute_approval_result") {
     const outcome = content.outcome;
-    if (outcome === "completed") return `审批已通过，委托任务执行完成。\n\n${attachmentLines}${credits}`;
+    if (outcome === "completed") return `审批已通过，委托任务执行完成。\n\n${attachmentLines}`;
     if (outcome === "rejected") return "委托任务未获批准，因此没有执行。";
     if (outcome === "expired") return "委托任务审批已超时，任务未执行。如仍需要，请重新提交请求。";
     if (outcome === "policy_denied") return "审批后安全策略复核未通过，任务没有执行。";
-    return `审批已通过，但委托任务执行失败。\n\n${attachmentLines}${credits}`;
+    return `审批已通过，但委托任务执行失败。\n\n${attachmentLines}`;
   }
   if (content?.kind === "compute_approval_pending") {
-    return text.replace(/操作：[\s\S]*?(?=\n\n风险：)/, "操作：执行已提交的委托任务");
+    return publicText.replace(/操作：[\s\S]*?(?=\n\n风险：)/, "操作：执行已提交的委托任务");
   }
   if (content?.intent === "compute") {
-    return `委托任务执行结果。\n\n${attachmentLines}${credits}`;
+    return `委托任务执行结果。\n\n${attachmentLines}`;
   }
-  return text;
+  return publicText;
 }
 
 /**
@@ -8482,6 +12064,317 @@ export async function returnConversationToAi(input: {
   });
 }
 
+export async function controlPublicAudienceHandoff(input: {
+  representativeSlug: string;
+  audienceIdentityId: string;
+  audienceId: string;
+  action: "cancel_request" | "end_human_service";
+}) {
+  return runConversationWriteTransaction(async (tx) => {
+    const conversationScope = {
+      representative: { slug: input.representativeSlug },
+      audienceIdentityId: input.audienceIdentityId,
+      sourceChannel: "web" as const,
+      channelThreadId: buildWebConversationThreadId(input.audienceId),
+    };
+    const scopedConversation = await tx.conversation.findFirst({
+      where: {
+        ...conversationScope,
+      },
+      select: { id: true },
+    });
+    if (!scopedConversation) {
+      throw new PublicAudienceHandoffControlError(
+        "conversation_not_found",
+        "Conversation not found.",
+        404,
+      );
+    }
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${scopedConversation.id}))
+    `;
+    const conversation = await tx.conversation.findFirst({
+      where: {
+        id: scopedConversation.id,
+        ...conversationScope,
+      },
+      include: {
+        episodes: { orderBy: { sequence: "desc" }, take: 1 },
+        assignments: {
+          where: { status: ConversationAssignmentStatus.ACTIVE },
+          orderBy: { assignedAt: "desc" },
+          take: 1,
+        },
+      },
+    });
+    if (!conversation) {
+      throw new PublicAudienceHandoffControlError(
+        "conversation_not_found",
+        "Conversation not found.",
+        404,
+      );
+    }
+    const episode = conversation.episodes[0];
+    if (!episode) {
+      throw new PublicAudienceHandoffControlError(
+        "episode_not_found",
+        "Conversation has no active episode.",
+        409,
+      );
+    }
+    const now = new Date();
+    const actorId = input.audienceIdentityId;
+
+    if (input.action === "cancel_request") {
+      if (
+        conversation.assignments[0]
+        || conversation.state === "HUMAN_ACTIVE"
+        || episode.status === ConversationEpisodeStatus.HUMAN_ACTIVE
+      ) {
+        throw new PublicAudienceHandoffControlError(
+          "human_service_active",
+          "Human service is already active; end the human service instead.",
+        );
+      }
+      const handoff = await tx.handoffRequest.findFirst({
+        where: {
+          conversationId: conversation.id,
+          status: { in: [HandoffStatus.OPEN, HandoffStatus.REVIEWING] },
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      });
+      if (!handoff) {
+        return {
+          action: input.action,
+          changed: false,
+          conversationState: conversation.state.toLowerCase(),
+        };
+      }
+      await resolveHandoffRequestInTransaction({
+        handoffRequestId: handoff.id,
+        status: HandoffStatus.CLOSED,
+        reason: "audience_canceled",
+      }, tx);
+      await cancelAudienceHandoffWorkflowsInTransaction(tx, {
+        handoffId: handoff.id,
+        resolvedAt: now,
+        outcome: "audience_canceled_handoff_request",
+      });
+      await tx.conversation.update({
+        where: { id: conversation.id },
+        data: {
+          state: "ACTIVE",
+          assignedOperatorId: null,
+          lastMessageAt: now,
+        },
+      });
+      await tx.conversationEpisode.update({
+        where: { id: episode.id },
+        data: { status: ConversationEpisodeStatus.ACTIVE },
+      });
+      const systemMessage = await recordPublicAudienceHandoffControlInTransaction(tx, {
+        conversationId: conversation.id,
+        episodeId: episode.id,
+        representativeId: conversation.representativeId,
+        contactId: conversation.contactId,
+        fromState: conversation.state,
+        actorId,
+        handoffRequestId: handoff.id,
+        reason: "audience_canceled_handoff_request",
+        message: "The audience canceled the human handoff request. The digital representative may continue.",
+        auditType: EventType.HANDOFF_RESOLVED,
+        occurredAt: now,
+      });
+      return {
+        action: input.action,
+        changed: true,
+        conversationState: "active",
+        message: {
+          id: systemMessage.id,
+          text: systemMessage.text ?? "",
+          createdAt: systemMessage.createdAt.toISOString(),
+        },
+      };
+    }
+
+    const assignment = conversation.assignments[0];
+    const acceptedHandoff = await tx.handoffRequest.findFirst({
+      where: {
+        conversationId: conversation.id,
+        status: HandoffStatus.ACCEPTED,
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    });
+    if (!assignment && !acceptedHandoff) {
+      return {
+        action: input.action,
+        changed: false,
+        conversationState: conversation.state.toLowerCase(),
+      };
+    }
+    await tx.conversationAssignment.updateMany({
+      where: {
+        conversationId: conversation.id,
+        status: ConversationAssignmentStatus.ACTIVE,
+      },
+      data: {
+        status: ConversationAssignmentStatus.RELEASED,
+        releasedAt: now,
+        releaseReason: "audience_returned_to_ai",
+      },
+    });
+    if (acceptedHandoff) {
+      await resolveHandoffRequestInTransaction({
+        handoffRequestId: acceptedHandoff.id,
+        status: HandoffStatus.CLOSED,
+        reason: "audience_returned_to_ai",
+      }, tx);
+      await cancelAudienceHandoffWorkflowsInTransaction(tx, {
+        handoffId: acceptedHandoff.id,
+        resolvedAt: now,
+        outcome: "audience_ended_human_service",
+      });
+    }
+    await tx.conversation.update({
+      where: { id: conversation.id },
+      data: {
+        state: "ACTIVE",
+        assignedOperatorId: null,
+        lastMessageAt: now,
+      },
+    });
+    await tx.conversationEpisode.update({
+      where: { id: episode.id },
+      data: { status: ConversationEpisodeStatus.ACTIVE },
+    });
+    const systemMessage = await recordPublicAudienceHandoffControlInTransaction(tx, {
+      conversationId: conversation.id,
+      episodeId: episode.id,
+      representativeId: conversation.representativeId,
+      contactId: conversation.contactId,
+      fromState: conversation.state,
+      actorId,
+      ...(acceptedHandoff
+        ? { handoffRequestId: acceptedHandoff.id }
+        : {}),
+      reason: "audience_ended_human_service",
+      message: "The audience ended human service. The digital representative may continue.",
+      auditType: EventType.HANDOFF_RESOLVED,
+      occurredAt: now,
+    });
+    return {
+      action: input.action,
+      changed: true,
+      conversationState: "active",
+      message: {
+        id: systemMessage.id,
+        text: systemMessage.text ?? "",
+        createdAt: systemMessage.createdAt.toISOString(),
+      },
+    };
+  });
+}
+
+async function recordPublicAudienceHandoffControlInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    conversationId: string;
+    episodeId: string;
+    representativeId: string;
+    contactId: string;
+    fromState: string;
+    actorId: string;
+    handoffRequestId?: string;
+    reason: string;
+    message: string;
+    auditType: EventType;
+    occurredAt: Date;
+  },
+) {
+  const message = await tx.message.create({
+    data: {
+      conversationId: input.conversationId,
+      episodeId: input.episodeId,
+      senderType: MessageSenderType.SYSTEM,
+      contentType: MessageContentType.SYSTEM,
+      text: input.message,
+      deliveryStatus: MessageDeliveryStatus.SENT,
+      retentionExpiresAt: buildMessageRetentionExpiry(input.occurredAt),
+      createdAt: input.occurredAt,
+    },
+  });
+  await tx.conversationStateTransition.create({
+    data: {
+      conversationId: input.conversationId,
+      fromState: input.fromState,
+      toState: "ACTIVE",
+      reason: input.reason,
+      actorType: "audience",
+      actorId: input.actorId,
+    },
+  });
+  await tx.eventAudit.create({
+    data: {
+      representativeId: input.representativeId,
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      type: input.auditType,
+      payload: {
+        actorType: "audience",
+        actorId: input.actorId,
+        ...(input.handoffRequestId
+          ? { handoffRequestId: input.handoffRequestId }
+          : {}),
+        systemMessageId: message.id,
+        occurredAt: input.occurredAt.toISOString(),
+      },
+    },
+  });
+  return message;
+}
+
+async function cancelAudienceHandoffWorkflowsInTransaction(
+  tx: Prisma.TransactionClient,
+  input: { handoffId: string; resolvedAt: Date; outcome: string },
+) {
+  const workflows = await tx.workflowRun.findMany({
+    where: {
+      handoffRequestId: input.handoffId,
+      status: { in: ["QUEUED", "RUNNING"] },
+    },
+    select: { id: true, engine: true, externalWorkflowId: true },
+  });
+  for (const workflow of workflows) {
+    const needsTemporalCancel =
+      workflow.engine === "TEMPORAL" && Boolean(workflow.externalWorkflowId);
+    await tx.workflowRun.update({
+      where: { id: workflow.id },
+      data: {
+        status: "CANCELED",
+        enginePhase: needsTemporalCancel ? "CANCEL_REQUESTED" : "CANCELED",
+        nextWakeAt: null,
+        completedAt: input.resolvedAt,
+        cancelRequestedAt: input.resolvedAt,
+        lastObservedAt: input.resolvedAt,
+        lastEngineError: null,
+        output: { outcome: input.outcome },
+      },
+    });
+    if (needsTemporalCancel) {
+      await tx.workflowCommandOutbox.create({
+        data: {
+          workflowRunId: workflow.id,
+          commandType: "CANCEL",
+          payload: {
+            source: input.outcome,
+            requestedAt: input.resolvedAt.toISOString(),
+          },
+        },
+      });
+    }
+  }
+}
+
 export async function publishRepresentativeVersion(input: {
   representativeSlug: string;
   publishedBy: string;
@@ -8790,7 +12683,7 @@ function buildRepresentativeSnapshot(representative: {
   computeDefaultPolicyMode: string;
   computeBaseImage: string;
   computeMaxSessionMinutes: number;
-  computeAutoApproveBudgetCents: number;
+  computeAutoApproveTokenLimit: number;
   computeArtifactRetentionDays: number;
   computeNetworkMode: string;
   computeNetworkAllowlist: string[];
@@ -8799,7 +12692,7 @@ function buildRepresentativeSnapshot(representative: {
   delegationNaturalLanguageEnabled: boolean;
   delegationExplicitComputeEnabled: boolean;
   delegationMaxSteps: number;
-  delegationMaxCostCents: number;
+  delegationMaxEstimatedTokens: number;
   delegationKnowledgeScope: string;
   knowledgePack: { identitySummary: string; faq: Prisma.JsonValue; materials: Prisma.JsonValue; policies: Prisma.JsonValue } | null;
   knowledgeAssetLinks: Array<{
@@ -8854,7 +12747,7 @@ function buildRepresentativeSnapshot(representative: {
     defaultToolName: string | null;
     enabled: boolean;
     approvalRequired: boolean;
-    estimatedCostCentsPerCall: number;
+    estimatedTokensPerCall: number;
     maxRetries: number;
     retryBackoffMs: number;
   }>;
@@ -8945,7 +12838,7 @@ function buildRepresentativeSnapshot(representative: {
       defaultPolicyMode: representative.computeDefaultPolicyMode.toLowerCase(),
       baseImage: representative.computeBaseImage,
       maxSessionMinutes: representative.computeMaxSessionMinutes,
-      autoApproveBudgetCents: representative.computeAutoApproveBudgetCents,
+      autoApproveTokenLimit: representative.computeAutoApproveTokenLimit,
       artifactRetentionDays: representative.computeArtifactRetentionDays,
       networkMode: representative.computeNetworkMode.toLowerCase(),
       networkAllowlist: representative.computeNetworkAllowlist,
@@ -8957,7 +12850,7 @@ function buildRepresentativeSnapshot(representative: {
       naturalLanguageEnabled: representative.delegationNaturalLanguageEnabled,
       explicitComputeEnabled: representative.delegationExplicitComputeEnabled,
       maxSteps: representative.delegationMaxSteps,
-      maxCostCents: representative.delegationMaxCostCents,
+      maxEstimatedTokens: representative.delegationMaxEstimatedTokens,
       knowledgeScope: representative.delegationKnowledgeScope.toLowerCase(),
     },
     knowledge: representative.knowledgePack
@@ -8996,7 +12889,7 @@ function buildRepresentativeSnapshot(representative: {
         defaultToolName: binding.defaultToolName,
         enabled: true,
         approvalRequired: binding.approvalRequired,
-        estimatedCostCentsPerCall: binding.estimatedCostCentsPerCall,
+        estimatedTokensPerCall: binding.estimatedTokensPerCall,
         maxRetries: binding.maxRetries,
         retryBackoffMs: binding.retryBackoffMs,
         skillReleasePin: binding.representativeSkillPackLinkId
@@ -10126,6 +14019,27 @@ export function readConversationGenerationRuntimeOutcome(
   };
 }
 
+function isSameConversationRecallMessage(content: unknown) {
+  return isJsonRecord(content)
+    && content.intent === "conversation_recent_recall";
+}
+
+function isUnverifiedToolFallbackMessage(content: unknown, text?: string | null) {
+  return (
+    isJsonRecord(content)
+    && content.intent === "turn_plan_v3_stable_general_fallback"
+  ) || Boolean(text?.startsWith(legacyUnverifiedToolFallbackPrefix));
+}
+
+const legacyUnverifiedToolFallbackPrefix =
+  "来源说明：外部工具本轮未执行，以下内容由通用模型根据已有知识概括；未核验相关项目或仓库的最新内容，也未引用已授权知识或记忆。";
+
+function stripLegacyUnverifiedToolFallbackPrefix(text: string) {
+  return text.startsWith(legacyUnverifiedToolFallbackPrefix)
+    ? text.slice(legacyUnverifiedToolFallbackPrefix.length).replace(/^\s+/u, "")
+    : text;
+}
+
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -10317,6 +14231,7 @@ function buildDemoConversationDetail(
         status: "sent",
         createdAt: "2026-07-16T05:55:00.000Z",
         citations: [],
+        attachments: [],
       },
       {
         id: "demo-message-2",
@@ -10331,6 +14246,7 @@ function buildDemoConversationDetail(
             excerpt: "Public-facing representatives operate inside explicit knowledge and action boundaries.",
           },
         ],
+        attachments: [],
       },
       {
         id: "demo-message-3",
@@ -10340,6 +14256,7 @@ function buildDemoConversationDetail(
         status: "sent",
         createdAt: item.lastMessageAt,
         citations: [],
+        attachments: [],
       },
     ],
     runs: [

@@ -76,6 +76,13 @@ services:
     healthcheck:
       start_period: 30s
 
+  compute-broker:
+    environment:
+      # Docker Desktop may map public DNS names to its 198.18/15 HTTPS egress
+      # proxy. Production keeps this unset so benchmark/private ranges remain
+      # blocked by the MCP SSRF boundary.
+      DELEGATE_ALLOW_DOCKER_DESKTOP_MCP_DNS_PROXY: "true"
+
   bot:
     environment:
       TELEGRAM_WEB_RECHARGE_BASE_URL: ${TELEGRAM_WEB_RECHARGE_BASE_URL:-http://localhost:3002}

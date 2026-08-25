@@ -1,12 +1,10 @@
 import { prisma } from "./prisma";
 import { readArtifactObject } from "./artifact-store";
-import { buildWebConversationThreadId } from "./web-audience";
 
 export async function getPublicConversationArtifactDownload(input: {
   representativeSlug: string;
   artifactId: string;
   audienceIdentityId: string;
-  audienceId: string;
 }) {
   const artifact = await prisma.artifact.findFirst({
     where: {
@@ -14,8 +12,6 @@ export async function getPublicConversationArtifactDownload(input: {
       representative: { slug: input.representativeSlug },
       conversation: {
         audienceIdentityId: input.audienceIdentityId,
-        sourceChannel: "web",
-        channelThreadId: buildWebConversationThreadId(input.audienceId),
       },
       OR: [
         { retentionUntil: null },
@@ -46,7 +42,6 @@ export async function getPublicConversationArtifactDownload(input: {
         quantity: buffer.byteLength,
         unit: "byte",
         costCents: Math.max(1, Math.ceil(buffer.byteLength / 65536)),
-        creditDelta: 0,
         notes: "public_conversation_artifact_download",
       },
     }),

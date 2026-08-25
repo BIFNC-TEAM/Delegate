@@ -1,7 +1,12 @@
 import OpenAI from "openai";
 
 import { calculateModelUsageCost } from "./pricing";
-import type { ModelRuntimeEnv, ModelUsageSnapshot, RepresentativeReplyPrompt } from "./types";
+import type {
+  ModelRuntimeEnv,
+  ModelTextCompletion,
+  ModelUsageSnapshot,
+  RepresentativeReplyPrompt,
+} from "./types";
 
 export async function generateOpenAIResponse(params: {
   env: ModelRuntimeEnv;
@@ -9,6 +14,7 @@ export async function generateOpenAIResponse(params: {
 }): Promise<{
   replyText: string;
   usage?: ModelUsageSnapshot;
+  completion: ModelTextCompletion;
 }> {
   if (params.env.state !== "ready" || !params.env.openai.apiKey) {
     throw new Error(`OpenAI runtime is not ready: ${params.env.state}.`);
@@ -29,9 +35,23 @@ export async function generateOpenAIResponse(params: {
     instructions: params.prompt.instructions,
     input: params.prompt.input,
     max_output_tokens: params.env.maxOutputTokens,
-    ...(params.prompt.responseFormat === "json_object"
-      ? { text: { format: { type: "json_object" as const } } }
-      : {}),
+    ...(params.prompt.strictJsonSchema
+      ? {
+          text: {
+            format: {
+              type: "json_schema" as const,
+              name: params.prompt.strictJsonSchema.name,
+              ...(params.prompt.strictJsonSchema.description
+                ? { description: params.prompt.strictJsonSchema.description }
+                : {}),
+              schema: params.prompt.strictJsonSchema.schema,
+              strict: true,
+            },
+          },
+        }
+      : params.prompt.responseFormat === "json_object"
+        ? { text: { format: { type: "json_object" as const } } }
+        : {}),
   });
 
   const replyText = extractResponseText(response);
@@ -81,6 +101,12 @@ export async function generateOpenAIResponse(params: {
   return {
     replyText,
     ...(usage ? { usage } : {}),
+    completion: response.status === "completed" && !response.incomplete_details
+      ? { status: "complete" }
+      : {
+          status: "incomplete",
+          reason: response.incomplete_details?.reason ?? response.status ?? "unknown",
+        },
   };
 }
 

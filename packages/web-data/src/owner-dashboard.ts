@@ -23,8 +23,6 @@ export type DashboardOverviewSnapshot = {
   }>;
   wallet: {
     starsBalance: number;
-    sponsorPoolCredit: number;
-    balanceCredits: number;
   };
   workflowEngine: {
     configured: "local_runner" | "temporal";
@@ -263,7 +261,7 @@ export async function getDashboardOverviewSnapshot(
           label: locale === "zh" ? "Stars 余额" : "Stars balance",
           value: wallet ? String(wallet.starsBalance) : "0",
           detail: wallet
-            ? `sponsor pool ${wallet.sponsorPoolCredit} · credits ${wallet.balanceCredits}`
+            ? locale === "zh" ? "仅显示 Stars 历史余额" : "Historical Stars balance only"
             : locale === "zh"
               ? "还没有 owner wallet 记录"
               : "No owner wallet record yet.",
@@ -271,8 +269,6 @@ export async function getDashboardOverviewSnapshot(
       ],
       wallet: {
         starsBalance: wallet?.starsBalance ?? 0,
-        sponsorPoolCredit: wallet?.sponsorPoolCredit ?? 0,
-        balanceCredits: wallet?.balanceCredits ?? 0,
       },
       workflowEngine: {
         configured: workflowEngine.configuredEngine,
@@ -584,8 +580,6 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
       metrics: [],
       wallet: {
         starsBalance: 2060,
-        sponsorPoolCredit: 1200,
-        balanceCredits: 240,
       },
       workflowEngine: {
         configured: "local_runner",
@@ -788,13 +782,13 @@ function getOrCreateDemoFallbackOverviewSnapshot(locale: "zh" | "en"): Dashboard
           { label: "今日新会话", value: "4", detail: "1 个来自群组 mention，3 个来自私聊" },
           { label: "已确认付费", value: "3", detail: "1 Pass，1 Deep Help，1 Sponsor" },
           { label: "待人工评估", value: "3", detail: "2 个合作，1 个退款" },
-          { label: "Stars 余额", value: "2060", detail: "sponsor pool 1200 · credits 240" },
+          { label: "Stars 余额", value: "2060", detail: "历史 Telegram Stars 余额" },
         ]
       : [
           { label: "New conversations", value: "4", detail: "1 from group mentions, 3 from private chat" },
           { label: "Confirmed payments", value: "3", detail: "1 Pass, 1 Deep Help, 1 Sponsor" },
           { label: "Pending owner review", value: "3", detail: "2 collaboration requests, 1 refund" },
-          { label: "Stars balance", value: "2060", detail: "sponsor pool 1200 · credits 240" },
+          { label: "Stars balance", value: "2060", detail: "Historical Telegram Stars balance" },
         ];
   demoFallbackOverviewSnapshot.workflowMetrics =
     locale === "zh"

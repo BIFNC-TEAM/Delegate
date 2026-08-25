@@ -20,8 +20,9 @@ export async function PATCH(
   const { slug, approvalId } = await params;
   try {
     const session = await requireDashboardRepresentativeAccess(slug);
+    let approvalDomain: "compute" | "skill_update" | null = null;
     if (session?.ownerId) {
-      await assertOwnerCanResolveApproval({
+      approvalDomain = await assertOwnerCanResolveApproval({
         ownerId: session.ownerId,
         representativeSlug: slug,
         approvalId,
@@ -41,15 +42,20 @@ export async function PATCH(
       return NextResponse.json({ error: "Decision note is too long." }, { status: 400 });
     }
 
-    const skillDecision = await resolveWorkspaceSkillApproval({
-      ...(session?.ownerId ? { ownerId: session.ownerId } : {}),
-      activeRepresentativeSlug: slug,
-      approvalId,
-      resolution,
-      resolvedBy: session?.ownerId ?? "local-owner",
-      ...(decisionNote ? { decisionNote } : {}),
-    });
-    if (skillDecision.handled) return NextResponse.json(skillDecision.result);
+    if (approvalDomain !== "compute") {
+      const skillDecision = await resolveWorkspaceSkillApproval({
+        ...(session?.ownerId ? { ownerId: session.ownerId } : {}),
+        activeRepresentativeSlug: slug,
+        approvalId,
+        resolution,
+        resolvedBy: session?.ownerId ?? "local-owner",
+        ...(decisionNote ? { decisionNote } : {}),
+      });
+      if (skillDecision.handled) return NextResponse.json(skillDecision.result);
+      if (approvalDomain === "skill_update") {
+        throw new Error("The approval domain changed while resolving a skill update.");
+      }
+    }
 
     const result = await resolveRepresentativeComputeApproval({
       representativeSlug: slug,

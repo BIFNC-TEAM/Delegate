@@ -48,7 +48,7 @@ export function buildNaturalLanguageComputePrompt(
       `Return 1-${boundedMaxSteps} ordered steps only when every step is concrete and grounded in the planner input.`,
       "If the user clearly requests execution but a required path, URL, command, or complete file content is missing, return clarification instead of steps.",
       "Use write only when both the target path and complete intended content are available.",
-      "Treat requests to generate reports, summaries, plans, lessons, stories, or other documents as generated-document tasks, not as low-level file writes.",
+      "Treat requests to generate reports, summaries, plans, tutorials, guides, lessons, stories, or other documents as generated-document tasks, not as low-level file writes.",
       "For generated-document tasks, ask only for missing business requirements such as topic, source material, audience, and output format. Never ask the user for a sandbox path or for already-written final content.",
       "Source material is optional for templates, checklists, meeting notes, test records, specifications, and other documents that can be drafted solely from explicit user requirements.",
       `When generated-document requirements are sufficient, author a concise Markdown draft and write it only to this system-owned path: ${defaultGeneratedDocumentPath}`,
@@ -161,6 +161,20 @@ export function inferDeterministicNaturalLanguageComputePlan(
     });
   }
 
+  const clarificationSupplement = extractClarificationSupplement(text);
+  const clarifiedFileContent = clarificationSupplement
+    ?.replace(/^(?:完整)?(?:内容|content)\s*(?:为|是)?\s*[：:]?\s*/i, "")
+    .trim();
+  if (clarifiedFileContent && isGenericFileWriteRequest(text)) {
+    const path = buildDefaultGeneratedFilePath(text);
+    return executionPlan(`生成 ${path}`, {
+      capability: "write",
+      path,
+      content: clarifiedFileContent,
+      summary: "生成用户补充内容的文件",
+    });
+  }
+
   if (isGeneratedDocumentRequest(text)) {
     if (hasSufficientGeneratedDocumentRequirements(text)) {
       const path = buildDefaultGeneratedDocumentPath(text);
@@ -179,7 +193,7 @@ export function inferDeterministicNaturalLanguageComputePlan(
     };
   }
 
-  if (/(?:保存|写入|生成|创建|导出).{0,32}(?:文件|markdown|md|txt|json|csv)/i.test(text)) {
+  if (isGenericFileWriteRequest(text)) {
     return {
       kind: "clarification",
       summary: "准备文件",
@@ -189,6 +203,30 @@ export function inferDeterministicNaturalLanguageComputePlan(
   }
 
   return null;
+}
+
+function extractClarificationSupplement(text: string) {
+  return text.match(
+    /(?:用户补充|additional user input)\s*[：:]\s*([\s\S]+)/i,
+  )?.[1]?.trim();
+}
+
+function isGenericFileWriteRequest(text: string) {
+  return /(?:保存|写入|生成|创建|导出).{0,32}(?:文件|markdown|md|txt|json|csv)/i.test(text);
+}
+
+function buildDefaultGeneratedFilePath(userText: string) {
+  const hash = buildDefaultGeneratedDocumentPath(userText).match(
+    /report-([a-f0-9]{8})\.md$/,
+  )?.[1] || "output";
+  const extension = /(?:json)/i.test(userText)
+    ? "json"
+    : /(?:csv|表格)/i.test(userText)
+      ? "csv"
+      : /(?:markdown|\.md\b)/i.test(userText)
+        ? "md"
+        : "txt";
+  return `outputs/file-${hash}.${extension}`;
 }
 
 function buildSafeClarificationQuestion(
@@ -242,14 +280,14 @@ export function buildDefaultGeneratedDocumentPath(userText: string) {
 }
 
 function isGeneratedDocumentRequest(text: string) {
-  return /(?:生成|创建|撰写|编写|制作|写|做|导出).{0,40}(?:报告|文档|总结|方案|教案|故事|记录|纪要|清单|表格|简历|邮件|说明|规范)|\b(?:generate|create|write|draft|prepare|export)\b.{0,40}\b(?:report|document|summary|plan|lesson|story|record|notes|minutes|checklist|table|resume|email|specification|spec)\b/i.test(text);
+  return /(?:生成|创建|撰写|编写|制作|写|做|导出).{0,40}(?:报告|文档|总结|方案|教案|教程|指南|故事|记录|纪要|清单|表格|简历|邮件|说明|规范)|(?:给我|提供|准备|整理).{0,40}(?:教程|指南|学习资料).{0,24}(?:以|用)?.{0,8}(?:文件|文档).{0,8}(?:形式)?(?:提供|交付|发送)?|(?:教程|指南|学习资料).{0,24}(?:以|用).{0,8}(?:文件|文档).{0,8}(?:形式)?(?:提供|交付|发送)?|\b(?:generate|create|write|draft|prepare|export)\b.{0,40}\b(?:report|document|summary|plan|tutorial|guide|lesson|story|record|notes|minutes|checklist|table|resume|email|specification|spec)\b/i.test(text);
 }
 
 function hasSufficientGeneratedDocumentRequirements(text: string) {
   const supplement = text.match(/(?:用户补充|additional user input)\s*[：:]\s*([\s\S]+)/i)?.[1]?.trim();
   const candidate = (supplement || text)
     .replace(/(?:请|帮我|麻烦)?(?:生成|创建|撰写|编写|制作|写|做|导出)/gi, "")
-    .replace(/(?:一份|一个)?(?:报告|报告文件|文档|总结|方案|教案|故事|记录|纪要|清单|表格|简历|邮件|说明|规范|文件)/gi, "")
+    .replace(/(?:一份|一个)?(?:报告|报告文件|文档|总结|方案|教案|教程|指南|学习资料|故事|记录|纪要|清单|表格|简历|邮件|说明|规范|文件)/gi, "")
     .replace(/(?:原始任务|待补充|用户补充|additional user input)\s*[：:]?/gi, "")
     .replace(/(?:路径|path)\s*[：:]?\s*\S+/gi, "")
     .replace(/[\s，。！？、,:;；'“”\"`]/g, "");

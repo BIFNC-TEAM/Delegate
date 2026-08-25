@@ -10,12 +10,15 @@ import {
 } from "@prisma/client";
 import {
   approvalExpirationInputSchema,
+  delegationExecutionSignalSchema,
   handoffFollowUpInputSchema,
 } from "@delegate/workflows";
 import {
   finalizeComputeApprovalConversation,
+  terminalizeV3ActionAdmissionInTransaction,
 } from "@delegate/web-data";
 
+import { executeDelegationExecutionTransition } from "./delegation-execution";
 import { prisma } from "./prisma";
 
 const DEFAULT_TEMPORAL_TASK_QUEUE = "delegate-public-runtime";
@@ -52,6 +55,8 @@ export type TemporalWorkflowDispatcher = {
     workflowId: string;
     taskQueue: string;
     scheduledAt: Date;
+    delegationTaskId?: string;
+    turnPlanId?: string;
   }): Promise<TemporalWorkflowStartResult>;
   cancelWorkflowExecution(params: {
     workflowRunId: string;
@@ -59,6 +64,11 @@ export type TemporalWorkflowDispatcher = {
     workflowId: string;
     runId?: string;
   }): Promise<TemporalWorkflowCancelResult>;
+  signalDelegationExecution?(params: {
+    workflowId: string;
+    runId?: string;
+    signal: import("@delegate/workflows").DelegationExecutionSignal;
+  }): Promise<void>;
 };
 
 export async function runWorkflowTick(options?: {
@@ -258,7 +268,67 @@ async function dispatchWorkflowCommand(
     case WorkflowCommandType.CANCEL:
       await dispatchWorkflowCancelCommand(command, temporalDispatcher);
       break;
+    case WorkflowCommandType.SIGNAL:
+      await dispatchWorkflowSignalCommand(command, temporalDispatcher);
+      break;
   }
+}
+
+async function dispatchWorkflowSignalCommand(
+  command: NonNullable<WorkflowCommandRecord>,
+  temporalDispatcher: TemporalWorkflowDispatcher,
+) {
+  const workflow = command.workflowRun;
+  if (!workflow) {
+    await markWorkflowCommandProcessed(command.id, new Date());
+    return;
+  }
+  if (
+    workflow.status === WorkflowStatus.COMPLETED
+    || workflow.status === WorkflowStatus.FAILED
+    || workflow.status === WorkflowStatus.CANCELED
+  ) {
+    await markWorkflowCommandProcessed(command.id, new Date());
+    return;
+  }
+  if (
+    workflow.engine !== WorkflowEngine.TEMPORAL
+    || workflow.kind !== WorkflowKind.DELEGATION_EXECUTION
+    || !workflow.externalWorkflowId
+  ) {
+    throw new Error("delegation_signal_workflow_not_temporal");
+  }
+  if (!temporalDispatcher.signalDelegationExecution) {
+    throw new Error("delegation_signal_dispatcher_missing");
+  }
+  const payload = isRecord(command.payload) ? command.payload : {};
+  const signal = delegationExecutionSignalSchema.parse(payload["signal"]);
+  await temporalDispatcher.signalDelegationExecution({
+    workflowId: workflow.externalWorkflowId,
+    ...(workflow.externalRunId ? { runId: workflow.externalRunId } : {}),
+    signal,
+  });
+  const observedAt = new Date();
+  await prisma.$transaction([
+    prisma.workflowRun.update({
+      where: { id: workflow.id },
+      data: {
+        lastObservedAt: observedAt,
+        lastEngineError: null,
+      },
+    }),
+    prisma.workflowCommandOutbox.update({
+      where: { id: command.id },
+      data: {
+        processedAt: observedAt,
+        lastError: null,
+      },
+    }),
+  ]);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 async function dispatchWorkflowStartCommand(
@@ -314,8 +384,14 @@ async function dispatchWorkflowStartCommand(
     workflowId: workflow.externalWorkflowId,
     taskQueue: workflow.queueName ?? DEFAULT_TEMPORAL_TASK_QUEUE,
     scheduledAt: workflow.scheduledAt,
+    ...(workflow.delegationTaskId
+      ? { delegationTaskId: workflow.delegationTaskId }
+      : {}),
+    ...(workflow.turnPlanId ? { turnPlanId: workflow.turnPlanId } : {}),
   });
   const effectiveObservedAt = dispatchResult.observedAt ?? new Date();
+  const delegationExecution =
+    workflow.kind === WorkflowKind.DELEGATION_EXECUTION;
 
   const activated = await prisma.workflowRun.updateMany({
     where: {
@@ -326,10 +402,12 @@ async function dispatchWorkflowStartCommand(
     },
     data: {
       status: WorkflowStatus.RUNNING,
-      enginePhase: WorkflowEnginePhase.WAITING_TIMER,
+      enginePhase: delegationExecution
+        ? WorkflowEnginePhase.ACTIVITY_RUNNING
+        : WorkflowEnginePhase.WAITING_TIMER,
       externalRunId: dispatchResult.runId ?? workflow.externalRunId ?? null,
       startedAt: workflow.startedAt ?? effectiveObservedAt,
-      nextWakeAt: workflow.scheduledAt,
+      nextWakeAt: delegationExecution ? null : workflow.scheduledAt,
       lastObservedAt: effectiveObservedAt,
       lastEngineError: null,
       dispatchAttemptCount: {
@@ -534,6 +612,17 @@ export async function processWorkflowRunById(workflowRunId: string) {
     case WorkflowKind.CREATOR_TRAINING_REVIEW:
       await retireCreatorTrainingReview(workflow);
       break;
+    case WorkflowKind.DELEGATION_EXECUTION:
+      if (!workflow.delegationTaskId) {
+        throw new Error("delegation_execution_task_missing");
+      }
+      await executeDelegationExecutionTransition({
+        workflowRunId: workflow.id,
+        delegationTaskId: workflow.delegationTaskId,
+        ...(workflow.turnPlanId ? { turnPlanId: workflow.turnPlanId } : {}),
+        transitionId: `local:${workflow.attemptCount}`,
+      });
+      break;
   }
 }
 
@@ -608,16 +697,27 @@ async function processApprovalExpiration(workflow: NonNullable<WorkflowRunRecord
     if (expired.count !== 1) return false;
 
     if (approval.toolExecutionId) {
-      await tx.toolExecution.updateMany({
-        where: {
-          approvalRequestId: approval.id,
-          status: "BLOCKED",
-        },
-        data: {
-          status: "CANCELED",
-          finishedAt: now,
-        },
+      const execution = await tx.toolExecution.findUnique({
+        where: { id: approval.toolExecutionId },
       });
+      if (execution?.planActionId) {
+        await terminalizeV3ActionAdmissionInTransaction(tx, {
+          executionId: execution.id,
+          outcome: "expired",
+          reason: "approval_request_expired",
+        });
+      } else {
+        await tx.toolExecution.updateMany({
+          where: {
+            approvalRequestId: approval.id,
+            status: "BLOCKED",
+          },
+          data: {
+            status: "CANCELED",
+            finishedAt: now,
+          },
+        });
+      }
     }
 
     await tx.eventAudit.create({
@@ -768,6 +868,8 @@ function workflowKindForAudit(kind: WorkflowKind) {
       return "handoff_follow_up";
     case WorkflowKind.CREATOR_TRAINING_REVIEW:
       return "creator_training_review";
+    case WorkflowKind.DELEGATION_EXECUTION:
+      return "delegation_execution";
     case WorkflowKind.APPROVAL_EXPIRATION:
     default:
       return "approval_expiration";
@@ -793,6 +895,8 @@ async function loadWorkflowCommand(commandId: string) {
           nextWakeAt: true,
           lastObservedAt: true,
           cancelRequestedAt: true,
+          delegationTaskId: true,
+          turnPlanId: true,
         },
       },
     },

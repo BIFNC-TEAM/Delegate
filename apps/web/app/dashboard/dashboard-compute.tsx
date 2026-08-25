@@ -26,16 +26,11 @@ type ComputeSnapshot = {
     defaultPolicyMode: "allow" | "ask" | "deny";
     baseImage: string;
     maxSessionMinutes: number;
-    autoApproveBudgetCents: number;
+    autoApproveTokenLimit: number;
     artifactRetentionDays: number;
     networkMode: "no_network" | "allowlist" | "full";
     networkAllowlist: string[];
     filesystemMode: "workspace_only" | "read_only_workspace" | "ephemeral_full";
-    wallet: {
-      balanceCredits: number;
-      sponsorPoolCredit: number;
-      starsBalance: number;
-    };
     delegateManagedProfiles: Array<{
       id: string;
       name: string;
@@ -111,7 +106,7 @@ type ComputeSnapshot = {
       defaultToolName?: string | null;
       enabled: boolean;
       approvalRequired: boolean;
-      estimatedCostCentsPerCall: number;
+      estimatedTokensPerCall: number;
       maxRetries: number;
       retryBackoffMs: number;
       consecutiveFailures: number;
@@ -210,7 +205,6 @@ type ComputeSnapshot = {
   ledger: Array<{
     id: string;
     kind: string;
-    creditDelta: number;
     costCents: number;
     quantity: number;
     unit: string;
@@ -642,7 +636,7 @@ type McpBindingFormState = {
   defaultToolName: string;
   enabled: boolean;
   approvalRequired: boolean;
-  estimatedCostCentsPerCall: number;
+  estimatedTokensPerCall: number;
   maxRetries: number;
   retryBackoffMs: number;
 };
@@ -920,7 +914,7 @@ export function DashboardCompute({
               blocked: "Blocked / deny",
               blockedDetail: "被拦住或直接拒绝的动作",
               billing: "Billing linked",
-              billingDetail: "带内部成本或 credit 影响的动作",
+              billingDetail: "带内部成本记录的动作",
             },
             tables: {
               actionKindEyebrow: "Action Kinds",
@@ -934,7 +928,7 @@ export function DashboardCompute({
               layerMeta: (count: number, owner: number) => `${count} actions · ${owner} owner-only`,
               billingEyebrow: "Billing Impact",
               billingTitle: "别只看 ledger，要看哪类动作最花钱",
-              billingMeta: (cost: number, credits: number) => `${formatCurrency(cost)} · ${credits} credits`,
+              billingMeta: (cost: number) => formatCurrency(cost),
               hotspotsEyebrow: "Hotspots",
               hotspotsTitle: "最贵、最常被拦、最常卡在 owner 的动作",
               staleEyebrow: "Stale Links",
@@ -976,7 +970,7 @@ export function DashboardCompute({
               blocked: "Blocked / deny",
               blockedDetail: "Actions that were blocked or denied",
               billing: "Billing linked",
-              billingDetail: "Actions with cost or credit impact",
+              billingDetail: "Actions with recorded internal cost",
             },
             tables: {
               actionKindEyebrow: "Action Kinds",
@@ -990,7 +984,7 @@ export function DashboardCompute({
               layerMeta: (count: number, owner: number) => `${count} actions · ${owner} owner-only`,
               billingEyebrow: "Billing Impact",
               billingTitle: "Do not just scan the ledger; see which actions cost the most",
-              billingMeta: (cost: number, credits: number) => `${formatCurrency(cost)} · ${credits} credits`,
+              billingMeta: (cost: number) => formatCurrency(cost),
               hotspotsEyebrow: "Hotspots",
               hotspotsTitle: "Most expensive, most blocked, and most owner-heavy actions",
               staleEyebrow: "Stale Links",
@@ -1190,19 +1184,9 @@ export function DashboardCompute({
               : ("default" as const),
         },
         {
-          label: t.signalCards.autoApproveBudget,
-          value: `$${(snapshot.representative.autoApproveBudgetCents / 100).toFixed(2)}`,
-          detail: t.signalCards.autoApproveBudgetDetail,
-        },
-        {
-          label: t.signalCards.walletCredits,
-          value: `${snapshot.representative.wallet.balanceCredits}`,
-          detail: t.signalCards.walletCreditsDetail,
-        },
-        {
-          label: t.signalCards.sponsorPool,
-          value: `${snapshot.representative.wallet.sponsorPoolCredit}`,
-          detail: t.signalCards.sponsorPoolDetail,
+          label: t.signalCards.autoApproveTokenLimitLabel,
+          value: `${snapshot.representative.autoApproveTokenLimit} tokens`,
+          detail: t.signalCards.autoApproveTokenLimitLabelDetail,
         },
       ]
     : [];
@@ -1416,7 +1400,7 @@ export function DashboardCompute({
             defaultToolName: mcpForm.defaultToolName,
             enabled: mcpForm.enabled,
             approvalRequired: mcpForm.approvalRequired,
-            estimatedCostCentsPerCall: mcpForm.estimatedCostCentsPerCall,
+            estimatedTokensPerCall: mcpForm.estimatedTokensPerCall,
             maxRetries: mcpForm.maxRetries,
             retryBackoffMs: mcpForm.retryBackoffMs,
           }),
@@ -1750,7 +1734,7 @@ export function DashboardCompute({
       defaultToolName: binding.defaultToolName ?? "",
       enabled: binding.enabled,
       approvalRequired: binding.approvalRequired,
-      estimatedCostCentsPerCall: binding.estimatedCostCentsPerCall,
+      estimatedTokensPerCall: binding.estimatedTokensPerCall,
       maxRetries: 0,
       retryBackoffMs: binding.retryBackoffMs,
     });
@@ -2618,7 +2602,7 @@ export function DashboardCompute({
                       </span>
                       <span className="chip">{binding.transportKind}</span>
                       <span className="chip">{binding.slug}</span>
-                      <span className="chip">{t.mcpEstimatedCost(binding.estimatedCostCentsPerCall)}</span>
+                      <span className="chip">{t.mcpEstimatedTokens(binding.estimatedTokensPerCall)}</span>
                       <span className="chip">{t.mcpRetries(binding.maxRetries, binding.retryBackoffMs)}</span>
                       {binding.consecutiveFailures > 0 ? (
                         <span className="chip chip-danger">{t.mcpFailures(binding.consecutiveFailures)}</span>
@@ -2740,21 +2724,21 @@ export function DashboardCompute({
                   />
                 </label>
                 <label className="field-label">
-                  <span>{t.mcpFields.estimatedCost}</span>
+                  <span>{t.mcpFields.estimatedTokens}</span>
                   <input
                     className="field-input"
                     min={0}
                     onChange={(event) =>
                       setMcpForm((current) => ({
                         ...current,
-                        estimatedCostCentsPerCall: Math.max(
+                        estimatedTokensPerCall: Math.max(
                           0,
                           Number.parseInt(event.target.value || "0", 10) || 0,
                         ),
                       }))
                     }
                     type="number"
-                    value={mcpForm.estimatedCostCentsPerCall}
+                    value={mcpForm.estimatedTokensPerCall}
                   />
                 </label>
                 <p className="footer-note">
@@ -4095,7 +4079,6 @@ export function DashboardCompute({
                           </div>
                           <div className="chip-row">
                             <span className="chip">{formatCurrency(row.totalCostCents)}</span>
-                            <span className="chip">{row.totalCreditDelta} credits</span>
                             <span className="chip">
                               {governedActionText.cards.ownerDetail}: {row.ownerRequiredCount}
                             </span>
@@ -4170,7 +4153,7 @@ export function DashboardCompute({
                         <div className="skill-row" key={row.key}>
                           <div>
                             <strong>{formatGovernedBillingKey(row.key, locale)}</strong>
-                            <p>{governedActionText.tables.billingMeta(row.costCents, row.creditDelta)}</p>
+                            <p>{governedActionText.tables.billingMeta(row.costCents)}</p>
                           </div>
                         </div>
                       ))
@@ -4316,7 +4299,6 @@ export function DashboardCompute({
                         </div>
                         <div className="footer-note">
                           {formatCurrency(action.totalCostCents)}
-                          {action.totalCreditDelta ? ` · ${action.totalCreditDelta} credits` : ""}
                         </div>
                       </div>
                     ))
@@ -4667,7 +4649,7 @@ export function DashboardCompute({
                   <div>
                     <strong>{entry.kind}</strong>
                     <p>
-                      {entry.creditDelta} credits · ${ (entry.costCents / 100).toFixed(2) }
+                      ${ (entry.costCents / 100).toFixed(2) }
                     </p>
                     <div className="chip-row">
                       <span className="chip">{entry.quantity} {entry.unit}</span>
@@ -4889,7 +4871,6 @@ function formatGovernedActionKind(
           package_rebuild: "重建 package",
           package_download: "下载 package",
           billing_debit: "账单扣减",
-          billing_credit: "账单入账",
         }
       : {
           compute_execution: "Compute execution",
@@ -4903,7 +4884,6 @@ function formatGovernedActionKind(
           package_rebuild: "Package rebuild",
           package_download: "Package download",
           billing_debit: "Billing debit",
-          billing_credit: "Billing credit",
         };
 
   return labels[value];
@@ -4952,8 +4932,6 @@ function formatGovernedBillingKey(
           mcp: "MCP",
           model: "模型",
           egress: "流出",
-          plan_debit: "计划扣减",
-          sponsor_credit: "赞助入账",
           other: "其他",
         }
       : {
@@ -4963,8 +4941,6 @@ function formatGovernedBillingKey(
           mcp: "MCP",
           model: "Model",
           egress: "Egress",
-          plan_debit: "Plan debit",
-          sponsor_credit: "Sponsor credit",
           other: "Other",
         };
 
@@ -5073,7 +5049,7 @@ function createEmptyMcpBindingForm(): McpBindingFormState {
     defaultToolName: "",
     enabled: true,
     approvalRequired: true,
-    estimatedCostCentsPerCall: 0,
+    estimatedTokensPerCall: 0,
     maxRetries: 0,
     retryBackoffMs: 1000,
   };
@@ -5122,12 +5098,8 @@ const copy = {
       browserSessionsDetail: "当前保留状态和导航历史的 browser 会话数。",
       nativeProviders: "Native lanes",
       nativeProvidersDetail: (state: string) => `当前 native computer-use preflight 状态：${state}。`,
-      autoApproveBudget: "Auto-approve budget",
-      autoApproveBudgetDetail: "当前代表级预算阈值，后续可用于轻量自动放行。",
-      walletCredits: "Wallet credits",
-      walletCreditsDetail: "Owner wallet 里还能直接支付 compute 的 credits。",
-      sponsorPool: "Sponsor pool",
-      sponsorPoolDetail: "可以给陌生人或免费流量兜底的公共 compute 额度。",
+      autoApproveTokenLimitLabel: "自动执行 Token 上限",
+      autoApproveTokenLimitLabelDetail: "预计 Token 不超过此值时，低风险且策略允许的操作才可自动执行。",
     },
     platformCards: {
       policyMode: "Default policy",
@@ -5209,7 +5181,7 @@ const copy = {
     mcpChip: (count: number) => `${count} bindings`,
     noMcpBindings: "还没有 MCP binding。先把一个远程 capability server 绑进来，再让代表通过审批后的 compute 请求去调用它。",
     allowedTools: (value: string) => `Allowed tools · ${value}`,
-    mcpEstimatedCost: (value: number) => `估算成本 ${value}¢ / call`,
+    mcpEstimatedTokens: (value: number) => `预计 ${value} tokens / 次调用`,
     mcpRetries: (_retries: number, _backoffMs: number) => "单次执行 · 不自动重试",
     mcpFailures: (count: number) => `${count} 次连续失败`,
     mcpHealthy: "最近健康",
@@ -5229,7 +5201,7 @@ const copy = {
       transportKind: "Transport",
       allowedTools: "Allowed tools",
       defaultTool: "Default tool",
-      estimatedCost: "Estimated cost / call (¢)",
+      estimatedTokens: "预计 Tokens / 次调用",
       maxRetries: "Max retries",
       retryBackoffMs: "Retry backoff (ms)",
       description: "Description",
@@ -5535,7 +5507,7 @@ const copy = {
     pendingPackageChip: "package pending",
     lastDownloadedChip: (value: string) => `下载于 ${value}`,
     ledgerEyebrow: "Billing Ledger",
-    ledgerTitle: "看清每次执行到底烧掉了多少 credits",
+    ledgerTitle: "查看每次执行的内部成本",
     ledgerChip: (count: number) => `${count} entries`,
     noLedger: "还没有 ledger 记录。",
     noArtifacts: "还没有 artifact。",
@@ -5593,12 +5565,8 @@ const copy = {
       browserSessionsDetail: "Browser profiles that still carry navigation state and recent history.",
       nativeProviders: "Native lanes",
       nativeProvidersDetail: (state: string) => `Current native computer-use preflight state: ${state}.`,
-      autoApproveBudget: "Auto-approve budget",
-      autoApproveBudgetDetail: "Representative-level budget threshold for future low-risk auto-approval.",
-      walletCredits: "Wallet credits",
-      walletCreditsDetail: "Credits available in the owner wallet for direct compute spend.",
-      sponsorPool: "Sponsor pool",
-      sponsorPoolDetail: "Shared credits that can subsidize public or free-flow compute.",
+      autoApproveTokenLimitLabel: "Automatic-execution token limit",
+      autoApproveTokenLimitLabelDetail: "Only low-risk, policy-allowed actions at or below this estimated token count may run automatically.",
     },
     platformCards: {
       policyMode: "Default policy",
@@ -5675,7 +5643,7 @@ const copy = {
     mcpChip: (count: number) => `${count} bindings`,
     noMcpBindings: "No MCP bindings yet. Attach a remote capability server here before routing approved work into it.",
     allowedTools: (value: string) => `Allowed tools · ${value}`,
-    mcpEstimatedCost: (value: number) => `Estimated cost ${value}¢ / call`,
+    mcpEstimatedTokens: (value: number) => `Estimated ${value} tokens / call`,
     mcpRetries: (_retries: number, _backoffMs: number) => "Single attempt · no automatic retry",
     mcpFailures: (count: number) => `${count} consecutive failures`,
     mcpHealthy: "healthy lately",
@@ -5695,7 +5663,7 @@ const copy = {
       transportKind: "Transport",
       allowedTools: "Allowed tools",
       defaultTool: "Default tool",
-      estimatedCost: "Estimated cost / call (¢)",
+      estimatedTokens: "Estimated tokens / call",
       maxRetries: "Max retries",
       retryBackoffMs: "Retry backoff (ms)",
       description: "Description",
@@ -6001,7 +5969,7 @@ const copy = {
     pendingPackageChip: "package pending",
     lastDownloadedChip: (value: string) => `downloaded ${value}`,
     ledgerEyebrow: "Billing Ledger",
-    ledgerTitle: "See how many credits each execution actually burned",
+    ledgerTitle: "Inspect internal cost for each execution",
     ledgerChip: (count: number) => `${count} entries`,
     noLedger: "No ledger activity yet.",
     noArtifacts: "No artifacts yet.",

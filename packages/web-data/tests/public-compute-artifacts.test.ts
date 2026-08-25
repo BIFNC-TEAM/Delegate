@@ -38,18 +38,13 @@ describe("public compute artifact downloads", () => {
       representativeSlug: "sktone",
       artifactId: "artifact-1",
       audienceIdentityId: "identity-1",
-      audienceId: "audience-1",
     })).resolves.toBeNull();
 
     expect(mocks.findFirst).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({
         id: "artifact-1",
         representative: { slug: "sktone" },
-        conversation: {
-          audienceIdentityId: "identity-1",
-          sourceChannel: "web",
-          channelThreadId: "web:audience-1",
-        },
+        conversation: { audienceIdentityId: "identity-1" },
       }),
     }));
     expect(mocks.readArtifactObject).not.toHaveBeenCalled();
@@ -74,7 +69,6 @@ describe("public compute artifact downloads", () => {
       representativeSlug: "sktone",
       artifactId: "artifact-1",
       audienceIdentityId: "identity-1",
-      audienceId: "audience-1",
     })).resolves.toMatchObject({
       mimeType: "text/plain; charset=utf-8",
       fileName: "result.txt",

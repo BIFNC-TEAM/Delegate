@@ -67,7 +67,7 @@ type RepresentativeSetupSnapshot = {
     defaultPolicyMode: ComputePolicyMode;
     baseImage: string;
     maxSessionMinutes: number;
-    autoApproveBudgetCents: number;
+    autoApproveTokenLimit: number;
     artifactRetentionDays: number;
     networkMode: ComputeNetworkMode;
     networkAllowlist: string[];
@@ -79,7 +79,7 @@ type RepresentativeSetupSnapshot = {
     naturalLanguageEnabled: boolean;
     explicitComputeEnabled: boolean;
     maxSteps: number;
-    maxCostCents: number;
+    maxEstimatedTokens: number;
     knowledgeScope: DelegationKnowledgeScope;
   };
 };
@@ -1008,7 +1008,7 @@ export function DashboardRepresentativeSetup({
               </label>
 
               <label className="field-stack">
-                <span>{t.delegationMaxCost}</span>
+                <span>{t.delegationMaxTokens}</span>
                 <input
                   className="text-input"
                   min={0}
@@ -1017,12 +1017,12 @@ export function DashboardRepresentativeSetup({
                       ...value,
                       delegation: {
                         ...value.delegation,
-                        maxCostCents: Number(event.target.value || 0),
+                        maxEstimatedTokens: Number(event.target.value || 0),
                       },
                     }))
                   }
                   type="number"
-                  value={draft.delegation.maxCostCents}
+                  value={draft.delegation.maxEstimatedTokens}
                 />
                 <small className="field-hint">{t.zeroMeansUnlimited}</small>
               </label>
@@ -1065,7 +1065,7 @@ export function DashboardRepresentativeSetup({
               </label>
 
               <label className="field-stack">
-                <span>{t.autoApproveBudget}</span>
+                <span>{t.autoApproveTokenLimitLabel}</span>
                 <input
                   className="text-input"
                   min={0}
@@ -1074,12 +1074,12 @@ export function DashboardRepresentativeSetup({
                       ...value,
                       compute: {
                         ...value.compute,
-                        autoApproveBudgetCents: Number(event.target.value || 0),
+                        autoApproveTokenLimit: Number(event.target.value || 0),
                       },
                     }))
                   }
                   type="number"
-                  value={draft.compute.autoApproveBudgetCents}
+                  value={draft.compute.autoApproveTokenLimit}
                 />
               </label>
 
@@ -1453,11 +1453,11 @@ const setupCopy = {
     userInputOnly: "仅本次会话输入",
     approvedPublicKnowledge: "会话输入 + 已审核公开知识",
     delegationMaxSteps: "单任务最大步骤数",
-    delegationMaxCost: "单任务成本上限（美分）",
-    zeroMeansUnlimited: "0 表示不设置额外任务成本上限；仍受平台和账户预算约束。",
+    delegationMaxTokens: "单任务预计 Token 上限",
+    zeroMeansUnlimited: "0 表示不设置额外的任务 Token 上限；仍受平台安全策略约束。",
     baseImage: "Base image",
     maxSessionMinutes: "Max session minutes",
-    autoApproveBudget: "免审批成本阈值（美分）",
+    autoApproveTokenLimitLabel: "自动执行 Token 上限",
     artifactRetentionDays: "Artifact retention (days)",
     networkMode: "Network mode",
     networkAllowlist: "Network allowlist",
@@ -1543,11 +1543,11 @@ const setupCopy = {
     userInputOnly: "Current conversation input only",
     approvedPublicKnowledge: "Conversation input + approved public knowledge",
     delegationMaxSteps: "Maximum steps per task",
-    delegationMaxCost: "Task cost limit (USD cents)",
-    zeroMeansUnlimited: "0 adds no task-specific cost cap; platform and account budgets still apply.",
+    delegationMaxTokens: "Estimated token limit per task",
+    zeroMeansUnlimited: "0 adds no task-specific token limit; managed platform safety policies still apply.",
     baseImage: "Base image",
     maxSessionMinutes: "Max session minutes",
-    autoApproveBudget: "Approval-free cost threshold (USD cents)",
+    autoApproveTokenLimitLabel: "Automatic-execution token limit",
     artifactRetentionDays: "Artifact retention (days)",
     networkMode: "Network mode",
     networkAllowlist: "Network allowlist",

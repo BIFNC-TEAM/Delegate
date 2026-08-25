@@ -254,6 +254,9 @@ enum EventType {
 }
 
 enum CapabilityKind {
+  BUILTIN
+  KNOWLEDGE
+  SKILL
   EXEC
   READ
   WRITE
@@ -487,11 +490,34 @@ enum ToolExecutionStatus {
   CANCELED
 }
 
+enum ExecutionAttemptPhase {
+  CREATED
+  CLAIMED
+  CALL_PREPARED
+  CALL_STARTED
+  RESPONSE_RECEIVED
+  VERIFYING
+  FINISHED
+  CANCELED_BEFORE_START
+  FAILED_BEFORE_CALL
+  OUTCOME_UNKNOWN
+}
+
 enum ApprovalStatus {
   PENDING
   APPROVED
   REJECTED
   EXPIRED
+}
+
+enum BillableUnitStatus {
+  PENDING_RESERVATION
+  RESERVED
+  TRANSFERRED
+  SETTLEMENT_PENDING
+  SETTLED
+  RELEASED
+  HELD_FOR_RECONCILIATION
 }
 
 enum ArtifactKind {
@@ -545,6 +571,7 @@ enum WorkflowKind {
   HANDOFF_FOLLOW_UP
   APPROVAL_EXPIRATION
   CREATOR_TRAINING_REVIEW
+  DELEGATION_EXECUTION
 }
 
 enum WorkflowStatus {
@@ -563,12 +590,60 @@ enum WorkflowEngine {
 enum WorkflowEnginePhase {
   DISPATCH_PENDING
   WAITING_TIMER
+  WAITING_SIGNAL
   ACTIVITY_RUNNING
   RETRY_BACKOFF
   CANCEL_REQUESTED
   COMPLETED
   FAILED
   CANCELED
+}
+
+enum ConversationTurnPlanStatus {
+  PROPOSED
+  VALIDATED
+  EXECUTING
+  COMPLETED
+  FAILED
+  CANCELED
+  SUPERSEDED
+}
+
+enum ConversationPlanActionKind {
+  RESPOND
+  CLARIFY
+  CAPABILITY
+  HANDOFF
+  REFUSE
+  DELIVER
+}
+
+enum ConversationPlanActionStatus {
+  PLANNED
+  AUTHORIZING
+  WAITING_APPROVAL
+  READY
+  QUEUED
+  EXECUTING
+  VERIFYING
+  SUCCEEDED
+  SKIPPED
+  FAILED
+  CANCELED
+  RECONCILIATION_REQUIRED
+}
+
+enum ConversationPlanSideEffectClass {
+  NONE
+  INTERNAL
+  EXTERNAL_REVERSIBLE
+  EXTERNAL_IRREVERSIBLE
+}
+
+enum ActionAuthorizationPhase {
+  INITIAL
+  POST_APPROVAL
+  PRE_EXECUTION
 }
 
 enum DelegationTaskKind {
@@ -680,6 +755,7 @@ enum DelegationTaskOutputKind {
 enum WorkflowCommandType {
   START
   CANCEL
+  SIGNAL
 }
 
 enum LedgerEntryKind {
@@ -689,8 +765,6 @@ enum LedgerEntryKind {
   ARTIFACT_EGRESS
   BROWSER_MINUTES
   MCP_CALLS
-  PLAN_DEBIT
-  SPONSOR_CREDIT
 }
 
 enum CreatorVerificationStatus {
@@ -1294,6 +1368,32 @@ enum MessageDeliveryStatus {
   REDACTED
 }
 
+enum MessageDeliveryAttemptStatus {
+  QUEUED
+  PROCESSING
+  PROVIDER_ACCEPTED
+  CONFIRMED
+  FAILED
+  CANCELED
+  DEAD_LETTER
+  RECONCILIATION_REQUIRED
+}
+
+enum MessageDeliveryAttemptPhase {
+  CREATED
+  CLAIMED
+  CALL_PREPARED
+  CALL_STARTED
+  RESPONSE_RECEIVED
+  PROVIDER_ACCEPTED
+  COMPLETED
+  FAILED_CONFIRMED
+  OUTCOME_UNKNOWN
+  LEASE_EXPIRED
+  CANCELED_BEFORE_START
+  RECONCILIATION_REQUIRED
+}
+
 enum GenerationRunStatus {
   QUEUED
   PROCESSING
@@ -1390,14 +1490,12 @@ model OwnerNotificationSettings {
 }
 
 model Wallet {
-  id                String   @id @default(cuid())
-  ownerId           String   @unique
-  balanceCredits    Int      @default(0)
-  sponsorPoolCredit Int      @default(0)
-  starsBalance      Int      @default(0)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  owner             Owner    @relation(fields: [ownerId], references: [id])
+  id           String   @id @default(cuid())
+  ownerId      String   @unique
+  starsBalance Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  owner        Owner    @relation(fields: [ownerId], references: [id])
 }
 
 model AudienceIdentity {
@@ -2351,7 +2449,7 @@ model Representative {
   computeDefaultPolicyMode              PolicyDecision                         @default(ASK)
   computeBaseImage                      String                                 @default("debian:bookworm-slim")
   computeMaxSessionMinutes              Int                                    @default(15)
-  computeAutoApproveBudgetCents         Int                                    @default(0)
+  computeAutoApproveTokenLimit            Int                                    @default(0)
   computeArtifactRetentionDays          Int                                    @default(14)
   computeNetworkMode                    ComputeNetworkMode                     @default(NO_NETWORK)
   computeNetworkAllowlist               String[]                               @default([])
@@ -2360,7 +2458,7 @@ model Representative {
   delegationNaturalLanguageEnabled      Boolean                                @default(true)
   delegationExplicitComputeEnabled      Boolean                                @default(true)
   delegationMaxSteps                    Int                                    @default(5)
-  delegationMaxCostCents                Int                                    @default(0)
+  delegationMaxEstimatedTokens             Int                                    @default(0)
   delegationKnowledgeScope              DelegationKnowledgeScope               @default(USER_INPUT_ONLY)
   lifecycleState                        RepresentativeLifecycleState           @default(DRAFT)
   activeVersionId                       String?
@@ -2383,6 +2481,7 @@ model Representative {
   events                                EventAudit[]
   handoffRequests                       HandoffRequest[]
   artifacts                             Artifact[]
+  billableUnits                         BillableUnit[]
   deliverables                          Deliverable[]
   approvalRequests                      ApprovalRequest[]
   intakeSubmissions                     IntakeSubmission[]
@@ -2399,6 +2498,7 @@ model Representative {
   chatSessions                          ChatSession[]
   workflowRuns                          WorkflowRun[]
   delegationTasks                       DelegationTask[]
+  conversationTurnPlans                 ConversationTurnPlan[]
   agentWallet                           AgentWallet?
   tokenPurchases                        AgentTokenPurchase[]
   usageCharges                          AgentUsageCharge[]
@@ -2459,6 +2559,7 @@ model RepresentativeVersion {
   generationRuns                 GenerationRun[]
   delegationTasks                DelegationTask[]
   computeSessions                ComputeSession[]
+  conversationTurnPlans          ConversationTurnPlan[]
   memoryUseRuns                  MemoryUseRun[]
   publishedResources             RepresentativeVersionResource[]
   publicKnowledgeProjectionItems PublicKnowledgeProjectionItem[]
@@ -2827,7 +2928,7 @@ model RepresentativeMcpBinding {
   defaultToolName                 String?
   enabled                         Boolean                  @default(true)
   approvalRequired                Boolean                  @default(true)
-  estimatedCostCentsPerCall       Int                      @default(0)
+  estimatedTokensPerCall       Int                      @default(0)
   maxRetries                      Int                      @default(2)
   retryBackoffMs                  Int                      @default(1000)
   configRevision                  Int                      @default(1)
@@ -2843,9 +2944,36 @@ model RepresentativeMcpBinding {
   representative                  Representative           @relation(fields: [representativeId], references: [id])
   representativeSkillPackLink     RepresentativeSkillPack? @relation(fields: [representativeSkillPackLinkId], references: [id])
   toolExecutions                  ToolExecution[]
+  toolDefinitions                 McpToolDefinition[]
 
   @@unique([representativeId, slug])
   @@index([representativeId, enabled, createdAt])
+}
+
+model McpToolDefinition {
+  id                      String                   @id @default(cuid())
+  bindingId               String
+  bindingRevision         Int
+  exactToolName           String
+  description             String?
+  semanticMetadata        Json?
+  inputSchema             Json
+  outputSchema            Json?
+  toolSchemaHash          String                   @db.Char(64)
+  bindingDefinitionHash   String                   @db.Char(64)
+  canonicalizationVersion String                   @default("delegate-capability-v1")
+  observedAnnotations     Json?
+  availability            String                   @default("ready")
+  observedAt              DateTime
+  supersededAt            DateTime?
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  binding                 RepresentativeMcpBinding @relation(fields: [bindingId], references: [id], onDelete: Cascade)
+
+  @@unique([bindingId, bindingRevision, exactToolName])
+  @@index([bindingId, availability, observedAt])
+  @@index([toolSchemaHash])
+  @@index([bindingDefinitionHash])
 }
 
 model Contact {
@@ -2921,7 +3049,6 @@ model Conversation {
   passUnlockedAt                DateTime?
   deepHelpUnlockedAt            DateTime?
   activeComputeSessionId        String?
-  computeBudgetRemainingCredits Int?
   lastComputeAt                 DateTime?
   openvikingSessionId           String?                           @unique
   openvikingSessionKey          String?
@@ -2945,6 +3072,8 @@ model Conversation {
   browserNavigations            BrowserNavigation[]
   workflowRuns                  WorkflowRun[]
   delegationTasks               DelegationTask[]
+  turnPlans                     ConversationTurnPlan[]
+  messageDeliveryAttempts       MessageDeliveryAttempt[]
   feedbackSignals               CreatorFeedbackSignal[]
   episodes                      ConversationEpisode[]
   messages                      Message[]
@@ -2999,6 +3128,202 @@ model ConversationTurn {
   createdAt       DateTime                @default(now())
   conversation    Conversation            @relation(fields: [conversationId], references: [id])
   feedbackSignals CreatorFeedbackSignal[]
+}
+
+model ConversationTurnPlan {
+  id                      String                     @id @default(cuid())
+  representativeId        String
+  representativeVersionId String?
+  conversationId          String
+  generationRunId         String?
+  inputMessageId          String
+  delegationTaskId        String?
+  supersedesPlanId        String?
+  schemaVersion           String                     @default("turn-plan.v2")
+  protocolVersion         Int                        @default(2)
+  scopeKey                String?
+  scopeSnapshot           Json?
+  executionEpoch          Int                        @default(0)
+  promptVersion           String
+  capabilityCatalogHash   String                     @db.Char(64)
+  planHash                String                     @db.Char(64)
+  revision                Int                        @default(1)
+  status                  ConversationTurnPlanStatus @default(PROPOSED)
+  mode                    String
+  objective               String
+  language                String?
+  requestHash             String                     @db.Char(64)
+  plannerProvider         String?
+  plannerModel            String?
+  plannerProposalHash     String?                    @db.Char(64)
+  plannerProposalSnapshot Json?
+  validationPolicyVersion String?
+  planSnapshot            Json
+  completionCriteria      Json?
+  validationResult        Json?
+  shadowMode              Boolean                    @default(true)
+  validatedAt             DateTime?
+  startedAt               DateTime?
+  completedAt             DateTime?
+  failedAt                DateTime?
+  createdAt               DateTime                   @default(now())
+  updatedAt               DateTime                   @updatedAt
+  representative          Representative             @relation(fields: [representativeId], references: [id])
+  representativeVersion   RepresentativeVersion?     @relation(fields: [representativeVersionId], references: [id], onDelete: SetNull)
+  conversation            Conversation               @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  generationRun           GenerationRun?             @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
+  inputMessage            Message                    @relation("ConversationTurnPlanInputMessage", fields: [inputMessageId], references: [id], onDelete: Cascade)
+  delegationTask          DelegationTask?            @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  supersedesPlan          ConversationTurnPlan?      @relation("ConversationTurnPlanSupersession", fields: [supersedesPlanId], references: [id], onDelete: SetNull)
+  supersededBy            ConversationTurnPlan[]     @relation("ConversationTurnPlanSupersession")
+  actions                 ConversationPlanAction[]
+  workflowRuns            WorkflowRun[]
+  activeExecutionFence    PlanExecutionFence?        @relation("PlanExecutionFenceActivePlan")
+  billableUnits           BillableUnit[]
+  actionResults           ActionResult[]
+  deliveryAttempts        MessageDeliveryAttempt[]
+
+  @@unique([conversationId, inputMessageId, revision])
+  @@unique([generationRunId, revision])
+  @@unique([scopeKey, revision])
+  @@index([representativeId, status, createdAt])
+  @@index([conversationId, status, createdAt])
+  @@index([delegationTaskId, status])
+  @@index([supersedesPlanId])
+  @@index([requestHash])
+  @@index([planHash])
+}
+
+model ConversationPlanAction {
+  id                     String                           @id @default(cuid())
+  turnPlanId             String
+  delegationTaskId       String?
+  delegationTaskStepId   String?
+  sequence               Int
+  actionKey              String
+  kind                   ConversationPlanActionKind
+  capability             CapabilityKind?
+  capabilityKey          String
+  capabilityVersion      String
+  capabilityDefinitionHash String                         @db.Char(64)
+  sideEffectClass        ConversationPlanSideEffectClass @default(NONE)
+  status                 ConversationPlanActionStatus     @default(PLANNED)
+  arguments              Json
+  argumentsHash          String                           @db.Char(64)
+  argumentProvenance     Json
+  inputSnapshot          Json
+  expectedOutput         Json?
+  expectedOutputSchema   Json
+  successContract        Json?
+  completionCriteria     Json?
+  onFailure              String
+  dependsOnActionIds     String[]                         @default([])
+  dependencyPolicy       Json?
+  activationPolicy       Json?
+  failurePolicy          Json?
+  authorizationPhase     ActionAuthorizationPhase?
+  effectiveDecision      PolicyDecision?
+  authorizationVersion   Int                              @default(0)
+  authorizationPolicyVersion String?
+  idempotencyKey         String                           @unique
+  requestPayloadHash     String?                          @db.Char(64)
+  attemptCount           Int                              @default(0)
+  startedAt              DateTime?
+  completedAt            DateTime?
+  failedAt               DateTime?
+  createdAt              DateTime                         @default(now())
+  updatedAt              DateTime                         @updatedAt
+  turnPlan               ConversationTurnPlan             @relation(fields: [turnPlanId], references: [id], onDelete: Cascade)
+  delegationTask         DelegationTask?                  @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
+  delegationTaskStep     DelegationTaskStep?              @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  authorizationDecisions ActionAuthorizationDecision[]
+  deliveryAttempts       MessageDeliveryAttempt[]
+  executionAttempts      ToolExecution[]
+  externalEffects        DelegationTaskExternalEffect[]
+  billableUnits          BillableUnit[]
+  actionResults          ActionResult[]
+
+  @@unique([turnPlanId, sequence])
+  @@unique([turnPlanId, actionKey])
+  @@index([status, createdAt])
+  @@index([delegationTaskId, status])
+  @@index([delegationTaskStepId])
+}
+
+model PlanExecutionFence {
+  scopeKey        String               @id
+  activePlanId    String               @unique
+  activeRevision  Int
+  executionEpoch  Int                  @default(1)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  activePlan      ConversationTurnPlan @relation("PlanExecutionFenceActivePlan", fields: [activePlanId], references: [id], onDelete: Restrict)
+
+  @@index([activePlanId, activeRevision])
+  @@index([executionEpoch, updatedAt])
+}
+
+model BillableUnit {
+  id                        String             @id @default(cuid())
+  planId                    String
+  actionId                  String?
+  goalId                    String?
+  deliverableId             String?
+  productId                 String
+  pricingVersionId          String
+  priceSnapshotHash         String             @db.Char(64)
+  representativeId          String
+  payerAccountId            String
+  entitlementAccountId      String
+  unitKind                  String
+  quantity                  Int
+  scope                     String
+  referenceIds              String[]           @default([])
+  completionRule            String
+  settlementTrigger         String
+  idempotencyKey            String             @unique
+  billingPolicySnapshotHash String             @db.Char(64)
+  authorizedPurposeHash     String             @db.Char(64)
+  status                    BillableUnitStatus @default(PENDING_RESERVATION)
+  reservationOwnerType      String?
+  reservationOwnerId        String?
+  reservationReference      String?
+  reservedAt                DateTime?
+  transferredAt             DateTime?
+  settledAt                 DateTime?
+  releasedAt                DateTime?
+  reconciliationHeldAt      DateTime?
+  createdAt                 DateTime           @default(now())
+  updatedAt                 DateTime           @updatedAt
+  plan                      ConversationTurnPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  action                    ConversationPlanAction? @relation(fields: [actionId], references: [id], onDelete: SetNull)
+  representative            Representative     @relation(fields: [representativeId], references: [id])
+
+  @@index([planId, status, createdAt])
+  @@index([actionId, status])
+  @@index([payerAccountId, entitlementAccountId, status])
+  @@index([reservationOwnerType, reservationOwnerId, status])
+}
+
+model ActionAuthorizationDecision {
+  id                 String                   @id @default(cuid())
+  planActionId       String
+  sequence           Int
+  phase              ActionAuthorizationPhase
+  decision           PolicyDecision
+  reason             String
+  policySnapshot     Json?
+  policySnapshotHash String?                  @db.Char(64)
+  requestPayloadHash String?                  @db.Char(64)
+  matchedRuleId      String?
+  evaluatedBy        String                   @default("policy-engine")
+  validUntil         DateTime?
+  createdAt          DateTime                 @default(now())
+  planAction         ConversationPlanAction   @relation(fields: [planActionId], references: [id], onDelete: Cascade)
+
+  @@unique([planActionId, sequence])
+  @@index([planActionId, phase, createdAt])
+  @@index([decision, createdAt])
 }
 
 model ConversationEpisode {
@@ -3065,6 +3390,7 @@ model ConversationChannelBinding {
   conversation                     Conversation                      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   representativeBinding            RepresentativeChannelBinding?     @relation(fields: [representativeBindingId], references: [id], onDelete: SetNull)
   messages                         Message[]
+  deliveryAttempts                 MessageDeliveryAttempt[]
   memoryChannelDisclosures         MemoryChannelDisclosureDelivery[]
 
   @@index([conversationId, kind])
@@ -3140,6 +3466,8 @@ model Message {
   memoryUseRunOutputs                MemoryUseRun[]                      @relation("MemoryUseOutputMessage")
   memoryDisclosureActivationBoundary MemoryChannelDisclosureActivation?  @relation("MemoryDisclosureActivationBoundary")
   memoryForgetBoundary               ContactChannelMemoryForgetBoundary? @relation("ContactChannelMemoryForgetSourceMessage")
+  inputForTurnPlans                   ConversationTurnPlan[]                @relation("ConversationTurnPlanInputMessage")
+  deliveryAttempts                   MessageDeliveryAttempt[]
 
   @@unique([conversationId, clientMessageId])
   @@unique([channelBindingId, externalMessageId])
@@ -3153,6 +3481,52 @@ model Message {
   @@index([sourceIdentityConnectionProofId])
   @@index([delegationTaskId, createdAt])
   @@index([retentionExpiresAt])
+}
+
+model MessageDeliveryAttempt {
+  id                    String                       @id @default(cuid())
+  messageId             String
+  conversationId        String
+  channelBindingId      String?
+  planId                String?
+  planActionId          String?
+  planRevision          Int?
+  executionEpoch        Int?
+  deliveryOutboxId      String?
+  deliveryLeaseAttempt  Int?
+  attemptNumber         Int
+  status                MessageDeliveryAttemptStatus @default(QUEUED)
+  attemptPhase          MessageDeliveryAttemptPhase   @default(CREATED)
+  transport             ChannelTransport?
+  sourceProvider        ChannelSourceProvider?
+  connectionId          String?
+  idempotencyKey        String                       @unique
+  leaseToken            String?                      @unique
+  leaseExpiresAt        DateTime?
+  availableAt           DateTime                     @default(now())
+  externalMessageId     String?
+  failureCode           String?
+  failureReason         String?
+  startedAt             DateTime?
+  providerCallStartedAt DateTime?
+  responseReceivedAt    DateTime?
+  completedAt           DateTime?
+  createdAt             DateTime                     @default(now())
+  updatedAt             DateTime                     @updatedAt
+  message               Message                      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  conversation          Conversation                 @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  channelBinding        ConversationChannelBinding?  @relation(fields: [channelBindingId], references: [id], onDelete: SetNull)
+  plan                  ConversationTurnPlan?        @relation(fields: [planId], references: [id], onDelete: SetNull)
+  planAction            ConversationPlanAction?      @relation(fields: [planActionId], references: [id], onDelete: SetNull)
+
+  @@unique([messageId, attemptNumber])
+  @@index([status, availableAt, createdAt])
+  @@index([conversationId, status, createdAt])
+  @@index([channelBindingId, status, createdAt])
+  @@index([planId, planRevision, executionEpoch, status])
+  @@index([planActionId])
+  @@index([deliveryOutboxId, deliveryLeaseAttempt])
+  @@index([attemptPhase, leaseExpiresAt])
 }
 
 model MessageRevision {
@@ -3238,6 +3612,7 @@ model GenerationRun {
   entitlementEntries      ServiceEntitlementLedgerEntry[]
   usageCharges            AgentUsageCharge[]
   memoryUseRun            MemoryUseRun?
+  turnPlans               ConversationTurnPlan[]
 
   @@unique([id, conversationId])
   @@index([conversationId, status, queuedAt])
@@ -3820,7 +4195,7 @@ model CapabilityPolicyRule {
   resourceScopeCondition PolicyResourceScope?
   channelCondition       Channel?
   requiredPlanTier       CapabilityPlanTier?
-  maxCostCents           Int?
+  maxEstimatedTokens           Int?
   requiresPaidPlan       Boolean                 @default(false)
   requiresHumanApproval  Boolean                 @default(false)
   priority               Int                     @default(0)
@@ -3945,12 +4320,23 @@ model SandboxLease {
 
 model ToolExecution {
   id                     String                    @id @default(cuid())
-  sessionId              String
+  sessionId              String?
   mcpBindingId           String?
   capability             CapabilityKind
   subagentId             String?
   delegationTaskId       String?
   delegationTaskStepId   String?
+  planActionId           String?
+  planRevision           Int?
+  executionEpoch         Int?
+  attemptNumber          Int?
+  attemptPhase           ExecutionAttemptPhase?
+  executionOutboxId      String?                   @unique
+  externalEffectId       String?                   @unique
+  billingAdmission       Json?
+  transportOutcome       String?
+  semanticOutcome        String?
+  rawResultRef           String?
   generationOutboxId     String?                   @unique
   generationLeaseAttempt Int?
   requestPayloadHash     String?
@@ -3973,10 +4359,13 @@ model ToolExecution {
   bytesRead              Int?
   bytesWritten           Int?
   createdAt              DateTime                  @default(now())
-  session                ComputeSession            @relation(fields: [sessionId], references: [id])
+  session                ComputeSession?           @relation(fields: [sessionId], references: [id])
   mcpBinding             RepresentativeMcpBinding? @relation(fields: [mcpBindingId], references: [id])
   delegationTask         DelegationTask?           @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
   delegationTaskStep     DelegationTaskStep?       @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  planAction             ConversationPlanAction?   @relation(fields: [planActionId], references: [id], onDelete: SetNull)
+  externalEffect         DelegationTaskExternalEffect? @relation(fields: [externalEffectId], references: [id], onDelete: SetNull)
+  actionResult           ActionResult?
   artifacts              Artifact[]
   browserNavigation      BrowserNavigation?
 
@@ -3985,6 +4374,40 @@ model ToolExecution {
   @@index([mcpBindingId, createdAt])
   @@index([delegationTaskId, status, createdAt])
   @@index([delegationTaskStepId])
+  @@unique([planActionId, attemptNumber])
+  @@index([planActionId, attemptPhase, createdAt])
+  @@index([executionEpoch, status, createdAt])
+}
+
+model ActionResult {
+  id                 String                 @id @default(cuid())
+  planId             String
+  actionId           String
+  executionAttemptId String                 @unique
+  planRevision       Int
+  executionEpoch     Int
+  transportOutcome   String
+  semanticOutcome    String
+  output             Json?
+  outputSchemaHash   String?                @db.Char(64)
+  outputHash         String?                @db.Char(64)
+  securityFindings   Json
+  evidenceBindings   Json
+  artifactRefs       String[]               @default([])
+  externalEffectId   String?
+  usageRecordIds     String[]               @default([])
+  billingUnitIds     String[]               @default([])
+  failure            Json?
+  verifiedAt         DateTime
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  plan               ConversationTurnPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  action             ConversationPlanAction @relation(fields: [actionId], references: [id], onDelete: Cascade)
+  executionAttempt   ToolExecution          @relation(fields: [executionAttemptId], references: [id], onDelete: Cascade)
+
+  @@index([planId, semanticOutcome, createdAt])
+  @@index([actionId, verifiedAt])
+  @@index([externalEffectId])
 }
 
 model ApprovalRequest {
@@ -4010,6 +4433,7 @@ model ApprovalRequest {
   decisionNote             String?
   requestPayloadHash       String?
   matchedPolicyRuleId      String?
+  maximumApprovedEffect    Json?
   representative           Representative                @relation(fields: [representativeId], references: [id])
   contact                  Contact?                      @relation(fields: [contactId], references: [id])
   conversation             Conversation?                 @relation(fields: [conversationId], references: [id])
@@ -4153,6 +4577,8 @@ model DelegationTask {
   externalEffects         DelegationTaskExternalEffect[]
   outputs                 DelegationTaskOutput[]
   events                  DelegationTaskEvent[]
+  turnPlans               ConversationTurnPlan[]
+  planActions             ConversationPlanAction[]
 
   @@index([representativeId, status, updatedAt])
   @@index([contactId, status, updatedAt])
@@ -4212,8 +4638,7 @@ model DelegationTaskResourcePolicy {
   id                                    String                @id @default(cuid())
   delegationTaskId                      String                @unique
   maxDurationMinutes                    Int                   @default(15)
-  maxCostCents                          Int?
-  maxCredits                            Int?
+  maxEstimatedTokens                          Int?
   maxComputeMinutes                     Int?
   maxToolCalls                          Int                   @default(1)
   maxSteps                              Int                   @default(1)
@@ -4246,7 +4671,7 @@ model DelegationTaskStep {
   dependsOnStepIds   String[]                       @default([])
   requiresApproval   Boolean                        @default(false)
   approvedAt         DateTime?
-  maxCostCents       Int?
+  maxEstimatedTokens       Int?
   maxDurationSeconds Int?
   inputSnapshot      Json?
   outputSnapshot     Json?
@@ -4265,6 +4690,7 @@ model DelegationTaskStep {
   artifacts          Artifact[]
   externalEffects    DelegationTaskExternalEffect[]
   outputs            DelegationTaskOutput[]
+  planActions         ConversationPlanAction[]
 
   @@unique([delegationTaskId, sequence])
   @@index([delegationTaskId, status, sequence])
@@ -4275,6 +4701,7 @@ model DelegationTaskExternalEffect {
   delegationTaskId     String
   delegationTaskStepId String?
   approvalRequestId    String?                        @unique
+  planActionId         String?
   type                 String
   target               String
   action               String
@@ -4283,6 +4710,9 @@ model DelegationTaskExternalEffect {
   requestPayload       Json?
   responseSnapshot     Json?
   externalReferenceId  String?
+  callAttemptId        String?
+  executionLeaseTokenHash String?                    @db.Char(64)
+  callStartedAt        DateTime?
   approvedAt           DateTime?
   executedAt           DateTime?
   reconciledAt         DateTime?
@@ -4292,11 +4722,15 @@ model DelegationTaskExternalEffect {
   delegationTask       DelegationTask                 @relation(fields: [delegationTaskId], references: [id], onDelete: Cascade)
   delegationTaskStep   DelegationTaskStep?            @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
   approvalRequest      ApprovalRequest?               @relation(fields: [approvalRequestId], references: [id], onDelete: SetNull)
+  planAction           ConversationPlanAction?        @relation(fields: [planActionId], references: [id], onDelete: SetNull)
+  executionAttempt     ToolExecution?
   output               DelegationTaskOutput?
 
   @@index([delegationTaskId, status, createdAt])
   @@index([delegationTaskStepId])
   @@index([externalReferenceId])
+  @@index([planActionId, status, createdAt])
+  @@index([callAttemptId])
 }
 
 model DelegationTaskOutput {
@@ -4353,6 +4787,7 @@ model WorkflowRun {
   subagentId           String?
   delegationTaskId     String?
   delegationTaskStepId String?
+  turnPlanId           String?
   kind                 WorkflowKind
   engine               WorkflowEngine          @default(LOCAL_RUNNER)
   status               WorkflowStatus          @default(QUEUED)
@@ -4383,6 +4818,7 @@ model WorkflowRun {
   approvalRequest      ApprovalRequest?        @relation(fields: [approvalRequestId], references: [id])
   delegationTask       DelegationTask?         @relation(fields: [delegationTaskId], references: [id], onDelete: SetNull)
   delegationTaskStep   DelegationTaskStep?     @relation(fields: [delegationTaskStepId], references: [id], onDelete: SetNull)
+  turnPlan             ConversationTurnPlan?   @relation(fields: [turnPlanId], references: [id], onDelete: SetNull)
   commandOutbox        WorkflowCommandOutbox[]
 
   @@index([representativeId, scheduledAt])
@@ -4392,6 +4828,7 @@ model WorkflowRun {
   @@index([approvalRequestId])
   @@index([delegationTaskId, status, scheduledAt])
   @@index([delegationTaskStepId])
+  @@index([turnPlanId, status, scheduledAt])
 }
 
 model WorkflowCommandOutbox {
@@ -4485,7 +4922,6 @@ model LedgerEntry {
   quantity         Float
   unit             String
   costCents        Int             @default(0)
-  creditDelta      Int             @default(0)
   currency         String          @default("USD")
   notes            String?
   createdAt        DateTime        @default(now())

@@ -5169,6 +5169,149 @@ button.skill-row:hover {
   margin-top: 12px;
 }
 
+.representative-task-progress {
+  display: grid;
+  width: min(82%, 680px);
+  gap: 12px;
+  align-self: center;
+  padding: 14px;
+  border: 1px solid rgba(99, 102, 241, 0.24);
+  border-radius: 14px;
+  background: rgba(238, 242, 255, 0.72);
+}
+
+.representative-task-progress > header {
+  display: grid;
+  gap: 3px;
+}
+
+.representative-task-progress > header span {
+  color: #4f46e5;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.representative-task-progress > header strong {
+  color: var(--marketing-ink);
+  font-size: 0.92rem;
+}
+
+.representative-task-progress > header small,
+.representative-task-progress li small {
+  color: var(--marketing-soft);
+  font-size: 0.74rem;
+}
+
+.representative-turn-plan-details {
+  border: 1px solid rgba(99, 102, 241, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.representative-turn-plan-details summary {
+  min-height: 44px;
+  padding: 11px 12px;
+  color: #4338ca;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.representative-turn-plan-details > div {
+  display: grid;
+  gap: 5px;
+  padding: 0 12px 12px;
+}
+
+.representative-turn-plan-details > div + div {
+  padding-top: 4px;
+}
+
+.representative-turn-plan-details strong {
+  color: var(--marketing-ink);
+  font-size: 0.76rem;
+}
+
+.representative-turn-plan-details ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--marketing-soft);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.representative-task-progress ol {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.representative-task-progress li {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(99, 102, 241, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.representative-task-progress li > span {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #6b7280;
+  font-family: var(--font-mono), "SFMono-Regular", Consolas, monospace;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+
+.representative-task-progress li > div {
+  display: grid;
+  gap: 2px;
+}
+
+.representative-task-progress li strong {
+  color: var(--marketing-ink);
+  font-size: 0.8rem;
+}
+
+.representative-task-progress li.is-running > span,
+.representative-task-progress li.is-queued > span,
+.representative-task-progress li.is-ready > span {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.representative-task-progress li.is-completed > span {
+  background: #ccfbf1;
+  color: #0d9488;
+}
+
+.representative-task-progress li.is-failed > span,
+.representative-task-progress li.is-blocked > span {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+@media (max-width: 680px) {
+  .representative-task-progress {
+    width: 100%;
+  }
+}
+
 .representative-profile-page .representative-chat-starters {
   padding: 14px 18px 0;
 }
@@ -5199,6 +5342,63 @@ button.skill-row:hover {
   font-size: 0.72rem;
   line-height: 1.4;
   text-align: right;
+}
+
+.representative-handoff-control-trigger {
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid var(--marketing-line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--marketing-soft);
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.representative-handoff-control-trigger:hover:not(:disabled) {
+  border-color: rgba(220, 38, 38, 0.28);
+  background: rgba(254, 242, 242, 0.72);
+  color: #b91c1c;
+}
+
+.representative-handoff-confirmation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px;
+  border: 1px solid rgba(217, 119, 6, 0.26);
+  border-radius: 10px;
+  background: rgba(255, 251, 235, 0.82);
+}
+
+.representative-handoff-confirmation > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.representative-handoff-confirmation strong {
+  color: var(--marketing-ink);
+  font-size: 0.88rem;
+}
+
+.representative-handoff-confirmation p {
+  margin: 0;
+  color: var(--marketing-soft);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 680px) {
+  .representative-handoff-confirmation {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .representative-handoff-confirmation .button-row {
+    justify-content: flex-end;
+  }
 }
 
 .representative-chat-composer-body {
@@ -5240,6 +5440,61 @@ button.skill-row:hover {
   min-height: 44px;
   align-items: center;
   justify-content: flex-end;
+}
+
+.representative-chat-pending-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.representative-chat-pending-attachments > div {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--marketing-line);
+  border-radius: 9px;
+  background: var(--marketing-panel-strong);
+  color: var(--marketing-ink);
+}
+
+.representative-chat-pending-attachments span {
+  max-width: 220px;
+  overflow: hidden;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.representative-chat-pending-attachments small {
+  color: var(--marketing-soft);
+  font-size: 0.72rem;
+}
+
+.representative-chat-pending-attachments button {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--marketing-soft);
+  cursor: pointer;
+}
+
+.representative-chat-pending-attachments button:hover {
+  background: rgba(15, 23, 42, 0.06);
+  color: var(--marketing-ink);
+}
+
+.representative-profile-page .representative-chat-attach {
+  min-height: 44px;
+  border-radius: 9px;
 }
 
 .representative-profile-page .representative-chat-send {

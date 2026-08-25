@@ -47,6 +47,7 @@ Delegate currently includes these working surfaces and services:
 - **Matrix Application Service foundation** in `apps/matrix-bridge`, providing authenticated Matrix transaction ingestion and channel event mapping. Native Matrix is an optional channel; it is not required for Telegram availability.
 - **AMN wallet control plane** covering immutable billing products and prices, snapshotted orders, internal wallet ledger entries, local mock payment, default-off WeChat Pay API v3 Native collection and recovery, service-credit fulfillment, usage charging, provisional Creator 20% revenue share, refund/reversal services, withdrawal request freezes, provider adapters, and owner/public wallet views.
 - **Compute broker** in `apps/compute-broker`, providing governed `exec`, `read`, `write`, `process`, and `browser` requests behind approval and policy gates.
+- **Agent Runtime V3** across `packages/runtime`, `packages/model-runtime`, the conversation worker, Compute Broker, and workflow runner: one server-validated goal/action DAG, schema-pinned MCP compilation, atomic execution admission, verified results, evidence-bound composition, and V2 rollback compatibility.
 - **Workflow runner** in `apps/workflow-runner`, supporting the local runner and Temporal-backed durable workflow dispatch.
 - **Prisma/Postgres data model** for representatives, contacts, conversations, delegation tasks, handoffs, approvals, invoices, compute, artifacts, deliverables, workflows, and audit trails.
 - **OpenViking integration** as a rebuildable retrieval projection behind PostgreSQL-authoritative public knowledge and governed memory, with exact-version/hash sync and safe operational diagnostics.
@@ -56,8 +57,9 @@ The durable workflow kinds implemented today are:
 
 - `APPROVAL_EXPIRATION`
 - `HANDOFF_FOLLOW_UP`
+- `DELEGATION_EXECUTION`
 
-Temporal is already wired for those workflows through post-commit command outbox dispatch, native workflow timers, cancellation cleanup, and dashboard phase observability. The historical `CREATOR_TRAINING_REVIEW` enum value is drain-only compatibility and cannot mutate product data. Ordinary real-time chat routing still stays out of Temporal.
+Temporal is wired through post-commit command outbox dispatch, native workflow timers, cancellation cleanup, durable delegation signals, and dashboard phase observability. A delegation signal only wakes orchestration; its activity re-reads Postgres business truth and deduplicates with a stable `signalId`. The historical `CREATOR_TRAINING_REVIEW` enum value is drain-only compatibility and cannot mutate product data. Ordinary real-time chat routing still stays out of Temporal.
 
 ## AMN Target Model
 
@@ -242,7 +244,8 @@ built-in development identities and production authentication boundary:
 pnpm docker:bootstrap:local
 ```
 
-For normal daily startup, use the non-building command below. TypeScript, TSX,
+For normal daily startup, use the non-building command below. It idempotently
+applies pending database migrations before starting services. TypeScript, TSX,
 and CSS changes in Dashboard, Representatives, and their mounted workspace
 packages are picked up by Turbopack Fast Refresh without rebuilding an image:
 
@@ -250,10 +253,10 @@ packages are picked up by Turbopack Fast Refresh without rebuilding an image:
 pnpm docker:up:local
 ```
 
-After a Prisma schema change, run `pnpm docker:migrate:local` and restart the
-Dashboard and Representatives containers so their generated Prisma Clients are
-refreshed. Dependency and image-layer changes still require
-`pnpm docker:bootstrap:local`.
+`pnpm docker:up:local` includes `pnpm docker:migrate:local`. If services were
+already running when the Prisma schema changed, restart the Dashboard and
+Representatives containers so their generated Prisma Clients are refreshed.
+Dependency and image-layer changes still require `pnpm docker:bootstrap:local`.
 
 Use `pnpm docker:up` for the production-shaped local stack; it requires a
 configured Logto Traditional Web application before creator login can succeed.
@@ -384,12 +387,17 @@ The health response should report `engine: "temporal"` and a running Temporal br
 The current Temporal model is:
 
 1. Producers write business truth, `WorkflowRun`, and `WorkflowCommandOutbox` in the same committed Postgres flow.
-2. The workflow runner dispatches `START` and `CANCEL` commands after commit.
+2. The workflow runner dispatches `START`, `CANCEL`, and idempotent `SIGNAL` commands after commit.
 3. Temporal starts the workflow immediately with `externalWorkflowId` as the stable idempotency key.
 4. The workflow receives `scheduledAt`, sleeps durably until that time, then runs a DB-backed idempotent activity.
 5. Manual resolution updates Postgres first and treats Temporal cancellation as cleanup, not authority.
+6. Delegation approval, user input, cancellation, policy revocation, and reconciliation signals use stable domain IDs; Temporal replay cannot advance the same transition twice.
 
-If Temporal configuration is incomplete, Delegate falls back to `local_runner` rather than enqueueing unserviceable Temporal jobs.
+`WORKFLOW_ENGINE` selects the workflow engine explicitly. `local_runner` remains
+available for local development and deployments that deliberately choose it. If
+`temporal` is selected but its address, namespace, or task queue is incomplete,
+Delegate fails closed with `temporal_not_fully_configured`; it does not silently
+switch engines or enqueue an unserviceable Temporal workflow.
 
 ## Environment Guide
 
@@ -434,19 +442,25 @@ The default `.env.example` is safe for local development. Important settings:
 - `PUBLIC_CHAT_RATE_LIMIT_SECRET` HMACs network/audience/representative rate-limit keys before they reach Postgres; it falls back to `REP_PUBLIC_CHAT_SESSION_SECRET`. The three `PUBLIC_CHAT_*_REQUESTS_*` variables tune distributed admission limits. Set `PUBLIC_CHAT_CLIENT_IP_HEADER` only when a trusted reverse proxy overwrites that header, otherwise leave it empty.
 - `PUBLIC_MATERIAL_LINK_SECRET` signs ten-minute public-material links that are bound to the representative, asset checksum, and processing version. Downloads re-check the current published/approved state, so archiving, disabling, replacing, or unpublishing an asset invalidates outstanding links.
 - `DELEGATE_MODEL_ENABLED`, `DELEGATE_MODEL_PROVIDER`, `DELEGATE_MODEL_FALLBACK_PROVIDER`, and the provider-specific model variables control model-backed representative replies.
-- `DELEGATE_MODEL_API_KEY` (or `OPENAI_API_KEY`), `DELEGATE_BAILIAN_API_KEY`, and `ANTHROPIC_API_KEY` enable OpenAI-compatible, Bailian, and Anthropic calls respectively. `ARK_API_KEY` is used by OpenViking/compute integrations, not by the representative reply runtime.
+- `TURN_PLAN_V3_MODE` controls the authoritative Agent Runtime rollout (`disabled | shadow | active_readonly | active_governed`). Active V3 runs one V3 Planner and does not invoke V2 or the legacy natural-language detailed planner. Public representatives try authorized knowledge first; disclosed General fallback additionally requires an explicit turn-level source instruction, a verified miss, and a server-approved non-Owner authority boundary. `active_governed` additionally publishes managed Markdown/TXT documents, typed Compute, and schema-pinned MCP.
+- Production active V3 additionally requires `TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED=true`, set only after the lane passes the executable Shadow release gates.
+- `TURN_PLANNER_V2_MODE` controls rollback/compatibility planning (`disabled | shadow | active_low_risk`). V2 never becomes a second active write authority while a V3 active mode is selected.
+- `DELEGATE_MODEL_PLANNER_PROVIDER` pins planning independently from reply generation. Local deployments prefer `agicto`; configured AGICTO, OpenAI, and compatible Bailian models use native Strict JSON Schema. `DELEGATE_MODEL_PLANNER_MAX_OUTPUT_TOKENS` is the independent budget for structured plans (default `2048`); providers using native strict output may manage their own completion ceiling. JSON-only planners remain untrusted until the server's strict proposal and capability validators both pass.
+- `DELEGATE_MODEL_DOCUMENT_MAX_OUTPUT_TOKENS`, `DELEGATE_MODEL_DOCUMENT_MAX_PARTS`, and `DELEGATE_MODEL_DOCUMENT_TIMEOUT_MS` are the independent output, bounded-continuation, and request budgets for complete managed documents. A length-limited response continues with the same Provider instead of restarting on a fallback; exhaustion still fails closed and never creates an Artifact.
+- `DELEGATE_AGICTO_API_KEY` enables the distinct AGICTO provider at `DELEGATE_AGICTO_BASE_URL`; when omitted it may reuse the already configured `OPENVIKING_MODEL_API_KEY` and `OPENVIKING_MODEL_API_BASE`. AGICTO uses an OpenAI-compatible wire format but is never recorded or credentialed as the OpenAI provider. `DELEGATE_MODEL_API_KEY` (or `OPENAI_API_KEY`), `DELEGATE_BAILIAN_API_KEY`, and `ANTHROPIC_API_KEY` remain isolated credentials for OpenAI, Bailian, and Anthropic respectively.
 - `OPENVIKING_*` controls public memory sync, recall, and commit behavior.
-- `COMPUTE_*` controls the broker, Docker runner, browser image, and native computer-use readiness.
+- `COMPUTE_*` controls the broker, Docker runner, browser image, and native computer-use readiness. `COMPUTE_MCP_CATALOG_REFRESH_INTERVAL_MS` defaults to 120 seconds and must remain below the five-minute external-Availability TTL.
+- `scripts/docker-compose-local.sh` derives `COMPUTE_HOST_WORKSPACE_ROOT` from the current repository path before Compose starts. Do not commit a developer-specific absolute path; direct Compose deployments must provide the host path explicitly or rely on the current `PWD` fallback.
 - `CONVERSATION_OUTBOX_PROCESSING_LEASE_MS` defaults to the five-minute
   renewable conversation-worker lease and cannot be configured below five
   minutes.
 - `WORKFLOW_*` controls local-runner versus Temporal workflow execution.
-- `ARTIFACT_STORE_*` controls MinIO-backed artifact storage.
+- `ARTIFACT_STORE_*` controls MinIO-backed artifact storage. Host-side tools use `ARTIFACT_STORE_ENDPOINT`; Compose services use `ARTIFACT_STORE_DOCKER_ENDPOINT` (default `http://artifact-store:9000`) so containers never mistake their own localhost for MinIO.
 - `KNOWLEDGE_OBJECT_STORE_*` controls private knowledge source storage. Its default bucket is fixed to `delegate-1324808004`; Tencent COS can be used through its S3-compatible endpoint with `FORCE_PATH_STYLE=false`.
 
 Knowledge files are persisted before background processing reads the original object, extracts and normalizes text, prepares retrieval chunks, and writes the document into OpenViking's vector index. An asset becomes `READY` only after source storage, extraction, and vector indexing all succeed. Archive and permanent-delete flows remove the vector index as well, preventing revoked content from remaining retrievable.
 
-When model providers are unavailable, the bot and public representative paths fall back to deterministic previews instead of failing the conversation.
+When model providers are unavailable, legacy presentation-only paths may use deterministic previews. Active V3 planning, evidence retrieval, tool execution, and composition fail closed and never replace a missing tool/evidence result with model knowledge.
 
 ## Useful Commands
 
@@ -671,6 +685,8 @@ The project uses resilient local CSS font fallbacks during builds. If exact Inst
 ## Documentation Map
 
 - [Architecture](./docs/architecture.md): product thesis, runtime loop, security boundary, and OpenViking rules.
+- [Agent Runtime V3](./docs/agent-runtime-v3.md): the authoritative PlannerProposal, TurnPlan, capability, approval, execution, evidence, delivery, billing, rollout, and pi-framework decision.
+- [Conversation runtime flow](./docs/conversation-runtime-flow.md): the channel-neutral V3 execution flow in Chinese.
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): larger system direction and tradeoffs.
 - [Public audience identity](./docs/public-audience-identity.md): web identity, Contact/Conversation, service purchase, and sandbox linkage.
 - [Wallet & Billing product contract](./docs/wallet-billing-product-contract.md): V1 package, price-version, entitlement, revenue, refund, and production-gate rules.

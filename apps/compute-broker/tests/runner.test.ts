@@ -11,7 +11,7 @@ describe("docker lease runner", () => {
   it("creates an isolated reusable lease container with a mounted session volume", () => {
     const args = buildDockerCreateLeaseArgs({
       image: "debian:bookworm-slim",
-      hostWorkspaceRoot: "/Users/a/repos/Delegate",
+      hostWorkspaceRoot: "/Users/tester/projects/Delegate",
       networkMode: "no_network",
       filesystemMode: "read_only_workspace",
       sessionId: "session_1234567890",
@@ -21,7 +21,7 @@ describe("docker lease runner", () => {
     expect(args).toContain("--network");
     expect(args).toContain("none");
     expect(args).toContain("--read-only");
-    expect(args).toContain("/Users/a/repos/Delegate:/workspace:ro");
+    expect(args).toContain("/Users/tester/projects/Delegate:/workspace:ro");
     expect(args).toContain(`${buildDockerLeaseVolumeName("session_1234567890")}:/delegate-session:rw`);
     expect(args).toContain(buildDockerLeaseContainerName("session_1234567890"));
   });
@@ -29,7 +29,7 @@ describe("docker lease runner", () => {
   it("does not silently grant full egress when the policy says allowlist", () => {
     const args = buildDockerCreateLeaseArgs({
       image: "debian:bookworm-slim",
-      hostWorkspaceRoot: "/Users/a/repos/Delegate",
+      hostWorkspaceRoot: "/Users/tester/projects/Delegate",
       networkMode: "allowlist",
       filesystemMode: "workspace_only",
       sessionId: "session_allowlist_1234",
@@ -43,13 +43,13 @@ describe("docker lease runner", () => {
     const sessionId = "public_session_1234";
     const args = buildDockerCreateLeaseArgs({
       image: "debian:bookworm-slim",
-      hostWorkspaceRoot: "/Users/a/repos/Delegate",
+      hostWorkspaceRoot: "/Users/tester/projects/Delegate",
       networkMode: "no_network",
       filesystemMode: "ephemeral_full",
       sessionId,
     });
 
-    expect(args).not.toContain("/Users/a/repos/Delegate:/workspace:rw");
+    expect(args).not.toContain("/Users/tester/projects/Delegate:/workspace:rw");
     expect(args).toContain(`${buildDockerLeaseVolumeName(sessionId)}:/workspace:rw`);
   });
 

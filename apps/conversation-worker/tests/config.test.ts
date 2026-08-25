@@ -3,9 +3,31 @@ import { describe, expect, it } from "vitest";
 import {
   resolveConversationWorkerConfig,
   resolveConversationWorkerModelReadiness,
+  resolveTurnPlannerRunPolicy,
 } from "../src/config";
 
 describe("conversation worker config", () => {
+  it("runs only V3 in active modes and replays persisted delegation steps", () => {
+    expect(resolveTurnPlannerRunPolicy({
+      turnPlannerV2Mode: "active_low_risk",
+      turnPlannerV3Mode: "active_governed",
+      hasPersistedDelegationRequest: false,
+    })).toEqual({
+      runV2Planner: false,
+      runV3Planner: true,
+      allowLegacyDetailedPlanner: false,
+      authoritativeProtocol: 3,
+    });
+    expect(resolveTurnPlannerRunPolicy({
+      turnPlannerV2Mode: "shadow",
+      turnPlannerV3Mode: "active_governed",
+      hasPersistedDelegationRequest: true,
+    })).toMatchObject({
+      runV2Planner: false,
+      runV3Planner: false,
+      authoritativeProtocol: 3,
+    });
+  });
   it("allows web-only processing without Matrix credentials", () => {
     expect(resolveConversationWorkerConfig({})).toMatchObject({
       port: 4040,
@@ -17,8 +39,70 @@ describe("conversation worker config", () => {
       memoryTickTimeoutMs: 60_000,
       readinessStaleMs: 180_000,
       telegramConversationPlatformMode: "worker",
+      turnPlannerV2Mode: "shadow",
+      turnPlannerV3Mode: "disabled",
       telegramRequestTimeoutMs: 15_000,
       outboxProcessingLeaseMs: 5 * 60_000,
+    });
+  });
+
+  it("supports shadow and read-only V3 rollout before governed lanes exist", () => {
+    expect(resolveConversationWorkerConfig({
+      TURN_PLAN_V3_MODE: "shadow",
+    })).toMatchObject({ turnPlannerV3Mode: "shadow" });
+    expect(resolveConversationWorkerConfig({
+      TURN_PLAN_V3_MODE: "active_readonly",
+    })).toMatchObject({ turnPlannerV3Mode: "active_readonly" });
+    expect(resolveConversationWorkerConfig({
+      TURN_PLAN_V3_MODE: "active_governed",
+    })).toMatchObject({ turnPlannerV3Mode: "active_governed" });
+    expect(() => resolveConversationWorkerConfig({
+      TURN_PLAN_V3_MODE: "full",
+    })).toThrow();
+  });
+
+  it("requires an explicit release attestation for production V3 active modes", () => {
+    expect(() => resolveConversationWorkerConfig({
+      NODE_ENV: "production",
+      TURN_PLAN_V3_MODE: "active_governed",
+    })).toThrow("TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED=true");
+    expect(resolveConversationWorkerConfig({
+      NODE_ENV: "production",
+      TURN_PLAN_V3_MODE: "active_governed",
+      TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED: "true",
+    })).toMatchObject({ turnPlannerV3Mode: "active_governed" });
+  });
+
+  it("supports an explicit V2 planner rollout mode", () => {
+    expect(resolveConversationWorkerConfig({
+      TURN_PLANNER_V2_MODE: "active_low_risk",
+    })).toMatchObject({ turnPlannerV2Mode: "active_low_risk" });
+    expect(resolveConversationWorkerConfig({
+      TURN_PLANNER_V2_MODE: "disabled",
+    })).toMatchObject({ turnPlannerV2Mode: "disabled" });
+    expect(() => resolveConversationWorkerConfig({
+      TURN_PLANNER_V2_MODE: "full",
+    })).toThrow();
+  });
+
+  it("validates the canonical public representative origin used for channel links", () => {
+    expect(resolveConversationWorkerConfig({
+      NEXT_PUBLIC_REPRESENTATIVE_URL: "https://representatives.example.test",
+    })).toMatchObject({
+      representativePublicOrigin: "https://representatives.example.test",
+    });
+    expect(() => resolveConversationWorkerConfig({
+      NEXT_PUBLIC_REPRESENTATIVE_URL: "https://user:secret@representatives.example.test/path",
+    })).toThrow("canonical HTTP(S) origin");
+    expect(() => resolveConversationWorkerConfig({
+      NODE_ENV: "production",
+      NEXT_PUBLIC_REPRESENTATIVE_URL: "http://representatives.example.test",
+    })).toThrow("production requires HTTPS");
+    expect(resolveConversationWorkerConfig({
+      NODE_ENV: "production",
+      NEXT_PUBLIC_REPRESENTATIVE_URL: "http://localhost:3002",
+    })).toMatchObject({
+      representativePublicOrigin: "http://localhost:3002",
     });
   });
 
@@ -114,6 +198,22 @@ describe("conversation worker config", () => {
 });
 
 describe("conversation worker model readiness", () => {
+  it("reports AGICTO as the configured provider using the existing OpenViking credential", () => {
+    const readiness = resolveConversationWorkerModelReadiness({
+      DELEGATE_MODEL_PROVIDER: "agicto",
+      OPENVIKING_MODEL_API_KEY: "test-agicto-key",
+      OPENVIKING_MODEL_API_BASE: "https://api.agicto.cn/v1",
+      OPENVIKING_VLM_MODEL: "qwen-plus",
+    });
+
+    expect(readiness).toEqual({
+      state: "ready",
+      configuredProvider: "agicto",
+      readyProviders: ["agicto"],
+    });
+    expect(JSON.stringify(readiness)).not.toContain("test-agicto-key");
+  });
+
   it("reports missing credentials without exposing credential values", () => {
     const readiness = resolveConversationWorkerModelReadiness({
       DELEGATE_MODEL_PROVIDER: "bailian",

@@ -54,7 +54,7 @@ function currentDraft(): RepresentativeSetupSnapshot {
       defaultPolicyMode: "ask",
       baseImage: "debian:bookworm-slim",
       maxSessionMinutes: 15,
-      autoApproveBudgetCents: 0,
+      autoApproveTokenLimit: 0,
       artifactRetentionDays: 14,
       networkMode: "no_network",
       networkAllowlist: [] as string[],
@@ -73,7 +73,7 @@ function currentDraft(): RepresentativeSetupSnapshot {
       naturalLanguageEnabled: true,
       explicitComputeEnabled: true,
       maxSteps: 5,
-      maxCostCents: 0,
+      maxEstimatedTokens: 0,
       knowledgeScope: "user_input_only",
     },
   };
@@ -101,7 +101,7 @@ function publishedSnapshot(skillPacks: unknown[] = []) {
       defaultPolicyMode: "ask",
       baseImage: "debian:bookworm-slim",
       maxSessionMinutes: 15,
-      autoApproveBudgetCents: 0,
+      autoApproveTokenLimit: 0,
       artifactRetentionDays: 14,
       networkMode: "no_network",
       networkAllowlist: [] as string[],
@@ -120,7 +120,7 @@ function publishedSnapshot(skillPacks: unknown[] = []) {
       naturalLanguageEnabled: true,
       explicitComputeEnabled: true,
       maxSteps: 5,
-      maxCostCents: 0,
+      maxEstimatedTokens: 0,
       knowledgeScope: "user_input_only",
     },
     knowledge: {
@@ -463,7 +463,7 @@ describe("representative published runtime snapshot", () => {
       defaultPolicyMode: "deny",
       baseImage: "pinned-image:v1",
       maxSessionMinutes: 10,
-      autoApproveBudgetCents: 40,
+      autoApproveTokenLimit: 40,
       artifactRetentionDays: 7,
       networkMode: "allowlist",
       networkAllowlist: ["shared.example", "current-only.example"],
@@ -483,7 +483,7 @@ describe("representative published runtime snapshot", () => {
       defaultPolicyMode: "allow",
       baseImage: "pinned-image:v1",
       maxSessionMinutes: 30,
-      autoApproveBudgetCents: 100,
+      autoApproveTokenLimit: 100,
       artifactRetentionDays: 30,
       networkMode: "allowlist",
       networkAllowlist: ["published-only.example", "shared.example"],
@@ -505,7 +505,7 @@ describe("representative published runtime snapshot", () => {
       defaultPolicyMode: "deny",
       baseImage: "pinned-image:v1",
       maxSessionMinutes: 10,
-      autoApproveBudgetCents: 40,
+      autoApproveTokenLimit: 40,
       artifactRetentionDays: 7,
       networkMode: "allowlist",
       networkAllowlist: ["shared.example"],
@@ -538,6 +538,24 @@ describe("representative published runtime snapshot", () => {
     expect(applyRepresentativeVersionSnapshot(current, changedImage).compute.enabled).toBe(false);
   });
 
+  it("converts legacy published approval budgets into token limits", () => {
+    const current = currentDraft();
+    current.compute.autoApproveTokenLimit = 500;
+    current.delegation.maxEstimatedTokens = 0;
+    const snapshot = publishedSnapshot();
+    const legacyCompute = snapshot.compute as Record<string, unknown>;
+    delete legacyCompute.autoApproveTokenLimit;
+    legacyCompute.autoApproveBudgetCents = 2;
+    const legacyDelegation = snapshot.delegation as Record<string, unknown>;
+    delete legacyDelegation.maxEstimatedTokens;
+    legacyDelegation.maxCostCents = 3;
+
+    const runtime = applyRepresentativeVersionSnapshot(current, snapshot);
+
+    expect(runtime.compute.autoApproveTokenLimit).toBe(200);
+    expect(runtime.delegation.maxEstimatedTokens).toBe(300);
+  });
+
   it("intersects delegation quotas and knowledge scope instead of expanding them", () => {
     const current = currentDraft();
     current.delegation = {
@@ -545,7 +563,7 @@ describe("representative published runtime snapshot", () => {
       naturalLanguageEnabled: false,
       explicitComputeEnabled: true,
       maxSteps: 2,
-      maxCostCents: 25,
+      maxEstimatedTokens: 25,
       knowledgeScope: "user_input_only",
     };
     const snapshot = publishedSnapshot();
@@ -554,7 +572,7 @@ describe("representative published runtime snapshot", () => {
       naturalLanguageEnabled: true,
       explicitComputeEnabled: true,
       maxSteps: 5,
-      maxCostCents: 100,
+      maxEstimatedTokens: 100,
       knowledgeScope: "public_knowledge",
     };
 
@@ -563,24 +581,24 @@ describe("representative published runtime snapshot", () => {
       naturalLanguageEnabled: false,
       explicitComputeEnabled: true,
       maxSteps: 2,
-      maxCostCents: 25,
+      maxEstimatedTokens: 25,
       knowledgeScope: "user_input_only",
     });
 
-    current.delegation.maxCostCents = 0;
+    current.delegation.maxEstimatedTokens = 0;
     expect(
-      applyRepresentativeVersionSnapshot(current, snapshot).delegation.maxCostCents,
+      applyRepresentativeVersionSnapshot(current, snapshot).delegation.maxEstimatedTokens,
     ).toBe(100);
-    snapshot.delegation.maxCostCents = 0;
-    current.delegation.maxCostCents = 25;
+    snapshot.delegation.maxEstimatedTokens = 0;
+    current.delegation.maxEstimatedTokens = 25;
     expect(
-      applyRepresentativeVersionSnapshot(current, snapshot).delegation.maxCostCents,
+      applyRepresentativeVersionSnapshot(current, snapshot).delegation.maxEstimatedTokens,
     ).toBe(25);
   });
 
-  it("disables legacy delegation snapshots that do not pin a cost ceiling", () => {
+  it("disables legacy delegation snapshots that do not pin a token ceiling", () => {
     const snapshot = publishedSnapshot();
-    delete (snapshot.delegation as { maxCostCents?: number }).maxCostCents;
+    delete (snapshot.delegation as { maxEstimatedTokens?: number }).maxEstimatedTokens;
 
     const runtime = applyRepresentativeVersionSnapshot(currentDraft(), snapshot);
 
@@ -601,7 +619,7 @@ describe("representative published runtime snapshot", () => {
           defaultToolName: "update_contact",
           enabled: true,
           approvalRequired: true,
-          estimatedCostCentsPerCall: 8,
+          estimatedTokensPerCall: 8,
           maxRetries: 1,
           retryBackoffMs: 2000,
         },
@@ -614,7 +632,7 @@ describe("representative published runtime snapshot", () => {
           defaultToolName: null,
           enabled: true,
           approvalRequired: false,
-          estimatedCostCentsPerCall: 0,
+          estimatedTokensPerCall: 0,
           maxRetries: 2,
           retryBackoffMs: 1000,
         },
@@ -627,7 +645,7 @@ describe("representative published runtime snapshot", () => {
           defaultToolName: "current_only",
           enabled: true,
           approvalRequired: false,
-          estimatedCostCentsPerCall: 0,
+          estimatedTokensPerCall: 0,
           maxRetries: 1,
           retryBackoffMs: 1000,
         },
@@ -643,7 +661,7 @@ describe("representative published runtime snapshot", () => {
             defaultToolName: "read_contact",
             enabled: true,
             approvalRequired: false,
-            estimatedCostCentsPerCall: 4,
+            estimatedTokensPerCall: 4,
             maxRetries: 3,
             retryBackoffMs: 500,
             skillReleasePin: null,
@@ -657,7 +675,7 @@ describe("representative published runtime snapshot", () => {
             defaultToolName: null,
             enabled: true,
             approvalRequired: false,
-            estimatedCostCentsPerCall: 0,
+            estimatedTokensPerCall: 0,
             maxRetries: 2,
             retryBackoffMs: 1000,
             skillReleasePin: null,
@@ -671,7 +689,7 @@ describe("representative published runtime snapshot", () => {
             defaultToolName: "published_only",
             enabled: true,
             approvalRequired: false,
-            estimatedCostCentsPerCall: 0,
+            estimatedTokensPerCall: 0,
             maxRetries: 1,
             retryBackoffMs: 1000,
             skillReleasePin: null,
@@ -690,11 +708,47 @@ describe("representative published runtime snapshot", () => {
         defaultToolName: "read_contact",
         enabled: true,
         approvalRequired: true,
-        estimatedCostCentsPerCall: 8,
+        estimatedTokensPerCall: 8,
         maxRetries: 1,
         retryBackoffMs: 2000,
       },
     ]);
+  });
+
+  it("converts a legacy MCP call estimate into tokens", () => {
+    const runtimeBindings = resolveRepresentativeRuntimeMcpBindings(
+      [{
+        id: "binding-legacy",
+        slug: "legacy",
+        serverUrl: "https://legacy.example.test",
+        transportKind: "STREAMABLE_HTTP",
+        allowedToolNames: ["lookup"],
+        defaultToolName: "lookup",
+        enabled: true,
+        approvalRequired: true,
+        estimatedTokensPerCall: 50,
+        maxRetries: 1,
+        retryBackoffMs: 1000,
+      }],
+      {
+        mcpBindings: [{
+          id: "binding-legacy",
+          slug: "legacy",
+          serverUrl: "https://legacy.example.test",
+          transportKind: "streamable_http",
+          allowedToolNames: ["lookup"],
+          defaultToolName: "lookup",
+          enabled: true,
+          approvalRequired: true,
+          estimatedCostCentsPerCall: 1,
+          maxRetries: 1,
+          retryBackoffMs: 1000,
+          skillReleasePin: null,
+        }],
+      },
+    );
+
+    expect(runtimeBindings[0]?.estimatedTokensPerCall).toBe(100);
   });
 
   it("revokes linked MCP grants for an untrusted ClawHub release but accepts a verified signature", () => {
@@ -720,7 +774,7 @@ describe("representative published runtime snapshot", () => {
         defaultToolName: "read_contact",
         enabled: true,
         approvalRequired: true,
-        estimatedCostCentsPerCall: 0,
+        estimatedTokensPerCall: 0,
         maxRetries: 1,
         retryBackoffMs: 1000,
         skillReleasePin: {
@@ -741,7 +795,7 @@ describe("representative published runtime snapshot", () => {
       defaultToolName: "read_contact",
       enabled: true,
       approvalRequired: true,
-      estimatedCostCentsPerCall: 0,
+      estimatedTokensPerCall: 0,
       maxRetries: 1,
       retryBackoffMs: 1000,
       representativeSkillPackLink: {
@@ -810,7 +864,7 @@ describe("representative published runtime snapshot", () => {
         defaultToolName: "read",
         enabled: true,
         approvalRequired: true,
-        estimatedCostCentsPerCall: 0,
+        estimatedTokensPerCall: 0,
         maxRetries: 1,
         retryBackoffMs: 1000,
         skillReleasePin: {
@@ -831,7 +885,7 @@ describe("representative published runtime snapshot", () => {
       defaultToolName: "read",
       enabled: true,
       approvalRequired: true,
-      estimatedCostCentsPerCall: 0,
+      estimatedTokensPerCall: 0,
       maxRetries: 1,
       retryBackoffMs: 1000,
       representativeSkillPackLink: {
@@ -924,7 +978,7 @@ describe("representative published runtime snapshot", () => {
       defaultToolName: "read",
       enabled: true,
       approvalRequired: true,
-      estimatedCostCentsPerCall: 0,
+      estimatedTokensPerCall: 0,
       maxRetries: 1,
       retryBackoffMs: 1000,
       representativeSkillPackLink: {
@@ -959,7 +1013,7 @@ describe("representative published runtime snapshot", () => {
       defaultToolName: "read",
       enabled: true,
       approvalRequired: true,
-      estimatedCostCentsPerCall: 0,
+      estimatedTokensPerCall: 0,
       maxRetries: 1,
       retryBackoffMs: 1000,
     };
@@ -992,7 +1046,7 @@ describe("representative published runtime snapshot", () => {
       nextCompute,
       nextDelegation: {
         ...current.delegation,
-        maxCostCents: 50,
+        maxEstimatedTokens: 50,
       },
       changedBy: "owner-1",
     });
@@ -1002,7 +1056,7 @@ describe("representative published runtime snapshot", () => {
       "compute.networkMode",
       "compute.networkAllowlist",
       "compute.capabilityModes.mcp",
-      "delegation.maxCostCents",
+      "delegation.maxEstimatedTokens",
     ]);
     expect(payload?.values.networkAllowlistCount).toBe(1);
     expect(JSON.stringify(payload)).not.toContain("registry.example");
@@ -1026,7 +1080,7 @@ describe("representative published runtime snapshot", () => {
     expect(publishingSource).toContain("install.status !== WorkspaceSkillInstallStatus.UPDATE_AVAILABLE");
     expect(setupSource).toContain("install.status !== WorkspaceSkillInstallStatus.UPDATE_AVAILABLE");
     expect(publishingSource).toContain("mcpBindings: representative.mcpBindings.flatMap");
-    expect(publishingSource).toContain("maxCostCents: representative.delegationMaxCostCents");
+    expect(publishingSource).toContain("maxEstimatedTokens: representative.delegationMaxEstimatedTokens");
     expect(setupSource).toContain("type: EventType.COMPUTE_POLICY_CHANGED");
     expect(setupSource).toContain("if (computePolicyAuditPayload)");
   });

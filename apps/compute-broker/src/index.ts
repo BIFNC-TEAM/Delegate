@@ -11,12 +11,16 @@ import {
 } from "@delegate/compute-protocol";
 import { computeBrokerConfig } from "./config";
 import { startApprovedExecutionLoop } from "./approved-execution-loop";
+import { startMcpCatalogRefreshLoop } from "./mcp-catalog-refresh";
 import {
   executeTool,
   listSessionApprovals,
   listSessionArtifacts,
   resolveApproval,
 } from "./executions";
+export { syncRepresentativeMcpToolDefinitions } from "./mcp-tool-definitions";
+export { enqueueActionExecutionAttempt } from "./action-execution-attempts";
+export { persistVerifiedActionResult } from "./verified-action-results";
 import { getNativeComputerUsePreflight } from "./native-browser";
 import { toPublicBrokerError } from "./public-error";
 import {
@@ -188,12 +192,37 @@ server.listen(computeBrokerConfig.port, "0.0.0.0", () => {
   console.log(`compute-broker listening on http://0.0.0.0:${computeBrokerConfig.port}`);
 });
 
-startSandboxLeaseCleanupLoop({
+const sandboxCleanupTimer = startSandboxLeaseCleanupLoop({
   intervalMs: computeBrokerConfig.sandboxLifecycle.cleanupIntervalMs,
   idleStopMinutes: computeBrokerConfig.sandboxLifecycle.idleStopMinutes,
 });
 
-startApprovedExecutionLoop();
+const stopApprovedExecutionLoop = startApprovedExecutionLoop();
+const stopMcpCatalogRefreshLoop = startMcpCatalogRefreshLoop({
+  intervalMs: computeBrokerConfig.mcpCatalogRefreshIntervalMs,
+});
+let backgroundLoopsStopped = false;
+
+export function stopComputeBrokerBackgroundLoops() {
+  if (backgroundLoopsStopped) return;
+  backgroundLoopsStopped = true;
+  clearInterval(sandboxCleanupTimer);
+  stopApprovedExecutionLoop();
+  stopMcpCatalogRefreshLoop();
+}
+
+server.once("close", stopComputeBrokerBackgroundLoops);
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    stopComputeBrokerBackgroundLoops();
+    server.close((error) => {
+      if (error) {
+        console.error("compute_broker_shutdown_failed", error);
+        process.exitCode = 1;
+      }
+    });
+  });
+}
 
 function isAuthorized(authorizationHeader: string | undefined): boolean {
   if (!authorizationHeader?.startsWith("Bearer ")) {

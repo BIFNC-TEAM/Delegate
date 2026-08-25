@@ -133,8 +133,8 @@ export async function PATCH(
                 maxSessionMinutes: Number(
                   (body.compute as { maxSessionMinutes?: number }).maxSessionMinutes ?? 15,
                 ),
-                autoApproveBudgetCents: Number(
-                  (body.compute as { autoApproveBudgetCents?: number }).autoApproveBudgetCents ??
+                autoApproveTokenLimit: Number(
+                  (body.compute as { autoApproveTokenLimit?: number }).autoApproveTokenLimit ??
                     0,
                 ),
                 artifactRetentionDays: Number(
@@ -177,7 +177,7 @@ export async function PATCH(
                 defaultPolicyMode: "ask",
                 baseImage: "debian:bookworm-slim",
                 maxSessionMinutes: 15,
-                autoApproveBudgetCents: 0,
+                autoApproveTokenLimit: 0,
                 artifactRetentionDays: 14,
                 networkMode: "no_network",
                 networkAllowlist: [],
@@ -247,7 +247,7 @@ function normalizeDelegationSetup(value: unknown) {
     explicitComputeEnabled:
       record.explicitComputeEnabled === undefined ? true : Boolean(record.explicitComputeEnabled),
     maxSteps: Number(record.maxSteps ?? 5),
-    maxCostCents: Number(record.maxCostCents ?? 0),
+    maxEstimatedTokens: Number(record.maxEstimatedTokens ?? 0),
     knowledgeScope: record.knowledgeScope === "public_knowledge"
       ? "public_knowledge" as const
       : "user_input_only" as const,

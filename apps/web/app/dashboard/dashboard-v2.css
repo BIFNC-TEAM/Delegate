@@ -2513,6 +2513,15 @@
 .inbox-citations > span { display: grid; gap: 2px; }
 .inbox-citations strong { font-size: .58rem; }
 .inbox-citations em { color: var(--v2-muted); font-size: .55rem; font-style: normal; line-height: 1.45; }
+.inbox-message-attachments { display: grid; gap: 6px; padding-top: 7px; border-top: 1px solid var(--v2-line); }
+.inbox-message-attachments > small { color: var(--v2-indigo); font-size: .5rem; font-weight: 850; text-transform: uppercase; }
+.inbox-message-attachments > div { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 5px 10px; align-items: center; padding: 8px; border: 1px solid var(--v2-line); border-radius: 8px; background: #fff; }
+.inbox-message-attachments img { grid-column: 1 / -1; width: min(260px,100%); max-height: 180px; object-fit: contain; border: 1px solid var(--v2-line); border-radius: 6px; background: #f9fafb; }
+.inbox-message-attachments > div > div { display: grid; min-width: 0; gap: 2px; }
+.inbox-message-attachments strong { overflow: hidden; color: var(--v2-ink); font-size: .6rem; text-overflow: ellipsis; white-space: nowrap; }
+.inbox-message-attachments span { color: var(--v2-muted); font-size: .53rem; }
+.inbox-message-attachments a { min-height: 30px; padding: 6px 8px; border: 1px solid var(--v2-line); border-radius: 7px; color: var(--v2-teal-strong); font-size: .56rem; font-weight: 800; text-decoration: none; }
+.inbox-message-attachments em { color: var(--v2-faint); font-size: .53rem; font-style: normal; }
 .inbox-composer { display: grid; grid-template-columns: minmax(0,.72fr) minmax(0,1.5fr) auto; align-items: end; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--v2-line); background: #fafafa; }
 .inbox-composer > div { display: grid; gap: 2px; }
 .inbox-composer strong { font-size: .64rem; }

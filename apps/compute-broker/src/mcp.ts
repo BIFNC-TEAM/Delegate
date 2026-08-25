@@ -29,6 +29,53 @@ type BindingRecord = {
   retryBackoffMs: number;
 };
 
+export type RemoteMcpToolDefinition = {
+  name: string;
+  description?: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+};
+
+export async function listRemoteMcpTools(params: {
+  binding: Pick<BindingRecord, "serverUrl" | "transportKind">;
+}): Promise<RemoteMcpToolDefinition[]> {
+  const bindingUrl = await assertSafePublicMcpUrl(params.binding.serverUrl);
+  const transport = createTransport(params.binding.transportKind, bindingUrl);
+  const client = new Client({ name: "delegate-capability-registry", version: "0.1.0" });
+  try {
+    await client.connect(transport as unknown as Transport);
+    const listedTools: unknown = await client.listTools();
+    assertMcpToolList(listedTools, {
+      maxBytes: computeBrokerConfig.mcpPayloadLimits.maxToolListBytes,
+      maxDepth: computeBrokerConfig.mcpPayloadLimits.maxJsonDepth,
+      maxNodes: computeBrokerConfig.mcpPayloadLimits.maxJsonNodes,
+      maxItems: computeBrokerConfig.mcpPayloadLimits.maxToolCount,
+    });
+    return listedTools.tools.map((tool) => {
+      const record = tool as unknown as Record<string, unknown>;
+      if (!isRecord(record["inputSchema"])) {
+        throw new SessionError(502, "mcp_tool_input_schema_missing");
+      }
+      return {
+        name: tool.name,
+        ...(typeof record["description"] === "string"
+          ? { description: record["description"] }
+          : {}),
+        inputSchema: record["inputSchema"] as Record<string, unknown>,
+        ...(isRecord(record["outputSchema"])
+          ? { outputSchema: record["outputSchema"] as Record<string, unknown> }
+          : {}),
+        ...(isRecord(record["annotations"])
+          ? { annotations: record["annotations"] as Record<string, unknown> }
+          : {}),
+      };
+    });
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
 type CallToolResultContent = Array<
   | {
       type: string;
@@ -46,6 +93,8 @@ export async function callRemoteMcpTool(params: {
   binding: BindingRecord;
   requestedToolName?: string | null | undefined;
   toolArguments?: Record<string, unknown> | undefined;
+  onBeforeToolCall?: (() => Promise<void>) | undefined;
+  onToolsListed?: ((tools: RemoteMcpToolDefinition[]) => Promise<void>) | undefined;
 }) {
   const bindingUrl = await assertSafePublicMcpUrl(params.binding.serverUrl);
   const payloadLimits = computeBrokerConfig.mcpPayloadLimits;
@@ -69,6 +118,8 @@ export async function callRemoteMcpTool(params: {
       bindingUrl,
       requestedToolName: params.requestedToolName,
       toolArguments: params.toolArguments,
+      onBeforeToolCall: params.onBeforeToolCall,
+      onToolsListed: params.onToolsListed,
     });
 
     return {
@@ -89,6 +140,8 @@ async function callRemoteMcpToolOnce(params: {
   bindingUrl: URL;
   requestedToolName?: string | null | undefined;
   toolArguments?: Record<string, unknown> | undefined;
+  onBeforeToolCall?: (() => Promise<void>) | undefined;
+  onToolsListed?: ((tools: RemoteMcpToolDefinition[]) => Promise<void>) | undefined;
 }) {
   const transport = createTransport(params.binding.transportKind, params.bindingUrl);
   const client = new Client({
@@ -107,6 +160,25 @@ async function callRemoteMcpToolOnce(params: {
       maxItems: computeBrokerConfig.mcpPayloadLimits.maxToolCount,
     });
     const availableToolNames = listedTools.tools.map((tool) => tool.name);
+    const toolDefinitions = listedTools.tools.map((tool) => {
+      const record = tool as unknown as Record<string, unknown>;
+      if (!isRecord(record["inputSchema"])) {
+        throw new SessionError(502, "mcp_tool_input_schema_missing");
+      }
+      return {
+        name: tool.name,
+        ...(typeof record["description"] === "string"
+          ? { description: record["description"] }
+          : {}),
+        inputSchema: record["inputSchema"] as Record<string, unknown>,
+        ...(isRecord(record["outputSchema"])
+          ? { outputSchema: record["outputSchema"] as Record<string, unknown> }
+          : {}),
+        ...(isRecord(record["annotations"])
+          ? { annotations: record["annotations"] as Record<string, unknown> }
+          : {}),
+      } satisfies RemoteMcpToolDefinition;
+    });
     const resolved = resolveMcpToolName({
       binding: params.binding,
       requestedToolName: params.requestedToolName,
@@ -116,6 +188,8 @@ async function callRemoteMcpToolOnce(params: {
       throw new SessionError(409, "mcp_tool_not_exposed_by_server");
     }
 
+    await params.onToolsListed?.(toolDefinitions);
+    await params.onBeforeToolCall?.();
     const result: unknown = await client.callTool({
       name: resolved.toolName,
       arguments: params.toolArguments ?? {},
@@ -228,6 +302,10 @@ function normalizeMcpError(
     attempt,
     details.retryable,
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function classifyMcpTransportFailure(error: unknown): {

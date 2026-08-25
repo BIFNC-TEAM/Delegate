@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 
 import {
+  admitGenerationMessageProviderDelivery,
   contactMemorySharingConsentContractVersion,
   consumeIdentityBindingChallenge,
   createContactMemorySharingChallenge,
@@ -2550,8 +2551,19 @@ async function prepareSharedMemoryDelivery(
     leaseAttempt: 1,
     outputMessageId: output.id,
   };
-  await prepareGenerationMessageChannelDelivery(fenceInput);
-  return { output, outbox, fenceInput };
+  const preparation = await prepareGenerationMessageChannelDelivery(fenceInput);
+  await admitGenerationMessageProviderDelivery({
+    ...fenceInput,
+    deliveryAdmission: preparation.deliveryAdmission,
+  });
+  return {
+    output,
+    outbox,
+    fenceInput: {
+      ...fenceInput,
+      deliveryAdmission: preparation.deliveryAdmission,
+    },
+  };
 }
 
 async function revokeSharedMemoryConsentInTransaction(

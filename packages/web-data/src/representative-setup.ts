@@ -122,7 +122,7 @@ const computeSetupSchema = z.object({
   defaultPolicyMode: policyDecisionSchema,
   baseImage: z.string().trim().min(1),
   maxSessionMinutes: z.number().int().min(5).max(240),
-  autoApproveBudgetCents: z.number().int().min(0).max(100000),
+  autoApproveTokenLimit: z.number().int().min(0).max(10_000_000),
   artifactRetentionDays: z.number().int().min(1).max(365),
   networkMode: computeNetworkModeSchema,
   networkAllowlist: z.array(z.string().trim().min(1)).max(50),
@@ -135,7 +135,7 @@ const delegationSetupSchema = z.object({
   naturalLanguageEnabled: z.boolean(),
   explicitComputeEnabled: z.boolean(),
   maxSteps: z.number().int().min(1).max(5),
-  maxCostCents: z.number().int().min(0).max(1_000_000),
+  maxEstimatedTokens: z.number().int().min(0).max(100_000_000),
   knowledgeScope: z.enum(["user_input_only", "public_knowledge"]),
 });
 
@@ -183,7 +183,7 @@ const representativeSetupUpdateSchema = z.object({
     naturalLanguageEnabled: true,
     explicitComputeEnabled: true,
     maxSteps: 5,
-    maxCostCents: 0,
+    maxEstimatedTokens: 0,
     knowledgeScope: "user_input_only",
   }),
 });
@@ -228,7 +228,7 @@ export type RepresentativeSetupSnapshot = Pick<
     defaultPolicyMode: "allow" | "ask" | "deny";
     baseImage: string;
     maxSessionMinutes: number;
-    autoApproveBudgetCents: number;
+    autoApproveTokenLimit: number;
     artifactRetentionDays: number;
     networkMode: "no_network" | "allowlist" | "full";
     networkAllowlist: string[];
@@ -240,7 +240,7 @@ export type RepresentativeSetupSnapshot = Pick<
     naturalLanguageEnabled: boolean;
     explicitComputeEnabled: boolean;
     maxSteps: number;
-    maxCostCents: number;
+    maxEstimatedTokens: number;
     knowledgeScope: "user_input_only" | "public_knowledge";
   };
 };
@@ -262,15 +262,35 @@ export class RepresentativeSetupConflictError extends Error {
 export type RepresentativeRuntimeMcpBindingGrant = {
   id: string;
   slug: string;
+  displayName?: string;
+  description?: string | null;
   serverUrl: string;
   transportKind: "streamable_http" | "sse";
   allowedToolNames: string[];
   defaultToolName: string | null;
   enabled: true;
   approvalRequired: boolean;
-  estimatedCostCentsPerCall: number;
+  estimatedTokensPerCall: number;
   maxRetries: number;
   retryBackoffMs: number;
+  configRevision?: number;
+  availability?: {
+    healthState: "ready" | "degraded" | "unavailable";
+    checkedAt: string;
+    failureCode?: string;
+  };
+  toolDefinitions?: Array<{
+    exactToolName: string;
+    description?: string | null;
+    semanticMetadata?: Record<string, unknown> | null;
+    inputSchema: Record<string, unknown>;
+    outputSchema: Record<string, unknown> | null;
+    toolSchemaHash: string;
+    bindingDefinitionHash: string;
+    bindingRevision: number;
+    canonicalizationVersion: string;
+    observedAt?: string;
+  }>;
 };
 export type RepresentativeRuntimeAuthoritySnapshot = {
   representativeVersionId: string;
@@ -294,11 +314,11 @@ export type ComputePolicyAuditPayload = {
   };
   values: {
     maxSessionMinutes: number;
-    autoApproveBudgetCents: number;
+    autoApproveTokenLimit: number;
     artifactRetentionDays: number;
     networkAllowlistCount: number;
     maxSteps: number;
-    maxCostCents: number;
+    maxEstimatedTokens: number;
   };
 };
 export type RepresentativeDirectoryItem = {
@@ -531,7 +551,7 @@ const defaultComputeSetup: RepresentativeSetupSnapshot["compute"] = {
   defaultPolicyMode: "ask",
   baseImage: "debian:bookworm-slim",
   maxSessionMinutes: 15,
-  autoApproveBudgetCents: 0,
+  autoApproveTokenLimit: 0,
   artifactRetentionDays: 14,
   networkMode: "no_network",
   networkAllowlist: [],
@@ -551,7 +571,7 @@ const defaultDelegationSetup: RepresentativeSetupSnapshot["delegation"] = {
   naturalLanguageEnabled: true,
   explicitComputeEnabled: true,
   maxSteps: 5,
-  maxCostCents: 0,
+  maxEstimatedTokens: 0,
   knowledgeScope: "user_input_only",
 };
 
@@ -669,7 +689,7 @@ export async function createRepresentative(
           computeDefaultPolicyMode: mapPolicyDecisionToDb(template.compute.defaultPolicyMode),
           computeBaseImage: template.compute.baseImage,
           computeMaxSessionMinutes: template.compute.maxSessionMinutes,
-          computeAutoApproveBudgetCents: template.compute.autoApproveBudgetCents,
+          computeAutoApproveTokenLimit: template.compute.autoApproveTokenLimit,
           computeArtifactRetentionDays: template.compute.artifactRetentionDays,
           computeNetworkMode: mapComputeNetworkModeToDb(template.compute.networkMode),
           computeNetworkAllowlist: sanitizeNetworkAllowlist(template.compute.networkAllowlist),
@@ -678,7 +698,7 @@ export async function createRepresentative(
           delegationNaturalLanguageEnabled: template.delegation.naturalLanguageEnabled,
           delegationExplicitComputeEnabled: template.delegation.explicitComputeEnabled,
           delegationMaxSteps: template.delegation.maxSteps,
-          delegationMaxCostCents: template.delegation.maxCostCents,
+          delegationMaxEstimatedTokens: template.delegation.maxEstimatedTokens,
           delegationKnowledgeScope: mapDelegationKnowledgeScopeToDb(template.delegation.knowledgeScope),
           agentWallet: {
             create: {
@@ -974,6 +994,10 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
       mcpBindings: {
         orderBy: { createdAt: "asc" },
         include: {
+          toolDefinitions: {
+            where: { availability: "ready", supersededAt: null },
+            orderBy: { observedAt: "desc" },
+          },
           representativeSkillPackLink: {
             select: {
               id: true,
@@ -1031,7 +1055,7 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
     ),
     baseImage: representative.computeBaseImage,
     maxSessionMinutes: representative.computeMaxSessionMinutes,
-    autoApproveBudgetCents: representative.computeAutoApproveBudgetCents,
+    autoApproveTokenLimit: representative.computeAutoApproveTokenLimit,
     artifactRetentionDays: representative.computeArtifactRetentionDays,
     networkMode: mapComputeNetworkModeFromDb(representative.computeNetworkMode),
     networkAllowlist: sanitizeNetworkAllowlist(
@@ -1049,7 +1073,7 @@ export async function getRepresentativeRuntimeAuthoritySnapshot(
     naturalLanguageEnabled: representative.delegationNaturalLanguageEnabled,
     explicitComputeEnabled: representative.delegationExplicitComputeEnabled,
     maxSteps: representative.delegationMaxSteps,
-    maxCostCents: representative.delegationMaxCostCents,
+    maxEstimatedTokens: representative.delegationMaxEstimatedTokens,
     knowledgeScope: mapDelegationKnowledgeScopeFromDb(
       representative.delegationKnowledgeScope,
     ),
@@ -1235,7 +1259,7 @@ export async function updateRepresentativeSetup(
           computeDefaultPolicyMode: mapPolicyDecisionToDb(input.compute.defaultPolicyMode),
           computeBaseImage: input.compute.baseImage,
           computeMaxSessionMinutes: input.compute.maxSessionMinutes,
-          computeAutoApproveBudgetCents: input.compute.autoApproveBudgetCents,
+          computeAutoApproveTokenLimit: input.compute.autoApproveTokenLimit,
           computeArtifactRetentionDays: input.compute.artifactRetentionDays,
           computeNetworkMode: mapComputeNetworkModeToDb(input.compute.networkMode),
           computeNetworkAllowlist: sanitizeNetworkAllowlist(input.compute.networkAllowlist),
@@ -1244,7 +1268,7 @@ export async function updateRepresentativeSetup(
           delegationNaturalLanguageEnabled: input.delegation.naturalLanguageEnabled,
           delegationExplicitComputeEnabled: input.delegation.explicitComputeEnabled,
           delegationMaxSteps: input.delegation.maxSteps,
-          delegationMaxCostCents: input.delegation.maxCostCents,
+          delegationMaxEstimatedTokens: input.delegation.maxEstimatedTokens,
           delegationKnowledgeScope: mapDelegationKnowledgeScopeToDb(input.delegation.knowledgeScope),
         },
         select: { humanInLoop: true },
@@ -1355,9 +1379,9 @@ export function buildComputePolicyAuditPayload(params: {
     params.currentCompute.maxSessionMinutes !== params.nextCompute.maxSessionMinutes
       ? "compute.maxSessionMinutes"
       : null,
-    params.currentCompute.autoApproveBudgetCents !==
-      params.nextCompute.autoApproveBudgetCents
-      ? "compute.autoApproveBudgetCents"
+    params.currentCompute.autoApproveTokenLimit !==
+      params.nextCompute.autoApproveTokenLimit
+      ? "compute.autoApproveTokenLimit"
       : null,
     params.currentCompute.artifactRetentionDays !==
       params.nextCompute.artifactRetentionDays
@@ -1399,8 +1423,8 @@ export function buildComputePolicyAuditPayload(params: {
     params.currentDelegation.maxSteps !== params.nextDelegation.maxSteps
       ? "delegation.maxSteps"
       : null,
-    params.currentDelegation.maxCostCents !== params.nextDelegation.maxCostCents
-      ? "delegation.maxCostCents"
+    params.currentDelegation.maxEstimatedTokens !== params.nextDelegation.maxEstimatedTokens
+      ? "delegation.maxEstimatedTokens"
       : null,
     params.currentDelegation.knowledgeScope !== params.nextDelegation.knowledgeScope
       ? "delegation.knowledgeScope"
@@ -1424,13 +1448,13 @@ export function buildComputePolicyAuditPayload(params: {
     },
     values: {
       maxSessionMinutes: params.nextCompute.maxSessionMinutes,
-      autoApproveBudgetCents: params.nextCompute.autoApproveBudgetCents,
+      autoApproveTokenLimit: params.nextCompute.autoApproveTokenLimit,
       artifactRetentionDays: params.nextCompute.artifactRetentionDays,
       networkAllowlistCount: sanitizeNetworkAllowlist(
         params.nextCompute.networkAllowlist,
       ).length,
       maxSteps: params.nextDelegation.maxSteps,
-      maxCostCents: params.nextDelegation.maxCostCents,
+      maxEstimatedTokens: params.nextDelegation.maxEstimatedTokens,
     },
   };
 }
@@ -1527,7 +1551,7 @@ function serializeRepresentativeSetup(
       defaultPolicyMode: mapPolicyDecisionFromDb(representative.computeDefaultPolicyMode),
       baseImage: representative.computeBaseImage,
       maxSessionMinutes: representative.computeMaxSessionMinutes,
-      autoApproveBudgetCents: representative.computeAutoApproveBudgetCents,
+      autoApproveTokenLimit: representative.computeAutoApproveTokenLimit,
       artifactRetentionDays: representative.computeArtifactRetentionDays,
       networkMode: mapComputeNetworkModeFromDb(representative.computeNetworkMode),
       networkAllowlist: sanitizeNetworkAllowlist(representative.computeNetworkAllowlist),
@@ -1539,7 +1563,7 @@ function serializeRepresentativeSetup(
       naturalLanguageEnabled: representative.delegationNaturalLanguageEnabled,
       explicitComputeEnabled: representative.delegationExplicitComputeEnabled,
       maxSteps: representative.delegationMaxSteps,
-      maxCostCents: representative.delegationMaxCostCents,
+      maxEstimatedTokens: representative.delegationMaxEstimatedTokens,
       knowledgeScope: mapDelegationKnowledgeScopeFromDb(representative.delegationKnowledgeScope),
     },
   };
@@ -1659,7 +1683,18 @@ export function resolvePublishedComputeCeiling(
   current: RepresentativeSetupSnapshot["compute"],
   publishedValue: unknown,
 ): RepresentativeSetupSnapshot["compute"] {
-  const published = computeSetupSchema.safeParse(publishedValue);
+  const publishedRecord = asJsonRecord(publishedValue);
+  const legacyAutoApproveBudget = publishedRecord?.autoApproveBudgetCents;
+  const published = computeSetupSchema.safeParse(
+    publishedRecord
+      && typeof publishedRecord.autoApproveTokenLimit !== "number"
+      && typeof legacyAutoApproveBudget === "number"
+      ? {
+          ...publishedRecord,
+          autoApproveTokenLimit: legacyAutoApproveBudget * 100,
+        }
+      : publishedValue,
+  );
   if (!published.success) {
     return {
       ...cloneComputeSetup(current),
@@ -1698,9 +1733,9 @@ export function resolvePublishedComputeCeiling(
       current.maxSessionMinutes,
       publishedCompute.maxSessionMinutes,
     ),
-    autoApproveBudgetCents: Math.min(
-      current.autoApproveBudgetCents,
-      publishedCompute.autoApproveBudgetCents,
+    autoApproveTokenLimit: Math.min(
+      current.autoApproveTokenLimit,
+      publishedCompute.autoApproveTokenLimit,
     ),
     artifactRetentionDays: Math.min(
       current.artifactRetentionDays,
@@ -1758,13 +1793,20 @@ export function resolvePublishedDelegationCeiling(
     published.maxSteps <= 5
       ? published.maxSteps
       : 1;
-  const hasPublishedMaxCostCents =
-    typeof published?.maxCostCents === "number" &&
-    Number.isInteger(published.maxCostCents) &&
-    published.maxCostCents >= 0 &&
-    published.maxCostCents <= 1_000_000;
-  const publishedMaxCostCents = hasPublishedMaxCostCents
-    ? published.maxCostCents as number
+  const legacyMaxCost = published?.maxCostCents;
+  const normalizedMaxEstimatedTokens =
+    typeof published?.maxEstimatedTokens === "number"
+      ? published.maxEstimatedTokens
+      : typeof legacyMaxCost === "number"
+        ? legacyMaxCost * 100
+        : undefined;
+  const hasPublishedMaxEstimatedTokens =
+    typeof normalizedMaxEstimatedTokens === "number" &&
+    Number.isInteger(normalizedMaxEstimatedTokens) &&
+    normalizedMaxEstimatedTokens >= 0 &&
+    normalizedMaxEstimatedTokens <= 100_000_000;
+  const publishedMaxEstimatedTokens = hasPublishedMaxEstimatedTokens
+    ? normalizedMaxEstimatedTokens as number
     : 0;
   const publishedKnowledgeScope =
     published?.knowledgeScope === "public_knowledge"
@@ -1775,22 +1817,22 @@ export function resolvePublishedDelegationCeiling(
     enabled:
       current.enabled &&
       published?.enabled === true &&
-      hasPublishedMaxCostCents,
+      hasPublishedMaxEstimatedTokens,
     naturalLanguageEnabled:
       current.naturalLanguageEnabled &&
       published?.naturalLanguageEnabled === true &&
-      hasPublishedMaxCostCents,
+      hasPublishedMaxEstimatedTokens,
     explicitComputeEnabled:
       current.explicitComputeEnabled &&
       published?.explicitComputeEnabled === true &&
-      hasPublishedMaxCostCents,
+      hasPublishedMaxEstimatedTokens,
     maxSteps: Math.min(current.maxSteps, publishedMaxSteps),
-    maxCostCents: hasPublishedMaxCostCents
-      ? resolveRestrictiveDelegationCostLimit(
-          current.maxCostCents,
-          publishedMaxCostCents,
+    maxEstimatedTokens: hasPublishedMaxEstimatedTokens
+      ? resolveRestrictiveDelegationTokenLimit(
+          current.maxEstimatedTokens,
+          publishedMaxEstimatedTokens,
         )
-      : current.maxCostCents,
+      : current.maxEstimatedTokens,
     knowledgeScope:
       current.knowledgeScope === "user_input_only" ||
       publishedKnowledgeScope === "user_input_only"
@@ -1799,7 +1841,7 @@ export function resolvePublishedDelegationCeiling(
   };
 }
 
-function resolveRestrictiveDelegationCostLimit(current: number, published: number): number {
+function resolveRestrictiveDelegationTokenLimit(current: number, published: number): number {
   // Zero means "unlimited" for delegation tasks, so it is the least
   // restrictive value rather than the numerical minimum.
   if (current === 0) return published;
@@ -1858,15 +1900,37 @@ export function resolveRepresentativeRuntimeMcpBindings(
   currentBindings: Array<{
     id: string;
     slug: string;
+    displayName?: string;
+    description?: string | null;
     serverUrl: string;
     transportKind: string;
     allowedToolNames: unknown;
     defaultToolName: string | null;
     enabled: boolean;
     approvalRequired: boolean;
-    estimatedCostCentsPerCall: number;
+    estimatedTokensPerCall: number;
     maxRetries: number;
     retryBackoffMs: number;
+    configRevision?: number;
+    consecutiveFailures?: number;
+    lastHealthObservationStartedAt?: Date | null;
+    lastFailureAt?: Date | null;
+    lastFailureReason?: string | null;
+    lastSuccessAt?: Date | null;
+    toolDefinitions?: Array<{
+      exactToolName: string;
+      description?: string | null;
+      semanticMetadata?: unknown;
+      inputSchema: unknown;
+      outputSchema: unknown;
+      toolSchemaHash: string;
+      bindingDefinitionHash: string;
+      bindingRevision: number;
+      canonicalizationVersion: string;
+      availability?: string;
+      observedAt?: Date;
+      supersededAt?: Date | null;
+    }>;
     representativeSkillPackLink?: {
       id: string;
       enabled: boolean;
@@ -1957,23 +2021,128 @@ export function resolveRepresentativeRuntimeMcpBindings(
       allowedToolNames,
     });
 
+    const toolDefinitions = (current.toolDefinitions ?? []).flatMap((definition) => {
+      if (
+        definition.bindingRevision !== (current.configRevision ?? -1)
+        || !allowedToolNames.includes(definition.exactToolName)
+        || !asJsonRecord(definition.inputSchema)
+        || (
+          definition.outputSchema !== null
+          && !asJsonRecord(definition.outputSchema)
+        )
+      ) {
+        return [];
+      }
+      return [{
+        exactToolName: definition.exactToolName,
+        ...(definition.description !== undefined
+          ? { description: definition.description }
+          : {}),
+        ...(asJsonRecord(definition.semanticMetadata)
+          ? { semanticMetadata: asJsonRecord(definition.semanticMetadata) }
+          : {}),
+        inputSchema: asJsonRecord(definition.inputSchema)!,
+        outputSchema: asJsonRecord(definition.outputSchema)
+          ? asJsonRecord(definition.outputSchema)
+          : null,
+        toolSchemaHash: `sha256:${definition.toolSchemaHash}`,
+        bindingDefinitionHash: `sha256:${definition.bindingDefinitionHash}`,
+        bindingRevision: definition.bindingRevision,
+        canonicalizationVersion: definition.canonicalizationVersion,
+        ...(definition.observedAt
+          ? { observedAt: definition.observedAt.toISOString() }
+          : {}),
+      }];
+    });
+    const availability = (
+      current.consecutiveFailures !== undefined
+      || current.lastHealthObservationStartedAt !== undefined
+      || current.lastFailureAt !== undefined
+      || current.lastSuccessAt !== undefined
+    )
+      ? resolveMcpBindingAvailability(current)
+      : undefined;
     return [{
       id: published.id,
       slug: published.slug,
+      ...(current.displayName ? { displayName: current.displayName } : {}),
+      ...(current.description !== undefined
+        ? { description: current.description }
+        : {}),
       serverUrl: published.serverUrl,
       transportKind: published.transportKind,
       allowedToolNames,
       defaultToolName,
       enabled: true as const,
       approvalRequired: current.approvalRequired || published.approvalRequired,
-      estimatedCostCentsPerCall: Math.max(
-        current.estimatedCostCentsPerCall,
-        published.estimatedCostCentsPerCall,
+      estimatedTokensPerCall: Math.max(
+        current.estimatedTokensPerCall,
+        published.estimatedTokensPerCall,
       ),
       maxRetries: Math.min(current.maxRetries, published.maxRetries),
       retryBackoffMs: Math.max(current.retryBackoffMs, published.retryBackoffMs),
+      ...(current.configRevision !== undefined
+        ? { configRevision: current.configRevision }
+        : {}),
+      ...(availability ? { availability } : {}),
+      ...(toolDefinitions.length ? { toolDefinitions } : {}),
     }];
   });
+}
+
+function resolveMcpBindingAvailability(binding: {
+  enabled: boolean;
+  consecutiveFailures?: number;
+  lastHealthObservationStartedAt?: Date | null;
+  lastFailureAt?: Date | null;
+  lastFailureReason?: string | null;
+  lastSuccessAt?: Date | null;
+}) {
+  const failed = (binding.consecutiveFailures ?? 0) > 0;
+  const checkedAt = latestTrustedObservationDate([
+    binding.lastHealthObservationStartedAt,
+    failed ? binding.lastFailureAt : binding.lastSuccessAt,
+  ]).toISOString();
+  if (!binding.enabled) {
+    return {
+      healthState: "unavailable" as const,
+      checkedAt,
+      failureCode: "mcp_binding_disabled",
+    };
+  }
+  if (failed) {
+    return {
+      healthState: "degraded" as const,
+      checkedAt,
+      failureCode: normalizeMcpAvailabilityFailureCode(binding.lastFailureReason),
+    };
+  }
+  if (!binding.lastSuccessAt) {
+    return {
+      healthState: "degraded" as const,
+      checkedAt,
+      failureCode: "mcp_health_unverified",
+    };
+  }
+  return { healthState: "ready" as const, checkedAt };
+}
+
+function latestTrustedObservationDate(values: Array<Date | null | undefined>) {
+  return values.reduce<Date>((latest, value) =>
+    value instanceof Date
+      && Number.isFinite(value.getTime())
+      && value.getTime() > latest.getTime()
+      ? value
+      : latest,
+  new Date(0));
+}
+
+function normalizeMcpAvailabilityFailureCode(value: string | null | undefined) {
+  const normalized = value?.trim().toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "_")
+    .replace(/^_+|_+$/gu, "")
+    .slice(0, 120);
+  return normalized ? `mcp_${normalized}` : "mcp_health_degraded";
 }
 
 type PublishedSkillReleasePin = {
@@ -2036,7 +2205,7 @@ function isRuntimeAvailableMcpSkillLink(link: {
 
 type PublishedMcpBindingGrant = Omit<
   RepresentativeRuntimeMcpBindingGrant,
-  "enabled"
+  "enabled" | "toolDefinitions"
 > & {
   enabled: boolean;
   skillReleasePin: PublishedSkillReleasePin | null;
@@ -2069,6 +2238,13 @@ function parsePublishedMcpBindingGrant(
     )
       ? [...new Set(record.allowedToolNames.map((toolName) => toolName.trim()))]
       : null;
+  const legacyEstimatedCost = record.estimatedCostCentsPerCall;
+  const estimatedTokensPerCall =
+    typeof record.estimatedTokensPerCall === "number"
+      ? record.estimatedTokensPerCall
+      : typeof legacyEstimatedCost === "number"
+        ? legacyEstimatedCost * 100
+        : undefined;
   if (
     !transportKind ||
     !allowedToolNames ||
@@ -2080,9 +2256,9 @@ function parsePublishedMcpBindingGrant(
     !record.serverUrl.trim() ||
     typeof record.enabled !== "boolean" ||
     typeof record.approvalRequired !== "boolean" ||
-    typeof record.estimatedCostCentsPerCall !== "number" ||
-    !Number.isInteger(record.estimatedCostCentsPerCall) ||
-    record.estimatedCostCentsPerCall < 0 ||
+    typeof estimatedTokensPerCall !== "number" ||
+    !Number.isInteger(estimatedTokensPerCall) ||
+    estimatedTokensPerCall < 0 ||
     typeof record.maxRetries !== "number" ||
     !Number.isInteger(record.maxRetries) ||
     record.maxRetries < 0 ||
@@ -2105,7 +2281,7 @@ function parsePublishedMcpBindingGrant(
         : null,
     enabled: record.enabled,
     approvalRequired: record.approvalRequired,
-    estimatedCostCentsPerCall: record.estimatedCostCentsPerCall,
+    estimatedTokensPerCall,
     maxRetries: record.maxRetries,
     retryBackoffMs: record.retryBackoffMs,
     skillReleasePin,

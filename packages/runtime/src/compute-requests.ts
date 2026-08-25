@@ -67,7 +67,7 @@ function parseComputePayload(normalized: string): ParsedComputeRequest | null {
 
     return buildRequest("read", path, {
       path,
-      estimatedCostCents: 2,
+      estimatedTokens: 200,
     });
   }
 
@@ -82,7 +82,7 @@ function parseComputePayload(normalized: string): ParsedComputeRequest | null {
     return buildRequest("write", path, {
       path,
       content,
-      estimatedCostCents: 4 + Math.ceil(content.length / 512),
+      estimatedTokens: 400 + 100 * Math.ceil(content.length / 512),
     });
   }
 
@@ -92,7 +92,7 @@ function parseComputePayload(normalized: string): ParsedComputeRequest | null {
 
     return buildRequest("browser", url, {
       url,
-      estimatedCostCents: 10,
+      estimatedTokens: 1_000,
     });
   }
 
@@ -124,7 +124,8 @@ function parseComputePayload(normalized: string): ParsedComputeRequest | null {
       bindingSlug,
       ...(toolName ? { toolName } : {}),
       toolArguments,
-      estimatedCostCents: 12 + Math.ceil(JSON.stringify(toolArguments).length / 256),
+      estimatedTokens:
+        1_200 + 100 * Math.ceil(JSON.stringify(toolArguments).length / 256),
     });
   }
 
@@ -141,7 +142,8 @@ export function shouldConsiderNaturalLanguageCompute(input: string) {
   if (!normalized || extractComputePayload(normalized).matched) return false;
 
   return [
-    /(?:保存|写入|生成|创建|撰写|编写|制作|写|做|导出|转换).{0,40}(?:文件|文档|markdown|md|txt|json|csv|报告|总结|方案|教案|故事|记录|纪要|清单|表格|简历|邮件|说明|规范)/i,
+    /(?:保存|写入|生成|创建|撰写|编写|制作|写|做|导出|转换).{0,40}(?:文件|文档|markdown|md|txt|json|csv|报告|总结|方案|教案|教程|指南|故事|记录|纪要|清单|表格|简历|邮件|说明|规范)/i,
+    /(?:给我|提供|准备|整理).{0,40}(?:教程|指南|学习资料).{0,24}(?:以|用)?.{0,8}(?:文件|文档).{0,8}(?:形式)?(?:提供|交付|发送)?|(?:教程|指南|学习资料).{0,24}(?:以|用).{0,8}(?:文件|文档).{0,8}(?:形式)?(?:提供|交付|发送)?/i,
     /(?:打开|访问|浏览|检查|测试).{0,24}(?:https?:\/\/|网页|网站|页面|url)/i,
     /(?:运行|执行).{0,12}(?:命令|脚本|代码)/i,
     /(?:读取|查看|分析).{0,20}(?:文件|\.md\b|\.txt\b|\.json\b|\.csv\b)/i,
@@ -162,7 +164,7 @@ export function buildComputeRequestFromNaturalLanguagePlan(
     case "read": {
       const path = plan.path?.trim();
       return path
-        ? buildRequest("read", summary, { path, estimatedCostCents: 2 })
+        ? buildRequest("read", summary, { path, estimatedTokens: 200 })
         : null;
     }
     case "write": {
@@ -172,14 +174,14 @@ export function buildComputeRequestFromNaturalLanguagePlan(
         ? buildRequest("write", summary, {
             path,
             content,
-            estimatedCostCents: 4 + Math.ceil(content.length / 512),
+            estimatedTokens: 400 + 100 * Math.ceil(content.length / 512),
           })
         : null;
     }
     case "browser": {
       const url = plan.url?.trim();
       return url && isLikelyUrl(url)
-        ? buildRequest("browser", summary, { url, estimatedCostCents: 10 })
+        ? buildRequest("browser", summary, { url, estimatedTokens: 1_000 })
         : null;
     }
     case "process":
@@ -188,10 +190,10 @@ export function buildComputeRequestFromNaturalLanguagePlan(
       return command
         ? buildRequest(plan.capability, summary, {
             command,
-            estimatedCostCents:
+            estimatedTokens:
               plan.capability === "process"
-                ? 6 + Math.ceil(command.length / 48)
-                : 4 + Math.ceil(command.length / 64),
+                ? 600 + 100 * Math.ceil(command.length / 48)
+                : 400 + 100 * Math.ceil(command.length / 64),
           })
         : null;
     }
@@ -228,10 +230,17 @@ export function readPersistedDelegationStepRequest(value: unknown): ParsedComput
     typeof record.bindingId !== "string" &&
     typeof record.bindingSlug !== "string"
   ) return null;
+  const { estimatedCostCents: legacyEstimatedCostCents, ...persisted } = record;
+  const estimatedTokens = typeof record.estimatedTokens === "number"
+    ? record.estimatedTokens
+    : typeof legacyEstimatedCostCents === "number"
+      ? legacyEstimatedCostCents * 100
+      : undefined;
   return {
-    ...record,
+    ...persisted,
     capability,
     displayTarget: displayTarget.trim(),
+    ...(estimatedTokens !== undefined ? { estimatedTokens } : {}),
     hasPaidEntitlement: record.hasPaidEntitlement === true,
     browserMode: record.browserMode === "native" ? "native" : "deterministic",
     maxSteps: typeof record.maxSteps === "number" ? Math.max(1, Math.min(8, Math.floor(record.maxSteps))) : 1,
@@ -252,10 +261,10 @@ export function formatComputeUsageExamples() {
 function buildCommandRequest(capability: CapabilityKind, command: string): ParsedComputeRequest {
   return buildRequest(capability, command, {
     command,
-    estimatedCostCents:
+    estimatedTokens:
       capability === "process"
-        ? 6 + Math.ceil(command.length / 48)
-        : 4 + Math.ceil(command.length / 64),
+        ? 600 + 100 * Math.ceil(command.length / 48)
+        : 400 + 100 * Math.ceil(command.length / 64),
   });
 }
 

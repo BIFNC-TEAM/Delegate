@@ -1,9 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  generalModelAnswerSourceStatement:
+    "来源说明：本回答未引用已授权知识或记忆，内容由通用模型生成。",
   privateChannelSourceVerificationUnavailableStatement:
     "来源说明：暂时无法核验本次回答是否引用了已授权知识或记忆。为避免发送未经核验的内容，本次回答已被隐藏，请稍后重新提问。",
   generateRepresentativeReply: vi.fn(),
+  generateManagedDocument: vi.fn(),
+  buildRecentConversationRecallReply: vi.fn(),
+  planTurnV2: vi.fn(),
+  planTurnV3: vi.fn(),
+  composeTurnV3: vi.fn(),
+  buildCapabilityCatalogV3: vi.fn(),
+  validateJsonSchemaValue: vi.fn(),
+  validateComposedMessageDraftV3: vi.fn(),
+  resolveComposerSourceGoalOutcomesV3: vi.fn(),
+  compileCapabilityAction: vi.fn(),
   hasMatchedExecutableSkill: vi.fn(),
   isConversationCancellationRequest: vi.fn(),
   hasPersistedTelegramBotConnections: vi.fn(),
@@ -12,9 +24,15 @@ const mocks = vi.hoisted(() => ({
   renderFailClosedReplyPreview: vi.fn(),
   renderGroundedKnowledgeFallbackWithTrace: vi.fn(),
   claimNextOperatorMessageWorkItem: vi.fn(),
+  claimNextConversationMessageDeliveryWorkItem: vi.fn(),
   claimNextGenerationWorkItem: vi.fn(),
+  completeConversationMessageDelivery: vi.fn(),
+  completeConversationTurnPlan: vi.fn(),
+  completeReadyConversationTurnPlanForGenerationRun: vi.fn(),
   completeInlineGenerationRun: vi.fn(),
   createConversationPlan: vi.fn(),
+  createManagedConversationDocumentArtifact: vi.fn(),
+  prepareManagedConversationDocumentArtifact: vi.fn(),
   readStructuredCollectorState: vi.fn(),
   shouldStartStructuredCollector: vi.fn(),
   beginStructuredCollector: vi.fn(),
@@ -22,18 +40,39 @@ const mocks = vi.hoisted(() => ({
   formatStructuredCollectorPrompt: vi.fn(),
   formatStructuredCollectorSummary: vi.fn(),
   getRepresentativeRuntimeSetupSnapshot: vi.fn(),
+  getRepresentativeRuntimeAuthoritySnapshot: vi.fn(),
   buildRepresentativeRuntimeProfile: vi.fn(),
   loadGenerationRecentTurns: vi.fn(),
+  loadLatestConversationTurnPlanRevision: vi.fn(),
+  loadReplayableConversationTurnPlan: vi.fn(),
+  loadReplayableConversationTurnPlanV3: vi.fn(),
+  persistConversationTurnPlanV3: vi.fn(),
+  persistConversationTurnPlannerFailureV3: vi.fn(),
+  loadV3GovernedCompositionContext: vi.fn(),
+  prepareV3InlineAction: vi.fn(),
+  markV3InlineActionCallStarted: vi.fn(),
+  completeV3InlineAction: vi.fn(),
   loadConversationOperationalContext: vi.fn(),
+  probeRepresentativeKnowledgeMetadata: vi.fn(),
   recallRepresentativeContext: vi.fn(),
   markGenerationDeliveryComplete: vi.fn(),
   prepareGenerationMessageChannelDelivery: vi.fn(),
+  persistConversationTurnPlan: vi.fn(),
+  persistConversationTurnPlannerFailure: vi.fn(),
+  recordConversationPlanActionAuthorization: vi.fn(),
+  recordConversationMessageProviderAcceptance: vi.fn(),
+  recordGenerationMessageProviderAcceptance: vi.fn(),
+  recordOperatorMessageProviderAcceptance: vi.fn(),
   completeConversationIntake: vi.fn(),
   setConversationCollectorState: vi.fn(),
+  updateGenerationTurnExecutionProgress: vi.fn(),
   clearConversationCollectorState: vi.fn(),
   parseComputeDirective: vi.fn(),
   shouldConsiderNaturalLanguageCompute: vi.fn(),
   buildComputeRequestsFromDelegationPlan: vi.fn(),
+  buildCapabilityCatalog: vi.fn(),
+  turnEnvelopeParse: vi.fn(),
+  validateTurnPlanV2: vi.fn(),
   readPersistedDelegationStepRequest: vi.fn(),
   resolveDeterministicContactMemorySharingCommand: vi.fn(),
   resolveGovernedPublicMaterialDeliveries: vi.fn(),
@@ -46,21 +85,27 @@ const mocks = vi.hoisted(() => ({
   continueClarifyingDelegationTask: vi.fn(),
   completeOperatorMessageDelivery: vi.fn(),
   deferOperatorMessageDelivery: vi.fn(),
+  deferConversationMessageDelivery: vi.fn(),
   findConversationClarifyingDelegationTask: vi.fn(),
   executeAudienceTool: vi.fn(),
   finalizeComputeDelegationTask: vi.fn(),
   failGenerationRun: vi.fn(),
+  failConversationTurnPlan: vi.fn(),
+  failActiveV3InlinePlanExecution: vi.fn(),
+  failV3InlinePlanExecution: vi.fn(),
   renewGenerationWorkItemLease: vi.fn(),
   retryGenerationDelivery: vi.fn(),
   markDelegationTaskAwaitingApproval: vi.fn(),
   markDelegationTaskRunning: vi.fn(),
   waitGenerationRunForComputeApproval: vi.fn(),
   assertConversationChannelDeliveryAvailable: vi.fn(),
+  admitGenerationMessageProviderDelivery: vi.fn(),
   authorizeGenerationRunFreeUsage: vi.fn(),
   reserveGenerationConversationWalletUsage: vi.fn(),
   renderPrivateChannelGenerationDeliveryText: vi.fn(),
   releaseConversationEntitlement: vi.fn(),
   retryOperatorMessageDelivery: vi.fn(),
+  retryConversationMessageDelivery: vi.fn(),
   resolveTelegramBotRuntimeCredential: vi.fn(),
   withActiveTelegramRepresentativeChannelFence: vi.fn(),
   withGenerationMessageProviderDeliveryFence: vi.fn(),
@@ -68,7 +113,15 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@delegate/model-runtime", () => ({
+  buildCapabilityDiscoveryDocumentV3: (input: Record<string, unknown>) => ({
+    ...input,
+    discoveryHash: `sha256:${"d".repeat(64)}`,
+  }),
+  generateManagedDocument: mocks.generateManagedDocument,
   generateRepresentativeReply: mocks.generateRepresentativeReply,
+  planTurnV2: mocks.planTurnV2,
+  planTurnV3: mocks.planTurnV3,
+  composeTurnV3: mocks.composeTurnV3,
   planNaturalLanguageComputeRequest: mocks.planNaturalLanguageComputeRequest,
   renderGroundedKnowledgeFallbackWithTrace:
     mocks.renderGroundedKnowledgeFallbackWithTrace,
@@ -80,6 +133,44 @@ vi.mock("@delegate/runtime", () => ({
     reason: "Built-in conversation action is allowed in the worker test fixture.",
   }),
   buildComputeRequestsFromDelegationPlan: mocks.buildComputeRequestsFromDelegationPlan,
+  buildRecentConversationRecallReply: mocks.buildRecentConversationRecallReply,
+  buildCapabilityCatalog: mocks.buildCapabilityCatalog,
+  buildCapabilityCatalogV3: mocks.buildCapabilityCatalogV3,
+  buildCapabilityAvailabilitySnapshotV3: ({ catalog, observedAt, capabilities }: {
+    catalog: { catalogHash: string };
+    observedAt: string;
+    capabilities: unknown[];
+  }) => ({
+    catalogHash: catalog.catalogHash,
+    observedAt,
+    capabilities,
+  }),
+  capabilityDefinitionV3Schema: {
+    safeParse: (value: unknown) => value && typeof value === "object"
+      ? { success: true, data: value }
+      : { success: false },
+  },
+  CAPABILITY_CANONICALIZATION_VERSION_V3: "delegate-capability-v1",
+  derivePlannerCapabilitySchema: (schema: Record<string, unknown>) => schema,
+  deriveTurnConstraintsFromMessage: (text: string) => ({
+    scope: "turn",
+    toolPolicy: text.includes("不要使用任何工具") ? "forbidden" : "auto",
+    source: text.includes("不要使用任何工具")
+      ? "explicit_user_instruction"
+      : "default",
+    sourcePointers: text.includes("不要使用任何工具")
+      ? ["/currentMessage/text"]
+      : [],
+  }),
+  stableSha256: () => `sha256:${"a".repeat(64)}`,
+  createCapabilityCompilerRegistryFromPublicationsV3: () => ({
+    compile: mocks.compileCapabilityAction,
+  }),
+  resolveGoalOutcomesV3: vi.fn(() => []),
+  resolveComposerSourceGoalOutcomesV3:
+    mocks.resolveComposerSourceGoalOutcomesV3,
+  validateComposedMessageDraftV3: mocks.validateComposedMessageDraftV3,
+  composedMessageDraftV3Schema: { safeParse: vi.fn(() => ({ success: false })) },
   advanceStructuredCollector: mocks.advanceStructuredCollector,
   beginStructuredCollector: mocks.beginStructuredCollector,
   createConversationPlan: mocks.createConversationPlan,
@@ -96,17 +187,152 @@ vi.mock("@delegate/runtime", () => ({
   resolveConversationSubagent: () => ({ id: "public", allowedConversationDispositions: ["answer"] }),
   shouldStartStructuredCollector: mocks.shouldStartStructuredCollector,
   shouldConsiderNaturalLanguageCompute: mocks.shouldConsiderNaturalLanguageCompute,
+  turnEnvelopeSchema: { parse: mocks.turnEnvelopeParse },
+  validateJsonSchemaValue: mocks.validateJsonSchemaValue,
+  validateTurnPlanV2: mocks.validateTurnPlanV2,
+  validateTurnPlanV3: vi.fn(({ plan }) => ({ ok: true, plan })),
 }));
 
 vi.mock("@delegate/web-data", () => ({
+  buildMcpToolCapabilityPublicationV3: ({ binding, tool }: {
+    binding: { id: string; slug: string };
+    tool: {
+      exactToolName: string;
+      bindingRevision: number;
+      description?: string;
+      inputSchema: Record<string, unknown>;
+      outputSchema?: Record<string, unknown>;
+      toolSchemaHash: string;
+      bindingDefinitionHash: string;
+    };
+  }) => {
+    const key = `mcp.${binding.slug}.${tool.exactToolName}`;
+    return {
+      definition: {
+        key,
+        version: String(tool.bindingRevision),
+        description: tool.description ?? `Call ${tool.exactToolName}`,
+        executor: "mcp",
+        inputSchema: tool.inputSchema,
+        outputSchema: tool.outputSchema ?? {
+          type: "object",
+          properties: { result: {} },
+          required: ["result"],
+          additionalProperties: false,
+        },
+        effect: { boundary: "external", mutation: "write", reversibility: "unknown" },
+        idempotency: "non_idempotent",
+        supportedChannels: ["web", "matrix", "telegram"],
+        requiredIdentityScopes: [],
+        requiredDataScopes: [],
+        tags: [binding.slug, tool.exactToolName],
+        semantics: {
+          operations: ["read", "search"],
+          evidenceClasses: ["capability_result"],
+          freshnessClasses: ["bounded"],
+          authorityClasses: ["external_authoritative"],
+          domains: ["repository"],
+          aliases: [binding.slug, tool.exactToolName],
+        },
+        canonicalizationVersion: "delegate-capability-v1",
+        mcpToolSchemaHash: tool.toolSchemaHash,
+        bindingDefinitionHash: tool.bindingDefinitionHash,
+        definitionHash: `sha256:${"a".repeat(64)}`,
+      },
+      availability: {
+        capabilityKey: key,
+        capabilityVersion: String(tool.bindingRevision),
+        definitionHash: `sha256:${"a".repeat(64)}`,
+        healthState: "ready",
+        checkedAt: "2026-08-25T00:00:00.000Z",
+      },
+      target: {
+        executor: "mcp",
+        bindingId: binding.id,
+        bindingRevision: tool.bindingRevision,
+        toolName: tool.exactToolName,
+      },
+      searchDocument: `${tool.description ?? ""} ${tool.exactToolName}`,
+      discoveryTextTrust: "third_party_untrusted",
+    };
+  },
+  buildWorkspaceSkillCapabilityPublicationV3: ({ skill, release }: {
+    skill: { slug: string };
+    release: {
+      id: string;
+      version: string;
+      displayName: string;
+      summary: string;
+      capabilityTags: string[];
+    };
+  }) => {
+    const key = `skill.${skill.slug}`;
+    return {
+      definition: {
+        key,
+        version: release.version,
+        description: `${release.displayName}: ${release.summary}`,
+        executor: "skill",
+        inputSchema: {
+          type: "object",
+          properties: { request: { type: "string" } },
+          required: ["request"],
+          additionalProperties: false,
+        },
+        outputSchema: {
+          type: "object",
+          properties: { result: {} },
+          required: ["result"],
+          additionalProperties: false,
+        },
+        effect: { boundary: "external", mutation: "write", reversibility: "unknown" },
+        idempotency: "non_idempotent",
+        supportedChannels: ["web", "matrix", "telegram"],
+        requiredIdentityScopes: [],
+        requiredDataScopes: [],
+        tags: release.capabilityTags,
+        semantics: {
+          operations: [], evidenceClasses: ["capability_result"],
+          freshnessClasses: ["stable"], authorityClasses: ["owner_authorized"],
+          domains: release.capabilityTags, aliases: [skill.slug],
+        },
+        canonicalizationVersion: "delegate-capability-v1",
+        definitionHash: `sha256:${"a".repeat(64)}`,
+      },
+      availability: {
+        capabilityKey: key,
+        capabilityVersion: release.version,
+        definitionHash: `sha256:${"a".repeat(64)}`,
+        healthState: "unavailable",
+        checkedAt: "1970-01-01T00:00:00.000Z",
+        failureCode: "skill_runner_unavailable",
+      },
+      target: { executor: "skill", skillSlug: skill.slug, releaseId: release.id },
+      searchDocument: `${release.displayName} ${release.summary} ${release.capabilityTags.join(" ")}`,
+      discoveryTextTrust: "owner_configured",
+    };
+  },
   assertConversationChannelDeliveryAvailable: mocks.assertConversationChannelDeliveryAvailable,
+  admitGenerationMessageProviderDelivery:
+    mocks.admitGenerationMessageProviderDelivery,
   authorizeGenerationRunFreeUsage: mocks.authorizeGenerationRunFreeUsage,
   buildRepresentativeRuntimeProfile: mocks.buildRepresentativeRuntimeProfile,
   claimNextOperatorMessageWorkItem: mocks.claimNextOperatorMessageWorkItem,
+  claimNextConversationMessageDeliveryWorkItem:
+    mocks.claimNextConversationMessageDeliveryWorkItem,
   claimNextGenerationWorkItem: mocks.claimNextGenerationWorkItem,
+  completeConversationMessageDelivery:
+    mocks.completeConversationMessageDelivery,
+  completeConversationTurnPlan: mocks.completeConversationTurnPlan,
+  completeReadyConversationTurnPlanForGenerationRun:
+    mocks.completeReadyConversationTurnPlanForGenerationRun,
   completeOperatorMessageDelivery: mocks.completeOperatorMessageDelivery,
   completeConversationIntake: mocks.completeConversationIntake,
   completeInlineGenerationRun: mocks.completeInlineGenerationRun,
+  createManagedConversationDocumentArtifact:
+    mocks.createManagedConversationDocumentArtifact,
+  prepareManagedConversationDocumentArtifact:
+    mocks.prepareManagedConversationDocumentArtifact,
   createAudienceComputeSession: mocks.createAudienceComputeSession,
   createComputeDelegationTask: mocks.createComputeDelegationTask,
   findConversationCancelableDelegationTask:
@@ -119,34 +345,75 @@ vi.mock("@delegate/web-data", () => ({
   continueClarifyingDelegationTask: mocks.continueClarifyingDelegationTask,
   deferGenerationRunForHuman: vi.fn(),
   deferOperatorMessageDelivery: mocks.deferOperatorMessageDelivery,
+  deferConversationMessageDelivery: mocks.deferConversationMessageDelivery,
   setConversationCollectorState: mocks.setConversationCollectorState,
+  updateGenerationTurnExecutionProgress:
+    mocks.updateGenerationTurnExecutionProgress,
   clearConversationCollectorState: mocks.clearConversationCollectorState,
   executeAudienceTool: mocks.executeAudienceTool,
   finalizeComputeDelegationTask: mocks.finalizeComputeDelegationTask,
   findConversationClarifyingDelegationTask: mocks.findConversationClarifyingDelegationTask,
   failGenerationRun: mocks.failGenerationRun,
+  failConversationTurnPlan: mocks.failConversationTurnPlan,
+  failActiveV3InlinePlanExecution: mocks.failActiveV3InlinePlanExecution,
+  failV3InlinePlanExecution: mocks.failV3InlinePlanExecution,
   GENERATION_WORK_LEASE_DURATION_MS: 3_000,
   GenerationMemoryDeliveryBlockedError:
     class GenerationMemoryDeliveryBlockedError extends Error {
       readonly code = "generation_memory_delivery_source_revoked";
     },
+  GenerationPlanDeliverySupersededError:
+    class GenerationPlanDeliverySupersededError extends Error {
+      readonly code = "turn_plan_superseded_before_delivery";
+    },
   GenerationWorkLeaseLostError: class GenerationWorkLeaseLostError extends Error {
     readonly code = "generation_work_lease_lost";
   },
   getRepresentativeRuntimeSetupSnapshot: mocks.getRepresentativeRuntimeSetupSnapshot,
+  getRepresentativeRuntimeAuthoritySnapshot:
+    mocks.getRepresentativeRuntimeAuthoritySnapshot,
   hasPersistedTelegramBotConnections:
     mocks.hasPersistedTelegramBotConnections,
   isDeterministicContactMemoryDeleteCommand:
     mocks.isDeterministicContactMemoryDeleteCommand,
   loadGenerationRecentTurns: mocks.loadGenerationRecentTurns,
+  loadLatestConversationTurnPlanRevision:
+    mocks.loadLatestConversationTurnPlanRevision,
+  loadReplayableConversationTurnPlan:
+    mocks.loadReplayableConversationTurnPlan,
+  loadReplayableConversationTurnPlanV3:
+    mocks.loadReplayableConversationTurnPlanV3,
+  persistConversationTurnPlanV3: mocks.persistConversationTurnPlanV3,
+  persistConversationTurnPlannerFailureV3:
+    mocks.persistConversationTurnPlannerFailureV3,
+  loadV3GovernedCompositionContext:
+    mocks.loadV3GovernedCompositionContext,
+  prepareV3InlineAction: mocks.prepareV3InlineAction,
+  markV3InlineActionCallStarted: mocks.markV3InlineActionCallStarted,
+  completeV3InlineAction: mocks.completeV3InlineAction,
   loadConversationOperationalContext: mocks.loadConversationOperationalContext,
   markGenerationDeliveryComplete: mocks.markGenerationDeliveryComplete,
   markDelegationTaskAwaitingApproval: mocks.markDelegationTaskAwaitingApproval,
   markDelegationTaskRunning: mocks.markDelegationTaskRunning,
   prepareGenerationMessageChannelDelivery:
     mocks.prepareGenerationMessageChannelDelivery,
+  persistConversationTurnPlan: mocks.persistConversationTurnPlan,
+  persistConversationTurnPlannerFailure:
+    mocks.persistConversationTurnPlannerFailure,
+  recordConversationPlanActionAuthorization:
+    mocks.recordConversationPlanActionAuthorization,
+  recordConversationMessageProviderAcceptance:
+    mocks.recordConversationMessageProviderAcceptance,
+  recordGenerationMessageProviderAcceptance:
+    mocks.recordGenerationMessageProviderAcceptance,
+  recordOperatorMessageProviderAcceptance:
+    mocks.recordOperatorMessageProviderAcceptance,
+  generalModelAnswerSourceStatement:
+    mocks.generalModelAnswerSourceStatement,
   privateChannelSourceVerificationUnavailableStatement:
     mocks.privateChannelSourceVerificationUnavailableStatement,
+  probeRepresentativeKnowledgeMetadata:
+    mocks.probeRepresentativeKnowledgeMetadata,
   recallRepresentativeContext: mocks.recallRepresentativeContext,
   resolveDeterministicContactMemorySharingCommand:
     mocks.resolveDeterministicContactMemorySharingCommand,
@@ -160,6 +427,7 @@ vi.mock("@delegate/web-data", () => ({
   renewGenerationWorkItemLease: mocks.renewGenerationWorkItemLease,
   retryGenerationDelivery: mocks.retryGenerationDelivery,
   retryOperatorMessageDelivery: mocks.retryOperatorMessageDelivery,
+  retryConversationMessageDelivery: mocks.retryConversationMessageDelivery,
   resolveTelegramBotRuntimeCredential:
     mocks.resolveTelegramBotRuntimeCredential,
   withActiveTelegramRepresentativeChannelFence:
@@ -174,6 +442,10 @@ vi.mock("@delegate/web-data", () => ({
     error instanceof Error
     && "code" in error
     && error.code === "generation_memory_delivery_source_revoked",
+  isGenerationPlanDeliverySupersededError: (error: unknown) =>
+    error instanceof Error
+    && "code" in error
+    && error.code === "turn_plan_superseded_before_delivery",
   waitGenerationRunForComputeApproval: mocks.waitGenerationRunForComputeApproval,
 }));
 
@@ -183,12 +455,52 @@ vi.mock("../src/matrix-outbound", () => ({
 
 import { GenerationWorkLeaseLostError } from "@delegate/web-data";
 
-import { processNextConversationWork } from "../src/processor";
+import {
+  buildRepresentativeDescriptionOutput,
+  buildV3GovernedComposerEvidence,
+  processNextConversationWork,
+  renderPolicyBlockedDelegationMessage,
+  renderTurnPlanV3PlanningFailureMessage,
+  resolveStableGeneralFallbackActivationStatus,
+} from "../src/processor";
 
 describe("conversation worker knowledge recall", () => {
+  it("explains paid MCP policy denial without presenting it as an unknown system error", () => {
+    expect(renderPolicyBlockedDelegationMessage("managed_plan_tier_required"))
+      .toContain("需要已购买的 Pass 服务额度");
+    expect(renderPolicyBlockedDelegationMessage("unclassified_policy_denial"))
+      .toBe("委托任务被安全策略拒绝，未执行。");
+    expect(resolveStableGeneralFallbackActivationStatus("plan_tier_required"))
+      .toBe("entitlement_denied");
+    expect(resolveStableGeneralFallbackActivationStatus("unclassified_policy_denial"))
+      .toBeUndefined();
+  });
+
+  it("distinguishes Planner timeout from capability compilation failure", () => {
+    expect(renderTurnPlanV3PlanningFailureMessage({
+      code: "provider_failed",
+      reason: "The operation was aborted due to timeout",
+    })).toContain("规划服务本轮超时或调用失败");
+    expect(renderTurnPlanV3PlanningFailureMessage({
+      code: "plan_invalid",
+    })).toContain("未通过能力、参数、证据或依赖校验");
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.validateJsonSchemaValue.mockReturnValue([]);
+    mocks.resolveComposerSourceGoalOutcomesV3.mockImplementation(({ plan }: {
+      plan: { goals: Array<{ id: string }> };
+    }) => plan.goals.map((goal) => ({
+      goalId: goal.id,
+      status: "succeeded",
+    })));
+    mocks.validateComposedMessageDraftV3.mockImplementation(({ draft }) => ({
+      ok: true,
+      draft,
+    }));
     mocks.claimNextOperatorMessageWorkItem.mockResolvedValue(null);
+    mocks.claimNextConversationMessageDeliveryWorkItem.mockResolvedValue(null);
     mocks.parseComputeDirective.mockReturnValue({ kind: "none" });
     mocks.hasMatchedExecutableSkill.mockReturnValue(false);
     mocks.resolveGovernedPublicMaterialDeliveries.mockResolvedValue([]);
@@ -197,13 +509,100 @@ describe("conversation worker knowledge recall", () => {
     mocks.readPersistedDelegationStepRequest.mockReturnValue(null);
     mocks.readStructuredCollectorState.mockReturnValue(null);
     mocks.loadConversationOperationalContext.mockResolvedValue(null);
+    mocks.loadLatestConversationTurnPlanRevision.mockResolvedValue(null);
+    mocks.loadReplayableConversationTurnPlan.mockResolvedValue(null);
+    mocks.loadReplayableConversationTurnPlanV3.mockResolvedValue(null);
+    mocks.loadV3GovernedCompositionContext.mockResolvedValue(null);
     mocks.shouldStartStructuredCollector.mockReturnValue(false);
     mocks.resolveDeterministicContactMemorySharingCommand.mockReturnValue(null);
     mocks.findConversationClarifyingDelegationTask.mockResolvedValue(null);
     mocks.findConversationCancelableDelegationTask.mockResolvedValue({ status: "none" });
     mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: null, source: "model" });
+    mocks.planTurnV2.mockResolvedValue({
+      ok: false,
+      code: "runtime_unavailable",
+      reason: "disabled in test",
+    });
+    mocks.buildCapabilityCatalog.mockReturnValue({
+      protocolVersion: 1,
+      capabilities: [],
+      catalogHash: `sha256:${"0".repeat(64)}`,
+    });
+    mocks.buildRecentConversationRecallReply.mockImplementation((input: {
+      requestText: string;
+      recentTurns: Array<{ direction: string; messageText: string }>;
+    }) => {
+      if (!/上面说了什么|刚才说了什么|上一条/.test(input.requestText)) {
+        return null;
+      }
+      const latest = [...input.recentTurns]
+        .reverse()
+        .find((turn) => turn.direction === "inbound" && turn.messageText.trim());
+      return {
+        matched: true,
+        found: Boolean(latest),
+        replyText: latest
+          ? `你刚才说的是：\n\n“${latest.messageText.trim()}”`
+          : "我在本次对话中没有找到可回顾的上一条访客消息。",
+      };
+    });
+    mocks.turnEnvelopeParse.mockImplementation((value) => value);
+    mocks.validateTurnPlanV2.mockImplementation(({ plan }) => ({
+      ok: true,
+      plan,
+    }));
+    mocks.getRepresentativeRuntimeAuthoritySnapshot.mockResolvedValue(null);
+    mocks.persistConversationTurnPlan.mockResolvedValue({ id: "turn-plan-1" });
+    mocks.persistConversationTurnPlannerFailure.mockResolvedValue({
+      id: "turn-plan-failure-1",
+    });
+    mocks.recordConversationPlanActionAuthorization.mockResolvedValue({
+      id: "authorization-1",
+    });
+    mocks.generateManagedDocument.mockResolvedValue({
+      ok: false,
+      code: "runtime_unavailable",
+      reason: "disabled in test",
+      state: "disabled",
+    });
+    mocks.createManagedConversationDocumentArtifact.mockResolvedValue({
+      artifact: { id: "managed-artifact-1" },
+      fileName: "document.md",
+      mimeType: "text/markdown; charset=utf-8",
+      sizeBytes: 100,
+      sha256: "a".repeat(64),
+      downloadUrl: "/reps/sktone/chat/artifacts/managed-artifact-1/download",
+    });
+    mocks.prepareManagedConversationDocumentArtifact.mockResolvedValue({
+      status: "claimed",
+      claim: {
+        planActionId: "plan-action-document",
+        generationRunId: "run-1",
+        argumentsHash: "c".repeat(64),
+        claimToken: "d".repeat(64),
+        artifactId: "managed-artifact-1",
+        objectKey:
+          "managed-documents/rep-1/conversation-1/managed-artifact-1.md",
+        format: "markdown",
+      },
+    });
+    mocks.completeConversationTurnPlan.mockResolvedValue(true);
+    mocks.completeReadyConversationTurnPlanForGenerationRun.mockResolvedValue(false);
+    mocks.failConversationTurnPlan.mockResolvedValue(true);
+    mocks.markV3InlineActionCallStarted.mockResolvedValue({
+      id: "inline-attempt",
+      attemptPhase: "CALL_STARTED",
+    });
+    mocks.failActiveV3InlinePlanExecution.mockResolvedValue(null);
+    mocks.failV3InlinePlanExecution.mockResolvedValue({
+      attemptsClosed: 1,
+      actionsFailed: 1,
+      planFailed: true,
+      memoryRunsFailed: 0,
+    });
     mocks.finalizeComputeDelegationTask.mockResolvedValue({ hasMoreSteps: false });
     mocks.assertConversationChannelDeliveryAvailable.mockResolvedValue(undefined);
+    mocks.admitGenerationMessageProviderDelivery.mockResolvedValue(true);
     mocks.authorizeGenerationRunFreeUsage.mockResolvedValue(true);
     mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(null);
     mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(null);
@@ -213,12 +612,23 @@ describe("conversation worker knowledge recall", () => {
     mocks.releaseConversationEntitlement.mockResolvedValue(undefined);
     mocks.renewGenerationWorkItemLease.mockResolvedValue(true);
     mocks.deferOperatorMessageDelivery.mockResolvedValue(true);
+    mocks.deferConversationMessageDelivery.mockResolvedValue(true);
     mocks.prepareGenerationMessageChannelDelivery.mockResolvedValue({
       conversationState: "WAITING_USER",
       leaseExpiresAt: new Date("2026-07-24T08:05:00.000Z"),
+      deliveryAdmission: {
+        attemptNumber: 1,
+        leaseToken: "delivery-lease-1",
+      },
     });
     mocks.retryGenerationDelivery.mockResolvedValue(undefined);
     mocks.retryOperatorMessageDelivery.mockResolvedValue(undefined);
+    mocks.retryConversationMessageDelivery.mockResolvedValue(true);
+    mocks.completeConversationMessageDelivery.mockResolvedValue(true);
+    mocks.completeOperatorMessageDelivery.mockResolvedValue(true);
+    mocks.recordConversationMessageProviderAcceptance.mockResolvedValue(true);
+    mocks.recordGenerationMessageProviderAcceptance.mockResolvedValue(true);
+    mocks.recordOperatorMessageProviderAcceptance.mockResolvedValue(true);
     mocks.resolveTelegramBotRuntimeCredential.mockResolvedValue(null);
     mocks.withActiveTelegramRepresentativeChannelFence.mockImplementation(
       async (_input, operation) => ({
@@ -270,6 +680,18 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
       id: "rep-1",
+      skillPacks: [],
+      knowledgePackRevision: 1,
+      knowledgePack: {
+        identitySummary: "Test representative",
+        faq: [{
+          title: "课程安排",
+          kind: "faq",
+          summary: "介绍课程时间和报名方式",
+        }],
+        materials: [],
+        policies: [],
+      },
       compute: { enabled: false, baseImage: "debian:bookworm-slim" },
     });
     mocks.buildRepresentativeRuntimeProfile.mockReturnValue({
@@ -287,6 +709,12 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.renderFailClosedReplyPreview.mockReturnValue("SAFE FAIL-CLOSED REPLY");
     mocks.loadGenerationRecentTurns.mockResolvedValue([]);
+    mocks.probeRepresentativeKnowledgeMetadata.mockResolvedValue({
+      status: "miss",
+      candidateCount: 0,
+      matchedTopics: [],
+      probeRevision: "knowledge-probe:version-1:test",
+    });
     mocks.recallRepresentativeContext.mockResolvedValue({
       items: [{
         uri: "viking://resources/delegate/reps/sktone/knowledge/asset-1.md/asset-1.md",
@@ -325,6 +753,1041 @@ describe("conversation worker knowledge recall", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("completes a queued Web task-status message without calling a provider", async () => {
+    mocks.claimNextConversationMessageDeliveryWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-task-status-web",
+      leaseAttempt: 1,
+      messageId: "message-task-status-web",
+      conversationId: "conversation-task-status-web",
+      text: "任务已完成。",
+      senderType: "SYSTEM",
+      senderName: "Delegate",
+      deliveryKind: "delegation_task_status",
+      channel: "web",
+    });
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      runId: "message-task-status-web",
+      status: "completed",
+    });
+    expect(mocks.completeConversationMessageDelivery).toHaveBeenCalledWith({
+      outboxId: "outbox-task-status-web",
+      leaseAttempt: 1,
+      messageId: "message-task-status-web",
+    });
+    expect(mocks.claimNextGenerationWorkItem).not.toHaveBeenCalled();
+    expect(mocks.sendMatrixRepresentativeMessage).not.toHaveBeenCalled();
+  });
+
+  it("delivers a queued Matrix task-status message as the representative", async () => {
+    mocks.claimNextConversationMessageDeliveryWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-task-status-matrix",
+      leaseAttempt: 2,
+      messageId: "message-task-status-matrix",
+      conversationId: "conversation-task-status-matrix",
+      text: "任务已完成。",
+      senderType: "SYSTEM",
+      senderName: "Delegate",
+      deliveryKind: "delegation_task_status",
+      channel: "matrix",
+      externalConversationId: "!room:example.test",
+      matrixSenderUserId: "@rep:example.test",
+      matrixEndpointLifecycleRevision: 4,
+    });
+    mocks.sendMatrixRepresentativeMessage.mockResolvedValueOnce("$task-status");
+
+    await expect(
+      processNextConversationWork({
+        port: 4040,
+        pollMs: 500,
+        matrixHomeserverUrl: "https://matrix.example.test",
+        matrixApplicationServiceToken: "as-token",
+      }),
+    ).resolves.toMatchObject({
+      processed: true,
+      runId: "message-task-status-matrix",
+      status: "completed",
+    });
+    expect(mocks.sendMatrixRepresentativeMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-task-status-matrix",
+        roomId: "!room:example.test",
+        senderUserId: "@rep:example.test",
+        senderMode: "ai",
+        deliveryId: "conversation-message-message-task-status-matrix",
+        text: "任务已完成。",
+      }),
+    );
+    expect(mocks.assertConversationChannelDeliveryAvailable).toHaveBeenCalledWith({
+      conversationId: "conversation-task-status-matrix",
+      channel: "matrix",
+      senderMode: "system",
+      allowNeedsHumanDelivery: true,
+    });
+    expect(mocks.completeConversationMessageDelivery).toHaveBeenCalledWith({
+      outboxId: "outbox-task-status-matrix",
+      leaseAttempt: 2,
+      messageId: "message-task-status-matrix",
+      externalMessageId: "$task-status",
+    });
+  });
+
+  it("dead-letters an unknown Telegram task-status outcome without automatic retry", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("timeout")));
+    mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+      connectionId: "111111111",
+      botId: "111111111",
+      username: "bot_a",
+      displayName: "Bot A",
+      token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+      credentialRevision: 1,
+    });
+    mocks.claimNextConversationMessageDeliveryWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-task-status-telegram",
+      leaseAttempt: 1,
+      messageId: "message-task-status-telegram",
+      conversationId: "conversation-task-status-telegram",
+      text: "任务已完成。",
+      senderType: "SYSTEM",
+      senderName: "Delegate",
+      deliveryKind: "delegation_task_status",
+      channel: "telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "111111111",
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "message-task-status-telegram",
+      status: "failed",
+      error: expect.stringContaining("outcome is unknown"),
+    });
+
+    expect(mocks.retryConversationMessageDelivery).toHaveBeenCalledWith({
+      outboxId: "outbox-task-status-telegram",
+      leaseAttempt: 1,
+      messageId: "message-task-status-telegram",
+      errorMessage: expect.stringContaining("outcome is unknown"),
+      providerOutcomeUnknown: true,
+      providerOutcomeCode: "telegram_provider_outcome_unknown",
+    });
+  });
+
+  it("keeps explicit Telegram provider rejection on the normal retry path", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({ ok: false, description: "rate limited" }),
+    }));
+    mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+      connectionId: "111111111",
+      botId: "111111111",
+      username: "bot_a",
+      displayName: "Bot A",
+      token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+      credentialRevision: 1,
+    });
+    mocks.claimNextConversationMessageDeliveryWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-task-status-rejected",
+      leaseAttempt: 1,
+      messageId: "message-task-status-rejected",
+      conversationId: "conversation-task-status-rejected",
+      text: "任务已完成。",
+      senderType: "SYSTEM",
+      senderName: "Delegate",
+      deliveryKind: "delegation_task_status",
+      channel: "telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "111111111",
+    });
+
+    await processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+    });
+
+    expect(mocks.retryConversationMessageDelivery).toHaveBeenCalledWith({
+      outboxId: "outbox-task-status-rejected",
+      leaseAttempt: 1,
+      messageId: "message-task-status-rejected",
+      errorMessage: "rate limited",
+    });
+  });
+
+  it("persists a strict V2 plan in shadow mode before the legacy turn completes", async () => {
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    const shadowPlan = {
+      protocolVersion: 2,
+      planId: "turn-plan-run-1-1",
+      objective: "回答问题",
+      mode: "respond",
+      goals: [{ id: "goal-1", description: "回答问题", priority: 100 }],
+      deliverables: [],
+      uncertainties: [],
+      questions: [],
+      actions: [],
+    };
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan: shadowPlan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "shadow",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-1",
+      status: "completed",
+    });
+
+    expect(mocks.planTurnV2).toHaveBeenCalledWith(expect.objectContaining({
+      planId: "turn-plan-run-1-1",
+      envelope: expect.objectContaining({
+        currentMessage: expect.objectContaining({ id: "message-1" }),
+      }),
+    }));
+    expect(mocks.persistConversationTurnPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        generationRunId: "run-1",
+        plan: shadowPlan,
+        plannerProvider: "openai",
+        plannerModel: "planner-model",
+        shadowMode: true,
+      }),
+    );
+  });
+
+  it("allocates a new immutable plan revision after a persisted planner failure", async () => {
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.loadLatestConversationTurnPlanRevision.mockResolvedValueOnce({
+      revision: 1,
+      status: "FAILED",
+    });
+    const revisedPlan = {
+      protocolVersion: 2,
+      planId: "turn-plan-run-1-2",
+      objective: "回答问题",
+      mode: "respond",
+      goals: [{ id: "goal-1", description: "回答问题", priority: 100 }],
+      deliverables: [],
+      uncertainties: [],
+      questions: [],
+      actions: [],
+    };
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan: revisedPlan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+
+    await processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "shadow",
+    });
+
+    expect(mocks.planTurnV2).toHaveBeenCalledWith(expect.objectContaining({
+      planId: "turn-plan-run-1-2",
+    }));
+    expect(mocks.persistConversationTurnPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ plan: revisedPlan, shadowMode: true }),
+    );
+  });
+
+  it("executes a platform-managed document without entering Compute approval", async () => {
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        artifactRetentionDays: 30,
+      },
+    });
+    const definitionHash = `sha256:${"b".repeat(64)}`;
+    const plan = {
+      protocolVersion: 2,
+      planId: "turn-plan-run-1-1",
+      objective: "生成地理学习教程文件",
+      mode: "execute",
+      goals: [
+        { id: "goal-1", description: "生成教程", priority: 100 },
+        { id: "goal-2", description: "组织基础地理知识", priority: 90 },
+        { id: "goal-3", description: "以文件形式交付", priority: 80 },
+      ],
+      deliverables: [{
+        id: "deliverable-1",
+        kind: "artifact",
+        format: "markdown",
+        producedByActionIds: ["action-document"],
+        completionCriteria: ["返回可下载文档"],
+      }],
+      uncertainties: [],
+      questions: [],
+      actions: [{
+        id: "action-document",
+        capability: {
+          key: "artifact.generate_document",
+          version: "1",
+          definitionHash,
+        },
+        arguments: {
+          topic: "地理学习教程",
+          audience: "通用学习者",
+          format: "markdown",
+        },
+        argumentProvenance: {},
+        dependsOn: [],
+        expectedOutputSchema: {},
+        completionCriteria: ["正文非空"],
+        onFailure: "stop",
+      }],
+    };
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+    mocks.persistConversationTurnPlan.mockResolvedValueOnce({
+      id: plan.planId,
+      shadowMode: false,
+      actions: [{ id: "plan-action-document", actionKey: "action-document" }],
+    });
+    mocks.generateManagedDocument.mockImplementationOnce(
+      async (input: { onProgress?: (progress: unknown) => Promise<void> }) => {
+        await input.onProgress?.({ stage: "generating", part: 1, maxParts: 3 });
+        await input.onProgress?.({ stage: "validating", part: 1, maxParts: 3 });
+        return {
+          ok: true,
+          title: "地理学习教程",
+          content: "# 地理学习教程\n\n这是完整且可直接使用的教程正文。",
+          requestedFormat: "markdown",
+          sourceFormat: "markdown",
+          provider: "openai",
+          model: "document-model",
+          usage: null,
+        };
+      },
+    );
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValueOnce(true);
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-1",
+      status: "completed",
+    });
+
+    expect(mocks.recordConversationPlanActionAuthorization).toHaveBeenCalledWith(
+      expect.objectContaining({
+        planActionId: "plan-action-document",
+        decision: "allow",
+      }),
+    );
+    expect(mocks.persistConversationTurnPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ plan, shadowMode: false }),
+    );
+    expect(mocks.generateManagedDocument).toHaveBeenCalledWith(
+      expect.objectContaining({
+        topic: "地理学习教程",
+        format: "markdown",
+      }),
+    );
+    expect(mocks.createManagedConversationDocumentArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        planActionId: "plan-action-document",
+        content: expect.stringContaining("完整且可直接使用"),
+      }),
+    );
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "turn_plan_v2_managed_document",
+        runtimeOutcome: { mode: "model" },
+        attachments: [expect.objectContaining({
+          artifactId: "managed-artifact-1",
+          fileName: "document.md",
+        })],
+      }),
+    );
+    expect(mocks.completeConversationTurnPlan).toHaveBeenCalledWith({
+      planId: plan.planId,
+      output: expect.objectContaining({ artifactId: "managed-artifact-1" }),
+    });
+    expect(
+      mocks.updateGenerationTurnExecutionProgress.mock.calls.map(
+        ([input]) => input.stage,
+      ),
+    ).toEqual([
+      "planning",
+      "authorizing",
+      "generating",
+      "validating",
+      "saving",
+      "delivering",
+    ]);
+    expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
+    expect(mocks.waitGenerationRunForComputeApproval).not.toHaveBeenCalled();
+    expect(mocks.planNaturalLanguageComputeRequest).not.toHaveBeenCalled();
+  });
+
+  it("does not generate a managed document without service entitlement", async () => {
+    const plan = managedDocumentPlanFixture();
+    mocks.claimNextGenerationWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-document-payment",
+      leaseAttempt: 1,
+      runId: "run-document-payment",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-document-payment",
+      contactId: "contact-document-payment",
+      audienceIdentityId: "audience-document-payment",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-document-payment",
+      userText: "请生成 Markdown 地理学习教程文件",
+      channel: "web",
+      usage: { freeRepliesUsed: 4, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: true, baseImage: "debian:bookworm-slim", artifactRetentionDays: 30 },
+    });
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+    mocks.persistConversationTurnPlan.mockResolvedValueOnce({
+      id: plan.planId,
+      shadowMode: false,
+      actions: [{ id: "plan-action-document-payment", actionKey: "action-document" }],
+    });
+    mocks.reserveGenerationConversationWalletUsage.mockResolvedValueOnce(null);
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-document-payment",
+      status: "completed",
+    });
+
+    expect(mocks.recordConversationPlanActionAuthorization).toHaveBeenCalledWith(
+      expect.objectContaining({ decision: "deny" }),
+    );
+    expect(mocks.generateManagedDocument).not.toHaveBeenCalled();
+    expect(mocks.createManagedConversationDocumentArtifact).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "turn_plan_v2_document_payment_required",
+        countUsage: false,
+      }),
+    );
+  });
+
+  it("reuses a succeeded managed document action after a worker crash", async () => {
+    const plan = managedDocumentPlanFixture();
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        artifactRetentionDays: 30,
+      },
+    });
+    mocks.loadReplayableConversationTurnPlan.mockResolvedValueOnce({
+      id: plan.planId,
+      planSnapshot: plan,
+      plannerProvider: "openai",
+      plannerModel: "planner-model",
+      status: "EXECUTING",
+      shadowMode: false,
+      actions: [{ id: "plan-action-document", actionKey: "action-document" }],
+    });
+    mocks.prepareManagedConversationDocumentArtifact.mockResolvedValueOnce({
+      status: "succeeded",
+      result: {
+        artifact: { id: "managed-artifact-1" },
+        fileName: "document.md",
+        mimeType: "text/markdown; charset=utf-8",
+        sizeBytes: 100,
+        sha256: "a".repeat(64),
+        downloadUrl:
+          "/reps/sktone/chat/artifacts/managed-artifact-1/download",
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-1",
+      status: "completed",
+    });
+
+    expect(mocks.planTurnV2).not.toHaveBeenCalled();
+    expect(mocks.generateManagedDocument).not.toHaveBeenCalled();
+    expect(mocks.createManagedConversationDocumentArtifact).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "turn_plan_v2_managed_document",
+        attachments: [expect.objectContaining({
+          artifactId: "managed-artifact-1",
+        })],
+      }),
+    );
+  });
+
+  it("never promotes a replayed shadow document plan into Fast Lane", async () => {
+    const plan = managedDocumentPlanFixture();
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.loadReplayableConversationTurnPlan.mockResolvedValueOnce({
+      id: plan.planId,
+      planSnapshot: plan,
+      plannerProvider: "openai",
+      plannerModel: "planner-model",
+      status: "VALIDATED",
+      shadowMode: true,
+      actions: [{ id: "plan-action-document", actionKey: "action-document" }],
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({ processed: true, runId: "run-1" });
+
+    expect(mocks.planTurnV2).not.toHaveBeenCalled();
+    expect(mocks.prepareManagedConversationDocumentArtifact).not.toHaveBeenCalled();
+    expect(mocks.generateManagedDocument).not.toHaveBeenCalled();
+    expect(mocks.createManagedConversationDocumentArtifact).not.toHaveBeenCalled();
+  });
+
+  it("does not ignore an unparsed visitor attachment when generating a document", async () => {
+    const plan = managedDocumentPlanFixture();
+    mocks.claimNextGenerationWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-document-attachment",
+      leaseAttempt: 1,
+      runId: "run-document-attachment",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-document-attachment",
+      contactId: "contact-document-attachment",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-document-attachment",
+      userText: "请根据附件生成 Markdown 地理学习教程文件",
+      inputAttachments: [{
+        id: "attachment-1",
+        fileName: "source.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 1024,
+      }],
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: true, baseImage: "debian:bookworm-slim", artifactRetentionDays: 30 },
+    });
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+    mocks.persistConversationTurnPlan.mockResolvedValueOnce({
+      id: plan.planId,
+      shadowMode: true,
+      actions: [{ id: "plan-action-document-attachment", actionKey: "action-document" }],
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-document-attachment",
+      status: "waiting_input",
+    });
+
+    expect(mocks.persistConversationTurnPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ shadowMode: true }),
+    );
+    expect(mocks.generateManagedDocument).not.toHaveBeenCalled();
+    expect(mocks.createManagedConversationDocumentArtifact).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "turn_plan_v2_document_attachment_context_required",
+        countUsage: false,
+      }),
+    );
+  });
+
+  it("delivers a managed document to Matrix with a verified absolute download link", async () => {
+    const plan = managedDocumentPlanFixture();
+    mocks.claimNextGenerationWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-document-matrix",
+      leaseAttempt: 1,
+      runId: "run-document-matrix",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-document-matrix",
+      contactId: "contact-document-matrix",
+      audienceIdentityId: "audience-document-matrix",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-document-matrix",
+      userText: "请生成 Markdown 地理学习教程文件",
+      channel: "matrix",
+      externalConversationId: "!room:example.test",
+      matrixSenderUserId: "@rep:example.test",
+      matrixEndpointLifecycleRevision: 2,
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: true, baseImage: "debian:bookworm-slim", artifactRetentionDays: 30 },
+    });
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+    mocks.persistConversationTurnPlan.mockResolvedValueOnce({
+      id: plan.planId,
+      shadowMode: false,
+      actions: [{ id: "plan-action-document-matrix", actionKey: "action-document" }],
+    });
+    mocks.generateManagedDocument.mockResolvedValueOnce({
+      ok: true,
+      title: "地理学习教程",
+      content: "# 地理学习教程\n\n完整教程正文。",
+      requestedFormat: "markdown",
+      sourceFormat: "markdown",
+      provider: "openai",
+      model: "document-model",
+      usage: null,
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+      representativePublicOrigin: "https://representatives.example.test",
+      matrixHomeserverUrl: "https://matrix.example.test",
+      matrixApplicationServiceToken: "matrix-application-service-token",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-document-matrix",
+      status: "completed",
+    });
+
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeOutcome: { mode: "model" },
+        attachments: [expect.objectContaining({
+          url: "https://representatives.example.test/reps/sktone/chat/artifacts/managed-artifact-1/download",
+        })],
+      }),
+    );
+    expect(mocks.sendMatrixRepresentativeMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining(
+          "https://representatives.example.test/reps/sktone/chat/artifacts/managed-artifact-1/download",
+        ),
+      }),
+    );
+  });
+
+  it("delivers an actionable managed-document failure on Matrix", async () => {
+    const plan = managedDocumentPlanFixture();
+    mocks.claimNextGenerationWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-document-matrix-failed",
+      leaseAttempt: 1,
+      runId: "run-document-matrix-failed",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-document-matrix-failed",
+      contactId: "contact-document-matrix-failed",
+      audienceIdentityId: "audience-document-matrix-failed",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-document-matrix-failed",
+      userText: "请生成 Markdown 地理学习教程文件",
+      channel: "matrix",
+      externalConversationId: "!room:example.test",
+      matrixSenderUserId: "@rep:example.test",
+      matrixEndpointLifecycleRevision: 2,
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        artifactRetentionDays: 30,
+      },
+    });
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+    mocks.persistConversationTurnPlan.mockResolvedValueOnce({
+      id: plan.planId,
+      shadowMode: false,
+      actions: [{
+        id: "plan-action-document-matrix-failed",
+        actionKey: "action-document",
+      }],
+    });
+    mocks.generateManagedDocument.mockResolvedValueOnce({
+      ok: false,
+      code: "invalid_document_content",
+      reason: "max_output_tokens",
+      state: "ready",
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+      representativePublicOrigin: "https://representatives.example.test",
+      matrixHomeserverUrl: "https://matrix.example.test",
+      matrixApplicationServiceToken: "matrix-application-service-token",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-document-matrix-failed",
+      status: "completed",
+    });
+
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "turn_plan_v2_document_failed",
+        runtimeOutcome: {
+          mode: "fallback",
+          fallbackStrategy: "deterministic_preview",
+          modelRuntimeState: "ready",
+          fallbackReason: "provider_failed",
+        },
+        countUsage: false,
+      }),
+    );
+    expect(mocks.createManagedConversationDocumentArtifact).not.toHaveBeenCalled();
+    expect(mocks.sendMatrixRepresentativeMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining("文档生成服务暂时不可用"),
+      }),
+    );
+  });
+
+  it("keeps unsupported V2 plans observational in active-low-risk mode", async () => {
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    const answerPlan = {
+      protocolVersion: 2,
+      planId: "turn-plan-run-1-1",
+      objective: "回答地理问题",
+      mode: "respond",
+      goals: [{ id: "goal-1", description: "回答地理问题", priority: 100 }],
+      deliverables: [],
+      uncertainties: [],
+      questions: [],
+      actions: [],
+    };
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan: answerPlan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({ processed: true, runId: "run-1" });
+
+    expect(mocks.persistConversationTurnPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plan: answerPlan,
+        shadowMode: true,
+      }),
+    );
+    expect(mocks.completeConversationTurnPlan).not.toHaveBeenCalledWith(
+      expect.objectContaining({ planId: answerPlan.planId }),
+    );
+  });
+
+  it.each([
+    {
+      name: "clarification mode with an action",
+      mutate: (plan: any) => {
+        plan.mode = "clarify";
+        plan.questions = [{
+          field: "topic",
+          question: "请补充主题。",
+          requiredForActionIds: ["action-document"],
+        }];
+      },
+    },
+    {
+      name: "a blocking question",
+      mutate: (plan: any) => {
+        plan.questions = [{
+          field: "audience",
+          question: "教程面向谁？",
+          requiredForActionIds: ["action-document"],
+        }];
+      },
+    },
+    {
+      name: "a blocking uncertainty",
+      mutate: (plan: any) => {
+        plan.uncertainties = [{
+          field: "source material",
+          reason: "Required source material is unavailable.",
+          blocksActionIds: ["action-document"],
+        }];
+      },
+    },
+    {
+      name: "a second deliverable",
+      mutate: (plan: any) => {
+        plan.deliverables.push({
+          id: "deliverable-answer",
+          kind: "message",
+          format: null,
+          producedByActionIds: [],
+          completionCriteria: ["回答附加问题"],
+        });
+      },
+    },
+    {
+      name: "a mismatched artifact format",
+      mutate: (plan: any) => {
+        plan.deliverables[0].format = "pdf";
+      },
+    },
+  ])("keeps $name out of the managed-document Fast Lane", async ({ mutate }) => {
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    const plan = managedDocumentPlanFixture();
+    mutate(plan);
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({ processed: true, runId: "run-1" });
+
+    expect(mocks.persistConversationTurnPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ plan, shadowMode: true }),
+    );
+    expect(mocks.generateManagedDocument).not.toHaveBeenCalled();
+    expect(mocks.createManagedConversationDocumentArtifact).not.toHaveBeenCalled();
+    expect(mocks.completeConversationTurnPlan).not.toHaveBeenCalled();
+    expect(mocks.prepareGenerationMessageChannelDelivery).not.toHaveBeenCalled();
+  });
+
+  it("never downgrades an ineligible managed-document plan into legacy Compute", async () => {
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: true, baseImage: "debian:bookworm-slim" },
+    });
+    const plan: any = managedDocumentPlanFixture();
+    plan.deliverables.push({
+      id: "deliverable-extra",
+      kind: "message",
+      format: null,
+      producedByActionIds: [],
+      completionCriteria: ["返回额外消息"],
+    });
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan,
+      selectedCapabilities: [],
+      provider: "agicto",
+      model: "qwen-plus",
+    });
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValueOnce(true);
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({ processed: true, runId: "run-1" });
+
+    expect(mocks.persistConversationTurnPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ plan, shadowMode: true }),
+    );
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyText: expect.stringContaining("不会降级为 Compute 写文件或创建审批"),
+      }),
+    );
+    expect(mocks.planNaturalLanguageComputeRequest).not.toHaveBeenCalled();
+    expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
+    expect(mocks.waitGenerationRunForComputeApproval).not.toHaveBeenCalled();
+  });
+
+  it("recalls the latest audience message in the current episode without model or billing", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-recent-recall",
+      leaseAttempt: 1,
+      runId: "run-recent-recall",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-recent-recall",
+      contactId: "contact-recent-recall",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-recent-recall",
+      userText: "我上面说了什么，你还记得吗",
+      channel: "web",
+      usage: { freeRepliesUsed: 3, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.loadGenerationRecentTurns.mockResolvedValue([
+      { direction: "inbound", messageText: "更早的消息" },
+      { direction: "inbound", messageText: "请给我规划一个中学地理学习计划" },
+    ]);
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "shadow",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-recent-recall",
+      status: "completed",
+    });
+
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "run-recent-recall",
+        intent: "conversation_recent_recall",
+        countUsage: false,
+        replyText: expect.stringContaining("请给我规划一个中学地理学习计划"),
+      }),
+    );
+    expect(mocks.recallRepresentativeContext).not.toHaveBeenCalled();
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+  });
+
+  it("declares recent turns untrusted and does not claim private channels support attachments", async () => {
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValueOnce({
+      id: "rep-1",
+      skillPacks: [],
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.claimNextGenerationWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-matrix-envelope",
+      leaseAttempt: 1,
+      runId: "run-matrix-envelope",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-matrix-envelope",
+      contactId: "contact-matrix-envelope",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-matrix-envelope",
+      userText: "继续刚才的话题",
+      channel: "matrix",
+      externalConversationId: "!room:example.test",
+      matrixSenderUserId: "@rep:example.test",
+      matrixEndpointLifecycleRevision: 3,
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.loadGenerationRecentTurns.mockResolvedValueOnce([{
+      direction: "inbound",
+      messageText: "之前的用户消息",
+    }]);
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "shadow",
+      matrixHomeserverUrl: "https://matrix.example.test",
+      matrixApplicationServiceToken: "as-token",
+    })).resolves.toMatchObject({ processed: true, runId: "run-matrix-envelope" });
+
+    expect(mocks.planTurnV2).toHaveBeenCalledWith(expect.objectContaining({
+      envelope: expect.objectContaining({
+        channel: { kind: "matrix", supportsAttachments: false },
+        authority: { identityScopes: [], dataScopes: [] },
+        recentTurns: [expect.objectContaining({
+          text: "之前的用户消息",
+          trustClass: "untrusted_conversation_data",
+        })],
+      }),
+    }));
   });
 
   it("answers an exact status command deterministically without billing or model generation", async () => {
@@ -1116,6 +2579,7 @@ describe("conversation worker knowledge recall", () => {
   });
 
   it("retries only persisted delivery for a completed Telegram generation", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -1159,6 +2623,9 @@ describe("conversation worker knowledge recall", () => {
         deepHelpUnlocked: false,
       },
     });
+    mocks.completeReadyConversationTurnPlanForGenerationRun.mockRejectedValueOnce(
+      new Error("plan repair unavailable"),
+    );
 
     await expect(processNextConversationWork({
       port: 4040,
@@ -1198,8 +2665,29 @@ describe("conversation worker knowledge recall", () => {
         outboxId: "outbox-delivery-retry",
         leaseAttempt: 2,
         outputMessageId: "message-output",
+        deliveryAdmission: {
+          attemptNumber: 1,
+          leaseToken: "delivery-lease-1",
+        },
       },
       expect.any(Function),
+    );
+    expect(mocks.admitGenerationMessageProviderDelivery).toHaveBeenCalledWith({
+      conversationId: "conversation-telegram",
+      runId: "run-delivery-retry",
+      outboxId: "outbox-delivery-retry",
+      leaseAttempt: 2,
+      outputMessageId: "message-output",
+      deliveryAdmission: {
+        attemptNumber: 1,
+        leaseToken: "delivery-lease-1",
+      },
+    });
+    expect(
+      mocks.admitGenerationMessageProviderDelivery.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mocks.withGenerationMessageProviderDeliveryFence.mock
+        .invocationCallOrder[0]!,
     );
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -1235,8 +2723,21 @@ describe("conversation worker knowledge recall", () => {
       outboxId: "outbox-delivery-retry",
       leaseAttempt: 2,
       outputMessageId: "message-output",
+      deliveryAdmission: {
+        attemptNumber: 1,
+        leaseToken: "delivery-lease-1",
+      },
       externalMessageId: "90210",
     });
+    expect(
+      mocks.completeReadyConversationTurnPlanForGenerationRun,
+    ).toHaveBeenCalledWith("run-delivery-retry");
+    expect(mocks.retryGenerationDelivery).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith(
+      "Delivered generation plan repair failed.",
+      expect.any(Error),
+    );
+    consoleError.mockRestore();
     vi.unstubAllGlobals();
   });
 
@@ -1298,17 +2799,96 @@ describe("conversation worker knowledge recall", () => {
           outboxId: "outbox-matrix-delivery",
           leaseAttempt: 1,
           outputMessageId: "message-output-matrix",
+          deliveryAdmission: {
+            attemptNumber: 1,
+            leaseToken: "delivery-lease-1",
+          },
         },
         text: "persisted Matrix reply\n\n——\n来源：代表经验",
       }),
+    );
+    expect(mocks.admitGenerationMessageProviderDelivery).toHaveBeenCalledWith({
+      conversationId: "conversation-matrix",
+      runId: "run-matrix-delivery",
+      outboxId: "outbox-matrix-delivery",
+      leaseAttempt: 1,
+      outputMessageId: "message-output-matrix",
+      deliveryAdmission: {
+        attemptNumber: 1,
+        leaseToken: "delivery-lease-1",
+      },
+    });
+    expect(
+      mocks.admitGenerationMessageProviderDelivery.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mocks.sendMatrixRepresentativeMessage.mock.invocationCallOrder[0]!,
     );
     expect(mocks.markGenerationDeliveryComplete).toHaveBeenCalledWith({
       runId: "run-matrix-delivery",
       outboxId: "outbox-matrix-delivery",
       leaseAttempt: 1,
       outputMessageId: "message-output-matrix",
+      deliveryAdmission: {
+        attemptNumber: 1,
+        leaseToken: "delivery-lease-1",
+      },
       externalMessageId: "$matrix-event-1",
     });
+  });
+
+  it("never automatically resends a Matrix delivery whose provider outcome is unknown", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-matrix-unknown",
+      leaseAttempt: 1,
+      runId: "run-matrix-unknown",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-matrix-unknown",
+      contactId: "contact-matrix",
+      controlState: "WAITING_USER",
+      inputMessageId: "message-inbound-matrix",
+      userText: "original inbound",
+      channel: "matrix",
+      externalConversationId: "!room:example.test",
+      matrixSenderUserId: "@delegate:example.test",
+      matrixEndpointLifecycleRevision: 7,
+      deliveryOnly: true,
+      outputMessageId: "message-output-matrix-unknown",
+      outputText: "persisted Matrix reply",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+    mocks.sendMatrixRepresentativeMessage.mockRejectedValueOnce(
+      Object.assign(new Error("Matrix outcome unknown"), {
+        code: "matrix_provider_outcome_unknown",
+      }),
+    );
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      matrixHomeserverUrl: "https://matrix.example.test",
+      matrixApplicationServiceToken: "as-token",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-matrix-unknown",
+      status: "failed",
+    });
+
+    expect(mocks.retryGenerationDelivery).toHaveBeenCalledWith({
+      runId: "run-matrix-unknown",
+      outboxId: "outbox-matrix-unknown",
+      leaseAttempt: 1,
+      outputMessageId: "message-output-matrix-unknown",
+      errorMessage: "Matrix outcome unknown",
+      providerOutcomeUnknown: true,
+      providerOutcomeCode: "matrix_provider_outcome_unknown",
+    });
+    expect(mocks.markGenerationDeliveryComplete).not.toHaveBeenCalled();
   });
 
   it.each(["matrix", "telegram"] as const)(
@@ -1533,6 +3113,10 @@ describe("conversation worker knowledge recall", () => {
         outboxId: "outbox-forgotten-telegram",
         leaseAttempt: 3,
         outputMessageId: "message-output",
+        deliveryAdmission: {
+          attemptNumber: 1,
+          leaseToken: "delivery-lease-1",
+        },
       },
       expect.any(Function),
     );
@@ -1599,6 +3183,78 @@ describe("conversation worker knowledge recall", () => {
         "Telegram Bot credential is unavailable for this conversation.",
     });
     vi.unstubAllGlobals();
+  });
+
+  it.each([
+    {
+      failure: "network timeout",
+      fetchProvider: () => Promise.reject(new Error("timeout")),
+    },
+    {
+      failure: "accepted response without a message id",
+      fetchProvider: () => Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, result: {} }),
+      }),
+    },
+  ])("dead-letters an unknown Telegram generation outcome after $failure", async ({
+    fetchProvider,
+  }) => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(fetchProvider));
+    mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+      connectionId: "111111111",
+      botId: "111111111",
+      username: "bot_a",
+      displayName: "Bot A",
+      token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+      credentialRevision: 1,
+    });
+    mocks.claimNextGenerationWorkItem.mockResolvedValueOnce({
+      outboxId: "outbox-telegram-unknown",
+      leaseAttempt: 1,
+      runId: "run-telegram-unknown",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-telegram-unknown",
+      contactId: "contact-telegram",
+      controlState: "WAITING_USER",
+      inputMessageId: "message-inbound",
+      userText: "original inbound",
+      channel: "telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "111111111",
+      deliveryOnly: true,
+      outputMessageId: "message-output",
+      outputText: "persisted reply",
+      usage: {
+        freeRepliesUsed: 4,
+        passUnlocked: true,
+        deepHelpUnlocked: false,
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "run-telegram-unknown",
+      status: "failed",
+      error: expect.stringContaining("outcome is unknown"),
+    });
+
+    expect(mocks.retryGenerationDelivery).toHaveBeenCalledWith({
+      runId: "run-telegram-unknown",
+      outboxId: "outbox-telegram-unknown",
+      leaseAttempt: 1,
+      outputMessageId: "message-output",
+      errorMessage: expect.stringContaining("outcome is unknown"),
+      providerOutcomeUnknown: true,
+      providerOutcomeCode: "telegram_provider_outcome_unknown",
+    });
   });
 
   it("recovers a terminal Telegram delegation without rerunning setup, model, or compute", async () => {
@@ -1698,6 +3354,10 @@ describe("conversation worker knowledge recall", () => {
         outboxId: "outbox-terminal-recovery",
         leaseAttempt: 2,
         outputMessageId: "message-terminal-recovery-output",
+        deliveryAdmission: {
+          attemptNumber: 1,
+          leaseToken: "delivery-lease-1",
+        },
         externalMessageId: "90211",
       });
       expect(mocks.getRepresentativeRuntimeSetupSnapshot).not.toHaveBeenCalled();
@@ -1776,6 +3436,10 @@ describe("conversation worker knowledge recall", () => {
       outboxId: "outbox-step-recovery",
       leaseAttempt: 3,
       outputMessageId: "message-step-recovery-output",
+      deliveryAdmission: {
+        attemptNumber: 1,
+        leaseToken: "delivery-lease-1",
+      },
     });
     expect(mocks.getRepresentativeRuntimeSetupSnapshot).not.toHaveBeenCalled();
     expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
@@ -1837,11 +3501,54 @@ describe("conversation worker knowledge recall", () => {
 
     expect(mocks.deferOperatorMessageDelivery).toHaveBeenCalledWith({
       outboxId: "operator-outbox-paused",
+      leaseAttempt: 1,
       messageId: "operator-message-paused",
       reason: "channel_paused",
     });
     expect(mocks.retryOperatorMessageDelivery).not.toHaveBeenCalled();
     expect(mocks.claimNextGenerationWorkItem).not.toHaveBeenCalled();
+  });
+
+  it("dead-letters an unknown Telegram operator outcome without automatic retry", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("timeout")));
+    mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+      connectionId: "111111111",
+      botId: "111111111",
+      username: "bot_a",
+      displayName: "Bot A",
+      token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+      credentialRevision: 1,
+    });
+    mocks.claimNextOperatorMessageWorkItem.mockResolvedValueOnce({
+      outboxId: "operator-outbox-unknown",
+      messageId: "operator-message-unknown",
+      conversationId: "conversation-operator-unknown",
+      text: "operator reply",
+      operatorName: "Owner",
+      channel: "telegram",
+      externalConversationId: "123456",
+      telegramConnectionId: "111111111",
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+    })).resolves.toMatchObject({
+      processed: true,
+      runId: "operator-message-unknown",
+      status: "failed",
+      error: expect.stringContaining("outcome is unknown"),
+    });
+
+    expect(mocks.retryOperatorMessageDelivery).toHaveBeenCalledWith({
+      outboxId: "operator-outbox-unknown",
+      leaseAttempt: 1,
+      messageId: "operator-message-unknown",
+      errorMessage: expect.stringContaining("outcome is unknown"),
+      providerOutcomeUnknown: true,
+      providerOutcomeCode: "telegram_provider_outcome_unknown",
+    });
   });
 
   it("delivers an operator reply with the conversation's Telegram Bot credential", async () => {
@@ -1906,6 +3613,7 @@ describe("conversation worker knowledge recall", () => {
     );
     expect(mocks.completeOperatorMessageDelivery).toHaveBeenCalledWith({
       outboxId: "operator-outbox-telegram-a",
+      leaseAttempt: 1,
       messageId: "operator-message-telegram-a",
       externalMessageId: "90212",
     });
@@ -2749,6 +4457,11 @@ describe("conversation worker knowledge recall", () => {
   it.each(["web", "matrix", "telegram"] as const)(
     "moves an explicit %s compute request into the approval waiting state",
     async (channel) => {
+    const telegramFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ok: true, result: { message_id: 741 } }),
+    });
+    vi.stubGlobal("fetch", telegramFetch);
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-2",
       leaseAttempt: 1,
@@ -2762,6 +4475,18 @@ describe("conversation worker knowledge recall", () => {
       inputMessageId: "message-2",
       userText: "/compute write notes/demo.txt ::: hello",
       channel,
+      ...(channel === "matrix"
+        ? {
+            externalConversationId: "!compute-approval:example.test",
+            matrixSenderUserId: "@delegate:example.test",
+            matrixEndpointLifecycleRevision: 3,
+          }
+        : channel === "telegram"
+          ? {
+              externalConversationId: "123456",
+              telegramConnectionId: "111111111",
+            }
+          : {}),
       usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
     });
     mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
@@ -2799,10 +4524,23 @@ describe("conversation worker knowledge recall", () => {
     });
     mocks.waitGenerationRunForComputeApproval.mockResolvedValue({
       run: { status: "WAITING_APPROVAL" },
-      message: { id: "pending-message" },
+      message: { id: "pending-message", text: "等待 Owner 审批。" },
     });
+    if (channel === "telegram") {
+      mocks.resolveTelegramBotRuntimeCredential.mockResolvedValueOnce({
+        connectionId: "111111111",
+        botId: "111111111",
+        token: "111111111:AAAAAAAAAAAAAAAAAAAAAAAA",
+      });
+    }
 
-    await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      telegramConversationPlatformMode: "worker",
+      matrixHomeserverUrl: "https://matrix.example.test",
+      matrixApplicationServiceToken: "as-token",
+    })).resolves.toMatchObject({
       processed: true,
       status: "waiting_approval",
     });
@@ -2837,8 +4575,1549 @@ describe("conversation worker knowledge recall", () => {
       approvalId: "approval-1",
       replyText: expect.stringContaining("操作：写入文件：demo.txt"),
     }));
+    expect(mocks.prepareGenerationMessageChannelDelivery).toHaveBeenCalledWith({
+      conversationId: "conversation-2",
+      runId: "run-2",
+      outboxId: "outbox-2",
+      leaseAttempt: 1,
+      outputMessageId: "pending-message",
+    });
+    if (channel === "matrix") {
+      expect(mocks.sendMatrixRepresentativeMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          roomId: "!compute-approval:example.test",
+          text: "等待 Owner 审批。",
+        }),
+      );
+    } else if (channel === "telegram") {
+      expect(telegramFetch).toHaveBeenCalledWith(
+        expect.stringContaining("/sendMessage"),
+        expect.objectContaining({
+          body: expect.stringContaining("等待 Owner 审批。"),
+        }),
+      );
+    }
     },
   );
+
+  it("routes natural language through the sole active V3 planner into a typed MCP approval", async () => {
+    const definitionHash = `sha256:${"b".repeat(64)}`;
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-v3",
+      leaseAttempt: 1,
+      runId: "run-v3",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-v3",
+      contactId: "contact-v3",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-v3",
+      userText: "查询 DeepWiki 中这个仓库的最新说明",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      name: "SKTone",
+      tone: "direct",
+      languages: ["zh"],
+      skillPacks: [],
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+        capabilityModes: {
+          exec: "deny",
+          read: "allow",
+          write: "ask",
+          process: "deny",
+          browser: "deny",
+          mcp: "ask",
+        },
+      },
+      delegation: {
+        enabled: true,
+        naturalLanguageEnabled: true,
+        explicitComputeEnabled: true,
+        maxSteps: 5,
+        maxEstimatedTokens: 10_000,
+        knowledgeScope: "user_input_only",
+      },
+    });
+    mocks.getRepresentativeRuntimeAuthoritySnapshot.mockResolvedValue({
+      representativeVersionId: "version-1",
+      compute: {
+        enabled: true,
+        capabilityModes: {
+          exec: "deny",
+          read: "allow",
+          write: "ask",
+          process: "deny",
+          browser: "deny",
+          mcp: "ask",
+        },
+      },
+      delegation: { enabled: true },
+      mcpBindings: [{
+        id: "binding-1",
+        slug: "deepwiki",
+        allowedToolNames: ["ask_question"],
+        defaultToolName: "ask_question",
+        enabled: true,
+        approvalRequired: true,
+        estimatedTokensPerCall: 100,
+        maxRetries: 0,
+        retryBackoffMs: 1_000,
+        serverUrl: "https://mcp.example.test",
+        transportKind: "streamable_http",
+        toolDefinitions: [{
+          exactToolName: "ask_question",
+          inputSchema: {
+            type: "object",
+            properties: { question: { type: "string" } },
+            required: ["question"],
+            additionalProperties: false,
+          },
+          outputSchema: null,
+          toolSchemaHash: `sha256:${"c".repeat(64)}`,
+          bindingDefinitionHash: `sha256:${"d".repeat(64)}`,
+          bindingRevision: 3,
+          canonicalizationVersion: "delegate-capability-v1",
+        }],
+      }],
+    });
+    mocks.buildCapabilityCatalog.mockReturnValue({
+      protocolVersion: 1,
+      catalogHash: `sha256:${"0".repeat(64)}`,
+      capabilities: [{
+        key: "mcp.deepwiki.ask_question",
+        version: "1",
+        description: "Ask DeepWiki",
+        executor: "mcp",
+        inputSchema: {
+          type: "object",
+          properties: { request: { type: "string" } },
+          required: ["request"],
+          additionalProperties: false,
+        },
+        outputSchema: {
+          type: "object",
+          properties: { result: { type: "string" } },
+          required: ["result"],
+          additionalProperties: false,
+        },
+        effect: "external_reversible",
+        idempotency: "requires_key",
+        supportedChannels: ["web"],
+        requiredIdentityScopes: [],
+        requiredDataScopes: [],
+        tags: ["deepwiki"],
+        definitionHash,
+      }],
+    });
+    mocks.buildCapabilityCatalogV3.mockImplementation((drafts) => ({
+      protocolVersion: 2,
+      canonicalizationVersion: "delegate-capability-v1",
+      catalogHash: `sha256:${"e".repeat(64)}`,
+      capabilities: drafts.map((draft: Record<string, unknown>) => ({
+        ...draft,
+        definitionHash,
+      })),
+    }));
+    mocks.planTurnV3.mockImplementation(async ({ catalog, scopeKey, planId }) => {
+      const mcp = catalog.capabilities.find((item: { key: string }) =>
+        item.key === "mcp.deepwiki.ask_question");
+      const compose = catalog.capabilities.find((item: { key: string }) =>
+        item.key === "response.compose");
+      return {
+        ok: true,
+        provider: "openai",
+        model: "planner-test",
+        selectedCapabilities: [mcp, compose],
+        proposal: { protocolVersion: 3, objective: "Lookup and answer" },
+        plan: {
+          protocolVersion: 3,
+          planId,
+          scopeKey,
+          revision: 1,
+          envelopeHash: `sha256:${"f".repeat(64)}`,
+          capabilityCatalogHash: catalog.catalogHash,
+          validationPolicyVersion: "turn-plan-v3-policy.1",
+          objective: "Lookup and answer",
+          goals: [{
+            id: "goal-1",
+            objective: "查询仓库",
+            sourcePointers: ["/currentMessage/text"],
+            strategy: "capability",
+            operation: "search",
+            semanticConfidence: 0.98,
+            generalEligibility: "not_allowed",
+            actionIds: ["lookup", "compose"],
+            deliverableIds: [],
+            evidenceRequirement: {
+              kind: "current_external",
+              freshness: "live",
+              allowedSourceKinds: ["mcp"],
+              citationRequired: true,
+              minimumEvidenceCount: 1,
+            },
+            failurePolicy: { strategy: "stop", reasonCode: "lookup_failed" },
+          }],
+          actions: [{
+            id: "lookup",
+            capability: {
+              key: mcp.key,
+              version: mcp.version,
+              definitionHash: mcp.definitionHash,
+            },
+            arguments: { question: "查询仓库" },
+            argumentProvenance: {
+              question: { source: "user_message", pointer: "/currentMessage/text" },
+            },
+            dependencies: [],
+            activation: { mode: "primary" },
+            expectedOutputSchema: mcp.outputSchema,
+            completionCriteria: ["Tool result verified"],
+            failurePolicy: { strategy: "stop", publicMessageCode: "lookup_failed" },
+          }, {
+            id: "compose",
+            capability: {
+              key: compose.key,
+              version: compose.version,
+              definitionHash: compose.definitionHash,
+            },
+            arguments: {},
+            argumentProvenance: {},
+            dependencies: [{
+              actionId: "lookup",
+              allowedStatuses: ["succeeded", "failed", "reconciliation_required"],
+            }],
+            activation: { mode: "primary" },
+            expectedOutputSchema: compose.outputSchema,
+            completionCriteria: ["Response verified"],
+            failurePolicy: { strategy: "stop", publicMessageCode: "compose_failed" },
+          }],
+          deliverables: [],
+          decisionTrace: ["live_tool_required"],
+        },
+      };
+    });
+    mocks.persistConversationTurnPlanV3.mockResolvedValue({
+      id: "turn-plan-v3-run-v3-1",
+      revision: 1,
+      executionEpoch: 1,
+      generationRunId: "run-v3",
+      actions: [
+        { id: "plan-action-lookup", actionKey: "lookup" },
+        { id: "plan-action-compose", actionKey: "compose" },
+      ],
+    });
+    mocks.compileCapabilityAction.mockReturnValue({
+      planId: "turn-plan-v3-run-v3-1",
+      planRevision: 1,
+      executionEpoch: 1,
+      actionId: "plan-action-lookup",
+      generationRunId: "run-v3",
+      capabilityKey: "mcp.deepwiki.ask_question",
+      capabilityVersion: "1",
+      capabilityDefinitionHash: definitionHash,
+      argumentsHash: `sha256:${"1".repeat(64)}`,
+      idempotencyKey: "turn-plan:lookup",
+      executor: "mcp",
+      bindingId: "binding-1",
+      bindingRevision: 3,
+      toolName: "ask_question",
+      expectedToolSchemaHash: `sha256:${"c".repeat(64)}`,
+      expectedBindingDefinitionHash: `sha256:${"d".repeat(64)}`,
+      toolArguments: { question: "查询仓库" },
+    });
+    mocks.createAudienceComputeSession.mockResolvedValue({ session: { id: "session-v3" } });
+    mocks.executeAudienceTool.mockResolvedValue({
+      outcome: "pending_approval",
+      approvalRequest: {
+        id: "approval-v3",
+        requestedActionSummary: "Ask DeepWiki",
+        riskSummary: "External tool call",
+      },
+      artifacts: [],
+    });
+    mocks.waitGenerationRunForComputeApproval.mockResolvedValue({
+      run: { status: "WAITING_APPROVAL" },
+      message: { id: "pending-v3", text: "等待 Owner 审批。" },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "waiting_approval" });
+
+    expect(mocks.planTurnV2).not.toHaveBeenCalled();
+    expect(mocks.planNaturalLanguageComputeRequest).not.toHaveBeenCalled();
+    expect(mocks.planTurnV3).toHaveBeenCalledOnce();
+    expect(mocks.planTurnV3).toHaveBeenCalledWith(expect.objectContaining({
+      envelope: expect.objectContaining({
+        planningDefaults: expect.objectContaining({
+          knowledgePolicy: "prefer_authorized",
+        }),
+      }),
+    }));
+    expect(mocks.createComputeDelegationTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        planSteps: [expect.objectContaining({
+          planActionId: "plan-action-lookup",
+          actionKey: "lookup",
+          executionRequest: expect.objectContaining({
+            executor: "mcp",
+            bindingRevision: 3,
+          }),
+        })],
+      }),
+    );
+    expect(mocks.executeAudienceTool).toHaveBeenCalledWith(
+      "session-v3",
+      expect.objectContaining({
+        capability: "mcp",
+        bindingId: "binding-1",
+        toolName: "ask_question",
+      }),
+    );
+  });
+
+  it("executes Knowledge before its dependent MCP action and composes both verified results", async () => {
+    configureMixedKnowledgeMcpV3({ knowledge: "hit" });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.completeV3InlineAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionAttemptId: "attempt-knowledge-mixed",
+        evidenceBindings: [expect.objectContaining({
+          evidenceClass: "authorized_knowledge",
+          evidenceId: "memory-item-mixed",
+        })],
+      }),
+    );
+    expect(mocks.createComputeDelegationTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        planSteps: [expect.objectContaining({
+          actionKey: "lookup",
+          dependsOnStepIndexes: [],
+        })],
+      }),
+    );
+    expect(
+      mocks.completeV3InlineAction.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.createComputeDelegationTask.mock.invocationCallOrder[0]!);
+    expect(mocks.composeTurnV3).toHaveBeenCalledWith(expect.objectContaining({
+      evidence: expect.arrayContaining([
+        expect.objectContaining({
+          evidenceClass: "authorized_knowledge",
+          evidenceId: "memory-item-mixed",
+        }),
+        expect.objectContaining({
+          evidenceClass: "tool_output",
+          evidenceId: "result-mcp-mixed",
+        }),
+      ]),
+    }));
+  });
+
+  it("continues from a verified Knowledge miss to MCP success with transparent disclosure", async () => {
+    configureMixedKnowledgeMcpV3({ knowledge: "miss" });
+    mocks.composeTurnV3.mockResolvedValue({
+      ok: true,
+      provider: "agicto",
+      model: "composer-test",
+      draft: {
+        segments: [{
+          kind: "claim",
+          goalId: "goal-knowledge",
+          text: "General fallback answer.",
+          sourceClass: "stable_general",
+          evidenceRefs: [],
+        }, {
+          kind: "claim",
+          goalId: "goal-tool",
+          text: "Verified tool answer.",
+          sourceClass: "tool_output",
+          evidenceRefs: ["result-mcp-mixed"],
+        }],
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.createComputeDelegationTask).toHaveBeenCalledOnce();
+    expect(mocks.composeTurnV3).toHaveBeenCalledWith(expect.objectContaining({
+      knowledgeFallbacks: [{
+        goalId: "goal-knowledge",
+        status: "not_found",
+      }],
+      evidence: [expect.objectContaining({
+        evidenceClass: "tool_output",
+        evidenceId: "result-mcp-mixed",
+      })],
+    }));
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyText: expect.stringContaining(
+          "本回答未引用已授权知识或记忆，内容由通用模型生成。\n\nGeneral fallback answer.\n\nVerified tool answer.",
+        ),
+      }),
+    );
+    const replyText = mocks.completeInlineGenerationRun.mock.calls.at(-1)?.[0]
+      .replyText as string;
+    expect(replyText.match(/说明：/gu)).toHaveLength(1);
+  });
+
+  it("does not create or invoke a dependent external action after inline source failure", async () => {
+    configureMixedKnowledgeMcpV3({ knowledge: "hit" });
+    mocks.failActiveV3InlinePlanExecution.mockResolvedValueOnce({
+      attemptsClosed: 1,
+      actionsFailed: 1,
+      planFailed: true,
+      memoryRunsFailed: 1,
+    });
+    mocks.recallRepresentativeContext.mockRejectedValueOnce(
+      new Error("knowledge_provider_unavailable"),
+    );
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.failActiveV3InlinePlanExecution).toHaveBeenCalledWith({
+      planId: "turn-plan-v3-mixed",
+      generationWorkLease: { outboxId: "outbox-v3-mixed", leaseAttempt: 1 },
+      reasonCode: "knowledge_provider_unavailable",
+    });
+    expect(mocks.createComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+  });
+
+  it("elevates transactional evidence only from bindings or immutable transactional semantics", () => {
+    const transactionalDefinition = mixedMcpDefinition({
+      evidenceClasses: ["transactional_authority"],
+      authorityClasses: ["transactional"],
+    });
+    const ordinaryDefinition = mixedMcpDefinition({
+      evidenceClasses: ["capability_result"],
+      authorityClasses: ["external_authoritative"],
+      definitionHash: `sha256:${"9".repeat(64)}`,
+    });
+    const evidence = buildV3GovernedComposerEvidence({
+      sourceActions: [{
+        actionKey: "transactional",
+        capabilityKey: transactionalDefinition.key,
+        capabilityDefinitionHash: transactionalDefinition.definitionHash,
+        actionResults: [{
+          id: "transaction-result",
+          semanticOutcome: "succeeded",
+          output: { balance: 10 },
+          evidenceBindings: [],
+        }],
+      }, {
+        actionKey: "ordinary",
+        capabilityKey: ordinaryDefinition.key,
+        capabilityDefinitionHash: ordinaryDefinition.definitionHash,
+        actionResults: [{
+          id: "ordinary-result",
+          semanticOutcome: "succeeded",
+          output: { text: "not transactional" },
+          evidenceBindings: [],
+        }],
+      }],
+      plannerProposalSnapshot: {
+        candidateSnapshot: {
+          candidates: [
+            { definition: transactionalDefinition },
+            { definition: ordinaryDefinition },
+          ],
+        },
+      },
+    });
+
+    expect(evidence).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        evidenceId: "transaction-result",
+        evidenceClass: "transactional_authority",
+      }),
+      expect.objectContaining({
+        evidenceId: "ordinary-result",
+        evidenceClass: "tool_output",
+      }),
+    ]));
+    const unsafeTransactionalEvidence = buildV3GovernedComposerEvidence({
+      sourceActions: [{
+        actionKey: "ordinary",
+        capabilityKey: ordinaryDefinition.key,
+        capabilityDefinitionHash: ordinaryDefinition.definitionHash,
+        actionResults: [{
+          id: "ordinary-result",
+          semanticOutcome: "succeeded",
+          output: { text: "not transactional" },
+          evidenceBindings: [],
+        }],
+      }],
+      plannerProposalSnapshot: {
+        candidateSnapshot: {
+          candidates: [{ definition: ordinaryDefinition }],
+        },
+      },
+      plan: {
+        goals: [{
+          id: "transaction-goal",
+          objective: "Read a transactional fact",
+          sourcePointers: ["/currentMessage/text"],
+          strategy: "capability",
+          operation: "read",
+          semanticConfidence: 1,
+          generalEligibility: "not_allowed",
+          actionIds: ["ordinary"],
+          deliverableIds: [],
+          evidenceRequirement: {
+            kind: "transactional_authority",
+            freshness: "live",
+            allowedSourceKinds: ["transactional_authority"],
+            citationRequired: true,
+            minimumEvidenceCount: 1,
+          },
+          failurePolicy: { strategy: "stop", reasonCode: "authority_missing" },
+        }],
+      },
+    });
+    expect(unsafeTransactionalEvidence).toEqual([]);
+  });
+
+  it("persists a non-authoritative V3 validation failure and never falls back to a model answer", async () => {
+    mocks.buildCapabilityCatalogV3.mockReturnValue({
+      protocolVersion: 2,
+      canonicalizationVersion: "delegate-capability-v1",
+      catalogHash: `sha256:${"e".repeat(64)}`,
+      capabilities: [],
+    });
+    mocks.planTurnV3.mockResolvedValue({
+      ok: false,
+      code: "plan_invalid",
+      reason: "Evidence requirement has no compatible action.",
+      issues: [{ code: "evidence_unsatisfied", path: "/goals/0" }],
+      proposal: { protocolVersion: 3, objective: "unsafe proposal" },
+      provider: "openai",
+      model: "planner-test",
+    });
+    mocks.persistConversationTurnPlannerFailureV3.mockResolvedValue({
+      id: "turn-plan-v3-failure",
+      status: "FAILED",
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_readonly",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.persistConversationTurnPlannerFailureV3).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "plan_invalid",
+        plannerProposalSnapshot: expect.objectContaining({
+          proposal: {
+            protocolVersion: 3,
+            objective: "unsafe proposal",
+          },
+          knowledgeProbe: expect.any(Object),
+        }),
+      }),
+    );
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+    expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+  });
+
+  it("fails active V3 closed when planning throws before a plan can be persisted", async () => {
+    mocks.planTurnV3.mockRejectedValueOnce(
+      new Error("catalog_definition_registration_failed"),
+    );
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
+    expect(mocks.planNaturalLanguageComputeRequest).not.toHaveBeenCalled();
+    expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyText: expect.stringContaining("没有降级为未经验证的模型回答"),
+        countUsage: false,
+      }),
+    );
+  });
+
+  it("executes a compose-only stable general plan in active governed mode", async () => {
+    const definitionHash = `sha256:${"b".repeat(64)}`;
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-v3-general",
+      leaseAttempt: 1,
+      runId: "run-v3-general",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-v3-general",
+      contactId: "contact-v3-general",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-v3-general",
+      userText: "请用三句话解释 CAP 定理，不要使用任何工具。",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.buildCapabilityCatalogV3.mockImplementation((drafts) => ({
+      protocolVersion: 2,
+      canonicalizationVersion: "delegate-capability-v1",
+      catalogHash: `sha256:${"e".repeat(64)}`,
+      capabilities: drafts.map((draft: Record<string, unknown>) => ({
+        ...draft,
+        definitionHash,
+      })),
+    }));
+    mocks.planTurnV3.mockImplementation(async ({ catalog, scopeKey, planId }) => {
+      const compose = catalog.capabilities.find((item: { key: string }) =>
+        item.key === "response.compose");
+      return {
+        ok: true,
+        provider: "openai",
+        model: "planner-test",
+        selectedCapabilities: [compose],
+        proposal: { protocolVersion: 3, objective: "Explain CAP" },
+        plan: {
+          protocolVersion: 3,
+          planId,
+          scopeKey,
+          revision: 1,
+          envelopeHash: `sha256:${"f".repeat(64)}`,
+          capabilityCatalogHash: catalog.catalogHash,
+          validationPolicyVersion: "turn-plan-v3-policy.1",
+          objective: "Explain CAP without tools",
+          goals: [{
+            id: "goal-1",
+            objective: "Explain CAP",
+            sourcePointers: ["/currentMessage/text"],
+            strategy: "general",
+            operation: "explain",
+            semanticConfidence: 0.98,
+            generalEligibility: "allowed",
+            actionIds: ["compose"],
+            deliverableIds: [],
+            evidenceRequirement: {
+              kind: "none",
+              freshness: "stable",
+              allowedSourceKinds: [],
+              citationRequired: false,
+              minimumEvidenceCount: 0,
+            },
+            failurePolicy: { strategy: "stop", reasonCode: "compose_failed" },
+          }],
+          actions: [{
+            id: "compose",
+            capability: {
+              key: compose.key,
+              version: compose.version,
+              definitionHash: compose.definitionHash,
+            },
+            arguments: {},
+            argumentProvenance: {},
+            dependencies: [],
+            activation: { mode: "primary" },
+            expectedOutputSchema: compose.outputSchema,
+            completionCriteria: ["Three stable-general sentences"],
+            failurePolicy: { strategy: "stop", publicMessageCode: "compose_failed" },
+          }],
+          deliverables: [],
+          decisionTrace: ["stable_general_no_tools"],
+        },
+      };
+    });
+    mocks.persistConversationTurnPlanV3.mockResolvedValue({
+      id: "turn-plan-v3-run-v3-general-1",
+      revision: 1,
+      executionEpoch: 1,
+      generationRunId: "run-v3-general",
+      actions: [{ id: "plan-action-compose", actionKey: "compose" }],
+    });
+    mocks.recordConversationPlanActionAuthorization.mockResolvedValue({
+      id: "authorization-general",
+      sequence: 3,
+    });
+    mocks.prepareV3InlineAction.mockResolvedValue({
+      attempt: { id: "attempt-compose", status: "RUNNING", executionLeaseToken: "inline-lease-compose" },
+    });
+    mocks.composeTurnV3.mockResolvedValue({
+      ok: true,
+      provider: "bailian",
+      model: "qwen-plus",
+      draft: {
+        segments: [{
+          kind: "claim",
+          goalId: "goal-self",
+          text: "CAP 表示一致性、可用性和分区容错性不能在网络分区时同时全部保证。",
+          sourceClass: "stable_general",
+          evidenceRefs: [],
+        }],
+      },
+    });
+    mocks.completeV3InlineAction.mockResolvedValue({ id: "result-compose" });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.composeTurnV3).toHaveBeenCalledOnce();
+    expect(mocks.composeTurnV3).toHaveBeenCalledWith(expect.objectContaining({
+      responseLanguage: "zh",
+      taskInput: {
+        text: "请用三句话解释 CAP 定理，不要使用任何工具。",
+        language: "zh",
+      },
+      actionResults: [],
+      evidence: [],
+    }));
+    expect(mocks.createComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+    expect(mocks.completeConversationTurnPlan).toHaveBeenCalledWith({
+      planId: "turn-plan-v3-run-v3-general-1",
+    });
+    expect(
+      mocks.completeConversationTurnPlan.mock.invocationCallOrder[0]!,
+    ).toBeLessThan(
+      mocks.completeInlineGenerationRun.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("closes the V3 execution lifecycle before delivering a composer failure notice", async () => {
+    const definitionHash = `sha256:${"b".repeat(64)}`;
+    const composeDefinition = {
+      key: "response.compose",
+      version: "1.0.0",
+      definitionHash,
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+      outputSchema: {
+        type: "object",
+        properties: { segments: { type: "array" } },
+        required: ["segments"],
+        additionalProperties: false,
+      },
+    };
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-v3-compose-failed",
+      leaseAttempt: 1,
+      runId: "run-v3-compose-failed",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-v3-compose-failed",
+      contactId: "contact-v3-compose-failed",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-v3-compose-failed",
+      userText: "解释 CAP 定理",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.buildCapabilityCatalogV3.mockReturnValue({
+      protocolVersion: 2,
+      canonicalizationVersion: "delegate-capability-v1",
+      catalogHash: `sha256:${"e".repeat(64)}`,
+      capabilities: [composeDefinition],
+    });
+    mocks.planTurnV3.mockResolvedValue({
+      ok: true,
+      provider: "agicto",
+      model: "planner-test",
+      selectedCapabilities: [composeDefinition],
+      proposal: { protocolVersion: 3, objective: "Explain CAP" },
+      plan: {
+        protocolVersion: 3,
+        planId: "turn-plan-v3-run-v3-compose-failed-1",
+        scopeKey: "generation:conversation-v3-compose-failed:message-v3-compose-failed",
+        revision: 1,
+        envelopeHash: `sha256:${"f".repeat(64)}`,
+        capabilityCatalogHash: `sha256:${"e".repeat(64)}`,
+        validationPolicyVersion: "turn-plan-v3-policy.1",
+        objective: "Explain CAP",
+        goals: [{
+          id: "goal-1",
+          objective: "Explain CAP",
+          sourcePointers: ["/currentMessage/text"],
+          strategy: "general",
+          operation: "explain",
+          semanticConfidence: 0.98,
+          generalEligibility: "allowed",
+          actionIds: ["compose"],
+          deliverableIds: [],
+          evidenceRequirement: {
+            kind: "none",
+            freshness: "stable",
+            allowedSourceKinds: [],
+            citationRequired: false,
+            minimumEvidenceCount: 0,
+          },
+          failurePolicy: { strategy: "stop", reasonCode: "compose_failed" },
+        }],
+        actions: [{
+          id: "compose",
+          capability: {
+            key: composeDefinition.key,
+            version: composeDefinition.version,
+            definitionHash,
+          },
+          arguments: {},
+          argumentProvenance: {},
+          dependencies: [],
+          activation: { mode: "primary" },
+          expectedOutputSchema: composeDefinition.outputSchema,
+          completionCriteria: ["Return an answer"],
+          failurePolicy: { strategy: "stop", publicMessageCode: "compose_failed" },
+        }],
+        deliverables: [],
+        decisionTrace: ["stable_general"],
+      },
+    });
+    mocks.persistConversationTurnPlanV3.mockResolvedValue({
+      id: "turn-plan-v3-run-v3-compose-failed-1",
+      revision: 1,
+      executionEpoch: 1,
+      generationRunId: "run-v3-compose-failed",
+      actions: [{ id: "plan-action-compose-failed", actionKey: "compose" }],
+    });
+    mocks.recordConversationPlanActionAuthorization.mockResolvedValue({
+      id: "authorization-compose-failed",
+      sequence: 3,
+    });
+    mocks.prepareV3InlineAction.mockResolvedValue({
+      attempt: { id: "attempt-compose-failed", status: "RUNNING", executionLeaseToken: "inline-lease-compose-failed" },
+    });
+    mocks.composeTurnV3.mockResolvedValue({
+      ok: false,
+      reason: "No provider produced a validated evidence-bound draft.",
+      diagnostics: [{
+        provider: "agicto",
+        model: "composer-model",
+        stage: "evidence_validation",
+        issueCodes: ["evidence_ref_unknown_or_class_mismatch"],
+      }],
+    });
+    mocks.failActiveV3InlinePlanExecution.mockResolvedValue({
+      attemptsClosed: 1,
+      actionsFailed: 1,
+      planFailed: true,
+      memoryRunsFailed: 0,
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValue({
+      message: { id: "system-failure-message", text: "严格只读计划未能完成。" },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.failActiveV3InlinePlanExecution).toHaveBeenCalledWith({
+      planId: "turn-plan-v3-run-v3-compose-failed-1",
+      generationWorkLease: {
+        outboxId: "outbox-v3-compose-failed",
+        leaseAttempt: 1,
+      },
+      reasonCode:
+        "No provider produced a validated evidence-bound draft. diagnostics=agicto/composer-model:evidence_validation:evidence_ref_unknown_or_class_mismatch",
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "delegation_failed",
+        countUsage: false,
+        evidenceIndependentSystemFailure: {
+          failureCode: "delegation_failed",
+        },
+      }),
+    );
+    expect(mocks.completeConversationTurnPlan).not.toHaveBeenCalled();
+  });
+
+  it("describes the representative from Owner profile, authorized knowledge, and user-facing outcomes", async () => {
+    const definitionHash = `sha256:${"b".repeat(64)}`;
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-v3-capabilities",
+      leaseAttempt: 1,
+      runId: "run-v3-capabilities",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-v3-capabilities",
+      contactId: "contact-v3-capabilities",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-v3-capabilities",
+      userText: "你会什么",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.buildCapabilityCatalogV3.mockImplementation((drafts) => ({
+      protocolVersion: 2,
+      canonicalizationVersion: "delegate-capability-v1",
+      catalogHash: `sha256:${"e".repeat(64)}`,
+      capabilities: drafts.map((draft: Record<string, unknown>) => ({
+        ...draft,
+        definitionHash,
+      })),
+    }));
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      ownerName: "周老师",
+      name: "地理代表—周行知",
+      tagline: "用 Owner 发布的资料讲清地理知识",
+      tone: "清晰、耐心",
+      languages: ["zh"],
+      humanInLoop: true,
+      handoffAccessMode: "PACKAGE_REQUIRED",
+      handoffPrompt: "请简要描述需要周老师确认的事项。",
+      skillPacks: [],
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.planTurnV3.mockImplementation(async ({ catalog, scopeKey, planId }) => {
+      const describe = catalog.capabilities.find((item: { key: string }) =>
+        item.key === "representative.describe_self");
+      const compose = catalog.capabilities.find((item: { key: string }) =>
+        item.key === "response.compose");
+      return {
+        ok: true,
+        provider: "agicto",
+        model: "qwen-plus",
+        selectedCapabilities: [describe, compose],
+        proposal: { protocolVersion: 3, objective: "Describe capabilities" },
+        plan: {
+          protocolVersion: 3,
+          planId,
+          scopeKey,
+          revision: 1,
+          envelopeHash: `sha256:${"f".repeat(64)}`,
+          capabilityCatalogHash: catalog.catalogHash,
+          validationPolicyVersion: "turn-plan-v3-policy.1",
+          objective: "Describe the representative from published Owner context",
+          goals: [{
+            id: "goal-1",
+            objective: "Answer what the representative can do",
+            sourcePointers: ["/currentMessage/text"],
+            strategy: "capability",
+            operation: "answer",
+            semanticConfidence: 0.98,
+            generalEligibility: "not_allowed",
+            actionIds: ["describe", "compose"],
+            deliverableIds: [],
+            evidenceRequirement: {
+              kind: "capability_result",
+              freshness: "bounded",
+              allowedSourceKinds: ["capability_catalog"],
+              citationRequired: true,
+              minimumEvidenceCount: 1,
+            },
+            failurePolicy: { strategy: "stop", reasonCode: "capabilities_unavailable" },
+          }],
+          actions: [{
+            id: "describe",
+            capability: {
+              key: describe.key,
+              version: describe.version,
+              definitionHash: describe.definitionHash,
+            },
+            arguments: {},
+            argumentProvenance: {},
+            dependencies: [],
+            activation: { mode: "primary" },
+            expectedOutputSchema: describe.outputSchema,
+            completionCriteria: ["Published capabilities returned"],
+            failurePolicy: { strategy: "stop", publicMessageCode: "capabilities_unavailable" },
+          }, {
+            id: "compose",
+            capability: {
+              key: compose.key,
+              version: compose.version,
+              definitionHash: compose.definitionHash,
+            },
+            arguments: {},
+            argumentProvenance: {},
+            dependencies: [{
+              actionId: "describe",
+              allowedStatuses: ["succeeded"],
+            }],
+            activation: { mode: "primary" },
+            expectedOutputSchema: compose.outputSchema,
+            completionCriteria: ["Evidence-bound response returned"],
+            failurePolicy: { strategy: "stop", publicMessageCode: "compose_failed" },
+          }],
+          deliverables: [],
+          decisionTrace: ["owner_profile_and_knowledge_are_authoritative"],
+        },
+      };
+    });
+    mocks.persistConversationTurnPlanV3.mockResolvedValue({
+      id: "turn-plan-v3-run-v3-capabilities-1",
+      revision: 1,
+      executionEpoch: 1,
+      generationRunId: "run-v3-capabilities",
+      actions: [
+        { id: "plan-action-describe", actionKey: "describe" },
+        { id: "plan-action-compose", actionKey: "compose" },
+      ],
+    });
+    mocks.recordConversationPlanActionAuthorization.mockResolvedValue({
+      id: "authorization-capabilities",
+      sequence: 3,
+    });
+    mocks.prepareV3InlineAction
+      .mockResolvedValueOnce({ attempt: { id: "attempt-describe", status: "RUNNING", executionLeaseToken: "inline-lease-describe" } })
+      .mockResolvedValueOnce({ attempt: { id: "attempt-compose", status: "RUNNING", executionLeaseToken: "inline-lease-compose" } });
+    mocks.completeV3InlineAction.mockResolvedValue({ id: "result-capabilities" });
+    mocks.composeTurnV3.mockResolvedValue({
+      ok: true,
+      provider: "agicto",
+      model: "qwen-plus",
+      draft: {
+        segments: [{
+          kind: "claim",
+          goalId: "goal-1",
+          text: "我是周老师的地理数字代表，会依据周老师发布的资料帮助你学习地理。",
+          sourceClass: "tool_output",
+          evidenceRefs: ["representative-profile:turn-plan-v3-run-v3-capabilities-1"],
+        }],
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.composeTurnV3).toHaveBeenCalledWith(expect.objectContaining({
+      evidence: expect.arrayContaining([expect.objectContaining({
+        evidenceId: "representative-profile:turn-plan-v3-run-v3-capabilities-1",
+        evidenceClass: "tool_output",
+      }), expect.objectContaining({
+        evidenceClass: "authorized_knowledge",
+      })]),
+    }));
+    const plannerCatalog = mocks.planTurnV3.mock.calls[0]?.[0].catalog;
+    const describeDefinition = plannerCatalog.capabilities.find(
+      (capability: { key: string }) =>
+        capability.key === "representative.describe_self",
+    );
+    expect(describeDefinition).toMatchObject({
+      version: "2",
+      outputSchema: expect.objectContaining({
+        required: expect.arrayContaining(["humanConfirmation"]),
+      }),
+      successContract: expect.objectContaining({
+        schema: expect.objectContaining({
+          required: expect.arrayContaining(["humanConfirmation"]),
+        }),
+      }),
+    });
+    expect(mocks.completeV3InlineAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionAttemptId: "attempt-describe",
+        rawOutput: expect.objectContaining({
+          capabilityOutcomes: expect.not.arrayContaining([
+            expect.stringContaining("representative.describe_self"),
+          ]),
+          humanConfirmation: {
+            enabled: true,
+            handoffAccessMode: "PACKAGE_REQUIRED",
+            handoffPrompt: "请简要描述需要周老师确认的事项。",
+            userFacingStatements: [
+              expect.stringContaining("需要真人作出承诺、审批或承担责任"),
+              expect.stringContaining("需满足相应服务权益"),
+            ],
+          },
+        }),
+      }),
+    );
+    expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+    expect(mocks.createComputeDelegationTask).not.toHaveBeenCalled();
+  });
+
+  it("publishes a fail-closed human-confirmation boundary and omits unavailable capabilities", () => {
+    const output = buildRepresentativeDescriptionOutput({
+      setup: {
+        name: "地理代表—周行知",
+        ownerName: "周老师",
+        tagline: "讲清地理知识",
+        tone: "清晰",
+        languages: ["zh"],
+        humanInLoop: false,
+        handoffAccessMode: "FREE",
+        handoffPrompt: "这条未启用的提示不应对用户暴露。",
+      } as never,
+      capabilities: [{
+        key: "knowledge.retrieve_authorized",
+        description: "Authorized knowledge",
+        executor: "knowledge",
+        definitionHash: `sha256:${"1".repeat(64)}`,
+      }, {
+        key: "mcp.private.internal_tool_key",
+        description: "Internal third-party tool description",
+        executor: "mcp",
+        definitionHash: `sha256:${"2".repeat(64)}`,
+      }],
+      availability: [{
+        definitionHash: `sha256:${"1".repeat(64)}`,
+        healthState: "degraded",
+      }, {
+        definitionHash: `sha256:${"2".repeat(64)}`,
+        healthState: "unavailable",
+      }],
+      knowledgeStatus: "not_found",
+      knowledgeItems: [],
+    });
+
+    expect(output.capabilityOutcomes).toEqual([
+      "依据 Owner 发布并授权的知识资料回答相关问题",
+    ]);
+    expect(output.capabilityOutcomes.join(" ")).not.toContain(
+      "mcp.private.internal_tool_key",
+    );
+    expect(output.humanConfirmation).toMatchObject({
+      enabled: false,
+      handoffAccessMode: "FREE",
+      handoffPrompt: "",
+      userFacingStatements: [
+        expect.stringContaining("必须由真人确认"),
+        expect.stringContaining("当前未启用真人接管"),
+      ],
+    });
+  });
+
+  it("revalidates and reuses the pinned representative-description result on replay", async () => {
+    const definitionHash = `sha256:${"7".repeat(64)}`;
+    let catalogCapabilities: Array<Record<string, any>> = [];
+    const replayedDescription = {
+      profile: {
+        representativeName: "地理代表—周行知",
+        ownerName: "周老师",
+        tagline: "讲清地理知识",
+        tone: "清晰",
+        languages: ["zh"],
+      },
+      capabilityOutcomes: ["依据 Owner 发布并授权的知识资料回答相关问题"],
+      humanConfirmation: {
+        enabled: true,
+        handoffAccessMode: "FREE",
+        handoffPrompt: "请描述需要周老师确认的事项。",
+        userFacingStatements: [
+          "需要真人承诺、审批或承担责任的事项必须由真人确认。",
+          "当前已启用真人接管。",
+        ],
+      },
+      knowledgeStatus: "not_found",
+      knowledgeEvidenceRefs: [],
+      knowledgeItems: [],
+    };
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-v3-description-replay",
+      leaseAttempt: 2,
+      runId: "run-v3-description-replay",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "地理代表—周行知",
+      conversationId: "conversation-v3-description-replay",
+      contactId: "contact-v3-description-replay",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-v3-description-replay",
+      userText: "哪些事需要真人确认？",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      ownerName: "周老师",
+      name: "地理代表—周行知",
+      tagline: "讲清地理知识",
+      tone: "清晰",
+      languages: ["zh"],
+      humanInLoop: true,
+      handoffAccessMode: "FREE",
+      handoffPrompt: "请描述需要周老师确认的事项。",
+      skillPacks: [],
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.buildCapabilityCatalogV3.mockImplementation((drafts) => {
+      catalogCapabilities = drafts.map((draft: Record<string, unknown>) => ({
+        ...draft,
+        definitionHash,
+      }));
+      return {
+        protocolVersion: 2,
+        canonicalizationVersion: "delegate-capability-v1",
+        catalogHash: `sha256:${"8".repeat(64)}`,
+        capabilities: catalogCapabilities,
+      };
+    });
+    mocks.loadReplayableConversationTurnPlanV3.mockImplementation(async () => {
+      const describe = catalogCapabilities.find((item) =>
+        item.key === "representative.describe_self")!;
+      const compose = catalogCapabilities.find((item) =>
+        item.key === "response.compose")!;
+      const planSnapshot = {
+        protocolVersion: 3,
+        planId: "turn-plan-v3-description-replay",
+        scopeKey: {
+          kind: "generation_turn",
+          conversationId: "conversation-v3-description-replay",
+          inputMessageId: "message-v3-description-replay",
+        },
+        revision: 1,
+        envelopeHash: `sha256:${"9".repeat(64)}`,
+        capabilityCatalogHash: `sha256:${"8".repeat(64)}`,
+        validationPolicyVersion: "turn-plan-v3-policy.3",
+        objective: "Describe the representative's human-confirmation boundary",
+        goals: [{
+          id: "goal-self",
+          objective: "Describe the representative's human-confirmation boundary",
+          sourcePointers: ["/currentMessage/text"],
+          strategy: "capability",
+          operation: "answer",
+          semanticConfidence: 0.99,
+          generalEligibility: "not_allowed",
+          actionIds: ["describe", "compose"],
+          deliverableIds: [],
+          evidenceRequirement: {
+            kind: "capability_result",
+            freshness: "bounded",
+            allowedSourceKinds: ["capability_result"],
+            citationRequired: true,
+            minimumEvidenceCount: 1,
+          },
+          failurePolicy: { strategy: "stop", reasonCode: "description_failed" },
+        }],
+        actions: [{
+          id: "describe",
+          capability: {
+            key: describe.key,
+            version: describe.version,
+            definitionHash: describe.definitionHash,
+          },
+          arguments: {},
+          argumentProvenance: {},
+          dependencies: [],
+          activation: { mode: "primary" },
+          expectedOutputSchema: describe.outputSchema,
+          completionCriteria: ["Pinned description available"],
+          failurePolicy: { strategy: "stop", publicMessageCode: "description_failed" },
+        }, {
+          id: "compose",
+          capability: {
+            key: compose.key,
+            version: compose.version,
+            definitionHash: compose.definitionHash,
+          },
+          arguments: {},
+          argumentProvenance: {},
+          dependencies: [{ actionId: "describe", allowedStatuses: ["succeeded"] }],
+          activation: { mode: "primary" },
+          expectedOutputSchema: compose.outputSchema,
+          completionCriteria: ["Response composed"],
+          failurePolicy: { strategy: "stop", publicMessageCode: "compose_failed" },
+        }],
+        deliverables: [],
+        decisionTrace: ["replay_pinned_description"],
+      };
+      return {
+        id: "turn-plan-v3-description-replay",
+        revision: 1,
+        executionEpoch: 1,
+        generationRunId: "run-v3-description-replay",
+        plannerProvider: "persisted",
+        plannerModel: "persisted",
+        planSnapshot,
+        actions: [
+          { id: "plan-action-description-replay", actionKey: "describe" },
+          { id: "plan-action-compose-replay", actionKey: "compose" },
+        ],
+      };
+    });
+    mocks.recordConversationPlanActionAuthorization.mockResolvedValue({ sequence: 3 });
+    mocks.prepareV3InlineAction
+      .mockResolvedValueOnce({
+        attempt: {
+          id: "attempt-description-replay",
+          status: "SUCCEEDED",
+          responseSnapshot: replayedDescription,
+        },
+      })
+      .mockResolvedValueOnce({
+        attempt: {
+          id: "attempt-compose-after-replay",
+          status: "RUNNING",
+          executionLeaseToken: "lease-compose-after-replay",
+        },
+      });
+    mocks.composeTurnV3.mockResolvedValue({
+      ok: true,
+      provider: "agicto",
+      model: "qwen-plus",
+      draft: {
+        segments: [{
+          kind: "claim",
+          goalId: "goal-self",
+          text: "需要真人承诺或审批的事项必须由真人确认。",
+          sourceClass: "tool_output",
+          evidenceRefs: ["representative-profile:turn-plan-v3-description-replay"],
+        }],
+      },
+    });
+    mocks.completeV3InlineAction.mockResolvedValue({ actionStatus: "SUCCEEDED" });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.validateJsonSchemaValue).toHaveBeenCalledWith(
+      replayedDescription,
+      expect.objectContaining({
+        required: expect.arrayContaining(["humanConfirmation"]),
+      }),
+      "/replayedActionResult",
+    );
+    expect(mocks.recallRepresentativeContext).not.toHaveBeenCalled();
+    expect(mocks.composeTurnV3).toHaveBeenCalledWith(expect.objectContaining({
+      actionResults: [expect.objectContaining({
+        actionId: "describe",
+        semanticOutcome: "succeeded",
+      })],
+      evidence: [expect.objectContaining({
+        evidenceClass: "tool_output",
+        content: replayedDescription,
+      })],
+    }));
+  });
+
+  it("falls back transparently to stable general knowledge after an authorized knowledge miss", async () => {
+    const definitionHash = `sha256:${"b".repeat(64)}`;
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-v3-knowledge-miss",
+      leaseAttempt: 1,
+      runId: "run-v3-knowledge-miss",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-v3-knowledge-miss",
+      contactId: "contact-v3-knowledge-miss",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-v3-knowledge-miss",
+      userText: "你知道等温线吗",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.recallRepresentativeContext.mockResolvedValue({
+      items: [],
+      citations: [],
+      memoryUseRunId: "memory-use-run-miss",
+    });
+    mocks.buildCapabilityCatalogV3.mockImplementation((drafts) => ({
+      protocolVersion: 2,
+      canonicalizationVersion: "delegate-capability-v1",
+      catalogHash: `sha256:${"e".repeat(64)}`,
+      capabilities: drafts.map((draft: Record<string, unknown>) => ({
+        ...draft,
+        definitionHash,
+      })),
+    }));
+    mocks.planTurnV3.mockImplementation(async ({ catalog, scopeKey, planId }) => {
+      const knowledge = catalog.capabilities.find((item: { key: string }) =>
+        item.key === "knowledge.retrieve_authorized");
+      const compose = catalog.capabilities.find((item: { key: string }) =>
+        item.key === "response.compose");
+      return {
+        ok: true,
+        provider: "agicto",
+        model: "qwen-plus",
+        selectedCapabilities: [knowledge, compose],
+        proposal: { protocolVersion: 3, objective: "Answer knowledge-first" },
+        plan: {
+          protocolVersion: 3,
+          planId,
+          scopeKey,
+          revision: 1,
+          envelopeHash: `sha256:${"f".repeat(64)}`,
+          capabilityCatalogHash: catalog.catalogHash,
+          validationPolicyVersion: "turn-plan-v3-policy.1",
+          objective: "Answer after authorized knowledge lookup",
+          goals: [{
+            id: "goal-1",
+            objective: "Explain isotherms",
+            sourcePointers: ["/currentMessage/text"],
+            strategy: "knowledge",
+            operation: "answer",
+            semanticConfidence: 0.95,
+            generalEligibility: "allowed",
+            actionIds: ["retrieve", "compose"],
+            deliverableIds: [],
+            evidenceRequirement: {
+              kind: "knowledge_preferred",
+              freshness: "bounded",
+              allowedSourceKinds: ["authorized_knowledge"],
+              citationRequired: false,
+              minimumEvidenceCount: 0,
+            },
+            evidenceFallbackPolicy: {
+              kind: "authorized_knowledge_miss_to_stable_general",
+              policySource: "server_planning_default",
+              activationStatuses: ["not_found", "unavailable"],
+              authorityBoundary: "non_owner_specific_stable_general",
+              disclosureRequired: true,
+            },
+            sourceAuthorityBoundary: {
+              classification: "stable_general_allowed",
+              policySource: "server_authority_policy",
+              policyVersion: "delegate.source-authority.v1",
+              reasonCodes: ["no_owner_authority_signal"],
+            },
+            failurePolicy: { strategy: "stop", reasonCode: "knowledge_unavailable" },
+          }],
+          actions: [{
+            id: "retrieve",
+            capability: {
+              key: knowledge.key,
+              version: knowledge.version,
+              definitionHash: knowledge.definitionHash,
+            },
+            arguments: { question: "你知道等温线吗" },
+            argumentProvenance: {
+              question: { source: "user_message", pointer: "/currentMessage/text" },
+            },
+            dependencies: [],
+            activation: { mode: "primary" },
+            expectedOutputSchema: knowledge.outputSchema,
+            completionCriteria: ["Knowledge lookup reaches a verified outcome"],
+            failurePolicy: { strategy: "stop", publicMessageCode: "knowledge_unavailable" },
+          }, {
+            id: "compose",
+            capability: {
+              key: compose.key,
+              version: compose.version,
+              definitionHash: compose.definitionHash,
+            },
+            arguments: {},
+            argumentProvenance: {},
+            dependencies: [{ actionId: "retrieve", allowedStatuses: ["succeeded"] }],
+            activation: { mode: "primary" },
+            expectedOutputSchema: compose.outputSchema,
+            completionCriteria: ["Transparent response returned"],
+            failurePolicy: { strategy: "stop", publicMessageCode: "compose_failed" },
+          }],
+          deliverables: [],
+          decisionTrace: ["knowledge_preferred_then_stable_general"],
+        },
+      };
+    });
+    mocks.persistConversationTurnPlanV3.mockResolvedValue({
+      id: "turn-plan-v3-run-v3-knowledge-miss-1",
+      revision: 1,
+      executionEpoch: 1,
+      generationRunId: "run-v3-knowledge-miss",
+      actions: [
+        { id: "plan-action-retrieve", actionKey: "retrieve" },
+        { id: "plan-action-compose", actionKey: "compose" },
+      ],
+    });
+    mocks.recordConversationPlanActionAuthorization.mockResolvedValue({
+      id: "authorization-knowledge-miss",
+      sequence: 3,
+    });
+    mocks.prepareV3InlineAction
+      .mockResolvedValueOnce({ attempt: { id: "attempt-retrieve", status: "RUNNING", executionLeaseToken: "inline-lease-retrieve" } })
+      .mockResolvedValueOnce({ attempt: { id: "attempt-compose", status: "RUNNING", executionLeaseToken: "inline-lease-compose" } });
+    mocks.completeV3InlineAction.mockResolvedValue({ id: "result-knowledge-miss" });
+    mocks.composeTurnV3.mockResolvedValue({
+      ok: true,
+      provider: "agicto",
+      model: "qwen-plus",
+      draft: {
+        segments: [{
+          kind: "claim",
+          goalId: "goal-1",
+          text: "等温线是地图上连接气温相同地点的曲线。",
+          sourceClass: "stable_general",
+          evidenceRefs: [],
+        }],
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.composeTurnV3).toHaveBeenCalledWith(expect.objectContaining({
+      knowledgeFallbacks: [{ goalId: "goal-1", status: "not_found" }],
+      evidence: [],
+    }));
+    expect(mocks.planTurnV3).toHaveBeenCalledWith(expect.objectContaining({
+      knowledgeProbe: expect.objectContaining({
+        status: "miss",
+        candidateCount: 0,
+        probeRevision: "knowledge-probe:version-1:test",
+      }),
+    }));
+    expect(mocks.probeRepresentativeKnowledgeMetadata).toHaveBeenCalledWith(
+      expect.objectContaining({
+        representativeVersionId: "version-1",
+        conversationId: "conversation-v3-knowledge-miss",
+        contactId: "contact-v3-knowledge-miss",
+        sourceChannel: "web",
+        allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
+      }),
+    );
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyText: expect.stringContaining(
+          "本回答未引用已授权知识或记忆，内容由通用模型生成",
+        ),
+      }),
+    );
+    expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+  });
 
   it("keeps a system-managed document path out of the public approval message", async () => {
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
@@ -3010,7 +6289,7 @@ describe("conversation worker knowledge recall", () => {
         sizeBytes: 10,
         summary: "/workspace/notes/qa.txt: browser QA",
       }],
-      billing: { actualCredits: 4 },
+      billing: { computeCostCents: 4 },
     });
     mocks.completeInlineGenerationRun.mockResolvedValue({ message: { id: "reply-natural" } });
 
@@ -3039,8 +6318,174 @@ describe("conversation worker knowledge recall", () => {
       taskId: "task-1",
       outcome: "completed",
       artifacts: [expect.objectContaining({ id: "artifact-natural" })],
-      actualCredits: 4,
     }));
+  });
+
+  it("uses a verified V2 compute.write action to open the governed detailed planner without keywords", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-v2-write",
+      leaseAttempt: 1,
+      runId: "run-v2-write",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-v2-write",
+      contactId: "contact-v2-write",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-v2-write",
+      userText: "按刚才确认的内容处理一下",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      skillPacks: [],
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(false);
+    const v2Plan = v2ComputePlanFixture("write");
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan: v2Plan,
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+    const detailedStep = {
+      capability: "write" as const,
+      path: "notes/confirmed.txt",
+      content: "confirmed content",
+      summary: "保存已确认内容",
+    };
+    mocks.planNaturalLanguageComputeRequest.mockResolvedValueOnce({
+      ok: true,
+      plan: {
+        kind: "execution",
+        summary: "保存已确认内容",
+        steps: [detailedStep],
+      },
+      source: "model",
+    });
+    mocks.buildComputeRequestsFromDelegationPlan.mockReturnValueOnce([{
+      ...detailedStep,
+      displayTarget: detailedStep.summary,
+      hasPaidEntitlement: false,
+      browserMode: "deterministic",
+      maxSteps: 1,
+      allowMutations: false,
+    }]);
+    mocks.createAudienceComputeSession.mockResolvedValueOnce({
+      session: { id: "session-v2-write" },
+    });
+    mocks.executeAudienceTool.mockResolvedValueOnce({
+      outcome: "completed",
+      artifacts: [],
+      billing: { computeCostCents: 4 },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    // V2 opens the governed planner directly; the legacy keyword gate remains
+    // a compatibility fallback and is not consulted for this turn.
+    expect(mocks.shouldConsiderNaturalLanguageCompute).not.toHaveBeenCalled();
+    expect(mocks.planNaturalLanguageComputeRequest).toHaveBeenCalledWith({
+      userText: "按刚才确认的内容处理一下",
+      maxSteps: 5,
+    });
+    expect(mocks.persistConversationTurnPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ plan: v2Plan, shadowMode: true }),
+    );
+    expect(mocks.createComputeDelegationTask).toHaveBeenCalledWith(
+      expect.objectContaining({ capability: "write" }),
+    );
+  });
+
+  it("fails closed before task creation when V2 and detailed planner capabilities mismatch", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-v2-mismatch",
+      leaseAttempt: 1,
+      runId: "run-v2-mismatch",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-v2-mismatch",
+      contactId: "contact-v2-mismatch",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-v2-mismatch",
+      userText: "按刚才确认的内容处理一下",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      skillPacks: [],
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(false);
+    mocks.planTurnV2.mockResolvedValueOnce({
+      ok: true,
+      plan: v2ComputePlanFixture("write"),
+      selectedCapabilities: [],
+      provider: "openai",
+      model: "planner-model",
+    });
+    const mismatchedStep = {
+      capability: "browser" as const,
+      url: "https://example.com",
+      summary: "打开网页",
+    };
+    mocks.planNaturalLanguageComputeRequest.mockResolvedValueOnce({
+      ok: true,
+      plan: {
+        kind: "execution",
+        summary: "打开网页",
+        steps: [mismatchedStep],
+      },
+      source: "model",
+    });
+    mocks.buildComputeRequestsFromDelegationPlan.mockReturnValueOnce([{
+      ...mismatchedStep,
+      displayTarget: mismatchedStep.summary,
+      hasPaidEntitlement: false,
+      browserMode: "deterministic",
+      maxSteps: 1,
+      allowMutations: false,
+    }]);
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "active_low_risk",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.planNaturalLanguageComputeRequest).toHaveBeenCalledOnce();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "delegation_failed",
+        countUsage: false,
+        replyText: expect.stringContaining("能力不一致"),
+      }),
+    );
+    expect(mocks.createComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
+    expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+    expect(mocks.waitGenerationRunForComputeApproval).not.toHaveBeenCalled();
   });
 
   it("marks a failed compute result as non-billable", async () => {
@@ -3086,7 +6531,7 @@ describe("conversation worker knowledge recall", () => {
     mocks.executeAudienceTool.mockResolvedValue({
       outcome: "failed",
       artifacts: [],
-      billing: { actualCredits: 4 },
+      billing: { computeCostCents: 4 },
     });
 
     await expect(processNextConversationWork({ port: 4040, pollMs: 500 })).resolves.toMatchObject({
@@ -3118,7 +6563,7 @@ describe("conversation worker knowledge recall", () => {
         naturalLanguageEnabled: false,
         explicitComputeEnabled: true,
         maxSteps: 5,
-        maxCostCents: 0,
+        maxEstimatedTokens: 0,
         knowledgeScope: "user_input_only",
       },
       compute: {
@@ -3161,7 +6606,7 @@ describe("conversation worker knowledge recall", () => {
         naturalLanguageEnabled: true,
         explicitComputeEnabled: false,
         maxSteps: 5,
-        maxCostCents: 0,
+        maxEstimatedTokens: 0,
         knowledgeScope: "user_input_only",
       },
       compute: { enabled: true, baseImage: "debian:bookworm-slim" },
@@ -3208,7 +6653,7 @@ describe("conversation worker knowledge recall", () => {
         naturalLanguageEnabled: true,
         explicitComputeEnabled: true,
         maxSteps: 5,
-        maxCostCents: 0,
+        maxEstimatedTokens: 0,
         knowledgeScope: "user_input_only",
       },
       compute: {
@@ -3298,7 +6743,7 @@ describe("conversation worker knowledge recall", () => {
       displayTarget: "生成公开资料摘要",
       path: "outputs/public-summary.md",
       content: "# 摘要",
-      estimatedCostCents: 5,
+      estimatedTokens: 5,
     }]);
     mocks.createAudienceComputeSession.mockResolvedValue({ session: { id: "session-public-knowledge" } });
     mocks.executeAudienceTool.mockResolvedValue({ outcome: "completed", artifacts: [] });
@@ -3309,7 +6754,7 @@ describe("conversation worker knowledge recall", () => {
         naturalLanguageEnabled: true,
         explicitComputeEnabled: true,
         maxSteps: 3,
-        maxCostCents: 0,
+        maxEstimatedTokens: 0,
         knowledgeScope: "public_knowledge",
       },
       compute: {
@@ -3338,7 +6783,7 @@ describe("conversation worker knowledge recall", () => {
     );
   });
 
-  it("stops a task whose estimate exceeds the representative cost limit", async () => {
+  it("stops a task whose estimate exceeds the representative token limit", async () => {
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-cost",
       runId: "run-cost",
@@ -3360,7 +6805,7 @@ describe("conversation worker knowledge recall", () => {
         path: "notes/cost.txt",
         content: "expensive",
         displayTarget: "notes/cost.txt",
-        estimatedCostCents: 12,
+        estimatedTokens: 12,
       },
     });
     mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
@@ -3370,7 +6815,7 @@ describe("conversation worker knowledge recall", () => {
         naturalLanguageEnabled: true,
         explicitComputeEnabled: true,
         maxSteps: 5,
-        maxCostCents: 5,
+        maxEstimatedTokens: 5,
         knowledgeScope: "user_input_only",
       },
       compute: {
@@ -3388,13 +6833,13 @@ describe("conversation worker knowledge recall", () => {
     });
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(expect.objectContaining({
       countUsage: false,
-      replyText: expect.stringContaining("超过该代表设置的 5 美分上限"),
+      replyText: expect.stringContaining("超过该代表设置的 5 Token 上限"),
     }));
     expect(mocks.createComputeDelegationTask).toHaveBeenCalledTimes(1);
     expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
       taskId: "task-1",
       outcome: "blocked",
-      failureReason: expect.stringContaining("Estimated cost 12 cents"),
+      failureReason: expect.stringContaining("Estimated token usage 12"),
     }));
     expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
   });
@@ -3408,7 +6853,7 @@ describe("conversation worker knowledge recall", () => {
         naturalLanguageEnabled: true,
         explicitComputeEnabled: true,
         maxSteps: 1,
-        maxCostCents: 0,
+        maxEstimatedTokens: 0,
         knowledgeScope: "user_input_only",
       },
       compute: {
@@ -3717,6 +7162,75 @@ describe("conversation worker knowledge recall", () => {
     });
   });
 
+  it("blocks an MCP request before task creation when the pinned version has no grant", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-mcp-unpublished",
+      leaseAttempt: 1,
+      runId: "run-mcp-unpublished",
+      representativeVersionId: "version-old",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-mcp-unpublished",
+      contactId: "contact-mcp-unpublished",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-mcp-unpublished",
+      userText: "/compute mcp deepwiki ask_question ::: {\"repoName\":\"BIFNC-TEAM/Delegate\",\"question\":\"用途？\"}",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "full",
+        filesystemMode: "workspace_only",
+      },
+    });
+    mocks.parseComputeDirective.mockReturnValue({
+      kind: "request",
+      request: {
+        capability: "mcp",
+        bindingSlug: "deepwiki",
+        toolName: "ask_question",
+        toolArguments: {
+          repoName: "BIFNC-TEAM/Delegate",
+          question: "用途？",
+        },
+        estimatedTokens: 1_300,
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+        displayTarget: "deepwiki:ask_question",
+      },
+    });
+    mocks.getRepresentativeRuntimeAuthoritySnapshot.mockResolvedValue({
+      representativeVersionId: "version-old",
+      mcpBindings: [],
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValue({
+      message: { id: "reply-mcp-unpublished" },
+    });
+
+    await expect(
+      processNextConversationWork({ port: 4040, pollMs: 500 }),
+    ).resolves.toMatchObject({
+      processed: true,
+      status: "completed",
+    });
+
+    expect(mocks.createComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.createAudienceComputeSession).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyText: expect.stringContaining("当前会话固定的代表版本尚未包含这个 MCP 连接"),
+        countUsage: false,
+      }),
+    );
+  });
+
   it("leaves an already in-flight delegated execution for lease recovery", async () => {
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-execution-in-progress",
@@ -4007,6 +7521,517 @@ describe("conversation worker knowledge recall", () => {
       outboxId: "outbox-reclaimed",
       leaseAttempt: 2,
       outputMessageId: "reply-reclaimed",
+      deliveryAdmission: {
+        attemptNumber: 1,
+        leaseToken: "delivery-lease-1",
+      },
     });
   });
 });
+
+function managedDocumentPlanFixture() {
+  return {
+    protocolVersion: 2,
+    planId: "turn-plan-run-1-1",
+    objective: "生成地理学习教程文件",
+    mode: "execute",
+    goals: [{ id: "goal-1", description: "生成教程", priority: 100 }],
+    deliverables: [{
+      id: "deliverable-1",
+      kind: "artifact",
+      format: "markdown",
+      producedByActionIds: ["action-document"],
+      completionCriteria: ["返回可下载文档"],
+    }],
+    uncertainties: [],
+    questions: [],
+    actions: [{
+      id: "action-document",
+      capability: {
+        key: "artifact.generate_document",
+        version: "1",
+        definitionHash: `sha256:${"b".repeat(64)}`,
+      },
+      arguments: { topic: "地理学习教程", format: "markdown" },
+      argumentProvenance: {},
+      dependsOn: [],
+      expectedOutputSchema: {},
+      completionCriteria: ["正文非空"],
+      onFailure: "stop",
+    }],
+  };
+}
+
+function configureMixedKnowledgeMcpV3(input: { knowledge: "hit" | "miss" }) {
+  const definitionHash = `sha256:${"b".repeat(64)}`;
+  const item = {
+    outboxId: "outbox-v3-mixed",
+    leaseAttempt: 1,
+    runId: "run-v3-mixed",
+    representativeVersionId: "version-1",
+    representativeSlug: "sktone",
+    representativeName: "SKTone",
+    conversationId: "conversation-v3-mixed",
+    contactId: "contact-v3-mixed",
+    controlState: "AI_ACTIVE",
+    inputMessageId: "message-v3-mixed",
+    userText: "结合我的授权资料和外部工具查询后回答",
+    channel: "web",
+    usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+  };
+  const setup = {
+    id: "rep-1",
+    name: "SKTone",
+    ownerName: "Owner",
+    tagline: "Representative",
+    tone: "direct",
+    languages: ["zh"],
+    skillPacks: [],
+    knowledgePackRevision: 1,
+    knowledgePack: {
+      identitySummary: "Test representative",
+      faq: [],
+      materials: [],
+      policies: [],
+    },
+    compute: {
+      enabled: true,
+      baseImage: "debian:bookworm-slim",
+      maxSessionMinutes: 15,
+      artifactRetentionDays: 14,
+      networkMode: "no_network",
+      filesystemMode: "workspace_only",
+      capabilityModes: {
+        exec: "deny",
+        read: "allow",
+        write: "ask",
+        process: "deny",
+        browser: "deny",
+        mcp: "allow",
+      },
+    },
+    delegation: {
+      enabled: true,
+      naturalLanguageEnabled: true,
+      explicitComputeEnabled: true,
+      maxSteps: 5,
+      maxEstimatedTokens: 10_000,
+      knowledgeScope: "user_input_only",
+    },
+  };
+  const authority = {
+    representativeVersionId: "version-1",
+    compute: setup.compute,
+    delegation: setup.delegation,
+    mcpBindings: [{
+      id: "binding-1",
+      slug: "deepwiki",
+      allowedToolNames: ["ask_question"],
+      defaultToolName: "ask_question",
+      enabled: true,
+      approvalRequired: false,
+      estimatedTokensPerCall: 100,
+      maxRetries: 0,
+      retryBackoffMs: 1_000,
+      serverUrl: "https://mcp.example.test",
+      transportKind: "streamable_http",
+      toolDefinitions: [{
+        exactToolName: "ask_question",
+        description: "Search external documentation.",
+        inputSchema: {
+          type: "object",
+          properties: { question: { type: "string" } },
+          required: ["question"],
+          additionalProperties: false,
+        },
+        outputSchema: {
+          type: "object",
+          properties: { result: {} },
+          required: ["result"],
+          additionalProperties: false,
+        },
+        toolSchemaHash: `sha256:${"c".repeat(64)}`,
+        bindingDefinitionHash: `sha256:${"d".repeat(64)}`,
+        bindingRevision: 3,
+        canonicalizationVersion: "delegate-capability-v1",
+      }],
+    }],
+  };
+  let plan: Record<string, any>;
+  let mcpDefinition: Record<string, any>;
+  let knowledgeDefinition: Record<string, any>;
+  mocks.claimNextGenerationWorkItem.mockResolvedValue(item);
+  mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue(setup);
+  mocks.getRepresentativeRuntimeAuthoritySnapshot.mockResolvedValue(authority);
+  mocks.buildCapabilityCatalogV3.mockImplementation((drafts) => ({
+    protocolVersion: 2,
+    canonicalizationVersion: "delegate-capability-v1",
+    catalogHash: `sha256:${"e".repeat(64)}`,
+    capabilities: drafts.map((draft: Record<string, unknown>) => ({
+      ...draft,
+      definitionHash: draft["key"] === "knowledge.retrieve_authorized"
+        ? `sha256:${"a".repeat(64)}`
+        : draft["key"] === "mcp.deepwiki.ask_question"
+          ? `sha256:${"c".repeat(64)}`
+          : definitionHash,
+    })),
+  }));
+  mocks.planTurnV3.mockImplementation(async ({ catalog, scopeKey, planId }) => {
+    const knowledge = catalog.capabilities.find((candidate: { key: string }) =>
+      candidate.key === "knowledge.retrieve_authorized");
+    knowledgeDefinition = knowledge;
+    const mcp = catalog.capabilities.find((candidate: { key: string }) =>
+      candidate.key === "mcp.deepwiki.ask_question");
+    const compose = catalog.capabilities.find((candidate: { key: string }) =>
+      candidate.key === "response.compose");
+    mcpDefinition = mcp;
+    plan = {
+      protocolVersion: 3,
+      planId: "turn-plan-v3-mixed",
+      scopeKey,
+      revision: 1,
+      envelopeHash: `sha256:${"f".repeat(64)}`,
+      capabilityCatalogHash: catalog.catalogHash,
+      validationPolicyVersion: "turn-plan-v3-policy.2",
+      objective: "Use knowledge and an external capability",
+      goals: [{
+        id: "goal-knowledge",
+        objective: "Check Owner knowledge",
+        sourcePointers: ["/currentMessage/text"],
+        strategy: "knowledge",
+        operation: "search",
+        semanticConfidence: 0.95,
+        generalEligibility: "allowed",
+        actionIds: ["knowledge", "compose"],
+        deliverableIds: [],
+        evidenceRequirement: {
+          kind: "knowledge_preferred",
+          freshness: "bounded",
+          allowedSourceKinds: ["authorized_knowledge"],
+          citationRequired: false,
+          minimumEvidenceCount: 0,
+        },
+        evidenceFallbackPolicy: {
+          kind: "authorized_knowledge_miss_to_stable_general",
+          policySource: "server_planning_default",
+          activationStatuses: ["not_found", "unavailable"],
+          authorityBoundary: "non_owner_specific_stable_general",
+          disclosureRequired: true,
+        },
+        sourceAuthorityBoundary: {
+          classification: "stable_general_allowed",
+          policySource: "server_authority_policy",
+          policyVersion: "delegate.source-authority.v1",
+          reasonCodes: ["no_owner_authority_signal"],
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "knowledge_failed" },
+      }, {
+        id: "goal-tool",
+        objective: "Use external evidence",
+        sourcePointers: ["/currentMessage/text"],
+        strategy: "capability",
+        operation: "search",
+        semanticConfidence: 0.95,
+        generalEligibility: "not_allowed",
+        actionIds: ["lookup", "compose"],
+        deliverableIds: [],
+        evidenceRequirement: {
+          kind: "capability_result",
+          freshness: "bounded",
+          allowedSourceKinds: ["mcp"],
+          citationRequired: true,
+          minimumEvidenceCount: 1,
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "tool_failed" },
+      }],
+      actions: [{
+        id: "knowledge",
+        capability: {
+          key: knowledge.key,
+          version: knowledge.version,
+          definitionHash: knowledge.definitionHash,
+        },
+        arguments: { question: item.userText },
+        argumentProvenance: {
+          question: { source: "user_message", pointer: "/currentMessage/text" },
+        },
+        dependencies: [],
+        activation: { mode: "primary" },
+        expectedOutputSchema: knowledge.outputSchema,
+        completionCriteria: ["Knowledge probe verified"],
+        failurePolicy: { strategy: "stop", publicMessageCode: "knowledge_failed" },
+      }, {
+        id: "lookup",
+        capability: {
+          key: mcp.key,
+          version: mcp.version,
+          definitionHash: mcp.definitionHash,
+        },
+        arguments: { question: item.userText },
+        argumentProvenance: {
+          question: { source: "user_message", pointer: "/currentMessage/text" },
+        },
+        dependencies: [{ actionId: "knowledge", allowedStatuses: ["succeeded"] }],
+        activation: { mode: "primary" },
+        expectedOutputSchema: mcp.outputSchema,
+        completionCriteria: ["Tool result verified"],
+        failurePolicy: { strategy: "stop", publicMessageCode: "tool_failed" },
+      }, {
+        id: "compose",
+        capability: {
+          key: compose.key,
+          version: compose.version,
+          definitionHash: compose.definitionHash,
+        },
+        arguments: {},
+        argumentProvenance: {},
+        dependencies: [{
+          actionId: "knowledge",
+          allowedStatuses: ["succeeded"],
+        }, {
+          actionId: "lookup",
+          allowedStatuses: ["succeeded", "failed", "reconciliation_required"],
+        }],
+        activation: { mode: "primary" },
+        expectedOutputSchema: compose.outputSchema,
+        completionCriteria: ["Response verified"],
+        failurePolicy: { strategy: "stop", publicMessageCode: "compose_failed" },
+      }],
+      deliverables: [],
+      decisionTrace: ["mixed_knowledge_and_capability"],
+    };
+    return {
+      ok: true,
+      provider: "agicto",
+      model: "planner-test",
+      selectedCapabilities: [knowledge, mcp, compose],
+      proposal: { protocolVersion: 3, objective: plan.objective },
+      plan,
+    };
+  });
+  mocks.persistConversationTurnPlanV3.mockImplementation(async () => ({
+    id: "turn-plan-v3-mixed",
+    revision: 1,
+    executionEpoch: 1,
+    generationRunId: item.runId,
+    actions: [{ id: "plan-action-knowledge", actionKey: "knowledge" }, {
+      id: "plan-action-lookup",
+      actionKey: "lookup",
+    }, { id: "plan-action-compose", actionKey: "compose" }],
+  }));
+  mocks.recordConversationPlanActionAuthorization.mockResolvedValue({ sequence: 3 });
+  mocks.prepareV3InlineAction
+    .mockResolvedValueOnce({ attempt: { id: "attempt-knowledge-mixed", status: "RUNNING", executionLeaseToken: "inline-lease-knowledge-mixed" } })
+    .mockResolvedValueOnce({ attempt: { id: "attempt-compose-mixed", status: "RUNNING", executionLeaseToken: "inline-lease-compose-mixed" } });
+  mocks.completeV3InlineAction.mockResolvedValue({
+    actionStatus: "SUCCEEDED",
+    verified: { semanticOutcome: "succeeded" },
+  });
+  const knowledgeItems = input.knowledge === "hit"
+    ? [{
+        memoryUseItemId: "memory-item-mixed",
+        abstract: "Owner-authorized knowledge.",
+        internalSource: { publicResourceKey: "knowledge/topic.md" },
+      }]
+    : [];
+  mocks.recallRepresentativeContext.mockResolvedValue({
+    items: knowledgeItems,
+    citations: [],
+    memoryUseRunId: "memory-run-mixed",
+  });
+  mocks.compileCapabilityAction.mockImplementation(({ definition }) => ({
+    planId: "turn-plan-v3-mixed",
+    planRevision: 1,
+    executionEpoch: 1,
+    actionId: "plan-action-lookup",
+    generationRunId: item.runId,
+    capabilityKey: definition.key,
+    capabilityVersion: definition.version,
+    capabilityDefinitionHash: definition.definitionHash,
+    argumentsHash: `sha256:${"1".repeat(64)}`,
+    idempotencyKey: "turn-plan:mixed:lookup",
+    executor: "mcp",
+    bindingId: "binding-1",
+    bindingRevision: 3,
+    toolName: "ask_question",
+    expectedToolSchemaHash: `sha256:${"c".repeat(64)}`,
+    expectedBindingDefinitionHash: `sha256:${"d".repeat(64)}`,
+    toolArguments: { question: item.userText },
+  }));
+  mocks.createComputeDelegationTask.mockResolvedValue({
+    task: { id: "task-v3-mixed" },
+    step: { id: "task-step-v3-mixed" },
+  });
+  mocks.createAudienceComputeSession.mockResolvedValue({ session: { id: "session-v3-mixed" } });
+  mocks.executeAudienceTool.mockResolvedValue({
+    outcome: "completed",
+    execution: {
+      semanticOutcome: "succeeded",
+      transportOutcome: "response_received",
+    },
+    artifacts: [],
+  });
+  mocks.finalizeComputeDelegationTask.mockResolvedValue({ hasMoreSteps: false });
+  mocks.loadV3GovernedCompositionContext.mockImplementation(async () => {
+    const knowledgeOutput = {
+      status: input.knowledge === "hit" ? "found" : "not_found",
+      evidenceRefs: knowledgeItems.map((entry) => entry.memoryUseItemId),
+      items: knowledgeItems.map((entry) => ({
+        evidenceId: entry.memoryUseItemId,
+        content: entry.abstract,
+      })),
+    };
+    return {
+      plan: {
+        id: "turn-plan-v3-mixed",
+        executionEpoch: 1,
+        plannerProvider: "agicto",
+        plannerModel: "planner-test",
+        plannerProposalSnapshot: {
+          capabilityDefinitions: [knowledgeDefinition, mcpDefinition],
+          candidateSnapshot: { candidates: [{ definition: mcpDefinition }] },
+        },
+        actions: [{
+          id: "plan-action-knowledge",
+          actionKey: "knowledge",
+          capabilityKey: "knowledge.retrieve_authorized",
+          capabilityDefinitionHash: knowledgeDefinition.definitionHash,
+          status: "SUCCEEDED",
+          actionResults: [{
+            id: "result-knowledge-mixed",
+            semanticOutcome: "succeeded",
+            transportOutcome: "response_received",
+            output: knowledgeOutput,
+            failure: null,
+            evidenceBindings: knowledgeItems.map((entry) => ({
+              evidenceId: entry.memoryUseItemId,
+              evidenceClass: "authorized_knowledge",
+            })),
+          }],
+        }, {
+          id: "plan-action-lookup",
+          actionKey: "lookup",
+          capabilityKey: mcpDefinition.key,
+          capabilityDefinitionHash: mcpDefinition.definitionHash,
+          status: "SUCCEEDED",
+          actionResults: [{
+            id: "result-mcp-mixed",
+            semanticOutcome: "succeeded",
+            transportOutcome: "response_received",
+            output: { result: "Verified external result." },
+            failure: null,
+            evidenceBindings: [],
+          }],
+        }, {
+          id: "plan-action-compose",
+          actionKey: "compose",
+          capabilityKey: "response.compose",
+          capabilityDefinitionHash: definitionHash,
+          status: "READY",
+          actionResults: [],
+        }],
+      },
+      parsedPlan: plan,
+      composeDefinition: plan.actions[2],
+      composeAction: { id: "plan-action-compose", actionKey: "compose" },
+    };
+  });
+  mocks.composeTurnV3.mockResolvedValue({
+    ok: true,
+    provider: "agicto",
+    model: "composer-test",
+    draft: {
+      segments: [{
+        kind: "claim",
+        goalId: "goal-tool",
+        text: "Combined verified answer.",
+        sourceClass: "tool_output",
+        evidenceRefs: ["result-mcp-mixed"],
+      }],
+    },
+  });
+  mocks.completeInlineGenerationRun.mockResolvedValue({
+    message: { id: "reply-v3-mixed", text: "Combined verified answer." },
+  });
+}
+
+function mixedMcpDefinition(input: {
+  evidenceClasses: string[];
+  authorityClasses: string[];
+  definitionHash?: string;
+}) {
+  return {
+    key: input.definitionHash ? "mcp.external.ordinary" : "mcp.external.transactional",
+    version: "1",
+    description: "External capability.",
+    executor: "mcp",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      properties: { result: {} },
+      required: ["result"],
+      additionalProperties: false,
+    },
+    effect: { boundary: "external", mutation: "write", reversibility: "unknown" },
+    idempotency: "non_idempotent",
+    supportedChannels: ["web"],
+    requiredIdentityScopes: [],
+    requiredDataScopes: [],
+    tags: [],
+    semantics: {
+      operations: ["read"],
+      evidenceClasses: input.evidenceClasses,
+      freshnessClasses: ["live"],
+      authorityClasses: input.authorityClasses,
+      domains: [],
+      aliases: [],
+    },
+    canonicalizationVersion: "delegate-capability-v1",
+    mcpToolSchemaHash: `sha256:${"7".repeat(64)}`,
+    bindingDefinitionHash: `sha256:${"8".repeat(64)}`,
+    definitionHash: input.definitionHash ?? `sha256:${"6".repeat(64)}`,
+  };
+}
+
+function v2ComputePlanFixture(
+  capability: "exec" | "read" | "write" | "process" | "browser",
+) {
+  const actionId = `action-compute-${capability}`;
+  return {
+    protocolVersion: 2,
+    planId: `turn-plan-compute-${capability}`,
+    objective: "执行受治理的详细任务",
+    mode: "execute",
+    goals: [{ id: "goal-compute", description: "执行任务", priority: 100 }],
+    deliverables: [{
+      id: "deliverable-compute",
+      kind: "external_result",
+      format: null,
+      producedByActionIds: [actionId],
+      completionCriteria: ["详细执行结果已验证"],
+    }],
+    uncertainties: [],
+    questions: [],
+    actions: [{
+      id: actionId,
+      capability: {
+        key: `compute.${capability}`,
+        version: "1",
+        definitionHash: `sha256:${"c".repeat(64)}`,
+      },
+      arguments: { request: "按刚才确认的内容处理一下" },
+      argumentProvenance: {
+        request: { source: "user_message", pointer: "/currentMessage/text" },
+      },
+      dependsOn: [],
+      expectedOutputSchema: {},
+      completionCriteria: ["详细规划器与 V2 能力一致"],
+      onFailure: "stop",
+    }],
+  };
+}

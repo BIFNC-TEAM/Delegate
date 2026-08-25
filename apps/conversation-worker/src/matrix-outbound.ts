@@ -1,10 +1,12 @@
 import type { ConversationWorkerConfig } from "./config";
 import {
   GenerationMemoryDeliveryBlockedError,
+  GenerationPlanDeliverySupersededError,
   getMatrixRoomSecuritySnapshot,
   isolateMatrixConversationRoom,
   withActiveMatrixRepresentativeChannelFence,
   withGenerationMessageProviderDeliveryFence,
+  type GenerationMessageDeliveryAdmission,
 } from "@delegate/web-data";
 
 export async function sendMatrixRepresentativeMessage(input: {
@@ -21,6 +23,7 @@ export async function sendMatrixRepresentativeMessage(input: {
     outboxId: string;
     leaseAttempt: number;
     outputMessageId: string;
+    deliveryAdmission: GenerationMessageDeliveryAdmission;
   };
   text: string;
 }) {
@@ -64,23 +67,29 @@ export async function sendMatrixRepresentativeMessage(input: {
         },
       },
       async (tx) => {
-        const send = () => fetch(url, {
-          method: "PUT",
-          headers: {
-            Authorization:
-              `Bearer ${input.config.matrixApplicationServiceToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            msgtype: "m.text",
-            body: input.text,
-            "com.delegate.sender_mode": input.senderMode,
-            ...(input.generationRunId
-              ? { "com.delegate.generation_run_id": input.generationRunId }
-              : {}),
-          }),
-          signal: AbortSignal.timeout(15_000),
-        });
+        const send = async () => {
+          try {
+            return await fetch(url, {
+              method: "PUT",
+              headers: {
+                Authorization:
+                  `Bearer ${input.config.matrixApplicationServiceToken}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                msgtype: "m.text",
+                body: input.text,
+                "com.delegate.sender_mode": input.senderMode,
+                ...(input.generationRunId
+                  ? { "com.delegate.generation_run_id": input.generationRunId }
+                  : {}),
+              }),
+              signal: AbortSignal.timeout(15_000),
+            });
+          } catch (error) {
+            throw new MatrixProviderOutcomeUnknownError(error);
+          }
+        };
         if (!input.generationDelivery) {
           return { executed: true as const, value: await send() };
         }
@@ -110,14 +119,42 @@ export async function sendMatrixRepresentativeMessage(input: {
   if (!providerDelivery.executed) {
     // The channel transaction must commit the cancellation before callers
     // observe this terminal error.
+    if (
+      providerDelivery.reason === "turn_plan_superseded_before_delivery"
+    ) {
+      throw new GenerationPlanDeliverySupersededError();
+    }
     throw new GenerationMemoryDeliveryBlockedError();
   }
   const response = providerDelivery.value;
-  const payload = (await response.json().catch(() => ({}))) as { event_id?: string; error?: string };
-  if (!response.ok || !payload.event_id) {
+  let payload: { event_id?: string; error?: string };
+  try {
+    payload = await response.json() as typeof payload;
+  } catch (error) {
+    if (response.ok) throw new MatrixProviderOutcomeUnknownError(error);
+    payload = {};
+  }
+  if (!response.ok) {
     throw new Error(payload.error || `Matrix delivery failed with HTTP ${response.status}.`);
   }
+  if (!payload.event_id) {
+    throw new MatrixProviderOutcomeUnknownError(
+      new Error("Matrix accepted the request without returning an event id."),
+    );
+  }
   return payload.event_id;
+}
+
+export class MatrixProviderOutcomeUnknownError extends Error {
+  readonly code = "matrix_provider_outcome_unknown";
+
+  constructor(cause: unknown) {
+    super(
+      "Matrix provider outcome is unknown; automatic retry is disabled to prevent duplicate delivery.",
+      { cause },
+    );
+    this.name = "MatrixProviderOutcomeUnknownError";
+  }
 }
 
 async function assertMatrixOutboundRoomSafe(input: {

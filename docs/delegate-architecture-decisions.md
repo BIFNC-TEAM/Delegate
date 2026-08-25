@@ -2,7 +2,7 @@
 
 ## Status
 
-Directional architecture decisions captured on 2026-03-24. This document updates the product-level target state for Delegate's next phase. It does not claim that all of these decisions are implemented in code today.
+Directional architecture decisions captured on 2026-03-24 and reconciled with Agent Runtime V3 on 2026-08-21. The authoritative runtime protocol is [Agent Runtime V3](./agent-runtime-v3.md); this document retains broader product and stack tradeoffs.
 
 ## Core shift
 
@@ -35,12 +35,12 @@ Representative Plane -> Capability Gate -> Isolated Compute Plane -> Audit + Bil
 | Browser / computer use | OpenClaw's browser/node split and policy framing | A single generic browser wrapper as the only browser strategy | Dual browser stack: Playwright/CDP for deterministic flows, OpenAI/Anthropic native computer-use lanes for ambiguous UI tasks | Multi-browser pools and domain-specialized browser agents |
 | Tool permissions | OpenClaw allow/deny matrices; Claude Code-style permission ergonomics | Prompt-only guardrails and coarse binary allowlists | A policy engine with `allow`, `ask`, `deny`, and org-managed defaults | Customer-specific policy packs and signed capability templates |
 | Hooks / lifecycle | Claude Code hooks model | Pure after-the-fact logs | Interceptable lifecycle hooks around tool use, handoff, memory commit, and billing | Customer webhooks and programmable automations |
-| Workflow orchestration | Session stickiness and failure-aware routing | One giant agent loop owning all business state | Typed workflow handlers now; Temporal for long-running business flows | Localized LangGraph subflows when agentic interrupts add real value |
+| Workflow orchestration | Session stickiness and failure-aware routing | One giant agent loop owning all business state | Postgres truth plus Temporal/Outbox durable waiting and signals | Localized subflows only behind the V3 Action/Result contract |
 | Context and memory | OpenClaw continuity mindset; Claude prompt caching, context editing, and memory-tool principles | Mixing transcript, artifacts, and owner-private memory in one store | Postgres for truth, OpenViking for public-safe long-term context, artifact storage for raw outputs, ephemeral compute state for sandbox-local files | Memory promotion policies learned from owner feedback |
 | Files and artifacts | Claude Files API product pattern | Storing large artifacts inside conversation transcript or long-term memory | Object storage + metadata + retention policies + summary extraction | Searchable artifact catalogs per representative |
 | Capability transport | OpenClaw discovery thinking; Anthropic MCP direction | Arbitrary plugin code running inside representative runtime | Internal capability services plus remote MCP servers with explicit policy and provenance | External skill marketplace with signed trust tiers |
 | Billing | OpenClaw usage visibility; Anthropic's separate compute-meter mindset | Treating token cost as the user-facing product price | Dual ledger: user credits/packs externally, model + compute + browser + storage cost internally | Dynamic margin-aware pricing and sponsor automation |
-| Multi-agent | Claude Code subagent boundary model | OpenClaw-style persona multiplication without hard boundaries | Explicit subagents with scoped context, scoped tools, and scoped budgets | Full agent network routing and capability graph |
+| Multi-agent | Scoped context/tool/budget boundaries | OpenClaw-style persona multiplication or a framework loop owning business truth | Goal-oriented TurnPlan V3 plus discriminated capability executors | A pi/other agent-core adapter only behind Skill/Compute execution contracts |
 
 ## Recommended stack
 
@@ -76,6 +76,7 @@ Representative Plane -> Capability Gate -> Isolated Compute Plane -> Audit + Bil
 - Temporal for retries, compensations, SLA windows, reminders, and asynchronous completion
 - current durable workflows keep Postgres as truth while Temporal handles outbox-dispatched start, native timer waiting, retry, and cancellation cleanup for approval expiration and handoff follow-up
 - model reasoning used for routing, summarization, and parameter filling, not as the only source of workflow truth
+- one immutable TurnPlan V3 is the execution truth; Temporal history is never a second plan/state authority
 
 ### 6. Memory and state
 
@@ -89,6 +90,13 @@ Representative Plane -> Capability Gate -> Isolated Compute Plane -> Audit + Bil
 - internal capability services for first-party tools
 - remote MCP servers for approved external capabilities
 - provenance and trust tier metadata stored for every installed capability
+- schema-pinned MCP definitions refreshed by a single-instance read-only catalog loop, plus live drift checks from the invocation handshake
+
+### 8. Agent framework boundary
+
+- Keep the Delegate V3 contracts as the top-level runtime.
+- Do not replace Policy, Approval, Billing, Temporal, Artifact CAS, or Outbox with pi/OpenClaw/LangGraph state.
+- A framework may be embedded later as a version-pinned Skill or isolated Compute executor; its output remains untrusted until Verified ActionResult validation.
 
 ## Claude-inspired decisions worth explicitly borrowing
 
@@ -201,18 +209,16 @@ That pattern is reasonable for a personal assistant. It is not the right default
 
 Discovery and provenance are useful. Executable authority should live in isolated capability services instead.
 
-## Immediate build order
+## Implemented foundation and next build order
 
-1. Formalize the `capability gate` schema with `allow / ask / deny`.
-2. Introduce session-scoped compute leases for `exec / read / write / process / browser`.
-3. Add artifact storage and retention policy.
-4. Add Temporal for long-running handoff and owner follow-up flows.
-5. Split browser execution into deterministic and native computer-use lanes.
-6. Add Claude-style hooks around tool execution and memory commit.
+Implemented: structured `allow/ask/deny`, session-scoped Compute leases, Artifact storage, Temporal-backed durable workflows, deterministic/native browser lanes, lifecycle hooks, and Agent Runtime V3 planning/execution fences.
+
+Next: collect lane-specific Shadow evidence, satisfy the executable release gates, add trusted Skill runtime adapters only when real package semantics exist, and expand server-owned SuccessContracts for third-party capabilities.
 
 The phased implementation sequence that maps these decisions onto product delivery lives in [docs/roadmap.md](./roadmap.md).
 
 The detailed engineering breakdown for `V2: Isolated Compute Plane` lives in [docs/v2-isolated-compute-plane-plan.md](./v2-isolated-compute-plane-plan.md).
+The implemented planning and execution protocol lives in [docs/agent-runtime-v3.md](./agent-runtime-v3.md).
 
 ## Sources
 
@@ -236,3 +242,4 @@ The detailed engineering breakdown for `V2: Isolated Compute Plane` lives in [do
 - Claude Code hooks: <https://code.claude.com/docs/en/hooks>
 - Claude Code subagents: <https://docs.anthropic.com/en/docs/claude-code/sub-agents>
 - Temporal docs: <https://docs.temporal.io/>
+- Pi agent toolkit: <https://github.com/badlogic/pi-mono>

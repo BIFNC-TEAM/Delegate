@@ -22,7 +22,19 @@ const mocks = vi.hoisted(() => {
     },
     handoffRequest: {
       findFirst: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
       updateMany: vi.fn(),
+    },
+    workflowRun: {
+      findMany: vi.fn(),
+      update: vi.fn(),
+    },
+    workflowCommandOutbox: {
+      create: vi.fn(),
+    },
+    eventAudit: {
+      create: vi.fn(),
     },
     lead: {
       updateMany: vi.fn(),
@@ -97,6 +109,7 @@ vi.mock("../src/service-entitlements", () => ({
 
 import {
   assignConversationOperator,
+  controlPublicAudienceHandoff,
   editConversationMessage,
 } from "../src/conversation-platform";
 
@@ -164,8 +177,30 @@ describe("conversation human control and message-edit fencing", () => {
     });
     mocks.tx.handoffRequest.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.handoffRequest.findFirst.mockResolvedValue(null);
+    mocks.tx.handoffRequest.findUnique.mockResolvedValue(null);
+    mocks.tx.handoffRequest.update.mockImplementation(
+      async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => ({
+        id: where.id,
+        representativeId: "representative-1",
+        contactId: "contact-1",
+        audienceIdentityId: "audience-1",
+        conversationId,
+        handoffEntitlementGrantId: null,
+        status: "CLOSED",
+        ...data,
+      }),
+    );
+    mocks.tx.workflowRun.findMany.mockResolvedValue([]);
+    mocks.tx.workflowRun.update.mockResolvedValue({ id: "workflow-1" });
+    mocks.tx.workflowCommandOutbox.create.mockResolvedValue({ id: "command-1" });
+    mocks.tx.eventAudit.create.mockResolvedValue({ id: "audit-1" });
     mocks.tx.lead.updateMany.mockResolvedValue({ count: 1 });
-    mocks.tx.message.create.mockResolvedValue({ id: "system-message-1" });
+    mocks.tx.message.create.mockImplementation(
+      async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "system-message-1",
+        ...data,
+      }),
+    );
     mocks.tx.message.update.mockResolvedValue({ id: inputMessageId });
     mocks.tx.message.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.messageRevision.create.mockResolvedValue({
@@ -214,6 +249,165 @@ describe("conversation human control and message-edit fencing", () => {
     });
     mocks.releaseConversationEntitlementByGenerationRunId.mockResolvedValue(null);
     mocks.transferConversationEntitlementByGenerationRunId.mockResolvedValue(null);
+  });
+
+  it("lets the audience cancel an unaccepted handoff and releases its workflow", async () => {
+    const handoff = {
+      id: "handoff-open",
+      representativeId: "representative-1",
+      contactId: "contact-1",
+      audienceIdentityId: "audience-1",
+      conversationId,
+      status: "OPEN",
+      handoffEntitlementGrantId: null,
+      createdAt: new Date("2026-07-24T08:00:00.000Z"),
+    };
+    mocks.tx.conversation.findFirst.mockResolvedValue({
+      id: conversationId,
+      representativeId: "representative-1",
+      contactId: "contact-1",
+      state: "NEEDS_HUMAN",
+      episodes: [{ id: episodeId, status: "NEEDS_HUMAN" }],
+      assignments: [],
+    });
+    mocks.tx.handoffRequest.findFirst.mockResolvedValueOnce(handoff);
+    mocks.tx.handoffRequest.findUnique.mockResolvedValue(handoff);
+    mocks.tx.workflowRun.findMany.mockResolvedValueOnce([{
+      id: "workflow-handoff",
+      engine: "TEMPORAL",
+      externalWorkflowId: "handoff-workflow-1",
+    }]);
+
+    await expect(controlPublicAudienceHandoff({
+      representativeSlug: "representative",
+      audienceIdentityId: "audience-1",
+      audienceId: "audience-session-1",
+      action: "cancel_request",
+    })).resolves.toMatchObject({
+      action: "cancel_request",
+      changed: true,
+      conversationState: "active",
+      message: {
+        id: "system-message-1",
+      },
+    });
+
+    expect(mocks.tx.handoffRequest.update).toHaveBeenCalledWith({
+      where: { id: "handoff-open" },
+      data: { status: "CLOSED" },
+    });
+    expect(mocks.tx.workflowRun.update).toHaveBeenCalledWith({
+      where: { id: "workflow-handoff" },
+      data: expect.objectContaining({
+        status: "CANCELED",
+        enginePhase: "CANCEL_REQUESTED",
+        output: { outcome: "audience_canceled_handoff_request" },
+      }),
+    });
+    expect(mocks.tx.workflowCommandOutbox.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        workflowRunId: "workflow-handoff",
+        commandType: "CANCEL",
+      }),
+    });
+    expect(mocks.tx.conversation.update).toHaveBeenCalledWith({
+      where: { id: conversationId },
+      data: {
+        state: "ACTIVE",
+        assignedOperatorId: null,
+        lastMessageAt: expect.any(Date),
+      },
+    });
+    expect(mocks.tx.eventAudit.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        type: "HANDOFF_RESOLVED",
+        payload: expect.objectContaining({ actorType: "audience" }),
+      }),
+    });
+  });
+
+  it("lets the audience end active human service without restoring consumed access", async () => {
+    const acceptedHandoff = {
+      id: "handoff-accepted",
+      representativeId: "representative-1",
+      contactId: "contact-1",
+      audienceIdentityId: "audience-1",
+      conversationId,
+      status: "ACCEPTED",
+      handoffEntitlementGrantId: null,
+      createdAt: new Date("2026-07-24T08:00:00.000Z"),
+    };
+    mocks.tx.conversation.findFirst.mockResolvedValue({
+      id: conversationId,
+      representativeId: "representative-1",
+      contactId: "contact-1",
+      state: "HUMAN_ACTIVE",
+      episodes: [{ id: episodeId, status: "HUMAN_ACTIVE" }],
+      assignments: [{ id: "assignment-1" }],
+    });
+    mocks.tx.handoffRequest.findFirst.mockResolvedValueOnce(acceptedHandoff);
+    mocks.tx.handoffRequest.findUnique.mockResolvedValue(acceptedHandoff);
+
+    await expect(controlPublicAudienceHandoff({
+      representativeSlug: "representative",
+      audienceIdentityId: "audience-1",
+      audienceId: "audience-session-1",
+      action: "end_human_service",
+    })).resolves.toMatchObject({
+      action: "end_human_service",
+      changed: true,
+      conversationState: "active",
+      message: {
+        id: "system-message-1",
+      },
+    });
+
+    expect(mocks.tx.conversationAssignment.updateMany).toHaveBeenCalledWith({
+      where: {
+        conversationId,
+        status: "ACTIVE",
+      },
+      data: {
+        status: "RELEASED",
+        releasedAt: expect.any(Date),
+        releaseReason: "audience_returned_to_ai",
+      },
+    });
+    expect(mocks.tx.handoffRequest.update).toHaveBeenCalledWith({
+      where: { id: "handoff-accepted" },
+      data: { status: "CLOSED" },
+    });
+    expect(mocks.tx.message.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        text: "The audience ended human service. The digital representative may continue.",
+      }),
+    });
+  });
+
+  it("re-reads human control after the conversation lock before canceling", async () => {
+    mocks.tx.conversation.findFirst
+      .mockResolvedValueOnce({ id: conversationId })
+      .mockResolvedValueOnce({
+        id: conversationId,
+        representativeId: "representative-1",
+        contactId: "contact-1",
+        state: "HUMAN_ACTIVE",
+        episodes: [{ id: episodeId, status: "HUMAN_ACTIVE" }],
+        assignments: [{ id: "assignment-concurrent" }],
+      });
+
+    await expect(controlPublicAudienceHandoff({
+      representativeSlug: "representative",
+      audienceIdentityId: "audience-1",
+      audienceId: "audience-session-1",
+      action: "cancel_request",
+    })).rejects.toMatchObject({
+      code: "human_service_active",
+      statusCode: 409,
+    });
+
+    expect(mocks.tx.handoffRequest.update).not.toHaveBeenCalled();
+    expect(mocks.tx.conversationAssignment.updateMany).not.toHaveBeenCalled();
   });
 
   it("fences and terminates active generation work before an operator takes control", async () => {

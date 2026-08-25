@@ -138,7 +138,8 @@ describe("public representative visitor-first page", () => {
     expect(representativeExtractionOnlyZh).toContain("联系人事实不会进入代表经验");
     expect(representativeExtractionOnlyZh).not.toContain("只可能提取联系人偏好");
     expect(enabledCrossChannelZh).toContain("同一已验证 Delegate 身份");
-    expect(enabledCrossChannelZh).toContain("明确同意");
+    expect(enabledCrossChannelZh).toContain("默认开启");
+    expect(enabledCrossChannelZh).toContain("随时关闭");
     expect(enabledCrossChannelZh).toContain("Web、Matrix、Telegram");
     expect(enabledCrossChannelZh).toContain("原始会话仍分别保存");
     expect(enabledCrossChannelZh).not.toContain("暂不支持");
@@ -280,6 +281,31 @@ describe("public representative visitor-first page", () => {
     expect(pageSource).toContain("faqQuestions={representative.knowledgePack.faq.map((item) => item.title)}");
   });
 
+  it("supports bounded public-chat attachments through multipart submission", () => {
+    expect(chatSource).toContain("PUBLIC_CHAT_ATTACHMENT_MAX_FILES = 5");
+    expect(chatSource).toContain("PUBLIC_CHAT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024");
+    expect(chatSource).toContain("PUBLIC_CHAT_ATTACHMENT_TOTAL_BYTES = 20 * 1024 * 1024");
+    expect(chatSource).toContain("new FormData()");
+    expect(chatSource).toContain('form.append("attachments", attachment');
+    expect(chatSource).toContain("representative-chat-pending-attachments");
+  });
+
+  it("lets the visitor cancel a pending handoff or end active human service", () => {
+    expect(chatSource).toContain("cancel_request");
+    expect(chatSource).toContain("end_human_service");
+    expect(chatSource).toContain("representative-handoff-control-trigger");
+    expect(chatSource).toContain('role="alertdialog"');
+    expect(chatSource).toContain(
+      "A consumed handoff entitlement is not refunded.",
+    );
+    expect(chatSource).toContain(
+      "你已取消人工接管请求，数字代表将继续回复。",
+    );
+    expect(chatSource).toContain(
+      "你已结束人工接待，数字代表将继续回复。",
+    );
+  });
+
   it("treats tips as support without exposing mock payment controls", () => {
     expect(rechargePanelSource).not.toContain("mock-success");
     expect(rechargePanelSource).not.toContain("mock-reversal");
@@ -331,9 +357,9 @@ describe("public representative visitor-first page", () => {
     expect(chatSource).not.toContain("props.hasHandoffPackages");
   });
 
-  it("shows a localized general-model source note only from the server marker", () => {
+  it("shows localized source notes only from server markers", () => {
     expect(chatSource).toContain(
-      'message.sourceDisclosure === "general_model"',
+      'message.sourceDisclosure === "same_conversation"',
     );
     expect(chatSource).toContain('message.role === "assistant"');
     expect(chatSource).toContain("payload.reply.sourceDisclosure");
@@ -342,7 +368,16 @@ describe("public representative visitor-first page", () => {
       "来源说明：本回答未引用已授权知识或记忆。",
     );
     expect(chatSource).toContain(
+      "来源说明：外部工具本轮未执行，以下内容由通用模型根据已有知识概括；未核验相关项目或仓库的最新内容，也未引用已授权知识或记忆。",
+    );
+    expect(chatSource).toContain(
       "Source note: This answer did not cite authorized knowledge or memory.",
+    );
+    expect(chatSource).toContain(
+      "来源说明：根据本次对话记录整理。",
+    );
+    expect(chatSource).toContain(
+      "Source note: Based on this conversation's record.",
     );
     expect(chatSource).toContain(
       'className="representative-answer-source-disclosure"',

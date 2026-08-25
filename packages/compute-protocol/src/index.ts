@@ -148,7 +148,7 @@ export const capabilityPolicyRuleSchema = z.object({
   resourceScopeCondition: policyResourceScopeSchema.optional(),
   channelCondition: policyChannelSchema.optional(),
   requiredPlanTier: capabilityPlanTierSchema.optional(),
-  maxCostCents: z.number().int().nonnegative().optional(),
+  maxEstimatedTokens: z.number().int().nonnegative().optional(),
   requiresPaidPlan: z.boolean().default(false),
   requiresHumanApproval: z.boolean().default(false),
   priority: z.number().int(),
@@ -227,11 +227,6 @@ const computeSubagentAllowedCapabilities = {
   "compute-agent": ["exec", "read", "write", "process", "mcp"],
   "browser-agent": ["browser"],
 } as const satisfies Record<z.infer<typeof computeSubagentIdSchema>, readonly z.infer<typeof capabilityKindSchema>[]>;
-
-const computeSubagentBudgetCredits = {
-  "compute-agent": 24,
-  "browser-agent": 48,
-} as const satisfies Record<z.infer<typeof computeSubagentIdSchema>, number>;
 
 function refineSubagentCapabilityBoundary<T extends z.ZodTypeAny>(
   schema: T,
@@ -428,7 +423,7 @@ export const toolExecutionRequestSchema = refineSubagentCapabilityBoundary(z.obj
   toolName: z.string().min(1).optional(),
   toolArguments: z.record(z.string(), z.unknown()).optional(),
   workingDirectory: z.string().min(1).optional(),
-  estimatedCostCents: z.number().int().nonnegative().optional(),
+  estimatedTokens: z.number().int().nonnegative().optional(),
   hasPaidEntitlement: z.boolean().default(false),
   browserMode: browserExecutionModeSchema.default("deterministic"),
   task: z.string().min(1).optional(),
@@ -461,7 +456,7 @@ export const mcpBindingSnapshotSchema = z.object({
   defaultToolName: z.string().nullable().optional(),
   enabled: z.boolean(),
   approvalRequired: z.boolean(),
-  estimatedCostCentsPerCall: z.number().int().nonnegative().default(0),
+  estimatedTokensPerCall: z.number().int().nonnegative().default(0),
   maxRetries: z.number().int().min(0).max(5).default(0),
   retryBackoffMs: z.number().int().min(100).max(30_000).default(1000),
   consecutiveFailures: z.number().int().nonnegative().default(0),
@@ -499,7 +494,7 @@ const mcpBindingFieldsSchema = z.object({
   defaultToolName: z.string().trim().min(1).max(128).optional(),
   enabled: z.boolean().default(true),
   approvalRequired: z.boolean().default(true),
-  estimatedCostCentsPerCall: z.number().int().nonnegative().default(0),
+  estimatedTokensPerCall: z.number().int().nonnegative().default(0),
   maxRetries: z.number().int().min(0).max(5).default(0),
   retryBackoffMs: z.number().int().min(100).max(30_000).default(1000),
 });
@@ -642,7 +637,7 @@ export const updateMcpBindingRequestSchema = refineMcpBindingSchema(
     transportKind: mcpTransportKindSchema,
     enabled: z.boolean(),
     approvalRequired: z.boolean(),
-    estimatedCostCentsPerCall: z.number().int().nonnegative(),
+    estimatedTokensPerCall: z.number().int().nonnegative(),
     maxRetries: z.number().int().min(0).max(5),
     retryBackoffMs: z.number().int().min(100).max(30_000),
   }).partial().extend({
@@ -1031,7 +1026,6 @@ export const governedActionKindSchema = z.enum([
   "package_rebuild",
   "package_download",
   "billing_debit",
-  "billing_credit",
 ]);
 
 export const governedActionOutcomeSchema = z.enum([
@@ -1070,8 +1064,6 @@ export const governedActionBillingBreakdownKeySchema = z.enum([
   "mcp",
   "model",
   "egress",
-  "plan_debit",
-  "sponsor_credit",
   "other",
 ]);
 
@@ -1098,7 +1090,6 @@ const governedActionRecordSchema = z.object({
   publicMaterialAffecting: z.boolean(),
   hasBillingImpact: z.boolean(),
   totalCostCents: z.number().int(),
-  totalCreditDelta: z.number().int(),
   occurredAt: z.string().datetime(),
   summary: z.string(),
   links: z.object({
@@ -1131,7 +1122,6 @@ export const representativeGovernedActionSnapshotSchema = z.object({
       ownerRequiredCount: z.number().int().nonnegative(),
       billingImpactCount: z.number().int().nonnegative(),
       totalCostCents: z.number().int(),
-      totalCreditDelta: z.number().int(),
     }),
   ),
   byOutcome: z.array(
@@ -1167,18 +1157,15 @@ export const representativeGovernedActionSnapshotSchema = z.object({
       count: z.number().int().nonnegative(),
       blockedCount: z.number().int().nonnegative(),
       totalCostCents: z.number().int(),
-      totalCreditDelta: z.number().int(),
     }),
   ),
   billingImpact: z.object({
     totalInternalCostCents: z.number().int(),
-    totalCreditDelta: z.number().int(),
     breakdown: z.array(
       z.object({
         key: governedActionBillingBreakdownKeySchema,
         label: z.string(),
         costCents: z.number().int(),
-        creditDelta: z.number().int(),
       }),
     ),
   }),
@@ -1250,6 +1237,19 @@ export const toolExecutionSnapshotSchema = z.object({
   mcpBindingId: z.string().nullable().optional(),
   policyDecision: policyDecisionSchema.nullable(),
   approvalRequestId: z.string().nullable(),
+  transportOutcome: z.enum([
+    "not_started",
+    "response_received",
+    "confirmed_not_sent",
+    "transport_failed",
+    "outcome_unknown",
+  ]).nullable().optional(),
+  semanticOutcome: z.enum([
+    "succeeded",
+    "failed",
+    "partial",
+    "unknown",
+  ]).nullable().optional(),
   startedAt: z.string().datetime().nullable(),
   finishedAt: z.string().datetime().nullable(),
   exitCode: z.number().int().nullable(),
@@ -1262,22 +1262,21 @@ export const toolExecutionSnapshotSchema = z.object({
 
 export const executeToolResponseSchema = z.object({
   outcome: computeExecutionOutcomeSchema,
+  blockReasonCode: z.string().trim().min(1).max(160)
+    .regex(/^[a-z0-9_:-]+$/)
+    .nullable()
+    .optional(),
   session: computeSessionSnapshotSchema,
   execution: toolExecutionSnapshotSchema,
   approvalRequest: approvalRequestSnapshotSchema.nullable().optional(),
   artifacts: z.array(artifactSnapshotSchema).default([]),
   billing: z
     .object({
-      estimatedCredits: z.number().int().nonnegative().optional(),
-      actualCredits: z.number().int().nonnegative().optional(),
       computeCostCents: z.number().int().nonnegative().optional(),
       browserCostCents: z.number().int().nonnegative().optional(),
       providerCostCents: z.number().int().nonnegative().optional(),
       mcpCostCents: z.number().int().nonnegative().optional(),
       storageCostCents: z.number().int().nonnegative().optional(),
-      conversationBudgetRemainingCredits: z.number().int().nullable().optional(),
-      ownerBalanceCredits: z.number().int().nullable().optional(),
-      sponsorPoolCredit: z.number().int().nullable().optional(),
     })
     .optional(),
 });
@@ -1448,10 +1447,6 @@ export function isCapabilityAllowedForComputeSubagent(
   capability: CapabilityKind,
 ): boolean {
   return listCapabilitiesForComputeSubagent(subagentId).includes(capability);
-}
-
-export function getComputeSubagentBudgetCredits(subagentId: ComputeSubagentId): number {
-  return computeSubagentBudgetCredits[subagentId];
 }
 
 export function resolveComputeSubagentIdForCapability(capability: CapabilityKind): ComputeSubagentId {

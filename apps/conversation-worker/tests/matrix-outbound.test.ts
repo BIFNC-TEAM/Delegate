@@ -99,6 +99,10 @@ describe("Matrix outbound authorship", () => {
         outboxId: "outbox-1",
         leaseAttempt: 2,
         outputMessageId: "output-1",
+        deliveryAdmission: {
+          attemptNumber: 2,
+          leaseToken: "delivery-lease-2",
+        },
       },
       text: "AI reply",
     });
@@ -120,9 +124,41 @@ describe("Matrix outbound authorship", () => {
         outboxId: "outbox-1",
         leaseAttempt: 2,
         outputMessageId: "output-1",
+        deliveryAdmission: {
+          attemptNumber: 2,
+          leaseToken: "delivery-lease-2",
+        },
       },
       expect.any(Function),
     );
+  });
+
+  it.each([
+    {
+      label: "network outcome",
+      providerResult: () => Promise.reject(new Error("network timeout")),
+    },
+    {
+      label: "accepted response without event id",
+      providerResult: () => Promise.resolve(jsonResponse({})),
+    },
+  ])("marks an unknown Matrix $label as non-retryable", async ({ providerResult }) => {
+    mockActiveRoom();
+    const fetchMock = validatedRoomFetch().mockImplementationOnce(
+      providerResult,
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(sendMatrixRepresentativeMessage({
+      config,
+      conversationId,
+      roomId,
+      senderUserId,
+      expectedEndpointLifecycleRevision: 7,
+      deliveryId: "unknown-outcome",
+      senderMode: "ai",
+      text: "possibly delivered",
+    })).rejects.toMatchObject({ code: "matrix_provider_outcome_unknown" });
   });
 
   it("does not call Matrix after the provider memory fence cancels delivery", async () => {
@@ -148,6 +184,10 @@ describe("Matrix outbound authorship", () => {
         outboxId: "outbox-forgotten",
         leaseAttempt: 3,
         outputMessageId: "output-forgotten",
+        deliveryAdmission: {
+          attemptNumber: 3,
+          leaseToken: "delivery-lease-3",
+        },
       },
       text: "must not leave",
     })).rejects.toMatchObject({

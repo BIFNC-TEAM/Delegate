@@ -27,6 +27,10 @@ vi.hoisted(() => {
       updateMany: vi.fn(),
       findUnique: vi.fn(),
     },
+    messageDeliveryAttempt: {
+      upsert: vi.fn(),
+      updateMany: vi.fn(),
+    },
     generationRun: {
       upsert: vi.fn(),
       findFirst: vi.fn(),
@@ -121,6 +125,8 @@ describe("conversation runtime version pin", () => {
     tx.toolExecution.updateMany.mockResolvedValue({ count: 0 });
     tx.computeSession.updateMany.mockResolvedValue({ count: 0 });
     tx.message.updateMany.mockResolvedValue({ count: 1 });
+    tx.messageDeliveryAttempt.upsert.mockResolvedValue({ id: "attempt-1" });
+    tx.messageDeliveryAttempt.updateMany.mockResolvedValue({ count: 1 });
     tx.conversation.updateMany.mockResolvedValue({ count: 1 });
     tx.conversationEpisode.updateMany.mockResolvedValue({ count: 1 });
     tx.serviceEntitlementLedgerEntry.findMany.mockResolvedValue([]);
@@ -197,7 +203,7 @@ describe("conversation runtime version pin", () => {
     });
   });
 
-  it("reactivates a waiting-user episode before queueing the next AI generation", async () => {
+  it("starts a new episode on the latest published version after the previous reply", async () => {
     tx.conversation.findFirst.mockResolvedValue({
       id: "conversation-1",
       state: "WAITING_USER",
@@ -224,11 +230,11 @@ describe("conversation runtime version pin", () => {
         },
       }],
     });
-    tx.conversationEpisode.update.mockResolvedValue({
-      id: "episode-1",
-      sequence: 1,
+    tx.conversationEpisode.create.mockResolvedValue({
+      id: "episode-2",
+      sequence: 2,
       status: "ACTIVE",
-      representativeVersionId: "representative-version-1",
+      representativeVersionId: "representative-version-2",
     });
 
     await acceptInboundConversationMessage({
@@ -240,17 +246,28 @@ describe("conversation runtime version pin", () => {
 
     expect(tx.conversationEpisode.update).toHaveBeenCalledWith({
       where: { id: "episode-1" },
-      data: { status: "ACTIVE" },
+      data: {
+        status: "RESOLVED",
+        endedAt: expect.any(Date),
+        resolutionReason: "representative_version_updated",
+      },
     });
-    expect(tx.conversationEpisode.create).not.toHaveBeenCalled();
+    expect(tx.conversationEpisode.create).toHaveBeenCalledWith({
+      data: {
+        conversationId: "conversation-1",
+        representativeVersionId: "representative-version-2",
+        sequence: 2,
+        status: "ACTIVE",
+      },
+    });
     expect(tx.generationRun.upsert).toHaveBeenCalledWith({
       where: {
         idempotencyKey:
           "reply:conversation-1:client-message-waiting-user",
       },
       create: expect.objectContaining({
-        episodeId: "episode-1",
-        representativeVersionId: "representative-version-1",
+        episodeId: "episode-2",
+        representativeVersionId: "representative-version-2",
       }),
       update: {},
     });
@@ -1929,6 +1946,7 @@ describe("conversation runtime version pin", () => {
       .mockResolvedValueOnce({
         id: "outbox-matrix-isolated",
         aggregateId: "run-matrix-isolated",
+        attemptCount: 1,
       })
       .mockResolvedValueOnce({ id: "outbox-matrix-isolated" });
     const matrixBinding = {
@@ -2091,8 +2109,12 @@ describe("conversation runtime version pin", () => {
         failureCode: "matrix_private_room_not_verified",
       }),
     });
-    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
-      where: { id: "outbox-matrix-isolated" },
+    expect(tx.outboxEvent.updateMany).toHaveBeenLastCalledWith({
+      where: {
+        id: "outbox-matrix-isolated",
+        status: "PROCESSING",
+        attemptCount: 1,
+      },
       data: {
         status: "DEAD_LETTER",
         lastError: "matrix_private_room_not_verified",
@@ -2199,8 +2221,12 @@ describe("conversation runtime version pin", () => {
         failureCode: "matrix_identity_reassigned",
       }),
     });
-    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
-      where: { id: "outbox-matrix-reassigned" },
+    expect(tx.outboxEvent.updateMany).toHaveBeenLastCalledWith({
+      where: {
+        id: "outbox-matrix-reassigned",
+        status: "PROCESSING",
+        attemptCount: 1,
+      },
       data: {
         status: "DEAD_LETTER",
         lastError: "matrix_identity_reassigned",
@@ -2322,8 +2348,12 @@ describe("conversation runtime version pin", () => {
           failureCode: "matrix_channel_lifecycle_reactivated",
         }),
       });
-      expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
-        where: { id: outboxId },
+      expect(tx.outboxEvent.updateMany).toHaveBeenLastCalledWith({
+        where: {
+          id: outboxId,
+          status: "PROCESSING",
+          attemptCount: 1,
+        },
         data: {
           status: "DEAD_LETTER",
           lastError: "matrix_channel_lifecycle_reactivated",
@@ -2513,8 +2543,13 @@ describe("conversation runtime version pin", () => {
       telegramWorkerEnabled: true,
     })).resolves.toBeNull();
 
-    expect(tx.message.update).toHaveBeenCalledWith({
-      where: { id: "message-telegram-output" },
+    expect(tx.message.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "message-telegram-output",
+        deliveryStatus: {
+          in: ["QUEUED", "PROCESSING", "FAILED"],
+        },
+      },
       data: {
         deliveryStatus: "CANCELED",
         failureCode: "telegram_connection_reassigned",
@@ -2522,12 +2557,31 @@ describe("conversation runtime version pin", () => {
           "Telegram delivery was canceled because this conversation belongs to a previously assigned Bot.",
       },
     });
-    expect(tx.outboxEvent.update).toHaveBeenLastCalledWith({
-      where: { id: "outbox-telegram-reassigned" },
+    expect(tx.outboxEvent.updateMany).toHaveBeenLastCalledWith({
+      where: {
+        id: "outbox-telegram-reassigned",
+        aggregateType: "generation_run",
+        aggregateId: "run-telegram-reassigned",
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: 1,
+      },
       data: {
         status: "DEAD_LETTER",
+        processedAt: expect.any(Date),
         lastError: "telegram_connection_reassigned",
       },
+    });
+    expect(tx.messageDeliveryAttempt.updateMany).toHaveBeenCalledWith({
+      where: {
+        messageId: "message-telegram-output",
+        attemptNumber: 1,
+        status: { in: ["QUEUED", "PROCESSING", "FAILED"] },
+      },
+      data: expect.objectContaining({
+        status: "CANCELED",
+        failureCode: "telegram_connection_reassigned",
+      }),
     });
   });
 
@@ -2606,6 +2660,50 @@ describe("conversation runtime version pin", () => {
     ).rejects.toMatchObject({
       name: "ChannelUnavailableError",
       code: "matrix_identity_reassigned",
+    });
+  });
+
+  it("allows a system task-status delivery while a human controls the conversation", async () => {
+    mockPrisma.conversation.findUnique.mockResolvedValue({
+      state: "HUMAN_ACTIVE",
+      representative: {
+        lifecycleState: "PUBLISHED",
+        activeVersionId: "representative-version-1",
+        publicMode: true,
+        runtimePolicyOverlays: [],
+      },
+      channelBindings: [{
+        id: "web-binding-system",
+        kind: "WEB",
+        metadata: null,
+        connectionId: "web",
+        representativeAssignmentRevision: 1,
+        representativeBinding: {
+          status: "CONNECTED",
+          desiredState: "ACTIVE",
+          healthStatus: "HEALTHY",
+          connectionId: "web",
+          endpointAssignmentRevision: 1,
+          telegramBotConnectionId: null,
+          telegramBotConnection: null,
+        },
+      }],
+    });
+
+    await expect(assertConversationChannelDeliveryAvailable({
+      conversationId: "conversation-human-active-system",
+      channel: "web",
+      senderMode: "system",
+      allowNeedsHumanDelivery: true,
+    })).resolves.toBeUndefined();
+
+    await expect(assertConversationChannelDeliveryAvailable({
+      conversationId: "conversation-human-active-system",
+      channel: "web",
+      senderMode: "ai",
+      allowNeedsHumanDelivery: true,
+    })).rejects.toMatchObject({
+      code: "CONVERSATION_HUMAN_ACTIVE",
     });
   });
 
@@ -2877,9 +2975,13 @@ describe("conversation runtime version pin", () => {
   it("requeues a paused operator message and gives its claimed attempt back", async () => {
     tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
     tx.message.update.mockResolvedValue({ id: "operator-message-paused" });
+    tx.message.findUnique.mockResolvedValue({
+      conversationId: "conversation-operator-paused",
+    });
 
     await expect(deferOperatorMessageDelivery({
       outboxId: "operator-outbox-paused",
+      leaseAttempt: 1,
       messageId: "operator-message-paused",
       reason: "channel_paused",
       retryAfterMs: 60_000,
@@ -2889,7 +2991,7 @@ describe("conversation runtime version pin", () => {
       where: {
         id: "operator-outbox-paused",
         status: "PROCESSING",
-        attemptCount: { gt: 0 },
+        attemptCount: 1,
       },
       data: {
         status: "PENDING",
@@ -2899,8 +3001,11 @@ describe("conversation runtime version pin", () => {
         lastError: "channel_paused",
       },
     });
-    expect(tx.message.update).toHaveBeenCalledWith({
-      where: { id: "operator-message-paused" },
+    expect(tx.message.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "operator-message-paused",
+        deliveryStatus: "PROCESSING",
+      },
       data: {
         deliveryStatus: "QUEUED",
         failureCode: null,

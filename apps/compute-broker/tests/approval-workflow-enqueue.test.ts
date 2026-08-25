@@ -7,6 +7,7 @@ const { mockPrisma } = vi.hoisted(() => {
       findUnique: vi.fn(),
     },
     toolExecution: {
+      findUnique: vi.fn(),
       update: vi.fn(),
     },
     eventAudit: {
@@ -46,6 +47,7 @@ describe("approval workflow enqueue", () => {
     });
     mockPrisma.approvalRequest.findUnique.mockResolvedValue(null);
     mockPrisma.toolExecution.update.mockResolvedValue({ id: "execution-1" });
+    mockPrisma.toolExecution.findUnique.mockResolvedValue(null);
     mockPrisma.eventAudit.create.mockResolvedValue({ id: "event-1" });
     mockPrisma.workflowRun.findUnique.mockResolvedValue(null);
     mockPrisma.workflowRun.create.mockResolvedValue({ id: "workflow-1" });

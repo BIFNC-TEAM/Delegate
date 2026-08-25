@@ -56,10 +56,15 @@ Relevant code:
 
 ### Durable workflows actually implemented today
 
-There are currently two active durable workflow kinds:
+There are currently three active durable workflow kinds:
 
 - `APPROVAL_EXPIRATION`
 - `HANDOFF_FOLLOW_UP`
+- `DELEGATION_EXECUTION`
+
+`DELEGATION_EXECUTION` waits on stable approval, clarification, cancellation,
+policy-revocation, and reconciliation signals. The Signal only wakes the
+workflow; its Activity re-reads Postgres and cannot execute a stale Plan epoch.
 
 The historical `CREATOR_TRAINING_REVIEW` schema value is retained only so
 already-durable rows can be completed as retired work; no new product flow may
@@ -105,7 +110,7 @@ Relevant code:
 2. Keep Postgres as the source of product truth for dashboard, audit, billing, and operator state.
 3. Preserve the current `WorkflowRun` table as the main business-facing workflow record.
 4. Migrate the existing durable workflow kinds incrementally, keeping Postgres as product truth.
-5. Keep `LOCAL_RUNNER` as a fallback and local development mode.
+5. Keep `LOCAL_RUNNER` as an explicitly selected alternative and local development mode; selecting an incompletely configured Temporal engine must fail closed rather than switch engines silently.
 6. Improve correctness around start idempotency, cancellation, retries, and observability.
 
 ## Non-Goals

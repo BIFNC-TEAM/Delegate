@@ -21,7 +21,7 @@ Existing runtime records keep nullable task and step references so historical da
 
 ## Current creation rule
 
-Ordinary question answering remains a conversation and does not create a task. A public web request creates a task only after an explicit `/compute` instruction or the grounded natural-language compute planner has identified a concrete operation. A bare `/compute` request only returns usage guidance.
+Ordinary stable/knowledge answering remains a conversation and does not create a task. In active V3, a task is created only after the server-validated TurnPlan contains a typed MCP/Compute Action. The old natural-language detailed planner runs only in V2 rollback/shadow modes. A bare `/compute` request still returns usage guidance.
 
 The compute path creates one step per planned operation, with at most five dependency-ordered steps in the current P1 scheduler:
 
@@ -52,4 +52,4 @@ Task transitions use a PostgreSQL advisory transaction lock. Each event receives
 - Conversation detail shows task status, next actor, step state, output count, and approval count.
 - Approval detail shows the task that requested the governed action.
 
-P1 multi-step service delegation uses the same aggregate for clarification, dependency-ordered Compute/browser steps, MCP calls, delivery, and reconciliation without equating any individual runtime session with the user's task. It is intentionally fail-fast and sequential; unknown MCP outcomes require Owner reconciliation before retry.
+Multi-step service delegation uses the same aggregate for clarification, dependency-ordered Compute/browser steps, MCP calls, delivery, and reconciliation without equating any individual runtime session with the user's task. PlanAction remains protocol truth. Planned `on_failure` alternatives activate only on matching Verified failure codes; unused alternatives become `SKIPPED`. Unknown MCP outcomes require Owner reconciliation before retry.

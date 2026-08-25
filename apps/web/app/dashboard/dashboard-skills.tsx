@@ -30,7 +30,7 @@ type ManagedMcpBinding = {
   defaultToolName: string | null;
   enabled: boolean;
   approvalRequired: boolean;
-  estimatedCostCentsPerCall: number;
+  estimatedTokensPerCall: number;
   maxRetries: number;
   retryBackoffMs: number;
 };
@@ -1035,7 +1035,7 @@ function ConnectionsPanel({
           ...(form.defaultToolName.trim() ? { defaultToolName: form.defaultToolName.trim() } : {}),
           enabled: form.enabled,
           approvalRequired: form.approvalRequired,
-          estimatedCostCentsPerCall: 0,
+          estimatedTokensPerCall: 0,
           maxRetries: 0,
           retryBackoffMs: 1000,
         }),

@@ -26,6 +26,8 @@ const envSchema = z.object({
   COMPUTE_NATIVE_MAX_STEPS: z.coerce.number().int().positive().max(8).default(3),
   COMPUTE_NATIVE_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(1024),
   COMPUTE_MCP_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+  COMPUTE_MCP_CATALOG_REFRESH_INTERVAL_MS: z.coerce.number().int().min(5_000)
+    .default(120_000),
   COMPUTE_MCP_DEFAULT_COST_CENTS_PER_CALL: z.coerce.number().int().nonnegative().default(4),
   COMPUTE_MCP_MAX_REQUEST_BYTES: z.coerce.number().int().positive().max(1024 * 1024)
     .default(256 * 1024),
@@ -36,7 +38,10 @@ const envSchema = z.object({
   COMPUTE_MCP_MAX_TOOL_COUNT: z.coerce.number().int().positive().max(2000).default(500),
   COMPUTE_MCP_MAX_JSON_DEPTH: z.coerce.number().int().positive().max(64).default(32),
   COMPUTE_MCP_MAX_JSON_NODES: z.coerce.number().int().positive().max(200_000).default(50_000),
-  COMPUTE_HOST_WORKSPACE_ROOT: z.string().min(1).default("/Users/a/repos/Delegate"),
+  COMPUTE_HOST_WORKSPACE_ROOT: z.preprocess(
+    (value) => typeof value === "string" && !value.trim() ? undefined : value,
+    z.string().min(1).default(process.cwd()),
+  ),
   SANDBOX_IDLE_STOP_MINUTES: z.coerce.number().int().positive().default(15),
   SANDBOX_CLEANUP_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   SANDBOX_AUTO_ARCHIVE_MINUTES: z.coerce.number().int().default(7 * 24 * 60),
@@ -100,6 +105,7 @@ export const computeBrokerConfig = {
     },
   },
   mcpTimeoutMs: parsed.COMPUTE_MCP_TIMEOUT_MS,
+  mcpCatalogRefreshIntervalMs: parsed.COMPUTE_MCP_CATALOG_REFRESH_INTERVAL_MS,
   mcpDefaultCostCentsPerCall: parsed.COMPUTE_MCP_DEFAULT_COST_CENTS_PER_CALL,
   mcpPayloadLimits: {
     maxRequestBytes: parsed.COMPUTE_MCP_MAX_REQUEST_BYTES,

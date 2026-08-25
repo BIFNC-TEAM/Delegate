@@ -26,6 +26,7 @@ describe("workflow-runner decisions", () => {
     const phases: WorkflowEnginePhase[] = [
       "dispatch_pending",
       "waiting_timer",
+      "waiting_signal",
       "activity_running",
       "retry_backoff",
       "cancel_requested",

@@ -5,6 +5,8 @@ import {
   scheduleApprovalExpiration,
   shouldDispatchWorkflowViaTemporalOutbox,
 } from "@delegate/workflows";
+import { capabilityEffectV3Schema } from "@delegate/runtime";
+import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { SessionError } from "./session-error";
 
@@ -63,6 +65,16 @@ export async function createApprovalRequestForExecution(
         return existingApproval;
       }
 
+      const execution = await tx.toolExecution.findUnique({
+        where: { id: params.executionId },
+        select: {
+          planAction: { select: { inputSnapshot: true } },
+        },
+      });
+      const maximumApprovedEffect = readPlanActionEffect(
+        execution?.planAction?.inputSnapshot,
+      );
+
       const scheduledAt = scheduleApprovalExpiration(
         new Date(),
         approvalTimeoutMinutes,
@@ -85,6 +97,9 @@ export async function createApprovalRequestForExecution(
           expiresAt: scheduledAt,
           requestPayloadHash: params.requestPayloadHash ?? null,
           matchedPolicyRuleId: params.matchedPolicyRuleId ?? null,
+          maximumApprovedEffect: maximumApprovedEffect
+            ? maximumApprovedEffect as Prisma.InputJsonObject
+            : Prisma.JsonNull,
         },
       });
 
@@ -216,6 +231,14 @@ export async function createApprovalRequestForExecution(
     assertApprovalRequestContext(existingApproval, params);
     return existingApproval;
   }
+}
+
+function readPlanActionEffect(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const parsed = capabilityEffectV3Schema.safeParse(
+    (value as Record<string, unknown>)["effect"],
+  );
+  return parsed.success ? parsed.data : null;
 }
 
 function assertApprovalRequestContext(

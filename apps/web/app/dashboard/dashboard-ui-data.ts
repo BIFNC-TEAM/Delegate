@@ -318,7 +318,7 @@ export const dashboardSectionBlueprints: Record<
       columns: [text("时间", "Time"), text("事件类型", "Event type"), text("操作者", "Actor"), text("代表", "Representative"), text("摘要", "Summary")],
       rows: [
         [text("10:42:18", "10:42:18"), text("APPROVAL_RESOLVED", "APPROVAL_RESOLVED"), text("owner@delegate.ai", "owner@delegate.ai"), text("Lin AI", "Lin AI"), text("允许发送报价文件", "Proposal delivery approved")],
-        [text("10:31:04", "10:31:04"), text("WALLET_USAGE_CHARGED", "WALLET_USAGE_CHARGED"), text("system", "system"), text("Product Advisor", "Product Advisor"), text("Browser 使用扣费 18 credits", "Browser usage charged 18 credits")],
+        [text("10:31:04", "10:31:04"), text("TOOL_EXECUTION_COMPLETED", "TOOL_EXECUTION_COMPLETED"), text("system", "system"), text("Product Advisor", "Product Advisor"), text("Browser 执行成本已记录", "Browser execution cost recorded")],
         [text("09:52:47", "09:52:47"), text("REPRESENTATIVE_PUBLISHED", "REPRESENTATIVE_PUBLISHED"), text("owner@delegate.ai", "owner@delegate.ai"), text("Recruiting Desk", "Recruiting Desk"), text("发布版本 v0.8", "Published version v0.8")],
       ],
     },

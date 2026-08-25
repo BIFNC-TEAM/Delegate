@@ -1,7 +1,12 @@
 import OpenAI from "openai";
 
 import { calculateModelUsageCost } from "./pricing";
-import type { ModelRuntimeEnv, ModelUsageSnapshot, RepresentativeReplyPrompt } from "./types";
+import type {
+  ModelRuntimeEnv,
+  ModelTextCompletion,
+  ModelUsageSnapshot,
+  RepresentativeReplyPrompt,
+} from "./types";
 
 export async function generateBailianResponse(params: {
   env: ModelRuntimeEnv;
@@ -9,6 +14,7 @@ export async function generateBailianResponse(params: {
 }): Promise<{
   replyText: string;
   usage?: ModelUsageSnapshot;
+  completion: ModelTextCompletion;
 }> {
   if (params.env.state !== "ready" || !params.env.bailian.apiKey) {
     throw new Error(`Bailian runtime is not ready: ${params.env.state}.`);
@@ -28,10 +34,26 @@ export async function generateBailianResponse(params: {
       { role: "system", content: params.prompt.instructions },
       { role: "user", content: params.prompt.input },
     ],
-    max_tokens: params.env.maxOutputTokens,
-    ...(params.prompt.responseFormat === "json_object"
-      ? { response_format: { type: "json_object" as const } }
-      : {}),
+    ...(params.prompt.strictJsonSchema
+      ? {
+          response_format: {
+            type: "json_schema" as const,
+            json_schema: {
+              name: params.prompt.strictJsonSchema.name,
+              ...(params.prompt.strictJsonSchema.description
+                ? { description: params.prompt.strictJsonSchema.description }
+                : {}),
+              schema: params.prompt.strictJsonSchema.schema,
+              strict: true,
+            },
+          },
+        }
+      : {
+          max_tokens: params.env.maxOutputTokens,
+          ...(params.prompt.responseFormat === "json_object"
+            ? { response_format: { type: "json_object" as const } }
+            : {}),
+        }),
   });
 
   const replyText = response.choices[0]?.message.content?.trim();
@@ -81,5 +103,11 @@ export async function generateBailianResponse(params: {
   return {
     replyText,
     ...(usage ? { usage } : {}),
+    completion: response.choices[0]?.finish_reason === "stop"
+      ? { status: "complete" }
+      : {
+          status: "incomplete",
+          reason: response.choices[0]?.finish_reason ?? "unknown",
+        },
   };
 }

@@ -26,7 +26,7 @@ export default async function RootLayout({
   });
 
   return (
-    <html lang={formatHtmlLang(locale)}>
+    <html lang={formatHtmlLang(locale)} suppressHydrationWarning>
       <body>{children}</body>
     </html>
   );

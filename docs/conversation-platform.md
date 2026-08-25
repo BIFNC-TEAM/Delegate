@@ -2,6 +2,12 @@
 
 Delegate uses a channel-neutral conversation domain for public web, Matrix, Telegram, and future adapters.
 
+Planning and capability execution use the single-authority
+[Agent Runtime V3](./agent-runtime-v3.md). The Conversation Platform owns
+channel acceptance, identity, messages, GenerationRun, human control, and
+delivery; TurnPlan V3 owns goal/action execution truth. The states are linked,
+not duplicated.
+
 The target boundary and migration rules are accepted in [the Unified Conversation Platform ADR](./adr-channel-conversation-platform.md). The platform unifies business behavior; it does not require every provider to use the same transport.
 
 ## Confirmed Boundaries
@@ -48,7 +54,15 @@ The public web route accepts and persists the audience message, returns `202 Acc
 
 Provider webhook and Application Service request handlers should durably accept a valid event and return promptly. Generation, delivery, retry, and dead-letter processing belong in workers. An unknown room or portal mapping is quarantined for provisioning or replay; it is not permanently marked as an ignorable audience message.
 
-Before an answer run reaches the model, the worker searches three permission-isolated OpenViking roots: representative public resources, the current Contact's public-safe memories, and representative-level learned patterns. Only approved, READY workspace assets linked to the representative can be recalled. Selected context is injected into the model prompt; public-safe citation title/excerpt and internal recall provenance are persisted with the reply.
+The Planner never receives raw OpenViking content. It receives only a bounded
+metadata signal from the pinned, authorized public-knowledge manifest. When the
+Validated Plan selects a Knowledge Action, the Worker searches the permitted
+representative public resources plus any separately authorized Contact Memory
+and Representative Experience roots, records a UseRun, and commits a Verified
+ActionResult. Only that verified result reaches `response.compose`; public-safe
+citation title/excerpt and internal recall provenance are persisted with the
+reply. A verified miss may use stable general knowledge only under the
+representative's knowledge-first fallback policy and fixed disclosure.
 
 ## Inbox, Pending Work, And Leads
 
@@ -86,11 +100,14 @@ The same availability contract is evaluated at inbound acceptance, before genera
 
 Service access is scoped to an `AudienceIdentity`, representative, and product/service. It is not a representative-wide token pool shared by unrelated audience members.
 
-The domain keeps Web checkout and Telegram Stars as separate payment rails. In
-the current repository, however, Web recharge is a non-production demo/mock
-flow: its mutation endpoints are disabled in production, and live provider
-checkout, signed webhooks, and production refunds are not yet closed. Telegram
-Stars is also default-off and not production-ready.
+The domain keeps Web checkout and Telegram Stars as separate payment rails.
+Web now has a production-shaped WeChat Pay API v3 Native loop: immutable price
+snapshots, provider order creation, signed payment and refund notifications,
+authoritative status queries, idempotent entitlement fulfillment, full-unused
+refunds, and reconciliation workers. Local mock mutations remain development
+only. Live collection is still default-off until merchant credentials,
+business/legal terms, and the production payment/refund canary are approved.
+Telegram Stars remains default-off and is not production-ready.
 
 - provider amounts, currencies, settlement references, disputes, and refunds remain rail-specific;
 - a successful, verified provider event may grant or extend the same service entitlement;
@@ -210,8 +227,8 @@ detectable through Telegram's `409 Conflict` response
 Running the legacy environment-token fallback without PostgreSQL is therefore
 supported only as a single-instance development mode.
 
-The current paid continuation path sends users to the Web demo/mock recharge
-surface. `TELEGRAM_WEB_RECHARGE_BASE_URL` lets the Bot use a public origin
+The current paid continuation path sends users to the Web service-package and
+WeChat Native checkout surface. `TELEGRAM_WEB_RECHARGE_BASE_URL` lets the Bot use a public origin
 without changing the representative app's canonical origin, and falls back to
 `NEXT_PUBLIC_REPRESENTATIVE_URL` when unset. The resolved value must be a public
 HTTPS origin for Telegram to emit a clickable inline recharge button. Loopback,
@@ -220,7 +237,8 @@ as message text for local testing. The official Telegram continuation requires
 a signed-in Web audience and an exact verified Telegram identity link for the
 active Bot before recharge creation; completion and reversal remain owned by
 the canonical Web identity even if a channel link is later revoked. A clickable
-button does not make the underlying mock flow production-ready.
+button does not enable collection; WeChat release flags, credential preflight,
+and the production canary remain authoritative.
 
 ### Telegram runtime ownership and delivery recovery
 
@@ -232,6 +250,10 @@ Telegram adapter and conversation worker:
   persists comparison messages and creates no generation outbox;
 - `worker`: grammY only accepts private text into the durable platform and the
   conversation worker owns both representative and Operator delivery.
+
+The explicit Telegram `/compute` command follows the same `worker` ingestion
+path as natural-language Compute requests. grammY does not execute it directly
+and does not redirect it to a separate Web-only runtime.
 
 `worker` is the default and is a production release gate. The bot and worker
 reject `legacy` or `shadow` when `NODE_ENV=production`, and new Stars invoices
@@ -267,7 +289,9 @@ it.
 
 Generation completion and provider delivery are separate recoverable phases.
 Once an output `Message` exists, retries use that persisted text and never run
-the model or consume the entitlement again. A persisted provider
+the model again. Ordinary free/service usage remains reserved until successful
+channel delivery; successful delivery settles it exactly once, while terminal
+failure releases it. A persisted provider
 `externalMessageId` closes the outbox without another send.
 
 Matrix delivery uses a stable transaction id and is provider-idempotent.
@@ -313,6 +337,11 @@ Rollback disables the canary adapter, restores the previous active adapter owner
 - Only one adapter owns provider ingestion, generation, and delivery during a cutover.
 - Bridge echo and history backfill cannot trigger generation.
 - Provider identity conflicts fail closed.
+- Plan-bound outbound delivery freezes Plan ID/revision/epoch, PlanAction,
+  Outbox attempt, and a delivery lease. A committed `CALL_STARTED` admission is
+  rechecked beside Matrix/Telegram provider calls and before Web marks `SENT`.
+  Supersession cancels only proven pre-call attempts; call-started or unknown
+  outcomes require reconciliation and are never automatically resent.
 - Balance and usage changes are audience-scoped, atomic, append-only, and idempotent.
 - Paused, unpublished, or human-controlled conversations cannot start generation.
 - Unknown mappings remain retryable and observable.

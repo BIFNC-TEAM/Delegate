@@ -4,6 +4,7 @@ import { RepresentativeChannelKind } from "@prisma/client";
 import { afterAll, describe, expect, it } from "vitest";
 
 import {
+  admitGenerationMessageProviderDelivery,
   prepareGenerationMessageChannelDelivery,
   retryGenerationDelivery,
   withGenerationMessageProviderDeliveryFence,
@@ -229,12 +230,20 @@ describePostgres("Memory use PostgreSQL execution", () => {
       },
     });
 
-    await prepareGenerationMessageChannelDelivery({
+    const firstPreparation = await prepareGenerationMessageChannelDelivery({
       conversationId: fixture.conversationAId,
       runId: fixture.generationRunId,
       outboxId: outbox.id,
       leaseAttempt: 1,
       outputMessageId: output.id,
+    });
+    await admitGenerationMessageProviderDelivery({
+      conversationId: fixture.conversationAId,
+      runId: fixture.generationRunId,
+      outboxId: outbox.id,
+      leaseAttempt: 1,
+      outputMessageId: output.id,
+      deliveryAdmission: firstPreparation.deliveryAdmission,
     });
     await expect(prisma.$transaction((tx) =>
       withGenerationMessageProviderDeliveryFence(
@@ -245,6 +254,7 @@ describePostgres("Memory use PostgreSQL execution", () => {
           outboxId: outbox.id,
           leaseAttempt: 1,
           outputMessageId: output.id,
+          deliveryAdmission: firstPreparation.deliveryAdmission,
         },
         async () => {
           throw new Error("simulated provider send failure");
@@ -265,6 +275,21 @@ describePostgres("Memory use PostgreSQL execution", () => {
         attemptCount: 2,
         availableAt: new Date(Date.now() + 60_000),
       },
+    });
+    const replayPreparation = await prepareGenerationMessageChannelDelivery({
+      conversationId: fixture.conversationAId,
+      runId: fixture.generationRunId,
+      outboxId: outbox.id,
+      leaseAttempt: 2,
+      outputMessageId: output.id,
+    });
+    await admitGenerationMessageProviderDelivery({
+      conversationId: fixture.conversationAId,
+      runId: fixture.generationRunId,
+      outboxId: outbox.id,
+      leaseAttempt: 2,
+      outputMessageId: output.id,
+      deliveryAdmission: replayPreparation.deliveryAdmission,
     });
 
     await prisma.$transaction(async (tx) => {
@@ -297,6 +322,7 @@ describePostgres("Memory use PostgreSQL execution", () => {
           outboxId: outbox.id,
           leaseAttempt: 2,
           outputMessageId: output.id,
+          deliveryAdmission: replayPreparation.deliveryAdmission,
         },
         async () => {
           replayProviderCalled = true;
@@ -378,12 +404,20 @@ describePostgres("Memory use PostgreSQL execution", () => {
         availableAt: new Date(Date.now() + 60_000),
       },
     });
-    await prepareGenerationMessageChannelDelivery({
+    const preparation = await prepareGenerationMessageChannelDelivery({
       conversationId: fixture.conversationAId,
       runId: fixture.generationRunId,
       outboxId: outbox.id,
       leaseAttempt: 1,
       outputMessageId: output.id,
+    });
+    await admitGenerationMessageProviderDelivery({
+      conversationId: fixture.conversationAId,
+      runId: fixture.generationRunId,
+      outboxId: outbox.id,
+      leaseAttempt: 1,
+      outputMessageId: output.id,
+      deliveryAdmission: preparation.deliveryAdmission,
     });
 
     const deleteText = "forget my memory";
@@ -411,6 +445,7 @@ describePostgres("Memory use PostgreSQL execution", () => {
           outboxId: outbox.id,
           leaseAttempt: 1,
           outputMessageId: output.id,
+          deliveryAdmission: preparation.deliveryAdmission,
         },
         async () => {
           providerAuthorized.resolve();

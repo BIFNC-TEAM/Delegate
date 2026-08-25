@@ -3,7 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-import type { PublicWebAnswerSourceDisclosure } from "@delegate/web-data";
+import type {
+  PublicConversationTaskProgress,
+  PublicTurnExecutionProgress,
+  PublicWebAnswerSourceDisclosure,
+} from "@delegate/web-data";
 
 import {
   removeRejectedPublicChatOptimisticMessage,
@@ -45,6 +49,7 @@ type ChatMessage = {
   senderDisplayName?: string;
   displayAck?: PublicMemoryDisplayAck;
   sourceDisclosure?: PublicWebAnswerSourceDisclosure;
+  generationInputClientMessageId?: string;
 };
 type RepresentativeAccessMode =
   | "FREE"
@@ -57,6 +62,8 @@ type PublicChatUsage = PublicChatResponse["usage"] & {
 type PublicChatHistory = {
   state: string;
   humanActive: boolean;
+  taskProgress?: PublicConversationTaskProgress | null;
+  turnProgress?: PublicTurnExecutionProgress | null;
   messages: Array<ChatMessage & { senderType: string; createdAt: string }>;
   usage: PublicChatUsage;
 };
@@ -72,8 +79,21 @@ type PublicChatAccepted = {
   governedMemoryDisclosure?: GovernedMemoryDisclosure;
 };
 
-const RUN_SUBSCRIPTION_DEADLINE_MS = 150_000;
+const RUN_SUBSCRIPTION_DEADLINE_MS = 330_000;
 const PROFILE_RAIL_COMPACT_QUERY = "(max-width: 1180px)";
+const PUBLIC_CHAT_ATTACHMENT_ACCEPT = [
+  "application/json",
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "text/csv",
+  "text/markdown",
+  "text/plain",
+].join(",");
+const PUBLIC_CHAT_ATTACHMENT_MAX_FILES = 5;
+const PUBLIC_CHAT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+const PUBLIC_CHAT_ATTACHMENT_TOTAL_BYTES = 20 * 1024 * 1024;
 const PROFILE_RAIL_FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",
@@ -107,10 +127,12 @@ export function RepresentativeChatPanel(props: {
   );
   const governedContextEnabled = governedMemoryDisclosure.enabled;
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
   const chatLogRef = useRef<HTMLDivElement>(null);
   const keepChatPinnedRef = useRef(true);
   const activeRunSourceRef = useRef<EventSource | null>(null);
   const activeRunTimeoutRef = useRef<number | null>(null);
+  const activeClientMessageIdRef = useRef<string | null>(null);
   const acknowledgedDisplayKeysRef = useRef(new Set<string>());
   const displayAckRetryTimersRef = useRef(new Set<number>());
   const displayAckMountedRef = useRef(false);
@@ -124,7 +146,13 @@ export function RepresentativeChatPanel(props: {
     props.accessMode === "CREDITS_ONLY",
   );
   const [input, setInput] = useState("");
+  const [pendingAttachments, setPendingAttachments] = useState<File[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [taskProgress, setTaskProgress] =
+    useState<PublicConversationTaskProgress | null>(null);
+  const [turnProgress, setTurnProgress] =
+    useState<PublicTurnExecutionProgress | null>(null);
+  const [progressClockMs, setProgressClockMs] = useState(0);
   const [usage, setUsage] = useState<PublicChatUsage>({
     freeRepliesUsed: 0,
     freeRepliesRemaining: props.freeReplyLimit,
@@ -140,6 +168,10 @@ export function RepresentativeChatPanel(props: {
   const [conversationState, setConversationState] = useState("new");
   const [busy, setBusy] = useState(false);
   const [hydrating, setHydrating] = useState(true);
+  const [handoffControlBusy, setHandoffControlBusy] = useState(false);
+  const [handoffConfirmation, setHandoffConfirmation] = useState<
+    "cancel_request" | "end_human_service" | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [copyFailedMessageId, setCopyFailedMessageId] = useState<string | null>(null);
@@ -278,6 +310,17 @@ export function RepresentativeChatPanel(props: {
   }, [profileRailCompact, profileRailOpen]);
 
   useEffect(() => {
+    if (turnProgress?.status !== "running") {
+      setProgressClockMs(0);
+      return;
+    }
+    const updateClock = () => setProgressClockMs(Date.now());
+    updateClock();
+    const timer = window.setInterval(updateClock, 1_000);
+    return () => window.clearInterval(timer);
+  }, [turnProgress?.id, turnProgress?.status]);
+
+  useEffect(() => {
     let cancelled = false;
     fetch(`/reps/${props.representativeSlug}/chat`)
       .then(async (response) => {
@@ -297,6 +340,12 @@ export function RepresentativeChatPanel(props: {
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
             ...(message.displayAck ? { displayAck: message.displayAck } : {}),
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
+            ...(message.generationInputClientMessageId
+              ? {
+                  generationInputClientMessageId:
+                    message.generationInputClientMessageId,
+                }
+              : {}),
           })));
         } else if (payload.state === "new") {
           setMessages([{
@@ -312,6 +361,8 @@ export function RepresentativeChatPanel(props: {
         }
         setConversationState(payload.state);
         setHumanActive(payload.humanActive);
+        setTaskProgress(payload.taskProgress ?? null);
+        setTurnProgress(payload.turnProgress ?? null);
         setUsage(payload.usage);
       })
       .catch((historyError) => {
@@ -345,11 +396,31 @@ export function RepresentativeChatPanel(props: {
             ...(message.attachments?.length ? { attachments: message.attachments } : {}),
             ...(message.displayAck ? { displayAck: message.displayAck } : {}),
             ...(message.sourceDisclosure ? { sourceDisclosure: message.sourceDisclosure } : {}),
+            ...(message.generationInputClientMessageId
+              ? {
+                  generationInputClientMessageId:
+                    message.generationInputClientMessageId,
+                }
+              : {}),
           })));
         }
         setConversationState(payload.state);
         setHumanActive(payload.humanActive);
+        setTaskProgress(payload.taskProgress ?? null);
+        setTurnProgress(payload.turnProgress ?? null);
         setUsage(payload.usage);
+        const activeClientMessageId = activeClientMessageIdRef.current;
+        if (
+          activeClientMessageId
+          && !isPublicTaskStreamActive(payload.taskProgress ?? undefined)
+          && !isPublicTurnStreamActive(payload.turnProgress ?? undefined)
+          && payload.messages.some((message) =>
+            message.generationInputClientMessageId === activeClientMessageId
+            && ["sent", "completed"].includes(message.status || ""),
+          )
+        ) {
+          settleActiveRun();
+        }
       } catch {
         // Keep the active stream alive if one event is malformed.
       }
@@ -575,6 +646,7 @@ export function RepresentativeChatPanel(props: {
   async function submitMessage(value: string) {
     const text = value.trim();
     if (!text || busy || hydrating) return;
+    const submittedAttachments = [...pendingAttachments];
     keepChatPinnedRef.current = true;
     const userMessage = {
       id: createClientMessageId(),
@@ -583,23 +655,40 @@ export function RepresentativeChatPanel(props: {
       status: "accepted",
       senderType: "audience",
       createdAt: new Date().toISOString(),
+      ...(submittedAttachments.length
+        ? {
+            attachments: submittedAttachments.map((file, index) => ({
+              id: `${createClientMessageId()}-${index}`,
+              fileName: file.name,
+              mimeType: resolvePublicChatAttachmentMimeType(file),
+              sizeBytes: file.size,
+            })),
+          }
+        : {}),
     };
     setMessages((current) => [...current, userMessage]);
     setInput("");
+    activeClientMessageIdRef.current = userMessage.id;
     setBusy(true);
     setError(null);
     try {
+      const requestBody = buildPublicChatRequestBody({
+        message: text,
+        clientMessageId: userMessage.id,
+        memoryDisclosure: {
+          policyRevision: governedMemoryDisclosure.policyRevision,
+          fingerprint: governedMemoryDisclosure.fingerprint,
+        },
+        attachments: submittedAttachments,
+      });
       const response = await fetch(`/reps/${props.representativeSlug}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: text,
-          clientMessageId: userMessage.id,
-          memoryDisclosure: {
-            policyRevision: governedMemoryDisclosure.policyRevision,
-            fingerprint: governedMemoryDisclosure.fingerprint,
-          },
-        }),
+        ...(requestBody instanceof FormData
+          ? { body: requestBody }
+          : {
+              headers: { "Content-Type": "application/json" },
+              body: requestBody,
+            }),
       });
       const payload = (await response.json()) as PublicChatAccepted;
       if (!response.ok) {
@@ -621,6 +710,7 @@ export function RepresentativeChatPanel(props: {
             submittedText: text,
           }));
           setError(t.memoryPolicyChanged);
+          activeClientMessageIdRef.current = null;
           setBusy(false);
           requestAnimationFrame(() => inputRef.current?.focus());
           return;
@@ -651,12 +741,15 @@ export function RepresentativeChatPanel(props: {
                   ? t.serviceCreditUnavailableWithHandoff
                   : t.serviceCreditUnavailable,
           );
+          activeClientMessageIdRef.current = null;
           setBusy(false);
           requestAnimationFrame(() => inputRef.current?.focus());
           return;
         }
         throw new Error(payload.error || t.errorGeneric);
       }
+      setPendingAttachments([]);
+      if (attachmentInputRef.current) attachmentInputRef.current.value = "";
       setUsage(payload.usage);
       if (payload.reply) {
         appendAssistant({
@@ -671,6 +764,7 @@ export function RepresentativeChatPanel(props: {
             : {}),
         });
         setBusy(false);
+        activeClientMessageIdRef.current = null;
         setConversationState("active");
       } else if (payload.heldForOperator || payload.status === "waiting_human") {
         // The acceptance response proves that AI generation was held, but it
@@ -687,8 +781,11 @@ export function RepresentativeChatPanel(props: {
           status: "waiting_human",
         });
         setBusy(false);
+        activeClientMessageIdRef.current = null;
       } else if (payload.runId) {
-        subscribeToRun(payload.runId);
+        if (activeClientMessageIdRef.current === userMessage.id) {
+          subscribeToRun(payload.runId);
+        }
       } else {
         throw new Error(t.errorGeneric);
       }
@@ -698,7 +795,85 @@ export function RepresentativeChatPanel(props: {
           ? { ...message, status: "failed" }
           : message));
       setError(submitError instanceof Error ? submitError.message : t.errorGeneric);
+      activeClientMessageIdRef.current = null;
       setBusy(false);
+    }
+  }
+
+  function selectAttachments(event: React.ChangeEvent<HTMLInputElement>) {
+    const selected = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (!selected.length) return;
+    const next = [...pendingAttachments, ...selected];
+    const totalBytes = next.reduce((total, file) => total + file.size, 0);
+    const invalidType = next.find((file) => !PUBLIC_CHAT_ATTACHMENT_ACCEPT
+      .split(",")
+      .includes(resolvePublicChatAttachmentMimeType(file)));
+    if (next.length > PUBLIC_CHAT_ATTACHMENT_MAX_FILES) {
+      setError(t.tooManyAttachments);
+      return;
+    }
+    if (invalidType) {
+      setError(t.unsupportedAttachment(invalidType.name));
+      return;
+    }
+    if (next.some((file) => file.size <= 0 || file.size > PUBLIC_CHAT_ATTACHMENT_MAX_BYTES)) {
+      setError(t.attachmentTooLarge);
+      return;
+    }
+    if (totalBytes > PUBLIC_CHAT_ATTACHMENT_TOTAL_BYTES) {
+      setError(t.attachmentsTooLarge);
+      return;
+    }
+    setPendingAttachments(next);
+    setError(null);
+  }
+
+  async function confirmHandoffControl() {
+    const action = handoffConfirmation;
+    if (!action || handoffControlBusy) return;
+    setHandoffControlBusy(true);
+    setError(null);
+    try {
+      const response = await fetch(
+        `/reps/${props.representativeSlug}/handoff`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        },
+      );
+      const payload = (await response.json().catch(() => ({}))) as {
+        conversationState?: string;
+        message?: { id: string; text: string; createdAt: string };
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error || t.handoffControlFailed);
+      }
+      setHumanActive(false);
+      setConversationState(payload.conversationState || "active");
+      if (payload.message) {
+        appendAssistant({
+          id: payload.message.id,
+          role: "assistant",
+          text: localizeSystemMessage(
+            payload.message.text,
+            "system",
+            props.locale,
+          ),
+          senderType: "system",
+          createdAt: payload.message.createdAt,
+          status: "completed",
+        });
+      }
+      setHandoffConfirmation(null);
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : t.handoffControlFailed,
+      );
+    } finally {
+      setHandoffControlBusy(false);
     }
   }
 
@@ -719,6 +894,7 @@ export function RepresentativeChatPanel(props: {
         activeRunTimeoutRef.current = null;
       }
       if (activeRunSourceRef.current === source) activeRunSourceRef.current = null;
+      activeClientMessageIdRef.current = null;
       setBusy(false);
     };
 
@@ -733,6 +909,8 @@ export function RepresentativeChatPanel(props: {
         const snapshot = JSON.parse((event as MessageEvent<string>).data) as {
           status: string;
           errorMessage?: string;
+          taskProgress?: PublicConversationTaskProgress;
+          turnProgress?: PublicTurnExecutionProgress;
           message?: {
             id: string;
             text: string;
@@ -744,6 +922,14 @@ export function RepresentativeChatPanel(props: {
             sourceDisclosure?: PublicWebAnswerSourceDisclosure;
           };
         };
+        setTaskProgress(snapshot.taskProgress ?? null);
+        setTurnProgress(snapshot.turnProgress ?? null);
+        const taskStillRunning = isPublicTaskStreamActive(
+          snapshot.taskProgress,
+        );
+        const turnStillRunning = isPublicTurnStreamActive(
+          snapshot.turnProgress,
+        );
         if (["completed", "waiting_approval"].includes(snapshot.status) && snapshot.message) {
           appendAssistant({
             id: snapshot.message.id,
@@ -760,10 +946,10 @@ export function RepresentativeChatPanel(props: {
               : {}),
           });
           setConversationState("active");
-          finish();
+          if (!taskStillRunning && !turnStillRunning) finish();
         } else if (["failed", "canceled"].includes(snapshot.status)) {
           setError(snapshot.errorMessage || t.errorGeneric);
-          finish();
+          if (!taskStillRunning && !turnStillRunning) finish();
         }
       } catch {
         // A malformed event is transient; EventSource can continue receiving
@@ -775,6 +961,17 @@ export function RepresentativeChatPanel(props: {
       // interruption or a server-side stream rotation into a failed reply.
       // The deadline above remains the final user-facing failure boundary.
     });
+  }
+
+  function settleActiveRun() {
+    activeRunSourceRef.current?.close();
+    activeRunSourceRef.current = null;
+    if (activeRunTimeoutRef.current !== null) {
+      window.clearTimeout(activeRunTimeoutRef.current);
+      activeRunTimeoutRef.current = null;
+    }
+    activeClientMessageIdRef.current = null;
+    setBusy(false);
   }
 
   function appendAssistant(message: ChatMessage) {
@@ -848,6 +1045,7 @@ export function RepresentativeChatPanel(props: {
     humanActive,
     hydrating,
     locale: props.locale,
+    ...(taskProgress?.status ? { taskStatus: taskProgress.status } : {}),
   });
   const composerDescription = computeAssist
     ? "representative-compute-assist"
@@ -971,10 +1169,14 @@ export function RepresentativeChatPanel(props: {
                     <div className="representative-message-bubble">
                       <p>{message.text}</p>
                   {message.role === "assistant"
-                    && message.sourceDisclosure === "general_model"
+                    && message.sourceDisclosure
                     && !isOperator ? (
                     <small className="representative-answer-source-disclosure">
-                      {t.generalModelSourceDisclosure}
+                      {message.sourceDisclosure === "same_conversation"
+                        ? t.sameConversationSourceDisclosure
+                        : message.sourceDisclosure === "unverified_tool_fallback"
+                          ? t.unverifiedToolFallbackSourceDisclosure
+                          : t.generalModelSourceDisclosure}
                     </small>
                   ) : null}
                   {message.attachments?.length ? (
@@ -1021,6 +1223,92 @@ export function RepresentativeChatPanel(props: {
                 </article>
               );
             })}
+            {turnProgress ? (
+              <section
+                aria-live="polite"
+                className="representative-task-progress representative-turn-progress"
+              >
+                <header>
+                  <span>{t.turnProgressLabel}</span>
+                  <strong>{turnProgress.objective || t.turnProgressPreparing}</strong>
+                  <small>
+                    {formatPublicTurnStage(turnProgress.stage, props.locale)}
+                    {` · ${formatPublicTurnElapsed(
+                      turnProgress.startedAt,
+                      progressClockMs || Date.parse(turnProgress.updatedAt),
+                      props.locale,
+                    )}`}
+                  </small>
+                </header>
+                {(turnProgress.goals.length || turnProgress.deliverables.length) ? (
+                  <details className="representative-turn-plan-details">
+                    <summary>{t.turnPlanDetails}</summary>
+                    {turnProgress.goals.length ? (
+                      <div>
+                        <strong>{t.turnGoalsLabel}</strong>
+                        <ul>
+                          {turnProgress.goals.map((goal) => (
+                            <li key={goal.id}>{goal.description}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {turnProgress.deliverables.length ? (
+                      <div>
+                        <strong>{t.turnDeliverablesLabel}</strong>
+                        <ul>
+                          {turnProgress.deliverables.map((deliverable) => (
+                            <li key={deliverable.id}>
+                              {formatPublicTurnDeliverable(deliverable, props.locale)}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </details>
+                ) : null}
+                <ol>
+                  {turnProgress.steps.map((step) => (
+                    <li className={`is-${step.status}`} key={step.id}>
+                      <span>{step.sequence}</span>
+                      <div>
+                        <strong>{formatPublicTurnStage(step.stage, props.locale)}</strong>
+                        <small>
+                          {formatPublicTaskStatus(step.status, props.locale)}
+                          {step.detail ? ` · ${t.turnPart(step.detail)}` : ""}
+                        </small>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            ) : null}
+            {taskProgress ? (
+              <section
+                aria-live="polite"
+                className="representative-task-progress"
+              >
+                <header>
+                  <span>{t.taskProgressLabel}</span>
+                  <strong>{taskProgress.title}</strong>
+                  <small>
+                    {formatPublicTaskStatus(taskProgress.status, props.locale)}
+                    {` · ${t.taskNextActor}: ${formatPublicTaskActor(taskProgress.nextActionBy, props.locale)}`}
+                  </small>
+                </header>
+                <ol>
+                  {taskProgress.steps.map((step) => (
+                    <li className={`is-${step.status}`} key={step.id}>
+                      <span>{step.sequence}</span>
+                      <div>
+                        <strong>{step.title}</strong>
+                        <small>{formatPublicTaskStatus(step.status, props.locale)}</small>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            ) : null}
             {busy && responder.kind === "ai" ? (
               <article className="representative-chat-message representative-chat-message-assistant is-pending">
                 <div aria-label={t.aiAvatarLabel(props.representativeName)} className="representative-message-avatar is-ai" role="img">
@@ -1057,7 +1345,63 @@ export function RepresentativeChatPanel(props: {
                 : responder.kind === "waiting"
                   ? t.waitingComposerContext
                   : t.aiComposerContext}</span>
+              {responder.kind === "waiting" || responder.kind === "human" ? (
+                <button
+                  className="representative-handoff-control-trigger"
+                  disabled={handoffControlBusy || hydrating}
+                  onClick={() => setHandoffConfirmation(
+                    responder.kind === "human"
+                      ? "end_human_service"
+                      : "cancel_request",
+                  )}
+                  type="button"
+                >
+                  {responder.kind === "human"
+                    ? t.endHumanService
+                    : t.cancelHandoffRequest}
+                </button>
+              ) : null}
             </header>
+            {handoffConfirmation ? (
+              <div
+                aria-labelledby="representative-handoff-confirmation-title"
+                className="representative-handoff-confirmation"
+                role="alertdialog"
+              >
+                <div>
+                  <strong id="representative-handoff-confirmation-title">
+                    {handoffConfirmation === "cancel_request"
+                      ? t.cancelHandoffTitle
+                      : t.endHumanServiceTitle}
+                  </strong>
+                  <p>{handoffConfirmation === "cancel_request"
+                    ? t.cancelHandoffDetail
+                    : t.endHumanServiceDetail}</p>
+                </div>
+                <div className="button-row">
+                  <button
+                    className="button-secondary"
+                    disabled={handoffControlBusy}
+                    onClick={() => setHandoffConfirmation(null)}
+                    type="button"
+                  >
+                    {t.keepHumanService}
+                  </button>
+                  <button
+                    className="button-primary"
+                    disabled={handoffControlBusy}
+                    onClick={() => void confirmHandoffControl()}
+                    type="button"
+                  >
+                    {handoffControlBusy
+                      ? t.updatingHumanService
+                      : handoffConfirmation === "cancel_request"
+                        ? t.confirmCancelHandoff
+                        : t.confirmEndHumanService}
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <div className="representative-chat-composer-body">
               <textarea
                 aria-describedby={composerDescription}
@@ -1082,6 +1426,24 @@ export function RepresentativeChatPanel(props: {
                 value={input}
               />
             </div>
+            {pendingAttachments.length ? (
+              <div className="representative-chat-pending-attachments" aria-label={t.selectedAttachments}>
+                {pendingAttachments.map((file, index) => (
+                  <div key={`${file.name}-${file.size}-${index}`}>
+                    <span>{file.name}</span>
+                    <small>{formatAttachmentBytes(file.size)}</small>
+                    <button
+                      aria-label={t.removeAttachment(file.name)}
+                      disabled={busy || hydrating}
+                      onClick={() => setPendingAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                      type="button"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {computeAssist ? (
               <div className="representative-compute-assist" id="representative-compute-assist" role="status">
                 <div><strong>{computeAssist.title}</strong><span>{computeAssist.detail}</span></div>
@@ -1139,6 +1501,25 @@ export function RepresentativeChatPanel(props: {
             ) : null}
             <footer className="dashboard-form-footer representative-chat-composer-actions">
               <div className="button-row">
+                <input
+                  accept={PUBLIC_CHAT_ATTACHMENT_ACCEPT}
+                  aria-label={t.addAttachments}
+                  hidden
+                  multiple
+                  onChange={selectAttachments}
+                  ref={attachmentInputRef}
+                  type="file"
+                />
+                <button
+                  aria-label={t.addAttachments}
+                  className="button-secondary representative-chat-attach"
+                  disabled={busy || hydrating || pendingAttachments.length >= PUBLIC_CHAT_ATTACHMENT_MAX_FILES}
+                  onClick={() => attachmentInputRef.current?.click()}
+                  type="button"
+                >
+                  <span aria-hidden="true">＋</span>
+                  <span>{t.attach}</span>
+                </button>
                 <button
                   aria-label={hydrating ? t.loadingHistory : busy ? t.sending : t.sendMessageAction}
                   className="button-primary representative-chat-send"
@@ -1231,12 +1612,144 @@ function getVisitorMessageStatus(status: string | undefined, locale: "zh" | "en"
   return labels[status as keyof typeof labels] ?? null;
 }
 
+function isPublicTaskStreamActive(
+  task: PublicConversationTaskProgress | undefined,
+) {
+  return Boolean(task && [
+    "draft",
+    "ready",
+    "queued",
+    "running",
+  ].includes(task.status));
+}
+
+function isPublicTurnStreamActive(
+  progress: PublicTurnExecutionProgress | undefined,
+) {
+  return progress?.status === "running";
+}
+
+function formatPublicTaskStatus(status: string, locale: "zh" | "en") {
+  const zh = locale === "zh";
+  const labels: Record<string, string> = zh
+    ? {
+        draft: "正在准备",
+        clarifying: "等待补充",
+        ready: "准备执行",
+        awaiting_approval: "等待审批",
+        queued: "排队中",
+        running: "执行中",
+        waiting_for_user: "等待你补充",
+        waiting_for_owner: "等待负责人处理",
+        completed: "已完成",
+        failed: "未完成",
+        canceled: "已取消",
+        expired: "已过期",
+        waiting_approval: "等待审批",
+        waiting_input: "等待输入",
+        blocked: "已阻止",
+        skipped: "已跳过",
+      }
+    : {
+        draft: "Preparing",
+        clarifying: "Needs details",
+        ready: "Ready",
+        awaiting_approval: "Awaiting approval",
+        queued: "Queued",
+        running: "Running",
+        waiting_for_user: "Waiting for you",
+        waiting_for_owner: "Waiting for owner",
+        completed: "Completed",
+        failed: "Not completed",
+        canceled: "Canceled",
+        expired: "Expired",
+        waiting_approval: "Awaiting approval",
+        waiting_input: "Waiting for input",
+        blocked: "Blocked",
+        skipped: "Skipped",
+      };
+  return labels[status] ?? status;
+}
+
+function formatPublicTurnStage(
+  stage: PublicTurnExecutionProgress["stage"],
+  locale: "zh" | "en",
+) {
+  const labels = locale === "zh"
+    ? {
+        planning: "理解需求并验证计划",
+        authorizing: "检查权限与服务额度",
+        generating: "生成文档正文",
+        validating: "校验内容完整性",
+        saving: "保存结果文件",
+        delivering: "发送结果",
+        completed: "已完成",
+        failed: "未完成",
+      }
+    : {
+        planning: "Understand and validate the plan",
+        authorizing: "Check permission and service access",
+        generating: "Generate document content",
+        validating: "Validate content completeness",
+        saving: "Save the result file",
+        delivering: "Deliver the result",
+        completed: "Completed",
+        failed: "Not completed",
+      };
+  return labels[stage];
+}
+
+function formatPublicTurnElapsed(
+  startedAt: string,
+  clockMs: number,
+  locale: "zh" | "en",
+) {
+  const startedMs = Date.parse(startedAt);
+  const seconds = Number.isFinite(startedMs) && Number.isFinite(clockMs)
+    ? Math.max(0, Math.floor((clockMs - startedMs) / 1_000))
+    : 0;
+  return locale === "zh" ? `已用时 ${seconds} 秒` : `${seconds}s elapsed`;
+}
+
+function formatPublicTurnDeliverable(
+  deliverable: PublicTurnExecutionProgress["deliverables"][number],
+  locale: "zh" | "en",
+) {
+  const kindLabels: Record<string, string> = locale === "zh"
+    ? {
+        artifact: "文件",
+        message: "消息",
+        public_material: "公开资料",
+        service_request: "服务请求",
+        external_result: "外部结果",
+      }
+    : {
+        artifact: "File",
+        message: "Message",
+        public_material: "Public material",
+        service_request: "Service request",
+        external_result: "External result",
+      };
+  const kind = kindLabels[deliverable.kind] ?? deliverable.kind;
+  return deliverable.format ? `${kind} · ${deliverable.format}` : kind;
+}
+
+function formatPublicTaskActor(actor: string, locale: "zh" | "en") {
+  const zh = locale === "zh";
+  if (actor === "audience") return zh ? "你" : "You";
+  if (actor === "owner") return zh ? "负责人" : "Owner";
+  if (actor === "operator") return zh ? "人工接待" : "Operator";
+  if (actor === "system") return zh ? "系统" : "System";
+  return zh ? "数字代表" : "Digital representative";
+}
+
 function resolveResponderPresentation(input: {
   busy: boolean;
   conversationState: string;
   humanActive: boolean;
   hydrating: boolean;
   locale: "zh" | "en";
+  taskStatus?: string;
 }) {
   const zh = input.locale === "zh";
   const state = input.conversationState.trim().toLowerCase();
@@ -1248,6 +1761,19 @@ function resolveResponderPresentation(input: {
   }
   if (["needs_human", "waiting_human"].includes(state)) {
     return { kind: "waiting", label: zh ? "等待真人接入" : "Waiting for a human" };
+  }
+  if (
+    ["clarifying", "waiting_for_user"].includes(
+      input.taskStatus?.trim().toLowerCase() || "",
+    )
+  ) {
+    return { kind: "ai", label: zh ? "等待你补充" : "Waiting for your input" };
+  }
+  if (input.taskStatus?.trim().toLowerCase() === "awaiting_approval") {
+    return { kind: "ai", label: zh ? "等待负责人审批" : "Waiting for owner approval" };
+  }
+  if (input.taskStatus?.trim().toLowerCase() === "waiting_for_owner") {
+    return { kind: "ai", label: zh ? "等待负责人处理" : "Waiting for the owner" };
   }
   if (state === "unavailable") {
     return { kind: "offline", label: zh ? "连接暂时中断" : "Connection interrupted" };
@@ -1307,6 +1833,18 @@ function localizeSystemMessage(
   if (text === "The human operator returned this conversation to the digital representative.") {
     return locale === "zh"
       ? "真人已结束接待，数字代表将继续回复。"
+      : text;
+  }
+
+  if (text === "The audience canceled the human handoff request. The digital representative may continue.") {
+    return locale === "zh"
+      ? "你已取消人工接管请求，数字代表将继续回复。"
+      : text;
+  }
+
+  if (text === "The audience ended human service. The digital representative may continue.") {
+    return locale === "zh"
+      ? "你已结束人工接待，数字代表将继续回复。"
       : text;
   }
 
@@ -1374,6 +1912,55 @@ function createClientMessageId() {
     : `web-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function buildPublicChatRequestBody(input: {
+  message: string;
+  clientMessageId: string;
+  memoryDisclosure: {
+    policyRevision: number | null;
+    fingerprint: string;
+  };
+  attachments: File[];
+}): string | FormData {
+  if (!input.attachments.length) {
+    return JSON.stringify({
+      message: input.message,
+      clientMessageId: input.clientMessageId,
+      memoryDisclosure: input.memoryDisclosure,
+    });
+  }
+  const form = new FormData();
+  form.set("message", input.message);
+  form.set("clientMessageId", input.clientMessageId);
+  form.set("memoryDisclosure", JSON.stringify(input.memoryDisclosure));
+  for (const attachment of input.attachments) {
+    form.append("attachments", attachment, attachment.name);
+  }
+  return form;
+}
+
+function resolvePublicChatAttachmentMimeType(file: Pick<File, "name" | "type">) {
+  const normalized = file.type.trim().toLowerCase();
+  if (normalized && normalized !== "application/octet-stream") return normalized;
+  const extension = file.name.toLowerCase().split(".").pop();
+  return extension === "json"
+    ? "application/json"
+    : extension === "pdf"
+      ? "application/pdf"
+      : extension === "jpg" || extension === "jpeg"
+        ? "image/jpeg"
+        : extension === "png"
+          ? "image/png"
+          : extension === "webp"
+            ? "image/webp"
+            : extension === "csv"
+              ? "text/csv"
+              : extension === "md" || extension === "markdown"
+                ? "text/markdown"
+                : extension === "txt"
+                  ? "text/plain"
+                  : "application/octet-stream";
+}
+
 function formatAttachmentBytes(value: number | undefined) {
   if (typeof value !== "number") return "";
   if (value < 1024) return `${value} B`;
@@ -1420,10 +2007,32 @@ const zhCopy = {
   humanAvatarLabel: (name: string) => `${name} 的真人头像`,
   aiAvatarBadgeLabel: "AI 数字代表",
   generalModelSourceDisclosure: "来源说明：本回答未引用已授权知识或记忆。",
+  unverifiedToolFallbackSourceDisclosure: "来源说明：外部工具本轮未执行，以下内容由通用模型根据已有知识概括；未核验相关项目或仓库的最新内容，也未引用已授权知识或记忆。",
+  sameConversationSourceDisclosure: "来源说明：根据本次对话记录整理。",
   artifactsLabel: "任务结果", downloadArtifact: "下载",
+  taskProgressLabel: "任务运行进度", taskNextActor: "下一步",
+  turnProgressLabel: "执行计划", turnProgressPreparing: "正在理解并规划你的请求",
+  turnPlanDetails: "查看规划内容", turnGoalsLabel: "目标",
+  turnDeliverablesLabel: "交付物", turnPart: (value: string) => `第 ${value} 段`,
+  addAttachments: "添加附件", attach: "附件", selectedAttachments: "待发送附件",
+  removeAttachment: (name: string) => `移除附件 ${name}`,
+  tooManyAttachments: "每条消息最多添加 5 个附件。",
+  unsupportedAttachment: (name: string) => `附件 ${name} 的格式不受支持。`,
+  attachmentTooLarge: "单个附件必须小于 10 MB。",
+  attachmentsTooLarge: "附件总大小不能超过 20 MB。",
   faqSuggestionsLabel: "你可以这样问我",
   inputLabel: "输入对话内容", placeholder: "描述你的问题、背景和期望结果…",
   aiComposerContext: "发送给数字代表", humanComposerContext: "发送给当前接待人员", waitingComposerContext: "等待真人回复，可继续补充",
+  cancelHandoffRequest: "取消接管请求", endHumanService: "结束人工接待",
+  cancelHandoffTitle: "取消人工接管请求？",
+  cancelHandoffDetail: "取消后，尚未使用的人工接管权益会释放，数字代表将恢复接待。",
+  endHumanServiceTitle: "结束人工接待并返回 AI？",
+  endHumanServiceDetail: "真人将退出当前会话，数字代表恢复接待；已经消费的人工接管权益不会退回。",
+  keepHumanService: "暂不操作", confirmCancelHandoff: "确认取消",
+  confirmEndHumanService: "确认结束", updatingHumanService: "正在更新…",
+  handoffControlFailed: "人工接待状态更新失败，请稍后重试。",
+  handoffRequestCanceledMessage: "你已取消人工接管请求，数字代表将继续回复。",
+  humanServiceEndedMessage: "你已结束人工接待，数字代表将继续回复。",
   sendMessageAction: "发送消息",
   continuationEyebrow: "继续对话",
   serviceGateTitle: (accessMode: RepresentativeAccessMode) => accessMode === "CREDITS_ONLY"
@@ -1481,10 +2090,32 @@ const enCopy = {
   humanAvatarLabel: (name: string) => `${name}'s human avatar`,
   aiAvatarBadgeLabel: "AI digital representative",
   generalModelSourceDisclosure: "Source note: This answer did not cite authorized knowledge or memory.",
+  unverifiedToolFallbackSourceDisclosure: "Source note: The external tool was not run. This answer is a general-model summary, was not checked against the latest project or repository content, and did not cite authorized knowledge or memory.",
+  sameConversationSourceDisclosure: "Source note: Based on this conversation's record.",
   artifactsLabel: "Task results", downloadArtifact: "Download",
+  taskProgressLabel: "Task progress", taskNextActor: "Next",
+  turnProgressLabel: "Execution plan", turnProgressPreparing: "Understanding and planning your request",
+  turnPlanDetails: "View plan", turnGoalsLabel: "Goals",
+  turnDeliverablesLabel: "Deliverables", turnPart: (value: string) => `Part ${value}`,
+  addAttachments: "Add attachments", attach: "Attach", selectedAttachments: "Selected attachments",
+  removeAttachment: (name: string) => `Remove attachment ${name}`,
+  tooManyAttachments: "You can attach up to 5 files per message.",
+  unsupportedAttachment: (name: string) => `The file type for ${name} is not supported.`,
+  attachmentTooLarge: "Each attachment must be smaller than 10 MB.",
+  attachmentsTooLarge: "Attachments may total no more than 20 MB.",
   faqSuggestionsLabel: "You can ask me",
   inputLabel: "Conversation message", placeholder: "Describe the problem, context, and outcome you want…",
   aiComposerContext: "Send to the digital representative", humanComposerContext: "Send to the current operator", waitingComposerContext: "Waiting for a human reply; you can keep adding details",
+  cancelHandoffRequest: "Cancel handoff request", endHumanService: "End human service",
+  cancelHandoffTitle: "Cancel the human handoff request?",
+  cancelHandoffDetail: "The digital representative will resume, and any unconsumed handoff entitlement will be released.",
+  endHumanServiceTitle: "End human service and return to AI?",
+  endHumanServiceDetail: "The operator will leave this conversation and the digital representative will resume. A consumed handoff entitlement is not refunded.",
+  keepHumanService: "Keep current state", confirmCancelHandoff: "Cancel request",
+  confirmEndHumanService: "End human service", updatingHumanService: "Updating…",
+  handoffControlFailed: "Unable to update human service. Please try again.",
+  handoffRequestCanceledMessage: "You canceled the human handoff request. The digital representative will continue.",
+  humanServiceEndedMessage: "You ended human service. The digital representative will continue.",
   sendMessageAction: "Send message",
   continuationEyebrow: "Continue the conversation",
   serviceGateTitle: (accessMode: RepresentativeAccessMode) => accessMode === "CREDITS_ONLY"

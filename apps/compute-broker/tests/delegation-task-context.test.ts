@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { isDelegationTaskSessionContextValid } from "../src/delegation-task-context";
+import {
+  isDelegationTaskSessionContextValid,
+  resolveDelegationTaskSessionDurationMinutes,
+  resolveEffectiveDelegationFilesystemMode,
+  resolveEffectiveDelegationNetworkMode,
+} from "../src/delegation-task-context";
 
 const input = {
   representativeId: "rep-1",
@@ -75,5 +80,37 @@ describe("delegation task compute session context", () => {
     ["terminal status", { ...task, status: "COMPLETED" }],
   ])("rejects a mismatched %s", (_label, candidate) => {
     expect(isDelegationTaskSessionContextValid(input, candidate)).toBe(false);
+  });
+
+  it("uses the shorter representative or task duration ceiling", () => {
+    expect(resolveDelegationTaskSessionDurationMinutes({
+      representativeMaxSessionMinutes: 30,
+      resourcePolicy: {
+        allowedCapabilities: ["WRITE"],
+        maxDurationMinutes: 5,
+      },
+    })).toBe(5);
+    expect(resolveDelegationTaskSessionDurationMinutes({
+      representativeMaxSessionMinutes: 5,
+      resourcePolicy: {
+        allowedCapabilities: ["WRITE"],
+        maxDurationMinutes: 30,
+      },
+    })).toBe(5);
+  });
+
+  it("allows task network and filesystem modes to tighten but never relax", () => {
+    expect(resolveEffectiveDelegationNetworkMode("allowlist", "FULL"))
+      .toBe("allowlist");
+    expect(resolveEffectiveDelegationNetworkMode("full", "NO_NETWORK"))
+      .toBe("no_network");
+    expect(resolveEffectiveDelegationFilesystemMode(
+      "workspace_only",
+      "EPHEMERAL_FULL",
+    )).toBe("workspace_only");
+    expect(resolveEffectiveDelegationFilesystemMode(
+      "ephemeral_full",
+      "READ_ONLY_WORKSPACE",
+    )).toBe("read_only_workspace");
   });
 });

@@ -15,11 +15,10 @@ describe("compute conversation results", () => {
         mimeType: "text/markdown",
         fileName: "report-1ce03c47.md",
       }],
-      actualCredits: 5,
     });
 
     expect(text).toContain("已生成文件：report-1ce03c47.md");
-    expect(text).toContain("消耗：5 credits");
+    expect(text).not.toContain("credits");
     expect(text).not.toContain("/workspace");
     expect(text).not.toContain("sandbox/session-1");
     expect(text).not.toContain("内部正文");
@@ -39,12 +38,18 @@ describe("compute conversation results", () => {
   it("sanitizes legacy compute result messages when serving public conversation history", () => {
     const text = renderPublicConversationMessageText({
       text: "审批已通过，委托任务执行完成。\n\nfile: /workspace/outputs/report.md: # 私有正文",
-      content: { kind: "compute_approval_result", outcome: "completed", actualCredits: 5 },
+      content: { kind: "compute_approval_result", outcome: "completed" },
       attachments: [{ fileName: "report.md" }],
     });
 
-    expect(text).toBe("审批已通过，委托任务执行完成。\n\n已生成文件：report.md\n\n消耗：5 credits");
+    expect(text).toBe("审批已通过，委托任务执行完成。\n\n已生成文件：report.md");
     expect(text).not.toContain("/workspace");
     expect(text).not.toContain("私有正文");
+  });
+
+  it("removes legacy Compute-credit lines from persisted public messages", () => {
+    expect(renderPublicConversationMessageText({
+      text: "委托任务被安全策略拒绝，未执行。\n\n消耗：4 credits",
+    })).toBe("委托任务被安全策略拒绝，未执行。");
   });
 });

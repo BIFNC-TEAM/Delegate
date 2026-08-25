@@ -29,6 +29,7 @@
     "@delegate/runtime": "workspace:*",
     "@delegate/workflows": "workspace:*",
     "@prisma/client": "^6.19.2",
+    "fast-sha256": "^1.3.0",
     "jose": "^6.2.3",
     "jszip": "^3.10.1",
     "pdf-parse": "^2.4.5",

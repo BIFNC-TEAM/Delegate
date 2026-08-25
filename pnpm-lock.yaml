@@ -108,6 +108,9 @@ importers:
       '@delegate/lifecycle-hooks':
         specifier: workspace:*
         version: link:../../packages/lifecycle-hooks
+      '@delegate/runtime':
+        specifier: workspace:*
+        version: link:../../packages/runtime
       '@delegate/web-data':
         specifier: workspace:*
         version: link:../../packages/web-data
@@ -379,6 +382,9 @@ importers:
       '@delegate/domain':
         specifier: workspace:*
         version: link:../domain
+      fast-sha256:
+        specifier: ^1.3.0
+        version: 1.3.0
       zod:
         specifier: ^4.3.6
         version: 4.3.6
@@ -412,6 +418,9 @@ importers:
       '@prisma/client':
         specifier: ^6.19.2
         version: 6.19.2(prisma@6.19.2(typescript@5.9.3))(typescript@5.9.3)
+      fast-sha256:
+        specifier: ^1.3.0
+        version: 1.3.0
       jose:
         specifier: ^6.2.3
         version: 6.2.3

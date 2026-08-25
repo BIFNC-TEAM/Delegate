@@ -138,7 +138,8 @@ Build:
 
 - Temporal-backed long-running workflows
 - retries, compensations, SLA timers, and follow-up automations
-- current foundation: approval expiration and handoff follow-up now use Postgres truth, outbox-dispatched Temporal start/cancel, native timer waiting, and phase-aware dashboard observability
+- current foundation: approval expiration, handoff follow-up, and delegation execution use Postgres truth, outbox-dispatched Temporal start/cancel/signal, native timer waiting, and phase-aware observability
+- Agent Runtime V3 now provides goal-oriented strict planning, schema-pinned MCP compilation, atomic execution admission, Verified ActionResults, conditional fallback, evidence-bound composition, and V2 rollback compatibility
 - capability services and remote MCP servers
 - signed trust tiers and provenance for installed capabilities
 - scoped subagents for triage, browser, compute, and handoff

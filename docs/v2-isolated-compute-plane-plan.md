@@ -148,8 +148,7 @@ Add:
   - `STORAGE_BYTES`
   - `ARTIFACT_EGRESS`
   - `BROWSER_MINUTES`
-  - `PLAN_DEBIT`
-  - `SPONSOR_CREDIT`
+  - `MCP_CALLS`
 
 ### Representative-level fields
 
@@ -159,7 +158,7 @@ Either inline on `Representative` or via a dedicated profile model:
 - `computeDefaultPolicyMode`
 - `computeBaseImage`
 - `computeMaxSessionMinutes`
-- `computeAutoApproveBudgetCents`
+- `computeAutoApproveTokenLimit`
 - `computeArtifactRetentionDays`
 - `computeNetworkMode`
 - `computeFilesystemMode`
@@ -203,7 +202,7 @@ Fields:
 - `commandPattern`
 - `pathPattern`
 - `domainPattern`
-- `maxCostCents`
+- `maxEstimatedTokens`
 - `requiresPaidPlan`
 - `requiresHumanApproval`
 - `priority`
@@ -322,7 +321,6 @@ Fields:
 - `quantity`
 - `unit`
 - `costCents`
-- `creditDelta`
 - `currency`
 - `notes`
 - `createdAt`
@@ -349,7 +347,6 @@ Add event types:
 Add:
 
 - `activeComputeSessionId`
-- `computeBudgetRemainingCredits`
 - `lastComputeAt`
 
 #### `Contact`
@@ -435,7 +432,7 @@ The lease should carry:
 - expiry
 - max runtime
 - artifact retention policy
-- max cost ceiling
+- maximum estimated-token ceiling
 
 ## Docker topology workstream
 
@@ -593,15 +590,10 @@ After execution completes:
 
 ## Billing hooks workstream
 
-## Dual-ledger principle
+## Cost-accounting principle
 
-Keep user-facing credits separate from internal cost accounting.
-
-### User-facing debits
-
-- `Compute Pass` consumption
-- `Deep Help` compute allotment usage
-- sponsor-pool consumption when configured
+Compute execution never exposes or debits a Compute-credit balance. Public
+service authorization uses the shared per-service entitlement flow.
 
 ### Internal cost entries
 
@@ -623,12 +615,8 @@ Add billing hooks at:
 
 ## V2 commercial rule
 
-Before running non-trivial compute:
-
-- verify plan entitlement or available credits
-- if not enough credits:
-  - offer `Compute Pass`
-  - do not launch sandbox
+Before running non-trivial compute, verify the current free/service-unit
+authorization and apply capability, side-effect, and estimated-token limits.
 
 ## Dashboard workstream
 
@@ -642,7 +630,7 @@ The lane should show:
 - recent executions
 - pending approvals
 - artifact list
-- compute credit burn
+- internal execution cost
 - blocked actions and policy reasons
 
 Representative setup should also gain:
@@ -650,7 +638,7 @@ Representative setup should also gain:
 - compute enabled toggle
 - default base image selector
 - max session minutes
-- auto-approve budget
+- automatic-execution token limit
 - artifact retention days
 - path/domain policy editor
 
@@ -841,7 +829,7 @@ Includes:
 
 - approval queue UI
 - approval resolution API
-- cost ceiling enforcement
+- estimated-token ceiling enforcement
 - artifact viewer/download links
 - representative-level compute settings
 - policy rule editor
@@ -858,7 +846,7 @@ Recommended ticket split:
 1. approval queue and status APIs
 2. dashboard approvals panel
 3. representative setup compute policy editor
-4. cost ceiling and retention settings
+4. estimated-token ceiling and retention settings
 5. audit and artifact detail views
 
 ### Phase D: Hardening

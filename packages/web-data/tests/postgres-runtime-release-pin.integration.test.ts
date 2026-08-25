@@ -232,7 +232,7 @@ async function createReleasePinFixture() {
           defaultToolName: "read",
           enabled: true,
           approvalRequired: true,
-          estimatedCostCentsPerCall: 0,
+          estimatedTokensPerCall: 0,
           maxRetries: 1,
           retryBackoffMs: 100,
           skillReleasePin: {

@@ -16,13 +16,15 @@ type GovernedActionKind =
   | "deliverable_publish"
   | "package_rebuild"
   | "package_download"
-  | "billing_debit"
-  | "billing_credit";
+  | "billing_debit";
 
 type GovernedActionOutcome =
   | "allow"
   | "ask"
   | "deny"
+  | "queued"
+  | "running"
+  | "approved_waiting_execution"
   | "approved"
   | "rejected"
   | "expired"
@@ -155,7 +157,6 @@ export type GovernedActionSource = {
     id: string;
     kind: string;
     costCents: number;
-    creditDelta: number;
     quantity: number;
     unit: string;
     createdAt: string;
@@ -188,7 +189,6 @@ export type RepresentativeGovernedActionSnapshot = {
     ownerRequiredCount: number;
     billingImpactCount: number;
     totalCostCents: number;
-    totalCreditDelta: number;
   }>;
   byOutcome: Array<{
     key: GovernedActionOutcome;
@@ -216,11 +216,9 @@ export type RepresentativeGovernedActionSnapshot = {
     count: number;
     blockedCount: number;
     totalCostCents: number;
-    totalCreditDelta: number;
   }>;
   billingImpact: {
     totalInternalCostCents: number;
-    totalCreditDelta: number;
     breakdown: Array<{
       key:
         | "compute"
@@ -229,12 +227,9 @@ export type RepresentativeGovernedActionSnapshot = {
         | "mcp"
         | "model"
         | "egress"
-        | "plan_debit"
-        | "sponsor_credit"
         | "other";
       label: string;
       costCents: number;
-      creditDelta: number;
     }>;
   };
   hotspots: {
@@ -298,7 +293,6 @@ export type RepresentativeGovernedActionSnapshot = {
     publicMaterialAffecting: boolean;
     hasBillingImpact: boolean;
     totalCostCents: number;
-    totalCreditDelta: number;
     occurredAt: string;
     summary: string;
     links: {
@@ -333,13 +327,15 @@ const actionKindOrder: GovernedActionKind[] = [
   "package_rebuild",
   "package_download",
   "billing_debit",
-  "billing_credit",
 ];
 
 const actionOutcomeOrder: GovernedActionOutcome[] = [
   "allow",
   "ask",
   "deny",
+  "queued",
+  "running",
+  "approved_waiting_execution",
   "approved",
   "rejected",
   "expired",
@@ -394,7 +390,6 @@ export function buildRepresentativeGovernedActionSnapshot(
     const approval = approvalsByExecutionId.get(execution.id);
     const ledgerEntries = ledgerByExecutionId.get(execution.id) ?? [];
     const totalCostCents = ledgerEntries.reduce((sum, entry) => sum + entry.costCents, 0);
-    const totalCreditDelta = ledgerEntries.reduce((sum, entry) => sum + entry.creditDelta, 0);
     recentActions.push({
       id: `compute_execution:${execution.id}`,
       actionKind: "compute_execution",
@@ -418,7 +413,6 @@ export function buildRepresentativeGovernedActionSnapshot(
       publicMaterialAffecting: false,
       hasBillingImpact: ledgerEntries.length > 0,
       totalCostCents,
-      totalCreditDelta,
       occurredAt: execution.finishedAt ?? execution.createdAt,
       summary: buildExecutionSummary(execution, approval),
       links: {
@@ -453,7 +447,6 @@ export function buildRepresentativeGovernedActionSnapshot(
       publicMaterialAffecting: false,
       hasBillingImpact: false,
       totalCostCents: 0,
-      totalCreditDelta: 0,
       occurredAt: approval.resolvedAt ?? approval.requestedAt,
       summary: approval.requestedActionSummary,
       links: {
@@ -484,7 +477,6 @@ export function buildRepresentativeGovernedActionSnapshot(
         publicMaterialAffecting: false,
         hasBillingImpact: false,
         totalCostCents: 0,
-        totalCreditDelta: 0,
         occurredAt: artifact.pinnedAt,
         summary: `Pinned ${artifact.kind} artifact`,
         links: {
@@ -517,7 +509,6 @@ export function buildRepresentativeGovernedActionSnapshot(
         publicMaterialAffecting: false,
         hasBillingImpact: false,
         totalCostCents: 0,
-        totalCreditDelta: 0,
         occurredAt: artifact.pinnedAt ?? artifact.createdAt,
         summary: "Artifact cannot be unpinned while deliverables still depend on it",
         links: {
@@ -553,7 +544,6 @@ export function buildRepresentativeGovernedActionSnapshot(
         publicMaterialAffecting: false,
         hasBillingImpact: Boolean(linkedLedgerEntry),
         totalCostCents: linkedLedgerEntry?.costCents ?? 0,
-        totalCreditDelta: linkedLedgerEntry?.creditDelta ?? 0,
         occurredAt: artifact.lastDownloadedAt,
         summary: `Artifact downloaded ${artifact.downloadCount} time(s)`,
         links: {
@@ -584,7 +574,6 @@ export function buildRepresentativeGovernedActionSnapshot(
       publicMaterialAffecting: deliverable.visibility === "public_material",
       hasBillingImpact: false,
       totalCostCents: 0,
-      totalCreditDelta: 0,
       occurredAt: deliverable.createdAt,
       summary: `Created ${deliverable.kind} deliverable`,
       links: {
@@ -612,7 +601,6 @@ export function buildRepresentativeGovernedActionSnapshot(
         publicMaterialAffecting: deliverable.visibility === "public_material",
         hasBillingImpact: false,
         totalCostCents: 0,
-        totalCreditDelta: 0,
         occurredAt: deliverable.updatedAt,
         summary: `Updated ${deliverable.kind} deliverable`,
         links: {
@@ -641,7 +629,6 @@ export function buildRepresentativeGovernedActionSnapshot(
         publicMaterialAffecting: true,
         hasBillingImpact: false,
         totalCostCents: 0,
-        totalCreditDelta: 0,
         occurredAt: deliverable.updatedAt,
         summary: `Published ${deliverable.title} as public material`,
         links: {
@@ -670,7 +657,6 @@ export function buildRepresentativeGovernedActionSnapshot(
         publicMaterialAffecting: deliverable.visibility === "public_material",
         hasBillingImpact: false,
         totalCostCents: 0,
-        totalCreditDelta: 0,
         occurredAt: deliverable.packageBuiltAt ?? deliverable.updatedAt,
         summary: deliverable.hasCachedPackage
           ? "Bundle package is cached and ready"
@@ -707,7 +693,6 @@ export function buildRepresentativeGovernedActionSnapshot(
         publicMaterialAffecting: deliverable.visibility === "public_material",
         hasBillingImpact: bundleEgressEntries.length > 0,
         totalCostCents: bundleEgressEntries.reduce((sum, entry) => sum + entry.costCents, 0),
-        totalCreditDelta: bundleEgressEntries.reduce((sum, entry) => sum + entry.creditDelta, 0),
         occurredAt: deliverable.lastDownloadedAt,
         summary: `Deliverable downloaded ${deliverable.downloadCount} time(s)`,
         links: {
@@ -719,8 +704,7 @@ export function buildRepresentativeGovernedActionSnapshot(
   }
 
   for (const entry of source.ledgerEntries) {
-    const actionKind =
-      entry.creditDelta > 0 || entry.kind === "sponsor_credit" ? "billing_credit" : "billing_debit";
+    const actionKind = "billing_debit";
     recentActions.push({
       id: `${actionKind}:${entry.id}`,
       actionKind,
@@ -744,7 +728,6 @@ export function buildRepresentativeGovernedActionSnapshot(
       publicMaterialAffecting: entry.notes?.startsWith("deliverable_bundle_download:") ?? false,
       hasBillingImpact: true,
       totalCostCents: entry.costCents,
-      totalCreditDelta: entry.creditDelta,
       occurredAt: entry.createdAt,
       summary: buildLedgerSummary(entry),
       links: {
@@ -783,7 +766,6 @@ export function buildRepresentativeGovernedActionSnapshot(
         ownerRequiredCount: actions.filter((action) => action.ownerRequired).length,
         billingImpactCount: actions.filter((action) => action.hasBillingImpact).length,
         totalCostCents: actions.reduce((sum, action) => sum + action.totalCostCents, 0),
-        totalCreditDelta: actions.reduce((sum, action) => sum + action.totalCreditDelta, 0),
       };
     }),
     byOutcome: actionOutcomeOrder.map((key) => ({
@@ -915,7 +897,6 @@ function buildSubagentBreakdown(actions: GovernedActionRecord[]) {
       count: number;
       blockedCount: number;
       totalCostCents: number;
-      totalCreditDelta: number;
     }
   >();
 
@@ -927,12 +908,10 @@ function buildSubagentBreakdown(actions: GovernedActionRecord[]) {
       count: 0,
       blockedCount: 0,
       totalCostCents: 0,
-      totalCreditDelta: 0,
     };
     current.count += 1;
     if (isBlockedOutcome(action.outcome)) current.blockedCount += 1;
     current.totalCostCents += action.totalCostCents;
-    current.totalCreditDelta += action.totalCreditDelta;
     buckets.set(key, current);
   }
 
@@ -941,26 +920,30 @@ function buildSubagentBreakdown(actions: GovernedActionRecord[]) {
 
 function buildBillingImpact(actions: GovernedActionRecord[]) {
   const buckets = new Map<
-    "compute" | "storage" | "browser" | "mcp" | "model" | "egress" | "plan_debit" | "sponsor_credit" | "other",
-    { key: "compute" | "storage" | "browser" | "mcp" | "model" | "egress" | "plan_debit" | "sponsor_credit" | "other"; label: string; costCents: number; creditDelta: number }
+    "compute" | "storage" | "browser" | "mcp" | "model" | "egress" | "other",
+    { key: "compute" | "storage" | "browser" | "mcp" | "model" | "egress" | "other"; label: string; costCents: number }
   >();
 
-  for (const action of actions.filter((candidate) => candidate.actionKind === "billing_debit" || candidate.actionKind === "billing_credit")) {
+  for (const action of actions.filter((candidate) => candidate.actionKind === "billing_debit")) {
     const key = resolveBillingBreakdownKey(action.summary);
     const current = buckets.get(key) ?? {
       key,
       label: key.replaceAll("_", " "),
       costCents: 0,
-      creditDelta: 0,
     };
     current.costCents += action.totalCostCents;
-    current.creditDelta += action.totalCreditDelta;
     buckets.set(key, current);
   }
 
+  const ledgerActions = actions.filter((candidate) => candidate.actionKind === "billing_debit");
   return {
-    totalInternalCostCents: actions.reduce((sum, action) => sum + action.totalCostCents, 0),
-    totalCreditDelta: actions.reduce((sum, action) => sum + action.totalCreditDelta, 0),
+    // Ledger rows are the accounting source of truth. Compute/resource actions
+    // carry the same linked cost for timeline display, so summing every action
+    // would count one internal cost more than once.
+    totalInternalCostCents: ledgerActions.reduce(
+      (sum, action) => sum + action.totalCostCents,
+      0,
+    ),
     breakdown: [...buckets.values()].sort((left, right) => right.costCents - left.costCents),
   };
 }
@@ -976,7 +959,6 @@ function buildHygiene(actions: GovernedActionRecord[]) {
         action.actionKind === "artifact_download" ||
         action.actionKind === "package_download") &&
       action.totalCostCents === 0 &&
-      action.totalCreditDelta === 0 &&
       action.hasBillingImpact === false &&
       ((action.actionKind === "compute_execution" && action.outcome === "completed") ||
         action.actionKind === "artifact_download" ||
@@ -1047,7 +1029,15 @@ function resolveExecutionOutcome(
   if (status === "succeeded") {
     return "completed";
   }
-  return policyDecision === "allow" ? "allow" : "completed";
+  if (status === "running") {
+    return "running";
+  }
+  if (status === "queued") {
+    return approvalStatus === "approved"
+      ? "approved_waiting_execution"
+      : "queued";
+  }
+  return policyDecision === "allow" ? "allow" : "blocked";
 }
 
 function buildExecutionSummary(
@@ -1133,7 +1123,7 @@ function isBlockedOutcome(outcome: GovernedActionOutcome) {
 
 function resolveBillingBreakdownKey(
   summary: string,
-): "compute" | "storage" | "browser" | "mcp" | "model" | "egress" | "plan_debit" | "sponsor_credit" | "other" {
+): "compute" | "storage" | "browser" | "mcp" | "model" | "egress" | "other" {
   const normalized = summary.toLowerCase();
   if (normalized.includes("compute")) return "compute";
   if (normalized.includes("storage")) return "storage";
@@ -1141,8 +1131,6 @@ function resolveBillingBreakdownKey(
   if (normalized.includes("mcp")) return "mcp";
   if (normalized.includes("model")) return "model";
   if (normalized.includes("egress")) return "egress";
-  if (normalized.includes("debit")) return "plan_debit";
-  if (normalized.includes("credit")) return "sponsor_credit";
   return "other";
 }
 
@@ -1160,10 +1148,6 @@ function buildLedgerSummary(entry: GovernedActionSource["ledgerEntries"][number]
       return "mcp calls";
     case "artifact_egress":
       return "artifact egress";
-    case "plan_debit":
-      return "plan debit";
-    case "sponsor_credit":
-      return "sponsor credit";
     default:
       return entry.kind.replaceAll("_", " ");
   }

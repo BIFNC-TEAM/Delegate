@@ -1,4 +1,4 @@
-import { lookup as dnsLookup } from "node:dns";
+import { lookup as dnsLookup, type LookupAddress } from "node:dns";
 import { BlockList, isIP } from "node:net";
 
 import { Agent, fetch as undiciFetch } from "undici";
@@ -24,6 +24,9 @@ const nonPublicIpv4Blocks = createBlockList("ipv4", [
   ["203.0.113.0", 24],
   ["224.0.0.0", 4],
   ["240.0.0.0", 4],
+]);
+const dockerDesktopDnsProxyIpv4Block = createBlockList("ipv4", [
+  ["198.18.0.0", 15],
 ]);
 const globalIpv6UnicastSpace = createBlockList("ipv6", [
   ["2000::", 3],
@@ -60,10 +63,25 @@ const publicOnlyDispatcher = new Agent({
             callback(error, "", 0);
             return;
           }
-          if (!addresses.length || addresses.some(({ address }) => isNonPublicAddress(address))) {
+          if (
+            !addresses.length
+            || addresses.some(({ address }) =>
+              isNonPublicAddress(address)
+              && !isAllowedDockerDesktopMcpProxyResolution(hostname, address)
+            )
+          ) {
             const blocked = new Error("mcp_endpoint_resolves_to_non_public_address");
             Object.assign(blocked, { code: "ENOTFOUND" });
             callback(blocked, "", 0);
+            return;
+          }
+          if (options.all) {
+            (
+              callback as unknown as (
+                error: NodeJS.ErrnoException | null,
+                addresses: LookupAddress[],
+              ) => void
+            )(null, addresses);
             return;
           }
           const selected = addresses[0]!;
@@ -270,6 +288,16 @@ export function isNonPublicAddress(address: string): boolean {
       || nonPublicIpv6BlocksInsideGlobalUnicast.check(normalized, "ipv6");
   }
   return nonPublicIpv4Blocks.check(normalized, "ipv4");
+}
+
+export function isAllowedDockerDesktopMcpProxyResolution(
+  hostname: string,
+  address: string,
+): boolean {
+  return process.env.DELEGATE_ALLOW_DOCKER_DESKTOP_MCP_DNS_PROXY === "true"
+    && isIP(hostname) === 0
+    && isIP(address) === 4
+    && dockerDesktopDnsProxyIpv4Block.check(address, "ipv4");
 }
 
 function wellKnownNat64AddressToIpv4(address: string): string | null {

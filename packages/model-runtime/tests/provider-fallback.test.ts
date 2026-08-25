@@ -3,9 +3,14 @@ import { getScopedSubagent } from "@delegate/runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  generateAgictoResponse: vi.fn(),
   generateOpenAIResponse: vi.fn(),
   generateBailianResponse: vi.fn(),
   generateAnthropicResponse: vi.fn(),
+}));
+
+vi.mock("../src/agicto", () => ({
+  generateAgictoResponse: mocks.generateAgictoResponse,
 }));
 
 vi.mock("../src/openai", () => ({
@@ -32,14 +37,15 @@ describe("provider fallback", () => {
     vi.clearAllMocks();
   });
 
-  it("switches from the primary OpenAI-compatible provider to Bailian", async () => {
+  it("switches from the primary AGICTO provider to Bailian", async () => {
     vi.stubEnv("DELEGATE_MODEL_ENABLED", "true");
-    vi.stubEnv("DELEGATE_MODEL_PROVIDER", "openai");
+    vi.stubEnv("DELEGATE_MODEL_PROVIDER", "agicto");
     vi.stubEnv("DELEGATE_MODEL_FALLBACK_PROVIDER", "bailian");
-    vi.stubEnv("OPENAI_API_KEY", "agicto-key");
+    vi.stubEnv("DELEGATE_AGICTO_API_KEY", "agicto-key");
+    vi.stubEnv("DELEGATE_AGICTO_MODEL", "qwen-plus");
     vi.stubEnv("DELEGATE_BAILIAN_API_KEY", "dashscope-key");
     vi.stubEnv("DELEGATE_BAILIAN_MODEL", "qwen-plus");
-    mocks.generateOpenAIResponse.mockRejectedValue(new Error("primary timed out"));
+    mocks.generateAgictoResponse.mockRejectedValue(new Error("primary timed out"));
     mocks.generateBailianResponse.mockResolvedValue({ replyText: "百炼备用回答" });
 
     const result = await generateRepresentativeReply({
@@ -59,7 +65,7 @@ describe("provider fallback", () => {
       recalled: [],
     });
 
-    expect(mocks.generateOpenAIResponse).toHaveBeenCalledOnce();
+    expect(mocks.generateAgictoResponse).toHaveBeenCalledOnce();
     expect(mocks.generateBailianResponse).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
       ok: true,
@@ -71,6 +77,12 @@ describe("provider fallback", () => {
   });
 
   it.each([
+    {
+      provider: "agicto" as const,
+      credentialName: "DELEGATE_AGICTO_API_KEY",
+      credentialValue: "agicto-key",
+      mock: mocks.generateAgictoResponse,
+    },
     {
       provider: "openai" as const,
       credentialName: "OPENAI_API_KEY",

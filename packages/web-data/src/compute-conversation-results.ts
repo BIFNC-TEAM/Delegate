@@ -14,13 +14,11 @@ import {
 } from "./conversation-platform";
 import {
   releaseConversationWalletUsage,
-  settleConversationWalletUsage,
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
 import { prisma } from "./prisma";
-import { finalizeComputeDelegationTask } from "./delegation-tasks";
+import { finalizeComputeDelegationTaskInTransaction } from "./delegation-tasks";
 import {
-  consumeConversationEntitlementByGenerationRunId,
   releaseConversationEntitlementByGenerationRunId,
   type ServiceEntitlementClient,
 } from "./service-entitlements";
@@ -44,7 +42,6 @@ export async function finalizeComputeApprovalConversation(input: {
     sizeBytes: number;
     fileName?: string;
   }>;
-  actualCredits?: number;
   failureReason?: string;
 }) {
   const approvalReference = await prisma.approvalRequest.findUnique({
@@ -84,14 +81,46 @@ export async function finalizeComputeApprovalConversation(input: {
       return null;
     }
     if (run.status === GenerationRunStatus.COMPLETED && run.outputMessageId) {
-      const message = await tx.message.findUnique({ where: { id: run.outputMessageId } });
+      let message = await tx.message.findUnique({ where: { id: run.outputMessageId } });
+      if (!message) return null;
+      if (
+        message.deliveryStatus !== MessageDeliveryStatus.SENT
+        && !message.externalMessageId
+      ) {
+        await enqueueComputeApprovalDeliveryInTransaction(tx, {
+          runId: run.id,
+          conversationId: run.conversationId,
+          inputMessageId: run.inputMessageId,
+          outputMessageId: message.id,
+          approvalId: approval.id,
+        });
+      }
+      const finalization = approval.delegationTaskId
+        ? await finalizeComputeDelegationTaskInTransaction(tx, {
+            taskId: approval.delegationTaskId,
+            ...(approval.delegationTaskStepId
+              ? { stepId: approval.delegationTaskStepId }
+              : {}),
+            generationRunId: run.id,
+            outcome: mapComputeOutcomeToTaskOutcome(input.outcome),
+            ...(input.artifacts?.length ? { artifacts: input.artifacts } : {}),
+            ...(input.failureReason ? { failureReason: input.failureReason } : {}),
+          })
+        : null;
+      if (
+        finalization?.hasMoreSteps
+        && message.deliveryStatus !== MessageDeliveryStatus.SENT
+      ) {
+        message = await tx.message.update({
+          where: { id: message.id },
+          data: {
+            text:
+              "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。",
+          },
+        });
+      }
       return {
         message,
-        delegationTaskId: approval.delegationTaskId,
-        delegationTaskStepId: approval.delegationTaskStepId,
-        generationRunId: run.id,
-        conversationId: run.conversationId,
-        episodeId: run.episodeId,
       };
     }
     if (run.status !== GenerationRunStatus.WAITING_APPROVAL) {
@@ -185,11 +214,10 @@ export async function finalizeComputeApprovalConversation(input: {
           kind: "compute_approval_result",
           approvalId: approval.id,
           outcome: input.outcome,
-          ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
           artifactIds: input.artifacts?.map((artifact) => artifact.id) ?? [],
         },
         clientMessageId: `compute-approval-result:${approval.id}`,
-        deliveryStatus: MessageDeliveryStatus.SENT,
+        deliveryStatus: MessageDeliveryStatus.QUEUED,
         retentionExpiresAt: buildMessageRetentionExpiry(now),
         createdAt: now,
       },
@@ -199,10 +227,9 @@ export async function finalizeComputeApprovalConversation(input: {
           kind: "compute_approval_result",
           approvalId: approval.id,
           outcome: input.outcome,
-          ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
           artifactIds: input.artifacts?.map((artifact) => artifact.id) ?? [],
         },
-        deliveryStatus: MessageDeliveryStatus.SENT,
+        deliveryStatus: MessageDeliveryStatus.QUEUED,
       },
     });
 
@@ -229,6 +256,13 @@ export async function finalizeComputeApprovalConversation(input: {
         status: GenerationRunStatus.COMPLETED,
         outputMessageId: message.id,
         completedAt: now,
+        ...(input.outcome === "completed" && !delegationTaskOwnsBilling
+          ? {
+              contextSnapshot: markComputeGenerationDeliveryBillingPending(
+                run.contextSnapshot,
+              ),
+            }
+          : {}),
         errorCode: input.outcome === "failed" || input.outcome === "policy_denied"
           ? `compute_${input.outcome}`
           : null,
@@ -248,9 +282,6 @@ export async function finalizeComputeApprovalConversation(input: {
       data: {
         state: "WAITING_USER",
         lastMessageAt: now,
-        ...(walletReservation || delegationTaskOwnsBilling || input.outcome !== "completed"
-          ? {}
-          : { freeRepliesUsed: { increment: 1 } }),
       },
     });
     if (settledConversation.count !== 1) {
@@ -278,12 +309,7 @@ export async function finalizeComputeApprovalConversation(input: {
       }
     }
     if (!delegationTaskOwnsBilling) {
-      if (input.outcome === "completed") {
-        await consumeConversationEntitlementByGenerationRunId(
-          { generationRunId: run.id },
-          tx as unknown as ServiceEntitlementClient,
-        );
-      } else {
+      if (input.outcome !== "completed") {
         await releaseConversationEntitlementByGenerationRunId(
           {
             generationRunId: run.id,
@@ -294,18 +320,7 @@ export async function finalizeComputeApprovalConversation(input: {
       }
     }
     if (walletReservation && !delegationTaskOwnsBilling) {
-      if (input.outcome === "completed") {
-        await settleConversationWalletUsage(
-          {
-            usageChargeId: walletReservation.usageChargeId,
-            expectedGenerationRunId: run.id,
-            settledTokenAmount: walletReservation.tokenAmount,
-            provider: "compute",
-            idempotencyKey: `generation:${run.id}:settle`,
-          },
-          tx as unknown as UsageChargeClient,
-        );
-      } else {
+      if (input.outcome !== "completed") {
         await releaseConversationWalletUsage(
           {
             usageChargeId: walletReservation.usageChargeId,
@@ -320,72 +335,90 @@ export async function finalizeComputeApprovalConversation(input: {
         );
       }
     }
-    return {
-      message,
-      delegationTaskId: approval.delegationTaskId,
-      delegationTaskStepId: approval.delegationTaskStepId,
-      generationRunId: run.id,
+    await enqueueComputeApprovalDeliveryInTransaction(tx, {
+      runId: run.id,
       conversationId: run.conversationId,
-      episodeId: run.episodeId,
+      inputMessageId: run.inputMessageId,
+      outputMessageId: message.id,
+      approvalId: approval.id,
+    });
+    const finalization = approval.delegationTaskId
+      ? await finalizeComputeDelegationTaskInTransaction(tx, {
+          taskId: approval.delegationTaskId,
+          ...(approval.delegationTaskStepId
+            ? { stepId: approval.delegationTaskStepId }
+            : {}),
+          generationRunId: run.id,
+          outcome: mapComputeOutcomeToTaskOutcome(input.outcome),
+          ...(input.artifacts?.length ? { artifacts: input.artifacts } : {}),
+          ...(input.failureReason ? { failureReason: input.failureReason } : {}),
+        })
+      : null;
+    const deliveredMessage = finalization?.hasMoreSteps
+      ? await tx.message.update({
+          where: { id: message.id },
+          data: {
+            text:
+              "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。",
+          },
+        })
+      : message;
+    return {
+      message: deliveredMessage,
     };
   });
   if (!result) return null;
   if (!result.message) return null;
-  const resultMessage = result.message;
-  let hasMoreSteps = false;
-  if (result.delegationTaskId) {
-    const finalization = await finalizeComputeDelegationTask({
-      taskId: result.delegationTaskId,
-      ...(result.delegationTaskStepId ? { stepId: result.delegationTaskStepId } : {}),
-      generationRunId: result.generationRunId,
-      outcome: input.outcome === "completed"
-        ? "completed"
-        : input.outcome === "rejected"
-          ? "rejected"
-          : input.outcome === "expired"
-            ? "expired"
-            : input.outcome === "policy_denied"
-              ? "blocked"
-              : "failed",
-      ...(input.artifacts?.length ? { artifacts: input.artifacts } : {}),
-      ...(input.failureReason ? { failureReason: input.failureReason } : {}),
-      ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
-    });
-    hasMoreSteps = Boolean(finalization?.hasMoreSteps);
-  }
-  if (hasMoreSteps) {
-    const text = "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。";
-    return runConversationWriteTransaction(async (tx) => {
-      await tx.$executeRaw`
-        SELECT pg_advisory_xact_lock(hashtext(${result.conversationId}))
-      `;
-      const writable = await tx.$executeRaw`
-        UPDATE "Conversation"
-        SET "state" = "state"
-        WHERE "id" = ${result.conversationId}
-          AND "state" NOT IN ('HUMAN_ACTIVE', 'NEEDS_HUMAN')
-      `;
-      if (writable !== 1) {
-        return resultMessage;
-      }
-      await tx.conversation.update({
-        where: { id: result.conversationId },
-        data: { state: "AI_QUEUED", lastMessageAt: new Date() },
-      });
-      const message = await tx.message.update({
-        where: { id: resultMessage.id },
-        data: { text },
-      });
-      if (result.episodeId) {
-        await tx.conversationEpisode.update({
-          where: { id: result.episodeId },
-          data: { status: ConversationEpisodeStatus.ACTIVE },
-        });
-      }
-      return message;
-    });
-  }
   return result.message;
+}
+
+function mapComputeOutcomeToTaskOutcome(
+  outcome: ComputeApprovalConversationOutcome,
+) {
+  return outcome === "completed"
+    ? "completed" as const
+    : outcome === "rejected"
+      ? "rejected" as const
+      : outcome === "expired"
+        ? "expired" as const
+        : outcome === "policy_denied"
+          ? "blocked" as const
+          : "failed" as const;
+}
+
+async function enqueueComputeApprovalDeliveryInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    runId: string;
+    conversationId: string;
+    inputMessageId: string;
+    outputMessageId: string;
+    approvalId: string;
+  },
+) {
+  return tx.outboxEvent.upsert({
+    where: {
+      idempotencyKey:
+        `generation.delivery.requested:${input.runId}:${input.outputMessageId}`,
+    },
+    create: {
+      conversationId: input.conversationId,
+      aggregateType: "generation_run",
+      aggregateId: input.runId,
+      eventType: "generation.requested",
+      payload: {
+        runId: input.runId,
+        conversationId: input.conversationId,
+        messageId: input.inputMessageId,
+        outputMessageId: input.outputMessageId,
+        approvalId: input.approvalId,
+        deliveryOnly: true,
+      },
+      idempotencyKey:
+        `generation.delivery.requested:${input.runId}:${input.outputMessageId}`,
+    },
+    update: {},
+  });
 }
 
 export function formatComputeOutcome(input: {
@@ -398,7 +431,6 @@ export function formatComputeOutcome(input: {
     mimeType: string;
     fileName?: string;
   }>;
-  actualCredits?: number;
   failureReason?: string;
 }) {
   const publicFailureReason = input.failureReason
@@ -420,11 +452,10 @@ export function formatComputeOutcome(input: {
         return `${label}：${resolveConversationArtifactFileName(artifact)}`;
       }).join("\n")
     : "没有生成可展示的结果文件。";
-  const billing = typeof input.actualCredits === "number" ? `\n\n消耗：${input.actualCredits} credits` : "";
   if (input.outcome === "failed") {
-    return `审批已通过，但委托任务执行失败。\n\n${artifacts}${publicFailureReason ? `\n\n原因：${publicFailureReason}` : ""}${billing}`;
+    return `审批已通过，但委托任务执行失败。\n\n${artifacts}${publicFailureReason ? `\n\n原因：${publicFailureReason}` : ""}`;
   }
-  return `审批已通过，委托任务执行完成。\n\n${artifacts}${billing}`;
+  return `审批已通过，委托任务执行完成。\n\n${artifacts}`;
 }
 
 function markComputeGenerationWalletReleased(
@@ -448,6 +479,23 @@ function markComputeGenerationWalletReleased(
     billingMode: "service_credit_released",
     billingFinalizedAt: now.toISOString(),
   } as Prisma.InputJsonObject;
+}
+
+function markComputeGenerationDeliveryBillingPending(
+  snapshot: Prisma.JsonValue | null,
+): Prisma.InputJsonObject {
+  const current = snapshot
+    && typeof snapshot === "object"
+    && !Array.isArray(snapshot)
+      ? snapshot as Prisma.JsonObject
+      : {};
+  return {
+    ...current,
+    deliveryBilling: {
+      version: 1,
+      status: "pending",
+    },
+  };
 }
 
 function renderPublicComputeFailureReason(failureReason: string) {

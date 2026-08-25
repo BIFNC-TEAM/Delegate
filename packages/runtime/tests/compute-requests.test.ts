@@ -25,6 +25,7 @@ describe("compute request parser", () => {
       capability: "write",
       path: "notes/demo.txt",
       content: "hello",
+      estimatedTokens: 500,
     });
     expect(parseComputeRequest('/compute mcp weather lookup ::: {"city":"Shanghai"}')).toMatchObject({
       capability: "mcp",
@@ -54,6 +55,7 @@ describe("compute request parser", () => {
     expect(shouldConsiderNaturalLanguageCompute("编写一个幼儿园主题教案")).toBe(true);
     expect(shouldConsiderNaturalLanguageCompute("帮我做一份年度报告")).toBe(true);
     expect(shouldConsiderNaturalLanguageCompute("请生成一份面向 QA 团队的 Markdown 测试记录")).toBe(true);
+    expect(shouldConsiderNaturalLanguageCompute("请给我一个地理学习教程，以文件的形式提供")).toBe(true);
     expect(shouldConsiderNaturalLanguageCompute("Compute 是什么？")).toBe(false);
     expect(buildComputeRequestFromNaturalLanguagePlan({
       capability: "write",
@@ -84,5 +86,17 @@ describe("compute request parser", () => {
       displayTarget: "读取文件",
     });
     expect(readPersistedDelegationStepRequest({ capability: "write", displayTarget: "缺内容", path: "x.txt" })).toBeNull();
+  });
+
+  it("converts legacy persisted cost estimates into read-only token estimates", () => {
+    expect(readPersistedDelegationStepRequest({
+      capability: "read",
+      displayTarget: "读取旧任务",
+      path: "README.md",
+      estimatedCostCents: 3,
+    })).toMatchObject({
+      capability: "read",
+      estimatedTokens: 300,
+    });
   });
 });

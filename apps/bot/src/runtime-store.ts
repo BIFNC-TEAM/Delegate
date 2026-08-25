@@ -84,7 +84,7 @@ export type ConversationContextRecord = {
     defaultPolicyMode: "allow" | "ask" | "deny";
     baseImage: string;
     maxSessionMinutes: number;
-    autoApproveBudgetCents: number;
+    autoApproveTokenLimit: number;
     artifactRetentionDays: number;
     networkMode: "no_network" | "allowlist" | "full";
     networkAllowlist: string[];
@@ -446,16 +446,11 @@ export async function getConversationContext(
         | "deny",
       baseImage: representative.computeBaseImage,
       maxSessionMinutes: representative.computeMaxSessionMinutes,
-      autoApproveBudgetCents: representative.computeAutoApproveBudgetCents,
+      autoApproveTokenLimit: representative.computeAutoApproveTokenLimit,
       artifactRetentionDays: representative.computeArtifactRetentionDays,
       networkMode: mapComputeNetworkModeFromDb(representative.computeNetworkMode),
       networkAllowlist: representative.computeNetworkAllowlist,
       filesystemMode: mapComputeFilesystemModeFromDb(representative.computeFilesystemMode),
-      ...(typeof conversation.computeBudgetRemainingCredits === "number"
-        ? {
-            conversationBudgetRemainingCredits: conversation.computeBudgetRemainingCredits,
-          }
-        : {}),
     },
   };
 }
@@ -886,7 +881,6 @@ export async function recordModelUsage(params: {
         quantity,
         unit: "token",
         costCents,
-        creditDelta: 0,
         notes: JSON.stringify({
           provider: params.provider,
           model: params.model,
@@ -1218,12 +1212,7 @@ export async function submitStructuredCollector(params: {
     objective: summary || "Structured intake completed.",
     desiredOutcome: recommendedOwnerAction,
     priority,
-    recommendedNextStep:
-      params.collectorState.kind === "scheduling"
-        ? "owner_schedule_review"
-        : params.collectorState.kind === "quote"
-          ? "owner_quote_review"
-          : "owner_service_request_review",
+    recommendedNextStep: "owner_service_request_review",
     payload: {
       collectorKind: params.collectorState.kind,
       sourceChannel: params.collectorState.sourceChannel,
@@ -1736,13 +1725,6 @@ export async function confirmInvoicePayment(
           starsBalance: {
             increment: params.totalAmount,
           },
-          ...(invoice.planType === PricingPlanType.SPONSOR
-            ? {
-                sponsorPoolCredit: {
-                  increment: params.totalAmount,
-                },
-              }
-            : {}),
         },
       });
     } else {
@@ -1750,8 +1732,6 @@ export async function confirmInvoicePayment(
         data: {
           ownerId: invoice.representative.owner.id,
           starsBalance: params.totalAmount,
-          sponsorPoolCredit: invoice.planType === PricingPlanType.SPONSOR ? params.totalAmount : 0,
-          balanceCredits: 0,
         },
       });
     }
@@ -1776,27 +1756,22 @@ export async function confirmInvoicePayment(
       `;
       const lockedConversation = await tx.conversation.findUnique({
         where: { id: invoice.conversationId },
-        select: { computeBudgetRemainingCredits: true },
+        select: { id: true },
       });
       if (!lockedConversation) {
         throw new Error("Invoice conversation is no longer available.");
       }
-      const nextComputeBudget =
-        (lockedConversation.computeBudgetRemainingCredits ?? 0) +
-        computeCreditsForPlan(invoice.planType);
       await tx.conversation.update({
         where: { id: invoice.conversationId },
         data: {
           ...(invoice.planType === PricingPlanType.PASS
             ? {
                 passUnlockedAt: paidAt,
-                computeBudgetRemainingCredits: nextComputeBudget,
               }
             : {}),
           ...(invoice.planType === PricingPlanType.DEEP_HELP
             ? {
                 deepHelpUnlockedAt: paidAt,
-                computeBudgetRemainingCredits: nextComputeBudget,
               }
             : {}),
         },
@@ -1965,19 +1940,8 @@ function telegramBotConnectionId(): string {
 }
 
 function buildOwnerAction(plan: ConversationPlan): string {
-  switch (plan.intent) {
-    case "refund":
-      return "Approve or decline refund before sending a human response.";
-    case "media":
-      return "Confirm whether the founder wants to take this media request.";
-    case "scheduling":
-      return "Confirm whether to expose a candidate time window.";
-    case "pricing":
-    case "collaboration":
-      return "Review context, budget, and decide whether to take the lead personally.";
-    default:
-      return "Review the request and decide whether the owner should step in.";
-  }
+  void plan;
+  return "Review the request and decide whether the owner should step in or create a governed follow-up task.";
 }
 
 function mapComputeNetworkModeFromDb(value: ComputeNetworkMode) {
@@ -1986,17 +1950,6 @@ function mapComputeNetworkModeFromDb(value: ComputeNetworkMode) {
 
 function mapComputeFilesystemModeFromDb(value: ComputeFilesystemMode) {
   return value.toLowerCase() as "workspace_only" | "read_only_workspace" | "ephemeral_full";
-}
-
-function computeCreditsForPlan(planType: PricingPlanType): number {
-  switch (planType) {
-    case PricingPlanType.DEEP_HELP:
-      return 180;
-    case PricingPlanType.PASS:
-      return 60;
-    default:
-      return 0;
-  }
 }
 
 function calculatePriority(plan: ConversationPlan): number {

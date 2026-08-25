@@ -87,7 +87,6 @@ function audienceSession() {
     },
     conversation: {
       channel: "PRIVATE_CHAT",
-      computeBudgetRemainingCredits: null,
     },
     policyProfile: capabilityProfile(),
   };
@@ -105,7 +104,7 @@ describe("execution-time audience authorization revalidation", () => {
         defaultPolicyMode: "ask",
         baseImage: "runtime:1",
         maxSessionMinutes: 15,
-        autoApproveBudgetCents: 0,
+        autoApproveTokenLimit: 0,
         artifactRetentionDays: 7,
         networkMode: "no_network",
         networkAllowlist: [],
@@ -124,7 +123,7 @@ describe("execution-time audience authorization revalidation", () => {
         naturalLanguageEnabled: true,
         explicitComputeEnabled: true,
         maxSteps: 5,
-        maxCostCents: 0,
+        maxEstimatedTokens: 0,
         knowledgeScope: "user_input_only",
       },
       mcpBindings: [],
@@ -169,5 +168,76 @@ describe("execution-time audience authorization revalidation", () => {
     await expect(
       loadSessionPolicyContext("session-1"),
     ).rejects.toThrow("audience_generation_run_authorization_denied");
+  });
+
+  it("loads task duration, network, and filesystem limits as stricter execution ceilings", async () => {
+    const { loadSessionPolicyContext } = await import("../src/policy");
+    const session = audienceSession();
+    session.policyProfile.networkMode = "FULL";
+    session.policyProfile.filesystemMode = "EPHEMERAL_FULL";
+    mockPrisma.computeSession.findUnique.mockResolvedValue({
+      ...session,
+      delegationTask: {
+        resourcePolicy: {
+          maxDurationMinutes: 2,
+          maxEstimatedTokens: 20,
+          allowedCapabilities: ["WRITE"],
+          allowedMcpBindingIds: [],
+          networkMode: "NO_NETWORK",
+          filesystemMode: "READ_ONLY_WORKSPACE",
+          requireApprovalForExternalSideEffects: true,
+        },
+      },
+    });
+    mockLoadComputeRuntimeAuthority.mockResolvedValueOnce({
+      representativeVersionId: "version-1",
+      compute: {
+        enabled: true,
+        defaultPolicyMode: "ask",
+        baseImage: "runtime:1",
+        maxSessionMinutes: 10,
+        autoApproveTokenLimit: 0,
+        artifactRetentionDays: 7,
+        networkMode: "full",
+        networkAllowlist: [],
+        filesystemMode: "ephemeral_full",
+        capabilityModes: {
+          exec: "ask",
+          read: "allow",
+          write: "ask",
+          process: "ask",
+          browser: "ask",
+          mcp: "ask",
+        },
+      },
+      delegation: {
+        enabled: true,
+        naturalLanguageEnabled: true,
+        explicitComputeEnabled: true,
+        maxSteps: 5,
+        maxEstimatedTokens: 0,
+        knowledgeScope: "user_input_only",
+      },
+      mcpBindings: [],
+    });
+
+    const context = await loadSessionPolicyContext("session-1");
+
+    expect(context.profile.networkMode).toBe("no_network");
+    expect(context.profile.filesystemMode).toBe("read_only_workspace");
+    expect(context.session.expiresAt).toEqual(
+      new Date(session.createdAt.getTime() + 2 * 60 * 1_000),
+    );
+    expect(mockPrisma.computeSession.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "session-1",
+        expiresAt: {
+          gt: new Date(session.createdAt.getTime() + 2 * 60 * 1_000),
+        },
+      },
+      data: {
+        expiresAt: new Date(session.createdAt.getTime() + 2 * 60 * 1_000),
+      },
+    });
   });
 });

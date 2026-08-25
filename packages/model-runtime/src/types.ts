@@ -27,7 +27,7 @@ export type RepresentativeRecallItem = OpenVikingRecallItem & {
   };
 };
 
-export type ModelProvider = "openai" | "bailian" | "anthropic";
+export type ModelProvider = "agicto" | "openai" | "bailian" | "anthropic";
 
 export type ModelRuntimeState =
   | "ready"
@@ -45,10 +45,20 @@ export type ModelRuntimeEnv = {
   enabled: boolean;
   provider: string;
   fallbackProvider?: string;
+  plannerProvider?: string;
   state: ModelRuntimeState;
   timeoutMs: number;
+  documentTimeoutMs: number;
   maxInputTokens: number;
   maxOutputTokens: number;
+  documentMaxOutputTokens: number;
+  documentMaxParts: number;
+  agicto: {
+    model: string;
+    apiKey?: string;
+    baseUrl?: string;
+    pricing: ModelPricingConfig;
+  };
   openai: {
     model: string;
     apiKey?: string;
@@ -67,6 +77,11 @@ export type ModelRuntimeEnv = {
     baseUrl?: string;
     pricing: ModelPricingConfig;
   };
+};
+
+export type ModelTextCompletion = {
+  status: "complete" | "incomplete";
+  reason?: string;
 };
 
 export type ModelRuntimeRecentTurn = {
@@ -121,6 +136,11 @@ export type RepresentativeReplyPrompt = {
   instructions: string;
   input: string;
   responseFormat?: "json_object";
+  strictJsonSchema?: {
+    name: string;
+    description?: string;
+    schema: Record<string, unknown>;
+  };
 };
 
 export type RepresentativeReplyContextTrace = {

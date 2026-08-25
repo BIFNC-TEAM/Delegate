@@ -32,14 +32,14 @@ describe("Telegram commerce UX", () => {
     });
   });
 
-  it("describes worker-owned compute as a Web continuation", () => {
+  it("describes worker-owned compute as a governed Telegram request", () => {
     expect(
       buildTelegramBotCommands(false).find(
         (command) => command.command === "compute",
       ),
     ).toEqual({
       command: "compute",
-      description: "Continue governed compute requests on Web",
+      description: "Run a governed compute request in the sandbox",
     });
   });
 

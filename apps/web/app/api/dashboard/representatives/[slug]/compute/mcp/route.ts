@@ -81,10 +81,10 @@ export async function POST(
           : undefined,
       enabled: body.enabled !== false,
       approvalRequired: body.approvalRequired !== false,
-      estimatedCostCentsPerCall:
-        typeof body.estimatedCostCentsPerCall === "number" &&
-        Number.isFinite(body.estimatedCostCentsPerCall)
-          ? Math.max(0, Math.trunc(body.estimatedCostCentsPerCall))
+      estimatedTokensPerCall:
+        typeof body.estimatedTokensPerCall === "number" &&
+        Number.isFinite(body.estimatedTokensPerCall)
+          ? Math.max(0, Math.trunc(body.estimatedTokensPerCall))
           : 0,
       maxRetries: 0,
       retryBackoffMs: 1000,

@@ -24,8 +24,6 @@ type DashboardOverviewSnapshot = {
   }>;
   wallet: {
     starsBalance: number;
-    sponsorPoolCredit: number;
-    balanceCredits: number;
   };
   workflowEngine: {
     configured: "local_runner" | "temporal";
@@ -128,11 +126,6 @@ export function DashboardOverview({
           value: `${snapshot.wallet.starsBalance}`,
           detail: t.signalCards.starsLiveDetail,
           tone: "safe" as const,
-        },
-        {
-          label: t.signalCards.sponsorPoolLabel,
-          value: `${snapshot.wallet.sponsorPoolCredit}`,
-          detail: t.signalCards.sponsorPoolDetail,
         },
         {
           label: t.signalCards.recentInvoicesLabel,
@@ -307,7 +300,7 @@ export function DashboardOverview({
                       {invoice.who} · {invoice.planName}
                     </strong>
                     <p>
-                      {invoice.starsAmount} credits · {invoice.status}
+                      {invoice.starsAmount} Stars · {invoice.status}
                     </p>
                     <div className="chip-row">
                       <span className="chip">{invoice.planType}</span>
@@ -551,8 +544,6 @@ const copy = {
       openHandoffsDetail: "当前值得主人优先判断与接手的请求数。",
       starsLiveLabel: "代表余额",
       starsLiveDetail: "当前可用于网页服务的余额信号。",
-      sponsorPoolLabel: "赞助池",
-      sponsorPoolDetail: "公共赞助池还能继续支撑多少代表流量。",
       recentInvoicesLabel: "最近付款",
       recentInvoicesDetail: "最近的网页续用、付款记录和充值意图信号。",
     },
@@ -566,7 +557,7 @@ const copy = {
     panelTitle: "先看今天的运营脉冲，再判断代表钱包、续用和人工接手状态。",
     heroKicker: "代表经营状态",
     heroTitle: "主人需要看到这个数字代表是否还在赚钱、消耗和等待接手。",
-    starsLiveChip: (stars: number) => `${stars} credits live`,
+    starsLiveChip: (stars: number) => `${stars} Stars`,
     activeHandoffsChip: (count: number) => `${count} 个待接手`,
     workflowEyebrow: "后台定时任务",
     workflowTitle: "跨时间的事情，要能排队、超时、补跑，而不是靠人记得。",
@@ -604,8 +595,6 @@ const copy = {
       openHandoffsDetail: "Requests that deserve direct human review right now.",
       starsLiveLabel: "Representative balance",
       starsLiveDetail: "Balance signal available for web service continuation.",
-      sponsorPoolLabel: "Sponsor pool",
-      sponsorPoolDetail: "How much shared credit is left to support representative traffic.",
       recentInvoicesLabel: "Recent payments",
       recentInvoicesDetail: "The latest web continuation, payment records, and recharge-intent signals.",
     },
@@ -619,7 +608,7 @@ const copy = {
     panelTitle: "Read today's operating pulse before judging representative wallet, continuation, and human follow-up state.",
     heroKicker: "Representative operating state",
     heroTitle: "Owners need to know whether this Digital Representative is earning, consuming, or waiting for intervention.",
-    starsLiveChip: (stars: number) => `${stars} credits live`,
+    starsLiveChip: (stars: number) => `${stars} Stars`,
     activeHandoffsChip: (count: number) => `${count} active follow-ups`,
     workflowEyebrow: "Background timers",
     workflowTitle: "Anything that spans time should queue, expire, and recover instead of relying on memory.",

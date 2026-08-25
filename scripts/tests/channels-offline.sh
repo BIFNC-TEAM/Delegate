@@ -60,7 +60,7 @@ export MATRIX_AS_TOKEN=""
 export MATRIX_AS_HS_TOKEN=""
 export TELEGRAM_BOT_TOKEN=""
 export TELEGRAM_WEBHOOK_SECRET=""
-export WORKFLOW_ENGINE="local"
+export WORKFLOW_ENGINE="local_runner"
 
 printf 'phase=channel_tests_matrix_local_env\n'
 bash "${SCRIPT_DIR}/matrix-local-env.test.sh"

@@ -13,6 +13,10 @@ const localComposeSource = readFileSync(
   new URL("../../../compose.local.yml", import.meta.url),
   "utf8",
 );
+const localComposeScriptSource = readFileSync(
+  new URL("../../../scripts/docker-compose-local.sh", import.meta.url),
+  "utf8",
+);
 const rootPackage = JSON.parse(
   readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),
 ) as {
@@ -21,6 +25,7 @@ const rootPackage = JSON.parse(
 const composeEnvironment = {
   PATH: process.env.PATH ?? "",
   HOME: process.env.HOME ?? "",
+  PWD: repositoryRoot,
 };
 const dockerComposeAvailable =
   spawnSync("docker", ["compose", "version"], {
@@ -113,6 +118,42 @@ describe("local Compose source synchronization contract", () => {
     expect(rootPackage.scripts?.["db:generate"]).toBe(
       "prisma generate --schema prisma/schema.prisma",
     );
+  });
+
+  it("keeps container artifact traffic on the Docker service network", () => {
+    const sharedEnvironment = baseComposeSource.slice(
+      baseComposeSource.indexOf("x-app-environment:"),
+      baseComposeSource.indexOf("x-app-service:"),
+    );
+    expect(sharedEnvironment).toContain(
+      "ARTIFACT_STORE_ENDPOINT: ${ARTIFACT_STORE_DOCKER_ENDPOINT:-http://artifact-store:9000}",
+    );
+    expect(sharedEnvironment).not.toContain(
+      "ARTIFACT_STORE_ENDPOINT: ${ARTIFACT_STORE_ENDPOINT:-http://artifact-store:9000}",
+    );
+  });
+
+  it("keeps container Compute Broker traffic on the Docker service network", () => {
+    const sharedEnvironment = baseComposeSource.slice(
+      baseComposeSource.indexOf("x-app-environment:"),
+      baseComposeSource.indexOf("x-app-service:"),
+    );
+    expect(sharedEnvironment).toContain(
+      "COMPUTE_BROKER_URL: ${COMPUTE_BROKER_DOCKER_URL:-http://compute-broker:4010}",
+    );
+    expect(sharedEnvironment).not.toContain(
+      "COMPUTE_BROKER_URL: ${COMPUTE_BROKER_URL:-http://compute-broker:4010}",
+    );
+  });
+
+  it("derives the Compute host workspace mount from the current repository", () => {
+    expect(localComposeScriptSource).toContain(
+      'export COMPUTE_HOST_WORKSPACE_ROOT="${COMPUTE_HOST_WORKSPACE_ROOT:-${PROJECT_ROOT}}"',
+    );
+    expect(baseComposeSource).toContain(
+      "COMPUTE_HOST_WORKSPACE_ROOT: ${COMPUTE_HOST_WORKSPACE_ROOT:-${PWD}}",
+    );
+    expect(baseComposeSource).not.toContain("/Users/a/repos/Delegate");
   });
 
   it("isolates Logto client secrets to their owning web application", () => {

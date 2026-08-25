@@ -52,8 +52,6 @@ describe("owner dashboard workflow observability", () => {
       owner: {
         wallet: {
           starsBalance: 120,
-          sponsorPoolCredit: 40,
-          balanceCredits: 20,
         },
       },
       handoffRequests: [],

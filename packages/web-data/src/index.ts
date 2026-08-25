@@ -32,6 +32,10 @@ export {
 } from "./agent-wallet-usage-charge";
 export * from "./agent-wallet-withdrawals";
 export * from "./agent-wallet-write";
+export {
+  deleteArtifactObject,
+  writeArtifactObject,
+} from "./artifact-store";
 export * from "./payment-provider-operation-gate";
 export * from "./account-session-shadow";
 export * from "./account-shadow";
@@ -40,8 +44,10 @@ export * from "./auth-identities";
 export * from "./auth-session";
 export * from "./audience-identity-binding";
 export * from "./billing-products";
+export * from "./billable-units";
 export * from "./commercial-ratio";
 export * from "./capability-health";
+export * from "./capability-publications";
 export * from "./channel-availability";
 export * from "./channel-management";
 export * from "./contact-memory-sharing";
@@ -52,6 +58,10 @@ export * from "./compute-conversation-results";
 export * from "./public-compute-artifacts";
 export * from "./public-chat-rate-limit";
 export * from "./conversation-platform";
+export * from "./conversation-turn-plans";
+export * from "./v3-inline-actions";
+export * from "./managed-document-artifacts";
+export * from "./delegation-workflows";
 export * from "./conversation-intake";
 export * from "./creator-payout-profiles";
 export * from "./deliverable-insights";

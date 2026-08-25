@@ -45,19 +45,21 @@ Delegate 现在包含这些可运行的页面和服务：
 - **Owner dashboard** 位于 `apps/web`，覆盖代表健康度、委托任务、governed actions、compute sessions、artifacts、deliverables、packages、代表级 Memory 配置、workflow state，以及 Owner 资料、身份安全和 Dashboard 通知设置。
 - **可选 Telegram bot runtime** 位于 `apps/bot`，基于 grammY long-poll 和共享 Conversation Platform；它保留 Telegram 特有命令与交付边界，但不是第一版 Delegate 产品主入口。
 - **可选 Matrix Application Service** 位于 `apps/matrix-bridge`，负责认证 Matrix transaction、映射渠道事件和管理虚拟用户。原生 Matrix 是独立的可选渠道，不是 Telegram 的必需中转层。
-- **AMN wallet control plane** 覆盖内部钱包 ledger、mock recharge、Agent token purchase、usage charging、Creator 20% revenue policy、refund/reversal services、withdrawal request freeze、provider adapters，以及 owner/public wallet views。
+- **AMN wallet control plane** 覆盖不可变服务商品与价格、本地 mock、默认关闭的微信支付 API v3 Native 收款与恢复、服务权益、usage charging、Creator 暂定 20% 收益策略、退款/冲正、提现冻结、provider adapters，以及 owner/public wallet views。
 - **Compute broker** 位于 `apps/compute-broker`，在 approval 和 policy gate 后提供受治理的 `exec`、`read`、`write`、`process` 和 `browser` 请求。
+- **Agent Runtime V3** 横跨 `packages/runtime`、`packages/model-runtime`、conversation worker、Compute Broker 和 workflow runner：使用唯一的服务端验证 Goal/Action DAG、schema-pinned MCP 编译、原子执行准入、Verified Result 和证据绑定 Composer，并保留 V2 回滚兼容。
 - **Workflow runner** 位于 `apps/workflow-runner`，支持 local runner 和 Temporal-backed durable workflow dispatch。
 - **Prisma/Postgres 数据模型** 覆盖 representatives、contacts、conversations、delegation tasks、handoffs、approvals、invoices、compute、artifacts、deliverables、workflows 和 audit trails。
 - **OpenViking 集成** 作为 PostgreSQL 权威数据之后的可重建投影，支持已发布公开知识与受治理记忆的同步和召回。
 - **工作区技能治理** 支持 ClawHub 元数据发现、不可变版本固定、代表草稿绑定、MCP/Compute 就绪检查、统一审批/审计及签名补丁更新策略；不会执行第三方技能包代码。
 
-当前真正实现的 durable workflow kind 只有两个：
+当前真正实现的 durable workflow kind 有三个：
 
 - `APPROVAL_EXPIRATION`
 - `HANDOFF_FOLLOW_UP`
+- `DELEGATION_EXECUTION`
 
-Temporal 已经为这两个 workflow 接入 post-commit command outbox dispatch、native workflow timer、cancellation cleanup 和 dashboard phase observability。普通实时聊天路由仍然不会放进 Temporal。
+Temporal 已经接入 post-commit command outbox dispatch、native workflow timer、cancellation cleanup、durable delegation signal 和 dashboard phase observability。普通实时聊天生成仍不会把业务真相放进 Temporal。
 
 ## AMN 目标模型
 
@@ -82,7 +84,7 @@ AMN 目标层次包括：
 - **Settlement Engine:** 计算 Creator revenue、platform fees、provider costs 和 withdrawals。
 - **Transparent Ledger:** 记录 recharge、charge、settlement 和 proof events，让用户和 creator 可以验证状态。
 
-今天已经实现的是 web-first Delegate 楔子加上第一条 AMN 钱包闭环：公开 representative 页面、网页聊天、pricing tiers、仅开发环境可用的 mock recharge、用户现金余额、Agent token purchase、Agent token usage charging、Creator pending / withdrawable earning、withdrawal request freeze、refund/reversal services、owner wallet dashboard、provider adapter boundaries 和 durable follow-up workflows。当前 Web 充值只是非生产 demo/mock，并不代表真实支付已经接通。
+今天已经实现的是 web-first Delegate 楔子加上第一条 AMN 钱包闭环：公开 representative 页面、网页聊天、不可变服务套餐与价格版本、仅开发环境可用的 mock，以及默认关闭的微信支付 API v3 Native 下单、签名支付/退款通知、主动查单、幂等权益发放、未使用全额退款和自动对账。生产收款仍必须通过商户凭据预检、业务/法务条款确认和真实支付/退款 canary，不能仅因代码路径存在就打开收款开关。
 
 仍未完全产品化的是：真实 Stripe SDK wiring 和 webhook signing、真实微信支付或支付宝 credential / certificate flow、通过 Stripe Connect / 支付宝转账 / 微信商家转账自动出金、通用开放 Wallet API、chargeback 自动化、Merkle proof 发布、多币种 FX，以及完整自动 settlement。
 
@@ -105,15 +107,15 @@ Delegate
 | 账户类型 | 已实现 | Prisma 已建模 `USER_CASH`、`AGENT_TOKEN`、`CREATOR_PENDING`、`CREATOR_WITHDRAWABLE`、`PLATFORM_REVENUE`、`PROVIDER_COST`。Creator earning 拆成 pending 和 withdrawable，方便按服务消耗释放和提现冻结。 |
 | 数据模型 | 基本实现 | 已实现 `AudienceIdentity`、`UserWallet`、`AgentWallet`、`WalletLedgerEntry`、`RechargeOrder`、`PaymentProviderEvent`、`AgentTokenPurchase`、`AgentUsageCharge`、`CreatorEarning`、`WithdrawRequest`。公开用户以 canonical `AudienceIdentity` 归属钱包；`UserWallet.externalUserId` 仅保留为兼容支付选择器。 |
 | 整数金额和 token | 已实现 | 钱全部用最小货币单位整数，例如 CNY fen、USD cents。Agent token 也是整数。 |
-| 用户充值 | mock 闭环已实现 | 已实现 `RechargeOrder` 创建、mock payment success、幂等 provider event、`UserWallet` 入账和 wallet ledger；所有公开充值写操作都要求已验证的 Web 账户。 |
+| 用户购买服务包 | 微信支付软件闭环已实现，生产开关默认关闭 | 浏览器只提交服务价格版本；服务端冻结金额、权益和分成快照，创建微信 Native 订单，验证签名通知/主动查询，幂等发放代表级服务权益，并支持未使用全额退款和对账。所有公开购买写操作都要求已验证的 Web 账户。 |
 | 用户给 Agent 买 token | 已实现 | 服务会检查 `UserWallet`、扣用户现金、给 `AgentWallet` 增 token、生成 `AgentTokenPurchase`、按策略生成 Creator pending earning，并写 ledger。当前价格用每个 Agent 的 `tokenUnitPriceCents`，集中 price catalog 仍是后续工作。 |
 | Agent 消耗 token | service 已实现 | `AgentUsageCharge` 会扣 Agent token、记录 provider cost / platform revenue，并把 Creator pending earning 按消耗释放到 withdrawable。它还没有自动接到所有真实回复、compute、browser、MCP runtime 路径上。 |
 | Creator 提现 | MVP 已实现 | `WithdrawRequest` 会检查 verified owner、claimed representative 和 withdrawable balance，并冻结提现金额、写 ledger。Stripe Connect / 支付宝转账 / 微信商家转账自动打款还未实现。 |
 | 退款和冲正 | 部分实现 | 已实现 paid recharge refund 和未消耗 token purchase reversal，并写 reversal ledger。完整 chargeback 自动处理和相关余额冻结仍是后续工作。 |
-| 复用支付能力 | adapter 边界已实现 | Mock provider 可用。Stripe Checkout 风格 adapter 已通过 injected client 边界实现。微信支付和支付宝 adapter 是 fail-closed 骨架，需要官方 SDK / OpenAPI 回调和验签后才能启用。Delegate 不处理银行卡号、支付密码或原始敏感支付信息。 |
+| 复用支付能力 | 微信支付 API v3 闭环已实现 | Mock 仅限开发；微信支付包含 Native 下单、证书/公钥验签、支付与退款通知、主动查询、超时恢复和 reconciliation。Stripe/支付宝仍是后续支付轨道。Delegate 不处理银行卡号、支付密码或原始敏感支付信息。 |
 | 第一版不做 | 保持不做 | 不做自动跨境提现、Merkle proof、开放 Wallet API、待认领代表自动提现、链上账本、多币种汇兑。 |
 
-Telegram 现在是可选、非生产的渠道运行时。如果 Delegate 后续正式提供 bot 内数字商品和数字服务，仍应遵循 Telegram 规则，包括在需要时使用 Telegram Stars。AMN Pay 是未来 Web / 统一充值路径，不是绕过平台政策的理由。当前 demo 中 Telegram 会把用户引导到 Web mock 充值页面；该入口必须先完成 Web 登录，并且只接受当前 Bot 下已经验证的 Telegram 绑定，确保服务权益落到同一个 Delegate 账户。只有 Bot 专用的 `TELEGRAM_WEB_RECHARGE_BASE_URL`（未配置时回退到 `NEXT_PUBLIC_REPRESENTATIVE_URL`）是公网 HTTPS origin，才会显示可点击的内联充值按钮。本地或其他非公网 HTTP 地址只会作为消息文本发送。
+Telegram 现在是可选渠道运行时。Bot 内数字商品和数字服务仍应遵循 Telegram 规则，包括在需要时使用 Telegram Stars；当前 Stars 生产收款保持关闭。Telegram 的付费继续入口会跳转到 Web 服务套餐/微信支付页面，必须先完成 Web 登录，并且只接受当前 Bot 下已经验证的 Telegram 绑定，确保服务权益落到同一个 Delegate 账户。只有 Bot 专用的 `TELEGRAM_WEB_RECHARGE_BASE_URL`（未配置时回退到 `NEXT_PUBLIC_REPRESENTATIVE_URL`）是公网 HTTPS origin，才会显示可点击的内联充值按钮。本地或其他非公网 HTTP 地址只会作为消息文本发送。
 
 ## 渠道架构方向
 
@@ -206,16 +208,16 @@ pnpm docker:bootstrap:local
 
 本地 override 会让 Dashboard 和公开代表页使用 `next dev --turbopack`，并以只读
 方式挂载应用及工作区包源码，同时继续启用内建开发身份并保持生产认证边界。日常启动
-使用下面这个不主动构建镜像的命令；普通 TypeScript、TSX 和 CSS 修改会通过
-Turbopack Fast Refresh 直接生效：
+使用下面这个不主动构建镜像的命令。它会先幂等应用待执行的数据库迁移，再启动服务；
+普通 TypeScript、TSX 和 CSS 修改会通过 Turbopack Fast Refresh 直接生效：
 
 ```bash
 pnpm docker:up:local
 ```
 
-修改 Prisma schema 后，需要执行 `pnpm docker:migrate:local`，再重启 Dashboard 和
-Reps 容器以重新生成 Prisma Client。依赖或镜像层发生变化时，仍需执行
-`pnpm docker:bootstrap:local`。
+`pnpm docker:up:local` 已包含 `pnpm docker:migrate:local`。如果服务已经在运行时修改了
+Prisma schema，仍需重启 Dashboard 和 Reps 容器以重新生成 Prisma Client。依赖或镜像
+层发生变化时，仍需执行 `pnpm docker:bootstrap:local`。
 
 `pnpm docker:up` 用于 production-shaped 本地栈；creator 登录前必须先配置
 Logto Traditional Web application。原生 Matrix 是可选渠道，也不是 Telegram
@@ -303,12 +305,16 @@ pnpm docker:up:temporal
 当前 Temporal 模型是：
 
 1. Producer 在同一次已提交的 Postgres flow 里写入 business truth、`WorkflowRun` 和 `WorkflowCommandOutbox`。
-2. Workflow runner 在 commit 之后分发 `START` 和 `CANCEL` commands。
+2. Workflow runner 在 commit 之后分发 `START`、`CANCEL` 和幂等 `SIGNAL` commands。
 3. Temporal 用 `externalWorkflowId` 作为稳定幂等 key，立即启动 workflow。
 4. Workflow 接收 `scheduledAt`，durably sleep 到对应时间，然后运行 DB-backed idempotent activity。
 5. 手动解决业务状态时先更新 Postgres，并把 Temporal cancellation 视为 cleanup，而不是 authority。
+6. 委托审批、用户补充、取消、策略撤销和 reconciliation signal 使用稳定的领域 ID；Temporal replay 不会重复推进同一个状态迁移。
 
-如果 Temporal 配置不完整，Delegate 会回退到 `local_runner`，不会把任务塞进无法处理的 Temporal 队列。
+`WORKFLOW_ENGINE` 会显式选择 workflow engine。`local_runner` 仍可用于本地开发，
+也可由部署环境主动选择。如果已经选择 `temporal`，但地址、namespace 或 task
+queue 配置不完整，Delegate 会以 `temporal_not_fully_configured` 失败关闭；不会
+静默切换引擎，也不会创建无法处理的 Temporal workflow。
 
 ## 环境变量指南
 
@@ -324,25 +330,29 @@ pnpm docker:up:temporal
 - `DELEGATE_AUTH_SESSION_SECRET` 用于签名 Dashboard/Reps auth 与 callback-state cookie。Reps 固定回调的签名 state 同时携带 Representative slug 和完整匿名聊天绑定，不从 Host 或未签名 query 推导身份。生产环境必须使用强 secret。
 - `DELEGATE_DASHBOARD_AUTH_MODE=required` 可以在非生产环境强制开启 dashboard 登录；生产环境始终要求登录。
 - `DELEGATE_AUTH_DEV_LOGIN` 和 `DELEGATE_AUTH_DEV_*` 身份仅在非生产环境接受；`DELEGATE_LOCAL_AUTH_BOOTSTRAP=true` 独立允许本地 fixture 绑定步骤。`pnpm docker:up:local` 会开启这两个开关，不会削弱生产登录边界。
-- `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` 会显示带明确本地演示标识的充值面板，便于测试 mock 充值、购买代表专属服务额度、用量扣减和未用额度退回闭环。创建、完成和退回充值都要求用户先登录；Telegram 来源还必须完成当前 Bot 的验证绑定。开发环境之外应保持为 `false`；mock mutation endpoints 在生产环境也会返回 `404`。真实 provider checkout、签名 payment webhook 和生产退款尚未形成 Web 支付闭环。
+- `NEXT_PUBLIC_ENABLE_PUBLIC_DEMOS=true` 只显示带明确本地演示标识的 mock 操作，便于测试直接权益发放和未用额度退回；开发环境之外应保持为 `false`，mock mutation endpoints 在生产环境返回 `404`。该开关不启用微信支付。真实微信 Native 下单、签名支付/退款通知、主动查询和退款恢复由独立的 `DELEGATE_WECHAT_PAY_*` 发布开关与凭据预检控制。
 - `DELEGATE_SKILL_TRUSTED_KEYS` 是 registry 发布者 key ID 到受信 Ed25519 公钥 PEM 的 JSON 映射；缺少匹配公钥时不会自动采纳签名补丁版本。
 - `DELEGATE_CLAWHUB_URL` 指定不含凭据的 HTTPS Registry origin，`DELEGATE_CLAWHUB_ALLOWED_HOSTS` 限制允许的主机名，`DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` 限制 exact-version 验证的新鲜度（默认 24 小时），且客户端拒绝重定向。采纳或回滚前会重新获取精确发布者/版本的 manifest 与 verdict，拒绝过期或发生漂移的证据，并使用当前受信公钥集合重验签后才改变 release 状态。
 - 当前 Telegram long-poll runtime 只要求 `TELEGRAM_BOT_TOKEN`。`TELEGRAM_BOT_ID` 可选，未填写时会从 token 的数字前缀推导；`getMe` 成功后，Bot 会把验证过的 ID 和 username 写入已配置的 Telegram 渠道绑定，Web 因此无需拿到 token 也能生成限定当前连接的 `/bind` 挑战。建议填写 `TELEGRAM_BOT_USERNAME` 以获得可读的渠道标识，但它不影响 polling 启动。`TELEGRAM_WEBHOOK_SECRET` 不会被 long-poll 读取，也不是 long-poll 必需项；它仍可供独立 webhook、签名或 fallback 逻辑使用，但不应只为启动 polling 而配置。
 - `REP_PUBLIC_CHAT_SESSION_SECRET` 可以覆盖 public-chat cookie 签名 secret。如果没有设置，reps app 会依次回退到 `TELEGRAM_WEBHOOK_SECRET` 和本地开发 secret。
 - `PUBLIC_CHAT_RATE_LIMIT_SECRET` 会先对网络、用户和数字代表限流键做 HMAC，再写入 Postgres；未配置时回退到 `REP_PUBLIC_CHAT_SESSION_SECRET`。三个 `PUBLIC_CHAT_*_REQUESTS_*` 变量用于调整分布式准入限额。只有受信反向代理会覆盖指定请求头时才设置 `PUBLIC_CHAT_CLIENT_IP_HEADER`，否则保持为空。
 - `PUBLIC_MATERIAL_LINK_SECRET` 用于签发十分钟有效、绑定数字代表、资料校验和与处理版本的公开资料链接。下载时会重新检查当前发布和审批状态，因此资料归档、停用、替换或取消公开后，已签发链接也会失效。
-- `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_OPENAI_MODEL` 和 `DELEGATE_ANTHROPIC_MODEL` 控制 model-backed representative replies。
-- `OPENAI_API_KEY`、`ANTHROPIC_API_KEY` 或 `ARK_API_KEY` 启用真实 provider 调用。
+- `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_MODEL_FALLBACK_PROVIDER` 和各 Provider 的模型配置控制 model-backed representative replies。`DELEGATE_MODEL_PLANNER_PROVIDER` 可将规划独立固定到支持原生 Strict Structured Outputs 的 Provider；本地默认建议优先 `agicto`，已配置的 AGICTO、OpenAI 和兼容百炼模型均走原生 Strict JSON Schema。默认主回答 Provider 也是独立的 `agicto`。
+- `TURN_PLAN_V3_MODE` 控制权威 Agent Runtime 发布（`disabled | shadow | active_readonly | active_governed`）。V3 active 只运行一次 V3 Planner，不调用 V2 或旧 natural-language Detailed Planner；公开数字代表先查授权知识，只有用户本轮明确允许通用来源、Knowledge 为 Verified miss/unavailable 且服务端确认非 Owner 权威事实时，才带固定说明回退通用知识；`active_governed` 再发布托管 Markdown/TXT、typed Compute 和 schema-pinned MCP。
+- 生产环境的 V3 active 还要求 `TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED=true`；只有对应 Lane 通过可执行 Shadow release gate 后才能设置。
+- `TURN_PLANNER_V2_MODE` 只控制 V2 回滚/兼容（`disabled | shadow | active_low_risk`）；V3 active 时 V2 不会成为第二套写入真相。
+- `DELEGATE_AGICTO_API_KEY` 启用 AGICTO；未单独配置时可以复用现有 `OPENVIKING_MODEL_API_KEY` 与 `OPENVIKING_MODEL_API_BASE`。AGICTO 仅在线路协议上兼容 OpenAI，不会被记录成 OpenAI Provider，也不会借用 `OPENAI_API_KEY`。长文档通过 `DELEGATE_MODEL_DOCUMENT_TIMEOUT_MS`、`DELEGATE_MODEL_DOCUMENT_MAX_OUTPUT_TOKENS` 和 `DELEGATE_MODEL_DOCUMENT_MAX_PARTS` 设置独立超时、单段预算和有界续写段数。
 - `OPENVIKING_*` 控制 public memory sync、recall 和 commit 行为。
-- `COMPUTE_*` 控制 broker、Docker runner、browser image 和 native computer-use readiness。
+- `COMPUTE_*` 控制 broker、Docker runner、browser image 和 native computer-use readiness。`COMPUTE_MCP_CATALOG_REFRESH_INTERVAL_MS` 默认 120 秒，应小于外部 Capability 5 分钟 Availability TTL。
+- `scripts/docker-compose-local.sh` 会从当前仓库目录动态注入 `COMPUTE_HOST_WORKSPACE_ROOT`。不要再提交某个开发者机器的绝对路径；直接使用 Compose 时应显式提供宿主机路径，或使用当前 `PWD` 回退。
 - `CONVERSATION_OUTBOX_PROCESSING_LEASE_MS` 默认是 5 分钟，最小也是 5 分钟；conversation worker 会为仍在执行的生成任务续租。
 - `WORKFLOW_*` 控制 local-runner 与 Temporal workflow execution。
-- `ARTIFACT_STORE_*` 控制 MinIO-backed artifact storage。
+- `ARTIFACT_STORE_*` 控制 MinIO-backed artifact storage；宿主机工具使用 `ARTIFACT_STORE_ENDPOINT`，Compose 内服务使用 `ARTIFACT_STORE_DOCKER_ENDPOINT`（默认 `http://artifact-store:9000`），避免容器误连自身的 localhost。
 - `KNOWLEDGE_OBJECT_STORE_*` 控制知识原文件对象存储，默认私有桶固定为 `delegate-1324808004`；腾讯云 COS 可使用 S3 兼容 endpoint，并将 `FORCE_PATH_STYLE` 设为 `false`。
 
 知识文件会先持久化到对象存储，再由后台任务重新读取原文件、解析正文、规范化与分块，并写入 OpenViking 向量索引。只有对象、正文和向量索引全部成功后，资产才会进入 `READY`；归档和永久删除会同步移除向量索引，避免已撤权内容继续被召回。
 
-当 model providers 不可用时，bot 和 public representative 路径会回退到 deterministic previews，而不是让对话失败。
+当 model providers 不可用时，旧的纯展示路径仍可使用 deterministic preview；V3 active 的规划、证据、工具执行和 Composer 会失败关闭，绝不会把缺失的工具/证据结果改成模型猜测。
 
 ## 常用命令
 
@@ -520,6 +530,8 @@ Delegate 使用 [DESIGN.md](./DESIGN.md) 中定义的 **Dispatch Editorial** 方
 ## 文档地图
 
 - [Architecture](./docs/architecture.md): product thesis、runtime loop、security boundary 和 OpenViking rules。
+- [Agent Runtime V3](./docs/agent-runtime-v3.md): PlannerProposal、TurnPlan、能力、审批、执行、证据、交付、计费、发布门槛和 pi 框架决策的权威规范。
+- [Conversation runtime flow](./docs/conversation-runtime-flow.md): 渠道中立的 V3 运行流程。
 - [Architecture decisions](./docs/delegate-architecture-decisions.md): 更大的系统方向和 tradeoffs。
 - [Public audience identity](./docs/public-audience-identity.md): Web 匿名身份、Contact/Conversation、充值和 sandbox linkage。
 - [Conversation platform](./docs/conversation-platform.md): 渠道中立消息、episode、版本、人工接管、SSE 和 Matrix Application Service 边界。

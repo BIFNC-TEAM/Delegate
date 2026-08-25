@@ -54,7 +54,6 @@ export async function GET(
     representativeSlug: slug,
     artifactId,
     audienceIdentityId: principal.audienceIdentityId,
-    audienceId: principal.audienceId,
   });
   if (!artifact) {
     return NextResponse.json({ error: "Artifact not found." }, { status: 404 });

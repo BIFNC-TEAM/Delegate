@@ -9,6 +9,11 @@ export type WorkflowRunnerReadinessInput = {
     lastTickAt: string | null;
     lastTickFailed: boolean;
   };
+  temporal: {
+    required: boolean;
+    status: "disabled" | "starting" | "running" | "failed";
+    error?: string;
+  };
   paymentReconciliation: {
     enabled: boolean;
     lastTickAt: string | null;
@@ -31,6 +36,10 @@ export type WorkflowRunnerReadinessSnapshot = {
       | "missing"
       | "stale"
       | "failed";
+  };
+  temporal: {
+    required: boolean;
+    status: "disabled" | "starting" | "running" | "failed";
   };
 };
 
@@ -56,6 +65,9 @@ export function buildWorkflowRunnerReadiness(
   });
   if (workflow !== "ready") {
     reasons.push(`workflow_loop_${workflow}`);
+  }
+  if (input.temporal.required && input.temporal.status !== "running") {
+    reasons.push(`temporal_bridge_${input.temporal.status}`);
   }
 
   const paymentReconciliation =
@@ -89,6 +101,10 @@ export function buildWorkflowRunnerReadiness(
     loops: {
       workflow,
       paymentReconciliation,
+    },
+    temporal: {
+      required: input.temporal.required,
+      status: input.temporal.status,
     },
   };
 }

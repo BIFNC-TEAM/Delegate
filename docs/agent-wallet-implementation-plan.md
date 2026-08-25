@@ -182,10 +182,10 @@ account is required for this phase.
 
 ## Current Delegate Baseline
 
-- `Owner.wallet` currently stores coarse credits through `Wallet.balanceCredits`, `Wallet.sponsorPoolCredit`, and `Wallet.starsBalance`.
+- `Owner.wallet` retains only historical Stars balance; the coarse Compute-credit balances have been retired.
 - `Invoice` records Telegram Stars style paid plans and provider charge identifiers.
-- `LedgerEntry` records representative-scoped compute/model/storage cost signals with `costCents` and `creditDelta`.
-- `apps/compute-broker/src/billing.ts` already debits conversation budgets, owner credits, and sponsor pool credits when compute runs.
+- `LedgerEntry` records representative-scoped compute/model/storage cost signals in `costCents`.
+- `apps/compute-broker/src/billing.ts` records internal execution cost without exposing or debiting Compute credits.
 - Dashboard views already surface wallet-like signals and compute ledger entries.
 
 These pieces should be reused, but they are not enough for AMN because they do not separate user cash, Agent token balances, creator pending earnings, creator withdrawable earnings, provider costs, platform revenue, refunds, and payout state.
@@ -568,7 +568,7 @@ The old `Wallet` and `LedgerEntry` paths should remain live while AMN Wallet is 
 
 The public service-credit bridge is now atomic:
 
-- existing compute billing can continue reading the old owner-credit models.
+- Compute execution records internal cents-based costs and no longer reads the retired owner-credit model.
 - public representative purchases, usage, and reversals update the scoped
   wallet and canonical entitlement ledgers together.
 - Compute authorization reads active run-scoped entitlement evidence and never

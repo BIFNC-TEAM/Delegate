@@ -135,7 +135,7 @@ describe("conversation planning", () => {
     expect(plan.billingDecision).toMatchObject({ decision: "no_charge", billable: false });
   });
 
-  it("keeps multiple business goals and plans each required built-in action", () => {
+  it("keeps multiple requested outcomes without routing through vertical labels", () => {
     const plan = createConversationPlan({
       text: "请发公开资料，并帮我预约一次合作沟通",
       channel: "private_chat",
@@ -143,8 +143,9 @@ describe("conversation planning", () => {
       usage: { freeRepliesUsed: 0, passUnlocked: false, deepHelpUnlocked: false },
     });
 
-    expect(plan.intentResult.businessLabels).toEqual(
-      expect.arrayContaining(["materials", "scheduling", "collaboration"]),
+    expect(plan.intentResult.businessLabels).toEqual([]);
+    expect(plan.intentResult.requestedOutcomes).toEqual(
+      expect.arrayContaining(["receive_public_material", "create_service_request"]),
     );
     expect(plan.actions.map((action) => action.kind)).toEqual([
       "deliver_public_material",
@@ -175,7 +176,7 @@ describe("conversation planning", () => {
         target: "compute:browser",
         input: { capability: "browser", url: "https://example.com" },
         requiredCapabilities: ["browser"],
-        estimatedCost: 2,
+        estimatedTokens: 200,
       },
     });
 
@@ -186,7 +187,7 @@ describe("conversation planning", () => {
         target: "compute:browser",
         requiredCapabilities: ["compute.execute", "browser"],
         externalSideEffect: true,
-        estimatedCost: 2,
+        estimatedTokens: 200,
       }),
     ]);
     expect(authorizeConversationAction(plan.actions[0]!)).toMatchObject({
@@ -338,7 +339,7 @@ describe("telegram group gating", () => {
 });
 
 describe("structured collectors", () => {
-  it("starts a quote collector for pricing requests", () => {
+  it("starts the generic service-request collector for requests that mention pricing", () => {
     const plan = createConversationPlan({
       text: "想聊一下报价，预算和合作方式怎么安排？",
       channel: "private_chat",
@@ -357,7 +358,7 @@ describe("structured collectors", () => {
       channel: "private_chat",
     });
 
-    expect(collector.kind).toBe("quote");
+    expect(collector.kind).toBe("service_request");
     expect(formatStructuredCollectorPrompt(collector)).toContain("第 1/1 步");
     expect(formatStructuredCollectorPrompt(collector)).toContain("需求描述");
     expect(collector.questionFields).toEqual(["description"]);

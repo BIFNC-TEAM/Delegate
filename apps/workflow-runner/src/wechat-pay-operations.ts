@@ -164,7 +164,6 @@ export async function runWeChatPayOperationsTick(
   const recoveredWorkerCodes = results.flatMap(
     (result, index) =>
       result.status === "fulfilled"
-      && operationalSummaryDidWork(result.value)
         ? [
             WECHAT_PAY_OPERATIONAL_FAILURE_CODES[
               workerKeys[index]!
@@ -195,10 +194,9 @@ export function weChatPayOperationsTickFailureCode(
     );
 }
 
-/**
- * A lane failure remains active while its Outbox work is in backoff. An idle
- * tick is only a heartbeat; it is not evidence that the failed item recovered.
- */
+/** Successful lane heartbeats clear transient execution failures. Durable
+ * FAILED/DEAD_LETTER work remains visible through the authoritative backlog
+ * counters returned by the operations health endpoint. */
 export function updateWeChatPayOperationsFailureCodes(
   previousCodes: readonly string[],
   result: WeChatPayOperationsTickResult,
@@ -255,9 +253,6 @@ async function trackedLane<T extends object>(
       WECHAT_PAY_OPERATIONAL_FAILURE_CODES[workerKey],
     );
   }
-  if (!operationalSummaryDidWork(summary)) {
-    return summary;
-  }
   try {
     await dependencies.recordSucceeded(workerKey, summary);
     return summary;
@@ -265,12 +260,6 @@ async function trackedLane<T extends object>(
     await dependencies.recordFailed(workerKey);
     throw error;
   }
-}
-
-function operationalSummaryDidWork(summary: object): boolean {
-  return positiveCounter(
-    (summary as Record<string, unknown>).claimed,
-  );
 }
 
 function operationalSummaryFailed(

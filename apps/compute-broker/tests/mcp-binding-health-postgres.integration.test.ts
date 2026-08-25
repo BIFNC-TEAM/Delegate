@@ -50,7 +50,7 @@ describePostgres("MCP binding health PostgreSQL concurrency", () => {
         defaultToolName: "lookup",
         enabled: true,
         approvalRequired: true,
-        estimatedCostCentsPerCall: 0,
+        estimatedTokensPerCall: 0,
         maxRetries: 0,
         retryBackoffMs: 100,
       });

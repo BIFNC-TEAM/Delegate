@@ -13,7 +13,10 @@ import {
   MessageSenderType,
   Prisma,
 } from "@prisma/client";
-import type { ParsedComputeRequest } from "@delegate/runtime";
+import type {
+  CapabilityExecutionRequest,
+  ParsedComputeRequest,
+} from "@delegate/runtime";
 
 import {
   releaseConversationWalletUsage,
@@ -22,11 +25,16 @@ import {
   type UsageChargeClient,
 } from "./agent-wallet-usage-charge";
 import {
+  enqueueConversationMessageDeliveryInTransaction,
   fenceGenerationWorkLease,
   readGenerationWalletReservation,
 } from "./conversation-platform";
 import { prisma } from "./prisma";
 import { canonicalizeDelegationTaskEvent } from "./delegation-task-events";
+import {
+  enqueueDelegationExecutionSignalInTransaction,
+  ensureDelegationExecutionWorkflowInTransaction,
+} from "./delegation-workflows";
 import {
   buildExternalEffectActionAvailability,
   readDelegationExternalEffectRequest,
@@ -192,6 +200,7 @@ export type DelegationTaskDetailSnapshot = NonNullable<Awaited<ReturnType<typeof
 
 export async function createComputeDelegationTask(input: {
   representativeId: string;
+  representativeSlug: string;
   representativeVersionId?: string | null;
   contactId: string;
   conversationId: string;
@@ -206,11 +215,13 @@ export async function createComputeDelegationTask(input: {
     summary: string;
     request: ParsedComputeRequest;
     dependsOnStepIndexes?: number[];
+    planActionId?: string;
+    actionKey?: string;
+    executionRequest?: CapabilityExecutionRequest;
   }>;
   capability: ComputeCapability;
   maxDurationMinutes: number;
-  maxCostCents?: number | null;
-  maxCredits?: number | null;
+  maxEstimatedTokens?: number | null;
   authorizedKnowledge?: AuthorizedDelegationKnowledge[];
   networkMode: "NO_NETWORK" | "ALLOWLIST" | "FULL";
   filesystemMode: "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL";
@@ -274,11 +285,17 @@ export async function createComputeDelegationTask(input: {
             representativeId: input.representativeId,
             originConversationId: input.conversationId,
           },
-          include: { steps: { orderBy: { sequence: "asc" }, take: 8 } },
+          include: {
+            steps: { orderBy: { sequence: "asc" }, take: 8 },
+            resourcePolicy: true,
+          },
         })
       : await tx.delegationTask.findUnique({
           where: { idempotencyKey: `compute-generation:${input.generationRunId}` },
-          include: { steps: { orderBy: { sequence: "asc" }, take: 8 } },
+          include: {
+            steps: { orderBy: { sequence: "asc" }, take: 8 },
+            resourcePolicy: true,
+          },
         });
     if (existing) {
       const currentStep = run.delegationTaskStepId
@@ -302,6 +319,41 @@ export async function createComputeDelegationTask(input: {
         existing.status !== DelegationTaskStatus.FAILED
       ) {
         throw new Error("Delegation task is no longer executable.");
+      }
+      let resolvedExistingRequest = input.request;
+      if (
+        currentStep?.kind === "MCP"
+        || input.request.capability === "mcp"
+      ) {
+        if (!currentStep) {
+          throw new Error("Delegation MCP retry has no persisted task step.");
+        }
+        const persistedRequest = readDelegationTaskStepRequest(currentStep);
+        if (!persistedRequest || persistedRequest.capability !== "mcp") {
+          throw new Error(
+            "Delegation MCP retry has no persisted execution request.",
+          );
+        }
+        if (input.request.capability !== "mcp") {
+          throw new Error("Delegation task retry changed its persisted capability.");
+        }
+        const [resolvedRetryPlan] =
+          await resolveDelegationPlanMcpBindingsInTransaction(
+            tx,
+            input.representativeId,
+            [{ summary: input.actionSummary, request: input.request }],
+          );
+        const retryBindingId = resolvedRetryPlan
+          ? requireResolvedMcpBindingId(resolvedRetryPlan.request)
+          : null;
+        assertPersistedDelegationMcpRetryBinding({
+          persistedRequestBindingId: persistedRequest.bindingId,
+          persistedStepBindingId: currentStep.mcpBindingId,
+          allowedMcpBindingIds:
+            existing.resourcePolicy?.allowedMcpBindingIds ?? null,
+          retryBindingId,
+        });
+        resolvedExistingRequest = persistedRequest;
       }
       let current = existing;
       if (existing.status === DelegationTaskStatus.FAILED) {
@@ -348,15 +400,28 @@ export async function createComputeDelegationTask(input: {
         ...(currentStep ? { stepId: currentStep.id } : {}),
         generationRunId: input.generationRunId,
         inputMessageId: input.inputMessageId,
-        request: input.request,
+        request: resolvedExistingRequest,
+      });
+      await ensureDelegationExecutionWorkflowInTransaction(tx, {
+        representativeId: input.representativeId,
+        representativeSlug: input.representativeSlug,
+        contactId: input.contactId,
+        conversationId: input.conversationId,
+        delegationTaskId: existing.id,
+        delegationTaskStepId: currentStep?.id ?? null,
       });
       return { task: current, step: currentStep ?? null };
     }
 
     const now = new Date();
-    const planSteps = input.planSteps?.length
+    const rawPlanSteps = input.planSteps?.length
       ? input.planSteps
       : [{ summary: input.actionSummary, request: input.request }];
+    const planSteps = await resolveDelegationPlanMcpBindingsInTransaction(
+      tx,
+      input.representativeId,
+      rawPlanSteps,
+    );
     if (planSteps.length > 5) throw new Error("Delegation task plan exceeds the five-step P1 limit.");
     if (planSteps[0]?.request.capability !== input.capability) {
       throw new Error("Delegation task first plan step does not match the requested capability.");
@@ -364,6 +429,7 @@ export async function createComputeDelegationTask(input: {
     const allowedCapabilities = [...new Set(
       planSteps.map((planned) => mapCapability(planned.request.capability)),
     )] as CapabilityKind[];
+    const allowedMcpBindingIds = collectResolvedMcpBindingIds(planSteps);
     const task = await tx.delegationTask.create({
       data: {
         representativeId: input.representativeId,
@@ -399,13 +465,13 @@ export async function createComputeDelegationTask(input: {
           create: {
             maxDurationMinutes: input.maxDurationMinutes,
             maxComputeMinutes: input.maxDurationMinutes,
-            maxCostCents: input.maxCostCents && input.maxCostCents > 0
-              ? input.maxCostCents
+            maxEstimatedTokens: input.maxEstimatedTokens && input.maxEstimatedTokens > 0
+              ? input.maxEstimatedTokens
               : null,
-            maxCredits: input.maxCredits ?? null,
             maxToolCalls: planSteps.length,
             maxSteps: planSteps.length,
             allowedCapabilities,
+            allowedMcpBindingIds,
             networkMode: input.networkMode,
             filesystemMode: input.filesystemMode,
             snapshot: {
@@ -443,26 +509,49 @@ export async function createComputeDelegationTask(input: {
           title: truncate(planned.summary, 160),
           status: index === 0 ? DelegationTaskStepStatus.READY : DelegationTaskStepStatus.DRAFT,
           capability: mapCapability(planned.request.capability),
+          ...(planned.request.capability === "mcp"
+            ? { mcpBindingId: requireResolvedMcpBindingId(planned.request) }
+            : {}),
           dependsOnStepIds: dependencyIndexes.map((dependencyIndex) => steps[dependencyIndex]!.id),
           maxDurationSeconds: Math.max(60, Math.floor(input.maxDurationMinutes * 60 / planSteps.length)),
           inputSnapshot: {
             request: planned.request as unknown as Prisma.InputJsonValue,
+            ...(planned.executionRequest
+              ? {
+                  executionRequest:
+                    planned.executionRequest as unknown as Prisma.InputJsonValue,
+                }
+              : {}),
             source: "delegation_plan",
           },
           idempotencyKey: `compute-step:${input.generationRunId}:${index + 1}`,
         },
       });
       steps.push(step);
-      if (planned.request.capability === "mcp") {
+      if (planned.planActionId) {
+        await linkV3PlanActionToDelegationStepInTransaction(tx, {
+          planActionId: planned.planActionId,
+          ...(planned.actionKey ? { actionKey: planned.actionKey } : {}),
+          generationRunId: input.generationRunId,
+          taskId: task.id,
+          stepId: step.id,
+        });
+      }
+      const externalEffect = describeDelegationExternalEffect(
+        planned.request,
+        planned.summary,
+      );
+      if (externalEffect) {
         await tx.delegationTaskExternalEffect.create({
           data: {
             delegationTaskId: task.id,
             delegationTaskStepId: step.id,
-            type: "mcp_tool_call",
-            target: truncate(planned.summary, 500),
-            action: "invoke",
+            planActionId: planned.planActionId ?? null,
+            type: externalEffect.type,
+            target: externalEffect.target,
+            action: externalEffect.action,
             status: "PROPOSED",
-            idempotencyKey: `mcp-effect:${task.id}:${step.id}`,
+            idempotencyKey: `${externalEffect.idempotencyPrefix}:${task.id}:${step.id}`,
             requestPayload: {
               request: planned.request as unknown as Prisma.InputJsonValue,
               objective: truncate(input.objective, 4_000),
@@ -490,12 +579,205 @@ export async function createComputeDelegationTask(input: {
       toStatus: DelegationTaskStatus.READY,
       payload: { capability: input.capability, stepId: step.id },
     });
+    await ensureDelegationExecutionWorkflowInTransaction(tx, {
+      representativeId: input.representativeId,
+      representativeSlug: input.representativeSlug,
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      delegationTaskId: task.id,
+      delegationTaskStepId: step.id,
+    });
     return { task: { ...task, steps }, step };
   });
 }
 
+type DelegationPlanStepInput = {
+  summary: string;
+  request: ParsedComputeRequest;
+  dependsOnStepIndexes?: number[];
+  planActionId?: string;
+  actionKey?: string;
+  executionRequest?: CapabilityExecutionRequest;
+};
+
+async function linkV3PlanActionToDelegationStepInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    planActionId: string;
+    actionKey?: string;
+    generationRunId: string;
+    taskId: string;
+    stepId: string;
+  },
+) {
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtext(${input.planActionId}))
+  `;
+  const action = await tx.conversationPlanAction.findUnique({
+    where: { id: input.planActionId },
+    include: {
+      turnPlan: { include: { activeExecutionFence: true } },
+    },
+  });
+  const fence = action?.turnPlan.activeExecutionFence;
+  if (
+    !action
+    || action.turnPlan.protocolVersion !== 3
+    || action.turnPlan.shadowMode
+    || action.turnPlan.generationRunId !== input.generationRunId
+    || (input.actionKey && action.actionKey !== input.actionKey)
+    || !fence
+    || fence.activePlanId !== action.turnPlan.id
+    || fence.activeRevision !== action.turnPlan.revision
+    || fence.executionEpoch !== action.turnPlan.executionEpoch
+    || !["PLANNED", "AUTHORIZING", "READY"].includes(action.status)
+  ) {
+    throw new Error("V3 plan action is not current for delegated execution.");
+  }
+  await tx.conversationPlanAction.update({
+    where: { id: action.id },
+    data: {
+      delegationTaskId: input.taskId,
+      delegationTaskStepId: input.stepId,
+    },
+  });
+  await tx.conversationTurnPlan.update({
+    where: { id: action.turnPlan.id },
+    data: { delegationTaskId: input.taskId },
+  });
+}
+
+export async function resolveDelegationPlanMcpBindingsInTransaction(
+  tx: Prisma.TransactionClient,
+  representativeId: string,
+  planSteps: DelegationPlanStepInput[],
+): Promise<DelegationPlanStepInput[]> {
+  const cache = new Map<string, { id: string; slug: string }>();
+  const resolved: DelegationPlanStepInput[] = [];
+  for (const planned of planSteps) {
+    if (planned.request.capability !== "mcp") {
+      resolved.push(planned);
+      continue;
+    }
+    const requestedId = planned.request.bindingId?.trim();
+    const requestedSlug = planned.request.bindingSlug?.trim();
+    if (!requestedId && !requestedSlug) {
+      throw new Error("Delegation MCP request has no authoritative binding coordinate.");
+    }
+    const cacheKey = `${requestedId ?? ""}:${requestedSlug ?? ""}`;
+    let binding = cache.get(cacheKey);
+    if (!binding) {
+      const stored = await tx.representativeMcpBinding.findFirst({
+        where: {
+          representativeId,
+          enabled: true,
+          ...(requestedId ? { id: requestedId } : {}),
+          ...(requestedSlug ? { slug: requestedSlug } : {}),
+        },
+        select: { id: true, slug: true },
+      });
+      if (!stored) {
+        throw new Error(
+          "Delegation MCP binding is unavailable or not authorized for this representative.",
+        );
+      }
+      binding = stored;
+      cache.set(cacheKey, binding);
+    }
+    resolved.push({
+      ...planned,
+      request: {
+        ...planned.request,
+        bindingId: binding.id,
+        bindingSlug: binding.slug,
+      },
+    });
+  }
+  return resolved;
+}
+
+function collectResolvedMcpBindingIds(planSteps: DelegationPlanStepInput[]) {
+  return [
+    ...new Set(
+      planSteps
+        .filter((planned) => planned.request.capability === "mcp")
+        .map((planned) => requireResolvedMcpBindingId(planned.request)),
+    ),
+  ];
+}
+
+function requireResolvedMcpBindingId(request: ParsedComputeRequest) {
+  const bindingId = request.bindingId?.trim();
+  if (!bindingId) {
+    throw new Error("Delegation MCP request has no resolved binding id.");
+  }
+  return bindingId;
+}
+
+export function assertPersistedDelegationMcpRetryBinding(input: {
+  persistedRequestBindingId: string | null | undefined;
+  persistedStepBindingId: string | null | undefined;
+  allowedMcpBindingIds: string[] | null | undefined;
+  retryBindingId: string | null | undefined;
+}) {
+  const persistedRequestBindingId = input.persistedRequestBindingId?.trim();
+  const persistedStepBindingId = input.persistedStepBindingId?.trim();
+  if (!persistedRequestBindingId || !persistedStepBindingId) {
+    throw new Error(
+      "Delegation MCP retry is missing its persisted binding coordinate.",
+    );
+  }
+  if (persistedRequestBindingId !== persistedStepBindingId) {
+    throw new Error(
+      "Delegation MCP step does not match its persisted request binding.",
+    );
+  }
+  if (!input.allowedMcpBindingIds?.includes(persistedStepBindingId)) {
+    throw new Error(
+      "Delegation MCP retry binding is not present in its persisted resource policy.",
+    );
+  }
+  if (input.retryBindingId?.trim() !== persistedStepBindingId) {
+    throw new Error("Delegation task retry changed its chosen MCP binding.");
+  }
+  return persistedStepBindingId;
+}
+
+export function describeDelegationExternalEffect(
+  request: ParsedComputeRequest,
+  summary: string,
+): {
+  type: "mcp_tool_call" | "browser_mutation";
+  target: string;
+  action: "invoke" | "mutate";
+  idempotencyPrefix: "mcp-effect" | "browser-mutation-effect";
+} | null {
+  if (request.capability === "mcp") {
+    return {
+      type: "mcp_tool_call",
+      target: truncate(summary, 500),
+      action: "invoke",
+      idempotencyPrefix: "mcp-effect",
+    };
+  }
+  if (
+    request.capability === "browser"
+    && request.browserMode === "native"
+    && request.allowMutations
+  ) {
+    return {
+      type: "browser_mutation",
+      target: truncate(request.url || request.task || summary, 500),
+      action: "mutate",
+      idempotencyPrefix: "browser-mutation-effect",
+    };
+  }
+  return null;
+}
+
 export async function createClarifyingDelegationTask(input: {
   representativeId: string;
+  representativeSlug: string;
   representativeVersionId?: string | null;
   contactId: string;
   conversationId: string;
@@ -614,6 +896,14 @@ export async function createClarifyingDelegationTask(input: {
       actorType: DelegationTaskActorType.SYSTEM,
       toStatus: DelegationTaskStatus.CLARIFYING,
       payload: { stepId: step.id, missingFields: input.missingFields },
+    });
+    await ensureDelegationExecutionWorkflowInTransaction(tx, {
+      representativeId: input.representativeId,
+      representativeSlug: input.representativeSlug,
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      delegationTaskId: task.id,
+      delegationTaskStepId: step.id,
     });
     return { task, step };
   });
@@ -754,9 +1044,22 @@ export async function continueClarifyingDelegationTask(input: {
         toStatus: DelegationTaskStatus.CLARIFYING,
         payload: { messageId: input.inputMessageId, missingFields: input.missingFields ?? [] },
       });
+      await enqueueDelegationExecutionSignalInTransaction(tx, {
+        delegationTaskId: task.id,
+        signal: {
+          signalId: `message:${input.inputMessageId}`,
+          kind: "user_input_received",
+          messageId: input.inputMessageId,
+          occurredAt: new Date().toISOString(),
+        },
+      });
       return { taskId: task.id, step: clarificationStep, ready: false, question };
     }
-    const planSteps = input.planSteps;
+    const planSteps = await resolveDelegationPlanMcpBindingsInTransaction(
+      tx,
+      task.representativeId,
+      input.planSteps,
+    );
     if (planSteps.length > 5) throw new DelegationTaskActionError("Delegation plan exceeds five execution steps.");
     await tx.delegationTaskStep.update({
       where: { id: clarificationStep.id },
@@ -776,6 +1079,9 @@ export async function continueClarifyingDelegationTask(input: {
           title: truncate(planned.summary, 160),
           status: index === 0 ? DelegationTaskStepStatus.READY : DelegationTaskStepStatus.DRAFT,
           capability: mapCapability(planned.request.capability),
+          ...(planned.request.capability === "mcp"
+            ? { mcpBindingId: requireResolvedMcpBindingId(planned.request) }
+            : {}),
           dependsOnStepIds: index === 0
             ? [clarificationStep.id]
             : dependencyIndexes.map((dependencyIndex) => createdSteps[dependencyIndex]!.id),
@@ -793,6 +1099,7 @@ export async function continueClarifyingDelegationTask(input: {
         maxSteps: planSteps.length,
         maxToolCalls: planSteps.length,
         allowedCapabilities: [...new Set(planSteps.map((planned) => mapCapability(planned.request.capability)))] as CapabilityKind[],
+        allowedMcpBindingIds: collectResolvedMcpBindingIds(planSteps),
       },
     });
     await tx.delegationTask.update({
@@ -821,6 +1128,15 @@ export async function continueClarifyingDelegationTask(input: {
       toStatus: DelegationTaskStatus.READY,
       payload: { messageId: input.inputMessageId, firstStepId: firstStep.id, stepCount: planSteps.length },
     });
+    await enqueueDelegationExecutionSignalInTransaction(tx, {
+      delegationTaskId: task.id,
+      signal: {
+        signalId: `message:${input.inputMessageId}`,
+        kind: "user_input_received",
+        messageId: input.inputMessageId,
+        occurredAt: new Date().toISOString(),
+      },
+    });
     return { taskId: task.id, step: firstStep, ready: true };
   });
 }
@@ -833,7 +1149,6 @@ export async function markDelegationTaskRunning(taskId: string, stepId?: string)
     stepStatus: DelegationTaskStepStatus.RUNNING,
     nextActionBy: DelegationTaskNextActor.SYSTEM,
     eventType: "task.execution_started",
-    externalEffectStatus: "EXECUTING",
   });
 }
 
@@ -973,6 +1288,16 @@ export async function markDelegationTaskRunningAfterApprovalInTransaction(
       stepId: input.stepId,
     },
   });
+  await enqueueDelegationExecutionSignalInTransaction(tx, {
+    delegationTaskId: input.taskId,
+    signal: {
+      signalId: `approval:${input.approvalId}:approved`,
+      kind: "approval_resolved",
+      approvalId: input.approvalId,
+      resolution: "approved",
+      occurredAt: now.toISOString(),
+    },
+  });
   return {
     taskId: input.taskId,
     stepId: input.stepId,
@@ -1030,7 +1355,6 @@ type FinalizeComputeDelegationTaskInput = {
   outcome: DelegationTaskTerminalOutcome;
   artifacts?: Array<{ id: string; kind: string; summary?: string | null }>;
   failureReason?: string;
-  actualCredits?: number;
 };
 
 type FinalizeComputeDelegationTaskInternalInput =
@@ -1331,7 +1655,7 @@ export async function abortDelegationTaskForGenerationFailureInTransaction(
   };
 }
 
-async function finalizeComputeDelegationTaskInTransaction(
+export async function finalizeComputeDelegationTaskInTransaction(
   tx: Prisma.TransactionClient,
   input: FinalizeComputeDelegationTaskInternalInput,
 ) {
@@ -1418,7 +1742,6 @@ async function finalizeComputeDelegationTaskInTransaction(
         outputSnapshot: {
           outcome: input.outcome,
           artifactIds,
-          ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
           ...(input.failureReason ? { failureReason: input.failureReason } : {}),
         },
         completedAt: terminal.stepStatus === DelegationTaskStepStatus.COMPLETED ? now : null,
@@ -1429,7 +1752,10 @@ async function finalizeComputeDelegationTaskInTransaction(
       where: { delegationTaskId: task.id, delegationTaskStepId: step.id },
       select: { id: true, status: true, responseSnapshot: true },
     });
-    const hasUnknownExternalOutcome = input.outcome === "failed" && effects.some((effect) => effect.status === "EXECUTING");
+    const hasUnknownExternalOutcome = input.outcome === "failed" && effects.some(
+      (effect) => effect.status === "EXECUTING"
+        || effect.status === "RECONCILIATION_REQUIRED",
+    );
     if (effects.length) {
       const effectStatus = input.outcome === "completed"
         ? "SUCCEEDED"
@@ -1528,12 +1854,44 @@ async function finalizeComputeDelegationTaskInTransaction(
     }
 
     let orchestrationFailureReason: string | null = null;
-    if (input.outcome === "completed") {
+    const skippedAlternativeStepIds = input.outcome === "completed"
+      ? await skipUnneededV3Alternatives(tx, {
+          taskId: task.id,
+          sourceStepId: step.id,
+        })
+      : [];
+    if (skippedAlternativeStepIds.length) {
+      await tx.delegationTaskStep.updateMany({
+        where: {
+          id: { in: skippedAlternativeStepIds },
+          status: { in: ["DRAFT", "READY"] },
+        },
+        data: { status: "SKIPPED", completedAt: now },
+      });
+    }
+    const activatedFallbackStepId =
+      input.outcome === "failed" && !hasUnknownExternalOutcome
+        ? await resolveActivatedV3FallbackStep(tx, {
+            taskId: task.id,
+            sourceStepId: step.id,
+            steps: task.steps,
+          })
+        : null;
+    const activatedFallbackStep = activatedFallbackStepId
+      ? task.steps.find((candidate) => candidate.id === activatedFallbackStepId)
+        ?? null
+      : null;
+    if (input.outcome === "completed" || activatedFallbackStep) {
       const projectedSteps = task.steps.map((candidate) => ({
           ...candidate,
-          status: candidate.id === step.id ? "COMPLETED" : candidate.status,
+          status: candidate.id === step.id
+            ? input.outcome === "completed" ? "COMPLETED" : "FAILED"
+            : skippedAlternativeStepIds.includes(candidate.id)
+              ? "SKIPPED"
+            : candidate.status,
       }));
-      const nextStep = selectNextDelegationTaskStep(projectedSteps);
+      const nextStep = activatedFallbackStep
+        ?? selectNextDelegationTaskStep(projectedSteps);
       if (nextStep && generationRun) {
         const conversation = await tx.conversation.findUnique({
           where: { id: generationRun.conversationId },
@@ -1650,11 +2008,19 @@ async function finalizeComputeDelegationTaskInTransaction(
         }
         await appendTaskEvent(tx, {
           taskId: task.id,
-          eventType: "task.step_completed",
+          eventType: activatedFallbackStep
+            ? "task.fallback_activated"
+            : "task.step_completed",
           actorType: DelegationTaskActorType.SYSTEM,
           fromStatus: task.status,
           toStatus: DelegationTaskStatus.READY,
-          payload: { stepId: step.id, nextStepId: nextStep.id, generationRunId: nextRun.id, artifactIds },
+          payload: {
+            stepId: step.id,
+            nextStepId: nextStep.id,
+            generationRunId: nextRun.id,
+            artifactIds,
+            ...(activatedFallbackStep ? { activation: "on_failure" } : {}),
+          },
         });
         return {
           taskId: task.id,
@@ -1665,6 +2031,8 @@ async function finalizeComputeDelegationTaskInTransaction(
         };
       }
       if (
+        input.outcome === "completed"
+        &&
         !orchestrationFailureReason
         && projectedSteps.some((candidate) =>
           !["COMPLETED", "SKIPPED"].includes(candidate.status)
@@ -1753,7 +2121,6 @@ async function finalizeComputeDelegationTaskInTransaction(
       payload: {
         stepId: step.id,
         artifactIds,
-        ...(typeof input.actualCredits === "number" ? { actualCredits: input.actualCredits } : {}),
         ...(input.failureReason ? { failureReason: input.failureReason } : {}),
       },
     });
@@ -1797,7 +2164,7 @@ export async function getRepresentativeDelegationTaskDetail(
       events: { orderBy: { sequence: "desc" }, take: 50 },
       ledgerEntries: {
         orderBy: { createdAt: "desc" },
-        select: { id: true, kind: true, creditDelta: true, costCents: true, quantity: true, unit: true, createdAt: true },
+        select: { id: true, kind: true, costCents: true, quantity: true, unit: true, createdAt: true },
       },
       generationRuns: {
         orderBy: { createdAt: "desc" },
@@ -1822,10 +2189,6 @@ export async function getRepresentativeDelegationTaskDetail(
     hasExternalEffect: task.externalEffects.length > 0,
     hasUnreconciledExternalEffect: task.externalEffects.some((effect) => effect.status === "RECONCILIATION_REQUIRED"),
   });
-  const creditsUsed = task.ledgerEntries.reduce(
-    (total, entry) => total + Math.max(0, -entry.creditDelta),
-    0,
-  );
   const costCents = task.ledgerEntries.reduce((total, entry) => total + entry.costCents, 0);
 
   return {
@@ -1879,15 +2242,14 @@ export async function getRepresentativeDelegationTaskDetail(
         status: step.status.toLowerCase(),
         ...(step.capability ? { capability: step.capability.toLowerCase() } : {}),
         requiresApproval: step.requiresApproval,
-        ...(step.maxCostCents !== null ? { maxCostCents: step.maxCostCents } : {}),
+        ...(step.maxEstimatedTokens !== null ? { maxEstimatedTokens: step.maxEstimatedTokens } : {}),
         ...(step.maxDurationSeconds !== null ? { maxDurationSeconds: step.maxDurationSeconds } : {}),
         dependsOnStepIds: step.dependsOnStepIds,
       })),
       policy: task.resourcePolicy
         ? {
             maxDurationMinutes: task.resourcePolicy.maxDurationMinutes,
-            maxCostCents: task.resourcePolicy.maxCostCents,
-            maxCredits: task.resourcePolicy.maxCredits,
+            maxEstimatedTokens: task.resourcePolicy.maxEstimatedTokens,
             maxComputeMinutes: task.resourcePolicy.maxComputeMinutes,
             maxToolCalls: task.resourcePolicy.maxToolCalls,
             maxSteps: task.resourcePolicy.maxSteps,
@@ -1975,7 +2337,7 @@ export async function getRepresentativeDelegationTaskDetail(
       }),
       createdAt: effect.createdAt.toISOString(),
     })),
-    usage: { creditsUsed, costCents, ledgerEntryCount: task.ledgerEntries.length },
+    usage: { costCents, ledgerEntryCount: task.ledgerEntries.length },
     attempts: task.generationRuns.map((run) => ({
       id: run.id,
       status: run.status.toLowerCase(),
@@ -2133,6 +2495,18 @@ export async function applyRepresentativeDelegationTaskAction(input: {
         actorId: input.actorId,
         fromStatus: task.status,
         toStatus: DelegationTaskStatus.CANCELED,
+      });
+      await enqueueDelegationExecutionSignalInTransaction(tx, {
+        delegationTaskId: task.id,
+        signal: {
+          signalId: `task:${task.id}:cancel:${task.version + 1}`,
+          kind: "cancel_requested",
+          requestedBy: input.actorId,
+          reason: canceledByAudience
+            ? "audience_canceled_task"
+            : "owner_canceled_task",
+          occurredAt: now.toISOString(),
+        },
       });
       return;
     }
@@ -3199,7 +3573,7 @@ async function createTaskSystemMessage(
   },
 ) {
   if (!input.conversationId) return;
-  await tx.message.upsert({
+  const message = await tx.message.upsert({
     where: {
       conversationId_clientMessageId: {
         conversationId: input.conversationId,
@@ -3215,9 +3589,14 @@ async function createTaskSystemMessage(
       text: input.text,
       content: { kind: "delegation_task_status" },
       clientMessageId: input.clientMessageId,
-      deliveryStatus: MessageDeliveryStatus.SENT,
+      deliveryStatus: MessageDeliveryStatus.QUEUED,
     },
     update: {},
+  });
+  await enqueueConversationMessageDeliveryInTransaction(tx, {
+    conversationId: input.conversationId,
+    messageId: message.id,
+    deliveryKind: "delegation_task_status",
   });
 }
 
@@ -3810,6 +4189,149 @@ async function finalizeDelegationTaskBilling(
 
 function mapCapability(capability: ComputeCapability) {
   return capability.toUpperCase() as CapabilityKind;
+}
+
+async function resolveActivatedV3FallbackStep(
+  tx: Prisma.TransactionClient,
+  input: {
+    taskId: string;
+    sourceStepId: string;
+    steps: Array<{ id: string; status: DelegationTaskStepStatus }>;
+  },
+) {
+  const actions = await tx.conversationPlanAction.findMany({
+    where: {
+      delegationTaskId: input.taskId,
+      turnPlan: { protocolVersion: 3, shadowMode: false },
+    },
+    include: {
+      actionResults: { orderBy: { verifiedAt: "desc" }, take: 1 },
+    },
+  });
+  const failedAction = actions.find((action) =>
+    action.delegationTaskStepId === input.sourceStepId);
+  if (!failedAction || failedAction.status !== "FAILED") return null;
+  const failedActivation = jsonRecord(failedAction.activationPolicy);
+  const source = failedActivation?.["mode"] === "on_failure"
+    && typeof failedActivation["sourceActionId"] === "string"
+    ? actions.find((action) => action.id === failedActivation["sourceActionId"])
+      ?? null
+    : failedAction;
+  if (!source || source.status !== "FAILED") return null;
+  const failure = jsonRecord(source.actionResults[0]?.failure);
+  const failureCode = typeof failure?.["code"] === "string"
+    ? failure["code"]
+    : null;
+  if (!failureCode) return null;
+  const sourceFailurePolicy = jsonRecord(source.failurePolicy);
+  const alternativeIds = Array.isArray(sourceFailurePolicy?.["alternativeActionIds"])
+    ? sourceFailurePolicy!["alternativeActionIds"].filter(
+        (value): value is string => typeof value === "string",
+      )
+    : [];
+  const currentFallbackGroup = failedActivation?.["mode"] === "on_failure"
+    && typeof failedActivation["fallbackGroupKey"] === "string"
+    ? failedActivation["fallbackGroupKey"]
+    : null;
+  const failedPriority = failedActivation?.["mode"] === "on_failure"
+    && typeof failedActivation["priority"] === "number"
+    ? failedActivation["priority"]
+    : Number.NEGATIVE_INFINITY;
+  const groupActions = actions.filter((action) => {
+    if (!alternativeIds.includes(action.id)) return false;
+    const activation = jsonRecord(action.activationPolicy);
+    return activation?.["mode"] === "on_failure"
+      && activation["sourceActionId"] === source.id
+      && (
+        currentFallbackGroup === null
+        || activation["fallbackGroupKey"] === currentFallbackGroup
+      );
+  });
+  if (groupActions.some((action) =>
+    action.id !== failedAction.id
+    && [
+      "QUEUED",
+      "AUTHORIZING",
+      "WAITING_APPROVAL",
+      "EXECUTING",
+      "VERIFYING",
+      "SUCCEEDED",
+      "RECONCILIATION_REQUIRED",
+    ].includes(action.status))) {
+    return null;
+  }
+  const candidates = actions.flatMap((action) => {
+    if (
+      !alternativeIds.includes(action.id)
+      || !action.delegationTaskStepId
+      || !["PLANNED", "READY"].includes(action.status)
+    ) return [];
+    const activation = jsonRecord(action.activationPolicy);
+    const allowedCodes = Array.isArray(activation?.["allowedFailureCodes"])
+      ? activation!["allowedFailureCodes"] as unknown[]
+      : [];
+    if (
+      activation?.["mode"] !== "on_failure"
+      || activation["sourceActionId"] !== source.id
+      || (
+        currentFallbackGroup !== null
+        && activation["fallbackGroupKey"] !== currentFallbackGroup
+      )
+      || typeof activation["priority"] !== "number"
+      || activation["priority"] <= failedPriority
+      || !allowedCodes.includes(failureCode)
+    ) return [];
+    const step = input.steps.find((candidate) =>
+      candidate.id === action.delegationTaskStepId);
+    if (!step || !["DRAFT", "READY"].includes(step.status)) return [];
+    return [{
+      step,
+      priority: activation["priority"],
+    }];
+  }).sort((left, right) => left.priority - right.priority
+    || (left.step.id < right.step.id ? -1 : left.step.id > right.step.id ? 1 : 0));
+  return candidates[0]?.step.id ?? null;
+}
+
+async function skipUnneededV3Alternatives(
+  tx: Prisma.TransactionClient,
+  input: { taskId: string; sourceStepId: string },
+) {
+  const actions = await tx.conversationPlanAction.findMany({
+    where: {
+      delegationTaskId: input.taskId,
+      turnPlan: { protocolVersion: 3, shadowMode: false },
+    },
+  });
+  const source = actions.find((action) =>
+    action.delegationTaskStepId === input.sourceStepId);
+  if (!source || source.status !== "SUCCEEDED") return [];
+  const failurePolicy = jsonRecord(source.failurePolicy);
+  const alternativeIds = Array.isArray(failurePolicy?.["alternativeActionIds"])
+    ? failurePolicy!["alternativeActionIds"].filter(
+        (value): value is string => typeof value === "string",
+      )
+    : [];
+  if (!alternativeIds.length) return [];
+  const alternatives = actions.filter((action) =>
+    alternativeIds.includes(action.id)
+    && action.delegationTaskStepId
+    && ["PLANNED", "READY"].includes(action.status));
+  if (!alternatives.length) return [];
+  await tx.conversationPlanAction.updateMany({
+    where: {
+      id: { in: alternatives.map((action) => action.id) },
+      status: { in: ["PLANNED", "READY"] },
+    },
+    data: { status: "SKIPPED", completedAt: new Date() },
+  });
+  return alternatives.map((action) => action.delegationTaskStepId!);
+}
+
+function jsonRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function mapTerminalOutcome(outcome: DelegationTaskTerminalOutcome) {

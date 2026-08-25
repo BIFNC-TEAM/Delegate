@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => {
       deleteMany: vi.fn(),
       createMany: vi.fn(),
     },
+    outboxEvent: { upsert: vi.fn() },
     generationRun: {
       update: vi.fn(),
       updateMany: vi.fn(),
@@ -47,7 +48,7 @@ const mocks = vi.hoisted(() => {
     settleConversationWalletUsage: vi.fn(),
     consumeConversationEntitlementByGenerationRunId: vi.fn(),
     releaseConversationEntitlementByGenerationRunId: vi.fn(),
-    finalizeComputeDelegationTask: vi.fn(),
+    finalizeComputeDelegationTaskInTransaction: vi.fn(),
   };
 });
 
@@ -66,7 +67,8 @@ vi.mock("../src/service-entitlements", () => ({
     mocks.releaseConversationEntitlementByGenerationRunId,
 }));
 vi.mock("../src/delegation-tasks", () => ({
-  finalizeComputeDelegationTask: mocks.finalizeComputeDelegationTask,
+  finalizeComputeDelegationTaskInTransaction:
+    mocks.finalizeComputeDelegationTaskInTransaction,
 }));
 
 import { finalizeComputeApprovalConversation } from "../src/compute-conversation-results";
@@ -132,7 +134,8 @@ describe("compute approval wallet finalization", () => {
     mocks.releaseConversationWalletUsage.mockResolvedValue({ status: "released" });
     mocks.consumeConversationEntitlementByGenerationRunId.mockResolvedValue(null);
     mocks.releaseConversationEntitlementByGenerationRunId.mockResolvedValue(null);
-    mocks.finalizeComputeDelegationTask.mockResolvedValue({
+    mocks.tx.outboxEvent.upsert.mockResolvedValue({ id: "delivery-outbox-1" });
+    mocks.finalizeComputeDelegationTaskInTransaction.mockResolvedValue({
       taskId: "task-1",
       status: "READY",
       hasMoreSteps: true,
@@ -140,33 +143,51 @@ describe("compute approval wallet finalization", () => {
     });
   });
 
-  it("settles paid credits and does not consume a free reply on success", async () => {
+  it("defers successful usage settlement until channel provider acceptance", async () => {
     await finalizeComputeApprovalConversation({
       approvalId: "approval-1",
       outcome: "completed",
-      actualCredits: 8,
     });
 
     expect(
       mocks.consumeConversationEntitlementByGenerationRunId,
-    ).toHaveBeenCalledWith(
-      { generationRunId: "run-1" },
-      mocks.tx,
-    );
+    ).not.toHaveBeenCalled();
     expect(
       mocks.releaseConversationEntitlementByGenerationRunId,
     ).not.toHaveBeenCalled();
-    expect(mocks.settleConversationWalletUsage).toHaveBeenCalledWith(
-      {
-        usageChargeId: "usage-1",
-        expectedGenerationRunId: "run-1",
-        settledTokenAmount: 1,
-        provider: "compute",
-        idempotencyKey: "generation:run-1:settle",
-      },
-      mocks.tx,
-    );
+    expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.tx.message.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ deliveryStatus: "QUEUED" }),
+        update: expect.objectContaining({ deliveryStatus: "QUEUED" }),
+      }),
+    );
+    expect(mocks.tx.generationRun.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contextSnapshot: expect.objectContaining({
+            deliveryBilling: { version: 1, status: "pending" },
+          }),
+        }),
+      }),
+    );
+    expect(mocks.tx.outboxEvent.upsert).toHaveBeenCalledWith({
+      where: {
+        idempotencyKey:
+          "generation.delivery.requested:run-1:result-message",
+      },
+      create: expect.objectContaining({
+        aggregateType: "generation_run",
+        aggregateId: "run-1",
+        eventType: "generation.requested",
+        payload: expect.objectContaining({
+          outputMessageId: "result-message",
+          deliveryOnly: true,
+        }),
+      }),
+      update: {},
+    });
     expect(mocks.tx.conversation.updateMany).toHaveBeenCalledWith({
       where: {
         id: "conversation-1",
@@ -256,10 +277,10 @@ describe("compute approval wallet finalization", () => {
     await finalizeComputeApprovalConversation({
       approvalId: "approval-1",
       outcome: "completed",
-      actualCredits: 8,
     });
 
-    expect(mocks.finalizeComputeDelegationTask).toHaveBeenCalledWith(
+    expect(mocks.finalizeComputeDelegationTaskInTransaction).toHaveBeenCalledWith(
+      mocks.tx,
       expect.objectContaining({
         taskId: "task-1",
         stepId: "step-1",
@@ -279,12 +300,11 @@ describe("compute approval wallet finalization", () => {
         lastMessageAt: expect.any(Date),
       },
     });
-    expect(mocks.tx.conversation.update).toHaveBeenCalledTimes(1);
-    expect(mocks.tx.conversation.update).toHaveBeenCalledWith({
-      where: { id: "conversation-1" },
+    expect(mocks.tx.message.update).toHaveBeenCalledWith({
+      where: { id: "result-message" },
       data: {
-        state: "AI_QUEUED",
-        lastMessageAt: expect.any(Date),
+        text:
+          "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。",
       },
     });
   });
@@ -297,7 +317,6 @@ describe("compute approval wallet finalization", () => {
       const result = await finalizeComputeApprovalConversation({
         approvalId: "approval-1",
         outcome: "completed",
-        actualCredits: 8,
       });
 
       expect(result).toBeNull();
@@ -329,7 +348,7 @@ describe("compute approval wallet finalization", () => {
       expect(mocks.tx.message.upsert).not.toHaveBeenCalled();
       expect(mocks.tx.messageAttachment.deleteMany).not.toHaveBeenCalled();
       expect(mocks.tx.conversation.updateMany).not.toHaveBeenCalled();
-      expect(mocks.finalizeComputeDelegationTask).not.toHaveBeenCalled();
+      expect(mocks.finalizeComputeDelegationTaskInTransaction).not.toHaveBeenCalled();
       expect(
         mocks.tx.$executeRaw.mock.calls.map((call) => call[1]),
       ).toEqual(["conversation-1", "run-1"]);
@@ -371,7 +390,7 @@ describe("compute approval wallet finalization", () => {
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.tx.message.upsert).not.toHaveBeenCalled();
-    expect(mocks.finalizeComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.finalizeComputeDelegationTaskInTransaction).not.toHaveBeenCalled();
   });
 
   it("rolls back human deferral when the guarded run transition loses the race", async () => {
@@ -408,7 +427,7 @@ describe("compute approval wallet finalization", () => {
 
     expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
-    expect(mocks.finalizeComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.finalizeComputeDelegationTaskInTransaction).not.toHaveBeenCalled();
   });
 
   it("does not settle when the guarded conversation transition loses the race", async () => {
@@ -425,7 +444,7 @@ describe("compute approval wallet finalization", () => {
 
     expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
-    expect(mocks.finalizeComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.finalizeComputeDelegationTaskInTransaction).not.toHaveBeenCalled();
   });
 
   it("returns an existing completed result idempotently", async () => {
@@ -441,6 +460,8 @@ describe("compute approval wallet finalization", () => {
     mocks.tx.message.findUnique.mockResolvedValue({
       id: "result-message",
       text: "existing result",
+      deliveryStatus: "SENT",
+      externalMessageId: "provider-message-1",
     });
 
     const result = await finalizeComputeApprovalConversation({
@@ -448,7 +469,7 @@ describe("compute approval wallet finalization", () => {
       outcome: "completed",
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       id: "result-message",
       text: "existing result",
     });
@@ -456,5 +477,57 @@ describe("compute approval wallet finalization", () => {
     expect(mocks.tx.generationRun.updateMany).not.toHaveBeenCalled();
     expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(mocks.releaseConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.tx.outboxEvent.upsert).not.toHaveBeenCalled();
+  });
+
+  it("re-enters task finalization when a completed run has not closed its task", async () => {
+    mocks.tx.approvalRequest.findUnique.mockResolvedValue({
+      ...approvalWithPaidRun,
+      delegationTaskId: "task-1",
+      delegationTaskStepId: "step-1",
+      generationRun: {
+        ...approvalWithPaidRun.generationRun,
+        status: "COMPLETED",
+        outputMessageId: "result-message",
+        delegationTaskId: "task-1",
+        delegationTaskStepId: "step-1",
+      },
+    });
+    mocks.tx.message.findUnique.mockResolvedValue({
+      id: "result-message",
+      text: "existing result",
+      deliveryStatus: "QUEUED",
+      externalMessageId: null,
+    });
+    mocks.finalizeComputeDelegationTaskInTransaction.mockResolvedValue({
+      taskId: "task-1",
+      status: "COMPLETED",
+      hasMoreSteps: false,
+    });
+
+    await finalizeComputeApprovalConversation({
+      approvalId: "approval-1",
+      outcome: "completed",
+    });
+
+    expect(
+      mocks.finalizeComputeDelegationTaskInTransaction,
+    ).toHaveBeenCalledWith(
+      mocks.tx,
+      expect.objectContaining({
+        taskId: "task-1",
+        stepId: "step-1",
+        generationRunId: "run-1",
+        outcome: "completed",
+      }),
+    );
+    expect(mocks.tx.outboxEvent.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          idempotencyKey:
+            "generation.delivery.requested:run-1:result-message",
+        },
+      }),
+    );
   });
 });

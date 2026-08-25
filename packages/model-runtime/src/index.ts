@@ -1,3 +1,4 @@
+import { generateAgictoResponse } from "./agicto";
 import { generateAnthropicResponse } from "./anthropic";
 import { generateBailianResponse } from "./bailian";
 import {
@@ -25,6 +26,10 @@ export * from "./context";
 export * from "./citations";
 export * from "./pricing";
 export * from "./types";
+export * from "./turn-planner";
+export * from "./turn-planner-v3";
+export * from "./turn-composer-v3";
+export * from "./managed-document";
 
 export async function planNaturalLanguageComputeRequest(params: {
   userText: string;
@@ -113,8 +118,10 @@ export async function generateRepresentativeReply(
       citedMemoryUseItemIds: [],
       contextTrace: assembled.trace,
       provider: env.provider,
-      ...(env.provider === "openai"
-        ? { model: env.openai.model }
+      ...(env.provider === "agicto"
+        ? { model: env.agicto.model }
+        : env.provider === "openai"
+          ? { model: env.openai.model }
         : env.provider === "bailian"
           ? { model: env.bailian.model }
           : env.provider === "anthropic"
@@ -187,8 +194,10 @@ export async function generateRepresentativeReply(
     citedMemoryUseItemIds: [],
     contextTrace: assembled.trace,
     provider: env.provider,
-    ...(env.provider === "openai"
-      ? { model: env.openai.model }
+    ...(env.provider === "agicto"
+      ? { model: env.agicto.model }
+      : env.provider === "openai"
+        ? { model: env.openai.model }
       : env.provider === "bailian"
         ? { model: env.bailian.model }
         : env.provider === "anthropic"
@@ -221,6 +230,10 @@ async function generateProviderResponse(
   env: ReturnType<typeof resolveModelRuntimeEnv>,
   prompt: ReturnType<typeof assembleRepresentativeReplyPrompt>["prompt"],
 ) {
+  if (provider === "agicto") {
+    return generateAgictoResponse({ env, prompt });
+  }
+
   if (provider === "openai") {
     return generateOpenAIResponse({ env, prompt });
   }
@@ -236,6 +249,10 @@ function resolveProviderModel(
   provider: ModelProvider,
   env: ReturnType<typeof resolveModelRuntimeEnv>,
 ): string {
+  if (provider === "agicto") {
+    return env.agicto.model;
+  }
+
   if (provider === "openai") {
     return env.openai.model;
   }

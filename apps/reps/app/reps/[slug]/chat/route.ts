@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
@@ -9,16 +11,20 @@ import {
   AgentWalletReconciliationError,
   buildRepresentativeRuntimeProfile,
   buildWebAudienceExternalUserId,
+  ConversationIngressValidationError,
   getUserAgentWalletBalance,
   getPublicConversationHistory,
   getPublicRepresentativeRuntime,
   resolvePublicAudienceWalletExternalUserId,
   enforcePublicChatNetworkAdmission,
   enforcePublicChatPrincipalAdmission,
+  deleteArtifactObject,
   PublicChatRateLimitError,
   resolveWebAudienceContact,
   resolveWebAudienceConversation,
   ServiceCreditRequiredError,
+  validateInboundConversationPayload,
+  writeArtifactObject,
   type PublicAudiencePrincipal,
 } from "@delegate/web-data";
 
@@ -92,6 +98,19 @@ export async function POST(
 ) {
   const { slug } = await params;
   try {
+    const declaredLength = Number.parseInt(
+      request.headers.get("content-length") ?? "0",
+      10,
+    );
+    if (Number.isFinite(declaredLength) && declaredLength > 21 * 1024 * 1024) {
+      return privateJson(
+        {
+          error: "Chat request exceeds the 21 MB transport limit.",
+          code: "chat_payload_too_large",
+        },
+        413,
+      );
+    }
     if (process.env.DATABASE_URL?.trim()) {
       await enforcePublicChatNetworkAdmission({
         clientAddress: resolvePublicChatClientAddress(request),
@@ -99,7 +118,7 @@ export async function POST(
     }
     const runtime = await getPublicRepresentativeRuntime(slug);
     if (runtime.status !== "available") return publicRuntimeError(runtime.status);
-    const body = normalizePublicChatRequest(await request.json());
+    const { body, attachmentFiles } = await readPublicChatRequest(request);
     if (!body.message) return privateJson({ error: "Message is required." }, 400);
     if (!publicMemoryDisclosureMatches(
       body.memoryDisclosure,
@@ -149,12 +168,29 @@ export async function POST(
       );
       const clientMessageId =
         body.clientMessageId || `web:${principal.audienceId}:${Date.now()}`;
+      if (attachmentFiles.length && !process.env.DATABASE_URL?.trim()) {
+        return privateJson(
+          {
+            error: "Attachments require the persistent conversation service.",
+            code: "attachments_unavailable",
+          },
+          503,
+        );
+      }
       const externalUserId = await resolvePublicWalletExternalUserId({
         principal,
         representativeSlug: slug,
       });
       let accepted: Awaited<ReturnType<typeof acceptInboundConversationMessage>>;
+      let uploadedAttachments: Awaited<ReturnType<typeof uploadPublicChatAttachments>> = [];
       try {
+        uploadedAttachments = await uploadPublicChatAttachments({
+          representativeId: runtime.setup.id,
+          audienceIdentityId: principal.audienceIdentityId,
+          clientMessageId,
+          message: body.message,
+          files: attachmentFiles,
+        });
         accepted = await acceptInboundConversationMessage({
           representativeSlug: slug,
           conversationId: conversation.id,
@@ -167,6 +203,9 @@ export async function POST(
             contact.displayName || contact.username || "Web visitor",
           clientMessageId,
           channel: "web",
+          ...(uploadedAttachments.length
+            ? { attachments: uploadedAttachments }
+            : {}),
           walletBilling: {
             externalUserId,
             representativeId: runtime.setup.id,
@@ -177,6 +216,7 @@ export async function POST(
           },
         });
       } catch (acceptError) {
+        await cleanupPublicChatAttachments(uploadedAttachments);
         if (acceptError instanceof ServiceCreditRequiredError) {
           const usage = await derivePublicWalletUsage({
             representativeId: runtime.setup.id,
@@ -276,6 +316,15 @@ export async function POST(
     setPublicAudienceSessionCookie(response, request, slug, sessionState);
     return response;
   } catch (error) {
+    if (error instanceof ConversationIngressValidationError) {
+      return privateJson(
+        {
+          error: error.message,
+          code: "invalid_chat_payload",
+        },
+        error.statusCode,
+      );
+    }
     if (error instanceof PublicChatRateLimitError) {
       const response = privateJson(
         {
@@ -301,6 +350,132 @@ export async function POST(
       },
     );
   }
+}
+
+async function readPublicChatRequest(request: Request) {
+  const contentType = request.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.includes("multipart/form-data")) {
+    return {
+      body: normalizePublicChatRequest(await request.json()),
+      attachmentFiles: [] as File[],
+    };
+  }
+  const form = await request.formData();
+  const memoryDisclosureValue = form.get("memoryDisclosure");
+  let memoryDisclosure: unknown = null;
+  if (typeof memoryDisclosureValue === "string" && memoryDisclosureValue.trim()) {
+    try {
+      memoryDisclosure = JSON.parse(memoryDisclosureValue);
+    } catch {
+      memoryDisclosure = null;
+    }
+  }
+  const attachmentFiles = form.getAll("attachments").filter(
+    (value): value is File => typeof File !== "undefined" && value instanceof File,
+  );
+  return {
+    body: normalizePublicChatRequest({
+      message: form.get("message"),
+      clientMessageId: form.get("clientMessageId"),
+      memoryDisclosure,
+    }),
+    attachmentFiles,
+  };
+}
+
+async function uploadPublicChatAttachments(input: {
+  representativeId: string;
+  audienceIdentityId: string;
+  clientMessageId: string;
+  message: string;
+  files: File[];
+}) {
+  if (!input.files.length) return [];
+  const attachmentDrafts = await Promise.all(input.files.map(async (file) => ({
+    fileName: file.name,
+    mimeType: resolvePublicChatAttachmentMimeType(file.name, file.type),
+    sizeBytes: file.size,
+    body: Buffer.from(await file.arrayBuffer()),
+  })));
+  const scopeHash = createHash("sha256")
+    .update(`${input.representativeId}:${input.audienceIdentityId}:${input.clientMessageId}`)
+    .digest("hex");
+  const validated = validateInboundConversationPayload({
+    representativeSlug: "public-upload-validation",
+    conversationId: "public-upload-validation",
+    text: input.message,
+    clientMessageId: input.clientMessageId,
+    channel: "web",
+    attachments: attachmentDrafts.map((attachment, index) => ({
+      fileName: attachment.fileName,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      objectKey: `conversation-inputs/${input.representativeId}/${scopeHash}/${index}`,
+    })),
+  });
+  const uploaded: Array<{
+    fileName: string;
+    mimeType: string;
+    sizeBytes: number;
+    objectKey: string;
+    checksum: string;
+  }> = [];
+  try {
+    for (const [index, attachment] of attachmentDrafts.entries()) {
+      const checksum = createHash("sha256").update(attachment.body).digest("hex");
+      const objectKey = `${validated[index]!.objectKey}-${checksum}`;
+      await writeArtifactObject({
+        objectKey,
+        body: attachment.body,
+        contentType: attachment.mimeType,
+      });
+      uploaded.push({
+        fileName: validated[index]!.fileName,
+        mimeType: validated[index]!.mimeType,
+        sizeBytes: validated[index]!.sizeBytes,
+        objectKey,
+        checksum,
+      });
+    }
+    return uploaded;
+  } catch (error) {
+    await cleanupPublicChatAttachments(uploaded);
+    throw error;
+  }
+}
+
+function resolvePublicChatAttachmentMimeType(
+  fileName: string,
+  reportedType: string,
+) {
+  const normalized = reportedType.trim().toLowerCase();
+  if (normalized && normalized !== "application/octet-stream") return normalized;
+  const extension = fileName.toLowerCase().split(".").pop();
+  return extension === "json"
+    ? "application/json"
+    : extension === "pdf"
+      ? "application/pdf"
+      : extension === "jpg" || extension === "jpeg"
+        ? "image/jpeg"
+        : extension === "png"
+          ? "image/png"
+          : extension === "webp"
+            ? "image/webp"
+            : extension === "csv"
+              ? "text/csv"
+              : extension === "md" || extension === "markdown"
+                ? "text/markdown"
+                : extension === "txt"
+                  ? "text/plain"
+                  : "application/octet-stream";
+}
+
+async function cleanupPublicChatAttachments(
+  attachments: Array<{ objectKey: string }>,
+) {
+  await Promise.allSettled(
+    attachments.map((attachment) => deleteArtifactObject(attachment.objectKey)),
+  );
 }
 
 export function resolvePublicChatClientAddress(request: Request) {

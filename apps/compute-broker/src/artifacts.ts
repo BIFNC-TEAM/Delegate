@@ -8,6 +8,7 @@ import {
   S3Client,
 } from "@aws-sdk/client-s3";
 import { buildArtifactObjectKey, resolveArtifactRetentionUntil } from "@delegate/artifacts";
+import { sanitizeUntrustedArtifactPayload } from "@delegate/runtime";
 
 import { computeBrokerConfig } from "./config";
 import { prisma } from "./prisma";
@@ -84,7 +85,11 @@ export async function persistJsonArtifact(params: {
   retentionDays: number;
   summary?: string;
 }) {
-  const body = Buffer.from(JSON.stringify(params.value, null, 2), "utf8");
+  const sanitized = sanitizeUntrustedArtifactPayload(params.value);
+  const sanitizedSummary = params.summary
+    ? sanitizeUntrustedArtifactPayload(params.summary).sanitized
+    : undefined;
+  const body = Buffer.from(JSON.stringify(sanitized.sanitized, null, 2), "utf8");
   return persistBufferArtifact({
     representativeId: params.representativeId,
     representativeSlug: params.representativeSlug,
@@ -96,7 +101,7 @@ export async function persistJsonArtifact(params: {
     body,
     mimeType: "application/json; charset=utf-8",
     retentionDays: params.retentionDays,
-    ...(params.summary ? { summary: params.summary } : {}),
+    ...(typeof sanitizedSummary === "string" ? { summary: sanitizedSummary } : {}),
   });
 }
 
@@ -138,8 +143,12 @@ export async function persistFileArtifact(params: {
   path: string;
   content: string;
 }) {
-  const body = Buffer.from(params.content, "utf8");
-  const preview = summarizeArtifact(params.content);
+  const sanitized = sanitizeUntrustedArtifactPayload(params.content);
+  const content = typeof sanitized.sanitized === "string"
+    ? sanitized.sanitized
+    : "[REDACTED_INVALID_TEXT]";
+  const body = Buffer.from(content, "utf8");
+  const preview = summarizeArtifact(content);
   return persistBufferArtifact({
     representativeId: params.representativeId,
     representativeSlug: params.representativeSlug,
@@ -166,7 +175,11 @@ async function persistTextArtifact(params: {
   content: string;
   retentionDays: number;
 }) {
-  const body = Buffer.from(params.content, "utf8");
+  const sanitized = sanitizeUntrustedArtifactPayload(params.content);
+  const content = typeof sanitized.sanitized === "string"
+    ? sanitized.sanitized
+    : "[REDACTED_INVALID_TEXT]";
+  const body = Buffer.from(content, "utf8");
   return persistBufferArtifact({
     representativeId: params.representativeId,
     representativeSlug: params.representativeSlug,
@@ -178,7 +191,7 @@ async function persistTextArtifact(params: {
     body,
     mimeType: "text/plain; charset=utf-8",
     retentionDays: params.retentionDays,
-    summary: summarizeArtifact(params.content),
+    summary: summarizeArtifact(content),
   });
 }
 

@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   buildWebAudienceExternalUserId: vi.fn(),
   cookies: vi.fn(),
   createConversationPlan: vi.fn(),
+  deleteArtifactObject: vi.fn(),
   enforcePublicChatNetworkAdmission: vi.fn(),
   enforcePublicChatPrincipalAdmission: vi.fn(),
   generateRepresentativeReply: vi.fn(),
@@ -18,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   resolveWebAudienceContact: vi.fn(),
   resolveWebAudienceConversation: vi.fn(),
   setPublicAudienceSessionCookie: vi.fn(),
+  validateInboundConversationPayload: vi.fn(),
+  writeArtifactObject: vi.fn(),
   PublicChatRateLimitError: class PublicChatRateLimitError extends Error {
     constructor(
       readonly scope: "network_minute" | "audience_minute" | "representative_day",
@@ -47,8 +50,12 @@ vi.mock("@delegate/web-data", () => ({
   AgentWalletReconciliationError: class AgentWalletReconciliationError extends Error {},
   buildRepresentativeRuntimeProfile: mocks.buildRepresentativeRuntimeProfile,
   buildWebAudienceExternalUserId: mocks.buildWebAudienceExternalUserId,
+  deleteArtifactObject: mocks.deleteArtifactObject,
   enforcePublicChatNetworkAdmission: mocks.enforcePublicChatNetworkAdmission,
   enforcePublicChatPrincipalAdmission: mocks.enforcePublicChatPrincipalAdmission,
+  ConversationIngressValidationError: class ConversationIngressValidationError extends Error {
+    readonly statusCode = 422;
+  },
   getPublicConversationHistory: vi.fn(),
   getPublicRepresentativeRuntime: mocks.getPublicRepresentativeRuntime,
   getUserAgentWalletBalance: mocks.getUserAgentWalletBalance,
@@ -58,6 +65,8 @@ vi.mock("@delegate/web-data", () => ({
   resolveWebAudienceContact: mocks.resolveWebAudienceContact,
   resolveWebAudienceConversation: mocks.resolveWebAudienceConversation,
   ServiceCreditRequiredError: class ServiceCreditRequiredError extends Error {},
+  validateInboundConversationPayload: mocks.validateInboundConversationPayload,
+  writeArtifactObject: mocks.writeArtifactObject,
 }));
 
 vi.mock("../app/reps/[slug]/public-principal", () => ({
@@ -127,6 +136,13 @@ describe("public chat memory disclosure boundary", () => {
       freeRepliesUsed: 0,
     });
     mocks.buildWebAudienceExternalUserId.mockReturnValue("wallet-user-1");
+    mocks.resolvePublicAudienceWalletExternalUserId.mockResolvedValue("wallet-user-1");
+    mocks.getUserAgentWalletBalance.mockResolvedValue(null);
+    mocks.validateInboundConversationPayload.mockImplementation(
+      (input: { attachments?: unknown[] }) => input.attachments ?? [],
+    );
+    mocks.writeArtifactObject.mockResolvedValue(undefined);
+    mocks.deleteArtifactObject.mockResolvedValue(undefined);
     mocks.acceptInboundConversationMessage.mockResolvedValue({
       heldForOperator: false,
       run: { id: "run-1" },
@@ -241,6 +257,51 @@ describe("public chat memory disclosure boundary", () => {
         }),
       }),
     );
+  });
+
+  it("uploads validated multipart attachments and binds only trusted object keys to the message", async () => {
+    vi.stubEnv("DATABASE_URL", "postgresql://delegate.test/delegate");
+    const form = new FormData();
+    form.set("message", "请查看附件");
+    form.set("clientMessageId", "message-with-file");
+    form.set("memoryDisclosure", JSON.stringify({
+      policyRevision: currentDisclosure.policyRevision,
+      fingerprint: currentDisclosure.fingerprint,
+    }));
+    form.append(
+      "attachments",
+      new File(["hello"], "notes.txt", { type: "text/plain" }),
+    );
+
+    const response = await postPublicChat(
+      new Request("http://localhost/reps/delegate/chat", {
+        method: "POST",
+        body: form,
+      }),
+      { params: Promise.resolve({ slug: "delegate" }) },
+    );
+
+    expect(response.status).toBe(202);
+    expect(mocks.writeArtifactObject).toHaveBeenCalledWith({
+      objectKey: expect.stringMatching(
+        /^conversation-inputs\/rep-1\/[a-f0-9]{64}\/0-[a-f0-9]{64}$/u,
+      ),
+      body: Buffer.from("hello"),
+      contentType: "text/plain",
+    });
+    expect(mocks.acceptInboundConversationMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "请查看附件",
+        attachments: [expect.objectContaining({
+          fileName: "notes.txt",
+          mimeType: "text/plain",
+          sizeBytes: 5,
+          checksum: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          objectKey: expect.stringContaining("conversation-inputs/rep-1/"),
+        })],
+      }),
+    );
+    expect(mocks.deleteArtifactObject).not.toHaveBeenCalled();
   });
 
   it("rejects a network burst before minting an anonymous principal", async () => {

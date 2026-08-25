@@ -27,11 +27,21 @@ const mocks = vi.hoisted(() => {
     message: {
       create: vi.fn(),
       findFirst: vi.fn(),
+      findUnique: vi.fn(),
       upsert: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
     },
     messageRevision: {
       create: vi.fn(),
+    },
+    messageDeliveryAttempt: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    planExecutionFence: {
+      findUnique: vi.fn(),
     },
     outboxEvent: {
       create: vi.fn(),
@@ -42,6 +52,9 @@ const mocks = vi.hoisted(() => {
     },
     approvalRequest: {
       updateMany: vi.fn(),
+    },
+    eventAudit: {
+      upsert: vi.fn(),
     },
     serviceEntitlementLedgerEntry: {
       findMany: vi.fn(),
@@ -94,6 +107,7 @@ import {
   deferGenerationRunForHuman,
   editConversationMessage,
   failGenerationRun,
+  markGenerationDeliveryComplete,
   redactConversationMessage,
   reserveGenerationConversationWalletUsage,
   ServiceCreditRequiredError,
@@ -183,6 +197,24 @@ describe("generation wallet reservation lifecycle", () => {
     mocks.tx.message.create.mockResolvedValue({ id: "message-out" });
     mocks.tx.message.upsert.mockResolvedValue({ id: "message-in" });
     mocks.tx.message.update.mockResolvedValue({ id: "message-in" });
+    mocks.tx.message.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.message.findUnique.mockResolvedValue({
+      conversationId: "conversation-1",
+    });
+    mocks.tx.messageDeliveryAttempt.upsert.mockResolvedValue({ id: "attempt-1" });
+    mocks.tx.messageDeliveryAttempt.findUnique.mockResolvedValue({
+      status: "PROCESSING",
+      attemptPhase: "RESPONSE_RECEIVED",
+      leaseToken: "delivery-lease-1",
+      deliveryOutboxId: "outbox-paid-delivery",
+      deliveryLeaseAttempt: 1,
+      planId: null,
+      planRevision: null,
+      executionEpoch: null,
+      planActionId: null,
+      plan: null,
+    });
+    mocks.tx.messageDeliveryAttempt.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.messageRevision.create.mockResolvedValue({
       id: "revision-1",
       version: 1,
@@ -819,6 +851,83 @@ describe("generation wallet reservation lifecycle", () => {
     expect(mocks.tx.conversation.update).toHaveBeenCalledWith({
       where: { id: "conversation-1" },
       data: { lastMessageAt: expect.any(Date) },
+    });
+  });
+
+  it("settles ordinary conversation usage only after channel delivery succeeds", async () => {
+    mocks.tx.generationRun.findUnique.mockResolvedValueOnce(reservedRun);
+
+    await completeInlineGenerationRun({
+      conversationId: reservedRun.conversationId,
+      runId: reservedRun.id,
+      outboxId: "outbox-paid-delivery",
+      leaseAttempt: 1,
+      replyText: "Persisted but not delivered yet",
+      senderDisplayName: "Representative",
+      countUsage: true,
+      completeOutbox: false,
+    });
+
+    expect(mocks.settleConversationWalletUsage).not.toHaveBeenCalled();
+    expect(mocks.tx.conversation.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ freeRepliesUsed: expect.anything() }),
+      }),
+    );
+
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      id: reservedRun.id,
+      conversationId: reservedRun.conversationId,
+      outputMessageId: "message-output",
+      contextSnapshot: {
+        deliveryBilling: { version: 1, status: "pending" },
+      },
+      runtimePolicySnapshot: reservedRun.runtimePolicySnapshot,
+      provider: "openai",
+      costCents: 2,
+      delegationTaskId: null,
+      delegationTaskStep: null,
+      conversation: {
+        representativeId: "representative-1",
+        contactId: "contact-1",
+      },
+    });
+    mocks.tx.serviceEntitlementLedgerEntry.findMany.mockResolvedValueOnce([]);
+
+    await markGenerationDeliveryComplete({
+      runId: reservedRun.id,
+      outboxId: "outbox-paid-delivery",
+      leaseAttempt: 1,
+      outputMessageId: "message-output",
+      deliveryAdmission: {
+        attemptNumber: 1,
+        leaseToken: "delivery-lease-1",
+      },
+      externalMessageId: "provider-message-1",
+    });
+
+    expect(mocks.settleConversationWalletUsage).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-reserved",
+        expectedGenerationRunId: reservedRun.id,
+        settledTokenAmount: 1,
+        providerCostCents: 2,
+        provider: "openai",
+        idempotencyKey: `generation:${reservedRun.id}:settle`,
+      },
+      mocks.tx,
+    );
+    expect(mocks.tx.message.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "message-output",
+        deliveryStatus: "PROCESSING",
+      },
+      data: {
+        deliveryStatus: "SENT",
+        externalMessageId: "provider-message-1",
+        failureCode: null,
+        failureReason: null,
+      },
     });
   });
 

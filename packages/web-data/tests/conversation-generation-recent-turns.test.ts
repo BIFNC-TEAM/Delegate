@@ -32,12 +32,16 @@ describe("generation recent-turn recall boundary", () => {
     });
     mocks.message.findMany.mockResolvedValue([
       {
+        id: "message-first",
         senderType: MessageSenderType.AUDIENCE,
         text: "First audience question",
+        createdAt: new Date("2026-08-04T10:00:00.000Z"),
       },
       {
+        id: "message-second",
         senderType: MessageSenderType.AUDIENCE,
         text: "Second audience question",
+        createdAt: new Date("2026-08-04T10:01:00.000Z"),
       },
     ]);
   });
@@ -61,11 +65,21 @@ describe("generation recent-turn recall boundary", () => {
       },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       take: 6,
-      select: { senderType: true, text: true },
+      select: { id: true, senderType: true, text: true, createdAt: true },
     });
     expect(recentTurns).toEqual([
-      { direction: "inbound", messageText: "Second audience question" },
-      { direction: "inbound", messageText: "First audience question" },
+      {
+        id: "message-second",
+        direction: "inbound",
+        messageText: "Second audience question",
+        createdAt: "2026-08-04T10:01:00.000Z",
+      },
+      {
+        id: "message-first",
+        direction: "inbound",
+        messageText: "First audience question",
+        createdAt: "2026-08-04T10:00:00.000Z",
+      },
     ]);
     expect(recentTurns.every((turn) => turn.direction === "inbound")).toBe(true);
   });

@@ -145,6 +145,20 @@ describe("natural-language compute planner", () => {
     }, request)).toBe(true);
   });
 
+  it("plans a requested tutorial file as a generated document", () => {
+    const request = "请给我一个地理学习教程，以文件的形式提供";
+    const plan = inferDeterministicNaturalLanguageComputePlan(request);
+
+    expect(plan).toMatchObject({
+      kind: "execution",
+      steps: [{
+        capability: "write",
+        path: buildDefaultGeneratedDocumentPath(request),
+        content: expect.stringContaining("地理学习教程"),
+      }],
+    });
+  });
+
   it("does not turn an informational report question into a compute task", () => {
     expect(inferDeterministicNaturalLanguageComputePlan("如何生成一个报告文件？")).toBeNull();
     expect(inferDeterministicNaturalLanguageComputePlan("我想知道如何生成一个报告文件")).toBeNull();

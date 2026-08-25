@@ -1016,6 +1016,7 @@ export type RepresentativeRecallItem = OpenVikingRecallItem & {
     memoryVersionId?: string;
     projectionItemId?: string;
     publicKnowledgeProjectionId?: string;
+    publicResourceKey?: string;
     memoryUseItemId?: string;
   };
 };
@@ -1106,14 +1107,31 @@ type RecallQueryClassification =
 
 const SAFE_PUBLIC_KNOWLEDGE_QUERY_STOP_WORDS = new Set([
   "a", "about", "an", "and", "are", "at", "be", "can", "could", "did",
-  "do", "does", "explain", "for", "from", "how", "i", "in", "is", "it",
+  "answer", "audience", "beginner", "beginners", "clearly", "define", "describe",
+  "do", "does", "explain", "explicit", "explicitly", "find", "first", "for",
+  "from", "guide", "how", "i", "in", "internal", "internals", "introduction",
+  "is", "it", "know", "knowledge", "learn", "learning", "list", "lookup",
+  "material", "materials", "method", "methods",
   "may", "me", "my", "of", "on", "or", "our", "please", "should", "tell",
-  "that", "the", "this", "to", "us", "was", "we", "were", "what", "when",
-  "where", "which", "who", "why", "will", "with", "would", "you", "your",
-  "一下", "为什么", "什么", "你", "你们", "告诉", "告诉我", "呢", "吗", "哪个",
-  "哪些", "如何", "帮", "帮我", "怎么", "我们", "我", "是否", "是", "有", "有没有",
-  "的", "能", "能否", "解释", "请", "请问", "说明", "关于", "可以", "您",
+  "representative", "retrieval", "retrieve", "search", "source", "sources", "step",
+  "steps", "student", "students", "summarize", "summary", "that", "the", "this",
+  "to", "tutorial", "us", "was", "we", "were", "what", "when", "where",
+  "which", "who", "why", "will", "with", "would", "you", "your",
+  "一下", "为什么", "什么", "多少", "你", "你是", "你们", "谁", "自己", "告诉", "告诉我", "呢", "吗", "哪个",
+  "哪些", "如何", "帮", "帮忙", "帮我", "怎么", "怎样", "我们", "我", "是否", "是",
+  "有", "有没有", "的", "地", "得", "和", "或", "及", "与", "能", "能否", "解释",
+  "请", "请问", "说明", "关于", "可以", "您", "应该", "知道", "了解", "学习", "学会",
+  "掌握", "使用", "中文", "英文", "介绍", "讲解", "回答", "给", "给出", "列出", "总结",
+  "概括", "分析", "查询", "查找", "搜索", "三步", "步骤", "方法", "方式", "建议", "教程",
+  "入门", "相关", "内容", "知识", "问题", "答案", "方面", "对于", "针对", "想", "想要",
+  "需要", "会", "在", "为", "把", "被", "从", "到", "上", "下", "中", "里", "了", "吧",
+  "啊", "呀", "么", "出", "并", "先", "查", "查不到", "找", "找不到", "检索", "命中",
+  "未命中", "代表", "代表知识", "资料", "要", "明确", "初中生", "小学生", "高中生",
+  "大学生", "学生", "儿童", "孩子", "新手", "初学者", "受众", "用户", "读者",
 ]);
+
+const PUBLIC_KNOWLEDGE_TOPIC_PREFIX = "published knowledge about ";
+const MAX_PUBLIC_KNOWLEDGE_TOPIC_TERMS = 16;
 
 /**
  * Convert untrusted audience text into a sanitized published-knowledge query
@@ -1151,7 +1169,11 @@ function classifyRecallQuery(rawQueryText: string): RecallQueryClassification {
       topicQuery,
     );
   }
-  if (/who are|what do you|about you|service|representative|你是谁|做什么|服务|代表/u.test(normalized)) {
+  if (
+    /who are|what do you|about you|your services?|你是谁|做什么|服务/u.test(normalized)
+    || /(?:介绍|说明).{0,6}(?:你自己|数字代表|这个代表)/u.test(normalized)
+    || /(?:代表).{0,6}(?:是谁|会什么|能做什么)/u.test(normalized)
+  ) {
     return safeRecallQuery(SAFE_RECALL_QUERIES.identity, undefined, topicQuery);
   }
   return safeRecallQuery(
@@ -1182,30 +1204,106 @@ function safeRecallQuery(
  * punctuation, identifier-like tokens, duplicates, and excess length.
  */
 function buildSanitizedPublicKnowledgeQuery(queryText: string): string {
+  const semanticTerms = extractPublicKnowledgeTopicTerms(queryText);
+  return semanticTerms.length
+    ? `${PUBLIC_KNOWLEDGE_TOPIC_PREFIX}${semanticTerms.join(" ")}`
+    : SAFE_RECALL_QUERIES.general;
+}
+
+/**
+ * Derive a small deterministic set of topic anchors. Chinese segments are
+ * folded into the longest non-generic 2-4 character phrase available so a
+ * single character such as `线` cannot authorize a different concept such as
+ * `等高线` for an `等温线` question. Latin terms are retained as complete
+ * identifiers/words and must later be covered exactly by the authorized body.
+ */
+function extractPublicKnowledgeTopicTerms(queryText: string): string[] {
   const normalized = queryText.normalize("NFKC");
   const segmenter = new Intl.Segmenter(
     /\p{Script=Han}/u.test(normalized) ? "zh-CN" : "en-US",
     { granularity: "word" },
   );
-  const uniqueTokens = new Set<string>();
+  const topicTerms: string[] = [];
+  let hanBuffer = "";
+  const flushHanBuffer = () => {
+    if (hanBuffer.length >= 2) topicTerms.push(hanBuffer);
+    hanBuffer = "";
+  };
+  const appendHanToken = (token: string) => {
+    if (token.length <= 4) {
+      if (hanBuffer && hanBuffer.length + token.length > 4) flushHanBuffer();
+      hanBuffer += token;
+      if (hanBuffer.length === 4) flushHanBuffer();
+      return;
+    }
+    flushHanBuffer();
+    let remaining = token;
+    while (remaining) {
+      const take = Math.min(4, remaining.length);
+      hanBuffer = remaining.slice(0, take);
+      remaining = remaining.slice(take);
+      if (hanBuffer.length === 4) flushHanBuffer();
+    }
+  };
   for (const segment of segmenter.segment(normalized)) {
-    if (!segment.isWordLike) continue;
+    if (!segment.isWordLike) {
+      flushHanBuffer();
+      continue;
+    }
     const token = segment.segment.toLocaleLowerCase("en-US").trim();
     if (
       !token
       || token.length > 64
-      || SAFE_PUBLIC_KNOWLEDGE_QUERY_STOP_WORDS.has(token)
       || /[_@]/u.test(token)
       || /^\d{5,}$/u.test(token)
       || /^[a-z]*\d[a-z\d-]{7,}$/iu.test(token)
-    ) continue;
-    uniqueTokens.add(token);
-    if (uniqueTokens.size >= 16) break;
+    ) {
+      flushHanBuffer();
+      continue;
+    }
+    if (isPublicKnowledgeTopicStopWord(token)) {
+      flushHanBuffer();
+      continue;
+    }
+    if (/^\p{Script=Han}+$/u.test(token)) {
+      appendHanToken(token);
+      continue;
+    }
+    flushHanBuffer();
+    if (/^[a-z][a-z\d-]*$/iu.test(token) && token.length >= 3) {
+      topicTerms.push(token);
+    }
+    if (topicTerms.length >= MAX_PUBLIC_KNOWLEDGE_TOPIC_TERMS) break;
   }
-  const semanticTerms = [...uniqueTokens].join(" ").slice(0, 220).trim();
-  return semanticTerms
-    ? `published knowledge about ${semanticTerms}`
-    : SAFE_RECALL_QUERIES.general;
+  flushHanBuffer();
+  return normalizePublicKnowledgeTopicTerms(topicTerms)
+    .slice(0, MAX_PUBLIC_KNOWLEDGE_TOPIC_TERMS);
+}
+
+function isPublicKnowledgeTopicStopWord(token: string) {
+  return SAFE_PUBLIC_KNOWLEDGE_QUERY_STOP_WORDS.has(token)
+    || /^[一二三四五六七八九十百\d]+步$/u.test(token);
+}
+
+function normalizePublicKnowledgeTopicTerms(terms: readonly string[]) {
+  const normalized = new Set<string>();
+  for (const rawTerm of terms) {
+    const term = rawTerm.normalize("NFKC").toLocaleLowerCase("en-US").trim();
+    if (
+      !term
+      || term.length > 64
+      || isPublicKnowledgeTopicStopWord(term)
+      || /[_@]/u.test(term)
+    ) continue;
+    if (/^\p{Script=Han}+$/u.test(term)) {
+      if (term.length >= 2 && term.length <= 4) normalized.add(term);
+      continue;
+    }
+    if (/^[a-z][a-z\d-]*$/iu.test(term) && term.length >= 3) {
+      normalized.add(term);
+    }
+  }
+  return [...normalized];
 }
 
 /**
@@ -1219,22 +1317,46 @@ function authorizePublicKnowledgeQueryAgainstPublishedCorpus(params: {
   baseQuery: string;
   topicQuery?: string;
   grants: ReadonlyMap<string, PublicKnowledgeRecallGrant>;
-}): string {
-  if (!params.topicQuery) return params.baseQuery;
-  const prefix = "published knowledge about ";
-  if (!params.topicQuery.startsWith(prefix)) return params.baseQuery;
-  const queryTerms = params.topicQuery.slice(prefix.length).split(/\s+/u).filter(Boolean);
+}): {
+  query: string | null;
+  authorizedTopicTerms: string[];
+  topicMatchTerms: string[];
+} {
+  if (!params.topicQuery) {
+    return { query: params.baseQuery, authorizedTopicTerms: [], topicMatchTerms: [] };
+  }
+  if (!params.topicQuery.startsWith(PUBLIC_KNOWLEDGE_TOPIC_PREFIX)) {
+    return { query: params.baseQuery, authorizedTopicTerms: [], topicMatchTerms: [] };
+  }
+  const queryTerms = normalizePublicKnowledgeTopicTerms(
+    params.topicQuery.slice(PUBLIC_KNOWLEDGE_TOPIC_PREFIX.length)
+      .split(/\s+/u)
+      .filter(Boolean),
+  );
+  if (!queryTerms.length) {
+    return { query: params.baseQuery, authorizedTopicTerms: [], topicMatchTerms: [] };
+  }
   const authorizedResources = [...params.grants.values()].map((grant) =>
-    `${grant.title}\n${grant.safeText}`.normalize("NFKC").toLocaleLowerCase("en-US")
+    grant.safeText.normalize("NFKC").toLocaleLowerCase("en-US")
   );
   const authorizedTerms = queryTerms.filter((term) =>
     authorizedResources.some((resource) => resource.includes(term))
   );
-  if (!authorizedTerms.length) return params.baseQuery;
+  const corpusMatchesTopic = publicKnowledgeSourceMatchesAuthorizedTopic(
+    authorizedResources.join("\n"),
+    queryTerms,
+  );
+  if (!corpusMatchesTopic) {
+    return { query: null, authorizedTopicTerms: [], topicMatchTerms: queryTerms };
+  }
   const authorizedTopic = authorizedTerms.join(" ");
-  return params.baseQuery === SAFE_RECALL_QUERIES.general
-    ? `${prefix}${authorizedTopic}`
-    : `${params.baseQuery}; authorized published topic: ${authorizedTopic}`;
+  return {
+    query: params.baseQuery === SAFE_RECALL_QUERIES.general
+      ? `${PUBLIC_KNOWLEDGE_TOPIC_PREFIX}${authorizedTopic}`
+      : `${params.baseQuery}; authorized published topic: ${authorizedTopic}`,
+    authorizedTopicTerms: authorizedTerms,
+    topicMatchTerms: queryTerms,
+  };
 }
 
 function recallQueryContainsRestrictedData(queryText: string): boolean {
@@ -1280,6 +1402,152 @@ function recallQueryContainsRestrictedData(queryText: string): boolean {
     /(?:\bpaid\b|\bpayment\b|付款|支付|消费|充值).{0,12}\d+(?:\.\d{1,2})?/iu,
   ];
   return restrictedPatterns.some((pattern) => pattern.test(queryText));
+}
+
+export type RepresentativeKnowledgeMetadataProbe = {
+  status: "hit" | "miss" | "unavailable" | "denied";
+  candidateCount: number;
+  matchedTopics: string[];
+  probeRevision: string;
+};
+
+/**
+ * Probe the same immutable public-knowledge authorization manifest used by
+ * recall, without calling OpenViking or creating a MemoryUseRun. The result is
+ * a routing signal only; it never becomes evidence for the Composer.
+ */
+export async function probeRepresentativeKnowledgeMetadata(params: {
+  representativeSlug: string;
+  representativeVersionId: string;
+  conversationId: string;
+  contactId: string;
+  sourceChannel: RecallSourceChannel;
+  queryText: string;
+  allowedSourceKinds?: readonly RepresentativeRecallSourceKind[];
+}): Promise<RepresentativeKnowledgeMetadataProbe> {
+  const baseRevision = `knowledge-probe:${params.representativeVersionId}`;
+  if (!isRecallSourceChannel(params.sourceChannel)) {
+    return emptyKnowledgeMetadataProbe("denied", baseRevision);
+  }
+  const allowedSourceKinds = normalizeRecallSourceKinds(params.allowedSourceKinds);
+  if (!allowedSourceKinds.has("PUBLIC_KNOWLEDGE")) {
+    return emptyKnowledgeMetadataProbe("denied", baseRevision);
+  }
+  const recallQuery = classifyRecallQuery(params.queryText);
+  if (recallQuery.kind === "empty") {
+    return emptyKnowledgeMetadataProbe("miss", baseRevision);
+  }
+  if (recallQuery.kind === "blocked") {
+    return emptyKnowledgeMetadataProbe("denied", baseRevision);
+  }
+
+  const conversation = await prisma.conversation.findFirst({
+    where: {
+      id: params.conversationId,
+      contactId: params.contactId,
+      sourceChannel: params.sourceChannel,
+      representative: { slug: params.representativeSlug },
+    },
+    select: {
+      activeEpisodeId: true,
+      representative: {
+        select: {
+          id: true,
+          ownerId: true,
+          slug: true,
+          lifecycleState: true,
+          openvikingEnabled: true,
+          openvikingAutoRecall: true,
+        },
+      },
+    },
+  });
+  if (
+    !conversation?.activeEpisodeId
+    || conversation.representative.lifecycleState !== "PUBLISHED"
+  ) {
+    return emptyKnowledgeMetadataProbe("denied", baseRevision);
+  }
+  if (
+    !conversation.representative.openvikingEnabled
+    || !conversation.representative.openvikingAutoRecall
+  ) {
+    return emptyKnowledgeMetadataProbe("unavailable", baseRevision);
+  }
+  const episode = await prisma.conversationEpisode.findFirst({
+    where: {
+      id: conversation.activeEpisodeId,
+      conversationId: params.conversationId,
+    },
+    select: {
+      representativeVersion: {
+        select: {
+          id: true,
+          representativeId: true,
+          status: true,
+          snapshot: true,
+        },
+      },
+    },
+  });
+  const pinnedVersion = episode?.representativeVersion;
+  const pinnedSnapshot = pinnedVersion
+    ? publishedRepresentativeSnapshotSchema.safeParse(pinnedVersion.snapshot)
+    : null;
+  if (
+    !pinnedVersion
+    || pinnedVersion.id !== params.representativeVersionId
+    || pinnedVersion.representativeId !== conversation.representative.id
+    || pinnedVersion.status !== "PUBLISHED"
+    || !pinnedSnapshot?.success
+  ) {
+    return emptyKnowledgeMetadataProbe("denied", baseRevision);
+  }
+  const authorization = await loadPublicKnowledgeRecallAuthorization({
+    representative: conversation.representative,
+    publishedVersionId: pinnedVersion.id,
+    snapshot: pinnedSnapshot.data,
+  });
+  const resources = [...authorization.publicKnowledgeGrantsByUri.values()];
+  if (!resources.length) {
+    return emptyKnowledgeMetadataProbe("unavailable", baseRevision);
+  }
+  const authorizedQuery = authorizePublicKnowledgeQueryAgainstPublishedCorpus({
+    baseQuery: recallQuery.publicKnowledgeBaseQuery,
+    ...(recallQuery.publicKnowledgeTopicQuery
+      ? { topicQuery: recallQuery.publicKnowledgeTopicQuery }
+      : {}),
+    grants: authorization.publicKnowledgeGrantsByUri,
+  });
+  const revision = `knowledge-probe:${pinnedVersion.id}:${sha256Text(resources
+    .map((resource) => `${resource.resourceKey}:${resource.contentHash}`)
+    .sort()
+    .join("|"))}`;
+  if (!authorizedQuery.query) {
+    return emptyKnowledgeMetadataProbe("miss", revision);
+  }
+  const matchedResources = authorizedQuery.topicMatchTerms.length
+    ? resources.filter((resource) =>
+        publicKnowledgeSourceMatchesAuthorizedTopic(
+          resource.safeText,
+          authorizedQuery.topicMatchTerms,
+        ))
+    : resources;
+  return {
+    status: matchedResources.length ? "hit" : "miss",
+    candidateCount: matchedResources.length,
+    // These are sanitized terms already present in both the user query and
+    // the authorized corpus; no document body or private metadata is exposed.
+    matchedTopics: authorizedQuery.authorizedTopicTerms.slice(0, 16),
+    probeRevision: revision,
+  };
+}
+
+function emptyKnowledgeMetadataProbe(
+  status: RepresentativeKnowledgeMetadataProbe["status"],
+  probeRevision: string,
+): RepresentativeKnowledgeMetadataProbe {
+  return { status, candidateCount: 0, matchedTopics: [], probeRevision };
 }
 
 /**
@@ -1460,7 +1728,11 @@ export async function recallRepresentativeContext(params: {
           : {}),
         grants: publicAuthorization.publicKnowledgeGrantsByUri,
       })
-    : SAFE_RECALL_QUERIES.general;
+    : {
+        query: SAFE_RECALL_QUERIES.general,
+        authorizedTopicTerms: [],
+        topicMatchTerms: [],
+      };
   const governedMemoryRecall = await loadAndSearchGovernedMemoryRecall({
     authorization: governedAuthorizationInput,
     representative,
@@ -1503,17 +1775,22 @@ export async function recallRepresentativeContext(params: {
     client: OpenVikingClient | null;
     limit: number;
     scoreThreshold: number;
+    query?: string;
+    topicMatchTerms?: string[];
     precomputedResult?: PromiseSettledResult<
       Awaited<ReturnType<OpenVikingClient["search"]>>
     >;
   }> = [];
-  if (publicClient) {
+  const authorizedPublicQuery = publicKnowledgeQuery.query;
+  if (publicClient && authorizedPublicQuery) {
     searchTargets.push(...uniqueRecallRoots([
       authorization.publishedVersionRoot,
     ]).map((targetUri) => ({
       targetUri,
       lane: "PUBLIC_KNOWLEDGE" as const,
       client: publicClient,
+      query: authorizedPublicQuery,
+      topicMatchTerms: publicKnowledgeQuery.topicMatchTerms,
       ...publicSearchConfig,
     })));
   }
@@ -1546,7 +1823,7 @@ export async function recallRepresentativeContext(params: {
         return Promise.reject(new Error("Recall client is unavailable."));
       }
       return target.client.search({
-        query: publicKnowledgeQuery,
+        query: target.query ?? SAFE_RECALL_QUERIES.general,
         targetUri: target.targetUri,
         limit: target.limit,
         scoreThreshold: target.scoreThreshold,
@@ -1583,6 +1860,14 @@ export async function recallRepresentativeContext(params: {
         || (target.lane === "PUBLIC_KNOWLEDGE" && !sourceIsPublic)
         || (target.lane === "GOVERNED_MEMORY" && sourceIsPublic)
         || !authorizedRecallSourceHasSafeText(source)
+        || (
+          target.lane === "PUBLIC_KNOWLEDGE"
+          && (target.topicMatchTerms?.length ?? 0) > 0
+          && !publicKnowledgeSourceMatchesAuthorizedTopic(
+            source.safeText,
+            target.topicMatchTerms!,
+          )
+        )
       ) {
         observedUnmappedCandidateCount += 1;
         continue;
@@ -1704,6 +1989,33 @@ export async function recallRepresentativeContext(params: {
     citations: [],
     memoryUseRunId,
   };
+}
+
+export function publicKnowledgeSourceMatchesAuthorizedTopic(
+  safeText: string,
+  authorizedTopicTerms: readonly string[],
+) {
+  const topicTerms = normalizePublicKnowledgeTopicTerms(authorizedTopicTerms);
+  if (!topicTerms.length) return true;
+  const normalizedSource = safeText.normalize("NFKC").toLocaleLowerCase("en-US");
+  const matchedTerms = new Set(
+    topicTerms.filter((term) => normalizedSource.includes(term)),
+  );
+  // Topic extraction preserves semantic order after removing request
+  // scaffolding. The first surviving term is the primary subject and is a
+  // mandatory fence; audience, retrieval, and formatting terms can never
+  // substitute for it even if they happen to occur in the published corpus.
+  const primaryTopicTerm = topicTerms[0]!;
+  if (!matchedTerms.has(primaryTopicTerm)) return false;
+
+  const latinTerms = topicTerms.filter((term) => /[a-z]/iu.test(term));
+  if (latinTerms.some((term) => !matchedTerms.has(term))) return false;
+
+  const hanTerms = topicTerms.filter((term) => /^\p{Script=Han}+$/u.test(term));
+  if (!hanTerms.length) return latinTerms.length > 0;
+  const requiredHanCoverage = Math.max(1, Math.ceil(hanTerms.length * 2 / 3));
+  const matchedHanTerms = hanTerms.filter((term) => matchedTerms.has(term));
+  return matchedHanTerms.length >= requiredHanCoverage;
 }
 
 async function revalidateRepresentativeRecallAuthorization(params: {
@@ -2532,6 +2844,7 @@ function hydratePublicKnowledgeRecall(
         sourceKind: "PUBLIC_KNOWLEDGE",
         contentHash: grant.contentHash,
         publicKnowledgeProjectionId: grant.publicKnowledgeProjectionId,
+        publicResourceKey: grant.resourceKey,
         memoryUseItemId,
       },
     },

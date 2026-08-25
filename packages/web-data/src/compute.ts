@@ -201,7 +201,7 @@ type RepresentativeIdentity = {
   computeDefaultPolicyMode: string;
   computeBaseImage: string;
   computeMaxSessionMinutes: number;
-  computeAutoApproveBudgetCents: number;
+  computeAutoApproveTokenLimit: number;
   computeArtifactRetentionDays: number;
   computeNetworkMode: string;
   computeNetworkAllowlist: string[];
@@ -238,11 +238,6 @@ type RepresentativeIdentity = {
           requiresHumanApproval: boolean;
         }>;
       }>;
-    } | null;
-    wallet: {
-      balanceCredits: number;
-      sponsorPoolCredit: number;
-      starsBalance: number;
     } | null;
     capabilityProfiles: Array<{
       id: string;
@@ -298,7 +293,7 @@ type RepresentativeIdentity = {
     defaultToolName: string | null;
     enabled: boolean;
     approvalRequired: boolean;
-    estimatedCostCentsPerCall: number;
+    estimatedTokensPerCall: number;
     maxRetries: number;
     retryBackoffMs: number;
     consecutiveFailures: number;
@@ -359,16 +354,11 @@ export type RepresentativeComputeSnapshot = {
     defaultPolicyMode: "allow" | "ask" | "deny";
     baseImage: string;
     maxSessionMinutes: number;
-    autoApproveBudgetCents: number;
+    autoApproveTokenLimit: number;
     artifactRetentionDays: number;
     networkMode: "no_network" | "allowlist" | "full";
     networkAllowlist: string[];
     filesystemMode: "workspace_only" | "read_only_workspace" | "ephemeral_full";
-    wallet: {
-      balanceCredits: number;
-      sponsorPoolCredit: number;
-      starsBalance: number;
-    };
     delegateManagedProfiles: Array<{
       id: string;
       name: string;
@@ -463,7 +453,6 @@ export type RepresentativeComputeSnapshot = {
   ledger: Array<{
     id: string;
     kind: string;
-    creditDelta: number;
     costCents: number;
     quantity: number;
     unit: string;
@@ -659,7 +648,7 @@ export async function getRepresentativeMcpBindingsSnapshot(representativeSlug: s
           defaultToolName: true,
           enabled: true,
           approvalRequired: true,
-          estimatedCostCentsPerCall: true,
+          estimatedTokensPerCall: true,
           maxRetries: true,
           retryBackoffMs: true,
           consecutiveFailures: true,
@@ -745,7 +734,6 @@ export async function getRepresentativeComputeSnapshot(
     ledger: ledgerEntries.map((entry) => ({
       id: entry.id,
       kind: entry.kind.toLowerCase(),
-      creditDelta: entry.creditDelta,
       costCents: entry.costCents,
       quantity: entry.quantity,
       unit: entry.unit,
@@ -887,7 +875,6 @@ export async function getRepresentativeGovernedActions(
         id: true,
         kind: true,
         costCents: true,
-        creditDelta: true,
         quantity: true,
         unit: true,
         createdAt: true,
@@ -952,13 +939,21 @@ export async function getRepresentativeGovernedActions(
           customerAccount: toGovernedCustomerRef(customerAccount),
         };
       }),
-      executions: executions.map((execution) => {
+      executions: executions.flatMap((execution) => {
+        if (
+          !execution.session
+          || !execution.sessionId
+          || !["EXEC", "READ", "WRITE", "PROCESS", "BROWSER", "MCP"]
+            .includes(execution.capability)
+        ) {
+          return [];
+        }
         const customerAccount = toGovernedCustomerRef(
           normalizeCustomerAccount(
             execution.session.contact?.customerAccount ?? null,
           ),
         );
-        return {
+        return [{
           id: execution.id,
           sessionId: execution.sessionId,
           capability: execution.capability.toLowerCase() as
@@ -984,7 +979,7 @@ export async function getRepresentativeGovernedActions(
           finishedAt: execution.finishedAt?.toISOString() ?? null,
           customerAccount,
           primaryLayer: resolveGovernedCustomerLayer(customerAccount, hasOrganization),
-        };
+        }];
       }),
       artifacts: resourceRecords.artifacts.map((artifact) => ({
         id: artifact.id,
@@ -1032,7 +1027,6 @@ export async function getRepresentativeGovernedActions(
           id: entry.id,
           kind: entry.kind.toLowerCase(),
           costCents: entry.costCents,
-          creditDelta: entry.creditDelta,
           quantity: Math.round(entry.quantity),
           unit: entry.unit,
           createdAt: entry.createdAt.toISOString(),
@@ -1195,7 +1189,6 @@ export async function getRepresentativeComputeArtifactDownload(
           quantity: buffer.byteLength,
           unit: "byte",
           costCents: egressCostCents,
-          creditDelta: 0,
           notes: "artifact_download_egress",
         },
       }),
@@ -1885,7 +1878,7 @@ export async function upsertRepresentativeMcpBinding(
     defaultToolName: input.defaultToolName,
     enabled: input.enabled,
     approvalRequired: input.approvalRequired,
-    estimatedCostCentsPerCall: input.estimatedCostCentsPerCall,
+    estimatedTokensPerCall: input.estimatedTokensPerCall,
     // Persist the legacy field as zero. Remote tool results are not provably
     // idempotent, so the runtime never retries an invocation automatically.
     maxRetries: 0,
@@ -1953,7 +1946,7 @@ export async function upsertRepresentativeMcpBinding(
       defaultToolName: parsed.defaultToolName ?? null,
       enabled: parsed.enabled,
       approvalRequired: parsed.approvalRequired,
-      estimatedCostCentsPerCall: parsed.estimatedCostCentsPerCall,
+      estimatedTokensPerCall: parsed.estimatedTokensPerCall,
       maxRetries: parsed.maxRetries,
       retryBackoffMs: parsed.retryBackoffMs,
     };
@@ -2014,7 +2007,7 @@ export async function upsertRepresentativeMcpBinding(
           existingBinding.defaultToolName !== (parsed.defaultToolName ?? null) ? "default_tool" : null,
           existingBinding.enabled !== parsed.enabled ? "enabled" : null,
           existingBinding.approvalRequired !== parsed.approvalRequired ? "approval_required" : null,
-          existingBinding.estimatedCostCentsPerCall !== parsed.estimatedCostCentsPerCall ? "estimated_cost" : null,
+          existingBinding.estimatedTokensPerCall !== parsed.estimatedTokensPerCall ? "estimated_tokens" : null,
           existingBinding.maxRetries !== parsed.maxRetries || existingBinding.retryBackoffMs !== parsed.retryBackoffMs ? "retry_policy" : null,
         ].filter((value): value is string => Boolean(value))
       : ["created"];
@@ -2143,7 +2136,7 @@ async function getRepresentativeIdentity(
       computeDefaultPolicyMode: true,
       computeBaseImage: true,
       computeMaxSessionMinutes: true,
-      computeAutoApproveBudgetCents: true,
+      computeAutoApproveTokenLimit: true,
       computeArtifactRetentionDays: true,
       computeNetworkMode: true,
       computeNetworkAllowlist: true,
@@ -2194,13 +2187,6 @@ async function getRepresentativeIdentity(
                   },
                 },
               },
-            },
-          },
-          wallet: {
-            select: {
-              balanceCredits: true,
-              sponsorPoolCredit: true,
-              starsBalance: true,
             },
           },
           capabilityProfiles: {
@@ -2278,7 +2264,7 @@ async function getRepresentativeIdentity(
           defaultToolName: true,
           enabled: true,
           approvalRequired: true,
-          estimatedCostCentsPerCall: true,
+          estimatedTokensPerCall: true,
           maxRetries: true,
           retryBackoffMs: true,
           consecutiveFailures: true,
@@ -2942,7 +2928,7 @@ function serializeRepresentativeIdentity(representative: RepresentativeIdentity)
       | "deny",
     baseImage: representative.computeBaseImage,
     maxSessionMinutes: representative.computeMaxSessionMinutes,
-    autoApproveBudgetCents: representative.computeAutoApproveBudgetCents,
+    autoApproveTokenLimit: representative.computeAutoApproveTokenLimit,
     artifactRetentionDays: representative.computeArtifactRetentionDays,
     networkMode: representative.computeNetworkMode.toLowerCase() as
       | "no_network"
@@ -2953,11 +2939,6 @@ function serializeRepresentativeIdentity(representative: RepresentativeIdentity)
       | "workspace_only"
       | "read_only_workspace"
       | "ephemeral_full",
-    wallet: {
-      balanceCredits: representative.owner.wallet?.balanceCredits ?? 0,
-      sponsorPoolCredit: representative.owner.wallet?.sponsorPoolCredit ?? 0,
-      starsBalance: representative.owner.wallet?.starsBalance ?? 0,
-    },
     delegateManagedProfiles: representative.capabilityProfiles.map((profile) => ({
       id: profile.id,
       name: profile.name,
@@ -3177,7 +3158,7 @@ function serializeMcpBindingRecord(binding: RepresentativeIdentity["mcpBindings"
     defaultToolName: binding.defaultToolName,
     enabled: binding.enabled,
     approvalRequired: binding.approvalRequired,
-    estimatedCostCentsPerCall: binding.estimatedCostCentsPerCall,
+    estimatedTokensPerCall: binding.estimatedTokensPerCall,
     maxRetries: binding.maxRetries,
     retryBackoffMs: binding.retryBackoffMs,
     consecutiveFailures: binding.consecutiveFailures,

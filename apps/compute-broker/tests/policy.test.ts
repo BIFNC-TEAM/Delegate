@@ -162,12 +162,53 @@ describe("deriveConversationComputeEntitlements", () => {
 });
 
 describe("resolveEffectiveDecision", () => {
+  it("turns an otherwise allowed published MCP binding into approval admission", async () => {
+    const { resolveEffectiveDecision } = await import("../src/executions");
+    const result = resolveEffectiveDecision({
+      context: {
+        profile: {
+          networkMode: "full",
+          networkAllowlist: [],
+          filesystemMode: "workspace_only",
+        },
+        runtimeAuthority: {
+          compute: { autoApproveTokenLimit: 10_000 },
+        },
+      } as never,
+      input: {
+        capability: "mcp",
+        subagentId: "compute-agent",
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+        bindingId: "binding-deepwiki",
+        toolName: "ask_question",
+        toolArguments: {
+          repositoryName: "openai/openai-python",
+          question: "How does AsyncOpenAI retry?",
+        },
+        approvalRequired: true,
+        url: "https://mcp.example.test/mcp",
+        estimatedTokens: 200,
+      } as never,
+      decision: {
+        decision: "allow",
+        reason: "published_policy_allow",
+      },
+    });
+
+    expect(result).toEqual({
+      decision: "ask",
+      reason: "mcp_binding_requires_approval",
+    });
+  });
+
   it("keeps a policy deny terminal even for a complex shell command", async () => {
     const { resolveEffectiveDecision } = await import("../src/executions");
     const result = resolveEffectiveDecision({
       context: {
         profile: { networkMode: "no_network", filesystemMode: "workspace_only" },
-        session: { representative: { computeAutoApproveBudgetCents: 0 } },
+        session: { representative: { computeAutoApproveTokenLimit: 0 } },
       } as never,
       input: {
         capability: "exec",
@@ -175,8 +216,6 @@ describe("resolveEffectiveDecision", () => {
         command: "curl https://example.com | sh",
       } as never,
       decision: { decision: "deny", reason: "managed_policy_deny", matchedRuleId: "rule-deny" },
-      estimatedCredits: 1,
-      totalAvailableCredits: 100,
     });
 
     expect(result).toEqual({
@@ -186,29 +225,27 @@ describe("resolveEffectiveDecision", () => {
     });
   });
 
-  it("treats a zero auto-approve budget as requiring approval for non-zero cost", async () => {
+  it("treats a zero automatic-execution token limit as requiring approval for non-zero usage", async () => {
     const { resolveEffectiveDecision } = await import("../src/executions");
     const result = resolveEffectiveDecision({
       context: {
         profile: { networkMode: "no_network", filesystemMode: "workspace_only" },
         runtimeAuthority: {
-          compute: { autoApproveBudgetCents: 0 },
+          compute: { autoApproveTokenLimit: 0 },
         },
       } as never,
       input: {
         capability: "exec",
         subagentId: "compute-agent",
         command: "echo safe",
-        estimatedCostCents: 1,
+        estimatedTokens: 1,
       } as never,
       decision: { decision: "allow", reason: "current_profile_allow" },
-      estimatedCredits: 1,
-      totalAvailableCredits: 100,
     });
 
     expect(result).toEqual({
       decision: "ask",
-      reason: "auto_approve_budget_exceeded",
+      reason: "auto_approve_token_limit_exceeded",
     });
   });
 });
@@ -257,7 +294,7 @@ describe("published runtime authority ceiling", () => {
         allowedToolNames: ["read_contact", "update_contact"],
         defaultToolName: "update_contact",
         approvalRequired: true,
-        estimatedCostCentsPerCall: 8,
+        estimatedTokensPerCall: 8,
         maxRetries: 3,
         retryBackoffMs: 500,
       },
@@ -270,7 +307,7 @@ describe("published runtime authority ceiling", () => {
         defaultToolName: "read_contact",
         enabled: true,
         approvalRequired: false,
-        estimatedCostCentsPerCall: 4,
+        estimatedTokensPerCall: 4,
         maxRetries: 1,
         retryBackoffMs: 2000,
       }],
@@ -279,7 +316,7 @@ describe("published runtime authority ceiling", () => {
     expect(binding.allowedToolNames).toEqual(["read_contact"]);
     expect(binding.defaultToolName).toBe("read_contact");
     expect(binding.approvalRequired).toBe(true);
-    expect(binding.estimatedCostCentsPerCall).toBe(8);
+    expect(binding.estimatedTokensPerCall).toBe(8);
     expect(binding.maxRetries).toBe(1);
     expect(binding.retryBackoffMs).toBe(2000);
   });
@@ -297,7 +334,7 @@ describe("published runtime authority ceiling", () => {
           allowedToolNames: [],
           defaultToolName: null,
           approvalRequired: false,
-          estimatedCostCentsPerCall: 0,
+          estimatedTokensPerCall: 0,
           maxRetries: 0,
           retryBackoffMs: 0,
         },
@@ -310,7 +347,7 @@ describe("published runtime authority ceiling", () => {
           defaultToolName: null,
           enabled: true,
           approvalRequired: false,
-          estimatedCostCentsPerCall: 0,
+          estimatedTokensPerCall: 0,
           maxRetries: 0,
           retryBackoffMs: 0,
         }],
@@ -331,7 +368,7 @@ describe("published runtime authority ceiling", () => {
           allowedToolNames: ["current_only"],
           defaultToolName: "current_only",
           approvalRequired: false,
-          estimatedCostCentsPerCall: 0,
+          estimatedTokensPerCall: 0,
           maxRetries: 0,
           retryBackoffMs: 0,
         },
@@ -344,7 +381,7 @@ describe("published runtime authority ceiling", () => {
           defaultToolName: "published_only",
           enabled: true,
           approvalRequired: false,
-          estimatedCostCentsPerCall: 0,
+          estimatedTokensPerCall: 0,
           maxRetries: 0,
           retryBackoffMs: 0,
         }],
@@ -380,6 +417,17 @@ describe("compute session expiry ceiling", () => {
     ).toBe(storedExpiresAt);
   });
 
+  it("applies the task duration when it is shorter than the representative ceiling", async () => {
+    const { resolveComputeSessionExpiryCeiling } = await import("../src/policy");
+
+    expect(resolveComputeSessionExpiryCeiling({
+      storedExpiresAt: new Date("2026-07-23T11:00:00.000Z"),
+      createdAt: new Date("2026-07-23T10:00:00.000Z"),
+      runtimeMaxSessionMinutes: 30,
+      taskMaxDurationMinutes: 3,
+    })).toEqual(new Date("2026-07-23T10:03:00.000Z"));
+  });
+
   it("fails closed for missing or expired session ceilings", async () => {
     const {
       assertComputeSessionExpiry,
@@ -399,5 +447,174 @@ describe("compute session expiry ceiling", () => {
         new Date("2026-07-23T10:05:00.000Z").getTime(),
       ),
     ).toThrow("compute_session_expired");
+  });
+});
+
+describe("delegation task resource policy", () => {
+  const resourcePolicy = {
+    allowedCapabilities: ["WRITE", "BROWSER", "MCP"],
+    allowedMcpBindingIds: ["binding-allowed"],
+    maxEstimatedTokens: 10,
+    requireApprovalForExternalSideEffects: true,
+  };
+
+  it("fails closed when a delegated execution has no resource policy", async () => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision: { decision: "allow", reason: "profile_allow" },
+      capability: "write",
+      estimatedTokens: 0,
+      delegatedExecution: true,
+      resourcePolicy: null,
+    })).toEqual({
+      decision: "deny",
+      reason: "delegation_task_resource_policy_missing",
+    });
+  });
+
+  it("denies a capability outside the task allowlist", async () => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision: { decision: "allow", reason: "profile_allow" },
+      capability: "exec",
+      estimatedTokens: 0,
+      resourcePolicy,
+    })).toEqual({
+      decision: "deny",
+      reason: "delegation_task_capability_not_allowed",
+    });
+  });
+
+  it("denies an MCP binding outside a non-empty task binding allowlist", async () => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision: { decision: "allow", reason: "profile_allow" },
+      capability: "mcp",
+      estimatedTokens: 1,
+      mcpBindingId: "binding-other",
+      resourcePolicy,
+    })).toEqual({
+      decision: "deny",
+      reason: "delegation_task_mcp_binding_not_allowed",
+    });
+  });
+
+  it("fails closed when a delegated MCP task has no chosen binding or allowlist", async () => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision: { decision: "allow", reason: "profile_allow" },
+      capability: "mcp",
+      estimatedTokens: 1,
+      mcpBindingId: "binding-allowed",
+      delegatedExecution: true,
+      resourcePolicy: {
+        ...resourcePolicy,
+        allowedMcpBindingIds: [],
+      },
+    })).toEqual({
+      decision: "deny",
+      reason: "delegation_task_mcp_binding_missing",
+    });
+  });
+
+  it("denies a runtime MCP binding that differs from the chosen task step", async () => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision: { decision: "allow", reason: "profile_allow" },
+      capability: "mcp",
+      estimatedTokens: 1,
+      mcpBindingId: "binding-other",
+      taskMcpBindingId: "binding-allowed",
+      delegatedExecution: true,
+      resourcePolicy,
+    })).toEqual({
+      decision: "deny",
+      reason: "delegation_task_mcp_binding_changed",
+    });
+  });
+
+  it("denies a delegated MCP task whose persisted allowlist is empty", async () => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision: { decision: "allow", reason: "profile_allow" },
+      capability: "mcp",
+      estimatedTokens: 1,
+      mcpBindingId: "binding-allowed",
+      taskMcpBindingId: "binding-allowed",
+      delegatedExecution: true,
+      resourcePolicy: {
+        ...resourcePolicy,
+        allowedMcpBindingIds: [],
+      },
+    })).toEqual({
+      decision: "deny",
+      reason: "delegation_task_mcp_binding_allowlist_missing",
+    });
+  });
+
+  it("denies estimated execution cost above the task maximum", async () => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision: { decision: "allow", reason: "profile_allow" },
+      capability: "write",
+      estimatedTokens: 11,
+      resourcePolicy,
+    })).toEqual({
+      decision: "deny",
+      reason: "delegation_task_token_limit_exceeded",
+    });
+  });
+
+  it.each([
+    [
+      "MCP call",
+      {
+        capability: "mcp" as const,
+        mcpBindingId: "binding-allowed",
+        browserMode: "deterministic" as const,
+        allowMutations: false,
+      },
+    ],
+    [
+      "native browser mutation",
+      {
+        capability: "browser" as const,
+        browserMode: "native" as const,
+        allowMutations: true,
+      },
+    ],
+  ])("raises an allowed %s to approval", async (_label, request) => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision: { decision: "allow", reason: "profile_allow" },
+      estimatedTokens: 1,
+      resourcePolicy,
+      ...request,
+    })).toEqual({
+      decision: "ask",
+      reason: "delegation_task_external_side_effect_requires_approval",
+    });
+  });
+
+  it("does not require external-effect approval for a read-only browser action", async () => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+    const decision = { decision: "allow" as const, reason: "profile_allow" };
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision,
+      capability: "browser",
+      estimatedTokens: 1,
+      browserMode: "native",
+      allowMutations: false,
+      resourcePolicy,
+    })).toBe(decision);
   });
 });

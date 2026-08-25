@@ -19,11 +19,10 @@ describe("unified workspace decision queue", () => {
     expect(computeSource).toContain("runtimeRequirementDiff");
   });
 
-  it("routes skill decisions through skill governance before compute resolution", () => {
+  it("dispatches authenticated approvals directly to their verified governance domain", () => {
     expect(route).toContain("assertOwnerCanResolveApproval");
-    expect(route.indexOf("resolveWorkspaceSkillApproval")).toBeLessThan(
-      route.indexOf("resolveRepresentativeComputeApproval({"),
-    );
+    expect(route).toContain('approvalDomain !== "compute"');
+    expect(route).toContain('approvalDomain === "skill_update"');
     expect(route).toContain("if (skillDecision.handled)");
     expect(computeSource).toContain("queryRepresentativeApprovals(representative.id, 100, representative.ownerId)");
     expect(computeSource).toContain('? [{ status: "asc" }, { requestedAt: "desc" }]');

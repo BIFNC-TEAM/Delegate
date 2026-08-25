@@ -570,6 +570,8 @@ export function approvalRiskScore(reason: string, riskSummary: string): number {
     return 82;
   }
   if (
+    normalizedReason.includes("tokens_above_rule_limit") ||
+    normalizedReason.includes("auto_approve_token_limit_exceeded") ||
     normalizedReason.includes("cost_above_rule_limit") ||
     normalizedReason.includes("auto_approve_budget_exceeded") ||
     normalizedReason.includes("subagent_budget_exceeded")

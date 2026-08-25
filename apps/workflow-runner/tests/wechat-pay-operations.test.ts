@@ -183,7 +183,7 @@ describe("WeChat Pay operations runner", () => {
     );
   });
 
-  it("keeps a failed lane red through idle backoff until claimed work succeeds", async () => {
+  it("clears a transient lane failure on the next successful idle heartbeat", async () => {
     let orderTick = 0;
     const succeeded: WeChatPayOperationalWorkerKey[] = [];
     const dependencies: WeChatPayOperationsTickDependencies = {
@@ -246,6 +246,7 @@ describe("WeChat Pay operations runner", () => {
     expect(activeCodes).toEqual([
       "wechat_order_reconciliation_tick_failed",
     ]);
+    succeeded.length = 0;
 
     const idleTick = await runWeChatPayOperationsTick(
       config,
@@ -255,11 +256,17 @@ describe("WeChat Pay operations runner", () => {
       activeCodes,
       idleTick,
     );
-    expect(idleTick.recoveredWorkerCodes).toEqual([]);
-    expect(activeCodes).toEqual([
+    expect(idleTick.recoveredWorkerCodes).toEqual([
       "wechat_order_reconciliation_tick_failed",
+      "wechat_refund_lifecycle_tick_failed",
+      "wechat_refund_reversal_tick_failed",
     ]);
-    expect(succeeded).toEqual([]);
+    expect(activeCodes).toEqual([]);
+    expect(succeeded).toEqual([
+      WECHAT_PAY_OPERATIONAL_WORKERS.orderReconciliation,
+      WECHAT_PAY_OPERATIONAL_WORKERS.refundLifecycle,
+      WECHAT_PAY_OPERATIONAL_WORKERS.refundReversal,
+    ]);
 
     const recoveredTick = await runWeChatPayOperationsTick(
       config,
@@ -271,11 +278,11 @@ describe("WeChat Pay operations runner", () => {
     );
     expect(recoveredTick.recoveredWorkerCodes).toEqual([
       "wechat_order_reconciliation_tick_failed",
+      "wechat_refund_lifecycle_tick_failed",
+      "wechat_refund_reversal_tick_failed",
     ]);
     expect(activeCodes).toEqual([]);
-    expect(succeeded).toEqual([
-      WECHAT_PAY_OPERATIONAL_WORKERS.orderReconciliation,
-    ]);
+    expect(succeeded).toHaveLength(6);
   });
 });
 

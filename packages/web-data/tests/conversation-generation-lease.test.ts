@@ -8,11 +8,24 @@ const mocks = vi.hoisted(() => {
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    conversationTurnPlan: {
+      findFirst: vi.fn(),
+    },
     memoryUseRun: {
       findFirst: vi.fn().mockResolvedValue(null),
     },
     message: {
+      findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    messageDeliveryAttempt: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    planExecutionFence: {
+      findUnique: vi.fn(),
     },
     conversation: {
       update: vi.fn(),
@@ -22,6 +35,7 @@ const mocks = vi.hoisted(() => {
       updateMany: vi.fn(),
     },
     outboxEvent: {
+      findUnique: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
     },
@@ -72,9 +86,15 @@ import {
   GenerationWorkLeaseLostError,
   markGenerationDeliveryComplete,
   renewGenerationWorkItemLease,
+  retryGenerationDelivery,
+  updateGenerationTurnExecutionProgress,
 } from "../src/conversation-platform";
 
 const currentTime = new Date("2026-07-24T08:00:00.000Z");
+const deliveryAdmission = (attemptNumber: number) => ({
+  attemptNumber,
+  leaseToken: `delivery-lease-${attemptNumber}`,
+});
 const validRun = {
   id: "run-stale",
   outputMessageId: "message-attempt-b",
@@ -141,7 +161,31 @@ describe("conversation generation work leases", () => {
     );
     mocks.tx.generationRun.findUnique.mockResolvedValue(validRun);
     mocks.tx.generationRun.update.mockResolvedValue(validRun);
+    mocks.tx.conversationTurnPlan.findFirst.mockResolvedValue(null);
     mocks.tx.message.update.mockResolvedValue({ id: "message-in" });
+    mocks.tx.message.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.messageDeliveryAttempt.findUnique.mockImplementation(
+      async ({ where }) => {
+        const attemptNumber = where.messageId_attemptNumber.attemptNumber;
+        return {
+          status: "PROCESSING",
+          attemptPhase: "CALL_PREPARED",
+          leaseToken: `delivery-lease-${attemptNumber}`,
+          leaseExpiresAt: new Date(currentTime.getTime() + 60_000),
+          deliveryOutboxId: "outbox-stale",
+          deliveryLeaseAttempt: attemptNumber,
+          planId: null,
+          planRevision: null,
+          executionEpoch: null,
+          planActionId: null,
+          plan: null,
+        };
+      },
+    );
+    mocks.tx.messageDeliveryAttempt.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.message.findUnique.mockResolvedValue({
+      conversationId: "conversation-1",
+    });
     mocks.tx.conversation.update.mockResolvedValue({ id: "conversation-1" });
     mocks.tx.outboxEvent.update.mockResolvedValue({
       id: "outbox-stale",
@@ -149,6 +193,12 @@ describe("conversation generation work leases", () => {
       attemptCount: 3,
     });
     mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.outboxEvent.findUnique.mockResolvedValue({
+      attemptCount: 3,
+      status: "PROCESSING",
+    });
+    mocks.tx.messageDeliveryAttempt.upsert.mockResolvedValue({ id: "attempt-1" });
+    mocks.tx.messageDeliveryAttempt.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.conversationEpisode.updateMany.mockResolvedValue({ count: 1 });
     mocks.tx.serviceEntitlementLedgerEntry.findMany.mockResolvedValue([]);
     mocks.tx.serviceEntitlementLedgerEntry.findUnique.mockResolvedValue(null);
@@ -161,6 +211,42 @@ describe("conversation generation work leases", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("persists a lease-fenced public-safe turn execution stage", async () => {
+    await updateGenerationTurnExecutionProgress({
+      runId: "run-stale",
+      outboxId: "outbox-stale",
+      leaseAttempt: 3,
+      stage: "generating",
+      part: 2,
+      maxParts: 3,
+    });
+
+    expect(mocks.tx.outboxEvent.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "outbox-stale",
+          aggregateId: "run-stale",
+          attemptCount: 3,
+          status: "PROCESSING",
+        }),
+      }),
+    );
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-stale" },
+      data: {
+        contextSnapshot: expect.objectContaining({
+          turnExecutionProgress: expect.objectContaining({
+            version: 1,
+            stage: "generating",
+            part: 2,
+            maxParts: 3,
+          }),
+        }),
+      },
+      select: { id: true, contextSnapshot: true },
+    });
   });
 
   it("atomically reclaims an expired PROCESSING item and starts a new lease", async () => {
@@ -210,6 +296,59 @@ describe("conversation generation work leases", () => {
         lastError: null,
       },
     });
+  });
+
+  it("retries an expired pre-call delivery but never classifies it as provider-unknown", async () => {
+    const candidate = {
+      id: "outbox-stale",
+      aggregateId: "run-stale",
+      conversationId: "conversation-1",
+      delegationTaskId: null,
+      status: "PROCESSING",
+      attemptCount: 2,
+      runStatus: "COMPLETED",
+      outputMessageId: "message-attempt-b",
+    };
+    mocks.tx.$queryRaw.mockResolvedValue([candidate]);
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      ...validRun,
+      status: "COMPLETED",
+      outputMessageId: "message-attempt-b",
+      outputMessage: {
+        id: "message-attempt-b",
+        text: "persisted reply",
+        externalMessageId: null,
+        deliveryStatus: "FAILED",
+      },
+    });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toMatchObject({
+      outboxId: "outbox-stale",
+      leaseAttempt: 3,
+      runId: "run-stale",
+      deliveryOnly: true,
+    });
+
+    expect(mocks.tx.messageDeliveryAttempt.updateMany).toHaveBeenCalledWith({
+      where: {
+        messageId: "message-attempt-b",
+        attemptNumber: 2,
+        status: { in: ["PROCESSING"] },
+      },
+      data: expect.objectContaining({
+        status: "FAILED",
+        attemptPhase: "LEASE_EXPIRED",
+        leaseToken: null,
+        failureCode: "delivery_lease_expired_before_provider_call",
+      }),
+    });
+    expect(mocks.tx.outboxEvent.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          lastError: "provider_outcome_unknown_after_lease_expiry",
+        }),
+      }),
+    );
   });
 
   it("dead-letters an expired max-attempt item and releases its funds", async () => {
@@ -269,6 +408,146 @@ describe("conversation generation work leases", () => {
     );
   });
 
+  it("releases delivery-gated billing when a persisted reply exhausts delivery retries", async () => {
+    mocks.tx.$queryRaw.mockResolvedValue([{
+      id: "outbox-stale",
+      aggregateId: "run-stale",
+      conversationId: "conversation-1",
+      delegationTaskId: null,
+      status: "PROCESSING",
+      attemptCount: 5,
+    }]);
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      ...validRun,
+      status: "COMPLETED",
+      contextSnapshot: {
+        deliveryBilling: { version: 1, status: "pending" },
+      },
+    });
+    mocks.tx.outboxEvent.findUnique.mockResolvedValue({
+      attemptCount: 5,
+      status: "PROCESSING",
+    });
+
+    await expect(claimNextGenerationWorkItem()).resolves.toBeNull();
+
+    expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-stale",
+        failed: true,
+        reason: "generation_work_lease_exhausted",
+        idempotencyKey: "generation:run-stale:release",
+      },
+      mocks.tx,
+    );
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-stale" },
+      data: expect.objectContaining({
+        runtimePolicySnapshot: expect.objectContaining({
+          billingMode: "service_credit_released",
+        }),
+        contextSnapshot: expect.objectContaining({
+          deliveryBilling: expect.objectContaining({
+            status: "released",
+            reason: "generation_work_lease_exhausted",
+          }),
+        }),
+      }),
+    });
+    expect(mocks.tx.message.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "message-attempt-b",
+        deliveryStatus: {
+          in: ["QUEUED", "PROCESSING", "FAILED"],
+        },
+      },
+      data: {
+        deliveryStatus: "FAILED",
+        failureCode: "generation_work_lease_exhausted",
+        failureReason: "The channel delivery worker exhausted all retry attempts.",
+      },
+    });
+    expect(mocks.tx.messageDeliveryAttempt.updateMany).toHaveBeenCalledWith({
+      where: {
+        messageId: "message-attempt-b",
+        attemptNumber: 5,
+        status: { in: ["QUEUED", "PROCESSING", "FAILED"] },
+      },
+      data: expect.objectContaining({
+        status: "DEAD_LETTER",
+        failureCode: "generation_work_lease_exhausted",
+      }),
+    });
+    expect(mocks.tx.outboxEvent.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "outbox-stale",
+        status: "PROCESSING",
+        attemptCount: 5,
+      },
+      data: {
+        status: "DEAD_LETTER",
+        processedAt: currentTime,
+        lastError: "generation_work_lease_exhausted",
+      },
+    });
+  });
+
+  it("dead-letters the first provider-unknown generation attempt and releases pending billing", async () => {
+    mocks.tx.generationRun.findUnique.mockResolvedValue({
+      ...validRun,
+      status: "COMPLETED",
+      contextSnapshot: {
+        deliveryBilling: { version: 1, status: "pending" },
+      },
+    });
+
+    await retryGenerationDelivery({
+      runId: "run-stale",
+      outboxId: "outbox-stale",
+      leaseAttempt: 1,
+      outputMessageId: "message-attempt-b",
+      errorMessage: "provider outcome unknown",
+      providerOutcomeUnknown: true,
+    });
+
+    expect(mocks.tx.outboxEvent.updateMany).toHaveBeenLastCalledWith({
+      where: {
+        id: "outbox-stale",
+        aggregateType: "generation_run",
+        aggregateId: "run-stale",
+        eventType: "generation.requested",
+        status: "PROCESSING",
+        attemptCount: 1,
+      },
+      data: expect.objectContaining({
+        status: "DEAD_LETTER",
+        lastError: "telegram_provider_outcome_unknown",
+      }),
+    });
+    expect(mocks.releaseConversationWalletUsage).toHaveBeenCalledWith(
+      {
+        usageChargeId: "usage-reserved",
+        expectedGenerationRunId: "run-stale",
+        failed: true,
+        reason: "telegram_provider_outcome_unknown",
+        idempotencyKey: "generation:run-stale:release",
+      },
+      mocks.tx,
+    );
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-stale" },
+      data: expect.objectContaining({
+        contextSnapshot: expect.objectContaining({
+          deliveryBilling: expect.objectContaining({
+            status: "released",
+            reason: "telegram_provider_outcome_unknown",
+          }),
+        }),
+      }),
+    });
+  });
+
   it("renews only the attempt that still owns the lease", async () => {
     mocks.prisma.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
 
@@ -302,22 +581,29 @@ describe("conversation generation work leases", () => {
       outboxId: "outbox-stale",
       leaseAttempt: 2,
       outputMessageId: "message-attempt-a",
+      deliveryAdmission: deliveryAdmission(2),
     })).rejects.toBeInstanceOf(GenerationWorkLeaseLostError);
 
-    expect(mocks.tx.message.update).not.toHaveBeenCalled();
+    expect(mocks.tx.message.updateMany).not.toHaveBeenCalled();
 
     await expect(markGenerationDeliveryComplete({
       runId: "run-stale",
       outboxId: "outbox-stale",
       leaseAttempt: 3,
       outputMessageId: "message-attempt-b",
+      deliveryAdmission: deliveryAdmission(3),
     })).resolves.toBeUndefined();
 
-    expect(mocks.tx.message.update).toHaveBeenCalledTimes(1);
-    expect(mocks.tx.message.update).toHaveBeenCalledWith({
-      where: { id: "message-attempt-b" },
+    expect(mocks.tx.message.updateMany).toHaveBeenCalledTimes(1);
+    expect(mocks.tx.message.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "message-attempt-b",
+        deliveryStatus: "PROCESSING",
+      },
       data: {
         deliveryStatus: "SENT",
+        failureCode: null,
+        failureReason: null,
       },
     });
     expect(mocks.tx.memoryUseRun.findFirst).not.toHaveBeenCalled();
@@ -346,6 +632,7 @@ describe("conversation generation work leases", () => {
       outboxId: "outbox-stale",
       leaseAttempt: 3,
       outputMessageId: "message-from-another-run",
+      deliveryAdmission: deliveryAdmission(3),
     })).rejects.toThrow("does not belong to the generation run");
 
     expect(mocks.tx.message.update).not.toHaveBeenCalled();

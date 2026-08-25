@@ -1,161 +1,289 @@
 # 数字代表统一对话运行流程
 
-本文是 Web、Matrix、Telegram 公开对话的共同运行契约，也是后续开发和验收依据。固定的 `freeScope`、`paywalledIntents` 和 Owner 业务动作开关已经退出运行时；价格、对话路由、工具授权、审批和人工接手分别由各自的权威模块决定。
+本文描述 Web、Matrix、Telegram 的共同业务流程。Agent 规划与能力执行的完整协议见
+[Agent Runtime V3](./agent-runtime-v3.md)；该文档是规划、执行、审批、证据、交付和
+回滚的权威规范。
 
 ## 核心原则
 
-1. 意图识别只描述用户目标，不直接授权动作。
-2. 一轮输入可以产生多个有序动作，而不是一个 `nextStep`。
-3. 公开回答、资料发送、信息采集、服务请求、工具执行、审批和人工接手是不同对象。
-4. 价格策略只判断本轮是否有权继续；不按“招聘、报价、合作”等固定业务标签收费。
-5. 只有真实工具或外部副作用才进入 Compute 能力策略。普通需求不会伪装成审批。
-6. 用户输入和模型输出都不能扩大权限。平台安全策略可以收紧 Owner 策略，但不能被其放宽。
-7. 所有渠道使用同一套计划、账本、状态和幂等规则。
+1. 用户目标识别、证据选择、执行授权、计费和人工接管是不同决策。
+2. 模型只生成不可信 `PlannerProposal`；服务端生成不可变、可执行的
+   `Validated TurnPlan V3`。
+3. 一轮输入可以拆成多个 Goal；每个 Goal 可以选择知识、工具或稳定通用回答，最终
+   组合为同一个 Action DAG。
+4. `TurnPlan V3` 是唯一执行真相，不再并列保存另一套 RouteDecision。
+5. 工具失败不得静默改成模型猜测。只能执行已验证的预案 Action，或明确返回失败、
+   澄清、人工接管或 reconciliation 状态。
+6. 模型、用户输入、附件、历史消息、MCP annotations 和工具输出都不能扩大权限。
+7. Postgres 保存业务真相；Temporal 只负责耐久等待、Signal、retry 调度和取消清理。
 
-## 端到端主流程
+## 当前主流程
 
 ```mermaid
 flowchart TD
-  A["渠道接收消息"] --> B["验证渠道、身份、版本与人工控制权"]
-  B -->|"人工处理中"| B1["停止 AI，交给 Operator"]
-  B -->|"无效或重放"| B2["拒绝或幂等返回"]
-  B --> C["处理确定性账户/记忆命令"]
-  C --> D["读取进行中的采集或委托状态"]
-  D -->|"采集中"| D1["校验并保存当前答案"]
-  D1 --> D2{"信息是否完整"}
-  D2 -->|"否"| D3["询问下一项，状态 WAITING_USER"]
-  D2 -->|"是"| D4["创建 Intake、Lead 与 SERVICE_REQUEST"]
-  D -->|"委托澄清中"| D5["补充执行输入并重新规划"]
-  D -->|"明确取消"| D6["只取消当前会话、当前联系人可取消的任务"]
-  D -->|"无进行中流程"| E["解析目标、风险信号和业务标签"]
-  E --> F["生成 TurnPlan：disposition + actions"]
-  F --> G["检查本轮价格/额度并预占"]
-  G -->|"额度不足"| G1["返回充值入口，不推进动作"]
-  G --> H{"动作类型"}
-  H -->|"公开回答"| I["检索已授权公开知识并生成回答"]
-  H -->|"公开资料"| J["匹配已发布资料并发送链接/附件"]
-  H -->|"需求采集"| K["只采集一段需求描述"]
-  H -->|"服务请求"| L["创建可跟踪 SERVICE_REQUEST"]
-  H -->|"工具/外部操作"| M["创建 DelegationTask 并检查能力策略"]
-  M -->|"allow"| M1["隔离执行工具"]
-  M -->|"ask"| M2["创建 ApprovalRequest，WAITING_APPROVAL"]
-  M -->|"deny"| M3["拒绝执行并说明安全替代方案"]
-  H -->|"明确要求真人"| N["检查人工权益并创建 HandoffRequest"]
-  I --> O["完成账本、审计、投递和状态迁移"]
-  J --> O
-  K --> O
-  L --> O
-  M1 --> O
-  M2 --> O
-  M3 --> O
-  N --> O
+  A["渠道接收消息"] --> B["规范化文本、链接、附件元数据和本轮 TurnConstraints"]
+  B --> C["校验身份、代表版本、安全、人工控制和进行中状态"]
+  C -->|"人工处理中"| C1["停止 AI，等待 Operator"]
+  C -->|"取消/记忆等确定性控制"| C2["执行受限控制命令"]
+  C --> D["构造含单轮约束的 TurnEnvelope、授权上下文和固定 CapabilityCatalog"]
+  D --> D1["Definition/Availability 硬过滤 + 同版本授权 Knowledge Metadata Probe"]
+  D1 --> D2["小目录全量候选 / 大目录 Hybrid Retriever + Candidate Snapshot"]
+  D2 --> D3["通用 External Requirement Signal + 安全 Discovery Summary"]
+  D3 --> E["一次严格 Structured Planner 调用"]
+  E --> F["不可信 PlannerProposal：Goals + Capability Selections"]
+  F --> F0["单调 Proposal Normalization：Selection/Goal/Evidence 对齐"]
+  F0 --> F1["Server Action Materializer：参数/Provenance/Composer/依赖/Deliverable"]
+  F1 --> G["服务端证据升级、Schema/Provenance/DAG/Scope 校验"]
+  G -->|"失败"| G1["保存 V3 PlannerFailure；失败关闭"]
+  G -->|"成功"| H["不可变 Validated TurnPlan V3 + Active Fence"]
+  H --> I{"Action executor"}
+  I -->|"Knowledge"| J["授权知识召回 + UseRun"]
+  I -->|"Builtin"| K["稳定回答/托管文档等内置 Action"]
+  I -->|"Representative self-description"| K1["representative.describe_self：Profile + Knowledge + outcomes + human-confirmation contract"]
+  I -->|"MCP/Compute"| L["Compiler Registry -> DelegationTask"]
+  L --> M["Policy / Approval / Entitlement"]
+  M -->|"ask"| M1["WAITING_APPROVAL；Temporal/Outbox 等待"]
+  M -->|"deny"| M2["拒绝，不执行"]
+  M -->|"allow"| N["Atomic Execution Admission"]
+  N --> O["Attempt + Lease + BillingAdmission + Effect + execution Outbox"]
+  O --> P["能力执行"]
+  J -->|"found"| Q["Verified ActionResult"]
+  J -->|"not_found / unavailable + knowledge_preferred"| J1["Stable general fallback + server disclosure"]
+  J1 --> Q
+  K --> Q
+  K1 --> Q
+  P --> Q
+  Q --> R["派生 GoalOutcome"]
+  R --> S["response.compose：Claim-level Evidence Binding"]
+  S --> T["校验并渲染消息"]
+  T --> U["Message / DeliveryAttempt / Provider Acceptance"]
+  U --> V["结算、释放或对账持有"]
 ```
 
-## TurnPlan 协议
+## V3 计划与能力目录
 
-当前 `TurnPlan`（代码名 `ConversationPlan`）至少包含：
+计划包含：
 
-- `intentResult`：通用目标、多业务标签、请求结果、缺失字段、置信度和风险信号。
-- `goal` / `intent`：兼容投影；只用于分析和运营统计，不作为权限或价格真相。
-- `disposition`：本轮主要状态，取值为 `answer | collect | payment_required | handoff | refuse`。
-- `replyGoal`：本轮用户可见结果，不包含未经授权的事实或承诺。
-- `billingDecision`：独立的 `allow_free | allow_entitlement | payment_required | no_charge` 决策。
-- `actions[]`：有序动作列表；每项包含输入、所需能力、是否有外部副作用和预计成本。
-- `reasons[]`：可审计的路由依据。
-- `responseOutline[]`：回复边界，不包含未经授权的事实或承诺。
+- `goals[]`：目标、原始消息指针、证据要求、失败策略和关联 Action/Deliverable；
+- `actions[]`：能力坐标、参数、逐参数 Provenance、精确依赖状态、条件激活、输出
+  Schema 和失败策略；
+- `deliverables[]`：消息、Artifact、服务请求或外部结果；
+- `response.compose`：普通 DAG Action，不是计划之外的特殊尾处理。
 
-每个动作独立形成 `AuthorizationDecision` 和 `ExecutionResult`。最终把计划、计费、逐动作授权及执行结果保存为 `ConversationTurnTrace(version=1)`，不能用某个已允许动作替整轮计划授权。
+Catalog 只发布当前模式具有真实执行器的能力：
 
-内置对话动作限定为：
+- `knowledge.retrieve_authorized`
+- `response.compose`
+- `artifact.generate_document`
+- `compute.exec/read/write/process/browser`
+- 已同步真实 `tools/list` Schema 的 `mcp.{binding}.{tool}`
 
-| 动作 | 作用 | 副作用 |
-| --- | --- | --- |
-| `answer_public_information` | 回答已授权公开信息 | 无 |
-| `deliver_public_material` | 发送已发布链接或附件 | 无 |
-| `collect_request_description` | 保存用户提交的一段需求描述 | 内部记录 |
-| `create_service_request` | 创建 Owner 可跟踪的服务请求 | 内部记录 |
-| `execute_tool` | 提议受 Compute/MCP 治理的工具执行 | 外部副作用；默认需要审批 |
-| `cancel_pending_action` | 撤回当前联系人在当前会话中的待处理任务 | 内部状态；不收费 |
-| `request_human_handoff` | 进入人工接手队列 | 人工队列 |
-| `refuse_unsafe_request` | 拒绝私有数据、凭据或越权请求 | 无 |
+Skill 保留编译协议，但当前公开运行时不会执行第三方 Skill 代码；没有可信版本固定和
+生产执行适配器的 Skill 不进入 active Catalog，也不会出现在“我会什么”的用户说明中。
 
-不在此列表中的执行能力由 Skill/MCP/Compute 描述，并进入独立的能力策略。
+能力 Definition 与 Availability 分离。Plan 固定 `definitionHash`；健康状态只影响当前
+可用性。MCP 目录在 Broker 启动时及每 120 秒通过只读 `tools/list` 刷新，5 分钟内没有
+可信 Availability、Catalog 不匹配或 Definition 漂移都会在规划前失败关闭。执行时仍使用
+调用握手自带的 `tools/list` 比较 live schema，不增加第二次“每次调用”发现请求。
+MCP Effect 只能来自版本化的服务端/Owner Policy；远端 annotations 不参与分类。未分类或
+仍为 external-write/unknown 的工具即使 `tools/list` 健康也保持 unavailable。DeepWiki 的
+读取工具只有在 HTTPS endpoint、transport、精确 tool schema hash 和 policy ID 全部匹配
+时，才由服务端 V1 Policy 固定为 external read-only；同名 binding/tool 不能获得该信任。
+安装本地的随机 binding ID/config revision 不进入 trust coordinate，因此合法新安装可移植。
 
-## 信息采集与服务请求
+## 证据与通用回答边界
 
-采集器不再由 Owner 配置，也不按“招聘、报价”等业务标签切换表单。数字代表只询问一次：请用户用一段话描述希望解决的问题或获得的结果。联系人、预算、时间、日程窗口、订单凭据和完成标准等信息，由真人接手后按实际需要继续询问。
+Planner 在同一次严格结构化调用中声明 Goal 的 Operation、Evidence、Freshness、
+Authority、Semantic Confidence 和 General Eligibility。服务端不维护订单、源码、天气等
+行业关键词路由；它只执行通用单调准入：General 必须是高置信 stable answer/explain，明确
+命名外部对象的查验必须由兼容的已发布 Capability 支撑，强证据和副作用必须由 Capability
+的不可变 Semantics 明确支持，未分类 MCP/Compute 不能仅凭 Executor 类型冒充实时或交易权威。
+Provider 即使把已选 Capability 的 Goal 错写为 General，服务端也只会按该 Capability 的真实
+Semantics 收紧；不会补造权限或把只读能力升级成写入能力。
 
-完成采集后创建三类记录：
+公开数字代表默认 `knowledgePolicy=prefer_authorized`，因此先尝试授权知识。只有用户本轮明确
+要求“知识未命中后使用稳定通用知识”，且服务端把完整 Goal 子句正向确认为非 Owner 专属时，
+才物化 Goal 级
+`knowledge_preferred`：先运行同一发布版本和授权 Manifest 的 Knowledge Action；命中则引用
+UseRun，未命中/不可用才允许稳定通用回答，并由服务端固定说明本轮未应用知识库。Planner
+直接声明的 `knowledge_preferred` 不能授权降级，明确 `authorized_knowledge` 也永不被削弱。
+用户本轮明确禁止工具时，才允许直接稳定 General。
 
-1. `IntakeSubmission`：保留需求描述和必要的运行元数据。
-2. `Lead`：用于后续真人跟进和运营视图；不要求数字代表预先收集联系方式。
-3. `DelegationTask(kind=SERVICE_REQUEST)`：Owner 可跟踪的业务请求，初始为 `WAITING_FOR_OWNER`。
+是否属于“非 Owner 专属”由服务端 Authority Signal 正向确认，不采信 Planner 自报置信度，
+也不是“风险词未命中即允许”。默认是 `owner_authority_required`；只有显式来源授权加稳定通用
+解释 Goal 才可允许 fallback。“你们几点关门/上班”“接受哪些付款方式”“有哪些课程”等隐含主语
+均视为当前 Owner/代表，知识未命中时不能用通用模型猜测。
 
-服务请求本身不授权退款、折扣、日历修改、消息发送或工具调用。Owner 后续可手工处理，或显式转成受策略约束的 Compute/MCP 任务。
+Validated Goal 固定当前消息中的精确 `sourceSpan`（quote + start/end offsets）。单 Goal 旧提案
+可以兼容为整句；多 Goal 每个非控制 Goal 都必须提供匹配服务端完整子句边界的精确范围，否则
+失败关闭。Authority
+逐 Goal 分类，因此混合 Owner 问题与稳定通用概念时不会整轮一起放宽或收紧。
 
-## 工具、审批与人工的边界
+Composer 只能输出：
 
-| 对象 | 何时创建 | 谁决定下一步 |
-| --- | --- | --- |
-| `SERVICE_REQUEST` | 信息已足够，需要业务处理 | Owner |
-| `DelegationTask(COMPUTE/MCP/...)` | 用户明确要求可执行任务 | 能力策略 / 系统 |
-| `ApprovalRequest` | 真实能力策略返回 `ask` | Owner 审批 |
-| `HandoffRequest` | 用户明确要求真人，或系统确实无法继续且人工权益允许 | Operator / Owner |
+- 引用本轮授权 UseRun 的知识 Claim；
+- 引用本轮 Verified ActionResult 的工具 Claim；
+- 引用当前权威查询结果的交易 Claim；
+- 已通过 evidence policy 的 stable-general Claim；
+- 明确标为推论并引用来源的 inference；
+- 由服务端 Renderer 生成自然语言的状态码。
 
-禁止用 `HandoffRequest` 代替审批，也禁止用 `ApprovalRequest` 表示普通报价或退款咨询。
+Claim、Inference、Status 都必须带 `goalId`。服务端按该 Goal 校验 Evidence Class、允许来源、
+最小证据数、ActionResult 归属与 GoalOutcome；工具失败或未知不能输出成功状态，证据型 Goal
+也不能只靠一个成功状态码完成。共享 `/currentMessage/text` 只表示来源相同，不会合并 Goal
+或扩大证据授权。
 
-## 公开回答与资料
+Composer 前先排除 Composer 自身和回复 Deliverable，只根据来源 Action 派生 GoalOutcome；
+任何来源仍为 `waiting` 都禁止生成成功 Composer Result。Composer replay 会按当前固定 Plan、
+ActionResult、Evidence 和 GoalOutcome 重新验证，Plan 完成前再做一次最终验证。多 Goal 的旧弱
+Draft 缺少明确 `goalId` 时失败关闭。知识 fallback 说明只插入对应 Goal 的第一条 Claim 前，
+不再整轮统一加前缀。
 
-- 事实回答只能使用当前版本允许的、带使用账本的公开知识召回。
-- 没有依据时应明确说明资料不足，不使用草稿快照补写事实。
-- 资料动作在发送时重新查询当前发布、公开、启用且已审批的资产，不信任较早的运行时快照；私有资产、Owner 备注和未审核附件不可见。
-- 资料链接有效期为十分钟，并绑定数字代表、资产、处理版本和内容校验和；每次下载再次检查发布状态。归档、停用、替换或取消公开会立即使旧链接不可用。
-- 回复失败时采用 fail-closed 文案，不暗示已搜索、已提交任务或已获得批准。
-- 资料交付在渠道确认送达后写入 `MATERIAL_SENT` 审计；只生成回复但投递失败时不记为已发送。
+工具输出即使包含“忽略系统规则”等文本，也只作为数据。未知 Evidence Ref 会拒绝整份
+Draft。
 
-## 入口安全与运行上下文
+## 工具、审批与执行准入
 
-- 文本最大 12,000 字符，拒绝 NUL 控制字符；每条消息最多 5 个附件、单个 10 MB、合计 20 MB。
-- Web 公共入口在写入身份、会话或消息之前执行分布式网络限流，并在解析用户后执行用户分钟限流与数字代表日限流；限流键经 HMAC 后写入 Postgres，不保存原始 IP 或身份标识。
-- 附件仅允许明确白名单 MIME；外部链接只接受 HTTP/HTTPS，文件名剥离路径片段。恶意内容扫描由对象存储接入层负责，未通过扫描的对象不能提供可信 `objectKey`。
-- `clientMessageId` 与渠道消息 ID 用于入站幂等；渠道来源身份、代表版本和价格策略在创建运行时固定。
-- 模型只接收最小化运营状态：当前采集、最近任务的类型/状态/下一负责方、未过期待审批摘要、人工接手状态与未过期可用额度。任务 ID、阻塞原因、私有备注、审批原始 Payload 和工具参数不会进入提示词。
-- `/status`、`!status`、“查询当前状态”和“查看当前状态”走确定性状态查询，不调用模型、不消耗对话额度。
+`allow/ask/deny` 只来自服务端 Policy。授权阶段单调前进：
 
-## 计费闭环
+```text
+INITIAL -> POST_APPROVAL -> PRE_EXECUTION
+```
 
-1. 入站时固定本轮价格策略版本。
-2. 免费模式或试用额度使用原子授权，避免多渠道争抢最后一次免费额度。
-3. 收费轮次先预占统一服务额度。
-4. 只有成功、可计费的结果才消费；失败、取消、租约丢失按账本规则释放或交由终态清理。
-5. 审批等待、采集取消、帮助提示和策略拒绝不重复收费。
-6. 价格目录是唯一价格真相；对话计划不能创造套餐或价格。
+同阶段 `DENY > ASK > ALLOW`；已拒绝 Action 不会复活。`ASK` 可以在相同 ActionIntent
+被 Owner 批准后进入 `POST_APPROVAL ALLOW`，随后仍需当前 Policy 的
+`PRE_EXECUTION` 检查。
 
-## 状态、幂等与恢复
+审批固定请求 Hash、能力定义和结构化 Effect ceiling。V3 审批通过后创建新的短期
+Compute Session/Lease，不延长或复活等待期间过期的 Session。
 
-- 人工控制优先级最高；`HUMAN_ACTIVE` 时 AI 不创建新回答、请求或任务。
-- 需求描述采集状态保存在 `Conversation.collectorState`，跨 Worker 重启和跨渠道 Worker 消费可恢复；已开始的旧版多字段会话按原问题继续完成，避免升级后丢失上下文。
-- 服务请求以输入消息建立幂等键；相同消息重放不会创建重复任务。
-- 工具执行、外部副作用和消息投递各自使用租约与幂等键。
-- 任何可能已到达外部系统但结果不确定的操作进入 reconciliation，而不是盲目重试。
-- `/cancel`、`cancel`、“取消任务”和“停止当前任务”等精确命令只作用于当前联系人、当前数字代表和当前会话。等待审批或尚未执行的任务可撤回；已经运行的外部动作不会被虚假标记为已取消，而是明确告知可能仍在执行。
-- 版本、价格策略、能力策略和知识使用证据必须随运行固定并进入审计。
-- Generation 完成与渠道投递分别写入审计；消息真正送达后才记录 `MESSAGE_ANSWERED` 和资料交付事实。
+外部调用前同一事务必须写入：
 
-## 兼容迁移
+- 当前 Plan/Revision/Epoch Fence；
+- Action Claim；
+- ExecutionAttempt 和 Lease；
+- `reserved` 或 `not_billable` 的 BillingAdmission；
+- ExternalEffect 和稳定 idempotency key；
+- `action.execution.requested` Outbox。
 
-Prisma 中的 `freeScope`、`paywalledIntents` 和 `actionGate` 旧列暂时保留，并在新建记录时写入空值；应用、Dashboard、发布快照和运行时均不再读取它们。线上完成数据迁移与回滚窗口后，可在独立迁移中物理删除这些列。
+调用前最后一步把 Effect/Attempt 一起切到 call-started，并记录 Attempt、Lease Hash 和
+开始时间。崩溃发生在 call-started 前可以确认为未发送；发生在之后只能进入
+`RECONCILIATION_REQUIRED`。CALL_STARTED 后即使失败来自本地持久化，也必须标记
+`OUTCOME_UNKNOWN`，持有 Effect/计费状态并关闭执行 Outbox，禁止自动重试外部副作用。
 
-Telegram 的生产唯一 Owner 为 Conversation Worker。`legacy` / `shadow` 仅保留给本地迁移诊断，并且必须显式设置 `TELEGRAM_CONVERSATION_COMPAT_DIAGNOSTICS_ENABLED=true`；生产环境无条件拒绝这两个模式。兼容窗口结束后再物理删除 grammY 内的旧业务分支。
+## Result、Artifact 与语义成功
 
-## 验收清单
+传输成功不等于业务成功。Raw result 依次经过大小/复杂度限制、输出 Schema、Secret/PII
+过滤、Prompt Injection 标记和服务端 `SuccessContract`，之后才成为 Verified
+ActionResult。
 
-- 同一输入在 Web、Matrix、Telegram 产生相同的 TurnPlan 和业务对象。
-- 报价、退款、合作等请求先采集并创建服务请求，不自动审批或转人工。
-- 只有 Compute/MCP 的 `ask` 决策创建审批。
-- 用户明确请求真人时才创建人工队列，并检查人工权益。
-- 额度不足时不推进采集、服务请求或工具执行。
-- 公开回答无授权资料时 fail closed；公开材料不会泄露私有资产。
-- 已签发资料在归档、停用、替换或取消公开后无法继续下载；跨渠道消息使用可访问的绝对链接。
-- 用户取消不跨联系人或跨会话命中任务，等待审批可撤回，运行中任务不会被误报为已停止。
-- 重放、并发、Worker 重启和租约丢失不会重复扣费、重复执行或重复建单。
+MCP 默认使用平台固定版本、仅能确认失败的通用语义判定器；`isError=true`、空结果和明确
+失败文本会判为失败，但“非空且未命中错误模式”仍是 `semantic=unknown`，不能宣称成功。
+第三方能力仍没有任何可靠 SuccessContract 时：
+
+```text
+transport = response_received
+semantic  = unknown
+Goal      != succeeded
+```
+
+DeepWiki 读取能力单独固定 `mcp.deepwiki.read_semantic@1`，显式拒绝仓库不存在、权限/鉴权失败、
+限流、timeout、overload 和常见 5xx 结果。由于当前返回是没有机器成功字段的自由文本，其他
+文本无论长短都保持 `semantic=unknown`；只有后续可信 Wrapper 的结构化成功字段才能完成 Goal。
+审批执行完成也只按 Verified ActionResult 的 semanticOutcome 收口，不能用进程 exit code 或
+HTTP/MCP 传输成功直接宣布完成。
+
+Text/File/JSON Artifact 在提交前使用同一 Secret redaction 边界。Artifact CAS、Action
+Result 和 Composer 通过稳定引用关联；Evidence ledger 不复制正文。
+
+Knowledge/Builtin/Composer 与外部工具一样拥有 Attempt 和 Lease；实际调用模型、Recall 或
+Artifact Writer 前必须进入 `CALL_STARTED`。完成和失败使用同一锁顺序及 Lease Token CAS，
+防止旧 Worker 在 Plan 失败或新 Revision 生效后提交迟到成功。
+
+## 条件 fallback 与多步骤
+
+备用 Action 使用
+`on_failure + sourceActionId + allowedFailureCodes + fallbackGroupKey + priority`。主 Action
+成功时未使用备用分支变成 `SKIPPED`；主 Action 失败时仅激活已在 Plan 内、且 Verified
+failure code 匹配的备用 Action。同组准入持有数据库锁，只允许当前最高优先级候选 Claim；
+当前候选失败后才允许下一个 priority，三个以上备用仍串行且不能形成循环。Planner 不能在
+运行时临时发明工具。
+
+DelegationTask 负责多步骤可见性和 Owner 操作；PlanAction 保持协议真相。Worker 的下一步
+GenerationRun 携带同一 Task/Step，并直接读取已持久化请求，不重新运行 V2 或 V3 Planner。
+
+## 托管文档
+
+Markdown/TXT 文档已迁移到 V3：
+
+1. Planner 只能选择 `artifact.generate_document`，不能指定沙盒路径。
+2. Action 参数必须来自用户原文或明确 server default；附件未解析/授权时失败关闭。
+3. V3 inline Attempt、Execution Outbox 和 Generation lease 先完成准入。
+4. Artifact ID/Object Key 与 PlanAction 稳定绑定；staging SHA 防止崩溃重试覆盖内容。
+5. Artifact Result 经过 SuccessContract 后交给 `response.compose`。
+6. 消息附件仍校验代表、会话身份、保留期和渠道交付边界。
+
+## 计费、交付和状态
+
+以下状态独立：
+
+```text
+Plan completed
+Action completed
+Artifact committed
+Message queued
+Provider accepted
+Billing settled / released / held
+```
+
+`ConversationTurnPlan.COMPLETED` 只表示结果已验证，不表示用户收到。消息投递由
+Message、Outbox 和 DeliveryAttempt 判断，DeliveryAttempt 关联 Composer Action。
+DeliveryAttempt 同时固定 Plan ID、Revision、Execution Epoch、Generation Outbox
+Attempt 和独立 Delivery Lease Token。Matrix/Telegram 在调用 Provider 前先用独立事务提交
+`CALL_STARTED`，随后在渠道锁内紧邻远端调用再次校验同一 Delivery Admission 与当前
+PlanExecutionFence；Web 在写入 `SENT` 前执行同样校验。
+
+新 Revision 生效时，`QUEUED` 或 `CALL_PREPARED` 直接取消并关闭 Outbox；
+`CALL_STARTED`、响应待落库或 Provider outcome unknown 进入
+`RECONCILIATION_REQUIRED/OUTCOME_UNKNOWN`，禁止自动重发。已经记录的 Provider
+Acceptance 作为事实保留，但不会被 Plan `COMPLETED` 或 Message `SENT` 相互推导。
+
+BillableUnit 固定 payer、entitlement account、product、pricing version、purpose 和
+idempotency key。Reservation 只有在这些坐标完全一致时才能转移；未知外部结果会持有到
+reconciliation。由 GenerationRun 统一拥有的免费/服务用量，在 Action 上显式记录
+`not_billable`，不会留下“没写记录但可能收费”的状态，也不会再写 Action 级
+LedgerEntry；缺少该 admission 时执行失败关闭。
+
+## Temporal 与长等待
+
+Approval、Clarification、Handoff、Cancellation 和 Reconciliation 通过 Workflow、Signal
+和 Outbox 恢复，不占用同步 Worker。Temporal Signal 只负责唤醒；Activity 每次重新读取
+Postgres 并按稳定 `signalId` 去重。Postgres 是任务、审批、账本和交付状态的唯一业务
+真相。
+
+## 发布模式
+
+`TURN_PLAN_V3_MODE`：
+
+- `disabled`：关闭 V3，可运行 V2 回滚兼容；
+- `shadow`：保存 V3 决策差异，不拥有执行；
+- `active_readonly`：只发布授权知识和稳定通用回答；
+- `active_governed`：发布托管文档、typed Compute 和 schema-pinned MCP。
+
+active V3 不调用 V2 Planner 或旧 natural-language Detailed Planner。V2 表、Plan 和代码
+仍可读取，并在显式 disabled/shadow 回滚窗口中使用；它们不是第二套 active 写真相。
+
+发布扩大必须通过 `evaluateV3ReleaseGate`：重复 Effect/结算、静默工具降级、无证据实时
+回答、provider unknown 自动重发、旧 Plan 执行、Policy 绕过和未知 Evidence Ref 必须为
+0；每个 Lane 至少 1,000 个 Shadow 样本并连续 7 天满足质量、时延和成本门槛。
+
+## 验证重点
+
+- 专属知识命中并引用 UseRun；缺失时不允许通用模型猜测；
+- 自然语言 -> V3 MCP -> 审批 -> 新 Session/Lease -> Verified Result；
+- MCP 失败/Schema 漂移明确失败，不静默降级；
+- Tool output prompt injection 只作为数据；
+- 多 Goal/多 Action、精确依赖和条件 fallback；
+- 权限撤销、Plan supersession 和迟到 Signal 失败关闭；
+- Worker crash 不重复 Effect、Artifact、Message 或 Billing；
+- Result ready 与 Provider acceptance 分离。

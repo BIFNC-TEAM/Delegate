@@ -23,6 +23,10 @@ describe("workflow-runner readiness", () => {
           lastTickAt: "2026-07-28T07:59:55.000Z",
           lastTickFailed: false,
         },
+        temporal: {
+          required: false,
+          status: "disabled",
+        },
         paymentReconciliation: {
           enabled: true,
           lastTickAt: "2026-07-28T07:59:50.000Z",
@@ -57,6 +61,10 @@ describe("workflow-runner readiness", () => {
         lastTickAt: "2026-07-28T07:59:55.000Z",
         lastTickFailed: false,
       },
+      temporal: {
+        required: false,
+        status: "disabled",
+      },
       paymentReconciliation: {
         enabled: false,
         lastTickAt: null,
@@ -85,6 +93,10 @@ describe("workflow-runner readiness", () => {
         lastTickAt: "2026-07-28T07:00:00.000Z",
         lastTickFailed: false,
       },
+      temporal: {
+        required: true,
+        status: "failed",
+      },
       paymentReconciliation: {
         enabled: true,
         lastTickAt: "2026-07-28T07:59:59.000Z",
@@ -99,6 +111,7 @@ describe("workflow-runner readiness", () => {
         "database_unavailable",
         "wechat_pay_configuration_invalid",
         "workflow_loop_stale",
+        "temporal_bridge_failed",
         "wechat_payment_reconciliation_loop_failed",
       ],
     });
@@ -115,6 +128,10 @@ describe("workflow-runner readiness", () => {
         lastTickAt: "2026-07-28T07:59:55.000Z",
         lastTickFailed: false,
       },
+      temporal: {
+        required: false,
+        status: "disabled",
+      },
       paymentReconciliation: {
         enabled: true,
         lastTickAt: "2026-07-28T07:59:59.000Z",
@@ -130,6 +147,38 @@ describe("workflow-runner readiness", () => {
       ],
       loops: {
         paymentReconciliation: "failed",
+      },
+    });
+  });
+
+  it("fails readiness closed while production Temporal is unavailable", () => {
+    const snapshot = buildWorkflowRunnerReadiness({
+      now,
+      staleAfterMs: 180_000,
+      databaseReady: true,
+      weChatPay: readyPreflight,
+      workflow: {
+        lastTickAt: "2026-07-28T07:59:55.000Z",
+        lastTickFailed: false,
+      },
+      temporal: {
+        required: true,
+        status: "starting",
+      },
+      paymentReconciliation: {
+        enabled: false,
+        lastTickAt: null,
+        lastTickFailed: false,
+        persistentWorkerFailure: false,
+      },
+    });
+
+    expect(snapshot).toMatchObject({
+      status: "not_ready",
+      reasons: ["temporal_bridge_starting"],
+      temporal: {
+        required: true,
+        status: "starting",
       },
     });
   });

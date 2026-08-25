@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   approvalExpirationDedupeKey,
+  buildDelegationExecutionWorkflowId,
   buildWorkflowExternalId,
+  delegationExecutionSignalSchema,
+  delegationExecutionSignalName,
+  delegationExecutionTransitionInputSchema,
   getWorkflowEngineConfig,
   handoffFollowUpDedupeKey,
   isWorkflowEnginePhaseTerminal,
@@ -45,28 +49,91 @@ describe("workflow helpers", () => {
   it("parses the workflow engine phases used for Temporal-native state modeling", () => {
     expect(workflowEnginePhaseSchema.parse("dispatch_pending")).toBe("dispatch_pending");
     expect(workflowEnginePhaseSchema.parse("waiting_timer")).toBe("waiting_timer");
+    expect(workflowEnginePhaseSchema.parse("waiting_signal")).toBe("waiting_signal");
     expect(workflowEnginePhaseSchema.parse("cancel_requested")).toBe("cancel_requested");
   });
 
   it("knows which workflow engine phases are terminal", () => {
     expect(isWorkflowEnginePhaseTerminal("dispatch_pending")).toBe(false);
     expect(isWorkflowEnginePhaseTerminal("waiting_timer")).toBe(false);
+    expect(isWorkflowEnginePhaseTerminal("waiting_signal")).toBe(false);
     expect(isWorkflowEnginePhaseTerminal("activity_running")).toBe(false);
     expect(isWorkflowEnginePhaseTerminal("completed")).toBe(true);
     expect(isWorkflowEnginePhaseTerminal("failed")).toBe(true);
     expect(isWorkflowEnginePhaseTerminal("canceled")).toBe(true);
   });
 
-  it("falls back to the local runner when Temporal is not fully configured", () => {
+  it("fails closed when Temporal was selected but is not fully configured", () => {
     const config = getWorkflowEngineConfig({
       WORKFLOW_ENGINE: "temporal",
       WORKFLOW_TEMPORAL_NAMESPACE: "delegate",
     });
 
     expect(config.configuredEngine).toBe("temporal");
-    expect(config.effectiveEngine).toBe("local_runner");
+    expect(config.effectiveEngine).toBe("temporal");
     expect(config.localQueueName).toBe(LOCAL_WORKFLOW_QUEUE);
     expect(config.fallbackReason).toBe("temporal_not_fully_configured");
+    expect(() =>
+      resolveWorkflowDispatchTarget({
+        config,
+        kind: "delegation_execution",
+        representativeKey: "rep-1",
+        subjectId: "task-1",
+      }),
+    ).toThrow("temporal_not_fully_configured");
+  });
+
+  it("requires an explicit workflow engine in production", () => {
+    expect(() => getWorkflowEngineConfig({ NODE_ENV: "production" }))
+      .toThrow("workflow_engine_must_be_explicit_in_production");
+    expect(getWorkflowEngineConfig({
+      NODE_ENV: "production",
+      WORKFLOW_ENGINE: "local_runner",
+    }).configuredEngine).toBe("local_runner");
+    expect(() => getWorkflowEngineConfig({ WORKFLOW_ENGINE: "typo" }))
+      .toThrow("workflow_engine_invalid");
+  });
+
+  it("uses the delegation task id as the stable Temporal workflow id", () => {
+    expect(buildDelegationExecutionWorkflowId("task-123")).toBe(
+      "delegate:delegation_execution:task-123",
+    );
+    expect(
+      buildWorkflowExternalId({
+        kind: "delegation_execution",
+        representativeKey: "rep-ignored",
+        subjectId: "task-123",
+      }),
+    ).toBe("delegate:delegation_execution:task-123");
+  });
+
+  it("validates every durable delegation signal and transition envelope", () => {
+    const signal = delegationExecutionSignalSchema.parse({
+      signalId: "approval:approval-1:approved",
+      kind: "approval_resolved",
+      approvalId: "approval-1",
+      resolution: "approved",
+      occurredAt: "2026-08-17T08:00:00.000Z",
+    });
+    expect(
+      delegationExecutionTransitionInputSchema.parse({
+        workflowRunId: "workflow-1",
+        delegationTaskId: "task-1",
+        turnPlanId: "plan-1",
+        transitionId: "signal:approval:approval-1:approved",
+        signal,
+      }),
+    ).toMatchObject({
+      delegationTaskId: "task-1",
+      transitionId: "signal:approval:approval-1:approved",
+      signal: {
+        signalId: "approval:approval-1:approved",
+        kind: "approval_resolved",
+      },
+    });
+    expect(delegationExecutionSignalName(signal)).toBe(
+      "delegation.approval_resolved",
+    );
   });
 
   it("builds a Temporal-ready dispatch target when the config is complete", () => {

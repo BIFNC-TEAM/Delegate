@@ -5,7 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 process.env.COMPUTE_BROKER_INTERNAL_TOKEN ??= "test-internal-token";
@@ -32,6 +32,7 @@ afterAll(async () => {
 describe("callRemoteMcpTool", () => {
   it("calls an MCP tool over streamable HTTP and returns a summarized result", async () => {
     const { callRemoteMcpTool } = await import("../src/mcp");
+    const onBeforeToolCall = vi.fn().mockResolvedValue(undefined);
     const result = await callRemoteMcpTool({
       binding: {
         id: "binding_weather",
@@ -47,8 +48,10 @@ describe("callRemoteMcpTool", () => {
       toolArguments: {
         city: "Shanghai",
       },
+      onBeforeToolCall,
     });
 
+    expect(onBeforeToolCall).toHaveBeenCalledTimes(1);
     expect(result.toolName).toBe("lookup");
     expect(result.availableToolNames).toContain("lookup");
     expect(result.summary).toContain("Weather for Shanghai");
@@ -121,6 +124,7 @@ describe("callRemoteMcpTool", () => {
     const { callRemoteMcpTool, McpTransportError } = await import("../src/mcp");
     const originalFetch = global.fetch;
     let fetchCount = 0;
+    const onBeforeToolCall = vi.fn().mockResolvedValue(undefined);
 
     global.fetch = (async () => {
       fetchCount += 1;
@@ -143,6 +147,7 @@ describe("callRemoteMcpTool", () => {
         toolArguments: {
           city: "Suzhou",
         },
+        onBeforeToolCall,
       }).catch((caught: unknown) => caught);
 
       expect(error).toBeInstanceOf(McpTransportError);
@@ -151,6 +156,7 @@ describe("callRemoteMcpTool", () => {
         message: "mcp_transport_connection_failed",
       });
       expect(fetchCount).toBe(1);
+      expect(onBeforeToolCall).not.toHaveBeenCalled();
       expect(String(error)).not.toContain("must-not-leak");
     } finally {
       global.fetch = originalFetch;

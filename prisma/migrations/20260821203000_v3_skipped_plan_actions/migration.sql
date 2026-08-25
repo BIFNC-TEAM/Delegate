@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TYPE "ConversationPlanActionStatus"
+  ADD VALUE IF NOT EXISTS 'SKIPPED';
+
+COMMIT;

@@ -181,7 +181,7 @@ export function serializeSession(session: {
 
 export function serializeExecution(execution: {
   id: string;
-  sessionId: string;
+  sessionId: string | null;
   mcpBindingId: string | null;
   capability: string;
   subagentId: string | null;
@@ -191,6 +191,8 @@ export function serializeExecution(execution: {
   workingDirectory: string | null;
   policyDecision: string | null;
   approvalRequestId: string | null;
+  transportOutcome?: string | null;
+  semanticOutcome?: string | null;
   startedAt: Date | null;
   finishedAt: Date | null;
   exitCode: number | null;
@@ -200,6 +202,9 @@ export function serializeExecution(execution: {
   bytesWritten: number | null;
   createdAt: Date;
 }) {
+  if (!execution.sessionId) {
+    throw new Error("Compute execution serialization requires a Compute session.");
+  }
   return toolExecutionSnapshotSchema.parse({
     id: execution.id,
     sessionId: execution.sessionId,
@@ -216,6 +221,8 @@ export function serializeExecution(execution: {
       ? mapPolicyDecisionFromDb(execution.policyDecision)
       : null,
     approvalRequestId: execution.approvalRequestId,
+    transportOutcome: execution.transportOutcome ?? null,
+    semanticOutcome: execution.semanticOutcome ?? null,
     startedAt: execution.startedAt?.toISOString() ?? null,
     finishedAt: execution.finishedAt?.toISOString() ?? null,
     exitCode: execution.exitCode,
@@ -312,7 +319,7 @@ export function serializeMcpBinding(binding: {
   defaultToolName: string | null;
   enabled: boolean;
   approvalRequired: boolean;
-  estimatedCostCentsPerCall: number;
+  estimatedTokensPerCall: number;
   maxRetries: number;
   retryBackoffMs: number;
   consecutiveFailures: number;
@@ -337,7 +344,7 @@ export function serializeMcpBinding(binding: {
     defaultToolName: binding.defaultToolName,
     enabled: binding.enabled,
     approvalRequired: binding.approvalRequired,
-    estimatedCostCentsPerCall: binding.estimatedCostCentsPerCall,
+    estimatedTokensPerCall: binding.estimatedTokensPerCall,
     maxRetries: binding.maxRetries,
     retryBackoffMs: binding.retryBackoffMs,
     consecutiveFailures: binding.consecutiveFailures,
@@ -475,7 +482,7 @@ export function serializeCapabilityProfile(profile: {
     resourceScopeCondition: string | null;
     channelCondition: string | null;
     requiredPlanTier: string | null;
-    maxCostCents: number | null;
+    maxEstimatedTokens: number | null;
     requiresPaidPlan: boolean;
     requiresHumanApproval: boolean;
     priority: number;
@@ -540,7 +547,7 @@ export function serializeCapabilityProfile(profile: {
       ...(rule.requiredPlanTier
         ? { requiredPlanTier: rule.requiredPlanTier.toLowerCase() as any }
         : {}),
-      ...(typeof rule.maxCostCents === "number" ? { maxCostCents: rule.maxCostCents } : {}),
+      ...(typeof rule.maxEstimatedTokens === "number" ? { maxEstimatedTokens: rule.maxEstimatedTokens } : {}),
       requiresPaidPlan: rule.requiresPaidPlan,
       requiresHumanApproval: rule.requiresHumanApproval,
       priority: rule.priority,

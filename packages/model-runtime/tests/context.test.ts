@@ -11,6 +11,7 @@ import {
   renderGroundedKnowledgeFallback,
   renderGroundedKnowledgeFallbackWithTrace,
   resolveModelRuntimeEnv,
+  resolvePlannerProviderAttemptOrder,
   resolveProviderAttemptOrder,
   type RepresentativeRecallItem,
 } from "../src/index";
@@ -781,12 +782,14 @@ describe("resolveModelRuntimeEnv", () => {
     expect(resolveProviderAttemptOrder(env)).toEqual(["anthropic"]);
   });
 
-  it("uses Bailian after the primary OpenAI-compatible provider", () => {
+  it("uses AGICTO before the Bailian fallback without borrowing OpenAI credentials", () => {
     const env = resolveModelRuntimeEnv({
       DELEGATE_MODEL_ENABLED: "true",
-      DELEGATE_MODEL_PROVIDER: "openai",
+      DELEGATE_MODEL_PROVIDER: "agicto",
       DELEGATE_MODEL_FALLBACK_PROVIDER: "bailian",
-      OPENAI_API_KEY: "agicto-key",
+      OPENVIKING_MODEL_API_KEY: "agicto-key",
+      OPENVIKING_MODEL_API_BASE: "https://api.agicto.cn/v1",
+      OPENVIKING_VLM_MODEL: "qwen-plus",
       DELEGATE_BAILIAN_API_KEY: "dashscope-key",
       DELEGATE_BAILIAN_MODEL: "qwen-plus",
     });
@@ -795,7 +798,27 @@ describe("resolveModelRuntimeEnv", () => {
     expect(env.bailian.baseUrl).toBe(
       "https://dashscope.aliyuncs.com/compatible-mode/v1",
     );
-    expect(resolveProviderAttemptOrder(env)).toEqual(["openai", "bailian"]);
+    expect(env.agicto).toMatchObject({
+      model: "qwen-plus",
+      baseUrl: "https://api.agicto.cn/v1",
+      apiKey: "agicto-key",
+    });
+    expect(env.openai.apiKey).toBeUndefined();
+    expect(resolveProviderAttemptOrder(env)).toEqual(["agicto", "bailian"]);
+  });
+
+  it("pins structured planning to its dedicated provider without changing reply order", () => {
+    const env = resolveModelRuntimeEnv({
+      DELEGATE_MODEL_ENABLED: "true",
+      DELEGATE_MODEL_PROVIDER: "bailian",
+      DELEGATE_MODEL_FALLBACK_PROVIDER: "openai",
+      DELEGATE_MODEL_PLANNER_PROVIDER: "openai",
+      DELEGATE_BAILIAN_API_KEY: "dashscope-key",
+      OPENAI_API_KEY: "openai-key",
+    });
+
+    expect(resolveProviderAttemptOrder(env)).toEqual(["bailian", "openai"]);
+    expect(resolvePlannerProviderAttemptOrder(env)).toEqual(["openai"]);
   });
 
   it("calculates internal model cost from per-provider pricing", () => {

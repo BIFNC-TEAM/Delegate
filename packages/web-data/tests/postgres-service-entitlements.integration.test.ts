@@ -609,7 +609,7 @@ describePostgres("service entitlement PostgreSQL 16 concurrency", () => {
         countUsage: false,
       });
 
-      await prepareGenerationMessageChannelDelivery({
+      const preparation = await prepareGenerationMessageChannelDelivery({
         conversationId: fixture.conversationId,
         runId: claimed.runId,
         outboxId: claimed.outboxId,
@@ -629,6 +629,7 @@ describePostgres("service entitlement PostgreSQL 16 concurrency", () => {
         outboxId: claimed.outboxId,
         leaseAttempt: claimed.leaseAttempt,
         outputMessageId: completed.message.id,
+        deliveryAdmission: preparation.deliveryAdmission,
         externalMessageId: "web-delivery-fixture",
       });
       await expect(assignConversationOperator({

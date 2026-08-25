@@ -28,6 +28,9 @@ const { tx } = vi.hoisted(() => ({
       findFirst: vi.fn(),
       create: vi.fn(),
     },
+    workflowRun: {
+      findUnique: vi.fn(),
+    },
   },
 }));
 
@@ -82,6 +85,7 @@ describe("delegated approval state", () => {
     });
     tx.delegationTaskEvent.findFirst.mockResolvedValue(null);
     tx.delegationTaskEvent.create.mockResolvedValue({ id: "task-event-1" });
+    tx.workflowRun.findUnique.mockResolvedValue(null);
   });
 
   it("atomically resumes the exact waiting task and step after approval", async () => {

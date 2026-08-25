@@ -11,6 +11,7 @@ vi.mock("../src/prisma", () => ({
 
 import {
   generalModelAnswerSourceStatement,
+  unverifiedToolFallbackAnswerSourceStatement,
   privateChannelSourceVerificationUnavailableStatement,
   renderPrivateChannelAnswerSourceFooter,
   renderPrivateChannelGenerationDeliveryText,
@@ -82,6 +83,15 @@ describe("private channel answer source footer", () => {
       modelGenerated: false,
       citations: [],
     })).toBe("确定性降级答案");
+
+    expect(renderPrivateChannelAnswerSourceFooter({
+      text: "工具未执行后的模型答案",
+      modelGenerated: true,
+      unverifiedToolFallback: true,
+      citations: [],
+    })).toBe(
+      `工具未执行后的模型答案\n\n——\n${unverifiedToolFallbackAnswerSourceStatement}`,
+    );
   });
 
   it("recomputes from the bound run, output and cited ledger facts", async () => {

@@ -144,6 +144,7 @@ export const planArgumentProvenanceSchema = z.object({
     "attachment",
     "trusted_context",
     "server_state",
+    "capability_default",
     "previous_action_output",
   ]),
   pointer: z.string().min(1).max(1_000).regex(/^\//),
@@ -656,6 +657,7 @@ function isSupportedJsonSchemaKeyword(key: string) {
     "items",
     "enum",
     "const",
+    "default",
     "allOf",
     "anyOf",
     "title",
@@ -775,7 +777,13 @@ function validateProvenancePointer(
     }
     return null;
   }
-  const allowedRoots: Record<Exclude<typeof provenance.source, "previous_action_output">, string[]> = {
+  if (provenance.source === "capability_default") {
+    return "Capability-default provenance is supported only by TurnPlan V3 immutable definitions.";
+  }
+  const allowedRoots: Record<Exclude<
+    typeof provenance.source,
+    "previous_action_output" | "capability_default"
+  >, string[]> = {
     user_message: ["currentMessage"],
     attachment: ["attachments"],
     trusted_context: ["conversationSummary", "authorizedContext"],

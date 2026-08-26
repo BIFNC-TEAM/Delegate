@@ -2013,6 +2013,14 @@ function readV3Object(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function readV3GovernedComposerResumeTaskId(value: unknown) {
+  const context = readV3Object(value);
+  return context?.["source"] === "v3_governed_composer_resume"
+    && typeof context["delegationTaskId"] === "string"
+    ? context["delegationTaskId"]
+    : null;
+}
+
 function normalizeStoredSha256(value: string) {
   return value.startsWith("sha256:") ? value : `sha256:${value}`;
 }
@@ -3763,6 +3771,57 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         ...workLease,
       });
       return { processed: true as const, runId: item.runId, status: "waiting_human" as const };
+    }
+
+    const governedComposerResumeTaskId =
+      readV3GovernedComposerResumeTaskId(item.contextSnapshot);
+    if (governedComposerResumeTaskId) {
+      if ((config.turnPlannerV3Mode ?? "disabled") !== "active_governed") {
+        throw new Error("V3 governed Composer resume requires active_governed mode.");
+      }
+      const governedComposition = await executeV3GovernedComposer({
+        delegationTaskId: governedComposerResumeTaskId,
+        leaseGuard,
+        taskInput: {
+          text: item.userText,
+          language: /\p{Script=Han}/u.test(item.userText) ? "zh" : "en",
+        },
+        generationWorkLease: workLease,
+      });
+      if (!governedComposition) {
+        throw new Error("V3 governed Composer resume has no terminal source results.");
+      }
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText: governedComposition.text,
+        senderDisplayName: item.representativeName,
+        intent: "turn_plan_v3_governed_composer_resume",
+        provider: governedComposition.provider as
+          | "agicto"
+          | "openai"
+          | "bailian"
+          | "anthropic",
+        model: governedComposition.model,
+        countUsage: false,
+        completeOutbox: false,
+      });
+      outputMessageId = completed.message.id;
+      await deliverGenerationOutput({
+        config,
+        item,
+        text: completed.message.text ?? governedComposition.text,
+        outputMessageId,
+        ...(governedComposition.planActionId
+          ? { planActionId: governedComposition.planActionId }
+          : {}),
+      });
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "completed" as const,
+      };
     }
 
     if (

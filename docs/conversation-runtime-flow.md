@@ -211,6 +211,14 @@ failure code 匹配的备用 Action。同组准入持有数据库锁，只允许
 
 DelegationTask 负责多步骤可见性和 Owner 操作；PlanAction 保持协议真相。Worker 的下一步
 GenerationRun 携带同一 Task/Step，并直接读取已持久化请求，不重新运行 V2 或 V3 Planner。
+当参数声明为 `previous_action_output` 时，下一步只从依赖 Action 的成功 Verified
+ActionResult 解析 JSON Pointer，补齐后再次按固定 Input Schema 校验，并把来源
+ActionResult/值 Hash 写入执行快照；不会修改不可变 Plan，也不会让模型补坐标或交易字段。
+
+审批把多步骤拆成多个 GenerationRun 时，后续 Run 仍由同一 Plan/Task/Step/Fence 约束，
+不再错误要求等于 Plan 的首个 Run ID。最后一个外部 Action 完成后，审批结果流程取消通用
+JSON 结果提示并写入 `v3_governed_composer_resume` Outbox；Worker 只恢复
+`response.compose`，不重复工具调用、不重复结算，完成后再投递最终证据绑定回答。
 
 ## 托管文档
 

@@ -276,6 +276,20 @@ Dependencies use explicit allowed status sets; there is no broad `terminal`
 condition. External writes can only depend on success. Composer actions may
 observe failure, partial, skipped, canceled, and reconciliation states.
 
+An Action may bind a missing input through `previous_action_output` provenance
+only when the pointer targets a declared dependency. The Planner materializer
+matches compatible pinned input/output Schema paths and records the dependency;
+the runtime validates the immutable partial Action without pretending the value
+already exists. After the source has a successful Verified ActionResult, the
+DelegationTask resolver reads the pointer, validates the complete arguments
+against the pinned input Schema, rewrites only the execution snapshot (never
+the immutable Plan), and records source ActionResult/value hashes before the
+next Action can be claimed.
+
+Reviewed capability defaults use `capability_default` provenance pointing to
+the immutable input Schema. Remote MCP defaults and descriptions remain
+untrusted and cannot create these values.
+
 Fallback actions are persisted but cannot run as ordinary primary steps. They
 carry `on_failure`, source Action, allowed failure codes, fallback group, and
 priority. A source success marks unused alternatives `SKIPPED`; a source failure
@@ -388,6 +402,14 @@ ActionResults, evidence ownership, fallback activations, and source
 GoalOutcomes—not merely its output Schema. Plan completion repeats the same
 semantic validation against final GoalOutcome; old ambiguous multi-Goal drafts
 fail closed.
+
+For an approval-separated multi-step DAG, every later tool step receives a new
+GenerationRun but remains under the original Plan/Task/Action fence. The final
+approval reconciler cancels its generic artifact-status message and durably
+requeues that last Run as `v3_governed_composer_resume`. The Worker then runs
+only the pending Composer—never the tools again—under the continuation lease,
+delivers the evidence-bound answer, and completes the Plan. Billing is not
+reserved or settled a second time during this Composer resume.
 
 Unknown references reject the entire draft. Tool output is data, never
 instruction.

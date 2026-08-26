@@ -354,6 +354,89 @@ export async function finalizeComputeApprovalConversation(input: {
           ...(input.failureReason ? { failureReason: input.failureReason } : {}),
         })
       : null;
+    const composerResume =
+      input.outcome === "completed"
+      && approval.delegationTaskId
+      && !finalization?.hasMoreSteps
+        ? await findPendingV3ComposerResumeInTransaction(
+            tx,
+            approval.delegationTaskId,
+          )
+        : null;
+    if (composerResume) {
+      await tx.message.update({
+        where: { id: message.id },
+        data: {
+          deliveryStatus: MessageDeliveryStatus.CANCELED,
+          failureCode: "v3_composer_resume",
+          failureReason:
+            "The verified tool result is being composed into the final governed response.",
+        },
+      });
+      await tx.outboxEvent.updateMany({
+        where: {
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          eventType: "generation.requested",
+          status: { in: ["PENDING", "FAILED"] },
+        },
+        data: {
+          status: "PROCESSED",
+          processedAt: now,
+          lastError: "superseded_by_v3_composer_resume",
+        },
+      });
+      const currentContext = run.contextSnapshot
+        && typeof run.contextSnapshot === "object"
+        && !Array.isArray(run.contextSnapshot)
+          ? run.contextSnapshot as Prisma.JsonObject
+          : {};
+      await tx.generationRun.update({
+        where: { id: run.id },
+        data: {
+          status: GenerationRunStatus.QUEUED,
+          outputMessageId: null,
+          completedAt: null,
+          errorCode: null,
+          errorMessage: null,
+          contextSnapshot: {
+            ...currentContext,
+            source: "v3_governed_composer_resume",
+            delegationTaskId: approval.delegationTaskId,
+            planId: composerResume.planId,
+          },
+        },
+      });
+      await tx.outboxEvent.create({
+        data: {
+          conversationId: run.conversationId,
+          aggregateType: "generation_run",
+          aggregateId: run.id,
+          eventType: "generation.requested",
+          payload: {
+            runId: run.id,
+            conversationId: run.conversationId,
+            messageId: run.inputMessageId,
+            delegationTaskId: approval.delegationTaskId,
+            planId: composerResume.planId,
+            composerResume: true,
+          },
+          idempotencyKey:
+            `generation.v3-composer.requested:${run.id}:${composerResume.planId}`,
+        },
+      });
+      await tx.conversation.update({
+        where: { id: run.conversationId },
+        data: { state: "AI_QUEUED", lastMessageAt: now },
+      });
+      if (run.episodeId) {
+        await tx.conversationEpisode.update({
+          where: { id: run.episodeId },
+          data: { status: ConversationEpisodeStatus.ACTIVE },
+        });
+      }
+      return { message: null };
+    }
     const deliveredMessage = finalization?.hasMoreSteps
       ? await tx.message.update({
           where: { id: message.id },
@@ -370,6 +453,29 @@ export async function finalizeComputeApprovalConversation(input: {
   if (!result) return null;
   if (!result.message) return null;
   return result.message;
+}
+
+async function findPendingV3ComposerResumeInTransaction(
+  tx: Prisma.TransactionClient,
+  delegationTaskId: string,
+) {
+  const plan = await tx.conversationTurnPlan.findFirst({
+    where: {
+      delegationTaskId,
+      protocolVersion: 3,
+      shadowMode: false,
+      status: { in: ["VALIDATED", "EXECUTING"] },
+      actions: {
+        some: {
+          capabilityKey: "response.compose",
+          status: { in: ["PLANNED", "READY"] },
+        },
+      },
+    },
+    orderBy: { revision: "desc" },
+    select: { id: true },
+  });
+  return plan ? { planId: plan.id } : null;
 }
 
 function mapComputeOutcomeToTaskOutcome(

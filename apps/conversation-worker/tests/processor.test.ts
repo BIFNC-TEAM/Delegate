@@ -4932,6 +4932,55 @@ describe("conversation worker knowledge recall", () => {
     }));
   });
 
+  it("resumes only response.compose after a final approved V3 tool step", async () => {
+    const { item, initializeResumePlan } = configureMixedKnowledgeMcpV3({
+      knowledge: "hit",
+    });
+    await initializeResumePlan();
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      ...item,
+      contextSnapshot: {
+        source: "v3_governed_composer_resume",
+        delegationTaskId: "task-v3-mixed",
+        planId: "turn-plan-v3-mixed",
+      },
+    });
+    mocks.prepareV3InlineAction.mockReset().mockResolvedValue({
+      attempt: {
+        id: "attempt-compose-resume",
+        status: "RUNNING",
+        executionLeaseToken: "inline-lease-compose-resume",
+      },
+    });
+
+    const resumeResult = await processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    });
+    expect(resumeResult.error).toBeUndefined();
+    expect(resumeResult).toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.planTurnV3).not.toHaveBeenCalled();
+    expect(mocks.createComputeDelegationTask).not.toHaveBeenCalled();
+    expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+    expect(mocks.composeTurnV3).toHaveBeenCalledOnce();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "turn_plan_v3_governed_composer_resume",
+        countUsage: false,
+        replyText: "Combined verified answer.",
+      }),
+    );
+    expect(mocks.prepareGenerationMessageChannelDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        planActionId: "plan-action-compose",
+        outputMessageId: "reply-v3-mixed",
+      }),
+    );
+  });
+
   it("continues from a verified Knowledge miss to MCP success with transparent disclosure", async () => {
     configureMixedKnowledgeMcpV3({ knowledge: "miss" });
     mocks.composeTurnV3.mockResolvedValue({
@@ -7658,8 +7707,28 @@ function configureMixedKnowledgeMcpV3(input: { knowledge: "hit" | "miss" }) {
     }],
   };
   let plan: Record<string, any>;
-  let mcpDefinition: Record<string, any>;
-  let knowledgeDefinition: Record<string, any>;
+  let mcpDefinition: Record<string, any> = {
+    ...mixedMcpDefinition({
+      evidenceClasses: ["capability_result"],
+      authorityClasses: ["external_authoritative"],
+      definitionHash: `sha256:${"c".repeat(64)}`,
+    }),
+    key: "mcp.deepwiki.ask_question",
+  };
+  let knowledgeDefinition: Record<string, any> = {
+    key: "knowledge.retrieve_authorized",
+    version: "1",
+    executor: "knowledge",
+    definitionHash: `sha256:${"a".repeat(64)}`,
+    semantics: {
+      evidenceClasses: ["authorized_knowledge"],
+      authorityClasses: ["owner_authorized"],
+      freshnessClasses: ["bounded"],
+      operations: ["search"],
+      domains: ["owner knowledge"],
+      aliases: [],
+    },
+  };
   mocks.claimNextGenerationWorkItem.mockResolvedValue(item);
   mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue(setup);
   mocks.getRepresentativeRuntimeAuthoritySnapshot.mockResolvedValue(authority);
@@ -7953,6 +8022,39 @@ function configureMixedKnowledgeMcpV3(input: { knowledge: "hit" | "miss" }) {
   mocks.completeInlineGenerationRun.mockResolvedValue({
     message: { id: "reply-v3-mixed", text: "Combined verified answer." },
   });
+  return {
+    item,
+    async initializeResumePlan() {
+      await mocks.planTurnV3({
+        catalog: {
+          capabilities: [{
+            ...knowledgeDefinition,
+            outputSchema: {
+              type: "object",
+              properties: {},
+              additionalProperties: true,
+            },
+          }, mcpDefinition, {
+            key: "response.compose",
+            version: "1",
+            definitionHash,
+            outputSchema: {
+              type: "object",
+              properties: { segments: { type: "array" } },
+              required: ["segments"],
+            },
+          }],
+        },
+        scopeKey: {
+          kind: "generation_turn",
+          conversationId: item.conversationId,
+          inputMessageId: item.inputMessageId,
+        },
+        planId: "turn-plan-v3-mixed",
+      });
+      mocks.planTurnV3.mockClear();
+    },
+  };
 }
 
 function mixedMcpDefinition(input: {

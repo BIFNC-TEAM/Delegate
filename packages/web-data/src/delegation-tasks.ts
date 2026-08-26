@@ -13,9 +13,11 @@ import {
   MessageSenderType,
   Prisma,
 } from "@prisma/client";
-import type {
-  CapabilityExecutionRequest,
-  ParsedComputeRequest,
+import {
+  stableSha256,
+  validateJsonSchemaValue,
+  type CapabilityExecutionRequest,
+  type ParsedComputeRequest,
 } from "@delegate/runtime";
 
 import {
@@ -1906,7 +1908,10 @@ export async function finalizeComputeDelegationTaskInTransaction(
         }
       }
       if (nextStep && !orchestrationFailureReason) {
-        const nextRequest = readDelegationTaskStepRequest(nextStep);
+        const nextRequest = await resolveDelegationTaskStepRequestV3(
+          tx,
+          nextStep,
+        );
         if (!nextRequest || !generationRun) {
           throw new Error("Delegation task next step is missing a persisted request or generation context.");
         }
@@ -4332,6 +4337,203 @@ function jsonRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+async function resolveDelegationTaskStepRequestV3(
+  tx: Prisma.TransactionClient,
+  step: { id: string; inputSnapshot: unknown },
+): Promise<ParsedComputeRequest | null> {
+  const snapshot = jsonRecord(step.inputSnapshot);
+  if (!snapshot) return null;
+  const initialRequest = readDelegationTaskStepRequest(step);
+  if (!initialRequest) return null;
+  if (!jsonRecord(snapshot["executionRequest"])) return initialRequest;
+  const planAction = await tx.conversationPlanAction.findFirst({
+    where: { delegationTaskStepId: step.id },
+    include: {
+      turnPlan: {
+        include: {
+          actions: {
+            include: {
+              actionResults: {
+                orderBy: { verifiedAt: "desc" },
+                take: 1,
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  if (!planAction || planAction.turnPlan.protocolVersion !== 3) {
+    return initialRequest;
+  }
+  const actionSnapshot = jsonRecord(planAction.inputSnapshot);
+  const provenance = jsonRecord(actionSnapshot?.["argumentProvenance"]);
+  const deferredBindings = Object.entries(provenance ?? {}).flatMap(([key, value]) => {
+    const binding = jsonRecord(value);
+    return binding?.["source"] === "previous_action_output"
+      && typeof binding["pointer"] === "string"
+      ? [{ key, pointer: binding["pointer"] }]
+      : [];
+  });
+  if (!deferredBindings.length) return initialRequest;
+  const argumentsValue = {
+    ...(jsonRecord(actionSnapshot?.["arguments"]) ?? {}),
+  };
+  const resolutionAudit: Array<{
+    argumentKey: string;
+    pointer: string;
+    sourceActionId: string;
+    actionResultId: string;
+    valueHash: string;
+  }> = [];
+  for (const binding of deferredBindings) {
+    const segments = parseJsonPointerV3(binding.pointer);
+    const sourceActionKey = segments[0] === "actions" ? segments[1] : null;
+    if (!sourceActionKey || segments[2] !== "output") {
+      throw new Error("Deferred V3 argument has an invalid previous-action pointer.");
+    }
+    const sourceAction = planAction.turnPlan.actions.find((candidate) =>
+      candidate.actionKey === sourceActionKey);
+    if (
+      !sourceAction
+      || !planAction.dependsOnActionIds.includes(sourceAction.id)
+    ) {
+      throw new Error("Deferred V3 argument does not reference a declared dependency.");
+    }
+    const sourceResult = sourceAction.actionResults[0];
+    if (!sourceResult || sourceResult.semanticOutcome !== "succeeded") {
+      throw new Error("Deferred V3 argument source has no successful verified ActionResult.");
+    }
+    const resolved = resolveJsonPointerV3(sourceResult.output, segments.slice(3));
+    if (typeof resolved === "undefined") {
+      throw new Error(
+        `Deferred V3 argument ${binding.key} was absent from the verified dependency output.`,
+      );
+    }
+    argumentsValue[binding.key] = resolved;
+    resolutionAudit.push({
+      argumentKey: binding.key,
+      pointer: binding.pointer,
+      sourceActionId: sourceAction.id,
+      actionResultId: sourceResult.id,
+      valueHash: stableSha256(resolved),
+    });
+  }
+  const inputSchema = jsonRecord(actionSnapshot?.["inputSchema"]);
+  if (!inputSchema) {
+    throw new Error("Deferred V3 action is missing its immutable input Schema snapshot.");
+  }
+  const validationProblems = validateJsonSchemaValue(
+    argumentsValue,
+    inputSchema,
+    "/resolvedArguments",
+  );
+  if (validationProblems.length) {
+    throw new Error(
+      `Deferred V3 arguments failed input Schema validation: ${validationProblems[0]!.message}`,
+    );
+  }
+  const executionRequest = jsonRecord(snapshot["executionRequest"]);
+  if (!executionRequest) {
+    throw new Error("Deferred V3 action is missing its compiled execution request template.");
+  }
+  const resolvedExecutionRequest = resolveCompiledExecutionArgumentsV3(
+    executionRequest,
+    argumentsValue,
+  );
+  const resolvedRequest = resolveParsedComputeRequestArgumentsV3(
+    initialRequest,
+    resolvedExecutionRequest,
+    argumentsValue,
+  );
+  const resolvedSnapshot = {
+    ...snapshot,
+    request: resolvedRequest as unknown as Prisma.InputJsonValue,
+    executionRequest:
+      resolvedExecutionRequest as unknown as Prisma.InputJsonValue,
+    resolvedArgumentBindings: resolutionAudit,
+    resolvedArgumentsHash: stableSha256(argumentsValue),
+  };
+  await tx.delegationTaskStep.update({
+    where: { id: step.id },
+    data: { inputSnapshot: resolvedSnapshot as unknown as Prisma.InputJsonObject },
+  });
+  const effects = await tx.delegationTaskExternalEffect.findMany({
+    where: {
+      delegationTaskStepId: step.id,
+      status: "PROPOSED",
+    },
+    select: { id: true, requestPayload: true },
+  });
+  for (const effect of effects) {
+    const requestPayload = jsonRecord(effect.requestPayload) ?? {};
+    await tx.delegationTaskExternalEffect.update({
+      where: { id: effect.id },
+      data: {
+        requestPayload: {
+          ...requestPayload,
+          request: resolvedRequest as unknown as Prisma.InputJsonValue,
+          resolvedArgumentsHash: stableSha256(argumentsValue),
+        } as unknown as Prisma.InputJsonObject,
+      },
+    });
+  }
+  return resolvedRequest;
+}
+
+function resolveCompiledExecutionArgumentsV3(
+  executionRequest: Record<string, unknown>,
+  argumentsValue: Record<string, unknown>,
+) {
+  const executor = executionRequest["executor"];
+  const argumentsHash = stableSha256(argumentsValue);
+  if (executor === "mcp") {
+    return { ...executionRequest, argumentsHash, toolArguments: argumentsValue };
+  }
+  if (executor === "compute") {
+    return { ...executionRequest, argumentsHash, payload: argumentsValue };
+  }
+  if (executor === "skill" || executor === "builtin" || executor === "knowledge") {
+    return { ...executionRequest, argumentsHash, arguments: argumentsValue };
+  }
+  throw new Error("Deferred V3 action has an unsupported compiled executor.");
+}
+
+function resolveParsedComputeRequestArgumentsV3(
+  request: ParsedComputeRequest,
+  executionRequest: Record<string, unknown>,
+  argumentsValue: Record<string, unknown>,
+): ParsedComputeRequest {
+  if (request.capability === "mcp") {
+    return { ...request, toolArguments: argumentsValue };
+  }
+  if (executionRequest["executor"] === "compute") {
+    return { ...request, ...argumentsValue } as ParsedComputeRequest;
+  }
+  throw new Error("Deferred V3 execution cannot be represented as a delegation request.");
+}
+
+function parseJsonPointerV3(pointer: string) {
+  if (!pointer.startsWith("/")) return [];
+  return pointer.slice(1).split("/").map((segment) =>
+    segment.replace(/~1/gu, "/").replace(/~0/gu, "~"));
+}
+
+function resolveJsonPointerV3(value: unknown, segments: string[]): unknown {
+  let current = value;
+  for (const segment of segments) {
+    if (Array.isArray(current)) {
+      if (!/^\d+$/u.test(segment)) return undefined;
+      current = current[Number(segment)];
+      continue;
+    }
+    const record = jsonRecord(current);
+    if (!record || !(segment in record)) return undefined;
+    current = record[segment];
+  }
+  return current;
 }
 
 function mapTerminalOutcome(outcome: DelegationTaskTerminalOutcome) {

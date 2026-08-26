@@ -406,7 +406,8 @@ async function prepareV3DelegatedActionAdmission(
   const plan = action.turnPlan;
   const fence = plan.activeExecutionFence;
   if (
-    plan.generationRunId !== input.generationRunId
+    plan.delegationTaskId !== input.delegationTaskId
+    || !plan.generationRunId
     || !fence
     || fence.activePlanId !== plan.id
     || fence.activeRevision !== plan.revision

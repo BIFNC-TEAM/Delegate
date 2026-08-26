@@ -834,7 +834,7 @@ function stripHash(value: string) {
 
 async function assertInlineGenerationWorkLease(
   tx: Prisma.TransactionClient,
-  plan: { generationRunId: string | null },
+  plan: { generationRunId: string | null; delegationTaskId: string | null },
   lease: { outboxId: string; leaseAttempt: number },
 ) {
   if (!plan.generationRunId || !Number.isSafeInteger(lease.leaseAttempt)) {
@@ -854,7 +854,6 @@ async function assertInlineGenerationWorkLease(
   if (
     !outbox
     || outbox.aggregateType !== "generation_run"
-    || outbox.aggregateId !== plan.generationRunId
     || outbox.eventType !== "generation.requested"
     || outbox.status !== "PROCESSING"
     || outbox.attemptCount !== lease.leaseAttempt
@@ -862,6 +861,42 @@ async function assertInlineGenerationWorkLease(
   ) {
     throw new Error("V3 inline action lost its Generation work lease.");
   }
+  if (outbox.aggregateId === plan.generationRunId) return;
+  const continuation = plan.delegationTaskId
+    ? await tx.generationRun.findUnique({
+        where: { id: outbox.aggregateId },
+        select: {
+          delegationTaskId: true,
+          status: true,
+        },
+      })
+    : null;
+  if (!isV3InlineGenerationLeaseOwner({
+    planGenerationRunId: plan.generationRunId,
+    planDelegationTaskId: plan.delegationTaskId,
+    outboxGenerationRunId: outbox.aggregateId,
+    continuation,
+  })) {
+    throw new Error("V3 inline action lost its Generation work lease.");
+  }
+}
+
+export function isV3InlineGenerationLeaseOwner(input: {
+  planGenerationRunId: string;
+  planDelegationTaskId: string | null;
+  outboxGenerationRunId: string;
+  continuation: {
+    delegationTaskId: string | null;
+    status: string;
+  } | null;
+}) {
+  if (input.outboxGenerationRunId === input.planGenerationRunId) return true;
+  return Boolean(
+    input.planDelegationTaskId
+    && input.continuation
+    && input.continuation.delegationTaskId === input.planDelegationTaskId
+    && input.continuation.status === "PROCESSING",
+  );
 }
 
 function inlineExecutionLeasePrefix(

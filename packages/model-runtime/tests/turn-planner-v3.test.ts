@@ -260,6 +260,221 @@ describe("TurnPlan V3 planner", () => {
     });
   });
 
+  it("materializes a generic lookup-to-tool DAG with verified output arguments", async () => {
+    const search = genericCandidateDraft("mcp.weather.search_locations", {
+      executor: "mcp",
+      inputSchema: closedObject({ name: { type: "string" } }, ["name"]),
+      outputSchema: closedObject({
+        results: {
+          type: "array",
+          items: closedObject({
+            latitude: { type: "number" },
+            longitude: { type: "number" },
+            timezone: { type: "string" },
+          }, ["latitude", "longitude"]),
+        },
+      }, ["results"]),
+      mcpToolSchemaHash: `sha256:${"1".repeat(64)}`,
+      bindingDefinitionHash: `sha256:${"2".repeat(64)}`,
+      semantics: {
+        operations: ["search"],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+        domains: ["location"],
+        aliases: ["location search"],
+      },
+    });
+    const forecast = genericCandidateDraft("mcp.weather.get_forecast", {
+      executor: "mcp",
+      inputSchema: closedObject({
+        latitude: { type: "number" },
+        longitude: { type: "number" },
+        timezone: { type: "string" },
+        hourly_variables: {
+          type: "array",
+          items: { type: "string" },
+          default: ["temperature_2m", "weather_code"],
+        },
+      }, ["latitude", "longitude"]),
+      outputSchema: closedObject({ weather: { type: "string" } }, ["weather"]),
+      mcpToolSchemaHash: `sha256:${"3".repeat(64)}`,
+      bindingDefinitionHash: `sha256:${"4".repeat(64)}`,
+      semantics: {
+        operations: ["read", "search"],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+        domains: ["weather"],
+        aliases: ["forecast", "天气"],
+      },
+    });
+    const catalog = buildCapabilityCatalogV3([search, forecast, composerDraft()]);
+    const checkedAt = new Date().toISOString();
+    const availabilitySnapshot = buildCapabilityAvailabilitySnapshotV3({
+      catalog,
+      observedAt: checkedAt,
+      capabilities: catalog.capabilities.map((definition) => ({
+        capabilityKey: definition.key,
+        capabilityVersion: definition.version,
+        definitionHash: definition.definitionHash,
+        healthState: "ready" as const,
+        checkedAt,
+      })),
+    });
+    const proposal: TurnPlanProposalV3 = {
+      protocolVersion: 3,
+      objective: "Look up a place and retrieve its live weather.",
+      goals: [{
+        id: "location-goal",
+        objective: "Resolve the requested location.",
+        sourcePointers: ["/currentMessage/text"],
+        strategy: "capability",
+        operation: "search",
+        semanticConfidence: 0.98,
+        generalEligibility: "not_allowed",
+        sourceSpan: {
+          pointer: "/currentMessage/text",
+          startOffset: 2,
+          endOffset: 4,
+          quote: "深圳",
+        },
+        evidenceRequirement: {
+          kind: "current_external",
+          freshness: "live",
+          allowedSourceKinds: ["current_external"],
+          citationRequired: true,
+          minimumEvidenceCount: 1,
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "weather_lookup_failed" },
+      }, {
+        id: "forecast-goal",
+        objective: "Read the live forecast.",
+        sourcePointers: ["/currentMessage/text"],
+        strategy: "capability",
+        operation: "read",
+        semanticConfidence: 0.98,
+        generalEligibility: "not_allowed",
+        sourceSpan: {
+          pointer: "/currentMessage/text",
+          startOffset: 0,
+          endOffset: 27,
+          quote: "今天深圳天气怎么样",
+        },
+        evidenceRequirement: {
+          kind: "current_external",
+          freshness: "live",
+          allowedSourceKinds: ["current_external"],
+          citationRequired: true,
+          minimumEvidenceCount: 1,
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "weather_lookup_failed" },
+      }],
+      capabilitySelections: [{
+        id: "search-location",
+        capabilityKey: search.key,
+        capabilityVersion: search.version,
+        goalIds: ["location-goal"],
+        argumentsJson: ":{",
+      }, {
+        id: "get-forecast",
+        capabilityKey: forecast.key,
+        capabilityVersion: forecast.version,
+        goalIds: ["forecast-goal"],
+        argumentsJson: "{}",
+      }],
+      decisionTrace: ["live_weather_requires_tools"],
+    };
+    const result = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: {
+          id: "message-1",
+          text: "今天深圳天气怎么样",
+          language: "zh",
+        },
+      },
+      catalog,
+      availabilitySnapshot,
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-1",
+      },
+      revision: 1,
+      adapter: strictAdapter(proposal),
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok) return;
+    expect(result.plan.goals).toHaveLength(1);
+    expect(result.plan.goals[0]).toMatchObject({ operation: "search" });
+    expect(result.proposal.decisionTrace)
+      .toContain("server_same_source_capability_goals_coalesced");
+    expect(result.proposal.decisionTrace)
+      .toContain("server_unique_source_span_normalized");
+    const searchAction = result.plan.actions.find((action) =>
+      action.capability.key === search.key)!;
+    const forecastAction = result.plan.actions.find((action) =>
+      action.capability.key === forecast.key)!;
+    expect(searchAction.arguments).toEqual({ name: "深圳" });
+    expect(forecastAction.dependencies).toEqual([{
+      actionId: searchAction.id,
+      allowedStatuses: ["succeeded"],
+    }]);
+    expect(forecastAction.arguments).toEqual({
+      hourly_variables: ["temperature_2m", "weather_code"],
+    });
+    expect(forecastAction.argumentProvenance).toMatchObject({
+      hourly_variables: {
+        source: "capability_default",
+        pointer: "/inputSchema/properties/hourly_variables/default",
+      },
+      latitude: {
+        source: "previous_action_output",
+        pointer: `/actions/${searchAction.id}/output/results/0/latitude`,
+      },
+      longitude: {
+        source: "previous_action_output",
+        pointer: `/actions/${searchAction.id}/output/results/0/longitude`,
+      },
+      timezone: {
+        source: "previous_action_output",
+        pointer: `/actions/${searchAction.id}/output/results/0/timezone`,
+      },
+    });
+
+    const danglingProposal = structuredClone(proposal);
+    danglingProposal.goals = [danglingProposal.goals[0]!];
+    danglingProposal.capabilitySelections[1]!.goalIds = ["planner-omitted-step-goal"];
+    const anchored = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: {
+          id: "message-1",
+          text: "今天深圳天气怎么样",
+          language: "zh",
+        },
+      },
+      catalog,
+      availabilitySnapshot,
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-1",
+      },
+      revision: 1,
+      adapter: strictAdapter(danglingProposal),
+    });
+    expect(anchored).toMatchObject({ ok: true });
+    if (anchored.ok) {
+      expect(anchored.proposal.capabilitySelections[1]?.goalIds)
+        .toEqual(["location-goal"]);
+      expect(anchored.proposal.decisionTrace)
+        .toContain("server_dangling_read_selection_anchored");
+    }
+  });
+
   it("uses a strict provider proposal schema and forbids policy decisions", () => {
     const prompt = buildTurnPlannerV3Prompt({
       envelope: envelope(),

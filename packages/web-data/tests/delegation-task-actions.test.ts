@@ -59,7 +59,7 @@ const {
     },
     workflowCommandOutbox: { upsert: vi.fn() },
     conversationTurnPlan: { findFirst: vi.fn() },
-    conversationPlanAction: { findMany: vi.fn(), findUnique: vi.fn() },
+    conversationPlanAction: { findFirst: vi.fn(), findMany: vi.fn(), findUnique: vi.fn() },
     eventAudit: { create: vi.fn() },
   };
   return {
@@ -846,6 +846,178 @@ describe("delegation task owner actions", () => {
     expect(mockPrisma.delegationTask.update).toHaveBeenCalledWith({
       where: { id: "task-1" },
       data: expect.objectContaining({ status: "READY", nextActionBy: "SYSTEM" }),
+    });
+  });
+
+  it("resolves a deferred V3 MCP argument only from a successful verified dependency result", async () => {
+    mockPrisma.generationRun.create.mockResolvedValueOnce({ id: "run-forecast" });
+    const forecastStepSnapshot = {
+      request: {
+        capability: "mcp",
+        bindingId: "weather-binding",
+        toolName: "get_forecast",
+        toolArguments: {},
+        displayTarget: "capability-2",
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+      },
+      executionRequest: {
+        executor: "mcp",
+        planId: "plan-1",
+        planRevision: 1,
+        executionEpoch: 1,
+        actionId: "action-forecast",
+        generationRunId: "run-search",
+        capabilityKey: "mcp.weather.get_forecast",
+        capabilityVersion: "1",
+        capabilityDefinitionHash: `sha256:${"1".repeat(64)}`,
+        argumentsHash: `sha256:${"2".repeat(64)}`,
+        idempotencyKey: "forecast-once",
+        bindingId: "weather-binding",
+        bindingRevision: 1,
+        toolName: "get_forecast",
+        expectedToolSchemaHash: `sha256:${"3".repeat(64)}`,
+        expectedBindingDefinitionHash: `sha256:${"4".repeat(64)}`,
+        toolArguments: {},
+      },
+    };
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-weather",
+      status: "RUNNING",
+      representativeId: "representative-1",
+      representativeVersionId: "rep-version-1",
+      steps: [{
+        id: "step-search",
+        kind: "MCP",
+        sequence: 1,
+        status: "RUNNING",
+        dependsOnStepIds: [],
+        inputSnapshot: {},
+      }, {
+        id: "step-forecast",
+        kind: "MCP",
+        sequence: 2,
+        status: "DRAFT",
+        dependsOnStepIds: ["step-search"],
+        inputSnapshot: forecastStepSnapshot,
+      }],
+      generationRuns: [{
+        id: "run-search",
+        delegationTaskStepId: "step-search",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+      }],
+    });
+    mockPrisma.conversationPlanAction.findFirst.mockResolvedValueOnce({
+      id: "action-forecast",
+      dependsOnActionIds: ["action-search"],
+      inputSnapshot: {
+        arguments: {},
+        argumentProvenance: {
+          latitude: {
+            source: "previous_action_output",
+            pointer: "/actions/capability-1/output/results/0/latitude",
+          },
+          longitude: {
+            source: "previous_action_output",
+            pointer: "/actions/capability-1/output/results/0/longitude",
+          },
+          timezone: {
+            source: "previous_action_output",
+            pointer: "/actions/capability-1/output/results/0/timezone",
+          },
+        },
+        inputSchema: {
+          type: "object",
+          properties: {
+            latitude: { type: "number" },
+            longitude: { type: "number" },
+            timezone: { type: "string" },
+          },
+          required: ["latitude", "longitude"],
+          additionalProperties: false,
+        },
+      },
+      turnPlan: {
+        protocolVersion: 3,
+        actions: [{
+          id: "action-search",
+          actionKey: "capability-1",
+          actionResults: [{
+            id: "result-search",
+            semanticOutcome: "succeeded",
+            output: {
+              results: [{
+                latitude: 22.5431,
+                longitude: 114.0579,
+                timezone: "Asia/Shanghai",
+              }],
+            },
+          }],
+        }, {
+          id: "action-forecast",
+          actionKey: "capability-2",
+          actionResults: [],
+        }],
+      },
+    });
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    const result = await finalizeComputeDelegationTask({
+      taskId: "task-weather",
+      stepId: "step-search",
+      generationRunId: "run-search",
+      outcome: "completed",
+    });
+
+    expect(result).toMatchObject({
+      status: "READY",
+      hasMoreSteps: true,
+      nextGenerationRunId: "run-forecast",
+    });
+    expect(mockPrisma.delegationTaskStep.update).toHaveBeenCalledWith({
+      where: { id: "step-forecast" },
+      data: {
+        inputSnapshot: expect.objectContaining({
+          request: expect.objectContaining({
+            toolArguments: {
+              latitude: 22.5431,
+              longitude: 114.0579,
+              timezone: "Asia/Shanghai",
+            },
+          }),
+          executionRequest: expect.objectContaining({
+            toolArguments: {
+              latitude: 22.5431,
+              longitude: 114.0579,
+              timezone: "Asia/Shanghai",
+            },
+            argumentsHash: expect.stringMatching(/^sha256:/),
+          }),
+          resolvedArgumentBindings: expect.arrayContaining([
+            expect.objectContaining({
+              argumentKey: "latitude",
+              sourceActionId: "action-search",
+              actionResultId: "result-search",
+            }),
+          ]),
+        }),
+      },
+    });
+    expect(mockPrisma.generationRun.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        contextSnapshot: expect.objectContaining({
+          request: expect.objectContaining({
+            toolArguments: expect.objectContaining({
+              latitude: 22.5431,
+              longitude: 114.0579,
+            }),
+          }),
+        }),
+      }),
     });
   });
 

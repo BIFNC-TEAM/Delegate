@@ -15,7 +15,8 @@ const mocks = vi.hoisted(() => {
       deleteMany: vi.fn(),
       createMany: vi.fn(),
     },
-    outboxEvent: { upsert: vi.fn() },
+    outboxEvent: { upsert: vi.fn(), updateMany: vi.fn(), create: vi.fn() },
+    conversationTurnPlan: { findFirst: vi.fn() },
     generationRun: {
       update: vi.fn(),
       updateMany: vi.fn(),
@@ -135,6 +136,9 @@ describe("compute approval wallet finalization", () => {
     mocks.consumeConversationEntitlementByGenerationRunId.mockResolvedValue(null);
     mocks.releaseConversationEntitlementByGenerationRunId.mockResolvedValue(null);
     mocks.tx.outboxEvent.upsert.mockResolvedValue({ id: "delivery-outbox-1" });
+    mocks.tx.outboxEvent.updateMany.mockResolvedValue({ count: 1 });
+    mocks.tx.outboxEvent.create.mockResolvedValue({ id: "composer-outbox-1" });
+    mocks.tx.conversationTurnPlan.findFirst.mockResolvedValue(null);
     mocks.finalizeComputeDelegationTaskInTransaction.mockResolvedValue({
       taskId: "task-1",
       status: "READY",
@@ -306,6 +310,61 @@ describe("compute approval wallet finalization", () => {
         text:
           "审批通过，当前步骤已完成，委托任务正在继续执行后续步骤。",
       },
+    });
+  });
+
+  it("requeues a final governed V3 approval result for evidence-bound composition", async () => {
+    mocks.tx.approvalRequest.findUnique.mockResolvedValue({
+      ...approvalWithPaidRun,
+      delegationTaskId: "task-1",
+      delegationTaskStepId: "step-2",
+      generationRun: {
+        ...approvalWithPaidRun.generationRun,
+        delegationTaskId: "task-1",
+        delegationTaskStepId: "step-2",
+        contextSnapshot: { source: "delegation_plan_step" },
+      },
+    });
+    mocks.finalizeComputeDelegationTaskInTransaction.mockResolvedValue({
+      taskId: "task-1",
+      status: "COMPLETED",
+      hasMoreSteps: false,
+    });
+    mocks.tx.conversationTurnPlan.findFirst.mockResolvedValue({ id: "plan-1" });
+
+    await expect(finalizeComputeApprovalConversation({
+      approvalId: "approval-1",
+      outcome: "completed",
+    })).resolves.toBeNull();
+
+    expect(mocks.tx.generationRun.update).toHaveBeenCalledWith({
+      where: { id: "run-1" },
+      data: expect.objectContaining({
+        status: "QUEUED",
+        outputMessageId: null,
+        completedAt: null,
+        contextSnapshot: expect.objectContaining({
+          source: "v3_governed_composer_resume",
+          delegationTaskId: "task-1",
+          planId: "plan-1",
+        }),
+      }),
+    });
+    expect(mocks.tx.outboxEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        aggregateType: "generation_run",
+        aggregateId: "run-1",
+        eventType: "generation.requested",
+        idempotencyKey:
+          "generation.v3-composer.requested:run-1:plan-1",
+      }),
+    });
+    expect(mocks.tx.message.update).toHaveBeenCalledWith({
+      where: { id: "result-message" },
+      data: expect.objectContaining({
+        deliveryStatus: "CANCELED",
+        failureCode: "v3_composer_resume",
+      }),
     });
   });
 

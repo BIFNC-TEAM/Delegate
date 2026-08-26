@@ -1846,6 +1846,7 @@ function serializePlanActionV3(input: {
       activation: input.action.activation,
       failurePolicy: input.action.failurePolicy,
       effect: input.definition.effect,
+      inputSchema: input.definition.inputSchema,
     } as unknown as Prisma.InputJsonObject,
     expectedOutputSchema:
       input.action.expectedOutputSchema as Prisma.InputJsonObject,

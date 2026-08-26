@@ -268,6 +268,18 @@ describe("V3 external capability publication adapters", () => {
       toolName,
       false,
     )).not.toThrow();
+    if (toolName === "openmeteo_get_forecast") {
+      expect(policy?.argumentDefaults).toEqual({
+        hourly_variables: [
+          "temperature_2m",
+          "apparent_temperature",
+          "relative_humidity_2m",
+          "precipitation_probability",
+          "weather_code",
+          "wind_speed_10m",
+        ],
+      });
+    }
     const successOutput = toolName === "openmeteo_search_locations"
       ? { results: [], count: 0 }
       : {

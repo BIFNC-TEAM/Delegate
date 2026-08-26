@@ -1211,9 +1211,18 @@ export function validateTurnPlanV3(input: {
           message: "Expected output schema must equal the immutable capability output schema.",
         });
       }
+      const deferredArgumentKeys = new Set(
+        Object.entries(action.argumentProvenance)
+          .filter(([, provenance]) =>
+            provenance.source === "previous_action_output")
+          .map(([key]) => key),
+      );
       for (const problem of validateJsonSchemaValue(
         action.arguments,
-        definition.inputSchema,
+        schemaWithDeferredRequiredArgumentsV3(
+          definition.inputSchema,
+          deferredArgumentKeys,
+        ),
         `${path}/arguments`,
       )) {
         issues.push({ code: "arguments_invalid", ...problem });
@@ -1288,6 +1297,7 @@ export function validateTurnPlanV3(input: {
       action,
       actionIndex,
       actionById,
+      ...(definition ? { definition } : {}),
       ...(input.envelope ? { envelope: input.envelope } : {}),
       issues,
     });
@@ -1340,6 +1350,7 @@ function validateProvenance(input: {
   action: PlanActionV3;
   actionIndex: number;
   actionById: Map<string, PlanActionV3>;
+  definition?: CapabilityDefinitionV3;
   envelope?: TurnEnvelope;
   issues: TurnPlanV3ValidationIssue[];
 }) {
@@ -1356,7 +1367,11 @@ function validateProvenance(input: {
     }
   }
   for (const provenanceKey of provenanceKeys) {
-    if (!(provenanceKey in input.action.arguments)) {
+    const provenance = input.action.argumentProvenance[provenanceKey];
+    if (
+      !(provenanceKey in input.action.arguments)
+      && provenance?.source !== "previous_action_output"
+    ) {
       input.issues.push({
         code: "provenance_invalid",
         path: `${path}/${escapeJsonPointer(provenanceKey)}`,
@@ -1364,7 +1379,6 @@ function validateProvenance(input: {
       });
       continue;
     }
-    const provenance = input.action.argumentProvenance[provenanceKey];
     if (!provenance) continue;
     if (provenance.source === "previous_action_output") {
       const segments = parseJsonPointer(provenance.pointer);
@@ -1380,6 +1394,30 @@ function validateProvenance(input: {
           code: "provenance_invalid",
           path: `${path}/${escapeJsonPointer(provenanceKey)}`,
           message: "Previous-action provenance must reference a declared dependency output.",
+        });
+      }
+      continue;
+    }
+    if (provenance.source === "capability_default") {
+      const segments = parseJsonPointer(provenance.pointer);
+      const resolved = input.definition
+        ? resolveJsonPointer({ inputSchema: input.definition.inputSchema }, segments)
+        : undefined;
+      if (
+        segments[0] !== "inputSchema"
+        || segments[1] !== "properties"
+        || segments[2] !== provenanceKey
+        || segments[3] !== "default"
+        || segments.length !== 4
+        || typeof resolved === "undefined"
+        || canonicalJson(resolved) !== canonicalJson(
+          input.action.arguments[provenanceKey],
+        )
+      ) {
+        input.issues.push({
+          code: "provenance_invalid",
+          path: `${path}/${escapeJsonPointer(provenanceKey)}`,
+          message: "Capability-default provenance must match the immutable input Schema default.",
         });
       }
       continue;
@@ -1448,6 +1486,18 @@ function validateProvenance(input: {
       });
     }
   }
+}
+
+function schemaWithDeferredRequiredArgumentsV3(
+  schema: Record<string, unknown>,
+  deferredArgumentKeys: ReadonlySet<string>,
+) {
+  if (!deferredArgumentKeys.size || !Array.isArray(schema.required)) return schema;
+  return {
+    ...schema,
+    required: schema.required.filter((value) =>
+      typeof value !== "string" || !deferredArgumentKeys.has(value)),
+  };
 }
 
 function containsDependencyCycleV3(actions: PlanActionV3[]) {

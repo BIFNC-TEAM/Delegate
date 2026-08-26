@@ -251,7 +251,7 @@ describe("delegated generation execution fence", () => {
     ).rejects.toThrow("generation_execution_request_mismatch");
   });
 
-  it("atomically admits a current V3 action before an external call", async () => {
+  it("atomically admits a later V3 DAG step under the original Plan fence", async () => {
     const actionState: Record<string, unknown> = {
       id: "action-db-1",
       argumentsHash: "a".repeat(64),
@@ -268,7 +268,7 @@ describe("delegated generation execution fence", () => {
       computeSession: { findUnique: vi.fn().mockResolvedValue({
         id: "session-1",
         conversationId: "conversation-1",
-        generationRunId: "run-1",
+        generationRunId: "run-step-2",
         generationOutboxId: "generation-outbox-1",
         delegationTaskId: "task-1",
         delegationTaskStepId: "step-1",
@@ -290,7 +290,8 @@ describe("delegated generation execution fence", () => {
           turnPlan: {
             id: "plan-1",
             conversationId: "conversation-1",
-            generationRunId: "run-1",
+            generationRunId: "run-plan-origin",
+            delegationTaskId: "task-1",
             revision: 2,
             executionEpoch: 7,
             activeExecutionFence: {
@@ -335,7 +336,7 @@ describe("delegated generation execution fence", () => {
     const admitted = await claimDelegatedGenerationExecution(tx, {
       sessionId: "session-1",
       conversationId: "conversation-1",
-      generationRunId: "run-1",
+      generationRunId: "run-step-2",
       delegationTaskId: "task-1",
       delegationTaskStepId: "step-1",
       outboxId: "generation-outbox-1",

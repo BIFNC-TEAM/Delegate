@@ -31,6 +31,11 @@ export type CapabilityServerPolicyV3 = {
   requiredIdentityScopes?: string[];
   requiredDataScopes?: string[];
   /**
+   * Reviewed, server-owned defaults for optional Tool arguments. These are
+   * capability policy, never copied from untrusted remote Schema annotations.
+   */
+  argumentDefaults?: Record<string, unknown>;
+  /**
    * Server-owned semantic classification for trusted remote tools. Remote MCP
    * descriptions, schemas, and annotations never populate this field.
    */
@@ -107,10 +112,13 @@ export function buildMcpToolCapabilityPublicationV3(input: {
       ].join(":"),
       description,
       executor: "mcp",
-      inputSchema: stripUntrustedSchemaAnnotations(
-        derivePlannerCapabilitySchema(input.tool.inputSchema, {
-          closeObjects: true,
-        }),
+      inputSchema: applyServerOwnedArgumentDefaultsV3(
+        stripUntrustedSchemaAnnotations(
+          derivePlannerCapabilitySchema(input.tool.inputSchema, {
+            closeObjects: true,
+          }),
+        ),
+        policy.argumentDefaults,
       ),
       outputSchema: input.tool.outputSchema
         ? stripUntrustedSchemaAnnotations(
@@ -251,6 +259,9 @@ export function resolveServerOwnedMcpCapabilityPolicyV3(input: {
       idempotency: "naturally_idempotent",
       successContract: openMeteoPolicy.successContract,
       semantics: openMeteoPolicy.semantics,
+      ...(openMeteoPolicy.argumentDefaults
+        ? { argumentDefaults: openMeteoPolicy.argumentDefaults }
+        : {}),
     };
   }
   return null;
@@ -273,6 +284,7 @@ const OPEN_METEO_TRUSTED_TOOL_POLICIES: Readonly<Record<
     schemaHash: string;
     successContract: SuccessContractV3;
     semantics: CapabilitySemanticsV3;
+    argumentDefaults?: Record<string, unknown>;
   }
 >> = {
   openmeteo_search_locations: {
@@ -344,8 +356,38 @@ const OPEN_METEO_TRUSTED_TOOL_POLICIES: Readonly<Record<
         "降雨",
       ],
     },
+    argumentDefaults: {
+      hourly_variables: [
+        "temperature_2m",
+        "apparent_temperature",
+        "relative_humidity_2m",
+        "precipitation_probability",
+        "weather_code",
+        "wind_speed_10m",
+      ],
+    },
   },
 };
+
+function applyServerOwnedArgumentDefaultsV3(
+  schema: Record<string, unknown>,
+  defaults?: Record<string, unknown>,
+) {
+  if (!defaults || !Object.keys(defaults).length) return schema;
+  const properties = schema.properties;
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+    throw new Error("Server-owned MCP argument defaults require an object input Schema.");
+  }
+  const nextProperties = { ...properties as Record<string, unknown> };
+  for (const [key, value] of Object.entries(defaults)) {
+    const property = nextProperties[key];
+    if (!property || typeof property !== "object" || Array.isArray(property)) {
+      throw new Error(`Server-owned MCP argument default ${key} is outside the Tool Schema.`);
+    }
+    nextProperties[key] = { ...property as Record<string, unknown>, default: value };
+  }
+  return { ...schema, properties: nextProperties };
+}
 
 function normalizeTrustedMcpEndpoint(value: string) {
   try {

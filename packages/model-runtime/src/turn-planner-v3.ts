@@ -981,7 +981,7 @@ export function buildTurnPlannerV3Prompt(input: {
       "Use only the exact key and version of plannerCandidates.",
       "Select business capabilities in capabilitySelections and associate each selection with goalIds.",
       "Do not select response.compose. The server always creates the single composer, its dependencies, and the message deliverable.",
-      "argumentsJson contains only argument candidates explicitly grounded in the supplied envelope; use {} when the server-owned binder can derive required values.",
+      "argumentsJson must be a valid JSON object string containing exact argument candidates grounded in the supplied envelope. Populate simple scalar entities such as a place/name when they are an exact substring of the user message; use {} only for full-message fields, server defaults, or values produced by another selected Action.",
       "Do not propose Action ids, dependencies, activation, provenance, completion criteria, failure actions, or deliverables; the server owns them.",
       "Current, external, or transactional facts require live evidence and cannot use stable general knowledge.",
       "Honor envelope.turnConstraints for this turn only. forbidden permits only stable general or control response.compose work; required must include at least one non-composer capability unless a control clarification is required before execution; conflict must produce a control response without executing tools.",
@@ -1223,12 +1223,31 @@ function materializeTurnPlanV3(input: {
       serverRequired: true,
     });
   }
-  const materializedSelections = selections.map((selection, index) => {
+  const boundSelections = selections.map((selection, originalIndex) => {
     const binding = materializeCapabilityArguments({
       definition: selection.definition,
       argumentCandidates: parseArguments(selection.argumentsJson),
       envelope: input.envelope,
+      groundedEntityCandidates: input.proposal.goals
+        .filter((goal) => selection.goalIds.includes(goal.id))
+        .flatMap((goal) => goal.sourceSpan?.quote ? [goal.sourceSpan.quote] : []),
+      semanticContextTerms: input.selectedCapabilities.flatMap((definition) => [
+        ...definition.semantics.domains,
+        ...definition.semantics.aliases,
+      ]),
     });
+    return { selection, binding, originalIndex };
+  }).sort((left, right) => {
+    const missingRequiredDifference = countMissingRequiredArgumentsV3(
+      left.selection.definition.inputSchema,
+      left.binding.arguments,
+    ) - countMissingRequiredArgumentsV3(
+      right.selection.definition.inputSchema,
+      right.binding.arguments,
+    );
+    return missingRequiredDifference || left.originalIndex - right.originalIndex;
+  });
+  const materializedSelections = boundSelections.map(({ selection, binding }, index) => {
     return {
       actionId: `capability-${index + 1}`,
       selection,
@@ -1252,6 +1271,7 @@ function materializeTurnPlanV3(input: {
       },
     };
   });
+  wirePreviousActionOutputArgumentsV3(materializedSelections);
   const composer = selectedByKey.get("response.compose");
   if (!composer) {
     throw new Error("V3 Action Materializer requires response.compose.");
@@ -1388,6 +1408,8 @@ function materializeCapabilityArguments(input: {
   definition: CapabilityDefinitionV3;
   argumentCandidates: Record<string, unknown>;
   envelope: TurnEnvelope;
+  groundedEntityCandidates?: string[];
+  semanticContextTerms?: string[];
 }) {
   const properties = asSchemaRecord(input.definition.inputSchema.properties) ?? {};
   const required = Array.isArray(input.definition.inputSchema.required)
@@ -1395,7 +1417,10 @@ function materializeCapabilityArguments(input: {
         typeof item === "string")
     : [];
   const argumentsRecord: Record<string, unknown> = {};
-  const provenance: Record<string, { source: "user_message" | "server_state"; pointer: string }> = {};
+  const provenance: Record<string, {
+    source: "user_message" | "server_state" | "capability_default";
+    pointer: string;
+  }> = {};
   for (const [key, candidate] of Object.entries(input.argumentCandidates)) {
     if (!(key in properties) || !isGroundedArgumentCandidate(
       candidate,
@@ -1406,7 +1431,13 @@ function materializeCapabilityArguments(input: {
   }
   for (const key of required) {
     if (Object.hasOwn(argumentsRecord, key)) continue;
-    const bound = bindRequiredArgument(key, input.envelope, properties[key]);
+    const bound = bindRequiredArgument(
+      key,
+      input.envelope,
+      properties[key],
+      input.groundedEntityCandidates,
+      input.semanticContextTerms,
+    );
     if (!bound) continue;
     argumentsRecord[key] = bound.value;
     provenance[key] = bound.provenance;
@@ -1422,6 +1453,16 @@ function materializeCapabilityArguments(input: {
       pointer: "/planningDefaults/managedDocumentFormat",
     };
   }
+  for (const [key, propertyValue] of Object.entries(properties)) {
+    if (Object.hasOwn(argumentsRecord, key)) continue;
+    const propertySchema = asSchemaRecord(propertyValue);
+    if (!propertySchema || !Object.hasOwn(propertySchema, "default")) continue;
+    argumentsRecord[key] = structuredClone(propertySchema.default);
+    provenance[key] = {
+      source: "capability_default",
+      pointer: `/inputSchema/properties/${escapeJsonPointerV3(key)}/default`,
+    };
+  }
   return { arguments: argumentsRecord, provenance };
 }
 
@@ -1429,6 +1470,8 @@ function bindRequiredArgument(
   key: string,
   envelope: TurnEnvelope,
   schema: unknown,
+  groundedEntityCandidates: string[] = [],
+  semanticContextTerms: string[] = [],
 ): {
   value: unknown;
   provenance: { source: "user_message" | "server_state"; pointer: string };
@@ -1449,6 +1492,19 @@ function bindRequiredArgument(
         }
       : null;
   }
+  if (["name", "location", "city", "place"].includes(key)) {
+    const grounded = extractGroundedNamedEntityV3({
+      text,
+      candidates: groundedEntityCandidates,
+      semanticContextTerms,
+    });
+    if (grounded) {
+      return {
+        value: grounded,
+        provenance: { source: "user_message", pointer: "/currentMessage/text" },
+      };
+    }
+  }
   if (key === "format" && envelope.planningDefaults?.managedDocumentFormat) {
     return {
       value: envelope.planningDefaults.managedDocumentFormat,
@@ -1466,6 +1522,38 @@ function bindRequiredArgument(
     };
   }
   return null;
+}
+
+function extractGroundedNamedEntityV3(input: {
+  text: string;
+  candidates: string[];
+  semanticContextTerms: string[];
+}) {
+  const sourceText = input.text.normalize("NFKC").trim();
+  const exactCandidates = [...new Set(input.candidates
+    .map((value) => value.normalize("NFKC").trim())
+    .filter((value) =>
+      value
+      && value !== sourceText
+      && sourceText.includes(value)))];
+  if (exactCandidates.length === 1) return exactCandidates[0]!;
+  let residual = sourceText;
+  const semanticTerms = [...new Set(input.semanticContextTerms
+    .map((value) => value.normalize("NFKC").trim())
+    .filter((value) => value.length >= 2 && sourceText.includes(value)))]
+    .sort((left, right) => right.length - left.length);
+  for (const term of semanticTerms) residual = residual.split(term).join(" ");
+  residual = residual
+    .replace(/(?:今天|今日|明天|后天|昨天|当前|现在|实时|最新|近期|本周|这周|下周|today|tomorrow|yesterday|current|currently|now|live|latest|recent)/giu, " ")
+    .replace(/(?:请|请问|帮我|麻烦|查询|查找|搜索|检索|获取|告诉我|看一下|看看|想知道|what|where|when|please|find|search|lookup|fetch|tell\s+me)/giu, " ")
+    .replace(/(?:怎么样|如何|情况|是什么|在哪里|多少|怎样|好吗|呢|吗|how|status|condition|is\s+it|does\s+it)/giu, " ")
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .trim();
+  return residual
+    && residual.length <= 100
+    && sourceText.includes(residual)
+      ? residual
+      : null;
 }
 
 function requiredStringCanUseWholeMessage(key: string) {
@@ -2793,13 +2881,165 @@ function normalizedSelectedCapabilityOperationV3(
     || requested === "deliver"
     || requested === "control"
   ) return requested;
-  const supported = new Set(definitions.flatMap((definition) =>
-    definition.semantics.operations));
-  if (!supported.size || supported.has(requested)) return requested;
+  const declaredOperationSets = definitions
+    .map((definition) => new Set(definition.semantics.operations))
+    .filter((operations) => operations.size > 0);
+  if (!declaredOperationSets.length) return requested;
+  const supportsEverySelectedCapability = (operation: CapabilityOperationV3) =>
+    declaredOperationSets.every((operations) => operations.has(operation));
+  if (supportsEverySelectedCapability(requested)) return requested;
   const priorities = requested === "answer" || requested === "explain"
     ? ["answer", "explain", "read", "search"] as const
     : ["read", "search", "explain", "answer"] as const;
-  return priorities.find((operation) => supported.has(operation)) ?? requested;
+  return priorities.find(supportsEverySelectedCapability) ?? requested;
+}
+
+function countMissingRequiredArgumentsV3(
+  schema: Record<string, unknown>,
+  argumentsValue: Record<string, unknown>,
+) {
+  const required = Array.isArray(schema.required)
+    ? schema.required.filter((value): value is string => typeof value === "string")
+    : [];
+  return required.filter((key) => !(key in argumentsValue)).length;
+}
+
+type MaterializedCapabilitySelectionV3 = {
+  actionId: string;
+  selection: {
+    definition: CapabilityDefinitionV3;
+  };
+  action: TurnPlanV3["actions"][number];
+};
+
+function wirePreviousActionOutputArgumentsV3(
+  selections: MaterializedCapabilitySelectionV3[],
+) {
+  for (let targetIndex = 0; targetIndex < selections.length; targetIndex += 1) {
+    const target = selections[targetIndex]!;
+    const inputProperties = schemaPropertiesV3(target.selection.definition.inputSchema);
+    for (const [argumentKey, argumentSchema] of Object.entries(inputProperties)) {
+      if (argumentKey in target.action.arguments) continue;
+      const targetArgumentSchema = asSchemaRecord(argumentSchema);
+      if (!targetArgumentSchema) continue;
+      const matches = selections.slice(0, targetIndex).flatMap((source) =>
+        collectSchemaValuePointersV3(
+          source.selection.definition.outputSchema,
+          argumentKey,
+        ).filter((candidate) => schemasHaveCompatibleValueTypeV3(
+          targetArgumentSchema,
+          candidate.schema,
+        )).map((candidate) => ({ source, ...candidate })));
+      if (matches.length !== 1) continue;
+      const match = matches[0]!;
+      target.action.argumentProvenance[argumentKey] = {
+        source: "previous_action_output",
+        pointer: `/actions/${escapeJsonPointerV3(match.source.actionId)}/output${match.pointer}`,
+      };
+      if (!target.action.dependencies.some((dependency) =>
+        dependency.actionId === match.source.actionId)) {
+        target.action.dependencies.push({
+          actionId: match.source.actionId,
+          allowedStatuses: ["succeeded"],
+        });
+      }
+    }
+  }
+}
+
+function schemaPropertiesV3(schema: Record<string, unknown>) {
+  return asSchemaRecord(schema.properties) ?? {};
+}
+
+function collectSchemaValuePointersV3(
+  schema: Record<string, unknown>,
+  propertyName: string,
+  pointer = "",
+  depth = 0,
+): Array<{ pointer: string; schema: Record<string, unknown> }> {
+  if (depth > 8) return [];
+  const matches: Array<{ pointer: string; schema: Record<string, unknown> }> = [];
+  for (const variantKey of ["allOf", "anyOf", "oneOf"] as const) {
+    const variants = schema[variantKey];
+    if (!Array.isArray(variants)) continue;
+    for (const variant of variants) {
+      const record = asSchemaRecord(variant);
+      if (record) {
+        matches.push(...collectSchemaValuePointersV3(
+          record,
+          propertyName,
+          pointer,
+          depth + 1,
+        ));
+      }
+    }
+  }
+  const properties = schemaPropertiesV3(schema);
+  for (const [key, value] of Object.entries(properties)) {
+    const propertySchema = asSchemaRecord(value);
+    if (!propertySchema) continue;
+    const propertyPointer = `${pointer}/${escapeJsonPointerV3(key)}`;
+    if (key === propertyName) {
+      matches.push({ pointer: propertyPointer, schema: propertySchema });
+    }
+    matches.push(...collectSchemaValuePointersV3(
+      propertySchema,
+      propertyName,
+      propertyPointer,
+      depth + 1,
+    ));
+  }
+  const items = asSchemaRecord(schema.items);
+  if (items) {
+    matches.push(...collectSchemaValuePointersV3(
+      items,
+      propertyName,
+      `${pointer}/0`,
+      depth + 1,
+    ));
+  }
+  return deduplicateSchemaPointersV3(matches);
+}
+
+function deduplicateSchemaPointersV3(
+  values: Array<{ pointer: string; schema: Record<string, unknown> }>,
+) {
+  const byPointer = new Map<string, { pointer: string; schema: Record<string, unknown> }>();
+  for (const value of values) byPointer.set(value.pointer, value);
+  return [...byPointer.values()];
+}
+
+function schemasHaveCompatibleValueTypeV3(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+) {
+  const targetTypes = schemaValueTypesV3(target);
+  const sourceTypes = schemaValueTypesV3(source);
+  return !targetTypes.size
+    || !sourceTypes.size
+    || [...targetTypes].some((type) => sourceTypes.has(type));
+}
+
+function schemaValueTypesV3(schema: Record<string, unknown>): Set<string> {
+  const types = new Set<string>();
+  if (typeof schema.type === "string") types.add(schema.type);
+  if (Array.isArray(schema.type)) {
+    schema.type.filter((value): value is string => typeof value === "string")
+      .forEach((value) => types.add(value));
+  }
+  for (const variantKey of ["allOf", "anyOf", "oneOf"] as const) {
+    const variants = schema[variantKey];
+    if (!Array.isArray(variants)) continue;
+    for (const variant of variants) {
+      const record = asSchemaRecord(variant);
+      if (record) schemaValueTypesV3(record).forEach((value) => types.add(value));
+    }
+  }
+  return types;
+}
+
+function escapeJsonPointerV3(value: string) {
+  return value.replace(/~/gu, "~0").replace(/\//gu, "~1");
 }
 
 function normalizeProposalForServerRequirementV3(
@@ -2808,13 +3048,28 @@ function normalizeProposalForServerRequirementV3(
   selectedCapabilities: CapabilityDefinitionV3[],
   envelope: TurnEnvelope,
 ): TurnPlanProposalV3 {
-  const deduplicatedProposal = deduplicateEquivalentPlannerGoalsV3(proposal);
+  const spanNormalizedProposal = normalizeUniqueGoalSourceSpansV3(
+    proposal,
+    envelope,
+  );
+  const anchoredProposal = normalizeDanglingSelectionsToSoleCapabilityGoalV3(
+    spanNormalizedProposal,
+    selectedCapabilities,
+  );
+  const deduplicatedProposal = deduplicateEquivalentPlannerGoalsV3(
+    anchoredProposal,
+  );
   const capabilityNormalized = normalizeSelectedCapabilityGoalsV3(
     deduplicatedProposal,
     selectedCapabilities,
   );
-  const knowledgeNormalized = normalizeKnowledgeSelectionsV3(
+  const capabilityCoalesced = coalesceSameSourceCapabilityGoalsV3(
     capabilityNormalized,
+    selectedCapabilities,
+    envelope,
+  );
+  const knowledgeNormalized = normalizeKnowledgeSelectionsV3(
+    capabilityCoalesced,
     selectedCapabilities,
     envelope,
   );
@@ -2893,6 +3148,250 @@ function normalizeProposalForServerRequirementV3(
     ])],
   };
   return turnPlanProposalV3Schema.parse(normalized);
+}
+
+function normalizeUniqueGoalSourceSpansV3(
+  proposal: TurnPlanProposalV3,
+  envelope: TurnEnvelope,
+): TurnPlanProposalV3 {
+  const text = envelope.currentMessage.text;
+  let changed = false;
+  const goals = proposal.goals.map((goal) => {
+    const span = goal.sourceSpan;
+    if (!span || span.pointer !== "/currentMessage/text" || !span.quote) {
+      return goal;
+    }
+    const offsets: number[] = [];
+    let cursor = 0;
+    while (cursor <= text.length) {
+      const index = text.indexOf(span.quote, cursor);
+      if (index < 0) break;
+      offsets.push(index);
+      cursor = index + Math.max(1, span.quote.length);
+    }
+    if (offsets.length !== 1) return goal;
+    const startOffset = offsets[0]!;
+    const endOffset = startOffset + span.quote.length;
+    if (span.startOffset === startOffset && span.endOffset === endOffset) {
+      return goal;
+    }
+    changed = true;
+    return {
+      ...goal,
+      sourceSpan: { ...span, startOffset, endOffset },
+    };
+  });
+  return changed
+    ? turnPlanProposalV3Schema.parse({
+        ...proposal,
+        goals,
+        decisionTrace: [...new Set([
+          ...proposal.decisionTrace,
+          "server_unique_source_span_normalized",
+        ])],
+      })
+    : proposal;
+}
+
+function normalizeDanglingSelectionsToSoleCapabilityGoalV3(
+  proposal: TurnPlanProposalV3,
+  selectedCapabilities: CapabilityDefinitionV3[],
+): TurnPlanProposalV3 {
+  if (proposal.goals.length !== 1) return proposal;
+  const goal = proposal.goals[0]!;
+  if (
+    goal.strategy !== "capability"
+    || !["answer", "explain", "read", "search"].includes(goal.operation)
+  ) return proposal;
+  const knownGoalIds = new Set([goal.id]);
+  const hasDanglingSelection = proposal.capabilitySelections.some((selection) =>
+    selection.goalIds.some((goalId) => !knownGoalIds.has(goalId)));
+  const hasAnchoredSelection = proposal.capabilitySelections.some((selection) =>
+    selection.goalIds.includes(goal.id));
+  if (!hasDanglingSelection || !hasAnchoredSelection) return proposal;
+  const definitionByCoordinate = new Map(selectedCapabilities.map((definition) => [
+    capabilityCoordinateV3(definition.key, definition.version),
+    definition,
+  ]));
+  const danglingSelections = proposal.capabilitySelections.filter((selection) =>
+    selection.goalIds.some((goalId) => !knownGoalIds.has(goalId)));
+  if (danglingSelections.some((selection) => {
+    const definition = definitionByCoordinate.get(capabilityCoordinateV3(
+      selection.capabilityKey,
+      selection.capabilityVersion,
+    ));
+    return !definition
+      || definition.effect.mutation !== "none"
+      || definition.semantics.operations.some((operation) =>
+        !["answer", "explain", "read", "search"].includes(operation));
+  })) return proposal;
+  return turnPlanProposalV3Schema.parse({
+    ...proposal,
+    capabilitySelections: proposal.capabilitySelections.map((selection) => ({
+      ...selection,
+      goalIds: selection.goalIds.some((goalId) => !knownGoalIds.has(goalId))
+        ? [goal.id]
+        : selection.goalIds,
+    })),
+    decisionTrace: [...new Set([
+      ...proposal.decisionTrace,
+      "server_dangling_read_selection_anchored",
+    ])],
+  });
+}
+
+function coalesceSameSourceCapabilityGoalsV3(
+  proposal: TurnPlanProposalV3,
+  selectedCapabilities: CapabilityDefinitionV3[],
+  envelope: TurnEnvelope,
+): TurnPlanProposalV3 {
+  if (proposal.goals.length < 2) return proposal;
+  const definitionByCoordinate = new Map(selectedCapabilities.map((definition) => [
+    capabilityCoordinateV3(definition.key, definition.version),
+    definition,
+  ]));
+  const definitionsByGoalId = new Map<string, CapabilityDefinitionV3[]>();
+  for (const selection of proposal.capabilitySelections) {
+    const definition = definitionByCoordinate.get(capabilityCoordinateV3(
+      selection.capabilityKey,
+      selection.capabilityVersion,
+    ));
+    if (!definition || definition.key === "response.compose") continue;
+    for (const goalId of selection.goalIds) {
+      const values = definitionsByGoalId.get(goalId) ?? [];
+      values.push(definition);
+      definitionsByGoalId.set(goalId, values);
+    }
+  }
+  const canonicalClauses = canonicalGoalClauseRangesV3(
+    envelope.currentMessage.text,
+  );
+  const groups = new Map<string, TurnPlanProposalV3["goals"]>();
+  for (const goal of proposal.goals) {
+    if (!goal.sourceSpan) continue;
+    const containingClause = canonicalClauses.find((candidate) =>
+      candidate.startOffset <= goal.sourceSpan!.startOffset
+      && candidate.endOffset >= goal.sourceSpan!.endOffset);
+    if (!containingClause) continue;
+    const key = `${containingClause.startOffset}:${containingClause.endOffset}`;
+    const values = groups.get(key) ?? [];
+    values.push(goal);
+    groups.set(key, values);
+  }
+  const canonicalGoalIdById = new Map<string, string>();
+  const replacementByGoalId = new Map<string, TurnPlanProposalV3["goals"][number]>();
+  let changed = false;
+  for (const goals of groups.values()) {
+    if (goals.length < 2) continue;
+    if (goals.some((goal) =>
+      goal.strategy !== "capability"
+      || !["answer", "explain", "read", "search"].includes(goal.operation)
+      || !(definitionsByGoalId.get(goal.id)?.length))) continue;
+    const sharedSpan = [...goals]
+      .map((goal) => goal.sourceSpan!)
+      .sort((left, right) =>
+        (left.endOffset - left.startOffset) - (right.endOffset - right.startOffset))[0]!;
+    const clause = canonicalClauses
+      .find((candidate) =>
+        candidate.startOffset <= sharedSpan.startOffset
+        && candidate.endOffset >= sharedSpan.endOffset);
+    if (!clause) continue;
+    const definitions = goals.flatMap((goal) =>
+      definitionsByGoalId.get(goal.id) ?? []);
+    const evidenceKind = strongestSelectedCapabilityEvidenceKindV3(definitions);
+    if (!evidenceKind) continue;
+    const canonical = goals[0]!;
+    const operation = normalizedSelectedCapabilityOperationV3(
+      canonical.operation,
+      definitions,
+    );
+    const allowedSourceKinds = [...new Set([
+      ...goals.flatMap((goal) => goal.evidenceRequirement.allowedSourceKinds),
+      ...definitions.flatMap((definition) => definition.semantics.evidenceClasses),
+      evidenceKind,
+    ])].filter((kind) => kind !== "none");
+    replacementByGoalId.set(canonical.id, {
+      ...canonical,
+      objective: envelope.currentMessage.text.slice(
+        clause.startOffset,
+        clause.endOffset,
+      ),
+      operation,
+      semanticConfidence: Math.max(...goals.map((goal) =>
+        goal.semanticConfidence)),
+      generalEligibility: "not_allowed",
+      // Preserve the uniquely grounded entity quote for argument binding.
+      // The full clause remains the Goal objective and source pointer; source
+      // authority still defaults fail-closed for a partial/non-explanatory
+      // quote, so this cannot broaden stable-general fallback authority.
+      sourceSpan: sharedSpan,
+      evidenceRequirement: buildCoalescedCapabilityEvidenceRequirementV3({
+        kind: evidenceKind,
+        allowedSourceKinds,
+        minimumEvidenceCount: Math.max(
+          1,
+          ...goals.map((goal) => goal.evidenceRequirement.minimumEvidenceCount),
+        ),
+      }),
+    });
+    for (const goal of goals) canonicalGoalIdById.set(goal.id, canonical.id);
+    changed = true;
+  }
+  if (!changed) return proposal;
+  const retainedGoals = proposal.goals.flatMap((goal) => {
+    const canonicalId = canonicalGoalIdById.get(goal.id);
+    if (!canonicalId) return [goal];
+    if (canonicalId !== goal.id) return [];
+    return [replacementByGoalId.get(goal.id) ?? goal];
+  });
+  return turnPlanProposalV3Schema.parse({
+    ...proposal,
+    goals: retainedGoals,
+    capabilitySelections: proposal.capabilitySelections.map((selection) => ({
+      ...selection,
+      goalIds: [...new Set(selection.goalIds.map((goalId) =>
+        canonicalGoalIdById.get(goalId) ?? goalId))],
+    })),
+    decisionTrace: [...new Set([
+      ...proposal.decisionTrace,
+      "server_same_source_capability_goals_coalesced",
+    ])],
+  });
+}
+
+function buildCoalescedCapabilityEvidenceRequirementV3(input: {
+  kind: Exclude<
+    TurnPlanProposalV3["goals"][number]["evidenceRequirement"]["kind"],
+    "none" | "knowledge_preferred"
+  >;
+  allowedSourceKinds: string[];
+  minimumEvidenceCount: number;
+}): TurnPlanProposalV3["goals"][number]["evidenceRequirement"] {
+  if (input.kind === "authorized_knowledge") {
+    return {
+      kind: "authorized_knowledge",
+      allowedSourceKinds: input.allowedSourceKinds,
+      minimumEvidenceCount: input.minimumEvidenceCount,
+      freshness: "bounded",
+      citationRequired: true,
+    };
+  }
+  if (input.kind === "capability_result") {
+    return {
+      kind: "capability_result",
+      allowedSourceKinds: input.allowedSourceKinds,
+      minimumEvidenceCount: input.minimumEvidenceCount,
+      freshness: "bounded",
+      citationRequired: true,
+    };
+  }
+  return {
+    kind: input.kind,
+    allowedSourceKinds: input.allowedSourceKinds,
+    minimumEvidenceCount: input.minimumEvidenceCount,
+    freshness: "live",
+    citationRequired: true,
+  };
 }
 
 function deduplicateEquivalentPlannerGoalsV3(

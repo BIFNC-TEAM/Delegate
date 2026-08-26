@@ -60,6 +60,30 @@ describe("V3 inline ActionResult fence", () => {
     vi.resetAllMocks();
   });
 
+  it("accepts a processing continuation Run from the same delegated Plan", async () => {
+    const { isV3InlineGenerationLeaseOwner } = await import(
+      "../src/v3-inline-actions"
+    );
+    expect(isV3InlineGenerationLeaseOwner({
+      planGenerationRunId: "run-origin",
+      planDelegationTaskId: "task-1",
+      outboxGenerationRunId: "run-step-2",
+      continuation: { delegationTaskId: "task-1", status: "PROCESSING" },
+    })).toBe(true);
+    expect(isV3InlineGenerationLeaseOwner({
+      planGenerationRunId: "run-origin",
+      planDelegationTaskId: "task-1",
+      outboxGenerationRunId: "run-step-2",
+      continuation: { delegationTaskId: "task-other", status: "PROCESSING" },
+    })).toBe(false);
+    expect(isV3InlineGenerationLeaseOwner({
+      planGenerationRunId: "run-origin",
+      planDelegationTaskId: "task-1",
+      outboxGenerationRunId: "run-step-2",
+      continuation: { delegationTaskId: "task-1", status: "COMPLETED" },
+    })).toBe(false);
+  });
+
   it("rejects completion if a newer plan becomes active between read and commit", async () => {
     const attempt = buildAttempt("plan-1");
     mocks.attemptFindUnique

@@ -26,20 +26,26 @@ binding is therefore for local development and non-commercial demonstration.
 Production or monetized use must self-host the upstream services or use an
 appropriately licensed commercial weather provider before enabling the binding.
 
-## Current conversation limitation
+## Multi-action execution
 
-The remote forecast tool requires latitude and longitude. The location-search
-tool accepts a city name, but the current V3 Action Materializer does not yet
-resolve one Action's output into the concrete arguments of a later MCP Action.
-Consequently:
+City-name requests use the generic V3 dependency protocol rather than a
+weather-specific router:
 
-- a coordinate-based weather request can call the forecast tool directly;
-- a city-name request can resolve the city and coordinates first;
-- completing city lookup and forecast in one turn requires a future, generic
-  previous-Action-output argument resolver or a trusted one-call weather tool.
+1. the location tool receives the grounded place name;
+2. its successful, schema-verified `ActionResult` supplies latitude,
+   longitude, and timezone through `previous_action_output` provenance;
+3. the forecast step resolves those pointers under the current Plan/Action
+   fence, validates the final arguments against the pinned input Schema, and
+   only then enters ordinary Policy, Approval, Lease, and MCP execution;
+4. the Composer reads only verified ActionResults.
 
-Do not add a weather-specific prompt shortcut that bypasses the immutable Plan
-or argument-provenance rules.
+The forecast capability also publishes a reviewed server-owned default set of
+hourly weather variables. The generic materializer records those values as
+`capability_default` provenance bound to the immutable capability definition;
+remote MCP descriptions and annotations cannot create or change defaults.
+
+Missing, ambiguous, failed, or schema-incompatible dependency output fails
+closed. It is never replaced by a model-invented coordinate or weather fact.
 
 ## Refresh and drift
 

@@ -86,7 +86,7 @@ OSS administrator. Then create:
 For local Dashboard testing, register:
 
 - redirect URI: `http://localhost:3001/auth/callback`;
-- post-sign-out URI: `http://localhost:3001`.
+- post-sign-out URI: `http://localhost:3001/auth/logout/callback`.
 
 For local Public Representatives testing, register the one canonical callback:
 
@@ -109,6 +109,20 @@ LOGTO_DASHBOARD_APP_SECRET=<dashboard-application-secret>
 LOGTO_REPS_APP_ID=<public-representatives-application-id>
 LOGTO_REPS_APP_SECRET=<public-representatives-application-secret>
 ```
+
+After the local Management M2M application has been created and assigned the
+Management API access role, configure Delegate's lifecycle hook and ignored
+local secret environment without printing credentials:
+
+```bash
+pnpm logto:local:configure-app-auth
+```
+
+The command is local-development-only, creates or updates the two-event Hook,
+registers the Dashboard post-sign-out callback, and atomically writes
+`.local/logto/delegate-auth.env` with mode `0600`.
+`scripts/docker-compose-local.sh` loads that file after `.env`; production must
+use its deployment secret manager instead.
 
 `NEXT_PUBLIC_DASHBOARD_URL` and `NEXT_PUBLIC_REPRESENTATIVE_URL` must each be
 an origin without a path, query, or fragment. Delegate derives both exact
@@ -156,11 +170,17 @@ all legacy variables and remove the old dynamic redirect registrations.
 The legacy backchannel is optional and non-secret. If it is set, remove it with
 the legacy tuple after the drain.
 
-### First Creator admission
+### Creator admission
 
-Dashboard admission remains closed by default. Before the first Creator login,
-create or sign in the intended user in Logto's default tenant and obtain that
-user's exact OIDC `sub`. Add the exact principal to Delegate:
+Dashboard admission remains closed by default:
+
+```dotenv
+DELEGATE_CREATOR_ADMISSION_MODE=invite_only
+```
+
+In invitation mode, create or sign in the intended user in Logto's default
+tenant, obtain that user's exact OIDC `sub`, and add the exact principal to
+Delegate:
 
 ```dotenv
 DELEGATE_CREATOR_ADMISSION_PRINCIPALS=http://127.0.0.1:3301/oidc|<sub>
@@ -170,6 +190,64 @@ The issuer portion must exactly match the public `LOGTO_ENDPOINT` issuer; never
 use the backchannel URL, an email address, a subject-only value, or a wildcard.
 Without this entry (or another explicit admission record), the first new Owner
 login is intentionally rejected.
+
+For a reviewed self-service rollout, set:
+
+```dotenv
+DELEGATE_CREATOR_ADMISSION_MODE=self_service
+```
+
+Self-service creation still requires an authorization request whose signed
+state explicitly records `flow=register`. A user who only chose sign-in is
+redirected to the Creator registration recovery page and never receives an
+Owner persona as a login side effect. Keep the website registration CTA gated
+until Account/AppSession shadow parity and the real Logto registration contract
+tests pass.
+
+### Identity lifecycle webhook
+
+Create a Logto webhook for the canonical Dashboard endpoint:
+
+```text
+https://<dashboard-origin>/api/auth/logto/webhook
+```
+
+Subscribe it to `User.SuspensionStatus.Updated` and `User.Deleted`, then copy
+the Console signing key into `LOGTO_WEBHOOK_SIGNING_KEY`. Delegate verifies the
+exact raw request body against the `logto-signature-sha-256` HMAC header,
+deduplicates the payload hash, ignores out-of-order suspension changes, and
+stores no raw provider payload. Suspension moves only an active AuthIdentity to
+`SUSPENDED`; reactivation restores only that state. Deletion moves the exact
+identity to `REVOKED`, marks its Account `DELETION_PENDING`, and revokes every
+local application session without deleting financial or audit history.
+
+### Management API reconciliation
+
+Create a dedicated Logto Machine-to-Machine application and assign the
+preconfigured Management API access role with the `all` permission. Inject its
+credentials only into workflow-runner:
+
+```dotenv
+LOGTO_MANAGEMENT_APP_ID=<m2m-app-id>
+LOGTO_MANAGEMENT_APP_SECRET=<m2m-app-secret>
+LOGTO_MANAGEMENT_API_RESOURCE=https://default.logto.app/api
+LOGTO_RECONCILIATION_POLL_MS=900000
+```
+
+For Logto OSS, the default Management API resource indicator is
+`https://default.logto.app/api`; API traffic itself uses the configured trusted
+Logto endpoint/backchannel. The runner requests `scope=all` through client
+credentials, fetches `/api/users` using bounded `page` / `page_size`
+pagination, and applies lifecycle repair only after a complete listing. The
+`logto-identity-reconciliation` OperationalWorkerCheckpoint participates in
+runner readiness. A failed or incomplete listing must be repaired before an
+`enforce` rollout.
+
+While `DELEGATE_ACCOUNT_SESSION_MODE=shadow`, collect structured
+`account_session_shadow_parity` events from Dashboard and Reps. All mismatches
+are logged, match events are deterministically sampled, and no token or
+principal material enters the log. Require zero mismatches for the reviewed
+observation window before changing to `enforce`.
 
 ### PostgreSQL version boundary
 

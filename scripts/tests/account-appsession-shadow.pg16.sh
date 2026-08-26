@@ -277,6 +277,14 @@ DELETE FROM "Account"
 WHERE "id" IN ('index_owner_account', 'index_audience_account');
 SQL
 
+printf 'phase=apply_appsession_public_audience_binding\n'
+run_sql_file \
+  "$REPO_ROOT/prisma/migrations/20260826103000_appsession_public_audience_binding/migration.sql"
+
+printf 'phase=apply_logto_identity_lifecycle\n'
+run_sql_file \
+  "$REPO_ROOT/prisma/migrations/20260826110000_logto_identity_lifecycle/migration.sql"
+
 printf 'phase=run_database_invariants_and_real_prisma_services\n'
 DATABASE_URL="$FIXTURE_DATABASE_URL" \
 DELEGATE_ACCOUNT_SESSION_POSTGRES_E2E=1 \

@@ -125,6 +125,31 @@ describe("AppSession v2", () => {
     expect(client.updateManyCalls).toBe(0);
   });
 
+  it("requires an audience binding only for Public Representatives sessions", async () => {
+    const client = new FakeAppSessionClient();
+    client.addPrincipal("account-1", "identity-1");
+
+    await expect(createAppSession({
+      accountId: "account-1",
+      authIdentityId: "identity-1",
+      application: "PUBLIC_REPRESENTATIVES",
+      now,
+    }, client)).rejects.toMatchObject({
+      code: "APP_SESSION_AUDIENCE_BINDING_UNAVAILABLE",
+      reason: "MISSING",
+    });
+    await expect(createAppSession({
+      accountId: "account-1",
+      authIdentityId: "identity-1",
+      application: "DASHBOARD",
+      publicAudienceId: "unexpected-audience",
+      now,
+    }, client)).rejects.toMatchObject({
+      code: "APP_SESSION_AUDIENCE_BINDING_UNAVAILABLE",
+      reason: "UNEXPECTED",
+    });
+  });
+
   it("isolates resolution by application and invalidates sessions when identity or Account is disabled", async () => {
     const client = new FakeAppSessionClient();
     client.addPrincipal("account-1", "identity-1");
@@ -245,6 +270,7 @@ describe("AppSession v2", () => {
       accountId: "account-1",
       authIdentityId: "identity-1",
       application: "PUBLIC_REPRESENTATIVES",
+      publicAudienceId: "audience-device-1",
       now,
     }, client);
     await createAppSession({
@@ -334,7 +360,7 @@ type FakeAccount = {
 type FakeIdentity = {
   id: string;
   accountId: string;
-  status: "ACTIVE" | "REVOKED";
+  status: "ACTIVE" | "SUSPENDED" | "REVOKED";
 };
 
 class FakeAppSessionClient implements AppSessionClient {

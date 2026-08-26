@@ -134,11 +134,17 @@ boundary.
 
 Successful Logto authentication does not grant Dashboard access.
 
-Dashboard admission is closed by default:
+Dashboard admission is closed by default. Deployments select one explicit
+Creator admission mode:
 
-- an existing Owner identity remains admitted;
-- a new Creator requires an explicit invitation, approval, or deployment
-  allowlist entry;
+- `invite_only`: a new Creator requires an explicit invitation, approval, or
+  exact deployment allowlist entry;
+- `self_service`: a verified principal may create a Creator only from an
+  authorization request whose short-lived signed state records an explicit
+  registration flow;
+- an existing Owner identity remains admitted in either mode;
+- ordinary sign-in never creates a Creator, including when the principal
+  already owns an Audience persona;
 - a Public Audience account never becomes a Creator as a side effect of login.
 
 Development bypasses must require both `NODE_ENV=development` and an explicit
@@ -168,6 +174,9 @@ Audience application session becomes platform-scoped during AppSession v2.
 ## Application session
 
 Logto central sessions and Delegate application sessions are separate.
+An explicit global logout revokes the Delegate `AppSession`, clears its browser
+cookies, ends the Logto central session, and returns only through an allowlisted
+post-sign-out callback so a protected-page refresh cannot silently sign in again.
 
 `AppSession` uses an opaque random browser token. Delegate stores only a
 cryptographic hash and records:
@@ -198,6 +207,26 @@ delayed, and out-of-order events are expected.
 
 Periodic reconciliation through the Management API repairs missed events.
 Management API calls never sit on the per-request authorization hot path.
+
+The workflow runner owns the only Management API M2M credential. A bounded
+periodic loop obtains one client-credentials token, completes the entire paged
+user listing, and only then compares it with exact-issuer local AuthIdentity
+rows. Partial responses, provider failures, and page-cap exhaustion never
+infer deletion. Each run records an OperationalWorkerCheckpoint so readiness
+can fail closed when the repair loop is missing, stale, or failing.
+
+During `shadow`, legacy remains authoritative. Dashboard and Public
+Representatives resolve the corresponding opaque AppSession only for parity,
+emit all mismatches plus a deterministic sample of matches, and never log
+principal or token material. `enforce` requires a zero-mismatch observation
+window rather than relying only on successful callback issuance.
+
+The initial synchronous webhook handler is intentionally bounded to one
+serializable database transaction: verify the raw-body HMAC, deduplicate the
+payload hash, transition the exact issuer+subject AuthIdentity, revoke matching
+AppSessions, and persist a content-free receipt. It performs no network calls.
+If lifecycle work later expands beyond this bounded transaction, ingress must
+move to a durable queue before adding that work.
 
 The initial revocation propagation objective is p99 within 60 seconds for:
 

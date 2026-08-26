@@ -179,6 +179,7 @@ describe("local Compose source synchronization contract", () => {
 
     expect(dashboard).toContain("LOGTO_DASHBOARD_APP_ID");
     expect(dashboard).toContain("LOGTO_DASHBOARD_APP_SECRET");
+    expect(dashboard).toContain("LOGTO_WEBHOOK_SIGNING_KEY");
     expect(dashboard).not.toContain("LOGTO_REPS_APP_ID");
     expect(dashboard).not.toContain("LOGTO_REPS_APP_SECRET");
     expect(dashboard).not.toContain("LOGTO_REPS_LEGACY_APP_SECRET");
@@ -188,6 +189,29 @@ describe("local Compose source synchronization contract", () => {
     expect(reps).toContain("LOGTO_REPS_LEGACY_APP_SECRET");
     expect(reps).not.toContain("LOGTO_DASHBOARD_APP_ID");
     expect(reps).not.toContain("LOGTO_DASHBOARD_APP_SECRET");
+    expect(reps).not.toContain("LOGTO_WEBHOOK_SIGNING_KEY");
+    expect(sharedEnvironment).not.toContain("LOGTO_WEBHOOK_SIGNING_KEY");
+    for (const [serviceName, block] of baseServices) {
+      if (serviceName === "dashboard") continue;
+      expect(
+        block,
+        `${serviceName} must not receive LOGTO_WEBHOOK_SIGNING_KEY`,
+      ).not.toContain("LOGTO_WEBHOOK_SIGNING_KEY");
+    }
+
+    const workflowRunner = baseServices.get("workflow-runner");
+    expect(workflowRunner).toContain("LOGTO_MANAGEMENT_APP_ID");
+    expect(workflowRunner).toContain("LOGTO_MANAGEMENT_APP_SECRET");
+    expect(sharedEnvironment).not.toContain("LOGTO_MANAGEMENT_APP_SECRET");
+    expect(dashboard).not.toContain("LOGTO_MANAGEMENT_APP_SECRET");
+    expect(reps).not.toContain("LOGTO_MANAGEMENT_APP_SECRET");
+    for (const [serviceName, block] of baseServices) {
+      if (serviceName === "workflow-runner") continue;
+      expect(
+        block,
+        `${serviceName} must not receive LOGTO_MANAGEMENT_APP_SECRET`,
+      ).not.toContain("LOGTO_MANAGEMENT_APP_SECRET");
+    }
 
     const forbiddenOutsideWebApps = [
       "LOGTO_DASHBOARD_APP_ID",

@@ -10,6 +10,7 @@ import {
   getWeChatPayOperationsHealthSnapshot,
   preflightWeChatPayRuntime,
   prisma,
+  runLogtoIdentityReconciliation,
 } from "@delegate/web-data";
 
 import { workflowRunnerConfig } from "./config";
@@ -37,6 +38,8 @@ let lastPaymentReconciliationSummary:
   WeChatPayOperationsTickResult | null = null;
 let lastPaymentReconciliationError: string | null = null;
 let paymentReconciliationFailureCodes: string[] = [];
+let lastLogtoReconciliationAt: string | null = null;
+let lastLogtoReconciliationError: string | null = null;
 let temporalBridgeState:
   | {
       status: "starting" | "running" | "failed";
@@ -90,6 +93,7 @@ async function handleHttpRequest(
       databaseReady,
       weChatPay,
       persistentPaymentWorkerFailure,
+      persistentLogtoWorkerFailure,
     ] = await Promise.all([
       checkDatabaseReadiness(),
       Promise.resolve(preflightWeChatPayRuntime()),
@@ -103,6 +107,16 @@ async function handleHttpRequest(
             snapshot.workers.some(
               (worker) => worker.status === "failing",
             ),
+          )
+          .catch(() => true)
+        : Promise.resolve(false),
+      workflowRunnerConfig.logtoIdentityReconciliation.enabled
+        ? prisma.operationalWorkerCheckpoint.findUnique({
+            where: { workerKey: "logto-identity-reconciliation" },
+            select: { consecutiveFailures: true },
+          })
+          .then((checkpoint) =>
+            (checkpoint?.consecutiveFailures ?? 0) > 0,
           )
           .catch(() => true)
         : Promise.resolve(false),
@@ -134,6 +148,18 @@ async function handleHttpRequest(
           lastPaymentReconciliationError !== null,
         persistentWorkerFailure:
           persistentPaymentWorkerFailure,
+      },
+      logtoIdentityReconciliation: {
+        enabled:
+          workflowRunnerConfig.logtoIdentityReconciliation.enabled,
+        lastTickAt: lastLogtoReconciliationAt,
+        lastTickFailed:
+          lastLogtoReconciliationError !== null
+          || persistentLogtoWorkerFailure,
+        staleAfterMs: Math.max(
+          workflowRunnerConfig.readinessStaleMs,
+          workflowRunnerConfig.logtoIdentityReconciliation.pollMs * 2,
+        ),
       },
     });
     sendJson(
@@ -218,6 +244,9 @@ async function boot(): Promise<void> {
   void openVikingMaintenanceLoop();
   if (workflowRunnerConfig.paymentReconciliation.enabled) {
     void paymentReconciliationLoop();
+  }
+  if (workflowRunnerConfig.logtoIdentityReconciliation.enabled) {
+    void logtoIdentityReconciliationLoop();
   }
 }
 
@@ -368,6 +397,42 @@ async function paymentReconciliationLoop(): Promise<void> {
     setTimeout(
       () => void paymentReconciliationLoop(),
       workflowRunnerConfig.paymentReconciliation.pollMs,
+    );
+  }
+}
+
+async function logtoIdentityReconciliationLoop(): Promise<void> {
+  try {
+    const summary = await runLogtoIdentityReconciliation();
+    lastLogtoReconciliationAt = new Date().toISOString();
+    lastLogtoReconciliationError = null;
+    if (
+      summary.suspended > 0
+      || summary.reactivated > 0
+      || summary.deletionPending > 0
+    ) {
+      console.warn("Logto identity reconciliation repaired drift.", {
+        event: "logto_identity_reconciliation_drift_repaired",
+        suspended: summary.suspended,
+        reactivated: summary.reactivated,
+        deletionPending: summary.deletionPending,
+        revokedSessions: summary.revokedSessions,
+      });
+    }
+  } catch (error) {
+    lastLogtoReconciliationAt = new Date().toISOString();
+    lastLogtoReconciliationError =
+      error instanceof Error
+        ? error.message
+        : "logto_identity_reconciliation_failed";
+    console.error(
+      "Logto identity reconciliation failed:",
+      lastLogtoReconciliationError,
+    );
+  } finally {
+    setTimeout(
+      () => void logtoIdentityReconciliationLoop(),
+      workflowRunnerConfig.logtoIdentityReconciliation.pollMs,
     );
   }
 }

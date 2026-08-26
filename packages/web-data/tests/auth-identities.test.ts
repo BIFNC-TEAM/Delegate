@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   CreatorAdmissionRequiredError,
+  CreatorRegistrationRequiredError,
   linkAudienceIdentityToAuth,
   normalizeAuthSubject,
+  readCreatorAdmissionMode,
   readCreatorAdmissionPrincipals,
   resolveOwnerForAuth,
+  resolveOwnerForRegistration,
 } from "../src/auth-identities";
 
 const LOGTO_ISSUER = "https://auth.example.com/oidc";
@@ -257,6 +260,64 @@ describe("auth identity mapping", () => {
     expect(existing.owner.id).toBe(admitted.owner.id);
     expect(existing.identityLink.email).toBe("owner+refreshed@example.com");
     expect(client.owners).toHaveLength(1);
+  });
+
+  it("requires an explicit registration flow in self-service mode", async () => {
+    const client = new FakeAuthIdentityClient();
+    const env = {
+      NODE_ENV: "production",
+      DELEGATE_CREATOR_ADMISSION_MODE: "self_service",
+    };
+
+    await expect(
+      resolveOwnerForAuth(
+        {
+          provider: "logto",
+          issuer: LOGTO_ISSUER,
+          subject: "self-service-creator",
+          name: "Self Service Creator",
+        },
+        client,
+        env,
+      ),
+    ).rejects.toBeInstanceOf(CreatorRegistrationRequiredError);
+
+    const registered = await resolveOwnerForRegistration(
+      {
+        provider: "logto",
+        issuer: LOGTO_ISSUER,
+        subject: "self-service-creator",
+        name: "Self Service Creator",
+      },
+      client,
+      env,
+    );
+
+    expect(registered).toMatchObject({
+      created: true,
+      owner: { displayName: "Self Service Creator" },
+      identityLink: {
+        issuer: LOGTO_ISSUER,
+        providerSubject: "self-service-creator",
+      },
+    });
+    expect(client.owners).toHaveLength(1);
+  });
+
+  it("keeps admission mode explicit and closed by default", () => {
+    expect(readCreatorAdmissionMode({})).toBe("invite_only");
+    expect(
+      readCreatorAdmissionMode({
+        DELEGATE_CREATOR_ADMISSION_MODE: "self_service",
+      }),
+    ).toBe("self_service");
+    expect(() =>
+      readCreatorAdmissionMode({
+        DELEGATE_CREATOR_ADMISSION_MODE: "open",
+      }),
+    ).toThrow(
+      "DELEGATE_CREATOR_ADMISSION_MODE must be invite_only or self_service.",
+    );
   });
 
   it("does not resolve the same subject from a different issuer as an existing creator", async () => {

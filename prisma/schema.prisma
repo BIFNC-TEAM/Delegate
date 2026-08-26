@@ -386,6 +386,7 @@ enum AuthIdentityProvider {
 
 enum AuthIdentityStatus {
   ACTIVE
+  SUSPENDED
   REVOKED
 }
 
@@ -1580,6 +1581,7 @@ model AppSession {
   authIdentityId       String
   application          AppSessionApplication
   tokenHash            Bytes                 @unique
+  publicAudienceId     String?                @db.VarChar(191)
   activeOrganizationId String?
   logtoSessionId       String?               @db.VarChar(255)
   issuedAt             DateTime              @default(now())
@@ -1601,6 +1603,22 @@ model AppSession {
   @@index([application, idleExpiresAt])
   @@index([application, absoluteExpiresAt])
   @@index([activeOrganizationId, revokedAt])
+}
+
+model LogtoWebhookReceipt {
+  id                String   @id @default(cuid())
+  issuer            String   @db.VarChar(2048)
+  hookId            String   @db.VarChar(255)
+  event             String   @db.VarChar(96)
+  providerSubject   String?  @db.VarChar(255)
+  payloadHash       String   @unique @db.Char(64)
+  providerCreatedAt DateTime
+  effect            String   @db.VarChar(64)
+  processedAt       DateTime @default(now())
+  createdAt         DateTime @default(now())
+
+  @@index([issuer, providerSubject, processedAt])
+  @@index([event, processedAt])
 }
 
 model IdentityLink {

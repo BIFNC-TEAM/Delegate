@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { createHmac } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -18,6 +19,7 @@ import {
   touchAppSession,
 } from "../src/app-sessions";
 import { prisma } from "../src/prisma";
+import { processLogtoLifecycleWebhook } from "../src/logto-lifecycle";
 
 const describePostgres =
   process.env.DELEGATE_ACCOUNT_SESSION_POSTGRES_E2E === "1"
@@ -42,6 +44,7 @@ describePostgres("Account/AppSession shadow PostgreSQL 16", () => {
   });
 
   afterEach(async () => {
+    await prisma.logtoWebhookReceipt.deleteMany();
     await prisma.appSession.deleteMany();
     await prisma.owner.deleteMany();
     await prisma.audienceIdentity.deleteMany();
@@ -280,6 +283,7 @@ describePostgres("Account/AppSession shadow PostgreSQL 16", () => {
         audienceIdentityId: "shadow_audience",
       },
       application: "PUBLIC_REPRESENTATIVES",
+      publicAudienceId: "shadow-audience-device",
       now,
     });
 
@@ -344,6 +348,46 @@ describePostgres("Account/AppSession shadow PostgreSQL 16", () => {
       now: secondAt,
     })).resolves.toMatchObject({ id: second.session.id });
     await expect(prisma.appSession.count()).resolves.toBe(2);
+  });
+
+  it("attaches both explicit personas to one exact Account without moving either persona", async () => {
+    const verifiedAt = new Date("2026-08-26T02:20:00.000Z");
+    await prisma.$executeRaw`
+      INSERT INTO "Owner" ("id") VALUES ('dual_persona_owner')
+    `;
+    await prisma.$executeRaw`
+      INSERT INTO "AudienceIdentity" ("id", "status")
+      VALUES ('dual_persona_audience', 'REGISTERED')
+    `;
+    const principal = verifiedPrincipal("dual-persona-user", verifiedAt);
+
+    const ownerIssued = await issueAccountSessionShadow({
+      principal,
+      persona: { kind: "owner", ownerId: "dual_persona_owner" },
+      application: "DASHBOARD",
+      now: verifiedAt,
+    });
+    const audienceIssued = await issueAccountSessionShadow({
+      principal,
+      persona: {
+        kind: "audience",
+        audienceIdentityId: "dual_persona_audience",
+      },
+      application: "PUBLIC_REPRESENTATIVES",
+      publicAudienceId: "dual-persona-device",
+      allowCrossPersonaEnrollment: true,
+      now: new Date(verifiedAt.getTime() + 1_000),
+    });
+
+    expect(audienceIssued.account.id).toBe(ownerIssued.account.id);
+    await expect(prisma.owner.findUniqueOrThrow({
+      where: { id: "dual_persona_owner" },
+      select: { accountId: true },
+    })).resolves.toEqual({ accountId: ownerIssued.account.id });
+    await expect(prisma.audienceIdentity.findUniqueOrThrow({
+      where: { id: "dual_persona_audience" },
+      select: { accountId: true },
+    })).resolves.toEqual({ accountId: ownerIssued.account.id });
   });
 
   it("rolls back principal creation, persona CAS, and old-token revoke when session creation throws", async () => {
@@ -508,6 +552,7 @@ describePostgres("Account/AppSession shadow PostgreSQL 16", () => {
             audienceIdentityId: "write_skew_audience",
           },
           application: "PUBLIC_REPRESENTATIVES",
+          publicAudienceId: "write-skew-audience-device",
           now: audiencePrincipal.verifiedAt,
         },
         barrier.client,
@@ -660,7 +705,78 @@ describePostgres("Account/AppSession shadow PostgreSQL 16", () => {
       now: new Date(verifiedAt.getTime() + 10 * 60 * 1_000),
     })).resolves.toBeNull();
   });
+
+  it("applies signed Logto suspension and reactivation against real AppSessions", async () => {
+    const signingKey = "postgres-logto-webhook-signing-key";
+    const verifiedAt = new Date("2026-08-26T02:30:00.000Z");
+    const resolved = await resolveAccountShadowForVerifiedPrincipal(
+      verifiedPrincipal("lifecycle-user", verifiedAt),
+    );
+    const created = await createAppSession({
+      accountId: resolved.account.id,
+      authIdentityId: resolved.authIdentity.id,
+      application: "DASHBOARD",
+      now: verifiedAt,
+    });
+    const suspendBody = JSON.stringify({
+      hookId: "hook-pg16",
+      event: "User.SuspensionStatus.Updated",
+      createdAt: "2026-08-26T02:31:00.000Z",
+      data: { id: "lifecycle-user", isSuspended: true },
+    });
+    const lifecycleEnv = {
+      LOGTO_ENDPOINT: "https://auth.pg16.delegate.test",
+      LOGTO_WEBHOOK_SIGNING_KEY: signingKey,
+    };
+
+    await expect(processLogtoLifecycleWebhook({
+      rawBody: suspendBody,
+      signature: signWebhook(suspendBody, signingKey),
+      env: lifecycleEnv,
+      now: new Date("2026-08-26T02:31:01.000Z"),
+    })).resolves.toMatchObject({
+      effect: "SUSPENDED",
+      revokedSessions: 1,
+    });
+    await expect(prisma.authIdentity.findUniqueOrThrow({
+      where: { id: resolved.authIdentity.id },
+      select: { status: true },
+    })).resolves.toEqual({ status: "SUSPENDED" });
+    await expect(resolveAppSession({
+      token: created.token,
+      application: "DASHBOARD",
+      now: new Date("2026-08-26T02:31:02.000Z"),
+    })).resolves.toBeNull();
+
+    const reactivateBody = JSON.stringify({
+      hookId: "hook-pg16",
+      event: "User.SuspensionStatus.Updated",
+      createdAt: "2026-08-26T02:32:00.000Z",
+      data: { id: "lifecycle-user", isSuspended: false },
+    });
+    await expect(processLogtoLifecycleWebhook({
+      rawBody: reactivateBody,
+      signature: signWebhook(reactivateBody, signingKey),
+      env: lifecycleEnv,
+      now: new Date("2026-08-26T02:32:01.000Z"),
+    })).resolves.toMatchObject({ effect: "REACTIVATED" });
+    await expect(prisma.authIdentity.findUniqueOrThrow({
+      where: { id: resolved.authIdentity.id },
+      select: { status: true },
+    })).resolves.toEqual({ status: "ACTIVE" });
+    await expect(resolveAppSession({
+      token: created.token,
+      application: "DASHBOARD",
+      now: new Date("2026-08-26T02:32:02.000Z"),
+    })).resolves.toBeNull();
+  });
 });
+
+function signWebhook(rawBody: string, signingKey: string): string {
+  return createHmac("sha256", signingKey)
+    .update(rawBody, "utf8")
+    .digest("hex");
+}
 
 function verifiedPrincipal(
   subject: string,

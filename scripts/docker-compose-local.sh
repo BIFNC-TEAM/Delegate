@@ -16,6 +16,9 @@ compose_env_args=(--env-file .env)
 if [[ -f .env.wechat.local ]]; then
   compose_env_args+=(--env-file .env.wechat.local)
 fi
+if [[ -f .local/logto/delegate-auth.env ]]; then
+  compose_env_args+=(--env-file .local/logto/delegate-auth.env)
+fi
 
 exec docker compose \
   "${compose_env_args[@]}" \

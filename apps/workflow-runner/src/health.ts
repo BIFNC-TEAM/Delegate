@@ -20,6 +20,12 @@ export type WorkflowRunnerReadinessInput = {
     lastTickFailed: boolean;
     persistentWorkerFailure: boolean;
   };
+  logtoIdentityReconciliation: {
+    enabled: boolean;
+    lastTickAt: string | null;
+    lastTickFailed: boolean;
+    staleAfterMs: number;
+  };
 };
 
 export type WorkflowRunnerReadinessSnapshot = {
@@ -31,6 +37,12 @@ export type WorkflowRunnerReadinessSnapshot = {
   loops: {
     workflow: "ready" | "missing" | "stale" | "failed";
     paymentReconciliation:
+      | "disabled"
+      | "ready"
+      | "missing"
+      | "stale"
+      | "failed";
+    logtoIdentityReconciliation:
       | "disabled"
       | "ready"
       | "missing"
@@ -92,6 +104,26 @@ export function buildWorkflowRunnerReadiness(
     );
   }
 
+  const logtoIdentityReconciliation =
+    input.logtoIdentityReconciliation.enabled
+      ? loopStatus({
+          now: input.now,
+          lastTickAt: input.logtoIdentityReconciliation.lastTickAt,
+          lastTickFailed:
+            input.logtoIdentityReconciliation.lastTickFailed,
+          staleAfterMs:
+            input.logtoIdentityReconciliation.staleAfterMs,
+        })
+      : "disabled";
+  if (
+    logtoIdentityReconciliation !== "ready"
+    && logtoIdentityReconciliation !== "disabled"
+  ) {
+    reasons.push(
+      `logto_identity_reconciliation_loop_${logtoIdentityReconciliation}`,
+    );
+  }
+
   return {
     status: reasons.length === 0 ? "ready" : "not_ready",
     service: "workflow-runner",
@@ -101,6 +133,7 @@ export function buildWorkflowRunnerReadiness(
     loops: {
       workflow,
       paymentReconciliation,
+      logtoIdentityReconciliation,
     },
     temporal: {
       required: input.temporal.required,

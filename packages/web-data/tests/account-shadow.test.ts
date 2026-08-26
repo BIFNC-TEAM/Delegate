@@ -5,6 +5,7 @@ import {
   AccountShadowUnavailableError,
   readAccountSessionMode,
   resolveAccountShadowForVerifiedPrincipal,
+  usesAccountSessionV2,
   usesLegacyAccountSessionAuthority,
   type AccountShadowClient,
   type AccountShadowRecord,
@@ -185,6 +186,10 @@ describe("account session finite mode", () => {
     expect(usesLegacyAccountSessionAuthority("shadow")).toBe(true);
     expect(usesLegacyAccountSessionAuthority("enforce")).toBe(false);
     expect(usesLegacyAccountSessionAuthority("contract")).toBe(false);
+    expect(usesAccountSessionV2("legacy")).toBe(false);
+    expect(usesAccountSessionV2("shadow")).toBe(true);
+    expect(usesAccountSessionV2("enforce")).toBe(true);
+    expect(usesAccountSessionV2("contract")).toBe(true);
   });
 });
 

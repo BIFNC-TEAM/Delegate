@@ -82,6 +82,7 @@ describe("atomic Account/AppSession shadow issuance", () => {
           audienceIdentityId: "audience-1",
         },
         application: "PUBLIC_REPRESENTATIVES",
+        publicAudienceId: "audience-device-1",
         now,
       },
       fixture.client,
@@ -113,6 +114,7 @@ describe("atomic Account/AppSession shadow issuance", () => {
               audienceIdentityId: "audience-1",
             },
             application: "PUBLIC_REPRESENTATIVES",
+            publicAudienceId: "audience-device-1",
             now,
           },
           fixture.client,
@@ -124,6 +126,28 @@ describe("atomic Account/AppSession shadow issuance", () => {
       expect(fixture.sessions).toHaveLength(0);
     },
   );
+
+  it("rejects a public Audience session without its proof-bound browser audience before opening a transaction", async () => {
+    const fixture = createFixture();
+    fixture.addAudience("audience-1", "REGISTERED");
+
+    await expect(issueAccountSessionShadow(
+      {
+        principal: principal(),
+        persona: {
+          kind: "audience",
+          audienceIdentityId: "audience-1",
+        },
+        application: "PUBLIC_REPRESENTATIVES",
+        now,
+      },
+      fixture.client,
+    )).rejects.toMatchObject({
+      code: "ACCOUNT_SESSION_PERSONA_CONFLICT",
+      reason: "APPLICATION_MISMATCH",
+    });
+    expect(fixture.transactionAttempts).toBe(0);
+  });
 
   it("never moves a persona that is already attached to another Account", async () => {
     const fixture = createFixture();
@@ -182,6 +206,7 @@ describe("atomic Account/AppSession shadow issuance", () => {
       },
       persona: { kind: "owner" as const, ownerId: "owner-1" },
       application: "DASHBOARD" as const,
+      publicAudienceId: undefined,
     },
     {
       target: "audience",
@@ -194,10 +219,11 @@ describe("atomic Account/AppSession shadow issuance", () => {
         audienceIdentityId: "audience-1",
       },
       application: "PUBLIC_REPRESENTATIVES" as const,
+      publicAudienceId: "audience-device-1",
     },
   ])(
     "requires explicit review before adding an unlinked $target cross-persona mapping",
-    async ({ configure, persona, application }) => {
+    async ({ configure, persona, application, publicAudienceId }) => {
       const fixture = createFixture();
       configure(fixture);
 
@@ -207,6 +233,7 @@ describe("atomic Account/AppSession shadow issuance", () => {
             principal: principal(),
             persona,
             application,
+            ...(publicAudienceId ? { publicAudienceId } : {}),
             now,
           },
           fixture.client,
@@ -218,6 +245,63 @@ describe("atomic Account/AppSession shadow issuance", () => {
       expect(fixture.sessions).toHaveLength(0);
     },
   );
+
+  it("allows an explicit Creator registration to add Owner persona to an existing Audience Account", async () => {
+    const fixture = createFixture();
+    fixture.addOwner("owner-1");
+    fixture.addAudience(
+      "audience-existing",
+      "REGISTERED",
+      null,
+      "account-1",
+    );
+
+    const issued = await issueAccountSessionShadow(
+      {
+        principal: principal(),
+        persona: { kind: "owner", ownerId: "owner-1" },
+        application: "DASHBOARD",
+        allowCrossPersonaEnrollment: true,
+        now,
+      },
+      fixture.client,
+    );
+
+    expect(fixture.owners[0]?.accountId).toBe("account-1");
+    expect(fixture.audiences[0]).toMatchObject({
+      id: "audience-existing",
+      accountId: "account-1",
+    });
+    expect(issued.session.application).toBe("DASHBOARD");
+  });
+
+  it("allows explicit public login to add Audience persona to an existing Creator Account", async () => {
+    const fixture = createFixture();
+    fixture.addOwner("owner-existing", "account-1");
+    fixture.addAudience("audience-1", "REGISTERED");
+
+    const issued = await issueAccountSessionShadow(
+      {
+        principal: principal(),
+        persona: {
+          kind: "audience",
+          audienceIdentityId: "audience-1",
+        },
+        application: "PUBLIC_REPRESENTATIVES",
+        publicAudienceId: "audience-device-1",
+        allowCrossPersonaEnrollment: true,
+        now,
+      },
+      fixture.client,
+    );
+
+    expect(fixture.audiences[0]?.accountId).toBe("account-1");
+    expect(fixture.owners[0]).toMatchObject({
+      id: "owner-existing",
+      accountId: "account-1",
+    });
+    expect(issued.session.application).toBe("PUBLIC_REPRESENTATIVES");
+  });
 
   it.each([
     {
@@ -564,6 +648,7 @@ function createFixture() {
         authIdentityId: identity.id,
         application: "DASHBOARD",
         tokenHash: hashAppSessionToken(token),
+        publicAudienceId: null,
         activeOrganizationId: null,
         logtoSessionId: null,
         issuedAt: new Date("2026-07-28T08:00:00.000Z"),

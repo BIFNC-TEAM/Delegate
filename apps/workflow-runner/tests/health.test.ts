@@ -10,6 +10,12 @@ const readyPreflight = {
   processingEnabled: true,
   errorCode: null,
 };
+const disabledLogtoReconciliation = {
+  enabled: false,
+  lastTickAt: null,
+  lastTickFailed: false,
+  staleAfterMs: 30 * 60_000,
+};
 
 describe("workflow-runner readiness", () => {
   it("accepts processing-only mode when both loops and the database are ready", () => {
@@ -33,6 +39,7 @@ describe("workflow-runner readiness", () => {
           lastTickFailed: false,
           persistentWorkerFailure: false,
         },
+        logtoIdentityReconciliation: disabledLogtoReconciliation,
       }),
     ).toMatchObject({
       status: "ready",
@@ -71,6 +78,7 @@ describe("workflow-runner readiness", () => {
         lastTickFailed: false,
         persistentWorkerFailure: false,
       },
+      logtoIdentityReconciliation: disabledLogtoReconciliation,
     });
 
     expect(snapshot.status).toBe("ready");
@@ -103,6 +111,7 @@ describe("workflow-runner readiness", () => {
         lastTickFailed: true,
         persistentWorkerFailure: false,
       },
+      logtoIdentityReconciliation: disabledLogtoReconciliation,
     });
 
     expect(snapshot).toMatchObject({
@@ -138,6 +147,7 @@ describe("workflow-runner readiness", () => {
         lastTickFailed: false,
         persistentWorkerFailure: true,
       },
+      logtoIdentityReconciliation: disabledLogtoReconciliation,
     });
 
     expect(snapshot).toMatchObject({
@@ -171,6 +181,7 @@ describe("workflow-runner readiness", () => {
         lastTickFailed: false,
         persistentWorkerFailure: false,
       },
+      logtoIdentityReconciliation: disabledLogtoReconciliation,
     });
 
     expect(snapshot).toMatchObject({
@@ -181,5 +192,65 @@ describe("workflow-runner readiness", () => {
         status: "starting",
       },
     });
+  });
+
+  it("fails readiness when enabled Logto reconciliation has not completed", () => {
+    const snapshot = buildWorkflowRunnerReadiness({
+      now,
+      staleAfterMs: 180_000,
+      databaseReady: true,
+      weChatPay: readyPreflight,
+      workflow: {
+        lastTickAt: "2026-07-28T07:59:55.000Z",
+        lastTickFailed: false,
+      },
+      temporal: { required: false, status: "disabled" },
+      paymentReconciliation: {
+        enabled: false,
+        lastTickAt: null,
+        lastTickFailed: false,
+        persistentWorkerFailure: false,
+      },
+      logtoIdentityReconciliation: {
+        enabled: true,
+        lastTickAt: null,
+        lastTickFailed: false,
+        staleAfterMs: 30 * 60_000,
+      },
+    });
+
+    expect(snapshot.reasons).toContain(
+      "logto_identity_reconciliation_loop_missing",
+    );
+    expect(snapshot.loops.logtoIdentityReconciliation).toBe("missing");
+  });
+
+  it("uses the slower Logto cadence without weakening payment freshness", () => {
+    const snapshot = buildWorkflowRunnerReadiness({
+      now,
+      staleAfterMs: 180_000,
+      databaseReady: true,
+      weChatPay: readyPreflight,
+      workflow: {
+        lastTickAt: "2026-07-28T07:59:55.000Z",
+        lastTickFailed: false,
+      },
+      temporal: { required: false, status: "disabled" },
+      paymentReconciliation: {
+        enabled: true,
+        lastTickAt: "2026-07-28T07:50:00.000Z",
+        lastTickFailed: false,
+        persistentWorkerFailure: false,
+      },
+      logtoIdentityReconciliation: {
+        enabled: true,
+        lastTickAt: "2026-07-28T07:50:00.000Z",
+        lastTickFailed: false,
+        staleAfterMs: 30 * 60_000,
+      },
+    });
+
+    expect(snapshot.loops.paymentReconciliation).toBe("stale");
+    expect(snapshot.loops.logtoIdentityReconciliation).toBe("ready");
   });
 });

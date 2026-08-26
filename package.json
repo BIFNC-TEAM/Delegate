@@ -32,6 +32,7 @@
     "docker:logs": "docker compose logs -f",
     "docker:ps": "docker compose ps",
     "logto:local:bootstrap": "bash deploy/logto/bootstrap.sh",
+    "logto:local:configure-app-auth": "node scripts/logto-local-app-auth-config.mjs",
     "logto:local:config": "bash deploy/logto/compose.sh config",
     "logto:local:preflight": "bash deploy/logto/preflight.sh",
     "logto:local:init": "bash deploy/logto/init.sh",

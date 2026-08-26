@@ -68,6 +68,29 @@ describe("Logto OIDC helpers", () => {
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
   });
 
+  it("routes explicit Creator registration to the Logto registration screen", () => {
+    const url = new URL(
+      buildLogtoAuthorizeUrl(
+        {
+          endpoint: "https://auth.example.com",
+          appId: "app-1",
+          appSecret: "secret",
+          redirectUri: "https://delegate.example.com/auth/callback",
+        },
+        {
+          state: "state-1",
+          nonce: "nonce-1",
+          codeChallenge: rfc7636CodeChallenge,
+          firstScreen: "register",
+          uiLocales: "zh-CN",
+        },
+      ),
+    );
+
+    expect(url.searchParams.get("first_screen")).toBe("register");
+    expect(url.searchParams.get("ui_locales")).toBe("zh-CN");
+  });
+
   it("generates high-entropy PKCE verifiers and derives the RFC 7636 S256 challenge", () => {
     const firstVerifier = generatePkceCodeVerifier();
     const secondVerifier = generatePkceCodeVerifier();
@@ -576,6 +599,37 @@ describe("delegate auth session cookies", () => {
       state,
     );
     expect(verifyDelegateAuthState(cookie, "secret", new Date("2026-07-04T12:01:01.000Z"))).toBeNull();
+  });
+
+  it("signs the explicit Creator authentication intent into callback state", () => {
+    const state = createDelegateAuthState({
+      actor: "owner",
+      creatorFlow: "register",
+      state: "state-1",
+      nonce: "nonce-1",
+      codeVerifier: rfc7636CodeVerifier,
+      returnTo: "/dashboard",
+      now: new Date("2026-07-04T12:00:00.000Z"),
+    });
+
+    expect(state.creatorFlow).toBe("register");
+    expect(
+      verifyDelegateAuthState(
+        signDelegateAuthState(state, "secret"),
+        "secret",
+        new Date("2026-07-04T12:05:00.000Z"),
+      ),
+    ).toEqual(state);
+    expect(() =>
+      createDelegateAuthState({
+        actor: "audience",
+        creatorFlow: "register",
+        state: "state-1",
+        nonce: "nonce-1",
+        codeVerifier: rfc7636CodeVerifier,
+        returnTo: "/reps/demo",
+      }),
+    ).toThrow("creatorFlow is only valid for owner authentication");
   });
 
   it("keeps representative audience metadata in signed callback state", () => {

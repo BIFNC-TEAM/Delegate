@@ -21,6 +21,10 @@ describe("workflow-runner payment reconciliation config", () => {
       syncBatchSize: 2,
       memoryDeletionBatchSize: 12,
     });
+    expect(config.logtoIdentityReconciliation).toEqual({
+      enabled: false,
+      pollMs: 15 * 60_000,
+    });
   });
 
   it("supports the legacy flag while preferring processing over collection", () => {
@@ -77,5 +81,26 @@ describe("workflow-runner payment reconciliation config", () => {
         OPENVIKING_SYNC_BATCH_SIZE: "21",
       }),
     ).toThrow("OPENVIKING_SYNC_BATCH_SIZE must be an integer between 1 and 20");
+  });
+
+  it("enables bounded Logto identity reconciliation only with complete M2M credentials", () => {
+    expect(resolveWorkflowRunnerConfig({
+      LOGTO_ENDPOINT: "https://auth.example.com",
+      LOGTO_MANAGEMENT_APP_ID: "app-id",
+      LOGTO_MANAGEMENT_APP_SECRET: "app-secret",
+      LOGTO_RECONCILIATION_POLL_MS: "60000",
+    }).logtoIdentityReconciliation).toEqual({
+      enabled: true,
+      pollMs: 60_000,
+    });
+    expect(() => resolveWorkflowRunnerConfig({
+      LOGTO_MANAGEMENT_APP_ID: "app-id",
+    })).toThrow("must be configured together");
+    expect(() => resolveWorkflowRunnerConfig({
+      LOGTO_ENDPOINT: "https://auth.example.com",
+      LOGTO_MANAGEMENT_APP_ID: "app-id",
+      LOGTO_MANAGEMENT_APP_SECRET: "app-secret",
+      LOGTO_RECONCILIATION_POLL_MS: "59999",
+    })).toThrow("LOGTO_RECONCILIATION_POLL_MS must be an integer between 60000");
   });
 });

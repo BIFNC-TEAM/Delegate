@@ -28,7 +28,7 @@ type AppSessionAccountRecord = {
 type AppSessionAuthIdentityRecord = {
   id: string;
   accountId: string;
-  status: "ACTIVE" | "REVOKED";
+  status: "ACTIVE" | "SUSPENDED" | "REVOKED";
 };
 
 export type AppSessionRecord = {
@@ -37,6 +37,7 @@ export type AppSessionRecord = {
   authIdentityId: string;
   application: AppSessionApplicationValue;
   tokenHash: Uint8Array;
+  publicAudienceId: string | null;
   activeOrganizationId: string | null;
   logtoSessionId: string | null;
   issuedAt: Date;
@@ -77,6 +78,7 @@ export type AppSessionClient = {
         authIdentityId: string;
         application: AppSessionApplicationValue;
         tokenHash: Uint8Array;
+        publicAudienceId: string | null;
         activeOrganizationId: string | null;
         logtoSessionId: string | null;
         issuedAt: Date;
@@ -106,6 +108,7 @@ export type CreateAppSessionInput = {
   accountId: string;
   authIdentityId: string;
   application: AppSessionApplicationValue;
+  publicAudienceId?: string | null | undefined;
   activeOrganizationId?: string | null | undefined;
   logtoSessionId?: string | null | undefined;
   idleTtlSeconds?: number | undefined;
@@ -136,7 +139,9 @@ export class AppSessionAccountUnavailableError extends Error {
 export class AppSessionIdentityUnavailableError extends Error {
   readonly code = "APP_SESSION_IDENTITY_UNAVAILABLE";
 
-  constructor(readonly identityStatus: "REVOKED" | "MISSING" | "MISMATCH") {
+  constructor(
+    readonly identityStatus: "SUSPENDED" | "REVOKED" | "MISSING" | "MISMATCH",
+  ) {
     super(`Cannot create an AppSession for identity status ${identityStatus}.`);
     this.name = "AppSessionIdentityUnavailableError";
   }
@@ -150,6 +155,17 @@ export class AppSessionWorkspaceSelectionUnavailableError extends Error {
       "AppSession activeOrganizationId is disabled until Account membership authorization is available.",
     );
     this.name = "AppSessionWorkspaceSelectionUnavailableError";
+  }
+}
+
+export class AppSessionAudienceBindingUnavailableError extends Error {
+  readonly code = "APP_SESSION_AUDIENCE_BINDING_UNAVAILABLE";
+
+  constructor(
+    readonly reason: "MISSING" | "UNEXPECTED",
+  ) {
+    super(`AppSession public audience binding is ${reason.toLowerCase()}.`);
+    this.name = "AppSessionAudienceBindingUnavailableError";
   }
 }
 
@@ -195,6 +211,17 @@ export async function createAppSession(
   if (activeOrganizationId !== null) {
     throw new AppSessionWorkspaceSelectionUnavailableError();
   }
+  const publicAudienceId = normalizeOptionalBounded(
+    input.publicAudienceId,
+    191,
+    "publicAudienceId",
+  );
+  if (application === "PUBLIC_REPRESENTATIVES" && !publicAudienceId) {
+    throw new AppSessionAudienceBindingUnavailableError("MISSING");
+  }
+  if (application === "DASHBOARD" && publicAudienceId) {
+    throw new AppSessionAudienceBindingUnavailableError("UNEXPECTED");
+  }
 
   const token = randomBytes(32).toString("base64url");
   const tokenHash = hashAppSessionToken(token);
@@ -205,6 +232,7 @@ export async function createAppSession(
     authIdentityId,
     application,
     tokenHash,
+    publicAudienceId,
     activeOrganizationId: null,
     logtoSessionId: normalizeOptionalBounded(
       input.logtoSessionId,

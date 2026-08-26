@@ -25,6 +25,10 @@ const verifyWorkflow = readFileSync(
 const rootPackage = JSON.parse(
   readFileSync(resolve(repoRoot, "package.json"), "utf8"),
 ) as { scripts?: Record<string, string> };
+const localAppAuthConfig = resolve(
+  repoRoot,
+  "scripts/logto-local-app-auth-config.mjs",
+);
 
 const scripts = [
   "deploy/logto/env.sh",
@@ -112,6 +116,15 @@ describe("self-hosted Logto local Compose contract", () => {
     for (const script of scripts) {
       execFileSync("bash", ["-n", resolve(repoRoot, script)]);
     }
+    execFileSync(process.execPath, ["--check", localAppAuthConfig]);
+    const localAppAuthSource = readFileSync(localAppAuthConfig, "utf8");
+    expect(localAppAuthSource).toContain(
+      ".local/logto/delegate-auth.env",
+    );
+    expect(localAppAuthSource).toContain("mode: 0o600");
+    expect(localAppAuthSource).not.toMatch(
+      /console\.log\([^\n]*(?:signingKey|clientSecret)/u,
+    );
 
     const envSource = readFileSync(
       resolve(repoRoot, "deploy/logto/env.sh"),
@@ -156,6 +169,9 @@ describe("self-hosted Logto local Compose contract", () => {
   it("exposes one documented package command per lifecycle action", () => {
     expect(rootPackage.scripts?.["logto:local:bootstrap"]).toBe(
       "bash deploy/logto/bootstrap.sh",
+    );
+    expect(rootPackage.scripts?.["logto:local:configure-app-auth"]).toBe(
+      "node scripts/logto-local-app-auth-config.mjs",
     );
     expect(rootPackage.scripts?.["logto:local:config"]).toBe(
       "bash deploy/logto/compose.sh config",

@@ -330,6 +330,17 @@ Before `identityResolutionMode=enforce`:
 - same email under a different principal does not merge;
 - existing Owner and Audience logins pass real Logto contract tests.
 
+Before `DELEGATE_ACCOUNT_SESSION_MODE=enforce`:
+
+- both Dashboard and Public Representatives emit shadow parity observations;
+- every mismatch category is zero for the reviewed observation window;
+- the workflow-runner Logto reconciliation checkpoint is current and has zero
+  consecutive failures;
+- a complete Management API page walk succeeds without reaching the configured
+  page cap;
+- suspension, reactivation, deletion, local logout, and cross-application
+  session isolation pass real Logto contract tests.
+
 Before `logtoIssuerMode=self_hosted`:
 
 - Account and AppSession v2 are active for the rollout cohort;

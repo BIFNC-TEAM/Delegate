@@ -39,6 +39,15 @@ services:
     healthcheck:
       start_period: 30s
 
+  workflow-runner:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./apps/workflow-runner/src:/app/apps/workflow-runner/src:ro
+      - ./packages/web-data/src:/app/packages/web-data/src:ro
+      - ./packages/workflows/src:/app/packages/workflows/src:ro
+      - ./prisma/schema.prisma:/app/prisma/schema.prisma:ro
+
   reps:
     environment:
       NODE_ENV: development

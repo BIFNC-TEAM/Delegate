@@ -1,11 +1,15 @@
 import { getWorkflowEngineConfig } from "@delegate/workflows";
-import { resolveWeChatPayReleaseFlags } from "@delegate/web-data";
+import {
+  readLogtoManagementConfig,
+  resolveWeChatPayReleaseFlags,
+} from "@delegate/web-data";
 
 export function resolveWorkflowRunnerConfig(
   env: Record<string, string | undefined> = process.env,
 ) {
   const weChatPayRelease =
     resolveWeChatPayReleaseFlags(env);
+  const logtoManagement = readLogtoManagementConfig(env);
   return {
     port: parseInt(env.WORKFLOW_RUNNER_PORT?.trim() || "4020", 10),
     pollMs: parseInt(
@@ -69,6 +73,16 @@ export function resolveWorkflowRunnerConfig(
         "WECHAT_PAY_RECONCILIATION_MAX_BACKOFF_MS",
         10 * 60_000,
         1_000,
+        24 * 60 * 60_000,
+      ),
+    },
+    logtoIdentityReconciliation: {
+      enabled: logtoManagement !== null,
+      pollMs: readBoundedInteger(
+        env,
+        "LOGTO_RECONCILIATION_POLL_MS",
+        15 * 60_000,
+        60_000,
         24 * 60 * 60_000,
       ),
     },

@@ -38,6 +38,8 @@ export {
 } from "./artifact-store";
 export * from "./payment-provider-operation-gate";
 export * from "./account-session-shadow";
+export * from "./account-session-authority";
+export * from "./account-session-parity";
 export * from "./account-shadow";
 export * from "./app-sessions";
 export * from "./auth-identities";
@@ -74,6 +76,9 @@ export * from "./handoff-entitlements";
 export * from "./knowledge-library";
 export * from "./knowledge-storage";
 export * from "./knowledge-vector";
+export * from "./logto-lifecycle";
+export * from "./logto-management";
+export * from "./logto-reconciliation";
 export * from "./mcp-binding-concurrency";
 export * from "./matrix-provisioning";
 export * from "./matrix-identifiers";

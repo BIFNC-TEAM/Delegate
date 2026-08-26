@@ -3,6 +3,7 @@ import { resolveAuthenticatedAudienceIdentity } from "./web-audience";
 
 export type ExternalAuthProvider = "logto";
 export type AuthIdentityIssuerMode = "shadow" | "enforce";
+export type CreatorAdmissionMode = "invite_only" | "self_service";
 
 export type ExternalAuthProfile = {
   provider: ExternalAuthProvider;
@@ -133,6 +134,8 @@ export type ResolveOwnerForAuthResult = {
 };
 
 export const CREATOR_ADMISSION_REQUIRED_CODE = "CREATOR_ADMISSION_REQUIRED";
+export const CREATOR_REGISTRATION_REQUIRED_CODE =
+  "CREATOR_REGISTRATION_REQUIRED";
 
 export class CreatorAdmissionRequiredError extends Error {
   readonly code = CREATOR_ADMISSION_REQUIRED_CODE;
@@ -144,10 +147,37 @@ export class CreatorAdmissionRequiredError extends Error {
   }
 }
 
+export class CreatorRegistrationRequiredError extends Error {
+  readonly code = CREATOR_REGISTRATION_REQUIRED_CODE;
+  readonly statusCode = 403;
+
+  constructor() {
+    super("A Creator account must be created before signing in.");
+    this.name = "CreatorRegistrationRequiredError";
+  }
+}
+
 export async function resolveOwnerForAuth(
   profile: ExternalAuthProfile,
   client: AuthIdentityClient = prisma as unknown as AuthIdentityClient,
   env: Record<string, string | undefined> = process.env,
+): Promise<ResolveOwnerForAuthResult> {
+  return resolveOwnerForAuthOperation(profile, client, env, false);
+}
+
+export async function resolveOwnerForRegistration(
+  profile: ExternalAuthProfile,
+  client: AuthIdentityClient = prisma as unknown as AuthIdentityClient,
+  env: Record<string, string | undefined> = process.env,
+): Promise<ResolveOwnerForAuthResult> {
+  return resolveOwnerForAuthOperation(profile, client, env, true);
+}
+
+async function resolveOwnerForAuthOperation(
+  profile: ExternalAuthProfile,
+  client: AuthIdentityClient,
+  env: Record<string, string | undefined>,
+  explicitRegistration: boolean,
 ): Promise<ResolveOwnerForAuthResult> {
   const normalized = normalizeExternalAuthProfile(profile);
   const existingLink = await client.ownerIdentityLink.findFirst({
@@ -214,11 +244,17 @@ export async function resolveOwnerForAuth(
     }
   }
 
-  if (
-    !readCreatorAdmissionPrincipals(env).has(
-      buildAuthPrincipalKey(normalized.issuer, normalized.subject),
-    )
-  ) {
+  const admissionMode = readCreatorAdmissionMode(env);
+  const creationAllowed =
+    admissionMode === "self_service"
+      ? explicitRegistration
+      : readCreatorAdmissionPrincipals(env).has(
+          buildAuthPrincipalKey(normalized.issuer, normalized.subject),
+        );
+  if (!creationAllowed) {
+    if (admissionMode === "self_service") {
+      throw new CreatorRegistrationRequiredError();
+    }
     throw new CreatorAdmissionRequiredError();
   }
 
@@ -294,6 +330,33 @@ export function isCreatorAdmissionRequiredError(
       error !== null &&
       "code" in error &&
       error.code === CREATOR_ADMISSION_REQUIRED_CODE)
+  );
+}
+
+export function isCreatorRegistrationRequiredError(
+  error: unknown,
+): error is CreatorRegistrationRequiredError {
+  return (
+    error instanceof CreatorRegistrationRequiredError ||
+    (typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === CREATOR_REGISTRATION_REQUIRED_CODE)
+  );
+}
+
+export function readCreatorAdmissionMode(
+  env: Record<string, string | undefined> = process.env,
+): CreatorAdmissionMode {
+  const mode = env.DELEGATE_CREATOR_ADMISSION_MODE?.trim().toLowerCase();
+  if (!mode || mode === "invite_only") {
+    return "invite_only";
+  }
+  if (mode === "self_service") {
+    return "self_service";
+  }
+  throw new Error(
+    "DELEGATE_CREATOR_ADMISSION_MODE must be invite_only or self_service.",
   );
 }
 

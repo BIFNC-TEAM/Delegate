@@ -27,6 +27,7 @@ export const DEFAULT_DELEGATE_DEV_AUTH_ISSUER =
   "https://local-auth.delegate.invalid/oidc";
 
 export type DelegateAuthActor = "owner" | "audience";
+export type CreatorAuthFlow = "sign_in" | "register";
 export type LogtoApplication = "dashboard" | "representatives";
 
 export type DelegateAuthSession = {
@@ -50,6 +51,7 @@ export type DelegateAuthSession = {
 
 type DelegateAuthStateBase = {
   actor: DelegateAuthActor;
+  creatorFlow?: CreatorAuthFlow;
   state: string;
   nonce: string;
   returnTo: string;
@@ -160,6 +162,16 @@ export function readLogtoOidcConfig(
     redirectUri,
     scopes: normalizeScopes(env.LOGTO_SCOPES),
   };
+}
+
+export function readLogtoIssuer(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const endpoint = normalizeOidcEndpoint(
+    normalizeRequiredEnv(env.LOGTO_ENDPOINT, "LOGTO_ENDPOINT"),
+    "LOGTO_ENDPOINT",
+  );
+  return getLogtoIssuer(endpoint);
 }
 
 export function isLogtoOidcConfigured(
@@ -328,6 +340,8 @@ export function buildLogtoAuthorizeUrl(
     nonce: string;
     codeChallenge: string;
     prompt?: string | undefined;
+    firstScreen?: CreatorAuthFlow | undefined;
+    uiLocales?: string | undefined;
   },
 ): string {
   const url = new URL("/oidc/auth", normalizeLogtoEndpoint(config.endpoint));
@@ -344,6 +358,16 @@ export function buildLogtoAuthorizeUrl(
   url.searchParams.set("code_challenge_method", "S256");
   if (input.prompt) {
     url.searchParams.set("prompt", input.prompt);
+  }
+  if (input.firstScreen) {
+    url.searchParams.set(
+      "first_screen",
+      normalizeCreatorAuthFlow(input.firstScreen),
+    );
+  }
+  const uiLocales = input.uiLocales?.trim();
+  if (uiLocales) {
+    url.searchParams.set("ui_locales", uiLocales);
   }
   return url.toString();
 }
@@ -564,6 +588,7 @@ export function createDelegateAuthSession(input: {
 
 export function createDelegateAuthState(input: {
   actor: DelegateAuthActor;
+  creatorFlow?: CreatorAuthFlow | undefined;
   state: string;
   nonce: string;
   codeVerifier: string;
@@ -580,6 +605,14 @@ export function createDelegateAuthState(input: {
   return {
     version: 2,
     actor: input.actor,
+    ...(input.creatorFlow
+      ? {
+          creatorFlow: normalizeOwnerCreatorAuthFlow(
+            input.actor,
+            input.creatorFlow,
+          ),
+        }
+      : {}),
     state: normalizeRequiredText(input.state, "state"),
     nonce: normalizeRequiredText(input.nonce, "nonce"),
     codeVerifier: normalizePkceCodeVerifier(input.codeVerifier),
@@ -879,6 +912,23 @@ function normalizeAuthStateTtlSeconds(value: number | undefined): number {
   return ttlSeconds;
 }
 
+function normalizeCreatorAuthFlow(value: CreatorAuthFlow): CreatorAuthFlow {
+  if (value === "sign_in" || value === "register") {
+    return value;
+  }
+  throw new Error("creatorFlow must be sign_in or register");
+}
+
+function normalizeOwnerCreatorAuthFlow(
+  actor: DelegateAuthActor,
+  value: CreatorAuthFlow,
+): CreatorAuthFlow {
+  if (actor !== "owner") {
+    throw new Error("creatorFlow is only valid for owner authentication");
+  }
+  return normalizeCreatorAuthFlow(value);
+}
+
 function normalizeRepresentativePublicChatState(
   state: DelegateRepresentativePublicChatState,
 ): DelegateRepresentativePublicChatState {
@@ -950,6 +1000,8 @@ function isDelegateAuthState(value: unknown): value is DelegateAuthState {
     !state.returnTo ||
     !isOptionalString(state.representativeSlug) ||
     !isOptionalString(state.audienceId) ||
+    !isOptionalCreatorAuthFlow(state.creatorFlow) ||
+    (state.creatorFlow !== undefined && state.actor !== "owner") ||
     typeof state.issuedAt !== "number" ||
     typeof state.expiresAt !== "number" ||
     !Number.isInteger(state.issuedAt) ||
@@ -976,6 +1028,12 @@ function isDelegateAuthState(value: unknown): value is DelegateAuthState {
     );
   }
   return state.version === 1;
+}
+
+function isOptionalCreatorAuthFlow(
+  value: unknown,
+): value is CreatorAuthFlow | undefined {
+  return value === undefined || value === "sign_in" || value === "register";
 }
 
 function isOptionalString(value: unknown): value is string | undefined {

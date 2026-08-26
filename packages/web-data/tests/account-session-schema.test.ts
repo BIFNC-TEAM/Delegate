@@ -27,6 +27,13 @@ const audienceAccountIndexMigration = readFileSync(
   ),
   "utf8",
 );
+const publicAudienceBindingMigration = readFileSync(
+  new URL(
+    "../../../prisma/migrations/20260826103000_appsession_public_audience_binding/migration.sql",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const indexRecoveryOperation = readFileSync(
   new URL(
     "../../../scripts/logto-issuer-safe-index-operation.sh",
@@ -125,6 +132,19 @@ describe("Account/AppSession shadow schema", () => {
     expect(migration).toContain(
       'REFERENCES "AuthIdentity"("id", "accountId")',
     );
+  });
+
+  it("adds the public audience binding as an expand-only nullable column", () => {
+    expect(schema).toContain(
+      "publicAudienceId     String?                @db.VarChar(191)",
+    );
+    expect(publicAudienceBindingMigration).toContain(
+      'ADD COLUMN "publicAudienceId" VARCHAR(191)',
+    );
+    expect(publicAudienceBindingMigration).not.toMatch(
+      /^\s*(?:UPDATE|DELETE|DROP|TRUNCATE)\b/mu,
+    );
+    expect(publicAudienceBindingMigration).not.toContain("NOT NULL");
   });
 
   it("enforces token, expiry, and registered-audience invariants", () => {

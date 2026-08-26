@@ -90,6 +90,15 @@ export type IssueAccountSessionShadowInput = {
   principal: VerifiedAccountPrincipal;
   persona: AccountSessionPersona;
   application: AppSessionApplicationValue;
+  /** Required for Public Representatives so a v2 session can restore the
+   * proof-bound browser audience after the shorter public-chat cookie expires. */
+  publicAudienceId?: string | null | undefined;
+  /**
+   * Allows an explicit user-initiated persona enrollment to attach to an
+   * Account that already owns the opposite persona. It never permits moving a
+   * persona between Accounts or claiming a second persona of the same kind.
+   */
+  allowCrossPersonaEnrollment?: boolean | undefined;
   /**
    * When present, possession of this application-scoped token authorizes its
    * revocation in the same transaction before the replacement is created.
@@ -144,6 +153,11 @@ export async function issueAccountSessionShadow(
     prisma as unknown as AccountSessionShadowClient,
 ): Promise<IssuedAccountSessionShadow> {
   assertPersonaApplication(input.persona, input.application);
+  assertPublicAudienceBinding(
+    input.persona,
+    input.application,
+    input.publicAudienceId,
+  );
   try {
     return await runWithPrismaWriteConflictRetry(
       () =>
@@ -177,6 +191,7 @@ export async function issueAccountSessionShadow(
               personaClient,
               input.persona,
               resolved.account.id,
+              input.allowCrossPersonaEnrollment === true,
             );
 
             const previousSessionRevoked =
@@ -198,6 +213,7 @@ export async function issueAccountSessionShadow(
                 accountId: resolved.account.id,
                 authIdentityId: resolved.authIdentity.id,
                 application: input.application,
+                publicAudienceId: input.publicAudienceId,
                 // No Account-based Workspace membership authority exists yet.
                 // Shadow issuance must not infer this from legacy Owner fields.
                 activeOrganizationId: null,
@@ -256,20 +272,60 @@ function assertPersonaApplication(
   }
 }
 
+function assertPublicAudienceBinding(
+  persona: AccountSessionPersona,
+  application: AppSessionApplicationValue,
+  publicAudienceId: string | null | undefined,
+): void {
+  const normalized = publicAudienceId?.trim();
+  if (
+    persona.kind === "audience"
+    && application === "PUBLIC_REPRESENTATIVES"
+    && !normalized
+  ) {
+    throw new AccountSessionPersonaConflictError(
+      persona,
+      "APPLICATION_MISMATCH",
+    );
+  }
+  if (
+    persona.kind === "owner"
+    && application === "DASHBOARD"
+    && normalized
+  ) {
+    throw new AccountSessionPersonaConflictError(
+      persona,
+      "APPLICATION_MISMATCH",
+    );
+  }
+}
+
 function attachPersonaWithCompareAndSet(
   client: AccountSessionPersonaClient,
   persona: AccountSessionPersona,
   accountId: string,
+  allowCrossPersonaEnrollment: boolean,
 ): Promise<void> {
   return persona.kind === "owner"
-    ? attachOwnerPersona(client, persona, accountId)
-    : attachAudiencePersona(client, persona, accountId);
+    ? attachOwnerPersona(
+        client,
+        persona,
+        accountId,
+        allowCrossPersonaEnrollment,
+      )
+    : attachAudiencePersona(
+        client,
+        persona,
+        accountId,
+        allowCrossPersonaEnrollment,
+      );
 }
 
 async function attachOwnerPersona(
   client: AccountSessionPersonaClient,
   persona: Extract<AccountSessionPersona, { kind: "owner" }>,
   accountId: string,
+  allowCrossPersonaEnrollment: boolean,
 ): Promise<void> {
   const ownerId = normalizePersonaId(persona.ownerId, "ownerId");
   const owner = await client.owner.findUnique({
@@ -294,7 +350,11 @@ async function attachOwnerPersona(
       mergedIntoId: true,
     },
   });
-  if (audienceClaim && owner.accountId !== accountId) {
+  if (
+    audienceClaim
+    && owner.accountId !== accountId
+    && !allowCrossPersonaEnrollment
+  ) {
     throw new AccountSessionPersonaConflictError(
       persona,
       "CROSS_PERSONA_REVIEW_REQUIRED",
@@ -329,6 +389,7 @@ async function attachAudiencePersona(
   client: AccountSessionPersonaClient,
   persona: Extract<AccountSessionPersona, { kind: "audience" }>,
   accountId: string,
+  allowCrossPersonaEnrollment: boolean,
 ): Promise<void> {
   const audienceIdentityId = normalizePersonaId(
     persona.audienceIdentityId,
@@ -362,7 +423,11 @@ async function attachAudiencePersona(
     where: { accountId },
     select: { id: true, accountId: true },
   });
-  if (ownerClaim && audience.accountId !== accountId) {
+  if (
+    ownerClaim
+    && audience.accountId !== accountId
+    && !allowCrossPersonaEnrollment
+  ) {
     throw new AccountSessionPersonaConflictError(
       persona,
       "CROSS_PERSONA_REVIEW_REQUIRED",

@@ -36,7 +36,7 @@ type AccountStatusValue =
   | "SUSPENDED"
   | "DELETION_PENDING"
   | "DELETED";
-type AuthIdentityStatusValue = "ACTIVE" | "REVOKED";
+type AuthIdentityStatusValue = "ACTIVE" | "SUSPENDED" | "REVOKED";
 type AuthIdentityProviderValue = "LOGTO";
 
 export type AccountShadowRecord = {
@@ -247,15 +247,17 @@ export function readAccountSessionMode(
   );
 }
 
-/**
- * The v2 session reader is intentionally not active yet. Only legacy and
- * shadow may continue trusting the signed legacy cookie; enforce/contract
- * must fail closed until their v2 authority implementation ships.
- */
+/** Legacy and shadow retain bounded compatibility with signed v1 cookies. */
 export function usesLegacyAccountSessionAuthority(
   mode: AccountSessionMode,
 ): mode is "legacy" | "shadow" {
   return mode === "legacy" || mode === "shadow";
+}
+
+export function usesAccountSessionV2(
+  mode: AccountSessionMode,
+): mode is "shadow" | "enforce" | "contract" {
+  return mode === "shadow" || mode === "enforce" || mode === "contract";
 }
 
 function findExactAuthIdentity(

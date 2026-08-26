@@ -324,6 +324,9 @@ queue 配置不完整，Delegate 会以 `temporal_not_fully_configured` 失败�
 - `LOGTO_ENDPOINT` 与 `LOGTO_SCOPES` 是共享 OIDC 配置；Dashboard 只读取 `LOGTO_DASHBOARD_APP_ID` / `LOGTO_DASHBOARD_APP_SECRET`，Public Representatives 只读取 `LOGTO_REPS_APP_ID` / `LOGTO_REPS_APP_SECRET`。两者都从各自 canonical `NEXT_PUBLIC_*` origin 派生固定 `/auth/callback`，不会跨 namespace fallback，也不再读取 `LOGTO_REDIRECT_URI`。
 - `LOGTO_BACKCHANNEL_ENDPOINT` 可为 token 与 JWKS 请求提供受信的服务端内网地址，但 authorize URL 与 issuer 校验始终使用公网 `LOGTO_ENDPOINT`。旧 Reps 动态回调只在完整 `LOGTO_REPS_LEGACY_*` tuple 和有效未来 `DELEGATE_REPS_LEGACY_CALLBACK_UNTIL` 下原地完成；否则在 token 请求前返回 `410`。
 - `LOGTO_ACCOUNT_CENTER_URL` 可在 Owner Settings 中显示经过校验的 Logto 自助账户管理入口。生产值必须使用 HTTPS；本地开发可以使用 loopback HTTP。
+- `DELEGATE_CREATOR_ADMISSION_MODE` 默认是 `invite_only`，经审核后可切换为 `self_service`。自助模式下只有短期签名 state 中明确携带 `flow=register` 的流程可以创建 Creator；普通登录不会把 Audience 自动升级成 Creator。邀请模式继续使用 `DELEGATE_CREATOR_ADMISSION_PRINCIPALS` 的精确 `issuer|subject` 白名单。
+- `DELEGATE_ACCOUNT_SESSION_MODE=enforce|contract` 只读取数据库支持的 Dashboard/Reps opaque AppSession，不再回退旧签名 Cookie；Public AppSession 会保存经过登录证明绑定的浏览器 Audience ID。`LOGTO_WEBHOOK_SIGNING_KEY` 用于验证 `/api/auth/logto/webhook` 的原始请求体 HMAC，暂停、恢复和删除事件会同步 AuthIdentity 状态并撤销本地会话。
+- `LOGTO_MANAGEMENT_APP_ID` / `LOGTO_MANAGEMENT_APP_SECRET` 只注入 workflow-runner；后台循环使用 client credentials 分页拉取完整 Logto 用户集合，修复漏发的暂停、恢复和删除事件。分页不完整或达到页数上限时失败关闭，绝不会据此推断用户已删除。shadow 模式还会输出不含 PII 的 legacy/v2 parity mismatch 事件，清零后才可切换 enforce。
 - Owner Settings 的通知偏好目前只控制 Dashboard 导航提醒，不会启用 Email、SMS、Slack、Webhook 或免打扰时段。
 - `NEXT_PUBLIC_DASHBOARD_URL` 和 `NEXT_PUBLIC_REPRESENTATIVE_URL` 是 production-shaped 应用必填的 canonical public origin。本地 override 会把它们固定为 loopback origin，避免复用远端环境文件时把开发登录重定向到远端主机。
 - `TELEGRAM_WEB_RECHARGE_BASE_URL` 可只为 Bot 配置公网 Web 充值 origin，而不改变 representative app 自身的 canonical origin；未配置时回退到 `NEXT_PUBLIC_REPRESENTATIVE_URL`。只有公网 HTTPS 值会生成内联按钮，本地 HTTP 值只以文本发送。

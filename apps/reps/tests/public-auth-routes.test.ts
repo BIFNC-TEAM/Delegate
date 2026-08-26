@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   signDelegateAuthSession: vi.fn(),
   signDelegateAuthState: vi.fn(),
   verifyDelegateAuthState: vi.fn(),
+  usesAccountSessionV2: vi.fn(),
   usesLegacyAccountSessionAuthority: vi.fn(),
 }));
 
@@ -79,6 +80,7 @@ vi.mock("@delegate/web-data", () => ({
   signDelegateAuthSession: mocks.signDelegateAuthSession,
   signDelegateAuthState: mocks.signDelegateAuthState,
   verifyDelegateAuthState: mocks.verifyDelegateAuthState,
+  usesAccountSessionV2: mocks.usesAccountSessionV2,
   usesLegacyAccountSessionAuthority:
     mocks.usesLegacyAccountSessionAuthority,
 }));
@@ -142,6 +144,10 @@ describe("public representative canonical auth routes", () => {
     mocks.readAccountSessionMode.mockReturnValue("legacy");
     mocks.usesLegacyAccountSessionAuthority.mockImplementation(
       (mode: string) => mode === "legacy" || mode === "shadow",
+    );
+    mocks.usesAccountSessionV2.mockImplementation(
+      (mode: string) =>
+        mode === "shadow" || mode === "enforce" || mode === "contract",
     );
     mocks.readLogtoOidcConfig.mockReturnValue({
       endpoint: "https://auth.example.com",
@@ -689,6 +695,8 @@ describe("public representative canonical auth routes", () => {
         audienceIdentityId: "audience-identity-1",
       },
       application: "PUBLIC_REPRESENTATIVES",
+      publicAudienceId: expect.any(String),
+      allowCrossPersonaEnrollment: true,
       previousToken: "old-reps-v2-token",
       userAgent: "Browser/2.0",
       now: expect.any(Date),
@@ -916,9 +924,38 @@ describe("public representative canonical auth routes", () => {
   });
 
   it.each(["enforce", "contract"])(
-    "refuses public login in %s until v2 read authority exists",
+    "starts public authorization in %s without falling back to legacy authority",
     async (mode) => {
       mocks.readAccountSessionMode.mockReturnValue(mode);
+      mocks.getPublicRepresentativeRuntime.mockResolvedValue({
+        status: "available",
+        setup: { id: "rep-1" },
+      });
+      mocks.resolveWebAudienceContact.mockResolvedValue({
+        audienceIdentityId: "audience-identity-1",
+      });
+      mocks.isLogtoOidcConfigured.mockReturnValue(true);
+      mocks.generateAuthStateToken
+        .mockReturnValueOnce("state-1")
+        .mockReturnValueOnce("nonce-1");
+      mocks.createDelegateRepresentativeAuthState.mockReturnValue({
+        version: 3,
+        actor: "audience",
+        state: "state-1",
+        nonce: "nonce-1",
+        codeVerifier: pkceCodeVerifier,
+        returnTo: "/reps/demo",
+        representativeSlug: "demo",
+        publicChat: {
+          audienceId: "aud_1",
+          sessionToken: "signed-public-chat-session-token",
+          expiresAt: "2026-08-05T00:00:00.000Z",
+        },
+      });
+      mocks.buildLogtoAuthorizeUrl.mockReturnValue(
+        "https://auth.example.com/oidc/auth?state=state-1",
+      );
+      mocks.signDelegateAuthState.mockReturnValue("signed-pkce-state");
 
       const response = await login(
         new Request("https://reps.example.com/reps/demo/auth/login", {
@@ -927,13 +964,29 @@ describe("public representative canonical auth routes", () => {
         { params: Promise.resolve({ slug: "demo" }) },
       );
 
-      expect(response.status).toBe(503);
-      expect(mocks.getPublicRepresentativeRuntime).not.toHaveBeenCalled();
+      expect(response.status).toBe(307);
+      expect(mocks.getPublicRepresentativeRuntime).toHaveBeenCalledWith(
+        "demo",
+      );
     },
   );
 
-  it("refuses an in-flight public callback in enforce mode before token exchange", async () => {
+  it("completes an enforce callback with only the platform AppSession cookie", async () => {
     mocks.readAccountSessionMode.mockReturnValue("enforce");
+    configureSuccessfulFixedCallback({
+      version: 3,
+      actor: "audience",
+      state: "state-1",
+      nonce: "nonce-1",
+      codeVerifier: pkceCodeVerifier,
+      returnTo: "/reps/demo#chat",
+      representativeSlug: "demo",
+      publicChat: {
+        audienceId: "aud-v3",
+        sessionToken: "signed-public-chat-session-token",
+        expiresAt: "2026-08-05T00:00:00.000Z",
+      },
+    });
 
     const response = await fixedCallback(
       new Request(
@@ -942,10 +995,22 @@ describe("public representative canonical auth routes", () => {
       ),
     );
 
-    expect(response.status).toBe(503);
-    expect(mocks.cookieStore).not.toHaveBeenCalled();
-    expect(mocks.exchangeLogtoCodeForTokens).not.toHaveBeenCalled();
-    expect(mocks.getPublicRepresentativeRuntime).not.toHaveBeenCalled();
+    expect(response.status).toBe(307);
+    expect(mocks.exchangeLogtoCodeForTokens).toHaveBeenCalledTimes(1);
+    expect(mocks.issueAccountSessionShadow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        application: "PUBLIC_REPRESENTATIVES",
+        publicAudienceId: "aud-v3",
+      }),
+    );
+    expect(mocks.createDelegateAuthSession).not.toHaveBeenCalled();
+    expect(mocks.signDelegateAuthSession).not.toHaveBeenCalled();
+    expect(response.cookies.get("delegate_reps_session_v2")?.value).toBe(
+      "new-reps-v2-token",
+    );
+    expect(
+      response.cookies.get("delegate_audience_auth_session")?.value,
+    ).toBe("");
   });
 
   it("rotates the public chat cookie when the audience logs out", async () => {

@@ -17,6 +17,7 @@ import {
   readAccountSessionMode,
   resolveWebAudienceContact,
   signDelegateAuthSession,
+  usesAccountSessionV2,
   usesLegacyAccountSessionAuthority,
   verifyDelegateAuthState,
 } from "@delegate/web-data";
@@ -53,10 +54,6 @@ export async function GET(
     }
 
     const accountSessionMode = readAccountSessionMode();
-    if (!usesLegacyAccountSessionAuthority(accountSessionMode)) {
-      return accountSessionAuthorityUnavailableResponse();
-    }
-
     const url = new URL(request.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
@@ -140,8 +137,8 @@ export async function GET(
       profile,
     });
     sessionState = binding.sessionState;
-    const shadowOutcome =
-      accountSessionMode === "shadow"
+    const accountSessionOutcome =
+      usesAccountSessionV2(accountSessionMode)
         ? await issuePublicAudienceAccountSessionShadow({
             principal: {
               provider: "logto",
@@ -162,6 +159,8 @@ export async function GET(
               audienceIdentityId: binding.audienceIdentityId,
             },
             application: "PUBLIC_REPRESENTATIVES",
+            publicAudienceId: sessionState.audienceId,
+            allowCrossPersonaEnrollment: true,
             previousToken: cookieStore.get(
               DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
             )?.value,
@@ -169,25 +168,39 @@ export async function GET(
             now: verifiedAt,
           })
         : null;
-    const session = createDelegateAuthSession({
-      actor: "audience",
-      issuer: profile.issuer,
-      subject: profile.subject,
-      audienceIdentityId: binding.audienceIdentityId,
-      audienceId: sessionState.audienceId,
-      email: profile.email ?? null,
-    });
     const authCookiePath = getRepresentativeAuthCookiePath(slug);
     const response = NextResponse.redirect(
       buildRepresentativeAuthRedirectUrl(request, authState.returnTo),
     );
-    response.cookies.set(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE, signDelegateAuthSession(session, secret), {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: shouldUseSecurePublicChatCookie(request),
-      path: authCookiePath,
-      maxAge: session.expiresAt - session.issuedAt,
-    });
+    if (usesLegacyAccountSessionAuthority(accountSessionMode)) {
+      const session = createDelegateAuthSession({
+        actor: "audience",
+        issuer: profile.issuer,
+        subject: profile.subject,
+        audienceIdentityId: binding.audienceIdentityId,
+        audienceId: sessionState.audienceId,
+        email: profile.email ?? null,
+      });
+      response.cookies.set(
+        DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
+        signDelegateAuthSession(session, secret),
+        {
+          httpOnly: true,
+          sameSite: "lax",
+          secure: shouldUseSecurePublicChatCookie(request),
+          path: authCookiePath,
+          maxAge: session.expiresAt - session.issuedAt,
+        },
+      );
+    } else {
+      response.cookies.set(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE, "", {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: shouldUseSecurePublicChatCookie(request),
+        path: authCookiePath,
+        maxAge: 0,
+      });
+    }
     response.cookies.set(LEGACY_DELEGATE_AUTH_SESSION_COOKIE, "", {
       httpOnly: true,
       sameSite: "lax",
@@ -223,13 +236,18 @@ export async function GET(
       path: authCookiePath,
       maxAge: 0,
     });
-    if (shadowOutcome?.status === "issued") {
+    if (accountSessionOutcome?.status === "issued") {
       setRepresentativesAppSessionCookie(
         response,
         request,
-        shadowOutcome.session,
+        accountSessionOutcome.session,
       );
-    } else if (shadowOutcome?.status === "review_required") {
+    } else if (accountSessionOutcome?.status === "review_required") {
+      if (!usesLegacyAccountSessionAuthority(accountSessionMode)) {
+        throw new Error(
+          "Account persona enrollment requires review before authentication can continue.",
+        );
+      }
       clearRepresentativesAppSessionCookie(response, request);
     }
     return response;
@@ -241,16 +259,6 @@ export async function GET(
       { status: 500 },
     );
   }
-}
-
-function accountSessionAuthorityUnavailableResponse() {
-  return NextResponse.json(
-    {
-      error:
-        "Account/AppSession v2 authority is not enabled in this build.",
-    },
-    { status: 503 },
-  );
 }
 
 function legacyCallbackGoneResponse() {

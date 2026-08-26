@@ -1731,6 +1731,222 @@
   }
 }
 
+/* Authenticated website account navigation */
+.site-account-menu {
+  position: relative;
+}
+
+.site-account-menu > summary {
+  display: flex;
+  min-height: 48px;
+  max-width: 248px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 12px 7px 8px;
+  border: 1px solid var(--site-line);
+  border-radius: 12px;
+  background: rgba(255, 254, 250, 0.9);
+  color: var(--site-ink);
+  cursor: pointer;
+  list-style: none;
+  transition: border-color 180ms cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.site-account-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.site-account-menu[open] > summary,
+.site-account-menu > summary:hover {
+  border-color: rgba(23, 169, 155, 0.58);
+  box-shadow: 0 8px 24px rgba(38, 84, 91, 0.1);
+}
+
+.site-account-avatar {
+  display: grid;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--site-sea);
+  color: #ffffff;
+  font-size: 0.84rem;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.site-account-trigger-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.84rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-account-chevron {
+  color: var(--site-muted);
+  font-size: 0.88rem;
+  transition: transform 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.site-account-menu[open] .site-account-chevron {
+  transform: rotate(180deg);
+}
+
+.site-account-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 30;
+  width: min(292px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid var(--site-line);
+  border-radius: 16px;
+  background: #fffefa;
+  box-shadow: 0 24px 64px rgba(38, 84, 91, 0.18);
+}
+
+.site-account-identity,
+.site-mobile-account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.site-account-identity {
+  padding: 16px;
+  border-bottom: 1px solid var(--site-line);
+}
+
+.site-account-identity-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.site-account-identity-copy strong,
+.site-account-identity-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.site-account-identity-copy strong {
+  color: var(--site-ink);
+  font-size: 0.88rem;
+}
+
+.site-account-identity-copy small {
+  color: var(--site-muted);
+  font-size: 0.74rem;
+}
+
+.site-account-links {
+  display: grid;
+  padding: 8px;
+}
+
+.site-account-links a {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  color: var(--site-ink-soft);
+  font-size: 0.84rem;
+  font-weight: 750;
+}
+
+.site-account-links a:hover {
+  background: #f0fdfa;
+  color: var(--site-sea);
+}
+
+.site-account-links a span {
+  display: grid;
+  width: 22px;
+  place-items: center;
+  color: var(--site-sea);
+}
+
+.site-account-language {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--site-line);
+  color: var(--site-muted);
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+
+.site-account-language .language-switcher {
+  min-height: 34px;
+  padding: 2px;
+}
+
+.site-account-language .language-pill {
+  min-width: 48px;
+  min-height: 28px;
+  padding: 4px 9px;
+}
+
+.site-account-language .language-pill small {
+  display: none;
+}
+
+.site-account-logout {
+  padding: 8px;
+  border-top: 1px solid var(--site-line);
+}
+
+.site-account-logout button,
+.site-mobile-menu form button {
+  width: 100%;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #6b7280;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 750;
+  text-align: left;
+}
+
+.site-account-logout button:hover,
+.site-mobile-menu form button:hover {
+  background: #f9fafb;
+  color: #111827;
+}
+
+.site-mobile-account {
+  margin: 4px 0;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--site-line);
+}
+
+.site-mobile-menu .site-mobile-register {
+  color: var(--site-sea);
+  font-weight: 800;
+}
+
+.site-mobile-menu form {
+  border-bottom: 1px solid var(--site-line);
+}
+
+@media (max-width: 820px) {
+  .site-account-menu > summary {
+    max-width: 210px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .site-shell *,
   .site-shell *::before,

@@ -8,7 +8,9 @@ import {
   LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   LEGACY_DELEGATE_AUTH_STATE_COOKIE,
   readAccountSessionMode,
+  readLogtoOidcConfig,
   revokeAppSession,
+  usesAccountSessionV2,
 } from "@delegate/web-data";
 
 import {
@@ -16,6 +18,8 @@ import {
   buildCreatorRedirectUrl,
   sanitizeCreatorReturnTo,
 } from "../../../auth-guard";
+
+const DELEGATE_LOGOUT_RETURN_COOKIE = "delegate_logout_return_v1";
 
 export function GET() {
   return new Response(null, {
@@ -46,7 +50,10 @@ export async function POST(request: Request) {
     const returnTo = sanitizeCreatorReturnTo(
       url.searchParams.get("returnTo"),
     );
-    if (shouldRevokeShadowSession()) {
+    const siteReturnTo = resolveTrustedSiteReturnTo(
+      url.searchParams.get("siteReturnTo"),
+    );
+    if (shouldRevokeAccountSession()) {
       const cookieStore = await cookies();
       const currentAppSession = cookieStore.get(
         DELEGATE_DASHBOARD_APP_SESSION_COOKIE,
@@ -65,10 +72,7 @@ export async function POST(request: Request) {
       }
     }
     const response = NextResponse.redirect(
-      buildCreatorRedirectUrl(
-        `/auth/error?reason=signed_out&returnTo=${encodeURIComponent(returnTo)}`,
-        request.url,
-      ),
+      buildLogtoEndSessionUrl(request),
       303,
     );
     response.cookies.delete(DELEGATE_OWNER_AUTH_SESSION_COOKIE);
@@ -82,6 +86,22 @@ export async function POST(request: Request) {
       path: "/",
       maxAge: 0,
     });
+    response.cookies.set(
+      DELEGATE_LOGOUT_RETURN_COOKIE,
+      encodeLogoutReturn(
+        siteReturnTo ? "site" : "dashboard",
+        siteReturnTo
+          ? `${siteReturnTo.pathname}${siteReturnTo.search}${siteReturnTo.hash}`
+          : returnTo,
+      ),
+      {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        path: "/auth/logout/callback",
+        maxAge: 5 * 60,
+      },
+    );
     return response;
   } catch (error) {
     return NextResponse.json(
@@ -93,6 +113,27 @@ export async function POST(request: Request) {
   }
 }
 
+function buildLogtoEndSessionUrl(request: Request): URL {
+  const config = readLogtoOidcConfig("dashboard");
+  const endSessionUrl = new URL("/oidc/session/end", config.endpoint);
+  endSessionUrl.searchParams.set("client_id", config.appId);
+  endSessionUrl.searchParams.set(
+    "post_logout_redirect_uri",
+    buildCreatorRedirectUrl("/auth/logout/callback", request.url).toString(),
+  );
+  return endSessionUrl;
+}
+
+function encodeLogoutReturn(
+  kind: "site" | "dashboard",
+  returnTo: string,
+): string {
+  return Buffer.from(
+    JSON.stringify({ version: 1, kind, returnTo }),
+    "utf8",
+  ).toString("base64url");
+}
+
 function isTrustedLogoutRequest(request: Request): boolean {
   const expectedOrigin = buildCreatorRedirectUrl(
     "/",
@@ -101,7 +142,9 @@ function isTrustedLogoutRequest(request: Request): boolean {
   const requestOrigin = request.headers.get("origin")?.trim();
   if (requestOrigin) {
     try {
-      return new URL(requestOrigin).origin === expectedOrigin;
+      const normalizedOrigin = new URL(requestOrigin).origin;
+      return normalizedOrigin === expectedOrigin
+        || isTrustedSiteOrigin(normalizedOrigin);
     } catch {
       return false;
     }
@@ -110,9 +153,65 @@ function isTrustedLogoutRequest(request: Request): boolean {
   return request.headers.get("sec-fetch-site")?.toLowerCase() !== "cross-site";
 }
 
-function shouldRevokeShadowSession(): boolean {
+function resolveTrustedSiteReturnTo(value: string | null): URL | null {
+  const configuredSiteOrigin = readConfiguredSiteOrigin();
+  const normalized = value?.trim();
+  if (
+    !configuredSiteOrigin
+    || !normalized
+    || !normalized.startsWith("/")
+    || normalized.startsWith("//")
+    || normalized.includes("\\")
+  ) {
+    return null;
+  }
   try {
-    return readAccountSessionMode() === "shadow";
+    const target = new URL(normalized, `${configuredSiteOrigin}/`);
+    return target.origin === configuredSiteOrigin ? target : null;
+  } catch {
+    return null;
+  }
+}
+
+function isTrustedSiteOrigin(origin: string): boolean {
+  const configuredSiteOrigin = readConfiguredSiteOrigin();
+  if (!configuredSiteOrigin) return false;
+  if (origin === configuredSiteOrigin) return true;
+  if (process.env.NODE_ENV === "production") return false;
+  try {
+    const actual = new URL(origin);
+    const configured = new URL(configuredSiteOrigin);
+    return actual.protocol === configured.protocol
+      && actual.port === configured.port
+      && isLoopback(actual.hostname)
+      && isLoopback(configured.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function readConfiguredSiteOrigin(): string | null {
+  const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+  if (!configured) return null;
+  try {
+    const url = new URL(configured);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isLoopback(hostname: string): boolean {
+  return hostname === "localhost"
+    || hostname === "::1"
+    || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+}
+
+function shouldRevokeAccountSession(): boolean {
+  try {
+    return usesAccountSessionV2(readAccountSessionMode());
   } catch {
     // Logout must remain available under a malformed deployment setting.
     return false;

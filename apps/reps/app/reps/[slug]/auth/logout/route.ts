@@ -11,6 +11,7 @@ import {
   LEGACY_DELEGATE_AUTH_STATE_COOKIE,
   readAccountSessionMode,
   revokeAppSession,
+  usesAccountSessionV2,
 } from "@delegate/web-data";
 
 import {
@@ -45,7 +46,7 @@ export async function GET(
       slug,
     );
     const authCookiePath = getRepresentativeAuthCookiePath(slug);
-    if (shouldRevokeShadowSession()) {
+    if (shouldRevokeAccountSession()) {
       const cookieStore = await cookies();
       const currentAppSession = cookieStore.get(
         DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
@@ -141,9 +142,9 @@ export async function GET(
   }
 }
 
-function shouldRevokeShadowSession(): boolean {
+function shouldRevokeAccountSession(): boolean {
   try {
-    return readAccountSessionMode() === "shadow";
+    return usesAccountSessionV2(readAccountSessionMode());
   } catch {
     // Logout must remain available under a malformed deployment setting.
     return false;

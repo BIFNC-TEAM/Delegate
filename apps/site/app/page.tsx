@@ -3,13 +3,14 @@ import { headers } from "next/headers";
 import { demoRepresentative } from "@delegate/domain";
 import {
   HashScrollRestorer,
-  LanguageSwitcher,
   buildLocalizedHref,
   extractCountryHint,
   pickCopy,
   resolveLocale,
   resolveServiceUrl,
 } from "@delegate/web-ui";
+
+import { SiteAccountNavigation } from "./site-account-navigation";
 
 const copy = {
   zh: {
@@ -22,12 +23,21 @@ const copy = {
       { href: "#plans", label: "方案" },
     ],
     menuLabel: "菜单",
-    navLogin: "进入控制台",
-    navCreate: "创建数字代表",
+    navLogin: "登录",
+    navCreate: "免费注册",
+    account: {
+      fallback: "已登录账号",
+      menuLabel: "打开账号菜单",
+      console: "前往控制台",
+      representatives: "我的数字代表",
+      settings: "用户设置",
+      signOut: "退出登录",
+      language: "语言",
+    },
     heroEyebrow: "AI FRONT DESK · WEB-FIRST",
-    heroTitle: "让每一个来找你的人，先被你的 AI 代表接住。",
+    heroTitle: "你的 AI 替身，代表你向外界提供服务",
     heroLead:
-      "Delegate 为创始人、顾问和创作者创建一个公开数字代表：回答公开问题、筛选需求、收取服务费；遇到敏感或高价值事项，再带着完整上下文交给你。",
+      "替你接待陌生人、筛选商机、处理简单任务。你躺平的时候，它替你干活，为你赚取被动收入，只把该你出面的事留给你。",
     heroPrimary: "创建我的数字代表",
     heroSecondary: "体验真实代表",
     heroTrust: ["仅使用已批准资料", "敏感动作先请示", "随时转人工接手"],
@@ -216,12 +226,21 @@ const copy = {
       { href: "#plans", label: "Plans" },
     ],
     menuLabel: "Menu",
-    navLogin: "Open console",
-    navCreate: "Create a representative",
+    navLogin: "Sign in",
+    navCreate: "Sign up free",
+    account: {
+      fallback: "Signed-in account",
+      menuLabel: "Open account menu",
+      console: "Go to dashboard",
+      representatives: "My representatives",
+      settings: "Account settings",
+      signOut: "Sign out",
+      language: "Language",
+    },
     heroEyebrow: "AI FRONT DESK · WEB-FIRST",
-    heroTitle: "Let your AI representative receive every person who comes looking for you.",
+    heroTitle: "Your AI double, representing you to provide services to the world.",
     heroLead:
-      "Delegate gives founders, advisors, and creators a public digital representative that answers approved questions, qualifies demand, charges for deeper service, and hands high-value moments back with context.",
+      "It welcomes strangers, qualifies opportunities, and handles simple tasks for you. While you rest, it keeps working and earning passive income—bringing you in only when your personal attention is needed.",
     heroPrimary: "Create my representative",
     heroSecondary: "Try the live representative",
     heroTrust: ["Approved knowledge only", "Sensitive actions ask first", "Human takeover anytime"],
@@ -362,10 +381,23 @@ export default async function HomePage({
     currentAppDefaultPort: 3000,
     currentHost,
   });
+  const selfServiceRegistrationEnabled =
+    process.env.DELEGATE_CREATOR_ADMISSION_MODE?.trim().toLowerCase()
+    === "self_service";
   const demoHref = buildLocalizedHref(`${representativeBaseUrl}/reps/${demoRepresentative.slug}`, locale);
-  const dashboardHref = buildLocalizedHref(`${dashboardBaseUrl}/dashboard?view=overview`, locale);
-  const setupHref = buildLocalizedHref(
-    `${dashboardBaseUrl}/dashboard?view=representatives&repSection=directory`,
+  const dashboardHref = buildCreatorAuthHref(
+    dashboardBaseUrl,
+    "sign_in",
+    buildLocalizedHref("/dashboard?view=overview", locale),
+    locale,
+  );
+  const setupHref = buildCreatorAuthHref(
+    dashboardBaseUrl,
+    selfServiceRegistrationEnabled ? "register" : "sign_in",
+    buildLocalizedHref(
+      "/dashboard?view=representatives&repSection=directory",
+      locale,
+    ),
     locale,
   );
   const footerHrefs = ["#how", "#use-cases", "#trust", "#faq"];
@@ -387,30 +419,32 @@ export default async function HomePage({
           {t.menu.map((item) => <a href={item.href} key={item.href}>{item.label}</a>)}
         </nav>
 
-        <div className="site-header-actions">
-          <LanguageSwitcher
-            activeLocale={locale}
-            ariaLabel="Language"
-            items={[
-              { locale: "zh", href: buildLocalizedHref("/", "zh"), label: t.switcher.zh, shortLabel: "ZH" },
-              { locale: "en", href: buildLocalizedHref("/", "en"), label: t.switcher.en, shortLabel: "EN" },
-            ]}
-          />
-          <a className="site-text-link site-header-login" href={dashboardHref}>{t.navLogin}</a>
-          <a className="site-button site-button-primary site-header-cta" href={setupHref}>{t.navCreate}</a>
-        </div>
-
-        <details className="site-mobile-menu">
-          <summary>{t.menuLabel}</summary>
-          <nav aria-label="Mobile website sections">
-            {t.menu.map((item) => <a href={item.href} key={item.href}>{item.label}</a>)}
-            <a className="site-mobile-login" href={dashboardHref}>{t.navLogin}</a>
-            <div className="site-mobile-language" aria-label="Language">
-              <a href={buildLocalizedHref("/", "zh")}>ZH · {t.switcher.zh}</a>
-              <a href={buildLocalizedHref("/", "en")}>EN · {t.switcher.en}</a>
-            </div>
-          </nav>
-        </details>
+        <SiteAccountNavigation
+          activeLocale={locale}
+          copy={{
+            languageAriaLabel: t.account.language,
+            menuLabel: t.menuLabel,
+            login: t.navLogin,
+            accountFallback: t.account.fallback,
+            accountMenuLabel: t.account.menuLabel,
+            console: t.account.console,
+            representatives: t.account.representatives,
+            settings: t.account.settings,
+            signOut: t.account.signOut,
+            zh: t.switcher.zh,
+            en: t.switcher.en,
+          }}
+          dashboardBaseUrl={dashboardBaseUrl}
+          loginHref={dashboardHref}
+          menu={t.menu}
+          registerHref={setupHref}
+          registerLabel={selfServiceRegistrationEnabled
+            ? t.navCreate
+            : locale === "zh"
+              ? "创建数字代表"
+              : "Create a representative"}
+          siteReturnTo={buildLocalizedHref("/", locale)}
+        />
       </header>
 
       <section className="site-hero" id="top">
@@ -656,4 +690,17 @@ export default async function HomePage({
       </footer>
     </main>
   );
+}
+
+function buildCreatorAuthHref(
+  dashboardBaseUrl: string,
+  flow: "sign_in" | "register",
+  returnTo: string,
+  locale: "zh" | "en",
+): string {
+  const url = new URL("/auth/login", dashboardBaseUrl);
+  url.searchParams.set("flow", flow);
+  url.searchParams.set("returnTo", returnTo);
+  url.searchParams.set("lang", locale);
+  return url.toString();
 }

@@ -12,11 +12,14 @@ import {
   exchangeLogtoCodeForTokens,
   issueAccountSessionShadow,
   isCreatorAdmissionRequiredError,
+  isCreatorRegistrationRequiredError,
   readDelegateAuthSessionSecret,
   readAccountSessionMode,
   readLogtoOidcConfig,
   resolveOwnerForAuth,
+  resolveOwnerForRegistration,
   signDelegateAuthSession,
+  usesAccountSessionV2,
   usesLegacyAccountSessionAuthority,
   verifyDelegateAuthState,
 } from "@delegate/web-data";
@@ -25,6 +28,7 @@ import {
   buildCreatorCanonicalAuthRequestUrl,
   buildCreatorRedirectUrl,
 } from "../../../auth-guard";
+import { clearCreatorAuthCookiesAndRedirect } from "../creator-auth-response";
 
 export async function GET(request: Request) {
   try {
@@ -34,10 +38,6 @@ export async function GET(request: Request) {
     }
 
     const accountSessionMode = readAccountSessionMode();
-    if (!usesLegacyAccountSessionAuthority(accountSessionMode)) {
-      return accountSessionAuthorityUnavailableResponse();
-    }
-
     const url = new URL(request.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
@@ -68,9 +68,15 @@ export async function GET(request: Request) {
       nonce: authState.nonce,
     });
     const verifiedAt = new Date();
-    const { owner } = await resolveOwnerForAuth(profile);
-    const shadowSession =
-      accountSessionMode === "shadow"
+    const creatorFlow =
+      authState.version === 2 && authState.creatorFlow === "register"
+        ? "register"
+        : "sign_in";
+    const { owner } = await (creatorFlow === "register"
+      ? resolveOwnerForRegistration(profile)
+      : resolveOwnerForAuth(profile));
+    const accountSession =
+      usesAccountSessionV2(accountSessionMode)
         ? await issueAccountSessionShadow({
             principal: {
               provider: "logto",
@@ -88,6 +94,7 @@ export async function GET(request: Request) {
             },
             persona: { kind: "owner", ownerId: owner.id },
             application: "DASHBOARD",
+            allowCrossPersonaEnrollment: creatorFlow === "register",
             previousToken: cookieStore.get(
               DELEGATE_DASHBOARD_APP_SESSION_COOKIE,
             )?.value,
@@ -95,45 +102,50 @@ export async function GET(request: Request) {
             now: verifiedAt,
           })
         : null;
-    const session = createDelegateAuthSession({
-      actor: "owner",
-      issuer: profile.issuer,
-      subject: profile.subject,
-      ownerId: owner.id,
-      email: profile.email ?? null,
-    });
     const response = NextResponse.redirect(
       buildCreatorRedirectUrl(authState.returnTo, request.url),
     );
-    response.cookies.set(DELEGATE_OWNER_AUTH_SESSION_COOKIE, signDelegateAuthSession(session, secret), {
-      httpOnly: true,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-      path: "/",
-      maxAge: session.expiresAt - session.issuedAt,
-    });
+    if (usesLegacyAccountSessionAuthority(accountSessionMode)) {
+      const session = createDelegateAuthSession({
+        actor: "owner",
+        issuer: profile.issuer,
+        subject: profile.subject,
+        ownerId: owner.id,
+        email: profile.email ?? null,
+      });
+      response.cookies.set(
+        DELEGATE_OWNER_AUTH_SESSION_COOKIE,
+        signDelegateAuthSession(session, secret),
+        {
+          httpOnly: true,
+          sameSite: "lax",
+          secure: process.env.NODE_ENV === "production",
+          path: "/",
+          maxAge: session.expiresAt - session.issuedAt,
+        },
+      );
+    } else {
+      response.cookies.delete(DELEGATE_OWNER_AUTH_SESSION_COOKIE);
+    }
     response.cookies.delete(DELEGATE_OWNER_AUTH_STATE_COOKIE);
     response.cookies.delete(LEGACY_DELEGATE_AUTH_SESSION_COOKIE);
     response.cookies.delete(LEGACY_DELEGATE_AUTH_STATE_COOKIE);
-    if (shadowSession) {
-      setDashboardAppSessionCookie(response, shadowSession);
+    if (accountSession) {
+      setDashboardAppSessionCookie(response, accountSession);
     }
     return response;
   } catch (error) {
-    if (isCreatorAdmissionRequiredError(error)) {
-      const response = NextResponse.redirect(
-        buildCreatorRedirectUrl(
-          "/auth/error?reason=creator_access_required",
-          request.url,
-        ),
-        303,
+    if (isCreatorRegistrationRequiredError(error)) {
+      return clearCreatorAuthCookiesAndRedirect(
+        request,
+        "/auth/error?reason=creator_registration_required",
       );
-      response.cookies.delete(DELEGATE_OWNER_AUTH_SESSION_COOKIE);
-      response.cookies.delete(DELEGATE_OWNER_AUTH_STATE_COOKIE);
-      response.cookies.delete(DELEGATE_DASHBOARD_APP_SESSION_COOKIE);
-      response.cookies.delete(LEGACY_DELEGATE_AUTH_SESSION_COOKIE);
-      response.cookies.delete(LEGACY_DELEGATE_AUTH_STATE_COOKIE);
-      return response;
+    }
+    if (isCreatorAdmissionRequiredError(error)) {
+      return clearCreatorAuthCookiesAndRedirect(
+        request,
+        "/auth/error?reason=creator_access_required",
+      );
     }
     return NextResponse.json(
       {
@@ -142,16 +154,6 @@ export async function GET(request: Request) {
       { status: 500 },
     );
   }
-}
-
-function accountSessionAuthorityUnavailableResponse() {
-  return NextResponse.json(
-    {
-      error:
-        "Account/AppSession v2 authority is not enabled in this build.",
-    },
-    { status: 503 },
-  );
 }
 
 function readBoundedUserAgent(request: Request): string | null {

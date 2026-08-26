@@ -5,18 +5,12 @@ import type { Metadata } from "next";
 import {
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE,
   AGENT_WALLET_TIP_PRODUCT_CODE,
-  DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
-  LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   getRepresentativePublicDeliverables,
   getPublicRepresentativeRuntime,
   listPublicCommerceProducts,
   prisma,
   preflightWeChatPayRuntime,
-  readAccountSessionMode,
-  readDelegateAuthSessionSecret,
   resolvePublicAudiencePrincipal,
-  verifyDelegateAuthSession,
-  usesLegacyAccountSessionAuthority,
 } from "@delegate/web-data";
 import {
   HashScrollRestorer,
@@ -40,6 +34,7 @@ import {
   buildPublicAudienceLogoutHref,
 } from "./public-auth";
 import { getGovernedContextDisclosure } from "./governed-context-disclosure";
+import { resolvePublicAudienceVerifiedAuthContext } from "./public-principal";
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
   const { slug } = await params;
@@ -100,22 +95,21 @@ export default async function RepresentativePage({
     locale,
     runtime.governedMemoryDisclosure,
   );
-  const legacyAuthorityEnabled = usesLegacyAccountSessionAuthority(
-    readAccountSessionMode(),
-  );
-  const authSession = legacyAuthorityEnabled
-    ? verifyDelegateAuthSession(
-        cookieStore.get(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE)?.value ??
-          cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value,
-        readDelegateAuthSessionSecret(),
-      )
-    : null;
-  let audienceSession =
-    authSession?.actor === "audience"
-    && authSession.audienceIdentityId
-    && authSession.audienceId
-      ? authSession
-      : null;
+  let audienceSession: Awaited<
+    ReturnType<typeof resolvePublicAudienceVerifiedAuthContext>
+  >["session"] = null;
+  try {
+    const verifiedAuth = await resolvePublicAudienceVerifiedAuthContext({
+      cookieStore,
+    });
+    audienceSession =
+      verifiedAuth.session?.audienceIdentityId
+      && verifiedAuth.session.audienceId
+        ? verifiedAuth.session
+        : null;
+  } catch {
+    audienceSession = null;
+  }
   let audiencePrincipalIdentityId: string | null = null;
   if (audienceSession) {
     const audienceId = audienceSession.audienceId;

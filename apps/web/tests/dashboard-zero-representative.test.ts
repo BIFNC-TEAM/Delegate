@@ -54,6 +54,11 @@ describe("zero-representative dashboard", () => {
     expect(sitePage).toContain(
       "/dashboard?view=representatives&repSection=directory",
     );
+    expect(sitePage).toContain('process.env.DELEGATE_CREATOR_ADMISSION_MODE');
+    expect(sitePage).toContain(
+      'selfServiceRegistrationEnabled ? "register" : "sign_in"',
+    );
+    expect(sitePage).toContain('url.searchParams.set("flow", flow)');
     expect(sitePage).not.toContain("/dashboard?view=setup");
   });
 });

@@ -2,14 +2,19 @@ import type { NextResponse } from "next/server";
 
 import {
   DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
+  DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
   LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   PublicAudiencePrincipalError,
   readAccountSessionMode,
   readDelegateAuthSessionSecret,
+  observeAccountSessionParity,
+  resolveAccountSessionAuthority,
   resolvePublicAudiencePrincipal,
   verifyDelegateAuthSession,
   usesLegacyAccountSessionAuthority,
   type PublicAudiencePrincipal,
+  type PublicAudienceAccountSessionPrincipal,
+  type DelegateAuthSession,
 } from "@delegate/web-data";
 
 import {
@@ -37,6 +42,101 @@ export type PublicAudienceRequestPrincipal = {
   revalidate(): Promise<void>;
 };
 
+export type PublicAudienceVerifiedAuthContext = {
+  session: DelegateAuthSession | null;
+  accountSessionToken: string | null;
+};
+
+export async function resolvePublicAudienceVerifiedAuthContext(input: {
+  cookieStore: PublicAudienceCookieReader;
+}): Promise<PublicAudienceVerifiedAuthContext> {
+  const accountSessionMode = readAccountSessionMode();
+  const audienceCookieValue = input.cookieStore.get(
+    DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
+  )?.value;
+  const legacyCookieValue =
+    audienceCookieValue
+    ?? input.cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value;
+
+  if (usesLegacyAccountSessionAuthority(accountSessionMode)) {
+    const session = verifyDelegateAuthSession(
+      legacyCookieValue,
+      readDelegateAuthSessionSecret(),
+    );
+    if (
+      legacyCookieValue
+      && (!session || (audienceCookieValue && session.actor !== "audience"))
+    ) {
+      throw invalidPublicAudienceSession();
+    }
+    const audienceSession = session?.actor === "audience" ? session : null;
+    if (
+      accountSessionMode === "shadow"
+      && audienceSession?.audienceIdentityId
+      && audienceSession.audienceId
+    ) {
+      const v2Token = input.cookieStore.get(
+        DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
+      )?.value ?? null;
+      const v2Principal = v2Token
+        ? await resolveAccountSessionAuthority({
+            token: v2Token,
+            application: "PUBLIC_REPRESENTATIVES",
+          }).catch(() => null)
+        : null;
+      observeAccountSessionParity({
+        application: "PUBLIC_REPRESENTATIVES",
+        legacy: {
+          actor: "audience",
+          issuer: audienceSession.issuer,
+          subject: audienceSession.subject,
+          personaId: audienceSession.audienceIdentityId,
+          audienceId: audienceSession.audienceId,
+        },
+        v2:
+          v2Principal?.actor === "audience"
+            ? {
+                actor: "audience",
+                issuer: v2Principal.issuer,
+                subject: v2Principal.subject,
+                personaId: v2Principal.audienceIdentityId,
+                audienceId: v2Principal.audienceId,
+              }
+            : null,
+        v2Token,
+      });
+    }
+    return {
+      session: audienceSession,
+      accountSessionToken: null,
+    };
+  }
+
+  const accountSessionToken = input.cookieStore.get(
+    DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
+  )?.value;
+  if (!accountSessionToken) {
+    if (legacyCookieValue) {
+      throw new PublicAudiencePrincipalError(
+        "AUTHENTICATED_PRINCIPAL_INVALID",
+        "Legacy audience sessions are disabled in the current account-session mode.",
+      );
+    }
+    return { session: null, accountSessionToken: null };
+  }
+  const principal = await resolveAccountSessionAuthority({
+    token: accountSessionToken,
+    application: "PUBLIC_REPRESENTATIVES",
+  });
+  if (principal?.actor !== "audience") {
+    throw invalidPublicAudienceSession();
+  }
+  return {
+    session: accountPrincipalToVerifiedAudienceSession(principal),
+    accountSessionToken,
+  };
+}
+
 /**
  * Verifies both signed browser cookies and delegates current identity-link
  * validation to web-data. A present but stale/revoked audience auth session is
@@ -53,41 +153,10 @@ export async function resolvePublicAudienceRequestPrincipal(input: {
     representativeSlug: input.representativeSlug,
     cookieValue: publicCookieValue,
   });
-  const audienceAuthCookieValue = input.cookieStore.get(
-    DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
-  )?.value;
-  const authCookieValue =
-    audienceAuthCookieValue
-    ?? input.cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value;
-  const legacyAuthorityEnabled = usesLegacyAccountSessionAuthority(
-    readAccountSessionMode(),
-  );
-  if (authCookieValue && !legacyAuthorityEnabled) {
-    throw new PublicAudiencePrincipalError(
-      "AUTHENTICATED_PRINCIPAL_INVALID",
-      "Legacy audience sessions are disabled in the current account-session mode.",
-    );
-  }
-  const verifiedSession = legacyAuthorityEnabled
-    ? verifyDelegateAuthSession(
-        authCookieValue,
-        readDelegateAuthSessionSecret(),
-      )
-    : null;
-  if (
-    authCookieValue
-    && (
-      !verifiedSession
-      || (audienceAuthCookieValue && verifiedSession.actor !== "audience")
-    )
-  ) {
-    throw new PublicAudiencePrincipalError(
-      "AUTHENTICATED_PRINCIPAL_INVALID",
-      "The authenticated audience session is no longer valid.",
-    );
-  }
-  const audienceAuthSession =
-    verifiedSession?.actor === "audience" ? verifiedSession : null;
+  const verifiedAuth = await resolvePublicAudienceVerifiedAuthContext({
+    cookieStore: input.cookieStore,
+  });
+  const audienceAuthSession = verifiedAuth.session;
 
   if (audienceAuthSession) {
     if (!audienceAuthSession.audienceId?.trim()) {
@@ -111,6 +180,7 @@ export async function resolvePublicAudienceRequestPrincipal(input: {
       principal,
       sessionState,
       verifiedAuthSession: audienceAuthSession,
+      accountSessionToken: verifiedAuth.accountSessionToken,
     });
   }
 
@@ -122,6 +192,7 @@ export async function resolvePublicAudienceRequestPrincipal(input: {
       principal,
       sessionState,
       verifiedAuthSession: null,
+      accountSessionToken: null,
     });
   } catch (error) {
     if (
@@ -138,6 +209,7 @@ export async function resolvePublicAudienceRequestPrincipal(input: {
       principal,
       sessionState,
       verifiedAuthSession: null,
+      accountSessionToken: null,
     });
   }
 }
@@ -146,17 +218,32 @@ function createRequestPrincipal(input: {
   principal: PublicAudiencePrincipal;
   sessionState: PublicChatSessionState;
   verifiedAuthSession: ReturnType<typeof verifyDelegateAuthSession>;
+  accountSessionToken: string | null;
 }): PublicAudienceRequestPrincipal {
   const expectedPrincipal = input.principal;
   const audienceId = input.sessionState.audienceId;
   const verifiedAuthSession = input.verifiedAuthSession;
+  const accountSessionToken = input.accountSessionToken;
 
   return {
     principal: expectedPrincipal,
     sessionState: input.sessionState,
     async revalidate() {
+      let currentAuthSession = verifiedAuthSession;
+      if (accountSessionToken) {
+        const accountPrincipal = await resolveAccountSessionAuthority({
+          token: accountSessionToken,
+          application: "PUBLIC_REPRESENTATIVES",
+        });
+        if (accountPrincipal?.actor !== "audience") {
+          throw invalidPublicAudienceSession();
+        }
+        currentAuthSession =
+          accountPrincipalToVerifiedAudienceSession(accountPrincipal);
+      }
       if (
-        verifiedAuthSession
+        currentAuthSession
+        && !accountSessionToken
         && !usesLegacyAccountSessionAuthority(readAccountSessionMode())
       ) {
         throw new PublicAudiencePrincipalError(
@@ -165,8 +252,8 @@ function createRequestPrincipal(input: {
         );
       }
       if (
-        verifiedAuthSession
-        && verifiedAuthSession.expiresAt <= Math.floor(Date.now() / 1_000)
+        currentAuthSession
+        && currentAuthSession.expiresAt <= Math.floor(Date.now() / 1_000)
       ) {
         throw new PublicAudiencePrincipalError(
           "AUTHENTICATED_PRINCIPAL_INVALID",
@@ -176,8 +263,8 @@ function createRequestPrincipal(input: {
 
       const currentPrincipal = await resolvePublicAudiencePrincipal({
         audienceId,
-        ...(verifiedAuthSession
-          ? { verifiedAuthSession }
+        ...(currentAuthSession
+          ? { verifiedAuthSession: currentAuthSession }
           : {}),
       });
       if (
@@ -193,6 +280,30 @@ function createRequestPrincipal(input: {
       }
     },
   };
+}
+
+function accountPrincipalToVerifiedAudienceSession(
+  principal: PublicAudienceAccountSessionPrincipal,
+): DelegateAuthSession {
+  return {
+    version: 1,
+    actor: "audience",
+    provider: "logto",
+    issuer: principal.issuer,
+    subject: principal.subject,
+    audienceIdentityId: principal.audienceIdentityId,
+    audienceId: principal.audienceId,
+    email: principal.email,
+    issuedAt: principal.issuedAt,
+    expiresAt: principal.expiresAt,
+  };
+}
+
+function invalidPublicAudienceSession() {
+  return new PublicAudiencePrincipalError(
+    "AUTHENTICATED_PRINCIPAL_INVALID",
+    "The authenticated audience session is no longer valid.",
+  );
 }
 
 export function assertPublicAudienceResourceOwner(

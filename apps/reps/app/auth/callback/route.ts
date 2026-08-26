@@ -18,6 +18,7 @@ import {
   readLogtoOidcConfig,
   resolveWebAudienceContact,
   signDelegateAuthSession,
+  usesAccountSessionV2,
   usesLegacyAccountSessionAuthority,
   verifyDelegateAuthState,
 } from "@delegate/web-data";
@@ -42,10 +43,6 @@ import {
 export async function GET(request: Request) {
   try {
     const accountSessionMode = readAccountSessionMode();
-    if (!usesLegacyAccountSessionAuthority(accountSessionMode)) {
-      return accountSessionAuthorityUnavailableResponse();
-    }
-
     const url = new URL(request.url);
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
@@ -124,8 +121,8 @@ export async function GET(request: Request) {
       now: verifiedAt,
     });
     sessionState = binding.sessionState;
-    const shadowOutcome =
-      accountSessionMode === "shadow"
+    const accountSessionOutcome =
+      usesAccountSessionV2(accountSessionMode)
         ? await issuePublicAudienceAccountSessionShadow({
             principal: {
               provider: "logto",
@@ -146,6 +143,8 @@ export async function GET(request: Request) {
               audienceIdentityId: binding.audienceIdentityId,
             },
             application: "PUBLIC_REPRESENTATIVES",
+            publicAudienceId: sessionState.audienceId,
+            allowCrossPersonaEnrollment: true,
             previousToken: cookieStore.get(
               DELEGATE_REPRESENTATIVES_APP_SESSION_COOKIE,
             )?.value,
@@ -153,15 +152,6 @@ export async function GET(request: Request) {
             now: verifiedAt,
           })
         : null;
-    const session = createDelegateAuthSession({
-      actor: "audience",
-      issuer: profile.issuer,
-      subject: profile.subject,
-      audienceIdentityId: binding.audienceIdentityId,
-      audienceId: sessionState.audienceId,
-      email: profile.email ?? null,
-      now: verifiedAt,
-    });
     const authCookiePath = getRepresentativeAuthCookiePath(slug);
     const returnTo = sanitizePublicAudienceReturnTo(
       authState.returnTo,
@@ -171,17 +161,36 @@ export async function GET(request: Request) {
     const response = NextResponse.redirect(
       buildRepresentativeAuthRedirectUrl(request, returnTo),
     );
-    response.cookies.set(
-      DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
-      signDelegateAuthSession(session, secret),
-      {
+    if (usesLegacyAccountSessionAuthority(accountSessionMode)) {
+      const session = createDelegateAuthSession({
+        actor: "audience",
+        issuer: profile.issuer,
+        subject: profile.subject,
+        audienceIdentityId: binding.audienceIdentityId,
+        audienceId: sessionState.audienceId,
+        email: profile.email ?? null,
+        now: verifiedAt,
+      });
+      response.cookies.set(
+        DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
+        signDelegateAuthSession(session, secret),
+        {
+          httpOnly: true,
+          sameSite: "lax",
+          secure,
+          path: authCookiePath,
+          maxAge: session.expiresAt - session.issuedAt,
+        },
+      );
+    } else {
+      response.cookies.set(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE, "", {
         httpOnly: true,
         sameSite: "lax",
         secure,
         path: authCookiePath,
-        maxAge: session.expiresAt - session.issuedAt,
-      },
-    );
+        maxAge: 0,
+      });
+    }
     response.cookies.set(
       getPublicChatCookieName(slug),
       writePublicChatSessionState({
@@ -204,13 +213,18 @@ export async function GET(request: Request) {
       path: DELEGATE_REPRESENTATIVES_AUTH_STATE_COOKIE_PATH,
       maxAge: 0,
     });
-    if (shadowOutcome?.status === "issued") {
+    if (accountSessionOutcome?.status === "issued") {
       setRepresentativesAppSessionCookie(
         response,
         secure,
-        shadowOutcome.session,
+        accountSessionOutcome.session,
       );
-    } else if (shadowOutcome?.status === "review_required") {
+    } else if (accountSessionOutcome?.status === "review_required") {
+      if (!usesLegacyAccountSessionAuthority(accountSessionMode)) {
+        throw new Error(
+          "Account persona enrollment requires review before authentication can continue.",
+        );
+      }
       clearRepresentativesAppSessionCookie(response, secure);
     }
     return response;
@@ -245,15 +259,6 @@ function clearScopedLegacyCookies(
       maxAge: 0,
     });
   }
-}
-
-function accountSessionAuthorityUnavailableResponse() {
-  return NextResponse.json(
-    {
-      error: "Account/AppSession v2 authority is not enabled in this build.",
-    },
-    { status: 503 },
-  );
 }
 
 function readBoundedUserAgent(request: Request): string | null {

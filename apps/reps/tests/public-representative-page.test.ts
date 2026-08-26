@@ -177,13 +177,13 @@ describe("public representative visitor-first page", () => {
     expect(pageSource).not.toContain("回答只使用已发布");
   });
 
-  it("stops reading legacy audience cookies when v2 enforcement modes are selected", () => {
+  it("delegates legacy and v2 audience authority to one verified context resolver", () => {
     expect(pageSource).toContain(
-      "usesLegacyAccountSessionAuthority(",
+      "resolvePublicAudienceVerifiedAuthContext",
     );
-    expect(pageSource).toContain("readAccountSessionMode()");
-    expect(pageSource).toMatch(
-      /const authSession = legacyAuthorityEnabled[\s\S]*?: null;/u,
+    expect(pageSource).not.toContain("verifyDelegateAuthSession(");
+    expect(pageSource).not.toContain(
+      "DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE",
     );
   });
 

@@ -6,7 +6,9 @@ const mocks = vi.hoisted(() => ({
   buildCreatorCanonicalAuthRequestUrl: vi.fn(),
   cookies: vi.fn(),
   readAccountSessionMode: vi.fn(),
+  readLogtoOidcConfig: vi.fn(),
   revokeAppSession: vi.fn(),
+  usesAccountSessionV2: vi.fn(),
 }));
 
 vi.mock("next/headers", () => ({
@@ -21,7 +23,9 @@ vi.mock("@delegate/web-data", () => ({
   LEGACY_DELEGATE_AUTH_SESSION_COOKIE: "delegate_auth_session",
   LEGACY_DELEGATE_AUTH_STATE_COOKIE: "delegate_auth_state",
   readAccountSessionMode: mocks.readAccountSessionMode,
+  readLogtoOidcConfig: mocks.readLogtoOidcConfig,
   revokeAppSession: mocks.revokeAppSession,
+  usesAccountSessionV2: mocks.usesAccountSessionV2,
 }));
 
 vi.mock("../auth-guard", () => ({
@@ -44,8 +48,20 @@ import {
 describe("Dashboard v2 shadow logout", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://www.example.com");
     mocks.buildCreatorCanonicalAuthRequestUrl.mockReturnValue(null);
     mocks.readAccountSessionMode.mockReturnValue("legacy");
+    mocks.readLogtoOidcConfig.mockReturnValue({
+      endpoint: "https://auth.example.com",
+      appId: "dashboard-app",
+      appSecret: "secret",
+      redirectUri: "https://dashboard.example.com/auth/callback",
+    });
+    mocks.usesAccountSessionV2.mockImplementation(
+      (mode: string) =>
+        mode === "shadow" || mode === "enforce" || mode === "contract",
+    );
     mocks.cookies.mockResolvedValue({
       get: vi.fn(() => undefined),
     });
@@ -92,7 +108,7 @@ describe("Dashboard v2 shadow logout", () => {
     });
     expect(response.status).toBe(303);
     expect(response.headers.get("location")).toBe(
-      "https://dashboard.example.com/auth/error?reason=signed_out&returnTo=%2Fdashboard",
+      "https://auth.example.com/oidc/session/end?client_id=dashboard-app&post_logout_redirect_uri=https%3A%2F%2Fdashboard.example.com%2Fauth%2Flogout%2Fcallback",
     );
     const appCookie = response.cookies.get(
       "delegate_dashboard_session_v2",
@@ -155,6 +171,60 @@ describe("Dashboard v2 shadow logout", () => {
     expect(mocks.revokeAppSession).not.toHaveBeenCalled();
   });
 
+  it("accepts the configured website POST and returns to a same-origin website path", async () => {
+    mocks.readAccountSessionMode.mockReturnValue("shadow");
+    mocks.cookies.mockResolvedValue({
+      get: vi.fn(() => ({ value: "website-dashboard-token" })),
+    });
+
+    const response = await logout(
+      new Request(
+        "https://dashboard.example.com/auth/logout?siteReturnTo=%2F%3Flang%3Dzh",
+        {
+          method: "POST",
+          headers: { origin: "https://www.example.com" },
+        },
+      ),
+    );
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe(
+      "https://auth.example.com/oidc/session/end?client_id=dashboard-app&post_logout_redirect_uri=https%3A%2F%2Fdashboard.example.com%2Fauth%2Flogout%2Fcallback",
+    );
+    expect(decodeLogoutReturnCookie(response)).toEqual({
+      version: 1,
+      kind: "site",
+      returnTo: "/?lang=zh",
+    });
+    expect(mocks.revokeAppSession).toHaveBeenCalledWith({
+      token: "website-dashboard-token",
+      application: "DASHBOARD",
+      reason: "USER_LOGOUT",
+    });
+  });
+
+  it("does not allow the website return parameter to become an open redirect", async () => {
+    const response = await logout(
+      new Request(
+        "https://dashboard.example.com/auth/logout?siteReturnTo=%2F%2Fattacker.example",
+        {
+          method: "POST",
+          headers: { origin: "https://www.example.com" },
+        },
+      ),
+    );
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe(
+      "https://auth.example.com/oidc/session/end?client_id=dashboard-app&post_logout_redirect_uri=https%3A%2F%2Fdashboard.example.com%2Fauth%2Flogout%2Fcallback",
+    );
+    expect(decodeLogoutReturnCookie(response)).toEqual({
+      version: 1,
+      kind: "dashboard",
+      returnTo: "/dashboard",
+    });
+  });
+
   it("renders both Dashboard logout controls as POST forms and exposes a stable signed-out page", () => {
     const framework = readFileSync(
       new URL("../app/dashboard/dashboard-framework.tsx", import.meta.url),
@@ -186,3 +256,9 @@ describe("Dashboard v2 shadow logout", () => {
     expect(authResultPage).not.toContain('import Link from "next/link"');
   });
 });
+
+function decodeLogoutReturnCookie(response: Awaited<ReturnType<typeof logout>>) {
+  const value = response.cookies.get("delegate_logout_return_v1")?.value;
+  expect(value).toBeTruthy();
+  return JSON.parse(Buffer.from(value!, "base64url").toString("utf8"));
+}

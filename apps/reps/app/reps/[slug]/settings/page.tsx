@@ -3,15 +3,8 @@ import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 
 import {
-  DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE,
-  LEGACY_DELEGATE_AUTH_SESSION_COOKIE,
   getPublicRepresentativeRuntime,
-  readAccountSessionMode,
-  readDelegateAuthSessionSecret,
   resolvePublicAudiencePrincipal,
-  usesLegacyAccountSessionAuthority,
-  verifyDelegateAuthSession,
-  type DelegateAuthSession,
 } from "@delegate/web-data";
 import {
   LanguageSwitcher,
@@ -26,6 +19,7 @@ import {
   buildPublicAudienceLoginHref,
   buildPublicAudienceLogoutHref,
 } from "../public-auth";
+import { resolvePublicAudienceVerifiedAuthContext } from "../public-principal";
 
 export const metadata: Metadata = {
   title: "Account settings · Delegate",
@@ -51,10 +45,7 @@ export default async function RepresentativeAccountSettingsPage({
   const runtime = await getPublicRepresentativeRuntime(slug);
   if (runtime.status !== "available") notFound();
 
-  const audienceSession = await resolveAudienceSession({
-    audienceCookie: cookieStore.get(DELEGATE_AUDIENCE_AUTH_SESSION_COOKIE)?.value,
-    legacyCookie: cookieStore.get(LEGACY_DELEGATE_AUTH_SESSION_COOKIE)?.value,
-  });
+  const audienceSession = await resolveAudienceSession(cookieStore);
   const preserveTelegramSource = query?.source === "telegram";
   const representativePath = preserveTelegramSource
     ? `/reps/${slug}?source=telegram`
@@ -213,18 +204,21 @@ export default async function RepresentativeAccountSettingsPage({
   );
 }
 
-async function resolveAudienceSession({
-  audienceCookie,
-  legacyCookie,
-}: {
-  audienceCookie?: string | undefined;
-  legacyCookie?: string | undefined;
-}): Promise<DelegateAuthSession | null> {
-  if (!usesLegacyAccountSessionAuthority(readAccountSessionMode())) return null;
-  const session = verifyDelegateAuthSession(
-    audienceCookie ?? legacyCookie,
-    readDelegateAuthSessionSecret(),
-  );
+async function resolveAudienceSession(cookieStore: {
+  get(name: string): { value: string } | undefined;
+}): Promise<
+  Awaited<ReturnType<typeof resolvePublicAudienceVerifiedAuthContext>>["session"]
+> {
+  let session: Awaited<
+    ReturnType<typeof resolvePublicAudienceVerifiedAuthContext>
+  >["session"] = null;
+  try {
+    session = (
+      await resolvePublicAudienceVerifiedAuthContext({ cookieStore })
+    ).session;
+  } catch {
+    return null;
+  }
   if (
     session?.actor !== "audience"
     || !session.audienceIdentityId

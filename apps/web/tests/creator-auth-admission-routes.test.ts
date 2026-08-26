@@ -12,15 +12,18 @@ const mocks = vi.hoisted(() => ({
   generatePkceCodeVerifier: vi.fn(),
   issueAccountSessionShadow: vi.fn(),
   isCreatorAdmissionRequiredError: vi.fn(),
+  isCreatorRegistrationRequiredError: vi.fn(),
   isDelegateAuthPersistenceUnavailableError: vi.fn(),
   isLogtoOidcConfigured: vi.fn(),
   readDelegateAuthSessionSecret: vi.fn(),
   readAccountSessionMode: vi.fn(),
   readLogtoOidcConfig: vi.fn(),
   resolveOwnerForAuth: vi.fn(),
+  resolveOwnerForRegistration: vi.fn(),
   shouldUseDelegateAuthDevLogin: vi.fn(),
   signDelegateAuthSession: vi.fn(),
   signDelegateAuthState: vi.fn(),
+  usesAccountSessionV2: vi.fn(),
   usesLegacyAccountSessionAuthority: vi.fn(),
   verifyDelegateAuthState: vi.fn(),
   cookies: vi.fn(),
@@ -45,6 +48,8 @@ vi.mock("@delegate/web-data", () => ({
   generatePkceCodeVerifier: mocks.generatePkceCodeVerifier,
   issueAccountSessionShadow: mocks.issueAccountSessionShadow,
   isCreatorAdmissionRequiredError: mocks.isCreatorAdmissionRequiredError,
+  isCreatorRegistrationRequiredError:
+    mocks.isCreatorRegistrationRequiredError,
   isDelegateAuthPersistenceUnavailableError:
     mocks.isDelegateAuthPersistenceUnavailableError,
   isLogtoOidcConfigured: mocks.isLogtoOidcConfigured,
@@ -52,9 +57,11 @@ vi.mock("@delegate/web-data", () => ({
   readAccountSessionMode: mocks.readAccountSessionMode,
   readLogtoOidcConfig: mocks.readLogtoOidcConfig,
   resolveOwnerForAuth: mocks.resolveOwnerForAuth,
+  resolveOwnerForRegistration: mocks.resolveOwnerForRegistration,
   shouldUseDelegateAuthDevLogin: mocks.shouldUseDelegateAuthDevLogin,
   signDelegateAuthSession: mocks.signDelegateAuthSession,
   signDelegateAuthState: mocks.signDelegateAuthState,
+  usesAccountSessionV2: mocks.usesAccountSessionV2,
   usesLegacyAccountSessionAuthority:
     mocks.usesLegacyAccountSessionAuthority,
   verifyDelegateAuthState: mocks.verifyDelegateAuthState,
@@ -89,6 +96,10 @@ describe("creator admission auth routes", () => {
     mocks.readAccountSessionMode.mockReturnValue("legacy");
     mocks.usesLegacyAccountSessionAuthority.mockImplementation(
       (mode: string) => mode === "legacy" || mode === "shadow",
+    );
+    mocks.usesAccountSessionV2.mockImplementation(
+      (mode: string) =>
+        mode === "shadow" || mode === "enforce" || mode === "contract",
     );
     mocks.readLogtoOidcConfig.mockReturnValue({
       endpoint: "https://auth.example.com",
@@ -140,8 +151,16 @@ describe("creator admission auth routes", () => {
         "code" in error &&
         error.code === "CREATOR_ADMISSION_REQUIRED",
     );
+    mocks.isCreatorRegistrationRequiredError.mockImplementation(
+      (error: unknown) =>
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "CREATOR_REGISTRATION_REQUIRED",
+    );
     mocks.isDelegateAuthPersistenceUnavailableError.mockReturnValue(false);
     mocks.resolveOwnerForAuth.mockRejectedValue(admissionError);
+    mocks.resolveOwnerForRegistration.mockRejectedValue(admissionError);
     mocks.issueAccountSessionShadow.mockResolvedValue(
       issuedShadowSession("new-dashboard-v2-token"),
     );
@@ -155,6 +174,7 @@ describe("creator admission auth routes", () => {
     mocks.createDelegateAuthState.mockReturnValue({
       version: 2,
       actor: "owner",
+      creatorFlow: "sign_in",
       state: "state-1",
       nonce: "nonce-1",
       codeVerifier:
@@ -175,6 +195,7 @@ describe("creator admission auth routes", () => {
     expect(response.status).toBe(307);
     expect(mocks.createDelegateAuthState).toHaveBeenCalledWith({
       actor: "owner",
+      creatorFlow: "sign_in",
       state: "state-1",
       nonce: "nonce-1",
       codeVerifier:
@@ -188,6 +209,8 @@ describe("creator admission auth routes", () => {
         nonce: "nonce-1",
         codeChallenge:
           "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        firstScreen: "sign_in",
+        uiLocales: undefined,
       },
     );
     expect(
@@ -195,6 +218,107 @@ describe("creator admission auth routes", () => {
     ).toBe("signed-pkce-state");
     expect(mocks.isLogtoOidcConfigured).toHaveBeenCalledWith("dashboard");
     expect(mocks.readLogtoOidcConfig).toHaveBeenCalledWith("dashboard");
+  });
+
+  it("signs explicit registration intent and opens the localized Logto registration screen", async () => {
+    mocks.isLogtoOidcConfigured.mockReturnValue(true);
+    mocks.generateAuthStateToken
+      .mockReturnValueOnce("state-1")
+      .mockReturnValueOnce("nonce-1");
+    mocks.createDelegateAuthState.mockReturnValue({
+      version: 2,
+      actor: "owner",
+      creatorFlow: "register",
+      state: "state-1",
+      nonce: "nonce-1",
+      codeVerifier:
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+      returnTo: "/dashboard?lang=zh",
+    });
+    mocks.buildLogtoAuthorizeUrl.mockReturnValue(
+      "https://auth.example.com/oidc/auth?state=state-1",
+    );
+    mocks.signDelegateAuthState.mockReturnValue("signed-register-state");
+
+    await startCreatorLogin(
+      new Request(
+        "https://dashboard.example.com/auth/login?flow=register&lang=zh&returnTo=%2Fdashboard%3Flang%3Dzh",
+      ),
+    );
+
+    expect(mocks.createDelegateAuthState).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor: "owner",
+        creatorFlow: "register",
+        returnTo: "/dashboard?lang=zh",
+      }),
+    );
+    expect(mocks.buildLogtoAuthorizeUrl).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        firstScreen: "register",
+        uiLocales: "zh-CN",
+      }),
+    );
+  });
+
+  it("creates a Creator only from signed registration state and permits explicit cross-persona enrollment", async () => {
+    mocks.readAccountSessionMode.mockReturnValue("shadow");
+    mocks.verifyDelegateAuthState.mockReturnValue({
+      version: 2,
+      actor: "owner",
+      creatorFlow: "register",
+      state: "state-1",
+      nonce: "nonce-1",
+      codeVerifier:
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+      returnTo: "/dashboard",
+    });
+    mocks.resolveOwnerForRegistration.mockResolvedValue({
+      owner: { id: "owner-new" },
+      identityLink: { id: "owner-link-new" },
+      created: true,
+    });
+    mocks.createDelegateAuthSession.mockReturnValue(legacyOwnerSession());
+    mocks.signDelegateAuthSession.mockReturnValue("signed-legacy-session");
+
+    const response = await completeCreatorLogin(
+      new Request(
+        "https://dashboard.example.com/auth/callback?code=code-1&state=state-1",
+      ),
+    );
+
+    expect(response.status).toBe(307);
+    expect(mocks.resolveOwnerForRegistration).toHaveBeenCalledWith(
+      expect.objectContaining({ subject: "uninvited-subject" }),
+    );
+    expect(mocks.resolveOwnerForAuth).not.toHaveBeenCalled();
+    expect(mocks.issueAccountSessionShadow).toHaveBeenCalledWith(
+      expect.objectContaining({
+        persona: { kind: "owner", ownerId: "owner-new" },
+        allowCrossPersonaEnrollment: true,
+      }),
+    );
+  });
+
+  it("redirects a self-service user who chose sign-in but has no Creator account to registration", async () => {
+    const registrationRequired = Object.assign(
+      new Error("A Creator account must be created before signing in."),
+      { code: "CREATOR_REGISTRATION_REQUIRED" },
+    );
+    mocks.resolveOwnerForAuth.mockRejectedValue(registrationRequired);
+
+    const response = await completeCreatorLogin(
+      new Request(
+        "https://dashboard.example.com/auth/callback?code=code-1&state=state-1",
+      ),
+    );
+
+    expect(response.status).toBe(303);
+    expect(response.headers.get("location")).toBe(
+      "https://dashboard.example.com/auth/error?reason=creator_registration_required",
+    );
+    expect(mocks.createDelegateAuthSession).not.toHaveBeenCalled();
   });
 
   it("redirects an uninvited Logto callback without creating a session", async () => {
@@ -339,6 +463,7 @@ describe("creator admission auth routes", () => {
       }),
       persona: { kind: "owner", ownerId: "owner-1" },
       application: "DASHBOARD",
+      allowCrossPersonaEnrollment: false,
       previousToken: "old-dashboard-v2-token",
       userAgent: "Browser/1.0",
       now: expect.any(Date),
@@ -385,22 +510,44 @@ describe("creator admission auth routes", () => {
   });
 
   it.each(["enforce", "contract"])(
-    "refuses %s while v2 read authority is not implemented",
+    "starts authorization in %s without falling back to legacy authority",
     async (mode) => {
       mocks.readAccountSessionMode.mockReturnValue(mode);
+      mocks.isLogtoOidcConfigured.mockReturnValue(true);
+      mocks.generateAuthStateToken
+        .mockReturnValueOnce("state-1")
+        .mockReturnValueOnce("nonce-1");
+      mocks.createDelegateAuthState.mockReturnValue({
+        version: 2,
+        actor: "owner",
+        creatorFlow: "sign_in",
+        state: "state-1",
+        nonce: "nonce-1",
+        codeVerifier:
+          "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+        returnTo: "/dashboard",
+      });
+      mocks.buildLogtoAuthorizeUrl.mockReturnValue(
+        "https://auth.example.com/oidc/auth?state=state-1",
+      );
+      mocks.signDelegateAuthState.mockReturnValue("signed-state");
 
       const response = await startCreatorLogin(
         new Request("https://dashboard.example.com/auth/login"),
       );
 
-      expect(response.status).toBe(503);
-      expect(mocks.isLogtoOidcConfigured).not.toHaveBeenCalled();
+      expect(response.status).toBe(307);
       expect(mocks.resolveOwnerForAuth).not.toHaveBeenCalled();
     },
   );
 
-  it("refuses an in-flight callback in contract mode before token exchange", async () => {
+  it("completes an enforce callback with only an AppSession v2 cookie", async () => {
     mocks.readAccountSessionMode.mockReturnValue("contract");
+    mocks.resolveOwnerForAuth.mockResolvedValue({
+      owner: { id: "owner-1" },
+      identityLink: { id: "owner-link-1" },
+      created: false,
+    });
 
     const response = await completeCreatorLogin(
       new Request(
@@ -408,9 +555,17 @@ describe("creator admission auth routes", () => {
       ),
     );
 
-    expect(response.status).toBe(503);
-    expect(mocks.cookies).not.toHaveBeenCalled();
-    expect(mocks.exchangeLogtoCodeForTokens).not.toHaveBeenCalled();
+    expect(response.status).toBe(307);
+    expect(mocks.exchangeLogtoCodeForTokens).toHaveBeenCalledTimes(1);
+    expect(mocks.issueAccountSessionShadow).toHaveBeenCalledTimes(1);
+    expect(mocks.createDelegateAuthSession).not.toHaveBeenCalled();
+    expect(mocks.signDelegateAuthSession).not.toHaveBeenCalled();
+    expect(
+      response.cookies.get("delegate_dashboard_session_v2")?.value,
+    ).toBe("new-dashboard-v2-token");
+    expect(
+      response.cookies.get("delegate_owner_auth_session")?.value,
+    ).toBe("");
   });
 });
 

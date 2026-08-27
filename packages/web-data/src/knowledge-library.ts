@@ -462,6 +462,70 @@ export async function getKnowledgeAsset(
   return serializeAsset(row);
 }
 
+export async function queueKnowledgeAssetProcessing(
+  ownerId: string | null | undefined,
+  assetId: string,
+): Promise<{ asset: KnowledgeAssetRecord; queued: boolean }> {
+  if (shouldUseDemoKnowledge(ownerId)) {
+    const asset = requireDemoAsset(assetId);
+    if (asset.status === "archived") {
+      throw new KnowledgeLibraryError(
+        "Archived knowledge must be restored before reprocessing.",
+        409,
+      );
+    }
+    if (asset.status === "processing") {
+      return { asset: cloneDemoAsset(asset), queued: false };
+    }
+    asset.status = "processing";
+    asset.processingError = null;
+    asset.updatedAt = new Date().toISOString();
+    asset.processingLogs.push(
+      demoLog("queued", "info", "知识已加入后台重新处理队列。"),
+    );
+    return { asset: cloneDemoAsset(asset), queued: true };
+  }
+
+  const scopedOwnerId = requireOwnerId(ownerId);
+  const existing = await requireDatabaseAsset(scopedOwnerId, assetId);
+  if (existing.status === KnowledgeAssetStatus.ARCHIVED) {
+    throw new KnowledgeLibraryError(
+      "Archived knowledge must be restored before reprocessing.",
+      409,
+    );
+  }
+  const transition = await prisma.knowledgeAsset.updateMany({
+    where: {
+      id: assetId,
+      ownerId: scopedOwnerId,
+      status: {
+        notIn: [KnowledgeAssetStatus.PROCESSING, KnowledgeAssetStatus.ARCHIVED],
+      },
+    },
+    data: {
+      status: KnowledgeAssetStatus.PROCESSING,
+      processingError: null,
+    },
+  });
+  if (transition.count > 0) {
+    await prisma.knowledgeProcessingLog.create({
+      data: {
+        assetId,
+        stage: "queued",
+        message: "知识已加入后台重新处理队列。",
+      },
+    });
+  }
+  const asset = await getKnowledgeAsset(scopedOwnerId, assetId);
+  if (asset.status === "archived") {
+    throw new KnowledgeLibraryError(
+      "Archived knowledge must be restored before reprocessing.",
+      409,
+    );
+  }
+  return { asset, queued: transition.count > 0 };
+}
+
 export async function findKnowledgeFileConflicts(
   ownerId: string | null | undefined,
   input: { fileName: string; checksum: string },

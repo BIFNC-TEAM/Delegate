@@ -761,6 +761,19 @@ type GenerationAccessPolicySnapshot = {
   effectiveFreeReplyLimit: number | null;
 };
 
+type GenerationUsageExemptReason = "mcp";
+
+function readGenerationUsageExemptReason(
+  snapshot: Prisma.JsonValue | null,
+): GenerationUsageExemptReason | null {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return null;
+  }
+  return (snapshot as Prisma.JsonObject)["usageExemptReason"] === "mcp"
+    ? "mcp"
+    : null;
+}
+
 function readGenerationAccessPolicy(
   snapshot: Prisma.JsonValue | null,
 ): GenerationAccessPolicySnapshot | null {
@@ -1884,7 +1897,11 @@ export async function acceptInboundConversationMessage(
       });
     }
 
-    let billingMode: "free" | "service_credit" | null = null;
+    let billingMode:
+      | "free"
+      | "service_credit"
+      | "service_credit_pending"
+      | null = null;
     let accessPolicySnapshot: GenerationAccessPolicySnapshot | null = null;
     let effectiveFreeRepliesUsed = conversation.freeRepliesUsed;
     if (shouldQueueAi) {
@@ -2105,9 +2122,16 @@ export async function acceptInboundConversationMessage(
           reservedUsage = reservation.usageCharge;
         } catch (error) {
           if (error instanceof InsufficientAgentUsageCreditsError) {
-            throw new ServiceCreditRequiredError(effectiveFreeRepliesUsed);
+            // Capability selection happens in the worker. Queue an unreserved
+            // run so an MCP-only turn can be admitted as no-charge; every
+            // other turn must still acquire a reservation before answering.
+            billingMode = "service_credit_pending";
+          } else {
+            throw error;
           }
-          throw error;
+        }
+        if (reservedUsage) {
+          billingMode = "service_credit";
         }
         run = await tx.generationRun.update({
           where: { id: run.id },
@@ -2115,10 +2139,14 @@ export async function acceptInboundConversationMessage(
             runtimePolicySnapshot: {
               billingMode,
               ...accessPolicySnapshot,
-              walletReservation: {
-                usageChargeId: reservedUsage.id,
-                tokenAmount: reservedUsage.reservedTokenAmount,
-              },
+              ...(reservedUsage
+                ? {
+                    walletReservation: {
+                      usageChargeId: reservedUsage.id,
+                      tokenAmount: reservedUsage.reservedTokenAmount,
+                    },
+                  }
+                : {}),
             },
           },
         });
@@ -2453,6 +2481,90 @@ export async function authorizeGenerationRunFreeUsage(input: {
       },
     });
     return true;
+  });
+}
+
+/**
+ * Converts the currently leased generation into an MCP-only no-charge run.
+ * Any ingress or worker reservation is released before the authoritative
+ * snapshot is replaced. The `free` billing mode keeps Broker authorization
+ * compatible; `usageExemptReason=mcp` prevents free-reply accounting when the
+ * delegated task reaches a terminal state.
+ */
+export async function authorizeGenerationRunMcpNoCharge(input: {
+  runId: string;
+  outboxId: string;
+  leaseAttempt: number;
+}) {
+  return runConversationWriteTransaction(async (tx) => {
+    const runScope = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      select: { conversationId: true },
+    });
+    if (!runScope) throw new Error("Generation run not found.");
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtext(${runScope.conversationId}))
+    `;
+    await fenceGenerationWorkLease(tx, input);
+    const run = await tx.generationRun.findUnique({
+      where: { id: input.runId },
+      select: {
+        id: true,
+        runtimePolicySnapshot: true,
+      },
+    });
+    if (!run) throw new Error("Generation run not found.");
+    const snapshot =
+      run.runtimePolicySnapshot
+      && typeof run.runtimePolicySnapshot === "object"
+      && !Array.isArray(run.runtimePolicySnapshot)
+        ? run.runtimePolicySnapshot as Prisma.JsonObject
+        : {};
+    if (
+      snapshot["billingMode"] === "free"
+      && snapshot["usageExemptReason"] === "mcp"
+      && !readGenerationWalletReservation(snapshot)
+    ) {
+      return { releasedWalletReservation: false };
+    }
+
+    await releaseConversationEntitlementByGenerationRunId(
+      {
+        generationRunId: run.id,
+        reason: "mcp_generation_no_charge",
+      },
+      tx as unknown as ServiceEntitlementClient,
+    );
+    const walletReservation = readGenerationWalletReservation(snapshot);
+    if (walletReservation) {
+      await releaseConversationWalletUsage(
+        {
+          usageChargeId: walletReservation.usageChargeId,
+          expectedGenerationRunId: run.id,
+          reason: "mcp_generation_no_charge",
+          idempotencyKey: `generation:${run.id}:mcp-no-charge`,
+        },
+        tx as unknown as UsageChargeClient,
+      );
+    }
+    const {
+      walletReservation: _walletReservation,
+      billingFinalizedAt: _billingFinalizedAt,
+      billingTransferredToGenerationRunId: _billingTransferredToGenerationRunId,
+      walletReservationTransferredTo: _walletReservationTransferredTo,
+      ...rest
+    } = snapshot;
+    await tx.generationRun.update({
+      where: { id: run.id },
+      data: {
+        runtimePolicySnapshot: {
+          ...rest,
+          billingMode: "free",
+          usageExemptReason: "mcp",
+        },
+      },
+    });
+    return { releasedWalletReservation: Boolean(walletReservation) };
   });
 }
 
@@ -3028,6 +3140,7 @@ export async function completeInlineGenerationRun(input: {
       where: { id: run.conversationId },
       data: {
         lastMessageAt: now,
+        ...(handoffRequested ? { collectorState: Prisma.JsonNull } : {}),
         ...(!input.countUsage
           || walletReservation
           || delegationTaskOwnsBilling
@@ -3391,6 +3504,7 @@ export type ClaimedGenerationWorkItem = {
   /** `null` means the pinned FREE policy has no reply ceiling. */
   effectiveFreeReplyLimit?: number | null;
   walletReservation?: GenerationWalletReservation;
+  usageExemptReason?: GenerationUsageExemptReason;
   usage: {
     freeRepliesUsed: number;
     passUnlocked: boolean;
@@ -4806,6 +4920,9 @@ export async function claimNextGenerationWorkItem(
     const accessPolicy = readGenerationAccessPolicy(
       run.runtimePolicySnapshot,
     );
+    const usageExemptReason = readGenerationUsageExemptReason(
+      run.runtimePolicySnapshot,
+    );
     const telegramConnectionId =
       channel === "telegram"
         ? activeBinding?.representativeBinding?.connectionId || null
@@ -4922,6 +5039,7 @@ export async function claimNextGenerationWorkItem(
           }
         : {}),
       ...(walletReservation ? { walletReservation } : {}),
+      ...(usageExemptReason ? { usageExemptReason } : {}),
       usage: {
         freeRepliesUsed: run.conversation.freeRepliesUsed,
         passUnlocked:
@@ -9258,21 +9376,9 @@ export async function getPublicConversationHistory(input: {
       },
       episodes: { orderBy: { sequence: "desc" }, take: 1 },
       delegationTasks: {
-        where: {
-          status: {
-            in: [
-              DelegationTaskStatus.DRAFT,
-              DelegationTaskStatus.CLARIFYING,
-              DelegationTaskStatus.READY,
-              DelegationTaskStatus.AWAITING_APPROVAL,
-              DelegationTaskStatus.QUEUED,
-              DelegationTaskStatus.RUNNING,
-              DelegationTaskStatus.WAITING_FOR_USER,
-              DelegationTaskStatus.WAITING_FOR_OWNER,
-            ],
-          },
-        },
-        orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+        // Resolve recency before lifecycle state. Filtering terminal tasks here
+        // resurrects an older unresolved task after a newer task completes.
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: 1,
         select: {
           id: true,
@@ -9331,12 +9437,36 @@ export async function getPublicConversationHistory(input: {
       messages: [],
     };
   }
+  const latestTask = conversation.delegationTasks[0];
+  const latestAudienceMessage = conversation.messages.find(
+    (message) => message.senderType === MessageSenderType.AUDIENCE,
+  );
+  const latestTaskIsCurrent = Boolean(
+    latestTask
+    && (
+      !latestAudienceMessage
+      || latestAudienceMessage.delegationTaskId === latestTask.id
+    ),
+  );
+  const latestTaskIsActive = Boolean(latestTask && ([
+    DelegationTaskStatus.DRAFT,
+    DelegationTaskStatus.CLARIFYING,
+    DelegationTaskStatus.READY,
+    DelegationTaskStatus.AWAITING_APPROVAL,
+    DelegationTaskStatus.QUEUED,
+    DelegationTaskStatus.RUNNING,
+    DelegationTaskStatus.WAITING_FOR_USER,
+    DelegationTaskStatus.WAITING_FOR_OWNER,
+  ] as DelegationTaskStatus[]).includes(latestTask.status));
+  const currentTask = latestTaskIsCurrent && latestTaskIsActive
+    ? latestTask
+    : null;
   return {
     state: conversation.state.toLowerCase(),
     humanActive: Boolean(conversation.assignments[0]),
     freeRepliesUsed: conversation.freeRepliesUsed,
-    taskProgress: conversation.delegationTasks[0]
-      ? serializePublicTaskProgress(conversation.delegationTasks[0])
+    taskProgress: currentTask
+      ? serializePublicTaskProgress(currentTask)
       : null,
     turnProgress: conversation.generationRuns?.[0]?.turnPlans?.[0]
       ? serializePublicTurnExecutionProgress({

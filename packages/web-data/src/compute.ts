@@ -1491,9 +1491,8 @@ export async function updateRepresentativeManagedPolicyOverlays(
           decision: parsed.baseline.mcpDecision.toUpperCase() as "ALLOW" | "ASK" | "DENY",
           resourceScopeCondition: "REMOTE_MCP",
           channelCondition: "PRIVATE_CHAT",
-          requiredPlanTier: parsed.baseline.requiredPlanTier.toUpperCase() as "PASS" | "DEEP_HELP",
           priority: 155,
-          requiresPaidPlan: true,
+          requiresPaidPlan: false,
           requiresHumanApproval: parsed.baseline.mcpRequiresApproval,
         },
         {
@@ -1520,11 +1519,8 @@ export async function updateRepresentativeManagedPolicyOverlays(
           decision: parsed.trustedCustomer.mcpDecision.toUpperCase() as "ALLOW" | "ASK" | "DENY",
           resourceScopeCondition: "REMOTE_MCP",
           channelCondition: "PRIVATE_CHAT",
-          requiredPlanTier: parsed.trustedCustomer.requiredPlanTier.toUpperCase() as
-            | "PASS"
-            | "DEEP_HELP",
           priority: 165,
-          requiresPaidPlan: true,
+          requiresPaidPlan: false,
           requiresHumanApproval: parsed.trustedCustomer.mcpRequiresApproval,
         },
       ],
@@ -3120,9 +3116,8 @@ function buildManagedOverlayRules(params: {
       decision: params.config.mcpDecision.toUpperCase() as "ALLOW" | "ASK" | "DENY",
       resourceScopeCondition: "REMOTE_MCP" as const,
       channelCondition: "PRIVATE_CHAT" as const,
-      requiredPlanTier: params.config.requiredPlanTier.toUpperCase() as "PASS" | "DEEP_HELP",
       priority: params.precedenceBase - 5,
-      requiresPaidPlan: true,
+      requiresPaidPlan: false,
       requiresHumanApproval: params.config.mcpRequiresApproval,
     },
   ];

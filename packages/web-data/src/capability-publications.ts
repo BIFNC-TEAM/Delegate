@@ -227,7 +227,7 @@ export function resolveServerOwnedMcpCapabilityPolicyV3(input: {
   ) {
     return {
       policyId: "delegate.mcp-policy.deepwiki.public-read.v1",
-      classificationVersion: "delegate.mcp-effect.deepwiki.v1",
+      classificationVersion: "delegate.mcp-effect.deepwiki.v2",
       effect: {
         boundary: "external",
         mutation: "none",
@@ -237,7 +237,7 @@ export function resolveServerOwnedMcpCapabilityPolicyV3(input: {
       successContract: {
         kind: "server_evaluator",
         evaluatorId: "mcp.deepwiki.read_semantic",
-        evaluatorVersion: "1",
+        evaluatorVersion: "2",
       },
     };
   }

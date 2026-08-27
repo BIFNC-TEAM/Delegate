@@ -52,9 +52,11 @@ The transactional MVP described by this plan is implemented on
   a wallet reservation with a matching entitlement RESERVE, or an active plan
   entitlement reservation. Legacy unlock flags are not authorization.
   Blocked, failed, over-budget, and policy-rejected results are explicitly
-  non-billable. Multi-step Compute/MCP tasks transfer that single billing
-  context between runs and settle or release it exactly once at the task
-  terminal state.
+  non-billable. MCP-only answers are explicitly no-charge: planning releases
+  any provisional reservation, the no-charge marker transfers across MCP
+  steps, and terminal completion increments neither purchased units nor free
+  replies. Mixed MCP + non-MCP tasks retain the non-MCP billing context and
+  settle or release it exactly once at the task terminal state.
 - retryable generation failures continue to occupy their free-reply slot during
   backoff. Free-slot decisions share the conversation advisory lock across
   channels. Editing transfers an active paid reservation to the replacement

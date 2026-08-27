@@ -494,6 +494,95 @@ describe("public Web answer source disclosure", () => {
     });
   });
 
+  it("does not resurrect an older unresolved task after the current task completes", async () => {
+    mocks.conversation.findFirst.mockResolvedValue({
+      state: "WAITING_USER",
+      freeRepliesUsed: 1,
+      assignments: [],
+      episodes: [],
+      messages: [historyMessageFixture({
+        id: "latest-audience-message",
+        senderType: MessageSenderType.AUDIENCE,
+        delegationTaskId: "task-completed-latest",
+      })],
+      delegationTasks: [{
+        id: "task-waiting-older",
+        title: "旧任务",
+        status: "WAITING_FOR_OWNER",
+        nextActionBy: "OWNER",
+        updatedAt: new Date("2026-08-17T02:10:00.000Z"),
+        steps: [{
+          id: "step-waiting-older",
+          sequence: 1,
+          title: "旧步骤",
+          status: "FAILED",
+          startedAt: new Date("2026-08-17T02:09:00.000Z"),
+          completedAt: null,
+          failedAt: new Date("2026-08-17T02:10:00.000Z"),
+          updatedAt: new Date("2026-08-17T02:10:00.000Z"),
+        }],
+      }],
+      generationRuns: [],
+    });
+
+    const history = await getPublicConversationHistory({
+      representativeSlug: "delegate",
+      audienceIdentityId: "identity-1",
+      audienceId: "audience-1",
+    });
+
+    expect(history.taskProgress).toBeNull();
+    expect(
+      mocks.conversation.findFirst.mock.calls[0]![0].include.delegationTasks,
+    ).toMatchObject({
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 1,
+    });
+    expect(
+      mocks.conversation.findFirst.mock.calls[0]![0].include.delegationTasks,
+    ).not.toHaveProperty("where");
+  });
+
+  it("clears progress when the latest task itself is terminal", async () => {
+    mocks.conversation.findFirst.mockResolvedValue({
+      state: "WAITING_USER",
+      freeRepliesUsed: 1,
+      assignments: [],
+      episodes: [],
+      messages: [historyMessageFixture({
+        id: "latest-audience-message",
+        senderType: MessageSenderType.AUDIENCE,
+        delegationTaskId: "task-completed-latest",
+      })],
+      delegationTasks: [{
+        id: "task-completed-latest",
+        title: "当前任务",
+        status: "COMPLETED",
+        nextActionBy: "NONE",
+        updatedAt: new Date("2026-08-17T02:10:00.000Z"),
+        steps: [{
+          id: "step-completed-latest",
+          sequence: 1,
+          title: "当前步骤",
+          status: "COMPLETED",
+          startedAt: new Date("2026-08-17T02:09:00.000Z"),
+          completedAt: new Date("2026-08-17T02:10:00.000Z"),
+          failedAt: null,
+          updatedAt: new Date("2026-08-17T02:10:00.000Z"),
+        }],
+      }],
+      generationRuns: [],
+    });
+
+    const history = await getPublicConversationHistory({
+      representativeSlug: "delegate",
+      audienceIdentityId: "identity-1",
+      audienceId: "audience-1",
+    });
+
+    expect(history.taskProgress).toBeNull();
+  });
+
   it("restores active TurnPlan progress after a public page refresh", async () => {
     mocks.conversation.findFirst.mockResolvedValue({
       state: "PROCESSING",

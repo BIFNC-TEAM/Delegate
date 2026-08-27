@@ -849,6 +849,76 @@ describe("delegation task owner actions", () => {
     });
   });
 
+  it("transfers the no-charge marker across MCP-only dependency steps", async () => {
+    mockPrisma.generationRun.create.mockResolvedValueOnce({ id: "run-forecast" });
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-weather",
+      status: "RUNNING",
+      representativeId: "representative-1",
+      representativeVersionId: "rep-version-1",
+      steps: [
+        { id: "step-search", kind: "MCP", sequence: 1, status: "RUNNING", dependsOnStepIds: [], inputSnapshot: {} },
+        {
+          id: "step-forecast",
+          kind: "MCP",
+          sequence: 2,
+          status: "DRAFT",
+          dependsOnStepIds: ["step-search"],
+          inputSnapshot: {
+            request: {
+              capability: "mcp",
+              bindingId: "weather-binding",
+              toolName: "openmeteo_get_forecast",
+              toolArguments: {},
+              displayTarget: "查询天气",
+              hasPaidEntitlement: false,
+              browserMode: "deterministic",
+              maxSteps: 1,
+              allowMutations: false,
+            },
+          },
+        },
+      ],
+      generationRuns: [{
+        id: "run-search",
+        delegationTaskStepId: "step-search",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+        runtimePolicySnapshot: {
+          billingMode: "free",
+          usageExemptReason: "mcp",
+        },
+      }],
+    });
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    const result = await finalizeComputeDelegationTask({
+      taskId: "task-weather",
+      stepId: "step-search",
+      generationRunId: "run-search",
+      outcome: "completed",
+    });
+
+    expect(result).toMatchObject({
+      status: "READY",
+      hasMoreSteps: true,
+      nextGenerationRunId: "run-forecast",
+    });
+    expect(mockPrisma.generationRun.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        delegationTaskStepId: "step-forecast",
+        runtimePolicySnapshot: {
+          billingMode: "free",
+          usageExemptReason: "mcp",
+        },
+      }),
+    });
+    expect(transferAgentUsageEntitlementReservation).not.toHaveBeenCalled();
+    expect(settleConversationWalletUsage).not.toHaveBeenCalled();
+    expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
+  });
+
   it("resolves a deferred V3 MCP argument only from a successful verified dependency result", async () => {
     mockPrisma.generationRun.create.mockResolvedValueOnce({ id: "run-forecast" });
     const forecastStepSnapshot = {
@@ -1471,6 +1541,52 @@ describe("delegation task owner actions", () => {
       where: { id: "conversation-1" },
       data: { freeRepliesUsed: { increment: 1 } },
     });
+    expect(settleConversationWalletUsage).not.toHaveBeenCalled();
+    expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
+  });
+
+  it("does not consume a free reply or service credit for an MCP-only task", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValueOnce({
+      id: "task-mcp-free",
+      status: "RUNNING",
+      representativeId: "representative-1",
+      representativeVersionId: "rep-version-1",
+      steps: [{
+        id: "step-mcp",
+        kind: "MCP",
+        sequence: 1,
+        status: "RUNNING",
+        dependsOnStepIds: [],
+        inputSnapshot: {},
+      }],
+      generationRuns: [{
+        id: "run-mcp-free",
+        delegationTaskStepId: "step-mcp",
+        conversationId: "conversation-1",
+        episodeId: "episode-1",
+        inputMessageId: "message-1",
+        runtimePolicySnapshot: {
+          billingMode: "free",
+          usageExemptReason: "mcp",
+        },
+      }],
+    });
+    const { finalizeComputeDelegationTask } = await import("../src/delegation-tasks");
+
+    await finalizeComputeDelegationTask({
+      taskId: "task-mcp-free",
+      stepId: "step-mcp",
+      generationRunId: "run-mcp-free",
+      outcome: "completed",
+    });
+
+    expect(mockPrisma.conversation.update.mock.calls).not.toContainEqual([
+      expect.objectContaining({
+        data: expect.objectContaining({
+          freeRepliesUsed: expect.anything(),
+        }),
+      }),
+    ]);
     expect(settleConversationWalletUsage).not.toHaveBeenCalled();
     expect(releaseConversationWalletUsage).not.toHaveBeenCalled();
   });

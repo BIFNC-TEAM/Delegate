@@ -41,7 +41,11 @@ export async function listRemoteMcpTools(params: {
   binding: Pick<BindingRecord, "serverUrl" | "transportKind">;
 }): Promise<RemoteMcpToolDefinition[]> {
   const bindingUrl = await assertSafePublicMcpUrl(params.binding.serverUrl);
-  const transport = createTransport(params.binding.transportKind, bindingUrl);
+  const transport = createTransport(
+    params.binding.transportKind,
+    bindingUrl,
+    computeBrokerConfig.mcpTimeoutMs,
+  );
   const client = new Client({ name: "delegate-capability-registry", version: "0.1.0" });
   try {
     await client.connect(transport as unknown as Transport);
@@ -93,6 +97,7 @@ export async function callRemoteMcpTool(params: {
   binding: BindingRecord;
   requestedToolName?: string | null | undefined;
   toolArguments?: Record<string, unknown> | undefined;
+  retrySafe?: boolean | undefined;
   onBeforeToolCall?: (() => Promise<void>) | undefined;
   onToolsListed?: ((tools: RemoteMcpToolDefinition[]) => Promise<void>) | undefined;
 }) {
@@ -109,41 +114,96 @@ export async function callRemoteMcpTool(params: {
     invalidStatusCode: 400,
   });
 
-  // maxRetries remains part of the persisted binding contract for compatibility.
-  // A tool invocation is intentionally attempted only once: a timeout or lost
-  // response cannot prove that the remote side did not already commit a mutation.
-  try {
-    const result = await callRemoteMcpToolOnce({
-      binding: params.binding,
-      bindingUrl,
-      requestedToolName: params.requestedToolName,
-      toolArguments: params.toolArguments,
-      onBeforeToolCall: params.onBeforeToolCall,
-      onToolsListed: params.onToolsListed,
-    });
+  // Unknown outcomes are never retried for ordinary MCP bindings because the
+  // remote side may already have committed a mutation. A server-verified,
+  // naturally idempotent read can safely absorb one transient transport fault.
+  const maxAttempts = params.retrySafe
+    ? Math.max(2, Math.min(params.binding.maxRetries + 1, 3))
+    : 1;
+  const timeoutMs = resolveMcpCallTimeoutMs(
+    computeBrokerConfig.mcpTimeoutMs,
+    params.retrySafe ?? false,
+  );
+  const recordToolCallStart = createAtMostOnceAsyncCallback(
+    params.onBeforeToolCall,
+  );
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const result = await callRemoteMcpToolOnce({
+        binding: params.binding,
+        bindingUrl,
+        timeoutMs,
+        requestedToolName: params.requestedToolName,
+        toolArguments: params.toolArguments,
+        onBeforeToolCall: recordToolCallStart,
+        onToolsListed: params.onToolsListed,
+      });
 
-    return {
-      ...result,
-      attempts: 1,
-      transportKind: params.binding.transportKind,
-    };
-  } catch (error) {
-    if (error instanceof SessionError && !(error instanceof McpTransportError)) {
-      throw error;
+      return {
+        ...result,
+        attempts: attempt,
+        transportKind: params.binding.transportKind,
+      };
+    } catch (error) {
+      if (error instanceof SessionError && !(error instanceof McpTransportError)) {
+        throw error;
+      }
+      const normalized = normalizeMcpError(
+        error,
+        params.binding.transportKind,
+        attempt,
+      );
+      if (!params.retrySafe || !normalized.retryable || attempt === maxAttempts) {
+        throw normalized;
+      }
+      if (params.binding.retryBackoffMs > 0) {
+        await wait(params.binding.retryBackoffMs);
+      }
     }
-    throw normalizeMcpError(error, params.binding.transportKind, 1);
   }
+  throw new McpTransportError(
+    "transport_connection_failed",
+    params.binding.transportKind,
+    maxAttempts,
+    false,
+  );
+}
+
+export function createAtMostOnceAsyncCallback(
+  callback?: (() => Promise<void>) | undefined,
+) {
+  if (!callback) return undefined;
+  let completed = false;
+  return async () => {
+    if (completed) return;
+    await callback();
+    completed = true;
+  };
+}
+
+export function resolveMcpCallTimeoutMs(
+  configuredTimeoutMs: number,
+  retrySafe: boolean,
+) {
+  return retrySafe
+    ? Math.max(configuredTimeoutMs, 60_000)
+    : configuredTimeoutMs;
 }
 
 async function callRemoteMcpToolOnce(params: {
   binding: BindingRecord;
   bindingUrl: URL;
+  timeoutMs: number;
   requestedToolName?: string | null | undefined;
   toolArguments?: Record<string, unknown> | undefined;
   onBeforeToolCall?: (() => Promise<void>) | undefined;
   onToolsListed?: ((tools: RemoteMcpToolDefinition[]) => Promise<void>) | undefined;
 }) {
-  const transport = createTransport(params.binding.transportKind, params.bindingUrl);
+  const transport = createTransport(
+    params.binding.transportKind,
+    params.bindingUrl,
+    params.timeoutMs,
+  );
   const client = new Client({
     name: "delegate-compute-broker",
     version: "0.1.0",
@@ -220,11 +280,15 @@ async function callRemoteMcpToolOnce(params: {
   }
 }
 
-function createTransport(kind: BindingRecord["transportKind"], url: URL) {
+function createTransport(
+  kind: BindingRecord["transportKind"],
+  url: URL,
+  timeoutMs: number,
+) {
   const common = {
     fetch: createPublicOnlyMcpFetch(
       url.origin,
-      computeBrokerConfig.mcpTimeoutMs,
+      timeoutMs,
       {
         maxRequestBytes: computeBrokerConfig.mcpPayloadLimits.maxRequestBytes,
         maxResponseBytes: computeBrokerConfig.mcpPayloadLimits.maxResponseBytes,
@@ -318,7 +382,11 @@ function classifyMcpTransportFailure(error: unknown): {
   }
 
   if (error instanceof Error) {
-    const message = error.message.trim();
+    const errorChain = collectErrorChain(error);
+    const message = errorChain
+      .map((candidate) => candidate.message.trim())
+      .filter(Boolean)
+      .join(": ");
     const lower = message.toLowerCase();
 
     if (lower.includes("mcp_response_payload_too_large")) {
@@ -345,7 +413,11 @@ function classifyMcpTransportFailure(error: unknown): {
       };
     }
 
-    if (error.name === "TimeoutError" || error.name === "AbortError" || lower.includes("timeout")) {
+    if (
+      errorChain.some((candidate) => ["TimeoutError", "AbortError"].includes(candidate.name))
+      || lower.includes("timeout")
+      || lower.includes("timed out")
+    ) {
       return {
         classification: "timeout",
         retryable: true,
@@ -381,6 +453,18 @@ function classifyMcpTransportFailure(error: unknown): {
     retryable: true,
     message: String(error),
   };
+}
+
+function collectErrorChain(error: Error) {
+  const chain: Error[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current instanceof Error && !seen.has(current) && chain.length < 6) {
+    chain.push(current);
+    seen.add(current);
+    current = current.cause;
+  }
+  return chain;
 }
 
 function classifyByStatus(statusCode: number | undefined, message: string) {
@@ -459,4 +543,8 @@ function summarizeMcpResult(content: unknown) {
 
 function truncate(value: string, maxLength: number) {
   return value.length > maxLength ? `${value.slice(0, maxLength - 1)}...` : value;
+}
+
+function wait(durationMs: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, durationMs));
 }

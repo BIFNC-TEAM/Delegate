@@ -152,13 +152,13 @@ describe("published MCP capability to compiler contract", () => {
           }
           if (
             candidate.version
-              !== "1:delegate.mcp-policy.deepwiki.public-read.v1:delegate.mcp-effect.deepwiki.v1"
+              !== "1:delegate.mcp-policy.deepwiki.public-read.v1:delegate.mcp-effect.deepwiki.v2"
           ) {
             throw new Error(`Unexpected candidate: ${JSON.stringify(candidate)}`);
           }
           expect(candidate.key).toBe("mcp.deepwiki.ask_question");
           expect(candidate.version).toBe(
-            "1:delegate.mcp-policy.deepwiki.public-read.v1:delegate.mcp-effect.deepwiki.v1",
+            "1:delegate.mcp-policy.deepwiki.public-read.v1:delegate.mcp-effect.deepwiki.v2",
           );
           expect(candidate.definitionHash).toBe(
             publication.definition.definitionHash,

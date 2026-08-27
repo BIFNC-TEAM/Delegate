@@ -55,18 +55,38 @@ describe("public chat reply resilience", () => {
   it("keeps live multi-step tasks visible instead of stopping at the first run result", () => {
     expect(runEventsSource).toContain("continuouslyStreamingTaskStates");
     expect(runEventsSource).toContain("snapshot.taskProgress");
-    expect(panelSource).toContain("representative-task-progress");
+    expect(panelSource).toContain("representative-progress-dock");
     expect(panelSource).toContain("taskProgress.steps.map");
     expect(panelSource).toContain("setTaskProgress(payload.taskProgress ?? null)");
   });
 
   it("streams and renders persisted TurnPlan execution progress", () => {
     expect(runEventsSource).toContain("snapshot.turnProgress?.status");
-    expect(panelSource).toContain("representative-turn-progress");
-    expect(panelSource).toContain("turnProgress.steps.map");
+    expect(panelSource).toContain("representative-progress-dock");
+    expect(panelSource).toContain("turnProgress?.steps.map");
     expect(panelSource).toContain("setTurnProgress(payload.turnProgress ?? null)");
     expect(panelSource).toContain("formatPublicTurnStage");
     expect(panelSource).toContain("formatPublicTurnElapsed");
+  });
+
+  it("keeps one compact progress dock in the composer instead of task cards in the transcript", () => {
+    const transcriptEnd = panelSource.indexOf(
+      "{messages.length === 1 && messages[0]?.id === \"welcome\"",
+    );
+    const composerStart = panelSource.indexOf(
+      '<form className="representative-chat-form representative-chat-composer"',
+    );
+    const progressDock = panelSource.indexOf(
+      'className="representative-progress-dock"',
+    );
+
+    expect(transcriptEnd).toBeGreaterThan(0);
+    expect(composerStart).toBeGreaterThan(transcriptEnd);
+    expect(progressDock).toBeGreaterThan(composerStart);
+    expect(panelSource).not.toContain('className="representative-task-progress');
+    expect(panelSource).not.toContain("representative-turn-progress");
+    expect(panelSource).toContain("getCurrentPublicProgressStepIndex");
+    expect(panelSource).toContain("t.progressStep");
   });
 
   it("releases the composer when a task is waiting for audience clarification", () => {

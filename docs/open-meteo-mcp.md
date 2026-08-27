@@ -16,8 +16,10 @@ Both tools are pinned by exact endpoint, transport, and Tool Schema hash in the
 server-owned MCP policy registry. Remote descriptions, JSON Schema annotations,
 and MCP annotations remain untrusted discovery data and cannot change effect,
 approval, authority, or success semantics. Calls remain subject to the normal
-Delegate Plan, policy, entitlement, lease, Verified Result, evidence, delivery,
-and audit boundaries.
+Delegate Plan, capability policy, approval, lease, Verified Result, evidence,
+delivery, and audit boundaries. MCP-only answers do not require a Pass and do
+not reserve, consume, or increment conversation service usage; a mixed MCP +
+non-MCP task keeps the ordinary billing contract of its non-MCP work.
 
 The hosted endpoint is maintained by the MCP server project, has no service
 level agreement, and uses Open-Meteo data. Open-Meteo's keyless hosted API is

@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { demoRepresentative } from "@delegate/domain";
@@ -15,6 +16,7 @@ import {
   inferKnowledgeTags,
   listKnowledgeAssets,
   processKnowledgeAsset,
+  queueKnowledgeAssetProcessing,
   replaceKnowledgeAssetSource,
   resolveUniqueKnowledgeAssetTitle,
   setRepresentativeKnowledgeAssetBindings,
@@ -100,6 +102,36 @@ describe("workspace knowledge library", () => {
     expect(archived.status).toBe("archived");
     await deleteKnowledgeAsset(null, created.id);
     await expect(getKnowledgeAsset(null, created.id)).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("queues reprocessing idempotently before background work starts", async () => {
+    const created = await createKnowledgeAsset(null, {
+      kind: "text",
+      title: `Queued processing ${Date.now()}`,
+      sourceText: "这份知识用于验证重新处理会先立即入队，再由后台任务完成向量索引。",
+      visibility: "owner_only",
+    });
+
+    const queued = await queueKnowledgeAssetProcessing(null, created.id);
+    expect(queued).toMatchObject({ queued: true, asset: { status: "processing" } });
+    const duplicate = await queueKnowledgeAssetProcessing(null, created.id);
+    expect(duplicate).toMatchObject({ queued: false, asset: { status: "processing" } });
+
+    const processed = await processKnowledgeAsset(null, created.id);
+    expect(processed).toMatchObject({ status: "ready", processingError: null });
+    await archiveKnowledgeAsset(null, created.id, true);
+    await deleteKnowledgeAsset(null, created.id);
+  });
+
+  it("allows long OpenViking indexing to finish behind the asynchronous route", () => {
+    const vectorSource = readFileSync(
+      new URL("../src/knowledge-vector.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(vectorSource).toContain("const KNOWLEDGE_INDEX_TIMEOUT_SECONDS = 300");
+    expect(vectorSource).toContain("timeout: KNOWLEDGE_INDEX_TIMEOUT_SECONDS");
+    expect(vectorSource).toContain("KNOWLEDGE_INDEX_TIMEOUT_SECONDS + 15");
   });
 
   it("links ready workspace assets to a representative without duplicating the source", async () => {

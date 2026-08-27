@@ -17,6 +17,7 @@ export type KnowledgeVectorIndexResult = {
 };
 
 const demoVectorIndex = new Map<string, Array<{ id: string; text: string; vector: number[] }>>();
+const KNOWLEDGE_INDEX_TIMEOUT_SECONDS = 300;
 
 export function splitKnowledgeText(text: string, chunkSize = 1_400, overlap = 180): string[] {
   const normalized = text.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
@@ -112,7 +113,7 @@ export async function indexKnowledgeText(params: {
         reason: "Delegate workspace knowledge asset ingestion",
         instruction: "Parse, segment, embed, and index this knowledge asset for permission-scoped retrieval.",
         wait: true,
-        timeout: 120,
+        timeout: KNOWLEDGE_INDEX_TIMEOUT_SECONDS,
       });
     }
   } catch (error) {
@@ -167,7 +168,7 @@ function buildKnowledgeClient(ownerId: string) {
   return new OpenVikingClient({
     baseUrl: env.baseUrl,
     ...(env.apiKey ? { apiKey: env.apiKey } : {}),
-    timeoutMs: Math.max(env.timeoutMs, 120_000),
+    timeoutMs: Math.max(env.timeoutMs, (KNOWLEDGE_INDEX_TIMEOUT_SECONDS + 15) * 1_000),
     accountId: "delegate",
     userId: `owner-${sanitizeVikingSegment(ownerId)}`,
     agentId: buildOpenVikingAgentId("knowledge-library", env),

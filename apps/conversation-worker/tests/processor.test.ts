@@ -101,6 +101,7 @@ const mocks = vi.hoisted(() => ({
   assertConversationChannelDeliveryAvailable: vi.fn(),
   admitGenerationMessageProviderDelivery: vi.fn(),
   authorizeGenerationRunFreeUsage: vi.fn(),
+  authorizeGenerationRunMcpNoCharge: vi.fn(),
   reserveGenerationConversationWalletUsage: vi.fn(),
   renderPrivateChannelGenerationDeliveryText: vi.fn(),
   releaseConversationEntitlement: vi.fn(),
@@ -316,6 +317,7 @@ vi.mock("@delegate/web-data", () => ({
   admitGenerationMessageProviderDelivery:
     mocks.admitGenerationMessageProviderDelivery,
   authorizeGenerationRunFreeUsage: mocks.authorizeGenerationRunFreeUsage,
+  authorizeGenerationRunMcpNoCharge: mocks.authorizeGenerationRunMcpNoCharge,
   buildRepresentativeRuntimeProfile: mocks.buildRepresentativeRuntimeProfile,
   claimNextOperatorMessageWorkItem: mocks.claimNextOperatorMessageWorkItem,
   claimNextConversationMessageDeliveryWorkItem:
@@ -460,11 +462,24 @@ import {
   buildV3GovernedComposerEvidence,
   processNextConversationWork,
   renderPolicyBlockedDelegationMessage,
+  renderComposedV3Draft,
   renderTurnPlanV3PlanningFailureMessage,
   resolveStableGeneralFallbackActivationStatus,
 } from "../src/processor";
 
 describe("conversation worker knowledge recall", () => {
+  it("renders inference metadata as natural prose without protocol labels", () => {
+    expect(renderComposedV3Draft({
+      segments: [{
+        kind: "inference",
+        goalId: "weather-goal",
+        text: "今天深圳有强降雨，建议携带雨具。",
+        sourceClass: "tool_output",
+        inferenceFromRefs: ["weather-result"],
+      }],
+    })).toBe("今天深圳有强降雨，建议携带雨具。");
+  });
+
   it("explains paid MCP policy denial without presenting it as an unknown system error", () => {
     expect(renderPolicyBlockedDelegationMessage("managed_plan_tier_required"))
       .toContain("需要已购买的 Pass 服务额度");
@@ -604,6 +619,9 @@ describe("conversation worker knowledge recall", () => {
     mocks.assertConversationChannelDeliveryAvailable.mockResolvedValue(undefined);
     mocks.admitGenerationMessageProviderDelivery.mockResolvedValue(true);
     mocks.authorizeGenerationRunFreeUsage.mockResolvedValue(true);
+    mocks.authorizeGenerationRunMcpNoCharge.mockResolvedValue({
+      releasedWalletReservation: false,
+    });
     mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(null);
     mocks.reserveGenerationConversationWalletUsage.mockResolvedValue(null);
     mocks.renderPrivateChannelGenerationDeliveryText.mockImplementation(
@@ -4126,7 +4144,7 @@ describe("conversation worker knowledge recall", () => {
     );
   });
 
-  it("blocks an over-limit natural-language compute request before invoking the planner", async () => {
+  it("classifies an over-limit natural-language request before applying the non-MCP payment gate", async () => {
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-over-limit-planner",
       leaseAttempt: 1,
@@ -4162,6 +4180,16 @@ describe("conversation worker knowledge recall", () => {
       contract: { freeReplyLimit: 4 },
     });
     mocks.shouldConsiderNaturalLanguageCompute.mockReturnValue(true);
+    mocks.createConversationPlan.mockReturnValue({
+      intent: "delegation",
+      disposition: "payment_required",
+      actions: [],
+      billingDecision: {
+        decision: "deny",
+        billable: false,
+        reason: "No service credit is available for non-MCP work.",
+      },
+    });
 
     await expect(
       processNextConversationWork({ port: 4040, pollMs: 500 }),
@@ -4178,14 +4206,14 @@ describe("conversation worker knowledge recall", () => {
       representativeId: "rep-1",
       tokenAmount: 1,
     });
-    expect(mocks.planNaturalLanguageComputeRequest).not.toHaveBeenCalled();
+    expect(mocks.planNaturalLanguageComputeRequest).toHaveBeenCalledOnce();
     expect(mocks.createClarifyingDelegationTask).not.toHaveBeenCalled();
     expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
     expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
       expect.objectContaining({
         countUsage: false,
-        intent: "delegation_payment_required",
-        replyText: expect.stringContaining("免费额度已用完"),
+        intent: "delegation",
+        replyText: expect.stringContaining("服务额度不足"),
       }),
     );
   });
@@ -4611,11 +4639,12 @@ describe("conversation worker knowledge recall", () => {
       representativeName: "SKTone",
       conversationId: "conversation-v3",
       contactId: "contact-v3",
+      audienceIdentityId: "audience-v3",
       controlState: "AI_ACTIVE",
       inputMessageId: "message-v3",
       userText: "查询 DeepWiki 中这个仓库的最新说明",
       channel: "web",
-      usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+      usage: { freeRepliesUsed: 4, passUnlocked: false, deepHelpUnlocked: false },
     });
     mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
       id: "rep-1",
@@ -4859,6 +4888,11 @@ describe("conversation worker knowledge recall", () => {
     expect(mocks.planTurnV2).not.toHaveBeenCalled();
     expect(mocks.planNaturalLanguageComputeRequest).not.toHaveBeenCalled();
     expect(mocks.planTurnV3).toHaveBeenCalledOnce();
+    expect(mocks.authorizeGenerationRunMcpNoCharge).toHaveBeenCalledWith({
+      runId: "run-v3",
+      outboxId: "outbox-v3",
+      leaseAttempt: 1,
+    });
     expect(mocks.planTurnV3).toHaveBeenCalledWith(expect.objectContaining({
       envelope: expect.objectContaining({
         planningDefaults: expect.objectContaining({
@@ -5517,6 +5551,98 @@ describe("conversation worker knowledge recall", () => {
       }),
     );
     expect(mocks.completeConversationTurnPlan).not.toHaveBeenCalled();
+  });
+
+  it("routes an explicit human takeover request before V3 planning and only promises queueing", async () => {
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-handoff-direct",
+      leaseAttempt: 1,
+      runId: "run-handoff-direct",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "地理代表—周行知",
+      conversationId: "conversation-handoff-direct",
+      contactId: "contact-handoff-direct",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-handoff-direct",
+      userText: "转真人",
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      ownerName: "阿江",
+      name: "地理代表—周行知",
+      tagline: "讲清地理知识",
+      tone: "清晰",
+      languages: ["zh"],
+      humanInLoop: true,
+      handoffAccessMode: "FREE",
+      handoffPrompt: "请描述需要阿江确认的事项。",
+      skillPacks: [],
+      compute: { enabled: false, baseImage: "debian:bookworm-slim" },
+    });
+    mocks.createConversationPlan.mockReturnValue({
+      goal: "request_human",
+      intent: "handoff",
+      audienceRole: "other",
+      disposition: "handoff",
+      actions: [{
+        id: "collect_request_description:handoff",
+        kind: "collect_request_description",
+        status: "planned",
+        sideEffect: "internal_record",
+      }, {
+        id: "request_human_handoff:handoff",
+        kind: "request_human_handoff",
+        status: "planned",
+        sideEffect: "human_queue",
+      }],
+      reasons: ["The audience explicitly requested human takeover."],
+      responseOutline: [
+        "Confirm the request was queued.",
+        "Do not promise immediate takeover.",
+      ],
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValue({
+      message: {
+        id: "reply-handoff-direct",
+        text: "已提交人工接管请求，正在等待负责人处理。",
+      },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({
+      processed: true,
+      status: "waiting_human",
+    });
+
+    expect(mocks.planTurnV3).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conversation-handoff-direct",
+        runId: "run-handoff-direct",
+        intent: "handoff",
+        countUsage: false,
+        completeOutbox: false,
+        replyText: expect.stringContaining("等待负责人处理"),
+        humanHandoff: {
+          reason: "The audience explicitly requested human takeover.",
+          summary: "转真人",
+          kind: "handoff",
+          priority: 80,
+          source: "web",
+        },
+      }),
+    );
+    const completionInput =
+      mocks.completeInlineGenerationRun.mock.calls[0]?.[0];
+    expect(completionInput.replyText).not.toContain("直接介入");
+    expect(completionInput.replyText).not.toContain("立即接手");
   });
 
   it("describes the representative from Owner profile, authorized knowledge, and user-facing outcomes", async () => {

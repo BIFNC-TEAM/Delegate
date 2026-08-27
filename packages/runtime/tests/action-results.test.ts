@@ -145,6 +145,58 @@ describe("verified action result pipeline", () => {
     });
   });
 
+  it("accepts pinned DeepWiki v2 text without mistaking documented failure states for an error", () => {
+    const contract = {
+      kind: "server_evaluator" as const,
+      evaluatorId: "mcp.deepwiki.read_semantic",
+      evaluatorVersion: "2",
+    };
+    const verify = (rawOutput: unknown) => verifyRawActionResult({
+      transportOutcome: "response_received" as const,
+      rawOutput,
+      expectedOutputSchema: { type: "object" },
+      successContract: contract,
+    });
+
+    expect(verify({ result: [
+      "# Page: Task lifecycle",
+      "The protocol exposes explicit terminal states.",
+      'FAILED["TASK_STATE_FAILED"]',
+    ].join("\n") })).toMatchObject({
+      semanticOutcome: "succeeded",
+    });
+    expect(verify({ result: {
+      isError: false,
+      content: [{ type: "text", text: "A2A enables interoperable agent communication." }],
+    } })).toMatchObject({ semanticOutcome: "succeeded" });
+
+    for (const failure of [
+      "Error processing question: Repository not found",
+      "Repository not found",
+      "Permission denied while reading repository",
+      "Unauthorized",
+      "Rate limit exceeded",
+      "Service unavailable",
+      "Request timed out",
+      "Internal server error",
+      "The server is overloaded; try again later",
+      "502 Bad Gateway",
+    ]) {
+      expect(verify({ result: failure })).toMatchObject({
+        semanticOutcome: "failed",
+        failureCode: "deepwiki_business_failure",
+      });
+    }
+    expect(verify({ result: { arbitrary: true } })).toMatchObject({
+      semanticOutcome: "unknown",
+      failureCode: "deepwiki_result_shape_unknown",
+    });
+    expect(verify({ result: { isError: true, content: [] } })).toMatchObject({
+      semanticOutcome: "failed",
+      failureCode: "deepwiki_protocol_error_result",
+    });
+  });
+
   it("marks prompt injection as data while preserving the sanitized payload", () => {
     const result = verifyRawActionResult({
       transportOutcome: "response_received",

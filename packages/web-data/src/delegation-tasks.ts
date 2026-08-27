@@ -3932,6 +3932,7 @@ type DelegationBillingContext =
       ownerRunId: string;
       conversationId: string;
       runtimePolicySnapshot: Prisma.JsonObject;
+      usageExemptReason: "mcp" | null;
     }
   | {
       mode: "service_credit";
@@ -3971,6 +3972,8 @@ function resolveDelegationBillingContext(
         ownerRunId: run.id,
         conversationId: run.conversationId,
         runtimePolicySnapshot: snapshot,
+        usageExemptReason:
+          snapshot["usageExemptReason"] === "mcp" ? "mcp" : null,
       });
       continue;
     }
@@ -4095,7 +4098,10 @@ async function finalizeDelegationTaskBilling(
   );
   if (!context) return;
   if (context.mode === "free") {
-    if (input.status === DelegationTaskStatus.COMPLETED) {
+    if (
+      input.status === DelegationTaskStatus.COMPLETED
+      && context.usageExemptReason !== "mcp"
+    ) {
       await tx.conversation.update({
         where: { id: context.conversationId },
         data: { freeRepliesUsed: { increment: 1 } },

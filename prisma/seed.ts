@@ -51,6 +51,9 @@ const DEMO_WEATHER_MCP_TOOLS = [
   "openmeteo_search_locations",
   "openmeteo_get_forecast",
 ] as const;
+const DEMO_FREE_SCOPE: Prisma.InputJsonArray = [];
+const DEMO_PAYWALLED_INTENTS: Prisma.InputJsonArray = [];
+const DEMO_ACTION_GATE: Prisma.InputJsonObject = {};
 
 const CONTACTS = [
   {
@@ -266,18 +269,18 @@ export async function seedDatabase(
         humanInLoop: true,
         languages: demoRepresentative.languages,
         freeReplyLimit: demoRepresentative.contract.freeReplyLimit,
-        freeScope: demoRepresentative.contract.freeScope,
-        paywalledIntents: demoRepresentative.contract.paywalledIntents,
+        freeScope: DEMO_FREE_SCOPE,
+        paywalledIntents: DEMO_PAYWALLED_INTENTS,
         handoffWindowHours: demoRepresentative.contract.handoffWindowHours,
         freeMonthlyCredit: 100,
         handoffPrompt: demoRepresentative.handoffPrompt,
         allowedSkills: demoRepresentative.skills,
-        actionGate: demoRepresentative.actionGate,
+        actionGate: DEMO_ACTION_GATE,
         computeEnabled: false,
         computeDefaultPolicyMode: PolicyDecision.ASK,
         computeBaseImage: "debian:bookworm-slim",
         computeMaxSessionMinutes: 15,
-        computeAutoApproveBudgetCents: 0,
+        computeAutoApproveTokenLimit: 0,
         computeArtifactRetentionDays: 14,
         computeNetworkMode: ComputeNetworkMode.NO_NETWORK,
         computeNetworkAllowlist: [],
@@ -295,18 +298,18 @@ export async function seedDatabase(
         humanInLoop: true,
         languages: demoRepresentative.languages,
         freeReplyLimit: demoRepresentative.contract.freeReplyLimit,
-        freeScope: demoRepresentative.contract.freeScope,
-        paywalledIntents: demoRepresentative.contract.paywalledIntents,
+        freeScope: DEMO_FREE_SCOPE,
+        paywalledIntents: DEMO_PAYWALLED_INTENTS,
         handoffWindowHours: demoRepresentative.contract.handoffWindowHours,
         freeMonthlyCredit: 100,
         handoffPrompt: demoRepresentative.handoffPrompt,
         allowedSkills: demoRepresentative.skills,
-        actionGate: demoRepresentative.actionGate,
+        actionGate: DEMO_ACTION_GATE,
         computeEnabled: false,
         computeDefaultPolicyMode: PolicyDecision.ASK,
         computeBaseImage: "debian:bookworm-slim",
         computeMaxSessionMinutes: 15,
-        computeAutoApproveBudgetCents: 0,
+        computeAutoApproveTokenLimit: 0,
         computeArtifactRetentionDays: 14,
         computeNetworkMode: ComputeNetworkMode.NO_NETWORK,
         computeNetworkAllowlist: [],
@@ -609,6 +612,7 @@ export async function seedDatabase(
     });
 
     for (const contact of CONTACTS) {
+      const contactUsername = "username" in contact ? contact.username : null;
       const upsertedContact = await tx.contact.upsert({
         where: {
           representativeId_telegramUserId: {
@@ -622,7 +626,7 @@ export async function seedDatabase(
           telegramUserId: contact.telegramUserId,
           channelUserId: contact.telegramUserId,
           externalUserId: contact.telegramUserId,
-          username: contact.username ?? null,
+          username: contactUsername,
           displayName: contact.displayName,
           role: contact.role,
           stage: contact.stage,
@@ -632,7 +636,7 @@ export async function seedDatabase(
           lastSeenAt: now,
         },
         update: {
-          username: contact.username ?? null,
+          username: contactUsername,
           channelUserId: contact.telegramUserId,
           externalUserId: contact.telegramUserId,
           displayName: contact.displayName,
@@ -1331,14 +1335,14 @@ function buildSeedRepresentativeVersionSnapshot(): Prisma.InputJsonObject {
     humanInLoop: true,
     conversation: {
       freeReplyLimit: demoRepresentative.contract.freeReplyLimit,
-      freeScope: [...demoRepresentative.contract.freeScope],
-      paywalledIntents: [...demoRepresentative.contract.paywalledIntents],
+      freeScope: [...DEMO_FREE_SCOPE],
+      paywalledIntents: [...DEMO_PAYWALLED_INTENTS],
       handoffWindowHours: demoRepresentative.contract.handoffWindowHours,
       handoffPrompt: demoRepresentative.handoffPrompt,
     },
     governance: {
       allowedSkills: [...demoRepresentative.skills],
-      actionGate: { ...demoRepresentative.actionGate },
+      actionGate: { ...DEMO_ACTION_GATE },
     },
     knowledge: {
       identitySummary: demoRepresentative.knowledgePack.identitySummary,
@@ -1574,9 +1578,8 @@ async function upsertManagedCapabilityPolicyProfile(
         capability: "MCP",
         decision: "ASK",
         resourceScopeCondition: "REMOTE_MCP",
-        requiredPlanTier: CapabilityPlanTier.PASS,
         priority: 208,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: true,
       },
       {
@@ -1725,9 +1728,8 @@ async function upsertOwnerManagedCapabilityProfiles(
         decision: "ASK",
         resourceScopeCondition: "REMOTE_MCP",
         channelCondition: Channel.PRIVATE_CHAT,
-        requiredPlanTier: CapabilityPlanTier.PASS,
         priority: 155,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: true,
       },
       {
@@ -1749,9 +1751,8 @@ async function upsertOwnerManagedCapabilityProfiles(
         decision: "ALLOW",
         resourceScopeCondition: "REMOTE_MCP",
         channelCondition: Channel.PRIVATE_CHAT,
-        requiredPlanTier: CapabilityPlanTier.PASS,
         priority: 165,
-        requiresPaidPlan: true,
+        requiresPaidPlan: false,
         requiresHumanApproval: false,
       },
     ],

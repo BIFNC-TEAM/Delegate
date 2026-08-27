@@ -1057,6 +1057,20 @@ export function RepresentativeChatPanel(props: {
       : responder.kind === "error"
         ? t.failedReplyDetail
         : null;
+  const progressStepCount = taskProgress?.steps.length
+    ?? turnProgress?.steps.length
+    ?? 0;
+  const progressStepIndex = taskProgress
+    ? getCurrentPublicProgressStepIndex(taskProgress.steps)
+    : turnProgress
+      ? getCurrentPublicProgressStepIndex(turnProgress.steps)
+      : -1;
+  const taskProgressStep = taskProgress && progressStepIndex >= 0
+    ? taskProgress.steps[progressStepIndex]
+    : undefined;
+  const turnProgressStep = turnProgress && progressStepIndex >= 0
+    ? turnProgress.steps[progressStepIndex]
+    : undefined;
 
   return (
     <section className="representative-conversation-shell" id="chat">
@@ -1223,92 +1237,6 @@ export function RepresentativeChatPanel(props: {
                 </article>
               );
             })}
-            {turnProgress ? (
-              <section
-                aria-live="polite"
-                className="representative-task-progress representative-turn-progress"
-              >
-                <header>
-                  <span>{t.turnProgressLabel}</span>
-                  <strong>{turnProgress.objective || t.turnProgressPreparing}</strong>
-                  <small>
-                    {formatPublicTurnStage(turnProgress.stage, props.locale)}
-                    {` · ${formatPublicTurnElapsed(
-                      turnProgress.startedAt,
-                      progressClockMs || Date.parse(turnProgress.updatedAt),
-                      props.locale,
-                    )}`}
-                  </small>
-                </header>
-                {(turnProgress.goals.length || turnProgress.deliverables.length) ? (
-                  <details className="representative-turn-plan-details">
-                    <summary>{t.turnPlanDetails}</summary>
-                    {turnProgress.goals.length ? (
-                      <div>
-                        <strong>{t.turnGoalsLabel}</strong>
-                        <ul>
-                          {turnProgress.goals.map((goal) => (
-                            <li key={goal.id}>{goal.description}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                    {turnProgress.deliverables.length ? (
-                      <div>
-                        <strong>{t.turnDeliverablesLabel}</strong>
-                        <ul>
-                          {turnProgress.deliverables.map((deliverable) => (
-                            <li key={deliverable.id}>
-                              {formatPublicTurnDeliverable(deliverable, props.locale)}
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                  </details>
-                ) : null}
-                <ol>
-                  {turnProgress.steps.map((step) => (
-                    <li className={`is-${step.status}`} key={step.id}>
-                      <span>{step.sequence}</span>
-                      <div>
-                        <strong>{formatPublicTurnStage(step.stage, props.locale)}</strong>
-                        <small>
-                          {formatPublicTaskStatus(step.status, props.locale)}
-                          {step.detail ? ` · ${t.turnPart(step.detail)}` : ""}
-                        </small>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            ) : null}
-            {taskProgress ? (
-              <section
-                aria-live="polite"
-                className="representative-task-progress"
-              >
-                <header>
-                  <span>{t.taskProgressLabel}</span>
-                  <strong>{taskProgress.title}</strong>
-                  <small>
-                    {formatPublicTaskStatus(taskProgress.status, props.locale)}
-                    {` · ${t.taskNextActor}: ${formatPublicTaskActor(taskProgress.nextActionBy, props.locale)}`}
-                  </small>
-                </header>
-                <ol>
-                  {taskProgress.steps.map((step) => (
-                    <li className={`is-${step.status}`} key={step.id}>
-                      <span>{step.sequence}</span>
-                      <div>
-                        <strong>{step.title}</strong>
-                        <small>{formatPublicTaskStatus(step.status, props.locale)}</small>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-              </section>
-            ) : null}
             {busy && responder.kind === "ai" ? (
               <article className="representative-chat-message representative-chat-message-assistant is-pending">
                 <div aria-label={t.aiAvatarLabel(props.representativeName)} className="representative-message-avatar is-ai" role="img">
@@ -1339,6 +1267,77 @@ export function RepresentativeChatPanel(props: {
           ) : null}
 
           <form className="representative-chat-form representative-chat-composer" onSubmit={handleSubmit}>
+            {taskProgress || turnProgress ? (
+              <details
+                aria-live="polite"
+                className="representative-progress-dock"
+              >
+                <summary>
+                  <i
+                    aria-hidden="true"
+                    className={`is-${taskProgressStep?.status ?? turnProgressStep?.status ?? taskProgress?.status ?? turnProgress?.status}`}
+                  />
+                  <span className="representative-progress-dock-current">
+                    <strong>
+                      {taskProgress
+                        ? taskProgressStep?.title || taskProgress.title
+                        : turnProgressStep
+                          ? formatPublicTurnStage(turnProgressStep.stage, props.locale)
+                          : turnProgress?.objective || t.turnProgressPreparing}
+                    </strong>
+                    <small>
+                      {taskProgress
+                        ? `${formatPublicTaskStatus(taskProgressStep?.status ?? taskProgress.status, props.locale)} · ${t.taskNextActor}: ${formatPublicTaskActor(taskProgress.nextActionBy, props.locale)}`
+                        : turnProgress
+                          ? `${formatPublicTaskStatus(turnProgressStep?.status ?? turnProgress.status, props.locale)} · ${formatPublicTurnElapsed(
+                              turnProgress.startedAt,
+                              progressClockMs || Date.parse(turnProgress.updatedAt),
+                              props.locale,
+                            )}`
+                          : null}
+                    </small>
+                  </span>
+                  {progressStepCount > 0 ? (
+                    <span className="representative-progress-dock-count">
+                      {t.progressStep(Math.max(1, progressStepIndex + 1), progressStepCount)}
+                    </span>
+                  ) : null}
+                  <span aria-hidden="true" className="representative-progress-dock-chevron">⌄</span>
+                </summary>
+                <div className="representative-progress-dock-panel">
+                  <header>
+                    <span>{taskProgress ? t.taskProgressLabel : t.turnProgressLabel}</span>
+                    <strong>
+                      {taskProgress?.title || turnProgress?.objective || t.turnProgressPreparing}
+                    </strong>
+                  </header>
+                  <ol>
+                    {taskProgress
+                      ? taskProgress.steps.map((step) => (
+                          <li className={`is-${step.status}`} key={step.id}>
+                            <span aria-hidden="true">{step.sequence}</span>
+                            <div>
+                              <strong>{step.title}</strong>
+                              <small>{formatPublicTaskStatus(step.status, props.locale)}</small>
+                            </div>
+                          </li>
+                        ))
+                      : turnProgress?.steps.map((step) => (
+                          <li className={`is-${step.status}`} key={step.id}>
+                            <span aria-hidden="true">{step.sequence}</span>
+                            <div>
+                              <strong>{formatPublicTurnStage(step.stage, props.locale)}</strong>
+                              <small>
+                                {formatPublicTaskStatus(step.status, props.locale)}
+                                {step.detail ? ` · ${t.turnPart(step.detail)}` : ""}
+                              </small>
+                            </div>
+                          </li>
+                        ))}
+                  </ol>
+                </div>
+              </details>
+            ) : null}
             <header className="representative-chat-composer-header">
               <span className="representative-chat-composer-recipient">{responder.kind === "human"
                 ? t.humanComposerContext
@@ -1627,6 +1626,27 @@ function isPublicTurnStreamActive(
   progress: PublicTurnExecutionProgress | undefined,
 ) {
   return progress?.status === "running";
+}
+
+function getCurrentPublicProgressStepIndex(
+  steps: Array<{ status: string }>,
+) {
+  if (steps.length === 0) return -1;
+  const activeIndex = steps.findIndex((step) => [
+    "running",
+    "awaiting_approval",
+    "waiting_approval",
+    "waiting_input",
+    "waiting_for_user",
+    "waiting_for_owner",
+    "blocked",
+    "failed",
+  ].includes(step.status));
+  if (activeIndex >= 0) return activeIndex;
+  const pendingIndex = steps.findIndex(
+    (step) => !["completed", "skipped"].includes(step.status),
+  );
+  return pendingIndex >= 0 ? pendingIndex : steps.length - 1;
 }
 
 function formatPublicTaskStatus(status: string, locale: "zh" | "en") {
@@ -2012,6 +2032,7 @@ const zhCopy = {
   artifactsLabel: "任务结果", downloadArtifact: "下载",
   taskProgressLabel: "任务运行进度", taskNextActor: "下一步",
   turnProgressLabel: "执行计划", turnProgressPreparing: "正在理解并规划你的请求",
+  progressStep: (current: number, total: number) => `第 ${current}/${total} 步`,
   turnPlanDetails: "查看规划内容", turnGoalsLabel: "目标",
   turnDeliverablesLabel: "交付物", turnPart: (value: string) => `第 ${value} 段`,
   addAttachments: "添加附件", attach: "附件", selectedAttachments: "待发送附件",
@@ -2095,6 +2116,7 @@ const enCopy = {
   artifactsLabel: "Task results", downloadArtifact: "Download",
   taskProgressLabel: "Task progress", taskNextActor: "Next",
   turnProgressLabel: "Execution plan", turnProgressPreparing: "Understanding and planning your request",
+  progressStep: (current: number, total: number) => `Step ${current}/${total}`,
   turnPlanDetails: "View plan", turnGoalsLabel: "Goals",
   turnDeliverablesLabel: "Deliverables", turnPart: (value: string) => `Part ${value}`,
   addAttachments: "Add attachments", attach: "Attach", selectedAttachments: "Selected attachments",

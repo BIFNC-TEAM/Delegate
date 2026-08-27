@@ -190,9 +190,20 @@ type RuntimeExecutionResult = {
 };
 
 export async function executeTool(sessionId: string, rawInput: unknown) {
-  const { input, context, decision, mcpBinding, sessionSubagentId } =
+  const {
+    input,
+    context,
+    decision,
+    mcpBinding,
+    serverVerifiedReadOnlyMcp,
+    sessionSubagentId,
+  } =
     await evaluateExecutionRequest(sessionId, rawInput);
-  const normalized = normalizeExecutionInput(input, mcpBinding);
+  const normalized = normalizeExecutionInput(
+    input,
+    mcpBinding,
+    serverVerifiedReadOnlyMcp,
+  );
   const effectiveDecision = resolveEffectiveDecision({
     context,
     input: normalized,
@@ -907,7 +918,11 @@ export async function processNextApprovedExecution() {
       requireExecutionSessionId(executionForRun),
       rawRequest,
     );
-    const normalized = normalizeExecutionInput(evaluated.input, evaluated.mcpBinding);
+    const normalized = normalizeExecutionInput(
+      evaluated.input,
+      evaluated.mcpBinding,
+      evaluated.serverVerifiedReadOnlyMcp,
+    );
     const decision = resolveEffectiveDecision({
       context: evaluated.context,
       input: normalized,
@@ -2331,6 +2346,7 @@ async function runMcpExecution(params: {
       },
       requestedToolName: resolved.toolName,
       toolArguments: params.input.toolArguments,
+      retrySafe: v3Pin?.retrySafe ?? false,
       ...(v3Pin
         ? {
             onToolsListed: async (tools: Array<{
@@ -2480,7 +2496,7 @@ async function loadV3McpExecutionPin(input: {
   ) {
     throw new SessionError(409, "mcp_published_definition_drift_replan_required");
   }
-  assertCurrentMcpEffectPolicyPin({
+  const currentPolicy = assertCurrentMcpEffectPolicyPin({
     serverUrl: input.serverUrl,
     transportKind: input.transportKind,
     toolName: input.toolName,
@@ -2490,7 +2506,12 @@ async function loadV3McpExecutionPin(input: {
     plannedEffect: asRecord(execution.planAction.inputSnapshot)?.["effect"],
     plannedSuccessContract: execution.planAction.successContract,
   });
-  return { toolSchemaHash: expectedToolSchemaHash };
+  return {
+    toolSchemaHash: expectedToolSchemaHash,
+    retrySafe:
+      currentPolicy.effect.mutation === "none"
+      && currentPolicy.idempotency === "naturally_idempotent",
+  };
 }
 
 export function assertCurrentMcpEffectPolicyPin(input: {
@@ -2525,6 +2546,7 @@ export function assertCurrentMcpEffectPolicyPin(input: {
   ) {
     throw new SessionError(409, "mcp_effect_policy_drift_replan_required");
   }
+  return currentPolicy;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -2914,6 +2936,7 @@ function normalizeExecutionInput(
     serverUrl: string;
     approvalRequired: boolean;
   } | null,
+  serverVerifiedReadOnlyMcp = false,
 ): NormalizedExecutionInput {
   switch (input.capability) {
     case "read": {
@@ -3038,7 +3061,9 @@ function normalizeExecutionInput(
         bindingSlug,
         toolName,
         toolArguments: input.toolArguments,
-        approvalRequired: mcpBinding?.approvalRequired ?? true,
+        approvalRequired: serverVerifiedReadOnlyMcp
+          ? false
+          : mcpBinding?.approvalRequired ?? true,
         workingDirectory: undefined,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,

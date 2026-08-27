@@ -48,6 +48,9 @@ describePostgres("fresh PostgreSQL seed", () => {
     expect(seeded.representative).toMatchObject({
       id: representativeId,
       slug: representativeSlug,
+      freeScope: [],
+      paywalledIntents: [],
+      actionGate: {},
       owner: {
         displayName: "Lin",
         identityLinks: [
@@ -92,6 +95,9 @@ async function readSeedSnapshot() {
     select: {
       id: true,
       slug: true,
+      freeScope: true,
+      paywalledIntents: true,
+      actionGate: true,
       owner: {
         select: {
           displayName: true,

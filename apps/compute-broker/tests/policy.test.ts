@@ -8,6 +8,26 @@ vi.mock("@delegate/web-data", () => ({
   finalizeComputeApprovalConversation: vi.fn(),
   getRepresentativeRuntimeAuthoritySnapshot: vi.fn(),
   verifyAgentUsageEntitlementReservation: vi.fn(),
+  resolveServerOwnedMcpCapabilityPolicyV3: vi.fn((input: {
+    serverUrl: string;
+    transportKind: string;
+    toolName: string;
+    toolSchemaHash: string;
+  }) => (
+    input.serverUrl === "https://open-meteo.caseyjhand.com/mcp"
+    && input.transportKind.toLowerCase() === "streamable_http"
+    && input.toolName === "openmeteo_get_forecast"
+    && input.toolSchemaHash === "forecast-schema-hash"
+  ) ? {
+      policyId: "delegate.mcp.openmeteo.read.v1",
+      classificationVersion: "delegate.mcp.openmeteo.effect.v1",
+      effect: {
+        boundary: "external",
+        mutation: "none",
+        reversibility: "not_applicable",
+      },
+      idempotency: "naturally_idempotent",
+    } : null),
   AGENT_WALLET_SERVICE_CREDIT_PRODUCT_CODE:
     "agent-wallet:service-credit:v1",
 }));
@@ -251,6 +271,80 @@ describe("resolveEffectiveDecision", () => {
 });
 
 describe("published runtime authority ceiling", () => {
+  it("recognizes only a server-pinned read-only MCP definition", async () => {
+    const { resolveServerVerifiedReadOnlyMcp } = await import("../src/policy");
+    const runtimeGrants = [{
+      id: "binding-weather",
+      slug: "open-meteo",
+      serverUrl: "https://open-meteo.caseyjhand.com/mcp",
+      transportKind: "streamable_http" as const,
+      allowedToolNames: ["openmeteo_get_forecast"],
+      defaultToolName: "openmeteo_get_forecast",
+      enabled: true as const,
+      approvalRequired: false,
+      estimatedTokensPerCall: 0,
+      maxRetries: 0,
+      retryBackoffMs: 0,
+      configRevision: 7,
+      toolDefinitions: [{
+        exactToolName: "openmeteo_get_forecast",
+        inputSchema: { type: "object" },
+        outputSchema: null,
+        toolSchemaHash: "forecast-schema-hash",
+        bindingDefinitionHash: "binding-hash",
+        bindingRevision: 7,
+        canonicalizationVersion: "delegate-capability-v1",
+      }],
+    }];
+
+    expect(resolveServerVerifiedReadOnlyMcp({
+      binding: {
+        id: "binding-weather",
+        serverUrl: "https://open-meteo.caseyjhand.com/mcp",
+        transportKind: "STREAMABLE_HTTP",
+        configRevision: 7,
+      },
+      runtimeGrants,
+      toolName: "openmeteo_get_forecast",
+    })).toBe(true);
+    expect(resolveServerVerifiedReadOnlyMcp({
+      binding: {
+        id: "binding-weather",
+        serverUrl: "https://attacker.example/mcp",
+        transportKind: "STREAMABLE_HTTP",
+        configRevision: 7,
+      },
+      runtimeGrants,
+      toolName: "openmeteo_get_forecast",
+    })).toBe(false);
+  });
+
+  it("relaxes only the managed approval rule for a verified read-only MCP", async () => {
+    const { applyServerVerifiedReadOnlyMcpDecision } = await import("../src/policy");
+
+    expect(applyServerVerifiedReadOnlyMcpDecision({
+      decision: "ask",
+      reason: "managed_human_approval_required",
+    }, true)).toEqual({
+      decision: "allow",
+      reason: "server_verified_read_only_mcp",
+    });
+    expect(applyServerVerifiedReadOnlyMcpDecision({
+      decision: "ask",
+      reason: "owner_requested_approval",
+    }, true)).toEqual({
+      decision: "ask",
+      reason: "owner_requested_approval",
+    });
+    expect(applyServerVerifiedReadOnlyMcpDecision({
+      decision: "deny",
+      reason: "policy_denied",
+    }, true)).toEqual({
+      decision: "deny",
+      reason: "policy_denied",
+    });
+  });
+
   it("can require approval or deny, but never relaxes an evaluated decision", async () => {
     const { restrictEvaluatedDecision } = await import("../src/policy");
 
@@ -614,6 +708,23 @@ describe("delegation task resource policy", () => {
       estimatedTokens: 1,
       browserMode: "native",
       allowMutations: false,
+      resourcePolicy,
+    })).toBe(decision);
+  });
+
+  it("does not reclassify a server-verified read-only MCP as an external side effect", async () => {
+    const { applyDelegationTaskResourcePolicyDecision } = await import("../src/policy");
+    const decision = { decision: "allow" as const, reason: "server_verified_read_only_mcp" };
+
+    expect(applyDelegationTaskResourcePolicyDecision({
+      decision,
+      capability: "mcp",
+      estimatedTokens: 1,
+      mcpBindingId: "binding-allowed",
+      taskMcpBindingId: "binding-allowed",
+      delegatedExecution: true,
+      allowMutations: false,
+      serverVerifiedReadOnlyMcp: true,
       resourcePolicy,
     })).toBe(decision);
   });

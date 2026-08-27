@@ -64,6 +64,7 @@ import {
   buildRepresentativeRuntimeProfile,
   assertConversationChannelDeliveryAvailable,
   authorizeGenerationRunFreeUsage,
+  authorizeGenerationRunMcpNoCharge,
   claimNextConversationMessageDeliveryWorkItem,
   claimNextOperatorMessageWorkItem,
   claimNextGenerationWorkItem,
@@ -1634,6 +1635,7 @@ async function executeV3ReadonlyPlan(input: {
           actionOutcomes,
         }),
         ...(knowledgeFallbacks.length ? { knowledgeFallbacks } : {}),
+        representativeStyle: buildRepresentativeResponseStyle(input.setup),
       });
       if (!composed.ok) throw new Error(formatV3ComposerFailure(composed));
       composerProvider = composed.provider;
@@ -2034,6 +2036,10 @@ async function executeV3GovernedComposer(input: {
     leaseAttempt: number;
   };
   fallbackActivationStatus?: KnowledgeFallbackActivationV3["status"];
+  representativeStyle: {
+    representativeName: string;
+    tone: string;
+  };
 }) {
   const context = await loadV3GovernedCompositionContext({
     delegationTaskId: input.delegationTaskId,
@@ -2197,6 +2203,7 @@ async function executeV3GovernedComposer(input: {
       actionOutcomes,
     }),
     ...(knowledgeFallbacks.length ? { knowledgeFallbacks } : {}),
+    representativeStyle: input.representativeStyle,
   }).catch(closeComposerFailure);
   if (!composed.ok) {
     const compositionFailure = formatV3ComposerFailure(composed);
@@ -2261,6 +2268,7 @@ async function executeV3PreExecutionStableGeneralFallback(input: {
   continuationAuthorized: boolean;
   activationStatus: KnowledgeFallbackActivationV3["status"];
   entitlementReservation?: ConversationEntitlementReservation | null;
+  setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>;
 }) {
   if (!input.planned.result.ok || !input.planned.persistedPlan) return null;
   const plan = input.planned.result.plan;
@@ -2345,6 +2353,7 @@ async function executeV3PreExecutionStableGeneralFallback(input: {
       evidence: [],
       goalOutcomes,
       knowledgeFallbacks: fallbacks,
+      representativeStyle: buildRepresentativeResponseStyle(input.setup),
     });
     if (!composed.ok) return null;
     draft = composed.draft;
@@ -2672,6 +2681,7 @@ async function executeV3ManagedDocumentPlan(input: {
         stateVersion: composerAuthorizationVersion,
         actionOutcomes: [{ actionId: artifactAction.id, status: "succeeded" }],
       }),
+      representativeStyle: buildRepresentativeResponseStyle(input.setup),
     });
     if (composed.ok) {
     await completeV3InlineAction({
@@ -2768,7 +2778,7 @@ function formatV3ComposerFailure(input: {
     : input.reason;
 }
 
-function renderComposedV3Draft(
+export function renderComposedV3Draft(
   draft: ComposedMessageDraftV3,
   options?: { fallbackDisclosures?: Map<string, string> },
 ) {
@@ -2777,7 +2787,7 @@ function renderComposedV3Draft(
     const rendered = segment.kind === "claim"
       ? segment.text
       : segment.kind === "inference"
-        ? `推论：${segment.text}`
+        ? segment.text
         : (() => {
             switch (segment.statusCode) {
               case "goal_succeeded": return "相关目标已完成。";
@@ -2794,6 +2804,16 @@ function renderComposedV3Draft(
     if (disclosure) disclosedGoals.add(segment.goalId);
     return [disclosure, rendered].filter((item): item is string => Boolean(item));
   }).join("\n\n");
+}
+
+function buildRepresentativeResponseStyle(input: {
+  name: string;
+  tone: string;
+}) {
+  return {
+    representativeName: input.name,
+    tone: input.tone,
+  };
 }
 
 function isActiveManagedDocumentPlan(
@@ -3779,6 +3799,13 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       if ((config.turnPlannerV3Mode ?? "disabled") !== "active_governed") {
         throw new Error("V3 governed Composer resume requires active_governed mode.");
       }
+      const resumeSetup = await getRepresentativeRuntimeSetupSnapshot(
+        item.representativeSlug,
+        item.representativeVersionId,
+      );
+      if (!resumeSetup) {
+        throw new Error("V3 governed Composer resume lost its representative style snapshot.");
+      }
       const governedComposition = await executeV3GovernedComposer({
         delegationTaskId: governedComposerResumeTaskId,
         leaseGuard,
@@ -3787,6 +3814,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           language: /\p{Script=Han}/u.test(item.userText) ? "zh" : "en",
         },
         generationWorkLease: workLease,
+        representativeStyle: buildRepresentativeResponseStyle(resumeSetup),
       });
       if (!governedComposition) {
         throw new Error("V3 governed Composer resume has no terminal source results.");
@@ -4270,6 +4298,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
     let parsedRequests: ParsedComputeRequest[] = persistedRequest
       ? [persistedRequest]
       : computeDirective.kind === "request" ? [computeDirective.request] : [];
+    let mcpNoCharge = item.usageExemptReason === "mcp";
     let planSummary = parsedRequests[0]?.displayTarget || "";
     let planSteps: Array<{
       summary: string;
@@ -4326,42 +4355,6 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         )
       )
     ) {
-      const knownPaidContinuationRequired = requiresPaidContinuation(
-        item.usage.freeRepliesUsed,
-      );
-      if (
-        knownPaidContinuationRequired
-        && !walletReservation
-        && !entitlementReservation
-        && item.audienceIdentityId
-      ) {
-        ({ walletReservation, entitlementReservation } =
-          await reservePaidContinuation());
-      }
-      if (
-        knownPaidContinuationRequired
-        && !walletReservation
-        && !entitlementReservation
-      ) {
-        const completed = await completeInlineGenerationRun({
-          conversationId: item.conversationId,
-          runId: item.runId,
-          ...workLease,
-          replyText:
-            "免费额度已用完，当前没有可预占的服务权益。请先充值或购买服务额度后再继续委托任务。",
-          senderDisplayName: item.representativeName,
-          intent: "delegation_payment_required",
-          countUsage: false,
-          completeOutbox: false,
-        });
-        outputMessageId = completed.message.id;
-        await deliverGenerationOutput({ config, item, text: completed.message.text ?? "", outputMessageId });
-        return {
-          processed: true as const,
-          runId: item.runId,
-          status: "completed" as const,
-        };
-      }
       const taskInput = clarifyingTask
         ? `原始任务：${clarifyingTask.objective}\n待补充：${clarifyingTask.blockingReason || "执行输入"}\n用户补充：${item.userText}`
         : item.userText;
@@ -4543,7 +4536,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       ({ walletReservation, entitlementReservation } =
         await reservePaidContinuation());
     }
-    const effectiveUsage = entitlementReservation
+    let effectiveUsage = entitlementReservation
       ? {
           ...item.usage,
           passUnlocked: true,
@@ -4572,9 +4565,102 @@ export async function processNextConversationWork(config: ConversationWorkerConf
                 deepHelpUnlocked: false,
               }
             : item.usage;
-    const continuationAuthorized =
+    let continuationAuthorized =
       !paidContinuationRequired
       || Boolean(walletReservation || entitlementReservation);
+
+    const directHandoffPlan = createConversationPlan({
+      text: item.userText,
+      channel: "private_chat",
+      representative: policyPinnedRepresentative,
+      usage: effectiveUsage,
+    });
+    if (directHandoffPlan.disposition === "handoff") {
+      const replyText = [
+        "已提交人工接管请求，正在等待负责人处理。",
+        "你可以继续补充背景；是否接手和后续安排以真人确认为准。",
+      ].join("\n\n");
+      const turnTrace = buildConversationTurnTrace(
+        directHandoffPlan,
+        (action) => {
+          const authorization = authorizeConversationAction(action);
+          if (authorization.decision === "deny") {
+            return {
+              actionId: action.id,
+              status: "denied",
+              summary: authorization.reason,
+            };
+          }
+          if (authorization.decision === "ask") {
+            return {
+              actionId: action.id,
+              status: "waiting_approval",
+              summary: authorization.reason,
+            };
+          }
+          if (action.kind === "collect_request_description") {
+            return {
+              actionId: action.id,
+              status: "completed",
+              summary: "The current user message is the minimum handoff description.",
+              output: { description: item.userText.slice(0, 600) },
+            };
+          }
+          if (action.kind === "request_human_handoff") {
+            return {
+              actionId: action.id,
+              status: "deferred",
+              summary:
+                "Human-handoff eligibility and request creation are finalized atomically with the reply.",
+            };
+          }
+          return {
+            actionId: action.id,
+            status: "deferred",
+            summary: "The action is not part of the deterministic handoff path.",
+          };
+        },
+      );
+      const completed = await completeInlineGenerationRun({
+        conversationId: item.conversationId,
+        runId: item.runId,
+        ...workLease,
+        replyText,
+        senderDisplayName: item.representativeName,
+        intent: "handoff",
+        turnTrace,
+        completeOutbox: false,
+        countUsage: false,
+        humanHandoff: {
+          reason: "The audience explicitly requested human takeover.",
+          summary: item.userText.slice(0, 600),
+          kind: directHandoffPlan.intent,
+          priority: 80,
+          source: item.channel,
+        },
+        runtimeOutcome: {
+          mode: "fallback",
+          fallbackStrategy: "deterministic_preview",
+          modelRuntimeState: "disabled",
+          fallbackReason: "policy_fallback",
+        },
+        ...(entitlementReservation ? { entitlementReservation } : {}),
+      });
+      outputMessageId = completed.message.id;
+      const deliveredText = completed.message.text ?? replyText;
+      await deliverGenerationOutput({
+        config,
+        item,
+        text: deliveredText,
+        outputMessageId,
+      });
+      leaseGuard.assertOwned();
+      return {
+        processed: true as const,
+        runId: item.runId,
+        status: "waiting_human" as const,
+      };
+    }
 
     if (activeCollector) {
       const canceled = isCollectorCancelMessage(item.userText);
@@ -4895,6 +4981,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           continuationAuthorized,
           activationStatus: "compiler_unavailable",
           entitlementReservation,
+          setup,
         });
         if (stableFallback) return stableFallback;
         return completeTerminalDelegationFailure(
@@ -4928,6 +5015,31 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           return dependencyIndex;
         }),
       }));
+    }
+
+    const selectedMcpOnlyPlan = parsedRequests.length > 0
+      && parsedRequests.every((request) => request.capability === "mcp")
+      && (
+        item.usageExemptReason === "mcp"
+        || !item.delegationTaskId
+      );
+    if (selectedMcpOnlyPlan) {
+      await authorizeGenerationRunMcpNoCharge({
+        runId: item.runId,
+        ...workLease,
+      });
+      mcpNoCharge = true;
+      walletReservation = null;
+      entitlementReservation = null;
+      paidContinuationRequired = false;
+      continuationAuthorized = true;
+      // The legacy ConversationPlan contract has no no-charge execution bit.
+      // Unlock only its response lane; Broker authorization still comes from
+      // the server-owned `usageExemptReason=mcp` GenerationRun snapshot.
+      effectiveUsage = {
+        ...item.usage,
+        passUnlocked: true,
+      };
     }
 
     if (
@@ -5345,6 +5457,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
                 language: /\p{Script=Han}/u.test(item.userText) ? "zh" : "en",
               },
               generationWorkLease: workLease,
+              representativeStyle: buildRepresentativeResponseStyle(setup),
               ...(computeReply.fallbackActivationStatus
                 ? {
                     fallbackActivationStatus:
@@ -5373,7 +5486,13 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         turnTrace: buildConversationTurnTrace(
           {
             ...plan,
-            billingDecision: computeReply.billable && !persistedRequest
+            billingDecision: mcpNoCharge
+              ? {
+                  decision: "no_charge",
+                  billable: false,
+                  reason: "MCP-only delegated answers do not consume conversation service usage.",
+                }
+              : computeReply.billable && !persistedRequest
               ? {
                   decision: "allow_entitlement",
                   billable: true,
@@ -5402,7 +5521,9 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         ),
         ...(computeReply.attachments?.length ? { attachments: computeReply.attachments } : {}),
         completeOutbox: false,
-        countUsage: governedComposition?.fallbackActivated
+        countUsage: mcpNoCharge
+          ? false
+          : governedComposition?.fallbackActivated
           ? continuationAuthorized
           : computeReply.billable && !persistedRequest,
         keepConversationQueued: computeReply.hasMoreSteps,

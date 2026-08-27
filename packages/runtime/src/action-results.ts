@@ -175,6 +175,10 @@ function evaluateRegisteredServerContract(
     contract.evaluatorId === "mcp.deepwiki.read_semantic"
     && contract.evaluatorVersion === "1"
   ) return evaluateDeepWikiReadSemanticV1(output);
+  if (
+    contract.evaluatorId === "mcp.deepwiki.read_semantic"
+    && contract.evaluatorVersion === "2"
+  ) return evaluateDeepWikiReadSemanticV2(output);
   return { outcome: "unknown", failureCode: "server_evaluator_unavailable" };
 }
 
@@ -259,6 +263,33 @@ function evaluateDeepWikiReadSemanticV1(
   return { outcome: "unknown", failureCode: "deepwiki_success_unproven" };
 }
 
+function evaluateDeepWikiReadSemanticV2(
+  output: unknown,
+): { outcome: SemanticOutcomeV3; failureCode?: string } {
+  const record = asRecord(output);
+  if (!record || !("result" in record)) {
+    return { outcome: "unknown", failureCode: "deepwiki_result_shape_unknown" };
+  }
+  const extracted = extractDeepWikiTextV1(record["result"]);
+  if (extracted.protocolError) {
+    return { outcome: "failed", failureCode: "deepwiki_protocol_error_result" };
+  }
+  if (!extracted.knownShape) {
+    return { outcome: "unknown", failureCode: "deepwiki_result_shape_unknown" };
+  }
+  if (!extracted.texts.length) {
+    return { outcome: "unknown", failureCode: "deepwiki_result_empty" };
+  }
+  if (extracted.texts.some(isDeepWikiBusinessFailureTextV2)) {
+    return { outcome: "failed", failureCode: "deepwiki_business_failure" };
+  }
+  // The endpoint, transport, tool schema, and this evaluator version are all
+  // pinned by the server-owned capability policy before execution. For this
+  // read-only contract, a known non-empty MCP result without an explicit error
+  // is the deliverable; it does not need a second business-state marker.
+  return { outcome: "succeeded" };
+}
+
 function extractDeepWikiTextV1(value: unknown): {
   knownShape: boolean;
   protocolError: boolean;
@@ -301,6 +332,18 @@ function isDeepWikiBusinessFailureTextV1(value: string) {
     const chineseFailure = /^(?:错误|处理失败|执行失败|仓库不存在|未找到仓库|无权访问|权限不足|未授权|请求过于频繁|服务不可用|请求超时|服务器内部错误|系统繁忙)/u;
     return englishFailure.test(status) || chineseFailure.test(status);
   });
+}
+
+function isDeepWikiBusinessFailureTextV2(value: string) {
+  const firstLine = value
+    .normalize("NFKC")
+    .split(/\r?\n/gu)
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine) return false;
+  const englishFailure = /^(?:error\s+processing\b|error\b[^:\n]{0,120}:|(?:failed|failure)\s*(?::|-|$)|(?:repository|repo|resource)\s+(?:was\s+)?not\s+found\b|(?:repository|repo)\s+does\s+not\s+exist\b|permission\s+denied\b|unauthori[sz]ed\b|forbidden\b|authentication\s+(?:failed|required)\b|access\s+denied\b|rate\s*limit(?:ed|\s+exceeded)?\b|too\s+many\s+requests\b|temporarily\s+unavailable\b|(?:the\s+)?(?:service|server|upstream)\s+(?:is\s+)?(?:temporarily\s+)?unavailable\b|(?:request\s+)?(?:timed?\s*out|timeout)\b|internal\s+server\s+error\b|bad\s+gateway\b|gateway\s+timeout\b|(?:the\s+)?(?:server\s+)?(?:is\s+)?overload(?:ed)?\b|(?:please\s+)?try\s+again\s+later\b|(?:500|502|503|504)\b)/iu;
+  const chineseFailure = /^(?:错误|处理失败|执行失败|仓库不存在|未找到仓库|无权访问|权限不足|未授权|请求过于频繁|服务不可用|请求超时|服务器内部错误|系统繁忙)(?:[：:\s]|$)/u;
+  return englishFailure.test(firstLine) || chineseFailure.test(firstLine);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

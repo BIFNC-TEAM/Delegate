@@ -167,7 +167,7 @@ describe("V3 external capability publication adapters", () => {
       version: [
         "3",
         "delegate.mcp-policy.deepwiki.public-read.v1",
-        "delegate.mcp-effect.deepwiki.v1",
+        "delegate.mcp-effect.deepwiki.v2",
       ].join(":"),
       effect: {
         boundary: "external",
@@ -177,7 +177,7 @@ describe("V3 external capability publication adapters", () => {
       successContract: {
         kind: "server_evaluator",
         evaluatorId: "mcp.deepwiki.read_semantic",
-        evaluatorVersion: "1",
+        evaluatorVersion: "2",
       },
     });
   });
@@ -200,7 +200,7 @@ describe("V3 external capability publication adapters", () => {
     expect(publication.definition.version).toBe([
       "42",
       "delegate.mcp-policy.deepwiki.public-read.v1",
-      "delegate.mcp-effect.deepwiki.v1",
+      "delegate.mcp-effect.deepwiki.v2",
     ].join(":"));
   });
 

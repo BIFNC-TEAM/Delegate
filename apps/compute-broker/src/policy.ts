@@ -6,6 +6,10 @@ import {
   type CapabilityKind,
   type ComputeSubagentId,
 } from "@delegate/compute-protocol";
+import {
+  resolveServerOwnedMcpCapabilityPolicyV3,
+  type RepresentativeRuntimeMcpBindingGrant,
+} from "@delegate/web-data";
 
 import {
   deriveConversationComputeEntitlements,
@@ -268,6 +272,14 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
         }).toolName
       : undefined;
   const bindingDomain = mcpBinding ? new URL(mcpBinding.serverUrl).hostname : undefined;
+  const serverVerifiedReadOnlyMcp =
+    input.capability === "mcp" && mcpBinding && mcpToolName
+      ? resolveServerVerifiedReadOnlyMcp({
+          binding: mcpBinding,
+          runtimeGrants: context.runtimeAuthority.mcpBindings,
+          toolName: mcpToolName,
+        })
+      : false;
   const estimatedTokens = Math.max(
     input.estimatedTokens ?? 0,
     mcpBinding?.estimatedTokensPerCall ?? 0,
@@ -298,10 +310,18 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
         : {}),
     },
   );
+  const policyDecision = applyServerVerifiedReadOnlyMcpDecision(
+    evaluatedDecision,
+    serverVerifiedReadOnlyMcp,
+  );
+  const publishedCapabilityMode =
+    context.runtimeAuthority.compute.capabilityModes[input.capability];
   const decision = applyDelegationTaskResourcePolicyDecision({
     decision: restrictEvaluatedDecision(
-      evaluatedDecision,
-      context.runtimeAuthority.compute.capabilityModes[input.capability],
+      policyDecision,
+      serverVerifiedReadOnlyMcp && publishedCapabilityMode === "ask"
+        ? "allow"
+        : publishedCapabilityMode,
     ),
     capability: input.capability,
     estimatedTokens,
@@ -311,6 +331,7 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
       : {}),
     browserMode: input.browserMode,
     allowMutations: input.allowMutations,
+    serverVerifiedReadOnlyMcp,
     delegatedExecution: Boolean(context.session.delegationTaskId),
     resourcePolicy: context.session.delegationTask?.resourcePolicy,
   });
@@ -337,8 +358,58 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
     decision,
     entitlements,
     mcpBinding,
+    serverVerifiedReadOnlyMcp,
     sessionSubagentId,
   };
+}
+
+export function resolveServerVerifiedReadOnlyMcp(input: {
+  binding: {
+    id: string;
+    serverUrl: string;
+    transportKind: string;
+    configRevision: number;
+  };
+  runtimeGrants: RepresentativeRuntimeMcpBindingGrant[];
+  toolName: string;
+}) {
+  const grant = input.runtimeGrants.find(
+    (candidate) => candidate.id === input.binding.id,
+  );
+  const definition = grant?.toolDefinitions?.find(
+    (candidate) =>
+      candidate.exactToolName === input.toolName
+      && candidate.bindingRevision === input.binding.configRevision,
+  );
+  if (!grant || !definition) return false;
+  const policy = resolveServerOwnedMcpCapabilityPolicyV3({
+    serverUrl: input.binding.serverUrl,
+    transportKind: input.binding.transportKind,
+    toolName: input.toolName,
+    toolSchemaHash: definition.toolSchemaHash,
+  });
+  return Boolean(
+    policy
+    && policy.effect.mutation === "none"
+    && policy.idempotency === "naturally_idempotent",
+  );
+}
+
+export function applyServerVerifiedReadOnlyMcpDecision(
+  decision: ExecutionPolicyDecision,
+  serverVerifiedReadOnlyMcp: boolean,
+): ExecutionPolicyDecision {
+  if (
+    serverVerifiedReadOnlyMcp
+    && decision.decision === "ask"
+    && decision.reason === "managed_human_approval_required"
+  ) {
+    return {
+      decision: "allow",
+      reason: "server_verified_read_only_mcp",
+    };
+  }
+  return decision;
 }
 
 export function assertComputeSessionExpiry(
@@ -394,6 +465,7 @@ export function applyDelegationTaskResourcePolicyDecision(input: {
   taskMcpBindingId?: string;
   browserMode?: "deterministic" | "native";
   allowMutations?: boolean;
+  serverVerifiedReadOnlyMcp?: boolean;
   delegatedExecution?: boolean;
   resourcePolicy: DelegationTaskResourcePolicyContext | null | undefined;
 }): ExecutionPolicyDecision {
@@ -467,7 +539,10 @@ export function applyDelegationTaskResourcePolicyDecision(input: {
   }
   if (input.decision.decision === "deny") return input.decision;
 
-  const externalSideEffect = input.capability === "mcp"
+  const externalSideEffect = (
+    input.capability === "mcp"
+    && !input.serverVerifiedReadOnlyMcp
+  )
     || (
       input.capability === "browser"
       && input.browserMode === "native"

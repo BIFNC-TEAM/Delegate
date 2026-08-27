@@ -98,7 +98,10 @@ describe("V3 pre-verification attempt state", () => {
       },
     };
 
-    expect(() => assertCurrentMcpEffectPolicyPin(valid)).not.toThrow();
+    expect(assertCurrentMcpEffectPolicyPin(valid)).toMatchObject({
+      effect: { mutation: "none" },
+      idempotency: "naturally_idempotent",
+    });
     expect(() => assertCurrentMcpEffectPolicyPin({
       ...valid,
       capabilityVersion: [

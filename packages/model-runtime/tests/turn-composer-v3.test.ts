@@ -205,6 +205,10 @@ describe("TurnPlan V3 composer", () => {
       evidence: [],
       goalOutcomes: [{ goalId: "goal-general", status: "succeeded" }],
       responseLanguage: "zh",
+      representativeStyle: {
+        representativeName: "地理代表——周行知",
+        tone: "清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。",
+      },
     });
     const input = JSON.parse(request.input);
 
@@ -216,7 +220,13 @@ describe("TurnPlan V3 composer", () => {
     expect(input.evidenceClassMapping).toEqual({
       capability_result: "tool_output",
     });
+    expect(input.representativeStyle).toEqual({
+      representativeName: "地理代表——周行知",
+      tone: "清晰、直接、礼貌，优先给出下一步，而不是泛泛闲聊。",
+    });
     expect(request.instructions).toContain("not evidence");
+    expect(request.instructions).toContain("清晰、直接、礼貌");
+    expect(request.instructions).toContain("Never prefix prose");
   });
 
   it("normalizes short evidence aliases into canonical knowledge references", async () => {

@@ -109,7 +109,7 @@ Delegate
 | 整数金额和 token | 已实现 | 钱全部用最小货币单位整数，例如 CNY fen、USD cents。Agent token 也是整数。 |
 | 用户购买服务包 | 微信支付软件闭环已实现，生产开关默认关闭 | 浏览器只提交服务价格版本；服务端冻结金额、权益和分成快照，创建微信 Native 订单，验证签名通知/主动查询，幂等发放代表级服务权益，并支持未使用全额退款和对账。所有公开购买写操作都要求已验证的 Web 账户。 |
 | 用户给 Agent 买 token | 已实现 | 服务会检查 `UserWallet`、扣用户现金、给 `AgentWallet` 增 token、生成 `AgentTokenPurchase`、按策略生成 Creator pending earning，并写 ledger。当前价格用每个 Agent 的 `tokenUnitPriceCents`，集中 price catalog 仍是后续工作。 |
-| Agent 消耗 token | service 已实现 | `AgentUsageCharge` 会扣 Agent token、记录 provider cost / platform revenue，并把 Creator pending earning 按消耗释放到 withdrawable。它还没有自动接到所有真实回复、compute、browser、MCP runtime 路径上。 |
+| Agent 消耗 token | service 已实现 | `AgentUsageCharge` 会扣 Agent token、记录 provider cost / platform revenue，并把 Creator pending earning 按消耗释放到 withdrawable。纯 MCP 回答不要求 Pass，规划后会释放临时预占，也不消耗已购服务额度或免费回复次数；MCP 与非 MCP 混合任务仍按非 MCP 工作的计费合同执行。其他真实回复、compute 和 browser runtime 继续使用受治理的额度生命周期。 |
 | Creator 提现 | MVP 已实现 | `WithdrawRequest` 会检查 verified owner、claimed representative 和 withdrawable balance，并冻结提现金额、写 ledger。Stripe Connect / 支付宝转账 / 微信商家转账自动打款还未实现。 |
 | 退款和冲正 | 部分实现 | 已实现 paid recharge refund 和未消耗 token purchase reversal，并写 reversal ledger。完整 chargeback 自动处理和相关余额冻结仍是后续工作。 |
 | 复用支付能力 | 微信支付 API v3 闭环已实现 | Mock 仅限开发；微信支付包含 Native 下单、证书/公钥验签、支付与退款通知、主动查询、超时恢复和 reconciliation。Stripe/支付宝仍是后续支付轨道。Delegate 不处理银行卡号、支付密码或原始敏感支付信息。 |

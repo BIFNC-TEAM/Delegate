@@ -162,19 +162,101 @@ describe("callRemoteMcpTool", () => {
       global.fetch = originalFetch;
     }
   });
+
+  it("retries one transient failure for a server-verified idempotent read", async () => {
+    const { callRemoteMcpTool } = await import("../src/mcp");
+    const originalFetch = global.fetch;
+    const retryServer = await startStreamableServer();
+    let fetchCount = 0;
+    let failedToolCall = false;
+    const onBeforeToolCall = vi.fn().mockResolvedValue(undefined);
+
+    global.fetch = (async (...args: Parameters<typeof fetch>) => {
+      fetchCount += 1;
+      const requestBody = typeof args[1]?.body === "string"
+        ? args[1].body
+        : "";
+      if (!failedToolCall && requestBody.includes('"method":"tools/call"')) {
+        failedToolCall = true;
+        throw new Error("synthetic_transient_network_failure");
+      }
+      return originalFetch(...args);
+    }) as typeof fetch;
+
+    try {
+      const result = await callRemoteMcpTool({
+        binding: {
+          id: "binding_safe_retry",
+          slug: "weather-safe-retry",
+          displayName: "Weather MCP safe retry",
+          serverUrl: retryServer.url,
+          transportKind: "streamable_http",
+          defaultToolName: "lookup",
+          allowedToolNames: ["lookup"],
+          maxRetries: 0,
+          retryBackoffMs: 0,
+        },
+        toolArguments: { city: "Shanghai" },
+        retrySafe: true,
+        onBeforeToolCall,
+      });
+
+      expect(result.attempts).toBe(2);
+      expect(result.summary).toContain("Weather for Shanghai");
+      expect(fetchCount).toBeGreaterThan(1);
+      expect(failedToolCall).toBe(true);
+      expect(onBeforeToolCall).toHaveBeenCalledTimes(1);
+    } finally {
+      global.fetch = originalFetch;
+      await retryServer.close();
+    }
+  });
+
+  it("classifies a nested fetch timeout without leaking private details", async () => {
+    const { callRemoteMcpTool, McpTransportError } = await import("../src/mcp");
+    const originalFetch = global.fetch;
+    const timeout = Object.assign(new Error("private upstream detail"), {
+      name: "TimeoutError",
+    });
+    global.fetch = (async () => {
+      throw new TypeError("fetch failed", { cause: timeout });
+    }) as typeof fetch;
+
+    try {
+      const error = await callRemoteMcpTool({
+        binding: {
+          id: "binding_timeout",
+          slug: "weather-timeout",
+          displayName: "Weather MCP timeout",
+          serverUrl: streamableServer!.url,
+          transportKind: "streamable_http",
+          defaultToolName: "lookup",
+          allowedToolNames: ["lookup"],
+          maxRetries: 0,
+          retryBackoffMs: 0,
+        },
+      }).catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(McpTransportError);
+      expect(error).toMatchObject({
+        classification: "timeout",
+        message: "mcp_timeout",
+      });
+      expect(String(error)).not.toContain("private upstream detail");
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
 });
 
 async function startStreamableServer(): Promise<TestServer> {
-  const mcpServer = new McpServer({
-    name: "delegate-test-mcp-streamable",
-    version: "1.0.0",
-  });
-  registerLookupTool(mcpServer);
-
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => `test-session-${Math.random().toString(16).slice(2, 10)}`,
-  });
-  await mcpServer.connect(transport as unknown as Transport);
+  const sessions = new Map<
+    string,
+    {
+      transport: StreamableHTTPServerTransport;
+      server: McpServer;
+    }
+  >();
 
   const server = createServer((request, response) => {
     if ((request.url ?? "/") !== "/mcp") {
@@ -183,7 +265,19 @@ async function startStreamableServer(): Promise<TestServer> {
       return;
     }
 
-    void transport.handleRequest(request, response);
+    const sessionId = request.headers["mcp-session-id"];
+    if (typeof sessionId === "string") {
+      const session = sessions.get(sessionId);
+      if (!session) {
+        response.statusCode = 404;
+        response.end("session_not_found");
+        return;
+      }
+      void session.transport.handleRequest(request, response);
+      return;
+    }
+
+    void handleStreamableInitialization(request, response, sessions);
   });
 
   await listen(server);
@@ -192,11 +286,55 @@ async function startStreamableServer(): Promise<TestServer> {
   return {
     url: `http://127.0.0.1:${address.port}/mcp`,
     async close() {
-      await transport.close().catch(() => undefined);
-      await mcpServer.close().catch(() => undefined);
+      for (const session of [...sessions.values()]) {
+        await session.transport.close().catch(() => undefined);
+        await session.server.close().catch(() => undefined);
+      }
       await closeServer(server);
     },
   };
+}
+
+async function handleStreamableInitialization(
+  request: IncomingMessage,
+  response: ServerResponse,
+  sessions: Map<
+    string,
+    {
+      transport: StreamableHTTPServerTransport;
+      server: McpServer;
+    }
+  >,
+) {
+  const mcpServer = new McpServer({
+    name: "delegate-test-mcp-streamable",
+    version: "1.0.0",
+  });
+  registerLookupTool(mcpServer);
+
+  let transport: StreamableHTTPServerTransport;
+  transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => `test-session-${Math.random().toString(16).slice(2, 10)}`,
+    onsessioninitialized: (sessionId) => {
+      sessions.set(sessionId, { transport, server: mcpServer });
+    },
+  });
+  transport.onclose = () => {
+    if (transport.sessionId) sessions.delete(transport.sessionId);
+  };
+
+  try {
+    await mcpServer.connect(transport as unknown as Transport);
+    await transport.handleRequest(request, response);
+  } catch (error) {
+    await transport.close().catch(() => undefined);
+    await mcpServer.close().catch(() => undefined);
+    if (!response.headersSent) {
+      response.statusCode = 500;
+      response.end("streamable_initialization_failed");
+    }
+    throw error;
+  }
 }
 
 async function startSseServer(): Promise<TestServer> {

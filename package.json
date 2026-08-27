@@ -7,7 +7,8 @@
   "packageManager": "pnpm@10.23.0",
   "scripts": {
     "build": "turbo run build",
-    "verify": "pnpm db:generate && pnpm db:validate && pnpm typecheck && pnpm test && pnpm test:wechat-callback-proxy && pnpm test:wechat-public-key-probe-cli",
+    "verify": "pnpm db:generate && pnpm db:validate && pnpm typecheck:seed && pnpm typecheck && pnpm test && pnpm test:wechat-callback-proxy && pnpm test:wechat-public-key-probe-cli",
+    "typecheck:seed": "tsc --noEmit -p prisma/tsconfig.json",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "dev:web": "pnpm --filter @delegate/dashboard dev",

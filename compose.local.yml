@@ -48,6 +48,22 @@ services:
       - ./packages/workflows/src:/app/packages/workflows/src:ro
       - ./prisma/schema.prisma:/app/prisma/schema.prisma:ro
 
+  conversation-worker:
+    volumes:
+      - ./apps/conversation-worker/src:/app/apps/conversation-worker/src:ro
+      - ./packages/artifacts/src:/app/packages/artifacts/src:ro
+      - ./packages/compute-protocol/src:/app/packages/compute-protocol/src:ro
+      - ./packages/domain/src:/app/packages/domain/src:ro
+      - ./packages/lifecycle-hooks/src:/app/packages/lifecycle-hooks/src:ro
+      - ./packages/model-runtime/src:/app/packages/model-runtime/src:ro
+      - ./packages/openviking/src:/app/packages/openviking/src:ro
+      - ./packages/registry/src:/app/packages/registry/src:ro
+      - ./packages/runtime/src:/app/packages/runtime/src:ro
+      - ./packages/web-data/package.json:/app/packages/web-data/package.json:ro
+      - ./packages/web-data/src:/app/packages/web-data/src:ro
+      - ./packages/workflows/src:/app/packages/workflows/src:ro
+      - ./prisma/schema.prisma:/app/prisma/schema.prisma:ro
+
   reps:
     environment:
       NODE_ENV: development
@@ -91,6 +107,18 @@ services:
       # proxy. Production keeps this unset so benchmark/private ranges remain
       # blocked by the MCP SSRF boundary.
       DELEGATE_ALLOW_DOCKER_DESKTOP_MCP_DNS_PROXY: "true"
+    volumes:
+      - ./apps/compute-broker/src:/app/apps/compute-broker/src:ro
+      - ./packages/artifacts/src:/app/packages/artifacts/src:ro
+      - ./packages/capability-policy/src:/app/packages/capability-policy/src:ro
+      - ./packages/compute-protocol/src:/app/packages/compute-protocol/src:ro
+      - ./packages/domain/src:/app/packages/domain/src:ro
+      - ./packages/lifecycle-hooks/src:/app/packages/lifecycle-hooks/src:ro
+      - ./packages/runtime/src:/app/packages/runtime/src:ro
+      - ./packages/web-data/package.json:/app/packages/web-data/package.json:ro
+      - ./packages/web-data/src:/app/packages/web-data/src:ro
+      - ./packages/workflows/src:/app/packages/workflows/src:ro
+      - ./prisma/schema.prisma:/app/prisma/schema.prisma:ro
 
   bot:
     environment:

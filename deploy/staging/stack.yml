@@ -1,0 +1,578 @@
+version: "3.8"
+
+x-app-service: &app-service
+  image: ${DELEGATE_APP_IMAGE}
+  env_file:
+    - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/app.env
+  networks:
+    - delegate-internal
+  deploy:
+    replicas: ${APP_REPLICAS:-1}
+    restart_policy:
+      condition: on-failure
+      delay: 5s
+      max_attempts: 5
+      window: 120s
+    placement:
+      constraints:
+        - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+    update_config:
+      order: start-first
+      parallelism: 1
+      delay: 10s
+      failure_action: rollback
+      monitor: 30s
+    rollback_config:
+      order: stop-first
+      parallelism: 1
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/postgres.env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - delegate-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U delegate -d delegate"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          cpus: "1.00"
+          memory: 1G
+
+  artifact-store:
+    image: minio/minio:latest
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/artifact-store.env
+    command: server /data --console-address ":9001"
+    volumes:
+      - artifact-store-data:/data
+    networks:
+      - delegate-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 128M
+        limits:
+          cpus: "0.75"
+          memory: 768M
+
+  logto-postgres:
+    image: postgres:17-alpine
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/logto-postgres.env
+    volumes:
+      - logto-postgres-data:/var/lib/postgresql/data
+    networks:
+      - delegate-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U logto -d logto"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 192M
+        limits:
+          cpus: "0.75"
+          memory: 768M
+
+  site:
+    <<: *app-service
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/site.env
+    command: ["sh", "-lc", "pnpm --filter @delegate/site exec next start -H 0.0.0.0 -p 3000"]
+    networks:
+      - delegate-internal
+      - traefik-public
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      replicas: ${APP_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 128M
+        limits:
+          cpus: "0.75"
+          memory: 768M
+      labels:
+        traefik.enable: "true"
+        traefik.constraint-label: traefik-public
+        traefik.docker.network: traefik-public
+        traefik.http.routers.delegate-site-http.entrypoints: http
+        traefik.http.routers.delegate-site-http.middlewares: https-redirect
+        traefik.http.routers.delegate-site-http.rule: Host(`www.bonary.xyz`)
+        traefik.http.routers.delegate-site-https.entrypoints: https
+        traefik.http.routers.delegate-site-https.rule: Host(`www.bonary.xyz`)
+        traefik.http.routers.delegate-site-https.tls: "true"
+        traefik.http.routers.delegate-site-https.tls.certresolver: lehttp
+        traefik.http.services.delegate-site.loadbalancer.server.port: "3000"
+
+  dashboard:
+    <<: *app-service
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/app.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/dashboard.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/auth-apps.env
+    command: ["sh", "-lc", "pnpm --filter @delegate/dashboard exec next start -H 0.0.0.0 -p 3001"]
+    networks:
+      - delegate-internal
+      - traefik-public
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then(r=>{if(r.status!==200)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      replicas: ${APP_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          cpus: "1.25"
+          memory: 1280M
+      labels:
+        traefik.enable: "true"
+        traefik.constraint-label: traefik-public
+        traefik.docker.network: traefik-public
+        traefik.http.routers.delegate-dashboard-http.entrypoints: http
+        traefik.http.routers.delegate-dashboard-http.middlewares: https-redirect
+        traefik.http.routers.delegate-dashboard-http.rule: Host(`dashboard.bonary.xyz`)
+        traefik.http.routers.delegate-dashboard-https.entrypoints: https
+        traefik.http.routers.delegate-dashboard-https.rule: Host(`dashboard.bonary.xyz`)
+        traefik.http.routers.delegate-dashboard-https.tls: "true"
+        traefik.http.routers.delegate-dashboard-https.tls.certresolver: lehttp
+        traefik.http.services.delegate-dashboard.loadbalancer.server.port: "3001"
+
+  reps:
+    <<: *app-service
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/app.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/reps.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/auth-apps.env
+    command: ["sh", "-lc", "pnpm --filter @delegate/reps exec next start -H 0.0.0.0 -p 3002"]
+    networks:
+      - delegate-internal
+      - traefik-public
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/ready').then(r=>{if(r.status!==200)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    deploy:
+      replicas: ${APP_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          cpus: "1.25"
+          memory: 1280M
+      labels:
+        traefik.enable: "true"
+        traefik.constraint-label: traefik-public
+        traefik.docker.network: traefik-public
+        traefik.http.routers.delegate-reps-http.entrypoints: http
+        traefik.http.routers.delegate-reps-http.middlewares: https-redirect
+        traefik.http.routers.delegate-reps-http.rule: Host(`delegate.bonary.xyz`)
+        traefik.http.routers.delegate-reps-https.entrypoints: https
+        traefik.http.routers.delegate-reps-https.rule: Host(`delegate.bonary.xyz`)
+        traefik.http.routers.delegate-reps-https.tls: "true"
+        traefik.http.routers.delegate-reps-https.tls.certresolver: lehttp
+        traefik.http.services.delegate-reps.loadbalancer.server.port: "3002"
+        traefik.http.routers.delegate-pay-http.entrypoints: http
+        traefik.http.routers.delegate-pay-http.middlewares: https-redirect
+        traefik.http.routers.delegate-pay-http.rule: Host(`pay.bonary.xyz`)
+        traefik.http.routers.delegate-pay-http.service: delegate-reps
+        traefik.http.routers.delegate-pay-https.entrypoints: https
+        traefik.http.routers.delegate-pay-https.rule: Host(`pay.bonary.xyz`) && (Path(`/api/payments/wechat/notify`) || Path(`/api/payments/wechat/refund-notify`))
+        traefik.http.routers.delegate-pay-https.service: delegate-reps
+        traefik.http.routers.delegate-pay-https.tls: "true"
+        traefik.http.routers.delegate-pay-https.tls.certresolver: lehttp
+        traefik.http.routers.delegate-api-health-http.entrypoints: http
+        traefik.http.routers.delegate-api-health-http.middlewares: https-redirect
+        traefik.http.routers.delegate-api-health-http.rule: Host(`api.bonary.xyz`)
+        traefik.http.routers.delegate-api-health-http.service: delegate-reps
+        traefik.http.routers.delegate-api-health-https.entrypoints: https
+        traefik.http.routers.delegate-api-health-https.rule: Host(`api.bonary.xyz`) && (Path(`/health`) || Path(`/ready`))
+        traefik.http.routers.delegate-api-health-https.service: delegate-reps
+        traefik.http.routers.delegate-api-health-https.tls: "true"
+        traefik.http.routers.delegate-api-health-https.tls.certresolver: lehttp
+
+  bot:
+    <<: *app-service
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/app.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/bot.env
+    command: ["sh", "-lc", "cd /app/apps/bot && exec node --import tsx src/index.ts"]
+    stop_grace_period: 70s
+    deploy:
+      replicas: ${APP_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 180s
+      resources:
+        reservations:
+          memory: 128M
+        limits:
+          cpus: "0.75"
+          memory: 768M
+
+  compute-broker:
+    <<: *app-service
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/app.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/compute.env
+    command: ["sh", "-lc", "pnpm --filter @delegate/compute-broker start"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4010/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      replicas: ${APP_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 192M
+        limits:
+          cpus: "1.00"
+          memory: 1G
+
+  workflow-runner:
+    <<: *app-service
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/app.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/workflow.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/auth-apps.env
+    command: ["sh", "-lc", "pnpm --filter @delegate/workflow-runner start"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4020/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    deploy:
+      replicas: ${APP_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 192M
+        limits:
+          cpus: "1.00"
+          memory: 1G
+
+  conversation-worker:
+    <<: *app-service
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/app.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/bot.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/matrix.env
+    command: ["sh", "-lc", "pnpm --filter @delegate/conversation-worker start"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4040/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    deploy:
+      replicas: ${APP_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          cpus: "1.25"
+          memory: 1280M
+
+  matrix-bridge:
+    <<: *app-service
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/app.env
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/matrix.env
+    command: ["sh", "-lc", "pnpm --filter @delegate/matrix-bridge start"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4030/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    deploy:
+      replicas: ${APP_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 128M
+        limits:
+          cpus: "0.75"
+          memory: 768M
+
+  openviking:
+    image: ${DELEGATE_OPENVIKING_IMAGE}
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/openviking.env
+    command: ["sh", "-lc", "sh /opt/delegate-openviking/entrypoint.sh"]
+    volumes:
+      - openviking-config:/etc/openviking
+      - openviking-data:/app/data
+    networks:
+      - delegate-internal
+      - traefik-public
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:1933/health >/dev/null || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    deploy:
+      replicas: ${CONTROL_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 512M
+        limits:
+          cpus: "1.50"
+          memory: 2G
+      labels:
+        traefik.enable: "true"
+        traefik.constraint-label: traefik-public
+        traefik.docker.network: traefik-public
+        traefik.http.middlewares.delegate-openviking-auth.basicauth.users: ${OPENVIKING_BASIC_AUTH}
+        traefik.http.routers.delegate-openviking-http.entrypoints: http
+        traefik.http.routers.delegate-openviking-http.middlewares: https-redirect
+        traefik.http.routers.delegate-openviking-http.rule: Host(`openviking.bonary.xyz`)
+        traefik.http.routers.delegate-openviking-https.entrypoints: https
+        traefik.http.routers.delegate-openviking-https.middlewares: delegate-openviking-auth
+        traefik.http.routers.delegate-openviking-https.rule: Host(`openviking.bonary.xyz`)
+        traefik.http.routers.delegate-openviking-https.tls: "true"
+        traefik.http.routers.delegate-openviking-https.tls.certresolver: lehttp
+        traefik.http.services.delegate-openviking.loadbalancer.server.port: "1933"
+
+  logto:
+    image: svhd/logto:1.41.0
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/logto.env
+    networks:
+      - delegate-internal
+      - traefik-public
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/oidc/.well-known/openid-configuration').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 8s
+      retries: 16
+      start_period: 45s
+    deploy:
+      replicas: ${CONTROL_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          cpus: "1.00"
+          memory: 1G
+      labels:
+        traefik.enable: "true"
+        traefik.constraint-label: traefik-public
+        traefik.docker.network: traefik-public
+        traefik.http.routers.delegate-login-http.entrypoints: http
+        traefik.http.routers.delegate-login-http.middlewares: https-redirect
+        traefik.http.routers.delegate-login-http.rule: Host(`login.bonary.xyz`)
+        traefik.http.routers.delegate-login-http.service: delegate-logto-core
+        traefik.http.routers.delegate-login-https.entrypoints: https
+        traefik.http.routers.delegate-login-https.rule: Host(`login.bonary.xyz`)
+        traefik.http.routers.delegate-login-https.service: delegate-logto-core
+        traefik.http.routers.delegate-login-https.tls: "true"
+        traefik.http.routers.delegate-login-https.tls.certresolver: lehttp
+        traefik.http.services.delegate-logto-core.loadbalancer.server.port: "3001"
+        traefik.http.routers.delegate-login-admin-http.entrypoints: http
+        traefik.http.routers.delegate-login-admin-http.middlewares: https-redirect
+        traefik.http.routers.delegate-login-admin-http.rule: Host(`login-admin.bonary.xyz`)
+        traefik.http.routers.delegate-login-admin-http.service: delegate-logto-admin
+        traefik.http.routers.delegate-login-admin-https.entrypoints: https
+        traefik.http.routers.delegate-login-admin-https.rule: Host(`login-admin.bonary.xyz`)
+        traefik.http.routers.delegate-login-admin-https.service: delegate-logto-admin
+        traefik.http.routers.delegate-login-admin-https.tls: "true"
+        traefik.http.routers.delegate-login-admin-https.tls.certresolver: lehttp
+        traefik.http.services.delegate-logto-admin.loadbalancer.server.port: "3002"
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    env_file:
+      - ${DELEGATE_ENV_ROOT:-/home/ubuntu/delegate/shared/env}/temporal.env
+    networks:
+      - delegate-internal
+    deploy:
+      replicas: ${CONTROL_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          cpus: "1.00"
+          memory: 1280M
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_UI_PORT: "8080"
+    networks:
+      - delegate-internal
+    deploy:
+      replicas: ${CONTROL_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  synapse:
+    image: matrixdotorg/synapse:v1.157.0
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+      UID: "1000"
+      GID: "1001"
+    volumes:
+      - /home/ubuntu/delegate/shared/matrix:/data
+    networks:
+      - delegate-internal
+      - traefik-public
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8008/_matrix/client/versions', timeout=5)\" || exit 1"]
+      interval: 15s
+      timeout: 8s
+      retries: 16
+      start_period: 45s
+    deploy:
+      replicas: ${CONTROL_REPLICAS:-1}
+      placement:
+        constraints:
+          - node.hostname == ${DELEGATE_NODE_HOSTNAME:-VM-0-14-ubuntu}
+      restart_policy:
+        condition: on-failure
+      resources:
+        reservations:
+          memory: 256M
+        limits:
+          cpus: "1.00"
+          memory: 1G
+      labels:
+        traefik.enable: "true"
+        traefik.constraint-label: traefik-public
+        traefik.docker.network: traefik-public
+        traefik.http.routers.delegate-matrix-http.entrypoints: http
+        traefik.http.routers.delegate-matrix-http.middlewares: https-redirect
+        traefik.http.routers.delegate-matrix-http.rule: Host(`matrix.bonary.xyz`)
+        traefik.http.routers.delegate-matrix-https.entrypoints: https
+        traefik.http.routers.delegate-matrix-https.rule: Host(`matrix.bonary.xyz`)
+        traefik.http.routers.delegate-matrix-https.tls: "true"
+        traefik.http.routers.delegate-matrix-https.tls.certresolver: lehttp
+        traefik.http.services.delegate-matrix.loadbalancer.server.port: "8008"
+
+networks:
+  delegate-internal:
+    external: true
+  traefik-public:
+    external: true
+
+volumes:
+  postgres-data:
+  artifact-store-data:
+  logto-postgres-data:
+  openviking-config:
+  openviking-data:

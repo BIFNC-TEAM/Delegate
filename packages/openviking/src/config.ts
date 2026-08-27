@@ -18,6 +18,7 @@ const envSchema = z.object({
   OPENVIKING_VLM_MODEL: z.string().optional(),
   OPENVIKING_EMBEDDING_MODEL: z.string().optional(),
   OPENVIKING_EMBEDDING_DIMENSION: z.string().optional(),
+  OPENVIKING_MODEL_CREDENTIALS_CONFIGURED: z.string().optional(),
   OPENVIKING_CAPTURE_MODE_DEFAULT: z.string().optional(),
   OPENVIKING_MODEL_API_KEY: z.string().optional(),
   OPENVIKING_MODEL_API_BASE: z.string().optional(),
@@ -70,6 +71,10 @@ export function resolveOpenVikingEnv(env: NodeJS.ProcessEnv = process.env): Open
   const hasArkConfig = Boolean(
     (dedicatedModelApiKey ?? normalizeOptionalString(parsed.ARK_API_KEY)) && provider === "volcengine",
   );
+  const modelCredentialsConfigured = parseBoolean(
+    parsed.OPENVIKING_MODEL_CREDENTIALS_CONFIGURED,
+    false,
+  );
 
   return {
     enabled,
@@ -91,7 +96,7 @@ export function resolveOpenVikingEnv(env: NodeJS.ProcessEnv = process.env): Open
       normalizeOptionalString(parsed.OPENVIKING_EMBEDDING_MODEL) ?? "text-embedding-3-large",
     embeddingDimension: parseInteger(parsed.OPENVIKING_EMBEDDING_DIMENSION, 3072),
     mode,
-    hasModelCredentials: hasOpenAiConfig || hasArkConfig,
+    hasModelCredentials: modelCredentialsConfigured || hasOpenAiConfig || hasArkConfig,
   };
 }
 

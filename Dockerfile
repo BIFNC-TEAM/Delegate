@@ -1,6 +1,12 @@
 FROM node:22-bookworm-slim
 
-RUN apt-get update \
+ARG DEBIAN_MIRROR=""
+
+RUN if [ -n "$DEBIAN_MIRROR" ]; then \
+      sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" \
+        /etc/apt/sources.list.d/debian.sources; \
+    fi \
+  && apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 update \
   && apt-get install -y --no-install-recommends openssl ca-certificates docker.io \
   && rm -rf /var/lib/apt/lists/*
 

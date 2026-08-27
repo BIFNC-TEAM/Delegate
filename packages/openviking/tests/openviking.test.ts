@@ -453,6 +453,16 @@ describe("OpenViking env config", () => {
 
     expect(config.hasModelCredentials).toBe(true);
   });
+
+  it("accepts a deployment capability flag without receiving the provider secret", () => {
+    const config = resolveOpenVikingEnv({
+      OPENVIKING_ENABLED: "true",
+      OPENVIKING_PROVIDER: "openai",
+      OPENVIKING_MODEL_CREDENTIALS_CONFIGURED: "true",
+    });
+
+    expect(config.hasModelCredentials).toBe(true);
+  });
 });
 
 describe("OpenViking client", () => {

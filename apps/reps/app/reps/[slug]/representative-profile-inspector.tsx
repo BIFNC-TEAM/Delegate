@@ -401,9 +401,9 @@ function ChannelStatus({
 }
 
 const zhCopy = {
-  profileLabel: "数字代表资料",
+  profileLabel: "对外代理资料",
   representativeInfoLabel: "代表信息",
-  profileEyebrow: "数字代表",
+  profileEyebrow: "对外代理",
   representing: (owner: string) => `代表 ${owner} 接待`,
   channelLabel: "渠道连续性",
   channelDetail: "绑定后，Web 与已开放的私聊渠道会识别为同一个 Delegate 用户；各渠道的原始消息仍分别保存。",

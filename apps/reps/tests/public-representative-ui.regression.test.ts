@@ -56,7 +56,7 @@ describe("public representative product shell", () => {
     expect(chatSource).not.toContain("representative-session-state");
     expect(chatSource).not.toContain("representative-chat-memory-note");
     expect(chatSource).not.toContain('className="representative-chat-trust-note"');
-    expect(chatSource).not.toContain("你正在与数字代表对话；需要真人判断时会明确提示。");
+    expect(chatSource).not.toContain("你正在与对外代理对话；需要真人判断时会明确提示。");
     expect(chatSource).not.toContain("t.aiActiveDetail");
     expect(chatSource).toContain("{sessionSummary}");
   });

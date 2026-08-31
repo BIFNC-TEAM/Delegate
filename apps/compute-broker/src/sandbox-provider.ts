@@ -13,12 +13,16 @@ import {
   type RunnerLease,
   type RunnerLeaseInput,
 } from "./runner";
+import type { SandboxProviderKind } from "./sandbox-routing";
 
-export type SandboxProviderKind = "docker" | "daytona";
+export type { SandboxProviderKind } from "./sandbox-routing";
+export type SandboxRuntimeClass = "code" | "browser";
 
 export type SandboxProviderStartInput = RunnerLeaseInput & {
   sandboxIdentityId: string;
   sandboxLeaseId: string;
+  creationKey?: string | undefined;
+  runtimeClass?: SandboxRuntimeClass | undefined;
   providerSandboxId?: string | null | undefined;
   labels?: Record<string, string> | undefined;
 };
@@ -31,6 +35,8 @@ export type SandboxProviderLease = RunnerLease & {
 
 export type SandboxProviderExecutionInput = Omit<RunnerExecutionInput, "lease"> & {
   lease: SandboxProviderLease;
+  maxStdoutBytes?: number | undefined;
+  maxStderrBytes?: number | undefined;
 };
 
 export type SandboxProviderStopInput = {
@@ -39,6 +45,32 @@ export type SandboxProviderStopInput = {
 };
 
 export type SandboxProviderDeleteInput = SandboxProviderStopInput;
+
+export type SandboxProviderErrorCode =
+  | "THROTTLED"
+  | "TRANSPORT_TIMEOUT"
+  | "REMOTE_5XX"
+  | "AUTH_INVALID"
+  | "CONFIG_INVALID"
+  | "POLICY_UNSUPPORTED"
+  | "RUNTIME_NOT_FOUND"
+  | "COMMAND_TIMEOUT"
+  | "AMBIGUOUS_CREATE"
+  | "OUTPUT_LIMIT";
+
+export class SandboxProviderError extends Error {
+  readonly code: SandboxProviderErrorCode;
+  readonly retryable: boolean;
+  readonly ambiguous: boolean;
+
+  constructor(code: SandboxProviderErrorCode, retryable: boolean, ambiguous = false) {
+    super(code.toLowerCase());
+    this.name = "SandboxProviderError";
+    this.code = code;
+    this.retryable = retryable;
+    this.ambiguous = ambiguous;
+  }
+}
 
 export type SandboxProvider = {
   readonly kind: SandboxProviderKind;
@@ -61,12 +93,20 @@ export type SandboxProviderConfig = {
     autoArchiveMinutes?: number | undefined;
     autoDeleteMinutes?: number | undefined;
   } | undefined;
+  tencent?: {
+    apiKey?: string | undefined;
+    domain?: string | undefined;
+    codeTool?: string | undefined;
+  } | undefined;
 };
 
 export async function createSandboxProviderFromConfig(config: SandboxProviderConfig): Promise<{
   provider: SandboxProvider;
   providerKind: SandboxProviderKind;
 }> {
+  if (config.sandboxProvider === "tencent") {
+    throw new Error("Tencent sandbox provider must be created through the provider registry.");
+  }
   const daytonaApiKey = config.daytona?.apiKey;
   if (config.sandboxProvider === "daytona" && daytonaApiKey) {
     const client = await createDaytonaClientFromInstalledSdk({
@@ -135,6 +175,8 @@ export function createDockerSandboxProvider(
         workingDirectory: input.workingDirectory,
         sessionId: input.sessionId,
         executionId: input.executionId,
+        maxStdoutBytes: input.maxStdoutBytes,
+        maxStderrBytes: input.maxStderrBytes,
       });
     },
     async stop(input) {
@@ -245,9 +287,7 @@ async function importDaytonaSdk(): Promise<Record<string, unknown>> {
 export type DaytonaCreateInput = {
   image: string;
   labels: Record<string, string>;
-  networkMode: ComputeNetworkMode;
-  filesystemMode: ComputeFilesystemMode;
-  hostWorkspaceRoot: string;
+  networkBlockAll?: boolean | undefined;
   resources?: DaytonaSandboxResources | undefined;
 };
 
@@ -277,7 +317,12 @@ export type DaytonaSandboxLike = {
   setAutoArchiveInterval?: ((minutes: number) => Promise<unknown>) | undefined;
   setAutoDeleteInterval?: ((minutes: number) => Promise<unknown>) | undefined;
   process?: {
-    executeCommand?: ((command: string) => Promise<DaytonaCommandResult>) | undefined;
+    executeCommand?: ((
+      command: string,
+      cwd?: string,
+      env?: Record<string, string>,
+      timeoutSeconds?: number,
+    ) => Promise<DaytonaCommandResult>) | undefined;
   } | undefined;
 };
 
@@ -317,10 +362,21 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   }
 
   async start(input: SandboxProviderStartInput): Promise<SandboxProviderLease> {
+    if (input.runtimeClass && input.runtimeClass !== "code") {
+      throw new SandboxProviderError("POLICY_UNSUPPORTED", false);
+    }
+    if (input.filesystemMode !== "ephemeral_full") {
+      throw new SandboxProviderError("POLICY_UNSUPPORTED", false);
+    }
+    if (input.networkMode === "allowlist") {
+      throw new SandboxProviderError("POLICY_UNSUPPORTED", false);
+    }
     const labels = {
       "delegate.sandbox_identity_id": input.sandboxIdentityId,
       "delegate.sandbox_lease_id": input.sandboxLeaseId,
       "delegate.compute_session_id": input.sessionId,
+      ...(input.creationKey ? { "delegate.creation_key": input.creationKey } : {}),
+      "delegate.runtime_class": input.runtimeClass ?? "code",
       ...(input.labels ?? {}),
     };
     const sandbox = input.providerSandboxId
@@ -328,9 +384,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       : await this.client.create({
           image: input.image,
           labels,
-          networkMode: input.networkMode,
-          filesystemMode: input.filesystemMode,
-          hostWorkspaceRoot: input.hostWorkspaceRoot,
+          networkBlockAll: input.networkMode === "no_network",
           ...(this.resources ? { resources: this.resources } : {}),
         });
 
@@ -356,18 +410,27 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   async execute(input: SandboxProviderExecutionInput): Promise<DockerExecutionResult> {
     const sandbox = await this.getExistingSandbox(assertProviderSandboxId(input.lease));
     const startedAt = Date.now();
-    const result = await sandbox.process?.executeCommand?.(input.command);
+    const result = await sandbox.process?.executeCommand?.(
+      input.command,
+      input.workingDirectory ?? "/workspace",
+      { DELEGATE_SESSION_ROOT: "/workspace" },
+      input.maxCommandSeconds,
+    );
 
     if (!result) {
       throw new Error("Daytona sandbox process execution is not available.");
     }
 
+    const stdout = truncateProviderOutput(result.stdout ?? result.result ?? "", input.maxStdoutBytes);
+    const stderr = truncateProviderOutput(result.stderr ?? "", input.maxStderrBytes);
+    const outputLimited = stdout.truncated || stderr.truncated;
     return {
-      exitCode: typeof result.exitCode === "number" ? result.exitCode : 0,
-      stdout: result.stdout ?? result.result ?? "",
-      stderr: result.stderr ?? "",
+      exitCode: outputLimited ? null : typeof result.exitCode === "number" ? result.exitCode : 0,
+      stdout: stdout.value,
+      stderr: stderr.value,
       wallMs: Math.max(1, Date.now() - startedAt),
       containerName: input.lease.containerName ?? input.lease.providerSandboxId ?? input.lease.id,
+      termination: outputLimited ? "output_limit" : "exit",
     };
   }
 
@@ -421,4 +484,14 @@ function assertProviderSandboxId(lease: SandboxProviderLease): string {
     throw new Error("Sandbox provider lease is missing providerSandboxId.");
   }
   return lease.providerSandboxId;
+}
+
+export function truncateProviderOutput(value: string, maxBytes?: number) {
+  if (!maxBytes) return { value, truncated: false };
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength <= maxBytes) return { value, truncated: false };
+  return {
+    value: bytes.subarray(0, maxBytes).toString("utf8"),
+    truncated: true,
+  };
 }

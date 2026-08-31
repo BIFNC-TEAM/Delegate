@@ -61,7 +61,7 @@ export const dashboardNavigation: Array<{
     items: [
       { id: "overview", index: "00", label: text("总览", "Overview"), shortLabel: text("总览", "Overview") },
       { id: "knowledge", index: "01", label: text("知识库", "Knowledge Library"), shortLabel: text("知识", "Knowledge") },
-      { id: "representatives", index: "02", label: text("数字代表", "Digital Representatives"), shortLabel: text("代表", "Representatives") },
+      { id: "representatives", index: "02", label: text("对外代理", "Digital Representatives"), shortLabel: text("代表", "Representatives") },
       { id: "inbox", index: "03", label: text("会话与线索", "Inbox"), shortLabel: text("会话", "Inbox") },
       { id: "approvals", index: "04", label: text("待审批 Action", "Approvals"), shortLabel: text("审批", "Approvals") },
     ],
@@ -117,12 +117,12 @@ export const dashboardSectionBlueprints: Record<
   },
   representatives: {
     eyebrow: text("Digital Representatives", "Digital Representatives"),
-    title: text("从知识、边界到价格，发布一个完整的数字代表。", "Publish a complete digital representative from knowledge to boundaries and pricing."),
-    description: text("创建、配置、预览和发布数字代表，并在同一处查看它们的运行状态。", "Create, configure, preview, and publish representatives while keeping their operating state visible."),
-    primaryAction: text("创建数字代表", "Create representative"),
-    tabs: [text("代表列表", "Representatives"), text("创建数字代表", "Create"), text("代表详情", "Details"), text("发布检查", "Publish checklist")],
+    title: text("从知识、边界到价格，发布一个完整的对外代理。", "Publish a complete digital representative from knowledge to boundaries and pricing."),
+    description: text("创建、配置、预览和发布对外代理，并在同一处查看它们的运行状态。", "Create, configure, preview, and publish representatives while keeping their operating state visible."),
+    primaryAction: text("创建对外代理", "Create representative"),
+    tabs: [text("代表列表", "Representatives"), text("创建对外代理", "Create"), text("代表详情", "Details"), text("发布检查", "Publish checklist")],
     metrics: [
-      { label: text("数字代表", "Representatives"), value: "04", detail: text("工作区总数", "Workspace total"), tone: "teal" },
+      { label: text("对外代理", "Representatives"), value: "04", detail: text("工作区总数", "Workspace total"), tone: "teal" },
       { label: text("已发布", "Published"), value: "03", detail: text("正在公开接待", "Live public interfaces") },
       { label: text("草稿", "Drafts"), value: "01", detail: text("尚未完成发布校验", "Not publish-ready") },
       { label: text("今日会话", "Conversations today"), value: "18", detail: text("来自全部代表", "Across all representatives"), tone: "indigo" },
@@ -132,7 +132,7 @@ export const dashboardSectionBlueprints: Record<
       description: text("快速判断发布状态、知识完整度和公开入口。", "Scan publishing state, knowledge coverage, and public entry points."),
       columns: [text("代表名称", "Representative"), text("状态", "Status"), text("知识文件", "Knowledge"), text("FAQ / 服务", "FAQ / Services"), text("最近发布", "Last published")],
       rows: [
-        [text("Lin 的数字代表", "Lin's digital representative"), text("已发布", "Published"), text("12 个文件", "12 files"), text("18 / 6", "18 / 6"), text("今天 09:42", "Today 09:42")],
+        [text("Lin 的对外代理", "Lin's digital representative"), text("已发布", "Published"), text("12 个文件", "12 files"), text("18 / 6", "18 / 6"), text("今天 09:42", "Today 09:42")],
         [text("Delegate 产品顾问", "Delegate product advisor"), text("已发布", "Published"), text("8 个文件", "8 files"), text("12 / 4", "12 / 4"), text("昨天", "Yesterday")],
         [text("招聘接待代表", "Recruiting front desk"), text("草稿", "Draft"), text("3 个文件", "3 files"), text("6 / 2", "6 / 2"), text("尚未发布", "Not published")],
       ],
@@ -159,7 +159,7 @@ export const dashboardSectionBlueprints: Record<
       description: text("按用户、来源代表、意图、付款和推荐动作排序。", "Triage by user, representative, intent, payment, and recommended action."),
       columns: [text("用户", "User"), text("来源代表", "Representative"), text("Intent", "Intent"), text("状态", "Status"), text("推荐动作", "Recommended action")],
       rows: [
-        [text("Alex Chen", "Alex Chen"), text("Lin 的数字代表", "Lin's representative"), text("Collaboration", "Collaboration"), text("Reviewing", "Reviewing"), text("安排 20 分钟沟通", "Schedule 20 min call")],
+        [text("Alex Chen", "Alex Chen"), text("Lin 的对外代理", "Lin's representative"), text("Collaboration", "Collaboration"), text("Reviewing", "Reviewing"), text("安排 20 分钟沟通", "Schedule 20 min call")],
         [text("Mina / Acme", "Mina / Acme"), text("产品顾问", "Product advisor"), text("Pricing", "Pricing"), text("待处理", "Open"), text("确认预算范围", "Confirm budget")],
         [text("匿名访客 #184", "Visitor #184"), text("招聘接待代表", "Recruiting desk"), text("Materials", "Materials"), text("已完成", "Closed"), text("无需人工接手", "No handoff needed")],
       ],
@@ -186,7 +186,7 @@ export const dashboardSectionBlueprints: Record<
       description: text("按风险、请求时间和过期时间处理敏感动作。", "Review sensitive actions by risk, request time, and expiry."),
       columns: [text("Action 类型", "Action"), text("来源代表", "Representative"), text("用户 / 会话", "User / conversation"), text("风险", "Risk"), text("过期时间", "Expires")],
       rows: [
-        [text("发送报价文件", "Send proposal file"), text("Lin 的数字代表", "Lin's representative"), text("Alex Chen", "Alex Chen"), text("高", "High"), text("28 分钟", "28 min")],
+        [text("发送报价文件", "Send proposal file"), text("Lin 的对外代理", "Lin's representative"), text("Alex Chen", "Alex Chen"), text("高", "High"), text("28 分钟", "28 min")],
         [text("浏览器提交表单", "Submit browser form"), text("产品顾问", "Product advisor"), text("Mina / Acme", "Mina / Acme"), text("中", "Medium"), text("2 小时", "2 hours")],
         [text("调用 CRM MCP", "Call CRM MCP"), text("销售接待代表", "Sales front desk"), text("Conversation #932", "Conversation #932"), text("中", "Medium"), text("5 小时", "5 hours")],
       ],
@@ -263,7 +263,7 @@ export const dashboardSectionBlueprints: Record<
       description: text("比较会话、FAQ 命中、未回答、Handoff 与收入。", "Compare conversations, FAQ hits, unanswered questions, handoff, and revenue."),
       columns: [text("代表", "Representative"), text("会话", "Conversations"), text("FAQ 命中", "FAQ hit"), text("Handoff", "Handoff"), text("收入", "Revenue")],
       rows: [
-        [text("Lin 的数字代表", "Lin's representative"), text("342", "342"), text("72%", "72%"), text("38", "38"), text("¥1,640", "¥1,640")],
+        [text("Lin 的对外代理", "Lin's representative"), text("342", "342"), text("72%", "72%"), text("38", "38"), text("¥1,640", "¥1,640")],
         [text("Delegate 产品顾问", "Delegate product advisor"), text("218", "218"), text("68%", "68%"), text("31", "31"), text("¥920", "¥920")],
         [text("招聘接待代表", "Recruiting front desk"), text("124", "124"), text("61%", "61%"), text("17", "17"), text("¥300", "¥300")],
       ],

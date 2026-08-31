@@ -96,6 +96,12 @@ export async function createComputeSession(rawInput: unknown) {
       throw new SessionError(403, `capability_not_granted_by_published_version:${capability}`);
     }
   }
+  if (
+    computeBrokerConfig.sandboxRoutingMode === "manual_poc" &&
+    input.requestedCapabilities.includes("browser")
+  ) {
+    throw new SessionError(409, "sandbox_runtime_class_not_enabled");
+  }
 
   const defaultPolicyProfile = representative.capabilityProfiles[0];
   const defaultPolicyProfileId = defaultPolicyProfile?.id;
@@ -135,6 +141,7 @@ export async function createComputeSession(rawInput: unknown) {
     status: "REQUESTED" as const,
     runnerType: mapRunnerTypeToDb(computeBrokerConfig.runnerType),
     baseImage: requestedBaseImage,
+    runtimeClass: input.requestedCapabilities.includes("browser") ? "BROWSER" as const : "CODE" as const,
     leaseTokenHash,
     expiresAt,
   };
@@ -315,6 +322,7 @@ export async function createComputeSession(rawInput: unknown) {
       leaseStatus: "requested",
       runnerType: computeBrokerConfig.runnerType,
       baseImage: session.baseImage,
+      runtimeClass: session.runtimeClass.toLowerCase(),
       leaseToken,
       expiresAt: session.expiresAt?.toISOString(),
       leaseAcquiredAt: null,
@@ -455,6 +463,7 @@ export async function replaceApprovedV3ExecutionSession(input: {
         baseImage: capability === "browser"
           ? computeBrokerConfig.browserImage
           : runtimeAuthority.compute.baseImage,
+        runtimeClass: capability === "browser" ? "BROWSER" : "CODE",
         leaseTokenHash,
         expiresAt,
       },

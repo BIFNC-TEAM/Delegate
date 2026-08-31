@@ -1,4 +1,4 @@
-# 数字代表统一对话运行流程
+# 对外代理统一对话运行流程
 
 本文描述 Web、Matrix、Telegram 的共同业务流程。Agent 规划与能力执行的完整协议见
 [Agent Runtime V3](./agent-runtime-v3.md)；该文档是规划、执行、审批、证据、交付和
@@ -101,7 +101,7 @@ Authority、Semantic Confidence 和 General Eligibility。服务端不维护订�
 Provider 即使把已选 Capability 的 Goal 错写为 General，服务端也只会按该 Capability 的真实
 Semantics 收紧；不会补造权限或把只读能力升级成写入能力。
 
-公开数字代表默认 `knowledgePolicy=prefer_authorized`，因此先尝试授权知识。只有用户本轮明确
+公开对外代理默认 `knowledgePolicy=prefer_authorized`，因此先尝试授权知识。只有用户本轮明确
 要求“知识未命中后使用稳定通用知识”，且服务端把完整 Goal 子句正向确认为非 Owner 专属时，
 才物化 Goal 级
 `knowledge_preferred`：先运行同一发布版本和授权 Manifest 的 Knowledge Action；命中则引用

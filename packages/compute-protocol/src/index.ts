@@ -95,6 +95,7 @@ export const deliverablePackagingPresetKeySchema = z.enum([
 export const maxDeliverableBundleItems = 20;
 export const computeRequestedBySchema = z.enum(["system", "owner", "audience"]);
 export const computeRunnerTypeSchema = z.enum(["docker", "vm"]);
+export const sandboxRuntimeClassSchema = z.enum(["code", "browser"]);
 export const computeNetworkModeSchema = z.enum(["no_network", "allowlist", "full"]);
 export const computeFilesystemModeSchema = z.enum([
   "workspace_only",
@@ -286,6 +287,7 @@ export const computeSessionLeaseSchema = z.object({
   leaseStatus: computeLeaseStatusSchema,
   runnerType: computeRunnerTypeSchema,
   baseImage: z.string(),
+  runtimeClass: sandboxRuntimeClassSchema.optional(),
   leaseToken: z.string(),
   leaseId: z.string().nullable().optional(),
   expiresAt: z.string().datetime().optional(),
@@ -309,6 +311,7 @@ export const computeSessionSnapshotSchema = z.object({
   runnerType: computeRunnerTypeSchema,
   runnerLeaseId: z.string().nullable(),
   baseImage: z.string(),
+  runtimeClass: sandboxRuntimeClassSchema.optional(),
   containerId: z.string().nullable(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -1323,7 +1326,8 @@ export const brokerHealthSchema = z.object({
   status: z.literal("ok"),
   service: z.literal("compute-broker"),
   runnerType: computeRunnerTypeSchema,
-  sandboxProvider: z.enum(["docker", "daytona"]).optional(),
+  sandboxProvider: z.enum(["docker", "daytona", "tencent"]).optional(),
+  sandboxRoutingMode: z.enum(["legacy", "manual_poc"]).optional(),
   artifactBucket: z.string(),
 });
 

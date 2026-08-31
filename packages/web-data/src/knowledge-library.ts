@@ -329,7 +329,7 @@ export async function setRepresentativeKnowledgeAssetBindings(
         demoLog(
           "representative_binding",
           "info",
-          isSelected ? "知识已授权给数字代表，等待索引同步。" : "知识已从数字代表撤回，等待索引清理。",
+          isSelected ? "知识已授权给对外代理，等待索引同步。" : "知识已从对外代理撤回，等待索引清理。",
         ),
       );
     }
@@ -434,8 +434,8 @@ export async function setRepresentativeKnowledgeAssetBindings(
           assetId,
           stage: "representative_binding",
           message: selectedSet.has(assetId)
-            ? "知识已授权给数字代表，等待索引同步。"
-            : "知识已从数字代表撤回，等待索引清理。",
+            ? "知识已授权给对外代理，等待索引同步。"
+            : "知识已从对外代理撤回，等待索引清理。",
         })),
       });
     }
@@ -1594,8 +1594,8 @@ const demoKnowledgeAssets: KnowledgeAssetRecord[] = [
     tags: ["创始人", "品牌"],
     autoTags: ["团队", "品牌", "服务"],
     visibility: "selected_representatives",
-    summary: "Lin 专注于 AI automation、代表型 agent 体验和业务流程设计，帮助有稳定 inbound 的小团队建立可信、可控的数字代表。",
-    text: "Lin 是 Delegate 的创始人，专注于 AI automation、数字代表体验和服务流程设计。Delegate 帮助小团队将重复的 inbound 接待、资格筛选、资料交付和人工转接流程结构化。对外沟通应清晰、直接、礼貌，并优先给出可执行的下一步。",
+    summary: "Lin 专注于 AI automation、代表型 agent 体验和业务流程设计，帮助有稳定 inbound 的小团队建立可信、可控的对外代理。",
+    text: "Lin 是 Delegate 的创始人，专注于 AI automation、对外代理体验和服务流程设计。Delegate 帮助小团队将重复的 inbound 接待、资格筛选、资料交付和人工转接流程结构化。对外沟通应清晰、直接、礼貌，并优先给出可执行的下一步。",
     linked: true,
   }),
   makeSeedAsset({
@@ -1607,7 +1607,7 @@ const demoKnowledgeAssets: KnowledgeAssetRecord[] = [
     autoTags: ["服务", "政策", "价格"],
     visibility: "organization_shared",
     summary: "说明咨询服务的适用客户、标准交付范围、报价边界、退款原则和必须转人工处理的情况。",
-    text: "本政策说明 Delegate 咨询服务的适用范围。数字代表可以介绍服务、收集预算与时间要求，但不得直接承诺最终报价、折扣或退款。涉及敏感资料、合同条款和高价值交易时必须转人工审批。",
+    text: "本政策说明 Delegate 咨询服务的适用范围。对外代理可以介绍服务、收集预算与时间要求，但不得直接承诺最终报价、折扣或退款。涉及敏感资料、合同条款和高价值交易时必须转人工审批。",
     linked: true,
   }),
   makeSeedAsset({
@@ -1618,8 +1618,8 @@ const demoKnowledgeAssets: KnowledgeAssetRecord[] = [
     tags: ["产品", "FAQ"],
     autoTags: ["产品", "FAQ", "技术"],
     visibility: "public_material",
-    summary: "覆盖数字代表是什么、能完成哪些公开任务、知识权限如何生效，以及何时需要主人审批。",
-    text: "Delegate 是数字代表操作系统。数字代表使用已授权的公开知识回答常见问题、筛选线索、收集需求并交付公开资料。私有文件、账号操作、退款、折扣和敏感材料默认不能自动访问或执行，需要主人明确审批。",
+    summary: "覆盖对外代理是什么、能完成哪些公开任务、知识权限如何生效，以及何时需要主人审批。",
+    text: "Delegate 是对外代理操作系统。对外代理使用已授权的公开知识回答常见问题、筛选线索、收集需求并交付公开资料。私有文件、账号操作、退款、折扣和敏感材料默认不能自动访问或执行，需要主人明确审批。",
     linked: false,
   }),
 ];

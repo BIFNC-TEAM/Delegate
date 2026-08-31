@@ -65,7 +65,7 @@ const frameworkCopy = {
     brandKicker: "Digital Representative OS",
     workspaceLabel: "当前工作区",
     workspaceName: "Delegate Studio",
-    workspaceMeta: (count: number) => `${count} 个数字代表`,
+    workspaceMeta: (count: number) => `${count} 个对外代理`,
     switchWorkspace: "切换代表",
     navAria: "Dashboard 主导航",
     frameworkBadge: "UI Framework",
@@ -177,7 +177,7 @@ export function DashboardFramework(props: DashboardFrameworkProps) {
                   <span>
                     <strong>
                       {props.locale === "zh"
-                        ? "创建第一个数字代表"
+                        ? "创建第一个对外代理"
                         : "Create the first representative"}
                     </strong>
                     <small>
@@ -436,7 +436,7 @@ function DashboardRepresentativeOnboarding({
           <p>ONBOARDING / 00</p>
           <h1>
             {zh
-              ? "先创建第一个数字代表。"
+              ? "先创建第一个对外代理。"
               : "Create your first representative."}
           </h1>
           <span>
@@ -454,7 +454,7 @@ function DashboardRepresentativeOnboarding({
         <div className="representative-directory-empty">
           <span>REPRESENTATIVES / 00</span>
           <h3 id="dashboard-empty-representative-title">
-            {zh ? "当前工作区还没有数字代表" : "No representatives in this workspace"}
+            {zh ? "当前工作区还没有对外代理" : "No representatives in this workspace"}
           </h3>
           <p>
             {zh
@@ -466,7 +466,7 @@ function DashboardRepresentativeOnboarding({
               className="dashboard-v2-button-primary"
               href={buildDashboardHref("representatives", "", locale)}
             >
-              {zh ? "创建数字代表" : "Create representative"}
+              {zh ? "创建对外代理" : "Create representative"}
             </Link>
             <Link
               className="dashboard-v2-button-secondary"
@@ -494,7 +494,7 @@ function DashboardOverviewFramework({
 }) {
   const zh = locale === "zh";
   const metricCards = [
-    { label: zh ? "数字代表总数" : "Representatives", value: String(Math.max(representativeCount, 1)).padStart(2, "0"), detail: zh ? "覆盖整个工作区" : "Across this workspace", tone: "teal" },
+    { label: zh ? "对外代理总数" : "Representatives", value: String(Math.max(representativeCount, 1)).padStart(2, "0"), detail: zh ? "覆盖整个工作区" : "Across this workspace", tone: "teal" },
     { label: zh ? "已发布代表" : "Published", value: String(Math.max(representativeCount, 1)).padStart(2, "0"), detail: zh ? "正在公开接待" : "Live public interfaces" },
     { label: zh ? "知识库文件" : "Knowledge files", value: "24", detail: zh ? "19 个已完成处理" : "19 fully processed" },
     { label: zh ? "今日会话" : "Conversations today", value: "18", detail: zh ? "较昨日 +12%" : "+12% from yesterday", tone: "indigo" },
@@ -518,7 +518,7 @@ function DashboardOverviewFramework({
   ];
   const activities = [
     { time: "10:42", title: zh ? "审批 Action 已通过" : "Action approved", detail: zh ? "Lin AI · 发送报价文件" : "Lin AI · Proposal delivery", kind: "AP" },
-    { time: "09:52", title: zh ? "数字代表已发布" : "Representative published", detail: zh ? "招聘接待代表 · v0.8" : "Recruiting front desk · v0.8", kind: "DR" },
+    { time: "09:52", title: zh ? "对外代理已发布" : "Representative published", detail: zh ? "招聘接待代表 · v0.8" : "Recruiting front desk · v0.8", kind: "DR" },
     { time: "09:18", title: zh ? "知识文件处理完成" : "Knowledge processing complete", detail: "Founder profile.pdf · 18 chunks", kind: "KB" },
   ];
 
@@ -624,7 +624,7 @@ function DashboardOverviewFramework({
         <Panel eyebrow={zh ? "快捷操作" : "Quick actions"} title={zh ? "从常用入口开始" : "Start from a common task"} tone="teal">
           <div className="dashboard-v2-quick-actions">
             <Link href={buildDashboardHref("knowledge", activeSlug, locale)}><span>01</span><strong>{zh ? "上传知识文件" : "Upload knowledge"}</strong><b>→</b></Link>
-            <Link href={buildDashboardHref("representatives", activeSlug, locale)}><span>02</span><strong>{zh ? "创建数字代表" : "Create representative"}</strong><b>→</b></Link>
+            <Link href={buildDashboardHref("representatives", activeSlug, locale)}><span>02</span><strong>{zh ? "创建对外代理" : "Create representative"}</strong><b>→</b></Link>
             <Link href={buildDashboardHref("approvals", activeSlug, locale)}><span>03</span><strong>{zh ? "查看待审批" : "Review approvals"}</strong><b>→</b></Link>
             <a href={buildLocalizedHref(`${representativeBaseUrl}/reps/${activeSlug}`, locale)}><span>04</span><strong>{zh ? "打开公开代表页" : "Open public page"}</strong><b>↗</b></a>
           </div>

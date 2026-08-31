@@ -36,14 +36,17 @@ export type RunnerExecutionInput = {
   workingDirectory?: string | null | undefined;
   sessionId: string;
   executionId: string;
+  maxStdoutBytes?: number | undefined;
+  maxStderrBytes?: number | undefined;
 };
 
 export type DockerExecutionResult = {
-  exitCode: number;
+  exitCode: number | null;
   stdout: string;
   stderr: string;
   wallMs: number;
   containerName: string;
+  termination: "exit" | "command_timeout" | "output_limit";
 };
 
 export function buildDockerLeaseContainerName(sessionId: string) {
@@ -234,32 +237,55 @@ async function runDockerExecution(
   try {
     const { stdout, stderr } = await execFileAsync("docker", args, {
       timeout: input.maxCommandSeconds * 1000,
-      maxBuffer: 1024 * 1024,
+      maxBuffer: Math.max(input.maxStdoutBytes ?? 1024 * 1024, input.maxStderrBytes ?? 1024 * 1024),
     });
+    const boundedStdout = truncateUtf8(stdout, input.maxStdoutBytes);
+    const boundedStderr = truncateUtf8(stderr, input.maxStderrBytes);
+    const outputLimited = boundedStdout.truncated || boundedStderr.truncated;
 
     return {
-      exitCode: 0,
-      stdout,
-      stderr,
+      exitCode: outputLimited ? null : 0,
+      stdout: boundedStdout.value,
+      stderr: boundedStderr.value,
       wallMs: Date.now() - startedAt,
       containerName,
+      termination: outputLimited ? "output_limit" : "exit",
     };
   } catch (error) {
+    const timedOut = Boolean((error as { killed?: boolean }).killed);
+    const maxBufferExceeded = (error as { code?: unknown }).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
     const exitCode =
       typeof (error as { code?: unknown }).code === "number"
         ? (error as { code: number }).code
-        : (error as { killed?: boolean }).killed
-          ? 124
+        : timedOut
+          ? null
           : 1;
 
+    const rawStdout = String((error as { stdout?: string }).stdout ?? "");
+    const rawStderr = String((error as { stderr?: string }).stderr ?? (error instanceof Error ? error.message : ""));
+    const stdout = truncateUtf8(rawStdout, input.maxStdoutBytes);
+    const stderr = truncateUtf8(rawStderr, input.maxStderrBytes);
+    const outputLimited = maxBufferExceeded || stdout.truncated || stderr.truncated;
+
     return {
-      exitCode,
-      stdout: String((error as { stdout?: string }).stdout ?? ""),
-      stderr: String((error as { stderr?: string }).stderr ?? (error instanceof Error ? error.message : "")),
+      exitCode: timedOut || outputLimited ? null : exitCode,
+      stdout: stdout.value,
+      stderr: stderr.value,
       wallMs: Date.now() - startedAt,
       containerName,
+      termination: timedOut ? "command_timeout" : outputLimited ? "output_limit" : "exit",
     };
   }
+}
+
+function truncateUtf8(value: string, maxBytes?: number) {
+  if (!maxBytes) return { value, truncated: false };
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.byteLength <= maxBytes) return { value, truncated: false };
+  return {
+    value: encoded.subarray(0, maxBytes).toString("utf8"),
+    truncated: true,
+  };
 }
 
 async function releaseDockerLease(input: {

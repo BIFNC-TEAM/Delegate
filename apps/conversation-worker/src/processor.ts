@@ -3026,9 +3026,9 @@ function buildRepresentativeHumanConfirmation(
     ? configuredPrompt || "请简要描述需要真人确认或接手的事项。"
     : "";
   const governanceBoundary =
-    "数字代表只能在 Owner 已发布的能力与授权范围内工作；需要真人作出承诺、审批或承担责任的事项，必须由真人确认。";
+    "对外代理只能在 Owner 已发布的能力与授权范围内工作；需要真人作出承诺、审批或承担责任的事项，必须由真人确认。";
   const handoffState = !enabled
-    ? "当前未启用真人接管；数字代表不会承诺或假定真人将接手。"
+    ? "当前未启用真人接管；对外代理不会承诺或假定真人将接手。"
     : handoffAccessMode === "FREE"
       ? "当前已启用真人接管，可按提示直接提出申请；是否接手及后续安排以真人确认为准。"
       : "当前已启用真人接管，但申请前需满足相应服务权益；是否接手及后续安排以真人确认为准。";
@@ -3910,7 +3910,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
               sourceChannel: "MATRIX",
             });
             replyText = revoked.changed
-              ? "已立即停止当前数字代表的跨渠道联系人记忆召回；共享记忆的远端投影已进入可重试清理队列。各渠道原始会话和渠道内记忆不受影响。"
+              ? "已立即停止当前对外代理的跨渠道联系人记忆召回；共享记忆的远端投影已进入可重试清理队列。各渠道原始会话和渠道内记忆不受影响。"
               : "当前没有有效的跨渠道联系人记忆授权；系统已再次确认共享召回处于关闭状态。";
           } else {
             if (
@@ -3962,7 +3962,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
                 ...sourceEvidence,
               });
               replyText = granted.active
-                ? "已允许当前数字代表在已验证为同一 Delegate 用户的 Web、Matrix 和 Telegram 私聊之间使用联系人记忆。"
+                ? "已允许当前对外代理在已验证为同一 Delegate 用户的 Web、Matrix 和 Telegram 私聊之间使用联系人记忆。"
                 : renderContactMemorySharingFailure(
                     "contact_memory_sharing_conflict",
                   );
@@ -5718,7 +5718,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       && paidContinuationRequired
       && !walletReservation
       && !entitlementReservation
-        ? "当前可用服务额度不足，请前往这个数字代表的公开页面充值或购买服务套餐后再继续。"
+        ? "当前可用服务额度不足，请前往这个对外代理的公开页面充值或购买服务套餐后再继续。"
         : plan.disposition === "answer"
           ? renderFailClosedReplyPreview(policyPinnedRepresentative, item.userText)
           : renderReplyPreview(policyPinnedRepresentative, plan);
@@ -6973,12 +6973,12 @@ function renderContactMemoryDeleteConfirmation(
   channel: "matrix" | "telegram",
 ) {
   const channelName = channel === "matrix" ? "Matrix" : "Telegram";
-  return `已完成：当前数字代表与当前 ${channelName} 渠道下的联系人记忆已立即停止召回，后台将异步清理对应长期记忆。代表经验和其他渠道的联系人记忆不受影响。`;
+  return `已完成：当前对外代理与当前 ${channelName} 渠道下的联系人记忆已立即停止召回，后台将异步清理对应长期记忆。代表经验和其他渠道的联系人记忆不受影响。`;
 }
 
 function renderContactMemorySharingDisclosure(challengeToken?: string) {
   return [
-    "跨渠道联系人记忆只会共享给当前数字代表，并且只在已验证为同一 Delegate 用户的 Web、Matrix、Telegram 私聊之间使用。",
+    "跨渠道联系人记忆只会共享给当前对外代理，并且只在已验证为同一 Delegate 用户的 Web、Matrix、Telegram 私聊之间使用。",
     "系统不会把原始聊天、付款或余额、凭据、Owner 私有备注、Compute 原始产物写入长期记忆；每次召回仍会检查当前身份、策略和渠道授权。",
     "你可以随时发送 !memory_unshare，立即停止共享记忆召回并异步清理远端投影；各渠道原始会话和渠道内记忆不受影响。",
     challengeToken
@@ -7010,7 +7010,7 @@ function renderContactMemorySharingFailure(
     return "授权未生效：请先在当前代表的 Web 页面登录并把这个 Matrix 账号绑定到同一个 Delegate 用户。";
   }
   if (code === "contact_memory_sharing_representative_not_found") {
-    return "当前数字代表已不可用，跨渠道联系人记忆授权未变更。";
+    return "当前对外代理已不可用，跨渠道联系人记忆授权未变更。";
   }
   return "跨渠道联系人记忆状态刚刚发生变化，请重试命令。";
 }

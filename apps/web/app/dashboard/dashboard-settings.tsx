@@ -1405,7 +1405,7 @@ const settingsCopy = {
   zh: {
     pageTitle: "管理你的账户资料、安全入口和 Dashboard 提醒。",
     pageDescription:
-      "这里的设置属于当前 Owner，不会改动任何数字代表的身份、知识、价格或发布版本。",
+      "这里的设置属于当前 Owner，不会改动任何对外代理的身份、知识、价格或发布版本。",
     sectionNavigationLabel: "设置分区",
     profileTab: "资料与偏好",
     securityTab: "登录与安全",
@@ -1416,7 +1416,7 @@ const settingsCopy = {
       "显示名称用于 Owner 控制面和需要明确操作者身份的业务记录。",
     displayNameLabel: "显示名称",
     displayNameHelp:
-      "最多 80 个字符；不会修改数字代表名称或公开页面上的 Owner 署名。",
+      "最多 80 个字符；不会修改对外代理名称或公开页面上的 Owner 署名。",
     displayNameRequired: "请输入显示名称。",
     displayNameTooLong: "显示名称不能超过 80 个字符。",
     displayNameInvalid: "请输入 1–80 个字符的有效显示名称。",

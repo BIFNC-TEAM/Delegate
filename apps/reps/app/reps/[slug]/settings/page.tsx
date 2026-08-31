@@ -271,7 +271,7 @@ const copy = {
     login: "登录 / 注册",
     languageEyebrow: "Language",
     languageTitle: "界面语言",
-    languageDescription: "选择数字代表页面和账户设置使用的显示语言。",
+    languageDescription: "选择对外代理页面和账户设置使用的显示语言。",
     currentLanguage: "显示语言",
     languageAriaLabel: "切换界面语言",
     language: { zh: "中文", en: "English" },

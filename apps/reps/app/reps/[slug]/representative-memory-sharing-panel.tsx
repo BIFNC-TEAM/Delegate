@@ -210,7 +210,7 @@ export function RepresentativeMemorySharingPanel({
           </div>
           <p>
             {zh
-              ? "仅在绑定至同一已验证 Delegate 身份的 Web、Matrix 和 Telegram 私聊间使用。未验证账号、其他联系人及其他数字代表保持隔离。开关仅由你控制，默认开启。"
+              ? "仅在绑定至同一已验证 Delegate 身份的 Web、Matrix 和 Telegram 私聊间使用。未验证账号、其他联系人及其他对外代理保持隔离。开关仅由你控制，默认开启。"
               : "Used only across Web, Matrix, and Telegram private chats linked to the same verified Delegate identity. Unverified accounts, other contacts, and other representatives remain isolated. Only you control this switch; it defaults on."}
           </p>
         </div>
@@ -250,7 +250,7 @@ export function RepresentativeMemorySharingPanel({
           <strong>{zh ? "记住什么" : "What may be remembered"}</strong>
           <p>
             {zh
-              ? "偏好、目标、约束及完成服务所需的必要背景，仅供当前数字代表使用。"
+              ? "偏好、目标、约束及完成服务所需的必要背景，仅供当前对外代理使用。"
               : "Preferences, goals, constraints, and necessary service context, for this representative only."}
           </p>
           <strong>{zh ? "永远不共享什么" : "What is never shared"}</strong>
@@ -460,7 +460,7 @@ function memorySharingBlockedCopy(
       en: "The consent terms changed. Refresh and confirm them again.",
     },
     representative_not_found: {
-      zh: "当前数字代表不可用。",
+      zh: "当前对外代理不可用。",
       en: "This representative is unavailable.",
     },
   };

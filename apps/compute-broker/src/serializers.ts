@@ -135,6 +135,7 @@ export function serializeSession(session: {
   runnerType: string;
   runnerLeaseId: string | null;
   baseImage: string;
+  runtimeClass: string;
   containerId: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -165,6 +166,7 @@ export function serializeSession(session: {
     runnerType: mapRunnerTypeFromDb(session.runnerType),
     runnerLeaseId: session.runnerLeaseId,
     baseImage: session.baseImage,
+    runtimeClass: session.runtimeClass.toLowerCase(),
     containerId: session.containerId,
     createdAt: session.createdAt.toISOString(),
     updatedAt: session.updatedAt.toISOString(),

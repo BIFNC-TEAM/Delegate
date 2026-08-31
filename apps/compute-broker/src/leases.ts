@@ -4,8 +4,12 @@ import type { ComputeSession } from "@prisma/client";
 import { computeBrokerConfig } from "./config";
 import { prisma } from "./prisma";
 import { acquireRunnerLease, releaseRunnerLease } from "./runner";
-import { ensureUserSandboxLease, stopSandboxLease } from "./sandbox-leases";
-import { createSandboxProviderFromConfig } from "./sandbox-provider";
+import {
+  createConfiguredProviderRegistry,
+  ensureUserSandboxLease,
+  stopSandboxLease,
+} from "./sandbox-leases";
+import { resolveProviderForNewIdentity } from "./sandbox-routing";
 import { mapLeaseStatusFromDb, mapRunnerTypeFromDb } from "./serializers";
 
 type LeaseManagedSession = ComputeSession;
@@ -75,14 +79,43 @@ async function ensureSandboxBackedComputeSessionLease(params: {
   filesystemMode: ComputeFilesystemMode;
 }) {
   const now = new Date();
-  const { provider, providerKind } = await createSandboxProviderFromConfig(computeBrokerConfig);
+  const providerRegistry = createConfiguredProviderRegistry();
   const sandbox = await ensureUserSandboxLease({
     session: params.session,
     networkMode: params.networkMode,
     filesystemMode: params.filesystemMode,
     hostWorkspaceRoot: computeBrokerConfig.hostWorkspaceRoot,
-    provider,
-    providerKind,
+    providerFactory: (providerKind) => providerRegistry.create(providerKind),
+    selectProviderForNewIdentity: async () => {
+      if (computeBrokerConfig.sandboxRoutingMode === "legacy") {
+        return {
+          providerKind: providerRegistry.resolveLegacyProvider(),
+          decisionSource: "legacy" as const,
+          routingDigest: null,
+        };
+      }
+      const routing = computeBrokerConfig.sandboxRouting;
+      if (!routing) throw new Error("sandbox_routing_document_required");
+      const representative = await prisma.representative.findUnique({
+        where: { id: params.session.representativeId },
+        select: { sandboxTestEligible: true, lifecycleState: true },
+      });
+      if (!representative || representative.lifecycleState === "ARCHIVED") {
+        throw new Error("sandbox_routing_representative_inactive");
+      }
+      if (!representative.sandboxTestEligible) {
+        throw new Error("sandbox_routing_representative_not_test_eligible");
+      }
+      const selected = resolveProviderForNewIdentity(routing, params.session.representativeId);
+      if (!providerRegistry.configured(selected.provider)) {
+        throw new Error("sandbox_provider_not_configured");
+      }
+      return {
+        providerKind: selected.provider,
+        decisionSource: selected.decisionSource,
+        routingDigest: routing.digest,
+      };
+    },
     idleStopMinutes: computeBrokerConfig.sandboxLifecycle.idleStopMinutes,
   });
 
@@ -115,7 +148,7 @@ async function ensureSandboxBackedComputeSessionLease(params: {
         leaseId: sandbox.providerLease.leaseId,
         containerId: sandbox.providerLease.containerId,
         runnerType: sandbox.providerLease.runnerType,
-        sandboxProvider: providerKind,
+        sandboxProvider: sandbox.providerLease.provider,
         providerSandboxId: sandbox.providerLease.providerSandboxId,
       },
     },

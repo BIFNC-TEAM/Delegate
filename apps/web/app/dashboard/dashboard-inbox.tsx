@@ -357,7 +357,7 @@ export function DashboardInbox({
           <h1>{zh ? "把 AI 会话和人工接手放进同一条处理队列。" : "Run AI conversations and human handoff from one queue."}</h1>
           <span>
             {zh
-              ? `当前显示 ${snapshot.representative.displayName} 的 Web、Matrix 与 Telegram 会话；可从左上角切换数字代表。`
+              ? `当前显示 ${snapshot.representative.displayName} 的 Web、Matrix 与 Telegram 会话；可从左上角切换对外代理。`
               : `Showing Web, Matrix, and Telegram conversations for ${snapshot.representative.displayName}. Switch representatives from the top-left selector.`}
           </span>
         </div>
@@ -822,7 +822,7 @@ function formatTaskPolicyExplanation(
 function senderLabel(type: string, displayName: string | undefined, locale: Locale) {
   if (displayName) return displayName;
   if (type === "operator") return locale === "zh" ? "人工顾问" : "Human operator";
-  if (type === "representative") return locale === "zh" ? "数字代表" : "Digital representative";
+  if (type === "representative") return locale === "zh" ? "对外代理" : "Digital representative";
   if (type === "system") return locale === "zh" ? "系统" : "System";
   return locale === "zh" ? "访客" : "Visitor";
 }

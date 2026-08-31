@@ -426,7 +426,7 @@ export function DashboardSkills({ activeSlug, locale }: { activeSlug: string; lo
 
       <section className="dashboard-v2-metric-grid skills-metrics">
         <SkillMetric detail={zh ? "工作区可治理技能" : "Workspace-governed skills"} label={zh ? "已安装" : "Installed"} value={snapshot.metrics.installed} tone="teal" />
-        <SkillMetric detail={zh ? "跨全部数字代表" : "Across all representatives"} label={zh ? "已启用绑定" : "Enabled bindings"} value={snapshot.metrics.enabledBindings} />
+        <SkillMetric detail={zh ? "跨全部对外代理" : "Across all representatives"} label={zh ? "已启用绑定" : "Enabled bindings"} value={snapshot.metrics.enabledBindings} />
         <SkillMetric detail={zh ? "能力策略为 Ask" : "Capabilities in Ask mode"} label={zh ? "审批保护" : "Approval protected"} value={snapshot.metrics.approvalProtected} tone="warning" />
         <SkillMetric detail={zh ? "需审核后才能启用" : "Review before enabling"} label={zh ? "更新可用" : "Updates"} value={snapshot.metrics.updates} tone="indigo" />
       </section>
@@ -1064,7 +1064,7 @@ function ConnectionsPanel({
         <div><p>MCP / COMPUTE</p><h2>{zh ? "连接健康与审批边界" : "Connection health and approval boundaries"}</h2></div>
         <button className="dashboard-v2-button-primary" onClick={createBinding} type="button">+ {zh ? "新增 MCP 连接" : "Add MCP connection"}</button>
       </header>
-      <p className="dashboard-v2-panel-description">{zh ? "连接属于具体数字代表。技能只能引用已配置连接，不能自行创建凭据或扩大工具白名单。" : "Connections belong to individual representatives. Skills can reference configured connections but cannot create credentials or expand tool allowlists."}</p>
+      <p className="dashboard-v2-panel-description">{zh ? "连接属于具体对外代理。技能只能引用已配置连接，不能自行创建凭据或扩大工具白名单。" : "Connections belong to individual representatives. Skills can reference configured connections but cannot create credentials or expand tool allowlists."}</p>
       {connectionMessage ? <div className="skills-banner is-success" role="status">{connectionMessage}</div> : null}
       {connectionError ? <div className="skills-banner is-error" role="alert">{connectionError}</div> : null}
       {bindingsLoadError ? (

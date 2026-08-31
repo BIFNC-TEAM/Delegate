@@ -57,14 +57,14 @@ describe("workspace knowledge library", () => {
     const created = await createKnowledgeAsset(null, {
       kind: "text",
       title: `${marker} 服务政策`,
-      sourceText: "数字代表可以回答公开的产品与价格问题，但退款、折扣、私有文件和敏感材料必须转人工审批。",
+      sourceText: "对外代理可以回答公开的产品与价格问题，但退款、折扣、私有文件和敏感材料必须转人工审批。",
       visibility: "owner_only",
       tags: ["政策", "政策", "QA"],
     });
 
     expect(created).toMatchObject({ status: "ready", processingVersion: 1 });
     expect(created.tags).toEqual(["政策", "QA"]);
-    expect(created.summary).toContain("数字代表");
+    expect(created.summary).toContain("对外代理");
     expect(created.autoTags).toEqual(expect.arrayContaining(["产品", "价格", "政策"]));
     expect(created.processingLogs.map((log) => log.stage)).toEqual(["queued", "extract", "vectorize", "complete"]);
     expect(created).toMatchObject({
@@ -146,7 +146,7 @@ describe("workspace knowledge library", () => {
     const created = await createKnowledgeAsset(null, {
       kind: "text",
       title: `Representative binding ${Date.now()}`,
-      sourceText: "这是一份工作区知识源，只保存一次，并通过显式授权关系提供给指定数字代表检索使用。",
+      sourceText: "这是一份工作区知识源，只保存一次，并通过显式授权关系提供给指定对外代理检索使用。",
       visibility: "owner_only",
     });
 

@@ -3248,7 +3248,7 @@ function resolveHumanHandoffReplyText(
     case "human_active":
       return "真人已经在接待当前会话，无需重复提交接管请求。";
     case "handoff_disabled":
-      return "当前数字代表未开放人工接管。你可以继续与数字代表对话。";
+      return "当前对外代理未开放人工接管。你可以继续与对外代理对话。";
     case "entitlement_required":
       return "当前服务不包含人工接管权益。请先在服务与订单中购买包含人工接管的服务套餐。";
     case "active_request_exists":

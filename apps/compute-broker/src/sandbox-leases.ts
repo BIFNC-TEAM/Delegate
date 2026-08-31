@@ -7,11 +7,18 @@ import { computeBrokerConfig } from "./config";
 import { prisma } from "./prisma";
 import { recordSandboxMetric } from "./sandbox-metrics";
 import {
-  createDockerSandboxProvider,
-  createSandboxProviderFromConfig,
+  SandboxProviderError,
   type SandboxProvider,
   type SandboxProviderLease,
 } from "./sandbox-provider";
+import {
+  createSandboxProviderOperation,
+  markSandboxProviderOperationBound,
+  markSandboxProviderOperationCalled,
+  markSandboxProviderOperationFailed,
+  markSandboxProviderOperationResolved,
+} from "./sandbox-provider-operations";
+import { SandboxProviderRegistry } from "./sandbox-provider-registry";
 import { mapRunnerTypeFromDb } from "./serializers";
 
 type SandboxManagedSession = {
@@ -20,6 +27,7 @@ type SandboxManagedSession = {
   contactId: string | null;
   conversationId: string | null;
   baseImage: string;
+  runtimeClass: string;
   runnerType: string;
   expiresAt: Date | null;
 };
@@ -29,8 +37,12 @@ export type EnsureUserSandboxLeaseParams = {
   networkMode: ComputeNetworkMode;
   filesystemMode: ComputeFilesystemMode;
   hostWorkspaceRoot?: string | undefined;
-  provider: SandboxProvider;
-  providerKind: "docker" | "daytona";
+  providerFactory: SandboxProviderFactory;
+  selectProviderForNewIdentity: () => Promise<{
+    providerKind: "docker" | "daytona" | "tencent";
+    decisionSource: "legacy" | "manual_override" | "default";
+    routingDigest?: string | null | undefined;
+  }>;
   idleStopMinutes?: number | undefined;
 };
 
@@ -47,13 +59,15 @@ type SandboxLeaseWithIdentity = {
   expiresAt: Date | null;
   stoppedAt: Date | null;
   errorReason: string | null;
+  runtimeClass: string;
+  identityLifecycleEpoch: number;
   sandboxIdentity: {
     representativeId: string;
     contactId: string;
   };
 };
 
-export type SandboxProviderFactory = (providerKind: "docker" | "daytona") => Promise<SandboxProvider>;
+export type SandboxProviderFactory = (providerKind: "docker" | "daytona" | "tencent") => Promise<SandboxProvider>;
 
 export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParams) {
   if (!params.session.contactId) {
@@ -61,48 +75,90 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
   }
 
   const now = new Date();
-  const provider = mapSandboxProviderToDb(params.providerKind);
   const scopeKey = buildSandboxScopeKey(params.session.conversationId);
   const expiresAt = new Date(
     now.getTime() + (params.idleStopMinutes ?? computeBrokerConfig.sandboxLifecycle.idleStopMinutes) * 60 * 1000,
   );
+
+  const identityKey = {
+    representativeId: params.session.representativeId,
+    contactId: params.session.contactId,
+    scopeKey,
+  };
+  const existingIdentity = await prisma.sandboxIdentity.findUnique({
+    where: { representativeId_contactId_scopeKey: identityKey },
+    select: { provider: true },
+  });
+  const selection = existingIdentity
+    ? {
+        providerKind: mapSandboxProviderFromDb(existingIdentity.provider),
+        decisionSource: "legacy" as const,
+        routingDigest: null,
+      }
+    : await params.selectProviderForNewIdentity();
+  const selectedProvider = mapSandboxProviderToDb(selection.providerKind);
 
   const reservation = await prisma.$transaction(async (tx) => {
     const contact = await tx.contact.findUnique({
       where: { id: params.session.contactId! },
       select: { audienceIdentityId: true },
     });
-    const identity = await tx.sandboxIdentity.upsert({
-      where: {
-        representativeId_contactId_scopeKey: {
-          representativeId: params.session.representativeId,
-          contactId: params.session.contactId!,
-          scopeKey,
-        },
-      },
-      update: {
-        provider,
-        audienceIdentityId: contact?.audienceIdentityId ?? null,
-        scopeKey,
-        status: "ACTIVE",
-        lastUsedAt: now,
-        deletedAt: null,
-      },
-      create: {
+    const created = await tx.sandboxIdentity.createMany({
+      data: [{
         representativeId: params.session.representativeId,
         contactId: params.session.contactId!,
         scopeKey,
         audienceIdentityId: contact?.audienceIdentityId ?? null,
-        provider,
+        provider: selectedProvider,
         providerIdentityKey: buildProviderIdentityKey(
           params.session.representativeId,
           params.session.contactId!,
           scopeKey,
         ),
         status: "ACTIVE",
+        lifecycleEpoch: 1,
+        lastUsedAt: now,
+      }],
+      skipDuplicates: true,
+    });
+    const identityCandidate = await tx.sandboxIdentity.findUniqueOrThrow({
+      where: {
+        representativeId_contactId_scopeKey: identityKey,
+      },
+    });
+    await tx.$queryRaw`SELECT "id" FROM "SandboxIdentity" WHERE "id" = ${identityCandidate.id} FOR UPDATE`;
+    const identity = await tx.sandboxIdentity.findUniqueOrThrow({
+      where: { id: identityCandidate.id },
+    });
+    if (identity.status === "ARCHIVED") throw new Error("sandbox_identity_archived");
+    if (identity.status === "DELETED") throw new Error("sandbox_identity_deleted");
+
+    const providerKind = mapSandboxProviderFromDb(identity.provider);
+    const provider = mapSandboxProviderToDb(providerKind);
+    await tx.sandboxIdentity.update({
+      where: { id: identity.id },
+      data: {
+        audienceIdentityId: contact?.audienceIdentityId ?? null,
         lastUsedAt: now,
       },
     });
+    if (created.count === 1) {
+      await tx.eventAudit.create({
+        data: {
+          representativeId: params.session.representativeId,
+          contactId: params.session.contactId,
+          conversationId: params.session.conversationId,
+          type: "SANDBOX_IDENTITY_CREATED",
+          payload: {
+            sandboxIdentityId: identity.id,
+            provider: providerKind,
+            decisionSource: selection.decisionSource,
+            routingDigest: selection.routingDigest ?? null,
+            scopeType: scopeKey === "contact" ? "contact" : "conversation",
+          },
+        },
+      });
+    }
 
     const reusableLease = await tx.sandboxLease.findFirst({
       where: {
@@ -111,6 +167,8 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
         networkMode: params.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
         filesystemMode: params.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
         baseImage: params.session.baseImage,
+        runtimeClass: mapRuntimeClassToDb(params.session.runtimeClass),
+        identityLifecycleEpoch: identity.lifecycleEpoch,
         status: {
           in: ["RUNNING", "STOPPED"],
         },
@@ -146,6 +204,8 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
             networkMode: params.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
             filesystemMode: params.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
             baseImage: params.session.baseImage,
+            runtimeClass: mapRuntimeClassToDb(params.session.runtimeClass),
+            identityLifecycleEpoch: identity.lifecycleEpoch,
             status: "STARTING",
             lastUsedAt: now,
             expiresAt,
@@ -159,18 +219,48 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       },
     });
 
+    const operation = createdLease
+      ? await createSandboxProviderOperation(tx, {
+          sandboxLeaseId: lease.id,
+          provider,
+          now,
+        })
+      : null;
+
     return {
       identity,
       lease,
       createdLease,
+      providerKind,
+      operation,
       providerSandboxId: lease.providerSandboxId ?? reusableLease?.providerSandboxId ?? null,
     };
   });
 
+  let provider: SandboxProvider | null = null;
+  let startedProviderLease: SandboxProviderLease | null = null;
+  let providerCallStarted = false;
   try {
-    const providerLease = await params.provider.start({
+    provider = await params.providerFactory(reservation.providerKind);
+    if (!reservation.createdLease && reservation.lease.status === "RUNNING") {
+      return {
+        identity: reservation.identity,
+        lease: reservation.lease,
+        providerLease: buildProviderLeaseFromReservation(reservation.lease, reservation.providerKind),
+      };
+    }
+    if (reservation.operation) {
+      const called = await prisma.sandboxProviderOperation.updateMany(
+        markSandboxProviderOperationCalled(reservation.operation.id, now),
+      );
+      if (called.count !== 1) throw new Error("sandbox_provider_operation_fence_lost");
+    }
+    providerCallStarted = true;
+    const providerLease = await provider.start({
       sandboxIdentityId: reservation.identity.id,
       sandboxLeaseId: reservation.lease.id,
+      creationKey: reservation.operation?.creationKey,
+      runtimeClass: mapRuntimeClassFromDb(params.session.runtimeClass),
       providerSandboxId: reservation.providerSandboxId,
       runnerType: mapRunnerTypeFromDb(params.session.runnerType),
       image: params.session.baseImage,
@@ -179,30 +269,60 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       filesystemMode: params.filesystemMode,
       sessionId: params.session.id,
     });
+    startedProviderLease = providerLease;
 
-    const lease = await prisma.sandboxLease.update({
-      where: { id: reservation.lease.id },
-      data: {
-        status: "RUNNING",
-        providerSandboxId: providerLease.providerSandboxId,
-        runnerLeaseId: providerLease.leaseId,
-        containerId: providerLease.containerId,
-        sessionRoot: providerLease.sessionRoot,
-        lastUsedAt: now,
-        expiresAt,
-        stoppedAt: null,
-        errorReason: null,
-      },
-    });
-    await prisma.computeSession.update({
-      where: { id: params.session.id },
-      data: {
-        sandboxLeaseId: lease.id,
-        runnerLeaseId: providerLease.leaseId,
-        containerId: providerLease.containerId,
-        leaseLastUsedAt: now,
-        lastHeartbeatAt: now,
-      },
+    const lease = await prisma.$transaction(async (tx) => {
+      const currentIdentity = await tx.sandboxIdentity.findUniqueOrThrow({
+        where: { id: reservation.identity.id },
+        select: { status: true, lifecycleEpoch: true },
+      });
+      if (
+        currentIdentity.status !== "ACTIVE" ||
+        currentIdentity.lifecycleEpoch !== reservation.identity.lifecycleEpoch
+      ) {
+        throw new Error("sandbox_identity_concurrent_change");
+      }
+      const bound = await tx.sandboxLease.updateMany({
+        where: {
+          id: reservation.lease.id,
+          status: "STARTING",
+          identityLifecycleEpoch: reservation.identity.lifecycleEpoch,
+        },
+        data: {
+          status: "RUNNING",
+          providerSandboxId: providerLease.providerSandboxId,
+          runnerLeaseId: providerLease.leaseId,
+          containerId: providerLease.containerId,
+          sessionRoot: providerLease.sessionRoot,
+          lastUsedAt: now,
+          expiresAt,
+          stoppedAt: null,
+          errorReason: null,
+        },
+      });
+      if (bound.count !== 1) throw new Error("sandbox_identity_concurrent_change");
+      const updatedLease = await tx.sandboxLease.findUniqueOrThrow({
+        where: { id: reservation.lease.id },
+      });
+      await tx.computeSession.update({
+        where: { id: params.session.id },
+        data: {
+          sandboxLeaseId: updatedLease.id,
+          runnerLeaseId: providerLease.leaseId,
+          containerId: providerLease.containerId,
+          leaseLastUsedAt: now,
+          lastHeartbeatAt: now,
+        },
+      });
+      if (reservation.operation) {
+        const boundOperation = await tx.sandboxProviderOperation.updateMany(markSandboxProviderOperationBound({
+          operationId: reservation.operation.id,
+          providerSandboxId: providerLease.providerSandboxId,
+          now,
+        }));
+        if (boundOperation.count !== 1) throw new Error("sandbox_provider_operation_fence_lost");
+      }
+      return updatedLease;
     });
     await prisma.eventAudit.create({
       data: {
@@ -213,12 +333,18 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
         payload: {
           sandboxIdentityId: reservation.identity.id,
           sandboxLeaseId: lease.id,
-          provider: params.providerKind,
+          provider: reservation.providerKind,
           providerSandboxId: providerLease.providerSandboxId,
           computeSessionId: params.session.id,
         },
       },
     });
+    if (reservation.operation) {
+      const resolved = await prisma.sandboxProviderOperation.updateMany(
+        markSandboxProviderOperationResolved(reservation.operation.id),
+      );
+      if (resolved.count !== 1) throw new Error("sandbox_provider_operation_fence_lost");
+    }
     recordSandboxMetric("sandbox_identity_upserts_total");
     if (reservation.createdLease) {
       recordSandboxMetric("sandbox_leases_created_total");
@@ -231,7 +357,25 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       providerLease,
     };
   } catch (error) {
-    const errorReason = error instanceof Error ? error.message.slice(0, 240) : "sandbox_provider_start_failed";
+    const providerError = error instanceof SandboxProviderError ? error : null;
+    const knownLocalError = error instanceof Error && [
+      "sandbox_identity_concurrent_change",
+      "sandbox_provider_operation_fence_lost",
+    ].includes(error.message)
+      ? error.message
+      : null;
+    const errorReason = providerError?.code.toLowerCase()
+      ?? knownLocalError
+      ?? (providerCallStarted ? "sandbox_provider_start_unknown" : "sandbox_provider_configuration_failed");
+    if (knownLocalError && provider && startedProviderLease) {
+      await provider.stop({
+        lease: startedProviderLease ?? buildProviderLeaseFromReservation(
+          reservation.lease,
+          reservation.providerKind,
+        ),
+        sessionId: params.session.id,
+      }).catch(() => undefined);
+    }
     await prisma.sandboxLease.update({
       where: { id: reservation.lease.id },
       data: {
@@ -239,6 +383,13 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
         errorReason,
       },
     });
+    if (reservation.operation) {
+      await prisma.sandboxProviderOperation.updateMany(markSandboxProviderOperationFailed({
+        operationId: reservation.operation.id,
+        errorCode: errorReason,
+        ambiguous: providerCallStarted && (providerError?.ambiguous ?? true),
+      }));
+    }
     recordSandboxMetric("sandbox_leases_errors_total");
     await prisma.eventAudit.create({
       data: {
@@ -249,7 +400,7 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
         payload: {
           sandboxIdentityId: reservation.identity.id,
           sandboxLeaseId: reservation.lease.id,
-          provider: params.providerKind,
+          provider: reservation.providerKind,
           computeSessionId: params.session.id,
           errorReason,
         },
@@ -271,8 +422,8 @@ export function buildProviderIdentityKey(
   return `delegate:${representativeId}:${contactId}:${scopeKey}`;
 }
 
-export function mapSandboxProviderToDb(provider: "docker" | "daytona") {
-  return provider.toUpperCase() as "DOCKER" | "DAYTONA";
+export function mapSandboxProviderToDb(provider: "docker" | "daytona" | "tencent") {
+  return provider.toUpperCase() as "DOCKER" | "DAYTONA" | "TENCENT";
 }
 
 export async function cleanupIdleSandboxLeases(params: {
@@ -467,19 +618,17 @@ export async function stopSandboxLease(params: {
   }
 }
 
-async function createProviderForLease(providerKind: "docker" | "daytona") {
-  if (providerKind === "docker") {
-    return createDockerSandboxProvider();
-  }
+async function createProviderForLease(providerKind: "docker" | "daytona" | "tencent") {
+  return createConfiguredProviderRegistry().create(providerKind);
+}
 
-  const configured = await createSandboxProviderFromConfig({
-    ...computeBrokerConfig,
-    sandboxProvider: "daytona",
+export function createConfiguredProviderRegistry() {
+  return new SandboxProviderRegistry({
+    legacyProvider: computeBrokerConfig.sandboxProvider,
+    sandboxLifecycle: computeBrokerConfig.sandboxLifecycle,
+    daytona: computeBrokerConfig.daytona,
+    tencent: computeBrokerConfig.tencent,
   });
-  if (configured.providerKind !== "daytona") {
-    throw new Error("Daytona sandbox provider is not configured.");
-  }
-  return configured.provider;
 }
 
 function buildProviderLeaseFromRecord(lease: SandboxLeaseWithIdentity): SandboxProviderLease {
@@ -489,15 +638,46 @@ function buildProviderLeaseFromRecord(lease: SandboxLeaseWithIdentity): SandboxP
   return {
     id: lease.id,
     provider: providerKind,
-    runnerType: providerKind === "daytona" ? "vm" : "docker",
+    runnerType: providerKind === "docker" ? "docker" : "vm",
     leaseId: lease.runnerLeaseId ?? providerSandboxId,
     providerSandboxId,
     containerId: lease.containerId,
     containerName: lease.containerId,
-    sessionRoot: lease.sessionRoot ?? "/delegate-session",
+    sessionRoot: lease.sessionRoot ?? (providerKind === "docker" ? "/delegate-session" : "/workspace"),
   };
 }
 
+function buildProviderLeaseFromReservation(
+  lease: {
+    id: string;
+    runnerLeaseId: string | null;
+    providerSandboxId: string | null;
+    containerId: string | null;
+    sessionRoot: string | null;
+  },
+  providerKind: "docker" | "daytona" | "tencent",
+): SandboxProviderLease {
+  const providerSandboxId = lease.providerSandboxId ?? lease.runnerLeaseId ?? lease.id;
+  return {
+    id: lease.id,
+    provider: providerKind,
+    runnerType: providerKind === "docker" ? "docker" : "vm",
+    leaseId: lease.runnerLeaseId ?? providerSandboxId,
+    providerSandboxId,
+    containerId: lease.containerId,
+    containerName: lease.containerId,
+    sessionRoot: lease.sessionRoot ?? (providerKind === "docker" ? "/delegate-session" : "/workspace"),
+  };
+}
+
+function mapRuntimeClassToDb(value: string) {
+  return value.toUpperCase() as "CODE" | "BROWSER";
+}
+
+function mapRuntimeClassFromDb(value: string) {
+  return value.toLowerCase() as "code" | "browser";
+}
+
 function mapSandboxProviderFromDb(value: string) {
-  return value.toLowerCase() as "docker" | "daytona";
+  return value.toLowerCase() as "docker" | "daytona" | "tencent";
 }

@@ -32,7 +32,7 @@ describe("public cross-channel memory consent panel", () => {
 
   it("states scope, exclusions, isolation, and immediate withdrawal behavior", () => {
     expect(panelSource).toContain("同一已验证 Delegate 身份");
-    expect(panelSource).toContain("未验证账号、其他联系人及其他数字代表保持隔离");
+    expect(panelSource).toContain("未验证账号、其他联系人及其他对外代理保持隔离");
     expect(panelSource).toContain("原始聊天");
     expect(panelSource).toContain("Owner 私有备注");
     expect(panelSource).toContain("Compute 原始产物");

@@ -261,7 +261,7 @@ export function renderMemoryChannelDisclosure(
     ? "Bounded recent messages may be used as same-conversation context and are not written to OpenViking."
     : "Short-term context is disabled.";
   const sharingZh = snapshot.crossChannelSharingEnabled
-    ? `只有解析到同一已验证身份，且你先发送 ${snapshot.crossChannelDisclosureCommand} 查看当前说明、再明确发送 ${snapshot.crossChannelShareCommand} 同意后，联系人记忆才会在本数字代表已验证并启用的 Web、Matrix 和 Telegram 渠道间共享。发送 ${snapshot.crossChannelUnshareCommand} 会撤回同意、立即停止全部跨渠道召回，并异步删除共享投影。`
+    ? `只有解析到同一已验证身份，且你先发送 ${snapshot.crossChannelDisclosureCommand} 查看当前说明、再明确发送 ${snapshot.crossChannelShareCommand} 同意后，联系人记忆才会在本对外代理已验证并启用的 Web、Matrix 和 Telegram 渠道间共享。发送 ${snapshot.crossChannelUnshareCommand} 会撤回同意、立即停止全部跨渠道召回，并异步删除共享投影。`
     : "跨渠道共享保持关闭。";
   const sharingEn = snapshot.crossChannelSharingEnabled
     ? `Contact Memory is shared across this representative's enabled, verified Web, Matrix, and Telegram channels only after they resolve to the same verified identity, you review the current disclosure with ${snapshot.crossChannelDisclosureCommand}, and then explicitly consent with ${snapshot.crossChannelShareCommand}. Use ${snapshot.crossChannelUnshareCommand} to withdraw consent, block all shared recall immediately, and asynchronously delete shared projections.`
@@ -270,7 +270,7 @@ export function renderMemoryChannelDisclosure(
   if (!snapshot.longTermMemoryEnabled) {
     return [
       "记忆说明 / Memory notice",
-      `当前数字代表未在 ${channelName} 启用跨会话长期记忆。${shortTermZh}`,
+      `当前对外代理未在 ${channelName} 启用跨会话长期记忆。${shortTermZh}`,
       `原始聊天全文、私有备注、工具或 Compute 原始产物、凭据、支付、余额、退款和权益信息不会直接进入长期记忆。${deletionZh}${sharingZh}`,
       `Cross-conversation long-term memory is disabled for this representative on ${channelName}. ${shortTermEn} Raw transcripts, private notes, raw tool or Compute output, credentials, and payment or entitlement facts are excluded. ${deletionEn} ${sharingEn}`,
     ].join("\n\n");
@@ -317,7 +317,7 @@ export function renderMemoryChannelDisclosure(
 
   return [
     "记忆说明 / Memory notice",
-    `本数字代表在 ${channelName} 可使用：${kindsZh}。${extractionZh}${recallZh}${shortTermZh}`,
+    `本对外代理在 ${channelName} 可使用：${kindsZh}。${extractionZh}${recallZh}${shortTermZh}`,
     `长期记忆保留 ${snapshot.retentionDays} 天，${expiryZh}。联系人记忆绝不会与其他联系人或代表共享。${sharingZh}原始聊天全文、私有备注、工具或 Compute 原始产物、身份字段、凭据、商业机密、支付、余额、退款和权益信息不会直接进入长期记忆。${deletionZh}`,
     `On ${channelName}, eligible memory includes ${kindsEn}. ${extractionEn} ${recallEn} ${shortTermEn} Active memory is retained for ${snapshot.retentionDays} days; ${expiryEn}. Contact memory is never shared with another contact or representative. ${sharingEn} Raw transcripts, private notes, raw tool or Compute output, identity fields, credentials, commercial secrets, and payment or entitlement facts are excluded. ${deletionEn}`,
   ].join("\n\n");

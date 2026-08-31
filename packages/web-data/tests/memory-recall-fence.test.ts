@@ -80,7 +80,7 @@ const contentHash = "sha256-memory-v1";
 describe("governed memory recall fence", () => {
   it("rejects an unrelated Profile result after topic authorization", () => {
     expect(publicKnowledgeSourceMatchesAuthorizedTopic(
-      "周行知老师的地理数字代表简介",
+      "周行知老师的地理对外代理简介",
       ["asyncopenai", "重试"],
     )).toBe(false);
     expect(publicKnowledgeSourceMatchesAuthorizedTopic(
@@ -229,8 +229,8 @@ describe("governed memory recall fence", () => {
     const resources = installPublicKnowledgeAssets([{
       assetId: "asset-representative-profile",
       safeText: [
-        "# 地理数字代表简介",
-        "这是面向初中生的地理数字代表，可提供公开知识说明。",
+        "# 地理对外代理简介",
+        "这是面向初中生的地理对外代理，可提供公开知识说明。",
       ].join("\n"),
     }, {
       assetId: "asset-earth-map-qa",

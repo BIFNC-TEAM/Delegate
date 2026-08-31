@@ -1171,7 +1171,7 @@ function classifyRecallQuery(rawQueryText: string): RecallQueryClassification {
   }
   if (
     /who are|what do you|about you|your services?|你是谁|做什么|服务/u.test(normalized)
-    || /(?:介绍|说明).{0,6}(?:你自己|数字代表|这个代表)/u.test(normalized)
+    || /(?:介绍|说明).{0,6}(?:你自己|对外代理|这个代表)/u.test(normalized)
     || /(?:代表).{0,6}(?:是谁|会什么|能做什么)/u.test(normalized)
   ) {
     return safeRecallQuery(SAFE_RECALL_QUERIES.identity, undefined, topicQuery);

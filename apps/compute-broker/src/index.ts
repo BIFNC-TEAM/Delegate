@@ -31,6 +31,8 @@ import {
 } from "./sessions";
 import { startSandboxLeaseCleanupLoop } from "./sandbox-leases";
 import { getSandboxMetricSnapshot } from "./sandbox-metrics";
+import { startSandboxProviderOperationQuarantineLoop } from "./sandbox-provider-operations";
+import { getSandboxReadinessSnapshot } from "./sandbox-readiness";
 
 const server = createServer(async (request, response) => {
   try {
@@ -46,9 +48,15 @@ const server = createServer(async (request, response) => {
           service: "compute-broker",
           runnerType: computeBrokerConfig.runnerType,
           sandboxProvider: computeBrokerConfig.sandboxProvider,
+          sandboxRoutingMode: computeBrokerConfig.sandboxRoutingMode,
           artifactBucket: computeBrokerConfig.artifactStore.bucket,
         }),
       );
+    }
+
+    if ((method === "GET" || method === "HEAD") && url.pathname === "/ready") {
+      const readiness = await getSandboxReadinessSnapshot();
+      return sendJson(response, readiness.status === "ready" ? 200 : 503, readiness);
     }
 
     if (!isAuthorized(request.headers.authorization)) {
@@ -196,6 +204,9 @@ const sandboxCleanupTimer = startSandboxLeaseCleanupLoop({
   intervalMs: computeBrokerConfig.sandboxLifecycle.cleanupIntervalMs,
   idleStopMinutes: computeBrokerConfig.sandboxLifecycle.idleStopMinutes,
 });
+const stopSandboxProviderOperationQuarantineLoop = startSandboxProviderOperationQuarantineLoop({
+  intervalMs: computeBrokerConfig.sandboxLifecycle.cleanupIntervalMs,
+});
 
 const stopApprovedExecutionLoop = startApprovedExecutionLoop();
 const stopMcpCatalogRefreshLoop = startMcpCatalogRefreshLoop({
@@ -207,6 +218,7 @@ export function stopComputeBrokerBackgroundLoops() {
   if (backgroundLoopsStopped) return;
   backgroundLoopsStopped = true;
   clearInterval(sandboxCleanupTimer);
+  stopSandboxProviderOperationQuarantineLoop();
   stopApprovedExecutionLoop();
   stopMcpCatalogRefreshLoop();
 }

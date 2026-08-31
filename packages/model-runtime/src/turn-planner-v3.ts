@@ -1477,6 +1477,15 @@ function bindRequiredArgument(
   provenance: { source: "user_message" | "server_state"; pointer: string };
 } | null {
   const text = envelope.currentMessage.text;
+  if (key === "command") {
+    const command = extractExplicitCommandV3(text);
+    if (command) {
+      return {
+        value: command,
+        provenance: { source: "user_message", pointer: "/currentMessage/text" },
+      };
+    }
+  }
   if (["question", "request", "topic", "description", "target"].includes(key)) {
     return {
       value: text,
@@ -1522,6 +1531,93 @@ function bindRequiredArgument(
     };
   }
   return null;
+}
+
+function extractExplicitCommandV3(
+  sourceText: string,
+): string | null {
+  const markers = [
+    /(?:执行|运行)(?:以下|这个|该)?(?:命令|指令)\s*(?:是|为)?\s*[:：]\s*/giu,
+    /\b(?:run|execute)\s+(?:the\s+)?command\s*[:：]\s*/giu,
+  ];
+  for (const marker of markers) {
+    for (const match of sourceText.matchAll(marker)) {
+      const markerOffset = match.index ?? 0;
+      if (hasNegatedExecutionMarkerV3(sourceText, markerOffset)) continue;
+      const startOffset = markerOffset + match[0].length;
+      const command = readExplicitCommandAtV3(sourceText, startOffset);
+      if (command && isPlausibleExplicitCommandV3(command)) return command;
+    }
+  }
+  return null;
+}
+
+function hasNegatedExecutionMarkerV3(sourceText: string, markerOffset: number) {
+  const prefix = sourceText.slice(Math.max(0, markerOffset - 32), markerOffset);
+  return /(?:不要|不应|不能|不可|别|禁止|请勿|无需|do\s+not|don't|dont|never)\s*$/iu
+    .test(prefix);
+}
+
+function readExplicitCommandAtV3(sourceText: string, rawStartOffset: number) {
+  let startOffset = rawStartOffset;
+  while (/\s/u.test(sourceText[startOffset] ?? "")) startOffset += 1;
+  if (sourceText.startsWith("```", startOffset)) {
+    const headerEnd = sourceText.indexOf("\n", startOffset + 3);
+    if (headerEnd < 0) return null;
+    const language = sourceText.slice(startOffset + 3, headerEnd).trim().toLowerCase();
+    if (language && !["bash", "sh", "shell", "zsh", "console"].includes(language)) {
+      return null;
+    }
+    const fenceEnd = sourceText.indexOf("```", headerEnd + 1);
+    return fenceEnd < 0
+      ? null
+      : sourceText.slice(headerEnd + 1, fenceEnd).trim();
+  }
+  if (sourceText[startOffset] === "`") {
+    const spanEnd = sourceText.indexOf("`", startOffset + 1);
+    return spanEnd < 0
+      ? null
+      : sourceText.slice(startOffset + 1, spanEnd).trim();
+  }
+
+  let quote: "\"" | "'" | null = null;
+  let escaped = false;
+  let endOffset = startOffset;
+  for (; endOffset < sourceText.length; endOffset += 1) {
+    const character = sourceText[endOffset]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "\"" || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (/[。！？；\n\r]/u.test(character)) break;
+  }
+  if (quote || escaped) return null;
+  return sourceText.slice(startOffset, endOffset).trim();
+}
+
+function isPlausibleExplicitCommandV3(value: string) {
+  if (
+    !value
+    || value.length > 16_384
+    || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(value)
+  ) {
+    return false;
+  }
+  const firstLine = value.split(/\r?\n/u, 1)[0]?.trim() ?? "";
+  return /^(?:[A-Za-z0-9_./~:-]+|"[^"\r\n]+"|'[^'\r\n]+')(?:\s|$)/u.test(firstLine)
+    && !firstLine.startsWith("-");
 }
 
 function extractGroundedNamedEntityV3(input: {

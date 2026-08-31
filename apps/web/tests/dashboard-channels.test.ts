@@ -248,7 +248,7 @@ describe("dashboard channels", () => {
     expect(listRoute).not.toContain("provisionOwnerTelegramChannel");
     expect(component).toContain("selectedTelegramBotId");
     expect(component).toContain("telegramBotConnectionId");
-    expect(component).toContain("其他数字代表的 Bot 配置不受影响");
+    expect(component).toContain("其他对外代理的 Bot 配置不受影响");
   });
 
   it("presents managed Matrix add and replace controls without collecting credentials", () => {

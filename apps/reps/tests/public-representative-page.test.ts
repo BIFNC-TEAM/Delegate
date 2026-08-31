@@ -106,7 +106,7 @@ describe("public representative visitor-first page", () => {
     });
 
     expect(enabledZh).toContain("长期记忆已启用");
-    expect(enabledZh).toContain("当前联系人、当前数字代表和 Web 渠道");
+    expect(enabledZh).toContain("当前联系人、当前对外代理和 Web 渠道");
     expect(enabledZh).toContain("去标识化、经多来源聚合并通过自动策略");
     expect(enabledZh).toContain("原始聊天全文");
     expect(enabledZh).toContain("付款、余额、退款和权益");
@@ -240,7 +240,7 @@ describe("public representative visitor-first page", () => {
     expect(rechargePanelSource).not.toContain("cashBalanceCents");
     expect(rechargePanelSource).not.toContain("[500, 2000, 10000]");
     expect(rechargePanelSource).toContain(
-      "选择当前数字代表的服务包",
+      "选择当前对外代理的服务包",
     );
     expect(rechargePanelSource).toContain(
       "自愿支持",
@@ -299,10 +299,10 @@ describe("public representative visitor-first page", () => {
       "A consumed handoff entitlement is not refunded.",
     );
     expect(chatSource).toContain(
-      "你已取消人工接管请求，数字代表将继续回复。",
+      "你已取消人工接管请求，对外代理将继续回复。",
     );
     expect(chatSource).toContain(
-      "你已结束人工接待，数字代表将继续回复。",
+      "你已结束人工接待，对外代理将继续回复。",
     );
   });
 

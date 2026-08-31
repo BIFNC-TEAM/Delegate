@@ -73,7 +73,7 @@ describe("public chat presentation", () => {
     expect(panelSource.match(/className="representative-chat-artifacts"/gu)).toHaveLength(2);
     expect(panelSource).toContain("localizeSystemMessage(message.text, message.senderType, props.locale)");
     expect(panelSource).toContain("真人接待 ${operatorJoined[1]} 已加入会话。");
-    expect(panelSource).toContain("真人已结束接待，数字代表将继续回复。");
+    expect(panelSource).toContain("真人已结束接待，对外代理将继续回复。");
   });
 
   it("reveals timestamps and copy controls only on precise-pointer hover or focus", () => {

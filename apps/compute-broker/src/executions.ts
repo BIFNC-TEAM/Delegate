@@ -71,11 +71,8 @@ import { normalizeContainerPath } from "./path-utils";
 import { prisma } from "./prisma";
 import { evaluateExecutionRequest, loadSessionPolicyContext } from "./policy";
 import { runRunnerExecution } from "./runner";
-import {
-  createDockerSandboxProvider,
-  createSandboxProviderFromConfig,
-  type SandboxProviderLease,
-} from "./sandbox-provider";
+import type { SandboxProviderLease } from "./sandbox-provider";
+import { createConfiguredProviderRegistry } from "./sandbox-leases";
 import {
   mapCapabilityFromDb,
   mapCapabilityToDb,
@@ -1846,7 +1843,7 @@ async function runContainerExecution(params: {
   }
 
   return {
-    exitCode: runnerResult.exitCode,
+    exitCode: runnerResult.exitCode ?? (runnerResult.termination === "command_timeout" ? 124 : 137),
     wallMs: runnerResult.wallMs,
     bytesRead: Buffer.byteLength(runnerResult.stdout, "utf8"),
     artifacts: artifactResult.artifacts,
@@ -1895,6 +1892,8 @@ async function runSandboxAwareExecution(params: {
       workingDirectory: params.workingDirectory,
       sessionId: params.sessionId,
       executionId: params.executionId,
+      maxStdoutBytes: computeBrokerConfig.sandboxOutputLimits.maxStdoutBytes,
+      maxStderrBytes: computeBrokerConfig.sandboxOutputLimits.maxStderrBytes,
     });
   }
 
@@ -1913,28 +1912,19 @@ async function runSandboxAwareExecution(params: {
     workingDirectory: params.workingDirectory,
     sessionId: params.sessionId,
     executionId: params.executionId,
+    maxStdoutBytes: computeBrokerConfig.sandboxOutputLimits.maxStdoutBytes,
+    maxStderrBytes: computeBrokerConfig.sandboxOutputLimits.maxStderrBytes,
   });
 }
 
-async function createSandboxProviderForExecution(providerKind: "docker" | "daytona") {
-  if (providerKind === "docker") {
-    return createDockerSandboxProvider();
-  }
-
-  const configured = await createSandboxProviderFromConfig({
-    ...computeBrokerConfig,
-    sandboxProvider: "daytona",
-  });
-  if (configured.providerKind !== "daytona") {
-    throw new Error("Daytona sandbox provider is not configured.");
-  }
-  return configured.provider;
+async function createSandboxProviderForExecution(providerKind: "docker" | "daytona" | "tencent") {
+  return createConfiguredProviderRegistry().create(providerKind);
 }
 
 function buildSandboxProviderLease(params: {
   leasedSession: LeasedSessionRecord;
   sandboxLease: SandboxLeaseForExecution;
-  providerKind: "docker" | "daytona";
+  providerKind: "docker" | "daytona" | "tencent";
 }): SandboxProviderLease {
   const runnerType = mapRunnerTypeFromDb(params.leasedSession.runnerType);
   const providerSandboxId =
@@ -1982,7 +1972,7 @@ async function resolveSandboxIdentityId(leasedSession: LeasedSessionRecord) {
 }
 
 function mapSandboxProviderFromDb(value: string) {
-  return value.toLowerCase() as "docker" | "daytona";
+  return value.toLowerCase() as "docker" | "daytona" | "tencent";
 }
 
 async function runNativeBrowserExecution(params: {

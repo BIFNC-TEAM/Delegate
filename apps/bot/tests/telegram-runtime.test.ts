@@ -336,7 +336,7 @@ describe("Telegram bot runtime", () => {
     });
 
     expect(reply).toHaveBeenCalledWith(
-      expect.stringContaining("目标数字代表"),
+      expect.stringContaining("目标对外代理"),
     );
   });
 

@@ -70,7 +70,7 @@ describe("WeChat Pay API v3", () => {
     const expectedBody = JSON.stringify({
       appid: "wx-test-app-id",
       mchid: "1900000109",
-      description: "Delegate 数字代表服务充值",
+      description: "Delegate 对外代理服务充值",
       out_trade_no: "recharge_123",
       time_expire: "2026-07-27T10:00:00Z",
       notify_url: "https://delegate.example/api/payments/wechat/notify",
@@ -286,7 +286,7 @@ describe("WeChat Pay API v3", () => {
     expect(JSON.parse(capturedBody!)).toEqual({
       appid: "wx-test-app-id",
       mchid: "1900000109",
-      description: "Delegate 数字代表服务充值",
+      description: "Delegate 对外代理服务充值",
       out_trade_no: "recharge_frozen_retry",
       time_expire: "2026-07-27T10:00:00Z",
       notify_url:

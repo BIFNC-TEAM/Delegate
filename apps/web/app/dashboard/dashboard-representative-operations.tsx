@@ -163,7 +163,7 @@ export function DashboardRepresentativeOperations({
   }
 
   const sectionNavigation = (
-    <nav aria-label={zh ? "数字代表模块" : "Digital representative workspace"} className="representative-section-tabs">
+    <nav aria-label={zh ? "对外代理模块" : "Digital representative workspace"} className="representative-section-tabs">
       <button className={activeSection === "directory" ? "is-active" : undefined} onClick={() => navigateSection("directory")} type="button">
         {zh ? "代表列表与创建" : "Directory & create"}
       </button>
@@ -183,8 +183,8 @@ export function DashboardRepresentativeOperations({
           actionLabel={zh ? "配置当前代表" : "Configure active representative"}
           canAct={Boolean(snapshot)}
           onAction={() => navigateSection("setup")}
-          summary={zh ? "创建多个数字代表，并为每个代表维护独立的身份、知识、价格与发布版本。" : "Create multiple representatives with independent identity, knowledge, pricing, and release history."}
-          title={zh ? "管理工作区里的全部数字代表。" : "Manage every representative in this workspace."}
+          summary={zh ? "创建多个对外代理，并为每个代表维护独立的身份、知识、价格与发布版本。" : "Create multiple representatives with independent identity, knowledge, pricing, and release history."}
+          title={zh ? "管理工作区里的全部对外代理。" : "Manage every representative in this workspace."}
         />
       ) : activeSection === "setup" && snapshot ? (
         <RepresentativeWorkspaceHeader
@@ -198,7 +198,7 @@ export function DashboardRepresentativeOperations({
         <header className="dashboard-v2-page-header representative-ops-header">
           <div>
             <p>DIGITAL REPRESENTATIVES / 02</p>
-            <h1>{zh ? "从配置、边界到版本，发布一个完整的数字代表。" : "Publish a complete representative from configuration to boundaries and versions."}</h1>
+            <h1>{zh ? "从配置、边界到版本，发布一个完整的对外代理。" : "Publish a complete representative from configuration to boundaries and versions."}</h1>
             <span>{zh ? "当前页面以发布就绪度为主线，知识、渠道、人工接管和版本状态在同一处检查。" : "Use readiness as the operating spine across knowledge, channels, handoff, and versions."}</span>
           </div>
           <div className="dashboard-v2-page-actions">
@@ -299,7 +299,7 @@ export function DashboardRepresentativeOperations({
                   </header>
                   <p className="dashboard-v2-panel-description">
                     {zh
-                      ? "这里显示当前代表的渠道摘要；连接、暂停和健康检查在发布渠道统一管理。每个数字代表可选择独立 Telegram Bot，也可复用工作区内同一个 Bot。"
+                      ? "这里显示当前代表的渠道摘要；连接、暂停和健康检查在发布渠道统一管理。每个对外代理可选择独立 Telegram Bot，也可复用工作区内同一个 Bot。"
                       : "This is the current representative's channel summary. Manage connections, pauses, and health checks in Channels. Each representative can use its own Telegram Bot or reuse one Bot in the workspace."}
                   </p>
                   <div className="representative-channel-list">

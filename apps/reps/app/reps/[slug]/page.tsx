@@ -397,7 +397,7 @@ function PausedRepresentativePage({ locale, siteBaseUrl }: { locale: Locale; sit
       <section className="marketing-hero representative-stage representative-paused-stage">
         <div className="marketing-hero-copy representative-hero-copy">
           <p className="eyebrow">TEMPORARILY PAUSED</p>
-          <h1>{zh ? "这位数字代表暂时离线。" : "This representative is temporarily offline."}</h1>
+          <h1>{zh ? "这位对外代理暂时离线。" : "This representative is temporarily offline."}</h1>
           <p className="marketing-lead">{zh ? "公开页面、聊天和服务接口已同步暂停。请稍后再来，或通过其他已公开渠道联系主理人。" : "The public page, chat, and service APIs are paused together. Please return later or use another published contact channel."}</p>
         </div>
       </section>
@@ -462,7 +462,7 @@ const copy = {
     rechargeNav: "服务与支持",
     resourcesNav: "公开资料",
     trustNav: "隐私与真人",
-    publicRepresentative: "公开数字代表",
+    publicRepresentative: "公开对外代理",
     startEyebrow: "从这里开始",
     startTitle: "直接说说你想解决什么",
     startSummary: (name: string, governedContextEnabled: boolean) =>
@@ -476,7 +476,7 @@ const copy = {
     resourcesTitle: "你可以直接查看和使用的内容",
     resourcesSummary: "回答会优先引用这些公开信息；与当前问题相关的来源也会显示在消息下方。",
     trustItems: (governedContextEnabled: boolean) => [
-      "这是 AI 数字代表，AI 和真人消息会明确区分。",
+      "这是 AI 对外代理，AI 和真人消息会明确区分。",
       governedContextEnabled
         ? "回答以已发布、允许公开使用的资料为基础，也可能使用仅限当前访客与本代表的受治理历史摘要。"
         : "回答使用已发布、允许公开使用的资料，并在相关回答下展示来源。",
@@ -484,12 +484,12 @@ const copy = {
     ],
     handoffVisitorTitle: (ownerName: string) => `需要 ${ownerName} 本人判断？`,
     handoffUnavailableTitle: "当前不提供人工接管",
-    handoffUnavailableDetail: "你仍可继续与数字代表对话；当前会话不会进入真人队列。",
+    handoffUnavailableDetail: "你仍可继续与对外代理对话；当前会话不会进入真人队列。",
     handoffPackageDetail: "人工接管由已购买的服务套餐权益提供；可用次数、优先级与有效期会在当前会话中显示。",
     handoffPackageUnavailableDetail: "人工接管需要有效的套餐权益；当前暂无包含人工接管的可购买套餐。",
     openHandoffPackages: "查看含人工权益的服务套餐",
     addHandoffContext: "回到对话并补充需求",
-    footerDisclosure: (name: string) => `${name} 是由 Delegate 提供支持的公开数字代表。`,
+    footerDisclosure: (name: string) => `${name} 是由 Delegate 提供支持的公开对外代理。`,
     brandTagline: "Web-first 公开代表档案",
     menuAriaLabel: "代表页分区",
     languageAriaLabel: "语言切换",
@@ -504,7 +504,7 @@ const copy = {
     accountCommerceLabel: "我的服务与订单",
     accountBindingsLabel: "账号与渠道绑定",
     logoutLabel: "退出",
-    conversationWorkspaceAriaLabel: "与数字代表对话",
+    conversationWorkspaceAriaLabel: "与对外代理对话",
     aiHumanLabel: "ai + human",
     aiOnlyLabel: "ai only",
     worksForLabel: "Who this representative works for",
@@ -528,14 +528,14 @@ const copy = {
     commerceHistoryTitle: "查看服务与支持记录",
     commerceHistorySummary: "当前没有可购买选项；这里保留你的最近订单状态、支付结果和已获得的服务权益。",
     agentWalletEyebrow: "额度范围",
-    agentWalletTitle: "服务额度只适用于当前数字代表",
+    agentWalletTitle: "服务额度只适用于当前对外代理",
     agentWalletCopy: (name: string) =>
       `${name} 的公开页面只展示服务端已上架的服务包。付款成功后，额度会直接发放到当前登录账户并限定用于这个代表。`,
     agentWalletCurrentChip: "当前：一次性服务包",
     webFirstChip: "网页优先",
     amnPayRoadmapChip: "微信收款受生产开关控制",
     balanceDisclosure: (name: string) =>
-      `购买的服务额度仅用于 ${name} 这个数字代表的服务，不代表进入真人的私人工作区，也不会自动授权其它代表。`,
+      `购买的服务额度仅用于 ${name} 这个对外代理的服务，不代表进入真人的私人工作区，也不会自动授权其它代表。`,
     rechargeCta: "购买服务包 / 继续服务",
     platformAccountsEyebrow: "Platform accounts",
     platformAccountsTitle: "跨平台入口汇聚",

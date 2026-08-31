@@ -1870,7 +1870,7 @@ describe("conversation worker knowledge recall", () => {
     "confirms an exact $channel Contact Memory deletion without recall, model, or billing",
     async (fixture) => {
       const confirmation =
-        `已完成：当前数字代表与当前 ${fixture.channelName} 渠道下的联系人记忆已立即停止召回，后台将异步清理对应长期记忆。代表经验和其他渠道的联系人记忆不受影响。`;
+        `已完成：当前对外代理与当前 ${fixture.channelName} 渠道下的联系人记忆已立即停止召回，后台将异步清理对应长期记忆。代表经验和其他渠道的联系人记忆不受影响。`;
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({
@@ -5786,7 +5786,7 @@ describe("conversation worker knowledge recall", () => {
         segments: [{
           kind: "claim",
           goalId: "goal-1",
-          text: "我是周老师的地理数字代表，会依据周老师发布的资料帮助你学习地理。",
+          text: "我是周老师的地理对外代理，会依据周老师发布的资料帮助你学习地理。",
           sourceClass: "tool_output",
           evidenceRefs: ["representative-profile:turn-plan-v3-run-v3-capabilities-1"],
         }],

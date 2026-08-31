@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { toPublicBrokerError } from "../src/public-error";
+import { SandboxProviderError } from "../src/sandbox-provider";
 import { SessionError } from "../src/session-error";
 
 describe("compute broker public error boundary", () => {
@@ -38,5 +39,31 @@ describe("compute broker public error boundary", () => {
       logPrivateDetail: true,
     });
     expect(JSON.stringify(result)).not.toMatch(/SELECT|password|db\.internal/u);
+  });
+
+  it("exposes only stable sandbox provider error codes", () => {
+    expect(toPublicBrokerError(new SandboxProviderError("THROTTLED", true))).toEqual({
+      statusCode: 503,
+      code: "sandbox_provider_unavailable",
+      logPrivateDetail: false,
+    });
+    expect(toPublicBrokerError(new SandboxProviderError("AUTH_INVALID", false))).toEqual({
+      statusCode: 503,
+      code: "sandbox_provider_unavailable",
+      logPrivateDetail: true,
+    });
+  });
+
+  it("maps allowlist and operation-fence failures without exposing internals", () => {
+    expect(toPublicBrokerError(new Error("sandbox_phase1_representative_not_allowed"))).toEqual({
+      statusCode: 403,
+      code: "sandbox_phase1_representative_not_allowed",
+      logPrivateDetail: false,
+    });
+    expect(toPublicBrokerError(new Error("sandbox_provider_operation_fence_lost"))).toEqual({
+      statusCode: 409,
+      code: "sandbox_creation_pending_reconciliation",
+      logPrivateDetail: false,
+    });
   });
 });

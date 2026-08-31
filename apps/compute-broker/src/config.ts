@@ -1,11 +1,19 @@
 import { artifactStoreConfigSchema } from "@delegate/artifacts";
 import { z } from "zod";
 
+import { parseSandboxRoutingConfig } from "./sandbox-routing";
+
+const blankEnvValueToUndefined = (value: unknown) =>
+  typeof value === "string" && !value.trim() ? undefined : value;
+
 const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   PORT: z.coerce.number().int().positive().default(4010),
   COMPUTE_BROKER_INTERNAL_TOKEN: z.string().min(1),
   COMPUTE_RUNNER_TYPE: z.enum(["docker", "vm"]).default("docker"),
-  SANDBOX_PROVIDER: z.enum(["docker", "daytona"]).default("docker"),
+  SANDBOX_PROVIDER: z.enum(["docker", "daytona", "tencent"]).default("docker"),
+  SANDBOX_ROUTING_MODE: z.enum(["legacy", "manual_poc"]).default("legacy"),
+  SANDBOX_PROVIDER_ROUTING_JSON: z.string().optional(),
   COMPUTE_RUNNER_IMAGE: z.string().min(1).default("debian:bookworm-slim"),
   COMPUTE_BROWSER_IMAGE: z.string().min(1).default("mcr.microsoft.com/playwright:v1.58.2-noble"),
   COMPUTE_BROWSER_PLAYWRIGHT_VERSION: z.string().min(1).default("1.58.2"),
@@ -46,12 +54,29 @@ const envSchema = z.object({
   SANDBOX_CLEANUP_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   SANDBOX_AUTO_ARCHIVE_MINUTES: z.coerce.number().int().default(7 * 24 * 60),
   SANDBOX_AUTO_DELETE_MINUTES: z.coerce.number().int().default(-1),
+  SANDBOX_MAX_STDOUT_BYTES: z.coerce.number().int().positive().max(16 * 1024 * 1024)
+    .default(1024 * 1024),
+  SANDBOX_MAX_STDERR_BYTES: z.coerce.number().int().positive().max(16 * 1024 * 1024)
+    .default(1024 * 1024),
   DAYTONA_API_KEY: z.string().optional(),
-  DAYTONA_API_URL: z.string().url().optional(),
+  DAYTONA_API_URL: z.preprocess(blankEnvValueToUndefined, z.string().url().optional()),
   DAYTONA_TARGET: z.string().optional(),
-  DAYTONA_SANDBOX_CPU: z.coerce.number().positive().optional(),
-  DAYTONA_SANDBOX_MEMORY_GIB: z.coerce.number().positive().optional(),
-  DAYTONA_SANDBOX_DISK_GIB: z.coerce.number().positive().optional(),
+  DAYTONA_SANDBOX_CPU: z.preprocess(
+    blankEnvValueToUndefined,
+    z.coerce.number().positive().optional(),
+  ),
+  DAYTONA_SANDBOX_MEMORY_GIB: z.preprocess(
+    blankEnvValueToUndefined,
+    z.coerce.number().positive().optional(),
+  ),
+  DAYTONA_SANDBOX_DISK_GIB: z.preprocess(
+    blankEnvValueToUndefined,
+    z.coerce.number().positive().optional(),
+  ),
+  TENCENT_AGS_API_KEY: z.string().optional(),
+  TENCENT_AGS_DOMAIN: z.string().optional(),
+  TENCENT_AGS_REGION: z.string().optional(),
+  TENCENT_AGS_CODE_TOOL: z.string().optional(),
   ARTIFACT_STORE_ENDPOINT: z.string().url().default("http://artifact-store:9000"),
   ARTIFACT_STORE_BUCKET: z.string().min(1).default("delegate-compute-artifacts"),
   ARTIFACT_STORE_ACCESS_KEY: z.string().min(1).default("delegate"),
@@ -61,12 +86,20 @@ const envSchema = z.object({
 
 const parsed = envSchema.parse(process.env);
 const daytonaResources = buildDaytonaResources(parsed);
+const sandboxRouting = parseSandboxRoutingConfig({
+  mode: parsed.SANDBOX_ROUTING_MODE,
+  rawDocument: parsed.SANDBOX_PROVIDER_ROUTING_JSON,
+  nodeEnv: parsed.NODE_ENV,
+});
+validateManualProviderCredentials(parsed, sandboxRouting);
 
 export const computeBrokerConfig = {
   port: parsed.PORT,
   internalToken: parsed.COMPUTE_BROKER_INTERNAL_TOKEN,
   runnerType: parsed.COMPUTE_RUNNER_TYPE,
   sandboxProvider: parsed.SANDBOX_PROVIDER,
+  sandboxRoutingMode: parsed.SANDBOX_ROUTING_MODE,
+  sandboxRouting,
   runnerImage: parsed.COMPUTE_RUNNER_IMAGE,
   browserImage: parsed.COMPUTE_BROWSER_IMAGE,
   browserPlaywrightVersion: parsed.COMPUTE_BROWSER_PLAYWRIGHT_VERSION,
@@ -122,6 +155,10 @@ export const computeBrokerConfig = {
     autoArchiveMinutes: parsed.SANDBOX_AUTO_ARCHIVE_MINUTES,
     autoDeleteMinutes: parsed.SANDBOX_AUTO_DELETE_MINUTES,
   },
+  sandboxOutputLimits: {
+    maxStdoutBytes: parsed.SANDBOX_MAX_STDOUT_BYTES,
+    maxStderrBytes: parsed.SANDBOX_MAX_STDERR_BYTES,
+  },
   daytona: {
     ...(normalizeOptionalString(parsed.DAYTONA_API_KEY)
       ? { apiKey: normalizeOptionalString(parsed.DAYTONA_API_KEY) }
@@ -133,6 +170,17 @@ export const computeBrokerConfig = {
       ? { target: normalizeOptionalString(parsed.DAYTONA_TARGET) }
       : {}),
     ...(daytonaResources ? { resources: daytonaResources } : {}),
+  },
+  tencent: {
+    ...(normalizeOptionalString(parsed.TENCENT_AGS_API_KEY)
+      ? { apiKey: normalizeOptionalString(parsed.TENCENT_AGS_API_KEY) }
+      : {}),
+    ...(resolveTencentDomain(parsed)
+      ? { domain: resolveTencentDomain(parsed) }
+      : {}),
+    ...(normalizeOptionalString(parsed.TENCENT_AGS_CODE_TOOL)
+      ? { codeTool: normalizeOptionalString(parsed.TENCENT_AGS_CODE_TOOL) }
+      : {}),
   },
   artifactStore: artifactStoreConfigSchema.parse({
     endpoint: parsed.ARTIFACT_STORE_ENDPOINT,
@@ -176,4 +224,32 @@ function buildDaytonaResources(parsedEnv: z.infer<typeof envSchema>) {
   };
 
   return Object.keys(resources).length ? resources : undefined;
+}
+
+function resolveTencentDomain(parsedEnv: z.infer<typeof envSchema>) {
+  const explicitDomain = normalizeOptionalString(parsedEnv.TENCENT_AGS_DOMAIN);
+  if (explicitDomain) return explicitDomain.replace(/^https?:\/\//u, "").replace(/\/$/u, "");
+  const region = normalizeOptionalString(parsedEnv.TENCENT_AGS_REGION);
+  return region ? `${region}.tencentags.com` : undefined;
+}
+
+function validateManualProviderCredentials(
+  parsedEnv: z.infer<typeof envSchema>,
+  routing: ReturnType<typeof parseSandboxRoutingConfig>,
+) {
+  if (!routing) return;
+  if (
+    routing.document.newIdentityEnabled.daytona &&
+    !normalizeOptionalString(parsedEnv.DAYTONA_API_KEY)
+  ) {
+    throw new Error("sandbox_daytona_credentials_required");
+  }
+  if (
+    routing.document.newIdentityEnabled.tencent &&
+    (!normalizeOptionalString(parsedEnv.TENCENT_AGS_API_KEY) ||
+      !resolveTencentDomain(parsedEnv) ||
+      !normalizeOptionalString(parsedEnv.TENCENT_AGS_CODE_TOOL))
+  ) {
+    throw new Error("sandbox_tencent_configuration_required");
+  }
 }

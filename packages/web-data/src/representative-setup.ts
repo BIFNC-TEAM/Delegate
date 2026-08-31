@@ -74,7 +74,7 @@ const defaultCnyServicePackages = [
 ] as const;
 
 const defaultCnyServicePackageDescription =
-  "一次性购买，当前数字代表专属；永久有效；仅在完全未使用时支持全额退款。";
+  "一次性购买，当前对外代理专属；永久有效；仅在完全未使用时支持全额退款。";
 
 const representativeSetupInclude = {
   owner: {

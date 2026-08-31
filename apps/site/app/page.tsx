@@ -14,7 +14,7 @@ import { SiteAccountNavigation } from "./site-account-navigation";
 
 const copy = {
   zh: {
-    brandTagline: "公开数字代表",
+    brandTagline: "公开对外代理",
     menu: [
       { href: "#product", label: "产品" },
       { href: "#how", label: "工作方式" },
@@ -29,7 +29,7 @@ const copy = {
       fallback: "已登录账号",
       menuLabel: "打开账号菜单",
       console: "前往控制台",
-      representatives: "我的数字代表",
+      representatives: "我的对外代理",
       settings: "用户设置",
       signOut: "退出登录",
       language: "语言",
@@ -38,11 +38,11 @@ const copy = {
     heroTitle: "你的 AI 替身，代表你向外界提供服务",
     heroLead:
       "替你接待陌生人、筛选商机、处理简单任务。你躺平的时候，它替你干活，为你赚取被动收入，只把该你出面的事留给你。",
-    heroPrimary: "创建我的数字代表",
+    heroPrimary: "创建我的对外代理",
     heroSecondary: "体验真实代表",
     heroTrust: ["仅使用已批准资料", "敏感动作先请示", "随时转人工接手"],
     mockLabel: "交互示例 · Mock 数据",
-    mockRepName: "Lin 的数字代表",
+    mockRepName: "Lin 的对外代理",
     mockRepStatus: "在线接待中",
     mockVisitorLabel: "访客",
     mockVisitorMessage: "我们是 20 人的 AI 团队，想邀请 Lin 做一次产品战略咨询。",
@@ -206,7 +206,7 @@ const copy = {
     finalEyebrow: "OPEN YOUR FRONT DESK",
     finalTitle: "把重复接待交给代表，把重要关系留给自己。",
     finalLead: "先体验一个真实代表，再决定如何发布属于你的公开入口。",
-    finalPrimary: "创建我的数字代表",
+    finalPrimary: "创建我的对外代理",
     finalSecondary: "先体验演示",
     footerSummary: "面向创始人、顾问和创作者的公开 AI 接待前台。",
     footerStatus: "Web-first · Early access",
@@ -441,7 +441,7 @@ export default async function HomePage({
           registerLabel={selfServiceRegistrationEnabled
             ? t.navCreate
             : locale === "zh"
-              ? "创建数字代表"
+              ? "创建对外代理"
               : "Create a representative"}
           siteReturnTo={buildLocalizedHref("/", locale)}
         />

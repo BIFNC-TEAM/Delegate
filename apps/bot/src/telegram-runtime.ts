@@ -241,7 +241,7 @@ export async function handleTelegramMiddlewareError(params: {
     if (params.error instanceof TelegramRepresentativeSelectionRequiredError) {
       try {
         await params.context.reply(
-          "请先从目标数字代表的公开页面打开这个 Bot，再继续发送消息。",
+          "请先从目标对外代理的公开页面打开这个 Bot，再继续发送消息。",
         );
       } catch (replyError) {
         logger.error(
@@ -258,7 +258,7 @@ export async function handleTelegramMiddlewareError(params: {
 
   try {
     await params.context.reply(
-      "当前无法确认你正在使用的数字代表。为避免消息进入错误代表，本次消息未处理，请稍后重试。",
+      "当前无法确认你正在使用的对外代理。为避免消息进入错误代表，本次消息未处理，请稍后重试。",
     );
   } catch (replyError) {
     logger.error(

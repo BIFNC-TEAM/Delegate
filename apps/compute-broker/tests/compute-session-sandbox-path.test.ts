@@ -39,6 +39,11 @@ vi.mock("../src/runner", async () => {
 });
 
 vi.mock("../src/sandbox-leases", () => ({
+  createConfiguredProviderRegistry: () => ({
+    create: vi.fn(),
+    configured: vi.fn(() => true),
+    resolveLegacyProvider: vi.fn(() => "docker"),
+  }),
   ensureUserSandboxLease: mockEnsureUserSandboxLease,
   stopSandboxLease: mockStopSandboxLease,
 }));
@@ -90,7 +95,8 @@ describe("compute session sandbox path", () => {
         representativeId: "rep-1",
         contactId: "contact-1",
       }),
-      providerKind: "docker",
+      providerFactory: expect.any(Function),
+      selectProviderForNewIdentity: expect.any(Function),
     }));
     expect(mockAcquireRunnerLease).not.toHaveBeenCalled();
     expect(mockPrisma.computeSession.update).toHaveBeenCalledWith({
@@ -168,6 +174,7 @@ function buildSession(overrides: { contactId: string | null }) {
     containerId: null,
     runnerType: "DOCKER" as const,
     baseImage: "debian:bookworm-slim",
+    runtimeClass: "CODE" as const,
     leaseTokenHash: "hash",
     leaseAcquiredAt: null,
     leaseLastUsedAt: null,

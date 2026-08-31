@@ -1393,7 +1393,7 @@ function isAbortError(error: unknown): boolean {
 
 const copy = {
   zh: {
-    identityNote: "服务套餐和自愿支持都会记入当前已登录的 Delegate 账户。套餐额度与人工权益仅适用于当前数字代表；打赏不赠送额度或人工权益。",
+    identityNote: "服务套餐和自愿支持都会记入当前已登录的 Delegate 账户。套餐额度与人工权益仅适用于当前对外代理；打赏不赠送额度或人工权益。",
     tipIdentityNote: "打赏会记入当前已登录的 Delegate 账户，仅用于表达自愿支持；不赠送服务额度、响应优先级或人工权益，支付确认后不可退款。",
     tipRecordTitle: "支持记录",
     tipRecordSummary: (count: number) => `当前账户已有 ${count} 笔打赏记录。`,
@@ -1417,7 +1417,7 @@ const copy = {
     checkBindingAction: "重新检查",
     checkingBinding: "检查中...",
     bindingCheckError: "Telegram 绑定状态检查失败。",
-    servicePackagesTitle: "选择当前数字代表的服务包",
+    servicePackagesTitle: "选择当前对外代理的服务包",
     servicePackagesDetail: "套餐会发放当前代表专属额度；标注的人工接管权益同时生效。",
     tipProductsTitle: "自愿支持",
     tipProductsDetail: "可选择不同金额表达支持；这不是购买服务，也不改变响应优先级。",
@@ -1457,7 +1457,7 @@ const copy = {
     tipThanksTitle: "感谢你的支持。",
     tipThanksDetail: "本次支持已确认，不会增加服务额度，也不会创建退款额度按钮。",
     wechatQrTitle: "微信扫码支付",
-    wechatQrDetail: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "请使用微信扫描二维码。支付成功后会记录本次自愿支持，不发放服务额度或人工权益。" : "请使用微信扫描二维码。支付成功后，所选服务额度和人工权益会直接发放给当前数字代表。",
+    wechatQrDetail: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "请使用微信扫描二维码。支付成功后会记录本次自愿支持，不发放服务额度或人工权益。" : "请使用微信扫描二维码。支付成功后，所选服务额度和人工权益会直接发放给当前对外代理。",
     wechatCountdown: (time: string) => `二维码剩余有效时间 ${time}`,
     wechatAwaitingPayment: "正在等待微信支付确认。",
     wechatRecovering: "微信支付订单正在安全确认，二维码生成后会自动显示。",
@@ -1468,7 +1468,7 @@ const copy = {
     retryPaymentStatusAction: "重新查询支付结果",
     wechatAuthExpired: "登录状态已失效，支付查询已停止。请重新登录后核对订单。",
     wechatManualReview: "支付结果与当前订单需要人工核对，自动查询已停止。",
-    wechatManualReviewAction: "请勿重复支付。联系数字代表主人并提供当前订单时间和金额进行核对。",
+    wechatManualReviewAction: "请勿重复支付。联系对外代理主人并提供当前订单时间和金额进行核对。",
     wechatProviderRetry: "微信支付状态暂时不可用，本页会降低频率后自动重试。",
     wechatStatusRetry: "网络暂时不可用，本页会自动重试支付状态。",
     wechatOffline: "当前设备已离线；支付查询已暂停，恢复联网后会自动继续。",
@@ -1483,7 +1483,7 @@ const copy = {
     checkoutUrlCopied: "已复制",
     copyError: "支付链接复制失败，请直接扫描二维码。",
     creditsLabel: "当前代表可用服务额度 ",
-    creditsScope: "仅限当前数字代表",
+    creditsScope: "仅限当前对外代理",
     reservedReturnHint: "有额度正在服务请求中，结算或释放后才能退回。",
     returnedTitle: "退款已处理",
     returnedDetail: (
@@ -1491,7 +1491,7 @@ const copy = {
       amountCents: number,
       currency: string,
     ) => `${tokens} 额度 · ${formatMoney(amountCents, currency)}`,
-    wechatDisclaimer: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "当前使用微信 Native 支付。Delegate 只保存订单和验签后的最小支付凭据，不接触微信支付密码；自愿支持不赠送服务权益，支付确认后不可退款。" : "当前使用微信 Native 支付。Delegate 只保存订单和验签后的最小支付凭据，不接触微信支付密码；支付成功后会发放当前数字代表专属服务权益，退款按所购套餐规则处理。",
+    wechatDisclaimer: (kind: "SERVICE_PACKAGE" | "TIP" | null) => kind === "TIP" ? "当前使用微信 Native 支付。Delegate 只保存订单和验签后的最小支付凭据，不接触微信支付密码；自愿支持不赠送服务权益，支付确认后不可退款。" : "当前使用微信 Native 支付。Delegate 只保存订单和验签后的最小支付凭据，不接触微信支付密码；支付成功后会发放当前对外代理专属服务权益，退款按所购套餐规则处理。",
   },
   en: {
     identityNote: "Service packages and voluntary support are recorded on the signed-in Delegate account. Package credits and human-help entitlements apply only to this representative; tips include neither.",

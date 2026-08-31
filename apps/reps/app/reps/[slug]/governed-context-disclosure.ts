@@ -38,8 +38,8 @@ export function getGovernedContextDisclosure(
       : "then recall remains blocked and auditable asynchronous cleanup begins";
     const extractionKindsZh = policy.contactMemoryEnabled
       ? policy.representativeExperienceEnabled
-        ? `本次消息可能提取仅限当前联系人的偏好、目标、约束与必要背景${policy.contactMemoryCrossChannelEnabled ? "；登录并验证为同一 Delegate 身份后，跨渠道联系人记忆默认开启，安全摘要可供当前代表在 Web、Matrix 和 Telegram 私聊间使用，你可以随时关闭" : "并限定在当前数字代表和 Web 渠道"}，也可能作为去标识化、多来源聚合的代表经验输入；单条消息或单个联系人不会直接生成代表经验`
-        : `本次消息只可能提取联系人偏好、目标、约束与必要背景，${policy.contactMemoryCrossChannelEnabled ? "登录并验证为同一 Delegate 身份后，跨渠道联系人记忆默认开启，安全摘要可供当前代表在 Web、Matrix 和 Telegram 私聊间使用，你可以随时关闭" : "并严格限定在当前联系人、当前数字代表和 Web 渠道"}`
+        ? `本次消息可能提取仅限当前联系人的偏好、目标、约束与必要背景${policy.contactMemoryCrossChannelEnabled ? "；登录并验证为同一 Delegate 身份后，跨渠道联系人记忆默认开启，安全摘要可供当前代表在 Web、Matrix 和 Telegram 私聊间使用，你可以随时关闭" : "并限定在当前对外代理和 Web 渠道"}，也可能作为去标识化、多来源聚合的代表经验输入；单条消息或单个联系人不会直接生成代表经验`
+        : `本次消息只可能提取联系人偏好、目标、约束与必要背景，${policy.contactMemoryCrossChannelEnabled ? "登录并验证为同一 Delegate 身份后，跨渠道联系人记忆默认开启，安全摘要可供当前代表在 Web、Matrix 和 Telegram 私聊间使用，你可以随时关闭" : "并严格限定在当前联系人、当前对外代理和 Web 渠道"}`
       : "本次消息只可能作为去标识化、多来源聚合的代表经验输入；单条消息或单个联系人不会直接生成代表经验，联系人事实不会进入代表经验";
     const extractionKindsEn = policy.contactMemoryEnabled
       ? policy.representativeExperienceEnabled
@@ -69,11 +69,11 @@ export function getGovernedContextDisclosure(
     const scopes = [
       policy.contactMemoryEnabled
         ? policy.contactMemoryCrossChannelEnabled
-          ? "联系人记忆始终限定在当前联系人和当前数字代表；Web、Matrix、Telegram 私聊映射到同一已验证 Delegate 身份后默认开启安全摘要共享，联系人可随时关闭，原始会话仍分别保存"
-          : "联系人记忆严格限定在当前联系人、当前数字代表和 Web 渠道，其他联系人、代表或渠道不可见"
+          ? "联系人记忆始终限定在当前联系人和当前对外代理；Web、Matrix、Telegram 私聊映射到同一已验证 Delegate 身份后默认开启安全摘要共享，联系人可随时关闭，原始会话仍分别保存"
+          : "联系人记忆严格限定在当前联系人、当前对外代理和 Web 渠道，其他联系人、代表或渠道不可见"
         : null,
       policy.representativeExperienceEnabled
-        ? "代表经验只服务当前数字代表，可面向其访客使用，但不包含任何联系人身份或个人事实"
+        ? "代表经验只服务当前对外代理，可面向其访客使用，但不包含任何联系人身份或个人事实"
         : null,
     ].filter((value): value is string => value !== null).join("；");
     const extraction = policy.automaticExtractionEnabled

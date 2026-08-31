@@ -556,7 +556,7 @@ const copy = {
     summary: (name: string) => `${name} 的控制台先展示高频信号，再进入人工接手、付款和钱包细节。`,
     panelTitle: "先看今天的运营脉冲，再判断代表钱包、续用和人工接手状态。",
     heroKicker: "代表经营状态",
-    heroTitle: "主人需要看到这个数字代表是否还在赚钱、消耗和等待接手。",
+    heroTitle: "主人需要看到这个对外代理是否还在赚钱、消耗和等待接手。",
     starsLiveChip: (stars: number) => `${stars} Stars`,
     activeHandoffsChip: (count: number) => `${count} 个待接手`,
     workflowEyebrow: "后台定时任务",

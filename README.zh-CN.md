@@ -22,7 +22,7 @@
 
 Delegate 是 **Agent Monetization Network（AMN）** 的第一条产品楔子。AMN 是一个面向 AI Agents 和 Digital Representatives 的开放收益网络。
 
-AMN 的长期命题很简单：任何 Agent 都可以赚钱，任何用户都可以充值，任何平台都可以接入，收益应该公开透明。Delegate 把这个命题先落成一个具体的公共数字代表：一个 web-first 接口，只基于已批准的公开知识回答问题，通过显式策略处理敏感操作，展示充值 / 服务深度，并在代表不该独立行动时转交给真人。
+AMN 的长期命题很简单：任何 Agent 都可以赚钱，任何用户都可以充值，任何平台都可以接入，收益应该公开透明。Delegate 把这个命题先落成一个具体的公共对外代理：一个 web-first 接口，只基于已批准的公开知识回答问题，通过显式策略处理敏感操作，展示充值 / 服务深度，并在代表不该独立行动时转交给真人。
 
 它不是把私人助理暴露给外部用户。Delegate 是一个独立的公共运行时，也是面向单个 Digital Representative 的充值 / 资料入口。
 
@@ -338,10 +338,10 @@ queue 配置不完整，Delegate 会以 `temporal_not_fully_configured` 失败�
 - `DELEGATE_CLAWHUB_URL` 指定不含凭据的 HTTPS Registry origin，`DELEGATE_CLAWHUB_ALLOWED_HOSTS` 限制允许的主机名，`DELEGATE_CLAWHUB_TRUST_MAX_AGE_MS` 限制 exact-version 验证的新鲜度（默认 24 小时），且客户端拒绝重定向。采纳或回滚前会重新获取精确发布者/版本的 manifest 与 verdict，拒绝过期或发生漂移的证据，并使用当前受信公钥集合重验签后才改变 release 状态。
 - 当前 Telegram long-poll runtime 只要求 `TELEGRAM_BOT_TOKEN`。`TELEGRAM_BOT_ID` 可选，未填写时会从 token 的数字前缀推导；`getMe` 成功后，Bot 会把验证过的 ID 和 username 写入已配置的 Telegram 渠道绑定，Web 因此无需拿到 token 也能生成限定当前连接的 `/bind` 挑战。建议填写 `TELEGRAM_BOT_USERNAME` 以获得可读的渠道标识，但它不影响 polling 启动。`TELEGRAM_WEBHOOK_SECRET` 不会被 long-poll 读取，也不是 long-poll 必需项；它仍可供独立 webhook、签名或 fallback 逻辑使用，但不应只为启动 polling 而配置。
 - `REP_PUBLIC_CHAT_SESSION_SECRET` 可以覆盖 public-chat cookie 签名 secret。如果没有设置，reps app 会依次回退到 `TELEGRAM_WEBHOOK_SECRET` 和本地开发 secret。
-- `PUBLIC_CHAT_RATE_LIMIT_SECRET` 会先对网络、用户和数字代表限流键做 HMAC，再写入 Postgres；未配置时回退到 `REP_PUBLIC_CHAT_SESSION_SECRET`。三个 `PUBLIC_CHAT_*_REQUESTS_*` 变量用于调整分布式准入限额。只有受信反向代理会覆盖指定请求头时才设置 `PUBLIC_CHAT_CLIENT_IP_HEADER`，否则保持为空。
-- `PUBLIC_MATERIAL_LINK_SECRET` 用于签发十分钟有效、绑定数字代表、资料校验和与处理版本的公开资料链接。下载时会重新检查当前发布和审批状态，因此资料归档、停用、替换或取消公开后，已签发链接也会失效。
+- `PUBLIC_CHAT_RATE_LIMIT_SECRET` 会先对网络、用户和对外代理限流键做 HMAC，再写入 Postgres；未配置时回退到 `REP_PUBLIC_CHAT_SESSION_SECRET`。三个 `PUBLIC_CHAT_*_REQUESTS_*` 变量用于调整分布式准入限额。只有受信反向代理会覆盖指定请求头时才设置 `PUBLIC_CHAT_CLIENT_IP_HEADER`，否则保持为空。
+- `PUBLIC_MATERIAL_LINK_SECRET` 用于签发十分钟有效、绑定对外代理、资料校验和与处理版本的公开资料链接。下载时会重新检查当前发布和审批状态，因此资料归档、停用、替换或取消公开后，已签发链接也会失效。
 - `DELEGATE_MODEL_ENABLED`、`DELEGATE_MODEL_PROVIDER`、`DELEGATE_MODEL_FALLBACK_PROVIDER` 和各 Provider 的模型配置控制 model-backed representative replies。`DELEGATE_MODEL_PLANNER_PROVIDER` 可将规划独立固定到支持原生 Strict Structured Outputs 的 Provider；本地默认建议优先 `agicto`，已配置的 AGICTO、OpenAI 和兼容百炼模型均走原生 Strict JSON Schema。默认主回答 Provider 也是独立的 `agicto`。
-- `TURN_PLAN_V3_MODE` 控制权威 Agent Runtime 发布（`disabled | shadow | active_readonly | active_governed`）。V3 active 只运行一次 V3 Planner，不调用 V2 或旧 natural-language Detailed Planner；公开数字代表先查授权知识，只有用户本轮明确允许通用来源、Knowledge 为 Verified miss/unavailable 且服务端确认非 Owner 权威事实时，才带固定说明回退通用知识；`active_governed` 再发布托管 Markdown/TXT、typed Compute 和 schema-pinned MCP。
+- `TURN_PLAN_V3_MODE` 控制权威 Agent Runtime 发布（`disabled | shadow | active_readonly | active_governed`）。V3 active 只运行一次 V3 Planner，不调用 V2 或旧 natural-language Detailed Planner；公开对外代理先查授权知识，只有用户本轮明确允许通用来源、Knowledge 为 Verified miss/unavailable 且服务端确认非 Owner 权威事实时，才带固定说明回退通用知识；`active_governed` 再发布托管 Markdown/TXT、typed Compute 和 schema-pinned MCP。
 - 生产环境的 V3 active 还要求 `TURN_PLAN_V3_ACTIVE_RELEASE_APPROVED=true`；只有对应 Lane 通过可执行 Shadow release gate 后才能设置。
 - `TURN_PLANNER_V2_MODE` 只控制 V2 回滚/兼容（`disabled | shadow | active_low_risk`）；V3 active 时 V2 不会成为第二套写入真相。
 - `DELEGATE_AGICTO_API_KEY` 启用 AGICTO；未单独配置时可以复用现有 `OPENVIKING_MODEL_API_KEY` 与 `OPENVIKING_MODEL_API_BASE`。AGICTO 仅在线路协议上兼容 OpenAI，不会被记录成 OpenAI Provider，也不会借用 `OPENAI_API_KEY`。长文档通过 `DELEGATE_MODEL_DOCUMENT_TIMEOUT_MS`、`DELEGATE_MODEL_DOCUMENT_MAX_OUTPUT_TOKENS` 和 `DELEGATE_MODEL_DOCUMENT_MAX_PARTS` 设置独立超时、单段预算和有界续写段数。

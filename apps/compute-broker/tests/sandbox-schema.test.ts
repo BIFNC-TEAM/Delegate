@@ -18,6 +18,8 @@ describe("per-user sandbox schema", () => {
     expect(block).toMatch(/\bcontactId\s+String\b/);
     expect(block).toMatch(/\bscopeKey\s+String\b/);
     expect(block).toContain("@@unique([representativeId, contactId, scopeKey])");
+    expect(block).toMatch(/\blifecycleEpoch\s+Int\s+@default\(1\)/);
+    expect(schema).toMatch(/enum SandboxProviderKind \{[\s\S]*?TENCENT[\s\S]*?\}/);
   });
 
   it("keeps compute sessions as execution records with an optional sandbox lease", () => {
@@ -29,6 +31,7 @@ describe("per-user sandbox schema", () => {
     expect(block).toMatch(
       /\brepresentativeVersion\s+RepresentativeVersion\?/,
     );
+    expect(block).toMatch(/\bruntimeClass\s+SandboxRuntimeClass/);
   });
 
   it("lets browser sessions migrate to sandbox identity without breaking compute-session lookup", () => {
@@ -37,5 +40,13 @@ describe("per-user sandbox schema", () => {
     expect(block).toContain("computeSessionId    String");
     expect(block).toContain("sandboxIdentityId");
     expect(block).toContain("sandboxLeaseId");
+  });
+
+  it("persists provider creation attempts with unique idempotency coordinates", () => {
+    const block = modelBlock("SandboxProviderOperation");
+
+    expect(block).toContain("creationKey");
+    expect(block).toContain("SandboxProviderOperationState");
+    expect(block).toContain("@@unique([sandboxLeaseId, attemptNumber, operation])");
   });
 });

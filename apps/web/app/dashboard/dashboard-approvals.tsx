@@ -219,7 +219,7 @@ export function DashboardApprovals({ activeSlug, locale }: { activeSlug: string;
             <>
               <dl className="dashboard-approval-facts">
                 <div><dt>{zh ? "决策类型" : "Decision type"}</dt><dd>{selected.kind === "skill_update" ? (zh ? "技能版本升级" : "Skill release update") : (zh ? "Compute 执行" : "Compute execution")}</dd></div>
-                <div><dt>{zh ? "数字代表" : "Representative"}</dt><dd>{selected.representative.displayName}</dd></div>
+                <div><dt>{zh ? "对外代理" : "Representative"}</dt><dd>{selected.representative.displayName}</dd></div>
                 <div><dt>{zh ? "委托任务 / 技能" : "Task / skill"}</dt><dd>{selected.skillRelease?.displayName || selected.task?.title || "—"}</dd></div>
                 <div><dt>{zh ? "能力" : "Capability"}</dt><dd>{selected.action?.capability || selected.subagentId || "—"}</dd></div>
                 <div><dt>{zh ? "联系人 / 来源" : "Contact / source"}</dt><dd>{selected.skillRelease?.source || selected.contact?.displayName || selected.customerAccount.displayName}</dd></div>

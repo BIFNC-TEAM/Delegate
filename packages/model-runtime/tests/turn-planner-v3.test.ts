@@ -589,6 +589,166 @@ describe("TurnPlan V3 planner", () => {
     }
   });
 
+  it.each([{
+    name: "plain Chinese marker",
+    command: 'python3 -c "print(sum(i*i for i in range(1,10001)))"',
+    userText: '请在沙箱中执行命令：python3 -c "print(sum(i*i for i in range(1,10001)))"。请返回 stdout 和退出码。',
+  }, {
+    name: "English marker with inline code",
+    command: "printf delegate-inline-ok",
+    userText: "Run command: `printf delegate-inline-ok`. Return stdout.",
+  }, {
+    name: "shell code fence",
+    command: "printf delegate-fence-ok",
+    userText: "请执行命令：```bash\nprintf delegate-fence-ok\n```。请返回 stdout。",
+  }])("binds an explicitly marked command from $name", async ({ command, userText }) => {
+    const compute = computeExecCandidate();
+    const proposal: TurnPlanProposalV3 = {
+      protocolVersion: 3,
+      objective: "Execute the explicit sandbox command.",
+      goals: [{
+        id: "execute-goal",
+        objective: "Execute the explicit sandbox command.",
+        sourcePointers: ["/currentMessage/text"],
+        sourceSpan: sourceSpanForTest(userText, userText),
+        strategy: "capability",
+        operation: "create",
+        semanticConfidence: 0.99,
+        generalEligibility: "not_allowed",
+        evidenceRequirement: {
+          kind: "capability_result",
+          freshness: "bounded",
+          allowedSourceKinds: ["capability_result"],
+          citationRequired: true,
+          minimumEvidenceCount: 1,
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "compute_failed" },
+      }],
+      capabilitySelections: [{
+        id: "execute",
+        capabilityKey: "compute.exec",
+        capabilityVersion: "1",
+        goalIds: ["execute-goal"],
+        argumentsJson: "{}",
+      }],
+      decisionTrace: ["explicit_compute_requested"],
+    };
+    const catalog = buildCapabilityCatalogV3([compute, composerDraft()]);
+    const availabilitySnapshot = readyAvailabilitySnapshot(catalog);
+    const result = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: { id: "message-1", text: userText, language: "zh" },
+      },
+      catalog,
+      availabilitySnapshot,
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-1",
+      },
+      revision: 1,
+      adapter: strictAdapter(proposal),
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) {
+      expect(result.plan.actions[0]?.arguments).toEqual({ command });
+      expect(result.plan.actions[0]?.argumentProvenance).toEqual({
+        command: {
+          source: "user_message",
+          pointer: "/currentMessage/text",
+        },
+      });
+    }
+  });
+
+  it.each([{
+    name: "unmarked natural-language request",
+    userText: "请使用 Python 计算 1 到 10000 的平方和，并返回结果。",
+    sourceQuote: "请使用 Python 计算 1 到 10000 的平方和，并返回结果。",
+  }, {
+    name: "LLM-selected command-looking text that the user only discusses",
+    userText: '解释 python3 -c "print(1)" 是什么意思。',
+    sourceQuote: 'python3 -c "print(1)"',
+  }, {
+    name: "explicit marker with an unclosed shell quote",
+    userText: '请执行命令：python3 -c "print(1)。请返回结果。',
+    sourceQuote: '请执行命令：python3 -c "print(1)。请返回结果。',
+  }, {
+    name: "explicitly negated execution marker",
+    userText: "请不要执行命令：printf should-not-run。只解释它的含义。",
+    sourceQuote: "printf should-not-run",
+  }, {
+    name: "non-shell code fence",
+    userText: "请执行命令：```python\nprint('not-a-shell-command')\n```。",
+    sourceQuote: "请执行命令：```python\nprint('not-a-shell-command')\n```。",
+  }, {
+    name: "unterminated inline code span",
+    userText: "请执行命令：`printf incomplete。",
+    sourceQuote: "请执行命令：`printf incomplete。",
+  }, {
+    name: "command containing a forbidden control character",
+    userText: "请执行命令：printf unsafe\u0001value。",
+    sourceQuote: "请执行命令：printf unsafe\u0001value。",
+  }])("does not bind $name", async ({ userText, sourceQuote }) => {
+    const catalog = buildCapabilityCatalogV3([computeExecCandidate(), composerDraft()]);
+    const proposal: TurnPlanProposalV3 = {
+      protocolVersion: 3,
+      objective: "Compute the requested result.",
+      goals: [{
+        id: "execute-goal",
+        objective: "Compute the requested result.",
+        sourcePointers: ["/currentMessage/text"],
+        sourceSpan: sourceSpanForTest(userText, sourceQuote),
+        strategy: "capability",
+        operation: "create",
+        semanticConfidence: 0.99,
+        generalEligibility: "not_allowed",
+        evidenceRequirement: {
+          kind: "capability_result",
+          freshness: "bounded",
+          allowedSourceKinds: ["capability_result"],
+          citationRequired: true,
+          minimumEvidenceCount: 1,
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "compute_failed" },
+      }],
+      capabilitySelections: [{
+        id: "execute",
+        capabilityKey: "compute.exec",
+        capabilityVersion: "1",
+        goalIds: ["execute-goal"],
+        argumentsJson: "{}",
+      }],
+      decisionTrace: ["compute_requested_without_explicit_command"],
+    };
+    const result = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: { id: "message-1", text: userText, language: "zh" },
+      },
+      catalog,
+      availabilitySnapshot: readyAvailabilitySnapshot(catalog),
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-1",
+      },
+      revision: 1,
+      adapter: strictAdapter(proposal),
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "plan_invalid",
+      issues: [expect.objectContaining({
+        code: "arguments_invalid",
+        path: "/actions/0/arguments/command",
+      })],
+    });
+  });
+
   it("never silently chooses the first repository when multiple locators are present", async () => {
     const userText = "比较 openai/openai-python 与 pydantic/pydantic 的重试实现";
     const repository = genericCandidateDraft("tool.repository.lookup", {
@@ -3250,6 +3410,48 @@ function genericCandidateDraft(
     canonicalizationVersion: CAPABILITY_CANONICALIZATION_VERSION_V3,
     ...overrides,
   };
+}
+
+function computeExecCandidate(): CapabilityDefinitionDraftV3 {
+  return genericCandidateDraft("compute.exec", {
+    executor: "compute",
+    inputSchema: closedObject({ command: { type: "string" } }, ["command"]),
+    outputSchema: closedObject({
+      exitCode: { type: "number" },
+      artifactRefs: { type: "array", items: { type: "string" } },
+    }, ["exitCode", "artifactRefs"]),
+    effect: {
+      boundary: "internal",
+      mutation: "write",
+      reversibility: "not_applicable",
+    },
+    idempotency: "requires_key",
+    semantics: {
+      operations: ["create"],
+      evidenceClasses: ["capability_result"],
+      freshnessClasses: ["bounded"],
+      authorityClasses: ["general"],
+      domains: ["compute", "exec"],
+      aliases: ["compute", "exec"],
+    },
+  });
+}
+
+function readyAvailabilitySnapshot(
+  catalog: ReturnType<typeof buildCapabilityCatalogV3>,
+) {
+  const checkedAt = new Date().toISOString();
+  return buildCapabilityAvailabilitySnapshotV3({
+    catalog,
+    observedAt: checkedAt,
+    capabilities: catalog.capabilities.map((definition) => ({
+      capabilityKey: definition.key,
+      capabilityVersion: definition.version,
+      definitionHash: definition.definitionHash,
+      healthState: "ready" as const,
+      checkedAt,
+    })),
+  });
 }
 
 function composerDraft(): CapabilityDefinitionDraftV3 {

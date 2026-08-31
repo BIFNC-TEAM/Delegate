@@ -875,7 +875,7 @@ export function DashboardWallet({
           </h1>
           <span>
             {zh
-              ? "按工作区、数字代表和币种追踪购买、使用扣费、收益释放、退款与提现；业务事件可以继续下钻到账本分录。"
+              ? "按工作区、对外代理和币种追踪购买、使用扣费、收益释放、退款与提现；业务事件可以继续下钻到账本分录。"
               : "Trace purchases, usage, earning release, refunds, and payouts by workspace, representative, and currency, then drill into the underlying ledger."}
           </span>
         </div>
@@ -1317,7 +1317,7 @@ function WalletWithdrawalDialog({
     event.preventDefault();
     setError(null);
     if (!selectedRepresentative) {
-      setError(zh ? "请选择数字代表。" : "Choose a representative.");
+      setError(zh ? "请选择对外代理。" : "Choose a representative.");
       return;
     }
     if (!amountCents || amountCents <= 0) {
@@ -1331,7 +1331,7 @@ function WalletWithdrawalDialog({
     if (amountCents > availableCents) {
       setError(
         zh
-          ? "提现金额不能超过该数字代表的可提现余额。"
+          ? "提现金额不能超过该对外代理的可提现余额。"
           : "The amount exceeds this representative's withdrawable balance.",
       );
       return;
@@ -1396,7 +1396,7 @@ function WalletWithdrawalDialog({
             </h2>
             <span>
               {zh
-                ? "提现按数字代表和币种分别提交；提交后对应收益会冻结并进入人工审核。"
+                ? "提现按对外代理和币种分别提交；提交后对应收益会冻结并进入人工审核。"
                 : "Withdrawals are submitted per representative and currency. The amount is frozen for manual review."}
             </span>
           </div>
@@ -1414,7 +1414,7 @@ function WalletWithdrawalDialog({
           <div className="wallet-withdrawal-confirmation">
             <dl>
               <Fact
-                label={zh ? "数字代表" : "Representative"}
+                label={zh ? "对外代理" : "Representative"}
                 value={selectedRepresentative.name}
               />
               <Fact label={zh ? "币种" : "Currency"} value={currency} mono />
@@ -1464,7 +1464,7 @@ function WalletWithdrawalDialog({
         ) : (
           <form onSubmit={reviewWithdrawal}>
             <label>
-              <span>{zh ? "数字代表" : "Representative"}</span>
+              <span>{zh ? "对外代理" : "Representative"}</span>
               <select
                 onChange={(event) => {
                   setRepresentativeSlug(event.target.value);
@@ -1580,7 +1580,7 @@ function WalletFilters({
   return (
     <section aria-label={zh ? "钱包筛选" : "Wallet filters"} className="wallet-filter-bar">
       <label>
-        <span>{zh ? "数字代表" : "Representative"}</span>
+        <span>{zh ? "对外代理" : "Representative"}</span>
         <select
           onChange={(event) => onRepresentative(event.target.value)}
           value={representative}
@@ -2076,10 +2076,10 @@ function WalletExceptionQueue({
                 </header>
                 <dl className="wallet-exception-facts">
                   <div>
-                    <dt>{zh ? "数字代表" : "Representative"}</dt>
+                    <dt>{zh ? "对外代理" : "Representative"}</dt>
                     <dd>
                       {exceptionCase.representativeName
-                        || (zh ? "当前数字代表" : "Current representative")}
+                        || (zh ? "当前对外代理" : "Current representative")}
                     </dd>
                   </div>
                   <div>
@@ -2449,7 +2449,7 @@ function WalletEventTable({
           <tr>
             <th>{zh ? "时间" : "Time"}</th>
             <th>{zh ? "事件" : "Event"}</th>
-            <th>{zh ? "数字代表" : "Representative"}</th>
+            <th>{zh ? "对外代理" : "Representative"}</th>
             <th>{zh ? "金额 / 数量" : "Amount / quantity"}</th>
             <th>{zh ? "状态" : "Status"}</th>
           </tr>
@@ -2515,7 +2515,7 @@ function WalletSettlementTable({
         <thead>
           <tr>
             <th>{zh ? "申请时间" : "Requested"}</th>
-            <th>{zh ? "数字代表" : "Representative"}</th>
+            <th>{zh ? "对外代理" : "Representative"}</th>
             <th>{zh ? "金额" : "Amount"}</th>
             <th>{zh ? "状态" : "Status"}</th>
             <th>{zh ? "打款渠道" : "Provider"}</th>
@@ -2802,7 +2802,7 @@ function EventDetail({
       <dl className="skills-detail-facts wallet-detail-facts">
         <Fact label={zh ? "状态" : "Status"} value={walletStatusLabel(event.status, locale)} />
         <Fact label={zh ? "发生时间" : "Occurred"} value={formatTimestamp(event.occurredAt, locale, true)} />
-        <Fact label={zh ? "数字代表" : "Representative"} value={event.representativeName ?? "—"} />
+        <Fact label={zh ? "对外代理" : "Representative"} value={event.representativeName ?? "—"} />
         <Fact label={zh ? "金额" : "Amount"} value={event.amountCents ? formatSignedMoney(event.amountCents, event.currency, locale) : "—"} />
         <Fact label={zh ? "服务额度" : "Service credits"} value={event.tokenAmount ? formatSignedNumber(event.tokenAmount) : "—"} />
         <Fact label="Source" value={`${event.sourceType}${event.sourceId ? ` · ${event.sourceId}` : ""}`} />
@@ -2885,7 +2885,7 @@ function SettlementDetail({
         <Fact label={zh ? "申请 ID" : "Request ID"} value={settlement.id} mono />
         <Fact label={zh ? "状态" : "Status"} value={walletStatusLabel(settlement.status, locale)} />
         <Fact label={zh ? "金额" : "Amount"} value={formatMoney(settlement.amountCents, settlement.currency, locale)} />
-        <Fact label={zh ? "数字代表" : "Representative"} value={settlement.representativeName ?? (zh ? "工作区" : "Workspace")} />
+        <Fact label={zh ? "对外代理" : "Representative"} value={settlement.representativeName ?? (zh ? "工作区" : "Workspace")} />
         <Fact label={zh ? "申请时间" : "Requested"} value={formatTimestamp(settlement.requestedAt, locale, true)} />
         <Fact label={zh ? "审核时间" : "Reviewed"} value={settlement.reviewedAt ? formatTimestamp(settlement.reviewedAt, locale, true) : "—"} />
         <Fact label={zh ? "审核人" : "Reviewer"} value={settlement.reviewedBy ?? "—"} />

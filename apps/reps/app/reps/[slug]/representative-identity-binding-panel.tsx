@@ -411,7 +411,7 @@ export function RepresentativeIdentityBindingPanel({
     const confirmed = window.confirm(
       binding.provider === "TELEGRAM"
         ? zh
-          ? `解除后，此 Telegram 账号在 ${target} 下将不再对应当前 Delegate 账号。如果同一个 Bot 被多个数字代表共用，这些代表都会受影响。历史消息、服务额度和订单不会删除。继续吗？`
+          ? `解除后，此 Telegram 账号在 ${target} 下将不再对应当前 Delegate 账号。如果同一个 Bot 被多个对外代理共用，这些代表都会受影响。历史消息、服务额度和订单不会删除。继续吗？`
           : `This Telegram account will no longer map to the current Delegate account on ${target}. If several representatives share that Bot, all of them are affected. History, service credits, and orders are preserved. Continue?`
         : zh
           ? `解除后，此 Matrix 账号在连接 ${target} 下将不再对应当前 Delegate 账号；共用该连接的代表都会受影响。历史消息、服务额度和订单不会删除。继续吗？`

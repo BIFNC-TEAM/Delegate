@@ -234,7 +234,7 @@ bot.command("start", async (ctx) => {
     await getDefaultRepresentativeSlugForTelegramBot();
   if (!payload && !assignedDefaultRepresentativeSlug) {
     await ctx.reply(
-      "这个 Bot 连接了多个数字代表。请从目标代表的公开页面重新打开 Telegram，以避免消息进入错误代表。",
+      "这个 Bot 连接了多个对外代理。请从目标代表的公开页面重新打开 Telegram，以避免消息进入错误代表。",
     );
     return;
   }
@@ -261,7 +261,7 @@ bot.command("start", async (ctx) => {
         }),
       );
       await ctx.reply(
-        "当前无法切换数字代表。为避免消息进入错误代表，原会话保持不变，请稍后重试。",
+        "当前无法切换对外代理。为避免消息进入错误代表，原会话保持不变，请稍后重试。",
       );
       return;
     }
@@ -423,7 +423,7 @@ bot.command("bind", async (ctx) => {
       return;
     } catch {
       await ctx.reply(
-        "账号绑定已经完成，但这个数字代表的 Bot 配置刚刚发生了变化，未切换当前会话。请回到代表公开页刷新后重新选择。",
+        "账号绑定已经完成，但这个对外代理的 Bot 配置刚刚发生了变化，未切换当前会话。请回到代表公开页刷新后重新选择。",
       );
       return;
     }
@@ -488,7 +488,7 @@ bot.command("memory_share", async (ctx) => {
       });
       await ctx.reply(
         [
-          "跨渠道联系人记忆只会共享给当前数字代表，并且只在已验证为同一 Delegate 用户的 Web、Matrix、Telegram 私聊之间使用。",
+          "跨渠道联系人记忆只会共享给当前对外代理，并且只在已验证为同一 Delegate 用户的 Web、Matrix、Telegram 私聊之间使用。",
           "系统不会把原始聊天、付款或余额、凭据、Owner 私有备注、Compute 原始产物写入长期记忆；每次召回仍会检查当前身份、策略和渠道授权。",
           "你可以随时发送 /memory_unshare，立即停止共享记忆召回并异步清理远端投影；各渠道原始会话和渠道内记忆不受影响。",
           `如果你同意，请在 10 分钟内发送：/memory_share confirm ${challenge.challengeToken}`,
@@ -505,7 +505,7 @@ bot.command("memory_share", async (ctx) => {
     });
     await ctx.reply(
       result.active
-        ? "已允许当前数字代表在已验证为同一 Delegate 用户的 Web、Matrix 和 Telegram 私聊之间使用联系人记忆。"
+        ? "已允许当前对外代理在已验证为同一 Delegate 用户的 Web、Matrix 和 Telegram 私聊之间使用联系人记忆。"
         : "跨渠道联系人记忆状态刚刚发生变化，请重新发送 /memory_share。",
     );
   } catch (error) {
@@ -553,7 +553,7 @@ bot.command("memory_unshare", async (ctx) => {
     });
     await ctx.reply(
       result.changed
-        ? "已立即停止当前数字代表的跨渠道联系人记忆召回；共享记忆的远端投影已进入可重试清理队列。各渠道原始会话和渠道内记忆不受影响。"
+        ? "已立即停止当前对外代理的跨渠道联系人记忆召回；共享记忆的远端投影已进入可重试清理队列。各渠道原始会话和渠道内记忆不受影响。"
         : "当前没有有效的跨渠道联系人记忆授权；系统已再次确认共享召回处于关闭状态。",
     );
   } catch (error) {
@@ -612,7 +612,7 @@ const handleContactMemoryDeleteCommand = async (ctx: any) => {
     };
     await acceptInboundConversationMessage(deletionInput);
     await ctx.reply(
-      "已立即停止召回当前数字代表与当前 Telegram 渠道下的联系人记忆；物理清理已进入可重试队列。代表经验和其他渠道不受影响。",
+      "已立即停止召回当前对外代理与当前 Telegram 渠道下的联系人记忆；物理清理已进入可重试队列。代表经验和其他渠道不受影响。",
     );
   } catch (error) {
     console.warn(

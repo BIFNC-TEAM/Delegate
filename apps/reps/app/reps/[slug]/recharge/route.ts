@@ -593,7 +593,7 @@ export async function POST(
         {
           error: invalid
             ? "该商品配置暂不可用，请联系代表主人检查商品设置。"
-            : "所选商品已下架或不属于当前数字代表，请重新选择。",
+            : "所选商品已下架或不属于当前对外代理，请重新选择。",
           code: error.code.toLowerCase(),
         },
         invalid ? 503 : 400,

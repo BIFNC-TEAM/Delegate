@@ -1760,7 +1760,7 @@ function formatPublicTaskActor(actor: string, locale: "zh" | "en") {
   if (actor === "owner") return zh ? "负责人" : "Owner";
   if (actor === "operator") return zh ? "人工接待" : "Operator";
   if (actor === "system") return zh ? "系统" : "System";
-  return zh ? "数字代表" : "Digital representative";
+  return zh ? "对外代理" : "Digital representative";
 }
 
 function resolveResponderPresentation(input: {
@@ -1852,19 +1852,19 @@ function localizeSystemMessage(
 
   if (text === "The human operator returned this conversation to the digital representative.") {
     return locale === "zh"
-      ? "真人已结束接待，数字代表将继续回复。"
+      ? "真人已结束接待，对外代理将继续回复。"
       : text;
   }
 
   if (text === "The audience canceled the human handoff request. The digital representative may continue.") {
     return locale === "zh"
-      ? "你已取消人工接管请求，数字代表将继续回复。"
+      ? "你已取消人工接管请求，对外代理将继续回复。"
       : text;
   }
 
   if (text === "The audience ended human service. The digital representative may continue.") {
     return locale === "zh"
-      ? "你已结束人工接待，数字代表将继续回复。"
+      ? "你已结束人工接待，对外代理将继续回复。"
       : text;
   }
 
@@ -2016,16 +2016,16 @@ function getComputeAssist(value: string, locale: "zh" | "en", enabled: boolean) 
 }
 
 const zhCopy = {
-  digitalRepresentativeLabel: "数字代表",
+  digitalRepresentativeLabel: "对外代理",
   aiStatus: "AI 正在接待", humanStatus: "真人正在接待",
   youLabel: "你", systemLabel: "系统", taskUpdateLabel: "任务进展",
   justNow: "刚刚", copyAction: "复制", copiedAction: "已复制",
   copyMessageAction: (senderName: string) => `复制 ${senderName} 的消息`,
   copyFailedAction: "复制失败，请重试",
   visitorAvatarLabel: "你的头像",
-  aiAvatarLabel: (name: string) => `${name} 的数字代表头像`,
+  aiAvatarLabel: (name: string) => `${name} 的对外代理头像`,
   humanAvatarLabel: (name: string) => `${name} 的真人头像`,
-  aiAvatarBadgeLabel: "AI 数字代表",
+  aiAvatarBadgeLabel: "AI 对外代理",
   generalModelSourceDisclosure: "来源说明：本回答未引用已授权知识或记忆。",
   unverifiedToolFallbackSourceDisclosure: "来源说明：外部工具本轮未执行，以下内容由通用模型根据已有知识概括；未核验相关项目或仓库的最新内容，也未引用已授权知识或记忆。",
   sameConversationSourceDisclosure: "来源说明：根据本次对话记录整理。",
@@ -2043,17 +2043,17 @@ const zhCopy = {
   attachmentsTooLarge: "附件总大小不能超过 20 MB。",
   faqSuggestionsLabel: "你可以这样问我",
   inputLabel: "输入对话内容", placeholder: "描述你的问题、背景和期望结果…",
-  aiComposerContext: "发送给数字代表", humanComposerContext: "发送给当前接待人员", waitingComposerContext: "等待真人回复，可继续补充",
+  aiComposerContext: "发送给对外代理", humanComposerContext: "发送给当前接待人员", waitingComposerContext: "等待真人回复，可继续补充",
   cancelHandoffRequest: "取消接管请求", endHumanService: "结束人工接待",
   cancelHandoffTitle: "取消人工接管请求？",
-  cancelHandoffDetail: "取消后，尚未使用的人工接管权益会释放，数字代表将恢复接待。",
+  cancelHandoffDetail: "取消后，尚未使用的人工接管权益会释放，对外代理将恢复接待。",
   endHumanServiceTitle: "结束人工接待并返回 AI？",
-  endHumanServiceDetail: "真人将退出当前会话，数字代表恢复接待；已经消费的人工接管权益不会退回。",
+  endHumanServiceDetail: "真人将退出当前会话，对外代理恢复接待；已经消费的人工接管权益不会退回。",
   keepHumanService: "暂不操作", confirmCancelHandoff: "确认取消",
   confirmEndHumanService: "确认结束", updatingHumanService: "正在更新…",
   handoffControlFailed: "人工接待状态更新失败，请稍后重试。",
-  handoffRequestCanceledMessage: "你已取消人工接管请求，数字代表将继续回复。",
-  humanServiceEndedMessage: "你已结束人工接待，数字代表将继续回复。",
+  handoffRequestCanceledMessage: "你已取消人工接管请求，对外代理将继续回复。",
+  humanServiceEndedMessage: "你已结束人工接待，对外代理将继续回复。",
   sendMessageAction: "发送消息",
   continuationEyebrow: "继续对话",
   serviceGateTitle: (accessMode: RepresentativeAccessMode) => accessMode === "CREDITS_ONLY"
@@ -2065,7 +2065,7 @@ const zhCopy = {
   servicePendingDetail: "无需重复购买。额度确认后即可继续发送，输入内容会一直保留。",
   lastFreeReplyDetail: "还剩 1 次免费回复。你可以继续提问，也可以提前了解后续服务方案。",
   previewServices: "查看服务方案",
-  sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", memoryPolicyChanged: "记忆策略刚刚更新。请阅读新的记忆说明后重新发送；上一条内容尚未提交。", serviceCreditPending: "服务额度正在处理中，请稍后重试；你的问题已保留在输入框中。", serviceCreditRequired: "免费回复已用完。请购买当前数字代表的服务额度后再发送；你的问题已保留在输入框中。", serviceCreditUnavailableWithHandoff: "免费回复已用完，当前数字代表暂无可购买的服务方案；可申请真人协助。你的问题已保留在输入框中。", serviceCreditUnavailable: "免费回复已用完，当前数字代表暂无可购买的服务方案。你的问题已保留在输入框中。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
+  sending: "正在处理…", send: "发送", thinking: (governedContextEnabled: boolean) => governedContextEnabled ? "正在结合已发布知识与允许使用的上下文整理回复…" : "正在结合已发布知识整理回复…", loadingHistory: "恢复会话中…", errorGeneric: "聊天请求失败，请稍后再试。", memoryPolicyChanged: "记忆策略刚刚更新。请阅读新的记忆说明后重新发送；上一条内容尚未提交。", serviceCreditPending: "服务额度正在处理中，请稍后重试；你的问题已保留在输入框中。", serviceCreditRequired: "免费回复已用完。请购买当前对外代理的服务额度后再发送；你的问题已保留在输入框中。", serviceCreditUnavailableWithHandoff: "免费回复已用完，当前对外代理暂无可购买的服务方案；可申请真人协助。你的问题已保留在输入框中。", serviceCreditUnavailable: "免费回复已用完，当前对外代理暂无可购买的服务方案。你的问题已保留在输入框中。", replyTimeout: "回复处理超时，请重新发送；已发送的内容仍保留在本次会话中。",
   humanQueueNotice: "已进入人工处理队列。你可以继续补充信息，负责人员会看到完整上下文。",
   sessionLabel: "服务和订单",
   purchasedServiceCreditsLabel: "已购服务额度",
@@ -2092,7 +2092,7 @@ const zhCopy = {
   commerceUnavailableDetail: (humanInLoop: boolean) => humanInLoop ? "当前没有可购买的服务套餐；你仍可在对话中了解人工接管方式。" : "当前没有可购买的服务套餐。",
   openRecharge: "查看服务套餐",
   freeServiceTitle: "当前对话永久免费",
-  freeServiceDetail: "不会销售继续对话所需的服务套餐；你可以直接使用数字代表。",
+  freeServiceDetail: "不会销售继续对话所需的服务套餐；你可以直接使用对外代理。",
   welcome: (name: string, governedContextEnabled: boolean) =>
     governedContextEnabled
       ? `你好，我是 ${name}，你可以直接告诉我想了解什么。我会以已发布资料为基础，并可能使用仅限你与当前代表的受治理历史摘要；需要本人判断时，我会说明并帮你转交。`

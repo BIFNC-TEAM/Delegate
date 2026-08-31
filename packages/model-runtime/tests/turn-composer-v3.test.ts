@@ -349,7 +349,7 @@ describe("TurnPlan V3 composer", () => {
           segments: [{
             kind: "claim",
             goalId: "goal-self",
-            text: "我是周老师的地理数字代表，可以协助地理学习。",
+            text: "我是周老师的地理对外代理，可以协助地理学习。",
             // Proposal labels are not authoritative; E1 is immutable tool_output.
             sourceClass: "authorized_knowledge",
             evidenceRefs: ["E1"],
@@ -405,7 +405,7 @@ describe("TurnPlan V3 composer", () => {
           segments: [{
             kind: "claim",
             goalId: "goal-self",
-            text: "我是周老师的数字代表，并有地理学习资料。",
+            text: "我是周老师的对外代理，并有地理学习资料。",
             sourceClass: "tool_output",
             evidenceRefs: ["E1", "E2"],
           }],
@@ -592,7 +592,7 @@ function representativeDescriptionPlanFixture(): any {
   return {
     ...stableGeneralPlanFixture(),
     planId: "plan-self",
-    objective: "介绍数字代表",
+    objective: "介绍对外代理",
     goals: [{
       id: "goal-self",
       objective: "综合代表资料与已授权知识进行介绍",

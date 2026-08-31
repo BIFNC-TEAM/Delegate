@@ -190,7 +190,7 @@ function walletStateFixture(): PublicWalletStateSnapshot {
       priceVersionId: "price-standard-v1",
       kind: "SERVICE_PACKAGE",
       name: "标准服务包",
-      description: "适用于当前数字代表",
+      description: "适用于当前对外代理",
       sortOrder: 0,
       isRecommended: true,
       amountCents: 2000,

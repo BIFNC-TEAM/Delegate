@@ -1934,7 +1934,7 @@ function resolveConfig(config: WeChatPayApiV3Config): ResolvedConfig {
   );
   const description =
     optionalText(config.description)
-    ?? "Delegate 数字代表服务充值";
+    ?? "Delegate 对外代理服务充值";
   if (Array.from(description).length > 127) {
     throw new WeChatPayConfigurationError(
       "WeChat Pay order description must not exceed 127 characters.",

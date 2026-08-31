@@ -493,7 +493,7 @@ export function DashboardChannels({
         zh
           ? `${telegramDialog.row.representativeName} 已绑定到 ${
               selectedBot ? telegramBotDisplayName(selectedBot) : "已验证的 Telegram Bot"
-            }；其他数字代表的 Bot 配置不受影响。`
+            }；其他对外代理的 Bot 配置不受影响。`
           : `${telegramDialog.row.representativeName} is now assigned to ${
               selectedBot ? telegramBotDisplayName(selectedBot) : "the verified Telegram Bot"
             }. Other representatives are unchanged.`,
@@ -509,7 +509,7 @@ export function DashboardChannels({
       setTelegramDialogError(
         createdTelegramBotConnectionId
           ? zh
-            ? `Bot 已安全添加，但未能分配给当前数字代表。它已保留在工作区 Bot 列表中，请直接重试分配。${
+            ? `Bot 已安全添加，但未能分配给当前对外代理。它已保留在工作区 Bot 列表中，请直接重试分配。${
                 nextError instanceof Error ? ` ${nextError.message}` : ""
               }`
             : `The Bot was added securely but could not be assigned to this representative. It remains in the workspace Bot list; retry the assignment.${
@@ -621,7 +621,7 @@ export function DashboardChannels({
           ? `${botName} 已恢复；已启用的代表绑定会重新进入运行状态。`
           : `${botName} is active again. Enabled representative assignments will resume.`,
         revoke: zh
-          ? `${botName} 已撤销，凭据已清除，并已从所有数字代表解绑。`
+          ? `${botName} 已撤销，凭据已清除，并已从所有对外代理解绑。`
           : `${botName} was revoked, its credential was cleared, and all representative assignments were removed.`,
       } as const;
       setNotice(noticeByAction[action]);
@@ -672,7 +672,7 @@ export function DashboardChannels({
       if (!response.ok) throw new Error(await extractError(response));
       setNotice(
         zh
-          ? `${telegramDialog.row.representativeName} 已与 ${telegramBotDisplayName(selectedTelegramBot!)} 解绑；其他数字代表不受影响。`
+          ? `${telegramDialog.row.representativeName} 已与 ${telegramBotDisplayName(selectedTelegramBot!)} 解绑；其他对外代理不受影响。`
           : `${telegramDialog.row.representativeName} was unassigned from ${telegramBotDisplayName(selectedTelegramBot!)}. Other representatives are unchanged.`,
       );
       await loadChannels();
@@ -828,7 +828,7 @@ export function DashboardChannels({
           </h1>
           <span>
             {zh
-              ? "Web、Matrix 与 Telegram 始终按来源分别呈现。每个数字代表都能选择独立 Telegram Bot，也可以安全复用工作区内已验证的同一个 Bot；经 Matrix 传输时会明确标注。"
+              ? "Web、Matrix 与 Telegram 始终按来源分别呈现。每个对外代理都能选择独立 Telegram Bot，也可以安全复用工作区内已验证的同一个 Bot；经 Matrix 传输时会明确标注。"
               : "Web, Matrix, and Telegram remain distinct sources. Each representative can use a different Telegram Bot or safely reuse a verified workspace Bot; Matrix transport is labeled explicitly."}
           </span>
         </div>
@@ -904,7 +904,7 @@ export function DashboardChannels({
             <section className="dashboard-v2-metric-grid channels-metrics">
               <ChannelMetric
                 detail={zh ? "当前 Owner 的全部代表" : "All representatives owned by this account"}
-                label={zh ? "数字代表" : "Representatives"}
+                label={zh ? "对外代理" : "Representatives"}
                 tone="teal"
                 value={snapshot?.metrics.representatives ?? 0}
               />
@@ -958,7 +958,7 @@ export function DashboardChannels({
                 <table className="dashboard-v2-table channels-table">
                   <thead>
                     <tr>
-                      <th>{zh ? "数字代表" : "Representative"}</th>
+                      <th>{zh ? "对外代理" : "Representative"}</th>
                       <th>{zh ? "来源 / 传输" : "Source / transport"}</th>
                       <th>{zh ? "期望状态" : "Desired state"}</th>
                       <th>{zh ? "健康 / 旧状态" : "Health / legacy"}</th>
@@ -985,7 +985,7 @@ export function DashboardChannels({
                       <tr>
                         <td className="channels-empty-cell" colSpan={7}>
                           {zh
-                            ? "当前筛选范围内没有数字代表。"
+                            ? "当前筛选范围内没有对外代理。"
                             : "No representatives match the current filter."}
                         </td>
                       </tr>
@@ -1052,7 +1052,7 @@ export function DashboardChannels({
               id="telegram-bot-dialog-description"
             >
               {zh
-                ? "选择工作区已有 Bot，或使用 BotFather Token 添加并验证一个新 Bot。替换只影响当前数字代表；同一个 Bot 可以被多个代表复用。替换后，旧 Bot 中已有会话会保留历史但停止新的自动回复。"
+                ? "选择工作区已有 Bot，或使用 BotFather Token 添加并验证一个新 Bot。替换只影响当前对外代理；同一个 Bot 可以被多个代表复用。替换后，旧 Bot 中已有会话会保留历史但停止新的自动回复。"
                 : "Choose an existing workspace Bot, or add and verify one with a BotFather token. Replacement affects only this representative, and one Bot can be reused by multiple representatives. Existing conversations on the old Bot keep their history but stop new automated replies."}
             </p>
 
@@ -1435,7 +1435,7 @@ export function DashboardChannels({
                     ? "复用 Bot 不会合并不同代表的会话或运行状态。"
                     : "Reusing a Bot does not merge representative conversations or operating state."
                   : zh
-                    ? "验证成功后会立即用于当前数字代表。"
+                    ? "验证成功后会立即用于当前对外代理。"
                     : "After verification, the Bot is assigned to this representative."}
               </span>
               <div>
@@ -1526,7 +1526,7 @@ export function DashboardChannels({
               id="matrix-channel-dialog-description"
             >
               {zh
-                ? "这里配置的是数字代表的系统受管 Matrix 身份，不是访客的私人 MXID。凭据由部署级 Application Service 管理，页面不会收集 Matrix 密码或 Access Token。"
+                ? "这里配置的是对外代理的系统受管 Matrix 身份，不是访客的私人 MXID。凭据由部署级 Application Service 管理，页面不会收集 Matrix 密码或 Access Token。"
                 : "This configures the representative's system-managed Matrix identity, not a visitor's personal MXID. Credentials remain with the deployment Application Service; this page never collects Matrix passwords or access tokens."}
             </p>
 

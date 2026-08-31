@@ -326,6 +326,26 @@ enum ComputeLeaseStatus {
 enum SandboxProviderKind {
   DOCKER
   DAYTONA
+  TENCENT
+}
+
+enum SandboxRuntimeClass {
+  CODE
+  BROWSER
+}
+
+enum SandboxProviderOperationKind {
+  CREATE
+}
+
+enum SandboxProviderOperationState {
+  PENDING
+  CALLED
+  BOUND
+  UNKNOWN
+  FAILED
+  QUARANTINED
+  RESOLVED
 }
 
 enum SandboxIdentityStatus {
@@ -2472,6 +2492,7 @@ model Representative {
   computeNetworkMode                    ComputeNetworkMode                     @default(NO_NETWORK)
   computeNetworkAllowlist               String[]                               @default([])
   computeFilesystemMode                 ComputeFilesystemMode                  @default(WORKSPACE_ONLY)
+  sandboxTestEligible                   Boolean                                @default(false)
   delegationEnabled                     Boolean                                @default(true)
   delegationNaturalLanguageEnabled      Boolean                                @default(true)
   delegationExplicitComputeEnabled      Boolean                                @default(true)
@@ -4245,6 +4266,7 @@ model ComputeSession {
   containerId             String?
   runnerType              ComputeRunnerType        @default(DOCKER)
   baseImage               String
+  runtimeClass            SandboxRuntimeClass      @default(CODE)
   leaseTokenHash          String                   @unique
   leaseAcquiredAt         DateTime?
   leaseLastUsedAt         DateTime?
@@ -4290,6 +4312,7 @@ model SandboxIdentity {
   provider            SandboxProviderKind   @default(DOCKER)
   providerIdentityKey String?
   status              SandboxIdentityStatus @default(ACTIVE)
+  lifecycleEpoch      Int                   @default(1)
   lastUsedAt          DateTime?
   archivedAt          DateTime?
   deletedAt           DateTime?
@@ -4315,6 +4338,8 @@ model SandboxLease {
   networkMode       ComputeNetworkMode    @default(NO_NETWORK)
   filesystemMode    ComputeFilesystemMode @default(WORKSPACE_ONLY)
   baseImage         String                @default("debian:bookworm-slim")
+  runtimeClass      SandboxRuntimeClass   @default(CODE)
+  identityLifecycleEpoch Int              @default(1)
   providerSandboxId String?
   status            SandboxLeaseStatus    @default(STARTING)
   runnerLeaseId     String?
@@ -4329,11 +4354,38 @@ model SandboxLease {
   sandboxIdentity   SandboxIdentity       @relation(fields: [sandboxIdentityId], references: [id])
   computeSessions   ComputeSession[]
   browserSessions   BrowserSession[]
+  providerOperations SandboxProviderOperation[]
 
   @@index([sandboxIdentityId, status, updatedAt])
   @@index([provider, status, lastUsedAt])
   @@index([expiresAt])
   @@index([providerSandboxId])
+}
+
+model SandboxProviderOperation {
+  id                    String                        @id @default(cuid())
+  sandboxLeaseId        String
+  attemptNumber         Int
+  creationKey           String                        @unique @db.VarChar(64)
+  provider              SandboxProviderKind
+  operation             SandboxProviderOperationKind @default(CREATE)
+  state                 SandboxProviderOperationState @default(PENDING)
+  providerOperationId   String?
+  providerSandboxId     String?
+  ownerTokenHash        String?                       @db.VarChar(64)
+  ownerLeaseExpiresAt   DateTime?
+  deadlineAt            DateTime
+  lastErrorCode         String?
+  calledAt              DateTime?
+  resolvedAt            DateTime?
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+  sandboxLease          SandboxLease                  @relation(fields: [sandboxLeaseId], references: [id], onDelete: Restrict)
+
+  @@unique([sandboxLeaseId, attemptNumber, operation])
+  @@index([state, deadlineAt])
+  @@index([provider, providerOperationId])
+  @@index([ownerLeaseExpiresAt])
 }
 
 model ToolExecution {

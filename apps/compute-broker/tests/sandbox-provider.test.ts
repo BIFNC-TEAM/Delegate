@@ -21,6 +21,7 @@ describe("sandbox provider contract", () => {
       stderr: "",
       wallMs: 12,
       containerName: "delegate-lease-session-1",
+      termination: "exit" as const,
     }));
     const release = vi.fn(async () => undefined);
     const provider = createDockerSandboxProvider({ acquire, run, release });
@@ -63,6 +64,7 @@ describe("sandbox provider contract", () => {
     const sandbox = createFakeDaytonaSandbox("sandbox-1");
     const client = {
       create: vi.fn(async () => sandbox),
+      get: vi.fn(async () => sandbox),
     };
     const provider = new DaytonaSandboxProvider({
       client,
@@ -89,6 +91,7 @@ describe("sandbox provider contract", () => {
 
     expect(client.create).toHaveBeenCalledWith(expect.objectContaining({
       image: "debian:bookworm-slim",
+      networkBlockAll: true,
       labels: expect.objectContaining({
         "delegate.sandbox_identity_id": "identity-1",
         "delegate.sandbox_lease_id": "lease-1",
@@ -107,6 +110,25 @@ describe("sandbox provider contract", () => {
       provider: "daytona",
       providerSandboxId: "sandbox-1",
     });
+
+    await provider.execute({
+      lease,
+      runnerType: "docker",
+      command: "pwd",
+      maxCommandSeconds: 9,
+      maxStdoutBytes: 1024,
+      maxStderrBytes: 1024,
+      filesystemMode: "ephemeral_full",
+      workingDirectory: "/workspace/project",
+      sessionId: "session-1",
+      executionId: "execution-1",
+    });
+    expect(sandbox.process?.executeCommand).toHaveBeenCalledWith(
+      "pwd",
+      "/workspace/project",
+      { DELEGATE_SESSION_ROOT: "/workspace" },
+      9,
+    );
   });
 
   it("starts an existing Daytona sandbox instead of creating a new one", async () => {

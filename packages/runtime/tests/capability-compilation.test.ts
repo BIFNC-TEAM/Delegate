@@ -141,6 +141,63 @@ describe("capability compiler registry", () => {
       expectedBindingDefinitionHash: `sha256:${"b".repeat(64)}`,
     });
   });
+
+  it("maps the planner-only compute.task capability onto governed exec", () => {
+    const base = compileContext();
+    const catalog = buildCapabilityCatalogV3([{
+      key: "compute.task",
+      version: "1",
+      description: "Compile a self-contained sandbox task.",
+      executor: "compute",
+      inputSchema: {
+        type: "object",
+        properties: { instruction: { type: "string" } },
+        required: ["instruction"],
+        additionalProperties: false,
+      },
+      outputSchema: objectSchema(),
+      effect: {
+        boundary: "internal",
+        mutation: "write",
+        reversibility: "not_applicable",
+      },
+      idempotency: "requires_key",
+      supportedChannels: ["web"],
+      requiredIdentityScopes: [],
+      requiredDataScopes: [],
+      tags: ["task"],
+      canonicalizationVersion: CAPABILITY_CANONICALIZATION_VERSION_V3,
+    }]);
+    const definition = catalog.capabilities[0]!;
+    const context: CapabilityCompileContext = {
+      ...base,
+      definition,
+      action: {
+        ...base.action,
+        capability: {
+          key: definition.key,
+          version: definition.version,
+          definitionHash: definition.definitionHash,
+        },
+        arguments: { instruction: "计算质数" },
+      },
+    };
+    const registry = createLegacyCapabilityCompilerRegistry({
+      resolveMcpTarget: () => {
+        throw new Error("unused");
+      },
+      resolveSkillRelease: () => {
+        throw new Error("unused");
+      },
+    });
+
+    expect(registry.compile(context)).toMatchObject({
+      executor: "compute",
+      capability: "exec",
+      capabilityKey: "compute.task",
+      payload: { instruction: "计算质数" },
+    });
+  });
 });
 
 function compileContext(): CapabilityCompileContext {

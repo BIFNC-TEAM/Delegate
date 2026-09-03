@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
   planTurnV2: vi.fn(),
   planTurnV3: vi.fn(),
   composeTurnV3: vi.fn(),
+  inferTurnSourceRequirementV3: vi.fn(),
+  resolveClarificationContinuation: vi.fn(),
   buildCapabilityCatalogV3: vi.fn(),
   validateJsonSchemaValue: vi.fn(),
   validateComposedMessageDraftV3: vi.fn(),
@@ -21,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   hasPersistedTelegramBotConnections: vi.fn(),
   isDeterministicContactMemoryDeleteCommand: vi.fn(),
   planNaturalLanguageComputeRequest: vi.fn(),
+  compileNaturalLanguageSandboxTask: vi.fn(),
   renderFailClosedReplyPreview: vi.fn(),
   renderGroundedKnowledgeFallbackWithTrace: vi.fn(),
   claimNextOperatorMessageWorkItem: vi.fn(),
@@ -83,6 +86,8 @@ const mocks = vi.hoisted(() => ({
   resolveRepresentativeComputeApproval: vi.fn(),
   createClarifyingDelegationTask: vi.fn(),
   continueClarifyingDelegationTask: vi.fn(),
+  closeConversationClarifyingDelegationTask: vi.fn(),
+  readPendingClarificationSpec: vi.fn(),
   completeOperatorMessageDelivery: vi.fn(),
   deferOperatorMessageDelivery: vi.fn(),
   deferConversationMessageDelivery: vi.fn(),
@@ -123,7 +128,32 @@ vi.mock("@delegate/model-runtime", () => ({
   planTurnV2: mocks.planTurnV2,
   planTurnV3: mocks.planTurnV3,
   composeTurnV3: mocks.composeTurnV3,
+  inferTurnSourceRequirementV3: mocks.inferTurnSourceRequirementV3,
+  resolveClarificationContinuation: mocks.resolveClarificationContinuation,
+  applyContinuationBindings: ({ pending, decision }: {
+    pending: { missingSlots: Array<{ id: string }> };
+    decision: { bindings: Array<{ slotId: string; value: string | number | boolean }> };
+  }) => {
+    const values = new Map(decision.bindings.map((binding) => [binding.slotId, binding.value]));
+    return {
+      boundValues: Object.fromEntries(values),
+      remainingSlots: pending.missingSlots.filter((slot) => !values.has(slot.id)),
+    };
+  },
+  isPendingClarificationExpired: () => false,
+  constrainTurnSourceRequirementForRetrievalV3: (requirement: {
+    operations: string[];
+    evidenceClasses: string[];
+    freshnessClasses: string[];
+    authorityClasses: string[];
+  }) => {
+    const strong = requirement.evidenceClasses.some((item) => item !== "none")
+      || requirement.freshnessClasses.includes("live")
+      || requirement.authorityClasses.some((item) => item !== "general");
+    return strong ? requirement : {};
+  },
   planNaturalLanguageComputeRequest: mocks.planNaturalLanguageComputeRequest,
+  compileNaturalLanguageSandboxTask: mocks.compileNaturalLanguageSandboxTask,
   renderGroundedKnowledgeFallbackWithTrace:
     mocks.renderGroundedKnowledgeFallbackWithTrace,
 }));
@@ -180,6 +210,7 @@ vi.mock("@delegate/runtime", () => ({
   hasMatchedExecutableSkill: mocks.hasMatchedExecutableSkill,
   isConversationCancellationRequest: mocks.isConversationCancellationRequest,
   parseComputeDirective: mocks.parseComputeDirective,
+  pendingClarificationSpecSchema: { parse: (value: unknown) => value },
   renderFailClosedReplyPreview: mocks.renderFailClosedReplyPreview,
   renderReplyPreview: () => "fallback",
   readPersistedDelegationStepRequest: mocks.readPersistedDelegationStepRequest,
@@ -345,6 +376,9 @@ vi.mock("@delegate/web-data", () => ({
     mocks.resolveRepresentativeComputeApproval,
   createClarifyingDelegationTask: mocks.createClarifyingDelegationTask,
   continueClarifyingDelegationTask: mocks.continueClarifyingDelegationTask,
+  closeConversationClarifyingDelegationTask:
+    mocks.closeConversationClarifyingDelegationTask,
+  readPendingClarificationSpec: mocks.readPendingClarificationSpec,
   deferGenerationRunForHuman: vi.fn(),
   deferOperatorMessageDelivery: mocks.deferOperatorMessageDelivery,
   deferConversationMessageDelivery: mocks.deferConversationMessageDelivery,
@@ -463,7 +497,10 @@ import {
   processNextConversationWork,
   renderPolicyBlockedDelegationMessage,
   renderComposedV3Draft,
+  renderV3UnsatisfiedSourceMessage,
   renderTurnPlanV3PlanningFailureMessage,
+  renderTurnPlanV3PlanningFailurePresentation,
+  resolveV3UnsatisfiedSourceRecovery,
   resolveStableGeneralFallbackActivationStatus,
 } from "../src/processor";
 
@@ -491,14 +528,157 @@ describe("conversation worker knowledge recall", () => {
       .toBeUndefined();
   });
 
-  it("distinguishes Planner timeout from capability compilation failure", () => {
+  it("separates public recovery copy and authorship from internal planning failures", () => {
     expect(renderTurnPlanV3PlanningFailureMessage({
       code: "provider_failed",
       reason: "The operation was aborted due to timeout",
-    })).toContain("规划服务本轮超时或调用失败");
+    })).toContain("服务暂时没有响应");
     expect(renderTurnPlanV3PlanningFailureMessage({
       code: "plan_invalid",
-    })).toContain("未通过能力、参数、证据或依赖校验");
+    })).toContain("暂时无法可靠地完成");
+    expect(renderTurnPlanV3PlanningFailureMessage({
+      code: "plan_invalid",
+    }, {
+      ok: true,
+      requirement: {
+        operations: ["read"],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+      },
+      confidence: 0.98,
+      reasonCode: "current_public_fact",
+      provider: "agicto",
+      model: "qwen-plus",
+    })).toContain("无法获取这方面的最新信息");
+    expect(renderTurnPlanV3PlanningFailureMessage({
+      code: "plan_invalid",
+      issues: [{
+        code: "arguments_invalid",
+        path: "/actions/0/arguments/latitude",
+        message: "Required property is missing.",
+      }],
+      proposal: {
+        capabilitySelections: [{
+          capabilityKey: "mcp.open-meteo.openmeteo_get_forecast",
+        }],
+      },
+    })).toContain("还需要 1 项信息");
+    expect(renderTurnPlanV3PlanningFailurePresentation({
+      code: "provider_failed",
+    })).toMatchObject({
+      authorship: "system",
+      failureCode: "planning_provider_failed",
+    });
+    expect(renderTurnPlanV3PlanningFailurePresentation({
+      code: "plan_invalid",
+      reason:
+        "Planner selected a capability that cannot satisfy the goal semantic contract.",
+      issues: [{
+        code: "evidence_unsatisfied",
+        path: "/capabilitySelections/0",
+        message:
+          "Capability compute.task@1 is incompatible with goal g1 across operations.",
+      }],
+    })).toMatchObject({
+      text: expect.stringContaining("你的描述没有问题"),
+      authorship: "system",
+      failureCode: "planning_capability_semantic_mismatch",
+    });
+    expect(renderTurnPlanV3PlanningFailurePresentation({
+      code: "plan_invalid",
+    }, {
+      ok: true,
+      requirement: {
+        operations: ["read"],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+      },
+      confidence: 0.98,
+      reasonCode: "current_public_fact",
+      provider: "agicto",
+      model: "qwen-plus",
+    })).toMatchObject({
+      authorship: "representative",
+      failureCode: "current_source_unavailable",
+    });
+  });
+
+  it("keeps internal runtime terminology out of public failure messages", () => {
+    const publicMessages = [
+      renderV3UnsatisfiedSourceMessage({
+        status: "not_found",
+        evidenceKind: "authorized_knowledge",
+        freshness: "bounded",
+      }),
+      renderV3UnsatisfiedSourceMessage({
+        status: "unavailable",
+        evidenceKind: "current_external",
+        freshness: "live",
+      }),
+      renderTurnPlanV3PlanningFailureMessage({ code: "provider_failed" }),
+      renderTurnPlanV3PlanningFailureMessage({ code: "plan_invalid" }),
+    ];
+    for (const message of publicMessages) {
+      expect(message).not.toMatch(
+        /MCP|Planner|Schema|授权知识|已发布(?:的)?(?:能力|数据源)|证据校验|通用模型/iu,
+      );
+    }
+  });
+
+  it("turns a required Knowledge miss into a deterministic terminal limitation", () => {
+    const plan = {
+      goals: [{
+        id: "goal-current",
+        operation: "answer",
+        actionIds: ["retrieve", "compose"],
+        evidenceRequirement: {
+          kind: "current_external",
+          freshness: "live",
+          minimumEvidenceCount: 1,
+        },
+      }],
+    } as never;
+    const recovery = resolveV3UnsatisfiedSourceRecovery({
+      plan,
+      resultByActionId: new Map([[
+        "retrieve",
+        { status: "not_found", items: [], evidenceRefs: [] },
+      ]]),
+      evidence: [],
+      knowledgeFallbacks: [],
+    });
+
+    expect(recovery).toEqual({
+      status: "not_found",
+      evidenceKind: "current_external",
+      freshness: "live",
+    });
+    expect(renderV3UnsatisfiedSourceMessage(recovery!))
+      .toContain("无法获取这方面的最新信息");
+    expect(resolveV3UnsatisfiedSourceRecovery({
+      plan,
+      resultByActionId: new Map([[
+        "retrieve",
+        { status: "not_found", items: [], evidenceRefs: [] },
+      ]]),
+      evidence: [],
+      knowledgeFallbacks: [{ goalId: "goal-current", status: "not_found" }],
+    })).toBeNull();
+    expect(resolveV3UnsatisfiedSourceRecovery({
+      plan,
+      resultByActionId: new Map([[
+        "retrieve",
+        { status: "not_found", items: [], evidenceRefs: [] },
+      ]]),
+      evidence: [{
+        evidenceId: "tool-result",
+        evidenceClass: "tool_output",
+        sourceActionId: "retrieve",
+      }],
+      knowledgeFallbacks: [],
+    })).toBeNull();
   });
 
   beforeEach(() => {
@@ -531,8 +711,24 @@ describe("conversation worker knowledge recall", () => {
     mocks.shouldStartStructuredCollector.mockReturnValue(false);
     mocks.resolveDeterministicContactMemorySharingCommand.mockReturnValue(null);
     mocks.findConversationClarifyingDelegationTask.mockResolvedValue(null);
+    mocks.readPendingClarificationSpec.mockReturnValue(null);
+    mocks.resolveClarificationContinuation.mockResolvedValue({
+      ok: false,
+      reason: "disabled in test",
+    });
+    mocks.closeConversationClarifyingDelegationTask.mockResolvedValue(true);
     mocks.findConversationCancelableDelegationTask.mockResolvedValue({ status: "none" });
     mocks.planNaturalLanguageComputeRequest.mockResolvedValue({ ok: true, plan: null, source: "model" });
+    mocks.inferTurnSourceRequirementV3.mockResolvedValue({
+      ok: false,
+      reason: "disabled in test",
+      diagnostics: [],
+    });
+    mocks.compileNaturalLanguageSandboxTask.mockResolvedValue({
+      ok: false,
+      reason: "disabled in test",
+      state: "disabled",
+    });
     mocks.planTurnV2.mockResolvedValue({
       ok: false,
       code: "runtime_unavailable",
@@ -882,6 +1078,7 @@ describe("conversation worker knowledge recall", () => {
     await expect(processNextConversationWork({
       port: 4040,
       pollMs: 500,
+      turnPlannerV3Mode: "active_governed",
       telegramConversationPlatformMode: "worker",
     })).resolves.toMatchObject({
       processed: true,
@@ -4582,6 +4779,7 @@ describe("conversation worker knowledge recall", () => {
       delegationTaskId: "task-1",
       delegationTaskStepId: "task-step-1",
     }));
+    expect(mocks.planTurnV3).not.toHaveBeenCalled();
     expect(mocks.executeAudienceTool).toHaveBeenCalledWith(
       "session-1",
       expect.objectContaining({
@@ -4922,6 +5120,244 @@ describe("conversation worker knowledge recall", () => {
     );
   });
 
+  it("compiles a V3 natural-language sandbox task before the existing exec approval", async () => {
+    const definitionHash = `sha256:${"b".repeat(64)}`;
+    const userText = "请在沙箱里计算 1 到 1000 之间质数的数量，并打印前 20 个质数。";
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      outboxId: "outbox-task-v3",
+      leaseAttempt: 1,
+      runId: "run-task-v3",
+      representativeVersionId: "version-1",
+      representativeSlug: "sktone",
+      representativeName: "SKTone",
+      conversationId: "conversation-task-v3",
+      contactId: "contact-task-v3",
+      audienceIdentityId: "audience-task-v3",
+      controlState: "AI_ACTIVE",
+      inputMessageId: "message-task-v3",
+      userText,
+      channel: "web",
+      usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue({
+      id: "rep-1",
+      name: "SKTone",
+      tone: "direct",
+      languages: ["zh"],
+      skillPacks: [],
+      compute: {
+        enabled: true,
+        baseImage: "debian:bookworm-slim",
+        maxSessionMinutes: 15,
+        networkMode: "no_network",
+        networkAllowlist: [],
+        filesystemMode: "ephemeral_full",
+        capabilityModes: {
+          exec: "ask",
+          read: "allow",
+          write: "ask",
+          process: "deny",
+          browser: "deny",
+          mcp: "deny",
+        },
+      },
+      delegation: {
+        enabled: true,
+        naturalLanguageEnabled: true,
+        explicitComputeEnabled: true,
+        maxSteps: 1,
+        maxEstimatedTokens: 10_000,
+        knowledgeScope: "user_input_only",
+      },
+    });
+    mocks.getRepresentativeRuntimeAuthoritySnapshot.mockResolvedValue({
+      representativeVersionId: "version-1",
+      compute: {
+        enabled: true,
+        capabilityModes: {
+          exec: "ask",
+          read: "allow",
+          write: "ask",
+          process: "deny",
+          browser: "deny",
+          mcp: "deny",
+        },
+      },
+      delegation: { enabled: true },
+      mcpBindings: [],
+    });
+    mocks.buildCapabilityCatalogV3.mockImplementation((drafts) => ({
+      protocolVersion: 2,
+      canonicalizationVersion: "delegate-capability-v1",
+      catalogHash: `sha256:${"e".repeat(64)}`,
+      capabilities: drafts.map((draft: Record<string, unknown>) => ({
+        ...draft,
+        definitionHash,
+      })),
+    }));
+    mocks.planTurnV3.mockImplementation(async ({ catalog, scopeKey, planId }) => {
+      const compute = catalog.capabilities.find((item: { key: string }) =>
+        item.key === "compute.task");
+      const compose = catalog.capabilities.find((item: { key: string }) =>
+        item.key === "response.compose");
+      return {
+        ok: true,
+        provider: "openai",
+        model: "planner-test",
+        selectedCapabilities: [compute, compose],
+        proposal: { protocolVersion: 3, objective: "计算质数" },
+        plan: {
+          protocolVersion: 3,
+          planId,
+          scopeKey,
+          revision: 1,
+          envelopeHash: `sha256:${"f".repeat(64)}`,
+          capabilityCatalogHash: catalog.catalogHash,
+          validationPolicyVersion: "turn-plan-v3-policy.3",
+          objective: "计算质数",
+          goals: [{
+            id: "goal-task",
+            objective: "计算质数",
+            sourcePointers: ["/currentMessage/text"],
+            strategy: "capability",
+            operation: "create",
+            semanticConfidence: 0.99,
+            generalEligibility: "not_allowed",
+            actionIds: ["task", "compose"],
+            deliverableIds: [],
+            evidenceRequirement: {
+              kind: "capability_result",
+              freshness: "bounded",
+              allowedSourceKinds: ["capability_result"],
+              citationRequired: true,
+              minimumEvidenceCount: 1,
+            },
+            failurePolicy: { strategy: "stop", reasonCode: "task_failed" },
+          }],
+          actions: [{
+            id: "task",
+            capability: {
+              key: compute.key,
+              version: compute.version,
+              definitionHash: compute.definitionHash,
+            },
+            arguments: { instruction: userText },
+            argumentProvenance: {
+              instruction: { source: "user_message", pointer: "/currentMessage/text" },
+            },
+            dependencies: [],
+            activation: { mode: "primary" },
+            expectedOutputSchema: compute.outputSchema,
+            completionCriteria: ["Exit code is zero"],
+            failurePolicy: { strategy: "stop", publicMessageCode: "task_failed" },
+          }, {
+            id: "compose",
+            capability: {
+              key: compose.key,
+              version: compose.version,
+              definitionHash: compose.definitionHash,
+            },
+            arguments: {},
+            argumentProvenance: {},
+            dependencies: [{ actionId: "task", allowedStatuses: ["succeeded"] }],
+            activation: { mode: "primary" },
+            expectedOutputSchema: compose.outputSchema,
+            completionCriteria: ["Response verified"],
+            failurePolicy: { strategy: "stop", publicMessageCode: "compose_failed" },
+          }],
+          deliverables: [],
+          decisionTrace: ["self_contained_compute_requested"],
+        },
+      };
+    });
+    mocks.persistConversationTurnPlanV3.mockResolvedValue({
+      id: "turn-plan-v3-task",
+      revision: 1,
+      executionEpoch: 1,
+      generationRunId: "run-task-v3",
+      actions: [
+        { id: "plan-action-task", actionKey: "task" },
+        { id: "plan-action-compose", actionKey: "compose" },
+      ],
+    });
+    mocks.compileCapabilityAction.mockReturnValue({
+      planId: "turn-plan-v3-task",
+      planRevision: 1,
+      executionEpoch: 1,
+      actionId: "plan-action-task",
+      generationRunId: "run-task-v3",
+      capabilityKey: "compute.task",
+      capabilityVersion: "1",
+      capabilityDefinitionHash: definitionHash,
+      argumentsHash: `sha256:${"1".repeat(64)}`,
+      idempotencyKey: "turn-plan:task",
+      executor: "compute",
+      capability: "exec",
+      payload: { instruction: userText },
+    });
+    mocks.compileNaturalLanguageSandboxTask.mockResolvedValue({
+      ok: true,
+      task: {
+        summary: "计算质数",
+        command: "python -c \"print(168)\"",
+        metadata: {
+          compilerVersion: "sandbox-task-compiler.v1",
+          instructionHash: "a".repeat(64),
+          codeHash: "c".repeat(64),
+          riskClass: "self_contained_compute",
+        },
+      },
+    });
+    mocks.createAudienceComputeSession.mockResolvedValue({ session: { id: "session-task-v3" } });
+    mocks.executeAudienceTool.mockResolvedValue({
+      outcome: "pending_approval",
+      approvalRequest: {
+        id: "approval-task-v3",
+        requestedActionSummary: "Run compiled sandbox task",
+        riskSummary: "Generated isolated computation",
+      },
+      artifacts: [],
+    });
+    mocks.waitGenerationRunForComputeApproval.mockResolvedValue({
+      run: { status: "WAITING_APPROVAL" },
+      message: { id: "pending-task-v3", text: "等待 Owner 审批。" },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "waiting_approval" });
+
+    expect(mocks.compileNaturalLanguageSandboxTask).toHaveBeenCalledWith({ instruction: userText });
+    expect(mocks.createComputeDelegationTask).toHaveBeenCalledWith(expect.objectContaining({
+      planSteps: [expect.objectContaining({
+        actionKey: "task",
+        request: expect.objectContaining({
+          capability: "exec",
+          command: "python -c \"print(168)\"",
+          compiledTask: expect.objectContaining({
+            compilerVersion: "sandbox-task-compiler.v1",
+          }),
+        }),
+      })],
+    }));
+    expect(mocks.executeAudienceTool).toHaveBeenCalledWith(
+      "session-task-v3",
+      expect.objectContaining({
+        capability: "exec",
+        command: "python -c \"print(168)\"",
+      }),
+    );
+    expect(mocks.waitGenerationRunForComputeApproval).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalId: "approval-task-v3",
+        replyText: expect.stringContaining("自然语言编译的隔离沙箱计算"),
+      }),
+    );
+  });
+
   it("executes Knowledge before its dependent MCP action and composes both verified results", async () => {
     configureMixedKnowledgeMcpV3({ knowledge: "hit" });
 
@@ -4964,6 +5400,34 @@ describe("conversation worker knowledge recall", () => {
         }),
       ]),
     }));
+  });
+
+  it("terminalizes the governed plan when an MCP action is denied by policy", async () => {
+    configureMixedKnowledgeMcpV3({ knowledge: "hit" });
+    mocks.executeAudienceTool.mockResolvedValue({
+      outcome: "blocked",
+      blockReasonCode: "mcp_requires_network",
+      artifacts: [],
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.failConversationTurnPlan).toHaveBeenCalledWith({
+      planId: "turn-plan-v3-mixed",
+      reason: "mcp_requires_network",
+    });
+    expect(mocks.composeTurnV3).not.toHaveBeenCalled();
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        countUsage: false,
+        replyText: "委托任务被安全策略拒绝，未执行。",
+      }),
+    );
   });
 
   it("resumes only response.compose after a final approved V3 tool step", async () => {
@@ -5066,6 +5530,60 @@ describe("conversation worker knowledge recall", () => {
     const replyText = mocks.completeInlineGenerationRun.mock.calls.at(-1)?.[0]
       .replyText as string;
     expect(replyText.match(/说明：/gu)).toHaveLength(1);
+  });
+
+  it("does not invoke the Composer when a required source remains unsatisfied", async () => {
+    configureMixedKnowledgeMcpV3({ knowledge: "miss" });
+    const loadContext = mocks.loadV3GovernedCompositionContext
+      .getMockImplementation()!;
+    mocks.loadV3GovernedCompositionContext.mockImplementation(async (...args) => {
+      const context = await loadContext(...args);
+      const knowledgeGoal = context.parsedPlan.goals[0];
+      knowledgeGoal.generalEligibility = "not_allowed";
+      knowledgeGoal.evidenceRequirement = {
+        kind: "authorized_knowledge",
+        freshness: "bounded",
+        allowedSourceKinds: ["authorized_knowledge"],
+        citationRequired: true,
+        minimumEvidenceCount: 1,
+      };
+      delete knowledgeGoal.evidenceFallbackPolicy;
+      knowledgeGoal.sourceAuthorityBoundary = {
+        classification: "owner_authority_required",
+        policySource: "server_authority_policy",
+        policyVersion: "delegate.source-authority.v1",
+        reasonCodes: ["owner_specific"],
+      };
+      return context;
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.composeTurnV3).not.toHaveBeenCalled();
+    expect(mocks.failConversationTurnPlan).toHaveBeenCalledWith({
+      planId: "turn-plan-v3-mixed",
+      actionId: "plan-action-compose",
+      reason: "v3_required_source_not_found",
+    });
+    expect(mocks.completeInlineGenerationRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "turn_plan_v3_source_unavailable",
+        countUsage: false,
+        replyText: expect.stringContaining("暂时没有找到足够的信息"),
+      }),
+    );
+    const publicFailureInput = mocks.completeInlineGenerationRun.mock.calls.at(-1)?.[0];
+    expect(publicFailureInput).not.toHaveProperty("evidenceIndependentSystemFailure");
+    expect(publicFailureInput).toMatchObject({
+      sourceIndependentPublicRecovery: {
+        reasonCode: "v3_required_source_unavailable",
+      },
+    });
   });
 
   it("does not create or invoke a dependent external action after inline source failure", async () => {
@@ -5232,6 +5750,201 @@ describe("conversation worker knowledge recall", () => {
     );
     expect(mocks.generateRepresentativeReply).not.toHaveBeenCalled();
     expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+  });
+
+  it("persists missing V3 arguments as a durable clarification task", async () => {
+    const definition = pendingLocationCapabilityDefinition();
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      ...defaultGenerationItem(),
+      userText: "今天天气如何",
+      inputMessageId: "message-weather-missing",
+      runId: "run-weather-missing",
+      outboxId: "outbox-weather-missing",
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue(
+      clarificationRuntimeSetup(),
+    );
+    mocks.buildCapabilityCatalogV3.mockReturnValue({
+      protocolVersion: 2,
+      canonicalizationVersion: "delegate-capability-v1",
+      catalogHash: `sha256:${"e".repeat(64)}`,
+      capabilities: [definition],
+    });
+    mocks.inferTurnSourceRequirementV3.mockResolvedValue({
+      ok: true,
+      requirement: {
+        operations: ["read"],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+      },
+      confidence: 0.99,
+      reasonCode: "current_public_fact",
+      provider: "test",
+      model: "test-model",
+    });
+    mocks.planTurnV3.mockResolvedValue({
+      ok: false,
+      code: "plan_invalid",
+      reason: "Missing required capability argument.",
+      issues: [{
+        code: "arguments_invalid",
+        path: "/actions/0/arguments/location",
+        message: "Required property is missing.",
+      }],
+      proposal: {
+        protocolVersion: 3,
+        objective: "查询今天的天气",
+        capabilitySelections: [{
+          id: "location-search",
+          capabilityKey: definition.key,
+          capabilityVersion: definition.version,
+          goalIds: ["weather-goal"],
+          argumentsJson: "{}",
+        }],
+      },
+      provider: "test",
+      model: "test-model",
+    });
+    mocks.persistConversationTurnPlannerFailureV3.mockResolvedValue({
+      id: "failed-weather-plan",
+      status: "FAILED",
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValue({
+      message: { id: "weather-clarification", text: "我还需要 1 项信息才能继续。" },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "waiting_input" });
+
+    expect(mocks.createClarifyingDelegationTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        objective: "查询今天的天气",
+        missingFields: ["location"],
+        pendingClarification: expect.objectContaining({
+          protocolVersion: 1,
+          source: "turn_plan_v3",
+          objective: "查询今天的天气",
+          missingSlots: [expect.objectContaining({
+            id: "location",
+            schema: { type: "string" },
+          })],
+        }),
+      }),
+    );
+    expect(mocks.executeAudienceTool).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending clarification without invoking a planner", async () => {
+    const task = pendingClarificationTask();
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      ...defaultGenerationItem(),
+      userText: "算了",
+      inputMessageId: "message-cancel-pending",
+      runId: "run-cancel-pending",
+      outboxId: "outbox-cancel-pending",
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue(
+      clarificationRuntimeSetup(),
+    );
+    mocks.findConversationClarifyingDelegationTask.mockResolvedValue(task);
+    mocks.readPendingClarificationSpec.mockReturnValue(pendingClarificationSpec());
+    mocks.resolveClarificationContinuation.mockResolvedValue({
+      ok: true,
+      decision: {
+        protocolVersion: 1,
+        decision: "cancel",
+        bindings: [],
+        confidence: 1,
+        reasonCode: "explicit_cancellation",
+      },
+      provider: "server",
+      model: "deterministic-cancel-v1",
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValue({
+      message: { id: "pending-canceled" },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.closeConversationClarifyingDelegationTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: task.id,
+        outcome: "canceled",
+        reasonCode: "explicit_cancellation",
+      }),
+    );
+    expect(mocks.planTurnV3).not.toHaveBeenCalled();
+  });
+
+  it("releases a complete new request from a pending clarification", async () => {
+    const task = pendingClarificationTask();
+    mocks.claimNextGenerationWorkItem.mockResolvedValue({
+      ...defaultGenerationItem(),
+      userText: "等高线是什么？",
+      inputMessageId: "message-replace-pending",
+      runId: "run-replace-pending",
+      outboxId: "outbox-replace-pending",
+    });
+    mocks.getRepresentativeRuntimeSetupSnapshot.mockResolvedValue(
+      clarificationRuntimeSetup(),
+    );
+    mocks.findConversationClarifyingDelegationTask.mockResolvedValue(task);
+    mocks.readPendingClarificationSpec.mockReturnValue(pendingClarificationSpec());
+    mocks.resolveClarificationContinuation.mockResolvedValue({
+      ok: true,
+      decision: {
+        protocolVersion: 1,
+        decision: "replace",
+        bindings: [],
+        confidence: 0.99,
+        reasonCode: "standalone_new_request",
+      },
+      provider: "test",
+      model: "test-model",
+    });
+    mocks.buildCapabilityCatalogV3.mockReturnValue({
+      protocolVersion: 2,
+      canonicalizationVersion: "delegate-capability-v1",
+      catalogHash: `sha256:${"e".repeat(64)}`,
+      capabilities: [],
+    });
+    mocks.planTurnV3.mockResolvedValue({
+      ok: false,
+      code: "runtime_unavailable",
+      reason: "test terminal path",
+    });
+    mocks.persistConversationTurnPlannerFailureV3.mockResolvedValue({
+      id: "replacement-plan-failure",
+      status: "FAILED",
+    });
+    mocks.completeInlineGenerationRun.mockResolvedValue({
+      message: { id: "replacement-reply" },
+    });
+
+    await expect(processNextConversationWork({
+      port: 4040,
+      pollMs: 500,
+      turnPlannerV2Mode: "disabled",
+      turnPlannerV3Mode: "active_governed",
+    })).resolves.toMatchObject({ processed: true, status: "completed" });
+
+    expect(mocks.closeConversationClarifyingDelegationTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: task.id,
+        outcome: "superseded",
+        reasonCode: "standalone_new_request",
+      }),
+    );
+    expect(mocks.planTurnV3).toHaveBeenCalledOnce();
   });
 
   it("fails active V3 closed when planning throws before a plan can be persisted", async () => {
@@ -5522,7 +6235,7 @@ describe("conversation worker knowledge recall", () => {
       memoryRunsFailed: 0,
     });
     mocks.completeInlineGenerationRun.mockResolvedValue({
-      message: { id: "system-failure-message", text: "严格只读计划未能完成。" },
+      message: { id: "system-failure-message", text: "已取得的来源未能生成通过证据校验的回答。" },
     });
 
     await expect(processNextConversationWork({
@@ -5545,6 +6258,7 @@ describe("conversation worker knowledge recall", () => {
       expect.objectContaining({
         intent: "delegation_failed",
         countUsage: false,
+        replyText: expect.stringContaining("回答整理暂时没有成功"),
         evidenceIndependentSystemFailure: {
           failureCode: "delegation_failed",
         },
@@ -6107,6 +6821,19 @@ describe("conversation worker knowledge recall", () => {
 
   it("falls back transparently to stable general knowledge after an authorized knowledge miss", async () => {
     const definitionHash = `sha256:${"b".repeat(64)}`;
+    mocks.inferTurnSourceRequirementV3.mockResolvedValue({
+      ok: true,
+      requirement: {
+        operations: ["explain"],
+        evidenceClasses: ["none"],
+        freshnessClasses: ["stable"],
+        authorityClasses: ["general"],
+      },
+      confidence: 0.99,
+      reasonCode: "stable_general_explanation",
+      provider: "agicto",
+      model: "qwen-plus",
+    });
     mocks.claimNextGenerationWorkItem.mockResolvedValue({
       outboxId: "outbox-v3-knowledge-miss",
       leaseAttempt: 1,
@@ -6269,6 +6996,7 @@ describe("conversation worker knowledge recall", () => {
       evidence: [],
     }));
     expect(mocks.planTurnV3).toHaveBeenCalledWith(expect.objectContaining({
+      semanticRequirement: {},
       knowledgeProbe: expect.objectContaining({
         status: "miss",
         candidateCount: 0,
@@ -7733,6 +8461,135 @@ function managedDocumentPlanFixture() {
       expectedOutputSchema: {},
       completionCriteria: ["正文非空"],
       onFailure: "stop",
+    }],
+  };
+}
+
+function defaultGenerationItem() {
+  return {
+    outboxId: "outbox-clarification",
+    leaseAttempt: 1,
+    runId: "run-clarification",
+    representativeVersionId: "version-1",
+    representativeSlug: "sktone",
+    representativeName: "SKTone",
+    conversationId: "conversation-1",
+    contactId: "contact-1",
+    controlState: "AI_ACTIVE",
+    inputMessageId: "message-clarification",
+    userText: "今天天气如何",
+    channel: "web",
+    usage: { freeRepliesUsed: 0, passUnlocked: true, deepHelpUnlocked: false },
+  };
+}
+
+function clarificationRuntimeSetup() {
+  return {
+    id: "rep-1",
+    name: "SKTone",
+    ownerName: "Owner",
+    tagline: "Representative",
+    tone: "direct",
+    languages: ["zh"],
+    skillPacks: [],
+    knowledgePackRevision: 1,
+    knowledgePack: { identitySummary: "Test", faq: [], materials: [], policies: [] },
+    compute: {
+      enabled: true,
+      baseImage: "debian:bookworm-slim",
+      maxSessionMinutes: 15,
+      artifactRetentionDays: 14,
+      networkMode: "no_network",
+      filesystemMode: "workspace_only",
+      capabilityModes: { mcp: "allow" },
+    },
+    delegation: {
+      enabled: true,
+      naturalLanguageEnabled: true,
+      explicitComputeEnabled: true,
+      maxSteps: 5,
+      maxEstimatedTokens: 10_000,
+      knowledgeScope: "user_input_only",
+    },
+  };
+}
+
+function pendingLocationCapabilityDefinition() {
+  return {
+    key: "mcp.weather.search_locations",
+    version: "1",
+    definitionHash: `sha256:${"a".repeat(64)}`,
+    description: "Search a location before retrieving live weather.",
+    executor: "mcp",
+    inputSchema: {
+      type: "object",
+      properties: { location: { type: "string" } },
+      required: ["location"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      properties: { results: { type: "array" } },
+      required: ["results"],
+      additionalProperties: false,
+    },
+    effect: { boundary: "external", mutation: "none", reversibility: "not_applicable" },
+    idempotency: "naturally_idempotent",
+    supportedChannels: ["web"],
+    requiredIdentityScopes: [],
+    requiredDataScopes: [],
+    tags: ["weather", "location"],
+    semantics: {
+      operations: ["search"],
+      evidenceClasses: ["current_external"],
+      freshnessClasses: ["live"],
+      authorityClasses: ["external_authoritative"],
+      domains: ["weather", "location"],
+      aliases: ["天气", "地点"],
+    },
+  };
+}
+
+function pendingClarificationSpec() {
+  return {
+    protocolVersion: 1 as const,
+    source: "turn_plan_v3" as const,
+    originInputMessageId: "message-weather",
+    representativeVersionId: "version-1",
+    objective: "查询今天的天气",
+    capabilityPins: [{
+      key: "mcp.weather.search_locations",
+      version: "1",
+      definitionHash: `sha256:${"a".repeat(64)}`,
+    }],
+    missingSlots: [{
+      id: "location",
+      argumentPath: "/actions/0/arguments/location",
+      schema: { type: "string" },
+      prompt: "请补充地点。",
+    }],
+    semanticRequirement: {
+      operations: ["read"] as const,
+      evidenceClasses: ["current_external"] as const,
+      freshnessClasses: ["live"] as const,
+      authorityClasses: ["external_authoritative"] as const,
+    },
+    clarificationCount: 0,
+    createdAt: "2026-09-03T00:00:00.000Z",
+    expiresAt: "2026-09-03T00:30:00.000Z",
+  };
+}
+
+function pendingClarificationTask() {
+  return {
+    id: "task-pending-clarification",
+    objective: "查询今天的天气",
+    blockingReason: "请补充地点。",
+    contextSnapshot: { pendingClarification: pendingClarificationSpec() },
+    steps: [{
+      id: "step-pending-clarification",
+      kind: "CLARIFICATION",
+      inputSnapshot: { pendingClarification: pendingClarificationSpec() },
     }],
   };
 }

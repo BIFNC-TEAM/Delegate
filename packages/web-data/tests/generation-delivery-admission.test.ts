@@ -58,6 +58,7 @@ function buildTx() {
     planExecutionFence: { findUnique: vi.fn() },
     outboxEvent: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
     message: {
+      findFirst: vi.fn().mockResolvedValue(null),
       findUnique: vi.fn().mockResolvedValue({
         conversationId: "conversation-1",
       }),

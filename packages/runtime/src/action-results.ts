@@ -80,6 +80,15 @@ export function verifyRawActionResult(input: {
       failureCode: "output_schema_invalid",
     };
   }
+  if (isStructuredToolError(sanitizedOutput)) {
+    return {
+      transportOutcome: input.transportOutcome,
+      semanticOutcome: "failed",
+      sanitizedOutput,
+      securityFindings: findings,
+      failureCode: "external_tool_error_result",
+    };
+  }
   const semantic = evaluateSuccessContract(
     sanitizedOutput,
     input.successContract,
@@ -91,6 +100,21 @@ export function verifyRawActionResult(input: {
     securityFindings: findings,
     ...(semantic.failureCode ? { failureCode: semantic.failureCode } : {}),
   };
+}
+
+function isStructuredToolError(output: unknown) {
+  if (!output || typeof output !== "object" || Array.isArray(output)) {
+    return false;
+  }
+  const record = output as Record<string, unknown>;
+  if (record["isError"] === true) return true;
+  const error = record["error"];
+  if (!error || typeof error !== "object" || Array.isArray(error)) {
+    return false;
+  }
+  const errorRecord = error as Record<string, unknown>;
+  return typeof errorRecord["message"] === "string"
+    && errorRecord["message"].trim().length > 0;
 }
 
 export function sanitizeUntrustedArtifactPayload(value: unknown): {

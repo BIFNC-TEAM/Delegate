@@ -20,12 +20,51 @@ vi.mock("../src/prisma", () => ({
 import {
   getPublicConversationHistory,
   getPublicGenerationRunSnapshot,
+  isSourceIndependentDeliveryAuthorized,
   resolvePublicWebAnswerSourceDisclosure,
+  shouldFailOpenMemoryUseForSourceIndependentResponse,
 } from "../src/conversation-platform";
 
 describe("public Web answer source disclosure", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("admits only server-marked source-independent recovery delivery for the same run", () => {
+    const content = {
+      intent: "turn_plan_v3_source_unavailable",
+      deliveryControl: {
+        sourceIndependentDelivery: true,
+        sourceIndependentPublicRecovery: true,
+        recoveryCode: "v3_required_source_not_found",
+        generationRunId: "run-1",
+      },
+    };
+
+    expect(isSourceIndependentDeliveryAuthorized(content, "run-1")).toBe(true);
+    expect(isSourceIndependentDeliveryAuthorized(content, "run-other")).toBe(false);
+    expect(isSourceIndependentDeliveryAuthorized({
+      deliveryControl: {
+        sourceIndependentDelivery: true,
+        generationRunId: "run-1",
+      },
+    }, "run-1")).toBe(false);
+  });
+
+  it("does not fail an open memory-use run before an empty public recovery finalizes it", () => {
+    expect(shouldFailOpenMemoryUseForSourceIndependentResponse({
+      evidenceIndependentSystemFailure: false,
+      sourceIndependentPublicRecovery: true,
+      memoryUseOutcome: "completed",
+    })).toBe(false);
+    expect(shouldFailOpenMemoryUseForSourceIndependentResponse({
+      evidenceIndependentSystemFailure: false,
+      sourceIndependentPublicRecovery: true,
+    })).toBe(true);
+    expect(shouldFailOpenMemoryUseForSourceIndependentResponse({
+      evidenceIndependentSystemFailure: true,
+      sourceIndependentPublicRecovery: false,
+    })).toBe(true);
   });
 
   it.each([

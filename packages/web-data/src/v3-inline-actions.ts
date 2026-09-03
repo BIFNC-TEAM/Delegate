@@ -634,7 +634,16 @@ export async function failV3InlinePlanExecution(input: {
     ) {
       throw new Error("V3 inline execution claim was lost during failure closure.");
     }
-    if (attempt.attemptPhase === "CALL_STARTED") {
+    // A dispatched read-only inline call may consume remote compute, but it
+    // cannot mutate Delegate or an external system. Preserving it as an
+    // unknown business outcome leaves the Plan EXECUTING forever and makes a
+    // recoverable composer/knowledge failure look like reconciliation work.
+    // Only a call whose immutable Action contract carries a side effect needs
+    // the unknown-outcome hold.
+    if (
+      attempt.attemptPhase === "CALL_STARTED"
+      && action.sideEffectClass !== "NONE"
+    ) {
       const unknownAttempts = await tx.toolExecution.updateMany({
         where: {
           id: attempt.id,

@@ -10,6 +10,10 @@ import {
   resolveServerOwnedMcpCapabilityPolicyV3,
   type RepresentativeRuntimeMcpBindingGrant,
 } from "@delegate/web-data";
+import {
+  readPersistedDelegationStepRequest,
+  stableSha256,
+} from "@delegate/runtime";
 
 import {
   deriveConversationComputeEntitlements,
@@ -123,6 +127,7 @@ export async function loadSessionPolicyContext(sessionId: string) {
       delegationTaskStep: {
         select: {
           mcpBindingId: true,
+          inputSnapshot: true,
         },
       },
       policyProfile: {
@@ -252,6 +257,10 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
       ? normalizeContainerPath(input.path)
       : input.path;
   const context = await loadSessionPolicyContext(sessionId);
+  const serverVerifiedCompiledTask = resolveServerVerifiedCompiledSandboxTask({
+    input,
+    stepInputSnapshot: context.session.delegationTaskStep?.inputSnapshot,
+  });
   const entitlements = deriveConversationComputeEntitlements(
     context.audienceAuthorization,
   );
@@ -359,8 +368,36 @@ export async function evaluateExecutionRequest(sessionId: string, rawInput: unkn
     entitlements,
     mcpBinding,
     serverVerifiedReadOnlyMcp,
+    serverVerifiedCompiledTask,
     sessionSubagentId,
   };
+}
+
+export function resolveServerVerifiedCompiledSandboxTask(input: {
+  input: ReturnType<typeof toolExecutionRequestSchema.parse>;
+  stepInputSnapshot: unknown;
+}) {
+  if (!input.input.compiledTask) return false;
+  const snapshot = record(input.stepInputSnapshot);
+  const executionRequest = record(snapshot?.["executionRequest"]);
+  const persistedRequest = readPersistedDelegationStepRequest(snapshot?.["request"]);
+  if (
+    input.input.capability !== "exec"
+    || !input.input.command
+    || executionRequest?.["capabilityKey"] !== "compute.task"
+    || !persistedRequest?.compiledTask
+    || persistedRequest.command !== input.input.command
+    || stableSha256(persistedRequest.compiledTask) !== stableSha256(input.input.compiledTask)
+  ) {
+    throw new SessionError(409, "compiled_sandbox_task_mismatch");
+  }
+  return true;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 export function resolveServerVerifiedReadOnlyMcp(input: {

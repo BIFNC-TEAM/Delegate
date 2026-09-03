@@ -4336,6 +4336,8 @@ model SandboxLease {
   sandboxIdentityId String
   provider          SandboxProviderKind   @default(DOCKER)
   networkMode       ComputeNetworkMode    @default(NO_NETWORK)
+  networkAllowlist  String[]               @default([])
+  networkPolicyHash String                 @default("legacy") @db.VarChar(64)
   filesystemMode    ComputeFilesystemMode @default(WORKSPACE_ONLY)
   baseImage         String                @default("debian:bookworm-slim")
   runtimeClass      SandboxRuntimeClass   @default(CODE)

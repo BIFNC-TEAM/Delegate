@@ -22,7 +22,7 @@ const {
     artifact: { findMany: vi.fn(), updateMany: vi.fn() },
     delegationTask: { findFirst: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
     delegationTaskEvent: { findFirst: vi.fn(), create: vi.fn() },
-    delegationTaskExternalEffect: { findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
+    delegationTaskExternalEffect: { create: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
     delegationTaskInput: { findFirst: vi.fn(), create: vi.fn() },
     delegationTaskOutput: { count: vi.fn(), create: vi.fn(), createMany: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
     delegationTaskStep: { create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
@@ -58,8 +58,9 @@ const {
       update: vi.fn(),
     },
     workflowCommandOutbox: { upsert: vi.fn() },
-    conversationTurnPlan: { findFirst: vi.fn() },
-    conversationPlanAction: { findFirst: vi.fn(), findMany: vi.fn(), findUnique: vi.fn() },
+    conversationTurnPlan: { findFirst: vi.fn(), update: vi.fn() },
+    conversationPlanAction: { findFirst: vi.fn(), findMany: vi.fn(), findUnique: vi.fn(), update: vi.fn() },
+    representativeMcpBinding: { findFirst: vi.fn() },
     eventAudit: { create: vi.fn() },
   };
   return {
@@ -2622,6 +2623,128 @@ describe("delegation task owner actions", () => {
           request,
         },
       },
+    });
+  });
+
+  it("preserves V3 governance and external-effect records when clarification resolves", async () => {
+    mockPrisma.delegationTask.findUnique.mockResolvedValue({
+      id: "task-clarifying",
+      representativeId: "representative-1",
+      status: "CLARIFYING",
+      contactId: "contact-1",
+      originConversationId: "conversation-1",
+      objective: "查询今天的天气",
+      blockingReason: "请补充地点",
+      planSummary: "查询今天的天气",
+      steps: [{ id: "step-clarifying", kind: "CLARIFICATION", status: "WAITING_INPUT" }],
+      resourcePolicy: { maxDurationMinutes: 15 },
+    });
+    mockPrisma.generationRun.findUnique.mockResolvedValueOnce({
+      id: "run-clarifying",
+      conversationId: "conversation-1",
+      inputMessageId: "message-supplement",
+      inputMessage: { text: "深圳" },
+    });
+    mockPrisma.delegationTaskInput.findFirst.mockResolvedValueOnce(null);
+    mockPrisma.representativeMcpBinding.findFirst.mockResolvedValueOnce({
+      id: "weather-binding",
+      slug: "weather",
+    });
+    mockPrisma.delegationTaskStep.create.mockResolvedValueOnce({
+      id: "step-weather-search",
+      sequence: 2,
+    });
+    mockPrisma.conversationPlanAction.findUnique.mockResolvedValueOnce({
+      id: "action-weather-search",
+      actionKey: "capability-1",
+      status: "PLANNED",
+      turnPlan: {
+        id: "plan-weather",
+        protocolVersion: 3,
+        shadowMode: false,
+        generationRunId: "run-clarifying",
+        revision: 1,
+        executionEpoch: 1,
+        activeExecutionFence: {
+          activePlanId: "plan-weather",
+          activeRevision: 1,
+          executionEpoch: 1,
+        },
+      },
+    });
+    const request = {
+      capability: "mcp" as const,
+      bindingId: "weather-binding",
+      bindingSlug: "weather",
+      toolName: "search_locations",
+      toolArguments: { name: "深圳" },
+      displayTarget: "capability-1",
+      estimatedTokens: 4_000,
+      hasPaidEntitlement: false,
+      browserMode: "deterministic" as const,
+      maxSteps: 1,
+      allowMutations: false,
+    };
+    const executionRequest = {
+      executor: "mcp" as const,
+      planId: "plan-weather",
+      planRevision: 1,
+      executionEpoch: 1,
+      actionId: "action-weather-search",
+      generationRunId: "run-clarifying",
+      capabilityKey: "mcp.weather.search_locations",
+      capabilityVersion: "1",
+      capabilityDefinitionHash: `sha256:${"1".repeat(64)}`,
+      argumentsHash: `sha256:${"2".repeat(64)}`,
+      idempotencyKey: "weather-search-once",
+      bindingId: "weather-binding",
+      bindingRevision: 1,
+      toolName: "search_locations",
+      expectedToolSchemaHash: `sha256:${"3".repeat(64)}`,
+      expectedBindingDefinitionHash: `sha256:${"4".repeat(64)}`,
+      toolArguments: { name: "深圳" },
+    };
+    const { continueClarifyingDelegationTask } = await import("../src/delegation-tasks");
+
+    await continueClarifyingDelegationTask({
+      taskId: "task-clarifying",
+      generationRunId: "run-clarifying",
+      inputMessageId: "message-supplement",
+      contactId: "contact-1",
+      planSummary: "查询今天的天气",
+      planSteps: [{
+        summary: "查询地点",
+        request,
+        planActionId: "action-weather-search",
+        actionKey: "capability-1",
+        executionRequest,
+      }],
+    });
+
+    expect(mockPrisma.delegationTaskStep.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        inputSnapshot: {
+          request,
+          executionRequest,
+          source: "clarification_resolved",
+        },
+      }),
+    });
+    expect(mockPrisma.conversationPlanAction.update).toHaveBeenCalledWith({
+      where: { id: "action-weather-search" },
+      data: {
+        delegationTaskId: "task-clarifying",
+        delegationTaskStepId: "step-weather-search",
+      },
+    });
+    expect(mockPrisma.delegationTaskExternalEffect.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        delegationTaskId: "task-clarifying",
+        delegationTaskStepId: "step-weather-search",
+        planActionId: "action-weather-search",
+        type: "mcp_tool_call",
+        status: "PROPOSED",
+      }),
     });
   });
 });

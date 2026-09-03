@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "smoke:daytona-opencode": "tsx scripts/daytona-opencode-smoke.ts",
+    "smoke:daytona": "tsx scripts/daytona-code-smoke.ts",
     "smoke:tencent-agsx": "tsx scripts/tencent-agsx-smoke.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",

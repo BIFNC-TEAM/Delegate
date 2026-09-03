@@ -1963,6 +1963,7 @@ function mapLegacyCapability(key: string) {
   const legacy = key.startsWith("compute.") ? key.slice("compute.".length) : "";
   switch (legacy) {
     case "exec": return "EXEC" as const;
+    case "task": return "EXEC" as const;
     case "read": return "READ" as const;
     case "write": return "WRITE" as const;
     case "process": return "PROCESS" as const;

@@ -41,9 +41,25 @@ describe("conversation worker config", () => {
       telegramConversationPlatformMode: "worker",
       turnPlannerV2Mode: "shadow",
       turnPlannerV3Mode: "disabled",
+      pendingClarificationMode: "shadow",
       telegramRequestTimeoutMs: 15_000,
       outboxProcessingLeaseMs: 5 * 60_000,
     });
+  });
+
+  it("supports disabled, shadow, and active pending clarification rollout", () => {
+    expect(resolveConversationWorkerConfig({
+      PENDING_CLARIFICATION_MODE: "disabled",
+    })).toMatchObject({ pendingClarificationMode: "disabled" });
+    expect(resolveConversationWorkerConfig({
+      PENDING_CLARIFICATION_MODE: "shadow",
+    })).toMatchObject({ pendingClarificationMode: "shadow" });
+    expect(resolveConversationWorkerConfig({
+      PENDING_CLARIFICATION_MODE: "active",
+    })).toMatchObject({ pendingClarificationMode: "active" });
+    expect(() => resolveConversationWorkerConfig({
+      PENDING_CLARIFICATION_MODE: "invalid",
+    })).toThrow();
   });
 
   it("supports shadow and read-only V3 rollout before governed lanes exist", () => {

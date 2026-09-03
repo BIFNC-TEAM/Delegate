@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   ComputeFilesystemMode,
   ComputeNetworkMode,
@@ -35,6 +37,7 @@ type SandboxManagedSession = {
 export type EnsureUserSandboxLeaseParams = {
   session: SandboxManagedSession;
   networkMode: ComputeNetworkMode;
+  networkAllowlist?: readonly string[] | undefined;
   filesystemMode: ComputeFilesystemMode;
   hostWorkspaceRoot?: string | undefined;
   providerFactory: SandboxProviderFactory;
@@ -75,6 +78,11 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
   }
 
   const now = new Date();
+  const networkAllowlist = normalizeSandboxNetworkAllowlist(params.networkAllowlist);
+  const networkPolicyHash = buildSandboxNetworkPolicyHash(
+    params.networkMode,
+    networkAllowlist,
+  );
   const scopeKey = buildSandboxScopeKey(params.session.conversationId);
   const expiresAt = new Date(
     now.getTime() + (params.idleStopMinutes ?? computeBrokerConfig.sandboxLifecycle.idleStopMinutes) * 60 * 1000,
@@ -89,6 +97,10 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
     where: { representativeId_contactId_scopeKey: identityKey },
     select: { provider: true },
   });
+  assertStoredSandboxProviderExecutable(
+    existingIdentity?.provider.toLowerCase(),
+    computeBrokerConfig.nodeEnv,
+  );
   const selection = existingIdentity
     ? {
         providerKind: mapSandboxProviderFromDb(existingIdentity.provider),
@@ -165,6 +177,7 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
         sandboxIdentityId: identity.id,
         provider,
         networkMode: params.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
+        networkPolicyHash,
         filesystemMode: params.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
         baseImage: params.session.baseImage,
         runtimeClass: mapRuntimeClassToDb(params.session.runtimeClass),
@@ -202,6 +215,8 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
             sandboxIdentityId: identity.id,
             provider,
             networkMode: params.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
+            networkAllowlist,
+            networkPolicyHash,
             filesystemMode: params.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
             baseImage: params.session.baseImage,
             runtimeClass: mapRuntimeClassToDb(params.session.runtimeClass),
@@ -266,6 +281,7 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
       image: params.session.baseImage,
       hostWorkspaceRoot: params.hostWorkspaceRoot ?? computeBrokerConfig.hostWorkspaceRoot,
       networkMode: params.networkMode,
+      networkAllowlist,
       filesystemMode: params.filesystemMode,
       sessionId: params.session.id,
     });
@@ -408,6 +424,29 @@ export async function ensureUserSandboxLease(params: EnsureUserSandboxLeaseParam
     });
     throw error;
   }
+}
+
+export function assertStoredSandboxProviderExecutable(
+  provider: string | undefined,
+  nodeEnv: string,
+) {
+  if (provider === "docker" && nodeEnv === "production") {
+    throw new Error("sandbox_provider_migration_required");
+  }
+}
+
+export function normalizeSandboxNetworkAllowlist(values: readonly string[] | undefined) {
+  return [...new Set((values ?? []).map((value) => value.trim()).filter(Boolean))]
+    .sort();
+}
+
+export function buildSandboxNetworkPolicyHash(
+  mode: ComputeNetworkMode,
+  allowlist: readonly string[],
+) {
+  return createHash("sha256")
+    .update(JSON.stringify({ mode, allowlist: normalizeSandboxNetworkAllowlist(allowlist) }))
+    .digest("hex");
 }
 
 export function buildSandboxScopeKey(conversationId: string | null | undefined) {

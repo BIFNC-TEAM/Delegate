@@ -15,8 +15,10 @@ import {
 } from "@prisma/client";
 import {
   stableSha256,
+  pendingClarificationSpecSchema,
   validateJsonSchemaValue,
   type CapabilityExecutionRequest,
+  type PendingClarificationSpec,
   type ParsedComputeRequest,
 } from "@delegate/runtime";
 
@@ -227,6 +229,7 @@ export async function createComputeDelegationTask(input: {
   authorizedKnowledge?: AuthorizedDelegationKnowledge[];
   networkMode: "NO_NETWORK" | "ALLOWLIST" | "FULL";
   filesystemMode: "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL";
+  pendingClarification?: PendingClarificationSpec;
 }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
@@ -794,6 +797,7 @@ export async function createClarifyingDelegationTask(input: {
   maxDurationMinutes: number;
   networkMode: "NO_NETWORK" | "ALLOWLIST" | "FULL";
   filesystemMode: "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL";
+  pendingClarification?: PendingClarificationSpec;
 }) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
@@ -847,8 +851,18 @@ export async function createClarifyingDelegationTask(input: {
         nextActionBy: DelegationTaskNextActor.AUDIENCE,
         blockingReason: truncate(input.question, 1_000),
         idempotencyKey: `compute-generation:${input.generationRunId}`,
-        planSummary: "等待用户补齐执行所需的明确输入，系统不会猜测路径、内容、命令或 URL。",
-        contextSnapshot: { source: "public_web_conversation", generationRunId: input.generationRunId },
+        planSummary: "等待用户补齐计划所需的明确输入；澄清阶段不授权或执行任何能力。",
+        contextSnapshot: {
+          source: "public_web_conversation",
+          generationRunId: input.generationRunId,
+          ...(input.pendingClarification
+            ? {
+                pendingClarification: pendingClarificationSpecSchema.parse(
+                  input.pendingClarification,
+                ),
+              }
+            : {}),
+        } as Prisma.InputJsonValue,
         resourcePolicy: {
           create: {
             maxDurationMinutes: input.maxDurationMinutes,
@@ -882,7 +896,17 @@ export async function createClarifyingDelegationTask(input: {
         kind: "CLARIFICATION",
         title: truncate(input.question, 160),
         status: DelegationTaskStepStatus.WAITING_INPUT,
-        inputSnapshot: { missingFields: input.missingFields, question: input.question },
+        inputSnapshot: {
+          missingFields: input.missingFields,
+          question: input.question,
+          ...(input.pendingClarification
+            ? {
+                pendingClarification: pendingClarificationSpecSchema.parse(
+                  input.pendingClarification,
+                ),
+              }
+            : {}),
+        } as Prisma.InputJsonValue,
         idempotencyKey: `clarification-step:${input.generationRunId}`,
       },
     });
@@ -915,17 +939,112 @@ export async function findConversationClarifyingDelegationTask(input: {
   representativeId: string;
   contactId: string;
   conversationId: string;
+  episodeId?: string | null;
 }) {
   return prisma.delegationTask.findFirst({
     where: {
       representativeId: input.representativeId,
       contactId: input.contactId,
       originConversationId: input.conversationId,
+      ...(input.episodeId ? { originEpisodeId: input.episodeId } : {}),
       status: DelegationTaskStatus.CLARIFYING,
       nextActionBy: DelegationTaskNextActor.AUDIENCE,
     },
     orderBy: { updatedAt: "desc" },
     include: { steps: { orderBy: { sequence: "asc" }, take: 8 } },
+  });
+}
+
+export function readPendingClarificationSpec(task: {
+  contextSnapshot?: unknown;
+  steps?: Array<{ kind?: string; inputSnapshot?: unknown }>;
+}): PendingClarificationSpec | null {
+  const taskContext = jsonRecord(task.contextSnapshot);
+  const taskParsed = pendingClarificationSpecSchema.safeParse(
+    taskContext?.pendingClarification,
+  );
+  if (taskParsed.success) return taskParsed.data;
+  const clarificationStep = task.steps?.find((step) => step.kind === "CLARIFICATION");
+  const stepSnapshot = jsonRecord(clarificationStep?.inputSnapshot);
+  const stepParsed = pendingClarificationSpecSchema.safeParse(
+    stepSnapshot?.pendingClarification,
+  );
+  return stepParsed.success ? stepParsed.data : null;
+}
+
+export async function closeConversationClarifyingDelegationTask(input: {
+  taskId: string;
+  representativeId: string;
+  contactId: string;
+  conversationId: string;
+  episodeId?: string | null;
+  inputMessageId: string;
+  outcome: "superseded" | "canceled" | "expired";
+  reasonCode: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.conversationId}))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.taskId}))`;
+    const task = await tx.delegationTask.findFirst({
+      where: {
+        id: input.taskId,
+        representativeId: input.representativeId,
+        contactId: input.contactId,
+        originConversationId: input.conversationId,
+        ...(input.episodeId ? { originEpisodeId: input.episodeId } : {}),
+        status: DelegationTaskStatus.CLARIFYING,
+        nextActionBy: DelegationTaskNextActor.AUDIENCE,
+      },
+      include: { steps: { where: { kind: "CLARIFICATION" }, take: 1 } },
+    });
+    if (!task) return false;
+    const closedAt = new Date();
+    const taskStatus = input.outcome === "expired"
+      ? DelegationTaskStatus.EXPIRED
+      : DelegationTaskStatus.CANCELED;
+    await tx.delegationTask.update({
+      where: { id: task.id },
+      data: {
+        status: taskStatus,
+        nextActionBy: DelegationTaskNextActor.NONE,
+        blockingReason: input.reasonCode,
+        ...(input.outcome === "expired"
+          ? { failedAt: closedAt }
+          : { canceledAt: closedAt }),
+        version: { increment: 1 },
+      },
+    });
+    const clarificationStep = task.steps[0];
+    if (clarificationStep) {
+      await tx.delegationTaskStep.update({
+        where: { id: clarificationStep.id },
+        data: {
+          status: input.outcome === "expired"
+            ? DelegationTaskStepStatus.FAILED
+            : DelegationTaskStepStatus.CANCELED,
+          ...(input.outcome === "expired"
+            ? { failedAt: closedAt }
+            : { completedAt: closedAt }),
+        },
+      });
+    }
+    await appendTaskEvent(tx, {
+      taskId: task.id,
+      eventType: input.outcome === "superseded"
+        ? "task.superseded_by_new_intent"
+        : input.outcome === "expired"
+          ? "task.clarification_expired"
+          : "task.canceled_by_user",
+      actorType: DelegationTaskActorType.AUDIENCE,
+      actorId: input.contactId,
+      fromStatus: DelegationTaskStatus.CLARIFYING,
+      toStatus: taskStatus,
+      payload: {
+        inputMessageId: input.inputMessageId,
+        reasonCode: input.reasonCode,
+      },
+    });
+    return true;
   });
 }
 
@@ -937,8 +1056,9 @@ export async function continueClarifyingDelegationTask(input: {
   question?: string;
   missingFields?: string[];
   planSummary?: string;
-  planSteps?: Array<{ summary: string; request: ParsedComputeRequest; dependsOnStepIndexes?: number[] }>;
+  planSteps?: DelegationPlanStepInput[];
   authorizedKnowledge?: AuthorizedDelegationKnowledge[];
+  pendingClarification?: PendingClarificationSpec;
 }) {
   return prisma.$transaction(async (tx) => {
     const taskReference = await tx.delegationTask.findUnique({
@@ -975,6 +1095,7 @@ export async function continueClarifyingDelegationTask(input: {
       !task || !run || !conversation
       || task.status !== DelegationTaskStatus.CLARIFYING ||
       task.contactId !== input.contactId || task.originConversationId !== run.conversationId ||
+      (task.originEpisodeId && task.originEpisodeId !== run.episodeId) ||
       run.inputMessageId !== input.inputMessageId
     ) {
       throw new DelegationTaskActionError("Clarifying task continuation context is invalid.");
@@ -1025,11 +1146,36 @@ export async function continueClarifyingDelegationTask(input: {
       const question = input.question || task.blockingReason || "请继续补充任务所需的信息。";
       await tx.delegationTask.update({
         where: { id: task.id },
-        data: { blockingReason: truncate(question, 1_000), version: { increment: 1 } },
+        data: {
+          blockingReason: truncate(question, 1_000),
+          ...(input.pendingClarification
+            ? {
+                contextSnapshot: {
+                  ...jsonRecord(task.contextSnapshot),
+                  pendingClarification: pendingClarificationSpecSchema.parse(
+                    input.pendingClarification,
+                  ),
+                } as Prisma.InputJsonValue,
+              }
+            : {}),
+          version: { increment: 1 },
+        },
       });
       await tx.delegationTaskStep.update({
         where: { id: clarificationStep.id },
-        data: { inputSnapshot: { question, missingFields: input.missingFields ?? [] } },
+        data: {
+          inputSnapshot: {
+            question,
+            missingFields: input.missingFields ?? [],
+            ...(input.pendingClarification
+              ? {
+                  pendingClarification: pendingClarificationSpecSchema.parse(
+                    input.pendingClarification,
+                  ),
+                }
+              : {}),
+          } as Prisma.InputJsonValue,
+        },
       });
       await linkGenerationToTask(tx, {
         taskId: task.id,
@@ -1088,11 +1234,52 @@ export async function continueClarifyingDelegationTask(input: {
             ? [clarificationStep.id]
             : dependencyIndexes.map((dependencyIndex) => createdSteps[dependencyIndex]!.id),
           maxDurationSeconds: Math.max(60, Math.floor((task.resourcePolicy?.maxDurationMinutes ?? 15) * 60 / planSteps.length)),
-          inputSnapshot: { request: planned.request as unknown as Prisma.InputJsonValue, source: "clarification_resolved" },
+          inputSnapshot: {
+            request: planned.request as unknown as Prisma.InputJsonValue,
+            ...(planned.executionRequest
+              ? {
+                  executionRequest:
+                    planned.executionRequest as unknown as Prisma.InputJsonValue,
+                }
+              : {}),
+            source: "clarification_resolved",
+          },
           idempotencyKey: `clarified-step:${task.id}:${index + 1}`,
         },
       });
       createdSteps.push(step);
+      if (planned.planActionId) {
+        await linkV3PlanActionToDelegationStepInTransaction(tx, {
+          planActionId: planned.planActionId,
+          ...(planned.actionKey ? { actionKey: planned.actionKey } : {}),
+          generationRunId: input.generationRunId,
+          taskId: task.id,
+          stepId: step.id,
+        });
+      }
+      const externalEffect = describeDelegationExternalEffect(
+        planned.request,
+        planned.summary,
+      );
+      if (externalEffect) {
+        await tx.delegationTaskExternalEffect.create({
+          data: {
+            delegationTaskId: task.id,
+            delegationTaskStepId: step.id,
+            planActionId: planned.planActionId ?? null,
+            type: externalEffect.type,
+            target: externalEffect.target,
+            action: externalEffect.action,
+            status: "PROPOSED",
+            idempotencyKey: `${externalEffect.idempotencyPrefix}:${task.id}:${step.id}`,
+            requestPayload: {
+              request: planned.request as unknown as Prisma.InputJsonValue,
+              objective: truncate(task.objective, 4_000),
+              actionSummary: truncate(planned.summary, 1_000),
+            },
+          },
+        });
+      }
     }
     const firstStep = createdSteps[0]!;
     await tx.delegationTaskResourcePolicy.update({

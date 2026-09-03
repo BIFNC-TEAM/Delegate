@@ -11,7 +11,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4010),
   COMPUTE_BROKER_INTERNAL_TOKEN: z.string().min(1),
   COMPUTE_RUNNER_TYPE: z.enum(["docker", "vm"]).default("docker"),
-  SANDBOX_PROVIDER: z.enum(["docker", "daytona", "tencent"]).default("docker"),
+  SANDBOX_PROVIDER: z.enum(["docker", "daytona", "tencent"]).default("tencent"),
   SANDBOX_ROUTING_MODE: z.enum(["legacy", "manual_poc"]).default("legacy"),
   SANDBOX_PROVIDER_ROUTING_JSON: z.string().optional(),
   COMPUTE_RUNNER_IMAGE: z.string().min(1).default("debian:bookworm-slim"),
@@ -73,6 +73,10 @@ const envSchema = z.object({
     blankEnvValueToUndefined,
     z.coerce.number().positive().optional(),
   ),
+  DAYTONA_SANDBOX_TTL_MINUTES: z.preprocess(
+    blankEnvValueToUndefined,
+    z.coerce.number().int().positive().optional(),
+  ),
   TENCENT_AGS_API_KEY: z.string().optional(),
   TENCENT_AGS_DOMAIN: z.string().optional(),
   TENCENT_AGS_REGION: z.string().optional(),
@@ -85,6 +89,12 @@ const envSchema = z.object({
 });
 
 const parsed = envSchema.parse(process.env);
+if (
+  parsed.NODE_ENV === "production"
+  && (parsed.SANDBOX_ROUTING_MODE === "legacy" || parsed.SANDBOX_PROVIDER === "docker")
+) {
+  throw new Error("sandbox_cloud_routing_required_in_production");
+}
 const daytonaResources = buildDaytonaResources(parsed);
 const sandboxRouting = parseSandboxRoutingConfig({
   mode: parsed.SANDBOX_ROUTING_MODE,
@@ -94,6 +104,7 @@ const sandboxRouting = parseSandboxRoutingConfig({
 validateManualProviderCredentials(parsed, sandboxRouting);
 
 export const computeBrokerConfig = {
+  nodeEnv: parsed.NODE_ENV,
   port: parsed.PORT,
   internalToken: parsed.COMPUTE_BROKER_INTERNAL_TOKEN,
   runnerType: parsed.COMPUTE_RUNNER_TYPE,
@@ -170,6 +181,9 @@ export const computeBrokerConfig = {
       ? { target: normalizeOptionalString(parsed.DAYTONA_TARGET) }
       : {}),
     ...(daytonaResources ? { resources: daytonaResources } : {}),
+    ...(typeof parsed.DAYTONA_SANDBOX_TTL_MINUTES === "number"
+      ? { ttlMinutes: parsed.DAYTONA_SANDBOX_TTL_MINUTES }
+      : {}),
   },
   tencent: {
     ...(normalizeOptionalString(parsed.TENCENT_AGS_API_KEY)

@@ -1,6 +1,7 @@
 FROM node:22-bookworm-slim
 
 ARG DEBIAN_MIRROR=""
+ARG SKIP_APP_BUILD="false"
 
 RUN if [ -n "$DEBIAN_MIRROR" ]; then \
       sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" \
@@ -21,7 +22,7 @@ COPY . .
 
 RUN pnpm install --frozen-lockfile \
   && pnpm db:generate \
-  && pnpm build
+  && if [ "$SKIP_APP_BUILD" != "true" ]; then pnpm build; fi
 
 EXPOSE 3000 3001 3002 4010
 

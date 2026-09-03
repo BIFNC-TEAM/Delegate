@@ -18,6 +18,7 @@ describe("per-user sandbox runtime docs", () => {
     expect(doc).toContain("SANDBOX_IDLE_STOP_MINUTES");
     expect(doc).toContain("/internal/compute/sandbox/metrics");
     expect(doc).toContain("curl http://localhost:4010/ready");
-    expect(doc).toContain("SANDBOX_PROVIDER=docker");
+    expect(doc).toContain("Docker is not admissible for new sandbox identities");
+    expect(doc).toContain("smoke:daytona");
   });
 });

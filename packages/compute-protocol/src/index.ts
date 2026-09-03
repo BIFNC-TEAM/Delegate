@@ -409,6 +409,15 @@ export const heartbeatComputeSessionResponseSchema = z.object({
   session: computeSessionSnapshotSchema,
 });
 
+export const compiledSandboxTaskMetadataSchema = z.object({
+  compilerVersion: z.literal("sandbox-task-compiler.v1"),
+  instructionHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  codeHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  riskClass: z.literal("self_contained_compute"),
+  compilerProvider: z.string().min(1).max(120).optional(),
+  compilerModel: z.string().min(1).max(200).optional(),
+}).strict();
+
 export const toolExecutionRequestSchema = refineSubagentCapabilityBoundary(z.object({
   capability: capabilityKindSchema,
   subagentId: computeSubagentIdSchema,
@@ -433,6 +442,7 @@ export const toolExecutionRequestSchema = refineSubagentCapabilityBoundary(z.obj
   nativeProvider: nativeComputerProviderSchema.optional(),
   maxSteps: z.number().int().positive().max(8).default(3),
   allowMutations: z.boolean().default(false),
+  compiledTask: compiledSandboxTaskMetadataSchema.optional(),
 }), (value) => ({
   subagentId: value.subagentId,
   capabilities: [value.capability],
@@ -1396,6 +1406,7 @@ export type TerminateComputeSessionRequest = z.infer<typeof terminateComputeSess
 export type HeartbeatComputeSessionRequest = z.infer<typeof heartbeatComputeSessionRequestSchema>;
 export type HeartbeatComputeSessionResponse = z.infer<typeof heartbeatComputeSessionResponseSchema>;
 export type ToolExecutionRequest = z.infer<typeof toolExecutionRequestSchema>;
+export type CompiledSandboxTaskMetadata = z.infer<typeof compiledSandboxTaskMetadataSchema>;
 export type NativeComputerUseExecutionRequest = z.infer<
   typeof nativeComputerUseExecutionRequestSchema
 >;

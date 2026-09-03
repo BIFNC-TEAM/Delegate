@@ -62,3 +62,19 @@ Branch: `codex/dashboard-optimization`
 - PASS — Security boundary: unmarked requests, LLM-selected command-looking spans without a server-recognized execution marker, explicitly negated execution markers, unclosed shell quotes, and non-shell code fences all remain fail-closed with `arguments_invalid`.
 - PASS — Live website result: stdout `delegate-tencent-e2e-ok`, exit code `0`, `TENCENT`, `NO_NETWORK + EPHEMERAL_FULL`, followed by session release.
 - PENDING — Daytona live smoke until Daytona credentials are configured.
+
+## Cloud-Only Follow-up Coverage
+
+- Routing rejects Docker defaults, overrides, and new-identity enablement in development, test, and production.
+- Production rejects legacy routing and `SANDBOX_PROVIDER=docker`.
+- Existing Docker-pinned identities still resolve the compatibility adapter for controlled drain/cleanup.
+- New contactless compute execution fails closed instead of acquiring a host Docker lease.
+- Daytona create forwards image, labels, resources, lifecycle intervals, timeout, and normalized network policy atomically.
+- Daytona restore covers started, stopped, paused/archived, recoverable error, missing runtime, and conflicting network policy paths.
+- Daytona supports both CODE and BROWSER runtime classes while Tencent remains CODE-only.
+- Daytona execution refreshes activity, uses cwd and timeout, normalizes SDK artifacts, enforces output limits, and maps timeout/auth/429/404/5xx without leaking provider details.
+- Daytona stop/delete are idempotent for an already-removed sandbox; delete waits for terminal destruction.
+- Lease reuse includes normalized network allowlist and policy hash.
+- Minimal Daytona live smoke proves create, command execution, no-network egress denial, and cleanup when credentials are available.
+
+Execution result: all local cloud-only and Daytona contract tests pass. Tencent live smoke passed after the cutover. Daytona live smoke is pending external credentials.

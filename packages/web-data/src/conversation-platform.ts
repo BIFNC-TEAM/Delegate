@@ -2616,6 +2616,10 @@ export async function completeInlineGenerationRun(input: {
   evidenceIndependentSystemFailure?: {
     failureCode: string;
   };
+  /** Representative-authored recovery text that does not use recalled evidence. */
+  sourceIndependentPublicRecovery?: {
+    reasonCode: string;
+  };
 }) {
   const replyText = input.replyText.trim();
   if (!replyText) throw new Error("Reply text is required.");
@@ -2629,7 +2633,24 @@ export async function completeInlineGenerationRun(input: {
     && (input.countUsage || input.memoryUse?.outcome === "completed")
   ) {
     throw new Error(
-      "An evidence-independent system failure cannot consume usage or cite recalled evidence.",
+      "A source-independent response cannot consume usage or cite recalled evidence.",
+    );
+  }
+  if (
+    input.sourceIndependentPublicRecovery
+    && (
+      input.countUsage
+      || (
+        input.memoryUse?.outcome === "completed"
+        && (
+          input.memoryUse.injectedItemIds.length > 0
+          || input.memoryUse.citedItemIds.length > 0
+        )
+      )
+    )
+  ) {
+    throw new Error(
+      "A public recovery cannot consume usage or depend on injected evidence.",
     );
   }
 
@@ -2977,7 +2998,13 @@ export async function completeInlineGenerationRun(input: {
       replyText,
       handoffResult,
     );
-    if (input.evidenceIndependentSystemFailure) {
+    if (shouldFailOpenMemoryUseForSourceIndependentResponse({
+      evidenceIndependentSystemFailure: Boolean(input.evidenceIndependentSystemFailure),
+      sourceIndependentPublicRecovery: Boolean(input.sourceIndependentPublicRecovery),
+      ...(input.memoryUse?.outcome
+        ? { memoryUseOutcome: input.memoryUse.outcome }
+        : {}),
+    })) {
       const startedMemoryUse = await tx.memoryUseRun.findFirst({
         where: { generationRunId: run.id, status: "STARTED" },
         select: { id: true },
@@ -3006,11 +3033,16 @@ export async function completeInlineGenerationRun(input: {
           ? MessageContentType.SYSTEM
           : MessageContentType.TEXT,
         text: resolvedReplyText,
-        ...(input.intent || input.humanHandoff || input.evidenceIndependentSystemFailure
+        ...(input.intent
+          || input.humanHandoff
+          || input.evidenceIndependentSystemFailure
+          || input.sourceIndependentPublicRecovery
           ? {
               content: {
                 ...(input.intent ? { intent: input.intent } : {}),
-                ...(input.humanHandoff || input.evidenceIndependentSystemFailure
+                ...(input.humanHandoff
+                  || input.evidenceIndependentSystemFailure
+                  || input.sourceIndependentPublicRecovery
                   ? {
                       deliveryControl: {
                         ...(input.humanHandoff ? { allowNeedsHuman: true } : {}),
@@ -3021,6 +3053,19 @@ export async function completeInlineGenerationRun(input: {
                                 input.evidenceIndependentSystemFailure.failureCode,
                             }
                           : {}),
+                        ...(input.sourceIndependentPublicRecovery
+                          ? {
+                              sourceIndependentPublicRecovery: true,
+                              recoveryCode:
+                                input.sourceIndependentPublicRecovery.reasonCode,
+                            }
+                          : {}),
+                        ...(
+                          input.evidenceIndependentSystemFailure
+                          || input.sourceIndependentPublicRecovery
+                            ? { sourceIndependentDelivery: true }
+                            : {}
+                        ),
                         generationRunId: run.id,
                       },
                     }
@@ -6550,6 +6595,17 @@ async function revalidateGenerationMessageMemoryDeliveryInTransaction(
   tx: Prisma.TransactionClient,
   input: GenerationMessageDeliveryCoordinates,
 ) {
+  const sourceIndependentMessage = await tx.message.findFirst({
+    where: {
+      id: input.outputMessageId,
+      conversationId: input.conversationId,
+    },
+    select: { content: true },
+  });
+  if (isSourceIndependentDeliveryAuthorized(
+    sourceIndependentMessage?.content,
+    input.runId,
+  )) return true;
   const memoryDelivery = await revalidateMemoryUseDeliverySourcesInTransaction(
     tx,
     {
@@ -14233,6 +14289,35 @@ function isNeedsHumanDeliveryAuthorized(
     && deliveryControl.allowNeedsHuman === true
     && deliveryControl.generationRunId === generationRunId
   );
+}
+
+export function isSourceIndependentDeliveryAuthorized(
+  content: unknown,
+  generationRunId: string,
+): boolean {
+  if (!isJsonRecord(content)) return false;
+  const deliveryControl = content.deliveryControl;
+  return (
+    isJsonRecord(deliveryControl)
+    && deliveryControl.sourceIndependentDelivery === true
+    && deliveryControl.generationRunId === generationRunId
+    && (
+      deliveryControl.evidenceIndependentSystemFailure === true
+      || deliveryControl.sourceIndependentPublicRecovery === true
+    )
+  );
+}
+
+export function shouldFailOpenMemoryUseForSourceIndependentResponse(input: {
+  evidenceIndependentSystemFailure: boolean;
+  sourceIndependentPublicRecovery: boolean;
+  memoryUseOutcome?: "completed" | "generation_failed";
+}) {
+  return input.evidenceIndependentSystemFailure
+    || (
+      input.sourceIndependentPublicRecovery
+      && typeof input.memoryUseOutcome === "undefined"
+    );
 }
 
 function buildDemoInboxSnapshot(representativeSlug: string): ConversationInboxSnapshot {

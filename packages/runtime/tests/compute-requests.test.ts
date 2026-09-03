@@ -99,4 +99,35 @@ describe("compute request parser", () => {
       estimatedTokens: 300,
     });
   });
+
+  it("restores only valid compiled sandbox task metadata", () => {
+    const code = "print(168)";
+    const encoded = Buffer.from(code, "utf8").toString("base64");
+    const request = {
+      capability: "exec",
+      displayTarget: "计算质数",
+      command:
+        `python -c "exec(__import__('base64').b64decode('${encoded}').decode('utf-8'))"`,
+      compiledTask: {
+        compilerVersion: "sandbox-task-compiler.v1",
+        instructionHash: "a".repeat(64),
+        codeHash: "23ff806a0bb684067310d0309bfbedec5d52068371575436e6346c001bb190f8",
+        riskClass: "self_contained_compute",
+        compilerProvider: "openai",
+        compilerModel: "gpt-test",
+      },
+    };
+    expect(readPersistedDelegationStepRequest(request)).toMatchObject({
+      compiledTask: request.compiledTask,
+    });
+    expect(readPersistedDelegationStepRequest({
+      ...request,
+      compiledTask: { ...request.compiledTask, codeHash: "not-a-hash" },
+    })).toBeNull();
+    expect(readPersistedDelegationStepRequest({
+      ...request,
+      command:
+        `python -c "exec(__import__('base64').b64decode('${Buffer.from("print(169)").toString("base64")}').decode('utf-8'))"`,
+    })).toBeNull();
+  });
 });

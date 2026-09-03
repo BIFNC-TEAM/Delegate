@@ -394,3 +394,37 @@ Public end-to-end verification passed after the fix: a new website conversation 
 Follow-up verification: model-runtime 195/195 tests passed; the full repository test graph passed 26/26 tasks after the command-binding trust-boundary review.
 
 External verification still required: Daytona live smoke cannot run until Daytona credentials are configured.
+
+## Cloud-Only Sandbox Follow-up — 2026-08-31
+
+Goal: new agent sandbox identities use only Tencent or Daytona. Docker remains a stored-provider compatibility adapter solely for already-pinned identities and local provider unit tests; it is not an admissible provider for any new identity or production legacy routing.
+
+Implementation decisions:
+
+- Keep `DOCKER` in the persisted Prisma enum until existing identities and leases are drained; deleting the enum first would make historical rows unreadable.
+- Reject Docker as routing default, override, or enabled new-identity provider in every environment.
+- Reject production `legacy` mode and production `SANDBOX_PROVIDER=docker`; cloud routing is mandatory.
+- Remove the contactless Docker acquisition fallback. New compute execution without a Contact fails closed instead of opening a host Docker container.
+- Keep the Docker adapter only for stop/delete/restore of historical pins during the drain window.
+- Promote Daytona SDK `0.200.0` to the authoritative integration: atomic create options, resource/lifecycle settings, code and browser runtime classes, network block/full/domain-or-CIDR allowlists, activity refresh, recovery, wait-for-delete, typed error mapping, and independent output normalization.
+- Persist the normalized network allowlist plus a policy hash on each lease so a policy change can never reuse a sandbox created under a different egress contract.
+- Add a minimal Daytona code smoke independent of OpenCode/browser credentials; live execution remains blocked until `DAYTONA_API_KEY` is supplied.
+
+NOT in scope:
+
+- rewriting historical `DOCKER` rows to a cloud provider without an explicit migration/runbook;
+- automatic geographic routing or cross-provider failover;
+- sharing one runtime instance between Tencent and Daytona;
+- production secret mounting into Daytona;
+- removing Docker from local Compose infrastructure used to build and test the application itself.
+
+Implementation result:
+
+- New identity routing accepts only `daytona | tencent`; Docker defaults, overrides, and enablement are rejected in every environment.
+- Production rejects legacy routing, Docker selection, contactless Docker acquisition, ready direct-Docker sessions, and historical Docker identity execution with stable migration-required errors.
+- `/ready` reports only cloud providers in `configuredProviders`; historical Docker rows remain visible only in `pinnedProviders`.
+- Daytona now uses the official SDK 0.200.0 boundary with deterministic create names, 409 recovery by creation-key label, code/browser classes, atomic resources/lifecycle/TTL/network settings, recovery, activity refresh, terminal delete waits, strict output normalization, and redacted typed errors.
+- `SandboxLease` persists normalized network allowlists and a SHA-256 policy hash; legacy leases do not silently satisfy a new policy.
+- Local migration `20260831113000_cloud_only_daytona_policy` applied successfully.
+- Verification passed: 19/19 typecheck tasks, 26/26 repository test tasks, compute-broker 49 files / 290 tests passed with 4 conditional skips, production Docker build passed, Tencent live smoke passed after cutover, and cloud readiness reported `configuredProviders=[tencent]`.
+- Daytona live smoke remains pending because no `DAYTONA_API_KEY` is configured locally.

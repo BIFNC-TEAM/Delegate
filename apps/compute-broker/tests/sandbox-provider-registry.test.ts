@@ -3,13 +3,21 @@ import { describe, expect, it } from "vitest";
 import { SandboxProviderRegistry } from "../src/sandbox-provider-registry";
 
 describe("sandbox provider registry", () => {
-  it("preserves the legacy Docker fallback for missing Daytona credentials", () => {
-    const registry = buildRegistry({ legacyProvider: "daytona" });
-    expect(registry.resolveLegacyProvider()).toBe("docker");
+  it("falls back only between configured cloud providers", () => {
+    expect(() => buildRegistry({ legacyProvider: "daytona" }).resolveLegacyProvider())
+      .toThrow("config_invalid");
     expect(buildRegistry({
       legacyProvider: "tencent",
-      tencent: { apiKey: "partial-only" },
-    }).resolveLegacyProvider()).toBe("docker");
+      daytona: { apiKey: "daytona-key" },
+    }).resolveLegacyProvider()).toBe("daytona");
+    expect(buildRegistry({
+      legacyProvider: "docker",
+      tencent: {
+        apiKey: "key",
+        domain: "ap-guangzhou.tencentags.com",
+        codeTool: "delegate-code-v1",
+      },
+    }).resolveLegacyProvider()).toBe("tencent");
   });
 
   it("does not silently construct an unconfigured cloud provider", async () => {

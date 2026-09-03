@@ -25,10 +25,8 @@ flowchart TD
     EUS --> SI["Reserve SandboxIdentity by representativeId + contactId + scopeKey"]
     SI --> SL["Reuse stopped/running SandboxLease or create a new lease"]
     SL --> SP["SandboxProvider adapter"]
-    SP -->|"default/fallback"| Docker["Docker runtime keyed by sandbox identity"]
-    SP -->|"configured"| Daytona["Daytona runtime"]
-    SP -->|"manual PoC"| Tencent["Tencent AGSX code runtime"]
-    Docker --> EX["Execute command/browser action"]
+    SP -->|"overseas/manual"| Daytona["Daytona code or browser runtime"]
+    SP -->|"China/manual"| Tencent["Tencent AGSX code runtime"]
     Daytona --> EX
     Tencent --> EX
     EX --> BS["Record BrowserSession with sandbox identity"]
@@ -37,13 +35,13 @@ flowchart TD
 
 ## Providers
 
-### Docker fallback
+### Docker compatibility only
 
-Docker remains the default provider. It now uses the stable sandbox identity key when running through the sandbox path, so local development does not require Daytona.
+Docker is not admissible for new sandbox identities. The persisted `DOCKER` enum value and adapter remain temporarily so already-pinned identities can be stopped, deleted, or drained without corrupting historical rows. Production legacy routing and contactless Docker acquisition fail closed.
 
 ### Daytona
 
-Daytona is behind the `SandboxProvider` adapter. Delegate owns policy, approvals, billing, audit, and lifecycle state. Daytona owns sandbox runtime creation, restore, stop, and command execution.
+Daytona is behind the `SandboxProvider` adapter. Delegate owns policy, approvals, billing, audit, and lifecycle state. Daytona owns sandbox runtime creation, recovery, stop/delete, command execution, browser-image execution, resources, TTL, lifecycle intervals, and runner-enforced network policy.
 
 The adapter intentionally keeps Daytona calls inside `apps/compute-broker/src/sandbox-provider.ts`. Bot, policy, execution, and browser code should not call provider SDKs directly.
 
@@ -56,18 +54,24 @@ Every existing `SandboxIdentity.provider` remains authoritative. Changing the ro
 ## Configuration
 
 ```bash
-# Backward-compatible default
+# Non-production compatibility only; production rejects legacy mode.
 SANDBOX_ROUTING_MODE=legacy
-SANDBOX_PROVIDER=docker
+SANDBOX_PROVIDER=tencent
 
 # Enable Daytona when the SDK/config are available
 SANDBOX_PROVIDER=daytona
 DAYTONA_API_KEY=...
 DAYTONA_API_URL=...
 DAYTONA_TARGET=...
+# Browser/custom-image only. CODE uses Daytona's managed snapshot because
+# snapshot creation rejects explicit resource overrides.
+DAYTONA_SANDBOX_CPU=2
+DAYTONA_SANDBOX_MEMORY_GIB=4
+DAYTONA_SANDBOX_DISK_GIB=10
+DAYTONA_SANDBOX_TTL_MINUTES=1440
 
 # Side-by-side code PoC. The JSON must contain only sandboxTestEligible
-# representatives and must disable Docker admission in production.
+# representatives. Docker must be false and cannot be a default or override.
 SANDBOX_ROUTING_MODE=manual_poc
 SANDBOX_PROVIDER_ROUTING_JSON='{"version":1,"default":"tencent","newIdentityEnabled":{"docker":false,"daytona":true,"tencent":true},"phase1AllowedRepresentativeIds":["rep_tencent","rep_daytona"],"representatives":{"rep_daytona":"daytona"}}'
 TENCENT_AGS_API_KEY=...
@@ -81,7 +85,11 @@ SANDBOX_AUTO_ARCHIVE_MINUTES=10080
 SANDBOX_AUTO_DELETE_MINUTES=-1
 ```
 
-Legacy mode keeps the existing local-development fallback. Manual PoC mode fails closed when an enabled cloud provider is missing credentials or Tool configuration.
+Daytona CODE identities use the provider-managed Python snapshot. The adapter creates `/home/daytona/workspace` through the Toolbox file API, returns it as the provider lease root, and maps the cross-provider virtual `/workspace` path to that directory. Existing Daytona identities are repaired idempotently when their lease is restored. Explicit resource overrides remain available for browser/custom-image sandboxes only.
+
+Strict Delegate network policies require a Daytona Tier 3/4 organization (or another account configuration that permits sandbox-level network overrides). Tier 1/2 organization restrictions keep essential services reachable and reject sandbox-level overrides, so the adapter fails closed before command execution and deletes a newly created sandbox. The smoke test verifies blocked fixed-IP TCP egress rather than relying on DNS failure.
+
+Manual PoC mode fails closed when an enabled cloud provider is missing credentials or Tool configuration. Production also fails closed when routing remains `legacy` or `SANDBOX_PROVIDER=docker`.
 
 Do not log `DAYTONA_API_KEY`, `TENCENT_AGS_API_KEY`, cookies, session tokens, browser credentials, or provider secrets.
 
@@ -135,11 +143,11 @@ Current counters:
 Fast rollback:
 
 ```bash
-SANDBOX_ROUTING_MODE=legacy
-SANDBOX_PROVIDER=docker
+SANDBOX_ROUTING_MODE=manual_poc
+SANDBOX_PROVIDER_ROUTING_JSON='{"version":1,"default":"tencent","newIdentityEnabled":{"docker":false,"daytona":false,"tencent":true},"phase1AllowedRepresentativeIds":["rep_tencent"],"representatives":{}}'
 ```
 
-This keeps the schema and sandbox identity data but routes new runtime work through Docker fallback. Existing `ComputeSession` records remain compatible because `sandboxLeaseId` is optional.
+This disables Daytona admission for new identities without changing existing provider pins. There is no Docker rollback path for new production identities.
 
 Full feature rollback should avoid dropping `SandboxIdentity` or `SandboxLease` immediately. Keep the migration data until any provider sandbox cleanup and billing reconciliation are complete.
 
@@ -167,6 +175,12 @@ With a dedicated Tencent test Tool and credentials configured:
 
 ```bash
 pnpm --filter @delegate/compute-broker smoke:tencent-agsx
+```
+
+With Daytona credentials configured:
+
+```bash
+pnpm --filter @delegate/compute-broker smoke:daytona
 ```
 
 The smoke test creates a temporary code sandbox, verifies command output and blocked public egress, reports sanitized timing data, and deletes the sandbox. It never prints the API key.

@@ -86,20 +86,23 @@ describe("sandbox routing", () => {
     })).toThrow("sandbox_routing_default_provider_disabled");
   });
 
-  it("forbids Docker admission in production manual mode", () => {
-    expect(() => parseSandboxRoutingConfig({
-      mode: "manual_poc",
-      nodeEnv: "production",
-      rawDocument: JSON.stringify({
-        ...baseDocument,
-        default: "docker",
-        newIdentityEnabled: {
-          ...baseDocument.newIdentityEnabled,
-          docker: true,
-        },
-      }),
-    })).toThrow("sandbox_routing_docker_forbidden_in_production");
-  });
+  it.each(["development", "test", "production"])(
+    "forbids Docker admission for new identities in %s",
+    (nodeEnv) => {
+      expect(() => parseSandboxRoutingConfig({
+        mode: "manual_poc",
+        nodeEnv,
+        rawDocument: JSON.stringify({
+          ...baseDocument,
+          default: "docker",
+          newIdentityEnabled: {
+            ...baseDocument.newIdentityEnabled,
+            docker: true,
+          },
+        }),
+      })).toThrow("sandbox_routing_docker_new_identity_forbidden");
+    },
+  );
 
   it("validates every allowlisted representative as an active test fixture", () => {
     const routing = parseSandboxRoutingConfig({

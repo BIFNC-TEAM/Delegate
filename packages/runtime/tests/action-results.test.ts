@@ -43,6 +43,55 @@ describe("verified action result pipeline", () => {
     });
   });
 
+  it("recognizes a schema-valid structured tool error before applying the success contract", () => {
+    const result = verifyRawActionResult({
+      transportOutcome: "response_received",
+      rawOutput: {
+        error: {
+          code: -32_000,
+          message: "Upstream service unavailable after bounded retries.",
+          data: { retryAttempts: 3 },
+        },
+      },
+      expectedOutputSchema: {
+        type: "object",
+        required: ["error"],
+        properties: {
+          error: {
+            type: "object",
+            required: ["code", "message"],
+            properties: {
+              code: { type: "number" },
+              message: { type: "string" },
+              data: { type: "object" },
+            },
+          },
+        },
+      },
+      successContract: {
+        kind: "success_schema",
+        schema: {
+          type: "object",
+          required: ["result"],
+          properties: { result: { type: "object" } },
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      transportOutcome: "response_received",
+      semanticOutcome: "failed",
+      failureCode: "external_tool_error_result",
+      sanitizedOutput: {
+        error: {
+          code: -32_000,
+          message: "Upstream service unavailable after bounded retries.",
+          data: { retryAttempts: 3 },
+        },
+      },
+    });
+  });
+
   it("never treats a response without a SuccessContract as succeeded", () => {
     const result = verifyRawActionResult({
       transportOutcome: "response_received",

@@ -3,6 +3,7 @@ import { posix as pathPosix } from "node:path";
 
 import {
   executeToolResponseSchema,
+  compiledSandboxTaskMetadataSchema,
   listApprovalsResponseSchema,
   listArtifactsResponseSchema,
   nativeComputerUseExecutionResponseSchema,
@@ -10,6 +11,7 @@ import {
   resolveApprovalRequestSchema,
   resolveApprovalResponseSchema,
   type CapabilityKind,
+  type CompiledSandboxTaskMetadata,
   type BrowserExecutionMode,
   type ComputeFilesystemMode,
   type ComputeSubagentId,
@@ -124,6 +126,9 @@ type NormalizedExecutionInput = {
   workingDirectory: string | undefined;
   estimatedTokens: number | undefined;
   hasPaidEntitlement: boolean;
+  compiledTask?: CompiledSandboxTaskMetadata;
+  serverVerifiedCompiledTask?: boolean;
+  serverVerifiedReadOnlyMcp?: boolean;
 };
 
 type ExecutionPlan = {
@@ -193,6 +198,7 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
     decision,
     mcpBinding,
     serverVerifiedReadOnlyMcp,
+    serverVerifiedCompiledTask,
     sessionSubagentId,
   } =
     await evaluateExecutionRequest(sessionId, rawInput);
@@ -200,6 +206,7 @@ export async function executeTool(sessionId: string, rawInput: unknown) {
     input,
     mcpBinding,
     serverVerifiedReadOnlyMcp,
+    serverVerifiedCompiledTask,
   );
   const effectiveDecision = resolveEffectiveDecision({
     context,
@@ -919,6 +926,7 @@ export async function processNextApprovedExecution() {
       evaluated.input,
       evaluated.mcpBinding,
       evaluated.serverVerifiedReadOnlyMcp,
+      evaluated.serverVerifiedCompiledTask,
     );
     const decision = resolveEffectiveDecision({
       context: evaluated.context,
@@ -1423,10 +1431,15 @@ async function runAllowedExecution(params: {
           executionLeaseToken,
         },
       });
-  const leasedSession = await ensureComputeSessionLease({
+  const leasedSession = await resolveExecutionSessionForCapability({
+    capability: params.input.capability,
     session: executionContext.session,
-    networkMode: executionContext.profile.networkMode,
-    filesystemMode: resolveExecutionFilesystemMode(executionContext),
+    ensureLeasedSession: () => ensureComputeSessionLease({
+      session: executionContext.session,
+      networkMode: executionContext.profile.networkMode,
+      networkAllowlist: executionContext.profile.networkAllowlist,
+      filesystemMode: resolveExecutionFilesystemMode(executionContext),
+    }),
   });
 
   await prisma.computeSession.update({
@@ -1691,6 +1704,19 @@ async function runAllowedExecution(params: {
   });
   await persistDelegatedExecutionResponse(execution.id, response);
   return response;
+}
+
+export async function resolveExecutionSessionForCapability(input: {
+  capability: CapabilityKind;
+  session: LeasedSessionRecord;
+  ensureLeasedSession: () => Promise<LeasedSessionRecord>;
+}) {
+  // MCP transport runs in the broker process and uses the logical Compute
+  // session only for audit, artifacts, and billing. Requiring a code/browser
+  // sandbox here makes an unrelated provider outage block an MCP call.
+  return input.capability === "mcp"
+    ? input.session
+    : input.ensureLeasedSession();
 }
 
 export function resolveExecutionResponseOutcome(input: {
@@ -2823,7 +2849,8 @@ export function resolveEffectiveDecision(params: {
   if (
     (params.input.capability === "exec" || params.input.capability === "process") &&
     params.input.command &&
-    !isSimpleExecCommand(params.input.command)
+    !isSimpleExecCommand(params.input.command) &&
+    !params.input.serverVerifiedCompiledTask
   ) {
     return {
       decision: "ask" as const,
@@ -2857,14 +2884,22 @@ export function resolveEffectiveDecision(params: {
     };
   }
 
-  if (params.input.capability === "mcp" && params.context.profile.networkMode === "no_network") {
+  if (
+    params.input.capability === "mcp"
+    && !params.input.serverVerifiedReadOnlyMcp
+    && params.context.profile.networkMode === "no_network"
+  ) {
     return {
       decision: "deny" as const,
       reason: "mcp_requires_network",
     };
   }
 
-  if (params.input.capability === "mcp" && params.context.profile.networkMode === "allowlist") {
+  if (
+    params.input.capability === "mcp"
+    && !params.input.serverVerifiedReadOnlyMcp
+    && params.context.profile.networkMode === "allowlist"
+  ) {
     const allowlist = normalizeNetworkAllowlist(params.context.profile.networkAllowlist);
     if (!allowlist.length) {
       return {
@@ -2927,6 +2962,7 @@ function normalizeExecutionInput(
     approvalRequired: boolean;
   } | null,
   serverVerifiedReadOnlyMcp = false,
+  serverVerifiedCompiledTask = false,
 ): NormalizedExecutionInput {
   switch (input.capability) {
     case "read": {
@@ -2954,6 +2990,7 @@ function normalizeExecutionInput(
         workingDirectory: input.workingDirectory,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
+        serverVerifiedCompiledTask: false,
       };
     }
     case "write": {
@@ -2985,6 +3022,7 @@ function normalizeExecutionInput(
         workingDirectory: input.workingDirectory,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
+        serverVerifiedCompiledTask: false,
       };
     }
     case "browser": {
@@ -3018,6 +3056,7 @@ function normalizeExecutionInput(
         workingDirectory: undefined,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
+        serverVerifiedCompiledTask: false,
       };
     }
     case "mcp": {
@@ -3057,6 +3096,8 @@ function normalizeExecutionInput(
         workingDirectory: undefined,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
+        serverVerifiedCompiledTask: false,
+        serverVerifiedReadOnlyMcp,
       };
     }
     case "process":
@@ -3086,6 +3127,8 @@ function normalizeExecutionInput(
         workingDirectory: input.workingDirectory,
         estimatedTokens: input.estimatedTokens,
         hasPaidEntitlement: input.hasPaidEntitlement,
+        ...(input.compiledTask ? { compiledTask: input.compiledTask } : {}),
+        serverVerifiedCompiledTask,
       };
     }
   }
@@ -3171,7 +3214,13 @@ function reconstructExecutionInput(execution: {
       ? persistedPayload.estimatedTokens
       : typeof persistedPayload?.estimatedCostCents === "number"
         ? persistedPayload.estimatedCostCents * 100
-        : undefined;
+      : undefined;
+  const compiledTaskResult = compiledSandboxTaskMetadataSchema.safeParse(
+    persistedPayload?.compiledTask,
+  );
+  const compiledTask = compiledTaskResult.success
+    ? compiledTaskResult.data
+    : undefined;
 
   if (capability === "read") {
     if (!execution.requestedPath) {
@@ -3285,6 +3334,7 @@ function reconstructExecutionInput(execution: {
     domain: undefined,
     url: undefined,
     ...(execution.workingDirectory ? { workingDirectory: execution.workingDirectory } : {}),
+    ...(compiledTask ? { compiledTask } : {}),
     ...(estimatedTokens !== undefined ? { estimatedTokens } : {}),
     hasPaidEntitlement,
     browserMode: "deterministic",
@@ -3307,6 +3357,7 @@ function toToolExecutionRequest(input: NormalizedExecutionInput): ToolExecutionR
     ...(input.toolName ? { toolName: input.toolName } : {}),
     ...(input.toolArguments ? { toolArguments: input.toolArguments } : {}),
     ...(input.workingDirectory ? { workingDirectory: input.workingDirectory } : {}),
+    ...(input.compiledTask ? { compiledTask: input.compiledTask } : {}),
     ...(typeof input.estimatedTokens === "number"
       ? { estimatedTokens: input.estimatedTokens }
       : {}),
@@ -3498,6 +3549,9 @@ function summarizeAction(input: NormalizedExecutionInput) {
       return `Run process "${truncate(input.command ?? "", 120)}"${input.workingDirectory ? ` in ${input.workingDirectory}` : ""}.`;
     case "exec":
     default:
+      if (input.serverVerifiedCompiledTask) {
+        return "Run a server-compiled self-contained sandbox computation.";
+      }
       return `Run "${truncate(input.command ?? "", 120)}"${input.workingDirectory ? ` in ${input.workingDirectory}` : ""}.`;
   }
 }

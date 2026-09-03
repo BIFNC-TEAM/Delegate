@@ -37,6 +37,7 @@ const configSchema = z.object({
   telegramConversationPlatformMode: z.enum(["legacy", "shadow", "worker"]).optional(),
   turnPlannerV2Mode: z.enum(["disabled", "shadow", "active_low_risk"]),
   turnPlannerV3Mode: z.enum(["disabled", "shadow", "active_readonly", "active_governed"]),
+  pendingClarificationMode: z.enum(["disabled", "shadow", "active"]),
   telegramRequestTimeoutMs: z.number().int().min(1_000).max(60_000).optional(),
   outboxProcessingLeaseMs: z.number().int()
     .min(minimumOutboxProcessingLeaseMs)
@@ -46,7 +47,10 @@ const configSchema = z.object({
 
 type ResolvedConversationWorkerConfig = z.infer<typeof configSchema>;
 type MemoryLoopConfigKey = keyof typeof conversationWorkerMemoryLoopDefaults;
-type BackwardCompatibleConfigKey = MemoryLoopConfigKey | "turnPlannerV2Mode" | "turnPlannerV3Mode";
+type BackwardCompatibleConfigKey = MemoryLoopConfigKey
+  | "turnPlannerV2Mode"
+  | "turnPlannerV3Mode"
+  | "pendingClarificationMode";
 
 /**
  * The memory-loop fields are optional for older in-process callers. The env
@@ -184,6 +188,8 @@ export function resolveConversationWorkerConfig(
     turnPlannerV2Mode:
       env.TURN_PLANNER_V2_MODE?.trim().toLowerCase() || "shadow",
     turnPlannerV3Mode,
+    pendingClarificationMode:
+      env.PENDING_CLARIFICATION_MODE?.trim().toLowerCase() || "shadow",
     telegramRequestTimeoutMs: Number(env.TELEGRAM_REQUEST_TIMEOUT_MS || 15_000),
     outboxProcessingLeaseMs: Number(
       env.CONVERSATION_OUTBOX_PROCESSING_LEASE_MS || defaultOutboxProcessingLeaseMs,

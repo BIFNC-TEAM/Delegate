@@ -6,7 +6,11 @@ import {
   type DaytonaSandboxResources,
   type SandboxProvider,
 } from "./sandbox-provider";
-import type { SandboxProviderKind } from "./sandbox-routing";
+import {
+  cloudSandboxProviderKinds,
+  type CloudSandboxProviderKind,
+  type SandboxProviderKind,
+} from "./sandbox-routing";
 import { TencentAgsxSandboxProvider } from "./tencent-agsx-provider";
 
 export type SandboxProviderRegistryConfig = {
@@ -21,6 +25,7 @@ export type SandboxProviderRegistryConfig = {
     apiUrl?: string | undefined;
     target?: string | undefined;
     resources?: DaytonaSandboxResources | undefined;
+    ttlMinutes?: number | undefined;
   };
   tencent: {
     apiKey?: string | undefined;
@@ -52,6 +57,7 @@ export class SandboxProviderRegistry {
         autoArchiveMinutes: this.config.sandboxLifecycle.autoArchiveMinutes,
         autoDeleteMinutes: this.config.sandboxLifecycle.autoDeleteMinutes,
         resources: this.config.daytona.resources,
+        ttlMinutes: this.config.daytona.ttlMinutes,
       });
     }
 
@@ -73,10 +79,14 @@ export class SandboxProviderRegistry {
     return Boolean(this.config.tencent.apiKey && this.config.tencent.domain && this.config.tencent.codeTool);
   }
 
-  resolveLegacyProvider() {
-    if (this.config.legacyProvider !== "docker" && !this.configured(this.config.legacyProvider)) {
-      return "docker" as const;
-    }
-    return this.config.legacyProvider;
+  resolveLegacyProvider(): CloudSandboxProviderKind {
+    const preferred = this.config.legacyProvider === "docker"
+      ? []
+      : [this.config.legacyProvider];
+    const provider = [...preferred, ...cloudSandboxProviderKinds]
+      .find((candidate, index, values) =>
+        values.indexOf(candidate) === index && this.configured(candidate));
+    if (!provider) throw new SandboxProviderError("CONFIG_INVALID", false);
+    return provider;
   }
 }

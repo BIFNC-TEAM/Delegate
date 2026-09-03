@@ -608,6 +608,9 @@ function renderPublicComputeFailureReason(failureReason: string) {
   if (failureReason.includes("path_outside_allowed_workspace")) {
     return "输出位置不符合沙盒安全规则；请重新描述希望生成的内容，文件位置将由系统自动管理。";
   }
+  if (failureReason.includes("external_tool_error_result")) {
+    return "外部数据服务返回了错误，本次查询未完成。请稍后重试，或改用其他已发布的数据源。";
+  }
   return "执行过程中出现错误，详细原因已记录供代表所有者查看。";
 }
 

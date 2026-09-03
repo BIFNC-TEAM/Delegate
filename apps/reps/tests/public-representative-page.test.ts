@@ -365,6 +365,10 @@ describe("public representative visitor-first page", () => {
     expect(chatSource).toContain("payload.reply.sourceDisclosure");
     expect(chatSource).toContain("snapshot.message.sourceDisclosure");
     expect(chatSource).toContain(
+      "!hasInlineAnswerSourceDisclosure(message.text)",
+    );
+    expect(chatSource).toContain('(?:来源说明：|Source note:)');
+    expect(chatSource).toContain(
       "来源说明：本回答未引用已授权知识或记忆。",
     );
     expect(chatSource).toContain(

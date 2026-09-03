@@ -156,9 +156,12 @@ export function createLegacyCapabilityCompilerRegistry(resolvers: {
     .register({
       executor: "compute",
       compile(context) {
-        const capability = context.definition.key.startsWith("compute.")
+        const requestedCapability = context.definition.key.startsWith("compute.")
           ? context.definition.key.slice("compute.".length)
           : "";
+        const capability = requestedCapability === "task"
+          ? "exec"
+          : requestedCapability;
         if (!isComputeCapability(capability)) {
           throw new Error(`Unsupported Compute capability ${context.definition.key}.`);
         }

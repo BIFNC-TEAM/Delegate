@@ -223,6 +223,71 @@ describe("resolveEffectiveDecision", () => {
     });
   });
 
+  it("allows a server-verified read-only MCP under a no-network representative profile", async () => {
+    const { resolveEffectiveDecision } = await import("../src/executions");
+    const result = resolveEffectiveDecision({
+      context: {
+        profile: {
+          networkMode: "no_network",
+          networkAllowlist: [],
+          filesystemMode: "workspace_only",
+        },
+        runtimeAuthority: {
+          compute: { autoApproveTokenLimit: 10_000 },
+        },
+      } as never,
+      input: {
+        capability: "mcp",
+        subagentId: "compute-agent",
+        approvalRequired: false,
+        serverVerifiedReadOnlyMcp: true,
+        url: "https://mcp.example.test/mcp",
+        estimatedTokens: 200,
+      } as never,
+      decision: {
+        decision: "allow",
+        reason: "published_policy_allow",
+      },
+    });
+
+    expect(result).toEqual({
+      decision: "allow",
+      reason: "published_policy_allow",
+    });
+  });
+
+  it("still denies an unverified MCP under a no-network representative profile", async () => {
+    const { resolveEffectiveDecision } = await import("../src/executions");
+    const result = resolveEffectiveDecision({
+      context: {
+        profile: {
+          networkMode: "no_network",
+          networkAllowlist: [],
+          filesystemMode: "workspace_only",
+        },
+        runtimeAuthority: {
+          compute: { autoApproveTokenLimit: 10_000 },
+        },
+      } as never,
+      input: {
+        capability: "mcp",
+        subagentId: "compute-agent",
+        approvalRequired: false,
+        url: "https://mcp.example.test/mcp",
+        estimatedTokens: 200,
+      } as never,
+      decision: {
+        decision: "allow",
+        reason: "published_policy_allow",
+      },
+    });
+
+    expect(result).toEqual({
+      decision: "deny",
+      reason: "mcp_requires_network",
+    });
+  });
+
   it("keeps a policy deny terminal even for a complex shell command", async () => {
     const { resolveEffectiveDecision } = await import("../src/executions");
     const result = resolveEffectiveDecision({
@@ -243,6 +308,25 @@ describe("resolveEffectiveDecision", () => {
       reason: "managed_policy_deny",
       matchedRuleId: "rule-deny",
     });
+  });
+
+  it("does not reclassify a server-verified compiled task as arbitrary complex shell", async () => {
+    const { resolveEffectiveDecision } = await import("../src/executions");
+    const result = resolveEffectiveDecision({
+      context: {
+        profile: { networkMode: "no_network", filesystemMode: "ephemeral_full" },
+        runtimeAuthority: { compute: { autoApproveTokenLimit: 10_000 } },
+      } as never,
+      input: {
+        capability: "exec",
+        subagentId: "compute-agent",
+        command: "python -c \"exec(__import__('base64').b64decode('cHJpbnQoNTUp').decode('utf-8'))\"",
+        serverVerifiedCompiledTask: true,
+      } as never,
+      decision: { decision: "allow", reason: "published_policy_allow" },
+    });
+
+    expect(result).toEqual({ decision: "allow", reason: "published_policy_allow" });
   });
 
   it("treats a zero automatic-execution token limit as requiring approval for non-zero usage", async () => {
@@ -270,7 +354,88 @@ describe("resolveEffectiveDecision", () => {
   });
 });
 
+describe("execution session selection", () => {
+  it("does not acquire a sandbox lease for broker-hosted MCP transport", async () => {
+    const { resolveExecutionSessionForCapability } = await import("../src/executions");
+    const session = { id: "logical-mcp-session" };
+    const ensureLeasedSession = vi.fn();
+
+    await expect(resolveExecutionSessionForCapability({
+      capability: "mcp",
+      session: session as never,
+      ensureLeasedSession,
+    })).resolves.toBe(session);
+    expect(ensureLeasedSession).not.toHaveBeenCalled();
+  });
+
+  it("still acquires a sandbox lease for executable capabilities", async () => {
+    const { resolveExecutionSessionForCapability } = await import("../src/executions");
+    const session = { id: "logical-exec-session" };
+    const leasedSession = { id: "leased-exec-session" };
+    const ensureLeasedSession = vi.fn().mockResolvedValue(leasedSession);
+
+    await expect(resolveExecutionSessionForCapability({
+      capability: "exec",
+      session: session as never,
+      ensureLeasedSession,
+    })).resolves.toBe(leasedSession);
+    expect(ensureLeasedSession).toHaveBeenCalledOnce();
+  });
+});
+
 describe("published runtime authority ceiling", () => {
+  it("verifies compiled task metadata only against the server-owned task step snapshot", async () => {
+    const { resolveServerVerifiedCompiledSandboxTask } = await import("../src/policy");
+    const code = "print(55)";
+    const encoded = Buffer.from(code, "utf8").toString("base64");
+    const command =
+      `python -c "exec(__import__('base64').b64decode('${encoded}').decode('utf-8'))"`;
+    const metadata = {
+      compilerVersion: "sandbox-task-compiler.v1" as const,
+      instructionHash: "a".repeat(64),
+      codeHash: "f4e2573b7ba2b405ee5f9024e1ad7e66f907d426a679246f0033844ec93c976d",
+      riskClass: "self_contained_compute" as const,
+      compilerProvider: "openai",
+      compilerModel: "gpt-test",
+    };
+    const stepInputSnapshot = {
+      request: {
+        capability: "exec",
+        displayTarget: "task",
+        command,
+        compiledTask: metadata,
+      },
+      executionRequest: { capabilityKey: "compute.task" },
+    };
+
+    expect(resolveServerVerifiedCompiledSandboxTask({
+      input: {
+        capability: "exec",
+        subagentId: "compute-agent",
+        command,
+        compiledTask: metadata,
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+      },
+      stepInputSnapshot,
+    })).toBe(true);
+    expect(() => resolveServerVerifiedCompiledSandboxTask({
+      input: {
+        capability: "exec",
+        subagentId: "compute-agent",
+        command: `${command} `,
+        compiledTask: metadata,
+        hasPaidEntitlement: false,
+        browserMode: "deterministic",
+        maxSteps: 1,
+        allowMutations: false,
+      },
+      stepInputSnapshot,
+    })).toThrow("compiled_sandbox_task_mismatch");
+  });
+
   it("recognizes only a server-pinned read-only MCP definition", async () => {
     const { resolveServerVerifiedReadOnlyMcp } = await import("../src/policy");
     const runtimeGrants = [{

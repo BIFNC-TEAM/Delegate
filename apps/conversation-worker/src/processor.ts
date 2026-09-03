@@ -3,10 +3,16 @@ import {
   generateRepresentativeReply,
   composeTurnV3,
   buildCapabilityDiscoveryDocumentV3,
+  constrainTurnSourceRequirementForRetrievalV3,
+  applyContinuationBindings,
+  inferTurnSourceRequirementV3,
+  isPendingClarificationExpired,
   planTurnV2,
   planTurnV3,
   planNaturalLanguageComputeRequest,
+  resolveClarificationContinuation,
   type ModelRuntimeState,
+  type TurnSourceRequirementInferenceV3,
 } from "@delegate/model-runtime";
 import {
   buildComputeRequestsFromDelegationPlan,
@@ -27,6 +33,7 @@ import {
   hasMatchedExecutableSkill,
   isConversationCancellationRequest,
   parseComputeDirective,
+  pendingClarificationSpecSchema,
   renderFailClosedReplyPreview,
   renderReplyPreview,
   readStructuredCollectorState,
@@ -57,6 +64,7 @@ import {
   type TurnPlanV3,
   type ComposerEvidenceReferenceV3,
   type KnowledgeFallbackActivationV3,
+  type PendingClarificationSpec,
 } from "@delegate/runtime";
 import {
   buildMcpToolCapabilityPublicationV3,
@@ -82,6 +90,7 @@ import {
   createClarifyingDelegationTask,
   createAudienceComputeSession,
   clearConversationCollectorState,
+  closeConversationClarifyingDelegationTask,
   createContactMemorySharingChallenge,
   deferOperatorMessageDelivery,
   deferConversationMessageDelivery,
@@ -117,6 +126,7 @@ import {
   isGenerationPlanDeliverySupersededError,
   isGenerationWorkLeaseLostError,
   continueClarifyingDelegationTask,
+  readPendingClarificationSpec,
   probeRepresentativeKnowledgeMetadata,
   recallRepresentativeContext,
   applyRepresentativeDelegationTaskAction,
@@ -166,6 +176,12 @@ import {
   isComputeGenerationExecutionInProgressError,
 } from "./compute-client";
 import { sendMatrixRepresentativeMessage } from "./matrix-outbound";
+import {
+  buildV3ComputeCapabilityDefinitions,
+  compileV3NaturalTaskExecutionRequest,
+  isNaturalSandboxTaskEnabled,
+  SandboxTaskCompilationError,
+} from "./v3-compute-capabilities";
 
 function resolveFallbackReason(
   state: ModelRuntimeState,
@@ -200,6 +216,10 @@ async function buildTurnPlanningContext(input: {
   item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
   setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>;
   activeCollector: StructuredCollectorState | null;
+  pendingClarification?: {
+    spec: PendingClarificationSpec;
+    boundValues: Record<string, string | number | boolean>;
+  };
 }) {
   const [authority, recentTurns, operationalContext] = await Promise.all([
     getRepresentativeRuntimeAuthoritySnapshot(
@@ -247,7 +267,18 @@ async function buildTurnPlanningContext(input: {
     })),
     conversationSummary: null,
     activeCollector: input.activeCollector,
-    activeTask: operationalContext?.latestTask ?? null,
+    activeTask: input.pendingClarification
+      ? {
+          kind: "pending_clarification",
+          objective: input.pendingClarification.spec.objective,
+          capabilityPins: input.pendingClarification.spec.capabilityPins,
+          missingSlots: input.pendingClarification.spec.missingSlots.map((slot) => ({
+            id: slot.id,
+            argumentPath: slot.argumentPath,
+          })),
+          boundValues: input.pendingClarification.boundValues,
+        }
+      : operationalContext?.latestTask ?? null,
     pendingApproval: operationalContext?.pendingApproval ?? null,
     activeHandoff: operationalContext?.activeHandoff ?? null,
     actorIdentity: {
@@ -422,6 +453,10 @@ async function runTurnPlannerV3(input: {
   setup: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeSetupSnapshot>>>;
   planningContext: Awaited<ReturnType<typeof buildTurnPlanningContext>>;
   plannedV2?: NonNullable<Awaited<ReturnType<typeof runTurnPlannerV2Shadow>>>;
+  pendingClarification?: {
+    spec: PendingClarificationSpec;
+    boundValues: Record<string, string | number | boolean>;
+  };
 }) {
   const rolloutMode = input.config.turnPlannerV3Mode ?? "disabled";
   if (rolloutMode === "disabled") return null;
@@ -446,6 +481,11 @@ async function runTurnPlannerV3(input: {
           : "third_party_untrusted",
     }));
   const governedCatalogEnabled = rolloutMode !== "active_readonly";
+  const naturalTaskEnabled = isNaturalSandboxTaskEnabled({
+    naturalLanguageEnabled: input.setup.delegation?.naturalLanguageEnabled === true,
+    networkMode: input.setup.compute.networkMode,
+    filesystemMode: input.setup.compute.filesystemMode,
+  });
   const compatibilityDefinitions = input.planningContext.catalog.capabilities
     .filter((definition) =>
       governedCatalogEnabled
@@ -509,7 +549,7 @@ async function runTurnPlannerV3(input: {
     ...compatibilityDefinitions,
     ...publications.map((publication) => publication.definition),
     ...(governedCatalogEnabled
-      ? buildV3ComputeCapabilityDefinitions(authority?.compute)
+      ? buildV3ComputeCapabilityDefinitions(authority?.compute, naturalTaskEnabled)
       : []),
     {
       key: "representative.describe_self",
@@ -673,6 +713,7 @@ async function runTurnPlannerV3(input: {
         publications,
         rolloutMode,
         authority,
+        sourceRequirement: null,
       };
     }
     const referencedCoordinates = new Set(validated.plan.actions.map((action) =>
@@ -693,6 +734,7 @@ async function runTurnPlannerV3(input: {
       publications,
       rolloutMode,
       authority,
+      sourceRequirement: null,
     };
   }
   const latest = await loadLatestConversationTurnPlanRevision({
@@ -706,27 +748,49 @@ async function runTurnPlannerV3(input: {
     inputMessageId: input.item.inputMessageId,
   };
   const planId = `turn-plan-v3-${input.item.runId}-${revision}`;
-  const knowledgeProbe = input.item.representativeVersionId
-    ? await probeRepresentativeKnowledgeMetadata({
-        representativeSlug: input.item.representativeSlug,
-        representativeVersionId: input.item.representativeVersionId,
-        conversationId: input.item.conversationId,
-        contactId: input.item.contactId,
-        sourceChannel: input.item.channel,
-        queryText: input.item.userText,
-        allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
-      }).catch(() => ({
-        status: "unavailable" as const,
-        candidateCount: 0,
-        matchedTopics: [],
-        probeRevision: `knowledge-probe:${input.item.representativeVersionId}:unavailable`,
-      }))
-    : {
-        status: "denied" as const,
-        candidateCount: 0,
-        matchedTopics: [],
-        probeRevision: "knowledge-probe:unpinned",
-      };
+  const [knowledgeProbe, sourceRequirement] = await Promise.all([
+    input.item.representativeVersionId
+      ? probeRepresentativeKnowledgeMetadata({
+          representativeSlug: input.item.representativeSlug,
+          representativeVersionId: input.item.representativeVersionId,
+          conversationId: input.item.conversationId,
+          contactId: input.item.contactId,
+          sourceChannel: input.item.channel,
+          queryText: input.item.userText,
+          allowedSourceKinds: ["PUBLIC_KNOWLEDGE"],
+        }).catch(() => ({
+          status: "unavailable" as const,
+          candidateCount: 0,
+          matchedTopics: [],
+          probeRevision: `knowledge-probe:${input.item.representativeVersionId}:unavailable`,
+        }))
+      : Promise.resolve({
+          status: "denied" as const,
+          candidateCount: 0,
+          matchedTopics: [],
+          probeRevision: "knowledge-probe:unpinned",
+        }),
+    input.pendingClarification?.spec.semanticRequirement
+      ? Promise.resolve({
+          ok: true as const,
+          requirement: input.pendingClarification.spec.semanticRequirement,
+          confidence: 1,
+          reasonCode: "pending_clarification_continuation",
+          provider: "server",
+          model: "pending-clarification-v1",
+        })
+      : inferTurnSourceRequirementV3({
+          text: input.item.userText,
+          language: /\p{Script=Han}/u.test(input.item.userText) ? "zh" : "en",
+          now: availabilityObservedAt,
+        }).catch((error) => ({
+          ok: false as const,
+          reason: error instanceof Error
+            ? error.message
+            : "source_requirement_inference_failed",
+          diagnostics: [],
+        })),
+  ]);
   const result = await planTurnV3({
     envelope: input.planningContext.envelope,
     catalog,
@@ -734,9 +798,24 @@ async function runTurnPlannerV3(input: {
     availabilityReferenceTime: availabilityObservedAt,
     discoveryDocuments,
     knowledgeProbe,
+    ...(sourceRequirement.ok
+      ? {
+          semanticRequirement:
+            constrainTurnSourceRequirementForRetrievalV3(
+              sourceRequirement.requirement,
+            ),
+        }
+      : {}),
     scopeKey,
     revision,
     planId,
+    validationPolicyVersion: "turn-plan-v3-policy.4",
+    ...(input.pendingClarification
+      ? {
+          requiredCapabilityPins:
+            input.pendingClarification.spec.capabilityPins,
+        }
+      : {}),
   });
   if (!result.ok) {
     console.error("TurnPlan V3 shadow planning failed.", result);
@@ -744,6 +823,7 @@ async function runTurnPlannerV3(input: {
       proposal: typeof result.proposal === "undefined" ? null : result.proposal,
       candidateSnapshot: result.candidateSnapshotAudit ?? null,
       knowledgeProbe,
+      sourceRequirement,
     };
     await persistConversationTurnPlannerFailureV3({
       planId,
@@ -758,8 +838,8 @@ async function runTurnPlannerV3(input: {
       catalog,
       ...(result.provider ? { plannerProvider: result.provider } : {}),
       ...(result.model ? { plannerModel: result.model } : {}),
-      promptVersion: "turn-planner.v3.generic-arbiter.3",
-      validationPolicyVersion: "turn-plan-v3-policy.3",
+      promptVersion: "turn-planner.v3.generic-arbiter.4",
+      validationPolicyVersion: "turn-plan-v3-policy.4",
       code: result.code,
       reason: result.reason,
       ...(result.issues ? { issues: result.issues } : {}),
@@ -782,6 +862,7 @@ async function runTurnPlannerV3(input: {
       publications,
       rolloutMode,
       authority,
+      sourceRequirement,
     };
   }
   const referencedDefinitionHashes = new Set(
@@ -797,6 +878,7 @@ async function runTurnPlannerV3(input: {
         capabilityDefinitions: result.selectedCapabilities.filter((definition) =>
           referencedDefinitionHashes.has(definition.definitionHash)),
         knowledgeProbe,
+        sourceRequirement,
       }
     : result.proposal;
   const persistedPlan = await persistConversationTurnPlanV3({
@@ -813,7 +895,7 @@ async function runTurnPlannerV3(input: {
     plan: result.plan,
     plannerProvider: result.provider,
     plannerModel: result.model,
-    promptVersion: "turn-planner.v3.generic-arbiter.3",
+    promptVersion: "turn-planner.v3.generic-arbiter.4",
     plannerProposalHash: stableSha256(plannerAuditSnapshot),
     plannerProposalSnapshot: plannerAuditSnapshot,
     shadowComparison: {
@@ -846,68 +928,8 @@ async function runTurnPlannerV3(input: {
     publications,
     rolloutMode,
     authority,
+    sourceRequirement,
   };
-}
-
-function buildV3ComputeCapabilityDefinitions(
-  compute: NonNullable<Awaited<ReturnType<typeof getRepresentativeRuntimeAuthoritySnapshot>>>["compute"] | undefined,
-) {
-  if (!compute?.enabled) return [];
-  return (["exec", "read", "write", "process", "browser"] as const)
-    .filter((capability) => compute.capabilityModes[capability] !== "deny")
-    .map((capability) => {
-      const inputSchema = capability === "read"
-        ? closedObjectSchema({ path: { type: "string" } }, ["path"])
-        : capability === "write"
-          ? closedObjectSchema({ path: { type: "string" }, content: { type: "string" } }, ["path", "content"])
-          : capability === "browser"
-            ? closedObjectSchema({ url: { type: "string" } }, ["url"])
-            : closedObjectSchema({ command: { type: "string" } }, ["command"]);
-      return {
-        key: `compute.${capability}`,
-        version: "1",
-        description: `Execute the governed ${capability} capability in an isolated Compute session.`,
-        executor: "compute" as const,
-        inputSchema,
-        outputSchema: closedObjectSchema({
-          exitCode: { type: "number" },
-          artifactRefs: { type: "array", items: { type: "string" } },
-        }, ["exitCode", "artifactRefs"]),
-        effect: capability === "read"
-          ? { boundary: "internal" as const, mutation: "none" as const, reversibility: "not_applicable" as const }
-          : { boundary: "internal" as const, mutation: "write" as const, reversibility: "not_applicable" as const },
-        idempotency: capability === "read"
-          ? "naturally_idempotent" as const
-          : "requires_key" as const,
-        successContract: {
-          kind: "status_predicate" as const,
-          pointer: "/exitCode",
-          operator: "equals" as const,
-          value: 0,
-        },
-        supportedChannels: ["web", "matrix", "telegram"],
-        requiredIdentityScopes: [],
-        requiredDataScopes: [],
-        tags: ["compute", capability],
-        semantics: {
-          operations: capability === "browser" || capability === "read"
-            ? ["read" as const, "search" as const]
-            : capability === "write"
-              ? ["create" as const, "mutate" as const]
-              : ["create" as const],
-          evidenceClasses: ["capability_result" as const],
-          freshnessClasses: capability === "browser"
-            ? ["live" as const]
-            : ["bounded" as const],
-          authorityClasses: capability === "browser"
-            ? ["external_authoritative" as const]
-            : ["general" as const],
-          domains: ["compute", capability],
-          aliases: ["compute", capability],
-        },
-        canonicalizationVersion: CAPABILITY_CANONICALIZATION_VERSION_V3,
-      };
-    });
 }
 
 type GovernedV3Action = {
@@ -918,11 +940,33 @@ type GovernedV3Action = {
   dependsOnActionIds: string[];
 };
 
-function compileGovernedActionsFromV3(
+async function compileGovernedActionsFromV3(
   planned: NonNullable<Awaited<ReturnType<typeof runTurnPlannerV3>>>,
   succeededInlineActionKeys: ReadonlySet<string> = new Set(),
-): GovernedV3Action[] | null {
+  naturalTaskEnabled = false,
+): Promise<GovernedV3Action[] | null> {
   if (!planned.result.ok || !planned.persistedPlan) return null;
+  const naturalTaskActionCount = planned.result.plan.actions.filter((action) =>
+    action.capability.key === "compute.task"
+    && typeof action.arguments["instruction"] === "string").length;
+  if (naturalTaskActionCount === 1) {
+    const externalActions = planned.result.plan.actions.filter((action) =>
+      action.capability.key !== "response.compose"
+      && !isV3InlineSourceCapability(action.capability.key));
+    const taskAction = externalActions.find((action) =>
+      action.capability.key === "compute.task"
+      && typeof action.arguments["instruction"] === "string");
+    if (
+      externalActions.length !== 1
+      || !taskAction
+      || taskAction.dependencies.length > 0
+      || taskAction.activation.mode !== "primary"
+    ) {
+      throw new SandboxTaskCompilationError("multiple_actions");
+    }
+  } else if (naturalTaskActionCount > 1) {
+    throw new SandboxTaskCompilationError("multiple_actions");
+  }
   const persistedByActionKey = new Map(
     planned.persistedPlan.actions.map((action: { actionKey: string; id: string }) =>
       [action.actionKey, action.id] as const),
@@ -954,7 +998,14 @@ function compileGovernedActionsFromV3(
         action,
         definition,
       });
+      if (executionRequest.executor === "compute") {
+        executionRequest = await compileV3NaturalTaskExecutionRequest({
+          request: executionRequest,
+          enabled: naturalTaskEnabled,
+        });
+      }
     } catch (error) {
+      if (error instanceof SandboxTaskCompilationError) throw error;
       console.error("TurnPlan V3 capability compilation failed.", error);
       return null;
     }
@@ -1325,6 +1376,58 @@ async function executeV3ReadonlyPlan(input: {
     if (!persisted) throw new Error(`V3 persisted action ${action.id} is missing.`);
     if (action.capability.key === "response.compose") {
       composerPlanActionId = persisted.id;
+      const recovery = resolveV3UnsatisfiedSourceRecovery({
+        plan: input.planned.result.plan,
+        resultByActionId,
+        evidence,
+        knowledgeFallbacks,
+      });
+      if (recovery) {
+        await failConversationTurnPlan({
+          planId: input.planned.result.plan.planId,
+          actionId: persisted.id,
+          reason: `v3_required_source_${recovery.status}`,
+        });
+        const replyText = renderV3UnsatisfiedSourceMessage(recovery);
+        const completed = await completeInlineGenerationRun({
+          conversationId: input.item.conversationId,
+          runId: input.item.runId,
+          outboxId: input.item.outboxId,
+          leaseAttempt: input.item.leaseAttempt,
+          replyText,
+          senderDisplayName: input.item.representativeName,
+          intent: "turn_plan_v3_source_unavailable",
+          countUsage: false,
+          completeOutbox: false,
+          sourceIndependentPublicRecovery: {
+            reasonCode: `v3_required_source_${recovery.status}`,
+          },
+          ...(memoryUseRunId
+            ? {
+                memoryUse: {
+                  runId: memoryUseRunId,
+                  outcome: "completed" as const,
+                  injectedItemIds: [],
+                  citedItemIds: [],
+                },
+              }
+            : {}),
+          ...(input.entitlementReservation
+            ? { entitlementReservation: input.entitlementReservation }
+            : {}),
+        });
+        await deliverGenerationOutput({
+          config: input.config,
+          item: input.item,
+          text: completed.message.text ?? replyText,
+          outputMessageId: completed.message.id,
+        });
+        return {
+          processed: true as const,
+          runId: input.item.runId,
+          status: "completed" as const,
+        };
+      }
     }
     let authorizationVersion = 0;
     for (const phase of ["initial", "post_approval", "pre_execution"] as const) {
@@ -1711,6 +1814,72 @@ async function executeV3ReadonlyPlan(input: {
   return { processed: true as const, runId: input.item.runId, status: "completed" as const };
 }
 
+export type V3UnsatisfiedSourceRecovery = {
+  status: "not_found" | "unavailable";
+  evidenceKind: TurnPlanV3["goals"][number]["evidenceRequirement"]["kind"];
+  freshness: TurnPlanV3["goals"][number]["evidenceRequirement"]["freshness"];
+};
+
+export function resolveV3UnsatisfiedSourceRecovery(input: {
+  plan: TurnPlanV3;
+  resultByActionId: ReadonlyMap<string, unknown>;
+  evidence: ReadonlyArray<ComposerEvidenceReferenceV3>;
+  knowledgeFallbacks: ReadonlyArray<KnowledgeFallbackActivationV3>;
+}): V3UnsatisfiedSourceRecovery | null {
+  const fallbackGoalIds = new Set(input.knowledgeFallbacks.map((item) => item.goalId));
+  for (const goal of input.plan.goals) {
+    if (
+      goal.operation === "control"
+      || goal.evidenceRequirement.minimumEvidenceCount === 0
+      || fallbackGoalIds.has(goal.id)
+    ) continue;
+    const evidenceCount = input.evidence.filter((item) =>
+      item.goalIds?.includes(goal.id)
+      || Boolean(item.sourceActionId && goal.actionIds.includes(item.sourceActionId)))
+      .length;
+    if (evidenceCount >= goal.evidenceRequirement.minimumEvidenceCount) continue;
+    for (const actionId of goal.actionIds) {
+      const output = readV3Object(input.resultByActionId.get(actionId));
+      const status = output?.["status"];
+      if (status === "not_found" || status === "unavailable") {
+        return {
+          status,
+          evidenceKind: goal.evidenceRequirement.kind,
+          freshness: goal.evidenceRequirement.freshness,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+export function renderV3UnsatisfiedSourceMessage(
+  recovery: V3UnsatisfiedSourceRecovery,
+) {
+  if (
+    recovery.freshness === "live"
+    || recovery.evidenceKind === "current_external"
+  ) {
+    return "我目前无法获取这方面的最新信息，因此不能可靠回答。你可以提供相关来源，或稍后再试。";
+  }
+  if (recovery.evidenceKind === "transactional_authority") {
+    return "我目前无法获取完成这个请求所需的账户或交易信息。请确认相关服务已经连接，或联系负责人。";
+  }
+  if (recovery.evidenceKind === "authorized_knowledge") {
+    return recovery.status === "not_found"
+      ? "我暂时没有找到足够的信息来回答这个问题。你可以补充一些背景或换一种问法，我再帮你看看。"
+      : "我暂时无法读取回答这个问题所需的信息，请稍后再试。";
+  }
+  return "我暂时没有得到足够可靠的结果来回答这个问题。你可以补充一些背景，或稍后再试。";
+}
+
+function renderV3ReadOnlyExecutionFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  return message.includes("No provider produced a validated evidence-bound draft")
+    ? "相关信息已经取得，但回答整理暂时没有成功。请稍后再试。"
+    : "回答所需的信息或服务暂时不可用，请稍后再试。";
+}
+
 type GovernedComposerEvidence = ComposerEvidenceReferenceV3 & {
   content: unknown;
 };
@@ -2092,6 +2261,31 @@ async function executeV3GovernedComposer(input: {
       status,
       target: knowledgeFallbacks,
     });
+  }
+  const sourceRecovery = resolveV3UnsatisfiedSourceRecovery({
+    plan: context.parsedPlan,
+    resultByActionId: new Map(sourceActions.map((action) => [
+      action.actionKey,
+      action.actionResults[0]?.output,
+    ])),
+    evidence,
+    knowledgeFallbacks,
+  });
+  if (sourceRecovery) {
+    await failConversationTurnPlan({
+      planId: context.plan.id,
+      actionId: context.composeAction.id,
+      reason: `v3_required_source_${sourceRecovery.status}`,
+    });
+    return {
+      text: renderV3UnsatisfiedSourceMessage(sourceRecovery),
+      provider: context.plan.plannerProvider ?? "persisted",
+      model: context.plan.plannerModel ?? "persisted",
+      citedEvidenceIds: [],
+      sourceActionKeys: sourceActions.map((action) => action.actionKey),
+      fallbackActivated: false,
+      sourceUnavailable: true,
+    };
   }
   const actionOutcomes = sourceActions.map((action) => ({
     actionId: action.actionKey,
@@ -4216,13 +4410,188 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       leaseGuard.assertOwned();
       return { processed: true as const, runId: item.runId, status: "completed" as const };
     }
-    const clarifyingTask = !persistedRequest && !activeCollector
+    let clarifyingTask = !persistedRequest && !activeCollector
       ? await findConversationClarifyingDelegationTask({
           representativeId: setup.id,
           contactId: item.contactId,
           conversationId: item.conversationId,
+          ...(item.episodeId ? { episodeId: item.episodeId } : {}),
         })
       : null;
+    let pendingClarification = clarifyingTask
+      ? readPendingClarificationSpec(clarifyingTask)
+      : null;
+    let clarificationContinuation: {
+      spec: PendingClarificationSpec;
+      boundValues: Record<string, string | number | boolean>;
+    } | null = null;
+    const pendingClarificationMode = config.pendingClarificationMode ?? "active";
+    if (
+      clarifyingTask
+      && pendingClarification
+      && pendingClarificationMode === "shadow"
+    ) {
+      const shadowDecision = await resolveClarificationContinuation({
+        pending: pendingClarification,
+        currentMessage: item.userText,
+        language: /\p{Script=Han}/u.test(item.userText) ? "zh" : "en",
+      });
+      console.info("Pending clarification shadow decision.", {
+        taskId: clarifyingTask.id,
+        decision: shadowDecision.ok
+          ? shadowDecision.decision.decision
+          : "unavailable",
+        reasonCode: shadowDecision.ok
+          ? shadowDecision.decision.reasonCode
+          : shadowDecision.reason,
+      });
+    }
+    if (
+      clarifyingTask
+      && pendingClarification
+      && pendingClarificationMode === "active"
+    ) {
+      const closePending = async (
+        outcome: "superseded" | "canceled" | "expired",
+        reasonCode: string,
+      ) => closeConversationClarifyingDelegationTask({
+        taskId: clarifyingTask!.id,
+        representativeId: setup.id,
+        contactId: item.contactId,
+        conversationId: item.conversationId,
+        ...(item.episodeId ? { episodeId: item.episodeId } : {}),
+        inputMessageId: item.inputMessageId,
+        outcome,
+        reasonCode,
+      });
+      if (
+        isPendingClarificationExpired(pendingClarification)
+        || (
+          pendingClarification.representativeVersionId
+          && pendingClarification.representativeVersionId
+            !== item.representativeVersionId
+        )
+      ) {
+        await closePending("expired", "pending_clarification_expired_or_version_changed");
+        clarifyingTask = null;
+        pendingClarification = null;
+      } else {
+        const continuation = await resolveClarificationContinuation({
+          pending: pendingClarification,
+          currentMessage: item.userText,
+          language: /\p{Script=Han}/u.test(item.userText) ? "zh" : "en",
+        });
+        const decision = continuation.ok
+          ? continuation.decision
+          : {
+              protocolVersion: 1 as const,
+              decision: "ambiguous" as const,
+              bindings: [],
+              confidence: 0,
+              reasonCode: "continuation_decision_unavailable",
+            };
+        if (decision.decision === "cancel") {
+          await closePending("canceled", decision.reasonCode);
+          const replyText = "好的，我已结束刚才未完成的请求。你可以直接提出新的问题。";
+          const completed = await completeInlineGenerationRun({
+            conversationId: item.conversationId,
+            runId: item.runId,
+            ...workLease,
+            replyText,
+            senderDisplayName: item.representativeName,
+            intent: "clarification_canceled",
+            countUsage: false,
+            completeOutbox: false,
+          });
+          outputMessageId = completed.message.id;
+          await deliverGenerationOutput({ config, item, text: replyText, outputMessageId });
+          return { processed: true as const, runId: item.runId, status: "completed" as const };
+        }
+        if (decision.decision === "replace") {
+          await closePending("superseded", decision.reasonCode);
+          clarifyingTask = null;
+          pendingClarification = null;
+        } else if (decision.decision === "ambiguous") {
+          const nextCount = pendingClarification.clarificationCount + 1;
+          if (nextCount >= 2) {
+            await closePending("superseded", "clarification_ambiguity_limit_reached");
+            clarifyingTask = null;
+            pendingClarification = null;
+          } else {
+            const updated = pendingClarificationSpecSchema.parse({
+              ...pendingClarification,
+              clarificationCount: nextCount,
+            });
+            const question = "你是在补充刚才请求所需的信息，还是想开始一个新问题？";
+            await continueClarifyingDelegationTask({
+              taskId: clarifyingTask.id,
+              generationRunId: item.runId,
+              inputMessageId: item.inputMessageId,
+              contactId: item.contactId,
+              question,
+              missingFields: updated.missingSlots.map((slot) => slot.id),
+              pendingClarification: updated,
+            });
+            const completed = await completeInlineGenerationRun({
+              conversationId: item.conversationId,
+              runId: item.runId,
+              ...workLease,
+              replyText: question,
+              senderDisplayName: item.representativeName,
+              intent: "clarification_ambiguous",
+              countUsage: false,
+              completeOutbox: false,
+            });
+            outputMessageId = completed.message.id;
+            await deliverGenerationOutput({ config, item, text: question, outputMessageId });
+            return { processed: true as const, runId: item.runId, status: "waiting_input" as const };
+          }
+        } else if (decision.decision === "continue") {
+          const applied = applyContinuationBindings({
+            pending: pendingClarification,
+            decision,
+          });
+          if (applied.remainingSlots.length) {
+            const updated = pendingClarificationSpecSchema.parse({
+              ...pendingClarification,
+              missingSlots: applied.remainingSlots,
+              clarificationCount: pendingClarification.clarificationCount + 1,
+            });
+            const question = `我还需要 ${applied.remainingSlots.length} 项信息才能继续。请补充明确的查询对象、范围或相关标识。`;
+            await continueClarifyingDelegationTask({
+              taskId: clarifyingTask.id,
+              generationRunId: item.runId,
+              inputMessageId: item.inputMessageId,
+              contactId: item.contactId,
+              question,
+              missingFields: updated.missingSlots.map((slot) => slot.id),
+              pendingClarification: updated,
+            });
+            const completed = await completeInlineGenerationRun({
+              conversationId: item.conversationId,
+              runId: item.runId,
+              ...workLease,
+              replyText: question,
+              senderDisplayName: item.representativeName,
+              intent: "clarification_partial",
+              countUsage: false,
+              completeOutbox: false,
+            });
+            outputMessageId = completed.message.id;
+            await deliverGenerationOutput({ config, item, text: question, outputMessageId });
+            return { processed: true as const, runId: item.runId, status: "waiting_input" as const };
+          }
+          clarificationContinuation = {
+            spec: pendingClarification,
+            boundValues: applied.boundValues,
+          };
+        }
+      }
+    }
+    const legacyClarifyingTask = clarifyingTask
+      && (!pendingClarification || pendingClarification.source === "legacy_compute")
+        ? clarifyingTask
+        : null;
     const computeDirective = !persistedRequest && !clarifyingTask && !activeCollector
       ? parseComputeDirective(item.userText)
       : { kind: "none" as const };
@@ -4343,7 +4712,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       setup.compute.enabled &&
       delegationConfig.enabled &&
       (
-        Boolean(clarifyingTask) ||
+        Boolean(legacyClarifyingTask) ||
         (
           delegationConfig.naturalLanguageEnabled &&
           (
@@ -4355,8 +4724,15 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         )
       )
     ) {
-      const taskInput = clarifyingTask
-        ? `原始任务：${clarifyingTask.objective}\n待补充：${clarifyingTask.blockingReason || "执行输入"}\n用户补充：${item.userText}`
+      const taskInput = legacyClarifyingTask
+        ? JSON.stringify({
+            protocolVersion: 1,
+            kind: "clarification_continuation",
+            objective: legacyClarifyingTask.objective,
+            missingSlots: pendingClarification?.missingSlots ?? [],
+            boundValues: clarificationContinuation?.boundValues ?? {},
+            currentMessage: item.userText,
+          })
         : item.userText;
       const plannerContext = await buildDelegationPlannerInput({
         setup,
@@ -4391,17 +4767,30 @@ export async function processNextConversationWork(config: ConversationWorkerConf
             billable: false,
             reason: "A planner clarification does not execute or complete a service step.",
           };
-          if (clarifyingTask) {
+          if (legacyClarifyingTask) {
             await continueClarifyingDelegationTask({
-              taskId: clarifyingTask.id,
+              taskId: legacyClarifyingTask.id,
               generationRunId: item.runId,
               inputMessageId: item.inputMessageId,
               contactId: item.contactId,
               question: planned.plan.question,
               missingFields: planned.plan.missingFields,
+              ...(pendingClarification
+                ? {
+                    pendingClarification: pendingClarificationSpecSchema.parse({
+                      ...pendingClarification,
+                      clarificationCount: pendingClarification.clarificationCount + 1,
+                    }),
+                  }
+                : {}),
               authorizedKnowledge,
             });
           } else {
+            const legacyPending = buildLegacyPendingClarification({
+              item,
+              objective: item.userText,
+              missingFields: planned.plan.missingFields,
+            });
             await createClarifyingDelegationTask({
               representativeId: setup.id,
               representativeSlug: item.representativeSlug,
@@ -4415,6 +4804,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
               summary: planned.plan.summary,
               question: planned.plan.question,
               missingFields: planned.plan.missingFields,
+              pendingClarification: legacyPending,
               authorizedKnowledge,
               maxDurationMinutes: setup.compute.maxSessionMinutes,
               networkMode: setup.compute.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
@@ -4477,9 +4867,9 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         if (parsedRequests.length !== planned.plan.steps.length) {
           throw new Error("Delegation planner produced an incomplete execution step.");
         }
-        if (clarifyingTask) {
+        if (legacyClarifyingTask) {
           const resumed = await continueClarifyingDelegationTask({
-            taskId: clarifyingTask.id,
+            taskId: legacyClarifyingTask.id,
             generationRunId: item.runId,
             inputMessageId: item.inputMessageId,
             contactId: item.contactId,
@@ -4503,7 +4893,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
       !parsedRequests.length &&
       item.delegationTaskId &&
       item.delegationTaskStepId &&
-      !clarifyingTask
+      !legacyClarifyingTask
     ) {
       return completeTerminalDelegationFailure(
         config,
@@ -4779,19 +5169,32 @@ export async function processNextConversationWork(config: ConversationWorkerConf
 
     if (
       plannerRunPolicy.runV3Planner
+      && computeDirective.kind !== "request"
     ) {
       try {
         await leaseGuard.confirmOwned();
-        planningContext ??= await buildTurnPlanningContext({
-          item,
-          setup,
-          activeCollector,
-        });
+        if (clarificationContinuation) {
+          planningContext = await buildTurnPlanningContext({
+            item,
+            setup,
+            activeCollector,
+            pendingClarification: clarificationContinuation,
+          });
+        } else {
+          planningContext ??= await buildTurnPlanningContext({
+            item,
+            setup,
+            activeCollector,
+          });
+        }
         turnPlanV3Result = await runTurnPlannerV3({
           config,
           item,
           setup,
           planningContext,
+          ...(clarificationContinuation
+            ? { pendingClarification: clarificationContinuation }
+            : {}),
           ...(turnPlanV2Result ? { plannedV2: turnPlanV2Result } : {}),
         });
         await leaseGuard.confirmOwned();
@@ -4901,7 +5304,7 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         return completeTerminalDelegationFailure(
           config,
           item,
-          "严格只读计划未能完成，系统没有降级为未经证据支持的回答。请稍后重试。",
+          renderV3ReadOnlyExecutionFailure(error),
           entitlementReservation ?? undefined,
         );
       }
@@ -4961,17 +5364,111 @@ export async function processNextConversationWork(config: ConversationWorkerConf
 
     if (turnPlanV3Result && (config.turnPlannerV3Mode ?? "disabled") === "active_governed") {
       if (!turnPlanV3Result.result.ok) {
+        const presentation = renderTurnPlanV3PlanningFailurePresentation(
+          turnPlanV3Result.result,
+          turnPlanV3Result.sourceRequirement,
+        );
+        const pending = buildV3PendingClarification({
+          planned: turnPlanV3Result,
+          item,
+        });
+        if (pending && pendingClarificationMode === "active") {
+          const question = presentation.text;
+          if (clarifyingTask && pendingClarification?.source === "turn_plan_v3") {
+            await continueClarifyingDelegationTask({
+              taskId: clarifyingTask.id,
+              generationRunId: item.runId,
+              inputMessageId: item.inputMessageId,
+              contactId: item.contactId,
+              question,
+              missingFields: pending.missingSlots.map((slot) => slot.id),
+              pendingClarification: pendingClarificationSpecSchema.parse({
+                ...pending,
+                clarificationCount: pendingClarification.clarificationCount + 1,
+              }),
+            });
+          } else {
+            await createClarifyingDelegationTask({
+              representativeId: setup.id,
+              representativeSlug: item.representativeSlug,
+              representativeVersionId: item.representativeVersionId,
+              contactId: item.contactId,
+              conversationId: item.conversationId,
+              ...(item.episodeId ? { episodeId: item.episodeId } : {}),
+              generationRunId: item.runId,
+              inputMessageId: item.inputMessageId,
+              objective: pending.objective,
+              summary: pending.objective,
+              question,
+              missingFields: pending.missingSlots.map((slot) => slot.id),
+              pendingClarification: pending,
+              maxDurationMinutes: setup.compute.maxSessionMinutes,
+              networkMode: setup.compute.networkMode.toUpperCase() as "NO_NETWORK" | "ALLOWLIST" | "FULL",
+              filesystemMode: setup.compute.filesystemMode.toUpperCase() as "WORKSPACE_ONLY" | "READ_ONLY_WORKSPACE" | "EPHEMERAL_FULL",
+            });
+          }
+          const completed = await completeInlineGenerationRun({
+            conversationId: item.conversationId,
+            runId: item.runId,
+            ...workLease,
+            replyText: question,
+            senderDisplayName: item.representativeName,
+            intent: "turn_plan_v3_clarification",
+            countUsage: false,
+            completeOutbox: false,
+          });
+          outputMessageId = completed.message.id;
+          await deliverGenerationOutput({
+            config,
+            item,
+            text: completed.message.text ?? question,
+            outputMessageId,
+          });
+          return {
+            processed: true as const,
+            runId: item.runId,
+            status: "waiting_input" as const,
+          };
+        }
         return completeTerminalDelegationFailure(
           config,
           item,
-          renderTurnPlanV3PlanningFailureMessage(turnPlanV3Result.result),
+          presentation.text,
+          entitlementReservation ?? undefined,
+          {
+            authorship: presentation.authorship,
+            failureCode: presentation.failureCode,
+            internalFailureReason:
+              `${turnPlanV3Result.result.code}:${turnPlanV3Result.result.reason ?? "unknown"}`,
+          },
+        );
+      }
+      let governedActions: GovernedV3Action[] | null;
+      try {
+        governedActions = await compileGovernedActionsFromV3(
+          turnPlanV3Result,
+          succeededV3InlineActionKeys,
+          isNaturalSandboxTaskEnabled({
+            naturalLanguageEnabled: setup.delegation?.naturalLanguageEnabled === true,
+            networkMode: setup.compute.networkMode,
+            filesystemMode: setup.compute.filesystemMode,
+          }),
+        );
+      } catch (error) {
+        if (!(error instanceof SandboxTaskCompilationError)) throw error;
+        await failConversationTurnPlan({
+          planId: turnPlanV3Result.result.plan.planId,
+          reason: error.message,
+        });
+        return completeTerminalDelegationFailure(
+          config,
+          item,
+          error.code === "declined"
+            ? "这个任务需要文件、附件、网络、外部服务或其他当前自然语言沙箱编译器未开放的能力，因此没有执行。请改为一个仅使用消息内数据的计算任务。"
+            : "自然语言沙箱任务未能通过严格编译与安全验证，系统没有创建执行会话。请缩小任务范围后重试。",
           entitlementReservation ?? undefined,
         );
       }
-      const governedActions = compileGovernedActionsFromV3(
-        turnPlanV3Result,
-        succeededV3InlineActionKeys,
-      );
       if (!governedActions) {
         const stableFallback = await executeV3PreExecutionStableGeneralFallback({
           config,
@@ -5015,6 +5512,27 @@ export async function processNextConversationWork(config: ConversationWorkerConf
           return dependencyIndex;
         }),
       }));
+      if (
+        clarifyingTask
+        && pendingClarification?.source === "turn_plan_v3"
+        && clarificationContinuation
+      ) {
+        const resumed = await continueClarifyingDelegationTask({
+          taskId: clarifyingTask.id,
+          generationRunId: item.runId,
+          inputMessageId: item.inputMessageId,
+          contactId: item.contactId,
+          planSummary,
+          planSteps,
+        });
+        if (!resumed.ready) {
+          throw new Error("V3 clarification continuation did not become ready.");
+        }
+        delegationOverride = {
+          task: { id: resumed.taskId },
+          step: { id: resumed.step.id },
+        };
+      }
     }
 
     const selectedMcpOnlyPlan = parsedRequests.length > 0
@@ -5445,8 +5963,20 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         };
       }
 
+      if (
+        computeReply.blockedReasonCode
+        && (config.turnPlannerV3Mode ?? "disabled") === "active_governed"
+        && turnPlanV3Result?.result.ok
+      ) {
+        await failConversationTurnPlan({
+          planId: turnPlanV3Result.result.plan.planId,
+          reason: computeReply.blockedReasonCode,
+        });
+      }
+
       const governedComposition =
         (config.turnPlannerV3Mode ?? "disabled") === "active_governed"
+        && !computeReply.blockedReasonCode
         && !computeReply.hasMoreSteps
         && computeReply.delegationTaskId
           ? await executeV3GovernedComposer({
@@ -5478,6 +6008,8 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         senderDisplayName: item.representativeName,
         intent: governedComposition?.fallbackActivated
           ? "turn_plan_v3_stable_general_fallback"
+          : governedComposition?.sourceUnavailable
+            ? "turn_plan_v3_source_unavailable"
           : "compute",
         ...(governedComposition?.provider
           ? { provider: governedComposition.provider as "agicto" | "openai" | "bailian" | "anthropic" }
@@ -5523,9 +6055,18 @@ export async function processNextConversationWork(config: ConversationWorkerConf
         completeOutbox: false,
         countUsage: mcpNoCharge
           ? false
+          : governedComposition?.sourceUnavailable
+          ? false
           : governedComposition?.fallbackActivated
           ? continuationAuthorized
           : computeReply.billable && !persistedRequest,
+        ...(governedComposition?.sourceUnavailable
+          ? {
+              sourceIndependentPublicRecovery: {
+                reasonCode: "v3_required_source_unavailable",
+              },
+            }
+          : {}),
         keepConversationQueued: computeReply.hasMoreSteps,
         ...(entitlementReservation ? { entitlementReservation } : {}),
       });
@@ -6178,6 +6719,14 @@ async function completeTerminalDelegationFailure(
   item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>,
   replyText: string,
   entitlementReservation?: ConversationEntitlementReservation,
+  presentation: {
+    authorship: "representative" | "system";
+    failureCode: string;
+    internalFailureReason?: string;
+  } = {
+    authorship: "system",
+    failureCode: "delegation_failed",
+  },
 ) {
   if (item.delegationTaskId && item.delegationTaskStepId) {
     await finalizeComputeDelegationTask({
@@ -6186,7 +6735,7 @@ async function completeTerminalDelegationFailure(
       generationRunId: item.runId,
       ...delegationLeaseFence(item),
       outcome: "failed",
-      failureReason: replyText,
+      failureReason: presentation.internalFailureReason ?? replyText,
     });
   }
   await completeInlineGenerationRun({
@@ -6197,9 +6746,17 @@ async function completeTerminalDelegationFailure(
     replyText,
     senderDisplayName: item.representativeName,
     intent: "delegation_failed",
-    evidenceIndependentSystemFailure: {
-      failureCode: "delegation_failed",
-    },
+    ...(presentation.authorship === "system"
+      ? {
+          evidenceIndependentSystemFailure: {
+            failureCode: presentation.failureCode,
+          },
+        }
+      : {
+          sourceIndependentPublicRecovery: {
+            reasonCode: presentation.failureCode,
+          },
+        }),
     countUsage: false,
     completeOutbox: false,
     ...(entitlementReservation ? { entitlementReservation } : {}),
@@ -6229,21 +6786,230 @@ export function renderPolicyBlockedDelegationMessage(reasonCode?: string | null)
 export function renderTurnPlanV3PlanningFailureMessage(result: {
   code: string;
   reason?: string;
-}) {
+  issues?: Array<{ code?: string; path?: string; message?: string }>;
+  proposal?: unknown;
+}, sourceRequirement?: TurnSourceRequirementInferenceV3 | null) {
+  return renderTurnPlanV3PlanningFailurePresentation(
+    result,
+    sourceRequirement,
+  ).text;
+}
+
+export function renderTurnPlanV3PlanningFailurePresentation(result: {
+  code: string;
+  reason?: string;
+  issues?: Array<{ code?: string; path?: string; message?: string }>;
+  proposal?: unknown;
+}, sourceRequirement?: TurnSourceRequirementInferenceV3 | null): {
+  text: string;
+  authorship: "representative" | "system";
+  failureCode: string;
+} {
+  const missingRequiredArgumentPaths = result.issues?.flatMap((issue) =>
+    issue.code === "arguments_invalid"
+    && issue.message === "Required property is missing."
+      ? [issue.path ?? ""]
+      : []) ?? [];
+  if (missingRequiredArgumentPaths.length > 0) {
+    const missingCount = new Set(missingRequiredArgumentPaths).size;
+    return {
+      text: `我还需要 ${missingCount} 项信息才能继续。请补充明确的查询对象、范围或相关标识。`,
+      authorship: "representative",
+      failureCode: "required_information_missing",
+    };
+  }
+  if (
+    result.reason
+      === "Planner selected a capability that cannot satisfy the goal semantic contract."
+    && result.issues?.some((issue) =>
+      issue.code === "evidence_unsatisfied"
+      && issue.path?.startsWith("/capabilitySelections/"))
+  ) {
+    return {
+      text: "系统暂时未能把这个请求与可用的执行能力正确对齐。你的描述没有问题，请稍后重试。",
+      authorship: "system",
+      failureCode: "planning_capability_semantic_mismatch",
+    };
+  }
+  if (sourceRequirement?.ok) {
+    const requirement = sourceRequirement.requirement;
+    if (
+      requirement.evidenceClasses.includes("transactional_authority")
+      || requirement.authorityClasses.includes("transactional")
+    ) {
+      return {
+        text: "我目前无法获取完成这个请求所需的账户或交易信息。请确认相关服务已经连接，或联系负责人。",
+        authorship: "representative",
+        failureCode: "transactional_source_unavailable",
+      };
+    }
+    if (
+      requirement.evidenceClasses.includes("current_external")
+      || requirement.freshnessClasses.includes("live")
+    ) {
+      return {
+        text: "我目前无法获取这方面的最新信息，因此不能可靠回答。你可以提供相关来源，或稍后再试。",
+        authorship: "representative",
+        failureCode: "current_source_unavailable",
+      };
+    }
+    if (
+      requirement.evidenceClasses.includes("authorized_knowledge")
+      || requirement.authorityClasses.includes("owner_authorized")
+    ) {
+      return {
+        text: "我暂时没有找到足够的信息来回答这个问题。你可以补充一些背景或换一种问法，我再帮你看看。",
+        authorship: "representative",
+        failureCode: "supporting_information_not_found",
+      };
+    }
+  }
   switch (result.code) {
     case "provider_failed":
-      return "规划服务本轮超时或调用失败，因此系统没有执行实时工具，也没有用通用模型猜测。请稍后重试。";
+      return {
+        text: "服务暂时没有响应，请稍后再试。",
+        authorship: "system",
+        failureCode: "planning_provider_failed",
+      };
     case "runtime_unavailable":
-      return "规划服务当前不可用，因此系统没有执行工具，也没有用通用模型猜测。请稍后重试。";
+      return {
+        text: "服务暂时不可用，请稍后再试。",
+        authorship: "system",
+        failureCode: "planning_runtime_unavailable",
+      };
     case "strict_schema_unsupported":
-      return "当前规划模型不支持受治理计划所需的严格结构化输出，因此系统没有执行工具。";
+      return {
+        text: "当前请求暂时无法处理，请稍后再试。",
+        authorship: "system",
+        failureCode: "planning_protocol_unsupported",
+      };
     case "proposal_invalid":
-      return "规划模型返回的结构不符合受治理计划协议，因此系统没有执行工具。请重新提交请求。";
+      return {
+        text: "当前请求没有成功处理，请重新发送一次。",
+        authorship: "system",
+        failureCode: "planning_response_invalid",
+      };
     case "plan_invalid":
-      return "本轮计划未通过能力、参数、证据或依赖校验，因此系统没有执行工具，也没有用模型猜测。";
+      return {
+        text: "我暂时无法可靠地完成这个请求。你可以补充一些背景或换一种方式描述。",
+        authorship: "representative",
+        failureCode: "request_not_actionable",
+      };
     default:
-      return "本轮未能生成可安全执行的受治理计划，因此系统没有执行工具，也没有用模型猜测。";
+      return {
+        text: "当前请求暂时无法处理，请稍后再试。",
+        authorship: "system",
+        failureCode: "planning_failed",
+      };
   }
+}
+
+function buildV3PendingClarification(input: {
+  planned: NonNullable<Awaited<ReturnType<typeof runTurnPlannerV3>>>;
+  item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
+}): PendingClarificationSpec | null {
+  if (input.planned.result.ok) return null;
+  const missingPaths = [...new Set(input.planned.result.issues?.flatMap((issue) =>
+    issue.code === "arguments_invalid"
+    && issue.message === "Required property is missing."
+    && issue.path
+      ? [issue.path]
+      : []) ?? [])];
+  if (!missingPaths.length) return null;
+  const proposal = readV3Object(input.planned.result.proposal);
+  const selections = Array.isArray(proposal?.capabilitySelections)
+    ? proposal.capabilitySelections.flatMap((value) => {
+        const record = readV3Object(value);
+        return typeof record?.capabilityKey === "string"
+          && typeof record.capabilityVersion === "string"
+          ? [{ key: record.capabilityKey, version: record.capabilityVersion }]
+          : [];
+      })
+    : [];
+  const definitions = selections.flatMap((selection) => {
+    const definition = input.planned.catalog.capabilities.find((candidate) =>
+      candidate.key === selection.key && candidate.version === selection.version);
+    return definition ? [definition] : [];
+  });
+  if (!definitions.length) return null;
+  const missingSlots = missingPaths.flatMap((argumentPath) => {
+    const segments = argumentPath.split("/").filter(Boolean);
+    const id = segments.at(-1);
+    if (!id || !/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(id)) return [];
+    const propertySchema = definitions.flatMap((definition) => {
+      const properties = readV3Object(definition.inputSchema.properties);
+      const schema = readV3Object(properties?.[id]);
+      return schema ? [schema] : [];
+    })[0] ?? { type: "string" };
+    return [{
+      id,
+      argumentPath,
+      schema: propertySchema,
+      prompt: `请补充 ${id}。`,
+    }];
+  });
+  if (!missingSlots.length) return null;
+  const now = new Date();
+  return pendingClarificationSpecSchema.parse({
+    protocolVersion: 1,
+    source: "turn_plan_v3",
+    originInputMessageId: input.item.inputMessageId,
+    ...(input.item.representativeVersionId
+      ? { representativeVersionId: input.item.representativeVersionId }
+      : {}),
+    objective: typeof proposal?.objective === "string"
+      ? proposal.objective
+      : input.item.userText,
+    capabilityPins: definitions.map((definition) => ({
+      key: definition.key,
+      version: definition.version,
+      definitionHash: definition.definitionHash,
+    })),
+    missingSlots,
+    ...(input.planned.sourceRequirement?.ok
+      ? { semanticRequirement: input.planned.sourceRequirement.requirement }
+      : {}),
+    clarificationCount: 0,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 30 * 60_000).toISOString(),
+  });
+}
+
+function buildLegacyPendingClarification(input: {
+  item: NonNullable<Awaited<ReturnType<typeof claimNextGenerationWorkItem>>>;
+  objective: string;
+  missingFields: string[];
+}): PendingClarificationSpec {
+  const now = new Date();
+  const missingSlots = [...new Set(input.missingFields)].map((field, index) => ({
+    id: /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(field)
+      ? field
+      : `field_${index + 1}`,
+    argumentPath: `/legacy/${index}`,
+    schema: { type: "string" },
+    prompt: `请补充 ${field}。`,
+  }));
+  return pendingClarificationSpecSchema.parse({
+    protocolVersion: 1,
+    source: "legacy_compute",
+    originInputMessageId: input.item.inputMessageId,
+    ...(input.item.representativeVersionId
+      ? { representativeVersionId: input.item.representativeVersionId }
+      : {}),
+    objective: input.objective,
+    capabilityPins: [],
+    missingSlots: missingSlots.length
+      ? missingSlots
+      : [{
+          id: "required_input",
+          argumentPath: "/legacy/0",
+          schema: { type: "string" },
+          prompt: "请补充任务所需的信息。",
+        }],
+    clarificationCount: 0,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 30 * 60_000).toISOString(),
+  });
 }
 
 export function resolveStableGeneralFallbackActivationStatus(
@@ -6280,6 +7046,7 @@ async function processConversationComputeRequest(input: {
   hasMoreSteps: boolean;
   approvalId?: string;
   delegationTaskId?: string;
+  blockedReasonCode?: string;
   fallbackActivationStatus?: KnowledgeFallbackActivationV3["status"];
   attachments?: Array<{
     fileName: string;
@@ -6555,6 +7322,9 @@ async function processConversationComputeRequest(input: {
       billable: false,
       hasMoreSteps: false,
       delegationTaskId: delegation.task.id,
+      ...(result.blockReasonCode
+        ? { blockedReasonCode: result.blockReasonCode }
+        : {}),
       ...(fallbackActivationStatus ? { fallbackActivationStatus } : {}),
     };
   }
@@ -6629,6 +7399,9 @@ function resolvePublicArtifactFileName(
 }
 
 function renderPublicComputeAction(request: ParsedComputeRequest) {
+  if (request.compiledTask) {
+    return "运行由自然语言编译的隔离沙箱计算";
+  }
   if (request.capability === "write") {
     if (/^outputs\/report-[a-f0-9]{8}\.md$/i.test(request.path || "")) {
       return "生成并保存文档";

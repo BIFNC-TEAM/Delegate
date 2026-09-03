@@ -136,6 +136,36 @@ describe("TurnPlan V3 planner", () => {
     );
   });
 
+  it("rejects a compose-only stable plan that weakens an inferred live external requirement", async () => {
+    const result = await planTurnV3({
+      envelope: envelope(),
+      catalog: v3Catalog(),
+      semanticRequirement: {
+        operations: ["read", "search"],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+      },
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-1",
+      },
+      revision: 1,
+      adapter: strictAdapter(validProposal()),
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "plan_invalid",
+      reason: "Planner proposal weakens the inferred source requirement.",
+      issues: [expect.objectContaining({
+        code: "evidence_unsatisfied",
+        path: "/capabilitySelections",
+      })],
+    });
+  });
+
   it("fails closed when the proposal references an unavailable capability", async () => {
     const proposal: TurnPlanProposalV3 = validProposal();
     proposal.capabilitySelections = [{
@@ -373,13 +403,13 @@ describe("TurnPlan V3 planner", () => {
       capabilitySelections: [{
         id: "search-location",
         capabilityKey: search.key,
-        capabilityVersion: search.version,
+        capabilityVersion: "model-guessed-version",
         goalIds: ["location-goal"],
         argumentsJson: ":{",
       }, {
         id: "get-forecast",
         capabilityKey: forecast.key,
-        capabilityVersion: forecast.version,
+        capabilityVersion: "model-guessed-version",
         goalIds: ["forecast-goal"],
         argumentsJson: "{}",
       }],
@@ -412,7 +442,9 @@ describe("TurnPlan V3 planner", () => {
     expect(result.proposal.decisionTrace)
       .toContain("server_same_source_capability_goals_coalesced");
     expect(result.proposal.decisionTrace)
-      .toContain("server_unique_source_span_normalized");
+      .toContain("server_single_clause_capability_chain_normalized");
+    expect(result.proposal.decisionTrace)
+      .toContain("server_capability_coordinate_normalized");
     const searchAction = result.plan.actions.find((action) =>
       action.capability.key === search.key)!;
     const forecastAction = result.plan.actions.find((action) =>
@@ -472,6 +504,327 @@ describe("TurnPlan V3 planner", () => {
         .toEqual(["location-goal"]);
       expect(anchored.proposal.decisionTrace)
         .toContain("server_dangling_read_selection_anchored");
+    }
+
+    const prerequisiteOnlyProposal = structuredClone(proposal);
+    prerequisiteOnlyProposal.objective = "Answer the live weather question.";
+    prerequisiteOnlyProposal.goals = [{
+      ...prerequisiteOnlyProposal.goals[0]!,
+      id: "weather-goal",
+      objective: "Answer the live weather question.",
+      sourceSpan: {
+        pointer: "/currentMessage/text",
+        startOffset: 0,
+        endOffset: 6,
+        quote: "今天天气如何",
+      },
+    }];
+    prerequisiteOnlyProposal.capabilitySelections = [{
+      ...prerequisiteOnlyProposal.capabilitySelections[0]!,
+      goalIds: ["weather-goal"],
+      argumentsJson: "{}",
+    }];
+    const clarification = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: {
+          id: "message-missing-location",
+          text: "今天天气如何",
+          language: "zh",
+        },
+      },
+      catalog,
+      availabilitySnapshot,
+      semanticRequirement: {
+        operations: [],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+      },
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-missing-location",
+      },
+      revision: 1,
+      adapter: strictAdapter(prerequisiteOnlyProposal),
+    });
+    expect(clarification).toMatchObject({
+      ok: false,
+      code: "plan_invalid",
+      issues: [expect.objectContaining({
+        code: "arguments_invalid",
+        path: "/actions/0/arguments/name",
+      })],
+      proposal: expect.objectContaining({
+        decisionTrace: expect.arrayContaining([
+          "server_prerequisite_chain_expanded",
+        ]),
+      }),
+    });
+
+    const splitGoalProposal = structuredClone(proposal);
+    splitGoalProposal.objective = "Answer the live weather question.";
+    splitGoalProposal.goals = splitGoalProposal.goals.map((goal, index) => ({
+      ...goal,
+      id: `split-goal-${index + 1}`,
+      sourceSpan: null,
+    }));
+    splitGoalProposal.capabilitySelections = splitGoalProposal.capabilitySelections.map(
+      (selection, index) => ({
+        ...selection,
+        goalIds: [`split-goal-${index + 1}`],
+        argumentsJson: "{}",
+      }),
+    );
+    const splitGoalClarification = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: {
+          id: "message-split-missing-location",
+          text: "今天天气如何",
+          language: "zh",
+        },
+      },
+      catalog,
+      availabilitySnapshot,
+      semanticRequirement: {
+        operations: [],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+      },
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-split-missing-location",
+      },
+      revision: 1,
+      adapter: strictAdapter(splitGoalProposal),
+    });
+    expect(splitGoalClarification).toMatchObject({
+      ok: false,
+      code: "plan_invalid",
+      issues: [expect.objectContaining({
+        code: "arguments_invalid",
+        path: "/actions/0/arguments/name",
+      })],
+      proposal: expect.objectContaining({
+        decisionTrace: expect.arrayContaining([
+          "server_single_clause_capability_chain_normalized",
+          "server_same_source_capability_goals_coalesced",
+        ]),
+      }),
+    });
+  });
+
+  it("rejects an unrelated weather capability for a live stock-market request", async () => {
+    const search = genericCandidateDraft("mcp.weather.search_locations", {
+      executor: "mcp",
+      inputSchema: closedObject({ name: { type: "string" } }, ["name"]),
+      outputSchema: closedObject({ results: { type: "array", items: { type: "object" } } }, ["results"]),
+      mcpToolSchemaHash: `sha256:${"1".repeat(64)}`,
+      bindingDefinitionHash: `sha256:${"2".repeat(64)}`,
+      semantics: {
+        operations: ["search"],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+        domains: ["weather", "location"],
+        aliases: ["forecast", "天气", "地点搜索"],
+      },
+    });
+    const catalog = buildCapabilityCatalogV3([search, composerDraft()]);
+    const proposal: TurnPlanProposalV3 = {
+      protocolVersion: 3,
+      objective: "Answer the live stock-market question.",
+      goals: [{
+        id: "market-goal",
+        objective: "Read current stock-market information.",
+        sourcePointers: ["/currentMessage/text"],
+        sourceSpan: sourceSpanForTest("今天的股市情况如何", "今天的股市情况如何"),
+        strategy: "capability",
+        operation: "search",
+        semanticConfidence: 0.9,
+        generalEligibility: "not_allowed",
+        evidenceRequirement: {
+          kind: "current_external",
+          freshness: "live",
+          allowedSourceKinds: ["current_external"],
+          citationRequired: true,
+          minimumEvidenceCount: 1,
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "source_unavailable" },
+      }],
+      capabilitySelections: [{
+        id: "wrong-weather-tool",
+        capabilityKey: search.key,
+        capabilityVersion: search.version,
+        goalIds: ["market-goal"],
+        argumentsJson: JSON.stringify({ name: "的股市" }),
+      }],
+      decisionTrace: ["model_selected_weather_for_market"],
+    };
+    const result = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: {
+          id: "message-1",
+          text: "今天的股市情况如何",
+          language: "zh",
+        },
+      },
+      catalog,
+      availabilitySnapshot: readyAvailabilitySnapshot(catalog),
+      semanticRequirement: {
+        operations: [],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+      },
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-1",
+      },
+      revision: 1,
+      adapter: strictAdapter(proposal),
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "plan_invalid",
+      reason: "Planner selected no capability relevant to the current external-source request.",
+      issues: [expect.objectContaining({
+        code: "evidence_unsatisfied",
+        path: "/capabilitySelections",
+      })],
+      candidateSnapshotAudit: expect.objectContaining({ mode: "full_catalog" }),
+    });
+  });
+
+  it("uses a server-classified pending clarification as retrieval context while grounding the slot in the current message", async () => {
+    const search = genericCandidateDraft("mcp.weather.search_locations", {
+      executor: "mcp",
+      inputSchema: closedObject({ name: { type: "string" } }, ["name"]),
+      outputSchema: closedObject({
+        results: {
+          type: "array",
+          items: closedObject({
+            latitude: { type: "number" },
+            longitude: { type: "number" },
+          }, ["latitude", "longitude"]),
+        },
+      }, ["results"]),
+      mcpToolSchemaHash: `sha256:${"1".repeat(64)}`,
+      bindingDefinitionHash: `sha256:${"2".repeat(64)}`,
+      semantics: {
+        operations: ["search"],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+        domains: ["weather", "location"],
+        aliases: ["forecast", "天气", "地点"],
+      },
+    });
+    const forecast = genericCandidateDraft("mcp.weather.get_forecast", {
+      executor: "mcp",
+      inputSchema: closedObject({
+        latitude: { type: "number" },
+        longitude: { type: "number" },
+      }, ["latitude", "longitude"]),
+      outputSchema: closedObject({ weather: { type: "string" } }, ["weather"]),
+      mcpToolSchemaHash: `sha256:${"3".repeat(64)}`,
+      bindingDefinitionHash: `sha256:${"4".repeat(64)}`,
+      semantics: {
+        operations: ["read", "search"],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+        domains: ["weather"],
+        aliases: ["forecast", "天气"],
+      },
+    });
+    const catalog = buildCapabilityCatalogV3([search, forecast, composerDraft()]);
+    const proposal: TurnPlanProposalV3 = {
+      protocolVersion: 3,
+      objective: "查询今天的天气",
+      goals: [{
+        id: "weather-goal",
+        objective: "Resolve the supplied place for the pending weather request.",
+        sourcePointers: ["/activeTask", "/currentMessage/text"],
+        sourceSpan: sourceSpanForTest("深圳", "深圳"),
+        strategy: "capability",
+        operation: "search",
+        semanticConfidence: 0.99,
+        generalEligibility: "not_allowed",
+        evidenceRequirement: {
+          kind: "current_external",
+          freshness: "live",
+          allowedSourceKinds: ["current_external"],
+          citationRequired: true,
+          minimumEvidenceCount: 1,
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "weather_lookup_failed" },
+      }],
+      capabilitySelections: [{
+        id: "location-search",
+        capabilityKey: search.key,
+        capabilityVersion: search.version,
+        goalIds: ["weather-goal"],
+        argumentsJson: "{}",
+      }],
+      decisionTrace: ["pending_clarification_continuation"],
+    };
+    const result = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: { id: "message-2", text: "深圳", language: "zh" },
+        recentTurns: [{
+          id: "message-1",
+          direction: "inbound",
+          text: "今天天气如何",
+          createdAt: "2026-09-03T00:00:00.000Z",
+          trustClass: "untrusted_conversation_data",
+        }],
+        activeTask: {
+          kind: "pending_clarification",
+          objective: "查询今天的天气",
+          missingSlots: [{ id: "name", argumentPath: "/actions/0/arguments/name" }],
+          boundValues: { name: "深圳" },
+        },
+      },
+      catalog,
+      availabilitySnapshot: readyAvailabilitySnapshot(catalog),
+      semanticRequirement: {
+        operations: [],
+        evidenceClasses: ["current_external"],
+        freshnessClasses: ["live"],
+        authorityClasses: ["external_authoritative"],
+      },
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-2",
+      },
+      revision: 1,
+      requiredCapabilityPins: [search, forecast].map((definition) => ({
+        key: definition.key,
+        version: definition.version ?? "1",
+        definitionHash: catalog.capabilities.find((candidate) =>
+          candidate.key === definition.key)!.definitionHash,
+      })),
+      adapter: strictAdapter(proposal),
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) {
+      expect(result.plan.actions[0]?.arguments).toEqual({ name: "深圳" });
+      expect(result.plan.actions[0]?.argumentProvenance).toEqual({
+        name: { source: "user_message", pointer: "/currentMessage/text" },
+      });
+      expect(result.plan.actions.some((action) =>
+        action.capability.key === forecast.key)).toBe(true);
     }
   });
 
@@ -747,6 +1100,128 @@ describe("TurnPlan V3 planner", () => {
         path: "/actions/0/arguments/command",
       })],
     });
+  });
+
+  it("binds the full natural-language instruction for compute.exec v2", async () => {
+    const userText = "请在沙箱里计算 1 到 1000 之间的所有质数，并给出数量和前 20 个结果。";
+    const candidate = computeNaturalTaskCandidate();
+    const catalog = buildCapabilityCatalogV3([candidate, composerDraft()]);
+    const proposal: TurnPlanProposalV3 = {
+      protocolVersion: 3,
+      objective: "Run the requested self-contained calculation.",
+      goals: [{
+        id: "task-goal",
+        objective: "Run the requested self-contained calculation.",
+        sourcePointers: ["/currentMessage/text"],
+        sourceSpan: sourceSpanForTest(userText, userText),
+        strategy: "capability",
+        operation: "create",
+        semanticConfidence: 0.99,
+        generalEligibility: "not_allowed",
+        evidenceRequirement: {
+          kind: "capability_result",
+          freshness: "bounded",
+          allowedSourceKinds: ["capability_result"],
+          citationRequired: true,
+          minimumEvidenceCount: 1,
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "compute_failed" },
+      }],
+      capabilitySelections: [{
+        id: "natural-task",
+        capabilityKey: "compute.task",
+        capabilityVersion: "1",
+        goalIds: ["task-goal"],
+        argumentsJson: "{}",
+      }],
+      decisionTrace: ["self_contained_compute_requested"],
+    };
+    const result = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: { id: "message-1", text: userText, language: "zh" },
+      },
+      catalog,
+      availabilitySnapshot: readyAvailabilitySnapshot(catalog),
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-1",
+      },
+      revision: 1,
+      adapter: strictAdapter(proposal),
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) {
+      expect(result.plan.actions[0]?.arguments).toEqual({ instruction: userText });
+      expect(result.plan.actions[0]?.argumentProvenance).toEqual({
+        instruction: {
+          source: "user_message",
+          pointer: "/currentMessage/text",
+        },
+      });
+    }
+  });
+
+  it("accepts an answer goal backed by a self-contained compute task", async () => {
+    const userText = "请计算 1 到 200 之间所有质数的数量，并给出计算脚本";
+    const candidate = computeNaturalTaskCandidate();
+    const catalog = buildCapabilityCatalogV3([candidate, composerDraft()]);
+    const proposal: TurnPlanProposalV3 = {
+      protocolVersion: 3,
+      objective: "Calculate the requested result and return the script.",
+      goals: [{
+        id: "task-goal",
+        objective: "Calculate the requested result and return the script.",
+        sourcePointers: ["/currentMessage/text"],
+        sourceSpan: sourceSpanForTest(userText, userText),
+        strategy: "capability",
+        operation: "answer",
+        semanticConfidence: 0.99,
+        generalEligibility: "not_allowed",
+        evidenceRequirement: {
+          kind: "capability_result",
+          freshness: "bounded",
+          allowedSourceKinds: ["capability_result"],
+          citationRequired: true,
+          minimumEvidenceCount: 1,
+        },
+        failurePolicy: { strategy: "stop", reasonCode: "compute_failed" },
+      }],
+      capabilitySelections: [{
+        id: "natural-task",
+        capabilityKey: "compute.task",
+        capabilityVersion: "1",
+        goalIds: ["task-goal"],
+        argumentsJson: "{}",
+      }],
+      decisionTrace: ["self_contained_compute_requested"],
+    };
+    const result = await planTurnV3({
+      envelope: {
+        ...envelope(),
+        currentMessage: { id: "message-1", text: userText, language: "zh" },
+      },
+      catalog,
+      availabilitySnapshot: readyAvailabilitySnapshot(catalog),
+      scopeKey: {
+        kind: "generation_turn",
+        conversationId: "conversation-1",
+        inputMessageId: "message-1",
+      },
+      revision: 1,
+      adapter: strictAdapter(proposal),
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    if (result.ok) {
+      expect(result.plan.goals[0]?.operation).toBe("answer");
+      expect(result.plan.actions[0]).toMatchObject({
+        capability: { key: "compute.task", version: "1" },
+        arguments: { instruction: userText },
+      });
+    }
   });
 
   it("never silently chooses the first repository when multiple locators are present", async () => {
@@ -3433,6 +3908,32 @@ function computeExecCandidate(): CapabilityDefinitionDraftV3 {
       authorityClasses: ["general"],
       domains: ["compute", "exec"],
       aliases: ["compute", "exec"],
+    },
+  });
+}
+
+function computeNaturalTaskCandidate(): CapabilityDefinitionDraftV3 {
+  return genericCandidateDraft("compute.task", {
+    version: "1",
+    executor: "compute",
+    inputSchema: closedObject({ instruction: { type: "string" } }, ["instruction"]),
+    outputSchema: closedObject({
+      exitCode: { type: "number" },
+      artifactRefs: { type: "array", items: { type: "string" } },
+    }, ["exitCode", "artifactRefs"]),
+    effect: {
+      boundary: "internal",
+      mutation: "write",
+      reversibility: "not_applicable",
+    },
+    idempotency: "requires_key",
+    semantics: {
+      operations: ["answer", "create"],
+      evidenceClasses: ["capability_result"],
+      freshnessClasses: ["bounded"],
+      authorityClasses: ["general"],
+      domains: ["self-contained computation"],
+      aliases: ["calculate", "analyze", "计算", "分析"],
     },
   });
 }

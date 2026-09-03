@@ -1,7 +1,16 @@
-import type { CapabilityKind, ToolExecutionRequest } from "@delegate/compute-protocol";
+import { createHash } from "node:crypto";
+
+import type {
+  CapabilityKind,
+  CompiledSandboxTaskMetadata,
+  ToolExecutionRequest,
+} from "@delegate/compute-protocol";
+
+export type { CompiledSandboxTaskMetadata } from "@delegate/compute-protocol";
 
 export type ParsedComputeRequest = Omit<ToolExecutionRequest, "subagentId"> & {
   displayTarget: string;
+  compiledTask?: CompiledSandboxTaskMetadata;
 };
 
 export type ComputeDirectiveResult =
@@ -230,6 +239,15 @@ export function readPersistedDelegationStepRequest(value: unknown): ParsedComput
     typeof record.bindingId !== "string" &&
     typeof record.bindingSlug !== "string"
   ) return null;
+  const compiledTask = readCompiledSandboxTaskMetadata(record.compiledTask);
+  if (typeof record.compiledTask !== "undefined" && !compiledTask) return null;
+  if (
+    compiledTask
+    && (
+      typeof record.command !== "string"
+      || !compiledTaskCommandMatches(record.command, compiledTask)
+    )
+  ) return null;
   const { estimatedCostCents: legacyEstimatedCostCents, ...persisted } = record;
   const estimatedTokens = typeof record.estimatedTokens === "number"
     ? record.estimatedTokens
@@ -245,7 +263,64 @@ export function readPersistedDelegationStepRequest(value: unknown): ParsedComput
     browserMode: record.browserMode === "native" ? "native" : "deterministic",
     maxSteps: typeof record.maxSteps === "number" ? Math.max(1, Math.min(8, Math.floor(record.maxSteps))) : 1,
     allowMutations: record.allowMutations === true,
+    ...(compiledTask ? { compiledTask } : {}),
   } as ParsedComputeRequest;
+}
+
+function readCompiledSandboxTaskMetadata(value: unknown): CompiledSandboxTaskMetadata | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  return record.compilerVersion === "sandbox-task-compiler.v1"
+    && typeof record.instructionHash === "string"
+    && /^[a-f0-9]{64}$/u.test(record.instructionHash)
+    && typeof record.codeHash === "string"
+    && /^[a-f0-9]{64}$/u.test(record.codeHash)
+    && record.riskClass === "self_contained_compute"
+    && (
+      typeof record.compilerProvider === "undefined"
+      || (
+        typeof record.compilerProvider === "string"
+        && record.compilerProvider.length >= 1
+        && record.compilerProvider.length <= 120
+      )
+    )
+    && (
+      typeof record.compilerModel === "undefined"
+      || (
+        typeof record.compilerModel === "string"
+        && record.compilerModel.length >= 1
+        && record.compilerModel.length <= 200
+      )
+    )
+    ? {
+        compilerVersion: record.compilerVersion,
+        instructionHash: record.instructionHash,
+        codeHash: record.codeHash,
+        riskClass: record.riskClass,
+        ...(typeof record.compilerProvider === "string"
+          ? { compilerProvider: record.compilerProvider }
+          : {}),
+        ...(typeof record.compilerModel === "string"
+          ? { compilerModel: record.compilerModel }
+          : {}),
+      }
+    : null;
+}
+
+function compiledTaskCommandMatches(
+  command: string,
+  metadata: CompiledSandboxTaskMetadata,
+) {
+  const match = command.match(
+    /^python -c "exec\(__import__\('base64'\)\.b64decode\('([A-Za-z0-9+/]+={0,2})'\)\.decode\('utf-8'\)\)"$/u,
+  );
+  if (!match?.[1]) return false;
+  try {
+    const code = Buffer.from(match[1], "base64").toString("utf8");
+    return createHash("sha256").update(code, "utf8").digest("hex") === metadata.codeHash;
+  } catch {
+    return false;
+  }
 }
 
 export function formatComputeUsageExamples() {

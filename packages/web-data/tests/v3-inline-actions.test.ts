@@ -203,8 +203,45 @@ describe("V3 inline ActionResult fence", () => {
     expect(mocks.memoryUpdateMany).not.toHaveBeenCalled();
   });
 
-  it("preserves a CALL_STARTED local failure as an unknown outcome", async () => {
+  it("terminally fails a CALL_STARTED read-only inline action", async () => {
     mocks.attemptFindUnique.mockResolvedValue(buildAttempt("plan-1"));
+    mocks.attemptUpdateMany.mockResolvedValue({ count: 1 });
+    mocks.attemptCount.mockResolvedValue(0);
+    mocks.actionUpdateMany
+      .mockResolvedValueOnce({ count: 1 })
+      .mockResolvedValueOnce({ count: 0 });
+    mocks.planUpdateMany.mockResolvedValue({ count: 1 });
+    mocks.outboxUpdateMany.mockResolvedValue({ count: 1 });
+    mocks.memoryUpdateMany.mockResolvedValue({ count: 1 });
+    const { failV3InlinePlanExecution } = await import("../src/v3-inline-actions");
+
+    await expect(failV3InlinePlanExecution({
+      executionAttemptId: "attempt-1",
+      expectedExecutionLeaseToken: "inline-lease-1",
+      reasonCode: "composer_validation_failed",
+    })).resolves.toMatchObject({
+      attemptsClosed: 1,
+      actionsFailed: 1,
+      planFailed: true,
+      reconciliationRequired: false,
+    });
+    expect(mocks.attemptUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        attemptPhase: "FINISHED",
+        transportOutcome: "transport_failed",
+        semanticOutcome: "failed",
+      }),
+    }));
+    expect(mocks.planUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "FAILED" }),
+    }));
+    expect(mocks.billableUnitUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("preserves a CALL_STARTED side-effecting failure as an unknown outcome", async () => {
+    mocks.attemptFindUnique.mockResolvedValue(
+      buildAttempt("plan-1", "CALL_STARTED", "EXTERNAL_REVERSIBLE"),
+    );
     mocks.attemptUpdateMany.mockResolvedValue({ count: 1 });
     mocks.actionUpdateMany.mockResolvedValue({ count: 1 });
     mocks.outboxUpdateMany.mockResolvedValue({ count: 1 });
@@ -242,6 +279,7 @@ describe("V3 inline ActionResult fence", () => {
 function buildAttempt(
   activePlanId: string,
   attemptPhase = "CALL_STARTED",
+  sideEffectClass = "NONE",
 ) {
   return {
     id: "attempt-1",
@@ -255,6 +293,7 @@ function buildAttempt(
     planAction: {
       id: "action-1",
       status: "EXECUTING",
+      sideEffectClass,
       expectedOutputSchema: {
         type: "object",
         properties: { value: { type: "string" } },

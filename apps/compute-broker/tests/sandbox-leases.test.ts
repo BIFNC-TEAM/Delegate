@@ -74,18 +74,30 @@ describe("ensureUserSandboxLease", () => {
   });
 
   it("uses the representative/contact/conversation scope and creates one running lease", async () => {
-    const provider = buildProvider();
+    const provider = buildProvider("daytona");
+    const identity = buildIdentity({ provider: "DAYTONA" });
+    mockPrisma.sandboxIdentity.findUniqueOrThrow.mockResolvedValue(identity);
+    mockPrisma.sandboxIdentity.update.mockResolvedValue(identity);
+    mockPrisma.sandboxLease.create.mockResolvedValue(buildLease({
+      status: "STARTING",
+      provider: "DAYTONA",
+    }));
+    mockPrisma.sandboxLease.findUniqueOrThrow.mockResolvedValue(buildLease({
+      status: "RUNNING",
+      provider: "DAYTONA",
+    }));
     const { ensureUserSandboxLease } = await import("../src/sandbox-leases");
 
     const result = await ensureUserSandboxLease({
       session: buildSession(),
-      networkMode: "no_network",
+      networkMode: "allowlist",
+      networkAllowlist: ["example.com", "10.0.0.0/8", "example.com"],
       filesystemMode: "ephemeral_full",
       hostWorkspaceRoot: "/workspace",
       providerFactory: async () => provider,
       selectProviderForNewIdentity: async () => ({
-        providerKind: "docker",
-        decisionSource: "legacy",
+        providerKind: "daytona",
+        decisionSource: "default",
       }),
       idleStopMinutes: 15,
     });
@@ -96,14 +108,16 @@ describe("ensureUserSandboxLease", () => {
           contactId: "contact-1",
           scopeKey: "conversation:conversation-1",
         audienceIdentityId: "audience-identity-1",
-        provider: "DOCKER",
+        provider: "DAYTONA",
       })],
       skipDuplicates: true,
     });
     expect(mockPrisma.sandboxLease.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         sandboxIdentityId: "identity-1",
-        provider: "DOCKER",
+        provider: "DAYTONA",
+        networkAllowlist: ["10.0.0.0/8", "example.com"],
+        networkPolicyHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
         status: "STARTING",
       }),
     });
@@ -111,6 +125,7 @@ describe("ensureUserSandboxLease", () => {
       sandboxIdentityId: "identity-1",
       sandboxLeaseId: "lease-1",
       sessionId: "session-1",
+      networkAllowlist: ["10.0.0.0/8", "example.com"],
     }));
     expect(mockPrisma.computeSession.update).toHaveBeenCalledWith({
       where: { id: "session-1" },
@@ -122,6 +137,29 @@ describe("ensureUserSandboxLease", () => {
     });
     expect(result.identity.id).toBe("identity-1");
     expect(result.lease.status).toBe("RUNNING");
+  });
+
+  it("derives a stable network policy hash independent of allowlist order", async () => {
+    const {
+      buildSandboxNetworkPolicyHash,
+      normalizeSandboxNetworkAllowlist,
+    } = await import("../src/sandbox-leases");
+    expect(normalizeSandboxNetworkAllowlist(["example.com", " 10.0.0.0/8 ", "example.com"]))
+      .toEqual(["10.0.0.0/8", "example.com"]);
+    expect(buildSandboxNetworkPolicyHash("allowlist", ["example.com", "10.0.0.0/8"]))
+      .toBe(buildSandboxNetworkPolicyHash("allowlist", ["10.0.0.0/8", "example.com"]));
+    expect(buildSandboxNetworkPolicyHash("full", []))
+      .not.toBe(buildSandboxNetworkPolicyHash("no_network", []));
+  });
+
+  it("blocks historical Docker pins from production execution but not cleanup environments", async () => {
+    const { assertStoredSandboxProviderExecutable } = await import("../src/sandbox-leases");
+    expect(() => assertStoredSandboxProviderExecutable("docker", "production"))
+      .toThrow("sandbox_provider_migration_required");
+    expect(() => assertStoredSandboxProviderExecutable("docker", "development"))
+      .not.toThrow();
+    expect(() => assertStoredSandboxProviderExecutable("daytona", "production"))
+      .not.toThrow();
   });
 
   it("restarts a stopped lease without creating a second identity", async () => {
@@ -197,7 +235,7 @@ describe("ensureUserSandboxLease", () => {
     mockPrisma.sandboxIdentity.createMany.mockResolvedValue({ count: 0 });
     mockPrisma.sandboxLease.findFirst.mockResolvedValue(runningLease);
     mockPrisma.sandboxLease.update.mockResolvedValue(runningLease);
-    const provider = { ...buildProvider(), kind: "daytona" as const };
+    const provider = buildProvider("daytona");
     const selectProviderForNewIdentity = vi.fn(async () => ({
       providerKind: "tencent" as const,
       decisionSource: "manual_override" as const,
@@ -328,18 +366,18 @@ describe("ensureUserSandboxLease", () => {
   });
 });
 
-function buildProvider() {
+function buildProvider(kind: "docker" | "daytona" = "docker") {
   return {
-    kind: "docker" as const,
+    kind,
     start: vi.fn(async () => ({
-      runnerType: "docker" as const,
+      runnerType: kind === "docker" ? "docker" as const : "vm" as const,
       id: "lease-1",
-      provider: "docker" as const,
+      provider: kind,
       leaseId: "provider-lease-1",
       providerSandboxId: "provider-sandbox-1",
       containerId: "container-1",
       containerName: "container-1",
-      sessionRoot: "/delegate-session",
+      sessionRoot: kind === "docker" ? "/delegate-session" : "/workspace",
     })),
     execute: vi.fn(),
     stop: vi.fn(async () => undefined),

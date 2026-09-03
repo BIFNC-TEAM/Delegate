@@ -11,6 +11,9 @@ const {
     computeSession: {
       update: vi.fn(),
     },
+    sandboxLease: {
+      findUnique: vi.fn(),
+    },
     eventAudit: {
       create: vi.fn(),
     },
@@ -53,6 +56,7 @@ describe("compute session sandbox path", () => {
     vi.clearAllMocks();
     vi.resetModules();
     process.env.COMPUTE_BROKER_INTERNAL_TOKEN = "test-internal-token";
+    process.env.NODE_ENV = "test";
     mockAcquireRunnerLease.mockResolvedValue({
       runnerType: "docker",
       leaseId: "runner-lease-1",
@@ -111,19 +115,20 @@ describe("compute session sandbox path", () => {
     expect(updated.sandboxLeaseId).toBe("sandbox-lease-1");
   });
 
-  it("keeps the legacy per-session runner path when no contact identity exists", async () => {
+  it("fails closed instead of acquiring Docker when no contact identity exists", async () => {
     const { ensureComputeSessionLease } = await import("../src/leases");
 
-    await ensureComputeSessionLease({
+    await expect(ensureComputeSessionLease({
       session: buildSession({ contactId: null }),
       networkMode: "no_network",
       filesystemMode: "ephemeral_full",
+    })).rejects.toMatchObject({
+      message: "cloud_sandbox_contact_required",
+      statusCode: 409,
     });
 
     expect(mockEnsureUserSandboxLease).not.toHaveBeenCalled();
-    expect(mockAcquireRunnerLease).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: "session-1",
-    }));
+    expect(mockAcquireRunnerLease).not.toHaveBeenCalled();
   });
 
   it("stops the sandbox lease when a sandbox-backed compute session is released", async () => {
@@ -148,6 +153,37 @@ describe("compute session sandbox path", () => {
         leaseStatus: "RELEASED",
         containerId: null,
       }),
+    });
+  });
+
+  it("blocks a ready direct-Docker session in production", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.SANDBOX_PROVIDER = "tencent";
+    process.env.SANDBOX_ROUTING_MODE = "manual_poc";
+    process.env.SANDBOX_PROVIDER_ROUTING_JSON = JSON.stringify({
+      version: 1,
+      default: "tencent",
+      newIdentityEnabled: { docker: false, daytona: false, tencent: true },
+      phase1AllowedRepresentativeIds: [],
+      representatives: {},
+    });
+    process.env.TENCENT_AGS_API_KEY = "test-key";
+    process.env.TENCENT_AGS_REGION = "ap-guangzhou";
+    process.env.TENCENT_AGS_CODE_TOOL = "delegate-code-v1";
+    const { ensureComputeSessionLease } = await import("../src/leases");
+
+    await expect(ensureComputeSessionLease({
+      session: {
+        ...buildSession({ contactId: "contact-1" }),
+        leaseStatus: "READY",
+        runnerLeaseId: "legacy-docker-lease",
+        containerId: "legacy-container",
+      },
+      networkMode: "no_network",
+      filesystemMode: "ephemeral_full",
+    })).rejects.toMatchObject({
+      message: "sandbox_provider_migration_required",
+      statusCode: 409,
     });
   });
 });

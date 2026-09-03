@@ -49,4 +49,10 @@ describe("per-user sandbox schema", () => {
     expect(block).toContain("SandboxProviderOperationState");
     expect(block).toContain("@@unique([sandboxLeaseId, attemptNumber, operation])");
   });
+
+  it("pins the normalized network policy on every sandbox lease", () => {
+    const block = modelBlock("SandboxLease");
+    expect(block).toMatch(/\bnetworkAllowlist\s+String\[\]/u);
+    expect(block).toMatch(/\bnetworkPolicyHash\s+String/u);
+  });
 });

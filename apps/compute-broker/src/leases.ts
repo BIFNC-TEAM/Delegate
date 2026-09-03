@@ -3,7 +3,7 @@ import type { ComputeSession } from "@prisma/client";
 
 import { computeBrokerConfig } from "./config";
 import { prisma } from "./prisma";
-import { acquireRunnerLease, releaseRunnerLease } from "./runner";
+import { releaseRunnerLease } from "./runner";
 import {
   createConfiguredProviderRegistry,
   ensureUserSandboxLease,
@@ -11,12 +11,14 @@ import {
 } from "./sandbox-leases";
 import { resolveProviderForNewIdentity } from "./sandbox-routing";
 import { mapLeaseStatusFromDb, mapRunnerTypeFromDb } from "./serializers";
+import { SessionError } from "./session-error";
 
 type LeaseManagedSession = ComputeSession;
 
 export async function ensureComputeSessionLease(params: {
   session: LeaseManagedSession;
   networkMode: ComputeNetworkMode;
+  networkAllowlist?: readonly string[] | undefined;
   filesystemMode: ComputeFilesystemMode;
 }) {
   if (
@@ -24,58 +26,34 @@ export async function ensureComputeSessionLease(params: {
     params.session.runnerLeaseId &&
     params.session.containerId
   ) {
+    await assertReadyComputeSessionUsesCloudProvider(params.session);
     return params.session;
   }
 
-  if (params.session.contactId) {
-    return ensureSandboxBackedComputeSessionLease(params);
+  if (!params.session.contactId) {
+    throw new SessionError(409, "cloud_sandbox_contact_required");
   }
+  return ensureSandboxBackedComputeSessionLease(params);
+}
 
-  const now = new Date();
-  const lease = await acquireRunnerLease({
-    runnerType: mapRunnerTypeFromDb(params.session.runnerType),
-    image: params.session.baseImage,
-    hostWorkspaceRoot: computeBrokerConfig.hostWorkspaceRoot,
-    networkMode: params.networkMode,
-    filesystemMode: params.filesystemMode,
-    sessionId: params.session.id,
+async function assertReadyComputeSessionUsesCloudProvider(session: LeaseManagedSession) {
+  if (computeBrokerConfig.nodeEnv !== "production") return;
+  if (!session.sandboxLeaseId) {
+    throw new SessionError(409, "sandbox_provider_migration_required");
+  }
+  const lease = await prisma.sandboxLease.findUnique({
+    where: { id: session.sandboxLeaseId },
+    select: { provider: true },
   });
-
-  const updated = await prisma.computeSession.update({
-    where: { id: params.session.id },
-    data: {
-      status:
-        params.session.status === "RUNNING" ? "RUNNING" : params.session.status === "COMPLETED" ? "COMPLETED" : "IDLE",
-      leaseStatus: "READY",
-      runnerLeaseId: lease.leaseId,
-      containerId: lease.containerId,
-      leaseAcquiredAt: params.session.leaseAcquiredAt ?? now,
-      lastHeartbeatAt: now,
-      failureReason: null,
-    },
-  });
-
-  await prisma.eventAudit.create({
-    data: {
-      representativeId: params.session.representativeId,
-      contactId: params.session.contactId ?? null,
-      conversationId: params.session.conversationId ?? null,
-      type: "COMPUTE_SESSION_STARTED",
-      payload: {
-        sessionId: params.session.id,
-        leaseId: lease.leaseId,
-        containerId: lease.containerId,
-        runnerType: lease.runnerType,
-      },
-    },
-  });
-
-  return updated;
+  if (!lease || lease.provider === "DOCKER") {
+    throw new SessionError(409, "sandbox_provider_migration_required");
+  }
 }
 
 async function ensureSandboxBackedComputeSessionLease(params: {
   session: LeaseManagedSession;
   networkMode: ComputeNetworkMode;
+  networkAllowlist?: readonly string[] | undefined;
   filesystemMode: ComputeFilesystemMode;
 }) {
   const now = new Date();
@@ -83,6 +61,7 @@ async function ensureSandboxBackedComputeSessionLease(params: {
   const sandbox = await ensureUserSandboxLease({
     session: params.session,
     networkMode: params.networkMode,
+    networkAllowlist: params.networkAllowlist,
     filesystemMode: params.filesystemMode,
     hostWorkspaceRoot: computeBrokerConfig.hostWorkspaceRoot,
     providerFactory: (providerKind) => providerRegistry.create(providerKind),

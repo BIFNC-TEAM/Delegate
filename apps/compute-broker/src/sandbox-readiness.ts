@@ -2,6 +2,7 @@ import { computeBrokerConfig } from "./config";
 import { prisma } from "./prisma";
 import { createConfiguredProviderRegistry } from "./sandbox-leases";
 import {
+  cloudSandboxProviderKinds,
   validateSandboxRoutingRepresentatives,
   type SandboxProviderKind,
 } from "./sandbox-routing";
@@ -76,7 +77,7 @@ async function loadSandboxReadinessSnapshot(): Promise<SandboxReadinessSnapshot>
         reasons.push(error instanceof Error ? error.message : "sandbox_routing_representative_invalid");
       }
 
-      for (const provider of ["docker", "daytona", "tencent"] as const) {
+      for (const provider of cloudSandboxProviderKinds) {
         if (routing.document.newIdentityEnabled[provider] && !registry.configured(provider)) {
           reasons.push(`new_identity_provider_unavailable:${provider}`);
         }
@@ -84,7 +85,7 @@ async function loadSandboxReadinessSnapshot(): Promise<SandboxReadinessSnapshot>
     }
   }
 
-  const configuredProviders = (["docker", "daytona", "tencent"] as const)
+  const configuredProviders = cloudSandboxProviderKinds
     .filter((provider) => registry.configured(provider));
   return {
     status: reasons.length ? "degraded" : "ready",

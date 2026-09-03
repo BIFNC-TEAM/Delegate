@@ -69,15 +69,18 @@ describe("purchased handoff entitlements", () => {
   });
 
   it("summarizes limited and unlimited active grants", async () => {
+    const paidAt = new Date(Date.now() - 60_000);
     const client = new FakeHandoffEntitlementClient([
       paidServiceOrder({
         id: "recharge_standard",
+        paidAt,
         allowance: "LIMITED",
         units: 2,
         serviceLevel: "STANDARD",
       }),
       paidServiceOrder({
         id: "recharge_unlimited",
+        paidAt,
         allowance: "UNLIMITED",
         units: null,
         serviceLevel: "PRIORITY",

@@ -96,13 +96,6 @@ export async function createComputeSession(rawInput: unknown) {
       throw new SessionError(403, `capability_not_granted_by_published_version:${capability}`);
     }
   }
-  if (
-    computeBrokerConfig.sandboxRoutingMode === "manual_poc" &&
-    input.requestedCapabilities.includes("browser")
-  ) {
-    throw new SessionError(409, "sandbox_runtime_class_not_enabled");
-  }
-
   const defaultPolicyProfile = representative.capabilityProfiles[0];
   const defaultPolicyProfileId = defaultPolicyProfile?.id;
   if (!defaultPolicyProfileId || !defaultPolicyProfile) {

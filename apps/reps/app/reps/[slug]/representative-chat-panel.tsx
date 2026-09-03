@@ -1184,6 +1184,7 @@ export function RepresentativeChatPanel(props: {
                       <p>{message.text}</p>
                   {message.role === "assistant"
                     && message.sourceDisclosure
+                    && !hasInlineAnswerSourceDisclosure(message.text)
                     && !isOperator ? (
                     <small className="representative-answer-source-disclosure">
                       {message.sourceDisclosure === "same_conversation"
@@ -1986,6 +1987,10 @@ function formatAttachmentBytes(value: number | undefined) {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function hasInlineAnswerSourceDisclosure(value: string) {
+  return /(?:^|\n)(?:来源说明：|Source note:)/iu.test(value);
 }
 
 function getComputeAssist(value: string, locale: "zh" | "en", enabled: boolean) {

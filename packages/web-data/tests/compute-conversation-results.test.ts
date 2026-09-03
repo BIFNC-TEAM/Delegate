@@ -35,6 +35,17 @@ describe("compute conversation results", () => {
     expect(text).not.toContain("token=secret");
   });
 
+  it("renders a useful public recovery message for structured external-tool errors", () => {
+    const text = formatComputeOutcome({
+      outcome: "failed",
+      failureReason: "external_tool_error_result",
+    });
+
+    expect(text).toContain("外部数据服务返回了错误");
+    expect(text).toContain("请稍后重试");
+    expect(text).not.toContain("external_tool_error_result");
+  });
+
   it("sanitizes legacy compute result messages when serving public conversation history", () => {
     const text = renderPublicConversationMessageText({
       text: "审批已通过，委托任务执行完成。\n\nfile: /workspace/outputs/report.md: # 私有正文",

@@ -14,6 +14,12 @@ import {
   isNaturalLanguageComputePlanGrounded,
   parseNaturalLanguageComputePlan,
 } from "./compute-planner";
+import {
+  buildSandboxTaskCompilerPrompt,
+  compileSandboxTaskProposal,
+  parseSandboxTaskCompilerProposal,
+  type SandboxTaskCompilerResult,
+} from "./sandbox-task-compiler";
 import type {
   ModelProvider,
   NaturalLanguageComputePlannerResult,
@@ -29,7 +35,63 @@ export * from "./types";
 export * from "./turn-planner";
 export * from "./turn-planner-v3";
 export * from "./turn-composer-v3";
+export * from "./turn-source-requirements-v3";
+export * from "./pending-clarification";
 export * from "./managed-document";
+export * from "./sandbox-task-compiler";
+
+export async function compileNaturalLanguageSandboxTask(params: {
+  instruction: string;
+  maxCodeBytes?: number;
+}): Promise<SandboxTaskCompilerResult> {
+  const env = resolveModelRuntimeEnv();
+  if (env.state !== "ready") {
+    return {
+      ok: false,
+      reason: `Sandbox task compiler unavailable: ${env.state}.`,
+      state: env.state,
+    };
+  }
+  const attemptOrder = resolveProviderAttemptOrder(env);
+  if (!attemptOrder.length) {
+    return {
+      ok: false,
+      reason: "Sandbox task compiler has no credentialed model provider.",
+      state: "missing_credentials",
+    };
+  }
+  const prompt = buildSandboxTaskCompilerPrompt(
+    params.instruction,
+    params.maxCodeBytes,
+  );
+  for (const provider of attemptOrder) {
+    try {
+      const response = await generateProviderResponse(provider, env, prompt);
+      const proposal = parseSandboxTaskCompilerProposal(
+        response.replyText,
+        params.maxCodeBytes,
+      );
+      return {
+        ok: true,
+        task: compileSandboxTaskProposal({
+          instruction: params.instruction,
+          proposal,
+        }),
+        ...(!proposal.needsExecution ? { reason: proposal.reason } : {}),
+        provider,
+        model: resolveProviderModel(provider, env),
+      };
+    } catch {
+      // Try only the already configured provider fallback chain. Compiler
+      // failures never fall back to a deterministic or unvalidated command.
+    }
+  }
+  return {
+    ok: false,
+    reason: "Sandbox task compiler failed strict generation or validation.",
+    state: "ready",
+  };
+}
 
 export async function planNaturalLanguageComputeRequest(params: {
   userText: string;

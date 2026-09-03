@@ -372,6 +372,11 @@ export async function planTurnV3(input: {
   planId?: string;
   topK?: number;
   validationPolicyVersion?: string;
+  requiredCapabilityPins?: Array<{
+    key: string;
+    version: string;
+    definitionHash: string;
+  }>;
 }): Promise<TurnPlannerV3Result> {
   const planId = input.planId ?? randomUUID();
   const candidateSnapshot = retrieveCapabilityCandidatesV3({
@@ -411,7 +416,28 @@ export async function planTurnV3(input: {
       : {}),
     ...(input.knowledgeProbe ? { knowledgeProbe: input.knowledgeProbe } : {}),
   });
-  const requiredCapabilityKeys: string[] = [];
+  const requiredCapabilityPins = input.requiredCapabilityPins ?? [];
+  const missingRequiredPin = requiredCapabilityPins.find((pin) =>
+    !selectedCapabilities.some((definition) =>
+      definition.key === pin.key
+      && definition.version === pin.version
+      && definition.definitionHash === pin.definitionHash));
+  if (missingRequiredPin) {
+    return {
+      ok: false,
+      code: "plan_invalid",
+      reason: "A capability pinned by the pending clarification is no longer available.",
+      issues: [{
+        code: "capability_unknown",
+        path: "/capabilitySelections",
+        message: `Pinned capability ${missingRequiredPin.key}@${missingRequiredPin.version} is unavailable or changed.`,
+      }],
+      candidateSnapshotAudit: candidateSnapshot,
+    };
+  }
+  const requiredCapabilityKeys = [...new Set(
+    requiredCapabilityPins.map((pin) => pin.key),
+  )];
   const adapters = input.adapter
     ? { ok: true as const, adapters: [input.adapter] }
     : createConfiguredPlannerAdapters();
@@ -542,6 +568,48 @@ export async function planTurnV3(input: {
           code: "evidence_unsatisfied",
           path: serverRequirementIssue.path,
           message: serverRequirementIssue.message,
+        }],
+        proposal: normalizedProposal,
+        provider: adapter.provider,
+        model: adapter.model,
+      });
+      continue;
+    }
+    const semanticRequirementIssue = findSemanticRequirementViolationV3(
+      normalizedProposal,
+      input.semanticRequirement,
+    );
+    if (semanticRequirementIssue) {
+      failures.push({
+        ok: false,
+        code: "plan_invalid",
+        reason: "Planner proposal weakens the inferred source requirement.",
+        issues: [{
+          code: "evidence_unsatisfied",
+          path: semanticRequirementIssue.path,
+          message: semanticRequirementIssue.message,
+        }],
+        proposal: normalizedProposal,
+        provider: adapter.provider,
+        model: adapter.model,
+      });
+      continue;
+    }
+    const selectionRelevanceIssue = findExternalSelectionRelevanceIssueV3({
+      proposal: normalizedProposal,
+      candidateSnapshot,
+      selectedCapabilities,
+      semanticRequirement: input.semanticRequirement,
+    });
+    if (selectionRelevanceIssue) {
+      failures.push({
+        ok: false,
+        code: "plan_invalid",
+        reason: "Planner selected no capability relevant to the current external-source request.",
+        issues: [{
+          code: "evidence_unsatisfied",
+          path: selectionRelevanceIssue.path,
+          message: selectionRelevanceIssue.message,
         }],
         proposal: normalizedProposal,
         provider: adapter.provider,
@@ -982,6 +1050,7 @@ export function buildTurnPlannerV3Prompt(input: {
       "Select business capabilities in capabilitySelections and associate each selection with goalIds.",
       "Do not select response.compose. The server always creates the single composer, its dependencies, and the message deliverable.",
       "argumentsJson must be a valid JSON object string containing exact argument candidates grounded in the supplied envelope. Populate simple scalar entities such as a place/name when they are an exact substring of the user message; use {} only for full-message fields, server defaults, or values produced by another selected Action.",
+      "When envelope.activeTask.kind is pending_clarification, preserve its objective and use only the current message to supply its declared missing slots. Do not treat the short reply as an unrelated standalone objective unless the server has already classified it as replacement.",
       "Do not propose Action ids, dependencies, activation, provenance, completion criteria, failure actions, or deliverables; the server owns them.",
       "Current, external, or transactional facts require live evidence and cannot use stable general knowledge.",
       "Honor envelope.turnConstraints for this turn only. forbidden permits only stable general or control response.compose work; required must include at least one non-composer capability unless a control clarification is required before execution; conflict must produce a control response without executing tools.",
@@ -1477,6 +1546,25 @@ function bindRequiredArgument(
   provenance: { source: "user_message" | "server_state"; pointer: string };
 } | null {
   const text = envelope.currentMessage.text;
+  const activeTask = asSchemaRecord(envelope.activeTask);
+  const activeTaskValues = activeTask?.kind === "pending_clarification"
+    ? asSchemaRecord(activeTask.boundValues)
+    : null;
+  if (
+    activeTaskValues
+    && Object.hasOwn(activeTaskValues, key)
+    && isGroundedArgumentCandidate(activeTaskValues[key], text)
+    && validateJsonSchemaValue(
+      activeTaskValues[key],
+      asSchemaRecord(schema) ?? {},
+      `/activeTask/boundValues/${escapeJsonPointerV3(key)}`,
+    ).length === 0
+  ) {
+    return {
+      value: activeTaskValues[key],
+      provenance: { source: "user_message", pointer: "/currentMessage/text" },
+    };
+  }
   if (key === "command") {
     const command = extractExplicitCommandV3(text);
     if (command) {
@@ -2922,6 +3010,41 @@ function normalizeSelectedCapabilityGoalsV3(
   });
 }
 
+function normalizeSelectedCapabilityCoordinatesV3(
+  proposal: TurnPlanProposalV3,
+  selectedCapabilities: CapabilityDefinitionV3[],
+): TurnPlanProposalV3 {
+  const definitionsByKey = new Map<string, CapabilityDefinitionV3[]>();
+  for (const definition of selectedCapabilities) {
+    const existing = definitionsByKey.get(definition.key) ?? [];
+    existing.push(definition);
+    definitionsByKey.set(definition.key, existing);
+  }
+  let changed = false;
+  const capabilitySelections = proposal.capabilitySelections.map((selection) => {
+    if (selection.capabilityKey === "response.compose") return selection;
+    const definitions = definitionsByKey.get(selection.capabilityKey) ?? [];
+    if (definitions.length !== 1) return selection;
+    const definition = definitions[0]!;
+    if (selection.capabilityVersion === definition.version) return selection;
+    changed = true;
+    return {
+      ...selection,
+      capabilityVersion: definition.version,
+    };
+  });
+  return turnPlanProposalV3Schema.parse({
+    ...proposal,
+    capabilitySelections,
+    decisionTrace: changed
+      ? [...new Set([
+          ...proposal.decisionTrace,
+          "server_capability_coordinate_normalized",
+        ])]
+      : proposal.decisionTrace,
+  });
+}
+
 function requiresExclusiveAuthorizedKnowledgeV3(value: string) {
   const normalized = value.normalize("NFKC").toLocaleLowerCase();
   return /(?:只能|仅能|仅可|必须|务必).{0,24}(?:依据|根据|使用|引用|来自)?.{0,16}(?:知识库|已授权知识|资料|文档|来源)|(?:只|仅).{0,8}(?:依据|根据|使用|引用).{0,16}(?:知识库|资料|文档|来源)|(?:未命中|查不到|找不到|没有资料).{0,20}(?:不要|别|禁止|无需).{0,8}(?:回答|猜测|推断)|(?:不要|禁止).{0,12}(?:通用模型|模型知识|自行猜测|猜测)|(?:only|must)\s+(?:use|rely\s+on|cite).{0,48}(?:knowledge|document|source|authorized)|(?:do\s+not|don'?t)\s+(?:answer|guess|infer).{0,48}(?:not\s+found|no\s+(?:knowledge|document|source))/iu
@@ -3144,8 +3267,22 @@ function normalizeProposalForServerRequirementV3(
   selectedCapabilities: CapabilityDefinitionV3[],
   envelope: TurnEnvelope,
 ): TurnPlanProposalV3 {
-  const spanNormalizedProposal = normalizeUniqueGoalSourceSpansV3(
+  const coordinateNormalizedProposal = normalizeSelectedCapabilityCoordinatesV3(
     proposal,
+    selectedCapabilities,
+  );
+  const chainExpandedProposal = normalizeCapabilityPrerequisiteChainsV3(
+    coordinateNormalizedProposal,
+    snapshot,
+    selectedCapabilities,
+  );
+  const singleClauseNormalizedProposal = normalizeSingleClauseCapabilityChainGoalsV3(
+    chainExpandedProposal,
+    selectedCapabilities,
+    envelope,
+  );
+  const spanNormalizedProposal = normalizeUniqueGoalSourceSpansV3(
+    singleClauseNormalizedProposal,
     envelope,
   );
   const anchoredProposal = normalizeDanglingSelectionsToSoleCapabilityGoalV3(
@@ -3244,6 +3381,191 @@ function normalizeProposalForServerRequirementV3(
     ])],
   };
   return turnPlanProposalV3Schema.parse(normalized);
+}
+
+function normalizeSingleClauseCapabilityChainGoalsV3(
+  proposal: TurnPlanProposalV3,
+  selectedCapabilities: CapabilityDefinitionV3[],
+  envelope: TurnEnvelope,
+): TurnPlanProposalV3 {
+  if (proposal.goals.length < 2) return proposal;
+  const clauses = canonicalGoalClauseRangesV3(envelope.currentMessage.text);
+  if (clauses.length !== 1) return proposal;
+  const definitionByCoordinate = new Map(selectedCapabilities.map((definition) => [
+    capabilityCoordinateV3(definition.key, definition.version),
+    definition,
+  ]));
+  const definitionsByGoal = new Map<string, CapabilityDefinitionV3[]>();
+  for (const selection of proposal.capabilitySelections) {
+    const definition = definitionByCoordinate.get(capabilityCoordinateV3(
+      selection.capabilityKey,
+      selection.capabilityVersion,
+    ));
+    if (!definition || definition.key === "response.compose") continue;
+    for (const goalId of selection.goalIds) {
+      const values = definitionsByGoal.get(goalId) ?? [];
+      values.push(definition);
+      definitionsByGoal.set(goalId, values);
+    }
+  }
+  if (proposal.goals.some((goal) =>
+    goal.strategy !== "capability"
+    || !(definitionsByGoal.get(goal.id)?.length))) return proposal;
+  const definitions = [...new Set(
+    proposal.goals.flatMap((goal) => definitionsByGoal.get(goal.id) ?? []),
+  )];
+  const hasVerifiedChain = definitions.some((source) =>
+    definitions.some((target) =>
+      source !== target
+      && canCapabilityOutputSatisfyRequiredInputV3(source, target)));
+  const bindingDefinitionHashes = new Set(definitions.flatMap((definition) =>
+    typeof definition.bindingDefinitionHash === "string"
+      ? [definition.bindingDefinitionHash]
+      : []));
+  const sharesReadOnlyBinding = definitions.length > 1
+    && definitions.every((definition) => definition.effect.mutation === "none")
+    && bindingDefinitionHashes.size === 1;
+  if (!hasVerifiedChain && !sharesReadOnlyBinding) return proposal;
+  const clause = clauses[0]!;
+  const sourceSpan = {
+    pointer: "/currentMessage/text" as const,
+    startOffset: clause.startOffset,
+    endOffset: clause.endOffset,
+    quote: envelope.currentMessage.text.slice(
+      clause.startOffset,
+      clause.endOffset,
+    ),
+  };
+  return turnPlanProposalV3Schema.parse({
+    ...proposal,
+    goals: proposal.goals.map((goal) => ({
+      ...goal,
+      sourceSpan,
+    })),
+    decisionTrace: [...new Set([
+      ...proposal.decisionTrace,
+      "server_single_clause_capability_chain_normalized",
+    ])],
+  });
+}
+
+function normalizeCapabilityPrerequisiteChainsV3(
+  proposal: TurnPlanProposalV3,
+  snapshot: CapabilityCandidateSnapshotV3,
+  selectedCapabilities: CapabilityDefinitionV3[],
+): TurnPlanProposalV3 {
+  const definitionByCoordinate = new Map(selectedCapabilities.map((definition) => [
+    capabilityCoordinateV3(definition.key, definition.version),
+    definition,
+  ]));
+  const candidateByCoordinate = new Map(snapshot.candidates.map((candidate) => [
+    capabilityCoordinateV3(candidate.capability.key, candidate.capability.version),
+    candidate,
+  ]));
+  const existingCoordinates = new Set(proposal.capabilitySelections.map((selection) =>
+    capabilityCoordinateV3(selection.capabilityKey, selection.capabilityVersion)));
+  const goalById = new Map(proposal.goals.map((goal) => [goal.id, goal] as const));
+  const additions: TurnPlanProposalV3["capabilitySelections"] = [];
+  for (const selection of proposal.capabilitySelections) {
+    const sourceCoordinate = capabilityCoordinateV3(
+      selection.capabilityKey,
+      selection.capabilityVersion,
+    );
+    const sourceDefinition = definitionByCoordinate.get(sourceCoordinate);
+    const sourceCandidate = candidateByCoordinate.get(sourceCoordinate);
+    if (
+      !sourceDefinition
+      || !sourceCandidate
+      || capabilityRetrievalRelevanceScoreV3(sourceCandidate)
+        >= lowConfidenceMinimumRetrievalScoreV3
+    ) continue;
+    const target = snapshot.candidates
+      .filter((candidate) =>
+        capabilityRetrievalRelevanceScoreV3(candidate)
+          >= lowConfidenceMinimumRetrievalScoreV3)
+      .flatMap((candidate) => {
+        const coordinate = capabilityCoordinateV3(
+          candidate.capability.key,
+          candidate.capability.version,
+        );
+        const definition = definitionByCoordinate.get(coordinate);
+        if (
+          !definition
+          || definition.key === "response.compose"
+          || definition.executor === "knowledge"
+          || existingCoordinates.has(coordinate)
+          || !canCapabilityOutputSatisfyRequiredInputV3(
+            sourceDefinition,
+            definition,
+          )
+        ) return [];
+        const compatibleGoalIds = selection.goalIds.filter((goalId) => {
+          const goal = goalById.get(goalId);
+          if (!goal || goal.strategy === "control") return false;
+          return evaluateCapabilitySemanticsCompatibilityV3(
+            definition.semantics,
+            semanticRequirementForGoalV3(goal),
+          ).compatible;
+        });
+        return compatibleGoalIds.length
+          ? [{ candidate, definition, coordinate, compatibleGoalIds }]
+          : [];
+      })[0];
+    if (!target) continue;
+    existingCoordinates.add(target.coordinate);
+    additions.push({
+      id: `server-chain-${proposal.capabilitySelections.length + additions.length + 1}`,
+      capabilityKey: target.definition.key,
+      capabilityVersion: target.definition.version,
+      goalIds: target.compatibleGoalIds,
+      argumentsJson: "{}",
+    });
+  }
+  if (!additions.length) return proposal;
+  return turnPlanProposalV3Schema.parse({
+    ...proposal,
+    capabilitySelections: [...proposal.capabilitySelections, ...additions],
+    decisionTrace: [...new Set([
+      ...proposal.decisionTrace,
+      "server_prerequisite_chain_expanded",
+    ])],
+  });
+}
+
+function canCapabilityOutputSatisfyRequiredInputV3(
+  source: CapabilityDefinitionV3,
+  target: CapabilityDefinitionV3,
+) {
+  const required = Array.isArray(target.inputSchema.required)
+    ? target.inputSchema.required.filter((value): value is string =>
+        typeof value === "string")
+    : [];
+  if (!required.length) return false;
+  let sourceBoundCount = 0;
+  for (const key of required) {
+    const targetSchema = asSchemaRecord(
+      schemaPropertiesV3(target.inputSchema)[key],
+    );
+    if (!targetSchema) return false;
+    if (Object.hasOwn(targetSchema, "default")) continue;
+    const matches = collectSchemaValuePointersV3(
+      source.outputSchema,
+      key,
+    ).filter((candidate) =>
+      schemasHaveCompatibleValueTypeV3(targetSchema, candidate.schema));
+    if (matches.length !== 1) return false;
+    sourceBoundCount += 1;
+  }
+  return sourceBoundCount > 0;
+}
+
+function capabilityRetrievalRelevanceScoreV3(
+  candidate: RankedCapabilityCandidateV3,
+) {
+  return candidate.scoreBreakdown.lexical
+    + candidate.scoreBreakdown.semanticText
+    + candidate.scoreBreakdown.schema
+    + candidate.scoreBreakdown.discovery;
 }
 
 function normalizeUniqueGoalSourceSpansV3(
@@ -3975,6 +4297,103 @@ function semanticRequirementForGoalV3(
   };
 }
 
+function findSemanticRequirementViolationV3(
+  proposal: TurnPlanProposalV3,
+  rawRequirement: Partial<CapabilitySemanticRequirementV3> | undefined,
+): { path: string; message: string } | null {
+  const requirement = capabilitySemanticRequirementV3Schema.parse(
+    rawRequirement ?? {},
+  );
+  const hasRequirement = requirement.operations.length > 0
+    || requirement.evidenceClasses.length > 0
+    || requirement.freshnessClasses.length > 0
+    || requirement.authorityClasses.length > 0;
+  if (!hasRequirement) return null;
+  const sourceRequired = requirement.evidenceClasses.some((item) => item !== "none")
+    || requirement.freshnessClasses.includes("live")
+    || requirement.authorityClasses.some((item) => item !== "general");
+  if (sourceRequired && proposal.capabilitySelections.length === 0) {
+    return {
+      path: "/capabilitySelections",
+      message:
+        "The inferred source requirement needs a governed source capability; a compose-only answer cannot satisfy it.",
+    };
+  }
+  const compatibleGoal = proposal.goals.find((goal) => {
+    if (goal.strategy === "control" || goal.operation === "control") return false;
+    const goalRequirement = semanticRequirementForGoalV3(goal);
+    return evaluateCapabilitySemanticsCompatibilityV3({
+      operations: goalRequirement.operations ?? [],
+      evidenceClasses: goalRequirement.evidenceClasses ?? [],
+      freshnessClasses: goalRequirement.freshnessClasses ?? [],
+      authorityClasses: goalRequirement.authorityClasses ?? [],
+      domains: [],
+      aliases: [],
+    }, requirement).compatible;
+  });
+  return compatibleGoal
+    ? null
+    : {
+        path: "/goals",
+        message:
+          "No non-control Goal preserves the inferred operation, evidence, freshness, and authority constraints.",
+      };
+}
+
+function findExternalSelectionRelevanceIssueV3(input: {
+  proposal: TurnPlanProposalV3;
+  candidateSnapshot: CapabilityCandidateSnapshotV3;
+  selectedCapabilities: CapabilityDefinitionV3[];
+  semanticRequirement: Partial<CapabilitySemanticRequirementV3> | undefined;
+}): { path: string; message: string } | null {
+  const requirement = capabilitySemanticRequirementV3Schema.parse(
+    input.semanticRequirement ?? {},
+  );
+  const requiresCurrentExternalSource =
+    requirement.evidenceClasses.some((item) =>
+      item === "current_external" || item === "transactional_authority")
+    || requirement.freshnessClasses.includes("live")
+    || requirement.authorityClasses.some((item) =>
+      item === "external_authoritative" || item === "transactional");
+  if (!requiresCurrentExternalSource) return null;
+
+  const definitionByCoordinate = new Map(input.selectedCapabilities.map((definition) => [
+    capabilityCoordinateV3(definition.key, definition.version),
+    definition,
+  ]));
+  const candidateByCoordinate = new Map(input.candidateSnapshot.candidates.map((candidate) => [
+    capabilityCoordinateV3(candidate.capability.key, candidate.capability.version),
+    candidate,
+  ]));
+  const selectedExternalCandidates = input.proposal.capabilitySelections.flatMap((selection) => {
+    const coordinate = capabilityCoordinateV3(
+      selection.capabilityKey,
+      selection.capabilityVersion,
+    );
+    const definition = definitionByCoordinate.get(coordinate);
+    const candidate = candidateByCoordinate.get(coordinate);
+    return definition
+      && candidate
+      && definition.key !== "response.compose"
+      && definition.executor !== "knowledge"
+        ? [candidate]
+        : [];
+  });
+  if (!selectedExternalCandidates.length) return null;
+  const bestRetrievalScore = Math.max(...selectedExternalCandidates.map((candidate) =>
+    candidate.scoreBreakdown.lexical
+      + candidate.scoreBreakdown.semanticText
+      + candidate.scoreBreakdown.schema
+      + candidate.scoreBreakdown.discovery));
+  return bestRetrievalScore >= lowConfidenceMinimumRetrievalScoreV3
+    ? null
+    : {
+        path: "/capabilitySelections",
+        message:
+          "Selected external capabilities have no sufficient lexical, semantic, schema, or discovery relevance to the current request.",
+      };
+}
+
 function capabilityCoordinateV3(key: string, version: string) {
   return `${key}@${version}`;
 }
@@ -3996,6 +4415,7 @@ function buildQuery(envelope: TurnEnvelope): CapabilityRetrievalQueryV3 {
     context: [
       ...recentTurns.map((turn) => turn.text),
       envelope.conversationSummary ?? "",
+      envelope.activeTask ? JSON.stringify(envelope.activeTask) : "",
       ...envelope.attachments.map((attachment) =>
         `${attachment.fileName} ${attachment.mimeType}`),
     ].filter(Boolean).join("\n"),

@@ -4,20 +4,22 @@ import { z } from "zod";
 
 export const sandboxProviderKinds = ["docker", "daytona", "tencent"] as const;
 export type SandboxProviderKind = (typeof sandboxProviderKinds)[number];
+export const cloudSandboxProviderKinds = ["daytona", "tencent"] as const;
+export type CloudSandboxProviderKind = (typeof cloudSandboxProviderKinds)[number];
 export type SandboxRoutingMode = "legacy" | "manual_poc";
 
-const providerSchema = z.enum(sandboxProviderKinds);
+const cloudProviderSchema = z.enum(cloudSandboxProviderKinds);
 const representativeIdSchema = z.string().trim().min(1).max(191).regex(/^[A-Za-z0-9_-]+$/);
 const routingDocumentSchema = z.object({
   version: z.literal(1),
-  default: providerSchema,
+  default: cloudProviderSchema,
   newIdentityEnabled: z.object({
-    docker: z.boolean(),
+    docker: z.literal(false),
     daytona: z.boolean(),
     tencent: z.boolean(),
   }).strict(),
   phase1AllowedRepresentativeIds: z.array(representativeIdSchema).max(1_000),
-  representatives: z.record(representativeIdSchema, providerSchema),
+  representatives: z.record(representativeIdSchema, cloudProviderSchema),
 }).strict();
 
 export type SandboxRoutingDocument = z.infer<typeof routingDocumentSchema>;
@@ -58,6 +60,8 @@ export function parseSandboxRoutingConfig(input: {
     throw new Error("sandbox_routing_document_invalid_json");
   }
 
+  assertDockerIsNotAdmittedForNewIdentities(decoded);
+
   const parsed = routingDocumentSchema.safeParse(decoded);
   if (!parsed.success) throw new Error("sandbox_routing_document_invalid");
   const document = parsed.data;
@@ -79,16 +83,6 @@ export function parseSandboxRoutingConfig(input: {
     throw new Error("sandbox_routing_default_provider_disabled");
   }
 
-  if (input.nodeEnv === "production") {
-    if (
-      document.default === "docker" ||
-      document.newIdentityEnabled.docker ||
-      overrideEntries.some(([, provider]) => provider === "docker")
-    ) {
-      throw new Error("sandbox_routing_docker_forbidden_in_production");
-    }
-  }
-
   const canonical = canonicalJson(document);
   return {
     mode: "manual_poc",
@@ -96,6 +90,22 @@ export function parseSandboxRoutingConfig(input: {
     digest: createHash("sha256").update(`routing:v1:${canonical}`).digest("hex"),
     allowedRepresentativeIds,
   };
+}
+
+function assertDockerIsNotAdmittedForNewIdentities(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const document = value as Record<string, unknown>;
+  const enabled = document.newIdentityEnabled;
+  const representatives = document.representatives;
+  if (
+    document.default === "docker"
+    || (enabled && typeof enabled === "object" && !Array.isArray(enabled)
+      && (enabled as Record<string, unknown>).docker !== false)
+    || (representatives && typeof representatives === "object" && !Array.isArray(representatives)
+      && Object.values(representatives as Record<string, unknown>).includes("docker"))
+  ) {
+    throw new Error("sandbox_routing_docker_new_identity_forbidden");
+  }
 }
 
 export function resolveProviderForNewIdentity(

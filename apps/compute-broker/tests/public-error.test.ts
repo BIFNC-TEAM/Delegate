@@ -65,5 +65,10 @@ describe("compute broker public error boundary", () => {
       code: "sandbox_creation_pending_reconciliation",
       logPrivateDetail: false,
     });
+    expect(toPublicBrokerError(new Error("sandbox_provider_migration_required"))).toEqual({
+      statusCode: 409,
+      code: "sandbox_provider_migration_required",
+      logPrivateDetail: false,
+    });
   });
 });

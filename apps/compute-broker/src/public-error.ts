@@ -89,6 +89,11 @@ const sandboxControlErrors: Record<string, PublicBrokerError> = {
     code: "sandbox_provider_unavailable",
     logPrivateDetail: true,
   },
+  sandbox_provider_migration_required: {
+    statusCode: 409,
+    code: "sandbox_provider_migration_required",
+    logPrivateDetail: false,
+  },
   sandbox_provider_operation_fence_lost: {
     statusCode: 409,
     code: "sandbox_creation_pending_reconciliation",

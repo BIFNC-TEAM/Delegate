@@ -45,6 +45,14 @@ describe("sandbox readiness", () => {
     });
   });
 
+  it("reports only cloud providers as configured for new identities", async () => {
+    mockRegistry.configured.mockImplementation((provider: string) =>
+      provider === "docker" || provider === "tencent");
+    const { getSandboxReadinessSnapshot } = await import("../src/sandbox-readiness");
+    const result = await getSandboxReadinessSnapshot({ force: true });
+    expect(result.configuredProviders).toEqual(["tencent"]);
+  });
+
   it("validates manual PoC representatives and enabled providers", async () => {
     mockConfig.sandboxRoutingMode = "manual_poc";
     mockConfig.sandboxRouting = parseSandboxRoutingConfig({

@@ -30,7 +30,7 @@ export async function GET(request: Request) {
     const filters: KnowledgeAssetListFilters = {
       ...(params.get("query") ? { query: params.get("query")! } : {}),
       ...(readEnum(params, "status", ["processing", "ready", "failed", "archived"] as const) ? { status: readEnum(params, "status", ["processing", "ready", "failed", "archived"] as const)! } : {}),
-      ...(readEnum(params, "kind", ["pdf", "docx", "txt", "markdown", "url", "text"] as const) ? { kind: readEnum(params, "kind", ["pdf", "docx", "txt", "markdown", "url", "text"] as const)! } : {}),
+      ...(readEnum(params, "kind", ["pdf", "docx", "pptx", "xlsx", "image", "txt", "markdown", "url", "text"] as const) ? { kind: readEnum(params, "kind", ["pdf", "docx", "pptx", "xlsx", "image", "txt", "markdown", "url", "text"] as const)! } : {}),
       ...(readEnum(params, "visibility", ["owner_only", "organization_shared", "selected_representatives", "public_material"] as const) ? { visibility: readEnum(params, "visibility", ["owner_only", "organization_shared", "selected_representatives", "public_material"] as const)! } : {}),
       ...(params.get("tag") ? { tag: params.get("tag")! } : {}),
       ...(params.get("representativeId") ? { representativeId: params.get("representativeId")! } : {}),

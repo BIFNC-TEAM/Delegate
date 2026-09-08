@@ -37,6 +37,8 @@ type FileUploadResponse = {
 const MAX_BATCH_FILES = 20;
 const MAX_FILE_BYTES = 15 * 1024 * 1024;
 const UPLOAD_CONCURRENCY = 3;
+const PROCESSING_POLL_INTERVAL_MS = 1_200;
+const PROCESSING_POLL_ATTEMPTS = 550;
 
 const visibilityOptions: Array<{ value: Visibility; zh: string; en: string; detailZh: string; detailEn: string }> = [
   { value: "owner_only", zh: "仅 Owner", en: "Owner only", detailZh: "只有工作区所有者可以使用", detailEn: "Only the workspace owner can use it" },
@@ -189,7 +191,7 @@ export function DashboardKnowledgeLibrary({ activeSlug, locale }: { activeSlug: 
         <div className="knowledge-toolbar">
           <label className="knowledge-search"><span>⌕</span><input aria-label={zh ? "搜索知识" : "Search knowledge"} onChange={(event) => { setLoading(true); setQuery(event.target.value); }} placeholder={zh ? "搜索标题、文件名、网址或标签" : "Search title, filename, URL, or tag"} value={query} /></label>
           <FilterSelect label={zh ? "状态" : "Status"} onChange={setStatus} value={status} options={[["", zh ? "全部状态" : "All statuses"], ["ready", zh ? "已完成" : "Ready"], ["processing", zh ? "处理中" : "Processing"], ["failed", zh ? "异常" : "Failed"], ["archived", zh ? "已归档" : "Archived"]]} />
-          <FilterSelect label={zh ? "类型" : "Type"} onChange={setKind} value={kind} options={[["", zh ? "全部类型" : "All types"], ["pdf", "PDF"], ["docx", "DOCX"], ["txt", "TXT"], ["markdown", "Markdown"], ["url", "URL"], ["text", zh ? "手工文本" : "Manual text"]]} />
+          <FilterSelect label={zh ? "类型" : "Type"} onChange={setKind} value={kind} options={[["", zh ? "全部类型" : "All types"], ["pdf", "PDF"], ["docx", "DOCX"], ["pptx", "PPTX"], ["xlsx", "XLSX"], ["image", zh ? "图片" : "Image"], ["txt", "TXT"], ["markdown", "Markdown"], ["url", "URL"], ["text", zh ? "手工文本" : "Manual text"]]} />
           <FilterSelect label={zh ? "权限" : "Visibility"} onChange={setVisibility} value={visibility} options={[["", zh ? "全部权限" : "All visibility"], ...visibilityOptions.map((option) => [option.value, zh ? option.zh : option.en] as [string, string])]} />
         </div>
 
@@ -211,7 +213,7 @@ export function DashboardKnowledgeLibrary({ activeSlug, locale }: { activeSlug: 
             </tbody>
           </table>
         </div>
-        <div className="knowledge-panel-footer"><span>{zh ? `显示 ${assets.length} 条知识` : `${assets.length} knowledge assets`}</span><small>{zh ? "文件最大 15 MB · 支持 PDF / DOCX / TXT / MD" : "15 MB max · PDF / DOCX / TXT / MD"}</small></div>
+        <div className="knowledge-panel-footer"><span>{zh ? `显示 ${assets.length} 条知识` : `${assets.length} knowledge assets`}</span><small>{zh ? "文件最大 15 MB · 支持 PDF / Office / 图片 / TXT / MD" : "15 MB max · PDF / Office / images / TXT / MD"}</small></div>
       </section>
 
       </div>
@@ -283,8 +285,8 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
 
   async function watchProcessing(itemId: string, assetId: string) {
     let transientFailures = 0;
-    for (let attempt = 0; attempt < 150; attempt += 1) {
-      await waitFor(1_200);
+    for (let attempt = 0; attempt < PROCESSING_POLL_ATTEMPTS; attempt += 1) {
+      await waitFor(PROCESSING_POLL_INTERVAL_MS);
       try {
         const response = await knowledgeFetch(activeSlug, `/api/dashboard/knowledge-assets/${assetId}`, { cache: "no-store" });
         const { asset } = await readResponse<{ asset: KnowledgeAssetRecord }>(response);
@@ -429,10 +431,10 @@ function KnowledgeImportDialog({ activeSlug, locale, representatives, onClose, o
       <form onSubmit={submit}>
         {mode === "file" ? <>
           <div className={`knowledge-dropzone${queue.length ? " has-file" : ""}`} onClick={() => { if (!submitting) fileRef.current?.click(); }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (!submitting) addFiles(Array.from(event.dataTransfer.files)); }}>
-            <input accept=".pdf,.docx,.txt,.md,.markdown" multiple onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} ref={fileRef} type="file" />
+            <input accept=".pdf,.docx,.pptx,.xlsx,.png,.jpg,.jpeg,.txt,.md,.markdown" multiple onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} ref={fileRef} type="file" />
             <span>{queue.length ? String(queue.length).padStart(2, "0") : "↑"}</span>
             <strong>{queue.length ? (zh ? `${queue.length} 个文件已加入上传队列` : `${queue.length} files in the upload queue`) : (zh ? "拖入多个文件，或点击选择" : "Drop files, or click to browse")}</strong>
-            <small>{queue.length ? `${formatBytes(queue.reduce((total, item) => total + item.file.size, 0))} · ${zh ? `单批最多 ${MAX_BATCH_FILES} 个` : `${MAX_BATCH_FILES} files max per batch`}` : (zh ? "PDF、DOCX、TXT、Markdown · 单文件最大 15 MB" : "PDF, DOCX, TXT, Markdown · 15 MB per file")}</small>
+            <small>{queue.length ? `${formatBytes(queue.reduce((total, item) => total + item.file.size, 0))} · ${zh ? `单批最多 ${MAX_BATCH_FILES} 个` : `${MAX_BATCH_FILES} files max per batch`}` : (zh ? "PDF、Office、PNG/JPG、TXT、Markdown · 单文件最大 15 MB" : "PDF, Office, PNG/JPG, TXT, Markdown · 15 MB per file")}</small>
           </div>
           <label className="knowledge-conflict-policy"><div><span>{zh ? "重复文件处理" : "Duplicate handling"}</span><small>{conflictPolicyDescription(conflictPolicy, zh)}</small></div><select disabled={submitting || isUploading} onChange={(event) => setConflictPolicy(event.target.value as UploadConflictPolicy)} value={conflictPolicy}><option value="skip_duplicates">{zh ? "跳过完全重复内容" : "Skip identical content"}</option><option value="keep_both">{zh ? "始终保留为新副本" : "Always keep a new copy"}</option><option value="replace_existing">{zh ? "覆盖已有文件" : "Replace existing file"}</option></select></label>
           {queue.length ? <section className="knowledge-upload-queue" aria-label={zh ? "上传队列" : "Upload queue"}>
@@ -500,15 +502,15 @@ function StatusBadge({ status, zh }: { status: KnowledgeAssetRecord["status"]; z
 function RepresentativeStack({ links, zh }: { links: KnowledgeAssetRecord["representativeLinks"]; zh: boolean }) { const enabled = links.filter((link) => link.enabled); return enabled.length ? <div className="knowledge-rep-stack" title={enabled.map((link) => link.representativeName).join(", ")}>{enabled.slice(0, 3).map((link) => <span key={link.representativeId}>{link.representativeName.slice(0, 1)}</span>)}{enabled.length > 3 ? <b>+{enabled.length - 3}</b> : null}<small>{enabled.length}</small></div> : <span className="knowledge-unlinked">{zh ? "未关联" : "Not linked"}</span>; }
 function LoadingRows() { return <>{[0, 1, 2].map((item) => <tr className="knowledge-loading-row" key={item}><td colSpan={7}><span /></td></tr>)}</>; }
 function EmptyState({ zh, hasFilters, onImport }: { zh: boolean; hasFilters: boolean; onImport: () => void }) { return <div className="knowledge-empty"><span>{hasFilters ? "⌕" : "＋"}</span><strong>{hasFilters ? (zh ? "没有匹配的知识" : "No matching knowledge") : (zh ? "从第一份知识开始" : "Start with your first knowledge asset")}</strong><p>{hasFilters ? (zh ? "调整搜索词或筛选条件后再试。" : "Try changing your search or filters.") : (zh ? "上传文件、导入公开网页，或直接粘贴知识正文。" : "Upload a file, import a public webpage, or paste authored knowledge.")}</p>{!hasFilters ? <button onClick={onImport} type="button">{zh ? "导入知识" : "Import knowledge"}</button> : null}</div>; }
-function fileMark(kind: KnowledgeAssetRecord["kind"]) { return kind === "pdf" ? "PDF" : kind === "docx" ? "W" : kind === "url" ? "↗" : kind === "markdown" ? "MD" : kind === "text" ? "Aa" : "TXT"; }
-function kindLabel(kind: KnowledgeAssetRecord["kind"]) { return kind === "markdown" ? "MD" : kind === "text" ? "TEXT" : kind.toUpperCase(); }
+function fileMark(kind: KnowledgeAssetRecord["kind"]) { return kind === "pdf" ? "PDF" : kind === "docx" ? "W" : kind === "pptx" ? "P" : kind === "xlsx" ? "X" : kind === "image" ? "IMG" : kind === "url" ? "↗" : kind === "markdown" ? "MD" : kind === "text" ? "Aa" : "TXT"; }
+function kindLabel(kind: KnowledgeAssetRecord["kind"]) { return kind === "markdown" ? "MD" : kind === "image" ? "IMAGE" : kind === "text" ? "TEXT" : kind.toUpperCase(); }
 function visibilityIcon(value: Visibility) { return value === "owner_only" ? "●" : value === "organization_shared" ? "◫" : value === "selected_representatives" ? "◉" : "◎"; }
 function visibilityLabel(value: Visibility, zh: boolean) { const option = visibilityOptions.find((item) => item.value === value)!; return zh ? option.zh : option.en; }
 function parseTags(value: string) { return [...new Set(value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean))].slice(0, 20); }
-function uploadFileKind(fileName: string): KnowledgeAssetRecord["kind"] { const extension = fileName.split(".").pop()?.toLowerCase(); return extension === "pdf" ? "pdf" : extension === "docx" ? "docx" : extension === "md" || extension === "markdown" ? "markdown" : "txt"; }
+function uploadFileKind(fileName: string): KnowledgeAssetRecord["kind"] { const extension = fileName.split(".").pop()?.toLowerCase(); return extension === "pdf" ? "pdf" : extension === "docx" ? "docx" : extension === "pptx" ? "pptx" : extension === "xlsx" ? "xlsx" : extension === "png" || extension === "jpg" || extension === "jpeg" ? "image" : extension === "md" || extension === "markdown" ? "markdown" : "txt"; }
 function validateUploadFile(file: File, zh: boolean) {
   const extension = file.name.split(".").pop()?.toLowerCase();
-  if (!extension || !["pdf", "docx", "txt", "md", "markdown"].includes(extension)) return zh ? "不支持该文件类型" : "Unsupported file type";
+  if (!extension || !["pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg", "txt", "md", "markdown"].includes(extension)) return zh ? "不支持该文件类型" : "Unsupported file type";
   if (!file.size) return zh ? "文件内容为空" : "The file is empty";
   if (file.size > MAX_FILE_BYTES) return zh ? "文件超过 15 MB" : "File exceeds 15 MB";
   return null;

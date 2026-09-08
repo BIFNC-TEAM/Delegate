@@ -76,6 +76,7 @@ export * from "./handoff-entitlements";
 export * from "./knowledge-library";
 export * from "./knowledge-storage";
 export * from "./knowledge-vector";
+export * from "./mineru";
 export * from "./logto-lifecycle";
 export * from "./logto-management";
 export * from "./logto-reconciliation";

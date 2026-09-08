@@ -42,6 +42,13 @@ describe("workspace knowledge library", () => {
       "ARTIFACT_STORE_SECRET_KEY",
       "TENCENTCLOUD_SECRET_ID",
       "TENCENTCLOUD_SECRET_KEY",
+      "MINERU_API_BASE_URL",
+      "MINERU_API_TOKEN",
+      "MINERU_API_TIMEOUT_MS",
+      "MINERU_API_POLL_INTERVAL_MS",
+      "MINERU_PARSE_METHOD",
+      "MINERU_LANGUAGE",
+      "MINERU_BACKEND",
     ]) {
       vi.stubEnv(key, "");
     }
@@ -230,6 +237,100 @@ describe("workspace knowledge library", () => {
     await expect(extractKnowledgeFile({ bytes: new Uint8Array(15 * 1024 * 1024 + 1), fileName: "large.txt" })).rejects.toMatchObject({ statusCode: 413 });
   });
 
+  it("extracts a real PDF with an embedded worker and rejects image-only PDFs", async () => {
+    const pdf = await extractKnowledgeFile({
+      bytes: buildTestPdf("Delegate PDF knowledge extraction works in production."),
+      fileName: "knowledge.pdf",
+      mimeType: "application/pdf",
+    });
+    expect(pdf).toEqual({
+      kind: "pdf",
+      text: expect.stringContaining("Delegate PDF knowledge extraction works in production."),
+      extractionBackend: "pdfjs",
+    });
+
+    await expect(extractKnowledgeFile({
+      bytes: buildTestPdf(),
+      fileName: "scan.pdf",
+      mimeType: "application/pdf",
+    })).rejects.toThrow("当前未配置 MinerU");
+  });
+
+  it("routes scanned PDFs through MinerU and retains local text fallback", async () => {
+    vi.stubEnv("MINERU_API_BASE_URL", "http://mineru.internal:8000");
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ task_id: "task-scan" }, 202))
+      .mockResolvedValueOnce(jsonResponse({ status: "completed" }))
+      .mockResolvedValueOnce(jsonResponse({
+        backend: "hybrid-engine",
+        version: "3.2.2",
+        results: {
+          scan: { md_content: "# OCR 正文\n\nMinerU 已识别扫描协议中的有效知识内容。" },
+        },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(extractKnowledgeFile({
+      bytes: buildTestPdf(),
+      fileName: "scan.pdf",
+      mimeType: "application/pdf",
+    })).resolves.toEqual({
+      kind: "pdf",
+      text: "# OCR 正文\n\nMinerU 已识别扫描协议中的有效知识内容。",
+      extractionBackend: "mineru",
+    });
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("service offline")));
+    await expect(extractKnowledgeFile({
+      bytes: buildTestPdf("Delegate text PDF remains available when MinerU is offline."),
+      fileName: "text.pdf",
+      mimeType: "application/pdf",
+    })).resolves.toMatchObject({
+      kind: "pdf",
+      extractionBackend: "pdfjs_fallback",
+      text: expect.stringContaining("Delegate text PDF remains available"),
+    });
+
+    await expect(extractKnowledgeFile({
+      bytes: buildTestPdf(),
+      fileName: "scan.pdf",
+      mimeType: "application/pdf",
+    })).rejects.toMatchObject({
+      statusCode: 503,
+      message: expect.stringContaining("无法连接 MinerU"),
+    });
+  });
+
+  it.each([
+    ["brief.docx", "docx"],
+    ["brief.pptx", "pptx"],
+    ["budget.xlsx", "xlsx"],
+    ["whiteboard.png", "image"],
+    ["receipt.JPG", "image"],
+    ["photo.jpeg", "image"],
+  ] as const)("routes %s through MinerU as %s knowledge", async (fileName, kind) => {
+    vi.stubEnv("MINERU_API_BASE_URL", "http://mineru.internal:8000");
+    vi.stubGlobal("fetch", vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ task_id: `task-${kind}` }, 202))
+      .mockResolvedValueOnce(jsonResponse({ status: "completed" }))
+      .mockResolvedValueOnce(jsonResponse({
+        backend: "hybrid-engine",
+        version: "3.2.2",
+        results: {
+          document: { md_content: `# ${kind}\n\nMinerU extracted enough reusable knowledge from ${fileName}.` },
+        },
+      })));
+
+    await expect(extractKnowledgeFile({
+      bytes: new Uint8Array([1, 2, 3]),
+      fileName,
+    })).resolves.toMatchObject({
+      kind,
+      extractionBackend: "mineru",
+      text: expect.stringContaining("MinerU extracted enough reusable knowledge"),
+    });
+  });
+
   it("persists an original file before parsing it and can rebuild the vector index from that object", async () => {
     const body = new TextEncoder().encode("Delegate 对象存储知识正文。这个文件必须先持久化，再解析并进入向量索引。");
     const stored = await storeKnowledgeSource({
@@ -338,8 +439,12 @@ describe("workspace knowledge library", () => {
 
   it("detects supported file kinds and creates bounded overlapping retrieval chunks", () => {
     expect(detectKnowledgeFileKind("guide.PDF")).toBe("pdf");
+    expect(detectKnowledgeFileKind("slides.pptx")).toBe("pptx");
+    expect(detectKnowledgeFileKind("budget.xlsx")).toBe("xlsx");
+    expect(detectKnowledgeFileKind("scan.PNG")).toBe("image");
+    expect(detectKnowledgeFileKind("photo.jpeg")).toBe("image");
     expect(detectKnowledgeFileKind("guide.md")).toBe("markdown");
-    expect(() => detectKnowledgeFileKind("image.png")).toThrow("仅支持");
+    expect(() => detectKnowledgeFileKind("image.bmp")).toThrow("仅支持");
     const chunks = splitKnowledgeText(`${"第一段知识。".repeat(80)}\n\n${"第二段知识。".repeat(80)}`, 240, 40);
     expect(chunks.length).toBeGreaterThan(2);
     expect(chunks.every((chunk) => chunk.length <= 280)).toBe(true);
@@ -378,3 +483,33 @@ describe("workspace knowledge library", () => {
     expect(requests.every((request) => new URL(request).searchParams.get("recursive") === "true")).toBe(true);
   });
 });
+
+function buildTestPdf(text = ""): Uint8Array {
+  const content = text ? `BT /F1 14 Tf 72 720 Td (${text}) Tj ET` : "";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+  ];
+  let source = "%PDF-1.4\n";
+  const offsets = objects.map((object, index) => {
+    const offset = source.length;
+    source += `${index + 1} 0 obj\n${object}\nendobj\n`;
+    return offset;
+  });
+  const xrefOffset = source.length;
+  source += `xref\n0 ${objects.length + 1}\n`;
+  source += "0000000000 65535 f \n";
+  source += offsets.map((offset) => `${offset.toString().padStart(10, "0")} 00000 n \n`).join("");
+  source += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return new TextEncoder().encode(source);
+}
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}

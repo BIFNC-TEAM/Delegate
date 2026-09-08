@@ -146,6 +146,21 @@ describe("local Compose source synchronization contract", () => {
     );
   });
 
+  it("forwards MinerU only to the Dashboard knowledge-processing boundary", () => {
+    const dashboard = baseServices.get("dashboard") ?? "";
+    const sharedEnvironment = baseComposeSource.slice(
+      baseComposeSource.indexOf("x-app-environment:"),
+      baseComposeSource.indexOf("x-app-service:"),
+    );
+
+    expect(dashboard).toContain(
+      "MINERU_API_BASE_URL: ${MINERU_DOCKER_API_BASE_URL:-${MINERU_API_BASE_URL:-}}",
+    );
+    expect(dashboard).toContain("MINERU_API_TOKEN: ${MINERU_API_TOKEN:-}");
+    expect(dashboard).toContain("MINERU_PARSE_METHOD: ${MINERU_PARSE_METHOD:-auto}");
+    expect(sharedEnvironment).not.toContain("MINERU_API_TOKEN");
+  });
+
   it("derives the Compute host workspace mount from the current repository", () => {
     expect(localComposeScriptSource).toContain(
       'export COMPUTE_HOST_WORKSPACE_ROOT="${COMPUTE_HOST_WORKSPACE_ROOT:-${PROJECT_ROOT}}"',

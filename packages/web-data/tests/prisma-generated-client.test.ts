@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 
 import {
   IdentityLinkProvider,
+  KnowledgeAssetKind,
   OwnerIdentityLinkProvider,
   Prisma,
 } from "@prisma/client";
@@ -11,6 +12,10 @@ import { generatedPrismaClientHasFields } from "../src/prisma";
 
 const prismaSchema = readFileSync(
   new URL("../../../prisma/schema.prisma", import.meta.url),
+  "utf8",
+);
+const knowledgeFormatMigration = readFileSync(
+  new URL("../../../prisma/migrations/20260903094000_knowledge_asset_mineru_formats/migration.sql", import.meta.url),
   "utf8",
 );
 
@@ -54,6 +59,21 @@ describe("generated Prisma client auth enums", () => {
   it("includes providers used by representative auth routes", () => {
     expect(IdentityLinkProvider.LOGTO).toBe("LOGTO");
     expect(OwnerIdentityLinkProvider.LOGTO).toBe("LOGTO");
+  });
+
+  it("includes every MinerU-backed knowledge asset kind", () => {
+    expect([
+      KnowledgeAssetKind.PDF,
+      KnowledgeAssetKind.DOCX,
+      KnowledgeAssetKind.PPTX,
+      KnowledgeAssetKind.XLSX,
+      KnowledgeAssetKind.IMAGE,
+    ]).toEqual(["PDF", "DOCX", "PPTX", "XLSX", "IMAGE"]);
+    for (const value of ["PPTX", "XLSX", "IMAGE"]) {
+      expect(knowledgeFormatMigration).toContain(
+        `ALTER TYPE "KnowledgeAssetKind" ADD VALUE IF NOT EXISTS '${value}'`,
+      );
+    }
   });
 
   it("contains every model field declared by the current Prisma schema", () => {

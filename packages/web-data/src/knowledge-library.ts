@@ -19,6 +19,10 @@ import { demoRepresentative } from "@delegate/domain";
 
 import { prisma } from "./prisma";
 import {
+  extractDocumentWithMinerU,
+  MinerUError,
+} from "./mineru";
+import {
   buildKnowledgeOwnerObjectPrefix,
   deleteKnowledgeSource,
   readKnowledgeSource,
@@ -29,7 +33,17 @@ const MAX_FILE_BYTES = 15 * 1024 * 1024;
 const MAX_SOURCE_CHARACTERS = 400_000;
 const URL_TIMEOUT_MS = 12_000;
 
-const assetKindSchema = z.enum(["pdf", "docx", "txt", "markdown", "url", "text"]);
+const assetKindSchema = z.enum([
+  "pdf",
+  "docx",
+  "pptx",
+  "xlsx",
+  "image",
+  "txt",
+  "markdown",
+  "url",
+  "text",
+]);
 const assetVisibilitySchema = z.enum([
   "owner_only",
   "organization_shared",
@@ -38,7 +52,8 @@ const assetVisibilitySchema = z.enum([
 ]);
 const usageModeSchema = z.enum(["qa_source", "public_material", "both"]);
 const reviewStatusSchema = z.enum(["pending", "approved", "rejected"]);
-const fileAssetKindSchema = z.enum(["pdf", "docx", "txt", "markdown"]);
+const fileAssetKindSchema = z.enum(["pdf", "docx", "pptx", "xlsx", "image", "txt", "markdown"]);
+const minerUFileExtensions = new Set(["pdf", "docx", "pptx", "xlsx", "png", "jpg", "jpeg"]);
 
 const representativeLinkSchema = z.object({
   representativeId: z.string().trim().min(1),
@@ -186,9 +201,9 @@ type AssetWithRelations = Prisma.KnowledgeAssetGetPayload<{
 }>;
 
 export class KnowledgeLibraryError extends Error {
-  statusCode: 400 | 401 | 403 | 404 | 409 | 413 | 422;
+  statusCode: 400 | 401 | 403 | 404 | 409 | 413 | 422 | 503;
 
-  constructor(message: string, statusCode: 400 | 401 | 403 | 404 | 409 | 413 | 422 = 400) {
+  constructor(message: string, statusCode: 400 | 401 | 403 | 404 | 409 | 413 | 422 | 503 = 400) {
     super(message);
     this.name = "KnowledgeLibraryError";
     this.statusCode = statusCode;
@@ -892,7 +907,7 @@ export async function processKnowledgeAsset(
     },
   });
   try {
-    const extracted = await resolveAssetText({
+    const extraction = await resolveAssetText({
       kind: fromAssetKind(asset.kind),
       sourceText: asset.sourceText,
       sourceUrl: asset.sourceUrl,
@@ -901,7 +916,7 @@ export async function processKnowledgeAsset(
       originalFileName: asset.originalFileName,
       mimeType: asset.mimeType,
     });
-    const normalized = normalizeExtractedText(extracted);
+    const normalized = normalizeExtractedText(extraction.text);
     if (normalized.length < 20) {
       throw new KnowledgeLibraryError("提取内容过短，请提供至少 20 个字符的有效正文。", 422);
     }
@@ -922,7 +937,8 @@ export async function processKnowledgeAsset(
         processingLogs: {
           create: {
             stage: "vectorize",
-            message: "正文提取结果已保存，正在写入 OpenViking 向量索引。",
+            message: `正文已通过 ${extractionBackendLabel(extraction.backend)} 提取并保存，正在写入 OpenViking 向量索引。`,
+            metadata: { extractionBackend: extraction.backend },
           },
         },
       },
@@ -1098,36 +1114,80 @@ export async function extractKnowledgeFile(input: {
   bytes: Uint8Array;
   fileName: string;
   mimeType?: string;
-}): Promise<{ kind: z.infer<typeof assetKindSchema>; text: string }> {
+}): Promise<{
+  kind: z.infer<typeof assetKindSchema>;
+  text: string;
+  extractionBackend?: "mineru" | "pdfjs" | "pdfjs_fallback" | "docx" | "docx_fallback";
+}> {
   if (input.bytes.byteLength > MAX_FILE_BYTES) {
     throw new KnowledgeLibraryError("文件不能超过 15 MB。", 413);
   }
   const kind = detectKnowledgeFileKind(input.fileName);
   const extension = input.fileName.toLowerCase().split(".").pop() ?? "";
-  if (extension === "docx") {
-    const zip = await JSZip.loadAsync(input.bytes);
-    const documentXml = await zip.file("word/document.xml")?.async("string");
-    if (!documentXml) throw new KnowledgeLibraryError("DOCX 文件缺少正文内容。", 422);
-    return { kind: "docx", text: decodeXmlText(documentXml) };
-  }
-  if (extension === "pdf") {
-    const parser = new PDFParse({ data: input.bytes });
-    let normalized = "";
+  if (minerUFileExtensions.has(extension)) {
+    const minerUConfigured = Boolean(process.env.MINERU_API_BASE_URL?.trim());
+    let minerUError: MinerUError | null = null;
     try {
-      const result = await parser.getText();
-      normalized = normalizeExtractedText(result.text);
+      const minerU = await extractDocumentWithMinerU(input);
+      if (minerU) {
+        const text = normalizeExtractedText(minerU.text);
+        if (text.length < 20) {
+          throw new MinerUError(
+            "mineru_empty_output",
+            "MinerU 未从该文件提取到足够正文。",
+            false,
+          );
+        }
+        if (minerU.text.length > MAX_SOURCE_CHARACTERS) {
+          throw new MinerUError(
+            "mineru_invalid_response",
+            "MinerU 提取正文超过 400,000 字符，请拆分后导入。",
+            false,
+          );
+        }
+        return { kind, text, extractionBackend: "mineru" };
+      }
     } catch (error) {
+      minerUError = error instanceof MinerUError
+        ? error
+        : new MinerUError(
+            "mineru_unavailable",
+            "MinerU 解析服务发生未知错误。",
+            true,
+            { cause: error },
+          );
+    }
+
+    let localError: unknown = null;
+    if (extension === "pdf" || extension === "docx") {
+      try {
+        const text = extension === "pdf"
+          ? await extractPdfTextLocally(input.bytes)
+          : await extractDocxTextLocally(input.bytes);
+        if ((extension === "pdf" && text.length >= 20) || (extension === "docx" && text.length > 0)) {
+          return {
+            kind,
+            text,
+            extractionBackend: extension === "pdf"
+              ? (minerUConfigured ? "pdfjs_fallback" : "pdfjs")
+              : (minerUConfigured ? "docx_fallback" : "docx"),
+          };
+        }
+      } catch (error) {
+        localError = error;
+      }
+    }
+    if (minerUError) {
       throw new KnowledgeLibraryError(
-        error instanceof Error ? `PDF 解析失败：${error.message}` : "PDF 解析失败。",
-        422,
+        `${minerUError.message}${extension === "pdf" || extension === "docx" ? " 本地解析也未提取到可用正文。" : ""}`,
+        minerUError.retryable ? 503 : 422,
       );
-    } finally {
-      await parser.destroy().catch(() => undefined);
     }
-    if (normalized.length < 20) {
-      throw new KnowledgeLibraryError("该 PDF 未提取到足够文本，可能是扫描件；请启用 OCR 后重试，或转换为可搜索 PDF/DOCX/TXT。", 422);
-    }
-    return { kind: "pdf", text: normalized };
+    if (localError instanceof KnowledgeLibraryError) throw localError;
+    throw new KnowledgeLibraryError(
+      `当前未配置 MinerU（MINERU_API_BASE_URL）；${knowledgeFileKindLabel(kind)} 无法完成解析。`,
+      422,
+    );
   }
   if (["txt", "md", "markdown"].includes(extension)) {
     return {
@@ -1138,11 +1198,55 @@ export async function extractKnowledgeFile(input: {
   throw new KnowledgeLibraryError(`不支持 ${kind} 类型的知识文件。`, 422);
 }
 
-export function detectKnowledgeFileKind(fileName: string): "pdf" | "docx" | "txt" | "markdown" {
+async function extractDocxTextLocally(bytes: Uint8Array): Promise<string> {
+  try {
+    const zip = await JSZip.loadAsync(bytes);
+    const documentXml = await zip.file("word/document.xml")?.async("string");
+    if (!documentXml) throw new KnowledgeLibraryError("DOCX 文件缺少正文内容。", 422);
+    return normalizeExtractedText(decodeXmlText(documentXml));
+  } catch (error) {
+    if (error instanceof KnowledgeLibraryError) throw error;
+    throw new KnowledgeLibraryError("DOCX 文件无法读取或内容已损坏。", 422);
+  }
+}
+
+async function extractPdfTextLocally(bytes: Uint8Array): Promise<string> {
+  // pdfjs-dist publishes this runtime worker without a declaration file.
+  // @ts-expect-error The worker initializes globalThis.pdfjsWorker for Node.
+  await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
+  const parser = new PDFParse({ data: bytes });
+  try {
+    const result = await parser.getText({ pageJoiner: "" });
+    return normalizeExtractedText(
+      result.pages.map((page) => page.text).join("\n\n"),
+    );
+  } catch (error) {
+    throw new KnowledgeLibraryError(
+      error instanceof Error ? `PDF 解析失败：${error.message}` : "PDF 解析失败。",
+      422,
+    );
+  } finally {
+    await parser.destroy().catch(() => undefined);
+  }
+}
+
+export function detectKnowledgeFileKind(
+  fileName: string,
+): "pdf" | "docx" | "pptx" | "xlsx" | "image" | "txt" | "markdown" {
   const extension = fileName.toLowerCase().split(".").pop() ?? "";
-  if (extension === "pdf" || extension === "docx" || extension === "txt") return extension;
+  if (["pdf", "docx", "pptx", "xlsx", "txt"].includes(extension)) {
+    return extension as "pdf" | "docx" | "pptx" | "xlsx" | "txt";
+  }
+  if (["png", "jpg", "jpeg"].includes(extension)) return "image";
   if (extension === "md" || extension === "markdown") return "markdown";
-  throw new KnowledgeLibraryError("仅支持 PDF、DOCX、TXT 和 Markdown 文件。", 422);
+  throw new KnowledgeLibraryError(
+    "仅支持 PDF、DOCX、PPTX、XLSX、PNG、JPG、TXT 和 Markdown 文件。",
+    422,
+  );
+}
+
+function knowledgeFileKindLabel(kind: z.infer<typeof fileAssetKindSchema>) {
+  return kind === "image" ? "图片" : kind.toUpperCase();
 }
 
 export function buildKnowledgeSummary(text: string): string {
@@ -1189,6 +1293,16 @@ function validateCreateSource(input: z.output<typeof knowledgeAssetCreateSchema>
   }
 }
 
+type KnowledgeExtractionBackend =
+  | "mineru"
+  | "pdfjs"
+  | "pdfjs_fallback"
+  | "docx"
+  | "docx_fallback"
+  | "plain_text"
+  | "authored_text"
+  | "public_url";
+
 async function resolveAssetText(input: {
   kind: z.infer<typeof assetKindSchema>;
   sourceText: string | null;
@@ -1197,7 +1311,7 @@ async function resolveAssetText(input: {
   sourceObjectKey?: string | null;
   originalFileName?: string | null;
   mimeType?: string | null;
-}): Promise<string> {
+}): Promise<{ text: string; backend: KnowledgeExtractionBackend }> {
   if (input.sourceObjectBucket && input.sourceObjectKey) {
     if (!input.originalFileName) throw new KnowledgeLibraryError("知识文件缺少原始文件名。", 422);
     const object = await readKnowledgeSource({
@@ -1211,11 +1325,31 @@ async function resolveAssetText(input: {
         ? { mimeType: (input.mimeType ?? object.contentType)! }
         : {}),
     });
-    return extraction.text;
+    return {
+      text: extraction.text,
+      backend: extraction.extractionBackend
+        ?? (extraction.kind === "docx" ? "docx" : "plain_text"),
+    };
   }
-  if (input.kind !== "url") return input.sourceText ?? "";
+  if (input.kind !== "url") {
+    return { text: input.sourceText ?? "", backend: "authored_text" };
+  }
   if (!input.sourceUrl) throw new KnowledgeLibraryError("URL 知识缺少来源网址。", 422);
-  return fetchKnowledgeUrl(input.sourceUrl);
+  return { text: await fetchKnowledgeUrl(input.sourceUrl), backend: "public_url" };
+}
+
+function extractionBackendLabel(backend: KnowledgeExtractionBackend) {
+  const labels: Record<KnowledgeExtractionBackend, string> = {
+    mineru: "MinerU",
+    pdfjs: "PDF.js",
+    pdfjs_fallback: "PDF.js（MinerU 回退）",
+    docx: "DOCX",
+    docx_fallback: "DOCX（MinerU 回退）",
+    plain_text: "纯文本",
+    authored_text: "手工文本",
+    public_url: "公开网页",
+  };
+  return labels[backend];
 }
 
 async function fetchKnowledgeUrl(rawUrl: string): Promise<string> {
@@ -1522,7 +1656,7 @@ async function processDemoKnowledgeAsset(
   asset.processingVersion += 1;
   asset.processingLogs.push(demoLog("extract", "info", "开始提取并规范化知识内容。"));
   try {
-    const text = normalizeExtractedText(await resolveAssetText({
+    const extraction = await resolveAssetText({
       kind: asset.kind,
       sourceText: asset.sourceText,
       sourceUrl: asset.sourceUrl,
@@ -1530,13 +1664,18 @@ async function processDemoKnowledgeAsset(
       sourceObjectKey: asset.sourceObjectKey,
       originalFileName: asset.originalFileName,
       mimeType: asset.mimeType,
-    }));
+    });
+    const text = normalizeExtractedText(extraction.text);
     if (text.length < 20) throw new KnowledgeLibraryError("提取内容过短，请提供至少 20 个字符的有效正文。", 422);
     asset.extractedText = text;
     asset.summary = buildKnowledgeSummary(text);
     asset.autoTags = inferKnowledgeTags(text, asset.title);
     asset.checksum = createHash("sha256").update(text).digest("hex");
-    asset.processingLogs.push(demoLog("vectorize", "info", "正文已分块，正在写入向量索引。"));
+    asset.processingLogs.push(demoLog(
+      "vectorize",
+      "info",
+      `正文已通过 ${extractionBackendLabel(extraction.backend)} 提取并分块，正在写入向量索引。`,
+    ));
     const vector = await indexKnowledgeText({
       ownerId: "demo",
       assetId: asset.id,

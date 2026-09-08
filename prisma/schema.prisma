@@ -434,6 +434,9 @@ enum CreatorTrainingSourceStatus {
 enum KnowledgeAssetKind {
   PDF
   DOCX
+  PPTX
+  XLSX
+  IMAGE
   TXT
   MARKDOWN
   URL
